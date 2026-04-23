@@ -59,7 +59,7 @@ impl Default for RetryPolicy {
 impl RetryPolicy {
     /// Disable retries entirely — equivalent to a plain `ActorRef::ask`
     /// call with the configured per-attempt timeout.
-    #[allow(dead_code)] // pub API kept for config-builder callers; currently only tests construct this
+    #[allow(dead_code)] // kept as a documented escape hatch for tests/tools
     pub fn single_attempt() -> Self {
         Self {
             max_attempts: 1,
@@ -81,6 +81,24 @@ impl RetryPolicy {
     /// Remaining wall-clock budget before the total deadline expires.
     pub(crate) fn remaining(&self, elapsed: Duration) -> Duration {
         self.total_deadline.saturating_sub(elapsed)
+    }
+
+    /// Return a copy whose total deadline can accommodate every configured
+    /// attempt at `per_attempt_timeout` plus the configured backoff bases.
+    pub(crate) fn with_attempt_budget_floor(mut self) -> Self {
+        let attempts = self.max_attempts.max(1);
+        let attempts_budget = self
+            .per_attempt_timeout
+            .checked_mul(attempts)
+            .unwrap_or(Duration::MAX);
+        let backoff_budget = (1..attempts).fold(Duration::ZERO, |acc, attempt| {
+            acc.saturating_add(Duration::from_millis(self.base_delay_ms_for(attempt)))
+        });
+        let minimum_total = attempts_budget.saturating_add(backoff_budget);
+        if self.total_deadline < minimum_total {
+            self.total_deadline = minimum_total;
+        }
+        self
     }
 }
 
@@ -309,5 +327,18 @@ mod tests {
         // layer depends on.
         let effective = p.max_attempts.max(1);
         assert_eq!(effective, 1);
+    }
+
+    #[test]
+    fn attempt_budget_floor_prevents_per_attempt_timeout_from_disabling_retry() {
+        let p = RetryPolicy {
+            total_deadline: Duration::from_secs(30),
+            per_attempt_timeout: Duration::from_secs(30),
+            max_attempts: 3,
+            base_delays_ms: vec![0, 50, 200],
+        }
+        .with_attempt_budget_floor();
+
+        assert_eq!(p.total_deadline, Duration::from_millis(90_250));
     }
 }

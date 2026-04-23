@@ -195,11 +195,11 @@ fn parse_or(tokens: &[Tok], cursor: &mut usize) -> Option<ParsedAssert> {
         *cursor += 1;
         parts.push(parse_and(tokens, cursor)?);
     }
-    Some(if parts.len() == 1 {
-        parts.into_iter().next().unwrap()
+    if parts.len() == 1 {
+        parts.pop()
     } else {
-        ParsedAssert::Or(parts)
-    })
+        Some(ParsedAssert::Or(parts))
+    }
 }
 
 fn parse_and(tokens: &[Tok], cursor: &mut usize) -> Option<ParsedAssert> {
@@ -209,11 +209,11 @@ fn parse_and(tokens: &[Tok], cursor: &mut usize) -> Option<ParsedAssert> {
         *cursor += 1;
         parts.push(parse_atom(tokens, cursor)?);
     }
-    Some(if parts.len() == 1 {
-        parts.into_iter().next().unwrap()
+    if parts.len() == 1 {
+        parts.pop()
     } else {
-        ParsedAssert::And(parts)
-    })
+        Some(ParsedAssert::And(parts))
+    }
 }
 
 fn parse_atom(tokens: &[Tok], cursor: &mut usize) -> Option<ParsedAssert> {

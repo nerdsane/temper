@@ -83,7 +83,57 @@ impl RuntimeMetricInstruments {
                 );
             }
         }
+
+        // ADR-0051: admission gauges — sampled alongside other runtime gauges
+        // rather than emitted on the dispatch hot path.
+        for (tenant, entity_type, action, active, queue_depth) in
+            state.admission.snapshot_for_metrics().await
+        {
+            crate::runtime_metrics::record_admission_active_permits(
+                &tenant,
+                &entity_type,
+                &action,
+                active,
+            );
+            crate::runtime_metrics::record_admission_queue_depth(
+                &tenant,
+                &entity_type,
+                &action,
+                queue_depth,
+            );
+        }
+
+        // ADR-0049: pending timer gauge — emitted per entity type.
+        for (entity_type, count) in state.state_timeout_tracker.pending_snapshot() {
+            crate::runtime_metrics::record_scheduler_pending_timers(&entity_type, count);
+        }
+
+        // ADR-0050: allow_indefinite_states governance gauge — emitted per
+        // entity type from the currently loaded spec registry.
+        for (entity_type, count) in allow_indefinite_state_counts(state) {
+            crate::runtime_metrics::record_spec_allow_indefinite_states(&entity_type, count);
+        }
     }
+}
+
+/// Walk every registered entity spec and count `allow_indefinite_states`
+/// per entity type. Result is cross-tenant (the last tenant's value wins on
+/// collision — acceptable because specs with the same name across tenants
+/// are semantically the same spec).
+fn allow_indefinite_state_counts(state: &ServerState) -> Vec<(String, u64)> {
+    let Ok(registry) = state.registry.read() else {
+        return Vec::new();
+    };
+    let mut out: std::collections::BTreeMap<String, u64> = std::collections::BTreeMap::new();
+    for tenant in registry.tenant_ids() {
+        for entity_type in registry.entity_types(tenant) {
+            if let Some(spec) = registry.get_spec(tenant, entity_type) {
+                let count = spec.automaton.automaton.allow_indefinite_states.len() as u64;
+                out.insert(entity_type.to_string(), count);
+            }
+        }
+    }
+    out.into_iter().collect()
 }
 
 impl ServerState {

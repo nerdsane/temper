@@ -207,6 +207,12 @@ pub fn from_wasm_invocation(input: WasmInvocationInput<'_>) -> WideEvent {
     attributes.insert("tenant".into(), serde_json::json!(input.tenant));
     if let Some(err) = input.error {
         attributes.insert("error".into(), serde_json::json!(err));
+        attributes.insert("error.message".into(), serde_json::json!(err));
+        attributes.insert(
+            "error.type".into(),
+            serde_json::json!(classify_error(EventKind::WasmInvocation, err)),
+        );
+        attributes.insert("exception.message".into(), serde_json::json!(err));
     }
 
     let mut measurements = BTreeMap::new();
@@ -406,6 +412,12 @@ pub fn from_llm_call(input: LlmCallInput<'_>) -> WideEvent {
     }
     if let Some(err) = input.error {
         attributes.insert("error".into(), serde_json::json!(err));
+        attributes.insert("error.message".into(), serde_json::json!(err));
+        attributes.insert(
+            "error.type".into(),
+            serde_json::json!(classify_error(EventKind::LlmCall, err)),
+        );
+        attributes.insert("exception.message".into(), serde_json::json!(err));
     }
 
     let mut measurements = BTreeMap::new();
@@ -496,6 +508,12 @@ pub fn from_tool_call(input: ToolCallInput<'_>) -> WideEvent {
     }
     if let Some(err) = input.error {
         attributes.insert("error".into(), serde_json::json!(err));
+        attributes.insert("error.message".into(), serde_json::json!(err));
+        attributes.insert(
+            "error.type".into(),
+            serde_json::json!(classify_error(EventKind::ToolCall, err)),
+        );
+        attributes.insert("exception.message".into(), serde_json::json!(err));
     }
 
     let mut measurements = BTreeMap::new();
@@ -524,6 +542,70 @@ pub fn from_tool_call(input: ToolCallInput<'_>) -> WideEvent {
 // View Projections → OTEL SDK
 // =========================================================================
 
+fn key_value_from_json(key: &str, value: &serde_json::Value) -> KeyValue {
+    match value {
+        serde_json::Value::String(value) => KeyValue::new(key.to_string(), value.clone()),
+        serde_json::Value::Bool(value) => KeyValue::new(key.to_string(), *value),
+        serde_json::Value::Number(value) => {
+            if let Some(value) = value.as_i64() {
+                KeyValue::new(key.to_string(), value)
+            } else if let Some(value) = value.as_u64().and_then(|value| i64::try_from(value).ok()) {
+                KeyValue::new(key.to_string(), value)
+            } else if let Some(value) = value.as_f64() {
+                KeyValue::new(key.to_string(), value)
+            } else {
+                KeyValue::new(key.to_string(), value.to_string())
+            }
+        }
+        serde_json::Value::Null | serde_json::Value::Array(_) | serde_json::Value::Object(_) => {
+            KeyValue::new(key.to_string(), value.to_string())
+        }
+    }
+}
+
+fn classify_error(kind: EventKind, error: &str) -> &'static str {
+    let normalized = error.to_ascii_lowercase();
+    if normalized.contains("timeout") {
+        "timeout"
+    } else if normalized.contains("fuel") {
+        "fuel_exhausted"
+    } else if normalized.contains("authorization denied") || normalized.contains("forbidden") {
+        "authorization_denied"
+    } else if normalized.contains("rate limit") {
+        "rate_limit"
+    } else if normalized.contains("connection") {
+        "connection_error"
+    } else {
+        match kind {
+            EventKind::WasmInvocation => "wasm_invocation_error",
+            EventKind::LlmCall => "llm_call_error",
+            EventKind::ToolCall => "tool_call_error",
+            EventKind::AuthzDecision => "authorization_error",
+            EventKind::InvariantCheck => "invariant_error",
+            EventKind::Transition => "transition_error",
+        }
+    }
+}
+
+fn event_error_message(event: &WideEvent) -> Option<String> {
+    event
+        .attributes
+        .get("error.message")
+        .or_else(|| event.attributes.get("exception.message"))
+        .or_else(|| event.attributes.get("error"))
+        .and_then(serde_json::Value::as_str)
+        .map(ToOwned::to_owned)
+}
+
+fn event_error_type(event: &WideEvent, error_message: &str) -> String {
+    event
+        .attributes
+        .get("error.type")
+        .and_then(serde_json::Value::as_str)
+        .map(ToOwned::to_owned)
+        .unwrap_or_else(|| classify_error(event.event_kind, error_message).to_string())
+}
+
 /// Project to the **Contextual View** (OTEL span).
 pub fn emit_span(event: &WideEvent) {
     let tracer = opentelemetry::global::tracer("temper");
@@ -544,7 +626,7 @@ pub fn emit_span(event: &WideEvent) {
         if k.starts_with("_otel.") {
             continue;
         }
-        attrs.push(KeyValue::new(k.clone(), v.to_string()));
+        attrs.push(key_value_from_json(k, v));
     }
     for (k, v) in &event.measurements {
         attrs.push(KeyValue::new(k.clone(), *v));
@@ -567,7 +649,19 @@ pub fn emit_span(event: &WideEvent) {
     let status = if event.success {
         Status::Ok
     } else {
-        Status::error(String::new())
+        let error_message =
+            event_error_message(event).unwrap_or_else(|| "operation failed".to_string());
+        let error_type = event_error_type(event, &error_message);
+        if !event.attributes.contains_key("error.message") {
+            attrs.push(KeyValue::new("error.message", error_message.clone()));
+        }
+        if !event.attributes.contains_key("exception.message") {
+            attrs.push(KeyValue::new("exception.message", error_message.clone()));
+        }
+        if !event.attributes.contains_key("error.type") {
+            attrs.push(KeyValue::new("error.type", error_type));
+        }
+        Status::error(error_message)
     };
 
     let start_time: SystemTime = event.timestamp.into();
@@ -732,6 +826,12 @@ mod tests {
         });
         assert!(!event.success);
         assert_eq!(event.attributes["error"], "module panicked");
+        assert_eq!(event.attributes["error.message"], "module panicked");
+        assert_eq!(event.attributes["error.type"], "wasm_invocation_error");
+        assert_eq!(
+            event_error_message(&event).as_deref(),
+            Some("module panicked")
+        );
     }
 
     #[test]

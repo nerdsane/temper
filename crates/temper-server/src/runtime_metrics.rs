@@ -21,9 +21,6 @@ struct RuntimeMetrics {
     event_replay_duration: Histogram<f64>,
     blob_io_wait_duration_ms: Histogram<f64>,
     blob_local_fast_path_requests_total: Counter<u64>,
-    monty_repl_acquisitions_total: Counter<u64>,
-    monty_repl_observed_active_invocations: Histogram<f64>,
-    monty_repl_wait_duration_ms: Histogram<f64>,
     wasm_integration_default_timeout_used_total: Counter<u64>,
     entity_concurrency_retry_total: Counter<u64>,
     entity_concurrency_retry_attempts: Histogram<u64>,
@@ -38,6 +35,10 @@ struct RuntimeMetrics {
     state_timeout_reset_total: Counter<u64>,
     scheduler_overdue_on_replay_total: Counter<u64>,
     scheduler_pending_timers: Gauge<u64>,
+    // ADR-0056: re-arm on actor hydration.
+    state_timeout_armed_on_hydration_total: Counter<u64>,
+    // ADR-0056 Sub-Decision 3: silent-exit regression guard.
+    integration_silent_exit_total: Counter<u64>,
     // --- ADR-0050: liveness coverage enforcement --------------------------
     spec_liveness_violations_total: Counter<u64>,
     spec_allow_indefinite_states: Gauge<u64>,
@@ -54,6 +55,20 @@ struct RuntimeMetrics {
     actor_mailbox_utilization: Gauge<f64>,
     actor_mailbox_full_drop_total: Counter<u64>,
     actor_ask_reply_latency_ms: Histogram<f64>,
+    // --- Dispatch contention (W2 / temper#146) ----------------------------
+    actor_registry_lock_wait_ms: Histogram<f64>,
+    actor_cold_start_duration_ms: Histogram<f64>,
+    event_store_append_wait_ms: Histogram<f64>,
+    // cedar_eval_duration is emitted from temper-authz (existing
+    // temper_cedar_evaluation_duration histogram) — no duplicate here.
+    // --- Handler-deadline primitive (W3 / temper#147 — reserved) ---------
+    // Names and tag shapes are frozen here so dashboards and monitors can
+    // be authored before the primitive lands. Emission sites wire on when
+    // the Wasmtime epoch-interruption layer ships.
+    handler_deadline_remaining_ms: Gauge<u64>,
+    handler_deadline_exceeded_total: Counter<u64>,
+    wasm_epoch_tick_interval_ms: Histogram<f64>,
+    handler_kill_latency_ms: Histogram<f64>,
     // --- Katagami (consumer-side outcome) ---------------------------------
     curation_job_duration_ms: Histogram<f64>,
     curation_job_outcome_total: Counter<u64>,
@@ -98,21 +113,6 @@ fn metrics() -> &'static RuntimeMetrics {
                 .with_description(
                     "Requests served by the in-process local blob fast path without loopback HTTP.",
                 )
-                .build(),
-            monty_repl_acquisitions_total: meter
-                .u64_counter("temper_monty_repl_acquisitions_total")
-                .with_description("Total number of monty_repl execution gate acquisitions.")
-                .build(),
-            monty_repl_observed_active_invocations: meter
-                .f64_histogram("temper_monty_repl_observed_active_invocations")
-                .with_description(
-                    "Observed number of concurrent monty_repl WASM executions at acquire/release points.",
-                )
-                .build(),
-            monty_repl_wait_duration_ms: meter
-                .f64_histogram("temper_monty_repl_wait_duration_ms")
-                .with_unit("ms")
-                .with_description("Time spent waiting to acquire the monty_repl execution gate.")
                 .build(),
             wasm_integration_default_timeout_used_total: meter
                 .u64_counter("temper_wasm_integration_default_timeout_used_total")
@@ -185,6 +185,27 @@ fn metrics() -> &'static RuntimeMetrics {
                 .u64_gauge("temper_scheduler_pending_timers")
                 .with_description("ADR-0049: live in-memory timer count per entity type.")
                 .build(),
+            state_timeout_armed_on_hydration_total: meter
+                .u64_counter("temper_state_timeout_armed_on_hydration_total")
+                .with_description(
+                    "ADR-0056: timers re-armed when an actor hydrated into a state with a \
+                     declared [[state_timeout]] but no live in-memory timer. `elapsed_bucket` \
+                     tag distinguishes overdue (fired immediately) from budgeted (armed with \
+                     remaining delay).",
+                )
+                .build(),
+            integration_silent_exit_total: meter
+                .u64_counter("temper_integration_silent_exit_total")
+                .with_description(
+                    "ADR-0056: inline WASM trigger-integration invocations that returned \
+                     successfully without causing any state transition on the triggering \
+                     entity. Under healthy operation this counter is permanently zero; any \
+                     nonzero reading is a regression of the consumer-side \
+                     exit-dispatches-an-action invariant (openpaw ADR-0039 Sub-Decision 3a) \
+                     or a transient persist failure that slipped past the retry layer \
+                     (ADR-0056 Sub-Decision 2). Alerts on this counter are critical-severity.",
+                )
+                .build(),
             spec_liveness_violations_total: meter
                 .u64_counter("temper_spec_liveness_violations_total")
                 .with_description(
@@ -245,6 +266,67 @@ fn metrics() -> &'static RuntimeMetrics {
                 .f64_histogram("temper_actor_ask_reply_latency_ms")
                 .with_unit("ms")
                 .with_description("Inside-actor ask handling latency (excludes dispatch overhead).")
+                .build(),
+            actor_registry_lock_wait_ms: meter
+                .f64_histogram("temper_actor_registry_lock_wait_ms")
+                .with_unit("ms")
+                .with_description(
+                    "Wall-clock time between actor-registry lookup request and grant. \
+                     Drives temper#146 investigation: under bursty cold-start load, high \
+                     p95 here points at the registry mutex as the bottleneck.",
+                )
+                .build(),
+            actor_cold_start_duration_ms: meter
+                .f64_histogram("temper_actor_cold_start_duration_ms")
+                .with_unit("ms")
+                .with_description(
+                    "End-to-end duration from first-message arrival to first-reply-ready \
+                     for a previously unhydrated actor. See temper#146.",
+                )
+                .build(),
+            event_store_append_wait_ms: meter
+                .f64_histogram("temper_event_store_append_wait_ms")
+                .with_unit("ms")
+                .with_description(
+                    "Time between event-store append() call and return, including any \
+                     writer-lock or fsync serialization. High p95 points at storage as a \
+                     cold-start bottleneck. See temper#146.",
+                )
+                .build(),
+            handler_deadline_remaining_ms: meter
+                .u64_gauge("temper_handler_deadline_remaining_ms")
+                .with_unit("ms")
+                .with_description(
+                    "W3 reserved (temper#147): budget remaining at WASM dispatch start. \
+                     Gauges how tight current deadlines are relative to observed \
+                     handler latency. Emitted when the handler-deadline primitive \
+                     lands.",
+                )
+                .build(),
+            handler_deadline_exceeded_total: meter
+                .u64_counter("temper_handler_deadline_exceeded_total")
+                .with_description(
+                    "W3 reserved (temper#147): WASM handlers killed for exceeding their \
+                     deadline. Tagged with `dying_span` (which host function was running \
+                     when the guest was killed); without that tag the metric would be \
+                     uninvestigatable.",
+                )
+                .build(),
+            wasm_epoch_tick_interval_ms: meter
+                .f64_histogram("temper_wasm_epoch_tick_interval_ms")
+                .with_unit("ms")
+                .with_description(
+                    "W3 reserved (temper#147): Wasmtime epoch-interruption ticker \
+                     interval. Drift here makes deadlines imprecise.",
+                )
+                .build(),
+            handler_kill_latency_ms: meter
+                .f64_histogram("temper_handler_kill_latency_ms")
+                .with_unit("ms")
+                .with_description(
+                    "W3 reserved (temper#147): time from deadline breach to guest \
+                     actually exiting. Detects guest code that resists termination.",
+                )
                 .build(),
             curation_job_duration_ms: meter
                 .f64_histogram("temper_curation_job_duration_ms")
@@ -356,39 +438,6 @@ pub fn record_blob_local_fast_path_request(method: &str) {
 /// Record process resident memory usage.
 pub fn record_process_resident_memory_bytes(bytes: u64) {
     metrics().process_resident_memory_bytes.record(bytes, &[]);
-}
-
-/// Record the number of concurrent monty_repl executions.
-pub fn record_monty_repl_active_invocations(count: u64, max_concurrency: usize) {
-    metrics().monty_repl_observed_active_invocations.record(
-        count as f64,
-        &[KeyValue::new(
-            "max_concurrency",
-            i64::try_from(max_concurrency).unwrap_or(i64::MAX),
-        )],
-    );
-}
-
-/// Record a successful monty_repl gate acquisition.
-pub fn record_monty_repl_acquisition(max_concurrency: usize) {
-    metrics().monty_repl_acquisitions_total.add(
-        1,
-        &[KeyValue::new(
-            "max_concurrency",
-            i64::try_from(max_concurrency).unwrap_or(i64::MAX),
-        )],
-    );
-}
-
-/// Record time spent waiting for the monty_repl execution gate.
-pub fn record_monty_repl_wait_duration(duration: Duration, max_concurrency: usize) {
-    metrics().monty_repl_wait_duration_ms.record(
-        duration.as_secs_f64() * 1000.0,
-        &[KeyValue::new(
-            "max_concurrency",
-            i64::try_from(max_concurrency).unwrap_or(i64::MAX),
-        )],
-    );
 }
 
 /// Record a WASM integration dispatch that fell back to the default timeout
@@ -566,6 +615,47 @@ pub fn record_state_timeout_reset(
     );
 }
 
+/// Record a state_timeout re-armed by the hydration hook (ADR-0056). `bucket`
+/// is `"overdue"` when the timer fired immediately because elapsed >=
+/// after_seconds, or `"budgeted"` when armed with remaining delay.
+pub fn record_state_timeout_armed_on_hydration(
+    tenant: &str,
+    entity_type: &str,
+    state: &str,
+    bucket: &'static str,
+) {
+    metrics().state_timeout_armed_on_hydration_total.add(
+        1,
+        &[
+            KeyValue::new("tenant", tenant.to_string()),
+            KeyValue::new("entity_type", entity_type.to_string()),
+            KeyValue::new("state", state.to_string()),
+            KeyValue::new("elapsed_bucket", bucket),
+        ],
+    );
+}
+
+/// Record a silent integration exit — an inline trigger invocation that
+/// returned successfully without causing a state transition on the
+/// triggering entity. Emits `temper_integration_silent_exit_total` (ADR-0056
+/// Sub-Decision 3).
+pub fn record_integration_silent_exit(
+    tenant: &str,
+    entity_type: &str,
+    triggering_action: &str,
+    state: &str,
+) {
+    metrics().integration_silent_exit_total.add(
+        1,
+        &[
+            KeyValue::new("tenant", tenant.to_string()),
+            KeyValue::new("entity_type", entity_type.to_string()),
+            KeyValue::new("action", triggering_action.to_string()),
+            KeyValue::new("state", state.to_string()),
+        ],
+    );
+}
+
 /// Record a timer that missed its deadline across a restart and had to be
 /// re-fired with `overdue=true`.
 pub fn record_scheduler_overdue_on_replay(tenant: &str, entity_type: &str) {
@@ -726,6 +816,92 @@ pub fn record_actor_ask_reply_latency(entity_type: &str, action: &str, elapsed: 
             KeyValue::new("entity_type", entity_type.to_string()),
             KeyValue::new("action", action.to_string()),
         ],
+    );
+}
+
+/// Record time spent in actor-registry lookup / spawn. High p95 points at
+/// mutex contention on the registry — core signal for temper#146.
+pub fn record_actor_registry_lock_wait(entity_type: &str, was_cold_start: bool, elapsed: Duration) {
+    metrics().actor_registry_lock_wait_ms.record(
+        elapsed.as_secs_f64() * 1000.0,
+        &[
+            KeyValue::new("entity_type", entity_type.to_string()),
+            KeyValue::new("cold_start", was_cold_start),
+        ],
+    );
+}
+
+/// Record end-to-end cold-start duration for a freshly spawned actor.
+pub fn record_actor_cold_start_duration(entity_type: &str, elapsed: Duration) {
+    metrics().actor_cold_start_duration_ms.record(
+        elapsed.as_secs_f64() * 1000.0,
+        &[KeyValue::new("entity_type", entity_type.to_string())],
+    );
+}
+
+/// Record time between event-store append() call and return.
+pub fn record_event_store_append_wait(backend: &str, operation: &str, elapsed: Duration) {
+    metrics().event_store_append_wait_ms.record(
+        elapsed.as_secs_f64() * 1000.0,
+        &[
+            KeyValue::new("backend", backend.to_string()),
+            KeyValue::new("operation", operation.to_string()),
+        ],
+    );
+}
+
+// Cedar evaluation duration is emitted from the temper-authz crate via the
+// existing `record_cedar_evaluation` helper. No duplicate metric here.
+
+// ============================================================================
+// W3 reserved (temper#147): handler-deadline primitive helpers.
+// ============================================================================
+//
+// These functions are the call-site surface the handler-deadline
+// implementation will use. They are public now so dashboards, monitors,
+// and tests can reference the metric names; the primitive wires them on
+// when epoch-interruption lands.
+
+/// Record the deadline headroom (budget remaining) at WASM dispatch start.
+pub fn record_handler_deadline_remaining(entity_type: &str, action: &str, remaining: Duration) {
+    metrics().handler_deadline_remaining_ms.record(
+        (remaining.as_secs_f64() * 1000.0).max(0.0) as u64,
+        &[
+            KeyValue::new("entity_type", entity_type.to_string()),
+            KeyValue::new("action", action.to_string()),
+        ],
+    );
+}
+
+/// Record a handler killed for exceeding its deadline.
+///
+/// `dying_span` identifies which host function was running when the guest
+/// was terminated (e.g. `wasm.web_search`, `wasm.provider_call`). It is
+/// mandatory: without it the metric cannot be used to identify hang
+/// sources.
+pub fn record_handler_deadline_exceeded(entity_type: &str, action: &str, dying_span: &'static str) {
+    metrics().handler_deadline_exceeded_total.add(
+        1,
+        &[
+            KeyValue::new("entity_type", entity_type.to_string()),
+            KeyValue::new("action", action.to_string()),
+            KeyValue::new("dying_span", dying_span),
+        ],
+    );
+}
+
+/// Record the observed interval between Wasmtime epoch ticks.
+pub fn record_wasm_epoch_tick_interval(elapsed: Duration) {
+    metrics()
+        .wasm_epoch_tick_interval_ms
+        .record(elapsed.as_secs_f64() * 1000.0, &[]);
+}
+
+/// Record the time from deadline breach to guest exit completion.
+pub fn record_handler_kill_latency(entity_type: &str, elapsed: Duration) {
+    metrics().handler_kill_latency_ms.record(
+        elapsed.as_secs_f64() * 1000.0,
+        &[KeyValue::new("entity_type", entity_type.to_string())],
     );
 }
 

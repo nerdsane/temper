@@ -272,3 +272,32 @@ jobs:
           done
           if [ "$ALL_PASSED" = false ]; then exit 1; fi
           echo "All specs verified: OK"
+
+
+  # ─────────────────────────────────────────────────────
+  # Gate N: Instrumentation hygiene (ADR-0052)
+  # Fails when a metric registration has no emission site.
+  # ─────────────────────────────────────────────────────
+  instrumentation-hygiene:
+    name: Instrumentation Hygiene (ADR-0052)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install rust toolchain
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
+
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/bin
+            ~/.cargo/registry
+            ~/.cargo/git
+            target/
+          key: ${{ runner.os }}-cargo-instrumentation-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-cargo-instrumentation-
+
+      - name: Run check_instrumentation
+        run: cargo run -q -p temper-server --bin check_instrumentation

@@ -9,7 +9,10 @@ mod telemetry;
 mod tests;
 
 use std::collections::BTreeMap;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, RwLock};
+use std::thread;
+use std::time::Duration;
 
 use sha2::{Digest, Sha256};
 use wasmtime::{Config, Engine, Linker, Module, ResourceLimiter, Store};
@@ -21,6 +24,8 @@ use crate::stream::StreamRegistry;
 use crate::types::{
     MAX_MODULE_SIZE, WasmInvocationContext, WasmInvocationResult, WasmResourceLimits,
 };
+
+const WASM_EPOCH_TICK_INTERVAL: Duration = Duration::from_millis(10);
 
 /// Errors from the WASM engine.
 #[derive(Debug, thiserror::Error)]
@@ -104,6 +109,57 @@ struct CachedModule {
     instance_pre_wasi: Option<wasmtime::InstancePre<HostState>>,
 }
 
+/// Background ticker for Wasmtime epoch interruption.
+///
+/// Wasmtime epochs are global to an `Engine`; per-invocation timeout tasks that
+/// call `increment_epoch()` can therefore interrupt every active store sharing
+/// that engine. A single monotonic ticker keeps epoch increments global while
+/// each store's deadline remains local and relative to the epoch at store setup.
+struct EpochTicker {
+    stop: Arc<AtomicBool>,
+    handle: Option<thread::JoinHandle<()>>,
+}
+
+impl EpochTicker {
+    fn start(engine: Engine) -> Result<Self, WasmError> {
+        let stop = Arc::new(AtomicBool::new(false));
+        let stop_for_thread = Arc::clone(&stop);
+        let handle = thread::Builder::new()
+            .name("temper-wasm-epoch".to_string())
+            .spawn(move || {
+                while !stop_for_thread.load(Ordering::Acquire) {
+                    thread::sleep(WASM_EPOCH_TICK_INTERVAL);
+                    if stop_for_thread.load(Ordering::Acquire) {
+                        break;
+                    }
+                    engine.increment_epoch();
+                }
+            })
+            .map_err(|e| WasmError::Compilation(format!("failed to start epoch ticker: {e}")))?;
+
+        Ok(Self {
+            stop,
+            handle: Some(handle),
+        })
+    }
+}
+
+impl Drop for EpochTicker {
+    fn drop(&mut self) {
+        self.stop.store(true, Ordering::Release);
+        if let Some(handle) = self.handle.take() {
+            let _ = handle.join();
+        }
+    }
+}
+
+fn epoch_deadline_ticks(max_duration: Duration) -> u64 {
+    let tick_nanos = WASM_EPOCH_TICK_INTERVAL.as_nanos().max(1);
+    let duration_nanos = max_duration.as_nanos();
+    let ticks = duration_nanos.saturating_add(tick_nanos.saturating_sub(1)) / tick_nanos;
+    u64::try_from(ticks.max(1)).unwrap_or(u64::MAX)
+}
+
 /// Host state passed into the WASM store.
 pub(crate) struct HostState {
     /// Serialized invocation context JSON.
@@ -136,6 +192,8 @@ pub(crate) struct HostState {
 pub struct WasmEngine {
     /// The underlying wasmtime engine.
     engine: Engine,
+    /// Shared epoch ticker used by per-store relative deadlines.
+    _epoch_ticker: EpochTicker,
     /// Compiled module cache: SHA-256 hash -> compiled module.
     cache: RwLock<BTreeMap<String, Arc<CachedModule>>>,
 }
@@ -149,9 +207,11 @@ impl WasmEngine {
         config.wasm_component_model(true);
 
         let engine = Engine::new(&config).map_err(|e| WasmError::Compilation(e.to_string()))?;
+        let epoch_ticker = EpochTicker::start(engine.clone())?;
 
         Ok(Self {
             engine,
+            _epoch_ticker: epoch_ticker,
             cache: RwLock::new(BTreeMap::new()),
         })
     }
@@ -264,6 +324,9 @@ impl WasmEngine {
             callback_action = tracing::field::Empty,
             duration_ms = tracing::field::Empty,
             error = tracing::field::Empty,
+            error.type = tracing::field::Empty,
+            error.message = tracing::field::Empty,
+            exception.message = tracing::field::Empty,
         )
     )]
     pub async fn invoke(
@@ -373,23 +436,7 @@ impl WasmEngine {
             .set_fuel(limits.max_fuel)
             .map_err(|e| WasmError::Invocation(format!("failed to set fuel: {e}")))?;
         store.limiter(|state| &mut state.limiter);
-        store.set_epoch_deadline(1);
-
-        let engine_for_timeout = engine.clone();
-        let max_duration = limits.max_duration;
-        let timeout_task = tokio::spawn(async move {
-            // determinism-ok: epoch timer for WASM wall-clock timeout enforcement
-            tokio::time::sleep(max_duration).await;
-            engine_for_timeout.increment_epoch();
-        });
-
-        struct AbortOnDrop(tokio::task::JoinHandle<()>);
-        impl Drop for AbortOnDrop {
-            fn drop(&mut self) {
-                self.0.abort();
-            }
-        }
-        let _timer_guard = AbortOnDrop(timeout_task);
+        store.set_epoch_deadline(epoch_deadline_ticks(limits.max_duration));
 
         let instance = if needs_wasi {
             if let Some(ref pre) = cached.instance_pre_wasi {
@@ -434,7 +481,7 @@ impl WasmEngine {
         let result_ptr = run_fn
             .call(&mut store, (ctx_ptr as i32, ctx_bytes.len() as i32))
             .map_err(|e| {
-                telemetry::map_invoke_error(e, &context, needs_wasi, max_duration, start)
+                telemetry::map_invoke_error(e, &context, needs_wasi, limits.max_duration, start)
             })?;
 
         let duration_ms = start.elapsed().as_millis() as u64;

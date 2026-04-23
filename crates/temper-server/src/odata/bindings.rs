@@ -6,6 +6,7 @@ use opentelemetry::KeyValue as OtelKeyValue;
 use opentelemetry::trace::{Span, Status, Tracer};
 use temper_runtime::scheduler::sim_now;
 use temper_runtime::tenant::TenantId;
+use tracing_opentelemetry::OpenTelemetrySpanExt;
 
 use temper_authz::SecurityContext;
 
@@ -17,6 +18,10 @@ use crate::identity::ResolvedIdentity;
 use crate::request_context::AgentContext;
 use crate::response::{ODataResponse, odata_error};
 use crate::state::{DispatchError, DispatchExtOptions, ServerState};
+
+fn idempotency_actor_key(tenant: &TenantId, entity_type: &str, entity_id: &str) -> String {
+    format!("{tenant}:{entity_type}:{entity_id}")
+}
 
 #[allow(clippy::too_many_arguments)]
 pub(super) async fn dispatch_bound_action(
@@ -47,7 +52,7 @@ pub(super) async fn dispatch_bound_action(
             OtelKeyValue::new("odata.action", action.to_string()),
             OtelKeyValue::new("tenant", tenant.as_str().to_string()),
         ])
-        .start(&tracer);
+        .start_with_context(&tracer, &tracing::Span::current().context());
 
     if let Some(ref aid) = agent_ctx.agent_id {
         http_span.set_attribute(OtelKeyValue::new("agent.id", aid.clone()));
@@ -257,9 +262,11 @@ pub(super) async fn dispatch_bound_action(
     }
 
     // Idempotency cache check
-    let actor_key = format!("{entity_type}:{key_str}");
+    let actor_key = idempotency_actor_key(tenant, entity_type, key_str);
     if let Some(ref idem_key) = idempotency_key
-        && let Some(cached) = state.idempotency_cache.get(&actor_key, idem_key)
+        && let Some(cached) = state
+            .idempotency_cache
+            .get_after_effects_applied(&actor_key, idem_key)
     {
         let body = annotate_entity(
             serde_json::to_value(&cached.state).unwrap_or_default(),
@@ -298,9 +305,11 @@ pub(super) async fn dispatch_bound_action(
             if response.success {
                 // Cache for idempotency
                 if let Some(ref idem_key) = idempotency_key {
-                    state
-                        .idempotency_cache
-                        .put(&actor_key, idem_key, response.clone());
+                    state.idempotency_cache.put_effects_applied(
+                        &actor_key,
+                        idem_key,
+                        response.clone(),
+                    );
                 }
 
                 http_span.set_status(Status::Ok);
@@ -379,4 +388,19 @@ pub(super) async fn dispatch_bound_action(
 
     http_span.end_with_timestamp(http_end);
     response
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn idempotency_actor_key_matches_actor_persistence_id_shape() {
+        let tenant = TenantId::new("acme");
+
+        assert_eq!(
+            idempotency_actor_key(&tenant, "WorkCycle", "wc-1"),
+            "acme:WorkCycle:wc-1"
+        );
+    }
 }

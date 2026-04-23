@@ -18,6 +18,7 @@ pub struct LlmSpanInput<'a> {
     pub session_id: &'a str,
     pub trace_id: &'a str,
     pub span_id: &'a str,
+    pub span_name: &'a str,
     pub provider: &'a str,
     pub model: &'a str,
     pub system_instructions: Option<&'a str>,
@@ -52,6 +53,11 @@ pub async fn submit_llm_span(input: LlmSpanInput<'_>) -> Result<(), String> {
         return Ok(());
     };
 
+    let payload = build_llm_span_payload(&input)?;
+    post_payload(&config, payload).await
+}
+
+fn build_llm_span_payload(input: &LlmSpanInput<'_>) -> Result<Value, String> {
     let mut input_messages = input
         .input_messages_json
         .map(convert_otel_messages_to_llmobs)
@@ -77,11 +83,16 @@ pub async fn submit_llm_span(input: LlmSpanInput<'_>) -> Result<(), String> {
     let duration_ns = (input.duration_ms as f64) * 1_000_000.0;
     let trace_id = normalize_trace_id(input.trace_id);
     let span_id = normalize_span_id(input.span_id);
+    let provider = normalize_model_provider(input.provider);
+    let mut metadata = Map::from_iter([
+        ("model_name".to_string(), json!(input.model)),
+        ("model_provider".to_string(), json!(provider)),
+    ]);
 
     let mut meta = Map::from_iter([
         ("kind".to_string(), json!("llm")),
         ("model_name".to_string(), json!(input.model)),
-        ("model_provider".to_string(), json!(input.provider)),
+        ("model_provider".to_string(), json!(provider)),
     ]);
     if !input_messages.is_empty() {
         meta.insert("input".to_string(), json!({ "messages": input_messages }));
@@ -90,17 +101,14 @@ pub async fn submit_llm_span(input: LlmSpanInput<'_>) -> Result<(), String> {
         meta.insert("output".to_string(), json!({ "messages": output_messages }));
     }
     if input.finish_reason.is_some() || input.error_type.is_some() {
-        let mut metadata = Map::new();
         if let Some(finish_reason) = input.finish_reason.filter(|value| !value.is_empty()) {
             metadata.insert("finish_reason".to_string(), json!(finish_reason));
         }
         if let Some(error_type) = input.error_type.filter(|value| !value.is_empty()) {
             metadata.insert("error_type".to_string(), json!(error_type));
         }
-        if !metadata.is_empty() {
-            meta.insert("metadata".to_string(), Value::Object(metadata));
-        }
     }
+    meta.insert("metadata".to_string(), Value::Object(metadata));
     if let Some(error_type) = input.error_type.filter(|value| !value.is_empty()) {
         meta.insert(
             "error".to_string(),
@@ -126,21 +134,29 @@ pub async fn submit_llm_span(input: LlmSpanInput<'_>) -> Result<(), String> {
         metrics.insert("total_tokens".to_string(), json!(total_tokens as f64));
     }
 
-    let payload = json!({
+    let span_tags = vec![
+        format!("service:{}", input.service_name),
+        format!("session_id:{}", input.session_id),
+        format!("model_name:{}", input.model),
+        format!("model_provider:{provider}"),
+    ];
+
+    Ok(json!({
         "data": {
             "type": "span",
             "attributes": {
                 "ml_app": input.service_name,
                 "session_id": input.session_id,
-                "tags": [format!("service:{}", input.service_name)],
+                "tags": span_tags.clone(),
                 "spans": [{
                     "parent_id": "undefined",
                     "trace_id": trace_id,
                     "span_id": span_id,
-                    "name": "wasm:llm_caller",
+                    "name": input.span_name,
                     "service": input.service_name,
                     "ml_app": input.service_name,
                     "session_id": input.session_id,
+                    "tags": span_tags,
                     "status": if input.error_type.is_some() { "error" } else { "ok" },
                     "start_ns": start_ns,
                     "duration": duration_ns,
@@ -149,9 +165,7 @@ pub async fn submit_llm_span(input: LlmSpanInput<'_>) -> Result<(), String> {
                 }],
             },
         },
-    });
-
-    post_payload(&config, payload).await
+    }))
 }
 
 pub async fn submit_tool_spans(
@@ -334,6 +348,16 @@ fn normalize_span_id(span_id: &str) -> String {
     }
 }
 
+fn normalize_model_provider(provider: &str) -> String {
+    let trimmed = provider.trim();
+    match trimmed.to_ascii_lowercase().as_str() {
+        "openai_codex" => "openai".to_string(),
+        "mock" => "custom".to_string(),
+        "" => "custom".to_string(),
+        _ => trimmed.to_string(),
+    }
+}
+
 fn hash_to_decimal_id(seed: &str) -> String {
     let mut digest = Sha256::new();
     digest.update(seed.as_bytes());
@@ -432,28 +456,5 @@ pub fn parse_tool_span_inputs(
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn converts_otel_messages_with_tool_calls_and_results() {
-        let messages = convert_otel_messages_to_llmobs(
-            r#"[
-              {"role":"user","parts":[{"type":"text","content":"List sessions"}]},
-              {"role":"assistant","parts":[{"type":"tool_call","id":"tool_123","name":"temper.list_sessions","arguments":{"top":3}}]},
-              {"role":"tool","parts":[{"type":"tool_call_response","id":"tool_123","result":{"sessions":["s1","s2"]}}]}
-            ]"#,
-        )
-        .unwrap();
-
-        assert_eq!(messages[0]["content"], "List sessions");
-        assert_eq!(messages[1]["tool_calls"][0]["name"], "temper.list_sessions");
-        assert_eq!(messages[2]["tool_results"][0]["tool_id"], "tool_123");
-    }
-
-    #[test]
-    fn normalizes_hex_trace_and_span_ids() {
-        assert_eq!(normalize_trace_id("0000000000000000000000000000000f"), "15");
-        assert_eq!(normalize_span_id("000000000000000a"), "10");
-    }
-}
+#[path = "llmobs_api_test.rs"]
+mod tests;

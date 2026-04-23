@@ -4,13 +4,14 @@ use std::sync::{Arc, RwLock};
 
 use axum::extract::Query;
 use axum::extract::State;
-use axum::http::{HeaderMap, StatusCode};
+use axum::http::{HeaderMap, HeaderValue, StatusCode};
 use axum::response::IntoResponse;
 use temper_odata::path::{ODataPath, parse_path};
 use temper_runtime::scheduler::sim_now;
 use temper_runtime::tenant::TenantId;
 use temper_wasm::{StreamRegistry, WasmInvocationContext};
 use tracing::instrument;
+use tracing_opentelemetry::OpenTelemetrySpanExt;
 
 use axum::Extension;
 
@@ -24,7 +25,7 @@ use super::constraints::pre_delete_relation_checks;
 use super::response::annotate_entity;
 use crate::blobs::hydrate_blob_refs_for_tenant;
 use crate::identity::ResolvedIdentity;
-use crate::request_context::{AgentContext, extract_agent_context};
+use crate::request_context::{AgentContext, extract_agent_context, remote_parent_context};
 use crate::response::{ODataResponse, odata_error};
 use crate::state::ServerState;
 use crate::state::trajectory::{TrajectoryEntry, TrajectorySource};
@@ -169,6 +170,9 @@ pub async fn handle_odata_post(
         Err(e) => return e.into_response(),
     };
     let mut agent_ctx = extract_agent_context(&headers);
+    if let Some(remote_parent) = remote_parent_context(&agent_ctx) {
+        tracing::Span::current().set_parent(remote_parent);
+    }
     let resolved_identity = resolved_id.map(|Extension(id)| id);
     // Enrich agent context with credential-resolved identity (ADR-0033).
     if let Some(ref identity) = resolved_identity {
@@ -658,7 +662,17 @@ async fn handle_stream_put(
     let stream_id = format!("upload-{}", temper_runtime::scheduler::sim_uuid());
     let streams = Arc::new(RwLock::new(StreamRegistry::default()));
     {
-        let mut s = streams.write().unwrap(); // ci-ok: infallible lock
+        let mut s = match streams.write() {
+            Ok(lock) => lock,
+            Err(_) => {
+                return odata_error(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "StreamRegistryPoisoned",
+                    "stream registry lock was poisoned",
+                )
+                .into_response();
+            }
+        };
         s.register_stream(&stream_id, body.to_vec());
     }
 
@@ -724,10 +738,9 @@ async fn handle_stream_put(
         {
             Ok(entity_resp) => {
                 let mut response = StatusCode::NO_CONTENT.into_response();
-                response.headers_mut().insert(
-                    "OData-Version",
-                    "4.0".parse().unwrap(), // ci-ok: static header value
-                );
+                response
+                    .headers_mut()
+                    .insert("OData-Version", HeaderValue::from_static("4.0"));
                 // Set ETag from entity's content_hash after action dispatch
                 let state_val = serde_json::to_value(&entity_resp.state).unwrap_or_default();
                 if let Some(hash) = state_val.get("content_hash").and_then(|v| v.as_str())

@@ -433,18 +433,26 @@ impl WasmHost for ProductionWasmHost {
         body: &str,
     ) -> Result<(u16, String), String> {
         let started = Instant::now();
+        // Strip Temper span hint headers (X-Temper-Span-*) before the request
+        // is built, and capture them for the local tracing span. See
+        // ADR-0037: WASM guests annotate outgoing calls with
+        // `X-Temper-Span-Name` / `X-Temper-Span-Attr-*` so the resulting
+        // span has a semantically meaningful name (e.g., `tool.llm_call`)
+        // and attributes (e.g., `gen_ai.request.model`).
+        let (filtered_headers, span_hints) = split_span_hint_headers(headers);
         let span = tracing::info_span!(
             "wasm.host.http_call",
             otel.name = "wasm.host.http_call",
             http.method = %method,
             http.url = %telemetry_url(url),
             request_bytes = body.len() as u64,
-            header_count = headers.len() as u64,
+            header_count = filtered_headers.len() as u64,
             status_code = tracing::field::Empty,
             response_bytes = tracing::field::Empty,
             duration_ms = tracing::field::Empty,
         );
         let _guard = span.enter();
+        apply_span_hints(&tracing::Span::current(), &span_hints);
 
         let mut builder = match method.to_uppercase().as_str() {
             "GET" => self.client.get(url),
@@ -455,7 +463,7 @@ impl WasmHost for ProductionWasmHost {
             other => return Err(format!("unsupported HTTP method: {other}")),
         };
 
-        for (k, v) in headers {
+        for (k, v) in &filtered_headers {
             builder = builder.header(k.as_str(), v.as_str());
         }
 
@@ -468,7 +476,7 @@ impl WasmHost for ProductionWasmHost {
             .get("temper_api_url")
             .is_some_and(|api_url| url.starts_with(api_url.trim_end_matches('/')));
         if is_internal && let Some(ref inv_ctx) = self.invocation_context {
-            let has_principal = headers
+            let has_principal = filtered_headers
                 .iter()
                 .any(|(k, _)| k.eq_ignore_ascii_case("x-temper-principal-kind"));
             if !has_principal {
@@ -499,17 +507,13 @@ impl WasmHost for ProductionWasmHost {
         // but this runs in WasmHost (not simulation), so wall-clock/network access is fine.
 
         // Auto-inject traceparent for cross-request trace correlation.
-        if let Some(ref trace_id) = self.trace_id
-            && !headers
-                .iter()
-                .any(|(k, _)| k.eq_ignore_ascii_case("traceparent"))
+        if !filtered_headers
+            .iter()
+            .any(|(k, _)| k.eq_ignore_ascii_case("traceparent"))
+            && let Some(traceparent) =
+                current_traceparent_header(&tracing::Span::current(), self.trace_id.as_deref())
         {
-            let nanos = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .map(|d| d.as_nanos() as u64)
-                .unwrap_or(0);
-            let span_id = format!("{nanos:016x}");
-            builder = builder.header("traceparent", format!("00-{trace_id}-{span_id}-01"));
+            builder = builder.header("traceparent", traceparent);
         }
 
         if !body.is_empty() {
@@ -632,6 +636,11 @@ impl WasmHost for ProductionWasmHost {
         tracing::Span::current().record("status_code", status);
         tracing::Span::current().record("response_bytes", resp_body.len() as u64);
         tracing::Span::current().record("duration_ms", duration_ms);
+        apply_response_captures(
+            &tracing::Span::current(),
+            &resp_body,
+            &span_hints.response_captures,
+        );
         metrics::record_host_http_call(
             method,
             "text",
@@ -651,24 +660,27 @@ impl WasmHost for ProductionWasmHost {
         body: &[u8],
     ) -> Result<(u16, Vec<u8>), String> {
         let started = Instant::now();
+        // See http_call for the span-hint-header rationale (ADR-0037).
+        let (filtered_headers, span_hints) = split_span_hint_headers(headers);
         let span = tracing::info_span!(
             "wasm.host.http_call_binary",
             otel.name = "wasm.host.http_call_binary",
             http.method = %method,
             http.url = %telemetry_url(url),
             request_bytes = body.len() as u64,
-            header_count = headers.len() as u64,
+            header_count = filtered_headers.len() as u64,
             status_code = tracing::field::Empty,
             response_bytes = tracing::field::Empty,
             duration_ms = tracing::field::Empty,
         );
         let _guard = span.enter();
+        apply_span_hints(&tracing::Span::current(), &span_hints);
 
         if let Some(ref interceptor) = self.binary_http_interceptor
             && let Some(result) = interceptor(
                 method.to_string(),
                 url.to_string(),
-                headers.to_vec(),
+                filtered_headers.clone(),
                 body.to_vec(),
             )
             .await
@@ -738,8 +750,17 @@ impl WasmHost for ProductionWasmHost {
             other => return Err(format!("unsupported HTTP method: {other}")),
         };
 
-        for (k, v) in headers {
+        for (k, v) in &filtered_headers {
             builder = builder.header(k.as_str(), v.as_str());
+        }
+
+        if !headers
+            .iter()
+            .any(|(k, _)| k.eq_ignore_ascii_case("traceparent"))
+            && let Some(traceparent) =
+                current_traceparent_header(&tracing::Span::current(), self.trace_id.as_deref())
+        {
+            builder = builder.header("traceparent", traceparent);
         }
 
         if !body.is_empty() {
@@ -829,6 +850,7 @@ impl WasmHost for ProductionWasmHost {
     }
 
     fn log(&self, level: &str, message: &str) {
+        record_guest_log_span_event(level, message, self.invocation_context.as_ref(), None);
         match level {
             "error" => tracing::error!(target: "wasm_guest", "{}", message),
             "warn" => tracing::warn!(target: "wasm_guest", "{}", message),
@@ -895,6 +917,13 @@ impl WasmHost for ProductionWasmHost {
             .and_then(|ctx| ctx.session_id.as_deref())
             .unwrap_or("");
         let trace_id = self.trace_id.as_deref().unwrap_or("");
+
+        record_guest_log_span_event(
+            &payload.level,
+            &payload.message,
+            self.invocation_context.as_ref(),
+            Some(&fields_json),
+        );
 
         match payload.level.as_str() {
             "error" => tracing::error!(
@@ -997,6 +1026,155 @@ fn infer_guest_operation(kind: EventKind, tags: &BTreeMap<String, String>) -> Op
     }
 }
 
+fn guest_log_span_attrs(
+    level: &str,
+    message: &str,
+    context: Option<&WasmInvocationContext>,
+    fields_json: Option<&str>,
+) -> BTreeMap<String, String> {
+    let mut attrs = BTreeMap::new();
+    attrs.insert("log.severity".to_string(), level.to_string());
+    attrs.insert("log.message".to_string(), message.to_string());
+    attrs.insert("log.target".to_string(), "wasm_guest".to_string());
+    if let Some(context) = context {
+        attrs.insert("tenant".to_string(), context.tenant.clone());
+        attrs.insert("entity_type".to_string(), context.entity_type.clone());
+        attrs.insert("entity_id".to_string(), context.entity_id.clone());
+        attrs.insert("trigger_action".to_string(), context.trigger_action.clone());
+        if let Some(agent_id) = context
+            .agent_id
+            .as_deref()
+            .filter(|value| !value.is_empty())
+        {
+            attrs.insert("agent_id".to_string(), agent_id.to_string());
+        }
+        if let Some(session_id) = context
+            .session_id
+            .as_deref()
+            .filter(|value| !value.is_empty())
+        {
+            attrs.insert("gen_ai.conversation.id".to_string(), session_id.to_string());
+        }
+        if !context.trace_id.is_empty() {
+            attrs.insert("trace_id".to_string(), context.trace_id.clone());
+        }
+    }
+    if let Some(fields_json) = fields_json.filter(|value| !value.is_empty()) {
+        attrs.insert("fields_json".to_string(), fields_json.to_string());
+    }
+    attrs
+}
+
+fn record_guest_log_span_event(
+    level: &str,
+    message: &str,
+    context: Option<&WasmInvocationContext>,
+    fields_json: Option<&str>,
+) {
+    use opentelemetry::KeyValue;
+    use opentelemetry::trace::TraceContextExt as _;
+    use tracing_opentelemetry::OpenTelemetrySpanExt as _;
+
+    let attrs = guest_log_span_attrs(level, message, context, fields_json)
+        .into_iter()
+        .map(|(key, value)| KeyValue::new(key, value))
+        .collect::<Vec<_>>();
+    emit_named_guest_log_span_event(level, message, context, fields_json);
+    let span = tracing::Span::current();
+    let cx = span.context();
+    let otel_span = cx.span();
+    if otel_span.span_context().is_valid() {
+        otel_span.add_event("wasm_guest.log", attrs);
+    }
+}
+
+fn emit_named_guest_log_span_event(
+    level: &str,
+    message: &str,
+    context: Option<&WasmInvocationContext>,
+    fields_json: Option<&str>,
+) {
+    let tenant = context.map(|ctx| ctx.tenant.as_str()).unwrap_or("");
+    let entity_type = context.map(|ctx| ctx.entity_type.as_str()).unwrap_or("");
+    let entity_id = context.map(|ctx| ctx.entity_id.as_str()).unwrap_or("");
+    let trigger_action = context.map(|ctx| ctx.trigger_action.as_str()).unwrap_or("");
+    let agent_id = context
+        .and_then(|ctx| ctx.agent_id.as_deref())
+        .unwrap_or("");
+    let session_id = context
+        .and_then(|ctx| ctx.session_id.as_deref())
+        .unwrap_or("");
+    let trace_id = context.map(|ctx| ctx.trace_id.as_str()).unwrap_or("");
+    let fields_json = fields_json.unwrap_or("");
+
+    match level.to_ascii_lowercase().as_str() {
+        "error" => tracing::event!(
+            name: "wasm_guest.log",
+            target: "wasm_guest",
+            tracing::Level::ERROR,
+            guest_log.message = %message,
+            guest_log.severity = %level,
+            guest_log.target = "wasm_guest",
+            tenant = %tenant,
+            entity_type = %entity_type,
+            entity_id = %entity_id,
+            trigger_action = %trigger_action,
+            agent_id = %agent_id,
+            gen_ai.conversation.id = %session_id,
+            trace_id = %trace_id,
+            fields_json = %fields_json,
+        ),
+        "warn" => tracing::event!(
+            name: "wasm_guest.log",
+            target: "wasm_guest",
+            tracing::Level::WARN,
+            guest_log.message = %message,
+            guest_log.severity = %level,
+            guest_log.target = "wasm_guest",
+            tenant = %tenant,
+            entity_type = %entity_type,
+            entity_id = %entity_id,
+            trigger_action = %trigger_action,
+            agent_id = %agent_id,
+            gen_ai.conversation.id = %session_id,
+            trace_id = %trace_id,
+            fields_json = %fields_json,
+        ),
+        "info" => tracing::event!(
+            name: "wasm_guest.log",
+            target: "wasm_guest",
+            tracing::Level::INFO,
+            guest_log.message = %message,
+            guest_log.severity = %level,
+            guest_log.target = "wasm_guest",
+            tenant = %tenant,
+            entity_type = %entity_type,
+            entity_id = %entity_id,
+            trigger_action = %trigger_action,
+            agent_id = %agent_id,
+            gen_ai.conversation.id = %session_id,
+            trace_id = %trace_id,
+            fields_json = %fields_json,
+        ),
+        _ => tracing::event!(
+            name: "wasm_guest.log",
+            target: "wasm_guest",
+            tracing::Level::DEBUG,
+            guest_log.message = %message,
+            guest_log.severity = %level,
+            guest_log.target = "wasm_guest",
+            tenant = %tenant,
+            entity_type = %entity_type,
+            entity_id = %entity_id,
+            trigger_action = %trigger_action,
+            agent_id = %agent_id,
+            gen_ai.conversation.id = %session_id,
+            trace_id = %trace_id,
+            fields_json = %fields_json,
+        ),
+    }
+}
+
 fn telemetry_url(url: &str) -> String {
     let after_scheme = url.find("://").map(|idx| &url[idx + 3..]).unwrap_or(url);
     let after_auth = after_scheme
@@ -1015,6 +1193,206 @@ fn telemetry_url(url: &str) -> String {
     } else {
         format!("{authority}{path}")
     }
+}
+
+fn current_traceparent_header(
+    span: &tracing::Span,
+    fallback_trace_id: Option<&str>,
+) -> Option<String> {
+    use opentelemetry::trace::TraceContextExt as _;
+    use tracing_opentelemetry::OpenTelemetrySpanExt as _;
+
+    let span_context = span.context().span().span_context().clone();
+    if span_context.is_valid() {
+        let flags = if span_context.trace_flags().is_sampled() {
+            "01"
+        } else {
+            "00"
+        };
+        return Some(format!(
+            "00-{}-{}-{}",
+            span_context.trace_id(),
+            span_context.span_id(),
+            flags
+        ));
+    }
+
+    let trace_id = fallback_trace_id.filter(|value| !value.is_empty())?;
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|duration| duration.as_nanos() as u64)
+        .unwrap_or(0);
+    let span_id = format!("{nanos:016x}");
+    Some(format!("00-{trace_id}-{span_id}-01"))
+}
+
+/// Span hints extracted from a WASM HTTP call's headers. See
+/// [`split_span_hint_headers`].
+#[derive(Default, Debug, PartialEq, Eq)]
+pub(crate) struct SpanHints {
+    /// If set, override the `wasm.host.http_call` span's name (from
+    /// `X-Temper-Span-Name`).
+    pub span_name: Option<String>,
+    /// Additional span attributes to record (from `X-Temper-Span-Attr-<key>`
+    /// headers). Keys are stripped of the prefix; both key and value must be
+    /// non-empty.
+    pub attributes: Vec<(String, String)>,
+    /// Post-response captures (from `X-Temper-Span-Capture-Response-<attr>:
+    /// <json-pointer>` headers). Each pair is (attr_name, RFC-6901 pointer);
+    /// the host applies them after the response body is received by parsing
+    /// the body as JSON and recording the value at `pointer` as span attr
+    /// `attr_name` (truncated). Enables LLM Observability content capture
+    /// (e.g., `gen_ai.completion` from `/content/0/text`).
+    pub response_captures: Vec<(String, String)>,
+}
+
+/// Upper bound on any single span attribute value derived from a response
+/// capture. Datadog's per-attribute size budget is ~25 KB; we stay well
+/// under so a single attr can't dominate the span payload. Truncated values
+/// are suffixed with `MAX_RESPONSE_CAPTURE_TRUNCATION_SUFFIX` so consumers
+/// can tell the value was cut.
+pub(crate) const MAX_RESPONSE_CAPTURE_BYTES: usize = 20 * 1024;
+const MAX_RESPONSE_CAPTURE_TRUNCATION_SUFFIX: &str = "…[truncated]";
+
+/// Split a header list into headers forwarded to the upstream request and
+/// Temper-specific span hints. See ADR-0037.
+///
+/// WASM modules (e.g., `llm_caller`, `monty_repl`) can annotate their
+/// outgoing HTTP calls with semantically meaningful span names and
+/// attributes without introducing a new ABI, by prefixing headers with
+/// `X-Temper-Span-`. These headers are consumed by the host and removed
+/// from the outbound request.
+///
+/// Recognized hint headers (case-insensitive):
+/// - `X-Temper-Span-Name: <name>` — sets span name (e.g., `tool.llm_call`).
+/// - `X-Temper-Span-Attr-<key>: <value>` — adds `<key>=<value>` as a span
+///   attribute. Useful for `gen_ai.request.model`, `tool.name`,
+///   `tool.call_id`, etc.
+///
+/// Any `X-Temper-Span-*` header with an unrecognized suffix is stripped
+/// (reserved for forward-compat) but otherwise ignored.
+pub(crate) fn split_span_hint_headers(
+    headers: &[(String, String)],
+) -> (Vec<(String, String)>, SpanHints) {
+    const PREFIX: &str = "x-temper-span-";
+    const NAME_HEADER: &str = "x-temper-span-name";
+    const ATTR_PREFIX: &str = "x-temper-span-attr-";
+    const CAPTURE_PREFIX: &str = "x-temper-span-capture-response-";
+
+    let mut kept: Vec<(String, String)> = Vec::with_capacity(headers.len());
+    let mut hints = SpanHints::default();
+    for (k, v) in headers {
+        let lk = k.to_ascii_lowercase();
+        if lk == NAME_HEADER {
+            if !v.is_empty() {
+                hints.span_name = Some(v.clone());
+            }
+            continue;
+        }
+        if let Some(attr_key) = lk.strip_prefix(ATTR_PREFIX) {
+            if !attr_key.is_empty() && !v.is_empty() {
+                hints.attributes.push((attr_key.to_string(), v.clone()));
+            }
+            continue;
+        }
+        if let Some(attr_key) = lk.strip_prefix(CAPTURE_PREFIX) {
+            if !attr_key.is_empty() && !v.is_empty() {
+                hints
+                    .response_captures
+                    .push((attr_key.to_string(), v.clone()));
+            }
+            continue;
+        }
+        if lk.starts_with(PREFIX) {
+            // Unknown X-Temper-Span-* header — strip silently for
+            // forward compatibility.
+            continue;
+        }
+        kept.push((k.clone(), v.clone()));
+    }
+    (kept, hints)
+}
+
+/// Apply span hints to the currently-active tracing span's underlying OTel
+/// span. `update_name` overrides the span display name; `set_attribute`
+/// calls attach the key/value pairs. If no tracer subscriber is installed
+/// (tests, early startup), this is a no-op.
+pub(crate) fn apply_span_hints(span: &tracing::Span, hints: &SpanHints) {
+    use opentelemetry::KeyValue;
+    use opentelemetry::trace::TraceContextExt;
+    use tracing_opentelemetry::OpenTelemetrySpanExt;
+
+    let cx = span.context();
+    let otel_span = cx.span();
+    if let Some(ref name) = hints.span_name {
+        otel_span.update_name(name.clone());
+    }
+    for (k, v) in &hints.attributes {
+        otel_span.set_attribute(KeyValue::new(k.clone(), v.clone()));
+    }
+}
+
+/// Resolve each `(attr, json_pointer)` pair from `response_captures` against
+/// `response_body`, and record the resolved value as a span attribute.
+///
+/// Used to capture LLM response content (`gen_ai.completion`) onto the
+/// `tool.llm_call.*` span so DD LLM Observability populates its Output
+/// panel. Request-side attrs (`gen_ai.prompt`, model, system) are handled
+/// by the request-header path; this function is the post-response half.
+///
+/// Behaviour:
+/// - Non-JSON `response_body` → silently skipped (not all captures succeed;
+///   the call may have errored upstream and returned HTML, empty, etc.).
+/// - Pointer missing in body → attr not recorded (no panic, no error log).
+/// - String values passed through; non-string (number, object, array) are
+///   re-serialized via `serde_json`.
+/// - Values over [`MAX_RESPONSE_CAPTURE_BYTES`] are truncated at a UTF-8
+///   boundary with [`MAX_RESPONSE_CAPTURE_TRUNCATION_SUFFIX`] appended.
+pub(crate) fn apply_response_captures(
+    span: &tracing::Span,
+    response_body: &str,
+    response_captures: &[(String, String)],
+) {
+    use opentelemetry::KeyValue;
+    use opentelemetry::trace::TraceContextExt;
+    use tracing_opentelemetry::OpenTelemetrySpanExt;
+
+    if response_captures.is_empty() {
+        return;
+    }
+    let Ok(root) = serde_json::from_str::<serde_json::Value>(response_body) else {
+        return;
+    };
+
+    let cx = span.context();
+    let otel_span = cx.span();
+    for (attr, pointer) in response_captures {
+        let Some(value) = root.pointer(pointer) else {
+            continue;
+        };
+        let raw = match value {
+            serde_json::Value::String(s) => s.clone(),
+            other => other.to_string(),
+        };
+        let truncated = truncate_for_span_attr(&raw);
+        otel_span.set_attribute(KeyValue::new(attr.clone(), truncated));
+    }
+}
+
+/// Truncate `value` to at most [`MAX_RESPONSE_CAPTURE_BYTES`] bytes on a
+/// UTF-8 boundary, appending a marker suffix if truncated.
+pub(crate) fn truncate_for_span_attr(value: &str) -> String {
+    if value.len() <= MAX_RESPONSE_CAPTURE_BYTES {
+        return value.to_string();
+    }
+    let mut cut = MAX_RESPONSE_CAPTURE_BYTES;
+    while cut > 0 && !value.is_char_boundary(cut) {
+        cut -= 1;
+    }
+    let mut out = String::with_capacity(cut + MAX_RESPONSE_CAPTURE_TRUNCATION_SUFFIX.len());
+    out.push_str(&value[..cut]);
+    out.push_str(MAX_RESPONSE_CAPTURE_TRUNCATION_SUFFIX);
+    out
 }
 
 /// Parse Connect protocol binary frames from a response body.
@@ -1259,6 +1637,11 @@ impl WasmHost for SimWasmHost {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use opentelemetry::trace::{TraceContextExt, TracerProvider as _};
+    use opentelemetry_sdk::trace::SdkTracerProvider;
+    use std::sync::{Arc, Mutex};
+    use tracing_opentelemetry::OpenTelemetrySpanExt;
+    use tracing_subscriber::prelude::*;
 
     /// Build a Connect frame: [flags(1)][length(4 big-endian)][payload].
     fn make_frame(flags: u8, payload: &[u8]) -> Vec<u8> {
@@ -1273,7 +1656,7 @@ mod tests {
     fn parse_single_data_frame() {
         let payload = b"{\"stdout\":\"hello\"}";
         let data = make_frame(0x00, payload);
-        let frames = parse_connect_frames(&data).unwrap();
+        let frames = parse_connect_frames(&data).expect("single data frame should parse");
         assert_eq!(frames, vec!["{\"stdout\":\"hello\"}"]);
     }
 
@@ -1282,7 +1665,7 @@ mod tests {
         let mut data = make_frame(0x00, b"{\"stdout\":\"line1\"}");
         data.extend(make_frame(0x00, b"{\"stdout\":\"line2\"}"));
         data.extend(make_frame(0x02, b"trailer")); // trailer frame, should be skipped
-        let frames = parse_connect_frames(&data).unwrap();
+        let frames = parse_connect_frames(&data).expect("multiple connect frames should parse");
         assert_eq!(frames.len(), 2);
         assert_eq!(frames[0], "{\"stdout\":\"line1\"}");
         assert_eq!(frames[1], "{\"stdout\":\"line2\"}");
@@ -1290,7 +1673,7 @@ mod tests {
 
     #[test]
     fn parse_empty_input() {
-        let frames = parse_connect_frames(&[]).unwrap();
+        let frames = parse_connect_frames(&[]).expect("empty input should parse");
         assert!(frames.is_empty());
     }
 
@@ -1309,7 +1692,7 @@ mod tests {
     #[test]
     fn parse_trailer_only() {
         let data = make_frame(0x02, b"{}");
-        let frames = parse_connect_frames(&data).unwrap();
+        let frames = parse_connect_frames(&data).expect("trailer-only frame should parse");
         assert!(frames.is_empty());
     }
 
@@ -1336,6 +1719,329 @@ mod tests {
             result
                 .unwrap_err()
                 .contains("incomplete Connect frame payload")
+        );
+    }
+
+    #[test]
+    fn current_traceparent_header_prefers_active_span_context() {
+        let tracer_provider = SdkTracerProvider::builder().build();
+        let subscriber = tracing_subscriber::registry().with(
+            tracing_opentelemetry::layer().with_tracer(tracer_provider.tracer("temper-wasm-test")),
+        );
+        let _subscriber_guard = tracing::subscriber::set_default(subscriber);
+
+        let span = tracing::info_span!("wasm.reply");
+        let expected = {
+            let _guard = span.enter();
+            let span_context = tracing::Span::current()
+                .context()
+                .span()
+                .span_context()
+                .clone();
+            assert!(
+                span_context.is_valid(),
+                "test span should have an OTEL context"
+            );
+            format!(
+                "00-{}-{}-01",
+                span_context.trace_id(),
+                span_context.span_id()
+            )
+        };
+
+        let actual = span
+            .in_scope(|| current_traceparent_header(&tracing::Span::current(), None))
+            .expect("active span should produce a traceparent");
+        assert_eq!(actual, expected);
+    }
+
+    #[test]
+    fn guest_log_span_attrs_include_message_and_invocation_context() {
+        let context = WasmInvocationContext {
+            tenant: "tenant-a".to_string(),
+            entity_type: "Session".to_string(),
+            entity_id: "ss-1".to_string(),
+            trigger_action: "ContextReady".to_string(),
+            trigger_params: serde_json::Value::Null,
+            entity_state: serde_json::Value::Null,
+            agent_id: Some("agent-1".to_string()),
+            session_id: Some("ss-1".to_string()),
+            integration_config: BTreeMap::new(),
+            trace_id: "0123456789abcdef0123456789abcdef".to_string(),
+        };
+
+        let attrs = guest_log_span_attrs(
+            "error",
+            "provider failed",
+            Some(&context),
+            Some(r#"{"status":500}"#),
+        );
+
+        assert_eq!(attrs["log.severity"], "error");
+        assert_eq!(attrs["log.message"], "provider failed");
+        assert_eq!(attrs["tenant"], "tenant-a");
+        assert_eq!(attrs["entity_type"], "Session");
+        assert_eq!(attrs["entity_id"], "ss-1");
+        assert_eq!(attrs["trigger_action"], "ContextReady");
+        assert_eq!(attrs["agent_id"], "agent-1");
+        assert_eq!(attrs["gen_ai.conversation.id"], "ss-1");
+        assert_eq!(attrs["trace_id"], "0123456789abcdef0123456789abcdef");
+        assert_eq!(attrs["fields_json"], r#"{"status":500}"#);
+    }
+
+    #[test]
+    fn guest_log_span_event_is_named_for_trace_export() {
+        #[derive(Clone)]
+        struct EventCapture {
+            names: Arc<Mutex<Vec<String>>>,
+        }
+
+        impl<S> tracing_subscriber::Layer<S> for EventCapture
+        where
+            S: tracing::Subscriber,
+        {
+            fn on_event(
+                &self,
+                event: &tracing::Event<'_>,
+                _ctx: tracing_subscriber::layer::Context<'_, S>,
+            ) {
+                self.names
+                    .lock()
+                    .expect("event capture lock poisoned")
+                    .push(event.metadata().name().to_string());
+            }
+        }
+
+        let names = Arc::new(Mutex::new(Vec::new()));
+        let subscriber = tracing_subscriber::registry().with(EventCapture {
+            names: names.clone(),
+        });
+        let _subscriber_guard = tracing::subscriber::set_default(subscriber);
+        let context = WasmInvocationContext {
+            tenant: "tenant-a".to_string(),
+            entity_type: "Session".to_string(),
+            entity_id: "ss-1".to_string(),
+            trigger_action: "ContextReady".to_string(),
+            trigger_params: serde_json::Value::Null,
+            entity_state: serde_json::Value::Null,
+            agent_id: Some("agent-1".to_string()),
+            session_id: Some("ss-1".to_string()),
+            integration_config: BTreeMap::new(),
+            trace_id: "0123456789abcdef0123456789abcdef".to_string(),
+        };
+
+        {
+            let span = tracing::info_span!("wasm.invoke");
+            let _guard = span.enter();
+            record_guest_log_span_event(
+                "error",
+                "provider failed",
+                Some(&context),
+                Some(r#"{"status":500}"#),
+            );
+        }
+
+        let names = names.lock().expect("event capture lock poisoned");
+        assert!(names.iter().any(|name| name == "wasm_guest.log"));
+    }
+
+    // --- Span-hint-header extraction (ADR-0037) ---
+
+    #[test]
+    fn split_span_hint_headers_preserves_regular_headers() {
+        let headers = vec![
+            ("content-type".to_string(), "application/json".to_string()),
+            ("authorization".to_string(), "Bearer xyz".to_string()),
+        ];
+        let (kept, hints) = split_span_hint_headers(&headers);
+        assert_eq!(kept.len(), 2);
+        assert_eq!(kept[0].0, "content-type");
+        assert_eq!(kept[1].0, "authorization");
+        assert!(hints.span_name.is_none());
+        assert!(hints.attributes.is_empty());
+    }
+
+    #[test]
+    fn split_span_hint_headers_extracts_span_name_case_insensitive() {
+        let headers = vec![
+            (
+                "X-Temper-Span-Name".to_string(),
+                "tool.anthropic".to_string(),
+            ),
+            ("content-type".to_string(), "application/json".to_string()),
+        ];
+        let (kept, hints) = split_span_hint_headers(&headers);
+        assert_eq!(hints.span_name.as_deref(), Some("tool.anthropic"));
+        assert_eq!(kept.len(), 1);
+        assert_eq!(kept[0].0, "content-type");
+    }
+
+    #[test]
+    fn split_span_hint_headers_extracts_generic_attributes() {
+        let headers = vec![
+            (
+                "X-Temper-Span-Attr-gen_ai.request.model".to_string(),
+                "claude-sonnet-4.6".to_string(),
+            ),
+            (
+                "x-temper-span-attr-tool.name".to_string(),
+                "temper_write".to_string(),
+            ),
+            ("content-type".to_string(), "application/json".to_string()),
+        ];
+        let (kept, hints) = split_span_hint_headers(&headers);
+        assert_eq!(kept.len(), 1);
+        assert_eq!(hints.attributes.len(), 2);
+        assert!(
+            hints
+                .attributes
+                .iter()
+                .any(|(k, v)| k == "gen_ai.request.model" && v == "claude-sonnet-4.6")
+        );
+        assert!(
+            hints
+                .attributes
+                .iter()
+                .any(|(k, v)| k == "tool.name" && v == "temper_write")
+        );
+    }
+
+    #[test]
+    fn split_span_hint_headers_strips_empty_values() {
+        let headers = vec![
+            ("X-Temper-Span-Name".to_string(), "".to_string()),
+            (
+                "X-Temper-Span-Attr-gen_ai.request.model".to_string(),
+                "".to_string(),
+            ),
+            ("X-Temper-Span-Attr-".to_string(), "ignored".to_string()),
+        ];
+        let (kept, hints) = split_span_hint_headers(&headers);
+        assert!(
+            kept.is_empty(),
+            "all x-temper-span-* headers should be stripped"
+        );
+        assert!(hints.span_name.is_none(), "empty name should be ignored");
+        assert!(
+            hints.attributes.is_empty(),
+            "empty key or value should be ignored"
+        );
+    }
+
+    #[test]
+    fn split_span_hint_headers_strips_reserved_unknown_prefix() {
+        // Future-proofing: unknown X-Temper-Span-* headers are stripped so they
+        // don't leak to upstream services, but we don't act on them either.
+        let headers = vec![
+            ("X-Temper-Span-Future".to_string(), "whatever".to_string()),
+            ("content-type".to_string(), "application/json".to_string()),
+        ];
+        let (kept, hints) = split_span_hint_headers(&headers);
+        assert_eq!(kept.len(), 1);
+        assert_eq!(kept[0].0, "content-type");
+        assert!(hints.span_name.is_none());
+        assert!(hints.attributes.is_empty());
+    }
+
+    // --- Response-capture headers (LLM Obs output) ---
+
+    #[test]
+    fn split_span_hint_headers_extracts_response_captures() {
+        let headers = vec![
+            (
+                "X-Temper-Span-Capture-Response-gen_ai.completion".to_string(),
+                "/content/0/text".to_string(),
+            ),
+            (
+                "x-temper-span-capture-response-tool.result".to_string(),
+                "/result".to_string(),
+            ),
+            ("content-type".to_string(), "application/json".to_string()),
+        ];
+        let (kept, hints) = split_span_hint_headers(&headers);
+        assert_eq!(kept.len(), 1);
+        assert_eq!(hints.response_captures.len(), 2);
+        assert!(
+            hints
+                .response_captures
+                .iter()
+                .any(|(k, v)| k == "gen_ai.completion" && v == "/content/0/text")
+        );
+        assert!(
+            hints
+                .response_captures
+                .iter()
+                .any(|(k, v)| k == "tool.result" && v == "/result")
+        );
+    }
+
+    #[test]
+    fn split_span_hint_headers_ignores_empty_response_capture() {
+        let headers = vec![
+            (
+                "X-Temper-Span-Capture-Response-gen_ai.completion".to_string(),
+                "".to_string(),
+            ),
+            (
+                "X-Temper-Span-Capture-Response-".to_string(),
+                "/foo".to_string(),
+            ),
+        ];
+        let (kept, hints) = split_span_hint_headers(&headers);
+        assert!(
+            kept.is_empty(),
+            "all x-temper-span-* headers should be stripped"
+        );
+        assert!(hints.response_captures.is_empty());
+    }
+
+    #[test]
+    fn truncate_for_span_attr_passes_through_short_values() {
+        let s = "hello world";
+        assert_eq!(truncate_for_span_attr(s), s);
+    }
+
+    #[test]
+    fn truncate_for_span_attr_truncates_long_values_on_utf8_boundary() {
+        // Build a string just over the budget with a multi-byte char near the cut.
+        let mut s = "a".repeat(MAX_RESPONSE_CAPTURE_BYTES - 1);
+        s.push('🎉'); // 4 bytes, starts at MAX - 1, extends past MAX.
+        s.push_str("extra");
+        let truncated = truncate_for_span_attr(&s);
+        assert!(truncated.ends_with("…[truncated]"));
+        assert!(
+            truncated.len() <= MAX_RESPONSE_CAPTURE_BYTES + "…[truncated]".len(),
+            "truncated length {} exceeded expected cap",
+            truncated.len()
+        );
+        // Must remain valid UTF-8 (call site requires it for span attrs).
+        let _ = std::str::from_utf8(truncated.as_bytes()).expect("truncated must be valid utf-8");
+    }
+
+    #[test]
+    fn apply_response_captures_is_safe_when_body_is_not_json() {
+        // Should not panic on malformed JSON; call site passes through raw body.
+        let span = tracing::Span::none();
+        apply_response_captures(
+            &span,
+            "this is not JSON",
+            &[(
+                "gen_ai.completion".to_string(),
+                "/content/0/text".to_string(),
+            )],
+        );
+    }
+
+    #[test]
+    fn apply_response_captures_is_safe_when_pointer_misses() {
+        let span = tracing::Span::none();
+        apply_response_captures(
+            &span,
+            r#"{"nope": "not here"}"#,
+            &[(
+                "gen_ai.completion".to_string(),
+                "/content/0/text".to_string(),
+            )],
         );
     }
 }
