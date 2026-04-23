@@ -20,6 +20,7 @@ sha2 = { workspace = true }
 async-trait = { workspace = true }
 chrono = { workspace = true }
 opentelemetry = { workspace = true }
+tracing-opentelemetry = { workspace = true }
 temper-observe = { workspace = true }
 uuid = { workspace = true }
 
@@ -28,3 +29,5 @@ test-helpers = []
 
 [dev-dependencies]
 tokio-test = { workspace = true }
+opentelemetry_sdk = { workspace = true }
+tracing-subscriber = { workspace = true }

@@ -3,7 +3,7 @@ use tracing::instrument;
 use crate::entity_actor::{EntityMsg, EntityResponse};
 use crate::request_context::AgentContext;
 use crate::state::trajectory::{TrajectoryEntry, TrajectorySource};
-use temper_runtime::scheduler::sim_now;
+use temper_runtime::scheduler::{sim_now, sim_uuid};
 use temper_runtime::tenant::TenantId;
 
 use super::effects::PostDispatchContext;
@@ -227,10 +227,40 @@ impl crate::state::ServerState {
             return Err(DispatchError::Ungoverned(entity_type.to_string()));
         }
 
-        let Some(actor_ref) = self.get_or_spawn_tenant_actor(tenant, entity_type, entity_id) else {
-            return Err(DispatchError::Internal(format!(
-                "failed to resolve actor for governed entity type '{entity_type}'"
-            )));
+        // W2 phase: actor_spawn — registry lookup / actor-creation path.
+        // Emitted as a child span so `aggregate_spans group by resource_name`
+        // slices dispatch latency by phase cleanly.
+        let (actor_ref, actor_existed_before) = {
+            let _phase = tracing::info_span!(
+                "dispatch.phase.actor_spawn",
+                tenant = %tenant,
+                entity_type,
+                entity_id,
+            )
+            .entered();
+            let registry_start = std::time::Instant::now();
+            let actor_key = format!("{tenant}:{entity_type}:{entity_id}");
+            let existed = self
+                .actor_registry
+                .read()
+                .map(|reg| reg.contains_key(&actor_key))
+                .unwrap_or(false);
+            let Some(ar) = self.get_or_spawn_tenant_actor(tenant, entity_type, entity_id) else {
+                return Err(DispatchError::Internal(format!(
+                    "failed to resolve actor for governed entity type '{entity_type}'"
+                )));
+            };
+            crate::runtime_metrics::record_actor_registry_lock_wait(
+                entity_type,
+                !existed,
+                registry_start.elapsed(),
+            );
+            (ar, existed)
+        };
+        let cold_start_outcome_start = if !actor_existed_before {
+            Some(std::time::Instant::now())
+        } else {
+            None
         };
 
         // Pre-resolve cross-entity state gates (Gap 1: Agent OS).
@@ -239,18 +269,28 @@ impl crate::state::ServerState {
             .await;
 
         let action_params = params.clone();
-        let admission_start = std::time::Instant::now(); // determinism-ok: wall-clock latency metric only, not on simulation path
         // ADR-0051: acquire an admission permit before spending retry budget.
         // Caps are pulled inline from the spec registry so `[admission]`
         // declarations take effect at spec load with no separate
         // registration step.
+        // W2 phase: admission_acquire observability span (upstream main).
+        let admission_span = tracing::info_span!(
+            "dispatch.phase.admission_acquire",
+            tenant = %tenant,
+            entity_type,
+            action_name = action,
+        );
+        let admission_start = std::time::Instant::now(); // determinism-ok: wall-clock latency metric only, not on simulation path
         let admission_caps = self.admission_caps_for(tenant, entity_type);
         let admission_was_capped = admission_caps.is_some();
-        let _admission_permit = match self
-            .admission
-            .try_acquire_with_caps(tenant, entity_type, action, admission_caps.as_ref())
-            .await
-        {
+        let admission_result = {
+            use tracing::Instrument;
+            self.admission
+                .try_acquire_with_caps(tenant, entity_type, action, admission_caps.as_ref())
+                .instrument(admission_span)
+                .await
+        };
+        let _admission_permit = match admission_result {
             AdmissionOutcome::Passthrough => None,
             AdmissionOutcome::Granted(permit) => {
                 let waited = admission_start.elapsed();
@@ -297,18 +337,35 @@ impl crate::state::ServerState {
         let action_name = action.to_string();
         let params_for_retry = params;
         let cross_for_retry = cross_entity_booleans;
-        let idempotency_key = agent_ctx.idempotency_key.clone();
-        let outcome = retry::ask_with_backoff::<_, EntityResponse, _>(
-            &actor_ref,
-            || EntityMsg::Action {
-                name: action_name.clone(),
-                params: params_for_retry.clone(),
-                cross_entity_booleans: cross_for_retry.clone(),
-                idempotency_key: idempotency_key.clone(),
-            },
-            &policy,
-        )
-        .await;
+        let idempotency_key = Some(agent_ctx.idempotency_key.clone().unwrap_or_else(|| {
+            format!(
+                "dispatch:{tenant}:{entity_type}:{entity_id}:{action}:{}",
+                sim_uuid()
+            )
+        }));
+        // W2 phase: ask_reply — round-trip through the retry layer to the
+        // actor and back. Aggregates with other phase spans by prefix.
+        let ask_span = tracing::info_span!(
+            "dispatch.phase.ask_reply",
+            tenant = %tenant,
+            entity_type,
+            action_name = %action_name,
+        );
+        let outcome = {
+            use tracing::Instrument;
+            retry::ask_with_backoff::<_, EntityResponse, _>(
+                &actor_ref,
+                || EntityMsg::Action {
+                    name: action_name.clone(),
+                    params: params_for_retry.clone(),
+                    cross_entity_booleans: cross_for_retry.clone(),
+                    idempotency_key: idempotency_key.clone(),
+                },
+                &policy,
+            )
+            .instrument(ask_span)
+            .await
+        };
         // ADR-0048: emit dispatch outcome / attempts / latency metrics.
         let ask_outcome_for_metrics = match &outcome.result {
             Ok(_) => {
@@ -355,6 +412,17 @@ impl crate::state::ServerState {
             outcome.attempts,
             outcome.elapsed,
         );
+
+        // W2 / temper#146: on a successful first-ask against a freshly
+        // spawned actor, record the cold-start duration.
+        if let Some(cold_start_begin) = cold_start_outcome_start
+            && outcome.result.is_ok()
+        {
+            crate::runtime_metrics::record_actor_cold_start_duration(
+                entity_type,
+                cold_start_begin.elapsed(),
+            );
+        }
 
         let response = match outcome.result {
             Ok(response) => response,
@@ -438,6 +506,13 @@ impl crate::state::ServerState {
             await_integration,
         };
         let response = self.run_post_dispatch_effects(&ctx, response).await;
+        if response.success
+            && let Some(ref idem_key) = idempotency_key
+        {
+            let actor_key = format!("{tenant}:{entity_type}:{entity_id}");
+            self.idempotency_cache
+                .mark_effects_applied(&actor_key, idem_key);
+        }
 
         tracing::Span::current().record("success", response.success);
         if let Some(ref err) = response.error {

@@ -1,4 +1,7 @@
-use super::{WasmDispatchCtx, WasmDispatchMode, WasmEntityRef, is_http_call_authz_denial};
+use super::{
+    WasmDispatchCtx, WasmDispatchMode, WasmEntityRef, is_http_call_authz_denial,
+    record_wasm_error_on_current_span,
+};
 use crate::entity_actor::EntityResponse;
 use crate::request_context::AgentContext;
 use crate::state::pending_decisions::PendingDecision;
@@ -52,7 +55,15 @@ impl crate::state::ServerState {
         wide_event::emit_metrics(&wide);
     }
 
-    #[instrument(skip_all, fields(otel.name = "dispatch.handle_wasm_failure", trigger_action, integration_name, module_name))]
+    #[instrument(skip_all, fields(
+        otel.name = "dispatch.handle_wasm_failure",
+        trigger_action,
+        integration_name,
+        module_name,
+        error.type = tracing::field::Empty,
+        error.message = tracing::field::Empty,
+        exception.message = tracing::field::Empty,
+    ))]
     pub(super) async fn handle_wasm_failure(
         &self,
         ctx: &WasmDispatchCtx<'_>,
@@ -62,6 +73,7 @@ impl crate::state::ServerState {
         error_str: String,
         duration_ms: u64,
     ) -> Result<Option<EntityResponse>, String> {
+        record_wasm_error_on_current_span(&error_str);
         let is_authz_denied = is_http_call_authz_denial(&error_str);
         self.record_invocation(
             ctx.entity_ref,

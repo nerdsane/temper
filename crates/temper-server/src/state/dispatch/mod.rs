@@ -176,6 +176,7 @@ impl crate::state::ServerState {
             per_attempt_timeout: self.action_dispatch_timeout,
             ..retry::RetryPolicy::default()
         }
+        .with_attempt_budget_floor()
     }
 }
 

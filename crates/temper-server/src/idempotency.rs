@@ -23,6 +23,9 @@ struct IdempotencyEntry {
     response: EntityResponse,
     /// When this entry was created (for TTL eviction).
     created_at: chrono::DateTime<chrono::Utc>,
+    /// Whether dispatcher-side post-dispatch effects have completed for this
+    /// cached response.
+    effects_applied: bool,
 }
 
 /// Per-entity-actor idempotency cache.
@@ -45,7 +48,10 @@ impl IdempotencyCache {
     /// Look up a cached response. Returns `None` if not found or expired.
     pub fn get(&self, actor_key: &str, idem_key: &str) -> Option<EntityResponse> {
         let now = sim_now();
-        let entries = self.entries.read().unwrap(); // ci-ok: infallible lock
+        let entries = match self.entries.read() {
+            Ok(entries) => entries,
+            Err(poisoned) => poisoned.into_inner(),
+        };
         let actor_entries = entries.get(actor_key)?;
         let entry = actor_entries.get(idem_key)?;
 
@@ -58,10 +64,71 @@ impl IdempotencyCache {
         Some(entry.response.clone())
     }
 
+    /// Look up a cached response only after post-dispatch effects have run.
+    ///
+    /// HTTP/OData callers use this stricter lookup so a retry after a dropped
+    /// actor reply re-enters dispatch and fires effects instead of short-
+    /// circuiting at the protocol boundary.
+    pub fn get_after_effects_applied(
+        &self,
+        actor_key: &str,
+        idem_key: &str,
+    ) -> Option<EntityResponse> {
+        let now = sim_now();
+        let entries = self.entries.read().unwrap(); // ci-ok: infallible lock
+        let actor_entries = entries.get(actor_key)?;
+        let entry = actor_entries.get(idem_key)?;
+
+        let age = now.signed_duration_since(entry.created_at);
+        if age.num_seconds() > IDEMPOTENCY_TTL_SECS || !entry.effects_applied {
+            return None;
+        }
+
+        Some(entry.response.clone())
+    }
+
     /// Cache a response for a given actor and idempotency key.
     ///
     /// If the per-actor budget is exceeded, the oldest entry is evicted.
     pub fn put(&self, actor_key: &str, idem_key: &str, response: EntityResponse) {
+        self.put_with_effects_applied(actor_key, idem_key, response, false);
+    }
+
+    /// Cache a response whose post-dispatch effects are known to be complete.
+    pub fn put_effects_applied(&self, actor_key: &str, idem_key: &str, response: EntityResponse) {
+        self.put_with_effects_applied(actor_key, idem_key, response, true);
+    }
+
+    /// Mark a cached response as having completed post-dispatch effects.
+    pub fn mark_effects_applied(&self, actor_key: &str, idem_key: &str) -> bool {
+        let now = sim_now();
+        let mut entries = match self.entries.write() {
+            Ok(entries) => entries,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        let Some(actor_entries) = entries.get_mut(actor_key) else {
+            return false;
+        };
+        let Some(entry) = actor_entries.get_mut(idem_key) else {
+            return false;
+        };
+
+        let age = now.signed_duration_since(entry.created_at);
+        if age.num_seconds() > IDEMPOTENCY_TTL_SECS {
+            return false;
+        }
+
+        entry.effects_applied = true;
+        true
+    }
+
+    fn put_with_effects_applied(
+        &self,
+        actor_key: &str,
+        idem_key: &str,
+        response: EntityResponse,
+        effects_applied: bool,
+    ) {
         let now = sim_now();
         let mut entries = self.entries.write().unwrap(); // ci-ok: infallible lock
         let actor_entries = entries.entry(actor_key.to_string()).or_default();
@@ -90,6 +157,7 @@ impl IdempotencyCache {
             IdempotencyEntry {
                 response,
                 created_at: now,
+                effects_applied,
             },
         );
     }
@@ -138,6 +206,35 @@ mod tests {
         cache.put("Order:o1", "key-1", resp.clone());
         let cached = cache.get("Order:o1", "key-1");
         assert!(cached.is_some());
+        assert_eq!(cached.unwrap().state.status, "Active");
+    }
+
+    #[test]
+    fn pending_effects_do_not_satisfy_protocol_cache_hit() {
+        let cache = IdempotencyCache::new();
+        cache.put("Order:o1", "key-1", make_response("Active"));
+
+        assert!(cache.get("Order:o1", "key-1").is_some());
+        assert!(
+            cache
+                .get_after_effects_applied("Order:o1", "key-1")
+                .is_none()
+        );
+
+        assert!(cache.mark_effects_applied("Order:o1", "key-1"));
+        assert!(
+            cache
+                .get_after_effects_applied("Order:o1", "key-1")
+                .is_some()
+        );
+    }
+
+    #[test]
+    fn put_effects_applied_satisfies_protocol_cache_hit() {
+        let cache = IdempotencyCache::new();
+        cache.put_effects_applied("Order:o1", "key-1", make_response("Active"));
+
+        let cached = cache.get_after_effects_applied("Order:o1", "key-1");
         assert_eq!(cached.unwrap().state.status, "Active");
     }
 

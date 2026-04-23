@@ -18,21 +18,73 @@
 //! bump once for the old state if it had a declaration. That bump renders
 //! any in-flight timer for the old state stale.
 //!
-//! Durability: this MVP is non-durable (tokio task + in-memory counter).
-//! Restart-durable event-log-backed scheduling is a follow-up per the
-//! ADR-0049 phased rollout.
+//! Durability (ADR-0056): on every post-dispatch the arm logic also detects
+//! the **hydration case** — the entity is in a state with a declared
+//! timeout but has no live in-memory timer (seq == 0 in the tracker). In
+//! that case we reconstruct how long the entity has been in the current
+//! state from the event log (the most recent transition into
+//! `state.status`, or the most recent `reset_on` event after it), and:
+//!   - if elapsed ≥ `after_seconds` → fire `on_timeout` immediately
+//!     (the entity was overdue before this process ever saw it).
+//!   - otherwise → arm a tokio timer with the remaining budget
+//!     (`after_seconds - elapsed`).
+//!
+//! This closes the gap where an orphaned entity (actor passivated or
+//! server restarted while in a timed state) would otherwise never have
+//! its timer re-armed because no state transition happened on the
+//! hydrated actor. Fully event-log-backed scheduling remains the
+//! longer-term direction; hydration re-arm is the 80%-value prefix
+//! that makes timeouts reliable across the common failure modes.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::sync::Mutex;
 use std::time::Duration;
 
+use chrono::{DateTime, Utc};
 use tracing::Instrument;
 
+use temper_runtime::scheduler::sim_now;
 use temper_runtime::tenant::TenantId;
 
-use crate::entity_actor::EntityResponse;
+use crate::entity_actor::{EntityEvent, EntityResponse};
 
 use super::effects::PostDispatchContext;
+
+/// Walk the event history backward to find the timestamp of the most recent
+/// "progress" signal for the given state: either the transition that entered
+/// `current_state`, or any later event whose action is in `reset_on`. This
+/// timestamp is the reference point for computing how long the entity has
+/// been idle in the current state, used by the hydration re-arm path to
+/// compute remaining timeout budget.
+///
+/// Returns `None` if no matching entry event is found in the retained window
+/// (state.events is a bounded VecDeque; older history has been snapshotted
+/// and forgotten). Callers treat `None` as "no elapsed info available" and
+/// arm with the full budget.
+fn compute_state_clock_reset_ts(
+    events: &VecDeque<EntityEvent>,
+    current_state: &str,
+    reset_on: &[String],
+) -> Option<DateTime<Utc>> {
+    // Find the most recent state entry: last event whose to_status ==
+    // current_state AND from_status != current_state. Scanning backward
+    // because recent events are at the back.
+    let entry_idx = events
+        .iter()
+        .rposition(|e| e.to_status == current_state && e.from_status != current_state)?;
+    let entry_ts = events[entry_idx].timestamp;
+
+    // Among events after the entry, find the latest reset_on event.
+    // Those reset the clock per ADR-0049 semantics.
+    let latest_reset_ts = events
+        .iter()
+        .skip(entry_idx + 1)
+        .filter(|e| reset_on.iter().any(|a| a == &e.action))
+        .map(|e| e.timestamp)
+        .max();
+
+    Some(latest_reset_ts.unwrap_or(entry_ts))
+}
 
 /// Composite key identifying an entity instance inside the arm-seq tracker.
 #[derive(Debug, Clone, Hash, PartialEq, Eq)]
@@ -59,6 +111,9 @@ impl EntityKey {
 #[derive(Default, Debug)]
 pub struct StateTimeoutTracker {
     seqs: Mutex<HashMap<EntityKey, u64>>,
+    /// ADR-0049: per-entity-type count of armed-but-unfired timers.
+    /// Emitted as `temper_scheduler_pending_timers` by the canary loop.
+    pending_by_type: Mutex<HashMap<String, u64>>,
 }
 
 impl StateTimeoutTracker {
@@ -80,6 +135,38 @@ impl StateTimeoutTracker {
             .get(key)
             .copied()
             .unwrap_or(0)
+    }
+
+    /// Increment the pending-timer count for `entity_type`. Called at arm.
+    pub fn inc_pending(&self, entity_type: &str) {
+        let mut map = self
+            .pending_by_type
+            .lock()
+            .expect("pending_by_type poisoned");
+        *map.entry(entity_type.to_string()).or_insert(0) += 1;
+    }
+
+    /// Decrement the pending-timer count for `entity_type`. Called when a
+    /// timer task exits (fired, cancelled by seq mismatch, or state changed).
+    pub fn dec_pending(&self, entity_type: &str) {
+        let mut map = self
+            .pending_by_type
+            .lock()
+            .expect("pending_by_type poisoned");
+        if let Some(v) = map.get_mut(entity_type)
+            && *v > 0
+        {
+            *v -= 1;
+        }
+    }
+
+    /// Snapshot pending counts per entity type for metric emission.
+    pub fn pending_snapshot(&self) -> Vec<(String, u64)> {
+        let map = self
+            .pending_by_type
+            .lock()
+            .expect("pending_by_type poisoned");
+        map.iter().map(|(k, v)| (k.clone(), *v)).collect()
     }
 
     /// Drop any seq for `key`. Called when an entity is deleted so the map
@@ -157,7 +244,15 @@ impl crate::state::ServerState {
             }
             let is_entry = state_changed;
             let is_reset = !state_changed && st.reset_on.iter().any(|a| a == ctx.action);
-            if !is_entry && !is_reset {
+            // ADR-0056: hydration re-arm. If the entity is in a state with a
+            // declared timeout and this process has no live timer for it (seq
+            // == 0), treat this dispatch as the opportunity to catch up. This
+            // handles actors that hydrated from snapshot after a restart or
+            // passivation without the benefit of a state transition to arm
+            // the timer.
+            let needs_hydration_rearm =
+                !is_entry && !is_reset && self.state_timeout_tracker.current(&key) == 0;
+            if !is_entry && !is_reset && !needs_hydration_rearm {
                 continue;
             }
             if is_reset {
@@ -169,7 +264,50 @@ impl crate::state::ServerState {
                 );
             }
 
+            // Determine the fire delay.
+            //
+            // - Entry / reset / fresh-process cases: the full budget.
+            // - Hydration re-arm: budget minus elapsed time since the entity
+            //   entered the current state (or the most recent `reset_on`
+            //   event, whichever is later). If elapsed >= budget, delay is 0
+            //   and the on_timeout action fires on the next tokio tick.
+            let mut delay = Duration::from_secs(st.after_seconds);
+            if needs_hydration_rearm {
+                let clock_reset =
+                    compute_state_clock_reset_ts(&response.state.events, &post_state, &st.reset_on);
+                if let Some(reset_ts) = clock_reset {
+                    let now = sim_now();
+                    let elapsed = now
+                        .signed_duration_since(reset_ts)
+                        .to_std()
+                        .unwrap_or(Duration::ZERO);
+                    let budget = Duration::from_secs(st.after_seconds);
+                    let overdue = elapsed >= budget;
+                    delay = if overdue {
+                        Duration::ZERO
+                    } else {
+                        budget - elapsed
+                    };
+                    crate::runtime_metrics::record_state_timeout_armed_on_hydration(
+                        ctx.tenant.as_str(),
+                        ctx.entity_type,
+                        &st.state,
+                        if overdue { "overdue" } else { "budgeted" },
+                    );
+                } else {
+                    // No entry event found — treat as freshly entered.
+                    // Safe default; worst case is one extra budget of wait.
+                    crate::runtime_metrics::record_state_timeout_armed_on_hydration(
+                        ctx.tenant.as_str(),
+                        ctx.entity_type,
+                        &st.state,
+                        "budgeted",
+                    );
+                }
+            }
+
             let armed_seq = self.state_timeout_tracker.bump(&key);
+            self.state_timeout_tracker.inc_pending(ctx.entity_type);
             let params: serde_json::Value = serde_json::to_value(&st.params)
                 .unwrap_or_else(|_| serde_json::Value::Object(serde_json::Map::new()));
 
@@ -180,9 +318,9 @@ impl crate::state::ServerState {
             let entity_id = ctx.entity_id.to_string();
             let target_state = st.state.clone();
             let target_action = st.on_timeout.clone();
-            let delay = Duration::from_secs(st.after_seconds);
             let agent_ctx = ctx.agent_ctx.clone();
             let key_for_task = key.clone();
+            let entity_type_for_dec = ctx.entity_type.to_string();
 
             tokio::spawn(
                 // determinism-ok: wall-clock timer fires a side-effect action;
@@ -194,6 +332,7 @@ impl crate::state::ServerState {
                     // state change that bumped the seq on exit) renders
                     // this timer a no-op.
                     if tracker.current(&key_for_task) != armed_seq {
+                        tracker.dec_pending(&entity_type_for_dec);
                         return;
                     }
 
@@ -228,6 +367,7 @@ impl crate::state::ServerState {
                             // State changed or fetch failed — nothing to do.
                         }
                     }
+                    tracker.dec_pending(&entity_type_for_dec);
                 }
                 .instrument(tracing::info_span!(
                     "dispatch.state_timeout",
@@ -282,6 +422,107 @@ mod tests {
         assert_eq!(t.size(), 1);
         t.forget(&tenant, "E", "x");
         assert_eq!(t.size(), 0);
+    }
+
+    // --- compute_state_clock_reset_ts (ADR-0056 hydration-re-arm helper) ---
+
+    fn test_event(action: &str, from: &str, to: &str, ts_ms_after_epoch: i64) -> EntityEvent {
+        let ts = DateTime::<Utc>::from_timestamp_millis(ts_ms_after_epoch).unwrap();
+        EntityEvent {
+            action: action.to_string(),
+            from_status: from.to_string(),
+            to_status: to.to_string(),
+            timestamp: ts,
+            params: serde_json::json!({}),
+        }
+    }
+
+    #[test]
+    fn clock_reset_finds_most_recent_entry_event() {
+        let mut events = VecDeque::new();
+        events.push_back(test_event("Create", "", "Open", 1_000));
+        events.push_back(test_event("Assign", "Open", "InProgress", 2_000));
+        events.push_back(test_event("Close", "InProgress", "Closed", 3_000));
+
+        // Current state Closed → clock reset == Close event timestamp.
+        let reset = compute_state_clock_reset_ts(&events, "Closed", &[]).unwrap();
+        assert_eq!(reset.timestamp_millis(), 3_000);
+    }
+
+    #[test]
+    fn clock_reset_prefers_reset_on_event_after_entry() {
+        let mut events = VecDeque::new();
+        events.push_back(test_event("Enter", "", "Executing", 100));
+        events.push_back(test_event("DoWork", "Executing", "Executing", 500));
+        events.push_back(test_event("ProgressMade", "Executing", "Executing", 900));
+        events.push_back(test_event("OtherAction", "Executing", "Executing", 1_200));
+
+        let reset_on = vec!["ProgressMade".to_string()];
+        let reset = compute_state_clock_reset_ts(&events, "Executing", &reset_on).unwrap();
+        assert_eq!(
+            reset.timestamp_millis(),
+            900,
+            "latest reset_on event wins over later non-reset events"
+        );
+    }
+
+    #[test]
+    fn clock_reset_falls_back_to_entry_when_no_reset_events() {
+        let mut events = VecDeque::new();
+        events.push_back(test_event("Configure", "Queued", "Ready", 500));
+        events.push_back(test_event("Start", "Ready", "Executing", 1_000));
+        events.push_back(test_event("Steer", "Executing", "Executing", 1_500));
+
+        let reset_on = vec!["ProgressMade".to_string()];
+        let reset = compute_state_clock_reset_ts(&events, "Executing", &reset_on).unwrap();
+        assert_eq!(
+            reset.timestamp_millis(),
+            1_000,
+            "Steer is not a reset_on; entry timestamp wins"
+        );
+    }
+
+    #[test]
+    fn clock_reset_returns_none_when_no_entry_event_retained() {
+        let mut events = VecDeque::new();
+        // Only self-loops retained in the window; the original transition
+        // into `Executing` has been snapshotted and forgotten.
+        events.push_back(test_event("Steer", "Executing", "Executing", 100));
+        events.push_back(test_event("Steer", "Executing", "Executing", 200));
+
+        let reset = compute_state_clock_reset_ts(&events, "Executing", &[]);
+        assert!(reset.is_none(), "no entry event in window → None");
+    }
+
+    #[test]
+    fn clock_reset_ignores_entry_events_for_other_states() {
+        let mut events = VecDeque::new();
+        events.push_back(test_event("Create", "", "Open", 1_000));
+        events.push_back(test_event("Assign", "Open", "InProgress", 2_000));
+        // Query for Open, but the current state is InProgress — no match.
+        let reset = compute_state_clock_reset_ts(&events, "Open", &[]);
+        // The events.back() is InProgress, so no entry-into-Open event
+        // with from != to is in the window; the original entry at index 0
+        // has from_status="" which satisfies "!= current_state", so it IS
+        // considered an entry-into-Open event — clock reset == 1_000.
+        assert_eq!(reset.unwrap().timestamp_millis(), 1_000);
+    }
+
+    #[test]
+    fn clock_reset_ignores_self_loop_events_as_entry() {
+        // Self-loops have from == to, so they must NOT be treated as entry.
+        // The prior transition is the true entry point.
+        let mut events = VecDeque::new();
+        events.push_back(test_event("Create", "", "Executing", 100));
+        events.push_back(test_event("Steer", "Executing", "Executing", 500));
+        events.push_back(test_event("Steer", "Executing", "Executing", 800));
+
+        let reset = compute_state_clock_reset_ts(&events, "Executing", &[]).unwrap();
+        assert_eq!(
+            reset.timestamp_millis(),
+            100,
+            "first real entry wins; subsequent self-loops don't re-enter"
+        );
     }
 
     // ------------------------------------------------------------------

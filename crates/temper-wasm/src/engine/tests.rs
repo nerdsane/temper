@@ -2,10 +2,12 @@
 
 use std::sync::Arc;
 use std::sync::RwLock;
+use std::time::Duration;
 
 use super::*;
-use crate::host_trait::SimWasmHost;
+use crate::host_trait::{SimWasmHost, WasmHost};
 use crate::stream::StreamRegistry;
+use async_trait::async_trait;
 
 // Minimal WAT module: accepts (ptr, len), writes nothing, returns 0.
 const WAT_NOOP: &str = r#"
@@ -50,6 +52,67 @@ const WAT_TRAP: &str = r#"
       )
     )
 "#;
+
+// Makes one host call, then returns normally. The host call gives another
+// invocation enough time to time out while this store is still active.
+const WAT_HOST_CALL_THEN_RETURN: &str = r#"
+    (module
+      (import "env" "host_http_call" (func $host_http_call
+        (param i32 i32 i32 i32 i32 i32 i32 i32 i32 i32) (result i32)))
+      (memory (export "memory") 1)
+      (data (i32.const 2048) "GET")
+      (data (i32.const 2056) "https://slow.test/")
+      (func (export "run") (param i32 i32) (result i32)
+        i32.const 2048
+        i32.const 3
+        i32.const 2056
+        i32.const 18
+        i32.const 0
+        i32.const 0
+        i32.const 0
+        i32.const 0
+        i32.const 4096
+        i32.const 64
+        call $host_http_call
+        drop
+        i32.const 0
+      )
+    )
+"#;
+
+struct SlowHttpHost {
+    delay: Duration,
+}
+
+#[async_trait]
+impl WasmHost for SlowHttpHost {
+    async fn http_call(
+        &self,
+        _method: &str,
+        _url: &str,
+        _headers: &[(String, String)],
+        _body: &str,
+    ) -> Result<(u16, String), String> {
+        tokio::time::sleep(self.delay).await;
+        Ok((200, r#"{"ok":true}"#.to_string()))
+    }
+
+    async fn http_call_binary(
+        &self,
+        _method: &str,
+        _url: &str,
+        _headers: &[(String, String)],
+        _body: &[u8],
+    ) -> Result<(u16, Vec<u8>), String> {
+        Ok((200, Vec::new()))
+    }
+
+    fn get_secret(&self, key: &str) -> Result<String, String> {
+        Err(format!("test secret not found: {key}"))
+    }
+
+    fn log(&self, _level: &str, _message: &str) {}
+}
 
 fn make_context() -> WasmInvocationContext {
     WasmInvocationContext {
@@ -169,6 +232,60 @@ async fn timeout_enforced_by_epoch() {
     assert!(
         matches!(result, Err(WasmError::Timeout(_))),
         "expected Timeout, got: {result:?}"
+    );
+}
+
+/// Timeout isolation: one invocation timing out must not interrupt a different
+/// active store that has not exhausted its own deadline.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn timed_out_invocation_does_not_interrupt_unrelated_active_invocation() {
+    let engine = Arc::new(WasmEngine::new().unwrap());
+    let slow_hash = engine
+        .compile_and_cache(WAT_HOST_CALL_THEN_RETURN.as_bytes())
+        .unwrap();
+    let timeout_hash = engine
+        .compile_and_cache(WAT_INFINITE_LOOP.as_bytes())
+        .unwrap();
+
+    let slow_engine = Arc::clone(&engine);
+    let slow_task = tokio::spawn(async move {
+        let limits = WasmResourceLimits {
+            max_fuel: u64::MAX,
+            max_duration: Duration::from_millis(800),
+            ..WasmResourceLimits::default()
+        };
+        let host: Arc<dyn WasmHost> = Arc::new(SlowHttpHost {
+            delay: Duration::from_millis(200),
+        });
+        slow_engine
+            .invoke(&slow_hash, &make_context(), host, &limits, make_streams())
+            .await
+    });
+
+    tokio::time::sleep(Duration::from_millis(20)).await;
+    let timeout_limits = WasmResourceLimits {
+        max_fuel: u64::MAX,
+        max_duration: Duration::from_millis(50),
+        ..WasmResourceLimits::default()
+    };
+    let timeout_result = engine
+        .invoke(
+            &timeout_hash,
+            &make_context(),
+            make_host(),
+            &timeout_limits,
+            make_streams(),
+        )
+        .await;
+    assert!(
+        matches!(timeout_result, Err(WasmError::Timeout(_))),
+        "expected the infinite loop to time out, got: {timeout_result:?}"
+    );
+
+    let slow_result = slow_task.await.expect("slow invocation task should join");
+    assert!(
+        !matches!(slow_result, Err(WasmError::Timeout(_))),
+        "timeout leaked into unrelated active invocation: {slow_result:?}"
     );
 }
 

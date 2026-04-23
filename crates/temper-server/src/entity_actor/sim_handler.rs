@@ -10,6 +10,7 @@ use std::sync::Arc;
 
 use temper_jit::table::{EvalContext, TransitionTable};
 use temper_runtime::scheduler::{CompareOp, SimActorHandler, SpecAssert, SpecInvariant};
+use temper_spec::automaton::StateVar;
 
 use super::effects::ScheduledAction;
 use super::types::EntityState;
@@ -74,12 +75,18 @@ impl EntityActorHandler {
     pub fn with_ioa_invariants(mut self, ioa_toml: &str) -> Self {
         let automaton = temper_spec::automaton::parse_automaton(ioa_toml)
             .expect("failed to parse I/O Automaton TOML for invariants");
+        let declared_bools: std::collections::BTreeSet<_> = automaton
+            .state
+            .iter()
+            .filter(|state| is_declared_bool(state))
+            .map(|state| state.name.clone())
+            .collect();
 
         self.invariants = automaton
             .invariants
             .iter()
             .filter_map(|inv| {
-                let assert_kind = parse_assert_expr(&inv.assert)?;
+                let assert_kind = parse_assert_expr(&inv.assert, &declared_bools)?;
                 Some(SpecInvariant {
                     name: inv.name.clone(),
                     when: inv.when.clone(),
@@ -97,12 +104,18 @@ impl EntityActorHandler {
 /// Uses [`temper_spec::automaton::parse_assert_expr`] as the single parser,
 /// then maps the result to the runtime type. Returns `None` for expressions
 /// that the framework cannot check automatically.
-fn parse_assert_expr(expr: &str) -> Option<SpecAssert> {
+fn parse_assert_expr(
+    expr: &str,
+    declared_bools: &std::collections::BTreeSet<String>,
+) -> Option<SpecAssert> {
     use temper_spec::automaton::parse_assert_expr as parse;
-    translate_parsed(parse(expr)?)
+    translate_parsed(parse(expr)?, declared_bools)
 }
 
-fn translate_parsed(parsed: temper_spec::automaton::ParsedAssert) -> Option<SpecAssert> {
+fn translate_parsed(
+    parsed: temper_spec::automaton::ParsedAssert,
+    declared_bools: &std::collections::BTreeSet<String>,
+) -> Option<SpecAssert> {
     use temper_spec::automaton::{AssertCompareOp, ParsedAssert};
 
     match parsed {
@@ -126,18 +139,28 @@ fn translate_parsed(parsed: temper_spec::automaton::ParsedAssert) -> Option<Spec
                 value,
             })
         }
-        ParsedAssert::BoolRequired { var, expect } => {
-            Some(SpecAssert::BoolRequired { var, expect })
-        }
+        ParsedAssert::BoolRequired { var, expect } => declared_bools
+            .contains(&var)
+            .then_some(SpecAssert::BoolRequired { var, expect }),
         ParsedAssert::And(parts) => {
-            let mapped: Option<Vec<_>> = parts.into_iter().map(translate_parsed).collect();
+            let mapped: Option<Vec<_>> = parts
+                .into_iter()
+                .map(|part| translate_parsed(part, declared_bools))
+                .collect();
             mapped.map(SpecAssert::And)
         }
         ParsedAssert::Or(parts) => {
-            let mapped: Option<Vec<_>> = parts.into_iter().map(translate_parsed).collect();
+            let mapped: Option<Vec<_>> = parts
+                .into_iter()
+                .map(|part| translate_parsed(part, declared_bools))
+                .collect();
             mapped.map(SpecAssert::Or)
         }
     }
+}
+
+fn is_declared_bool(state: &StateVar) -> bool {
+    state.var_type == "bool"
 }
 
 impl SimActorHandler for EntityActorHandler {
@@ -343,6 +366,10 @@ mod tests {
         assert!(
             names.contains(&"CancelledIsFinal"),
             "should have CancelledIsFinal, got: {names:?}"
+        );
+        assert!(
+            !names.contains(&"ShipRequiresPayment"),
+            "undeclared bool invariants should be skipped in simulation, got: {names:?}"
         );
     }
 
