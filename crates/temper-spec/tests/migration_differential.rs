@@ -71,6 +71,13 @@ const MIGRATIONS: &[(&str, &str, &str)] = &[
         "os-apps/paw-ingest/specs/webhook_event.ioa.toml"),
     ("/Users/seshendranalla/Development/openpaw-action-triggers", "7a644954",
         "os-apps/paw-wiki/specs/wiki_job.ioa.toml"),
+    // --- openpaw batch 2 (trigger-keyed script fix) — commit 563c6048 ---
+    ("/Users/seshendranalla/Development/openpaw-action-triggers", "563c6048",
+        "os-apps/paw-research/specs/web_query.ioa.toml"),
+    ("/Users/seshendranalla/Development/openpaw-action-triggers", "563c6048",
+        "os-apps/paw-managed-agents/specs/managed_session.ioa.toml"),
+    ("/Users/seshendranalla/Development/openpaw-action-triggers", "563c6048",
+        "os-apps/paw-managed-agents/specs/managed_agent.ioa.toml"),
 ];
 
 fn git_show(repo_root: &str, sha: &str, path: &str) -> String {
@@ -103,17 +110,23 @@ fn inner_name(name: &str) -> &str {
     }
 }
 
+/// Index by dispatch key — the `trigger` field stripped of any `__trigger__:`
+/// prefix. This is what the invoking action's `effect = trigger X` resolves
+/// against at runtime, and the invariant we care about preserving across
+/// migration. The integration's `name` field was a separate human-readable
+/// label that ADR-0046 collapses into the dispatch key.
 fn index(integrations: &[Integration]) -> BTreeMap<String, &Integration> {
     integrations
         .iter()
-        .map(|i| (inner_name(&i.name).to_string(), i))
+        .map(|i| (inner_name(&i.trigger).to_string(), i))
         .collect()
 }
 
 fn assert_equiv(path: &str, old: &Integration, new: &Integration) {
-    // Name and trigger are expected to differ: the expander namespaces synthesized
-    // integrations as `__trigger__:{action}:{name}`. Compare inner names only.
-    assert_eq!(inner_name(&old.name), inner_name(&new.name), "{path}: inner name");
+    // Trigger (dispatch key) is the invariant — this is what `effect = "trigger X"`
+    // resolves against and what the runtime routes by. The `name` field was a
+    // separate human-readable label pre-ADR-0046; the new form collapses both
+    // into a single dispatch-keyed name, so we deliberately don't compare names.
     assert_eq!(inner_name(&old.trigger), inner_name(&new.trigger), "{path}: trigger inner name");
     assert_eq!(old.integration_type, new.integration_type, "{path}: type name={}", old.name);
     assert_eq!(old.module, new.module, "{path}: module name={}", old.name);
