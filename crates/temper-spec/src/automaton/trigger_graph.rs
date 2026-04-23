@@ -368,7 +368,7 @@ to = "Notified"
         let graph = TriggerGraph::from_automatons(&[&order]);
         // wasm + webhook triggers contribute no edges; Order has no
         // entity-kind triggers here, so outgoing should be absent.
-        assert!(graph.outgoing.get("Order").is_none());
+        assert!(!graph.outgoing.contains_key("Order"));
     }
 
     #[test]

@@ -182,6 +182,107 @@ impl fmt::Debug for CompositeTemperModel {
     }
 }
 
+impl Model for CompositeTemperModel {
+    type State = CompositeState;
+    type Action = CompositeAction;
+
+    fn init_states(&self) -> Vec<Self::State> {
+        // Each entity starts in its single initial state. Cross-product is
+        // therefore a single joint state.
+        let mut entities = BTreeMap::new();
+        for (entity_type, model) in &self.models {
+            let init = model
+                .init_states()
+                .into_iter()
+                .next()
+                .expect("TemperModel always produces at least one init state");
+            entities.insert(entity_type.clone(), init);
+        }
+        vec![CompositeState { entities }]
+    }
+
+    fn actions(&self, state: &Self::State, out: &mut Vec<Self::Action>) {
+        // For each entity, yield its externally-enabled actions.
+        // Triggered cascades are not separate actions (they fire inside
+        // next_state), so we don't emit them here.
+        for entity_type in &self.entity_types {
+            let Some(entity_model) = self.models.get(entity_type) else {
+                continue;
+            };
+            let Some(entity_state) = state.entities.get(entity_type) else {
+                continue;
+            };
+            let mut per_entity = Vec::new();
+            entity_model.actions(entity_state, &mut per_entity);
+            for a in per_entity {
+                out.push(CompositeAction {
+                    entity: entity_type.clone(),
+                    action: a,
+                });
+            }
+        }
+    }
+
+    fn next_state(&self, state: &Self::State, action: Self::Action) -> Option<Self::State> {
+        let source_model = self.models.get(&action.entity)?;
+        let source_state = state.entities.get(&action.entity)?;
+
+        // Apply the primary (external) action to the actor entity.
+        let new_source_state = source_model.next_state(source_state, action.action.clone())?;
+        let new_source_status = new_source_state.status.clone();
+
+        // Commit to joint state.
+        let mut next = state.clone();
+        next.entities
+            .insert(action.entity.clone(), new_source_state);
+
+        // Fire-and-forget cascade: apply triggered transitions
+        // transitively, bounded by MAX_TRIGGER_DEPTH.
+        self.cascade(
+            &mut next,
+            &action.entity,
+            &action.action.name,
+            &new_source_status,
+            0,
+        );
+
+        Some(next)
+    }
+
+    fn properties(&self) -> Vec<Property<Self>> {
+        // For slice 8d (v1) we use a single always-property that projects
+        // the joint state down to each entity and checks the entity's
+        // local invariants via a closure. Future refinement: emit per-
+        // invariant properties so counterexamples identify which
+        // invariant and which entity failed.
+        //
+        // We can't easily reuse TemperModel's `Property::always` fn pointers
+        // (they take &TemperModel, not &CompositeTemperModel), so the
+        // verifier runs per-entity BFS checks once and then runs a
+        // composite always-property that evaluates user invariants
+        // against each entity's slice using the local invariant
+        // evaluator.
+        //
+        // Cross-entity invariants translation is a later slice; the
+        // per-entity projection below is already more than snapshot
+        // checking — Stateright's BFS visits every reachable joint
+        // state.
+        vec![Property::<Self>::always(
+            "joint_local_invariants",
+            |m, s| {
+                for (entity_type, entity_state) in &s.entities {
+                    let Some(model) = m.models.get(entity_type) else {
+                        continue;
+                    };
+                    if !super::invariant_eval::all_local_invariants_hold(model, entity_state) {
+                        return false;
+                    }
+                }
+                true
+            },
+        )]
+    }
+}
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -321,107 +422,5 @@ to = "Working"
         let after = model.next_state(init, assign).unwrap();
         // The inline cascade fires Start automatically once — Agent lands in Working.
         assert_eq!(after.entities.get("Agent").unwrap().status, "Working");
-    }
-}
-
-impl Model for CompositeTemperModel {
-    type State = CompositeState;
-    type Action = CompositeAction;
-
-    fn init_states(&self) -> Vec<Self::State> {
-        // Each entity starts in its single initial state. Cross-product is
-        // therefore a single joint state.
-        let mut entities = BTreeMap::new();
-        for (entity_type, model) in &self.models {
-            let init = model
-                .init_states()
-                .into_iter()
-                .next()
-                .expect("TemperModel always produces at least one init state");
-            entities.insert(entity_type.clone(), init);
-        }
-        vec![CompositeState { entities }]
-    }
-
-    fn actions(&self, state: &Self::State, out: &mut Vec<Self::Action>) {
-        // For each entity, yield its externally-enabled actions.
-        // Triggered cascades are not separate actions (they fire inside
-        // next_state), so we don't emit them here.
-        for entity_type in &self.entity_types {
-            let Some(entity_model) = self.models.get(entity_type) else {
-                continue;
-            };
-            let Some(entity_state) = state.entities.get(entity_type) else {
-                continue;
-            };
-            let mut per_entity = Vec::new();
-            entity_model.actions(entity_state, &mut per_entity);
-            for a in per_entity {
-                out.push(CompositeAction {
-                    entity: entity_type.clone(),
-                    action: a,
-                });
-            }
-        }
-    }
-
-    fn next_state(&self, state: &Self::State, action: Self::Action) -> Option<Self::State> {
-        let source_model = self.models.get(&action.entity)?;
-        let source_state = state.entities.get(&action.entity)?;
-
-        // Apply the primary (external) action to the actor entity.
-        let new_source_state = source_model.next_state(source_state, action.action.clone())?;
-        let new_source_status = new_source_state.status.clone();
-
-        // Commit to joint state.
-        let mut next = state.clone();
-        next.entities
-            .insert(action.entity.clone(), new_source_state);
-
-        // Fire-and-forget cascade: apply triggered transitions
-        // transitively, bounded by MAX_TRIGGER_DEPTH.
-        self.cascade(
-            &mut next,
-            &action.entity,
-            &action.action.name,
-            &new_source_status,
-            0,
-        );
-
-        Some(next)
-    }
-
-    fn properties(&self) -> Vec<Property<Self>> {
-        // For slice 8d (v1) we use a single always-property that projects
-        // the joint state down to each entity and checks the entity's
-        // local invariants via a closure. Future refinement: emit per-
-        // invariant properties so counterexamples identify which
-        // invariant and which entity failed.
-        //
-        // We can't easily reuse TemperModel's `Property::always` fn pointers
-        // (they take &TemperModel, not &CompositeTemperModel), so the
-        // verifier runs per-entity BFS checks once and then runs a
-        // composite always-property that evaluates user invariants
-        // against each entity's slice using the local invariant
-        // evaluator.
-        //
-        // Cross-entity invariants translation is a later slice; the
-        // per-entity projection below is already more than snapshot
-        // checking — Stateright's BFS visits every reachable joint
-        // state.
-        vec![Property::<Self>::always(
-            "joint_local_invariants",
-            |m, s| {
-                for (entity_type, entity_state) in &s.entities {
-                    let Some(model) = m.models.get(entity_type) else {
-                        continue;
-                    };
-                    if !super::invariant_eval::all_local_invariants_hold(model, entity_state) {
-                        return false;
-                    }
-                }
-                true
-            },
-        )]
     }
 }
