@@ -156,6 +156,7 @@ impl crate::state::ServerState {
         wasm.module = tracing::field::Empty,
         wasm.timeout_source = tracing::field::Empty,
         gen_ai.system = tracing::field::Empty,
+        gen_ai.provider.name = tracing::field::Empty,
         gen_ai.system_instructions = tracing::field::Empty,
         gen_ai.request.model = tracing::field::Empty,
         gen_ai.operation.name = tracing::field::Empty,
@@ -599,50 +600,52 @@ impl crate::state::ServerState {
 
                 let callback_params = &result.callback_params;
 
-                // Record GenAI token usage from callback params (if present)
-                if let Some(input) = callback_params.get("input_tokens").and_then(|v| v.as_i64()) {
-                    Span::current().record("gen_ai.usage.input_tokens", input);
-                }
-                if let Some(output) = callback_params
-                    .get("output_tokens")
-                    .and_then(|v| v.as_i64())
-                {
-                    Span::current().record("gen_ai.usage.output_tokens", output);
-                }
-                // Record GenAI input/output messages for LLM Observability content.
-                // These are JSON strings of message arrays set by WASM modules.
-                if let Some(input_msgs) = callback_params
-                    .get("_gen_ai_input_messages")
-                    .and_then(|v| v.as_str())
-                {
-                    Span::current().record("gen_ai.input.messages", input_msgs);
-                }
-                if let Some(output_msgs) = callback_params
-                    .get("_gen_ai_output_messages")
-                    .and_then(|v| v.as_str())
-                {
-                    Span::current().record("gen_ai.output.messages", output_msgs);
-                }
-                if let Some(system_instructions) = callback_params
-                    .get("_gen_ai_system_instructions")
-                    .and_then(|v| v.as_str())
-                    .filter(|value| !value.is_empty())
-                {
-                    Span::current().record("gen_ai.system_instructions", system_instructions);
-                }
-                // Dynamic provider override (if WASM module reports actual provider used)
-                if let Some(provider) = callback_params
-                    .get("_gen_ai_provider")
-                    .and_then(|v| v.as_str())
-                {
-                    Span::current().record("gen_ai.system", provider);
-                }
-                if let Some(finish_reason) = callback_params
-                    .get("_gen_ai_finish_reason")
-                    .and_then(|v| v.as_str())
-                    .filter(|value| !value.is_empty())
-                {
-                    Span::current().record("gen_ai.response.finish_reasons", finish_reason);
+                if should_record_gen_ai_span_attrs(integration.llm, callback_params) {
+                    // Record GenAI token usage from callback params (if present)
+                    if let Some(input) =
+                        callback_params.get("input_tokens").and_then(|v| v.as_i64())
+                    {
+                        Span::current().record("gen_ai.usage.input_tokens", input);
+                    }
+                    if let Some(output) = callback_params
+                        .get("output_tokens")
+                        .and_then(|v| v.as_i64())
+                    {
+                        Span::current().record("gen_ai.usage.output_tokens", output);
+                    }
+                    // Record GenAI input/output messages for LLM Observability content.
+                    // These are JSON strings of message arrays set by WASM modules.
+                    if let Some(input_msgs) = callback_params
+                        .get("_gen_ai_input_messages")
+                        .and_then(|v| v.as_str())
+                    {
+                        Span::current().record("gen_ai.input.messages", input_msgs);
+                    }
+                    if let Some(output_msgs) = callback_params
+                        .get("_gen_ai_output_messages")
+                        .and_then(|v| v.as_str())
+                    {
+                        Span::current().record("gen_ai.output.messages", output_msgs);
+                    }
+                    if let Some(system_instructions) = callback_params
+                        .get("_gen_ai_system_instructions")
+                        .and_then(|v| v.as_str())
+                        .filter(|value| !value.is_empty())
+                    {
+                        Span::current().record("gen_ai.system_instructions", system_instructions);
+                    }
+                    let provider = llm_provider_for_observability(entity_state, callback_params);
+                    Span::current().record("gen_ai.system", provider.as_str());
+                    Span::current().record("gen_ai.provider.name", provider.as_str());
+                    let model = llm_model_for_observability(entity_state, callback_params);
+                    Span::current().record("gen_ai.request.model", model.as_str());
+                    if let Some(finish_reason) = callback_params
+                        .get("_gen_ai_finish_reason")
+                        .and_then(|v| v.as_str())
+                        .filter(|value| !value.is_empty())
+                    {
+                        Span::current().record("gen_ai.response.finish_reasons", finish_reason);
+                    }
                 }
 
                 let complete_seq = self.next_entity_event_sequence(
@@ -688,8 +691,14 @@ impl crate::state::ServerState {
                         llm_call_wide_event(ctx, entity_state, callback_params, result.duration_ms);
                     temper_observe::wide_event::emit_span(&event);
                     temper_observe::wide_event::emit_metrics(&event);
-                    submit_llmobs_llm_span(ctx, entity_state, callback_params, result.duration_ms)
-                        .await;
+                    submit_llmobs_llm_span(
+                        ctx,
+                        entity_state,
+                        callback_params,
+                        result.duration_ms,
+                        module_name,
+                    )
+                    .await;
                 }
                 if module_name == MONTY_REPL_MODULE {
                     submit_llmobs_tool_spans(ctx, entity_state, callback_params).await;
@@ -899,16 +908,8 @@ fn llm_call_wide_event<'a>(
     callback_params: &'a Value,
     duration_ms: u64,
 ) -> temper_observe::wide_event::WideEvent {
-    let provider = callback_params
-        .get("_gen_ai_provider")
-        .and_then(Value::as_str)
-        .or_else(|| entity_state.fields.get("provider").and_then(Value::as_str))
-        .unwrap_or("unknown");
-    let model = entity_state
-        .fields
-        .get("model")
-        .and_then(Value::as_str)
-        .unwrap_or("unknown");
+    let provider = llm_provider_for_observability(entity_state, callback_params);
+    let model = llm_model_for_observability(entity_state, callback_params);
     let session_id = ctx
         .agent_ctx
         .session_id
@@ -941,8 +942,8 @@ fn llm_call_wide_event<'a>(
         .unwrap_or_default();
 
     temper_observe::wide_event::from_llm_call(temper_observe::wide_event::LlmCallInput {
-        provider,
-        model,
+        provider: &provider,
+        model: &model,
         operation: "chat",
         entity_type: ctx.entity_ref.entity_type,
         entity_id: ctx.entity_ref.entity_id,
@@ -960,11 +961,52 @@ fn llm_call_wide_event<'a>(
     })
 }
 
+fn should_record_gen_ai_span_attrs(integration_is_llm: bool, _callback_params: &Value) -> bool {
+    integration_is_llm
+}
+
+fn llm_provider_for_observability(entity_state: &EntityState, callback_params: &Value) -> String {
+    let provider = callback_params
+        .get("_gen_ai_provider")
+        .and_then(Value::as_str)
+        .or_else(|| entity_state.fields.get("provider").and_then(Value::as_str))
+        .unwrap_or("unknown");
+    normalize_llm_provider_for_observability(provider)
+}
+
+fn normalize_llm_provider_for_observability(provider: &str) -> String {
+    let trimmed = provider.trim();
+    match trimmed.to_ascii_lowercase().as_str() {
+        "openai_codex" => "openai".to_string(),
+        "mock" => "custom".to_string(),
+        "" => "unknown".to_string(),
+        _ => trimmed.to_string(),
+    }
+}
+
+fn llm_model_for_observability(entity_state: &EntityState, callback_params: &Value) -> String {
+    callback_params
+        .get("_gen_ai_model")
+        .and_then(Value::as_str)
+        .filter(|value| !value.trim().is_empty())
+        .or_else(|| {
+            entity_state
+                .fields
+                .get("model")
+                .and_then(Value::as_str)
+                .filter(|value| !value.trim().is_empty())
+        })
+        .unwrap_or("unknown")
+        .trim()
+        .to_string()
+}
+
 async fn submit_llmobs_llm_span(
     ctx: &WasmDispatchCtx<'_>,
     entity_state: &EntityState,
     callback_params: &Value,
     duration_ms: u64,
+    module_name: &str,
 ) {
     let current_trace_id = current_otel_trace_id(&Span::current());
     let trace_id = callback_params
@@ -978,21 +1020,14 @@ async fn submit_llmobs_llm_span(
         return;
     };
 
-    let provider = callback_params
-        .get("_gen_ai_provider")
-        .and_then(Value::as_str)
-        .or_else(|| entity_state.fields.get("provider").and_then(Value::as_str))
-        .unwrap_or("unknown");
-    let model = entity_state
-        .fields
-        .get("model")
-        .and_then(Value::as_str)
-        .unwrap_or("unknown");
+    let provider = llm_provider_for_observability(entity_state, callback_params);
+    let model = llm_model_for_observability(entity_state, callback_params);
     let session_id = ctx
         .agent_ctx
         .session_id
         .as_deref()
         .unwrap_or(ctx.entity_ref.entity_id);
+    let span_name = format!("wasm:{module_name}");
 
     let input_tokens = callback_params
         .get("input_tokens")
@@ -1009,8 +1044,9 @@ async fn submit_llmobs_llm_span(
             session_id,
             trace_id,
             span_id,
-            provider,
-            model,
+            span_name: &span_name,
+            provider: &provider,
+            model: &model,
             system_instructions: callback_params
                 .get("_gen_ai_system_instructions")
                 .and_then(Value::as_str),
@@ -1163,6 +1199,7 @@ fn build_llm_root_span(
         .get("provider")
         .and_then(|v| v.as_str())
         .unwrap_or("anthropic");
+    let provider = normalize_llm_provider_for_observability(provider);
     let model = entity_state
         .fields
         .get("model")
@@ -1181,6 +1218,7 @@ fn build_llm_root_span(
         integration = %integration.name,
         wasm.module = %module_name,
         gen_ai.system = %provider,
+        gen_ai.provider.name = %provider,
         gen_ai.system_instructions = tracing::field::Empty,
         gen_ai.request.model = %model,
         gen_ai.operation.name = "chat",
@@ -1350,6 +1388,7 @@ mod tests {
             "_gen_ai_output_messages": "[{\"role\":\"assistant\"}]",
             "_gen_ai_system_instructions": "system",
             "_gen_ai_provider": "anthropic",
+            "_gen_ai_model": "claude-sonnet-4-6",
             "_gen_ai_finish_reason": "end_turn",
             "_dd_llmobs_tool_spans": "[]",
             "gen_ai_parent_trace_id": "trace-public",
@@ -1364,7 +1403,48 @@ mod tests {
         assert!(stripped.get("_gen_ai_output_messages").is_none());
         assert!(stripped.get("_gen_ai_system_instructions").is_none());
         assert!(stripped.get("_gen_ai_provider").is_none());
+        assert!(stripped.get("_gen_ai_model").is_none());
         assert!(stripped.get("_gen_ai_finish_reason").is_none());
         assert!(stripped.get("_dd_llmobs_tool_spans").is_none());
+    }
+
+    #[test]
+    fn gen_ai_span_attrs_are_recorded_only_for_llm_integrations() {
+        let params = json!({
+            "input_tokens": 10,
+            "output_tokens": 20,
+            "_gen_ai_input_messages": "[{\"role\":\"user\"}]",
+            "_gen_ai_output_messages": "[{\"role\":\"assistant\"}]",
+            "_gen_ai_provider": "openai",
+            "_gen_ai_model": "gpt-5.4",
+        });
+
+        assert!(should_record_gen_ai_span_attrs(true, &params));
+        assert!(!should_record_gen_ai_span_attrs(false, &params));
+    }
+
+    #[test]
+    fn llm_model_for_observability_prefers_callback_model() {
+        let entity_state = EntityState {
+            entity_type: "Session".to_string(),
+            entity_id: "session-1".to_string(),
+            status: "CallingProvider".to_string(),
+            item_count: 0,
+            counters: std::collections::BTreeMap::new(),
+            booleans: std::collections::BTreeMap::new(),
+            lists: std::collections::BTreeMap::new(),
+            fields: json!({"model": "claude-sonnet-4-6"}),
+            events: std::collections::VecDeque::new(),
+            total_event_count: 0,
+            sequence_nr: 0,
+        };
+        let callback_params = json!({
+            "_gen_ai_model": "gpt-5.4",
+        });
+
+        assert_eq!(
+            llm_model_for_observability(&entity_state, &callback_params),
+            "gpt-5.4"
+        );
     }
 }
