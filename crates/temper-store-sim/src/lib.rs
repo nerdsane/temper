@@ -8,8 +8,9 @@
 //! The same `ServerEventStore` dispatch enum adds a `Sim` variant that routes
 //! to this implementation. Production code runs unchanged.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, VecDeque};
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 use temper_runtime::persistence::{EventStore, PersistenceEnvelope, PersistenceError};
 use temper_runtime::tenant::parse_persistence_id_parts;
@@ -128,6 +129,12 @@ struct SimEventStoreInner {
     /// retry-path tests where probabilistic injection would be flaky. See
     /// `inject_concurrency_violations`.
     pending_concurrency_violations: BTreeMap<String, u64>,
+    /// One-shot append delays per `persistence_id`.
+    ///
+    /// Used by dispatch retry tests to deterministically model "the actor
+    /// persisted the transition, but the caller's ask timeout expired before
+    /// the reply arrived".
+    pending_append_delays: BTreeMap<String, VecDeque<Duration>>,
 }
 
 impl SimEventStore {
@@ -140,6 +147,7 @@ impl SimEventStore {
                 rng: DeterministicRng::new(seed),
                 faults,
                 pending_concurrency_violations: BTreeMap::new(),
+                pending_append_delays: BTreeMap::new(),
             })),
         }
     }
@@ -173,6 +181,22 @@ impl SimEventStore {
             .get(persistence_id)
             .copied()
             .unwrap_or(0)
+    }
+
+    /// Delay the next append for `persistence_id` by `delay`.
+    ///
+    /// The delay is consumed once. Multiple calls queue multiple delays in
+    /// FIFO order.
+    pub fn inject_append_delay(&self, persistence_id: &str, delay: Duration) {
+        let mut inner = self
+            .inner
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        inner
+            .pending_append_delays
+            .entry(persistence_id.to_string())
+            .or_default()
+            .push_back(delay);
     }
 
     /// Create a SimEventStore with no fault injection.
@@ -245,6 +269,30 @@ impl EventStore for SimEventStore {
         expected_sequence: u64,
         events: &[PersistenceEnvelope],
     ) -> Result<u64, PersistenceError> {
+        let append_delay = {
+            let mut inner = self
+                .inner
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            let delay = inner
+                .pending_append_delays
+                .get_mut(persistence_id)
+                .and_then(VecDeque::pop_front);
+            if inner
+                .pending_append_delays
+                .get(persistence_id)
+                .is_some_and(VecDeque::is_empty)
+            {
+                inner.pending_append_delays.remove(persistence_id);
+            }
+            delay
+        };
+        if let Some(delay) = append_delay
+            && !delay.is_zero()
+        {
+            tokio::time::sleep(delay).await;
+        }
+
         let mut inner = self.inner.lock().expect("SimEventStore lock poisoned"); // ci-ok: infallible lock
 
         // Deterministic one-shot injection (see `inject_concurrency_violations`).
