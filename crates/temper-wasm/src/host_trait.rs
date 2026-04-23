@@ -161,6 +161,21 @@ pub trait WasmHost: Send + Sync {
         Err("http_stream_response_head not supported by this host".to_string())
     }
 
+    /// Submit the response head for an inbound exchange (ADR-0056
+    /// dispatch). The guest calls this once — keyed on the
+    /// response-body handle it was given — before writing the
+    /// response body. The kernel dispatcher blocks on
+    /// `await_inbound_response_head` until this fires.
+    async fn http_stream_send_response_head(
+        &self,
+        _response_body: crate::http_stream::StreamHandle,
+        _head: crate::http_stream::HttpResponseHead,
+    ) -> Result<(), crate::http_stream::StreamError> {
+        Err(crate::http_stream::StreamError::Aborted(
+            "http_stream_send_response_head not supported by this host".into(),
+        ))
+    }
+
     /// Log a message at the given level.
     fn log(&self, level: &str, message: &str);
 
@@ -1228,6 +1243,16 @@ impl WasmHost for ProductionWasmHost {
             .await_response_head(response_body)
             .await
             .map_err(|e| e.to_string())
+    }
+
+    async fn http_stream_send_response_head(
+        &self,
+        response_body: crate::http_stream::StreamHandle,
+        head: crate::http_stream::HttpResponseHead,
+    ) -> Result<(), crate::http_stream::StreamError> {
+        self.http_streams
+            .submit_inbound_response_head(response_body, head)
+            .await
     }
 }
 

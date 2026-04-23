@@ -1140,6 +1140,60 @@ pub(super) fn link_host_functions(linker: &mut Linker<HostState>) -> Result<(), 
             ))
         })?;
 
+    // host_http_stream_send_response_head(resp_handle, head_ptr, head_len) -> i32
+    // Inbound-dispatch counterpart. Guest calls this once per
+    // invocation to hand the kernel the HTTP response head
+    // (status + headers as JSON). Returns 0 on success, negative
+    // on error per the stream convention.
+    linker
+        .func_wrap(
+            "env",
+            "host_http_stream_send_response_head",
+            |mut caller: Caller<'_, HostState>,
+             resp_handle: i32,
+             head_ptr: i32,
+             head_len: i32|
+             -> i32 {
+                let memory = caller.get_export("memory").and_then(|e| e.into_memory());
+                let Some(memory) = memory else { return -4 };
+
+                let mut buf = vec![0u8; head_len as usize];
+                if memory.read(&caller, head_ptr as usize, &mut buf).is_err() {
+                    return -4;
+                }
+                #[derive(serde::Deserialize)]
+                struct RawHead {
+                    status: u16,
+                    #[serde(default)]
+                    headers: Vec<(String, String)>,
+                }
+                let raw: RawHead = match serde_json::from_slice(&buf) {
+                    Ok(r) => r,
+                    Err(_) => return -4,
+                };
+                let head = crate::http_stream::HttpResponseHead {
+                    status: raw.status,
+                    headers: raw.headers,
+                };
+                let host = caller.data().host.clone();
+                let sh = crate::http_stream::StreamHandle(resp_handle as u32);
+                let result = tokio::task::block_in_place(|| {
+                    tokio::runtime::Handle::current()
+                        .block_on(host.http_stream_send_response_head(sh, head))
+                });
+                match result {
+                    Ok(()) => 0,
+                    Err(crate::http_stream::StreamError::InvalidHandle) => -3,
+                    Err(_) => -4,
+                }
+            },
+        )
+        .map_err(|e| {
+            WasmError::Compilation(format!(
+                "failed to link host_http_stream_send_response_head: {e}"
+            ))
+        })?;
+
     Ok(())
 }
 

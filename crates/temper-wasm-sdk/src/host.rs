@@ -172,4 +172,15 @@ unsafe extern "C" {
         buf_ptr: i32,
         buf_cap: i32,
     ) -> i32;
+
+    /// Submit the HTTP response head for an inbound (HttpEndpoint)
+    /// dispatch. Guests call this once per invocation before
+    /// writing the response body, passing a JSON object
+    /// `{"status":N, "headers":[["k","v"],...]}`.
+    /// Returns 0 on success, -3 = InvalidHandle, -4 = other error.
+    pub fn host_http_stream_send_response_head(
+        resp_handle: i32,
+        head_ptr: i32,
+        head_len: i32,
+    ) -> i32;
 }

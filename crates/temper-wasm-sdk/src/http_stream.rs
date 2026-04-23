@@ -164,6 +164,80 @@ pub struct HttpResponseHead {
 
 extern crate alloc;
 
+/// Inbound HTTP dispatch context delivered through
+/// `WasmInvocationContext.http_request`. Guest code deserializes
+/// this from the context JSON and drives the inbound exchange via
+/// its helpers.
+#[derive(Debug, Clone, serde::Deserialize)]
+pub struct InboundHttp {
+    pub method: alloc::string::String,
+    pub path: alloc::string::String,
+    #[serde(default)]
+    pub params: alloc::collections::BTreeMap<alloc::string::String, alloc::string::String>,
+    #[serde(default)]
+    pub headers: alloc::vec::Vec<(alloc::string::String, alloc::string::String)>,
+    #[serde(default)]
+    pub principal_id: Option<alloc::string::String>,
+    pub request_body_handle: u32,
+    pub response_body_handle: u32,
+}
+
+impl InboundHttp {
+    /// Reader for the request body the kernel pumps into the
+    /// exchange. Reads from `request_body_handle`.
+    pub fn request_body(&self) -> HttpResponseBodyReader {
+        HttpResponseBodyReader {
+            handle: StreamHandle(self.request_body_handle),
+        }
+    }
+
+    /// Writer for the response body the guest emits.
+    pub fn response_body(&self) -> HttpRequestBodyWriter {
+        HttpRequestBodyWriter {
+            handle: StreamHandle(self.response_body_handle),
+        }
+    }
+
+    /// Fire the HTTP response head. Must be called exactly once,
+    /// before the guest finishes.
+    pub fn submit_response_head(
+        &self,
+        status: u16,
+        headers: &[(&str, &str)],
+    ) -> Result<(), StreamError> {
+        let header_pairs: alloc::vec::Vec<[alloc::string::String; 2]> = headers
+            .iter()
+            .map(|(k, v)| {
+                [
+                    alloc::string::String::from(*k),
+                    alloc::string::String::from(*v),
+                ]
+            })
+            .collect();
+        let head = serde_json::json!({
+            "status": status,
+            "headers": header_pairs,
+        })
+        .to_string();
+        let rc = unsafe {
+            host::host_http_stream_send_response_head(
+                self.response_body_handle as i32,
+                head.as_ptr() as i32,
+                head.len() as i32,
+            )
+        };
+        if rc == 0 {
+            Ok(())
+        } else if rc == -3 {
+            Err(StreamError::InvalidHandle)
+        } else {
+            Err(StreamError::Other(alloc::format!(
+                "host_http_stream_send_response_head rc {rc}"
+            )))
+        }
+    }
+}
+
 /// Open a streaming outbound HTTP exchange. Returns the two
 /// body-stream wrappers plus a closure the guest calls to
 /// retrieve the response head after finalising the request.
