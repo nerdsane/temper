@@ -123,10 +123,7 @@ impl CompositeVerificationPlan {
     /// entity, and builds a per-entity [`TemperModel`] for each. Returns
     /// errors for missing seeds, missing trigger targets, and per-entity
     /// model-build failures.
-    pub fn new(
-        automatons: &[&Automaton],
-        seed: &str,
-    ) -> Result<Self, CompositePlanError> {
+    pub fn new(automatons: &[&Automaton], seed: &str) -> Result<Self, CompositePlanError> {
         let graph = TriggerGraph::from_automatons(automatons);
         if !graph.entities.contains(seed) {
             return Err(CompositePlanError::SeedMissing(seed.to_string()));
@@ -220,7 +217,11 @@ impl CompositeVerificationPlan {
                     .as_deref()
                     .map(|s| format!(" @{s}"))
                     .unwrap_or_default();
-                let liveness = if e.liveness_required { " (required)" } else { "" };
+                let liveness = if e.liveness_required {
+                    " (required)"
+                } else {
+                    ""
+                };
                 format!(
                     "{}.{}{} → {}.{}{}",
                     e.from, e.source_action, state, e.to, e.target_action, liveness
@@ -365,8 +366,7 @@ to = "Published"
     fn summary_renders_edges_and_scope() {
         let order = parse_automaton(order_ioa()).unwrap();
         let payment = parse_automaton(payment_ioa()).unwrap();
-        let plan =
-            CompositeVerificationPlan::new(&[&order, &payment], "Order").unwrap();
+        let plan = CompositeVerificationPlan::new(&[&order, &payment], "Order").unwrap();
         let summary = plan.summary();
         assert!(summary.contains("Order"));
         assert!(summary.contains("Payment"));

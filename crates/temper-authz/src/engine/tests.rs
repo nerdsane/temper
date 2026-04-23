@@ -65,7 +65,10 @@ fn system_authorized_via_system_platform_policy_not_bypass() {
     // This would have been silently bypassed if we still used is_system.
     let customer = SecurityContext::from_headers(&[
         ("X-Temper-Principal-Id".to_string(), "alice".to_string()),
-        ("X-Temper-Principal-Kind".to_string(), "customer".to_string()),
+        (
+            "X-Temper-Principal-Kind".to_string(),
+            "customer".to_string(),
+        ),
     ]);
     let decision = engine.authorize(&customer, "AnyAction", "AnyResource", &attrs);
     assert!(

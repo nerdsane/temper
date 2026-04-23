@@ -322,10 +322,10 @@ impl VerificationCascade {
         // Does not fail the cascade — reported as a warning-level
         // enrichment so developers see cross-entity structure alongside
         // single-entity verification.
-        let composite_report =
-            self.composite_scope
-                .as_ref()
-                .and_then(|cfg| build_composite_report(cfg, &mut warnings));
+        let composite_report = self
+            .composite_scope
+            .as_ref()
+            .and_then(|cfg| build_composite_report(cfg, &mut warnings));
 
         let all_passed = levels.iter().all(|l| l.passed);
         CascadeResult {
@@ -842,10 +842,7 @@ from = ["Draft"]
         let result = cascade.run();
         assert!(result.composite_report.is_none());
         assert!(
-            result
-                .warnings
-                .iter()
-                .any(|w| w.contains("NotAnEntity")),
+            result.warnings.iter().any(|w| w.contains("NotAnEntity")),
             "warning should mention missing seed. Got: {:?}",
             result.warnings
         );

@@ -285,9 +285,7 @@ fn record_actor_mailbox_metrics(
             .map(|s| s.to_string())
             .unwrap_or_else(|| "_unknown_".to_string());
         record_actor_mailbox_depth(&entity_type, key, actor_ref.mailbox_depth() as u64);
-        let entry = per_type_total_util
-            .entry(entity_type)
-            .or_insert((0.0, 0));
+        let entry = per_type_total_util.entry(entity_type).or_insert((0.0, 0));
         entry.0 += actor_ref.mailbox_utilization();
         entry.1 += 1;
     }
@@ -526,12 +524,7 @@ pub fn record_dispatch_error(
 // ============================================================================
 
 /// Record that a state_timeout fired for a specific (entity, state, action).
-pub fn record_state_timeout_fired(
-    tenant: &str,
-    entity_type: &str,
-    state: &str,
-    action: &str,
-) {
+pub fn record_state_timeout_fired(tenant: &str, entity_type: &str, state: &str, action: &str) {
     metrics().state_timeout_fired_total.add(
         1,
         &[
@@ -641,12 +634,7 @@ pub fn record_admission_queued(tenant: &str, entity_type: &str, action: &str) {
     );
 }
 
-pub fn record_admission_deferred(
-    tenant: &str,
-    entity_type: &str,
-    action: &str,
-    waited: Duration,
-) {
+pub fn record_admission_deferred(tenant: &str, entity_type: &str, action: &str, waited: Duration) {
     let attrs = [
         KeyValue::new("tenant", tenant.to_string()),
         KeyValue::new("entity_type", entity_type.to_string()),
@@ -658,12 +646,7 @@ pub fn record_admission_deferred(
         .record(waited.as_secs_f64() * 1000.0, &attrs);
 }
 
-pub fn record_admission_active_permits(
-    tenant: &str,
-    entity_type: &str,
-    action: &str,
-    count: u64,
-) {
+pub fn record_admission_active_permits(tenant: &str, entity_type: &str, action: &str, count: u64) {
     metrics().admission_active_permits.record(
         count,
         &[
@@ -685,12 +668,7 @@ pub fn record_admission_queue_depth(tenant: &str, entity_type: &str, action: &st
     );
 }
 
-pub fn record_admission_permit_hold(
-    tenant: &str,
-    entity_type: &str,
-    action: &str,
-    held: Duration,
-) {
+pub fn record_admission_permit_hold(tenant: &str, entity_type: &str, action: &str, held: Duration) {
     metrics().admission_permit_hold_time_ms.record(
         held.as_secs_f64() * 1000.0,
         &[

@@ -409,16 +409,19 @@ impl Model for CompositeTemperModel {
         // per-entity projection below is already more than snapshot
         // checking — Stateright's BFS visits every reachable joint
         // state.
-        vec![Property::<Self>::always("joint_local_invariants", |m, s| {
-            for (entity_type, entity_state) in &s.entities {
-                let Some(model) = m.models.get(entity_type) else {
-                    continue;
-                };
-                if !super::invariant_eval::all_local_invariants_hold(model, entity_state) {
-                    return false;
+        vec![Property::<Self>::always(
+            "joint_local_invariants",
+            |m, s| {
+                for (entity_type, entity_state) in &s.entities {
+                    let Some(model) = m.models.get(entity_type) else {
+                        continue;
+                    };
+                    if !super::invariant_eval::all_local_invariants_hold(model, entity_state) {
+                        return false;
+                    }
                 }
-            }
-            true
-        })]
+                true
+            },
+        )]
     }
 }

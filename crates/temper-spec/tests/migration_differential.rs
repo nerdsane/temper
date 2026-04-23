@@ -23,61 +23,139 @@ use temper_spec::automaton::{Integration, parse_automaton};
 /// (repo_worktree, migration_commit_sha, spec_path_relative_to_repo_root)
 const MIGRATIONS: &[(&str, &str, &str)] = &[
     // --- temper repo ---
-    ("/Users/seshendranalla/Development/temper-action-triggers", "53e2304",
-        "reference-apps/weather-tracker/specs/weather_report.ioa.toml"),
-    ("/Users/seshendranalla/Development/temper-action-triggers", "c7cf6a2",
-        "os-apps/temper-agent/specs/cron_job.ioa.toml"),
-    ("/Users/seshendranalla/Development/temper-action-triggers", "c7cf6a2",
-        "os-apps/temper-agent/specs/cron_scheduler.ioa.toml"),
-    ("/Users/seshendranalla/Development/temper-action-triggers", "c7cf6a2",
-        "os-apps/temper-agent/specs/heartbeat_monitor.ioa.toml"),
-    ("/Users/seshendranalla/Development/temper-action-triggers", "c7cf6a2",
-        "reference-apps/crucible/specs/crucible_scheduler.ioa.toml"),
-    ("/Users/seshendranalla/Development/temper-action-triggers", "c7cf6a2",
-        "reference-apps/crucible/specs/session_schedule.ioa.toml"),
+    (
+        "/Users/seshendranalla/Development/temper-action-triggers",
+        "53e2304",
+        "reference-apps/weather-tracker/specs/weather_report.ioa.toml",
+    ),
+    (
+        "/Users/seshendranalla/Development/temper-action-triggers",
+        "c7cf6a2",
+        "os-apps/temper-agent/specs/cron_job.ioa.toml",
+    ),
+    (
+        "/Users/seshendranalla/Development/temper-action-triggers",
+        "c7cf6a2",
+        "os-apps/temper-agent/specs/cron_scheduler.ioa.toml",
+    ),
+    (
+        "/Users/seshendranalla/Development/temper-action-triggers",
+        "c7cf6a2",
+        "os-apps/temper-agent/specs/heartbeat_monitor.ioa.toml",
+    ),
+    (
+        "/Users/seshendranalla/Development/temper-action-triggers",
+        "c7cf6a2",
+        "reference-apps/crucible/specs/crucible_scheduler.ioa.toml",
+    ),
+    (
+        "/Users/seshendranalla/Development/temper-action-triggers",
+        "c7cf6a2",
+        "reference-apps/crucible/specs/session_schedule.ioa.toml",
+    ),
     // ad06abd (not 15c8e87): get pre-migration content, not post-prompt-fix.
-    ("/Users/seshendranalla/Development/temper-action-triggers", "ad06abd",
-        "os-apps/evolution/evolution_run.ioa.toml"),
-    ("/Users/seshendranalla/Development/temper-action-triggers", "ad06abd",
-        "os-apps/intent-discovery/specs/intent_discovery.ioa.toml"),
-    ("/Users/seshendranalla/Development/temper-action-triggers", "ad06abd",
-        "os-apps/temper-agent/specs/temper_agent.ioa.toml"),
-    ("/Users/seshendranalla/Development/temper-action-triggers", "ad06abd",
-        "os-apps/temper-channels/specs/channel.ioa.toml"),
+    (
+        "/Users/seshendranalla/Development/temper-action-triggers",
+        "ad06abd",
+        "os-apps/evolution/evolution_run.ioa.toml",
+    ),
+    (
+        "/Users/seshendranalla/Development/temper-action-triggers",
+        "ad06abd",
+        "os-apps/intent-discovery/specs/intent_discovery.ioa.toml",
+    ),
+    (
+        "/Users/seshendranalla/Development/temper-action-triggers",
+        "ad06abd",
+        "os-apps/temper-agent/specs/temper_agent.ioa.toml",
+    ),
+    (
+        "/Users/seshendranalla/Development/temper-action-triggers",
+        "ad06abd",
+        "os-apps/temper-channels/specs/channel.ioa.toml",
+    ),
     // --- openpaw repo — 7a644954 bulk migration ---
-    ("/Users/seshendranalla/Development/openpaw-action-triggers", "7a644954",
-        "os-apps/paw-agent/specs/capability_request.ioa.toml"),
-    ("/Users/seshendranalla/Development/openpaw-action-triggers", "7a644954",
-        "os-apps/paw-agent/specs/cron_job.ioa.toml"),
-    ("/Users/seshendranalla/Development/openpaw-action-triggers", "7a644954",
-        "os-apps/paw-agent/specs/plan_review.ioa.toml"),
-    ("/Users/seshendranalla/Development/openpaw-action-triggers", "7a644954",
-        "os-apps/paw-agent/specs/session.ioa.toml"),
-    ("/Users/seshendranalla/Development/openpaw-action-triggers", "7a644954",
-        "os-apps/paw-autoreason/specs/tournament.ioa.toml"),
-    ("/Users/seshendranalla/Development/openpaw-action-triggers", "7a644954",
-        "os-apps/paw-channels/specs/channel.ioa.toml"),
-    ("/Users/seshendranalla/Development/openpaw-action-triggers", "7a644954",
-        "os-apps/paw-consilium/specs/deliberation.ioa.toml"),
-    ("/Users/seshendranalla/Development/openpaw-action-triggers", "7a644954",
-        "os-apps/paw-foresight/specs/foresight_model.ioa.toml"),
-    ("/Users/seshendranalla/Development/openpaw-action-triggers", "7a644954",
-        "os-apps/paw-foresight/specs/projection.ioa.toml"),
-    ("/Users/seshendranalla/Development/openpaw-action-triggers", "7a644954",
-        "os-apps/paw-fs/specs/workspace.ioa.toml"),
-    ("/Users/seshendranalla/Development/openpaw-action-triggers", "7a644954",
-        "os-apps/paw-heal/specs/alert_cycle.ioa.toml"),
-    ("/Users/seshendranalla/Development/openpaw-action-triggers", "7a644954",
-        "os-apps/paw-ingest/specs/webhook_event.ioa.toml"),
-    ("/Users/seshendranalla/Development/openpaw-action-triggers", "7a644954",
-        "os-apps/paw-wiki/specs/wiki_job.ioa.toml"),
+    (
+        "/Users/seshendranalla/Development/openpaw-action-triggers",
+        "7a644954",
+        "os-apps/paw-agent/specs/capability_request.ioa.toml",
+    ),
+    (
+        "/Users/seshendranalla/Development/openpaw-action-triggers",
+        "7a644954",
+        "os-apps/paw-agent/specs/cron_job.ioa.toml",
+    ),
+    (
+        "/Users/seshendranalla/Development/openpaw-action-triggers",
+        "7a644954",
+        "os-apps/paw-agent/specs/plan_review.ioa.toml",
+    ),
+    (
+        "/Users/seshendranalla/Development/openpaw-action-triggers",
+        "7a644954",
+        "os-apps/paw-agent/specs/session.ioa.toml",
+    ),
+    (
+        "/Users/seshendranalla/Development/openpaw-action-triggers",
+        "7a644954",
+        "os-apps/paw-autoreason/specs/tournament.ioa.toml",
+    ),
+    (
+        "/Users/seshendranalla/Development/openpaw-action-triggers",
+        "7a644954",
+        "os-apps/paw-channels/specs/channel.ioa.toml",
+    ),
+    (
+        "/Users/seshendranalla/Development/openpaw-action-triggers",
+        "7a644954",
+        "os-apps/paw-consilium/specs/deliberation.ioa.toml",
+    ),
+    (
+        "/Users/seshendranalla/Development/openpaw-action-triggers",
+        "7a644954",
+        "os-apps/paw-foresight/specs/foresight_model.ioa.toml",
+    ),
+    (
+        "/Users/seshendranalla/Development/openpaw-action-triggers",
+        "7a644954",
+        "os-apps/paw-foresight/specs/projection.ioa.toml",
+    ),
+    (
+        "/Users/seshendranalla/Development/openpaw-action-triggers",
+        "7a644954",
+        "os-apps/paw-fs/specs/workspace.ioa.toml",
+    ),
+    (
+        "/Users/seshendranalla/Development/openpaw-action-triggers",
+        "7a644954",
+        "os-apps/paw-heal/specs/alert_cycle.ioa.toml",
+    ),
+    (
+        "/Users/seshendranalla/Development/openpaw-action-triggers",
+        "7a644954",
+        "os-apps/paw-ingest/specs/webhook_event.ioa.toml",
+    ),
+    (
+        "/Users/seshendranalla/Development/openpaw-action-triggers",
+        "7a644954",
+        "os-apps/paw-wiki/specs/wiki_job.ioa.toml",
+    ),
     // --- openpaw batch 2 (trigger-keyed script fix) — commit 563c6048 ---
-    ("/Users/seshendranalla/Development/openpaw-action-triggers", "563c6048",
-        "os-apps/paw-research/specs/web_query.ioa.toml"),
-    ("/Users/seshendranalla/Development/openpaw-action-triggers", "563c6048",
-        "os-apps/paw-managed-agents/specs/managed_session.ioa.toml"),
-    ("/Users/seshendranalla/Development/openpaw-action-triggers", "563c6048",
-        "os-apps/paw-managed-agents/specs/managed_agent.ioa.toml"),
+    (
+        "/Users/seshendranalla/Development/openpaw-action-triggers",
+        "563c6048",
+        "os-apps/paw-research/specs/web_query.ioa.toml",
+    ),
+    (
+        "/Users/seshendranalla/Development/openpaw-action-triggers",
+        "563c6048",
+        "os-apps/paw-managed-agents/specs/managed_session.ioa.toml",
+    ),
+    (
+        "/Users/seshendranalla/Development/openpaw-action-triggers",
+        "563c6048",
+        "os-apps/paw-managed-agents/specs/managed_agent.ioa.toml",
+    ),
 ];
 
 fn git_show(repo_root: &str, sha: &str, path: &str) -> String {
@@ -97,6 +175,18 @@ fn read_current(repo_root: &str, path: &str) -> String {
     std::fs::read_to_string(format!("{repo_root}/{path}"))
         .unwrap_or_else(|e| panic!("read {repo_root}/{path}: {e}"))
 }
+
+/// Integrations intentionally dropped (not just migrated) after the initial
+/// conversion. These are expected to be missing from the post-migration spec
+/// — the differential treats their absence as correct, not a regression.
+///
+/// Keyed by `(path, inner_name(trigger))`.
+const INTENTIONALLY_DROPPED: &[(&str, &str)] = &[
+    // paw-agent/session.call_llm — monolithic llm_caller retired after the
+    // session flow was split into prepare_context → call_provider →
+    // apply_provider_response. Deleted in commit ce3dddcb.
+    ("os-apps/paw-agent/specs/session.ioa.toml", "call_llm"),
+];
 
 /// Return the inner name — strips the `__trigger__:{action}:` prefix that
 /// the expander adds when synthesizing Integrations from `[[action.triggers]]`
@@ -127,11 +217,27 @@ fn assert_equiv(path: &str, old: &Integration, new: &Integration) {
     // resolves against and what the runtime routes by. The `name` field was a
     // separate human-readable label pre-ADR-0046; the new form collapses both
     // into a single dispatch-keyed name, so we deliberately don't compare names.
-    assert_eq!(inner_name(&old.trigger), inner_name(&new.trigger), "{path}: trigger inner name");
-    assert_eq!(old.integration_type, new.integration_type, "{path}: type name={}", old.name);
+    assert_eq!(
+        inner_name(&old.trigger),
+        inner_name(&new.trigger),
+        "{path}: trigger inner name"
+    );
+    assert_eq!(
+        old.integration_type, new.integration_type,
+        "{path}: type name={}",
+        old.name
+    );
     assert_eq!(old.module, new.module, "{path}: module name={}", old.name);
-    assert_eq!(old.on_success, new.on_success, "{path}: on_success name={}", old.name);
-    assert_eq!(old.on_failure, new.on_failure, "{path}: on_failure name={}", old.name);
+    assert_eq!(
+        old.on_success, new.on_success,
+        "{path}: on_success name={}",
+        old.name
+    );
+    assert_eq!(
+        old.on_failure, new.on_failure,
+        "{path}: on_failure name={}",
+        old.name
+    );
     assert_eq!(old.llm, new.llm, "{path}: llm name={}", old.name);
     // Config: flatten BTreeMap — compare key sets + values.
     let old_keys: Vec<&String> = old.config.keys().collect();
@@ -181,12 +287,22 @@ fn all_migrations_preserve_integrations() {
         let new_names: Vec<&String> = new_idx.keys().collect();
 
         // New may be a superset if any inline triggers were never [[integration]]
-        // (e.g. entity-kind triggers); but every pre-existing integration must persist.
+        // (e.g. entity-kind triggers); but every pre-existing integration must persist
+        // unless explicitly listed in INTENTIONALLY_DROPPED.
         for name in &old_names {
             match new_idx.get(*name) {
-                None => failures.push(format!(
-                    "{path}: integration '{name}' dropped by migration"
-                )),
+                None => {
+                    if INTENTIONALLY_DROPPED
+                        .iter()
+                        .any(|(p, n)| *p == *path && *n == name.as_str())
+                    {
+                        eprintln!(
+                            "  {path}: note — integration '{name}' intentionally dropped post-migration"
+                        );
+                    } else {
+                        failures.push(format!("{path}: integration '{name}' dropped by migration"));
+                    }
+                }
                 Some(new_i) => {
                     let old_i = old_idx[*name];
                     let result = std::panic::catch_unwind(|| assert_equiv(path, old_i, new_i));
@@ -205,7 +321,9 @@ fn all_migrations_preserve_integrations() {
         // Surface extras for visibility (not a failure — may be legit entity-kind additions).
         for name in &new_names {
             if !old_idx.contains_key(*name) {
-                eprintln!("  {path}: note — new integration '{name}' appeared (likely entity-kind or newly synthesized)");
+                eprintln!(
+                    "  {path}: note — new integration '{name}' appeared (likely entity-kind or newly synthesized)"
+                );
             }
         }
     }
@@ -244,10 +362,13 @@ module = "probe_module"
 on_success = "Fire"
 "#;
     let a = parse_automaton(src).expect("parse");
-    assert_eq!(a.integrations.len(), 1, "one synthesized Integration expected");
+    assert_eq!(
+        a.integrations.len(),
+        1,
+        "one synthesized Integration expected"
+    );
     assert_eq!(
         a.integrations[0].name, "__trigger__:Fire:my_trigger",
         "expander must namespace synthesized names as `__trigger__:{{action}}:{{name}}`"
     );
 }
-

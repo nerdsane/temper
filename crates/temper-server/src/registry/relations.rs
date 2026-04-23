@@ -125,10 +125,7 @@ pub(super) fn synthesize_action_trigger_reaction(
     let resolve_target = trigger.resolve_target.clone()?;
 
     Some(ReactionRule {
-        name: format!(
-            "{source_entity_type}:{source_action}:{}",
-            trigger.name
-        ),
+        name: format!("{source_entity_type}:{source_action}:{}", trigger.name),
         when: ReactionTrigger {
             entity_type: source_entity_type.to_string(),
             action: Some(source_action.to_string()),

@@ -340,9 +340,12 @@ pub(super) async fn dispatch_bound_action(
             let reason = e.to_string();
             http_span.set_status(Status::error(reason.clone()));
             http_span.set_attribute(OtelKeyValue::new("http.status_code", 503i64));
-            let mut resp =
-                odata_error(StatusCode::SERVICE_UNAVAILABLE, "DispatchTransient", &reason)
-                    .into_response();
+            let mut resp = odata_error(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "DispatchTransient",
+                &reason,
+            )
+            .into_response();
             // Retry-After is per-RFC seconds; 1s is a conservative default
             // until admission control (ADR-0051) can supply a tuned value.
             resp.headers_mut().insert(

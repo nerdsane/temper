@@ -175,10 +175,7 @@ fn edge_from_trigger(
         to: target_entity,
         target_action,
         to_state: trigger.to_state.clone(),
-        liveness_required: matches!(
-            trigger.liveness,
-            super::types::TriggerLiveness::Required
-        ),
+        liveness_required: matches!(trigger.liveness, super::types::TriggerLiveness::Required),
     })
 }
 

@@ -318,7 +318,10 @@ queue_timeout_seconds = 20
     let auto = parse_toml_to_automaton(spec).unwrap();
     let admission = auto.admission.as_ref().expect("admission block parsed");
     assert_eq!(admission.max_concurrent_creates, Some(5));
-    assert_eq!(admission.max_concurrent_actions.get("Submit").copied(), Some(3));
+    assert_eq!(
+        admission.max_concurrent_actions.get("Submit").copied(),
+        Some(3)
+    );
     assert_eq!(
         admission.max_concurrent_actions.get("Configure").copied(),
         Some(10)
