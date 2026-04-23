@@ -35,6 +35,11 @@ pub struct Context {
     pub entity_id: String,
     /// The action that triggered this integration.
     pub trigger_action: String,
+    /// HTTP dispatch context (present only when this invocation was
+    /// routed via an ADR-0056 HttpEndpoint). Guests serving HTTP
+    /// unwrap this then drive the inbound exchange via
+    /// `temper_wasm_sdk::http_stream::InboundHttp`.
+    pub http_request: Option<Value>,
 }
 
 pub struct WideEventInput<'a> {
@@ -121,6 +126,8 @@ impl Context {
             .unwrap_or("")
             .to_string();
 
+        let http_request = parsed.get("http_request").cloned();
+
         Ok(Self {
             config,
             trigger_params,
@@ -129,6 +136,7 @@ impl Context {
             entity_type,
             entity_id,
             trigger_action,
+            http_request,
         })
     }
 
