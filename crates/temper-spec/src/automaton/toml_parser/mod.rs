@@ -501,9 +501,7 @@ fn extract_field_invariants(
 /// top level and accepts inline-table overrides, so serde handles it
 /// entirely — the hand-rolled parser would need separate handling for the
 /// `max_concurrent_actions = { ... }` inline table otherwise.
-fn extract_admission(
-    source: &str,
-) -> Result<Option<super::types::Admission>, AutomatonParseError> {
+fn extract_admission(source: &str) -> Result<Option<super::types::Admission>, AutomatonParseError> {
     let slice = isolate_single_table(source, "[admission]");
     if slice.trim().is_empty() {
         return Ok(None);

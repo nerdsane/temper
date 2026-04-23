@@ -103,7 +103,9 @@ mod tests {
                     .method("PATCH")
                     .uri("/_admin/admission/acme/Session")
                     .header("Content-Type", "application/json")
-                    .body(Body::from(serde_json::to_vec(&serde_json::Value::Null).unwrap()))
+                    .body(Body::from(
+                        serde_json::to_vec(&serde_json::Value::Null).unwrap(),
+                    ))
                     .unwrap(),
             )
             .await

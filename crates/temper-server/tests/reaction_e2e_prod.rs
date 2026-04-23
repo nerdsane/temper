@@ -12,9 +12,9 @@ use std::sync::Arc;
 use temper_runtime::ActorSystem;
 use temper_runtime::tenant::TenantId;
 use temper_server::ServerState;
-use temper_server::trigger::registry::parse_reactions;
 use temper_server::registry::SpecRegistry;
 use temper_server::request_context::AgentContext;
+use temper_server::trigger::registry::parse_reactions;
 use temper_spec::csdl::parse_csdl;
 
 const CSDL_XML: &str = r#"<?xml version="1.0" encoding="utf-8"?>

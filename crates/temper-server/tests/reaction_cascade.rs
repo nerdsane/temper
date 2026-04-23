@@ -297,7 +297,7 @@ fn multi_step_cascade_with_chained_reactions() {
                     params_from: std::collections::BTreeMap::new(),
                 },
                 resolve_target: TargetResolver::SameId,
-            principal: None,
+                principal: None,
             },
             ReactionRule {
                 name: "authorize_triggers_capture".to_string(),
@@ -314,7 +314,7 @@ fn multi_step_cascade_with_chained_reactions() {
                     params_from: std::collections::BTreeMap::new(),
                 },
                 resolve_target: TargetResolver::SameId,
-            principal: None,
+                principal: None,
             },
         ],
     );
@@ -522,7 +522,7 @@ fn guard_passing_rule_fires_guard_failing_rule_skipped() {
                     params_from: std::collections::BTreeMap::new(),
                 },
                 resolve_target: TargetResolver::SameId,
-            principal: None,
+                principal: None,
             },
             ReactionRule {
                 name: "skipped_on_cancelled".to_string(),
@@ -541,7 +541,7 @@ fn guard_passing_rule_fires_guard_failing_rule_skipped() {
                     params_from: std::collections::BTreeMap::new(),
                 },
                 resolve_target: TargetResolver::SameId,
-            principal: None,
+                principal: None,
             },
         ],
     );

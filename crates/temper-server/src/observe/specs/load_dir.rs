@@ -7,8 +7,8 @@ use temper_spec::cross_invariant::{
 };
 use tracing::instrument;
 
-use crate::trigger::registry::parse_reactions;
 use crate::state::ServerState;
+use crate::trigger::registry::parse_reactions;
 
 use super::super::specs_helpers::{
     build_ndjson_response, cross_lint_ndjson_line, lint_loaded_specs, lint_ndjson_line,

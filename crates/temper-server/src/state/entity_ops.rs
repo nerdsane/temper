@@ -459,14 +459,10 @@ impl ServerState {
         // ADR-0048: retry transient ask failures (AskTimeout, MailboxFull)
         // so a single slow actor reply does not surface as HTTP 500.
         let policy = self.dispatch_retry_policy();
-        retry::ask_with_backoff::<_, EntityResponse, _>(
-            &actor_ref,
-            || EntityMsg::GetState,
-            &policy,
-        )
-        .await
-        .result
-        .map_err(|e| format!("Actor query failed: {e}"))
+        retry::ask_with_backoff::<_, EntityResponse, _>(&actor_ref, || EntityMsg::GetState, &policy)
+            .await
+            .result
+            .map_err(|e| format!("Actor query failed: {e}"))
     }
 
     /// Create a new entity with initial fields and return its state.

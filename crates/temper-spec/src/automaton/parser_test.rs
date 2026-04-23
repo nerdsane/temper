@@ -167,8 +167,9 @@ to = "Done"
 
     #[test]
     fn warn_only_accepts_spec_with_trap_state() {
-        let auto = parse_automaton_with_liveness(SPEC_WITH_TRAP_STATE, LivenessEnforcement::WarnOnly)
-            .expect("warn-only mode must accept");
+        let auto =
+            parse_automaton_with_liveness(SPEC_WITH_TRAP_STATE, LivenessEnforcement::WarnOnly)
+                .expect("warn-only mode must accept");
         assert_eq!(auto.automaton.name, "Trappy");
     }
 
@@ -186,8 +187,14 @@ to = "Done"
         let err = parse_automaton_with_liveness(SPEC_WITH_TRAP_STATE, LivenessEnforcement::Enforce)
             .expect_err("enforce must reject");
         let msg = err.to_string();
-        assert!(msg.contains("ADR-0050"), "error should cite ADR-0050: {msg}");
-        assert!(msg.contains("Running"), "error must name the trap state: {msg}");
+        assert!(
+            msg.contains("ADR-0050"),
+            "error should cite ADR-0050: {msg}"
+        );
+        assert!(
+            msg.contains("Running"),
+            "error must name the trap state: {msg}"
+        );
         // Start also has no coverage and is non-terminal — both should appear.
         assert!(
             msg.contains("Start"),

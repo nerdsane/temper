@@ -155,9 +155,7 @@ fn expand_wasm_and_webhook_triggers(automaton: &mut Automaton) {
             }
             // Append a `trigger` effect so the transition table emits it
             // as a custom_effect the runtime can pick up.
-            action.effect.push(Effect::Trigger {
-                name: synth_name,
-            });
+            action.effect.push(Effect::Trigger { name: synth_name });
         }
     }
     automaton.integrations.extend(synthesized);

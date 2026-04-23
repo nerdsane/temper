@@ -295,7 +295,10 @@ field = "payment_id"
 "#;
     let automaton = parse_automaton(spec).expect("params trigger should parse");
     let trigger = &automaton.actions[0].triggers[0];
-    assert_eq!(trigger.params_from.get("amount").map(String::as_str), Some("total_cents"));
+    assert_eq!(
+        trigger.params_from.get("amount").map(String::as_str),
+        Some("total_cents")
+    );
     assert_eq!(
         trigger.params_from.get("currency").map(String::as_str),
         Some("currency_code")

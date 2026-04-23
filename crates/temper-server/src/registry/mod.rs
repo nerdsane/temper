@@ -26,9 +26,7 @@ use crate::trigger::types::ReactionRule;
 
 pub use types::*;
 
-use relations::{
-    build_relation_graph, build_webhook_routes, synthesize_action_trigger_reaction,
-};
+use relations::{build_relation_graph, build_webhook_routes, synthesize_action_trigger_reaction};
 
 /// Multi-tenant specification registry.
 ///
@@ -361,11 +359,9 @@ impl SpecRegistry {
             for (entity_type, spec) in &config.entities {
                 for action in &spec.automaton.actions {
                     for trigger in &action.triggers {
-                        if let Some(rule) = synthesize_action_trigger_reaction(
-                            entity_type,
-                            &action.name,
-                            trigger,
-                        ) {
+                        if let Some(rule) =
+                            synthesize_action_trigger_reaction(entity_type, &action.name, trigger)
+                        {
                             rules.push(rule);
                         }
                     }

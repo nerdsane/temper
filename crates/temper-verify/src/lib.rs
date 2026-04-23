@@ -17,8 +17,8 @@ pub mod smt;
 
 // Re-export key types.
 pub use cascade::{ActorSimResult, CascadeLevel, CascadeResult, LevelResult, VerificationCascade};
-pub use composite::{CompositePlanError, CompositeVerificationPlan};
 pub use checker::{VerificationResult, check_model};
+pub use composite::{CompositePlanError, CompositeVerificationPlan};
 pub use model::{
     InvariantKind, ModelEffect, ModelGuard, ResolvedTransition, TemperModel, TemperModelAction,
     TemperModelState, build_model_from_ioa,
