@@ -496,6 +496,7 @@ fn effect_var(effect: &Effect) -> Option<&str> {
     match effect {
         Effect::Increment { var } => Some(var.as_str()),
         Effect::Decrement { var } => Some(var.as_str()),
+        Effect::SetCounterFromParam { var, .. } => Some(var.as_str()),
         Effect::SetBool { var, .. } => Some(var.as_str()),
         Effect::Emit { .. } => None,
         Effect::ListAppend { var } => Some(var.as_str()),
@@ -533,6 +534,9 @@ fn render_effect(effect: &Effect) -> String {
     match effect {
         Effect::Increment { var } => format!("increment {var}"),
         Effect::Decrement { var } => format!("decrement {var}"),
+        Effect::SetCounterFromParam { var, param } => {
+            format!("set_counter_from_param {var} <- {param}")
+        }
         Effect::SetBool { var, value } => format!("set {var} {value}"),
         Effect::Emit { event } => format!("emit {event}"),
         Effect::ListAppend { var } => format!("list_append {var}"),

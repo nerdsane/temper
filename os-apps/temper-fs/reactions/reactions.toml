@@ -3,30 +3,20 @@
 # Cross-entity reactions fired by the ReactionDispatcher.
 # Reactions are fire-and-forget, cascade depth bounded by MAX_REACTION_DEPTH = 8.
 
-# When a file's content is updated via $value PUT, create a new FileVersion.
+# When a new file version is created, supersede the previous FileVersion if one exists.
 [[reaction]]
-name = "file_stream_updated_creates_version"
+name = "file_version_create_supersedes_previous"
 
 [reaction.when]
-entity_type = "File"
-action = "StreamUpdated"
-to_state = "Ready"
-
-[reaction.then]
 entity_type = "FileVersion"
 action = "Create"
 
-[reaction.resolve_target]
-type = "create_if_missing"
-id_field = "last_version_id"
-
-# When a new version is created, supersede the previous FileVersion.
-[[reaction]]
-name = "file_stream_updated_supersedes_old_version"
-
-[reaction.when]
-entity_type = "File"
-action = "StreamUpdated"
+[reaction.when.guard]
+type = "not"
+[reaction.when.guard.guard]
+type = "field_equals"
+field = "previous_version_id"
+value = ""
 
 [reaction.then]
 entity_type = "FileVersion"
@@ -34,7 +24,7 @@ action = "Supersede"
 
 [reaction.resolve_target]
 type = "field"
-field = "last_version_id"
+field = "previous_version_id"
 
 # When a file's content is updated, increment the workspace's used bytes.
 [[reaction]]

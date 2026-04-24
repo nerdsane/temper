@@ -271,6 +271,7 @@ fn format_effects(effects: &[Effect]) -> String {
         .map(|e| match e {
             Effect::Increment { var } => format!("{var}' = {var} + 1"),
             Effect::Decrement { var } => format!("{var}' = {var} - 1"),
+            Effect::SetCounterFromParam { var, param } => format!("{var}' = {param}"),
             Effect::SetBool { var, value } => {
                 format!("{var}' = {}", if *value { "TRUE" } else { "FALSE" })
             }
