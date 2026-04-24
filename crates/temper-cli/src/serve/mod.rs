@@ -519,37 +519,6 @@ fn spawn_observe_ui(api_port: u16) {
     });
 }
 
-#[cfg(test)]
-mod tests {
-    use super::cache_platform_secret_if_present;
-    use temper_server::secrets::vault::SecretsVault;
-
-    fn test_vault() -> SecretsVault {
-        SecretsVault::new(&[0x42; 32])
-    }
-
-    #[test]
-    fn cache_platform_secret_if_present_stores_present_value() {
-        let vault = test_vault();
-
-        cache_platform_secret_if_present(&vault, "exa_api_key", Some("exa-live".to_string()));
-
-        assert_eq!(
-            vault.get_platform_secret("exa_api_key"),
-            Some("exa-live".to_string())
-        );
-    }
-
-    #[test]
-    fn cache_platform_secret_if_present_skips_missing_value() {
-        let vault = test_vault();
-
-        cache_platform_secret_if_present(&vault, "exa_api_key", None);
-
-        assert_eq!(vault.get_platform_secret("exa_api_key"), None);
-    }
-}
-
 /// Spawn the Discord channel transport using the temper-transport crate.
 ///
 /// The transport is an OData API client — it bootstraps Channel + AgentRoute
@@ -884,5 +853,36 @@ async fn spawn_background_verification(state: &PlatformState, specs_dir: &str, t
                 }
             }
         });
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::cache_platform_secret_if_present;
+    use temper_server::secrets::vault::SecretsVault;
+
+    fn test_vault() -> SecretsVault {
+        SecretsVault::new(&[0x42; 32])
+    }
+
+    #[test]
+    fn cache_platform_secret_if_present_stores_present_value() {
+        let vault = test_vault();
+
+        cache_platform_secret_if_present(&vault, "exa_api_key", Some("exa-live".to_string()));
+
+        assert_eq!(
+            vault.get_platform_secret("exa_api_key"),
+            Some("exa-live".to_string())
+        );
+    }
+
+    #[test]
+    fn cache_platform_secret_if_present_skips_missing_value() {
+        let vault = test_vault();
+
+        cache_platform_secret_if_present(&vault, "exa_api_key", None);
+
+        assert_eq!(vault.get_platform_secret("exa_api_key"), None);
     }
 }
