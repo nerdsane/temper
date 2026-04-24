@@ -36,6 +36,11 @@ name = "mime_type"
 type = "string"
 initial = ""
 
+[[state]]
+name = "last_version_id"
+type = "string"
+initial = ""
+
 # --- Actions ---
 
 [[action]]
@@ -55,11 +60,8 @@ params = ["content_hash", "size_bytes", "mime_type"]
 effect = '[{ type = "increment", var = "version_count" }, { type = "set_bool", var = "has_content", value = "true" }]'
 hint = "Fired by $value PUT handler after WASM upload succeeds. Updates content metadata and advances to Ready. Not callable from Locked."
 
-# ADR-0046 migration: inline the three reactions from reactions/reactions.toml.
-# Runtime dispatch is still handled by the ReactionDispatcher until slice 5
-# swaps it for the new TriggerDispatcher; the inline declarations here are
-# parse-time only (see temper-spec validators). All three run as the
-# "file-service" platform service (see policies/file-service.cedar — pending).
+# ADR-0046: inline triggers are the single source of truth for the
+# File -> FileVersion / Workspace cascade after StreamUpdated commits.
 
 [[action.triggers]]
 name = "file_stream_updated_creates_version"
@@ -69,9 +71,17 @@ to_state = "Ready"
 target_entity = "FileVersion"
 target_action = "Create"
 
+[action.triggers.params]
+created_by = "file-service"
+
+[action.triggers.params_from]
+file_id = "Id"
+version_number = "version_count"
+content_hash = "content_hash"
+size_bytes = "size_bytes"
+
 [action.triggers.resolve_target]
-type = "create_if_missing"
-id_field = "last_version_id"
+type = "create"
 
 [[action.triggers]]
 name = "file_stream_updated_supersedes_old_version"
@@ -91,9 +101,20 @@ principal = "file-service"
 target_entity = "Workspace"
 target_action = "IncrementUsage"
 
+[action.triggers.params_from]
+size_bytes = "size_bytes"
+
 [action.triggers.resolve_target]
 type = "field"
 field = "workspace_id"
+
+[[action]]
+name = "RecordVersion"
+kind = "internal"
+from = ["Ready"]
+to = "Ready"
+params = ["last_version_id"]
+hint = "Record the newest FileVersion entity after a successful version create cascade."
 
 [[action]]
 name = "Lock"

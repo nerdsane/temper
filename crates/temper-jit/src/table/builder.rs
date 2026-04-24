@@ -126,7 +126,13 @@ fn convert_effect(effect: ResolvedEffect) -> Effect {
         ResolvedEffect::IncrementCounter(ref var) if var == "items" => Effect::IncrementItems,
         ResolvedEffect::DecrementCounter(ref var) if var == "items" => Effect::DecrementItems,
         ResolvedEffect::IncrementCounter(var) => Effect::IncrementCounter(var),
+        ResolvedEffect::IncrementCounterByParam { var, param } => {
+            Effect::IncrementCounterByParam { var, param }
+        }
         ResolvedEffect::DecrementCounter(var) => Effect::DecrementCounter(var),
+        ResolvedEffect::DecrementCounterByParam { var, param } => {
+            Effect::DecrementCounterByParam { var, param }
+        }
         ResolvedEffect::SetBool { var, value } => Effect::SetBool { var, value },
         ResolvedEffect::ListAppend(var) => Effect::ListAppend(var),
         ResolvedEffect::ListRemoveAt(var) => Effect::ListRemoveAt(var),

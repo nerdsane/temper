@@ -6,6 +6,7 @@
 
 use axum::http::HeaderMap;
 use opentelemetry::trace::{SpanContext, SpanId, TraceContextExt, TraceFlags, TraceId, TraceState};
+use temper_authz::SecurityContext;
 
 /// Agent identity context extracted from HTTP headers and credential resolution.
 ///
@@ -19,6 +20,12 @@ use opentelemetry::trace::{SpanContext, SpanId, TraceContextExt, TraceFlags, Tra
 /// - `X-Intent` — caller-supplied description of what they were trying to do
 #[derive(Debug, Clone, Default)]
 pub struct AgentContext {
+    /// Full Cedar security context when known at the request boundary.
+    ///
+    /// External HTTP entrypoints populate this after credential resolution so
+    /// downstream trigger dispatch can inherit the exact principal rather than
+    /// approximating it from partial agent metadata.
+    pub security_ctx: Option<SecurityContext>,
     /// Optional agent identifier. Populated from `ResolvedIdentity` when
     /// credential resolution succeeds, or from internal system context.
     pub agent_id: Option<String>,
@@ -51,6 +58,7 @@ impl AgentContext {
     /// dropping identity via `Default`.
     pub fn system() -> Self {
         Self {
+            security_ctx: Some(SecurityContext::system()),
             agent_id: Some("system".to_string()),
             session_id: None,
             agent_type: None,
@@ -78,8 +86,17 @@ impl AgentContext {
     /// - `platform-dispatch` — dispatch fallback paths
     /// - `wasm-runtime` — WASM invocation artifact creation
     pub fn for_service(service_name: &str) -> Self {
+        let service_id = format!("service:{service_name}");
+        let mut security_ctx = SecurityContext::from_headers(&[]).with_agent_context(
+            Some(&service_id),
+            None,
+            Some(service_name),
+        );
+        security_ctx.principal.role = Some("service".to_string());
+
         Self {
-            agent_id: Some(format!("service:{service_name}")),
+            security_ctx: Some(security_ctx),
+            agent_id: Some(service_id),
             session_id: None,
             agent_type: Some(service_name.to_string()),
             intent: None,
@@ -129,6 +146,7 @@ pub(crate) fn extract_agent_context(headers: &HeaderMap) -> AgentContext {
         .map(String::from);
 
     AgentContext {
+        security_ctx: None,
         agent_id: None,
         session_id,
         agent_type: None,

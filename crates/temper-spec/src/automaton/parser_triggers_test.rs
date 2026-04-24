@@ -234,6 +234,36 @@ to = "Notified"
 }
 
 #[test]
+fn test_action_triggers_invalid_nested_toml_fails_loud() {
+    let spec = r#"
+[automaton]
+name = "File"
+states = ["Created", "Ready"]
+initial = "Created"
+
+[[action]]
+name = "StreamUpdated"
+from = ["Created"]
+to = "Ready"
+
+[[action.triggers]]
+name = "broken_trigger"
+kind = "entity"
+target_entity = "FileVersion"
+target_action = "Create"
+
+[action.triggers.resolve_target
+type = "create"
+"#;
+
+    let err = parse_automaton(spec).expect_err("invalid nested trigger TOML must fail");
+    assert!(
+        err.to_string().contains("action.triggers"),
+        "expected action.triggers parse failure, got: {err}"
+    );
+}
+
+#[test]
 fn test_action_triggers_to_state_filter() {
     let spec = r#"
 [automaton]
@@ -603,6 +633,7 @@ initial = "Draft"
 name = "ConfirmOrder"
 from = ["Draft"]
 to = "Confirmed"
+effect = [{ type = "trigger", name = "charge_payment" }]
 
 [[action.triggers]]
 name = "charge_payment"
@@ -646,6 +677,136 @@ to = "Failed"
             if name == "__trigger__:ConfirmOrder:charge_payment")
     });
     assert!(has_effect, "source action should have trigger effect");
+    let has_bare_effect = confirm.effect.iter().any(|e| {
+        matches!(e, Effect::Trigger { name }
+            if name == "charge_payment")
+    });
+    assert!(
+        !has_bare_effect,
+        "source action should not retain the bare trigger name after expansion"
+    );
+}
+
+#[test]
+fn bare_effect_trigger_reuses_unique_inline_trigger_declared_on_other_action() {
+    let spec = r#"
+[automaton]
+name = "Session"
+states = ["Ready", "Executing", "Waiting"]
+initial = "Ready"
+
+[[action]]
+name = "Prepare"
+from = ["Ready"]
+to = "Waiting"
+effect = [{ type = "trigger", name = "prepare_context" }]
+
+[[action.triggers]]
+name = "prepare_context"
+kind = "wasm"
+module = "context_preparer"
+on_failure = "Fail"
+
+[action.triggers.config]
+temper_api_url = "{secret:temper_api_url}"
+
+[[action]]
+name = "Continue"
+from = ["Executing"]
+to = "Waiting"
+effect = [{ type = "trigger", name = "prepare_context" }]
+
+[[action]]
+name = "Fail"
+from = ["Ready", "Executing", "Waiting"]
+to = "Ready"
+"#;
+
+    let automaton = parse_automaton(spec).expect("cross-action trigger reuse should parse");
+    let continue_action = automaton
+        .actions
+        .iter()
+        .find(|a| a.name == "Continue")
+        .expect("Continue action");
+    let has_rewritten_effect = continue_action.effect.iter().any(|e| {
+        matches!(e, Effect::Trigger { name }
+            if name == "__trigger__:Prepare:prepare_context")
+    });
+    assert!(
+        has_rewritten_effect,
+        "bare trigger reference should resolve to the unique inline trigger definition"
+    );
+}
+
+#[test]
+fn bare_effect_trigger_rejects_ambiguous_inline_trigger_name() {
+    let spec = r#"
+[automaton]
+name = "Session"
+states = ["A", "B", "C"]
+initial = "A"
+
+[[action]]
+name = "PrepareA"
+from = ["A"]
+to = "B"
+effect = [{ type = "trigger", name = "prepare_context" }]
+
+[[action.triggers]]
+name = "prepare_context"
+kind = "wasm"
+module = "context_preparer_a"
+
+[[action]]
+name = "PrepareB"
+from = ["B"]
+to = "C"
+effect = [{ type = "trigger", name = "prepare_context" }]
+
+[[action.triggers]]
+name = "prepare_context"
+kind = "wasm"
+module = "context_preparer_b"
+
+[[action]]
+name = "Continue"
+from = ["C"]
+to = "B"
+effect = [{ type = "trigger", name = "prepare_context" }]
+"#;
+
+    let err = parse_automaton(spec).expect_err("ambiguous inline trigger reuse must fail");
+    assert!(
+        err.to_string().contains("ambiguous"),
+        "expected ambiguous trigger reference error, got: {err}"
+    );
+}
+
+#[test]
+fn bare_effect_trigger_allows_platform_custom_effect_name() {
+    let spec = r#"
+[automaton]
+name = "GovernanceDecision"
+states = ["Pending", "Approved"]
+initial = "Pending"
+
+[[action]]
+name = "Approve"
+from = ["Pending"]
+to = "Approved"
+effect = '[{ type = "trigger", name = "GenerateCedarPolicy" }, { type = "trigger", name = "DispatchCallback" }]'
+"#;
+
+    let automaton = parse_automaton(spec).expect("CamelCase platform custom effects should parse");
+    let approve = automaton.actions.iter().find(|a| a.name == "Approve").unwrap();
+    let has_generate = approve.effect.iter().any(|effect| {
+        matches!(effect, Effect::Trigger { name } if name == "GenerateCedarPolicy")
+    });
+    let has_dispatch = approve.effect.iter().any(|effect| {
+        matches!(effect, Effect::Trigger { name } if name == "DispatchCallback")
+    });
+    assert!(has_generate, "GenerateCedarPolicy should remain as a custom effect");
+    assert!(has_dispatch, "DispatchCallback should remain as a custom effect");
 }
 
 #[test]

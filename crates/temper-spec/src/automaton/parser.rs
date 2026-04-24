@@ -77,7 +77,7 @@ pub fn parse_automaton_with_liveness(
     // existing WASM/webhook runtime picks them up without needing a parallel
     // dispatch path. Entity-kind triggers are handled separately by the
     // reaction dispatcher.
-    expand_wasm_and_webhook_triggers(&mut automaton);
+    expand_wasm_and_webhook_triggers(&mut automaton)?;
     // ADR-0050: enforce (or warn on) liveness coverage.
     check_liveness_coverage(&automaton, mode)?;
     Ok(automaton)
@@ -100,13 +100,98 @@ pub fn parse_automaton_with_liveness(
 ///
 /// Entity-kind triggers are skipped (they dispatch through the reaction
 /// system, not the integration runtime).
-fn expand_wasm_and_webhook_triggers(automaton: &mut Automaton) {
+fn synthesized_trigger_name(action_name: &str, trigger_name: &str) -> String {
+    format!("__trigger__:{action_name}:{trigger_name}")
+}
+
+fn is_platform_custom_effect_name(effect_name: &str) -> bool {
+    effect_name.chars().any(|ch| ch.is_ascii_uppercase())
+}
+
+fn expand_wasm_and_webhook_triggers(
+    automaton: &mut Automaton,
+) -> Result<(), AutomatonParseError> {
     use super::types::{Effect, Integration, TriggerKind};
+
+    let legacy_trigger_names: std::collections::BTreeSet<String> = automaton
+        .integrations
+        .iter()
+        .map(|integration| integration.trigger.clone())
+        .collect();
+    let mut inline_trigger_owners: std::collections::BTreeMap<String, Vec<String>> =
+        std::collections::BTreeMap::new();
+    for action in &automaton.actions {
+        for trigger in &action.triggers {
+            if matches!(trigger.kind, TriggerKind::Wasm | TriggerKind::Webhook) {
+                inline_trigger_owners
+                    .entry(trigger.name.clone())
+                    .or_default()
+                    .push(action.name.clone());
+            }
+        }
+    }
+
+    for action in automaton.actions.iter_mut() {
+        let local_inline_trigger_names: std::collections::BTreeSet<String> = action
+            .triggers
+            .iter()
+            .filter(|trigger| matches!(trigger.kind, TriggerKind::Wasm | TriggerKind::Webhook))
+            .map(|trigger| trigger.name.clone())
+            .collect();
+
+        for effect in action.effect.iter_mut() {
+            let Effect::Trigger { name } = effect else {
+                continue;
+            };
+            let bare_name = name.clone();
+            if bare_name.starts_with("__trigger__:") || legacy_trigger_names.contains(&bare_name) {
+                continue;
+            }
+            if local_inline_trigger_names.contains(&bare_name) {
+                *name = synthesized_trigger_name(&action.name, &bare_name);
+                continue;
+            }
+            let Some(owners) = inline_trigger_owners.get(&bare_name) else {
+                if is_platform_custom_effect_name(&bare_name) {
+                    continue;
+                }
+                return Err(AutomatonParseError::Validation(format!(
+                    "action '{}' effect trigger '{}' does not resolve to a local [[action.triggers]] block, a unique reusable inline trigger, or a legacy [[integration]]",
+                    action.name, bare_name
+                )));
+            };
+            if owners.len() != 1 {
+                return Err(AutomatonParseError::Validation(format!(
+                    "action '{}' effect trigger '{}' is ambiguous across actions {:?}",
+                    action.name, bare_name, owners
+                )));
+            }
+            *name = synthesized_trigger_name(&owners[0], &bare_name);
+        }
+
+        let existing_effect_names: std::collections::BTreeSet<String> = action
+            .effect
+            .iter()
+            .filter_map(|effect| match effect {
+                Effect::Trigger { name } => Some(name.clone()),
+                _ => None,
+            })
+            .collect();
+        for trigger in &action.triggers {
+            if !matches!(trigger.kind, TriggerKind::Wasm | TriggerKind::Webhook) {
+                continue;
+            }
+            let synth_name = synthesized_trigger_name(&action.name, &trigger.name);
+            if !existing_effect_names.contains(&synth_name) {
+                action.effect.push(Effect::Trigger { name: synth_name });
+            }
+        }
+    }
 
     let mut synthesized: Vec<Integration> = Vec::new();
     for action in automaton.actions.iter_mut() {
         for trigger in &action.triggers {
-            let synth_name = format!("__trigger__:{}:{}", action.name, trigger.name);
+            let synth_name = synthesized_trigger_name(&action.name, &trigger.name);
             match trigger.kind {
                 TriggerKind::Entity => continue, // handled by reactions
                 TriggerKind::Wasm => {
@@ -161,12 +246,10 @@ fn expand_wasm_and_webhook_triggers(automaton: &mut Automaton) {
                     });
                 }
             }
-            // Append a `trigger` effect so the transition table emits it
-            // as a custom_effect the runtime can pick up.
-            action.effect.push(Effect::Trigger { name: synth_name });
         }
     }
     automaton.integrations.extend(synthesized);
+    Ok(())
 }
 
 /// Callback invoked for each liveness violation encountered at spec parse
@@ -361,8 +444,14 @@ fn format_effects(effects: &[Effect]) -> String {
     effects
         .iter()
         .map(|e| match e {
-            Effect::Increment { var } => format!("{var}' = {var} + 1"),
-            Effect::Decrement { var } => format!("{var}' = {var} - 1"),
+            Effect::Increment { var, amount } => match amount {
+                Some(amount) => format!("{var}' = {var} + {amount}"),
+                None => format!("{var}' = {var} + 1"),
+            },
+            Effect::Decrement { var, amount } => match amount {
+                Some(amount) => format!("{var}' = {var} - {amount}"),
+                None => format!("{var}' = {var} - 1"),
+            },
             Effect::SetBool { var, value } => {
                 format!("{var}' = {}", if *value { "TRUE" } else { "FALSE" })
             }

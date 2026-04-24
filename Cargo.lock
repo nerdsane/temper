@@ -8543,3 +8543,63 @@ dependencies = [
  "cc",
  "pkg-config",
 ]
+
+[[patch.unused]]
+name = "temper-authz"
+version = "0.1.0"
+
+[[patch.unused]]
+name = "temper-jit"
+version = "0.1.0"
+
+[[patch.unused]]
+name = "temper-macros"
+version = "0.1.0"
+
+[[patch.unused]]
+name = "temper-observe"
+version = "0.1.0"
+
+[[patch.unused]]
+name = "temper-odata"
+version = "0.1.0"
+
+[[patch.unused]]
+name = "temper-platform"
+version = "0.1.0"
+
+[[patch.unused]]
+name = "temper-runtime"
+version = "0.1.0"
+
+[[patch.unused]]
+name = "temper-sandbox"
+version = "0.1.0"
+
+[[patch.unused]]
+name = "temper-server"
+version = "0.1.0"
+
+[[patch.unused]]
+name = "temper-spec"
+version = "0.1.0"
+
+[[patch.unused]]
+name = "temper-store-postgres"
+version = "0.1.0"
+
+[[patch.unused]]
+name = "temper-store-redis"
+version = "0.1.0"
+
+[[patch.unused]]
+name = "temper-store-turso"
+version = "0.1.0"
+
+[[patch.unused]]
+name = "temper-wasm"
+version = "0.1.0"
+
+[[patch.unused]]
+name = "temper-wasm-sdk"
+version = "0.1.0"

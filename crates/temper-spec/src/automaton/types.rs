@@ -179,10 +179,18 @@ pub enum Guard {
 pub enum Effect {
     /// Increment a counter variable.
     #[serde(rename = "increment")]
-    Increment { var: String },
+    Increment {
+        var: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        amount: Option<String>,
+    },
     /// Decrement a counter variable.
     #[serde(rename = "decrement")]
-    Decrement { var: String },
+    Decrement {
+        var: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        amount: Option<String>,
+    },
     /// Set a boolean variable.
     #[serde(rename = "set_bool")]
     SetBool { var: String, value: bool },

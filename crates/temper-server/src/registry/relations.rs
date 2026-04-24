@@ -95,13 +95,7 @@ fn nav_target_entity(type_name: &str) -> String {
 /// Returns `None` for `kind = "wasm"` and `kind = "webhook"` triggers — those
 /// are handled by a separate runtime path in a later slice. Returns `Some`
 /// for `kind = "entity"` triggers, translating the declaration into the
-/// existing reaction machinery.
-///
-/// The `principal` field on `ActionTrigger` is NOT yet threaded through the
-/// synthesized `ReactionRule`. Until the dispatcher learns per-rule principal
-/// resolution (slice 6 authz work), all reactions dispatch under
-/// `AgentContext::system()` which is the pre-existing behavior. Authorization
-/// elevation/inheritance is a separate concern from rule synthesis.
+/// existing reaction machinery, including the declared trigger principal.
 ///
 /// Guard translation: `TriggerGuard` and `ReactionGuard` are structurally
 /// identical enums living in different crates (spec vs server layer). The
