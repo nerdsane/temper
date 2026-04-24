@@ -177,7 +177,7 @@ impl TursoEventStore {
         conn.execute(schema::CREATE_TENANT_INSTALLED_APPS_TABLE, ())
             .await
             .map_err(storage_error)?;
-        for stmt in &[
+        for stmt in [
             schema::ALTER_INSTALLED_APPS_ADD_APP_VERSION,
             schema::ALTER_INSTALLED_APPS_ADD_BUNDLE_DIGEST,
             schema::ALTER_INSTALLED_APPS_ADD_SPEC_DIGEST,
@@ -188,7 +188,7 @@ impl TursoEventStore {
             schema::ALTER_INSTALLED_APPS_ADD_LAST_RECONCILED_AT,
             schema::ALTER_INSTALLED_APPS_ADD_STATUS,
         ] {
-            let _ = conn.execute(*stmt, ()).await;
+            let _ = conn.execute(stmt, ()).await;
         }
 
         // Phase 0: New tables for Turso-as-single-source-of-truth.

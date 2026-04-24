@@ -243,20 +243,10 @@ impl TursoEventStore {
     }
 
     /// Record or update digest metadata for an installed OS app.
-    #[allow(clippy::too_many_arguments)]
-    #[instrument(skip_all, fields(tenant_id, app_name, otel.name = "turso.record_installed_app_metadata"))]
+    #[instrument(skip_all, fields(tenant_id = %record.tenant_id, app_name = %record.app_name, otel.name = "turso.record_installed_app_metadata"))]
     pub async fn record_installed_app_metadata(
         &self,
-        tenant_id: &str,
-        app_name: &str,
-        app_version: &str,
-        bundle_digest: &str,
-        spec_digest: &str,
-        policy_digest: &str,
-        wasm_digest: &str,
-        content_digest: &str,
-        seed_digest: &str,
-        status: &str,
+        record: &TursoInstalledAppRow,
     ) -> Result<(), PersistenceError> {
         let _query_timer = TursoQueryTimer::start("turso.record_installed_app_metadata");
         let conn = self.configured_connection().await?;
@@ -278,16 +268,16 @@ impl TursoEventStore {
                  last_reconciled_at = datetime('now'),
                  status = excluded.status",
             params![
-                tenant_id,
-                app_name,
-                app_version,
-                bundle_digest,
-                spec_digest,
-                policy_digest,
-                wasm_digest,
-                content_digest,
-                seed_digest,
-                status
+                record.tenant_id.as_str(),
+                record.app_name.as_str(),
+                record.app_version.as_str(),
+                record.bundle_digest.as_str(),
+                record.spec_digest.as_str(),
+                record.policy_digest.as_str(),
+                record.wasm_digest.as_str(),
+                record.content_digest.as_str(),
+                record.seed_digest.as_str(),
+                record.status.as_str()
             ],
         )
         .await

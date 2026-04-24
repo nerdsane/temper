@@ -200,7 +200,7 @@ pub trait PlatformStore: Send + Sync {
 // TursoEventStore implementation
 // ---------------------------------------------------------------------------
 
-use temper_store_turso::{TursoEventStore, TursoSpecVerificationUpdate};
+use temper_store_turso::{TursoEventStore, TursoInstalledAppRow, TursoSpecVerificationUpdate};
 
 #[async_trait::async_trait]
 impl PlatformStore for TursoEventStore {
@@ -310,20 +310,23 @@ impl PlatformStore for TursoEventStore {
         &self,
         record: &InstalledAppRecord,
     ) -> Result<(), String> {
-        self.record_installed_app_metadata(
-            &record.tenant,
-            &record.app_name,
-            &record.app_version,
-            &record.bundle_digest,
-            &record.spec_digest,
-            &record.policy_digest,
-            &record.wasm_digest,
-            &record.content_digest,
-            &record.seed_digest,
-            &record.status,
-        )
-        .await
-        .map_err(|e| e.to_string())
+        let row = TursoInstalledAppRow {
+            tenant_id: record.tenant.clone(),
+            app_name: record.app_name.clone(),
+            app_version: record.app_version.clone(),
+            bundle_digest: record.bundle_digest.clone(),
+            spec_digest: record.spec_digest.clone(),
+            policy_digest: record.policy_digest.clone(),
+            wasm_digest: record.wasm_digest.clone(),
+            content_digest: record.content_digest.clone(),
+            seed_digest: record.seed_digest.clone(),
+            installed_at: record.installed_at.clone().unwrap_or_default(),
+            last_reconciled_at: record.last_reconciled_at.clone(),
+            status: record.status.clone(),
+        };
+        self.record_installed_app_metadata(&row)
+            .await
+            .map_err(|e| e.to_string())
     }
 
     async fn get_installed_app(
