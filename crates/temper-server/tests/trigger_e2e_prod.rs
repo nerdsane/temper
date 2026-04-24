@@ -394,12 +394,7 @@ permit(
     let file_id = "file-1";
 
     let workspace = state
-        .get_or_create_tenant_entity(
-            &tenant,
-            "Workspace",
-            workspace_id,
-            serde_json::json!({}),
-        )
+        .get_or_create_tenant_entity(&tenant, "Workspace", workspace_id, serde_json::json!({}))
         .await
         .expect("workspace seed should succeed");
     assert_eq!(workspace.state.status, "Active");

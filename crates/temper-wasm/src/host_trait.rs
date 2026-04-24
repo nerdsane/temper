@@ -1895,18 +1895,19 @@ mod tests {
         secrets.insert("temper_api_url".to_string(), format!("http://{addr}"));
         secrets.insert("temper_api_key".to_string(), "secret123".to_string());
 
-        let host = ProductionWasmHost::new(secrets).with_invocation_context(WasmInvocationContext {
-            tenant: "default".to_string(),
-            entity_type: "Workspace".to_string(),
-            entity_id: "ws-1".to_string(),
-            trigger_action: "CreateFile".to_string(),
-            trigger_params: Value::Null,
-            entity_state: Value::Null,
-            agent_id: Some("operator".to_string()),
-            session_id: None,
-            integration_config: BTreeMap::new(),
-            trace_id: String::new(),
-        });
+        let host =
+            ProductionWasmHost::new(secrets).with_invocation_context(WasmInvocationContext {
+                tenant: "default".to_string(),
+                entity_type: "Workspace".to_string(),
+                entity_id: "ws-1".to_string(),
+                trigger_action: "CreateFile".to_string(),
+                trigger_params: Value::Null,
+                entity_state: Value::Null,
+                agent_id: Some("operator".to_string()),
+                session_id: None,
+                integration_config: BTreeMap::new(),
+                trace_id: String::new(),
+            });
 
         let headers = vec![
             ("X-Tenant-Id".to_string(), "default".to_string()),

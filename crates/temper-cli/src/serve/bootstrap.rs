@@ -621,8 +621,8 @@ mod tests {
 
     use temper_platform::os_apps::get_os_app;
     use temper_platform::state::PlatformState;
-    use temper_server::event_store::ServerEventStore;
     use temper_runtime::tenant::TenantId;
+    use temper_server::event_store::ServerEventStore;
     use temper_spec::csdl::parse_csdl;
     use temper_store_turso::TursoEventStore;
 

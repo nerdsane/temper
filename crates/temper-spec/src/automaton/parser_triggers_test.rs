@@ -798,15 +798,27 @@ effect = '[{ type = "trigger", name = "GenerateCedarPolicy" }, { type = "trigger
 "#;
 
     let automaton = parse_automaton(spec).expect("CamelCase platform custom effects should parse");
-    let approve = automaton.actions.iter().find(|a| a.name == "Approve").unwrap();
-    let has_generate = approve.effect.iter().any(|effect| {
-        matches!(effect, Effect::Trigger { name } if name == "GenerateCedarPolicy")
-    });
-    let has_dispatch = approve.effect.iter().any(|effect| {
-        matches!(effect, Effect::Trigger { name } if name == "DispatchCallback")
-    });
-    assert!(has_generate, "GenerateCedarPolicy should remain as a custom effect");
-    assert!(has_dispatch, "DispatchCallback should remain as a custom effect");
+    let approve = automaton
+        .actions
+        .iter()
+        .find(|a| a.name == "Approve")
+        .unwrap();
+    let has_generate = approve
+        .effect
+        .iter()
+        .any(|effect| matches!(effect, Effect::Trigger { name } if name == "GenerateCedarPolicy"));
+    let has_dispatch = approve
+        .effect
+        .iter()
+        .any(|effect| matches!(effect, Effect::Trigger { name } if name == "DispatchCallback"));
+    assert!(
+        has_generate,
+        "GenerateCedarPolicy should remain as a custom effect"
+    );
+    assert!(
+        has_dispatch,
+        "DispatchCallback should remain as a custom effect"
+    );
 }
 
 #[test]

@@ -1488,7 +1488,8 @@ async fn test_local_stream_uploads_create_real_file_version_lineage() {
         }
         tokio::time::sleep(Duration::from_millis(25)).await;
     }
-    let file_resp = file_resp.expect("file should point at the second version after trigger cascade");
+    let file_resp =
+        file_resp.expect("file should point at the second version after trigger cascade");
     assert_eq!(file_resp.state.status, "Ready");
     assert_eq!(file_resp.state.counters.get("version_count"), Some(&2));
 

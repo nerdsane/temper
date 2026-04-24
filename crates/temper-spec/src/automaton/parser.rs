@@ -108,9 +108,7 @@ fn is_platform_custom_effect_name(effect_name: &str) -> bool {
     effect_name.chars().any(|ch| ch.is_ascii_uppercase())
 }
 
-fn expand_wasm_and_webhook_triggers(
-    automaton: &mut Automaton,
-) -> Result<(), AutomatonParseError> {
+fn expand_wasm_and_webhook_triggers(automaton: &mut Automaton) -> Result<(), AutomatonParseError> {
     use super::types::{Effect, Integration, TriggerKind};
 
     let legacy_trigger_names: std::collections::BTreeSet<String> = automaton

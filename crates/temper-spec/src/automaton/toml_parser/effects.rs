@@ -68,20 +68,14 @@ fn parse_effect_fields(
                 Some(Effect::ScheduleAt { action, field })
             }
         }
-        "increment" => fields
-            .get("var")
-            .cloned()
-            .map(|var| Effect::Increment {
-                var,
-                amount: fields.get("amount").cloned(),
-            }),
-        "decrement" => fields
-            .get("var")
-            .cloned()
-            .map(|var| Effect::Decrement {
-                var,
-                amount: fields.get("amount").cloned(),
-            }),
+        "increment" => fields.get("var").cloned().map(|var| Effect::Increment {
+            var,
+            amount: fields.get("amount").cloned(),
+        }),
+        "decrement" => fields.get("var").cloned().map(|var| Effect::Decrement {
+            var,
+            amount: fields.get("amount").cloned(),
+        }),
         "set_counter_from_param" => fields.get("var").cloned().map(|var| {
             let param = fields.get("param").cloned().unwrap_or_else(|| var.clone());
             Effect::SetCounterFromParam { var, param }
