@@ -61,7 +61,7 @@ pub enum OsAppReconcileResult {
     Installed {
         app_name: String,
         bundle_digest: String,
-        install: InstallResult,
+        install: Box<InstallResult>,
     },
 }
 

@@ -307,6 +307,6 @@ pub async fn reconcile_os_app(
     Ok(OsAppReconcileResult::Installed {
         app_name: app_name.to_string(),
         bundle_digest: digest.bundle_digest,
-        install,
+        install: Box::new(install),
     })
 }
