@@ -5,6 +5,7 @@ pub mod custom_effects;
 mod dispatch;
 mod entity_ops;
 mod evolution;
+mod file_reads;
 pub mod metrics;
 pub mod pending_decisions;
 mod persistence;
@@ -17,6 +18,7 @@ pub mod wasm_invocation_log;
 pub use admission::{AdmissionController, AdmissionOutcome, AdmissionPermit};
 pub use dispatch::{DispatchCommand, DispatchError, DispatchExtOptions, StateTimeoutTracker};
 pub use entity_ops::{FailedLevelInfo, VerificationGateError};
+pub use file_reads::{TextFileReadResult, TextFileVersionReadResult};
 pub use metrics::MetricsCollector;
 pub use pending_decisions::{
     ActionScope, DecisionStatus, DurationScope, PendingDecision, PolicyScopeMatrix, PrincipalScope,
@@ -771,8 +773,12 @@ impl ServerState {
             .and_then(|vault| vault.get_secret(&tenant.to_string(), "blob_endpoint"));
 
         if blob_endpoint.is_none()
-            && let Some(store) = self.platform_persistent_store().cloned()
+            && let Some(store) = self.persistent_store_for_tenant(tenant.as_str()).await
         {
+            let file_state = self
+                .get_tenant_entity_state(tenant, "File", file_id)
+                .await
+                .map_err(|e| format!("failed to load File('{file_id}') state: {e}"))?;
             let mut hasher = Sha256::new();
             hasher.update(body);
             let content_hash = format!("sha256:{:x}", hasher.finalize());
@@ -781,6 +787,21 @@ impl ServerState {
                 .put_blob(&blob_key, body)
                 .await
                 .map_err(|e| format!("failed to persist local blob '{blob_key}': {e}"))?;
+
+            let version_number = file_state
+                .state
+                .counters
+                .get("version_count")
+                .copied()
+                .unwrap_or(0)
+                + 1;
+            let previous_version_id = file_state
+                .state
+                .fields
+                .get("last_version_id")
+                .and_then(|value| value.as_str())
+                .unwrap_or_default();
+            let created_by = agent_ctx.agent_id.clone().unwrap_or_default();
             return self
                 .dispatch_tenant_action(
                     tenant,
@@ -791,6 +812,9 @@ impl ServerState {
                         "content_hash": content_hash,
                         "size_bytes": body.len() as i64,
                         "mime_type": mime_type,
+                        "version_number": version_number,
+                        "previous_version_id": previous_version_id,
+                        "created_by": created_by,
                     }),
                     agent_ctx,
                 )

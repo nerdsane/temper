@@ -6192,6 +6192,7 @@ dependencies = [
  "criterion",
  "ed25519-dalek",
  "futures-util",
+ "hmac",
  "hyper 1.8.1",
  "libc",
  "lru",

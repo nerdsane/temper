@@ -4,10 +4,12 @@ use super::agent_bootstrap::{
 use super::*;
 use std::collections::HashMap;
 use std::fs;
+use std::time::Duration;
 
 use temper_authz::SecurityContext;
 use temper_runtime::tenant::TenantId;
 use temper_server::registry::{EntityLevelSummary, EntityVerificationResult, VerificationStatus};
+use temper_server::request_context::AgentContext;
 use temper_spec::automaton;
 use temper_spec::csdl::parse_csdl;
 use temper_store_turso::TursoSpecVerificationUpdate;
@@ -1067,6 +1069,69 @@ fn test_state_field_str_accepts_lowercase_names() {
     assert_eq!(state_field_str(&fields, &["Name", "name"]), Some("paw"));
 }
 
+#[test]
+fn test_temper_fs_bundle_loads_reactions() {
+    let bundle = get_os_app("temper-fs").expect("temper-fs app not found");
+    let rule_names: Vec<&str> = bundle
+        .reactions
+        .iter()
+        .map(|rule| rule.name.as_str())
+        .collect();
+    assert!(
+        rule_names.contains(&"file_version_create_supersedes_previous"),
+        "temper-fs reactions missing lineage rule: {rule_names:?}"
+    );
+}
+
+#[tokio::test]
+async fn test_install_app_registers_reactions_for_tenant() {
+    let state = PlatformState::new(None);
+
+    install_os_app(&state, "test-fs-reactions", "temper-fs")
+        .await
+        .expect("install temper-fs");
+
+    let tenant = TenantId::new("test-fs-reactions");
+    let registry = state.registry.read().unwrap(); // ci-ok: infallible lock
+    let reaction_registry = registry.build_reaction_registry();
+    let rule_names: Vec<&str> = reaction_registry
+        .lookup(&tenant, "FileVersion", "Create", "Current")
+        .into_iter()
+        .map(|rule| rule.name.as_str())
+        .collect();
+
+    assert!(
+        rule_names.contains(&"file_version_create_supersedes_previous"),
+        "tenant missing temper-fs lineage reaction after install: {rule_names:?}"
+    );
+}
+
+#[tokio::test]
+async fn test_installing_later_apps_preserves_existing_reactions() {
+    let state = PlatformState::new(None);
+
+    install_os_app(&state, "test-fs-reaction-merge", "temper-fs")
+        .await
+        .expect("install temper-fs");
+    install_os_app(&state, "test-fs-reaction-merge", "temper-agent")
+        .await
+        .expect("install temper-agent");
+
+    let tenant = TenantId::new("test-fs-reaction-merge");
+    let registry = state.registry.read().unwrap(); // ci-ok: infallible lock
+    let reaction_registry = registry.build_reaction_registry();
+    let rule_names: Vec<&str> = reaction_registry
+        .lookup(&tenant, "FileVersion", "Create", "Current")
+        .into_iter()
+        .map(|rule| rule.name.as_str())
+        .collect();
+
+    assert!(
+        rule_names.contains(&"file_version_create_supersedes_previous"),
+        "later app install should not wipe temper-fs lineage reaction: {rule_names:?}"
+    );
+}
+
 #[tokio::test]
 async fn test_install_app_bootstraps_adrs_into_temper_fs() {
     use std::sync::Arc;
@@ -1146,6 +1211,141 @@ async fn test_install_app_bootstraps_adrs_into_temper_fs() {
     assert!(found, "expected ADR file entity to exist in TemperFS");
 
     let _ = fs::remove_dir_all(&app_root);
+    let _ = fs::remove_file(&db_path);
+    let _ = fs::remove_file(format!("{db_path}-wal"));
+    let _ = fs::remove_file(format!("{db_path}-shm"));
+}
+
+#[tokio::test]
+async fn test_local_stream_uploads_create_real_file_version_lineage() {
+    use std::sync::Arc;
+    use temper_server::event_store::ServerEventStore;
+    use temper_server::state::DispatchCommand;
+    use temper_store_turso::TursoEventStore;
+
+    let db_path = format!(
+        "/tmp/temper-file-version-lineage-{}.db",
+        uuid::Uuid::new_v4()
+    );
+    let db_url = format!("file:{db_path}");
+    let turso = TursoEventStore::new(&db_url, None).await.unwrap();
+    let mut state = PlatformState::new(None);
+    state.server.event_store = Some(Arc::new(ServerEventStore::Turso(turso)));
+
+    install_os_app(&state, "test-file-lineage", "temper-fs")
+        .await
+        .expect("install temper-fs");
+
+    let tenant = TenantId::new("test-file-lineage");
+    let agent_ctx = AgentContext::system();
+    let file_id = "file-version-lineage";
+
+    state
+        .server
+        .get_or_create_tenant_entity(&tenant, "File", file_id, serde_json::json!({}))
+        .await
+        .expect("create file actor");
+    state
+        .server
+        .dispatch(DispatchCommand {
+            tenant: &tenant,
+            entity_type: "File",
+            entity_id: file_id,
+            action: "Create",
+            params: serde_json::json!({
+                "name": "lineage.txt",
+                "path": "/lineage.txt",
+                "directory_id": "",
+                "workspace_id": "",
+                "mime_type": "text/plain",
+            }),
+            agent_ctx: &agent_ctx,
+            await_integration: false,
+        })
+        .await
+        .expect("initialize file");
+
+    state
+        .server
+        .put_file_stream_content(&tenant, file_id, b"first version", "text/plain", &agent_ctx)
+        .await
+        .expect("upload first version");
+    state
+        .server
+        .put_file_stream_content(
+            &tenant,
+            file_id,
+            b"second version",
+            "text/plain",
+            &agent_ctx,
+        )
+        .await
+        .expect("upload second version");
+
+    let file_resp = state
+        .server
+        .get_tenant_entity_state(&tenant, "File", file_id)
+        .await
+        .expect("load file state");
+    assert_eq!(file_resp.state.status, "Ready");
+    assert_eq!(file_resp.state.counters.get("version_count"), Some(&2));
+
+    let latest_version_id = file_resp
+        .state
+        .fields
+        .get("last_version_id")
+        .and_then(|value| value.as_str())
+        .filter(|value| !value.is_empty())
+        .expect("file should point at latest version")
+        .to_string();
+
+    let latest_version = state
+        .server
+        .get_tenant_entity_state(&tenant, "FileVersion", &latest_version_id)
+        .await
+        .expect("load latest file version");
+    assert_eq!(latest_version.state.status, "Current");
+    assert_eq!(
+        latest_version.state.counters.get("version_number"),
+        Some(&2)
+    );
+
+    let previous_version_id = latest_version
+        .state
+        .fields
+        .get("previous_version_id")
+        .and_then(|value| value.as_str())
+        .filter(|value| !value.is_empty())
+        .expect("latest version should point at previous version")
+        .to_string();
+
+    for _ in 0..20 {
+        let previous = state
+            .server
+            .get_tenant_entity_state(&tenant, "FileVersion", &previous_version_id)
+            .await
+            .expect("load previous file version");
+        if previous.state.status == "Superseded" {
+            assert_eq!(previous.state.counters.get("version_number"), Some(&1));
+            let _ = fs::remove_file(&db_path);
+            let _ = fs::remove_file(format!("{db_path}-wal"));
+            let _ = fs::remove_file(format!("{db_path}-shm"));
+            return;
+        }
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+
+    let previous = state
+        .server
+        .get_tenant_entity_state(&tenant, "FileVersion", &previous_version_id)
+        .await
+        .expect("load previous file version after wait");
+    assert_eq!(
+        previous.state.status, "Superseded",
+        "previous version should be superseded after the second upload"
+    );
+    assert_eq!(previous.state.counters.get("version_number"), Some(&1));
+
     let _ = fs::remove_file(&db_path);
     let _ = fs::remove_file(format!("{db_path}-wal"));
     let _ = fs::remove_file(format!("{db_path}-shm"));

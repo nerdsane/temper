@@ -183,6 +183,9 @@ pub enum Effect {
     /// Decrement a counter variable.
     #[serde(rename = "decrement")]
     Decrement { var: String },
+    /// Set a counter variable from an action param.
+    #[serde(rename = "set_counter_from_param")]
+    SetCounterFromParam { var: String, param: String },
     /// Set a boolean variable.
     #[serde(rename = "set_bool")]
     SetBool { var: String, value: bool },
