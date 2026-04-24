@@ -5,6 +5,7 @@ pub mod custom_effects;
 mod dispatch;
 mod entity_ops;
 mod evolution;
+mod file_reads;
 pub mod metrics;
 pub mod pending_decisions;
 mod persistence;
@@ -17,6 +18,7 @@ pub mod wasm_invocation_log;
 pub use admission::{AdmissionController, AdmissionOutcome, AdmissionPermit};
 pub use dispatch::{DispatchCommand, DispatchError, DispatchExtOptions, StateTimeoutTracker};
 pub use entity_ops::{FailedLevelInfo, VerificationGateError};
+pub use file_reads::{TextFileReadResult, TextFileVersionReadResult};
 pub use metrics::MetricsCollector;
 pub use pending_decisions::{
     ActionScope, DecisionStatus, DurationScope, PendingDecision, PolicyScopeMatrix, PrincipalScope,
@@ -40,6 +42,7 @@ use temper_jit::table::TransitionTable;
 use temper_runtime::ActorSystem;
 use temper_runtime::actor::ActorRef;
 use temper_runtime::scheduler::sim_now;
+use temper_runtime::tenant::TenantId;
 use temper_spec::csdl::CsdlDocument;
 use temper_store_postgres::PostgresEventStore;
 
@@ -650,6 +653,30 @@ impl ServerState {
         }
     }
 
+    pub(crate) fn query_projection_fields(
+        &self,
+        tenant: &TenantId,
+        entity_type: &str,
+        fields: &serde_json::Value,
+    ) -> serde_json::Value {
+        let Some(obj) = fields.as_object() else {
+            return fields.clone();
+        };
+        let registry = self.registry.read().unwrap();
+        let Some(spec) = registry.get_spec(tenant, entity_type) else {
+            return fields.clone();
+        };
+
+        let mut projected = obj.clone();
+        for state_var in &spec.automaton.state {
+            if state_var.query_indexed == Some(false) {
+                projected.remove(&state_var.name);
+            }
+        }
+
+        serde_json::Value::Object(projected)
+    }
+
     /// Attach a webhook dispatcher for external system notifications.
     pub fn with_webhook_dispatcher(mut self, dispatcher: Arc<WebhookDispatcher>) -> Self {
         self.webhook_dispatcher = Some(dispatcher);
@@ -746,8 +773,12 @@ impl ServerState {
             .and_then(|vault| vault.get_secret(&tenant.to_string(), "blob_endpoint"));
 
         if blob_endpoint.is_none()
-            && let Some(store) = self.platform_persistent_store().cloned()
+            && let Some(store) = self.persistent_store_for_tenant(tenant.as_str()).await
         {
+            let file_state = self
+                .get_tenant_entity_state(tenant, "File", file_id)
+                .await
+                .map_err(|e| format!("failed to load File('{file_id}') state: {e}"))?;
             let mut hasher = Sha256::new();
             hasher.update(body);
             let content_hash = format!("sha256:{:x}", hasher.finalize());
@@ -756,6 +787,21 @@ impl ServerState {
                 .put_blob(&blob_key, body)
                 .await
                 .map_err(|e| format!("failed to persist local blob '{blob_key}': {e}"))?;
+
+            let version_number = file_state
+                .state
+                .counters
+                .get("version_count")
+                .copied()
+                .unwrap_or(0)
+                + 1;
+            let previous_version_id = file_state
+                .state
+                .fields
+                .get("last_version_id")
+                .and_then(|value| value.as_str())
+                .unwrap_or_default();
+            let created_by = agent_ctx.agent_id.clone().unwrap_or_default();
             return self
                 .dispatch_tenant_action(
                     tenant,
@@ -766,6 +812,9 @@ impl ServerState {
                         "content_hash": content_hash,
                         "size_bytes": body.len() as i64,
                         "mime_type": mime_type,
+                        "version_number": version_number,
+                        "previous_version_id": previous_version_id,
+                        "created_by": created_by,
                     }),
                     agent_ctx,
                 )
@@ -831,6 +880,81 @@ impl ServerState {
             agent_ctx,
         )
         .await
+    }
+
+    /// Download stream content for a TemperFS `File` entity without going
+    /// back through loopback HTTP.
+    ///
+    /// This is the programmatic equivalent of `GET /tdata/Files('{id}')/$value`
+    /// and keeps WASM-local fast paths aligned with the normal blob_adapter
+    /// read contract.
+    pub async fn get_file_stream_content(
+        &self,
+        tenant: &temper_runtime::tenant::TenantId,
+        file_id: &str,
+        agent_ctx: &crate::request_context::AgentContext,
+    ) -> Result<(u16, Vec<u8>), String> {
+        let entity_state = serde_json::to_value(
+            &self
+                .get_tenant_entity_state(tenant, "File", file_id)
+                .await
+                .map_err(|e| format!("failed to load File('{file_id}') state: {e}"))?
+                .state,
+        )
+        .map_err(|e| format!("failed to serialize File('{file_id}') state: {e}"))?;
+
+        let has_content = entity_state
+            .get("booleans")
+            .and_then(|b| b.get("has_content"))
+            .and_then(|v| v.as_bool())
+            .or_else(|| {
+                entity_state
+                    .get("fields")
+                    .and_then(|f| f.get("has_content"))
+                    .and_then(|v| v.as_bool())
+            })
+            .unwrap_or(false);
+        if !has_content {
+            return Ok((404, Vec::new()));
+        }
+
+        let response_stream_id = format!("download-{}", temper_runtime::scheduler::sim_uuid());
+        let streams = Arc::new(RwLock::new(StreamRegistry::default()));
+
+        let inv_ctx = WasmInvocationContext {
+            tenant: tenant.to_string(),
+            entity_type: "File".to_string(),
+            entity_id: file_id.to_string(),
+            trigger_action: "StreamDownload".to_string(),
+            trigger_params: serde_json::json!({
+                "stream_id": response_stream_id,
+                "operation": "get",
+            }),
+            entity_state,
+            agent_id: agent_ctx.agent_id.clone(),
+            session_id: agent_ctx.session_id.clone(),
+            integration_config: std::collections::BTreeMap::new(),
+            trace_id: agent_ctx.trace_id.clone().unwrap_or_default(),
+        };
+
+        let wasm_result = self
+            .invoke_wasm_direct(tenant, "blob_adapter", inv_ctx, streams.clone())
+            .await
+            .map_err(|e| format!("blob_adapter download failed: {e}"))?;
+
+        if !wasm_result.success {
+            return Err(wasm_result
+                .error
+                .unwrap_or_else(|| "blob_adapter returned an unknown error".to_string()));
+        }
+
+        let bytes = streams
+            .write()
+            .map_err(|_| "stream registry lock was poisoned".to_string())?
+            .take_stream(&response_stream_id)
+            .unwrap_or_default();
+
+        Ok((200, bytes))
     }
 
     /// Find an entity spec by name across all tenants.

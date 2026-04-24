@@ -452,6 +452,7 @@ fn format_effects(effects: &[Effect]) -> String {
                 Some(amount) => format!("{var}' = {var} - {amount}"),
                 None => format!("{var}' = {var} - 1"),
             },
+            Effect::SetCounterFromParam { var, param } => format!("{var}' = {param}"),
             Effect::SetBool { var, value } => {
                 format!("{var}' = {}", if *value { "TRUE" } else { "FALSE" })
             }

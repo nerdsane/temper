@@ -6,6 +6,7 @@
 
 mod authorize;
 mod decisions;
+mod files;
 mod policies;
 mod repl;
 mod secrets;
@@ -32,6 +33,8 @@ use crate::state::ServerState;
 /// - POST   /api/evolution/sentinel/check               -> trigger sentinel health check
 /// - POST   /api/evolution/analyze                      -> run IntentDiscovery loop
 /// - POST   /api/evolution/materialize                  -> persist O/P/A/I + PM issues
+/// - POST   /api/files/read-text-batch                  -> batch current-file text reads via projections + blobs
+/// - POST   /api/files/read-version-text-batch          -> batch immutable file-version text reads
 pub fn build_api_router() -> Router<ServerState> {
     Router::new()
         .route(
@@ -66,6 +69,14 @@ pub fn build_api_router() -> Router<ServerState> {
         .route(
             "/evolution/materialize",
             post(crate::observe::evolution::handle_evolution_materialize),
+        )
+        .route(
+            "/files/read-text-batch",
+            post(files::handle_read_text_batch),
+        )
+        .route(
+            "/files/read-version-text-batch",
+            post(files::handle_read_version_text_batch),
         )
         // OTS trajectory endpoints (full agent execution traces for GEPA)
         .route(

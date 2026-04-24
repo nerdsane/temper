@@ -131,6 +131,7 @@ pub(crate) async fn handle_get_spec_detail(
                         name: sv.name.clone(),
                         var_type: sv.var_type.clone(),
                         initial: sv.initial.clone(),
+                        query_indexed: sv.query_indexed,
                     })
                     .collect(),
             };

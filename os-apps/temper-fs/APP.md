@@ -40,7 +40,7 @@ Single file within TemperFS. Content stored externally; metadata tracked here.
 
 **Key actions**:
 - **Create**: Create file entry (content not yet uploaded)
-- **StreamUpdated**: Fired by $value PUT handler after upload succeeds; advances to Ready
+- **StreamUpdated**: Fired by $value PUT handler after upload succeeds; advances to Ready and spawns a fresh immutable `FileVersion`
 - **Lock / Unlock**: Prevent or re-enable content modifications
 - **Archive**: Terminal state
 
@@ -48,12 +48,12 @@ Single file within TemperFS. Content stored externally; metadata tracked here.
 
 ### FileVersion
 
-Immutable record of a specific file version. Created on each content upload.
+Immutable record of a specific file version. Created on each content upload and linked back to the previous immutable version before superseding it.
 
 **States**: Current → Superseded
 
 **Key actions**:
-- **Create**: Record version with file ID, version number, content hash, size, and creator
+- **Create**: Record version with file ID, version number, content hash, mime type, size, previous version ID, and creator
 - **Supersede**: Mark as replaced by a newer version (terminal)
 
 ## Setup

@@ -271,6 +271,9 @@ impl TursoEventStore {
         conn.execute(schema::CREATE_ENTITY_CATALOG_STATUS_INDEX, ())
             .await
             .map_err(storage_error)?;
+        let _ = conn
+            .execute(schema::ALTER_ENTITY_CATALOG_ADD_PROJECTION_HASH, ())
+            .await;
 
         // Entity field index — EAV table for OData filter push-down.
         conn.execute(schema::CREATE_ENTITY_FIELD_INDEX_TABLE, ())

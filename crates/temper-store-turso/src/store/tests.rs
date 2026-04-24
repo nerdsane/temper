@@ -1,5 +1,6 @@
 //! Integration tests for the Turso event store.
 
+use libsql::params;
 use temper_runtime::persistence::{
     EventMetadata, EventStore, PersistenceEnvelope, PersistenceError,
 };
@@ -421,6 +422,182 @@ async fn query_projection_roundtrip_updates_catalog_and_field_index() {
     assert!(
         counts.is_empty(),
         "entity catalog should be empty after removing the projection"
+    );
+}
+
+#[tokio::test]
+async fn unchanged_projection_updates_catalog_without_rebuilding_field_rows() {
+    let store = make_store("query-projection-stable-hash").await;
+    let tenant = format!("tenant-{}", uuid::Uuid::new_v4());
+    let entity_type = "Order";
+    let entity_id = "ord-stable-projection";
+
+    store
+        .upsert_query_projection(
+            &tenant,
+            entity_type,
+            entity_id,
+            "Draft",
+            &serde_json::json!({
+                "Title": "Projection Test",
+                "Owner": "alice",
+            }),
+            7,
+        )
+        .await
+        .expect("initial projection upsert");
+
+    let conn = store.connection().expect("connection");
+    let mut rows = conn
+        .query(
+            "SELECT rowid FROM entity_field_index \
+             WHERE tenant = ?1 AND entity_type = ?2 AND entity_id = ?3 AND field_name = 'Title'",
+            params![tenant.clone(), entity_type, entity_id],
+        )
+        .await
+        .expect("query initial title row");
+    let initial_row = rows
+        .next()
+        .await
+        .expect("read initial title row")
+        .expect("title row should exist");
+    let initial_rowid = initial_row.get::<i64>(0).expect("initial rowid");
+
+    store
+        .upsert_query_projection(
+            &tenant,
+            entity_type,
+            entity_id,
+            "Draft",
+            &serde_json::json!({
+                "Title": "Projection Test",
+                "Owner": "alice",
+            }),
+            8,
+        )
+        .await
+        .expect("second projection upsert");
+
+    let conn = store.connection().expect("connection");
+    let mut rows = conn
+        .query(
+            "SELECT rowid FROM entity_field_index \
+             WHERE tenant = ?1 AND entity_type = ?2 AND entity_id = ?3 AND field_name = 'Title'",
+            params![tenant.clone(), entity_type, entity_id],
+        )
+        .await
+        .expect("query updated title row");
+    let updated_row = rows
+        .next()
+        .await
+        .expect("read updated title row")
+        .expect("title row should still exist");
+    let updated_rowid = updated_row.get::<i64>(0).expect("updated rowid");
+
+    let mut catalog_rows = conn
+        .query(
+            "SELECT sequence_nr FROM entity_catalog \
+             WHERE tenant = ?1 AND entity_type = ?2 AND entity_id = ?3",
+            params![tenant, entity_type, entity_id],
+        )
+        .await
+        .expect("query catalog row");
+    let catalog_row = catalog_rows
+        .next()
+        .await
+        .expect("read catalog row")
+        .expect("catalog row should exist");
+    let sequence_nr = catalog_row.get::<i64>(0).expect("catalog sequence_nr");
+
+    assert_eq!(
+        updated_rowid, initial_rowid,
+        "unchanged projections should keep existing field index rows"
+    );
+    assert_eq!(
+        sequence_nr, 8,
+        "entity catalog should still advance to the latest sequence number"
+    );
+}
+
+#[tokio::test]
+async fn load_query_projection_fields_many_returns_requested_fields_by_entity() {
+    let store = make_store("query-projection-fields-many").await;
+    let tenant = format!("tenant-{}", uuid::Uuid::new_v4());
+
+    store
+        .upsert_query_projection(
+            &tenant,
+            "File",
+            "file-a",
+            "Ready",
+            &serde_json::json!({
+                "content_hash": "sha256:file-a",
+                "mime_type": "application/json",
+                "has_content": true,
+                "size_bytes": 12,
+            }),
+            1,
+        )
+        .await
+        .expect("upsert file-a projection");
+    store
+        .upsert_query_projection(
+            &tenant,
+            "File",
+            "file-b",
+            "Created",
+            &serde_json::json!({
+                "content_hash": "",
+                "mime_type": "text/plain",
+                "has_content": false,
+            }),
+            1,
+        )
+        .await
+        .expect("upsert file-b projection");
+
+    let rows = store
+        .load_query_projection_fields_many(
+            &tenant,
+            "File",
+            &[
+                "file-a".to_string(),
+                "file-b".to_string(),
+                "missing".to_string(),
+            ],
+            &["content_hash", "mime_type", "has_content"],
+        )
+        .await
+        .expect("load projected fields");
+
+    assert_eq!(rows.len(), 2);
+    assert_eq!(rows[0].entity_id, "file-a");
+    assert_eq!(rows[0].status, "Ready");
+    assert_eq!(
+        rows[0]
+            .fields
+            .get("content_hash")
+            .and_then(|v| v.as_deref()),
+        Some("sha256:file-a")
+    );
+    assert_eq!(
+        rows[0].fields.get("mime_type").and_then(|v| v.as_deref()),
+        Some("application/json")
+    );
+    assert_eq!(
+        rows[0].fields.get("has_content").and_then(|v| v.as_deref()),
+        Some("true")
+    );
+
+    assert_eq!(rows[1].entity_id, "file-b");
+    assert_eq!(rows[1].status, "Created");
+    assert_eq!(
+        rows[1].fields.get("has_content").and_then(|v| v.as_deref()),
+        Some("false")
+    );
+    assert!(
+        rows.iter().all(|row| row.entity_id != "missing"),
+        "missing entity ids should be omitted"
     );
 }
 

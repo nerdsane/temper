@@ -6,11 +6,45 @@
 //! just to evaluate filters in memory.
 
 use libsql::{TransactionBehavior, params};
+use sha2::{Digest, Sha256};
+use std::collections::{BTreeMap, BTreeSet};
 use temper_runtime::persistence::{PersistenceError, storage_error};
 use temper_runtime::scheduler::sim_now;
 use tracing::instrument;
 
 use super::TursoEventStore;
+
+fn projection_hash(status: &str, fields: &serde_json::Value) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(status.as_bytes());
+    hasher.update(b"\n");
+
+    if let Some(obj) = fields.as_object() {
+        for (field_name, value) in obj {
+            let field_value = scalar_to_text(value);
+            if field_value.is_none() && !value.is_null() {
+                continue;
+            }
+            hasher.update(field_name.as_bytes());
+            hasher.update(b"=");
+            match field_value {
+                Some(field_value) => hasher.update(field_value.as_bytes()),
+                None => hasher.update(b"<null>"),
+            }
+            hasher.update(b"\n");
+        }
+    }
+
+    format!("{:x}", hasher.finalize())
+}
+
+/// Sparse projected field values loaded from the durable query plane.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProjectedEntityFieldsRow {
+    pub entity_id: String,
+    pub status: String,
+    pub fields: BTreeMap<String, Option<String>>,
+}
 
 impl TursoEventStore {
     /// Upsert the durable query-plane projection for a single entity.
@@ -32,15 +66,51 @@ impl TursoEventStore {
         sequence_nr: u64,
     ) -> Result<(), PersistenceError> {
         let conn = self.configured_connection().await?;
+        let new_projection_hash = projection_hash(status, fields);
         let tx = conn
             .transaction_with_behavior(TransactionBehavior::Immediate)
             .await
             .map_err(storage_error)?;
 
+        let mut existing_rows = tx
+            .query(
+                "SELECT projection_hash FROM entity_catalog \
+                 WHERE tenant = ?1 AND entity_type = ?2 AND entity_id = ?3",
+                params![tenant, entity_type, entity_id],
+            )
+            .await
+            .map_err(storage_error)?;
+        let existing_projection_hash = existing_rows
+            .next()
+            .await
+            .map_err(storage_error)?
+            .and_then(|row| row.get::<String>(0).ok());
+
+        if existing_projection_hash.as_deref() == Some(new_projection_hash.as_str()) {
+            tx.execute(
+                "UPDATE entity_catalog \
+                 SET status = ?4, updated_at = ?5, sequence_nr = ?6, projection_version = 2, projection_hash = ?7 \
+                 WHERE tenant = ?1 AND entity_type = ?2 AND entity_id = ?3",
+                params![
+                    tenant,
+                    entity_type,
+                    entity_id,
+                    status,
+                    sim_now().to_rfc3339(),
+                    i64::try_from(sequence_nr).unwrap_or(i64::MAX),
+                    new_projection_hash,
+                ],
+            )
+            .await
+            .map_err(storage_error)?;
+            tx.commit().await.map_err(storage_error)?;
+            return Ok(());
+        }
+
         tx.execute(
             "INSERT OR REPLACE INTO entity_catalog \
-             (tenant, entity_type, entity_id, status, updated_at, sequence_nr, projection_version) \
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, 1)",
+             (tenant, entity_type, entity_id, status, updated_at, sequence_nr, projection_version, projection_hash) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, 2, ?7)",
             params![
                 tenant,
                 entity_type,
@@ -48,6 +118,7 @@ impl TursoEventStore {
                 status,
                 sim_now().to_rfc3339(),
                 i64::try_from(sequence_nr).unwrap_or(i64::MAX),
+                new_projection_hash,
             ],
         )
         .await
@@ -202,6 +273,98 @@ impl TursoEventStore {
             }
         }
         Ok(ids)
+    }
+
+    /// Load a sparse set of projected fields for many entities in one query.
+    ///
+    /// Returns one row per projected entity that exists in the durable query
+    /// plane. Missing entity ids are omitted from the result.
+    #[instrument(skip_all, fields(
+        otel.name = "turso.load_query_projection_fields_many",
+        tenant, entity_type,
+        entity_count = entity_ids.len(),
+        field_count = field_names.len(),
+    ))]
+    pub async fn load_query_projection_fields_many(
+        &self,
+        tenant: &str,
+        entity_type: &str,
+        entity_ids: &[String],
+        field_names: &[&str],
+    ) -> Result<Vec<ProjectedEntityFieldsRow>, PersistenceError> {
+        if entity_ids.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        let conn = self.configured_connection().await?;
+        let requested_fields: BTreeSet<&str> = field_names.iter().copied().collect();
+
+        let entity_placeholders = std::iter::repeat_n("?", entity_ids.len())
+            .collect::<Vec<_>>()
+            .join(", ");
+        let field_placeholders = std::iter::repeat_n("?", requested_fields.len())
+            .collect::<Vec<_>>()
+            .join(", ");
+        let sql = format!(
+            "SELECT c.entity_id, c.status, f.field_name, f.field_value \
+             FROM entity_catalog c \
+             LEFT JOIN entity_field_index f \
+               ON c.tenant = f.tenant \
+              AND c.entity_type = f.entity_type \
+              AND c.entity_id = f.entity_id \
+              AND f.field_name IN ({field_placeholders}) \
+             WHERE c.tenant = ? \
+               AND c.entity_type = ? \
+               AND c.entity_id IN ({entity_placeholders}) \
+             ORDER BY c.entity_id, f.field_name"
+        );
+
+        let mut params: Vec<libsql::Value> =
+            Vec::with_capacity(2 + requested_fields.len() + entity_ids.len());
+        for field_name in &requested_fields {
+            params.push(libsql::Value::from((*field_name).to_string()));
+        }
+        params.push(libsql::Value::from(tenant.to_string()));
+        params.push(libsql::Value::from(entity_type.to_string()));
+        for entity_id in entity_ids {
+            params.push(libsql::Value::from(entity_id.clone()));
+        }
+
+        let mut rows = conn
+            .query(&sql, libsql::params_from_iter(params))
+            .await
+            .map_err(storage_error)?;
+
+        let mut by_entity: BTreeMap<String, ProjectedEntityFieldsRow> = BTreeMap::new();
+        while let Some(row) = rows.next().await.map_err(storage_error)? {
+            let entity_id: String = row.get(0).map_err(storage_error)?;
+            let status: String = row.get(1).map_err(storage_error)?;
+            let field_name: Option<String> = row.get(2).map_err(storage_error)?;
+            let field_value: Option<String> = row.get(3).map_err(storage_error)?;
+
+            let entry =
+                by_entity
+                    .entry(entity_id.clone())
+                    .or_insert_with(|| ProjectedEntityFieldsRow {
+                        entity_id: entity_id.clone(),
+                        status,
+                        fields: requested_fields
+                            .iter()
+                            .map(|field| ((*field).to_string(), None))
+                            .collect(),
+                    });
+
+            if let Some(field_name) = field_name
+                && requested_fields.contains(field_name.as_str())
+            {
+                entry.fields.insert(field_name, field_value);
+            }
+        }
+
+        Ok(entity_ids
+            .iter()
+            .filter_map(|entity_id| by_entity.remove(entity_id))
+            .collect())
     }
 
     /// Return projected entity counts grouped by tenant.

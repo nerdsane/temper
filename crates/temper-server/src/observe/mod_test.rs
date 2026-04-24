@@ -13,6 +13,7 @@ use tower::ServiceExt;
 use crate::event_store::ServerEventStore;
 use crate::registry::SpecRegistry;
 use crate::request_context::AgentContext;
+use crate::secrets::vault::SecretsVault;
 use crate::state::TrajectoryEntry;
 
 const CSDL_XML: &str = include_str!("../../../../test-fixtures/specs/model.csdl.xml");
@@ -124,6 +125,215 @@ fn build_app_with_state(state: ServerState) -> Router {
         .nest("/observe", build_observe_router())
         .nest("/api", crate::api::build_api_router())
         .with_state(state)
+}
+
+#[tokio::test]
+async fn batch_file_text_read_returns_projected_file_contents_in_request_order() {
+    let state = test_state_with_turso().await;
+    let tenant = "default";
+    let turso = state
+        .persistent_store_for_tenant(tenant)
+        .await
+        .expect("tenant turso store");
+
+    turso
+        .upsert_query_projection(
+            tenant,
+            "File",
+            "file-a",
+            "Ready",
+            &serde_json::json!({
+                "content_hash": "sha256:file-a",
+                "mime_type": "application/json",
+                "has_content": true,
+            }),
+            1,
+        )
+        .await
+        .expect("upsert file-a projection");
+    turso
+        .upsert_query_projection(
+            tenant,
+            "File",
+            "file-b",
+            "Created",
+            &serde_json::json!({
+                "content_hash": "",
+                "mime_type": "text/plain",
+                "has_content": false,
+            }),
+            1,
+        )
+        .await
+        .expect("upsert file-b projection");
+    turso
+        .put_blob("temper-fs/sha256:file-a", b"{\"msg\":\"hello\"}")
+        .await
+        .expect("persist blob");
+
+    let app = build_app_with_state(state);
+    let response = app
+        .oneshot(system_post(
+            "/api/files/read-text-batch",
+            r#"{"file_ids":["file-a","file-b","missing"]}"#,
+        ))
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(response.into_body(), 1024 * 1024)
+        .await
+        .unwrap();
+    let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    let files = json["files"].as_array().expect("files array");
+    assert_eq!(files.len(), 3);
+
+    assert_eq!(files[0]["file_id"], "file-a");
+    assert_eq!(files[0]["found"], true);
+    assert_eq!(files[0]["content_hash"], "sha256:file-a");
+    assert_eq!(files[0]["mime_type"], "application/json");
+    assert_eq!(files[0]["text"], "{\"msg\":\"hello\"}");
+
+    assert_eq!(files[1]["file_id"], "file-b");
+    assert_eq!(files[1]["found"], true);
+    assert_eq!(files[1]["text"], "");
+
+    assert_eq!(files[2]["file_id"], "missing");
+    assert_eq!(files[2]["found"], false);
+    assert_eq!(files[2]["text"], "");
+}
+
+#[tokio::test]
+async fn batch_file_version_text_read_returns_immutable_version_contents_in_request_order() {
+    let state = test_state_with_turso().await;
+    let tenant = "default";
+    let turso = state
+        .persistent_store_for_tenant(tenant)
+        .await
+        .expect("tenant turso store");
+
+    turso
+        .upsert_query_projection(
+            tenant,
+            "FileVersion",
+            "ver-a",
+            "Current",
+            &serde_json::json!({
+                "content_hash": "sha256:ver-a",
+                "mime_type": "application/json",
+            }),
+            1,
+        )
+        .await
+        .expect("upsert ver-a projection");
+    turso
+        .upsert_query_projection(
+            tenant,
+            "FileVersion",
+            "ver-b",
+            "Superseded",
+            &serde_json::json!({
+                "content_hash": "",
+                "mime_type": "text/plain",
+            }),
+            1,
+        )
+        .await
+        .expect("upsert ver-b projection");
+    turso
+        .put_blob("temper-fs/sha256:ver-a", b"{\"msg\":\"immutable\"}")
+        .await
+        .expect("persist blob");
+
+    let app = build_app_with_state(state);
+    let response = app
+        .oneshot(system_post(
+            "/api/files/read-version-text-batch",
+            r#"{"file_version_ids":["ver-a","ver-b","missing"]}"#,
+        ))
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(response.into_body(), 1024 * 1024)
+        .await
+        .unwrap();
+    let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    let files = json["files"].as_array().expect("files array");
+    assert_eq!(files.len(), 3);
+
+    assert_eq!(files[0]["file_version_id"], "ver-a");
+    assert_eq!(files[0]["found"], true);
+    assert_eq!(files[0]["content_hash"], "sha256:ver-a");
+    assert_eq!(files[0]["mime_type"], "application/json");
+    assert_eq!(files[0]["text"], "{\"msg\":\"immutable\"}");
+
+    assert_eq!(files[1]["file_version_id"], "ver-b");
+    assert_eq!(files[1]["found"], true);
+    assert_eq!(files[1]["text"], "");
+
+    assert_eq!(files[2]["file_version_id"], "missing");
+    assert_eq!(files[2]["found"], false);
+    assert_eq!(files[2]["text"], "");
+}
+
+#[tokio::test]
+async fn batch_file_version_text_read_uses_local_store_for_internal_blob_endpoint() {
+    let mut state = test_state_with_turso().await;
+    let tenant = "default";
+    let turso = state
+        .persistent_store_for_tenant(tenant)
+        .await
+        .expect("tenant turso store");
+
+    turso
+        .upsert_query_projection(
+            tenant,
+            "FileVersion",
+            "ver-local",
+            "Current",
+            &serde_json::json!({
+                "content_hash": "sha256:ver-local",
+                "mime_type": "text/plain",
+            }),
+            1,
+        )
+        .await
+        .expect("upsert ver-local projection");
+    turso
+        .put_blob("temper-fs/sha256:ver-local", b"local-fast-path")
+        .await
+        .expect("persist blob");
+
+    let vault = SecretsVault::new(&[7u8; 32]);
+    vault
+        .cache_secret(
+            tenant,
+            "blob_endpoint",
+            "http://127.0.0.1:3474/_internal/blobs".to_string(),
+        )
+        .expect("cache blob endpoint");
+    state.secrets_vault = Some(Arc::new(vault));
+
+    let app = build_app_with_state(state);
+    let response = app
+        .oneshot(system_post(
+            "/api/files/read-version-text-batch",
+            r#"{"file_version_ids":["ver-local"]}"#,
+        ))
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(response.into_body(), 1024 * 1024)
+        .await
+        .unwrap();
+    let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    let files = json["files"].as_array().expect("files array");
+    assert_eq!(files.len(), 1);
+    assert_eq!(files[0]["file_version_id"], "ver-local");
+    assert_eq!(files[0]["found"], true);
+    assert_eq!(files[0]["text"], "local-fast-path");
 }
 
 #[tokio::test]

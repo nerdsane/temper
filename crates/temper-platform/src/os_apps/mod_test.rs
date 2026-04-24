@@ -4,10 +4,12 @@ use super::agent_bootstrap::{
 use super::*;
 use std::collections::HashMap;
 use std::fs;
+use std::time::Duration;
 
 use temper_authz::SecurityContext;
 use temper_runtime::tenant::TenantId;
 use temper_server::registry::{EntityLevelSummary, EntityVerificationResult, VerificationStatus};
+use temper_server::request_context::AgentContext;
 use temper_spec::automaton;
 use temper_spec::csdl::parse_csdl;
 use temper_store_turso::TursoSpecVerificationUpdate;
@@ -1371,4 +1373,182 @@ to = "Authorized"
     assert_eq!(payment.state.status, "Authorized");
 
     let _ = fs::remove_dir_all(&app_root);
+}
+
+#[tokio::test]
+async fn test_local_stream_uploads_create_real_file_version_lineage() {
+    use std::sync::Arc;
+    use temper_server::event_store::ServerEventStore;
+    use temper_server::state::DispatchCommand;
+    use temper_store_turso::TursoEventStore;
+
+    let db_path = format!(
+        "/tmp/temper-file-version-lineage-{}.db",
+        uuid::Uuid::new_v4()
+    );
+    let db_url = format!("file:{db_path}");
+    let turso = TursoEventStore::new(&db_url, None).await.unwrap();
+    let mut state = PlatformState::new(None);
+    state.server.event_store = Some(Arc::new(ServerEventStore::Turso(turso)));
+
+    install_os_app(&state, "test-file-lineage", "temper-fs")
+        .await
+        .expect("install temper-fs");
+
+    let tenant = TenantId::new("test-file-lineage");
+    let agent_ctx = AgentContext::system();
+    let file_id = "file-version-lineage";
+
+    state
+        .server
+        .get_or_create_tenant_entity(&tenant, "File", file_id, serde_json::json!({}))
+        .await
+        .expect("create file actor");
+    state
+        .server
+        .dispatch(DispatchCommand {
+            tenant: &tenant,
+            entity_type: "File",
+            entity_id: file_id,
+            action: "Create",
+            params: serde_json::json!({
+                "name": "lineage.txt",
+                "path": "/lineage.txt",
+                "directory_id": "",
+                "workspace_id": "",
+                "mime_type": "text/plain",
+            }),
+            agent_ctx: &agent_ctx,
+            await_integration: false,
+        })
+        .await
+        .expect("initialize file");
+
+    state
+        .server
+        .put_file_stream_content(&tenant, file_id, b"first version", "text/plain", &agent_ctx)
+        .await
+        .expect("upload first version");
+
+    let mut first_version_id = String::new();
+    for _ in 0..200 {
+        let file_after_first_upload = state
+            .server
+            .get_tenant_entity_state(&tenant, "File", file_id)
+            .await
+            .expect("load file state after first upload");
+        if let Some(version_id) = file_after_first_upload
+            .state
+            .fields
+            .get("last_version_id")
+            .and_then(|value| value.as_str())
+            .filter(|value| !value.is_empty())
+        {
+            first_version_id = version_id.to_string();
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+    assert!(
+        !first_version_id.is_empty(),
+        "first upload should populate last_version_id before second upload"
+    );
+
+    state
+        .server
+        .put_file_stream_content(
+            &tenant,
+            file_id,
+            b"second version",
+            "text/plain",
+            &agent_ctx,
+        )
+        .await
+        .expect("upload second version");
+
+    let mut file_resp = None;
+    for _ in 0..200 {
+        let candidate = state
+            .server
+            .get_tenant_entity_state(&tenant, "File", file_id)
+            .await
+            .expect("load file state");
+        let latest_version_id = candidate
+            .state
+            .fields
+            .get("last_version_id")
+            .and_then(|value| value.as_str())
+            .unwrap_or_default();
+        if candidate.state.counters.get("version_count") == Some(&2)
+            && !latest_version_id.is_empty()
+            && latest_version_id != first_version_id
+        {
+            file_resp = Some(candidate);
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+    let file_resp = file_resp.expect("file should point at the second version after trigger cascade");
+    assert_eq!(file_resp.state.status, "Ready");
+    assert_eq!(file_resp.state.counters.get("version_count"), Some(&2));
+
+    let latest_version_id = file_resp
+        .state
+        .fields
+        .get("last_version_id")
+        .and_then(|value| value.as_str())
+        .filter(|value| !value.is_empty())
+        .expect("file should point at latest version")
+        .to_string();
+
+    let latest_version = state
+        .server
+        .get_tenant_entity_state(&tenant, "FileVersion", &latest_version_id)
+        .await
+        .expect("load latest file version");
+    assert_eq!(latest_version.state.status, "Current");
+    assert_eq!(
+        latest_version.state.counters.get("version_number"),
+        Some(&2)
+    );
+
+    let previous_version_id = latest_version
+        .state
+        .fields
+        .get("previous_version_id")
+        .and_then(|value| value.as_str())
+        .filter(|value| !value.is_empty())
+        .expect("latest version should point at previous version")
+        .to_string();
+
+    for _ in 0..200 {
+        let previous = state
+            .server
+            .get_tenant_entity_state(&tenant, "FileVersion", &previous_version_id)
+            .await
+            .expect("load previous file version");
+        if previous.state.status == "Superseded" {
+            assert_eq!(previous.state.counters.get("version_number"), Some(&1));
+            let _ = fs::remove_file(&db_path);
+            let _ = fs::remove_file(format!("{db_path}-wal"));
+            let _ = fs::remove_file(format!("{db_path}-shm"));
+            return;
+        }
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+
+    let previous = state
+        .server
+        .get_tenant_entity_state(&tenant, "FileVersion", &previous_version_id)
+        .await
+        .expect("load previous file version after wait");
+    assert_eq!(
+        previous.state.status, "Superseded",
+        "previous version should be superseded after the second upload"
+    );
+    assert_eq!(previous.state.counters.get("version_number"), Some(&1));
+
+    let _ = fs::remove_file(&db_path);
+    let _ = fs::remove_file(format!("{db_path}-wal"));
+    let _ = fs::remove_file(format!("{db_path}-shm"));
 }
