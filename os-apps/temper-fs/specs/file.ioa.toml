@@ -36,6 +36,11 @@ name = "mime_type"
 type = "string"
 initial = ""
 
+[[state]]
+name = "last_version_id"
+type = "string"
+initial = ""
+
 # --- Actions ---
 
 [[action]]
@@ -51,8 +56,13 @@ name = "StreamUpdated"
 kind = "input"
 from = ["Created", "Ready"]
 to = "Ready"
-params = ["content_hash", "size_bytes", "mime_type"]
-effect = '[{ type = "increment", var = "version_count" }, { type = "set_bool", var = "has_content", value = "true" }]'
+params = ["content_hash", "size_bytes", "mime_type", "version_number", "previous_version_id", "created_by"]
+effect = [
+  { type = "increment", var = "version_count" },
+  { type = "set_counter_from_param", var = "size_bytes", param = "size_bytes" },
+  { type = "set_bool", var = "has_content", value = "true" },
+  { type = "spawn", entity_type = "FileVersion", entity_id_source = "{uuid}", initial_action = "Create", store_id_in = "last_version_id" },
+]
 hint = "Fired by $value PUT handler after WASM upload succeeds. Updates content metadata and advances to Ready. Not callable from Locked."
 
 [[action]]

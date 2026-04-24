@@ -136,12 +136,7 @@ fn handle_upload(ctx_json: &str) -> i32 {
     // 2. CAS dedup — skip upload if blob already stored
     if cache_contains(&content_hash) {
         log("info", "blob_adapter: CAS cache hit, skipping upload");
-        let result = format!(
-            r#"{{"action":"StreamUpdated","params":{{"content_hash":"{}","size_bytes":{},"mime_type":"{}"}},"success":true}}"#,
-            escape_json(&content_hash),
-            size_bytes,
-            escape_json(&content_type),
-        );
+        let result = build_stream_updated_result(ctx_json, &content_hash, &size_bytes, &content_type);
         set_result(&result);
         return 0;
     }
@@ -166,12 +161,7 @@ fn handle_upload(ctx_json: &str) -> i32 {
     cache_from_stream(&content_hash, &stream_id);
 
     // 7. Return action + params for server to dispatch
-    let result = format!(
-        r#"{{"action":"StreamUpdated","params":{{"content_hash":"{}","size_bytes":{},"mime_type":"{}"}},"success":true}}"#,
-        escape_json(&content_hash),
-        size_bytes,
-        escape_json(&content_type),
-    );
+    let result = build_stream_updated_result(ctx_json, &content_hash, &size_bytes, &content_type);
     set_result(&result);
     0
 }
@@ -483,6 +473,58 @@ fn extract_nested_json_str(json: &str, outer_key: &str, inner_key: &str) -> Stri
     String::new()
 }
 
+fn build_stream_updated_result(
+    ctx_json: &str,
+    content_hash: &str,
+    size_bytes: &str,
+    mime_type: &str,
+) -> String {
+    let (version_number, previous_version_id, created_by) =
+        extract_stream_version_metadata(ctx_json);
+    format!(
+        r#"{{"action":"StreamUpdated","params":{{"content_hash":"{}","size_bytes":{},"mime_type":"{}","version_number":{},"previous_version_id":"{}","created_by":"{}"}},"success":true}}"#,
+        escape_json(content_hash),
+        size_bytes,
+        escape_json(mime_type),
+        version_number,
+        escape_json(&previous_version_id),
+        escape_json(&created_by),
+    )
+}
+
+fn extract_stream_version_metadata(ctx_json: &str) -> (u64, String, String) {
+    let entity_state = extract_json_object(ctx_json, "entity_state");
+    let fields = if entity_state.is_empty() {
+        String::new()
+    } else {
+        extract_json_object(&entity_state, "fields")
+    };
+    let version_count = extract_field_from_entity_state(&entity_state, &fields, "version_count")
+        .parse::<u64>()
+        .unwrap_or(0);
+    let previous_version_id =
+        extract_field_from_entity_state(&entity_state, &fields, "last_version_id");
+    let created_by = extract_json_str(ctx_json, "agent_id");
+    (
+        version_count.saturating_add(1),
+        previous_version_id,
+        created_by,
+    )
+}
+
+fn extract_field_from_entity_state(entity_state: &str, fields: &str, field: &str) -> String {
+    if !fields.is_empty() {
+        let value = extract_json_str(fields, field);
+        if !value.is_empty() {
+            return value;
+        }
+    }
+    if !entity_state.is_empty() {
+        return extract_json_str(entity_state, field);
+    }
+    String::new()
+}
+
 /// Minimal JSON string escaping.
 fn escape_json(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
@@ -497,4 +539,59 @@ fn escape_json(s: &str) -> String {
         }
     }
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::build_stream_updated_result;
+
+    #[test]
+    fn stream_updated_result_includes_version_metadata_for_existing_file() {
+        let ctx_json = r#"{
+            "agent_id":"agent-7",
+            "entity_state":{
+                "fields":{
+                    "version_count":2,
+                    "last_version_id":"ver-2"
+                }
+            }
+        }"#;
+
+        let result = build_stream_updated_result(
+            ctx_json,
+            "sha256:new-content",
+            "42",
+            "text/plain",
+        );
+        let parsed: serde_json::Value = serde_json::from_str(&result).unwrap();
+
+        assert_eq!(parsed["action"], "StreamUpdated");
+        assert_eq!(parsed["params"]["content_hash"], "sha256:new-content");
+        assert_eq!(parsed["params"]["size_bytes"], 42);
+        assert_eq!(parsed["params"]["mime_type"], "text/plain");
+        assert_eq!(parsed["params"]["version_number"], 3);
+        assert_eq!(parsed["params"]["previous_version_id"], "ver-2");
+        assert_eq!(parsed["params"]["created_by"], "agent-7");
+    }
+
+    #[test]
+    fn stream_updated_result_defaults_first_version_metadata() {
+        let ctx_json = r#"{
+            "entity_state":{
+                "fields":{}
+            }
+        }"#;
+
+        let result = build_stream_updated_result(
+            ctx_json,
+            "sha256:first-content",
+            "7",
+            "application/json",
+        );
+        let parsed: serde_json::Value = serde_json::from_str(&result).unwrap();
+
+        assert_eq!(parsed["params"]["version_number"], 1);
+        assert_eq!(parsed["params"]["previous_version_id"], "");
+        assert_eq!(parsed["params"]["created_by"], "");
+    }
 }

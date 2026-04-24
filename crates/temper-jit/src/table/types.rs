@@ -140,6 +140,8 @@ pub enum Effect {
     IncrementCounter(String),
     /// Decrement a named counter variable.
     DecrementCounter(String),
+    /// Set a named counter variable from an action param.
+    SetCounterFromParam { var: String, param: String },
     /// Set a named boolean variable.
     SetBool { var: String, value: bool },
     /// Emit a named event.

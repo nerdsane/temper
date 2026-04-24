@@ -106,6 +106,7 @@
         <Property Name="HasContent" Type="Edm.Boolean" DefaultValue="false"/>
         <Property Name="ContentHash" Type="Edm.String"/>
         <Property Name="MimeType" Type="Edm.String"/>
+        <Property Name="LastVersionId" Type="Edm.Guid"/>
         <Property Name="CreatedAt" Type="Edm.DateTimeOffset" Nullable="false"/>
         <Property Name="UpdatedAt" Type="Edm.DateTimeOffset" Nullable="false"/>
         <NavigationProperty Name="Directory" Type="Temper.FS.Directory">
@@ -113,6 +114,9 @@
         </NavigationProperty>
         <NavigationProperty Name="Workspace" Type="Temper.FS.Workspace">
           <ReferentialConstraint Property="WorkspaceId" ReferencedProperty="Id"/>
+        </NavigationProperty>
+        <NavigationProperty Name="LastVersion" Type="Temper.FS.FileVersion">
+          <ReferentialConstraint Property="LastVersionId" ReferencedProperty="Id"/>
         </NavigationProperty>
         <NavigationProperty Name="Versions" Type="Collection(Temper.FS.FileVersion)"/>
         <Annotation Term="Temper.Vocab.StateMachine.States">
@@ -134,11 +138,16 @@
         <Property Name="Status" Type="Temper.FS.FileVersionStatus" Nullable="false"/>
         <Property Name="VersionNumber" Type="Edm.Int32" Nullable="false"/>
         <Property Name="ContentHash" Type="Edm.String" Nullable="false"/>
+        <Property Name="MimeType" Type="Edm.String" Nullable="false"/>
         <Property Name="SizeBytes" Type="Edm.Int64" Nullable="false"/>
+        <Property Name="PreviousVersionId" Type="Edm.Guid"/>
         <Property Name="CreatedBy" Type="Edm.String"/>
         <Property Name="CreatedAt" Type="Edm.DateTimeOffset" Nullable="false"/>
         <NavigationProperty Name="File" Type="Temper.FS.File">
           <ReferentialConstraint Property="FileId" ReferencedProperty="Id"/>
+        </NavigationProperty>
+        <NavigationProperty Name="PreviousVersion" Type="Temper.FS.FileVersion">
+          <ReferentialConstraint Property="PreviousVersionId" ReferencedProperty="Id"/>
         </NavigationProperty>
         <Annotation Term="Temper.Vocab.StateMachine.States">
           <Collection><String>Current</String><String>Superseded</String></Collection>
@@ -246,6 +255,9 @@
         <Parameter Name="content_hash" Type="Edm.String" Nullable="false"/>
         <Parameter Name="size_bytes" Type="Edm.Int64" Nullable="false"/>
         <Parameter Name="mime_type" Type="Edm.String" Nullable="false"/>
+        <Parameter Name="version_number" Type="Edm.Int32" Nullable="false"/>
+        <Parameter Name="previous_version_id" Type="Edm.Guid"/>
+        <Parameter Name="created_by" Type="Edm.String"/>
         <ReturnType Type="Temper.FS.File"/>
         <Annotation Term="Temper.Vocab.StateMachine.ValidFromStates">
           <Collection><String>Created</String><String>Ready</String></Collection>
@@ -307,10 +319,12 @@
         <EntitySet Name="Files" EntityType="Temper.FS.File">
           <NavigationPropertyBinding Path="Directory" Target="Directories"/>
           <NavigationPropertyBinding Path="Workspace" Target="Workspaces"/>
+          <NavigationPropertyBinding Path="LastVersion" Target="FileVersions"/>
           <NavigationPropertyBinding Path="Versions" Target="FileVersions"/>
         </EntitySet>
         <EntitySet Name="FileVersions" EntityType="Temper.FS.FileVersion">
           <NavigationPropertyBinding Path="File" Target="Files"/>
+          <NavigationPropertyBinding Path="PreviousVersion" Target="FileVersions"/>
         </EntitySet>
       </EntityContainer>
 

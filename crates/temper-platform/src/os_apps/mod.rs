@@ -16,6 +16,7 @@ use std::sync::{OnceLock, RwLock};
 use serde::Serialize;
 use sha2::{Digest, Sha256};
 use temper_runtime::tenant::TenantId;
+use temper_server::reaction::registry::parse_reactions;
 use temper_spec::automaton;
 use temper_spec::csdl::{emit_csdl_xml, merge_csdl, parse_csdl};
 
@@ -989,6 +990,19 @@ fn read_app_guide(app_dir: &Path) -> Option<String> {
     None
 }
 
+fn read_app_reactions(app_dir: &Path) -> Option<Vec<temper_server::reaction::types::ReactionRule>> {
+    for relative_path in ["reactions/reactions.toml", "specs/reactions.toml"] {
+        let path = app_dir.join(relative_path);
+        if !path.exists() {
+            continue;
+        }
+        let source = std::fs::read_to_string(&path).ok()?;
+        let reactions = parse_reactions(&source).ok()?;
+        return Some(reactions);
+    }
+    Some(Vec::new())
+}
+
 /// Extract a description from app guide markdown.
 ///
 /// Looks for the first non-header, non-empty line, or a TOML frontmatter
@@ -1079,6 +1093,7 @@ fn load_app_bundle(app_dir: &Path) -> Option<AppBundle> {
 
     // Read CSDL (optional — apps without specs won't have CSDL).
     let csdl = find_csdl(app_dir).and_then(|p| std::fs::read_to_string(&p).ok());
+    let reactions = read_app_reactions(app_dir)?;
     let cross_invariants_toml =
         std::fs::read_to_string(app_dir.join("specs").join("cross-invariants.toml")).ok();
 
@@ -1120,6 +1135,7 @@ fn load_app_bundle(app_dir: &Path) -> Option<AppBundle> {
         && seed_instances.is_empty()
         && app_guide.is_none()
         && csdl.is_none()
+        && reactions.is_empty()
         && cross_invariants_toml.is_none()
     {
         return None;
@@ -1128,6 +1144,7 @@ fn load_app_bundle(app_dir: &Path) -> Option<AppBundle> {
     Some(AppBundle {
         specs,
         csdl,
+        reactions,
         cross_invariants_toml,
         cedar_policies,
         wasm_modules,
@@ -1412,6 +1429,7 @@ async fn install_os_app_without_dependencies(
                     label: &format!("OsApp({app_name})"),
                     verified_cache: &verified_cache,
                     cross_invariants_source: bundle.cross_invariants_toml.as_deref(),
+                    reactions: bundle.reactions.as_slice(),
                 },
             );
 
@@ -1429,6 +1447,11 @@ async fn install_os_app_without_dependencies(
             }
         }
     }
+
+    // App installs can add or change cross-entity reactions. Refresh the live
+    // dispatcher immediately so the newly registered tenant config takes effect
+    // without requiring a process restart or a separate specs reload.
+    state.server.rebuild_reaction_dispatcher();
 
     // ── Step 3: Load Cedar policies into memory. ────────────────────
     if let Some(ref policy_text) = combined_policy {
