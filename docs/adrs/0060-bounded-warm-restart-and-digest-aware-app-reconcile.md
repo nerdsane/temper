@@ -1,4 +1,4 @@
-# ADR-0059: Bounded Warm Restart and Digest-Aware App Reconcile
+# ADR-0060: Bounded Warm Restart and Digest-Aware App Reconcile
 
 - Status: Accepted
 - Date: 2026-04-24
