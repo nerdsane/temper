@@ -43,7 +43,11 @@ pub(super) async fn populate_field_index_from_snapshots(state: &ServerState, ten
                             entity_type,
                             entity_id,
                             &state_snapshot.status,
-                            &state_snapshot.fields,
+                            &state.query_projection_fields(
+                                tenant,
+                                entity_type,
+                                &state_snapshot.fields,
+                            ),
                             state_snapshot.sequence_nr,
                         )
                         .await
@@ -150,7 +154,7 @@ pub(super) async fn populate_field_index_from_snapshots(state: &ServerState, ten
                     entity_type,
                     entity_id,
                     &replayed.status,
-                    &replayed.fields,
+                    &state.query_projection_fields(tenant, entity_type, &replayed.fields),
                     replayed.sequence_nr,
                 )
                 .await

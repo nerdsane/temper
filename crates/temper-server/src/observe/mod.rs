@@ -95,6 +95,9 @@ pub struct StateVarDetail {
     pub var_type: String,
     /// Initial value.
     pub initial: String,
+    /// Whether the field participates in the durable query-plane projection.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub query_indexed: Option<bool>,
 }
 
 /// Entity instance summary.

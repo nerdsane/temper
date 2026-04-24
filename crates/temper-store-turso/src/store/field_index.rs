@@ -6,12 +6,37 @@
 //! just to evaluate filters in memory.
 
 use libsql::{TransactionBehavior, params};
+use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet};
 use temper_runtime::persistence::{PersistenceError, storage_error};
 use temper_runtime::scheduler::sim_now;
 use tracing::instrument;
 
 use super::TursoEventStore;
+
+fn projection_hash(status: &str, fields: &serde_json::Value) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(status.as_bytes());
+    hasher.update(b"\n");
+
+    if let Some(obj) = fields.as_object() {
+        for (field_name, value) in obj {
+            let field_value = scalar_to_text(value);
+            if field_value.is_none() && !value.is_null() {
+                continue;
+            }
+            hasher.update(field_name.as_bytes());
+            hasher.update(b"=");
+            match field_value {
+                Some(field_value) => hasher.update(field_value.as_bytes()),
+                None => hasher.update(b"<null>"),
+            }
+            hasher.update(b"\n");
+        }
+    }
+
+    format!("{:x}", hasher.finalize())
+}
 
 /// Sparse projected field values loaded from the durable query plane.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -41,15 +66,51 @@ impl TursoEventStore {
         sequence_nr: u64,
     ) -> Result<(), PersistenceError> {
         let conn = self.configured_connection().await?;
+        let new_projection_hash = projection_hash(status, fields);
         let tx = conn
             .transaction_with_behavior(TransactionBehavior::Immediate)
             .await
             .map_err(storage_error)?;
 
+        let mut existing_rows = tx
+            .query(
+                "SELECT projection_hash FROM entity_catalog \
+                 WHERE tenant = ?1 AND entity_type = ?2 AND entity_id = ?3",
+                params![tenant, entity_type, entity_id],
+            )
+            .await
+            .map_err(storage_error)?;
+        let existing_projection_hash = existing_rows
+            .next()
+            .await
+            .map_err(storage_error)?
+            .and_then(|row| row.get::<String>(0).ok());
+
+        if existing_projection_hash.as_deref() == Some(new_projection_hash.as_str()) {
+            tx.execute(
+                "UPDATE entity_catalog \
+                 SET status = ?4, updated_at = ?5, sequence_nr = ?6, projection_version = 2, projection_hash = ?7 \
+                 WHERE tenant = ?1 AND entity_type = ?2 AND entity_id = ?3",
+                params![
+                    tenant,
+                    entity_type,
+                    entity_id,
+                    status,
+                    sim_now().to_rfc3339(),
+                    i64::try_from(sequence_nr).unwrap_or(i64::MAX),
+                    new_projection_hash,
+                ],
+            )
+            .await
+            .map_err(storage_error)?;
+            tx.commit().await.map_err(storage_error)?;
+            return Ok(());
+        }
+
         tx.execute(
             "INSERT OR REPLACE INTO entity_catalog \
-             (tenant, entity_type, entity_id, status, updated_at, sequence_nr, projection_version) \
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, 1)",
+             (tenant, entity_type, entity_id, status, updated_at, sequence_nr, projection_version, projection_hash) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, 2, ?7)",
             params![
                 tenant,
                 entity_type,
@@ -57,6 +118,7 @@ impl TursoEventStore {
                 status,
                 sim_now().to_rfc3339(),
                 i64::try_from(sequence_nr).unwrap_or(i64::MAX),
+                new_projection_hash,
             ],
         )
         .await

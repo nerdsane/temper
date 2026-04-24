@@ -514,7 +514,7 @@ impl ServerState {
 
         if let Some(store) = self.event_store.as_ref() {
             let status = response.state.status.clone();
-            let fields = response.state.fields.clone();
+            let fields = self.query_projection_fields(tenant, entity_type, &response.state.fields);
             let sequence_nr = response.state.sequence_nr;
             if let Err(e) = store
                 .upsert_query_projection(
@@ -574,7 +574,7 @@ impl ServerState {
             && let Some(store) = self.event_store.as_ref()
         {
             let status = response.state.status.clone();
-            let fields = response.state.fields.clone();
+            let fields = self.query_projection_fields(tenant, entity_type, &response.state.fields);
             let sequence_nr = response.state.sequence_nr;
             if let Err(e) = store
                 .upsert_query_projection(

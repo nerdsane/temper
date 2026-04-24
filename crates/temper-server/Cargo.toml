@@ -63,6 +63,8 @@ tokio-test = { workspace = true }
 criterion = { workspace = true }
 tokio = { workspace = true, features = ["full"] }
 wiremock = { workspace = true }
+tracing-subscriber = { workspace = true }
+opentelemetry_sdk = { workspace = true }
 temper-store-sim = { workspace = true }
 temper-server = { path = ".", features = ["sim"] }
 temper-wasm = { workspace = true, features = ["test-helpers"] }
