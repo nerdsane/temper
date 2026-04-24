@@ -285,7 +285,12 @@ async fn dispatch_matched_route(
         trace_id: String::new(),
         http_request: Some(HttpDispatchContext {
             method: method.as_str().to_uppercase(),
-            path: uri.path().to_string(),
+            // Include the query string so guests can parse
+            // `service=git-upload-pack` etc. from InboundHttp.path.
+            path: match uri.query() {
+                Some(q) => format!("{}?{}", uri.path(), q),
+                None => uri.path().to_string(),
+            },
             params: route.params.clone(),
             headers: header_pairs,
             principal_id: None,
