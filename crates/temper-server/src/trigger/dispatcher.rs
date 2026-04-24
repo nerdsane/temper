@@ -290,11 +290,9 @@ fn resolve_trigger_principal(
 ) -> AgentContext {
     match declared_principal {
         Some(service_name) if !service_name.is_empty() => {
-            let mut ctx = AgentContext::for_service(service_name);
-            ctx.session_id = invoking_ctx.session_id.clone();
-            ctx.intent = invoking_ctx.intent.clone();
-            ctx.trace_id = invoking_ctx.trace_id.clone();
-            ctx.parent_span_id = invoking_ctx.parent_span_id.clone();
+            let mut ctx = AgentContext::for_service_inheriting(service_name, invoking_ctx);
+            // Preserve ADR-0048 behavior for declared reaction principals:
+            // existing trigger dispatch copied the caller's idempotency key.
             ctx.idempotency_key = invoking_ctx.idempotency_key.clone();
             if let Some(security_ctx) = ctx.security_ctx.as_mut() {
                 security_ctx.context_attrs.insert(

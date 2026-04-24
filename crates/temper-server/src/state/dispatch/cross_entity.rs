@@ -1,5 +1,6 @@
 use crate::request_context::AgentContext;
 use temper_runtime::tenant::TenantId;
+use tracing::Instrument;
 
 impl crate::state::ServerState {
     /// Pre-resolve cross-entity state guards for an action.
@@ -194,78 +195,103 @@ impl crate::state::ServerState {
             let parent_params = action_params.clone();
             let agent = agent_ctx.clone();
             let copied_fields = req.copied_field_values.clone();
+            let workflow_root_entity_type = agent
+                .workflow_root_entity_type
+                .clone()
+                .unwrap_or_else(|| parent_t.clone());
+            let workflow_root_entity_id = agent
+                .workflow_root_entity_id
+                .clone()
+                .unwrap_or_else(|| parent_i.clone());
+            let workflow_run_id = agent
+                .workflow_run_id
+                .clone()
+                .unwrap_or_else(|| format!("{parent_t}:{parent_i}"));
+            let span = tracing::info_span!(
+                "dispatch.background_spawn_entity",
+                workflow.root_entity_type = %workflow_root_entity_type,
+                workflow.root_entity_id = %workflow_root_entity_id,
+                workflow.run_id = %workflow_run_id,
+                parent_type = %parent_t,
+                parent_id = %parent_i,
+                child_type = %child_type,
+                child_id = %child_id,
+            );
 
-            tokio::spawn(async move {
-                // determinism-ok: spawn dispatch is a background side-effect
-                let mut parent_fields = serde_json::Map::new();
-                parent_fields.insert(
-                    "parent_type".to_string(),
-                    serde_json::Value::String(parent_t.clone()),
-                );
-                parent_fields.insert(
-                    "parent_id".to_string(),
-                    serde_json::Value::String(parent_i.clone()),
-                );
-                parent_fields.insert(
-                    format!("{}_id", to_snake_case(&parent_t)),
-                    serde_json::Value::String(parent_i.clone()),
-                );
-                let initial_fields = serde_json::Value::Object(parent_fields.clone());
+            tokio::spawn(
+                async move {
+                    // determinism-ok: spawn dispatch is a background side-effect
+                    let mut parent_fields = serde_json::Map::new();
+                    parent_fields.insert(
+                        "parent_type".to_string(),
+                        serde_json::Value::String(parent_t.clone()),
+                    );
+                    parent_fields.insert(
+                        "parent_id".to_string(),
+                        serde_json::Value::String(parent_i.clone()),
+                    );
+                    parent_fields.insert(
+                        format!("{}_id", to_snake_case(&parent_t)),
+                        serde_json::Value::String(parent_i.clone()),
+                    );
+                    let initial_fields = serde_json::Value::Object(parent_fields.clone());
 
-                match state
-                    .get_or_create_tenant_entity(&t, &child_type, &child_id, initial_fields)
-                    .await
-                {
-                    Ok(_) => {
-                        tracing::info!(
-                            parent_type = %parent_t,
-                            parent_id = %parent_i,
-                            child_type = %child_type,
-                            child_id = %child_id,
-                            "spawned child entity"
-                        );
+                    match state
+                        .get_or_create_tenant_entity(&t, &child_type, &child_id, initial_fields)
+                        .await
+                    {
+                        Ok(_) => {
+                            tracing::info!(
+                                parent_type = %parent_t,
+                                parent_id = %parent_i,
+                                child_type = %child_type,
+                                child_id = %child_id,
+                                "spawned child entity"
+                            );
 
-                        if let Some(action) = initial_action {
-                            let mut initial_action_params =
-                                parent_params.as_object().cloned().unwrap_or_default();
-                            for (key, value) in parent_fields {
-                                initial_action_params.insert(key, value);
-                            }
-                            // Merge copied field values (take precedence over parent params)
-                            for (key, value) in &copied_fields {
-                                initial_action_params.insert(key.clone(), value.clone());
-                            }
-                            if let Err(e) = state
-                                .dispatch_tenant_action(
-                                    &t,
-                                    &child_type,
-                                    &child_id,
-                                    &action,
-                                    serde_json::Value::Object(initial_action_params),
-                                    &agent,
-                                )
-                                .await
-                            {
-                                tracing::error!(
-                                    child_type = %child_type,
-                                    child_id = %child_id,
-                                    action = %action,
-                                    error = %e,
-                                    "failed to dispatch initial action on spawned entity"
-                                );
+                            if let Some(action) = initial_action {
+                                let mut initial_action_params =
+                                    parent_params.as_object().cloned().unwrap_or_default();
+                                for (key, value) in parent_fields {
+                                    initial_action_params.insert(key, value);
+                                }
+                                // Merge copied field values (take precedence over parent params)
+                                for (key, value) in &copied_fields {
+                                    initial_action_params.insert(key.clone(), value.clone());
+                                }
+                                if let Err(e) = state
+                                    .dispatch_tenant_action(
+                                        &t,
+                                        &child_type,
+                                        &child_id,
+                                        &action,
+                                        serde_json::Value::Object(initial_action_params),
+                                        &agent,
+                                    )
+                                    .await
+                                {
+                                    tracing::error!(
+                                        child_type = %child_type,
+                                        child_id = %child_id,
+                                        action = %action,
+                                        error = %e,
+                                        "failed to dispatch initial action on spawned entity"
+                                    );
+                                }
                             }
                         }
-                    }
-                    Err(e) => {
-                        tracing::error!(
-                            child_type = %child_type,
-                            child_id = %child_id,
-                            error = %e,
-                            "failed to spawn child entity"
-                        );
+                        Err(e) => {
+                            tracing::error!(
+                                child_type = %child_type,
+                                child_id = %child_id,
+                                error = %e,
+                                "failed to spawn child entity"
+                            );
+                        }
                     }
                 }
-            });
+                .instrument(span),
+            );
         }
     }
 }
