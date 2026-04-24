@@ -144,6 +144,8 @@ pub enum Effect {
     DecrementCounter(String),
     /// Decrement a named counter variable by a numeric action parameter.
     DecrementCounterByParam { var: String, param: String },
+    /// Set a named counter variable from an action param.
+    SetCounterFromParam { var: String, param: String },
     /// Set a named boolean variable.
     SetBool { var: String, value: bool },
     /// Emit a named event.

@@ -467,7 +467,8 @@ impl crate::state::ServerState {
             let entity_type = ctx.entity_type.to_string();
             let entity_id = ctx.entity_id.to_string();
             let status = response.state.status.clone();
-            let fields = response.state.fields.clone();
+            let fields =
+                self.query_projection_fields(ctx.tenant, ctx.entity_type, &response.state.fields);
             let sequence_nr = response.state.sequence_nr;
             let result = if status == "Deleted" {
                 store

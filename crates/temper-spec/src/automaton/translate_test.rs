@@ -124,6 +124,30 @@ effect = [
 }
 
 #[test]
+fn translate_set_counter_from_param_effects() {
+    let spec = r#"
+[automaton]
+name = "Upload"
+states = ["Pending", "Ready"]
+initial = "Pending"
+
+[[action]]
+name = "Complete"
+from = ["Pending"]
+to = "Ready"
+effect = [{ type = "set_counter_from_param", var = "size_bytes", param = "payload_size" }]
+"#;
+    let automaton = parse_automaton(spec).unwrap();
+    let actions = translate_actions(&automaton);
+    let effects = &actions[0].effects;
+    assert_eq!(effects.len(), 1);
+    assert!(matches!(
+        &effects[0],
+        ResolvedEffect::SetCounterFromParam { var, param } if var == "size_bytes" && param == "payload_size"
+    ));
+}
+
+#[test]
 fn translate_name_heuristic_additem() {
     let spec = r#"
 [automaton]
@@ -243,6 +267,13 @@ from = ["Draft"]
 fn is_verifiable_classification() {
     assert!(ResolvedEffect::IncrementCounter("x".into()).is_verifiable());
     assert!(ResolvedEffect::DecrementCounter("x".into()).is_verifiable());
+    assert!(
+        !ResolvedEffect::SetCounterFromParam {
+            var: "x".into(),
+            param: "value".into(),
+        }
+        .is_verifiable()
+    );
     assert!(
         ResolvedEffect::SetBool {
             var: "x".into(),

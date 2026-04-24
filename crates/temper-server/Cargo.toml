@@ -51,6 +51,7 @@ ed25519-dalek = "2.1"
 futures-util = "0.3"
 lru = { workspace = true }
 sha2 = { workspace = true }
+hmac = "0.12"
 libc = { workspace = true }
 # ADR-0055: CPU profile capture. pprof-rs is used because crates.io
 # `datadog-profiling` is currently an empty placeholder (see ADR for
@@ -62,6 +63,8 @@ tokio-test = { workspace = true }
 criterion = { workspace = true }
 tokio = { workspace = true, features = ["full"] }
 wiremock = { workspace = true }
+tracing-subscriber = { workspace = true }
+opentelemetry_sdk = { workspace = true }
 temper-store-sim = { workspace = true }
 temper-server = { path = ".", features = ["sim"] }
 temper-wasm = { workspace = true, features = ["test-helpers"] }

@@ -89,6 +89,11 @@ pub struct StateVar {
     /// and the sweeper deletes rows past their expiry.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub overflow_ttl_seconds: Option<u64>,
+    /// Optional query-plane override. When `Some(false)`, the field remains in
+    /// entity state but is omitted from the durable field index used for OData
+    /// collection filtering.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub query_indexed: Option<bool>,
 }
 
 /// An action in the I/O Automaton.
@@ -191,6 +196,9 @@ pub enum Effect {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         amount: Option<String>,
     },
+    /// Set a counter variable from an action param.
+    #[serde(rename = "set_counter_from_param")]
+    SetCounterFromParam { var: String, param: String },
     /// Set a boolean variable.
     #[serde(rename = "set_bool")]
     SetBool { var: String, value: bool },

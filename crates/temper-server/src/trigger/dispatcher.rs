@@ -132,7 +132,7 @@ impl ReactionDispatcher {
             );
 
             let effective_params =
-                super::params::build_effective_params(&rule.then, fields, &rule.name);
+                super::params::build_effective_params(&rule.then, entity_id, fields, &rule.name);
 
             // ADR-0046: resolve the dispatch principal. If the rule declares
             // an explicit `principal`, build a synthetic service identity;

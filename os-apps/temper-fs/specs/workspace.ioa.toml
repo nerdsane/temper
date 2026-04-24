@@ -33,6 +33,7 @@ kind = "input"
 from = ["Active"]
 to = "Active"
 params = ["name", "quota_limit"]
+effect = [{ type = "set_counter_from_param", var = "quota_limit", param = "quota_limit" }]
 hint = "Create a new workspace with a name and storage quota."
 
 [[action]]
@@ -41,6 +42,7 @@ kind = "input"
 from = ["Active"]
 to = "Active"
 params = ["quota_limit"]
+effect = [{ type = "set_counter_from_param", var = "quota_limit", param = "quota_limit" }]
 hint = "Update the workspace storage quota limit."
 
 [[action]]

@@ -13,6 +13,29 @@ use temper_spec::csdl::parse_csdl;
 
 const CSDL_XML: &str = include_str!("../../../test-fixtures/specs/model.csdl.xml");
 const ORDER_IOA: &str = include_str!("../../../test-fixtures/specs/order.ioa.toml");
+const PROJECTION_AWARE_ORDER_IOA: &str = r#"
+[automaton]
+name = "Order"
+states = ["Draft"]
+initial = "Draft"
+
+[[state]]
+name = "Title"
+type = "string"
+initial = ""
+
+[[state]]
+name = "progress_token"
+type = "counter"
+initial = "0"
+query_indexed = false
+
+[[action]]
+name = "Touch"
+from = ["Draft"]
+to = "Draft"
+effect = [{ type = "increment", var = "progress_token" }]
+"#;
 
 fn build_state_with_turso(system_name: &str, store: TursoEventStore) -> ServerState {
     let mut registry = SpecRegistry::new();
@@ -22,6 +45,24 @@ fn build_state_with_turso(system_name: &str, store: TursoEventStore) -> ServerSt
         csdl,
         CSDL_XML.to_string(),
         &[("Order", ORDER_IOA)],
+    );
+
+    let mut state = ServerState::from_registry(ActorSystem::new(system_name), registry);
+    state.event_store = Some(Arc::new(ServerEventStore::Turso(store)));
+    state
+}
+
+fn build_projection_aware_state_with_turso(
+    system_name: &str,
+    store: TursoEventStore,
+) -> ServerState {
+    let mut registry = SpecRegistry::new();
+    let csdl = parse_csdl(CSDL_XML).expect("CSDL should parse");
+    registry.register_tenant(
+        "tenant-a",
+        csdl,
+        CSDL_XML.to_string(),
+        &[("Order", PROJECTION_AWARE_ORDER_IOA)],
     );
 
     let mut state = ServerState::from_registry(ActorSystem::new(system_name), registry);
@@ -207,6 +248,76 @@ async fn startup_backfill_rebuilds_query_projection_without_hydrating_actors() {
         .await
         .expect("projected entity counts after backfill");
     assert_eq!(counts, vec![("tenant-a".to_string(), 1)]);
+
+    let _ = std::fs::remove_file(db_path);
+}
+
+#[tokio::test]
+async fn query_projection_excludes_fields_marked_not_query_indexed() {
+    let db_path = std::env::temp_dir().join(format!(
+        "temper-query-projection-opt-out-{}.db",
+        uuid::Uuid::new_v4()
+    ));
+    let db_url = format!("file:{}", db_path.display());
+    let store = TursoEventStore::new(&db_url, None)
+        .await
+        .expect("create local turso db");
+
+    let tenant = TenantId::new("tenant-a");
+    let entity_type = "Order";
+    let entity_id = "ord-projection-opt-out";
+
+    let state =
+        build_projection_aware_state_with_turso("test-query-projection-opt-out", store.clone());
+    state
+        .get_or_create_tenant_entity(
+            &tenant,
+            entity_type,
+            entity_id,
+            serde_json::json!({"Title": "Projection Lifecycle"}),
+        )
+        .await
+        .expect("create entity");
+    let response = state
+        .dispatch_tenant_action(
+            &tenant,
+            entity_type,
+            entity_id,
+            "Touch",
+            serde_json::json!({}),
+            &AgentContext::default(),
+        )
+        .await
+        .expect("dispatch Touch");
+    assert!(
+        response.success,
+        "Touch should succeed for projection opt-out test"
+    );
+
+    let title_ids = store
+        .query_field_index(
+            tenant.as_str(),
+            entity_type,
+            "field_name = ?3 AND field_value = ?4",
+            vec!["Title".to_string(), "Projection Lifecycle".to_string()],
+        )
+        .await
+        .expect("query title field");
+    assert_eq!(title_ids, vec![entity_id.to_string()]);
+
+    let progress_ids = store
+        .query_field_index(
+            tenant.as_str(),
+            entity_type,
+            "field_name = ?3 AND field_value = ?4",
+            vec!["progress_token".to_string(), "1".to_string()],
+        )
+        .await
+        .expect("query opt-out field");
+    assert!(
+        progress_ids.is_empty(),
+        "fields marked query_indexed=false should not appear in the field index"
+    );
 
     let _ = std::fs::remove_file(db_path);
 }

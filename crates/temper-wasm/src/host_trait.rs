@@ -23,6 +23,20 @@ use temper_observe::wide_event::{self, EventKind, WideEvent};
 ///
 /// Production uses real HTTP + secret store. Simulation uses canned
 /// responses for deterministic testing.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct HttpBatchRequest {
+    pub method: String,
+    pub url: String,
+    pub headers: Vec<(String, String)>,
+    pub body: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct HttpBatchResponse {
+    pub status: u16,
+    pub body: String,
+}
+
 #[async_trait]
 pub trait WasmHost: Send + Sync {
     /// Make an HTTP request. Returns (status_code, response_body).
@@ -33,6 +47,25 @@ pub trait WasmHost: Send + Sync {
         headers: &[(String, String)],
         body: &str,
     ) -> Result<(u16, String), String>;
+
+    /// Make multiple HTTP requests concurrently. Returns responses in request order.
+    async fn http_call_batch(
+        &self,
+        requests: &[HttpBatchRequest],
+    ) -> Result<Vec<HttpBatchResponse>, String> {
+        let results = futures_util::future::join_all(requests.iter().map(|request| async {
+            self.http_call(
+                &request.method,
+                &request.url,
+                request.headers.as_slice(),
+                &request.body,
+            )
+            .await
+            .map(|(status, body)| HttpBatchResponse { status, body })
+        }))
+        .await;
+        results.into_iter().collect()
+    }
 
     /// Retrieve a secret by key.
     fn get_secret(&self, key: &str) -> Result<String, String>;
@@ -158,6 +191,20 @@ pub type BinaryHttpInterceptorFn = Arc<
         + Sync,
 >;
 
+/// Optional callback that can short-circuit text HTTP requests.
+///
+/// This lets the server handle specific local transport paths directly
+/// (for example, internal OData `$value` reads/writes) without going back
+/// through loopback HTTP when the guest expects a UTF-8 body.
+pub type TextHttpInterceptorFn = Arc<
+    dyn Fn(String, String, Vec<(String, String)>, String) -> TextHttpInterceptorFuture
+        + Send
+        + Sync,
+>;
+
+type TextHttpInterceptorFuture =
+    Pin<Box<dyn Future<Output = Option<Result<(u16, String), String>>> + Send>>;
+
 /// Production host: real HTTP calls via reqwest, real secrets.
 pub struct ProductionWasmHost {
     /// HTTP client for making real requests.
@@ -176,6 +223,8 @@ pub struct ProductionWasmHost {
     trace_id: Option<String>,
     /// Optional short-circuit for binary HTTP calls.
     binary_http_interceptor: Option<BinaryHttpInterceptorFn>,
+    /// Optional short-circuit for text HTTP calls.
+    text_http_interceptor: Option<TextHttpInterceptorFn>,
     /// Invocation context for auto-enriching guest telemetry.
     invocation_context: Option<WasmInvocationContext>,
 }
@@ -307,6 +356,7 @@ impl ProductionWasmHost {
             progress_emitter: None,
             trace_id: None,
             binary_http_interceptor: None,
+            text_http_interceptor: None,
             invocation_context: None,
         }
     }
@@ -352,6 +402,12 @@ impl ProductionWasmHost {
     /// Create with a binary HTTP interceptor for local fast paths.
     pub fn with_binary_http_interceptor(mut self, interceptor: BinaryHttpInterceptorFn) -> Self {
         self.binary_http_interceptor = Some(interceptor);
+        self
+    }
+
+    /// Create with a text HTTP interceptor for local fast paths.
+    pub fn with_text_http_interceptor(mut self, interceptor: TextHttpInterceptorFn) -> Self {
+        self.text_http_interceptor = Some(interceptor);
         self
     }
 
@@ -453,6 +509,17 @@ impl WasmHost for ProductionWasmHost {
         body: &str,
     ) -> Result<(u16, String), String> {
         let started = Instant::now();
+        if let Some(interceptor) = &self.text_http_interceptor
+            && let Some(result) = interceptor(
+                method.to_string(),
+                url.to_string(),
+                headers.to_vec(),
+                body.to_string(),
+            )
+            .await
+        {
+            return result;
+        }
         // Strip Temper span hint headers (X-Temper-Span-*) before the request
         // is built, and capture them for the local tracing span. See
         // ADR-0037: WASM guests annotate outgoing calls with
@@ -2276,6 +2343,84 @@ mod tests {
                 "gen_ai.completion".to_string(),
                 "/content/0/text".to_string(),
             )],
+        );
+    }
+
+    #[test]
+    fn default_http_call_batch_runs_requests_concurrently() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::time::Duration;
+
+        struct ConcurrentBatchHost {
+            current_in_flight: AtomicUsize,
+            max_in_flight: AtomicUsize,
+        }
+
+        #[async_trait]
+        impl WasmHost for ConcurrentBatchHost {
+            async fn http_call(
+                &self,
+                method: &str,
+                url: &str,
+                _headers: &[(String, String)],
+                _body: &str,
+            ) -> Result<(u16, String), String> {
+                let in_flight = self.current_in_flight.fetch_add(1, Ordering::SeqCst) + 1;
+                self.max_in_flight.fetch_max(in_flight, Ordering::SeqCst);
+                tokio::time::sleep(Duration::from_millis(25)).await;
+                self.current_in_flight.fetch_sub(1, Ordering::SeqCst);
+                Ok((200, format!("{method} {url}")))
+            }
+
+            async fn http_call_binary(
+                &self,
+                _method: &str,
+                _url: &str,
+                _headers: &[(String, String)],
+                _body: &[u8],
+            ) -> Result<(u16, Vec<u8>), String> {
+                Err("binary calls not used in this test".to_string())
+            }
+
+            fn get_secret(&self, _key: &str) -> Result<String, String> {
+                Err("secrets not used in this test".to_string())
+            }
+
+            fn log(&self, _level: &str, _message: &str) {}
+        }
+
+        let host = ConcurrentBatchHost {
+            current_in_flight: AtomicUsize::new(0),
+            max_in_flight: AtomicUsize::new(0),
+        };
+
+        let responses = tokio_test::block_on(host.http_call_batch(&[
+            HttpBatchRequest {
+                method: "GET".to_string(),
+                url: "https://example.com/a".to_string(),
+                headers: vec![],
+                body: String::new(),
+            },
+            HttpBatchRequest {
+                method: "GET".to_string(),
+                url: "https://example.com/b".to_string(),
+                headers: vec![],
+                body: String::new(),
+            },
+            HttpBatchRequest {
+                method: "GET".to_string(),
+                url: "https://example.com/c".to_string(),
+                headers: vec![],
+                body: String::new(),
+            },
+        ]))
+        .expect("batch call should succeed");
+
+        assert_eq!(responses.len(), 3);
+        assert_eq!(responses[0].body, "GET https://example.com/a");
+        assert!(
+            host.max_in_flight.load(Ordering::SeqCst) > 1,
+            "default batch implementation should overlap independent requests"
         );
     }
 }

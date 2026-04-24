@@ -1445,6 +1445,11 @@ async fn install_os_app_without_dependencies(
         state.server.rebuild_reaction_dispatcher();
     }
 
+    // App installs can add or change cross-entity reactions. Refresh the live
+    // dispatcher immediately so the newly registered tenant config takes effect
+    // without requiring a process restart or a separate specs reload.
+    state.server.rebuild_reaction_dispatcher();
+
     // ── Step 3: Load Cedar policies into memory. ────────────────────
     if let Some(ref policy_text) = combined_policy {
         if let Err(e) = state

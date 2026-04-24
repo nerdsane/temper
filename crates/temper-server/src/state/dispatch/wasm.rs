@@ -1,9 +1,6 @@
 use std::sync::Arc;
 
-use opentelemetry::{
-    Context as OtelContext,
-    trace::{Status, TraceContextExt},
-};
+use opentelemetry::trace::{Status, TraceContextExt};
 use serde_json::{Value, json};
 use tracing::{Instrument, Span, instrument};
 use tracing_opentelemetry::OpenTelemetrySpanExt;
@@ -15,8 +12,8 @@ use crate::state::sim_now;
 use temper_runtime::tenant::TenantId;
 use temper_wasm::{
     AuthorizedWasmHost, BinaryHttpInterceptorFn, ProductionWasmHost, ProgressEmitterFn,
-    StreamRegistry, WasmAuthzContext, WasmAuthzGate, WasmHost, WasmInvocationContext,
-    WasmResourceLimits,
+    StreamRegistry, TextHttpInterceptorFn, WasmAuthzContext, WasmAuthzGate, WasmHost,
+    WasmInvocationContext, WasmResourceLimits,
 };
 
 use super::{
@@ -114,6 +111,93 @@ fn internal_api_base_url(state: &crate::state::ServerState) -> Option<String> {
         })
 }
 
+fn parse_internal_file_value_request(base_url: &str, url: &str) -> Option<String> {
+    let prefix = format!("{}/tdata/Files('", base_url.trim_end_matches('/'));
+    let remainder = url.strip_prefix(&prefix)?;
+    let file_id = remainder.strip_suffix("')/$value")?;
+    Some(file_id.replace("''", "'"))
+}
+
+fn header_value<'a>(headers: &'a [(String, String)], name: &str) -> Option<&'a str> {
+    headers
+        .iter()
+        .find(|(key, _)| key.eq_ignore_ascii_case(name))
+        .map(|(_, value)| value.as_str())
+}
+
+fn local_file_value_text_interceptor(
+    state: crate::state::ServerState,
+    tenant: TenantId,
+    agent_ctx: AgentContext,
+    temper_api_url: Option<String>,
+) -> Option<TextHttpInterceptorFn> {
+    let base_url = temper_api_url?.trim_end_matches('/').to_string();
+    let is_loopback = base_url.starts_with("http://127.0.0.1:")
+        || base_url.starts_with("http://localhost:")
+        || base_url.starts_with("http://[::1]:")
+        || base_url.starts_with("https://localhost:");
+    if !is_loopback {
+        return None;
+    }
+
+    Some(Arc::new(
+        move |method: String, url: String, headers: Vec<(String, String)>, body: String| {
+            let state = state.clone();
+            let tenant = tenant.clone();
+            let agent_ctx = agent_ctx.clone();
+            let base_url = base_url.clone();
+            Box::pin(async move {
+                let file_id = match parse_internal_file_value_request(&base_url, &url) {
+                    Some(file_id) => file_id,
+                    None => return None,
+                };
+
+                tracing::info!(
+                    method = %method,
+                    file_id = %file_id,
+                    "handling internal File $value request without loopback HTTP"
+                );
+
+                match method.as_str() {
+                    "GET" => {
+                        let (status, bytes) = match state
+                            .get_file_stream_content(&tenant, &file_id, &agent_ctx)
+                            .await
+                        {
+                            Ok(result) => result,
+                            Err(error) => return Some(Err(error)),
+                        };
+                        if status != 200 {
+                            return Some(Ok((status, String::new())));
+                        }
+                        match String::from_utf8(bytes) {
+                            Ok(text) => Some(Ok((200, text))),
+                            Err(_) => None,
+                        }
+                    }
+                    "PUT" => {
+                        let content_type = header_value(&headers, "content-type")
+                            .unwrap_or("application/octet-stream");
+                        Some(
+                            state
+                                .put_file_stream_content(
+                                    &tenant,
+                                    &file_id,
+                                    body.as_bytes(),
+                                    content_type,
+                                    &agent_ctx,
+                                )
+                                .await
+                                .map(|_| (204, String::new())),
+                        )
+                    }
+                    _ => None,
+                }
+            })
+        },
+    ))
+}
+
 impl crate::state::ServerState {
     #[instrument(skip_all, fields(otel.name = %format_args!("{}.{}.integrations", req.entity_type, req.action), tenant = %req.tenant, entity_type = req.entity_type, entity_id = req.entity_id, action_name = req.action))]
     pub(crate) async fn dispatch_wasm_integrations_internal(
@@ -206,9 +290,10 @@ impl crate::state::ServerState {
             return Ok(None);
         };
 
-        // Keep LLM integrations on their own root trace so LLM Observability
-        // lands on the content-bearing LLM span rather than the parent workflow
-        // span. Integrations opt in via `llm = true` in the IOA spec.
+        // LLM integrations get a dedicated child span with the `gen_ai.*`
+        // attributes so LLM Observability lands on the content-bearing model
+        // call while the dispatch trace stays continuous. Integrations opt in
+        // via `llm = true` in the IOA spec.
         let llm_root_span = if integration.llm {
             Some(build_llm_root_span(
                 ctx,
@@ -295,6 +380,12 @@ impl crate::state::ServerState {
             self.platform_persistent_store().cloned(),
             tenant_secrets.get("blob_endpoint").cloned(),
         );
+        let local_file_interceptor = local_file_value_text_interceptor(
+            self.clone(),
+            ctx.entity_ref.tenant.clone(),
+            ctx.agent_ctx.clone(),
+            tenant_secrets.get("temper_api_url").cloned(),
+        );
         // Use integration config timeout for both WASM execution and HTTP client.
         //
         // When no explicit `timeout_secs` is configured, fall back to the
@@ -356,6 +447,10 @@ impl crate::state::ServerState {
                 .with_internal_api_base_url(internal_api_url)
                 .with_internal_api_key(internal_api_key)
                 .with_invocation_context(host_invocation_context)
+                .with_text_http_interceptor(
+                    local_file_interceptor
+                        .unwrap_or_else(|| Arc::new(|_, _, _, _| Box::pin(async { None }))),
+                )
                 .with_trace_id(
                     current_otel_trace_id(active_span).or_else(|| ctx.agent_ctx.trace_id.clone()),
                 ),
@@ -1246,7 +1341,6 @@ fn build_llm_root_span(
         .unwrap_or(ctx.entity_ref.entity_id);
 
     let span = tracing::info_span!(
-        parent: None,
         "llm_caller.trace",
         otel.name = %format!("wasm:{module_name}"),
         integration = %integration.name,
@@ -1266,7 +1360,6 @@ fn build_llm_root_span(
         error.message = tracing::field::Empty,
         exception.message = tracing::field::Empty,
     );
-    span.set_parent(OtelContext::new());
     span
 }
 
@@ -1482,5 +1575,93 @@ mod tests {
             llm_model_for_observability(&entity_state, &callback_params),
             "gpt-5.4"
         );
+    }
+
+    #[test]
+    fn parse_internal_file_value_request_matches_only_value_paths() {
+        assert_eq!(
+            parse_internal_file_value_request(
+                "http://127.0.0.1:3467",
+                "http://127.0.0.1:3467/tdata/Files('fl-123')/$value"
+            )
+            .as_deref(),
+            Some("fl-123")
+        );
+        assert!(
+            parse_internal_file_value_request(
+                "http://127.0.0.1:3467",
+                "http://127.0.0.1:3467/tdata/Files('fl-123')"
+            )
+            .is_none()
+        );
+    }
+
+    #[test]
+    fn llm_root_span_stays_on_active_trace() {
+        use opentelemetry::trace::{TraceContextExt, TracerProvider as _};
+        use opentelemetry_sdk::trace::SdkTracerProvider;
+        use tracing_subscriber::prelude::*;
+
+        let tracer_provider = SdkTracerProvider::builder().build();
+        let subscriber = tracing_subscriber::registry().with(
+            tracing_opentelemetry::layer()
+                .with_tracer(tracer_provider.tracer("temper-server-llm-root-test")),
+        );
+        let _subscriber_guard = tracing::subscriber::set_default(subscriber);
+
+        let tenant = TenantId::default();
+        let entity_state = EntityState {
+            entity_type: "Session".to_string(),
+            entity_id: "ss-1".to_string(),
+            status: "CallingProvider".to_string(),
+            item_count: 0,
+            counters: std::collections::BTreeMap::new(),
+            booleans: std::collections::BTreeMap::new(),
+            lists: std::collections::BTreeMap::new(),
+            fields: json!({"provider": "openai", "model": "gpt-5.4"}),
+            events: std::collections::VecDeque::new(),
+            total_event_count: 0,
+            sequence_nr: 0,
+        };
+        let integration = temper_spec::automaton::Integration {
+            name: "provider_caller".to_string(),
+            trigger: "call_provider".to_string(),
+            integration_type: "wasm".to_string(),
+            module: Some("provider_caller".to_string()),
+            config: std::collections::BTreeMap::new(),
+            on_success: None,
+            on_failure: None,
+            llm: true,
+        };
+        let agent_ctx = AgentContext {
+            session_id: Some("ss-1".to_string()),
+            ..AgentContext::default()
+        };
+
+        let parent = tracing::info_span!("dispatch.dispatch_tenant_action_core");
+        let expected_trace_id = parent.in_scope(|| {
+            tracing::Span::current()
+                .context()
+                .span()
+                .span_context()
+                .trace_id()
+                .to_string()
+        });
+        let llm_trace_id = parent.in_scope(|| {
+            let ctx = WasmDispatchCtx {
+                entity_ref: WasmEntityRef {
+                    tenant: &tenant,
+                    entity_type: "Session",
+                    entity_id: "ss-1",
+                },
+                action: "ContextReady",
+                agent_ctx: &agent_ctx,
+                mode: WasmDispatchMode::Inline,
+            };
+            let span = build_llm_root_span(&ctx, &integration, &entity_state, "provider_caller");
+            span.context().span().span_context().trace_id().to_string()
+        });
+
+        assert_eq!(llm_trace_id, expected_trace_id);
     }
 }

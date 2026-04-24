@@ -135,6 +135,7 @@ fn convert_effect(effect: ResolvedEffect) -> ModelEffect {
         ResolvedEffect::ListRemoveAt(var) => ModelEffect::ListRemoveAt(var),
         // Runtime-only effects should have been filtered by is_verifiable()
         ResolvedEffect::Emit(_)
+        | ResolvedEffect::SetCounterFromParam { .. }
         | ResolvedEffect::Trigger(_)
         | ResolvedEffect::IncrementCounterByParam { .. }
         | ResolvedEffect::DecrementCounterByParam { .. }
