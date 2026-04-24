@@ -59,6 +59,8 @@ pub enum ResolvedEffect {
     IncrementCounter(String),
     /// Decrement a counter variable by 1.
     DecrementCounter(String),
+    /// Set a counter variable from an action param.
+    SetCounterFromParam { var: String, param: String },
     /// Set a boolean variable.
     SetBool { var: String, value: bool },
     /// Append a value to a list variable.
@@ -244,6 +246,10 @@ fn translate_single_effect(effect: &Effect) -> ResolvedEffect {
     match effect {
         Effect::Increment { var } => ResolvedEffect::IncrementCounter(var.clone()),
         Effect::Decrement { var } => ResolvedEffect::DecrementCounter(var.clone()),
+        Effect::SetCounterFromParam { var, param } => ResolvedEffect::SetCounterFromParam {
+            var: var.clone(),
+            param: param.clone(),
+        },
         Effect::SetBool { var, value } => ResolvedEffect::SetBool {
             var: var.clone(),
             value: *value,
