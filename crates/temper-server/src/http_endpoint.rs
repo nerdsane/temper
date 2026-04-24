@@ -338,19 +338,64 @@ fn match_path_prefix(template: &str, path: &str) -> Option<BTreeMap<String, Stri
         match (t_seg, p_seg) {
             (None, _) => return Some(params),
             (Some(""), Some("")) => continue, // leading `/` aligns
-            (Some(t), Some(p)) => {
-                if let Some(name) = t.strip_prefix('{').and_then(|s| s.strip_suffix('}')) {
-                    if p.is_empty() {
-                        return None;
+            (Some(t), Some(p)) => match match_segment(t, p) {
+                Some(extracted) => {
+                    for (k, v) in extracted {
+                        params.insert(k, v);
                     }
-                    params.insert(name.to_string(), p.to_string());
-                } else if t != p {
-                    return None;
                 }
-            }
+                None => return None,
+            },
             (Some(_), None) => return None,
         }
     }
+}
+
+/// Match a single template segment against a single path segment.
+/// Returns the extracted `{name}` params on success, `None` on
+/// mismatch.
+///
+/// Supports two shapes:
+///   1. Pure literal:    `repos` matches only `repos`.
+///   2. Templated:       exactly one `{name}` placeholder, with
+///                        optional literal prefix + suffix.
+///                        `{owner}` matches any non-empty segment.
+///                        `{repo}.git` matches segments ending in
+///                        `.git`, with the prefix captured as `repo`.
+///                        `v{ver}` matches `v1`, `v2.0`, etc.
+fn match_segment(template: &str, path: &str) -> Option<Vec<(String, String)>> {
+    if !template.contains('{') {
+        return if template == path {
+            Some(Vec::new())
+        } else {
+            None
+        };
+    }
+    // Reject multi-placeholder segments. If the template has more
+    // than one `{`, callers should register multiple sibling prefixes
+    // or split the segment differently.
+    if template.matches('{').count() > 1 {
+        return None;
+    }
+    let brace_open = template.find('{')?;
+    let brace_close = template.find('}')?;
+    if brace_close <= brace_open {
+        return None;
+    }
+    let prefix = &template[..brace_open];
+    let name = &template[brace_open + 1..brace_close];
+    let suffix = &template[brace_close + 1..];
+    if !path.starts_with(prefix) || !path.ends_with(suffix) {
+        return None;
+    }
+    if path.len() < prefix.len() + suffix.len() {
+        return None;
+    }
+    let value = &path[prefix.len()..path.len() - suffix.len()];
+    if value.is_empty() {
+        return None;
+    }
+    Some(vec![(name.to_string(), value.to_string())])
 }
 
 #[cfg(test)]
@@ -558,25 +603,58 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn mixed_templated_segment_not_supported() {
-        // Per ADR-0056, only whole-segment templates are supported.
-        // `{repo}.git` is NOT a template segment — it's a literal
-        // that starts with `{`. The table must reject the path that
-        // only differs by value.
+    async fn templated_segment_with_suffix() {
+        // `{repo}.git` matches `widgets.git`; `repo` captures `widgets`.
         let table = HttpEndpointTable::new();
         table
             .replace(vec![route(
                 "he-1",
-                "/repos/{owner}/{repo}.git",
+                "/{owner}/{repo}.git/info/refs",
+                &["GET"],
+                "git_upload_pack",
+            )])
+            .await;
+        let m = table
+            .match_request("GET", "/acme/widgets.git/info/refs")
+            .await
+            .unwrap();
+        assert_eq!(m.params.get("owner").unwrap(), "acme");
+        assert_eq!(m.params.get("repo").unwrap(), "widgets");
+    }
+
+    #[tokio::test]
+    async fn templated_segment_with_suffix_rejects_missing_suffix() {
+        let table = HttpEndpointTable::new();
+        table
+            .replace(vec![route(
+                "he-1",
+                "/{owner}/{repo}.git/info/refs",
+                &["GET"],
+                "git_upload_pack",
+            )])
+            .await;
+        // Path is missing the `.git` suffix → no match.
+        assert!(
+            table
+                .match_request("GET", "/acme/widgets/info/refs")
+                .await
+                .is_none()
+        );
+    }
+
+    #[tokio::test]
+    async fn multiple_placeholders_in_segment_rejected() {
+        let table = HttpEndpointTable::new();
+        table
+            .replace(vec![route(
+                "he-1",
+                "/{a}{b}",
                 &["GET"],
                 "bad",
             )])
             .await;
-        assert!(
-            table
-                .match_request("GET", "/repos/acme/widgets.git")
-                .await
-                .is_none()
-        );
+        // Multi-placeholder segments are intentionally unsupported —
+        // the extraction is ambiguous.
+        assert!(table.match_request("GET", "/foo").await.is_none());
     }
 }
