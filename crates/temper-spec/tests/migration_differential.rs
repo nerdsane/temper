@@ -162,7 +162,12 @@ fn git_show(repo_root: &str, sha: &str, path: &str) -> String {
     git_show_inner(repo_root, sha, path, None)
 }
 
-fn git_show_inner(repo_root: &str, sha: &str, path: &str, git_dir_override: Option<&str>) -> String {
+fn git_show_inner(
+    repo_root: &str,
+    sha: &str,
+    path: &str,
+    git_dir_override: Option<&str>,
+) -> String {
     let mut cmd = Command::new("git");
     if let Some(git_dir) = git_dir_override {
         cmd.env("GIT_DIR", git_dir);
