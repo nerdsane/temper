@@ -70,6 +70,51 @@ fn build_projection_aware_state_with_turso(
     state
 }
 
+async fn wait_for_query_projection_ids(
+    store: &TursoEventStore,
+    tenant: &str,
+    entity_type: &str,
+    field_name: &str,
+    field_value: &str,
+    expected: &[String],
+) -> Vec<String> {
+    let mut last = Vec::new();
+    for _ in 0..50 {
+        last = store
+            .query_field_index(
+                tenant,
+                entity_type,
+                "field_name = ?3 AND field_value = ?4",
+                vec![field_name.to_string(), field_value.to_string()],
+            )
+            .await
+            .expect("query projection");
+        if last == expected {
+            return last;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
+    last
+}
+
+async fn wait_for_projected_counts(
+    store: &TursoEventStore,
+    expected: &[(String, u64)],
+) -> Vec<(String, u64)> {
+    let mut last = Vec::new();
+    for _ in 0..50 {
+        last = store
+            .projected_entity_counts_by_tenant()
+            .await
+            .expect("projected entity counts");
+        if last == expected {
+            return last;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
+    last
+}
+
 #[tokio::test]
 async fn live_transitions_update_and_delete_query_projection() {
     let db_path = std::env::temp_dir().join(format!(
@@ -114,21 +159,18 @@ async fn live_transitions_update_and_delete_query_projection() {
         "AddItem should succeed for live projection test"
     );
 
-    let ids = observer_store
-        .query_field_index(
-            tenant.as_str(),
-            entity_type,
-            "field_name = ?3 AND field_value = ?4",
-            vec!["Title".to_string(), "Projection Lifecycle".to_string()],
-        )
-        .await
-        .expect("query projection");
+    let ids = wait_for_query_projection_ids(
+        &observer_store,
+        tenant.as_str(),
+        entity_type,
+        "Title",
+        "Projection Lifecycle",
+        &[entity_id.to_string()],
+    )
+    .await;
     assert_eq!(ids, vec![entity_id.to_string()]);
 
-    let counts = observer_store
-        .projected_entity_counts_by_tenant()
-        .await
-        .expect("projected entity counts");
+    let counts = wait_for_projected_counts(&observer_store, &[("tenant-a".to_string(), 1)]).await;
     assert_eq!(counts, vec![("tenant-a".to_string(), 1)]);
 
     state
@@ -136,24 +178,21 @@ async fn live_transitions_update_and_delete_query_projection() {
         .await
         .expect("delete entity");
 
-    let ids = observer_store
-        .query_field_index(
-            tenant.as_str(),
-            entity_type,
-            "field_name = ?3 AND field_value = ?4",
-            vec!["Title".to_string(), "Projection Lifecycle".to_string()],
-        )
-        .await
-        .expect("query projection after delete");
+    let ids = wait_for_query_projection_ids(
+        &observer_store,
+        tenant.as_str(),
+        entity_type,
+        "Title",
+        "Projection Lifecycle",
+        &[],
+    )
+    .await;
     assert!(
         ids.is_empty(),
         "deleted entities should be removed from the field index"
     );
 
-    let counts = observer_store
-        .projected_entity_counts_by_tenant()
-        .await
-        .expect("projected entity counts after delete");
+    let counts = wait_for_projected_counts(&observer_store, &[]).await;
     assert!(
         counts.is_empty(),
         "deleted entities should leave the catalog"
@@ -294,15 +333,15 @@ async fn query_projection_excludes_fields_marked_not_query_indexed() {
         "Touch should succeed for projection opt-out test"
     );
 
-    let title_ids = store
-        .query_field_index(
-            tenant.as_str(),
-            entity_type,
-            "field_name = ?3 AND field_value = ?4",
-            vec!["Title".to_string(), "Projection Lifecycle".to_string()],
-        )
-        .await
-        .expect("query title field");
+    let title_ids = wait_for_query_projection_ids(
+        &store,
+        tenant.as_str(),
+        entity_type,
+        "Title",
+        "Projection Lifecycle",
+        &[entity_id.to_string()],
+    )
+    .await;
     assert_eq!(title_ids, vec![entity_id.to_string()]);
 
     let progress_ids = store
