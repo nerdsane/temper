@@ -425,6 +425,88 @@ async fn query_projection_roundtrip_updates_catalog_and_field_index() {
 }
 
 #[tokio::test]
+async fn load_query_projection_fields_many_returns_requested_fields_by_entity() {
+    let store = make_store("query-projection-fields-many").await;
+    let tenant = format!("tenant-{}", uuid::Uuid::new_v4());
+
+    store
+        .upsert_query_projection(
+            &tenant,
+            "File",
+            "file-a",
+            "Ready",
+            &serde_json::json!({
+                "content_hash": "sha256:file-a",
+                "mime_type": "application/json",
+                "has_content": true,
+                "size_bytes": 12,
+            }),
+            1,
+        )
+        .await
+        .expect("upsert file-a projection");
+    store
+        .upsert_query_projection(
+            &tenant,
+            "File",
+            "file-b",
+            "Created",
+            &serde_json::json!({
+                "content_hash": "",
+                "mime_type": "text/plain",
+                "has_content": false,
+            }),
+            1,
+        )
+        .await
+        .expect("upsert file-b projection");
+
+    let rows = store
+        .load_query_projection_fields_many(
+            &tenant,
+            "File",
+            &[
+                "file-a".to_string(),
+                "file-b".to_string(),
+                "missing".to_string(),
+            ],
+            &["content_hash", "mime_type", "has_content"],
+        )
+        .await
+        .expect("load projected fields");
+
+    assert_eq!(rows.len(), 2);
+    assert_eq!(rows[0].entity_id, "file-a");
+    assert_eq!(rows[0].status, "Ready");
+    assert_eq!(
+        rows[0]
+            .fields
+            .get("content_hash")
+            .and_then(|v| v.as_deref()),
+        Some("sha256:file-a")
+    );
+    assert_eq!(
+        rows[0].fields.get("mime_type").and_then(|v| v.as_deref()),
+        Some("application/json")
+    );
+    assert_eq!(
+        rows[0].fields.get("has_content").and_then(|v| v.as_deref()),
+        Some("true")
+    );
+
+    assert_eq!(rows[1].entity_id, "file-b");
+    assert_eq!(rows[1].status, "Created");
+    assert_eq!(
+        rows[1].fields.get("has_content").and_then(|v| v.as_deref()),
+        Some("false")
+    );
+    assert!(
+        rows.iter().all(|row| row.entity_id != "missing"),
+        "missing entity ids should be omitted"
+    );
+}
+
+#[tokio::test]
 async fn load_wasm_module_metadata_all_tenants_returns_metadata_without_bulk_bytes() {
     let store = make_store("wasm-metadata").await;
 

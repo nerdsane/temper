@@ -146,6 +146,37 @@ effect = [{ type = "schedule", action = "Refresh", delay_seconds = 2700 }]
 }
 
 #[test]
+fn test_parse_set_counter_from_param_effect() {
+    let spec = r#"
+[automaton]
+name = "Upload"
+states = ["Pending", "Ready"]
+initial = "Pending"
+
+[[action]]
+name = "Complete"
+from = ["Pending"]
+to = "Ready"
+effect = [{ type = "set_counter_from_param", var = "size_bytes", param = "payload_size" }]
+"#;
+
+    let automaton = parse_automaton(spec).expect("should parse set_counter_from_param effect");
+    let complete = automaton
+        .actions
+        .iter()
+        .find(|action| action.name == "Complete")
+        .unwrap();
+    assert_eq!(complete.effect.len(), 1);
+    match &complete.effect[0] {
+        Effect::SetCounterFromParam { var, param } => {
+            assert_eq!(var, "size_bytes");
+            assert_eq!(param, "payload_size");
+        }
+        other => panic!("expected SetCounterFromParam, got: {other:?}"),
+    }
+}
+
+#[test]
 fn test_unknown_inline_effect_type_rejected() {
     let spec = r#"
 [automaton]

@@ -9,6 +9,7 @@ use std::collections::BTreeMap;
 
 use temper_runtime::tenant::TenantId;
 use temper_server::platform_store::{PlatformStore, SpecVerificationUpdate};
+use temper_server::reaction::types::ReactionRule;
 use temper_server::registry::{EntityLevelSummary, EntityVerificationResult, VerificationStatus};
 use temper_spec::automaton;
 use temper_spec::csdl::parse_csdl;
@@ -90,6 +91,7 @@ pub(crate) struct BootstrapTenantSpecsOptions<'a> {
     pub(crate) label: &'a str,
     pub(crate) verified_cache: &'a BTreeMap<String, (String, bool)>,
     pub(crate) cross_invariants_source: Option<&'a str>,
+    pub(crate) reactions: &'a [ReactionRule],
 }
 
 pub(crate) fn bootstrap_tenant_specs(
@@ -114,6 +116,7 @@ fn bootstrap_tenant_specs_inner(
         label,
         verified_cache,
         cross_invariants_source,
+        reactions,
     } = options;
 
     tracing::info!(
@@ -172,7 +175,7 @@ fn bootstrap_tenant_specs_inner(
                 csdl,
                 csdl_source.to_string(),
                 specs,
-                Vec::new(),
+                reactions.to_vec(),
                 cross_invariants_source.map(str::to_string),
                 merge,
             )
@@ -223,6 +226,7 @@ pub fn bootstrap_system_tenant(
             label: "System",
             verified_cache,
             cross_invariants_source: None,
+            reactions: &[],
         },
     )
 }
@@ -248,6 +252,7 @@ pub fn bootstrap_agent_specs(
             label: "Agent",
             verified_cache,
             cross_invariants_source: None,
+            reactions: &[],
         },
     )
 }

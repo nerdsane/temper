@@ -28,6 +28,21 @@ pub use types::*;
 
 use relations::{build_relation_graph, build_webhook_routes, synthesize_agent_trigger_reactions};
 
+fn merge_reaction_rules(
+    existing: &[ReactionRule],
+    incoming: Vec<ReactionRule>,
+) -> Vec<ReactionRule> {
+    let mut merged: BTreeMap<String, ReactionRule> = existing
+        .iter()
+        .cloned()
+        .map(|rule| (rule.name.clone(), rule))
+        .collect();
+    for rule in incoming {
+        merged.insert(rule.name.clone(), rule);
+    }
+    merged.into_values().collect()
+}
+
 /// Multi-tenant specification registry.
 ///
 /// Thread-safe for concurrent reads. Registration is done at startup;
@@ -180,7 +195,11 @@ impl SpecRegistry {
                 existing_config.csdl_xml = Arc::new(csdl_xml);
                 existing_config.entity_set_map = entity_set_map;
             }
-            existing_config.reactions = reactions;
+            existing_config.reactions = if merge {
+                merge_reaction_rules(&existing_config.reactions, reactions)
+            } else {
+                reactions
+            };
             existing_config.relation_graph = relation_graph;
             // In merge mode, an incoming payload without cross-invariants must
             // not wipe the ones previously loaded for the tenant — otherwise a

@@ -330,6 +330,30 @@ pub fn apply_effects(
                     state.item_count = state.item_count.saturating_sub(1);
                 }
             }
+            Effect::SetCounterFromParam { var, param } => {
+                let parsed = params
+                    .get(param)
+                    .and_then(|v| {
+                        v.as_u64()
+                            .or_else(|| v.as_i64().and_then(|n| u64::try_from(n).ok()))
+                    })
+                    .and_then(|n| usize::try_from(n).ok());
+                match parsed {
+                    Some(value) => {
+                        state.counters.insert(var.clone(), value);
+                        if var == "items" {
+                            state.item_count = value;
+                        }
+                    }
+                    None => tracing::warn!(
+                        entity_type = %state.entity_type,
+                        entity_id = %state.entity_id,
+                        counter = %var,
+                        param = %param,
+                        "set_counter_from_param skipped because param was missing or not a non-negative integer"
+                    ),
+                }
+            }
             Effect::SetBool { var, value } => {
                 state.booleans.insert(var.clone(), *value);
             }
@@ -999,6 +1023,58 @@ effect = [{ type = "schedule_at", field = "next_run_at", action = "Trigger" }]
         assert!(
             result.scheduled_actions.is_empty(),
             "missing field should produce no scheduled actions"
+        );
+    }
+
+    #[test]
+    fn test_set_counter_from_param_effect_sets_counter_and_field() {
+        let spec = r#"
+[automaton]
+name = "Upload"
+states = ["Pending", "Ready"]
+initial = "Pending"
+
+[[state]]
+name = "size_bytes"
+type = "counter"
+initial = "0"
+
+[[action]]
+name = "Complete"
+from = ["Pending"]
+to = "Ready"
+params = ["payload_size"]
+effect = [{ type = "set_counter_from_param", var = "size_bytes", param = "payload_size" }]
+"#;
+
+        let table = TransitionTable::from_ioa_source(spec);
+        let mut state = EntityState {
+            entity_type: "Upload".into(),
+            entity_id: "upload-1".into(),
+            status: "Pending".into(),
+            item_count: 0,
+            counters: std::collections::BTreeMap::new(),
+            booleans: std::collections::BTreeMap::new(),
+            lists: std::collections::BTreeMap::new(),
+            fields: serde_json::json!({}),
+            events: std::collections::VecDeque::new(),
+            total_event_count: 0,
+            sequence_nr: 0,
+        };
+
+        let result = process_action(
+            &mut state,
+            &table,
+            "Complete",
+            &serde_json::json!({ "payload_size": 4096 }),
+        );
+
+        assert!(result.success, "action should succeed");
+        assert_eq!(state.status, "Ready");
+        assert_eq!(state.counters.get("size_bytes"), Some(&4096));
+        assert_eq!(
+            state.fields.get("size_bytes").and_then(|v| v.as_u64()),
+            Some(4096)
         );
     }
 

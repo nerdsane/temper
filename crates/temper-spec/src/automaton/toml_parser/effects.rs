@@ -76,6 +76,10 @@ fn parse_effect_fields(
             .get("var")
             .cloned()
             .map(|var| Effect::Decrement { var }),
+        "set_counter_from_param" => fields.get("var").cloned().map(|var| {
+            let param = fields.get("param").cloned().unwrap_or_else(|| var.clone());
+            Effect::SetCounterFromParam { var, param }
+        }),
         "set_bool" => fields.get("var").cloned().map(|var| Effect::SetBool {
             var,
             value: fields.get("value").is_some_and(|s| s == "true"),
