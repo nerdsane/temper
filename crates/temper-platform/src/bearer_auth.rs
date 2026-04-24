@@ -144,8 +144,8 @@ fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
 mod tests {
     use super::*;
     use axum::Router;
-    use axum::body::to_bytes;
     use axum::body::Body;
+    use axum::body::to_bytes;
     use axum::extract::Extension;
     use axum::http::HeaderMap;
     use axum::http::Request as HttpRequest;
