@@ -13,13 +13,13 @@
   "dependencies": {
     "@dagrejs/dagre": "^2.0.4",
     "geist": "^1.7.0",
-    "next": "^15.5.14",
-    "react": "^19.0.0",
-    "react-dom": "^19.0.0"
+    "next": "^15.5.15",
+    "react": "^19.2.5",
+    "react-dom": "^19.2.5"
   },
   "devDependencies": {
     "@eslint/eslintrc": "^3.3.5",
-    "@tailwindcss/postcss": "^4.2.2",
+    "@tailwindcss/postcss": "^4.2.4",
     "@testing-library/jest-dom": "^6.9.1",
     "@testing-library/react": "^16.3.2",
     "@types/dagre": "^0.7.54",
@@ -30,8 +30,8 @@
     "eslint": "^9.39.4",
     "eslint-config-next": "^15.1.0",
     "jsdom": "^28.1.0",
-    "tailwindcss": "^4.2.2",
+    "tailwindcss": "^4.2.4",
     "typescript": "^5.7.0",
-    "vitest": "^4.1.2"
+    "vitest": "^4.1.5"
   }
 }
