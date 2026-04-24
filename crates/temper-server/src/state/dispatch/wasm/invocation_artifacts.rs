@@ -94,6 +94,7 @@ impl crate::state::ServerState {
                 integration_name,
                 module_name,
                 &error_str,
+                ctx.agent_ctx,
             )
         } else {
             None
@@ -143,13 +144,14 @@ impl crate::state::ServerState {
                 Ok(Some(resp))
             }
             WasmDispatchMode::Background => {
+                let callback_ctx = AgentContext::for_service_inheriting("wasm-runtime", agent_ctx);
                 self.dispatch_tenant_action(
                     entity_ref.tenant,
                     entity_ref.entity_type,
                     entity_ref.entity_id,
                     callback_action,
                     callback_params,
-                    &AgentContext::for_service("wasm-runtime"),
+                    &callback_ctx,
                 )
                 .await
                 .map_err(|e| {
@@ -171,6 +173,7 @@ impl crate::state::ServerState {
         integration_name: &str,
         module_name: &str,
         error_str: &str,
+        agent_ctx: &AgentContext,
     ) -> Option<String> {
         let pd = PendingDecision::from_denial(
             entity_ref.tenant.as_str(),
@@ -199,6 +202,7 @@ impl crate::state::ServerState {
 
         let state_c = self.clone();
         let gd_id = format!("GD-{}", sim_uuid());
+        let dispatch_ctx = AgentContext::for_service_inheriting("wasm-runtime", agent_ctx);
         let gd_params = serde_json::json!({
             "tenant": entity_ref.tenant.as_str(), "agent_id": "wasm-module",
             "action_name": "http_call", "resource_type": "HttpEndpoint",
@@ -210,7 +214,7 @@ impl crate::state::ServerState {
             let tenant = TenantId::new("temper-system");
             if let Err(e) = state_c.dispatch_tenant_action(
                 &tenant, "GovernanceDecision", &gd_id,
-                "CreateGovernanceDecision", gd_params, &AgentContext::for_service("wasm-runtime"),
+                "CreateGovernanceDecision", gd_params, &dispatch_ctx,
             ).await {
                 tracing::warn!(error = %e, "failed to create GovernanceDecision for WASM denial");
             }

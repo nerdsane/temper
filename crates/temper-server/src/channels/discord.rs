@@ -610,6 +610,9 @@ impl DiscordTransport {
             intent: None,
             trace_id: None,
             parent_span_id: None,
+            workflow_root_entity_type: None,
+            workflow_root_entity_id: None,
+            workflow_run_id: None,
             idempotency_key: None,
         };
 
@@ -732,6 +735,9 @@ impl DiscordTransport {
             intent: None,
             trace_id: None,
             parent_span_id: None,
+            workflow_root_entity_type: None,
+            workflow_root_entity_id: None,
+            workflow_run_id: None,
             idempotency_key: None,
         };
 

@@ -7,6 +7,7 @@
 use axum::http::HeaderMap;
 use opentelemetry::trace::{SpanContext, SpanId, TraceContextExt, TraceFlags, TraceId, TraceState};
 use temper_authz::SecurityContext;
+use tracing_opentelemetry::OpenTelemetrySpanExt;
 
 /// Agent identity context extracted from HTTP headers and credential resolution.
 ///
@@ -44,6 +45,15 @@ pub struct AgentContext {
     pub trace_id: Option<String>,
     /// Parent span ID from the `traceparent` header.
     pub parent_span_id: Option<String>,
+    /// Root entity type for the logical workflow trace.
+    ///
+    /// This is observability metadata carried in dispatch context. It is not
+    /// persisted as entity business state.
+    pub workflow_root_entity_type: Option<String>,
+    /// Root entity ID for the logical workflow trace.
+    pub workflow_root_entity_id: Option<String>,
+    /// Stable workflow run identifier used as a queryable APM/log attribute.
+    pub workflow_run_id: Option<String>,
     /// ADR-0048 sub-decision 5: idempotency key extracted from the
     /// `Idempotency-Key` header. Threaded into `EntityMsg::Action` so the
     /// actor can dedupe duplicate asks produced by dispatch-layer retries.
@@ -65,6 +75,9 @@ impl AgentContext {
             intent: None,
             trace_id: None,
             parent_span_id: None,
+            workflow_root_entity_type: None,
+            workflow_root_entity_id: None,
+            workflow_run_id: None,
             idempotency_key: None,
         }
     }
@@ -102,8 +115,60 @@ impl AgentContext {
             intent: None,
             trace_id: None,
             parent_span_id: None,
+            workflow_root_entity_type: None,
+            workflow_root_entity_id: None,
+            workflow_run_id: None,
             idempotency_key: None,
         }
+    }
+
+    /// Create a service identity while preserving caller observability context.
+    ///
+    /// Service callbacks often need a narrower principal than the invoking
+    /// agent, but they still belong to the same logical workflow trace.
+    pub fn for_service_inheriting(service_name: &str, parent: &AgentContext) -> Self {
+        Self::for_service(service_name).inherit_observability_from(parent)
+    }
+
+    /// Copy non-authority observability fields from another dispatch context.
+    pub fn inherit_observability_from(mut self, parent: &AgentContext) -> Self {
+        self.session_id = parent.session_id.clone();
+        self.intent = parent.intent.clone();
+        self.trace_id = parent.trace_id.clone();
+        self.parent_span_id = parent.parent_span_id.clone();
+        self.workflow_root_entity_type = parent.workflow_root_entity_type.clone();
+        self.workflow_root_entity_id = parent.workflow_root_entity_id.clone();
+        self.workflow_run_id = parent.workflow_run_id.clone();
+        self
+    }
+
+    /// Ensure this context has a workflow root and current-span trace ids.
+    pub fn for_dispatch_root(&self, entity_type: &str, entity_id: &str) -> Self {
+        let mut next = self.clone();
+        if next.workflow_root_entity_type.is_none() {
+            next.workflow_root_entity_type = Some(entity_type.to_string());
+        }
+        if next.workflow_root_entity_id.is_none() {
+            next.workflow_root_entity_id = Some(entity_id.to_string());
+        }
+        if next.workflow_run_id.is_none() {
+            let root_type = next
+                .workflow_root_entity_type
+                .as_deref()
+                .unwrap_or(entity_type);
+            let root_id = next.workflow_root_entity_id.as_deref().unwrap_or(entity_id);
+            next.workflow_run_id = Some(format!("{root_type}:{root_id}"));
+        }
+        next.with_current_span_trace_context()
+    }
+
+    /// Fill missing W3C trace IDs from the currently active OpenTelemetry span.
+    pub fn with_current_span_trace_context(mut self) -> Self {
+        if let Some((trace_id, span_id)) = current_span_trace_context_ids() {
+            self.trace_id = Some(trace_id);
+            self.parent_span_id = Some(span_id);
+        }
+        self
     }
 }
 
@@ -153,8 +218,26 @@ pub(crate) fn extract_agent_context(headers: &HeaderMap) -> AgentContext {
         intent,
         trace_id,
         parent_span_id,
+        workflow_root_entity_type: None,
+        workflow_root_entity_id: None,
+        workflow_run_id: None,
         idempotency_key,
     }
+}
+
+pub(crate) fn current_span_trace_context_ids() -> Option<(String, String)> {
+    let span_context = tracing::Span::current()
+        .context()
+        .span()
+        .span_context()
+        .clone();
+    if !span_context.is_valid() {
+        return None;
+    }
+    Some((
+        span_context.trace_id().to_string(),
+        span_context.span_id().to_string(),
+    ))
 }
 
 pub(crate) fn remote_parent_context(agent_ctx: &AgentContext) -> Option<opentelemetry::Context> {
@@ -251,5 +334,77 @@ mod tests {
             "4bf92f3577b34da6a3ce929d0e0e4736"
         );
         assert_eq!(span_context.span_id().to_string(), "00f067aa0ba902b7");
+    }
+
+    #[test]
+    fn service_context_inherits_workflow_trace_context() {
+        let parent = AgentContext {
+            session_id: Some("ss-1".to_string()),
+            intent: Some("run workflow".to_string()),
+            trace_id: Some("4bf92f3577b34da6a3ce929d0e0e4736".to_string()),
+            parent_span_id: Some("00f067aa0ba902b7".to_string()),
+            workflow_root_entity_type: Some("CurationJob".to_string()),
+            workflow_root_entity_id: Some("job-1".to_string()),
+            workflow_run_id: Some("wf-job-1".to_string()),
+            idempotency_key: Some("parent-key".to_string()),
+            ..AgentContext::default()
+        };
+
+        let service = AgentContext::for_service_inheriting("wasm-runtime", &parent);
+
+        assert_eq!(service.agent_type.as_deref(), Some("wasm-runtime"));
+        assert_eq!(service.session_id.as_deref(), Some("ss-1"));
+        assert_eq!(service.intent.as_deref(), Some("run workflow"));
+        assert_eq!(service.trace_id.as_deref(), parent.trace_id.as_deref());
+        assert_eq!(
+            service.parent_span_id.as_deref(),
+            parent.parent_span_id.as_deref()
+        );
+        assert_eq!(
+            service.workflow_root_entity_type.as_deref(),
+            Some("CurationJob")
+        );
+        assert_eq!(service.workflow_root_entity_id.as_deref(), Some("job-1"));
+        assert_eq!(service.workflow_run_id.as_deref(), Some("wf-job-1"));
+        assert!(service.idempotency_key.is_none());
+    }
+
+    #[test]
+    fn dispatch_context_sets_root_workflow_and_current_span_parent() {
+        use opentelemetry::trace::TracerProvider as _;
+        use tracing_subscriber::prelude::*;
+
+        let tracer_provider = opentelemetry_sdk::trace::SdkTracerProvider::builder().build();
+        let subscriber = tracing_subscriber::registry().with(
+            tracing_opentelemetry::layer()
+                .with_tracer(tracer_provider.tracer("temper-server-request-context-test")),
+        );
+        let _subscriber_guard = tracing::subscriber::set_default(subscriber);
+        let span = tracing::info_span!("dispatch.Workflow.Start");
+
+        let enriched =
+            span.in_scope(|| AgentContext::default().for_dispatch_root("CurationJob", "job-1"));
+
+        assert_eq!(
+            enriched.workflow_root_entity_type.as_deref(),
+            Some("CurationJob")
+        );
+        assert_eq!(enriched.workflow_root_entity_id.as_deref(), Some("job-1"));
+        assert_eq!(
+            enriched.workflow_run_id.as_deref(),
+            Some("CurationJob:job-1")
+        );
+        assert!(
+            enriched
+                .trace_id
+                .as_deref()
+                .is_some_and(|id| id.len() == 32)
+        );
+        assert!(
+            enriched
+                .parent_span_id
+                .as_deref()
+                .is_some_and(|id| id.len() == 16)
+        );
     }
 }
