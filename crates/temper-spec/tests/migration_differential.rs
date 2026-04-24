@@ -349,11 +349,10 @@ fn normalize_new_config_for_expected_evolution(
     config: &BTreeMap<String, String>,
 ) -> BTreeMap<String, String> {
     let mut normalized = config.clone();
-    match (path, trigger_name) {
-        ("os-apps/paw-agent/specs/session.ioa.toml", "call_provider" | "compact_context") => {
-            normalized.remove("api_key");
-        }
-        _ => {}
+    if let ("os-apps/paw-agent/specs/session.ioa.toml", "call_provider" | "compact_context") =
+        (path, trigger_name)
+    {
+        normalized.remove("api_key");
     }
     normalized
 }
