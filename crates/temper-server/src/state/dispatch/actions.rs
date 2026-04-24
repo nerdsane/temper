@@ -1,14 +1,15 @@
 use tracing::instrument;
+use tracing_opentelemetry::OpenTelemetrySpanExt;
 
 use crate::entity_actor::{EntityMsg, EntityResponse};
-use crate::request_context::AgentContext;
+use crate::request_context::{AgentContext, remote_parent_context};
 use crate::state::trajectory::{TrajectoryEntry, TrajectorySource};
 use temper_runtime::scheduler::{sim_now, sim_uuid};
 use temper_runtime::tenant::TenantId;
 
 use super::effects::PostDispatchContext;
 use super::retry;
-use super::{DispatchCommand, DispatchError, DispatchExtOptions};
+use super::{DispatchCommand, DispatchError, DispatchExtOptions, record_workflow_span_attrs};
 use crate::state::admission::AdmissionOutcome;
 
 impl crate::state::ServerState {
@@ -190,6 +191,11 @@ impl crate::state::ServerState {
         entity_type,
         entity_id,
         action_name = action,
+        workflow.root_entity_type = tracing::field::Empty,
+        workflow.root_entity_id = tracing::field::Empty,
+        workflow.run_id = tracing::field::Empty,
+        temper.action = tracing::field::Empty,
+        session.id = tracing::field::Empty,
         success = tracing::field::Empty,
         error_msg = tracing::field::Empty,
     ))]
@@ -203,6 +209,13 @@ impl crate::state::ServerState {
         agent_ctx: &AgentContext,
         await_integration: bool,
     ) -> Result<EntityResponse, DispatchError> {
+        if let Some(parent) = remote_parent_context(agent_ctx) {
+            tracing::Span::current().set_parent(parent);
+        }
+        let enriched_agent_ctx = agent_ctx.for_dispatch_root(entity_type, entity_id);
+        let agent_ctx = &enriched_agent_ctx;
+        record_workflow_span_attrs(agent_ctx, entity_type, entity_id, Some(action));
+
         if !self
             .is_entity_type_governed(tenant, entity_type)
             .map_err(DispatchError::Internal)?

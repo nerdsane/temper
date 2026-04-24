@@ -259,6 +259,27 @@ impl crate::state::ServerState {
             let action = sched.action.clone();
             let ctx = agent_ctx.clone();
             let delay = std::time::Duration::from_secs(sched.delay_seconds);
+            let workflow_root_entity_type = ctx
+                .workflow_root_entity_type
+                .clone()
+                .unwrap_or_else(|| et.clone());
+            let workflow_root_entity_id = ctx
+                .workflow_root_entity_id
+                .clone()
+                .unwrap_or_else(|| eid.clone());
+            let workflow_run_id = ctx
+                .workflow_run_id
+                .clone()
+                .unwrap_or_else(|| format!("{et}:{eid}"));
+            let span = tracing::info_span!(
+                "dispatch.scheduled_actions",
+                workflow.root_entity_type = %workflow_root_entity_type,
+                workflow.root_entity_id = %workflow_root_entity_id,
+                workflow.run_id = %workflow_run_id,
+                temper.action = %action,
+                entity_type = %et,
+                entity_id = %eid,
+            );
             tokio::spawn(
                 // determinism-ok: timer delivery is a background side-effect
                 async move {
@@ -274,7 +295,7 @@ impl crate::state::ServerState {
                         )
                         .await;
                 }
-                .instrument(tracing::info_span!("dispatch.scheduled_actions")),
+                .instrument(span),
             );
         }
     }
