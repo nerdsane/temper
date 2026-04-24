@@ -153,6 +153,11 @@ impl ParseState {
                     state_var.overflow_ttl_seconds = Some(v);
                 }
             }
+            "query_indexed" => match value.trim() {
+                "true" => state_var.query_indexed = Some(true),
+                "false" => state_var.query_indexed = Some(false),
+                _ => {}
+            },
             _ => {}
         }
     }
@@ -273,6 +278,7 @@ impl ParseState {
             initial: String::new(),
             overflow_inline_max_bytes: None,
             overflow_ttl_seconds: None,
+            query_indexed: None,
         });
         self.current_section = Section::State;
         true

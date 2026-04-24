@@ -3,12 +3,26 @@
 use core::ptr::addr_of;
 use std::collections::BTreeMap;
 
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::host;
 
+/// HTTP request sent through the host.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HttpRequest {
+    /// HTTP method.
+    pub method: String,
+    /// Absolute request URL.
+    pub url: String,
+    /// Request headers as ordered key/value pairs.
+    pub headers: Vec<(String, String)>,
+    /// UTF-8 request body.
+    pub body: String,
+}
+
 /// HTTP response from a host call.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct HttpResponse {
     /// HTTP status code.
     pub status: u16,
@@ -206,6 +220,40 @@ impl Context {
             status,
             body: resp_body,
         })
+    }
+
+    /// Make multiple HTTP requests via the host and collect the responses in order.
+    pub fn http_call_batch(&self, requests: &[HttpRequest]) -> Result<Vec<HttpResponse>, String> {
+        if requests.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        let requests_json = serde_json::to_string(requests)
+            .map_err(|e| format!("failed to serialize batch HTTP requests: {e}"))?;
+
+        let response_json = unsafe {
+            let ptr = addr_of!(host::HTTP_BUF) as *const u8;
+            let len = host::host_http_call_batch(
+                requests_json.as_ptr() as i32,
+                requests_json.len() as i32,
+                ptr as i32,
+                host::HTTP_BUF_LEN as i32,
+            );
+            if len == -1 {
+                return Err("HTTP batch call failed".to_string());
+            }
+            if len == -2 {
+                return Err("HTTP batch response too large for buffer".to_string());
+            }
+            if len <= 0 {
+                return Err("HTTP batch call returned empty response".to_string());
+            }
+            let slice = core::slice::from_raw_parts(ptr, len as usize);
+            String::from_utf8_lossy(slice).to_string()
+        };
+
+        serde_json::from_str(&response_json)
+            .map_err(|e| format!("failed to parse batch HTTP responses: {e}"))
     }
 
     /// Make a Connect protocol server-streaming RPC call via the host.

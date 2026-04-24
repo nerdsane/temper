@@ -186,6 +186,10 @@ CREATE TABLE IF NOT EXISTS policies (
 pub const ALTER_POLICIES_ADD_ENABLED: &str =
     "ALTER TABLE policies ADD COLUMN enabled INTEGER NOT NULL DEFAULT 1";
 
+/// Migration: add `projection_hash` to the durable query-plane catalog.
+pub const ALTER_ENTITY_CATALOG_ADD_PROJECTION_HASH: &str =
+    "ALTER TABLE entity_catalog ADD COLUMN projection_hash TEXT NOT NULL DEFAULT ''";
+
 /// Durable per-tenant authorization denial patterns used to reconstruct
 /// policy suggestions across process restarts.
 pub const CREATE_POLICY_DENIAL_PATTERNS_TABLE: &str = "\

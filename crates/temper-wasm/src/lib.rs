@@ -16,7 +16,7 @@ pub use authorized_host::{AuthorizedWasmHost, WasmAuthzDecision, WasmAuthzGate, 
 pub use engine::{WasmEngine, WasmError};
 pub use host_trait::{
     BinaryHttpInterceptorFn, ProductionWasmHost, ProgressEmitterFn, SimWasmHost, SpecEvaluatorFn,
-    WasmHost, parse_connect_frames,
+    TextHttpInterceptorFn, WasmHost, parse_connect_frames,
 };
 pub use stream::{StreamRegistry, StreamRegistryConfig};
 pub use types::{

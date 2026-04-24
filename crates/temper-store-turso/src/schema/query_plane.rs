@@ -7,7 +7,8 @@ CREATE TABLE IF NOT EXISTS entity_catalog (
     status             TEXT NOT NULL,
     updated_at         TEXT NOT NULL,
     sequence_nr        INTEGER NOT NULL DEFAULT 0,
-    projection_version INTEGER NOT NULL DEFAULT 1,
+    projection_version INTEGER NOT NULL DEFAULT 2,
+    projection_hash    TEXT NOT NULL DEFAULT '',
     PRIMARY KEY (tenant, entity_type, entity_id)
 );";
 

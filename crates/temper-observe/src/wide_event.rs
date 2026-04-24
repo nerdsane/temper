@@ -606,8 +606,16 @@ fn event_error_type(event: &WideEvent, error_message: &str) -> String {
         .unwrap_or_else(|| classify_error(event.event_kind, error_message).to_string())
 }
 
+fn projects_to_contextual_span(event_kind: EventKind) -> bool {
+    !matches!(event_kind, EventKind::WasmInvocation | EventKind::LlmCall)
+}
+
 /// Project to the **Contextual View** (OTEL span).
 pub fn emit_span(event: &WideEvent) {
+    if !projects_to_contextual_span(event.event_kind) {
+        return;
+    }
+
     let tracer = opentelemetry::global::tracer("temper");
     let span_name = match event.event_kind {
         EventKind::Transition => format!("{}.{}", event.entity_type, event.operation),
@@ -630,13 +638,6 @@ pub fn emit_span(event: &WideEvent) {
     }
     for (k, v) in &event.measurements {
         attrs.push(KeyValue::new(k.clone(), *v));
-    }
-    let llm_apm_only = event.event_kind == EventKind::LlmCall;
-    if llm_apm_only {
-        // Dispatch spans are the canonical LLMObs view; wide-event LLM spans stay in APM.
-        // Datadog applies dd_llmobs_enabled=false at the trace level, so these spans must
-        // be emitted onto their own trace or they suppress the real llm_caller span too.
-        attrs.push(KeyValue::new("dd_llmobs_enabled", false));
     }
     attrs.push(KeyValue::new("temper.trace_id", event.trace_id.clone()));
     attrs.push(KeyValue::new("temper.span_id", event.span_id.clone()));
@@ -667,14 +668,8 @@ pub fn emit_span(event: &WideEvent) {
     let start_time: SystemTime = event.timestamp.into();
     let end_time = start_time + std::time::Duration::from_nanos(event.duration_ns);
 
-    let parent_cx = if llm_apm_only {
-        // Keep APM-only LLM wide events off the canonical llm_caller trace. Datadog
-        // treats dd_llmobs_enabled=false at the trace level, so attaching these spans
-        // to the real trace suppresses the actual LLMObs record we want to keep.
-        opentelemetry::Context::new()
-    } else {
-        remote_parent_context(event).unwrap_or_else(|| tracing::Span::current().context())
-    };
+    let parent_cx =
+        remote_parent_context(event).unwrap_or_else(|| tracing::Span::current().context());
     let mut span = tracer
         .span_builder(span_name)
         .with_start_time(start_time)
@@ -727,6 +722,39 @@ pub fn emit_metrics(event: &WideEvent) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use opentelemetry_sdk::error::OTelSdkResult;
+    use opentelemetry_sdk::trace::{SdkTracerProvider, SpanData, SpanExporter};
+    use std::sync::{Arc, Mutex};
+
+    static TRACER_LOCK: Mutex<()> = Mutex::new(());
+
+    #[derive(Clone, Debug, Default)]
+    struct TestSpanExporter {
+        spans: Arc<Mutex<Vec<SpanData>>>,
+    }
+
+    impl TestSpanExporter {
+        fn finished_spans(&self) -> Vec<SpanData> {
+            self.spans
+                .lock()
+                .expect("span exporter lock poisoned")
+                .clone()
+        }
+    }
+
+    impl SpanExporter for TestSpanExporter {
+        fn export(
+            &mut self,
+            batch: Vec<SpanData>,
+        ) -> std::pin::Pin<Box<dyn std::future::Future<Output = OTelSdkResult> + Send + 'static>>
+        {
+            self.spans
+                .lock()
+                .expect("span exporter lock poisoned")
+                .extend(batch);
+            Box::pin(std::future::ready(Ok(())))
+        }
+    }
 
     fn sample_event() -> WideEvent {
         from_transition(TransitionInput {
@@ -741,6 +769,25 @@ mod tests {
             item_count: 2,
             trace_id: "trace-abc",
         })
+    }
+
+    fn captured_span_names(events: &[WideEvent]) -> Vec<String> {
+        let _guard = TRACER_LOCK.lock().expect("tracer lock poisoned");
+        let exporter = TestSpanExporter::default();
+        let provider = SdkTracerProvider::builder()
+            .with_simple_exporter(exporter.clone())
+            .build();
+        let previous = opentelemetry::global::set_tracer_provider(provider.clone());
+        for event in events {
+            emit_span(event);
+        }
+        provider.force_flush().expect("force flush span exporter");
+        opentelemetry::global::set_tracer_provider(previous);
+        exporter
+            .finished_spans()
+            .into_iter()
+            .map(|span| span.name.into_owned())
+            .collect()
     }
 
     #[test]
@@ -758,6 +805,89 @@ mod tests {
     #[test]
     fn test_emit_span_noop() {
         emit_span(&sample_event());
+    }
+
+    #[test]
+    fn test_emit_span_projects_supported_contextual_spans() {
+        let names = captured_span_names(&[
+            sample_event(),
+            from_authz_decision(AuthzDecisionInput {
+                action: "SubmitOrder",
+                resource_type: "Order",
+                principal_kind: "user",
+                decision: "Allow",
+                duration_ns: 0,
+                tenant: "tenant-a",
+            }),
+            from_invariant_check(InvariantCheckInput {
+                invariant_name: "order_total_positive",
+                entity_type: "Order",
+                entity_id: "order-123",
+                tenant: "tenant-a",
+                check_count: 1,
+                outcome: "converged",
+                duration_ns: 0,
+            }),
+            from_tool_call(ToolCallInput {
+                tool_name: "temper_get",
+                tool_call_id: None,
+                entity_type: "Session",
+                entity_id: "sess-1",
+                session_id: "sess-1",
+                tool_arguments: None,
+                tool_result: None,
+                success: true,
+                duration_ns: 0,
+                trace_id: "trace-tool",
+                error: None,
+            }),
+        ]);
+
+        assert_eq!(
+            names,
+            vec![
+                "Order.SubmitOrder",
+                "authz.SubmitOrder",
+                "invariant.order_total_positive",
+                "tool.execute_tool",
+            ]
+        );
+    }
+
+    #[test]
+    fn test_emit_span_skips_llm_and_wasm_shadow_spans() {
+        let names = captured_span_names(&[
+            from_wasm_invocation(WasmInvocationInput {
+                module_name: "provider_caller",
+                trigger_action: "CallProvider",
+                entity_type: "Session",
+                entity_id: "sess-1",
+                tenant: "tenant-a",
+                success: true,
+                duration_ns: 0,
+                error: None,
+            }),
+            from_llm_call(LlmCallInput {
+                provider: "anthropic",
+                model: "claude-sonnet-4-6",
+                operation: "chat",
+                entity_type: "Session",
+                entity_id: "sess-1",
+                session_id: "sess-1",
+                success: true,
+                duration_ns: 0,
+                input_tokens: 0,
+                output_tokens: 0,
+                stop_reason: "end_turn",
+                system_instructions: None,
+                input_messages: None,
+                output_messages: None,
+                trace_id: "trace-llm",
+                error: None,
+            }),
+        ]);
+
+        assert!(names.is_empty(), "unexpected shadow spans: {names:?}");
     }
 
     #[test]

@@ -6196,6 +6196,7 @@ dependencies = [
  "libc",
  "lru",
  "opentelemetry",
+ "opentelemetry_sdk",
  "pprof",
  "reqwest",
  "serde",
@@ -6229,6 +6230,7 @@ dependencies = [
  "tower-http 0.6.8",
  "tracing",
  "tracing-opentelemetry",
+ "tracing-subscriber",
  "uuid",
  "wiremock",
 ]
@@ -6362,6 +6364,7 @@ dependencies = [
 name = "temper-wasm-sdk"
 version = "0.1.0"
 dependencies = [
+ "serde",
  "serde_json",
 ]
 

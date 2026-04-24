@@ -81,6 +81,18 @@ unsafe extern "C" {
         result_buf_len: i32,
     ) -> i32;
 
+    /// Make multiple HTTP calls via the host.
+    /// `requests_ptr..requests_len` contains a JSON array of
+    /// `{method,url,headers,body}` objects.
+    /// Returns bytes written to result_buf (JSON array of `{status,body}`),
+    /// -1 on error, -2 if buffer too small.
+    pub fn host_http_call_batch(
+        requests_ptr: i32,
+        requests_len: i32,
+        result_buf_ptr: i32,
+        result_buf_len: i32,
+    ) -> i32;
+
     /// Make a Connect protocol server-streaming RPC call via the host.
     /// Returns bytes written to result_buf (JSON array of frame payloads),
     /// -1 on error, -2 if buffer too small.

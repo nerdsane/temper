@@ -92,6 +92,11 @@ pub struct StateVar {
     /// and the sweeper deletes rows past their expiry.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub overflow_ttl_seconds: Option<u64>,
+    /// Optional query-plane override. When `Some(false)`, the field remains in
+    /// entity state but is omitted from the durable field index used for OData
+    /// collection filtering.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub query_indexed: Option<bool>,
 }
 
 /// An action in the I/O Automaton.
