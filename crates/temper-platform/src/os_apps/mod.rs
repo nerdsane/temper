@@ -16,6 +16,8 @@ use std::sync::{OnceLock, RwLock};
 use serde::Serialize;
 use sha2::{Digest, Sha256};
 use temper_runtime::tenant::TenantId;
+use temper_server::platform_store::InstalledAppRecord;
+use temper_server::registry::VerificationStatus;
 use temper_spec::automaton;
 use temper_spec::csdl::{emit_csdl_xml, merge_csdl, parse_csdl};
 
@@ -1188,6 +1190,292 @@ fn collect_install_order(
     Ok(())
 }
 
+/// Resolve a deduplicated dependency-first install order for a set of apps.
+pub fn resolve_os_app_install_order(app_names: &[String]) -> Result<Vec<String>, String> {
+    let mut visiting = HashSet::new();
+    let mut visited = HashSet::new();
+    let mut order = Vec::new();
+    for app_name in app_names {
+        collect_install_order(app_name, &mut visiting, &mut visited, &mut order)?;
+    }
+    Ok(order)
+}
+
+fn app_entry(app_name: &str) -> Option<AppEntry> {
+    let cat = catalog().read().unwrap(); // ci-ok: infallible lock
+    cat.entries
+        .iter()
+        .find(|entry| entry.name == app_name)
+        .cloned()
+}
+
+fn digest_bytes(parts: &[(&str, Vec<u8>)]) -> String {
+    let mut hasher = Sha256::new();
+    for (name, bytes) in parts {
+        hasher.update(name.as_bytes());
+        hasher.update([0]);
+        hasher.update(bytes);
+        hasher.update([0xff]);
+    }
+    format!("sha256:{:x}", hasher.finalize())
+}
+
+fn digest_app_bundle(app_name: &str, bundle: &AppBundle) -> OsAppBundleDigest {
+    let entry = app_entry(app_name);
+    let app_version = entry
+        .as_ref()
+        .map(|entry| entry.version.clone())
+        .unwrap_or_else(|| "0.1.0".to_string());
+
+    let mut spec_parts = Vec::new();
+    for (entity_type, ioa_source) in &bundle.specs {
+        spec_parts.push((
+            format!("spec:{entity_type}"),
+            ioa_source.as_bytes().to_vec(),
+        ));
+    }
+    if let Some(csdl) = &bundle.csdl {
+        spec_parts.push(("csdl".to_string(), csdl.as_bytes().to_vec()));
+    }
+    if let Some(cross_invariants) = &bundle.cross_invariants_toml {
+        spec_parts.push((
+            "cross-invariants".to_string(),
+            cross_invariants.as_bytes().to_vec(),
+        ));
+    }
+    spec_parts.sort_by(|a, b| a.0.cmp(&b.0));
+
+    let mut policy_parts: Vec<(String, Vec<u8>)> = bundle
+        .cedar_policies
+        .iter()
+        .enumerate()
+        .map(|(idx, policy)| (format!("policy:{idx}"), policy.as_bytes().to_vec()))
+        .collect();
+    policy_parts.sort_by(|a, b| a.0.cmp(&b.0));
+
+    let mut wasm_parts = Vec::new();
+    for (module_name, wasm_bytes) in &bundle.wasm_modules {
+        wasm_parts.push((format!("wasm:{module_name}"), wasm_bytes.clone()));
+    }
+    for (module_name, config) in &bundle.wasm_module_configs {
+        let config_bytes = serde_json::to_vec(config).unwrap_or_default();
+        wasm_parts.push((format!("wasm-config:{module_name}"), config_bytes));
+    }
+    wasm_parts.sort_by(|a, b| a.0.cmp(&b.0));
+
+    let mut content_parts = Vec::new();
+    if let Some(app_guide) = entry.as_ref().and_then(|entry| entry.app_guide.as_ref()) {
+        content_parts.push(("APP.md".to_string(), app_guide.as_bytes().to_vec()));
+    }
+    for agent in &bundle.agents {
+        content_parts.push((
+            format!("agent:{}:content", agent.name),
+            agent.content.as_bytes().to_vec(),
+        ));
+    }
+    for skill in &bundle.skills {
+        content_parts.push((
+            format!(
+                "skill:{}:{}",
+                skill.agent_name.as_deref().unwrap_or("_system"),
+                skill.name
+            ),
+            skill.content.as_bytes().to_vec(),
+        ));
+        for companion in &skill.companion_files {
+            content_parts.push((
+                format!(
+                    "skill-companion:{}:{}:{}",
+                    skill.agent_name.as_deref().unwrap_or("_system"),
+                    skill.name,
+                    companion.name
+                ),
+                companion.content.clone(),
+            ));
+        }
+    }
+    for file in &bundle.system_files {
+        content_parts.push((
+            format!("system:{}", file.relative_path),
+            file.content.clone(),
+        ));
+    }
+    for adr in &bundle.adrs {
+        content_parts.push((
+            format!("adr:{}", adr.file_name),
+            adr.content.as_bytes().to_vec(),
+        ));
+    }
+    content_parts.sort_by(|a, b| a.0.cmp(&b.0));
+
+    let mut seed_parts = Vec::new();
+    for seed in &bundle.seed_instances {
+        seed_parts.push((
+            format!(
+                "seed:{}:{}",
+                seed.entity_type,
+                seed.id.as_deref().unwrap_or("_generated")
+            ),
+            serde_json::to_vec(seed).unwrap_or_default(),
+        ));
+    }
+    seed_parts.sort_by(|a, b| a.0.cmp(&b.0));
+
+    let spec_digest = digest_bytes(
+        &spec_parts
+            .iter()
+            .map(|(name, bytes)| (name.as_str(), bytes.clone()))
+            .collect::<Vec<_>>(),
+    );
+    let policy_digest = digest_bytes(
+        &policy_parts
+            .iter()
+            .map(|(name, bytes)| (name.as_str(), bytes.clone()))
+            .collect::<Vec<_>>(),
+    );
+    let wasm_digest = digest_bytes(
+        &wasm_parts
+            .iter()
+            .map(|(name, bytes)| (name.as_str(), bytes.clone()))
+            .collect::<Vec<_>>(),
+    );
+    let content_digest = digest_bytes(
+        &content_parts
+            .iter()
+            .map(|(name, bytes)| (name.as_str(), bytes.clone()))
+            .collect::<Vec<_>>(),
+    );
+    let seed_digest = digest_bytes(
+        &seed_parts
+            .iter()
+            .map(|(name, bytes)| (name.as_str(), bytes.clone()))
+            .collect::<Vec<_>>(),
+    );
+    let bundle_digest = digest_bytes(&[
+        ("app_name", app_name.as_bytes().to_vec()),
+        ("app_version", app_version.as_bytes().to_vec()),
+        ("spec", spec_digest.as_bytes().to_vec()),
+        ("policy", policy_digest.as_bytes().to_vec()),
+        ("wasm", wasm_digest.as_bytes().to_vec()),
+        ("content", content_digest.as_bytes().to_vec()),
+        ("seed", seed_digest.as_bytes().to_vec()),
+    ]);
+
+    OsAppBundleDigest {
+        app_name: app_name.to_string(),
+        app_version,
+        bundle_digest,
+        spec_digest,
+        policy_digest,
+        wasm_digest,
+        content_digest,
+        seed_digest,
+    }
+}
+
+/// Compute the current bundle digest for an app in the catalog.
+pub fn os_app_bundle_digest(app_name: &str) -> Option<OsAppBundleDigest> {
+    get_os_app(app_name).map(|bundle| digest_app_bundle(app_name, &bundle))
+}
+
+fn tenant_has_ready_app_specs_for_bundle(
+    state: &PlatformState,
+    tenant: &str,
+    bundle: &AppBundle,
+) -> bool {
+    let tenant_id = TenantId::new(tenant);
+    let registry = state.registry.read().unwrap(); // ci-ok: infallible lock
+    bundle.specs.iter().all(|(entity_type, _)| {
+        let has_table = registry.get_table(&tenant_id, entity_type).is_some();
+        let is_ready = matches!(
+            registry.get_verification_status(&tenant_id, entity_type),
+            Some(VerificationStatus::Completed(_) | VerificationStatus::Restored(_))
+        );
+        has_table && is_ready
+    })
+}
+
+async fn record_app_install_metadata(
+    state: &PlatformState,
+    tenant: &str,
+    digest: &OsAppBundleDigest,
+    status: &str,
+) {
+    let Some(ps) = state
+        .server
+        .event_store
+        .as_ref()
+        .and_then(|store| store.platform_store())
+    else {
+        return;
+    };
+
+    let record = InstalledAppRecord {
+        tenant: tenant.to_string(),
+        app_name: digest.app_name.clone(),
+        app_version: digest.app_version.clone(),
+        bundle_digest: digest.bundle_digest.clone(),
+        spec_digest: digest.spec_digest.clone(),
+        policy_digest: digest.policy_digest.clone(),
+        wasm_digest: digest.wasm_digest.clone(),
+        content_digest: digest.content_digest.clone(),
+        seed_digest: digest.seed_digest.clone(),
+        installed_at: None,
+        last_reconciled_at: None,
+        status: status.to_string(),
+    };
+
+    if let Err(error) = ps.record_installed_app_metadata(&record).await {
+        tracing::warn!(
+            tenant,
+            app = %digest.app_name,
+            error = %error,
+            "Failed to persist OS app digest metadata"
+        );
+    }
+}
+
+/// Reconcile one app without recursively processing dependencies.
+///
+/// Callers that need dependencies should first call
+/// [`resolve_os_app_install_order`] and reconcile each returned app once.
+pub async fn reconcile_os_app(
+    state: &PlatformState,
+    tenant: &str,
+    app_name: &str,
+) -> Result<OsAppReconcileResult, String> {
+    let bundle = get_os_app(app_name).ok_or_else(|| format!("OS app '{app_name}' not found"))?;
+    let digest = digest_app_bundle(app_name, &bundle);
+
+    if let Some(ps) = state
+        .server
+        .event_store
+        .as_ref()
+        .and_then(|store| store.platform_store())
+        && let Ok(Some(record)) = ps.get_installed_app(tenant, app_name).await
+        && record.bundle_digest == digest.bundle_digest
+        && tenant_has_ready_app_specs_for_bundle(state, tenant, &bundle)
+    {
+        tracing::info!(
+            tenant,
+            app = %app_name,
+            bundle_digest = %digest.bundle_digest,
+            "OS app unchanged; skipping hot reconcile"
+        );
+        return Ok(OsAppReconcileResult::Skipped {
+            app_name: app_name.to_string(),
+            bundle_digest: digest.bundle_digest,
+        });
+    }
+
+    let install = install_os_app_without_dependencies(state, tenant, app_name).await?;
+    Ok(OsAppReconcileResult::Installed {
+        app_name: app_name.to_string(),
+        bundle_digest: digest.bundle_digest,
+        install,
+    })
+}
+
 /// Install an OS app into a tenant (workspace).
 ///
 /// Reads app files from disk, runs the verification cascade, registers
@@ -1579,6 +1867,9 @@ async fn install_os_app_without_dependencies(
 
     // ── Step 9: Create seed instances. ───────────────────────────────
     let seed_created = bootstrap_seed_data(state, &tenant_id, tenant, &bundle.seed_instances).await;
+
+    let bundle_digest = digest_app_bundle(app_name, &bundle);
+    record_app_install_metadata(state, tenant, &bundle_digest, "installed").await;
 
     Ok(InstallResult {
         added,

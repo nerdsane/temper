@@ -177,6 +177,19 @@ impl TursoEventStore {
         conn.execute(schema::CREATE_TENANT_INSTALLED_APPS_TABLE, ())
             .await
             .map_err(storage_error)?;
+        for stmt in &[
+            schema::ALTER_INSTALLED_APPS_ADD_APP_VERSION,
+            schema::ALTER_INSTALLED_APPS_ADD_BUNDLE_DIGEST,
+            schema::ALTER_INSTALLED_APPS_ADD_SPEC_DIGEST,
+            schema::ALTER_INSTALLED_APPS_ADD_POLICY_DIGEST,
+            schema::ALTER_INSTALLED_APPS_ADD_WASM_DIGEST,
+            schema::ALTER_INSTALLED_APPS_ADD_CONTENT_DIGEST,
+            schema::ALTER_INSTALLED_APPS_ADD_SEED_DIGEST,
+            schema::ALTER_INSTALLED_APPS_ADD_LAST_RECONCILED_AT,
+            schema::ALTER_INSTALLED_APPS_ADD_STATUS,
+        ] {
+            let _ = conn.execute(*stmt, ()).await;
+        }
 
         // Phase 0: New tables for Turso-as-single-source-of-truth.
         conn.execute(schema::CREATE_FEATURE_REQUESTS_TABLE, ())
@@ -360,6 +373,23 @@ pub struct TursoSpecRow {
     pub updated_at: String,
     /// Whether this spec has been committed (WAL-style commit flag).
     pub committed: bool,
+}
+
+/// Row returned by installed OS app metadata queries.
+#[derive(Debug, Clone)]
+pub struct TursoInstalledAppRow {
+    pub tenant_id: String,
+    pub app_name: String,
+    pub app_version: String,
+    pub bundle_digest: String,
+    pub spec_digest: String,
+    pub policy_digest: String,
+    pub wasm_digest: String,
+    pub content_digest: String,
+    pub seed_digest: String,
+    pub installed_at: String,
+    pub last_reconciled_at: Option<String>,
+    pub status: String,
 }
 
 /// Row returned by trajectory queries.

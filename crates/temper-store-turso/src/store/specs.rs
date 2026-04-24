@@ -4,7 +4,7 @@ use libsql::{TransactionBehavior, params};
 use temper_runtime::persistence::{PersistenceError, storage_error};
 use tracing::instrument;
 
-use super::{TursoEventStore, TursoSpecRow};
+use super::{TursoEventStore, TursoInstalledAppRow, TursoSpecRow};
 use crate::TursoSpecVerificationUpdate;
 use crate::metrics::TursoQueryTimer;
 
@@ -240,6 +240,101 @@ impl TursoEventStore {
         .await
         .map_err(storage_error)?;
         Ok(())
+    }
+
+    /// Record or update digest metadata for an installed OS app.
+    #[allow(clippy::too_many_arguments)]
+    #[instrument(skip_all, fields(tenant_id, app_name, otel.name = "turso.record_installed_app_metadata"))]
+    pub async fn record_installed_app_metadata(
+        &self,
+        tenant_id: &str,
+        app_name: &str,
+        app_version: &str,
+        bundle_digest: &str,
+        spec_digest: &str,
+        policy_digest: &str,
+        wasm_digest: &str,
+        content_digest: &str,
+        seed_digest: &str,
+        status: &str,
+    ) -> Result<(), PersistenceError> {
+        let _query_timer = TursoQueryTimer::start("turso.record_installed_app_metadata");
+        let conn = self.configured_connection().await?;
+        conn.execute(
+            "INSERT INTO tenant_installed_apps (
+                 tenant_id, app_name, app_version, bundle_digest, spec_digest,
+                 policy_digest, wasm_digest, content_digest, seed_digest,
+                 installed_at, last_reconciled_at, status
+             )
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, datetime('now'), datetime('now'), ?10)
+             ON CONFLICT(tenant_id, app_name) DO UPDATE SET
+                 app_version = excluded.app_version,
+                 bundle_digest = excluded.bundle_digest,
+                 spec_digest = excluded.spec_digest,
+                 policy_digest = excluded.policy_digest,
+                 wasm_digest = excluded.wasm_digest,
+                 content_digest = excluded.content_digest,
+                 seed_digest = excluded.seed_digest,
+                 last_reconciled_at = datetime('now'),
+                 status = excluded.status",
+            params![
+                tenant_id,
+                app_name,
+                app_version,
+                bundle_digest,
+                spec_digest,
+                policy_digest,
+                wasm_digest,
+                content_digest,
+                seed_digest,
+                status
+            ],
+        )
+        .await
+        .map_err(storage_error)?;
+        Ok(())
+    }
+
+    /// Load digest metadata for an installed OS app.
+    #[instrument(skip_all, fields(tenant_id, app_name, otel.name = "turso.get_installed_app"))]
+    pub async fn get_installed_app(
+        &self,
+        tenant_id: &str,
+        app_name: &str,
+    ) -> Result<Option<TursoInstalledAppRow>, PersistenceError> {
+        let _query_timer = TursoQueryTimer::start("turso.get_installed_app");
+        let conn = self.configured_connection().await?;
+        let mut rows = conn
+            .query(
+                "SELECT tenant_id, app_name, app_version, bundle_digest, spec_digest,
+                        policy_digest, wasm_digest, content_digest, seed_digest,
+                        installed_at, last_reconciled_at, status
+                 FROM tenant_installed_apps
+                 WHERE tenant_id = ?1 AND app_name = ?2
+                 LIMIT 1",
+                params![tenant_id, app_name],
+            )
+            .await
+            .map_err(storage_error)?;
+
+        let Some(row) = rows.next().await.map_err(storage_error)? else {
+            return Ok(None);
+        };
+
+        Ok(Some(TursoInstalledAppRow {
+            tenant_id: row.get(0).map_err(storage_error)?,
+            app_name: row.get(1).map_err(storage_error)?,
+            app_version: row.get(2).map_err(storage_error)?,
+            bundle_digest: row.get(3).map_err(storage_error)?,
+            spec_digest: row.get(4).map_err(storage_error)?,
+            policy_digest: row.get(5).map_err(storage_error)?,
+            wasm_digest: row.get(6).map_err(storage_error)?,
+            content_digest: row.get(7).map_err(storage_error)?,
+            seed_digest: row.get(8).map_err(storage_error)?,
+            installed_at: row.get(9).map_err(storage_error)?,
+            last_reconciled_at: row.get(10).map_err(storage_error)?,
+            status: row.get(11).map_err(storage_error)?,
+        }))
     }
 
     /// List all installed apps across all tenants (for boot + UI).

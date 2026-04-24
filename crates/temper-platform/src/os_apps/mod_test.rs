@@ -4,6 +4,7 @@ use super::agent_bootstrap::{
 use super::*;
 use std::collections::HashMap;
 use std::fs;
+use std::path::PathBuf;
 use std::time::Duration;
 
 use temper_authz::SecurityContext;
@@ -155,6 +156,70 @@ fn test_list_skills_returns_catalog() {
         evo.app_guide.is_some(),
         "evolution should have an app guide"
     );
+}
+
+#[test]
+fn test_resolve_os_app_install_order_dedupes_shared_dependencies() {
+    let temp = tempfile::tempdir().unwrap();
+
+    for (name, deps) in [
+        ("base", Vec::<&str>::new()),
+        ("left", vec!["base"]),
+        ("right", vec!["base"]),
+        ("top", vec!["left", "right"]),
+    ] {
+        let app_dir = temp.path().join(name);
+        fs::create_dir_all(&app_dir).unwrap();
+        fs::write(
+            app_dir.join("app.toml"),
+            format!(
+                "name = \"{name}\"\ndescription = \"{name}\"\nversion = \"0.1.0\"\ndependencies = [{}]\n",
+                deps.into_iter()
+                    .map(|dep| format!("\"{dep}\""))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ),
+        )
+        .unwrap();
+        fs::write(app_dir.join("APP.md"), format!("# {name}\n")).unwrap();
+    }
+
+    set_os_apps_dir(temp.path().to_path_buf());
+    let order = resolve_os_app_install_order(&["top".to_string(), "right".to_string()]).unwrap();
+
+    assert_eq!(order, vec!["base", "left", "right", "top"]);
+    set_os_apps_dir(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../os-apps"));
+}
+
+#[tokio::test]
+async fn test_reconcile_os_app_skips_unchanged_bundle_digest() {
+    let db_path = format!("/tmp/temper-test-digest-{}.db", uuid::Uuid::new_v4());
+    let db_url = format!("file:{db_path}");
+
+    let turso = temper_store_turso::TursoEventStore::new(&db_url, None)
+        .await
+        .unwrap();
+    let mut state = PlatformState::new(None);
+    state.server.event_store = Some(std::sync::Arc::new(
+        temper_server::event_store::ServerEventStore::Turso(turso),
+    ));
+
+    install_skill(&state, "test-digest", "project-management")
+        .await
+        .expect("initial install should succeed");
+
+    let result = reconcile_os_app(&state, "test-digest", "project-management")
+        .await
+        .expect("unchanged reconcile should succeed");
+
+    assert!(
+        matches!(result, OsAppReconcileResult::Skipped { .. }),
+        "unchanged app should skip hot reinstall, got {result:?}"
+    );
+
+    let _ = std::fs::remove_file(&db_path);
+    let _ = std::fs::remove_file(format!("{db_path}-wal"));
+    let _ = std::fs::remove_file(format!("{db_path}-shm"));
 }
 
 #[test]

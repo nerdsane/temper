@@ -37,6 +37,34 @@ pub struct InstallResult {
     pub seed_instances: Vec<String>,
 }
 
+/// Stable digest breakdown for an OS app bundle.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct OsAppBundleDigest {
+    pub app_name: String,
+    pub app_version: String,
+    pub bundle_digest: String,
+    pub spec_digest: String,
+    pub policy_digest: String,
+    pub wasm_digest: String,
+    pub content_digest: String,
+    pub seed_digest: String,
+}
+
+/// Outcome of digest-aware app reconcile.
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(tag = "result", rename_all = "snake_case")]
+pub enum OsAppReconcileResult {
+    Skipped {
+        app_name: String,
+        bundle_digest: String,
+    },
+    Installed {
+        app_name: String,
+        bundle_digest: String,
+        install: InstallResult,
+    },
+}
+
 /// Parsed app.toml manifest.
 #[derive(Debug, Clone, serde::Deserialize, serde::Serialize)]
 pub struct AppManifest {
