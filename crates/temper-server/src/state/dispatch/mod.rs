@@ -6,6 +6,7 @@ use crate::entity_actor::EntityState;
 use crate::request_context::AgentContext;
 use temper_runtime::tenant::TenantId;
 use temper_wasm::{WasmAuthzContext, WasmAuthzDecision, WasmAuthzGate};
+use tracing::Instrument;
 
 mod actions;
 mod adapter;
@@ -217,6 +218,59 @@ pub struct DispatchCommand<'a> {
     pub await_integration: bool,
 }
 
+pub(super) fn record_workflow_span_attrs(
+    agent_ctx: &AgentContext,
+    entity_type: &str,
+    entity_id: &str,
+    action: Option<&str>,
+) {
+    let span = tracing::Span::current();
+    span.record(
+        "workflow.root_entity_type",
+        agent_ctx
+            .workflow_root_entity_type
+            .as_deref()
+            .unwrap_or(entity_type),
+    );
+    span.record(
+        "workflow.root_entity_id",
+        agent_ctx
+            .workflow_root_entity_id
+            .as_deref()
+            .unwrap_or(entity_id),
+    );
+    if let Some(run_id) = agent_ctx.workflow_run_id.as_deref() {
+        span.record("workflow.run_id", run_id);
+    }
+    if let Some(action) = action {
+        span.record("temper.action", action);
+    }
+    if let Some(session_id) = agent_ctx.session_id.as_deref() {
+        span.record("session.id", session_id);
+    }
+}
+
+fn workflow_root_type(agent_ctx: &AgentContext, fallback: &str) -> String {
+    agent_ctx
+        .workflow_root_entity_type
+        .clone()
+        .unwrap_or_else(|| fallback.to_string())
+}
+
+fn workflow_root_id(agent_ctx: &AgentContext, fallback: &str) -> String {
+    agent_ctx
+        .workflow_root_entity_id
+        .clone()
+        .unwrap_or_else(|| fallback.to_string())
+}
+
+fn workflow_run_id(agent_ctx: &AgentContext, entity_type: &str, entity_id: &str) -> String {
+    agent_ctx
+        .workflow_run_id
+        .clone()
+        .unwrap_or_else(|| format!("{entity_type}:{entity_id}"))
+}
+
 #[derive(Clone, Default)]
 struct HttpCallAuthzDenialTracker {
     denial_reason: Arc<Mutex<Option<String>>>,
@@ -313,23 +367,38 @@ impl crate::state::ServerState {
         let entity_state = _entity_state.clone();
         let agent_ctx = agent_ctx.clone();
         let action_params = action_params.clone();
-        tokio::spawn(async move {
-            // determinism-ok: async integration side-effects run outside simulation core
-            let req = WasmDispatchRequest {
-                tenant: &tenant,
-                entity_type: &entity_type,
-                entity_id: &entity_id,
-                action: &action,
-                custom_effects: &custom_effects,
-                entity_state: &entity_state,
-                agent_ctx: &agent_ctx,
-                action_params: &action_params,
-                mode: WasmDispatchMode::Background,
-            };
-            if let Err(e) = state.dispatch_wasm_integrations_internal(&req).await {
-                tracing::error!(error = %e, "background WASM integration dispatch failed");
+        let workflow_root_entity_type = workflow_root_type(&agent_ctx, &entity_type);
+        let workflow_root_entity_id = workflow_root_id(&agent_ctx, &entity_id);
+        let workflow_run_id = workflow_run_id(&agent_ctx, &entity_type, &entity_id);
+        let span = tracing::info_span!(
+            "dispatch.background_wasm_integrations",
+            workflow.root_entity_type = %workflow_root_entity_type,
+            workflow.root_entity_id = %workflow_root_entity_id,
+            workflow.run_id = %workflow_run_id,
+            temper.action = %action,
+            entity_type = %entity_type,
+            entity_id = %entity_id,
+        );
+        tokio::spawn(
+            async move {
+                // determinism-ok: async integration side-effects run outside simulation core
+                let req = WasmDispatchRequest {
+                    tenant: &tenant,
+                    entity_type: &entity_type,
+                    entity_id: &entity_id,
+                    action: &action,
+                    custom_effects: &custom_effects,
+                    entity_state: &entity_state,
+                    agent_ctx: &agent_ctx,
+                    action_params: &action_params,
+                    mode: WasmDispatchMode::Background,
+                };
+                if let Err(e) = state.dispatch_wasm_integrations_internal(&req).await {
+                    tracing::error!(error = %e, "background WASM integration dispatch failed");
+                }
             }
-        });
+            .instrument(span),
+        );
     }
 }
 

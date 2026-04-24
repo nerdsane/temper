@@ -1,4 +1,4 @@
-use tracing::instrument;
+use tracing::{Instrument, instrument};
 
 use crate::adapters::{AdapterAgentContext, AdapterContext, AdapterResult};
 use crate::entity_actor::{EntityResponse, EntityState};
@@ -8,7 +8,7 @@ use crate::secrets::template::resolve_secret_templates;
 use temper_runtime::scheduler::sim_uuid;
 use temper_runtime::tenant::TenantId;
 
-use super::{WasmDispatchMode, WasmDispatchRequest, WasmEntityRef};
+use super::{WasmDispatchMode, WasmDispatchRequest, WasmEntityRef, record_workflow_span_attrs};
 
 struct AdapterDispatchCtx<'a> {
     entity_ref: WasmEntityRef<'a>,
@@ -40,32 +40,73 @@ impl crate::state::ServerState {
         let entity_state = input.entity_state.clone();
         let agent_ctx = input.agent_ctx.clone();
         let action_params = input.action_params.clone();
+        let workflow_root_entity_type = agent_ctx
+            .workflow_root_entity_type
+            .clone()
+            .unwrap_or_else(|| entity_type.clone());
+        let workflow_root_entity_id = agent_ctx
+            .workflow_root_entity_id
+            .clone()
+            .unwrap_or_else(|| entity_id.clone());
+        let workflow_run_id = agent_ctx
+            .workflow_run_id
+            .clone()
+            .unwrap_or_else(|| format!("{entity_type}:{entity_id}"));
+        let span = tracing::info_span!(
+            "dispatch.background_adapter_integrations",
+            workflow.root_entity_type = %workflow_root_entity_type,
+            workflow.root_entity_id = %workflow_root_entity_id,
+            workflow.run_id = %workflow_run_id,
+            temper.action = %action,
+            entity_type = %entity_type,
+            entity_id = %entity_id,
+        );
 
-        tokio::spawn(async move {
-            // determinism-ok: async integration side-effects run outside simulation core
-            let req = WasmDispatchRequest {
-                tenant: &tenant,
-                entity_type: &entity_type,
-                entity_id: &entity_id,
-                action: &action,
-                custom_effects: &custom_effects,
-                entity_state: &entity_state,
-                agent_ctx: &agent_ctx,
-                action_params: &action_params,
-                mode: WasmDispatchMode::Background,
-            };
-            if let Err(e) = state.dispatch_adapter_integrations_internal(&req).await {
-                tracing::error!(error = %e, "background adapter integration dispatch failed");
+        tokio::spawn(
+            async move {
+                // determinism-ok: async integration side-effects run outside simulation core
+                let req = WasmDispatchRequest {
+                    tenant: &tenant,
+                    entity_type: &entity_type,
+                    entity_id: &entity_id,
+                    action: &action,
+                    custom_effects: &custom_effects,
+                    entity_state: &entity_state,
+                    agent_ctx: &agent_ctx,
+                    action_params: &action_params,
+                    mode: WasmDispatchMode::Background,
+                };
+                if let Err(e) = state.dispatch_adapter_integrations_internal(&req).await {
+                    tracing::error!(error = %e, "background adapter integration dispatch failed");
+                }
             }
-        });
+            .instrument(span),
+        );
     }
 
     /// Dispatch adapter integrations in either inline or background mode.
-    #[instrument(skip_all, fields(otel.name = "dispatch.dispatch_adapter_integrations_internal", tenant = %req.tenant, entity_type = req.entity_type, entity_id = req.entity_id, action_name = req.action))]
+    #[instrument(skip_all, fields(
+        otel.name = "dispatch.dispatch_adapter_integrations_internal",
+        tenant = %req.tenant,
+        entity_type = req.entity_type,
+        entity_id = req.entity_id,
+        action_name = req.action,
+        workflow.root_entity_type = tracing::field::Empty,
+        workflow.root_entity_id = tracing::field::Empty,
+        workflow.run_id = tracing::field::Empty,
+        temper.action = tracing::field::Empty,
+        session.id = tracing::field::Empty,
+    ))]
     pub(crate) async fn dispatch_adapter_integrations_internal(
         &self,
         req: &WasmDispatchRequest<'_>,
     ) -> Result<Option<EntityResponse>, String> {
+        record_workflow_span_attrs(
+            req.agent_ctx,
+            req.entity_type,
+            req.entity_id,
+            Some(req.action),
+        );
         let integrations = {
             let registry = self
                 .registry
@@ -164,7 +205,7 @@ impl crate::state::ServerState {
         // Mint a platform credential if the entity references an AgentType (ADR-0033).
         // The plaintext key is passed to the adapter and never persisted.
         let agent_api_key = self
-            .mint_agent_credential_if_needed(ctx.entity_ref.tenant, entity_state)
+            .mint_agent_credential_if_needed(ctx.entity_ref.tenant, entity_state, ctx.agent_ctx)
             .await;
 
         let adapter_ctx = AdapterContext {
@@ -285,13 +326,15 @@ impl crate::state::ServerState {
                 Ok(Some(resp))
             }
             WasmDispatchMode::Background => {
+                let callback_ctx =
+                    AgentContext::for_service_inheriting("platform-dispatch", agent_ctx);
                 self.dispatch_tenant_action(
                     entity_ref.tenant,
                     entity_ref.entity_type,
                     entity_ref.entity_id,
                     callback_action,
                     callback_params,
-                    &AgentContext::for_service("platform-dispatch"),
+                    &callback_ctx,
                 )
                 .await
                 .map_err(|e| {
@@ -316,6 +359,7 @@ impl crate::state::ServerState {
         &self,
         tenant: &TenantId,
         entity_state: &EntityState,
+        agent_ctx: &AgentContext,
     ) -> Option<String> {
         let agent_type_id = entity_state
             .fields
@@ -342,6 +386,7 @@ impl crate::state::ServerState {
         });
 
         // Create the AgentCredential entity using key_hash as entity ID for O(1) lookup.
+        let dispatch_ctx = AgentContext::for_service_inheriting("platform-dispatch", agent_ctx);
         let result = self
             .dispatch_tenant_action(
                 tenant,
@@ -349,7 +394,7 @@ impl crate::state::ServerState {
                 &key_hash,
                 "Issue",
                 issue_params,
-                &AgentContext::for_service("platform-dispatch"),
+                &dispatch_ctx,
             )
             .await;
 

@@ -18,7 +18,7 @@ use temper_wasm::{
 
 use super::{
     HttpCallAuthzDenialTracker, TrackingWasmAuthzGate, WasmDispatchMode, WasmDispatchRequest,
-    WasmEntityRef,
+    WasmEntityRef, record_workflow_span_attrs,
 };
 use replay_inputs::{extract_trajectory_actions_from_ots, has_replay_trajectory_input};
 
@@ -199,11 +199,28 @@ fn local_file_value_text_interceptor(
 }
 
 impl crate::state::ServerState {
-    #[instrument(skip_all, fields(otel.name = %format_args!("{}.{}.integrations", req.entity_type, req.action), tenant = %req.tenant, entity_type = req.entity_type, entity_id = req.entity_id, action_name = req.action))]
+    #[instrument(skip_all, fields(
+        otel.name = %format_args!("{}.{}.integrations", req.entity_type, req.action),
+        tenant = %req.tenant,
+        entity_type = req.entity_type,
+        entity_id = req.entity_id,
+        action_name = req.action,
+        workflow.root_entity_type = tracing::field::Empty,
+        workflow.root_entity_id = tracing::field::Empty,
+        workflow.run_id = tracing::field::Empty,
+        temper.action = tracing::field::Empty,
+        session.id = tracing::field::Empty,
+    ))]
     pub(crate) async fn dispatch_wasm_integrations_internal(
         &self,
         req: &WasmDispatchRequest<'_>,
     ) -> Result<Option<EntityResponse>, String> {
+        record_workflow_span_attrs(
+            req.agent_ctx,
+            req.entity_type,
+            req.entity_id,
+            Some(req.action),
+        );
         let integrations = {
             let registry = self.registry.read().unwrap(); // ci-ok: infallible lock
             registry
