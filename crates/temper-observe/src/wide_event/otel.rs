@@ -157,7 +157,8 @@ pub fn emit_span(event: &WideEvent) {
     let start_time: SystemTime = event.timestamp.into();
     let end_time = start_time + Duration::from_nanos(event.duration_ns);
 
-    let parent_cx = remote_parent_context(event).unwrap_or_else(|| tracing::Span::current().context());
+    let parent_cx =
+        remote_parent_context(event).unwrap_or_else(|| tracing::Span::current().context());
 
     let mut span = tracer
         .span_builder(span_name)
