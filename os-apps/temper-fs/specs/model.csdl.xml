@@ -106,6 +106,7 @@
         <Property Name="HasContent" Type="Edm.Boolean" DefaultValue="false"/>
         <Property Name="ContentHash" Type="Edm.String"/>
         <Property Name="MimeType" Type="Edm.String"/>
+        <Property Name="LastVersionId" Type="Edm.Guid"/>
         <Property Name="CreatedAt" Type="Edm.DateTimeOffset" Nullable="false"/>
         <Property Name="UpdatedAt" Type="Edm.DateTimeOffset" Nullable="false"/>
         <NavigationProperty Name="Directory" Type="Temper.FS.Directory">
@@ -145,6 +146,7 @@
         </Annotation>
         <Annotation Term="Temper.Vocab.StateMachine.InitialState" String="Current"/>
         <Annotation Term="Temper.Vocab.ShardKey" String="FileId"/>
+        <Annotation Term="Temper.Vocab.AuthZ.CedarPolicy" String="policies/file_version.cedar"/>
       </EntityType>
 
       <!-- ============ Bound Actions ============ -->
@@ -279,6 +281,16 @@
           <Collection><String>Ready</String><String>Locked</String></Collection>
         </Annotation>
         <Annotation Term="Temper.Vocab.StateMachine.TargetState" String="Archived"/>
+      </Action>
+
+      <Action Name="RecordVersion" IsBound="true">
+        <Parameter Name="bindingParameter" Type="Temper.FS.File"/>
+        <Parameter Name="last_version_id" Type="Edm.Guid" Nullable="false"/>
+        <ReturnType Type="Temper.FS.File"/>
+        <Annotation Term="Temper.Vocab.StateMachine.ValidFromStates">
+          <Collection><String>Ready</String></Collection>
+        </Annotation>
+        <Annotation Term="Temper.Vocab.StateMachine.TargetState" String="Ready"/>
       </Action>
 
       <!-- FileVersion Actions -->

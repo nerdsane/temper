@@ -729,6 +729,31 @@ async fn e2e_bootstrap_operator_credential_idempotent() {
     assert!(identity.verified);
 }
 
+/// Resolver cache is tenant-scoped — a credential resolved in one tenant must
+/// not leak into another tenant that has no matching AgentCredential entity.
+#[tokio::test]
+async fn e2e_identity_resolution_cache_is_tenant_scoped() {
+    let state = identity_test_state();
+    let api_key = "tmpr_tenant_scoped_cache_test";
+
+    temper_platform::bootstrap_operator_credential(&state, api_key, TEST_TENANT).await;
+
+    let resolver = IdentityResolver::new();
+    let first = resolver
+        .resolve(&state.server, &TenantId::new(TEST_TENANT), api_key)
+        .await
+        .expect("credential should resolve in source tenant");
+    assert_eq!(first.agent_type_name, "operator");
+
+    let leaked = resolver
+        .resolve(&state.server, &TenantId::new("other-tenant"), api_key)
+        .await;
+    assert!(
+        leaked.is_none(),
+        "resolver cache must not reuse identities across tenants"
+    );
+}
+
 /// Without credential registration, API key does NOT resolve (no fallback).
 #[tokio::test]
 async fn e2e_unregistered_api_key_does_not_resolve() {

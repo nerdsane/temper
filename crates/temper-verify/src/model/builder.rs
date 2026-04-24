@@ -136,6 +136,8 @@ fn convert_effect(effect: ResolvedEffect) -> ModelEffect {
         // Runtime-only effects should have been filtered by is_verifiable()
         ResolvedEffect::Emit(_)
         | ResolvedEffect::Trigger(_)
+        | ResolvedEffect::IncrementCounterByParam { .. }
+        | ResolvedEffect::DecrementCounterByParam { .. }
         | ResolvedEffect::Schedule { .. }
         | ResolvedEffect::ScheduleAt { .. }
         | ResolvedEffect::Spawn { .. } => {

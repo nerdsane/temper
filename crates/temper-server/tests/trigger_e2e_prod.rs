@@ -96,10 +96,92 @@ from = ["Pending"]
 to = "Authorized"
 "#;
 
+const FILE_WORKSPACE_CSDL_XML: &str = r#"<?xml version="1.0" encoding="utf-8"?>
+<edmx:Edmx Version="4.0" xmlns:edmx="http://docs.oasis-open.org/odata/ns/edmx">
+  <edmx:DataServices>
+    <Schema Namespace="Temper.TriggerFsE2E" xmlns="http://docs.oasis-open.org/odata/ns/edm">
+      <EntityType Name="File">
+        <Key><PropertyRef Name="Id"/></Key>
+        <Property Name="Id" Type="Edm.String" Nullable="false"/>
+        <Property Name="Status" Type="Edm.String"/>
+        <Property Name="workspace_id" Type="Edm.String"/>
+      </EntityType>
+      <EntityType Name="Workspace">
+        <Key><PropertyRef Name="Id"/></Key>
+        <Property Name="Id" Type="Edm.String" Nullable="false"/>
+        <Property Name="Status" Type="Edm.String"/>
+        <Property Name="used_bytes" Type="Edm.Int64"/>
+      </EntityType>
+      <EntityContainer Name="Container">
+        <EntitySet Name="Files" EntityType="Temper.TriggerFsE2E.File"/>
+        <EntitySet Name="Workspaces" EntityType="Temper.TriggerFsE2E.Workspace"/>
+      </EntityContainer>
+    </Schema>
+  </edmx:DataServices>
+</edmx:Edmx>"#;
+
+const FILE_IOA: &str = r#"
+[automaton]
+name = "File"
+states = ["Created", "Ready"]
+initial = "Created"
+
+[[state]]
+name = "workspace_id"
+type = "string"
+initial = ""
+
+[[state]]
+name = "size_bytes"
+type = "counter"
+initial = "0"
+
+[[action]]
+name = "StreamUpdated"
+kind = "input"
+from = ["Created", "Ready"]
+to = "Ready"
+params = ["size_bytes"]
+
+[[action.triggers]]
+name = "file_stream_updated_increments_workspace_usage"
+kind = "entity"
+principal = "file-service"
+target_entity = "Workspace"
+target_action = "IncrementUsage"
+
+[action.triggers.params_from]
+size_bytes = "size_bytes"
+
+[action.triggers.resolve_target]
+type = "field"
+field = "workspace_id"
+"#;
+
+const WORKSPACE_IOA: &str = r#"
+[automaton]
+name = "Workspace"
+states = ["Active"]
+initial = "Active"
+
+[[state]]
+name = "used_bytes"
+type = "counter"
+initial = "0"
+
+[[action]]
+name = "IncrementUsage"
+kind = "input"
+from = ["Active"]
+to = "Active"
+effect = [{ type = "increment", var = "used_bytes", amount = "size_bytes" }]
+params = ["size_bytes"]
+"#;
+
 /// Build a ServerState with Order + Payment registered under the tenant.
 /// No `reactions.toml` — cross-entity wiring is declared inline on
 /// `Order.ConfirmOrder` as an `[[action.triggers]]` block.
-fn build_state(tenant: &str) -> ServerState {
+fn build_state(tenant: &str, tenant_policy: &str) -> ServerState {
     let mut registry = SpecRegistry::new();
     let csdl = parse_csdl(CSDL_XML).expect("CSDL should parse");
     registry
@@ -114,6 +196,33 @@ fn build_state(tenant: &str) -> ServerState {
 
     let system = ActorSystem::new("trigger-e2e-prod");
     let state = ServerState::from_registry(system, registry);
+    state
+        .authz
+        .reload_tenant_policies(tenant, tenant_policy)
+        .expect("tenant policy should load");
+    state.rebuild_reaction_dispatcher();
+    state
+}
+
+fn build_file_workspace_state(tenant: &str, tenant_policy: &str) -> ServerState {
+    let mut registry = SpecRegistry::new();
+    let csdl = parse_csdl(FILE_WORKSPACE_CSDL_XML).expect("filesystem CSDL should parse");
+    registry
+        .try_register_tenant_with_reactions(
+            tenant,
+            csdl,
+            FILE_WORKSPACE_CSDL_XML.to_string(),
+            &[("File", FILE_IOA), ("Workspace", WORKSPACE_IOA)],
+            Vec::new(),
+        )
+        .expect("tenant registration should succeed with inline triggers");
+
+    let system = ActorSystem::new("trigger-e2e-fs");
+    let state = ServerState::from_registry(system, registry);
+    state
+        .authz
+        .reload_tenant_policies(tenant, tenant_policy)
+        .expect("tenant policy should load");
     state.rebuild_reaction_dispatcher();
     state
 }
@@ -142,7 +251,18 @@ async fn dispatch(
 #[tokio::test]
 async fn inline_action_triggers_fire_through_production_dispatcher() {
     let tenant = TenantId::new("trigger-e2e");
-    let state = build_state("trigger-e2e");
+    let state = build_state(
+        "trigger-e2e",
+        r#"
+permit(
+    principal is Agent,
+    action == Action::"AuthorizePayment",
+    resource is Payment
+) when {
+    principal.agent_type == "payment-service"
+};
+"#,
+    );
 
     // Seed a Payment entity we'll reference from the Order's trigger.
     // Payment starts in Pending.
@@ -198,5 +318,124 @@ async fn inline_action_triggers_fire_through_production_dispatcher() {
     assert_eq!(
         pay_resp.state.status, "Authorized",
         "inline [[action.triggers]] must advance Payment to Authorized"
+    );
+}
+
+#[tokio::test]
+async fn inline_action_triggers_respect_tenant_cedar_denials() {
+    let tenant = TenantId::new("trigger-e2e-deny");
+    let state = build_state("trigger-e2e-deny", "");
+
+    let pay_id = "pay-denied";
+    let order_id = "order-denied";
+    dispatch(
+        &state,
+        &tenant,
+        "Order",
+        order_id,
+        "AddItem",
+        serde_json::json!({ "payment_id": pay_id }),
+    )
+    .await;
+    dispatch(
+        &state,
+        &tenant,
+        "Order",
+        order_id,
+        "SubmitOrder",
+        serde_json::json!({}),
+    )
+    .await;
+
+    let resp = dispatch(
+        &state,
+        &tenant,
+        "Order",
+        order_id,
+        "ConfirmOrder",
+        serde_json::json!({}),
+    )
+    .await;
+    assert!(
+        resp.success,
+        "source action should still commit on trigger deny"
+    );
+    assert_eq!(resp.state.status, "Confirmed");
+
+    tokio::task::yield_now().await;
+
+    let pay_resp = state
+        .get_tenant_entity_state(&tenant, "Payment", pay_id)
+        .await
+        .expect("payment should still exist after denied trigger");
+    assert_eq!(
+        pay_resp.state.status, "Pending",
+        "denied inline trigger must not advance Payment"
+    );
+}
+
+#[tokio::test]
+async fn inline_action_triggers_resolve_lowercase_source_fields_for_target_lookup() {
+    let tenant = TenantId::new("trigger-e2e-fs");
+    let state = build_file_workspace_state(
+        "trigger-e2e-fs",
+        r#"
+permit(
+    principal is Agent,
+    action == Action::"IncrementUsage",
+    resource is Workspace
+) when {
+    principal.agent_type == "file-service"
+};
+"#,
+    );
+
+    let workspace_id = "ws-1";
+    let file_id = "file-1";
+
+    let workspace = state
+        .get_or_create_tenant_entity(
+            &tenant,
+            "Workspace",
+            workspace_id,
+            serde_json::json!({}),
+        )
+        .await
+        .expect("workspace seed should succeed");
+    assert_eq!(workspace.state.status, "Active");
+
+    let file = state
+        .get_or_create_tenant_entity(
+            &tenant,
+            "File",
+            file_id,
+            serde_json::json!({ "workspace_id": workspace_id }),
+        )
+        .await
+        .expect("file seed should succeed");
+    assert_eq!(file.state.status, "Created");
+
+    let resp = dispatch(
+        &state,
+        &tenant,
+        "File",
+        file_id,
+        "StreamUpdated",
+        serde_json::json!({ "size_bytes": 42 }),
+    )
+    .await;
+    assert!(resp.success, "File.StreamUpdated should succeed");
+    assert_eq!(resp.state.status, "Ready");
+
+    tokio::task::yield_now().await;
+
+    let workspace_after = state
+        .get_tenant_entity_state(&tenant, "Workspace", workspace_id)
+        .await
+        .expect("workspace should exist after trigger fired");
+    assert_eq!(
+        workspace_after.state.fields["used_bytes"],
+        serde_json::json!(42),
+        "inline trigger should resolve workspace_id and increment workspace usage",
     );
 }

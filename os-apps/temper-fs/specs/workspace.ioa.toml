@@ -48,7 +48,7 @@ name = "IncrementUsage"
 kind = "input"
 from = ["Active"]
 to = "Active"
-effect = "increment used_bytes"
+effect = [{ type = "increment", var = "used_bytes", amount = "size_bytes" }]
 params = ["size_bytes"]
 hint = "Record additional storage usage. Rejected if it would exceed quota."
 
@@ -57,7 +57,7 @@ name = "DecrementUsage"
 kind = "input"
 from = ["Active"]
 to = "Active"
-effect = "decrement used_bytes"
+effect = [{ type = "decrement", var = "used_bytes", amount = "size_bytes" }]
 params = ["size_bytes"]
 hint = "Release storage usage when files are removed or shrink."
 

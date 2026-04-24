@@ -65,6 +65,13 @@ pub struct FailedLevelInfo {
     pub details: Option<Vec<VerificationDetail>>,
 }
 
+/// Snapshot of an entity as seen by Cedar authorization.
+#[derive(Debug, Clone)]
+pub(crate) struct AuthzResourceSnapshot {
+    pub(crate) current_state: EntityResponse,
+    pub(crate) resource_attrs: BTreeMap<String, serde_json::Value>,
+}
+
 impl ServerState {
     fn touch_actor_access(&self, actor_key: &str) {
         if let Ok(mut last_accessed) = self.last_accessed.write() {
@@ -127,6 +134,70 @@ impl ServerState {
     ) -> Result<bool, String> {
         Ok(self.has_registered_spec(tenant, entity_type)?
             || self.transition_tables.contains_key(entity_type))
+    }
+
+    /// Load the current entity state and derive the Cedar resource view used
+    /// for action authorization.
+    pub(crate) async fn load_authz_resource_snapshot(
+        &self,
+        tenant: &TenantId,
+        entity_type: &str,
+        entity_id: &str,
+    ) -> Result<AuthzResourceSnapshot, String> {
+        let current_state = self
+            .get_tenant_entity_state(tenant, entity_type, entity_id)
+            .await?;
+
+        let mut resource_attrs = BTreeMap::new();
+        resource_attrs.insert(
+            "id".to_string(),
+            serde_json::Value::String(entity_id.to_string()),
+        );
+        resource_attrs.insert(
+            "status".to_string(),
+            serde_json::Value::String(current_state.state.status.clone()),
+        );
+        if let serde_json::Value::Object(fields) = &current_state.state.fields {
+            for (k, v) in fields {
+                resource_attrs.insert(k.clone(), v.clone());
+            }
+        }
+
+        let context_entities: Vec<temper_spec::automaton::ContextEntityDecl> = self
+            .registry
+            .read()
+            .map_err(|e| format!("registry lock poisoned: {e}"))?
+            .get_spec(tenant, entity_type)
+            .map(|s| s.automaton.context_entities.clone())
+            .unwrap_or_default();
+
+        for ce in &context_entities {
+            let target_id = current_state
+                .state
+                .fields
+                .get(&ce.id_field)
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
+
+            if !target_id.is_empty()
+                && let Some(status) = self
+                    .resolve_entity_status(tenant, &ce.entity_type, target_id)
+                    .await
+            {
+                resource_attrs.insert(
+                    format!("ctx_{}_status", ce.name),
+                    serde_json::Value::String(status),
+                );
+            }
+        }
+
+        let has_spec = self.has_registered_spec(tenant, entity_type)?;
+        resource_attrs.insert("has_spec".to_string(), serde_json::Value::Bool(has_spec));
+
+        Ok(AuthzResourceSnapshot {
+            current_state,
+            resource_attrs,
+        })
     }
 
     /// Populate `entity_index` from the event store without spawning actors.

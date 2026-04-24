@@ -99,7 +99,7 @@ impl ParseState {
         Ok(())
     }
 
-    fn finish(mut self, input: &str) -> Automaton {
+    fn finish(mut self, input: &str) -> Result<Automaton, AutomatonParseError> {
         self.flush_items();
         self.flush_integration();
 
@@ -111,7 +111,7 @@ impl ParseState {
 
         // ADR-0046: extract [[action.triggers]] via serde and merge into
         // actions by name. The hand-rolled parser skips these blocks.
-        let mut triggers_by_action = extract_action_triggers(input);
+        let mut triggers_by_action = extract_action_triggers(input)?;
         let mut actions = self.actions;
         for action in &mut actions {
             if let Some(trigs) = triggers_by_action.remove(&action.name) {
@@ -119,7 +119,7 @@ impl ParseState {
             }
         }
 
-        Automaton {
+        Ok(Automaton {
             automaton: AutomatonMeta {
                 name: self.meta_name,
                 states: self.meta_states,
@@ -136,7 +136,7 @@ impl ParseState {
             field_invariants: Vec::new(),
             state_timeouts: Vec::new(),
             admission: None,
-        }
+        })
     }
 
     fn apply_automaton_field(&mut self, key: &str, value: &str) {
@@ -393,7 +393,7 @@ pub(super) fn parse_toml_to_automaton(input: &str) -> Result<Automaton, Automato
         }
     }
 
-    let mut automaton = state.finish(input);
+    let mut automaton = state.finish(input)?;
     // Field invariants use nested inline-table predicates that the hand-rolled
     // parser does not handle, so delegate to serde. Unlike webhooks and agent
     // triggers, parse errors are surfaced — a silently-dropped field invariant
@@ -427,16 +427,18 @@ fn extract_webhooks(source: &str) -> Vec<super::types::Webhook> {
 ///
 /// Returns a map from action name to the triggers declared under it.
 /// The hand-rolled parser is unable to handle nested array-of-tables,
-/// so we do a second pass with `toml::from_str` on a minimal skeleton
-/// that only cares about each action's `name` and `triggers`. Other
-/// action fields are deserialized by the hand-rolled parser.
-///
-/// Silent failure (empty map on parse error) matches the posture used
-/// for `[[webhook]]` and `[[agent_trigger]]` — loud validation happens
-/// during spec verification (L0), not at deserialization time.
+/// so we do a second pass with `toml::from_str` over only the `[[action]]`
+/// sections. Errors are propagated: silently dropping malformed triggers
+/// would change runtime orchestration behavior.
 fn extract_action_triggers(
     source: &str,
-) -> std::collections::BTreeMap<String, Vec<super::types::ActionTrigger>> {
+) -> Result<std::collections::BTreeMap<String, Vec<super::types::ActionTrigger>>, AutomatonParseError>
+{
+    let slice = isolate_action_sections(source);
+    if slice.trim().is_empty() {
+        return Ok(std::collections::BTreeMap::new());
+    }
+
     #[derive(serde::Deserialize)]
     struct ActionTriggersWrapper {
         #[serde(default, rename = "action")]
@@ -449,10 +451,8 @@ fn extract_action_triggers(
         #[serde(default)]
         triggers: Vec<super::types::ActionTrigger>,
     }
-    let wrapper: ActionTriggersWrapper = match toml::from_str(source) {
-        Ok(w) => w,
-        Err(_) => return std::collections::BTreeMap::new(),
-    };
+    let wrapper: ActionTriggersWrapper = toml::from_str(&slice)
+        .map_err(|e| AutomatonParseError::Toml(format!("action.triggers: {e}")))?;
     let mut map: std::collections::BTreeMap<String, Vec<super::types::ActionTrigger>> =
         std::collections::BTreeMap::new();
     for action in wrapper.actions {
@@ -461,7 +461,7 @@ fn extract_action_triggers(
         }
         map.entry(action.name).or_default().extend(action.triggers);
     }
-    map
+    Ok(map)
 }
 
 /// Extract `[[field_invariant]]` sections from TOML source via serde.
@@ -556,6 +556,32 @@ fn isolate_sections(source: &str, marker: &str) -> String {
             inside = trimmed.starts_with(marker);
             if inside {
                 out.push_str(marker);
+                out.push('\n');
+            }
+            continue;
+        }
+        if inside {
+            out.push_str(line);
+            out.push('\n');
+        }
+    }
+    out
+}
+
+/// Return a minimal TOML document containing only `[[action]]` sections and
+/// their nested `[[action.*]]` tables from `source`.
+fn isolate_action_sections(source: &str) -> String {
+    let mut out = String::new();
+    let mut inside = false;
+    for line in source.lines() {
+        let trimmed = line.trim_start();
+        let is_header = trimmed.starts_with('[');
+        if is_header {
+            inside = trimmed.starts_with("[[action]]")
+                || trimmed.starts_with("[[action.")
+                || trimmed.starts_with("[action.");
+            if inside {
+                out.push_str(trimmed);
                 out.push('\n');
             }
             continue;

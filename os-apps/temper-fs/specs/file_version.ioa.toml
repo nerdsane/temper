@@ -45,6 +45,20 @@ to = "Current"
 params = ["file_id", "version_number", "content_hash", "size_bytes", "created_by"]
 hint = "Create a new file version record with content metadata."
 
+[[action.triggers]]
+name = "record_newest_version_on_file"
+kind = "entity"
+principal = "file-service"
+target_entity = "File"
+target_action = "RecordVersion"
+
+[action.triggers.params_from]
+last_version_id = "Id"
+
+[action.triggers.resolve_target]
+type = "field"
+field = "file_id"
+
 [[action]]
 name = "Supersede"
 kind = "internal"

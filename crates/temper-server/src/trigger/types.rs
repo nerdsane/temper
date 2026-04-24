@@ -35,8 +35,7 @@ pub struct ReactionRule {
     /// `SecurityContext` with every Cedar attribute (`role`, `agent_type`,
     /// `id`) populated from this name. When `None`, dispatch inherits
     /// the invoking principal — the trigger runs as whoever called the
-    /// source action. Serde-default preserves backwards compatibility
-    /// for reactions loaded from the pre-ADR-0046 `reactions.toml`.
+    /// source action.
     #[serde(default)]
     pub principal: Option<String>,
 }

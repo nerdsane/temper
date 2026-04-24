@@ -947,6 +947,49 @@ version = "1.0.0"
 }
 
 #[test]
+fn test_load_app_bundle_rejects_legacy_reactions_file() {
+    let temp_dir = std::env::temp_dir().join(format!(
+        "temper-legacy-reactions-bundle-test-{}",
+        uuid::Uuid::new_v4()
+    ));
+    let reactions_dir = temp_dir.join("reactions");
+    fs::create_dir_all(&reactions_dir).unwrap();
+
+    fs::write(
+        temp_dir.join("app.toml"),
+        r#"name = "legacy-reactions-app"
+description = "Legacy reactions app"
+version = "1.0.0"
+"#,
+    )
+    .unwrap();
+    fs::write(
+        reactions_dir.join("reactions.toml"),
+        r#"[[reaction]]
+name = "legacy"
+[reaction.when]
+entity_type = "File"
+action = "StreamUpdated"
+[reaction.then]
+entity_type = "FileVersion"
+action = "Create"
+[reaction.resolve_target]
+type = "field"
+field = "file_id"
+"#,
+    )
+    .unwrap();
+
+    let bundle = load_app_bundle(&temp_dir);
+    assert!(
+        bundle.is_none(),
+        "legacy reactions.toml should be rejected after the ADR-0046 hard cut"
+    );
+
+    let _ = fs::remove_dir_all(&temp_dir);
+}
+
+#[test]
 fn test_find_wasm_modules_respects_manifest_target() {
     // When the manifest declares `target = "wasm32-wasip1"`, the discovery
     // function must pick the wasip1 binary even if a wasm32-unknown-unknown
@@ -1149,4 +1192,183 @@ async fn test_install_app_bootstraps_adrs_into_temper_fs() {
     let _ = fs::remove_file(&db_path);
     let _ = fs::remove_file(format!("{db_path}-wal"));
     let _ = fs::remove_file(format!("{db_path}-shm"));
+}
+
+#[tokio::test]
+async fn test_install_os_app_rebuilds_reaction_dispatcher_for_inline_entity_triggers() {
+    use serde_json::json;
+    use temper_runtime::tenant::TenantId;
+    use temper_server::request_context::AgentContext;
+
+    let app_root = std::env::temp_dir().join(format!(
+        "temper-inline-trigger-install-{}",
+        uuid::Uuid::new_v4()
+    ));
+    let app_dir = app_root.join("inline-trigger-app");
+    fs::create_dir_all(app_dir.join("specs")).unwrap();
+    fs::create_dir_all(app_dir.join("policies")).unwrap();
+
+    fs::write(
+        app_dir.join("app.toml"),
+        "name = \"inline-trigger-app\"\ndescription = \"Temporary inline trigger test app\"\nversion = \"0.1.0\"\n",
+    )
+    .unwrap();
+    fs::write(
+        app_dir.join("APP.md"),
+        "# Inline Trigger App\n\nTemporary inline trigger install test app.\n",
+    )
+    .unwrap();
+    fs::write(
+        app_dir.join("specs/model.csdl.xml"),
+        r#"<?xml version="1.0" encoding="utf-8"?>
+<edmx:Edmx Version="4.0" xmlns:edmx="http://docs.oasis-open.org/odata/ns/edmx">
+  <edmx:DataServices>
+    <Schema Namespace="Temper.InstallTest" xmlns="http://docs.oasis-open.org/odata/ns/edm">
+      <EntityType Name="Order">
+        <Key><PropertyRef Name="Id"/></Key>
+        <Property Name="Id" Type="Edm.String" Nullable="false"/>
+        <Property Name="Status" Type="Edm.String"/>
+        <Property Name="PaymentId" Type="Edm.String"/>
+      </EntityType>
+      <EntityType Name="Payment">
+        <Key><PropertyRef Name="Id"/></Key>
+        <Property Name="Id" Type="Edm.String" Nullable="false"/>
+        <Property Name="Status" Type="Edm.String"/>
+      </EntityType>
+      <EntityContainer Name="Container">
+        <EntitySet Name="Orders" EntityType="Temper.InstallTest.Order"/>
+        <EntitySet Name="Payments" EntityType="Temper.InstallTest.Payment"/>
+      </EntityContainer>
+    </Schema>
+  </edmx:DataServices>
+</edmx:Edmx>"#,
+    )
+    .unwrap();
+    fs::write(
+        app_dir.join("specs/order.ioa.toml"),
+        r#"[automaton]
+name = "Order"
+states = ["Draft", "Submitted", "Confirmed"]
+initial = "Draft"
+
+[[state]]
+name = "payment_id"
+type = "string"
+initial = ""
+
+[[action]]
+name = "AddItem"
+kind = "input"
+from = ["Draft"]
+params = ["payment_id"]
+
+[[action]]
+name = "SubmitOrder"
+kind = "internal"
+from = ["Draft"]
+to = "Submitted"
+
+[[action]]
+name = "ConfirmOrder"
+kind = "internal"
+from = ["Submitted"]
+to = "Confirmed"
+
+[[action.triggers]]
+name = "confirm_triggers_auth"
+kind = "entity"
+principal = "payment-service"
+target_entity = "Payment"
+target_action = "AuthorizePayment"
+
+[action.triggers.resolve_target]
+type = "field"
+field = "payment_id"
+"#,
+    )
+    .unwrap();
+    fs::write(
+        app_dir.join("specs/payment.ioa.toml"),
+        r#"[automaton]
+name = "Payment"
+states = ["Pending", "Authorized"]
+initial = "Pending"
+
+[[action]]
+name = "AuthorizePayment"
+kind = "internal"
+from = ["Pending"]
+to = "Authorized"
+"#,
+    )
+    .unwrap();
+    fs::write(
+        app_dir.join("policies/payment.cedar"),
+        r#"permit(
+    principal is Agent,
+    action == Action::"AuthorizePayment",
+    resource is Payment
+) when {
+    principal.agent_type == "payment-service"
+};
+"#,
+    )
+    .unwrap();
+
+    add_os_apps_dir(app_root.clone());
+
+    let state = PlatformState::new(None);
+    add_os_apps_dir(app_root.clone());
+    install_os_app(&state, "test-inline-trigger", "inline-trigger-app")
+        .await
+        .expect("install inline-trigger-app");
+
+    let tenant = TenantId::new("test-inline-trigger");
+    state
+        .server
+        .dispatch_tenant_action(
+            &tenant,
+            "Order",
+            "order-1",
+            "AddItem",
+            json!({"payment_id":"pay-1"}),
+            &AgentContext::system(),
+        )
+        .await
+        .expect("AddItem should succeed");
+    state
+        .server
+        .dispatch_tenant_action(
+            &tenant,
+            "Order",
+            "order-1",
+            "SubmitOrder",
+            json!({}),
+            &AgentContext::system(),
+        )
+        .await
+        .expect("SubmitOrder should succeed");
+    state
+        .server
+        .dispatch_tenant_action(
+            &tenant,
+            "Order",
+            "order-1",
+            "ConfirmOrder",
+            json!({}),
+            &AgentContext::system(),
+        )
+        .await
+        .expect("ConfirmOrder should succeed");
+
+    tokio::task::yield_now().await;
+
+    let payment = state
+        .server
+        .get_tenant_entity_state(&tenant, "Payment", "pay-1")
+        .await
+        .expect("payment should exist after inline trigger dispatch");
+    assert_eq!(payment.state.status, "Authorized");
+
+    let _ = fs::remove_dir_all(&app_root);
 }

@@ -164,6 +164,10 @@ pub struct ProductionWasmHost {
     client: reqwest::Client,
     /// Secrets from env vars or a secret store.
     secrets: BTreeMap<String, String>,
+    /// Canonical base URL for the local Temper API when known directly by the server.
+    internal_api_base_url: Option<String>,
+    /// Ambient platform bearer token for internal loopback calls.
+    internal_api_key: Option<String>,
     /// Optional spec evaluator (provided by temper-server at construction).
     spec_evaluator: Option<SpecEvaluatorFn>,
     /// Optional progress emitter (provided by temper-server at construction).
@@ -297,6 +301,8 @@ impl ProductionWasmHost {
         Self {
             client: builder.build().unwrap_or_default(),
             secrets,
+            internal_api_base_url: None,
+            internal_api_key: None,
             spec_evaluator: None,
             progress_emitter: None,
             trace_id: None,
@@ -326,6 +332,20 @@ impl ProductionWasmHost {
     /// Attach invocation context for guest telemetry auto-enrichment.
     pub fn with_invocation_context(mut self, context: WasmInvocationContext) -> Self {
         self.invocation_context = Some(context);
+        self
+    }
+
+    /// Attach the canonical local Temper API base URL for internal call detection.
+    pub fn with_internal_api_base_url(mut self, api_url: Option<String>) -> Self {
+        self.internal_api_base_url = api_url
+            .map(|value| value.trim_end_matches('/').to_string())
+            .filter(|value| !value.is_empty());
+        self
+    }
+
+    /// Attach the platform API token used for internal loopback calls.
+    pub fn with_internal_api_key(mut self, api_key: Option<String>) -> Self {
+        self.internal_api_key = api_key.filter(|s| !s.is_empty());
         self
     }
 
@@ -469,16 +489,33 @@ impl WasmHost for ProductionWasmHost {
 
         // Auto-inject Temper auth headers for internal API calls (ADR-0043).
         // Internal = URL starts with temper_api_url from secrets.
-        // Only inject when the guest hasn't already set principal headers,
-        // allowing cross-tenant admin calls (e.g. request_approval → temper-system).
+        //
+        // Principal headers and bearer auth are handled independently:
+        // guests may deliberately set a service principal, but still need the
+        // local API key so bearer auth accepts the request.
         let is_internal = self
-            .secrets
-            .get("temper_api_url")
-            .is_some_and(|api_url| url.starts_with(api_url.trim_end_matches('/')));
+            .internal_api_base_url
+            .as_ref()
+            .is_some_and(|api_url| url.starts_with(api_url))
+            || self
+                .secrets
+                .get("temper_api_url")
+                .is_some_and(|api_url| url.starts_with(api_url.trim_end_matches('/')));
         if is_internal && let Some(ref inv_ctx) = self.invocation_context {
+            let has_tenant = filtered_headers
+                .iter()
+                .any(|(k, _)| k.eq_ignore_ascii_case("x-tenant-id"));
             let has_principal = filtered_headers
                 .iter()
                 .any(|(k, _)| k.eq_ignore_ascii_case("x-temper-principal-kind"));
+            let has_authorization = filtered_headers
+                .iter()
+                .any(|(k, _)| k.eq_ignore_ascii_case("authorization"));
+
+            if !has_tenant {
+                builder = builder.header("x-tenant-id", inv_ctx.tenant.as_str());
+            }
+
             if !has_principal {
                 let agent_type = if inv_ctx.entity_type.eq_ignore_ascii_case("Session") {
                     "agent"
@@ -491,16 +528,22 @@ impl WasmHost for ProductionWasmHost {
                     .filter(|s| !s.is_empty())
                     .unwrap_or(inv_ctx.entity_id.as_str());
                 builder = builder
-                    .header("x-tenant-id", inv_ctx.tenant.as_str())
                     .header("x-temper-principal-kind", "agent")
                     .header("x-temper-principal-id", principal_id)
                     .header("x-temper-agent-type", agent_type);
                 if let Some(ref sid) = inv_ctx.session_id {
                     builder = builder.header("x-temper-ctx-sessionid", sid.as_str());
                 }
-                if let Some(key) = self.secrets.get("temper_api_key").filter(|k| !k.is_empty()) {
-                    builder = builder.header("authorization", format!("Bearer {key}"));
-                }
+            }
+
+            if !has_authorization
+                && let Some(key) = self
+                    .internal_api_key
+                    .as_ref()
+                    .or_else(|| self.secrets.get("temper_api_key"))
+                    .filter(|k| !k.is_empty())
+            {
+                builder = builder.header("authorization", format!("Bearer {key}"));
             }
         }
         // determinism-ok: is_internal check uses non-deterministic URL comparison,
@@ -1639,6 +1682,8 @@ mod tests {
     use super::*;
     use opentelemetry::trace::{TraceContextExt, TracerProvider as _};
     use opentelemetry_sdk::trace::SdkTracerProvider;
+    use std::io::{Read, Write};
+    use std::net::TcpListener;
     use std::sync::{Arc, Mutex};
     use tracing_opentelemetry::OpenTelemetrySpanExt;
     use tracing_subscriber::prelude::*;
@@ -1753,6 +1798,195 @@ mod tests {
             .in_scope(|| current_traceparent_header(&tracing::Span::current(), None))
             .expect("active span should produce a traceparent");
         assert_eq!(actual, expected);
+    }
+
+    #[test]
+    fn internal_http_call_injects_bearer_even_with_explicit_principal_headers() {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind test listener");
+        let addr = listener.local_addr().expect("listener addr");
+        let captured = Arc::new(Mutex::new(String::new()));
+        let captured_clone = Arc::clone(&captured);
+
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().expect("accept request");
+            let mut buf = [0u8; 8192];
+            let len = stream.read(&mut buf).expect("read request");
+            *captured_clone.lock().expect("capture lock") =
+                String::from_utf8_lossy(&buf[..len]).into_owned();
+
+            let body = "{}";
+            write!(
+                stream,
+                "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                body.len(),
+                body
+            )
+            .expect("write response");
+        });
+
+        let mut secrets = BTreeMap::new();
+        secrets.insert("temper_api_url".to_string(), format!("http://{addr}"));
+        secrets.insert("temper_api_key".to_string(), "secret123".to_string());
+
+        let host = ProductionWasmHost::new(secrets).with_invocation_context(WasmInvocationContext {
+            tenant: "default".to_string(),
+            entity_type: "Workspace".to_string(),
+            entity_id: "ws-1".to_string(),
+            trigger_action: "CreateFile".to_string(),
+            trigger_params: Value::Null,
+            entity_state: Value::Null,
+            agent_id: Some("operator".to_string()),
+            session_id: None,
+            integration_config: BTreeMap::new(),
+            trace_id: String::new(),
+        });
+
+        let headers = vec![
+            ("X-Tenant-Id".to_string(), "default".to_string()),
+            ("x-temper-principal-kind".to_string(), "agent".to_string()),
+            ("x-temper-principal-id".to_string(), "system".to_string()),
+        ];
+
+        let (status, _) = tokio_test::block_on(host.http_call(
+            "GET",
+            &format!("http://{addr}/tdata/Directories"),
+            &headers,
+            "",
+        ))
+        .expect("internal call should succeed");
+
+        assert_eq!(status, 200);
+        server.join().expect("server thread");
+
+        let request = captured.lock().expect("capture lock").to_lowercase();
+        assert!(
+            request.contains("authorization: bearer secret123"),
+            "expected bearer token in request, got: {request}"
+        );
+        assert!(
+            request.contains("x-temper-principal-kind: agent"),
+            "expected explicit principal header to be preserved, got: {request}"
+        );
+    }
+
+    #[test]
+    fn internal_http_call_injects_bearer_from_internal_api_key_context() {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind test listener");
+        let addr = listener.local_addr().expect("listener addr");
+        let captured = Arc::new(Mutex::new(String::new()));
+        let captured_clone = Arc::clone(&captured);
+
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().expect("accept request");
+            let mut buf = [0u8; 8192];
+            let len = stream.read(&mut buf).expect("read request");
+            *captured_clone.lock().expect("capture lock") =
+                String::from_utf8_lossy(&buf[..len]).into_owned();
+
+            let body = "{}";
+            write!(
+                stream,
+                "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                body.len(),
+                body
+            )
+            .expect("write response");
+        });
+
+        let mut secrets = BTreeMap::new();
+        secrets.insert("temper_api_url".to_string(), format!("http://{addr}"));
+
+        let host = ProductionWasmHost::new(secrets)
+            .with_internal_api_key(Some("ambient-secret".to_string()))
+            .with_invocation_context(WasmInvocationContext {
+                tenant: "default".to_string(),
+                entity_type: "Workspace".to_string(),
+                entity_id: "ws-1".to_string(),
+                trigger_action: "CreateFile".to_string(),
+                trigger_params: Value::Null,
+                entity_state: Value::Null,
+                agent_id: Some("operator".to_string()),
+                session_id: None,
+                integration_config: BTreeMap::new(),
+                trace_id: String::new(),
+            });
+
+        let headers = vec![("X-Tenant-Id".to_string(), "default".to_string())];
+
+        let (status, _) = tokio_test::block_on(host.http_call(
+            "GET",
+            &format!("http://{addr}/tdata/Directories"),
+            &headers,
+            "",
+        ))
+        .expect("internal call should succeed");
+
+        assert_eq!(status, 200);
+        server.join().expect("server thread");
+
+        let request = captured.lock().expect("capture lock").to_lowercase();
+        assert!(
+            request.contains("authorization: bearer ambient-secret"),
+            "expected ambient bearer token in request, got: {request}"
+        );
+    }
+
+    #[test]
+    fn internal_http_call_uses_configured_internal_api_base_url_without_secret() {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind test listener");
+        let addr = listener.local_addr().expect("listener addr");
+        let captured = Arc::new(Mutex::new(String::new()));
+        let captured_clone = Arc::clone(&captured);
+
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().expect("accept request");
+            let mut buf = [0u8; 8192];
+            let len = stream.read(&mut buf).expect("read request");
+            *captured_clone.lock().expect("capture lock") =
+                String::from_utf8_lossy(&buf[..len]).into_owned();
+
+            let body = "{}";
+            write!(
+                stream,
+                "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                body.len(),
+                body
+            )
+            .expect("write response");
+        });
+
+        let host = ProductionWasmHost::new(BTreeMap::new())
+            .with_internal_api_base_url(Some(format!("http://{addr}")))
+            .with_internal_api_key(Some("ambient-secret".to_string()))
+            .with_invocation_context(WasmInvocationContext {
+                tenant: "default".to_string(),
+                entity_type: "Session".to_string(),
+                entity_id: "ss-1".to_string(),
+                trigger_action: "WorkspaceReady".to_string(),
+                trigger_params: Value::Null,
+                entity_state: Value::Null,
+                agent_id: Some("ss-1".to_string()),
+                session_id: Some("ss-1".to_string()),
+                integration_config: BTreeMap::new(),
+                trace_id: String::new(),
+            });
+
+        let (status, _) = tokio_test::block_on(host.http_call(
+            "GET",
+            &format!("http://{addr}/tdata/Files('file-1')/$value"),
+            &[("X-Tenant-Id".to_string(), "default".to_string())],
+            "",
+        ))
+        .expect("internal call should succeed");
+
+        assert_eq!(status, 200);
+        server.join().expect("server thread");
+
+        let request = captured.lock().expect("capture lock").to_lowercase();
+        assert!(
+            request.contains("authorization: bearer ambient-secret"),
+            "expected ambient bearer token in request, got: {request}"
+        );
     }
 
     #[test]

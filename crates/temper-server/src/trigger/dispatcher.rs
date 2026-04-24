@@ -8,6 +8,7 @@
 use std::sync::Arc;
 
 use crate::request_context::AgentContext;
+use temper_authz::SecurityContext;
 use temper_runtime::tenant::TenantId;
 use tracing;
 use tracing::instrument;
@@ -134,11 +135,69 @@ impl ReactionDispatcher {
                 super::params::build_effective_params(&rule.then, fields, &rule.name);
 
             // ADR-0046: resolve the dispatch principal. If the rule declares
-            // an explicit `principal`, build a synthetic elevated context;
-            // otherwise inherit the invoking principal. Reactions loaded
-            // from legacy `reactions.toml` have `principal = None` and thus
-            // inherit — preserving the pre-ADR-0046 semantics for them.
-            let dispatch_ctx = resolve_trigger_principal(rule.principal.as_deref(), invoking_ctx);
+            // an explicit `principal`, build a synthetic service identity;
+            // otherwise inherit the invoking principal's exact
+            // `SecurityContext` when available.
+            let dispatch_ctx = resolve_trigger_principal(
+                rule.principal.as_deref(),
+                invoking_ctx,
+                &rule.name,
+                entity_type,
+                entity_id,
+                action,
+            );
+
+            let authz_snapshot = match state
+                .load_authz_resource_snapshot(tenant, &rule.then.entity_type, &target_entity_id)
+                .await
+            {
+                Ok(snapshot) => snapshot,
+                Err(e) => {
+                    tracing::warn!(
+                        rule = rule.name,
+                        target_entity = %rule.then.entity_type,
+                        target_id = %target_entity_id,
+                        error = %e,
+                        "Reaction authz snapshot failed"
+                    );
+                    results.push(ReactionResult {
+                        rule_name: rule.name.clone(),
+                        success: false,
+                        target_status: None,
+                        error: Some(e),
+                        depth,
+                    });
+                    continue;
+                }
+            };
+
+            let security_ctx = effective_trigger_security_context(&dispatch_ctx);
+            if let Err(denial) = state.authorize_with_context(
+                &security_ctx,
+                &rule.then.action,
+                &rule.then.entity_type,
+                &authz_snapshot.resource_attrs,
+                tenant.as_str(),
+            ) {
+                let reason = denial.to_string();
+                tracing::warn!(
+                    rule = rule.name,
+                    target_entity = %rule.then.entity_type,
+                    target_id = %target_entity_id,
+                    target_action = %rule.then.action,
+                    principal_id = %security_ctx.principal.id,
+                    principal_kind = ?security_ctx.principal.kind,
+                    "Reaction authorization denied: {reason}"
+                );
+                results.push(ReactionResult {
+                    rule_name: rule.name.clone(),
+                    success: false,
+                    target_status: Some(authz_snapshot.current_state.state.status.clone()),
+                    error: Some(reason),
+                    depth,
+                });
+                continue;
+            }
 
             // Fire the target action via the core dispatch (no reaction cascade
             // to avoid infinite async recursion — we handle cascading ourselves).
@@ -220,24 +279,64 @@ impl ReactionDispatcher {
 ///   prefers. The `agent_type` slot carries the name so the Cedar request
 ///   sees it via `principal.agent_type == "<name>"`.
 /// - When the rule has no principal (`None`), inherit the invoking context
-///   directly — the reaction runs as whoever called the source action.
-///   For legacy reactions loaded from `reactions.toml` (which had no
-///   principal concept), this preserves pre-ADR-0046 behavior when the
-///   invoker was already `AgentContext::system()`.
+///   directly — the trigger runs as whoever called the source action.
 fn resolve_trigger_principal(
     declared_principal: Option<&str>,
     invoking_ctx: &AgentContext,
+    rule_name: &str,
+    source_entity_type: &str,
+    source_entity_id: &str,
+    source_action: &str,
 ) -> AgentContext {
     match declared_principal {
         Some(service_name) if !service_name.is_empty() => {
-            // Synthetic elevated context. Clone other fields (trace_id,
-            // session_id, idempotency_key) from the invoker so observability
-            // continuity is preserved across the reaction hop.
-            let mut ctx = invoking_ctx.clone();
-            ctx.agent_id = Some(format!("service:{service_name}"));
-            ctx.agent_type = Some(service_name.to_string());
+            let mut ctx = AgentContext::for_service(service_name);
+            ctx.session_id = invoking_ctx.session_id.clone();
+            ctx.intent = invoking_ctx.intent.clone();
+            ctx.trace_id = invoking_ctx.trace_id.clone();
+            ctx.parent_span_id = invoking_ctx.parent_span_id.clone();
+            ctx.idempotency_key = invoking_ctx.idempotency_key.clone();
+            if let Some(security_ctx) = ctx.security_ctx.as_mut() {
+                security_ctx.context_attrs.insert(
+                    "triggerRule".to_string(),
+                    serde_json::Value::String(rule_name.to_string()),
+                );
+                security_ctx.context_attrs.insert(
+                    "triggerSourceEntityType".to_string(),
+                    serde_json::Value::String(source_entity_type.to_string()),
+                );
+                security_ctx.context_attrs.insert(
+                    "triggerSourceEntityId".to_string(),
+                    serde_json::Value::String(source_entity_id.to_string()),
+                );
+                security_ctx.context_attrs.insert(
+                    "triggerSourceAction".to_string(),
+                    serde_json::Value::String(source_action.to_string()),
+                );
+                security_ctx.context_attrs.insert(
+                    "triggerDeclaredPrincipal".to_string(),
+                    serde_json::Value::Bool(true),
+                );
+            }
             ctx
         }
         _ => invoking_ctx.clone(),
     }
+}
+
+fn effective_trigger_security_context(agent_ctx: &AgentContext) -> SecurityContext {
+    if let Some(security_ctx) = &agent_ctx.security_ctx {
+        return security_ctx.clone();
+    }
+
+    let mut security_ctx = SecurityContext::from_headers(&[]).with_agent_context(
+        agent_ctx.agent_id.as_deref(),
+        agent_ctx.session_id.as_deref(),
+        agent_ctx.agent_type.as_deref(),
+    );
+    security_ctx.context_attrs.insert(
+        "triggerInheritedContextApproximate".to_string(),
+        serde_json::Value::Bool(true),
+    );
+    security_ctx
 }
