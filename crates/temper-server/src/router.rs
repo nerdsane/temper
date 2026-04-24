@@ -159,24 +159,26 @@ async fn http_endpoint_fallback(
         .and_then(|v| v.to_str().ok())
         .map(str::to_string);
 
-    // In single-tenant mode, fall back to the first registered tenant
-    // if the header is absent — same convention as the OData router.
+    // Git clients (and GitHub-REST-compat clients) can't send
+    // X-Tenant-Id; the whole point of the HttpEndpoint surface is
+    // to terminate foreign wire protocols. So unlike the OData
+    // router, the HttpEndpoint fallback always falls back to the
+    // first registered non-system tenant when the header is absent.
+    // Multi-tenant deployments that need strict tenant routing
+    // should encode the tenant in the path prefix of their
+    // HttpEndpoint rows (e.g. /{tenant}/{repo}.git/...).
     let tenant_id = match tenant_header {
         Some(t) if !t.is_empty() => TenantId::new(&t),
         _ => {
-            if state.single_tenant_mode {
-                let registry = state.registry.read().unwrap();
-                match registry.tenant_ids().first() {
-                    Some(t) => (*t).clone(),
-                    None => return http_404_response(uri.path()),
-                }
-            } else {
-                return axum::http::Response::builder()
-                    .status(axum::http::StatusCode::BAD_REQUEST)
-                    .body(Body::from(
-                        "missing X-Tenant-Id header (required in multi-tenant mode)",
-                    ))
-                    .expect("response builder");
+            let registry = state.registry.read().unwrap();
+            let first_non_system = registry
+                .tenant_ids()
+                .into_iter()
+                .find(|t| t.as_str() != "temper-system")
+                .or_else(|| registry.tenant_ids().into_iter().next());
+            match first_non_system {
+                Some(t) => t.clone(),
+                None => return http_404_response(uri.path()),
             }
         }
     };
