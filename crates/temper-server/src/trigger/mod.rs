@@ -17,7 +17,7 @@ pub mod sim_dispatcher;
 pub mod types;
 
 pub use dispatcher::ReactionDispatcher;
-pub use registry::ReactionRegistry;
+pub use registry::{ReactionRegistry, parse_reactions};
 pub use sim_dispatcher::SimReactionSystem;
 pub use types::{
     MAX_GUARD_DEPTH, MAX_REACTION_DEPTH, MAX_REACTIONS_PER_TENANT, ReactionGuard, ReactionResult,

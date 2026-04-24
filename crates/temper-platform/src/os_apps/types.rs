@@ -1,7 +1,6 @@
 use std::collections::BTreeMap;
 
 use serde::Serialize;
-use temper_server::reaction::types::ReactionRule;
 
 use super::{AdrEntry, AgentDefinition, AppSkillDefinition, SeedInstance, SystemFileEntry};
 
@@ -137,8 +136,6 @@ pub struct AppBundle {
     pub specs: Vec<(String, String)>,
     /// CSDL XML source (None if app has no IOA specs).
     pub csdl: Option<String>,
-    /// Cross-entity reaction rules loaded from `reactions/reactions.toml`, if present.
-    pub reactions: Vec<ReactionRule>,
     /// Optional tenant-scoped cross-invariants source.
     pub cross_invariants_toml: Option<String>,
     /// Cedar policy sources (may be empty).

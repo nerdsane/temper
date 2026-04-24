@@ -260,6 +260,10 @@ pub fn parse_reactions(toml_str: &str) -> Result<Vec<ReactionRule>, String> {
                 params_from,
             },
             resolve_target,
+            // ADR-0046: reactions.toml entries have no principal field yet;
+            // they dispatch with inherited invoking context under the new
+            // dispatcher semantics (elevation requires [[action.triggers]]).
+            principal: None,
         });
     }
 
@@ -293,6 +297,7 @@ mod tests {
                 params_from: BTreeMap::new(),
             },
             resolve_target: TargetResolver::SameId,
+            principal: None,
         }
     }
 

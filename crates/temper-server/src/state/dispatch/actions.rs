@@ -43,7 +43,7 @@ impl crate::state::ServerState {
             entity_id,
             action,
             params,
-            &AgentContext::system(),
+            &AgentContext::for_service("platform-dispatch"),
         )
         .await
     }
@@ -166,6 +166,11 @@ impl crate::state::ServerState {
                         &response.state.status,
                         &fields,
                         0,
+                        // ADR-0046: thread the invoking context through so
+                        // reactions without an explicit principal inherit
+                        // the invoking authority, and declared principals
+                        // can elevate deterministically.
+                        agent_ctx,
                     )
                     .await;
             }
@@ -264,14 +269,18 @@ impl crate::state::ServerState {
             .await;
 
         let action_params = params.clone();
-        // W2 phase: admission_acquire.
+        // ADR-0051: acquire an admission permit before spending retry budget.
+        // Caps are pulled inline from the spec registry so `[admission]`
+        // declarations take effect at spec load with no separate
+        // registration step.
+        // W2 phase: admission_acquire observability span (upstream main).
         let admission_span = tracing::info_span!(
             "dispatch.phase.admission_acquire",
             tenant = %tenant,
             entity_type,
             action_name = action,
         );
-        let admission_start = std::time::Instant::now();
+        let admission_start = std::time::Instant::now(); // determinism-ok: wall-clock latency metric only, not on simulation path
         let admission_caps = self.admission_caps_for(tenant, entity_type);
         let admission_was_capped = admission_caps.is_some();
         let admission_result = {

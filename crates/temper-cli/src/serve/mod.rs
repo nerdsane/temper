@@ -151,10 +151,14 @@ pub async fn run(
     // Seed secrets from env into the vault for all tenants.
     if let Some(ref vault) = state.server.secrets_vault {
         // ANTHROPIC_API_KEY — makes {secret:anthropic_api_key} resolve in LLM integrations.
-        if let Ok(key) = std::env::var("ANTHROPIC_API_KEY") {
-            // determinism-ok: env var read at startup for configuration
-            let _ = vault.cache_platform_secret("anthropic_api_key", key);
-        }
+        cache_platform_secret_if_present(
+            vault,
+            "anthropic_api_key",
+            std::env::var("ANTHROPIC_API_KEY").ok(),
+        );
+
+        // EXA_API_KEY — makes {secret:exa_api_key} resolve in research integrations.
+        cache_platform_secret_if_present(vault, "exa_api_key", std::env::var("EXA_API_KEY").ok());
 
         // blob_endpoint — points blob_adapter at the server's internal blob storage
         // when no external blob endpoint (R2/S3) is configured.
@@ -313,6 +317,16 @@ fn seed_cedar_policies(state: &PlatformState, tenant_policy_seed: BTreeMap<Strin
     let mut policies = state.server.tenant_policies.write().unwrap(); // ci-ok: infallible lock
     for (tenant, policy_text) in tenant_policy_seed {
         policies.insert(tenant, policy_text);
+    }
+}
+
+fn cache_platform_secret_if_present(
+    vault: &temper_server::secrets::vault::SecretsVault,
+    secret_name: &str,
+    value: Option<String>,
+) {
+    if let Some(value) = value {
+        let _ = vault.cache_platform_secret(secret_name, value);
     }
 }
 
@@ -839,5 +853,36 @@ async fn spawn_background_verification(state: &PlatformState, specs_dir: &str, t
                 }
             }
         });
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::cache_platform_secret_if_present;
+    use temper_server::secrets::vault::SecretsVault;
+
+    fn test_vault() -> SecretsVault {
+        SecretsVault::new(&[0x42; 32])
+    }
+
+    #[test]
+    fn cache_platform_secret_if_present_stores_present_value() {
+        let vault = test_vault();
+
+        cache_platform_secret_if_present(&vault, "exa_api_key", Some("exa-live".to_string()));
+
+        assert_eq!(
+            vault.get_platform_secret("exa_api_key"),
+            Some("exa-live".to_string())
+        );
+    }
+
+    #[test]
+    fn cache_platform_secret_if_present_skips_missing_value() {
+        let vault = test_vault();
+
+        cache_platform_secret_if_present(&vault, "exa_api_key", None);
+
+        assert_eq!(vault.get_platform_secret("exa_api_key"), None);
     }
 }

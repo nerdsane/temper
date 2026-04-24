@@ -61,9 +61,64 @@ effect = [
   { type = "increment", var = "version_count" },
   { type = "set_counter_from_param", var = "size_bytes", param = "size_bytes" },
   { type = "set_bool", var = "has_content", value = "true" },
-  { type = "spawn", entity_type = "FileVersion", entity_id_source = "{uuid}", initial_action = "Create", store_id_in = "last_version_id" },
 ]
 hint = "Fired by $value PUT handler after WASM upload succeeds. Updates content metadata and advances to Ready. Not callable from Locked."
+
+# ADR-0046: inline triggers are the single source of truth for the
+# File -> FileVersion / Workspace cascade after StreamUpdated commits.
+
+[[action.triggers]]
+name = "file_stream_updated_creates_version"
+kind = "entity"
+principal = "file-service"
+to_state = "Ready"
+target_entity = "FileVersion"
+target_action = "Create"
+
+[action.triggers.params_from]
+file_id = "Id"
+version_number = "version_count"
+content_hash = "content_hash"
+size_bytes = "size_bytes"
+mime_type = "mime_type"
+previous_version_id = "previous_version_id"
+created_by = "created_by"
+
+[action.triggers.resolve_target]
+type = "create"
+
+[[action.triggers]]
+name = "file_stream_updated_supersedes_old_version"
+kind = "entity"
+principal = "file-service"
+target_entity = "FileVersion"
+target_action = "Supersede"
+
+[action.triggers.resolve_target]
+type = "field"
+field = "last_version_id"
+
+[[action.triggers]]
+name = "file_stream_updated_increments_workspace_usage"
+kind = "entity"
+principal = "file-service"
+target_entity = "Workspace"
+target_action = "IncrementUsage"
+
+[action.triggers.params_from]
+size_bytes = "size_bytes"
+
+[action.triggers.resolve_target]
+type = "field"
+field = "workspace_id"
+
+[[action]]
+name = "RecordVersion"
+kind = "internal"
+from = ["Ready"]
+to = "Ready"
+params = ["last_version_id"]
+hint = "Record the newest FileVersion entity after a successful version create cascade."
 
 [[action]]
 name = "Lock"

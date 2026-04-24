@@ -21,8 +21,57 @@ use temper_platform::integration::{
 use temper_spec::automaton::parse_automaton;
 use temper_verify::cascade::VerificationCascade;
 
-const ORDER_IOA_WITH_INTEGRATIONS: &str =
-    include_str!("../../../reference-apps/ecommerce/specs/order.ioa.toml");
+const ORDER_IOA_WITH_INTEGRATIONS: &str = r#"
+[automaton]
+name = "Order"
+states = ["Draft", "Submitted", "Confirmed", "Shipped"]
+initial = "Draft"
+
+[[state]]
+name = "items"
+type = "counter"
+initial = "0"
+
+[[action]]
+name = "AddItem"
+kind = "input"
+from = ["Draft"]
+effect = [{ type = "increment", var = "items" }]
+
+[[action]]
+name = "SubmitOrder"
+kind = "internal"
+from = ["Draft"]
+to = "Submitted"
+guard = "items > 0"
+
+[[action]]
+name = "ConfirmOrder"
+kind = "internal"
+from = ["Submitted"]
+to = "Confirmed"
+
+[[action]]
+name = "ShipOrder"
+kind = "internal"
+from = ["Confirmed"]
+to = "Shipped"
+
+[[integration]]
+name = "notify_fulfillment"
+trigger = "SubmitOrder"
+type = "webhook"
+
+[[integration]]
+name = "charge_payment"
+trigger = "ConfirmOrder"
+type = "webhook"
+
+[[integration]]
+name = "notify_shipping"
+trigger = "ShipOrder"
+type = "webhook"
+"#;
 
 // -----------------------------------------------------------------------
 // Parser → Registry integration

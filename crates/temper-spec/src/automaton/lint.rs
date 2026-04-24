@@ -494,8 +494,8 @@ fn guard_var(guard: &Guard) -> Option<&str> {
 
 fn effect_var(effect: &Effect) -> Option<&str> {
     match effect {
-        Effect::Increment { var } => Some(var.as_str()),
-        Effect::Decrement { var } => Some(var.as_str()),
+        Effect::Increment { var, .. } => Some(var.as_str()),
+        Effect::Decrement { var, .. } => Some(var.as_str()),
         Effect::SetCounterFromParam { var, .. } => Some(var.as_str()),
         Effect::SetBool { var, .. } => Some(var.as_str()),
         Effect::Emit { .. } => None,
@@ -532,8 +532,14 @@ fn render_guard(guard: &Guard) -> String {
 
 fn render_effect(effect: &Effect) -> String {
     match effect {
-        Effect::Increment { var } => format!("increment {var}"),
-        Effect::Decrement { var } => format!("decrement {var}"),
+        Effect::Increment { var, amount } => amount
+            .as_ref()
+            .map(|amount| format!("increment {var} by {amount}"))
+            .unwrap_or_else(|| format!("increment {var}")),
+        Effect::Decrement { var, amount } => amount
+            .as_ref()
+            .map(|amount| format!("decrement {var} by {amount}"))
+            .unwrap_or_else(|| format!("decrement {var}")),
         Effect::SetCounterFromParam { var, param } => {
             format!("set_counter_from_param {var} <- {param}")
         }

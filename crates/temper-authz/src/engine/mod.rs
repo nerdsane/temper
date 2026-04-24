@@ -75,11 +75,15 @@ pub struct AuthzEngine {
 
 impl AuthzEngine {
     /// Create a new AuthzEngine from Cedar policy text (loaded into the
-    /// fallback global policy set).
+    /// fallback global policy set). ADR-0046: the built-in `system-platform`
+    /// policy is merged in so System principals are authorized by an
+    /// explicit, auditable policy rather than a hard-coded bypass.
     pub fn new(policy_text: &str) -> Result<Self, AuthzError> {
-        let policy_set = policy_text
+        // Parse the user policy first — return an error if it's malformed.
+        let mut policy_set = policy_text
             .parse::<PolicySet>()
             .map_err(|e| AuthzError::PolicyParse(e.to_string()))?;
+        merge_system_platform_policy(&mut policy_set);
 
         Ok(Self {
             tenant_policies: RwLock::new(BTreeMap::new()),
@@ -88,14 +92,19 @@ impl AuthzEngine {
         })
     }
 
-    /// Create an AuthzEngine with no policies (Cedar default-deny semantics).
+    /// Create an AuthzEngine with no user policies, but with the built-in
+    /// `system-platform` policy installed (ADR-0046). System principals
+    /// remain authorized; everything else hits Cedar's default-deny.
     ///
-    /// Use this to test deny behavior. For test setups that need all requests
-    /// to be allowed, use [`permissive`](Self::permissive) instead.
+    /// Use this to test deny behavior for non-System principals. For test
+    /// setups that need all requests to be allowed, use
+    /// [`permissive`](Self::permissive) instead.
     pub fn empty() -> Self {
+        let mut policy_set = PolicySet::new();
+        merge_system_platform_policy(&mut policy_set);
         Self {
             tenant_policies: RwLock::new(BTreeMap::new()),
-            fallback_policy_set: RwLock::new(PolicySet::new()),
+            fallback_policy_set: RwLock::new(policy_set),
             authorizer: Authorizer::new(),
         }
     }
@@ -103,7 +112,8 @@ impl AuthzEngine {
     /// Create an AuthzEngine that permits all requests.
     ///
     /// Loads a single catch-all `permit(principal, action, resource);` policy
-    /// so that Cedar evaluates to Allow even for non-System principals.
+    /// so that Cedar evaluates to Allow for every principal kind (System or
+    /// otherwise). Used in tests and permissive dev environments.
     pub fn permissive() -> Self {
         let policy_set =
             PolicySet::from_str("permit(principal, action, resource);").unwrap_or_default();
@@ -240,15 +250,19 @@ impl AuthzEngine {
 
     /// Returns the total number of policies across all tenants + fallback.
     pub fn policy_count(&self) -> usize {
-        let tenant_count = self
+        let tenant_count: usize = self
             .tenant_policies
             .read()
-            .map(|t| t.values().map(|tp| tp.policy_set.policies().count()).sum())
+            .map(|t| {
+                t.values()
+                    .map(|tp| count_user_policies(&tp.policy_set))
+                    .sum()
+            })
             .unwrap_or(0);
         let fallback_count = self
             .fallback_policy_set
             .read()
-            .map_or(0, |ps| ps.policies().count());
+            .map_or(0, |ps| count_user_policies(&ps));
         tenant_count + fallback_count
     }
 
@@ -500,13 +514,24 @@ impl AuthzEngine {
         }
     }
 
-    /// Quick check: is this a system principal (bypasses all checks)?
+    /// Quick check: is this a system principal?
+    ///
+    /// Since ADR-0046, this no longer bypasses authorization. It is kept as a
+    /// convenience predicate for callers that want to branch on principal
+    /// kind for reasons other than authorization (logging, telemetry tagging).
+    /// Actual authorization of System principals flows through the normal
+    /// Cedar evaluation, matching the built-in `system-platform` policy
+    /// installed at engine construction time (see `SYSTEM_PLATFORM_POLICY`).
     pub fn is_system(security_ctx: &SecurityContext) -> bool {
         security_ctx.principal.kind == PrincipalKind::System
     }
 
-    /// Authorize with system bypass: system principals always allowed.
-    /// Uses fallback global policy set.
+    /// Authorize through the fallback global policy set.
+    ///
+    /// ADR-0046: formerly short-circuited System principals with an unchecked
+    /// Allow. System authority is now explicit in the `system-platform` Cedar
+    /// policy; delegating straight to [`authorize`] ensures every request is
+    /// policy-checked and logged.
     pub fn authorize_or_bypass(
         &self,
         security_ctx: &SecurityContext,
@@ -514,15 +539,15 @@ impl AuthzEngine {
         resource_type: &str,
         resource_attrs: &HashMap<String, serde_json::Value>,
     ) -> AuthzDecision {
-        if Self::is_system(security_ctx) {
-            return AuthzDecision::Allow {
-                policy_ids: vec!["system-bypass".to_string()],
-            };
-        }
         self.authorize(security_ctx, action, resource_type, resource_attrs)
     }
 
-    /// Authorize for a specific tenant with system bypass.
+    /// Authorize for a specific tenant through Cedar.
+    ///
+    /// ADR-0046: formerly short-circuited System principals with an unchecked
+    /// Allow. System authority is now explicit in the `system-platform`
+    /// policy merged into the fallback policy set; this function simply
+    /// delegates to [`authorize_for_tenant`].
     pub fn authorize_for_tenant_or_bypass(
         &self,
         tenant: &str,
@@ -531,13 +556,61 @@ impl AuthzEngine {
         resource_type: &str,
         resource_attrs: &HashMap<String, serde_json::Value>,
     ) -> AuthzDecision {
-        if Self::is_system(security_ctx) {
-            return AuthzDecision::Allow {
-                policy_ids: vec!["system-bypass".to_string()],
-            };
-        }
         self.authorize_for_tenant(tenant, security_ctx, action, resource_type, resource_attrs)
     }
+}
+
+/// Built-in Cedar policy granting System-kind principals broad authority
+/// (ADR-0046). Installed into every [`AuthzEngine`] at construction time so
+/// that platform code paths using `AgentContext::system()` continue to
+/// function after the blanket bypass was removed.
+///
+/// This is intentionally broad for day-one migration — it preserves the
+/// pre-ADR-0046 behavior of System principals being universally allowed,
+/// but makes that authority an auditable, overridable Cedar policy rather
+/// than hard-coded control flow. Follow-up work narrows this policy to the
+/// specific actions the platform genuinely needs (bootstrap writes,
+/// credential rotation, recovery).
+const SYSTEM_PLATFORM_POLICY: &str = r#"
+@id("system-platform:broad-permit")
+permit(principal is System, action, resource);
+"#;
+
+/// PolicyId prefix used for the built-in system-platform policies
+/// (ADR-0046). Used to exclude them from user-facing counts.
+const SYSTEM_PLATFORM_POLICY_ID_PREFIX: &str = "system-platform:";
+
+/// Merge the built-in system-platform policy into an existing [`PolicySet`].
+///
+/// Policies are added with explicit `PolicyId`s prefixed by
+/// [`SYSTEM_PLATFORM_POLICY_ID_PREFIX`] so downstream code can filter them
+/// out of user-facing reports (see [`count_user_policies`]). If the
+/// hard-coded system policy fails to parse, the combined set is left
+/// unchanged — preserving availability at the cost of System auth.
+fn merge_system_platform_policy(combined: &mut PolicySet) {
+    let system_set: PolicySet = match SYSTEM_PLATFORM_POLICY.parse() {
+        Ok(ps) => ps,
+        Err(_) => return,
+    };
+    for (idx, policy) in system_set.policies().enumerate() {
+        let named = policy.clone().new_id(PolicyId::new(format!(
+            "{SYSTEM_PLATFORM_POLICY_ID_PREFIX}broad-permit-{idx}"
+        )));
+        let _ = combined.add(named);
+    }
+}
+
+/// Count user-authored policies in a [`PolicySet`], excluding the built-in
+/// `system-platform` policies (ADR-0046). Tenants should reason about their
+/// own policy surface without the platform's internals polluting the count.
+fn count_user_policies(ps: &PolicySet) -> usize {
+    ps.policies()
+        .filter(|p| {
+            !p.id()
+                .to_string()
+                .starts_with(SYSTEM_PLATFORM_POLICY_ID_PREFIX)
+        })
+        .count()
 }
 
 fn cedar_evaluations_counter() -> &'static Counter<u64> {

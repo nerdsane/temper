@@ -98,7 +98,7 @@ pub async fn bootstrap_system_files(
         return;
     }
 
-    let agent_ctx = temper_server::request_context::AgentContext::system();
+    let agent_ctx = temper_server::request_context::AgentContext::for_service("platform-bootstrap");
     if let Err(e) = super::ensure_app_docs_workspace(state, tenant_id, &agent_ctx).await {
         tracing::warn!(tenant, error = %e, "Failed to ensure workspace for system file bootstrap");
         return;

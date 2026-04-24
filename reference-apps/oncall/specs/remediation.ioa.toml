@@ -100,14 +100,3 @@ name = "ApprovalRequired"
 when = ["Approved", "Executing", "Succeeded", "Failed"]
 assert = "human_approved"
 
-# --- Integrations ---
-
-[[integration]]
-name = "request_approval"
-trigger = "Approve"
-type = "webhook"
-
-[[integration]]
-name = "notify_execution"
-trigger = "Execute"
-type = "webhook"

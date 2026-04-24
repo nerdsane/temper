@@ -7,15 +7,13 @@ use temper_spec::cross_invariant::{
 };
 use tracing::instrument;
 
-use crate::reaction::registry::parse_reactions;
-use crate::state::ServerState;
-
 use super::super::specs_helpers::{
     build_ndjson_response, cross_lint_ndjson_line, lint_loaded_specs, lint_ndjson_line,
     to_pascal_case,
 };
 use super::types::LoadDirRequest;
 use super::verification_stream::build_verification_stream_response;
+use crate::state::ServerState;
 
 /// POST /api/specs/load-dir -- hot-load specs from a directory into the running server.///
 /// Reads CSDL and IOA files from `specs_dir`, registers them under `tenant`,
@@ -101,27 +99,16 @@ pub(crate) async fn handle_load_dir(
         ));
     }
 
-    // Optional reactions.toml.
-    let reactions = {
-        let path = specs_path.join("reactions.toml");
-        if path.exists() {
-            let source = std::fs::read_to_string(&path).map_err(|e| {
-                // determinism-ok: HTTP handler reads reactions file
-                (
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    format!("Failed to read {}: {e}", path.display()),
-                )
-            })?;
-            parse_reactions(&source).map_err(|e| {
-                (
-                    StatusCode::BAD_REQUEST,
-                    format!("Failed to parse {}: {e}", path.display()),
-                )
-            })?
-        } else {
-            Vec::new()
-        }
-    };
+    let legacy_reactions_path = specs_path.join("reactions.toml");
+    if legacy_reactions_path.exists() {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            format!(
+                "Legacy {} is no longer supported; migrate to inline [[action.triggers]]",
+                legacy_reactions_path.display()
+            ),
+        ));
+    }
 
     // Optional cross-invariants.toml.
     let cross_invariants_toml = {
@@ -224,7 +211,7 @@ pub(crate) async fn handle_load_dir(
                 csdl,
                 csdl_xml,
                 &ioa_pairs,
-                reactions,
+                Vec::new(),
                 cross_invariants_toml.clone(),
                 body.merge,
             )

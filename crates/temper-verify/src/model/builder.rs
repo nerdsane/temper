@@ -137,6 +137,8 @@ fn convert_effect(effect: ResolvedEffect) -> ModelEffect {
         ResolvedEffect::Emit(_)
         | ResolvedEffect::SetCounterFromParam { .. }
         | ResolvedEffect::Trigger(_)
+        | ResolvedEffect::IncrementCounterByParam { .. }
+        | ResolvedEffect::DecrementCounterByParam { .. }
         | ResolvedEffect::Schedule { .. }
         | ResolvedEffect::ScheduleAt { .. }
         | ResolvedEffect::Spawn { .. } => {

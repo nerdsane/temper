@@ -323,11 +323,26 @@ pub fn apply_effects(
                     state.item_count += 1;
                 }
             }
+            Effect::IncrementCounterByParam { var, param } => {
+                let delta = counter_delta_from_params(params, param);
+                *state.counters.entry(var.clone()).or_default() += delta;
+                if var == "items" {
+                    state.item_count += delta;
+                }
+            }
             Effect::DecrementCounter(var) => {
                 let c = state.counters.entry(var.clone()).or_default();
                 *c = c.saturating_sub(1);
                 if var == "items" {
                     state.item_count = state.item_count.saturating_sub(1);
+                }
+            }
+            Effect::DecrementCounterByParam { var, param } => {
+                let delta = counter_delta_from_params(params, param);
+                let c = state.counters.entry(var.clone()).or_default();
+                *c = c.saturating_sub(delta);
+                if var == "items" {
+                    state.item_count = state.item_count.saturating_sub(delta);
                 }
             }
             Effect::SetCounterFromParam { var, param } => {
@@ -488,6 +503,17 @@ pub fn apply_effects(
         spawn_requests,
         schedule_at_requests,
     )
+}
+
+fn counter_delta_from_params(params: &serde_json::Value, param: &str) -> usize {
+    params
+        .get(param)
+        .and_then(|value| match value {
+            serde_json::Value::Number(number) => number.as_u64().map(|v| v as usize),
+            serde_json::Value::String(text) => text.parse::<usize>().ok(),
+            _ => None,
+        })
+        .unwrap_or(0)
 }
 
 /// Resolve deferred `schedule_at` requests into [`ScheduledAction`]s.
@@ -768,6 +794,45 @@ effect = [{ type = "schedule", action = "Refresh", delay_seconds = 2700 }]
         assert_eq!(scheduled[0].action, "Refresh");
         assert_eq!(scheduled[0].delay_seconds, 3600);
         assert_eq!(state.status, "Active");
+    }
+
+    #[test]
+    fn test_apply_effects_uses_numeric_param_amounts_for_counter_deltas() {
+        let effects = vec![
+            Effect::IncrementCounterByParam {
+                var: "used_bytes".into(),
+                param: "size_bytes".into(),
+            },
+            Effect::DecrementCounterByParam {
+                var: "used_bytes".into(),
+                param: "released_bytes".into(),
+            },
+        ];
+
+        let mut state = EntityState {
+            entity_type: "Workspace".into(),
+            entity_id: "ws-1".into(),
+            status: "Active".into(),
+            item_count: 0,
+            counters: std::collections::BTreeMap::from([("used_bytes".into(), 10usize)]),
+            booleans: std::collections::BTreeMap::new(),
+            lists: std::collections::BTreeMap::new(),
+            fields: serde_json::json!({}),
+            events: std::collections::VecDeque::new(),
+            total_event_count: 0,
+            sequence_nr: 0,
+        };
+
+        let (_custom, _scheduled, _spawns, _schedule_at) = apply_effects(
+            &mut state,
+            &effects,
+            &serde_json::json!({
+                "size_bytes": "30",
+                "released_bytes": 7,
+            }),
+        );
+
+        assert_eq!(state.counters.get("used_bytes"), Some(&33));
     }
 
     #[test]

@@ -149,7 +149,7 @@ impl crate::state::ServerState {
                     entity_ref.entity_id,
                     callback_action,
                     callback_params,
-                    &AgentContext::system(),
+                    &AgentContext::for_service("wasm-runtime"),
                 )
                 .await
                 .map_err(|e| {
@@ -210,7 +210,7 @@ impl crate::state::ServerState {
             let tenant = TenantId::new("temper-system");
             if let Err(e) = state_c.dispatch_tenant_action(
                 &tenant, "GovernanceDecision", &gd_id,
-                "CreateGovernanceDecision", gd_params, &AgentContext::system(),
+                "CreateGovernanceDecision", gd_params, &AgentContext::for_service("wasm-runtime"),
             ).await {
                 tracing::warn!(error = %e, "failed to create GovernanceDecision for WASM denial");
             }

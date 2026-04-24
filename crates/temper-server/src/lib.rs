@@ -24,7 +24,6 @@ pub mod odata;
 pub mod platform_store;
 pub mod profiling;
 mod query_eval;
-pub mod reaction;
 pub mod registry;
 pub mod registry_bootstrap;
 pub mod request_context;
@@ -35,6 +34,7 @@ pub mod secrets;
 #[cfg(feature = "observe")]
 pub mod sentinel;
 pub mod state;
+pub mod trigger;
 pub mod wasm_registry;
 pub mod webhooks;
 

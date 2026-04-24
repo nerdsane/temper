@@ -88,6 +88,8 @@ pub(super) async fn dispatch_bound_action(
             None, // No self-declared agent_type
         )
     };
+    let mut dispatch_agent_ctx = agent_ctx.clone();
+    dispatch_agent_ctx.security_ctx = Some(security_ctx.clone());
 
     // Default-deny: reject actions on entity types with no registered spec.
     let is_governed = match state.is_entity_type_governed(tenant, entity_type) {
@@ -117,9 +119,8 @@ pub(super) async fn dispatch_bound_action(
         .into_response();
     }
 
-    // Fetch entity state BEFORE authz check so resource attributes are available.
-    let current_state = match state
-        .get_tenant_entity_state(tenant, entity_type, key_str)
+    let authz_snapshot = match state
+        .load_authz_resource_snapshot(tenant, entity_type, key_str)
         .await
     {
         Ok(v) => v,
@@ -128,81 +129,16 @@ pub(super) async fn dispatch_bound_action(
             http_span.set_attribute(OtelKeyValue::new("http.status_code", 500i64));
             let end_time: std::time::SystemTime = sim_now().into();
             http_span.end_with_timestamp(end_time);
-            return odata_error(StatusCode::INTERNAL_SERVER_ERROR, "ReadError", &e).into_response();
-        }
-    };
-
-    // Build resource attributes from current entity state for Cedar evaluation.
-    let mut resource_attrs = std::collections::BTreeMap::new();
-    resource_attrs.insert(
-        "id".to_string(),
-        serde_json::Value::String(key_str.to_string()),
-    );
-    resource_attrs.insert(
-        "status".to_string(),
-        serde_json::Value::String(current_state.state.status.clone()),
-    );
-    // Include entity fields as resource attributes.
-    if let serde_json::Value::Object(fields) = &current_state.state.fields {
-        for (k, v) in fields {
-            resource_attrs.insert(k.clone(), v.clone());
-        }
-    }
-
-    // Resolve context entities for Cedar authorization (Gap 3: Agent OS).
-    // Read [[context_entity]] declarations from the spec, resolve target entity
-    // statuses, and inject as ctx_{name}_status into resource_attrs.
-    {
-        let context_entities: Vec<temper_spec::automaton::ContextEntityDecl> =
-            match state.registry.read() {
-                Ok(registry) => registry
-                    .get_spec(tenant, entity_type)
-                    .map(|s| s.automaton.context_entities.clone())
-                    .unwrap_or_default(),
-                Err(e) => {
-                    let msg = format!("registry lock poisoned: {e}");
-                    http_span.set_status(Status::error(msg.clone()));
-                    http_span.set_attribute(OtelKeyValue::new("http.status_code", 500i64));
-                    let end_time: std::time::SystemTime = sim_now().into();
-                    http_span.end_with_timestamp(end_time);
-                    return odata_error(StatusCode::INTERNAL_SERVER_ERROR, "RegistryError", &msg)
-                        .into_response();
-                }
+            let code = if e.contains("registry lock poisoned") {
+                "RegistryError"
+            } else {
+                "ReadError"
             };
-
-        for ce in &context_entities {
-            let target_id = current_state
-                .state
-                .fields
-                .get(&ce.id_field)
-                .and_then(|v| v.as_str())
-                .unwrap_or("");
-
-            if !target_id.is_empty()
-                && let Some(status) = state
-                    .resolve_entity_status(tenant, &ce.entity_type, target_id)
-                    .await
-            {
-                resource_attrs.insert(
-                    format!("ctx_{}_status", ce.name),
-                    serde_json::Value::String(status),
-                );
-            }
-        }
-    }
-
-    let has_spec = match state.has_registered_spec(tenant, entity_type) {
-        Ok(value) => value,
-        Err(e) => {
-            http_span.set_status(Status::error(e.clone()));
-            http_span.set_attribute(OtelKeyValue::new("http.status_code", 500i64));
-            let end_time: std::time::SystemTime = sim_now().into();
-            http_span.end_with_timestamp(end_time);
-            return odata_error(StatusCode::INTERNAL_SERVER_ERROR, "RegistryError", &e)
-                .into_response();
+            return odata_error(StatusCode::INTERNAL_SERVER_ERROR, code, &e).into_response();
         }
     };
-    resource_attrs.insert("has_spec".to_string(), serde_json::Value::Bool(has_spec));
+    let current_state = authz_snapshot.current_state;
+    let resource_attrs = authz_snapshot.resource_attrs;
 
     let authz_result = state.authorize_with_context(
         &security_ctx,
@@ -293,7 +229,7 @@ pub(super) async fn dispatch_bound_action(
             action,
             body_json,
             DispatchExtOptions {
-                agent_ctx,
+                agent_ctx: &dispatch_agent_ctx,
                 await_integration,
             },
         )

@@ -185,7 +185,7 @@ pub(crate) async fn handle_decide(
             &ed_id,
             "CreateDecision",
             ed_params,
-            &AgentContext::system(),
+            &AgentContext::for_service("evolution-engine"),
         )
         .await
     {

@@ -8,8 +8,8 @@ use anyhow::{Context, Result};
 
 use crate::util::to_pascal_case;
 use temper_runtime::tenant::TenantId;
-use temper_server::reaction::registry::parse_reactions;
 use temper_server::registry::SpecRegistry;
+use temper_server::trigger::registry::parse_reactions;
 use temper_spec::automaton::{LintSeverity, lint_automata_bundle, lint_automaton, parse_automaton};
 use temper_spec::cross_invariant::{
     CrossInvariantLintSeverity, lint_cross_invariants, parse_cross_invariants,
@@ -251,7 +251,7 @@ pub(super) fn read_ioa_sources(specs_dir: &Path) -> Result<HashMap<String, Strin
 /// Read optional `reactions.toml` and parse it into reaction rules.
 pub(super) fn read_reactions(
     specs_dir: &Path,
-) -> Result<Vec<temper_server::reaction::ReactionRule>> {
+) -> Result<Vec<temper_server::trigger::ReactionRule>> {
     let reactions_path = specs_dir.join("reactions.toml");
     if !reactions_path.exists() {
         return Ok(Vec::new());

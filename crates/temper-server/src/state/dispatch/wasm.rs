@@ -97,6 +97,20 @@ fn local_blob_binary_interceptor(
     }))
 }
 
+fn internal_api_base_url(state: &crate::state::ServerState) -> Option<String> {
+    std::env::var("TEMPER_API_URL")
+        .ok()
+        .map(|value| value.trim_end_matches('/').to_string())
+        .filter(|value| !value.is_empty())
+        .or_else(|| {
+            state
+                .listen_port
+                .get()
+                .copied()
+                .map(|port| format!("http://127.0.0.1:{port}"))
+        })
+}
+
 fn parse_internal_file_value_request(base_url: &str, url: &str) -> Option<String> {
     let prefix = format!("{}/tdata/Files('", base_url.trim_end_matches('/'));
     let remainder = url.strip_prefix(&prefix)?;
@@ -420,6 +434,8 @@ impl crate::state::ServerState {
             module_name.clone(),
         );
         let host_invocation_context = inv_ctx.clone();
+        let internal_api_key = std::env::var("TEMPER_API_KEY").ok();
+        let internal_api_url = internal_api_base_url(self);
         let inner: Arc<dyn WasmHost> = Arc::new(
             ProductionWasmHost::with_timeout(tenant_secrets, http_timeout)
                 .with_binary_http_interceptor(
@@ -428,6 +444,8 @@ impl crate::state::ServerState {
                 )
                 .with_spec_evaluator(spec_evaluator_fn())
                 .with_progress_emitter(progress_emitter)
+                .with_internal_api_base_url(internal_api_url)
+                .with_internal_api_key(internal_api_key)
                 .with_invocation_context(host_invocation_context)
                 .with_text_http_interceptor(
                     local_file_interceptor
@@ -974,6 +992,8 @@ impl crate::state::ServerState {
         let mut base_host = ProductionWasmHost::new(tenant_secrets)
             .with_spec_evaluator(spec_evaluator_fn())
             .with_progress_emitter(progress_emitter)
+            .with_internal_api_base_url(internal_api_base_url(self))
+            .with_internal_api_key(std::env::var("TEMPER_API_KEY").ok())
             .with_invocation_context(context.clone());
         if let Some(interceptor) = local_blob_interceptor {
             base_host = base_host.with_binary_http_interceptor(interceptor);

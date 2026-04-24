@@ -69,6 +69,11 @@ from = ["Submitted"]
 to = "ChargePending"
 effect = "trigger charge_payment"
 
+[[integration]]
+name = "charge_payment"
+trigger = "charge_payment"
+type = "webhook"
+
 [[action]]
 name = "ChargeSucceeded"
 kind = "input"

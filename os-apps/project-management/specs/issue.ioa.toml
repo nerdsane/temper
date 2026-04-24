@@ -275,6 +275,16 @@ effect = "increment comment_count"
 params = ["CommentId"]
 hint = "Add a comment to the issue."
 
+# --- Reassign (added by GEPA evolution run evo-reassign-fix) ---
+
+[[action]]
+name = "Reassign"
+kind = "input"
+from = ["Backlog", "Triage", "Todo", "Planning", "Planned", "InProgress", "InReview"]
+guard = "is_true assignee_set"
+params = ["NewAssigneeId"]
+hint = "Reassign the issue to a different implementer."
+
 # --- Output Actions ---
 
 [[action]]
@@ -323,35 +333,3 @@ assert = "planner_set"
 name = "PlannedRequiresPlan"
 when = ["Planned", "InProgress", "InReview", "Done"]
 assert = "has_plan"
-
-# --- Integrations ---
-
-[[integration]]
-name = "notify_planner_assigned"
-trigger = "AssignPlanner"
-type = "webhook"
-
-[[integration]]
-name = "notify_plan_ready"
-trigger = "WritePlan"
-type = "webhook"
-
-[[integration]]
-name = "notify_plan_approved"
-trigger = "ApprovePlan"
-type = "webhook"
-
-[[integration]]
-name = "notify_assignee"
-trigger = "Assign"
-type = "webhook"
-
-[[integration]]
-name = "notify_review_requested"
-trigger = "SubmitForReview"
-type = "webhook"
-
-[[integration]]
-name = "notify_completed"
-trigger = "ApproveReview"
-type = "webhook"

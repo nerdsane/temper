@@ -63,6 +63,19 @@ to = "Connecting"
 hint = "Start channel connection."
 effect = [{ type = "trigger", name = "channel_connect" }]
 
+# ADR-0046: inline trigger — migrated from [[integration]] below.
+# Post-parse expansion re-synthesizes the equivalent Integration so
+# the existing WASM/webhook runtime handles execution unchanged.
+[[action.triggers]]
+name = "channel_connect"
+kind = "wasm"
+module = "channel_connect"
+on_failure = "ConnectFailed"
+
+[action.triggers.config]
+temper_api_url = "{secret:temper_api_url}"
+
+
 [[action]]
 name = "Ready"
 kind = "input"
@@ -78,6 +91,19 @@ params = ["message_id", "author_id", "thread_id", "content"]
 hint = "Receive an incoming message from the channel platform."
 effect = [{ type = "increment", var = "message_count" }, { type = "trigger", name = "route_message" }]
 
+# ADR-0046: inline trigger — migrated from [[integration]] below.
+# Post-parse expansion re-synthesizes the equivalent Integration so
+# the existing WASM/webhook runtime handles execution unchanged.
+[[action.triggers]]
+name = "route_message"
+kind = "wasm"
+module = "route_message"
+on_failure = "RouteFailed"
+
+[action.triggers.config]
+temper_api_url = "{secret:temper_api_url}"
+
+
 [[action]]
 name = "SendReply"
 kind = "input"
@@ -85,6 +111,19 @@ from = ["Connected"]
 params = ["thread_id", "content", "agent_entity_id"]
 hint = "Send a reply back to the channel."
 effect = [{ type = "trigger", name = "send_reply" }]
+
+# ADR-0046: inline trigger — migrated from [[integration]] below.
+# Post-parse expansion re-synthesizes the equivalent Integration so
+# the existing WASM/webhook runtime handles execution unchanged.
+[[action.triggers]]
+name = "send_reply"
+kind = "wasm"
+module = "send_reply"
+on_failure = "ReplyFailed"
+
+[action.triggers.config]
+temper_api_url = "{secret:temper_api_url}"
+
 
 [[action]]
 name = "ReplyDelivered"
@@ -141,33 +180,3 @@ hint = "Reply delivery WASM failed. Stay Connected."
 name = "ArchivedIsFinal"
 when = ["Archived"]
 assert = "no_further_transitions"
-
-[[integration]]
-name = "channel_connect"
-trigger = "channel_connect"
-type = "wasm"
-module = "channel_connect"
-on_failure = "ConnectFailed"
-
-[integration.config]
-temper_api_url = "{secret:temper_api_url}"
-
-[[integration]]
-name = "route_message"
-trigger = "route_message"
-type = "wasm"
-module = "route_message"
-on_failure = "RouteFailed"
-
-[integration.config]
-temper_api_url = "{secret:temper_api_url}"
-
-[[integration]]
-name = "send_reply"
-trigger = "send_reply"
-type = "wasm"
-module = "send_reply"
-on_failure = "ReplyFailed"
-
-[integration.config]
-temper_api_url = "{secret:temper_api_url}"
