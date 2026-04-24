@@ -625,7 +625,7 @@ queue_timeout_seconds = 10
         let system = ActorSystem::new("load-admission-test");
         let state = Arc::new(ServerState::from_registry(system, registry));
         let tenant = temper_runtime::tenant::TenantId::from("default".to_string());
-        let agent_ctx = AgentContext::system();
+        let agent_ctx = AgentContext::for_service("timeout-scheduler");
 
         // Pre-create 120 ticket entities so the concurrent AssignAgent calls
         // race on the shared admission cap for that action.
@@ -824,7 +824,7 @@ queue_timeout_seconds = 0
         let system = ActorSystem::new("load-tight-admission-test");
         let state = Arc::new(ServerState::from_registry(system, registry));
         let tenant = temper_runtime::tenant::TenantId::from("default".to_string());
-        let agent_ctx = AgentContext::system();
+        let agent_ctx = AgentContext::for_service("timeout-scheduler");
 
         // Shared entity — all 300 dispatches contend for the SAME ticket
         // so the actor's single-threaded processing adds queue time on
@@ -988,7 +988,7 @@ queue_timeout_seconds = 30
         let system = ActorSystem::new("throughput-1000-test");
         let state = Arc::new(ServerState::from_registry(system, registry));
         let tenant = temper_runtime::tenant::TenantId::from("default".to_string());
-        let agent_ctx = AgentContext::system();
+        let agent_ctx = AgentContext::for_service("timeout-scheduler");
 
         const N: usize = 1000;
 
@@ -1095,7 +1095,7 @@ queue_timeout_seconds = 30
         let state = ServerState::from_registry(system, registry);
 
         let tenant = temper_runtime::tenant::TenantId::from("default".to_string());
-        let agent_ctx = AgentContext::system();
+        let agent_ctx = AgentContext::for_service("timeout-scheduler");
 
         // Create the entity so it lands in `Open`.
         let created = state

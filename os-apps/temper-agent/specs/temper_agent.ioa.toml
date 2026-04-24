@@ -255,6 +255,21 @@ to = "Provisioning"
 hint = "Start sandbox provisioning. Triggers provision_sandbox WASM integration."
 effect = [{ type = "trigger", name = "provision_sandbox" }]
 
+# ADR-0046: inline trigger — migrated from [[integration]] below.
+# Post-parse expansion re-synthesizes the equivalent Integration so
+# the existing WASM/webhook runtime handles execution unchanged.
+[[action.triggers]]
+name = "provision_sandbox"
+kind = "wasm"
+module = "sandbox_provisioner"
+on_failure = "Fail"
+
+[action.triggers.config]
+temper_api_url = "{secret:temper_api_url}"
+sandbox_url = "{secret:sandbox_url}"
+e2b_api_key = "{secret:e2b_api_key}"
+
+
 [[action]]
 name = "SandboxReady"
 kind = "input"
@@ -263,6 +278,29 @@ to = "Thinking"
 params = ["sandbox_url", "sandbox_id", "workspace_id", "conversation_file_id", "file_manifest_id", "session_file_id", "session_leaf_id"]
 hint = "Callback from sandbox provisioner. Sets sandbox connection, TemperFS workspace/file/manifest/session, and starts think loop."
 effect = [{ type = "trigger", name = "call_llm" }]
+
+# ADR-0046: inline trigger — migrated from [[integration]] below.
+# Post-parse expansion re-synthesizes the equivalent Integration so
+# the existing WASM/webhook runtime handles execution unchanged.
+[[action.triggers]]
+name = "call_llm"
+kind = "wasm"
+module = "llm_caller"
+on_failure = "Fail"
+
+[action.triggers.config]
+api_key = "{secret:anthropic_api_key}"
+anthropic_api_key = "{secret:anthropic_api_key}"
+openrouter_api_key = "{secret:openrouter_api_key}"
+anthropic_api_url = "https://api.anthropic.com/v1/messages"
+openrouter_api_url = "https://openrouter.ai/api/v1/chat/completions"
+anthropic_auth_mode = "auto"
+openrouter_site_url = ""
+openrouter_app_name = "temper-agent"
+temper_api_url = "{secret:temper_api_url}"
+timeout_secs = "300"
+max_response_bytes = "4194304"
+
 
 [[action]]
 name = "ProcessToolCalls"
@@ -277,6 +315,23 @@ effect = [
   { type = "increment", var = "context_tokens" },
   { type = "trigger", name = "run_tools" }
 ]
+
+# ADR-0046: inline trigger — migrated from [[integration]] below.
+# Post-parse expansion re-synthesizes the equivalent Integration so
+# the existing WASM/webhook runtime handles execution unchanged.
+[[action.triggers]]
+name = "run_tools"
+kind = "wasm"
+module = "tool_runner"
+on_failure = "Fail"
+
+[action.triggers.config]
+temper_api_url = "{secret:temper_api_url}"
+max_sync_file_bytes = "61440"
+sync_exclude = "__pycache__,node_modules,.git"
+logfire_read_token = "{secret:logfire_read_token}"
+logfire_api_base = "https://logfire-us.pydantic.dev"
+
 
 [[action]]
 name = "HandleToolResults"
@@ -306,6 +361,21 @@ effect = [
   { type = "trigger", name = "compact_context" }
 ]
 
+# ADR-0046: inline trigger — migrated from [[integration]] below.
+# Post-parse expansion re-synthesizes the equivalent Integration so
+# the existing WASM/webhook runtime handles execution unchanged.
+[[action.triggers]]
+name = "compact_context"
+kind = "wasm"
+module = "context_compactor"
+on_failure = "Fail"
+
+[action.triggers.config]
+api_key = "{secret:anthropic_api_key}"
+temper_api_url = "{secret:temper_api_url}"
+timeout_secs = "120"
+
+
 [[action]]
 name = "CompactionComplete"
 kind = "input"
@@ -333,6 +403,19 @@ effect = [
   { type = "increment", var = "context_tokens" },
   { type = "trigger", name = "check_steering" }
 ]
+
+# ADR-0046: inline trigger — migrated from [[integration]] below.
+# Post-parse expansion re-synthesizes the equivalent Integration so
+# the existing WASM/webhook runtime handles execution unchanged.
+[[action.triggers]]
+name = "check_steering"
+kind = "wasm"
+module = "steering_checker"
+on_failure = "Fail"
+
+[action.triggers.config]
+temper_api_url = "{secret:temper_api_url}"
+
 
 [[action]]
 name = "ContinueWithSteering"
@@ -426,6 +509,19 @@ effect = [{ type = "trigger", name = "restore_workspace" }]
 
 # --- Invariants ---
 
+# ADR-0046: inline trigger — migrated from [[integration]] below.
+# Post-parse expansion re-synthesizes the equivalent Integration so
+# the existing WASM/webhook runtime handles execution unchanged.
+[[action.triggers]]
+name = "restore_workspace"
+kind = "wasm"
+module = "workspace_restorer"
+on_failure = "Fail"
+
+[action.triggers.config]
+temper_api_url = "{secret:temper_api_url}"
+
+
 [[invariant]]
 name = "CompletedHasResult"
 when = ["Completed"]
@@ -452,81 +548,3 @@ when = ["Created", "Provisioning", "Thinking", "Executing", "Compacting", "Steer
 assert = "turn_count >= 0"
 
 # --- Integrations ---
-
-[[integration]]
-name = "provision_sandbox"
-trigger = "provision_sandbox"
-type = "wasm"
-module = "sandbox_provisioner"
-on_failure = "Fail"
-
-[integration.config]
-temper_api_url = "{secret:temper_api_url}"
-sandbox_url = "{secret:sandbox_url}"
-e2b_api_key = "{secret:e2b_api_key}"
-
-[[integration]]
-name = "call_llm"
-trigger = "call_llm"
-type = "wasm"
-module = "llm_caller"
-on_failure = "Fail"
-
-[integration.config]
-api_key = "{secret:anthropic_api_key}"
-anthropic_api_key = "{secret:anthropic_api_key}"
-openrouter_api_key = "{secret:openrouter_api_key}"
-anthropic_api_url = "https://api.anthropic.com/v1/messages"
-openrouter_api_url = "https://openrouter.ai/api/v1/chat/completions"
-anthropic_auth_mode = "auto"
-openrouter_site_url = ""
-openrouter_app_name = "temper-agent"
-temper_api_url = "{secret:temper_api_url}"
-timeout_secs = "300"
-max_response_bytes = "4194304"
-
-[[integration]]
-name = "run_tools"
-trigger = "run_tools"
-type = "wasm"
-module = "tool_runner"
-on_failure = "Fail"
-
-[integration.config]
-temper_api_url = "{secret:temper_api_url}"
-max_sync_file_bytes = "61440"
-sync_exclude = "__pycache__,node_modules,.git"
-logfire_read_token = "{secret:logfire_read_token}"
-logfire_api_base = "https://logfire-us.pydantic.dev"
-
-[[integration]]
-name = "compact_context"
-trigger = "compact_context"
-type = "wasm"
-module = "context_compactor"
-on_failure = "Fail"
-
-[integration.config]
-api_key = "{secret:anthropic_api_key}"
-temper_api_url = "{secret:temper_api_url}"
-timeout_secs = "120"
-
-[[integration]]
-name = "check_steering"
-trigger = "check_steering"
-type = "wasm"
-module = "steering_checker"
-on_failure = "Fail"
-
-[integration.config]
-temper_api_url = "{secret:temper_api_url}"
-
-[[integration]]
-name = "restore_workspace"
-trigger = "restore_workspace"
-type = "wasm"
-module = "workspace_restorer"
-on_failure = "Fail"
-
-[integration.config]
-temper_api_url = "{secret:temper_api_url}"

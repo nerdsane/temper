@@ -16,7 +16,6 @@ use std::sync::{OnceLock, RwLock};
 use serde::Serialize;
 use sha2::{Digest, Sha256};
 use temper_runtime::tenant::TenantId;
-use temper_server::reaction::registry::parse_reactions;
 use temper_spec::automaton;
 use temper_spec::csdl::{emit_csdl_xml, merge_csdl, parse_csdl};
 
@@ -990,19 +989,6 @@ fn read_app_guide(app_dir: &Path) -> Option<String> {
     None
 }
 
-fn read_app_reactions(app_dir: &Path) -> Option<Vec<temper_server::reaction::types::ReactionRule>> {
-    for relative_path in ["reactions/reactions.toml", "specs/reactions.toml"] {
-        let path = app_dir.join(relative_path);
-        if !path.exists() {
-            continue;
-        }
-        let source = std::fs::read_to_string(&path).ok()?;
-        let reactions = parse_reactions(&source).ok()?;
-        return Some(reactions);
-    }
-    Some(Vec::new())
-}
-
 /// Extract a description from app guide markdown.
 ///
 /// Looks for the first non-header, non-empty line, or a TOML frontmatter
@@ -1081,6 +1067,17 @@ pub fn get_skill_guide(name: &str) -> Option<String> {
 /// Load a complete app bundle from a directory on disk.
 fn load_app_bundle(app_dir: &Path) -> Option<AppBundle> {
     let manifest = read_app_manifest(app_dir)?;
+    let legacy_reaction_paths = [
+        app_dir.join("reactions").join("reactions.toml"),
+        app_dir.join("specs").join("reactions.toml"),
+    ];
+    if let Some(path) = legacy_reaction_paths.iter().find(|path| path.exists()) {
+        tracing::error!(
+            path = %path.display(),
+            "legacy reactions.toml is no longer supported; migrate this app to inline [[action.triggers]]"
+        );
+        return None;
+    }
     let ioa_files = find_ioa_files(app_dir);
 
     // Read IOA specs, extracting entity type from the parsed automaton name.
@@ -1093,7 +1090,6 @@ fn load_app_bundle(app_dir: &Path) -> Option<AppBundle> {
 
     // Read CSDL (optional — apps without specs won't have CSDL).
     let csdl = find_csdl(app_dir).and_then(|p| std::fs::read_to_string(&p).ok());
-    let reactions = read_app_reactions(app_dir)?;
     let cross_invariants_toml =
         std::fs::read_to_string(app_dir.join("specs").join("cross-invariants.toml")).ok();
 
@@ -1135,7 +1131,6 @@ fn load_app_bundle(app_dir: &Path) -> Option<AppBundle> {
         && seed_instances.is_empty()
         && app_guide.is_none()
         && csdl.is_none()
-        && reactions.is_empty()
         && cross_invariants_toml.is_none()
     {
         return None;
@@ -1144,7 +1139,6 @@ fn load_app_bundle(app_dir: &Path) -> Option<AppBundle> {
     Some(AppBundle {
         specs,
         csdl,
-        reactions,
         cross_invariants_toml,
         cedar_policies,
         wasm_modules,
@@ -1429,7 +1423,6 @@ async fn install_os_app_without_dependencies(
                     label: &format!("OsApp({app_name})"),
                     verified_cache: &verified_cache,
                     cross_invariants_source: bundle.cross_invariants_toml.as_deref(),
-                    reactions: bundle.reactions.as_slice(),
                 },
             );
 
@@ -1446,6 +1439,10 @@ async fn install_os_app_without_dependencies(
                 .await;
             }
         }
+        // App installs can introduce or update inline entity triggers.
+        // Refresh the live dispatcher after the registry mutation so the
+        // newly bootstrapped trigger graph is active for subsequent traffic.
+        state.server.rebuild_reaction_dispatcher();
     }
 
     // App installs can add or change cross-entity reactions. Refresh the live
@@ -1632,7 +1629,7 @@ async fn bootstrap_app_entity(
         return None;
     }
 
-    let agent_ctx = temper_server::request_context::AgentContext::system();
+    let agent_ctx = temper_server::request_context::AgentContext::for_service("platform-bootstrap");
 
     // Look for an existing App entity with this name.
     let existing_ids = state.server.list_entity_ids(tenant_id, "App");
@@ -1832,7 +1829,7 @@ async fn bootstrap_skills(
         return Vec::new();
     }
 
-    let agent_ctx = temper_server::request_context::AgentContext::system();
+    let agent_ctx = temper_server::request_context::AgentContext::for_service("platform-bootstrap");
 
     // Ensure workspace exists.
     if let Err(e) = ensure_app_docs_workspace(state, tenant_id, &agent_ctx).await {
@@ -2112,7 +2109,7 @@ async fn bootstrap_adrs(
         return Vec::new();
     }
 
-    let agent_ctx = temper_server::request_context::AgentContext::system();
+    let agent_ctx = temper_server::request_context::AgentContext::for_service("platform-bootstrap");
     if let Err(error) = ensure_app_docs_workspace(state, tenant_id, &agent_ctx).await {
         tracing::warn!(
             tenant,
@@ -2513,7 +2510,7 @@ async fn bootstrap_seed_data(
         return Vec::new();
     }
 
-    let agent_ctx = temper_server::request_context::AgentContext::system();
+    let agent_ctx = temper_server::request_context::AgentContext::for_service("platform-bootstrap");
     let mut created = Vec::new();
 
     for instance in instances {

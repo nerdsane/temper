@@ -8,8 +8,17 @@ name = "FetchWeatherData"
 kind = "input"
 from = ["Collecting"]
 to = "Fetching"
-effect = "trigger fetch_open_meteo"
 hint = "Initiate weather data fetch from Open-Meteo API for this report's location."
+
+# ADR-0046: inline trigger — replaces the top-level [[integration]] block
+# below. Post-parse expansion synthesizes an Integration + trigger effect,
+# so the existing WASM runtime picks it up with zero behavioral change.
+[[action.triggers]]
+name = "fetch_open_meteo"
+kind = "wasm"
+module = "fetch_open_meteo"
+on_success = "FetchSucceeded"
+on_failure = "FetchFailed"
 
 [[action]]
 name = "FetchSucceeded"
@@ -43,10 +52,6 @@ name = "EventuallyReady"
 from = ["Collecting"]
 reaches = ["Ready", "Archived"]
 
-[[integration]]
-name = "fetch_open_meteo"
-trigger = "fetch_open_meteo"
-type = "wasm"
-module = "fetch_open_meteo"
-on_success = "FetchSucceeded"
-on_failure = "FetchFailed"
+# ADR-0046: [[integration]] block removed; replaced by [[action.triggers]]
+# on FetchWeatherData above. Post-parse expansion synthesizes the
+# equivalent integration automatically.

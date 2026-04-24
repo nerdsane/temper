@@ -68,14 +68,14 @@ fn parse_effect_fields(
                 Some(Effect::ScheduleAt { action, field })
             }
         }
-        "increment" => fields
-            .get("var")
-            .cloned()
-            .map(|var| Effect::Increment { var }),
-        "decrement" => fields
-            .get("var")
-            .cloned()
-            .map(|var| Effect::Decrement { var }),
+        "increment" => fields.get("var").cloned().map(|var| Effect::Increment {
+            var,
+            amount: fields.get("amount").cloned(),
+        }),
+        "decrement" => fields.get("var").cloned().map(|var| Effect::Decrement {
+            var,
+            amount: fields.get("amount").cloned(),
+        }),
         "set_counter_from_param" => fields.get("var").cloned().map(|var| {
             let param = fields.get("param").cloned().unwrap_or_else(|| var.clone());
             Effect::SetCounterFromParam { var, param }
@@ -127,12 +127,12 @@ fn parse_effect_fields(
 }
 
 fn parse_legacy_effect(value: &str) -> Option<Effect> {
-    if let Some(var) = parse_prefixed_identifier(value, "increment ") {
-        return Some(Effect::Increment { var });
+    if let Some((var, amount)) = parse_counter_effect(value, "increment ") {
+        return Some(Effect::Increment { var, amount });
     }
 
-    if let Some(var) = parse_prefixed_identifier(value, "decrement ") {
-        return Some(Effect::Decrement { var });
+    if let Some((var, amount)) = parse_counter_effect(value, "decrement ") {
+        return Some(Effect::Decrement { var, amount });
     }
 
     if let Some((var, bool_value)) = parse_bool_set(value) {
@@ -165,6 +165,22 @@ fn parse_prefixed_identifier(value: &str, prefix: &str) -> Option<String> {
         .map(str::trim)
         .filter(|candidate| !candidate.is_empty())
         .map(ToOwned::to_owned)
+}
+
+fn parse_counter_effect(value: &str, prefix: &str) -> Option<(String, Option<String>)> {
+    let rest = value.strip_prefix(prefix)?.trim();
+    if rest.is_empty() {
+        return None;
+    }
+    if let Some((var, amount)) = rest.split_once(" by ") {
+        let var = var.trim();
+        let amount = amount.trim();
+        if var.is_empty() || amount.is_empty() {
+            return None;
+        }
+        return Some((var.to_string(), Some(amount.to_string())));
+    }
+    Some((rest.to_string(), None))
 }
 
 fn parse_bool_set(value: &str) -> Option<(String, bool)> {

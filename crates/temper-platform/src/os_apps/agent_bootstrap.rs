@@ -51,7 +51,7 @@ pub(super) async fn bootstrap_agents(
         registry.get_spec(tenant_id, "Agent").is_some()
     };
 
-    let agent_ctx = temper_server::request_context::AgentContext::system();
+    let agent_ctx = temper_server::request_context::AgentContext::for_service("platform-bootstrap");
 
     for agent in agents {
         let stable_soul_id = bootstrapped_agent_soul_entity_id(&agent.name);

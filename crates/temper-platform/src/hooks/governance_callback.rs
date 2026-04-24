@@ -100,7 +100,7 @@ pub(super) fn handle_dispatch_callback(
                 &entity_id,
                 &action,
                 params,
-                &AgentContext::system(),
+                &AgentContext::for_service("governance-service"),
             )
             .await
         {
@@ -282,7 +282,7 @@ params = ["error_message"]
                     "scope": "narrow",
                     "pending_decision_id": decision_id,
                 }),
-                &AgentContext::system(),
+                &AgentContext::for_service("governance-service"),
             )
             .await
             .expect("governance decision should be created");
@@ -301,7 +301,7 @@ params = ["error_message"]
                     "callback_on_approve": "ResumeAfterApproval",
                     "callback_on_deny": "Fail",
                 }),
-                &AgentContext::system(),
+                &AgentContext::for_service("governance-service"),
             )
             .await
             .expect("callback should register");
@@ -318,7 +318,7 @@ params = ["error_message"]
                     "scope": "narrow",
                     "generated_policy": "",
                 }),
-                &AgentContext::system(),
+                &AgentContext::for_service("governance-service"),
             )
             .await
             .expect("approval should succeed");
@@ -375,7 +375,7 @@ params = ["error_message"]
                     "scope": "narrow",
                     "pending_decision_id": decision_id,
                 }),
-                &AgentContext::system(),
+                &AgentContext::for_service("governance-service"),
             )
             .await
             .expect("governance decision should be created");
@@ -392,7 +392,7 @@ params = ["error_message"]
                     "scope": "narrow",
                     "generated_policy": "",
                 }),
-                &AgentContext::system(),
+                &AgentContext::for_service("governance-service"),
             )
             .await
             .expect("approval should succeed before callback registration");
@@ -411,7 +411,7 @@ params = ["error_message"]
                     "callback_on_approve": "ResumeAfterApproval",
                     "callback_on_deny": "Fail",
                 }),
-                &AgentContext::system(),
+                &AgentContext::for_service("governance-service"),
             )
             .await
             .expect("late callback registration should replay the approval callback");

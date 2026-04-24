@@ -603,6 +603,7 @@ impl DiscordTransport {
         );
 
         let agent_ctx = AgentContext {
+            security_ctx: None,
             agent_id: Some(format!("discord-transport:{user_id}")),
             session_id: None,
             agent_type: Some("system".to_string()),
@@ -724,6 +725,7 @@ impl DiscordTransport {
         );
 
         let agent_ctx = AgentContext {
+            security_ctx: None,
             agent_id: Some(format!("discord-transport:{user_id}")),
             session_id: None,
             agent_type: Some("system".to_string()),

@@ -72,9 +72,182 @@ pub fn parse_automaton_with_liveness(
     // ADR-0049: wire each state_timeout's `state` into the target action's
     // `from` list so the action is actually enabled from that state.
     wire_state_timeout_from_states(&mut automaton);
+    // ADR-0046: expand `[[action.triggers]]` kind="wasm" / "webhook" blocks
+    // into synthesized `[[integration]]` entries + action effects so the
+    // existing WASM/webhook runtime picks them up without needing a parallel
+    // dispatch path. Entity-kind triggers are handled separately by the
+    // reaction dispatcher.
+    expand_wasm_and_webhook_triggers(&mut automaton)?;
     // ADR-0050: enforce (or warn on) liveness coverage.
     check_liveness_coverage(&automaton, mode)?;
     Ok(automaton)
+}
+
+/// ADR-0046: translate `[[action.triggers]]` kind="wasm" / "webhook"
+/// declarations into the existing `[[integration]]` + `Effect::Trigger`
+/// runtime. For each such trigger, synthesizes:
+///
+/// 1. A new `Integration` appended to `automaton.integrations` with
+///    fields copied from the trigger (module / url / method / config /
+///    on_success / on_failure).
+/// 2. A `trigger` effect on the source action so the transition table
+///    emits a `custom_effect` that the runtime's wasm/webhook dispatcher
+///    picks up by name.
+///
+/// Synthesized integrations are named
+/// `"__trigger__:{source_action}:{trigger_name}"` to avoid collisions
+/// with hand-authored `[[integration]]` blocks that share trigger names.
+///
+/// Entity-kind triggers are skipped (they dispatch through the reaction
+/// system, not the integration runtime).
+fn synthesized_trigger_name(action_name: &str, trigger_name: &str) -> String {
+    format!("__trigger__:{action_name}:{trigger_name}")
+}
+
+fn is_platform_custom_effect_name(effect_name: &str) -> bool {
+    effect_name.chars().any(|ch| ch.is_ascii_uppercase())
+}
+
+fn expand_wasm_and_webhook_triggers(automaton: &mut Automaton) -> Result<(), AutomatonParseError> {
+    use super::types::{Effect, Integration, TriggerKind};
+
+    let legacy_trigger_names: std::collections::BTreeSet<String> = automaton
+        .integrations
+        .iter()
+        .map(|integration| integration.trigger.clone())
+        .collect();
+    let mut inline_trigger_owners: std::collections::BTreeMap<String, Vec<String>> =
+        std::collections::BTreeMap::new();
+    for action in &automaton.actions {
+        for trigger in &action.triggers {
+            if matches!(trigger.kind, TriggerKind::Wasm | TriggerKind::Webhook) {
+                inline_trigger_owners
+                    .entry(trigger.name.clone())
+                    .or_default()
+                    .push(action.name.clone());
+            }
+        }
+    }
+
+    for action in automaton.actions.iter_mut() {
+        let local_inline_trigger_names: std::collections::BTreeSet<String> = action
+            .triggers
+            .iter()
+            .filter(|trigger| matches!(trigger.kind, TriggerKind::Wasm | TriggerKind::Webhook))
+            .map(|trigger| trigger.name.clone())
+            .collect();
+
+        for effect in action.effect.iter_mut() {
+            let Effect::Trigger { name } = effect else {
+                continue;
+            };
+            let bare_name = name.clone();
+            if bare_name.starts_with("__trigger__:") || legacy_trigger_names.contains(&bare_name) {
+                continue;
+            }
+            if local_inline_trigger_names.contains(&bare_name) {
+                *name = synthesized_trigger_name(&action.name, &bare_name);
+                continue;
+            }
+            let Some(owners) = inline_trigger_owners.get(&bare_name) else {
+                if is_platform_custom_effect_name(&bare_name) {
+                    continue;
+                }
+                return Err(AutomatonParseError::Validation(format!(
+                    "action '{}' effect trigger '{}' does not resolve to a local [[action.triggers]] block, a unique reusable inline trigger, or a legacy [[integration]]",
+                    action.name, bare_name
+                )));
+            };
+            if owners.len() != 1 {
+                return Err(AutomatonParseError::Validation(format!(
+                    "action '{}' effect trigger '{}' is ambiguous across actions {:?}",
+                    action.name, bare_name, owners
+                )));
+            }
+            *name = synthesized_trigger_name(&owners[0], &bare_name);
+        }
+
+        let existing_effect_names: std::collections::BTreeSet<String> = action
+            .effect
+            .iter()
+            .filter_map(|effect| match effect {
+                Effect::Trigger { name } => Some(name.clone()),
+                _ => None,
+            })
+            .collect();
+        for trigger in &action.triggers {
+            if !matches!(trigger.kind, TriggerKind::Wasm | TriggerKind::Webhook) {
+                continue;
+            }
+            let synth_name = synthesized_trigger_name(&action.name, &trigger.name);
+            if !existing_effect_names.contains(&synth_name) {
+                action.effect.push(Effect::Trigger { name: synth_name });
+            }
+        }
+    }
+
+    let mut synthesized: Vec<Integration> = Vec::new();
+    for action in automaton.actions.iter_mut() {
+        for trigger in &action.triggers {
+            let synth_name = synthesized_trigger_name(&action.name, &trigger.name);
+            match trigger.kind {
+                TriggerKind::Entity => continue, // handled by reactions
+                TriggerKind::Wasm => {
+                    let Some(module) = trigger.module.as_ref() else {
+                        continue;
+                    };
+                    synthesized.push(Integration {
+                        name: synth_name.clone(),
+                        trigger: synth_name.clone(),
+                        integration_type: "wasm".to_string(),
+                        module: Some(module.clone()),
+                        on_success: trigger.on_success.clone(),
+                        on_failure: trigger.on_failure.clone(),
+                        llm: trigger.llm,
+                        config: trigger.config.clone(),
+                    });
+                }
+                TriggerKind::Webhook => {
+                    // ADR-0046 known gap: we synthesize the Integration record
+                    // but no runtime dispatcher keys on integration_type ==
+                    // "webhook" today (only "wasm" via wasm.rs:200 and
+                    // "adapter" via adapter.rs:96). A spec-declared webhook
+                    // trigger parses and installs but never fires HTTP. Real
+                    // outbound webhook delivery currently runs through
+                    // temper-server's separate WebhookDispatcher + webhooks.toml
+                    // path. A follow-up will add state/dispatch/webhook.rs
+                    // and collapse the two paths. The config-flattening below
+                    // stays so the Integration record is immediately usable
+                    // once that dispatcher lands.
+                    let mut config = trigger.config.clone();
+                    if let Some(url) = &trigger.url {
+                        config.insert("url".to_string(), url.clone());
+                    }
+                    if let Some(method) = &trigger.method {
+                        config.insert("method".to_string(), method.clone());
+                    }
+                    for (k, v) in &trigger.headers {
+                        config.insert(format!("header.{k}"), v.clone());
+                    }
+                    if let Some(body) = &trigger.body_template {
+                        config.insert("body_template".to_string(), body.clone());
+                    }
+                    synthesized.push(Integration {
+                        name: synth_name.clone(),
+                        trigger: synth_name.clone(),
+                        integration_type: "webhook".to_string(),
+                        module: None,
+                        on_success: trigger.on_success.clone(),
+                        on_failure: trigger.on_failure.clone(),
+                        llm: false,
+                        config,
+                    });
+                }
+            }
+        }
+    }
+    automaton.integrations.extend(synthesized);
+    Ok(())
 }
 
 /// Callback invoked for each liveness violation encountered at spec parse
@@ -269,8 +442,14 @@ fn format_effects(effects: &[Effect]) -> String {
     effects
         .iter()
         .map(|e| match e {
-            Effect::Increment { var } => format!("{var}' = {var} + 1"),
-            Effect::Decrement { var } => format!("{var}' = {var} - 1"),
+            Effect::Increment { var, amount } => match amount {
+                Some(amount) => format!("{var}' = {var} + {amount}"),
+                None => format!("{var}' = {var} + 1"),
+            },
+            Effect::Decrement { var, amount } => match amount {
+                Some(amount) => format!("{var}' = {var} - {amount}"),
+                None => format!("{var}' = {var} - 1"),
+            },
             Effect::SetCounterFromParam { var, param } => format!("{var}' = {param}"),
             Effect::SetBool { var, value } => {
                 format!("{var}' = {}", if *value { "TRUE" } else { "FALSE" })
@@ -416,6 +595,144 @@ fn validate(automaton: &Automaton) -> Result<(), AutomatonParseError> {
             return Err(AutomatonParseError::Validation(format!(
                 "allow_indefinite_states references undeclared state '{state}'"
             )));
+        }
+    }
+
+    // 6. Validate [[action.triggers]] declarations (ADR-0046).
+    validate_action_triggers(automaton, &action_names)?;
+
+    Ok(())
+}
+
+/// Validate all `[[action.triggers]]` blocks per ADR-0046 rules.
+///
+/// Checks performed (parse-time, per-entity — cross-entity checks like
+/// target-action existence happen at registry load time):
+/// - Kind-specific required fields present.
+/// - `to_state` (if set) is a declared state.
+/// - Trigger guard nesting depth ≤ `MAX_TRIGGER_GUARD_DEPTH`.
+/// - `params` and `params_from` keys must not collide.
+/// - For `Wasm`/`Webhook` kinds: `on_success`/`on_failure` reference
+///   actions declared on the same source entity.
+/// - Trigger names within a single action must be unique.
+fn validate_action_triggers(
+    automaton: &Automaton,
+    action_names: &[&str],
+) -> Result<(), AutomatonParseError> {
+    for action in &automaton.actions {
+        let mut seen_names: std::collections::BTreeSet<&str> = std::collections::BTreeSet::new();
+        for trigger in &action.triggers {
+            if trigger.name.is_empty() {
+                return Err(AutomatonParseError::Validation(format!(
+                    "action '{}' has an [[action.triggers]] block with empty name",
+                    action.name
+                )));
+            }
+            if !seen_names.insert(trigger.name.as_str()) {
+                return Err(AutomatonParseError::Validation(format!(
+                    "action '{}' declares trigger '{}' more than once",
+                    action.name, trigger.name
+                )));
+            }
+
+            // Kind-specific field presence.
+            match trigger.kind {
+                TriggerKind::Entity => {
+                    if trigger.target_entity.as_deref().is_none_or(str::is_empty) {
+                        return Err(AutomatonParseError::Validation(format!(
+                            "trigger '{}' on action '{}' is kind=\"entity\" but missing 'target_entity'",
+                            trigger.name, action.name
+                        )));
+                    }
+                    if trigger.target_action.as_deref().is_none_or(str::is_empty) {
+                        return Err(AutomatonParseError::Validation(format!(
+                            "trigger '{}' on action '{}' is kind=\"entity\" but missing 'target_action'",
+                            trigger.name, action.name
+                        )));
+                    }
+                    if trigger.resolve_target.is_none() {
+                        return Err(AutomatonParseError::Validation(format!(
+                            "trigger '{}' on action '{}' is kind=\"entity\" but missing 'resolve_target'",
+                            trigger.name, action.name
+                        )));
+                    }
+                }
+                TriggerKind::Wasm => {
+                    if trigger.module.as_deref().is_none_or(str::is_empty) {
+                        return Err(AutomatonParseError::Validation(format!(
+                            "trigger '{}' on action '{}' is kind=\"wasm\" but missing 'module'",
+                            trigger.name, action.name
+                        )));
+                    }
+                }
+                TriggerKind::Webhook => {
+                    if trigger.url.as_deref().is_none_or(str::is_empty) {
+                        return Err(AutomatonParseError::Validation(format!(
+                            "trigger '{}' on action '{}' is kind=\"webhook\" but missing 'url'",
+                            trigger.name, action.name
+                        )));
+                    }
+                    if trigger.method.as_deref().is_none_or(str::is_empty) {
+                        return Err(AutomatonParseError::Validation(format!(
+                            "trigger '{}' on action '{}' is kind=\"webhook\" but missing 'method'",
+                            trigger.name, action.name
+                        )));
+                    }
+                }
+            }
+
+            // to_state filter must be a declared state if set.
+            if let Some(ref to_state) = trigger.to_state
+                && !automaton.automaton.states.contains(to_state)
+            {
+                return Err(AutomatonParseError::Validation(format!(
+                    "trigger '{}' on action '{}' references undeclared to_state '{to_state}'",
+                    trigger.name, action.name
+                )));
+            }
+
+            // on_success / on_failure must reference actions declared on this
+            // source entity (they dispatch on the source after module/HTTP).
+            if let Some(ref cb) = trigger.on_success
+                && !action_names.contains(&cb.as_str())
+            {
+                return Err(AutomatonParseError::Validation(format!(
+                    "trigger '{}' on action '{}' on_success references unknown action '{cb}'",
+                    trigger.name, action.name
+                )));
+            }
+            if let Some(ref cb) = trigger.on_failure
+                && !action_names.contains(&cb.as_str())
+            {
+                return Err(AutomatonParseError::Validation(format!(
+                    "trigger '{}' on action '{}' on_failure references unknown action '{cb}'",
+                    trigger.name, action.name
+                )));
+            }
+
+            // Guard depth bound.
+            if let Some(ref guard) = trigger.guard {
+                let depth = guard.depth();
+                if depth > MAX_TRIGGER_GUARD_DEPTH {
+                    return Err(AutomatonParseError::Validation(format!(
+                        "trigger '{}' on action '{}' has guard nesting depth {depth} exceeding \
+                         MAX_TRIGGER_GUARD_DEPTH ({MAX_TRIGGER_GUARD_DEPTH})",
+                        trigger.name, action.name
+                    )));
+                }
+            }
+
+            // params / params_from key collision.
+            if let Some(params_obj) = trigger.params.as_object() {
+                for key in trigger.params_from.keys() {
+                    if params_obj.contains_key(key) {
+                        return Err(AutomatonParseError::Validation(format!(
+                            "trigger '{}' on action '{}' has key '{key}' in both 'params' and 'params_from'",
+                            trigger.name, action.name
+                        )));
+                    }
+                }
+            }
         }
     }
 

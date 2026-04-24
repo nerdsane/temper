@@ -9,7 +9,7 @@ use temper_spec::automaton::{Automaton, Integration, Webhook};
 use temper_spec::cross_invariant::{CrossInvariantSpec, DeletePolicy};
 use temper_spec::csdl::CsdlDocument;
 
-use crate::reaction::types::ReactionRule;
+use crate::trigger::types::ReactionRule;
 
 /// Verification status for a single entity type.
 #[derive(Debug, Clone, serde::Serialize)]

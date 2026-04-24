@@ -68,7 +68,7 @@ pub(crate) async fn handle_sentinel_check(
     let analysis_tenant =
         extract_tenant(&headers, &state).unwrap_or_else(|_| TenantId::new("temper-system"));
     let mut discovery_results = Vec::new();
-    let system_ctx = AgentContext::system();
+    let system_ctx = AgentContext::for_service("evolution-engine");
     for alert in &alerts {
         let trigger_context = serde_json::json!({
             "rule_name": alert.rule_name.clone(),

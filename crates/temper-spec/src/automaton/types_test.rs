@@ -85,6 +85,7 @@ effect = [
     { type = "increment", var = "count" },
     { type = "decrement", var = "count" },
     { type = "set_counter_from_param", var = "size_bytes", param = "payload_size" },
+    { type = "increment", var = "bytes", amount = "size_bytes" },
     { type = "set_bool", var = "done", value = true },
     { type = "emit", event = "order_placed" },
     { type = "list_append", var = "log" },
@@ -95,20 +96,24 @@ effect = [
 "#;
     let automaton: Automaton = toml::from_str(toml_src).unwrap();
     let effects = &automaton.actions[0].effect;
-    assert_eq!(effects.len(), 9);
-    assert!(matches!(&effects[0], Effect::Increment { var } if var == "count"));
-    assert!(matches!(&effects[1], Effect::Decrement { var } if var == "count"));
+    assert_eq!(effects.len(), 10);
+    assert!(matches!(&effects[0], Effect::Increment { var, amount: None } if var == "count"));
+    assert!(matches!(&effects[1], Effect::Decrement { var, amount: None } if var == "count"));
     assert!(matches!(
         &effects[2],
         Effect::SetCounterFromParam { var, param } if var == "size_bytes" && param == "payload_size"
     ));
-    assert!(matches!(&effects[3], Effect::SetBool { var, value: true } if var == "done"));
-    assert!(matches!(&effects[4], Effect::Emit { event } if event == "order_placed"));
-    assert!(matches!(&effects[5], Effect::ListAppend { var } if var == "log"));
-    assert!(matches!(&effects[6], Effect::ListRemoveAt { var } if var == "log"));
-    assert!(matches!(&effects[7], Effect::Trigger { name } if name == "run_wasm"));
+    assert!(matches!(
+        &effects[3],
+        Effect::Increment { var, amount: Some(amount) } if var == "bytes" && amount == "size_bytes"
+    ));
+    assert!(matches!(&effects[4], Effect::SetBool { var, value: true } if var == "done"));
+    assert!(matches!(&effects[5], Effect::Emit { event } if event == "order_placed"));
+    assert!(matches!(&effects[6], Effect::ListAppend { var } if var == "log"));
+    assert!(matches!(&effects[7], Effect::ListRemoveAt { var } if var == "log"));
+    assert!(matches!(&effects[8], Effect::Trigger { name } if name == "run_wasm"));
     assert!(
-        matches!(&effects[8], Effect::Schedule { action, delay_seconds: 30 } if action == "Retry")
+        matches!(&effects[9], Effect::Schedule { action, delay_seconds: 30 } if action == "Retry")
     );
 }
 

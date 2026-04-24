@@ -59,6 +59,10 @@ pub enum ResolvedEffect {
     IncrementCounter(String),
     /// Decrement a counter variable by 1.
     DecrementCounter(String),
+    /// Increment a counter variable by a numeric action parameter.
+    IncrementCounterByParam { var: String, param: String },
+    /// Decrement a counter variable by a numeric action parameter.
+    DecrementCounterByParam { var: String, param: String },
     /// Set a counter variable from an action param.
     SetCounterFromParam { var: String, param: String },
     /// Set a boolean variable.
@@ -244,8 +248,20 @@ fn translate_effects(
 /// Translate a single IOA effect to its resolved form.
 fn translate_single_effect(effect: &Effect) -> ResolvedEffect {
     match effect {
-        Effect::Increment { var } => ResolvedEffect::IncrementCounter(var.clone()),
-        Effect::Decrement { var } => ResolvedEffect::DecrementCounter(var.clone()),
+        Effect::Increment { var, amount } => match amount {
+            Some(param) => ResolvedEffect::IncrementCounterByParam {
+                var: var.clone(),
+                param: param.clone(),
+            },
+            None => ResolvedEffect::IncrementCounter(var.clone()),
+        },
+        Effect::Decrement { var, amount } => match amount {
+            Some(param) => ResolvedEffect::DecrementCounterByParam {
+                var: var.clone(),
+                param: param.clone(),
+            },
+            None => ResolvedEffect::DecrementCounter(var.clone()),
+        },
         Effect::SetCounterFromParam { var, param } => ResolvedEffect::SetCounterFromParam {
             var: var.clone(),
             param: param.clone(),

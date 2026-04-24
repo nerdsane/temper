@@ -8,9 +8,9 @@ use std::sync::Arc;
 
 use temper_jit::table::TransitionTable;
 use temper_runtime::scheduler::{FaultConfig, SimActorSystemConfig, install_deterministic_context};
-use temper_server::reaction::registry::{ReactionRegistry, parse_reactions};
-use temper_server::reaction::sim_dispatcher::SimReactionSystem;
-use temper_server::reaction::types::{
+use temper_server::trigger::registry::{ReactionRegistry, parse_reactions};
+use temper_server::trigger::sim_dispatcher::SimReactionSystem;
+use temper_server::trigger::types::{
     ReactionGuard, ReactionRule, ReactionTarget, ReactionTrigger, TargetResolver,
 };
 
@@ -69,6 +69,7 @@ fn ecommerce_registry() -> ReactionRegistry {
                 params_from: std::collections::BTreeMap::new(),
             },
             resolve_target: TargetResolver::SameId,
+            principal: None,
         }],
     );
     reg
@@ -204,6 +205,7 @@ fn field_based_target_resolution() {
             resolve_target: TargetResolver::Field {
                 field: "payment_id".to_string(),
             },
+            principal: None,
         }],
     );
 
@@ -295,6 +297,7 @@ fn multi_step_cascade_with_chained_reactions() {
                     params_from: std::collections::BTreeMap::new(),
                 },
                 resolve_target: TargetResolver::SameId,
+                principal: None,
             },
             ReactionRule {
                 name: "authorize_triggers_capture".to_string(),
@@ -311,6 +314,7 @@ fn multi_step_cascade_with_chained_reactions() {
                     params_from: std::collections::BTreeMap::new(),
                 },
                 resolve_target: TargetResolver::SameId,
+                principal: None,
             },
         ],
     );
@@ -370,6 +374,7 @@ fn cascade_with_params_from_fires_even_when_source_fields_missing() {
                 params_from,
             },
             resolve_target: TargetResolver::SameId,
+            principal: None,
         }],
     );
 
@@ -397,15 +402,57 @@ fn cascade_with_params_from_fires_even_when_source_fields_missing() {
 }
 
 #[test]
-fn paw_fs_reactions_toml_loads_through_parser() {
-    // Regression guard: the real os-apps/temper-fs/reactions/reactions.toml
-    // must load through parse_reactions. Prior to the Phase 3 audit this
-    // file was effectively dead data (PascalCase resolver types silently
-    // rejected by the snake_case parser). Ensures future edits keep the
-    // file valid against the parser.
-    let source = include_str!("../../../os-apps/temper-fs/reactions/reactions.toml");
-    let rules = parse_reactions(source).expect("paw-fs reactions.toml must parse");
-    assert_eq!(rules.len(), 3, "expected 3 rules in paw-fs reactions.toml");
+fn reactions_toml_format_parses_cleanly() {
+    // Regression guard: the reactions.toml format used by paw-fs and
+    // katagami-curation in the openpaw repo must parse through
+    // parse_reactions. Prior to the Phase 3 audit this format was
+    // effectively dead data on some paths (PascalCase resolver types
+    // silently rejected by the snake_case parser).
+    //
+    // ADR-0046 note: the temper-repo temper-fs reactions were migrated to
+    // inline [[action.triggers]] in commit 92c79fc, and the old file
+    // deleted in f317b20. This test uses an inlined fixture matching the
+    // same three rules paw-fs still carries in the openpaw repo.
+    let source = r#"
+[[reaction]]
+name = "file_stream_updated_creates_version"
+[reaction.when]
+entity_type = "File"
+action = "StreamUpdated"
+to_state = "Ready"
+[reaction.then]
+entity_type = "FileVersion"
+action = "Create"
+[reaction.resolve_target]
+type = "create_if_missing"
+id_field = "last_version_id"
+
+[[reaction]]
+name = "file_stream_updated_supersedes_old_version"
+[reaction.when]
+entity_type = "File"
+action = "StreamUpdated"
+[reaction.then]
+entity_type = "FileVersion"
+action = "Supersede"
+[reaction.resolve_target]
+type = "field"
+field = "last_version_id"
+
+[[reaction]]
+name = "file_stream_updated_increments_workspace_usage"
+[reaction.when]
+entity_type = "File"
+action = "StreamUpdated"
+[reaction.then]
+entity_type = "Workspace"
+action = "IncrementUsage"
+[reaction.resolve_target]
+type = "field"
+field = "workspace_id"
+"#;
+    let rules = parse_reactions(source).expect("reactions.toml format must parse");
+    assert_eq!(rules.len(), 3);
 
     let names: Vec<&str> = rules.iter().map(|r| r.name.as_str()).collect();
     assert!(names.contains(&"file_stream_updated_creates_version"));
@@ -475,6 +522,7 @@ fn guard_passing_rule_fires_guard_failing_rule_skipped() {
                     params_from: std::collections::BTreeMap::new(),
                 },
                 resolve_target: TargetResolver::SameId,
+                principal: None,
             },
             ReactionRule {
                 name: "skipped_on_cancelled".to_string(),
@@ -493,6 +541,7 @@ fn guard_passing_rule_fires_guard_failing_rule_skipped() {
                     params_from: std::collections::BTreeMap::new(),
                 },
                 resolve_target: TargetResolver::SameId,
+                principal: None,
             },
         ],
     );
@@ -545,6 +594,7 @@ fn not_guard_skips_rule_when_inner_passes() {
                 params_from: std::collections::BTreeMap::new(),
             },
             resolve_target: TargetResolver::SameId,
+            principal: None,
         }],
     );
 

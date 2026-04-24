@@ -541,18 +541,6 @@ enum AppBootstrapSource {
     Cli,
 }
 
-fn tenant_has_app_specs(state: &PlatformState, tenant: &str, app_name: &str) -> bool {
-    let Some(bundle) = temper_platform::os_apps::get_os_app(app_name) else {
-        return false;
-    };
-    let tenant_id = TenantId::new(tenant);
-    let registry = state.registry.read().unwrap(); // ci-ok: infallible lock
-    bundle
-        .specs
-        .iter()
-        .all(|(entity_type, _)| registry.get_table(&tenant_id, entity_type).is_some())
-}
-
 /// Phase 8b: Restore persisted skills and apply `--skill` requests.
 ///
 /// Why this exists:
@@ -587,9 +575,10 @@ pub(super) async fn bootstrap_installed_apps(state: &PlatformState, skills: &[St
     }
 
     for ((tenant, app_name), source) in requested {
-        if tenant_has_app_specs(state, &tenant, &app_name) {
-            continue;
-        }
+        // Replay through the real installer every startup. Presence-only checks
+        // are not sufficient because an installed app's bundle can drift:
+        // updated IOA/Cedar/WASM/ADR assets must refresh even when the tenant
+        // already has entity tables from an older install.
         match temper_platform::install_os_app(state, &tenant, &app_name).await {
             Ok(result) => match source {
                 AppBootstrapSource::Persisted => {
@@ -623,5 +612,68 @@ pub(super) async fn bootstrap_installed_apps(state: &PlatformState, skills: &[St
                 eprintln!("  Warning: failed to install skill '{app_name}' for '{tenant}': {e}");
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+
+    use temper_platform::os_apps::get_os_app;
+    use temper_platform::state::PlatformState;
+    use temper_runtime::tenant::TenantId;
+    use temper_server::event_store::ServerEventStore;
+    use temper_spec::csdl::parse_csdl;
+    use temper_store_turso::TursoEventStore;
+
+    use super::bootstrap_installed_apps;
+
+    #[tokio::test]
+    async fn bootstrap_installed_apps_replays_persisted_app_when_registry_specs_are_stale() {
+        let tenant = "bootstrap-drift";
+        let app_name = "temper-fs";
+        let bundle = get_os_app(app_name).expect("temper-fs app bundle should load");
+        let csdl_xml = bundle.csdl.clone().expect("temper-fs should have CSDL");
+        let csdl = parse_csdl(&csdl_xml).expect("temper-fs CSDL should parse");
+        let mut stale_specs: Vec<(String, String)> = bundle.specs.clone();
+        stale_specs[0].1.push_str("\n# stale bootstrap copy\n");
+        let stale_refs: Vec<(&str, &str)> = stale_specs
+            .iter()
+            .map(|(entity_type, source)| (entity_type.as_str(), source.as_str()))
+            .collect();
+
+        let mut state = PlatformState::new(None);
+        {
+            let mut registry = state.registry.write().unwrap();
+            registry.register_tenant(tenant, csdl, csdl_xml, &stale_refs);
+        }
+
+        let db_path = std::env::temp_dir().join(format!(
+            "temper-bootstrap-{}.db",
+            temper_runtime::scheduler::sim_uuid()
+        ));
+        let db_url = format!("file:{}", db_path.display());
+        let turso = TursoEventStore::new(&db_url, None)
+            .await
+            .expect("turso store should initialize");
+        turso
+            .record_installed_app(tenant, app_name)
+            .await
+            .expect("installed app should persist");
+        state.server.event_store = Some(Arc::new(ServerEventStore::Turso(turso)));
+
+        bootstrap_installed_apps(&state, &[]).await;
+
+        let tenant_id = TenantId::new(tenant);
+        let registry = state.registry.read().unwrap();
+        let refreshed = registry
+            .get_spec(&tenant_id, &bundle.specs[0].0)
+            .expect("replayed app spec should remain registered");
+        assert_eq!(
+            refreshed.ioa_source, bundle.specs[0].1,
+            "startup replay should refresh stale installed app specs from the current bundle"
+        );
+
+        let _ = std::fs::remove_file(&db_path);
     }
 }

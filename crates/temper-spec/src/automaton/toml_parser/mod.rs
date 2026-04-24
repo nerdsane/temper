@@ -26,10 +26,13 @@ enum Section {
     Invariant,
     Liveness,
     Integration,
-    AgentTrigger,
     FieldInvariant,
     StateTimeout,
     Webhook,
+    /// ADR-0046: nested `[[action.triggers]]` blocks. Hand-rolled parser
+    /// skips the body; triggers are extracted via serde in the second pass
+    /// and merged into their action by name.
+    ActionTrigger,
 }
 
 #[derive(Debug, Default)]
@@ -60,13 +63,20 @@ impl ParseState {
             "[[invariant]]" => self.start_invariant_section(),
             "[[liveness]]" => self.start_liveness_section(),
             "[[integration]]" => self.start_integration_section(),
-            "[[agent_trigger]]" => self.start_passthrough_section(Section::AgentTrigger),
             "[[field_invariant]]" => self.start_passthrough_section(Section::FieldInvariant),
             // ADR-0049: state_timeouts use nested inline tables for params;
             // parse via serde in the second pass rather than field-by-field.
             "[[state_timeout]]" => self.start_passthrough_section(Section::StateTimeout),
             "[[webhook]]" => self.start_webhook_section(),
             _ if line.starts_with("[webhook.") => self.start_webhook_section(),
+            // ADR-0046: nested [[action.triggers]] — flush the action body so
+            // trigger keys don't leak into its fields, then enter passthrough
+            // (serde extracts triggers in the second pass).
+            "[[action.triggers]]" => {
+                self.flush_items();
+                self.current_section = Section::ActionTrigger;
+                true
+            }
             _ => false,
         }
     }
@@ -79,17 +89,17 @@ impl ParseState {
             Section::Invariant => self.apply_invariant_field(key, &value),
             Section::Liveness => self.apply_liveness_field(key, &value),
             Section::Integration => self.apply_integration_field(key, &value),
-            Section::AgentTrigger
-            | Section::FieldInvariant
+            Section::FieldInvariant
             | Section::StateTimeout
             | Section::Webhook
+            | Section::ActionTrigger
             | Section::None => {}
         }
 
         Ok(())
     }
 
-    fn finish(mut self, input: &str) -> Automaton {
+    fn finish(mut self, input: &str) -> Result<Automaton, AutomatonParseError> {
         self.flush_items();
         self.flush_integration();
 
@@ -99,7 +109,17 @@ impl ParseState {
         debug_assert!(self.current_liveness.is_none());
         debug_assert!(self.current_integration.is_none());
 
-        Automaton {
+        // ADR-0046: extract [[action.triggers]] via serde and merge into
+        // actions by name. The hand-rolled parser skips these blocks.
+        let mut triggers_by_action = extract_action_triggers(input)?;
+        let mut actions = self.actions;
+        for action in &mut actions {
+            if let Some(trigs) = triggers_by_action.remove(&action.name) {
+                action.triggers.extend(trigs);
+            }
+        }
+
+        Ok(Automaton {
             automaton: AutomatonMeta {
                 name: self.meta_name,
                 states: self.meta_states,
@@ -107,17 +127,16 @@ impl ParseState {
                 allow_indefinite_states: self.meta_allow_indefinite_states,
             },
             state: self.state_vars,
-            actions: self.actions,
+            actions,
             invariants: self.invariants,
             liveness: self.liveness_props,
             integrations: self.integrations,
             webhooks: extract_webhooks(input),
             context_entities: Vec::new(),
-            agent_triggers: extract_agent_triggers(input),
             field_invariants: Vec::new(),
             state_timeouts: Vec::new(),
             admission: None,
-        }
+        })
     }
 
     fn apply_automaton_field(&mut self, key: &str, value: &str) {
@@ -295,6 +314,7 @@ impl ParseState {
             effect: Vec::new(),
             params: Vec::new(),
             hint: None,
+            triggers: Vec::new(),
         });
         self.current_section = Section::Action;
         true
@@ -379,7 +399,7 @@ pub(super) fn parse_toml_to_automaton(input: &str) -> Result<Automaton, Automato
         }
     }
 
-    let mut automaton = state.finish(input);
+    let mut automaton = state.finish(input)?;
     // Field invariants use nested inline-table predicates that the hand-rolled
     // parser does not handle, so delegate to serde. Unlike webhooks and agent
     // triggers, parse errors are surfaced — a silently-dropped field invariant
@@ -409,16 +429,45 @@ fn extract_webhooks(source: &str) -> Vec<super::types::Webhook> {
         .unwrap_or_default()
 }
 
-/// Extract `[[agent_trigger]]` sections from TOML source via serde.
-fn extract_agent_triggers(source: &str) -> Vec<super::types::AgentTrigger> {
-    #[derive(serde::Deserialize)]
-    struct AgentTriggerWrapper {
-        #[serde(default, rename = "agent_trigger")]
-        agent_triggers: Vec<super::types::AgentTrigger>,
+/// Extract nested `[[action.triggers]]` sections via serde (ADR-0046).
+///
+/// Returns a map from action name to the triggers declared under it.
+/// The hand-rolled parser is unable to handle nested array-of-tables,
+/// so we do a second pass with `toml::from_str` over only the `[[action]]`
+/// sections. Errors are propagated: silently dropping malformed triggers
+/// would change runtime orchestration behavior.
+fn extract_action_triggers(
+    source: &str,
+) -> Result<std::collections::BTreeMap<String, Vec<super::types::ActionTrigger>>, AutomatonParseError>
+{
+    let slice = isolate_action_sections(source);
+    if slice.trim().is_empty() {
+        return Ok(std::collections::BTreeMap::new());
     }
-    toml::from_str::<AgentTriggerWrapper>(source)
-        .map(|w| w.agent_triggers)
-        .unwrap_or_default()
+
+    #[derive(serde::Deserialize)]
+    struct ActionTriggersWrapper {
+        #[serde(default, rename = "action")]
+        actions: Vec<ActionSkeleton>,
+    }
+    #[derive(serde::Deserialize)]
+    struct ActionSkeleton {
+        #[serde(default)]
+        name: String,
+        #[serde(default)]
+        triggers: Vec<super::types::ActionTrigger>,
+    }
+    let wrapper: ActionTriggersWrapper = toml::from_str(&slice)
+        .map_err(|e| AutomatonParseError::Toml(format!("action.triggers: {e}")))?;
+    let mut map: std::collections::BTreeMap<String, Vec<super::types::ActionTrigger>> =
+        std::collections::BTreeMap::new();
+    for action in wrapper.actions {
+        if action.name.is_empty() || action.triggers.is_empty() {
+            continue;
+        }
+        map.entry(action.name).or_default().extend(action.triggers);
+    }
+    Ok(map)
 }
 
 /// Extract `[[field_invariant]]` sections from TOML source via serde.
@@ -513,6 +562,32 @@ fn isolate_sections(source: &str, marker: &str) -> String {
             inside = trimmed.starts_with(marker);
             if inside {
                 out.push_str(marker);
+                out.push('\n');
+            }
+            continue;
+        }
+        if inside {
+            out.push_str(line);
+            out.push('\n');
+        }
+    }
+    out
+}
+
+/// Return a minimal TOML document containing only `[[action]]` sections and
+/// their nested `[[action.*]]` tables from `source`.
+fn isolate_action_sections(source: &str) -> String {
+    let mut out = String::new();
+    let mut inside = false;
+    for line in source.lines() {
+        let trimmed = line.trim_start();
+        let is_header = trimmed.starts_with('[');
+        if is_header {
+            inside = trimmed.starts_with("[[action]]")
+                || trimmed.starts_with("[[action.")
+                || trimmed.starts_with("[action.");
+            if inside {
+                out.push_str(trimmed);
                 out.push('\n');
             }
             continue;

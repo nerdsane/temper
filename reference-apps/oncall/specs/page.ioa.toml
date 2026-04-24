@@ -102,19 +102,3 @@ name = "EscalationTracked"
 when = ["Escalated"]
 assert = "escalation_tier > 0"
 
-# --- Integrations ---
-
-[[integration]]
-name = "notify_agent"
-trigger = "AssignAgent"
-type = "webhook"
-
-[[integration]]
-name = "notify_escalation"
-trigger = "Escalate"
-type = "webhook"
-
-[[integration]]
-name = "notify_resolved"
-trigger = "Resolve"
-type = "webhook"

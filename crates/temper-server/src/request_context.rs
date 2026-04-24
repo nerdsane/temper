@@ -6,6 +6,7 @@
 
 use axum::http::HeaderMap;
 use opentelemetry::trace::{SpanContext, SpanId, TraceContextExt, TraceFlags, TraceId, TraceState};
+use temper_authz::SecurityContext;
 
 /// Agent identity context extracted from HTTP headers and credential resolution.
 ///
@@ -19,6 +20,12 @@ use opentelemetry::trace::{SpanContext, SpanId, TraceContextExt, TraceFlags, Tra
 /// - `X-Intent` — caller-supplied description of what they were trying to do
 #[derive(Debug, Clone, Default)]
 pub struct AgentContext {
+    /// Full Cedar security context when known at the request boundary.
+    ///
+    /// External HTTP entrypoints populate this after credential resolution so
+    /// downstream trigger dispatch can inherit the exact principal rather than
+    /// approximating it from partial agent metadata.
+    pub security_ctx: Option<SecurityContext>,
     /// Optional agent identifier. Populated from `ResolvedIdentity` when
     /// credential resolution succeeds, or from internal system context.
     pub agent_id: Option<String>,
@@ -51,9 +58,47 @@ impl AgentContext {
     /// dropping identity via `Default`.
     pub fn system() -> Self {
         Self {
+            security_ctx: Some(SecurityContext::system()),
             agent_id: Some("system".to_string()),
             session_id: None,
             agent_type: None,
+            intent: None,
+            trace_id: None,
+            parent_span_id: None,
+            idempotency_key: None,
+        }
+    }
+
+    /// ADR-0046: Create an `AgentContext` for a named platform service.
+    ///
+    /// Used in place of [`AgentContext::system`] to give callers an
+    /// explicit, auditable identity. The service name populates
+    /// `agent_type` so Cedar policies can match on
+    /// `principal.agent_type == "<service>"` — narrower than the
+    /// broad-permit `system-platform` policy.
+    ///
+    /// Recommended service names (see `docs/adrs/0046-unified-action-triggers.md`
+    /// migration audit):
+    /// - `platform-bootstrap` — tenant/app install, credential rotation
+    /// - `governance-service` — ADR-0014 governance callbacks
+    /// - `evolution-engine` — Observation/Problem/Analysis materialization
+    /// - `timeout-scheduler` — state-timeout firings (ADR-0049)
+    /// - `platform-dispatch` — dispatch fallback paths
+    /// - `wasm-runtime` — WASM invocation artifact creation
+    pub fn for_service(service_name: &str) -> Self {
+        let service_id = format!("service:{service_name}");
+        let mut security_ctx = SecurityContext::from_headers(&[]).with_agent_context(
+            Some(&service_id),
+            None,
+            Some(service_name),
+        );
+        security_ctx.principal.role = Some("service".to_string());
+
+        Self {
+            security_ctx: Some(security_ctx),
+            agent_id: Some(service_id),
+            session_id: None,
+            agent_type: Some(service_name.to_string()),
             intent: None,
             trace_id: None,
             parent_span_id: None,
@@ -101,6 +146,7 @@ pub(crate) fn extract_agent_context(headers: &HeaderMap) -> AgentContext {
         .map(String::from);
 
     AgentContext {
+        security_ctx: None,
         agent_id: None,
         session_id,
         agent_type: None,

@@ -67,6 +67,21 @@ pub async fn bearer_auth_check(
         return Err(StatusCode::UNAUTHORIZED);
     };
 
+    let has_explicit_principal = req.headers().contains_key("x-temper-principal-kind")
+        && req.headers().contains_key("x-temper-principal-id");
+    let matches_global_api_key = state
+        .api_token
+        .as_ref()
+        .is_some_and(|expected| constant_time_eq(token.as_bytes(), expected.as_bytes()));
+
+    // ADR-0043 guest override path: internal loopback callers may present the
+    // platform API key while explicitly declaring the principal they are acting
+    // as. Preserve those headers instead of collapsing the request into the
+    // bootstrapped operator credential.
+    if matches_global_api_key && has_explicit_principal {
+        return Ok(next.run(req).await);
+    }
+
     // Step 1: Try to resolve as an agent credential.
     let tenant = extract_tenant(&req);
     if let Some(identity) = state
@@ -80,9 +95,7 @@ pub async fn bearer_auth_check(
     }
 
     // Step 2: Fall back to global API key (admin/operator access).
-    if let Some(ref expected) = state.api_token
-        && constant_time_eq(token.as_bytes(), expected.as_bytes())
-    {
+    if matches_global_api_key {
         if !req.headers().contains_key("x-temper-principal-kind") {
             req.headers_mut().insert(
                 "x-temper-principal-kind",
@@ -132,13 +145,42 @@ mod tests {
     use super::*;
     use axum::Router;
     use axum::body::Body;
+    use axum::body::to_bytes;
+    use axum::extract::Extension;
+    use axum::http::HeaderMap;
     use axum::http::Request as HttpRequest;
     use axum::middleware;
     use axum::routing::get;
+    use std::collections::BTreeMap;
+    use temper_server::identity::ResolvedIdentity;
     use tower::ServiceExt;
 
     async fn ok_handler() -> &'static str {
         "ok"
+    }
+
+    async fn inspect_identity_handler(
+        headers: HeaderMap,
+        resolved_identity: Option<Extension<ResolvedIdentity>>,
+    ) -> String {
+        let resolved = resolved_identity
+            .map(|Extension(identity)| identity.agent_type_name)
+            .unwrap_or_else(|| "none".to_string());
+        let principal_kind = headers
+            .get("x-temper-principal-kind")
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("");
+        let principal_id = headers
+            .get("x-temper-principal-id")
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("");
+        let agent_type = headers
+            .get("x-temper-agent-type")
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("");
+        format!(
+            "resolved={resolved};principal_kind={principal_kind};principal_id={principal_id};agent_type={agent_type}"
+        )
     }
 
     fn app_with_token(token: Option<String>) -> Router {
@@ -289,6 +331,48 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(resp.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn global_api_key_preserves_explicit_principal_headers() {
+        let mut state = PlatformState::new(None);
+        state.api_token = Some("secret123".into());
+        crate::bootstrap::bootstrap_system_tenant(&state, &BTreeMap::new());
+        crate::bootstrap::bootstrap_agent_specs(&state, "default", false, &BTreeMap::new());
+        crate::bootstrap::bootstrap_operator_credential(&state, "secret123", "default").await;
+
+        let app = Router::new()
+            .route("/inspect", get(inspect_identity_handler))
+            .layer(middleware::from_fn_with_state(
+                state.clone(),
+                bearer_auth_check,
+            ))
+            .with_state(state);
+
+        let resp = app
+            .oneshot(
+                HttpRequest::get("/inspect")
+                    .header("authorization", "Bearer secret123")
+                    .header("x-tenant-id", "default")
+                    .header("x-temper-principal-kind", "agent")
+                    .header("x-temper-principal-id", "system")
+                    .header("x-temper-agent-type", "system")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        let body = to_bytes(resp.into_body(), usize::MAX).await.unwrap();
+        let body = String::from_utf8(body.to_vec()).unwrap();
+        assert!(
+            body.contains("resolved=none"),
+            "global API key with explicit principal headers must not inject operator identity: {body}"
+        );
+        assert!(body.contains("principal_kind=agent"));
+        assert!(body.contains("principal_id=system"));
+        assert!(body.contains("agent_type=system"));
     }
 
     #[test]

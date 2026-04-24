@@ -659,7 +659,7 @@ async fn manual_gepa_verification() {
     };
 
     // Build mutated spec
-    let mutated_spec = include_str!("../../../os-apps/project-management/issue.ioa.toml")
+    let mutated_spec = include_str!("../../../os-apps/project-management/specs/issue.ioa.toml")
         .to_string()
         + r#"
 

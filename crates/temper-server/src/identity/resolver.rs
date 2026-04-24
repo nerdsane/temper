@@ -42,7 +42,9 @@ struct CacheEntry {
 /// Resolves bearer tokens to platform-assigned agent identities.
 ///
 /// Uses an in-memory cache (`BTreeMap` for DST determinism) to avoid
-/// entity lookups on every request. Cache entries expire after [`CACHE_TTL_SECS`].
+/// entity lookups on every request. Cache entries are scoped by `(tenant,
+/// key_hash)` so a credential verified in one tenant never leaks into
+/// another. Entries expire after [`CACHE_TTL_SECS`].
 pub struct IdentityResolver {
     cache: Arc<RwLock<BTreeMap<String, CacheEntry>>>,
 }
@@ -77,9 +79,10 @@ impl IdentityResolver {
         bearer_token: &str,
     ) -> Option<ResolvedIdentity> {
         let key_hash = hash_token(bearer_token);
+        let cache_key = cache_key(tenant, &key_hash);
 
         // Check cache first.
-        if let Some(cached) = self.get_cached(&key_hash) {
+        if let Some(cached) = self.get_cached(&cache_key) {
             return Some(cached);
         }
 
@@ -131,7 +134,7 @@ impl IdentityResolver {
         };
 
         // Cache the result.
-        self.put_cached(key_hash, identity.clone());
+        self.put_cached(cache_key, identity.clone());
 
         Some(identity)
     }
@@ -151,12 +154,20 @@ impl IdentityResolver {
     /// Invalidate a specific credential by its hashed key (`AgentCredential` entity ID).
     pub fn invalidate_key_hash(&self, key_hash: &str) {
         let mut cache = self.cache.write().unwrap(); // ci-ok: infallible lock
-        cache.remove(key_hash);
+        let suffix = format!(":{key_hash}");
+        let keys: Vec<String> = cache
+            .keys()
+            .filter(|key| key.ends_with(&suffix))
+            .cloned()
+            .collect();
+        for key in keys {
+            cache.remove(&key);
+        }
     }
 
-    fn get_cached(&self, key_hash: &str) -> Option<ResolvedIdentity> {
+    fn get_cached(&self, cache_key: &str) -> Option<ResolvedIdentity> {
         let cache = self.cache.read().unwrap(); // ci-ok: infallible lock
-        let entry = cache.get(key_hash)?;
+        let entry = cache.get(cache_key)?;
         let now = sim_now();
         if now < entry.expires_at {
             Some(entry.identity.clone())
@@ -165,7 +176,7 @@ impl IdentityResolver {
         }
     }
 
-    fn put_cached(&self, key_hash: String, identity: ResolvedIdentity) {
+    fn put_cached(&self, cache_key: String, identity: ResolvedIdentity) {
         let expires_at = sim_now() + chrono::Duration::seconds(CACHE_TTL_SECS);
         let mut cache = self.cache.write().unwrap(); // ci-ok: infallible lock
 
@@ -182,13 +193,17 @@ impl IdentityResolver {
         }
 
         cache.insert(
-            key_hash,
+            cache_key,
             CacheEntry {
                 identity,
                 expires_at,
             },
         );
     }
+}
+
+fn cache_key(tenant: &TenantId, key_hash: &str) -> String {
+    format!("{}:{key_hash}", tenant.as_str())
 }
 
 /// Hash a bearer token with SHA-256 for credential lookup.

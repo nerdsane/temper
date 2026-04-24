@@ -87,6 +87,43 @@ effect = [{ type = "increment", var = "count" }, { type = "set_bool", var = "don
 }
 
 #[test]
+fn translate_counter_effects_with_param_amounts_as_runtime_only() {
+    let spec = r#"
+[automaton]
+name = "Test"
+states = ["Draft", "Active"]
+initial = "Draft"
+
+[[action]]
+name = "TrackUsage"
+from = ["Draft"]
+to = "Active"
+effect = [
+  { type = "increment", var = "used_bytes", amount = "size_bytes" },
+  { type = "decrement", var = "used_bytes", amount = "released_bytes" }
+]
+"#;
+    let automaton = parse_automaton(spec).unwrap();
+    let actions = translate_actions(&automaton);
+    let effects = &actions[0].effects;
+    assert_eq!(effects.len(), 2);
+    assert!(matches!(
+        &effects[0],
+        ResolvedEffect::IncrementCounterByParam { var, param }
+            if var == "used_bytes" && param == "size_bytes"
+    ));
+    assert!(matches!(
+        &effects[1],
+        ResolvedEffect::DecrementCounterByParam { var, param }
+            if var == "used_bytes" && param == "released_bytes"
+    ));
+    assert!(
+        !effects[0].is_verifiable() && !effects[1].is_verifiable(),
+        "param-based counter deltas are runtime-only until verification models action-param arithmetic"
+    );
+}
+
+#[test]
 fn translate_set_counter_from_param_effects() {
     let spec = r#"
 [automaton]
@@ -161,6 +198,11 @@ name = "Start"
 from = ["Idle"]
 to = "Active"
 effect = [{ type = "trigger", name = "run_wasm" }, { type = "schedule", action = "Refresh", delay_seconds = 60 }, { type = "spawn", entity_type = "Child", entity_id_source = "{uuid}", initial_action = "Init" }]
+
+[[integration]]
+name = "run_wasm"
+trigger = "run_wasm"
+type = "webhook"
 "#;
     let automaton = parse_automaton(spec).unwrap();
     let actions = translate_actions(&automaton);
