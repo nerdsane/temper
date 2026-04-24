@@ -172,18 +172,26 @@ impl Default for HttpEndpointTables {
 pub async fn rebuild_tenant_table(state: &crate::state::ServerState, tenant: &TenantId) {
     use crate::entity_actor::types::{EntityMsg, EntityResponse};
 
-    let index_key = format!("{}:HttpEndpoint", tenant.as_str());
-    let ids: Vec<String> = {
-        let Ok(index) = state.entity_index.read() else {
-            return;
-        };
-        index
-            .get(&index_key)
-            .cloned()
-            .unwrap_or_default()
-            .into_iter()
-            .collect()
-    };
+    // On fresh pod boots the in-memory entity_index is lazily
+    // populated — we need to prime it from the event store or
+    // rebuild sees 0 rows even when there ARE active HttpEndpoint
+    // rows in durable storage. `list_entity_ids_lazy` handles the
+    // populate-if-empty path.
+    let ids: Vec<String> = state.list_entity_ids_lazy(tenant, "HttpEndpoint").await;
+
+    // Force-materialise each actor from its snapshot/event log so
+    // the subsequent ask(GetState) finds them in the registry.
+    // Actors materialise lazily on OData reads; for boot-time
+    // table priming we eagerly spawn since the router fallback
+    // can't afford to 404 on the first request after restart.
+    for entity_id in &ids {
+        let _ = state.get_or_spawn_tenant_actor_with_fields(
+            tenant,
+            "HttpEndpoint",
+            entity_id,
+            serde_json::json!({}),
+        );
+    }
 
     let mut routes: Vec<HttpEndpointRoute> = Vec::with_capacity(ids.len());
     for entity_id in ids {
