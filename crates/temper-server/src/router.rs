@@ -314,30 +314,79 @@ async fn dispatch_matched_route(
     let invoke_streams = std::sync::Arc::new(std::sync::RwLock::new(
         temper_wasm::stream::StreamRegistry::default(),
     ));
-    tokio::spawn(async move {
-        let _ = engine
+    let invoke_hash = module_hash.clone();
+    let invoke_integration = route.route.integration_module.clone();
+    tracing::info!(
+        endpoint_id = %route.route.id,
+        integration = %invoke_integration,
+        module_hash = %invoke_hash,
+        request_body_handle = guest_request_body.0,
+        response_body_handle = guest_response_body.0,
+        "HttpEndpoint dispatch → invoking WASM"
+    );
+    let invoke_task = tokio::spawn(async move {
+        match engine
             .invoke_with_blobs(
-                &module_hash,
+                &invoke_hash,
                 &ctx,
                 host,
                 &limits,
                 invoke_streams,
                 std::collections::BTreeMap::new(),
             )
-            .await;
+            .await
+        {
+            Ok(result) => {
+                if !result.success {
+                    tracing::warn!(
+                        integration = %invoke_integration,
+                        error = result.error.unwrap_or_default(),
+                        "WASM integration returned success=false"
+                    );
+                }
+            }
+            Err(e) => {
+                tracing::warn!(
+                    integration = %invoke_integration,
+                    error = %e,
+                    "WASM integration failed to invoke"
+                );
+            }
+        }
     });
 
-    // Await the guest's response head.
-    let head: HttpResponseHead = match streams
-        .await_inbound_response_head(guest_response_body)
-        .await
-    {
-        Ok(h) => h,
-        Err(e) => {
+    // Await the guest's response head — bounded by the route's
+    // configured timeout so a bad guest doesn't wedge the request.
+    let head_timeout =
+        std::time::Duration::from_secs(route.route.timeout_secs as u64);
+    let head_result = tokio::time::timeout(
+        head_timeout,
+        streams.await_inbound_response_head(guest_response_body),
+    )
+    .await;
+    let head: HttpResponseHead = match head_result {
+        Ok(Ok(h)) => h,
+        Ok(Err(e)) => {
             tracing::warn!(error = %e, "HttpEndpoint: guest did not submit response head");
+            invoke_task.abort();
             return axum::http::Response::builder()
                 .status(axum::http::StatusCode::BAD_GATEWAY)
-                .body(Body::from("guest integration failed to submit response head"))
+                .body(Body::from(format!(
+                    "guest integration failed to submit response head: {e}"
+                )))
+                .expect("response builder");
+        }
+        Err(_) => {
+            tracing::warn!(
+                timeout_secs = route.route.timeout_secs,
+                "HttpEndpoint: guest timed out before submitting response head"
+            );
+            invoke_task.abort();
+            return axum::http::Response::builder()
+                .status(axum::http::StatusCode::GATEWAY_TIMEOUT)
+                .body(Body::from(
+                    "guest integration timed out before submitting response head",
+                ))
                 .expect("response builder");
         }
     };
