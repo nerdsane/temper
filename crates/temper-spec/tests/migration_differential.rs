@@ -159,7 +159,16 @@ const MIGRATIONS: &[(&str, &str, &str)] = &[
 ];
 
 fn git_show(repo_root: &str, sha: &str, path: &str) -> String {
-    let out = Command::new("git")
+    git_show_inner(repo_root, sha, path, None)
+}
+
+fn git_show_inner(repo_root: &str, sha: &str, path: &str, git_dir_override: Option<&str>) -> String {
+    let mut cmd = Command::new("git");
+    if let Some(git_dir) = git_dir_override {
+        cmd.env("GIT_DIR", git_dir);
+    }
+    sanitize_git_env(&mut cmd);
+    let out = cmd
         .args(["-C", repo_root, "show", &format!("{sha}^:{path}")])
         .output()
         .expect("git show");
@@ -169,6 +178,21 @@ fn git_show(repo_root: &str, sha: &str, path: &str) -> String {
         String::from_utf8_lossy(&out.stderr)
     );
     String::from_utf8(out.stdout).expect("utf8")
+}
+
+fn sanitize_git_env(cmd: &mut Command) {
+    for key in [
+        "GIT_DIR",
+        "GIT_WORK_TREE",
+        "GIT_INDEX_FILE",
+        "GIT_OBJECT_DIRECTORY",
+        "GIT_ALTERNATE_OBJECT_DIRECTORIES",
+        "GIT_COMMON_DIR",
+        "GIT_NAMESPACE",
+        "GIT_PREFIX",
+    ] {
+        cmd.env_remove(key);
+    }
 }
 
 fn read_current(repo_root: &str, path: &str) -> String {
@@ -239,21 +263,109 @@ fn assert_equiv(path: &str, old: &Integration, new: &Integration) {
         old.name
     );
     assert_eq!(old.llm, new.llm, "{path}: llm name={}", old.name);
-    // Config: flatten BTreeMap — compare key sets + values.
-    let old_keys: Vec<&String> = old.config.keys().collect();
-    let new_keys: Vec<&String> = new.config.keys().collect();
-    assert_eq!(
-        old_keys, new_keys,
-        "{path}: config keys differ for {}: old={:?} new={:?}",
-        old.name, old_keys, new_keys
-    );
-    for (k, v) in &old.config {
+    assert_config_equiv(path, inner_name(&old.trigger), old, new);
+}
+
+fn assert_config_equiv(path: &str, trigger_name: &str, old: &Integration, new: &Integration) {
+    let old_cfg = normalize_old_config_for_expected_evolution(path, trigger_name, &old.config);
+    let new_cfg = normalize_new_config_for_expected_evolution(path, trigger_name, &new.config);
+    let allowed_extra = allowed_extra_config_keys(path, trigger_name);
+
+    if allowed_extra.is_empty() {
+        let old_keys: Vec<&String> = old_cfg.keys().collect();
+        let new_keys: Vec<&String> = new_cfg.keys().collect();
+        assert_eq!(
+            old_keys, new_keys,
+            "{path}: config keys differ for {}: old={:?} new={:?}",
+            old.name, old_keys, new_keys
+        );
+        for (k, v) in &old_cfg {
+            assert_eq!(
+                Some(v),
+                new_cfg.get(k),
+                "{path}: config[{k}] name={}",
+                old.name
+            );
+        }
+        return;
+    }
+
+    for (k, v) in &old_cfg {
         assert_eq!(
             Some(v),
-            new.config.get(k),
+            new_cfg.get(k),
             "{path}: config[{k}] name={}",
             old.name
         );
+    }
+
+    let mut unexpected_new_keys: Vec<&str> = Vec::new();
+    for key in new_cfg.keys() {
+        if old_cfg.contains_key(key) {
+            continue;
+        }
+        if allowed_extra.contains(&key.as_str()) {
+            continue;
+        }
+        unexpected_new_keys.push(key.as_str());
+    }
+    assert!(
+        unexpected_new_keys.is_empty(),
+        "{path}: unexpected config keys for {}: {:?}",
+        old.name,
+        unexpected_new_keys
+    );
+}
+
+fn normalize_old_config_for_expected_evolution(
+    path: &str,
+    trigger_name: &str,
+    config: &BTreeMap<String, String>,
+) -> BTreeMap<String, String> {
+    let mut normalized = config.clone();
+    match (path, trigger_name) {
+        ("os-apps/paw-agent/specs/session.ioa.toml", "call_provider") => {
+            normalized.remove("api_key");
+            if let Some(openai_api_url) = normalized.remove("openai_api_url") {
+                normalized.insert("openai_codex_api_url".to_string(), openai_api_url);
+            }
+        }
+        ("os-apps/paw-agent/specs/session.ioa.toml", "compact_context") => {
+            normalized.remove("api_key");
+        }
+        _ => {}
+    }
+    normalized
+}
+
+fn normalize_new_config_for_expected_evolution(
+    path: &str,
+    trigger_name: &str,
+    config: &BTreeMap<String, String>,
+) -> BTreeMap<String, String> {
+    let mut normalized = config.clone();
+    match (path, trigger_name) {
+        ("os-apps/paw-agent/specs/session.ioa.toml", "call_provider" | "compact_context") => {
+            normalized.remove("api_key");
+        }
+        _ => {}
+    }
+    normalized
+}
+
+fn allowed_extra_config_keys(path: &str, trigger_name: &str) -> &'static [&'static str] {
+    match (path, trigger_name) {
+        ("os-apps/paw-agent/specs/session.ioa.toml", "call_provider") => {
+            &["openai_api_key", "openai_api_url"]
+        }
+        ("os-apps/paw-agent/specs/session.ioa.toml", "compact_context") => &[
+            "anthropic_api_url",
+            "openai_api_key",
+            "openai_api_url",
+            "openai_codex_api_url",
+            "openrouter_api_url",
+        ],
+        _ => &[],
     }
 }
 
@@ -371,4 +483,16 @@ on_success = "Fire"
         a.integrations[0].name, "__trigger__:Fire:my_trigger",
         "expander must namespace synthesized names as `__trigger__:{{action}}:{{name}}`"
     );
+}
+
+#[test]
+fn git_show_ignores_inherited_git_dir_from_other_repo() {
+    let repo = "/Users/seshendranalla/Development/openpaw-action-triggers";
+    let wrong_git_dir = "/Users/seshendranalla/Development/temper-action-triggers/.git";
+    let path = "os-apps/paw-agent/specs/capability_request.ioa.toml";
+
+    let clean = git_show(repo, "7a644954", path);
+    let contaminated = git_show_inner(repo, "7a644954", path, Some(wrong_git_dir));
+
+    assert_eq!(clean, contaminated);
 }

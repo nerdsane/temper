@@ -1,7 +1,8 @@
 # ADR-0046: Unified Action Triggers — Supersede Reactions Subsystem
 
-- Status: Proposed
+- Status: Accepted
 - Date: 2026-04-20
+- Accepted: 2026-04-24
 - Deciders: Temper core maintainers
 - Supersedes: ADR-0045 (specifically its Sub-Decision 5 — "Keep reactions separate from actions")
 - Related:
