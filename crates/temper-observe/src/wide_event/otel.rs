@@ -97,6 +97,13 @@ fn remote_parent_context(event: &WideEvent) -> Option<opentelemetry::Context> {
 
 /// Project to the **Contextual View** (OTEL span).
 pub fn emit_span(event: &WideEvent) {
+    if matches!(
+        event.event_kind,
+        EventKind::LlmCall | EventKind::WasmInvocation
+    ) {
+        return;
+    }
+
     let tracer = opentelemetry::global::tracer("temper");
     let span_name = match event.event_kind {
         EventKind::Transition => format!("{}.{}", event.entity_type, event.operation),
@@ -121,10 +128,6 @@ pub fn emit_span(event: &WideEvent) {
         attrs.push(KeyValue::new(k.clone(), *v));
     }
 
-    let llm_apm_only = event.event_kind == EventKind::LlmCall;
-    if llm_apm_only {
-        attrs.push(KeyValue::new("dd_llmobs_enabled", false));
-    }
     attrs.push(KeyValue::new("temper.trace_id", event.trace_id.clone()));
     attrs.push(KeyValue::new("temper.span_id", event.span_id.clone()));
     attrs.push(KeyValue::new(
@@ -154,11 +157,8 @@ pub fn emit_span(event: &WideEvent) {
     let start_time: SystemTime = event.timestamp.into();
     let end_time = start_time + Duration::from_nanos(event.duration_ns);
 
-    let parent_cx = if llm_apm_only {
-        opentelemetry::Context::new()
-    } else {
-        remote_parent_context(event).unwrap_or_else(|| tracing::Span::current().context())
-    };
+    let parent_cx =
+        remote_parent_context(event).unwrap_or_else(|| tracing::Span::current().context());
 
     let mut span = tracer
         .span_builder(span_name)

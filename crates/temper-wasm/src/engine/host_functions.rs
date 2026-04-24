@@ -27,6 +27,22 @@ pub(crate) enum FieldResolution {
     HostError,
 }
 
+#[derive(Debug, serde::Deserialize)]
+struct HostHttpBatchRequest {
+    method: String,
+    url: String,
+    #[serde(default)]
+    headers: Vec<(String, String)>,
+    #[serde(default)]
+    body: String,
+}
+
+#[derive(Debug, serde::Serialize)]
+struct HostHttpBatchResponse {
+    status: u16,
+    body: String,
+}
+
 /// Resolve an entity-state field against the invocation context JSON and the
 /// per-invocation blob cache. Plain strings come back as UTF-8 bytes (unquoted);
 /// blob-ref envelopes come back as the decoded blob payload. See ADR-0046.
@@ -343,6 +359,77 @@ pub(super) fn link_host_functions(linker: &mut Linker<HostState>) -> Result<(), 
             },
         )
         .map_err(|e| WasmError::Compilation(format!("failed to link host_http_call: {e}")))?;
+
+    // host_http_call_batch(requests_ptr, requests_len, result_buf_ptr, result_buf_len) -> i32
+    // Requests are a JSON array of {method,url,headers,body}. Returns bytes written
+    // to result_buf (JSON array of {status,body}), or -1 on error, -2 if buf too small.
+    linker
+        .func_wrap(
+            "env",
+            "host_http_call_batch",
+            |mut caller: Caller<'_, HostState>,
+             requests_ptr: i32,
+             requests_len: i32,
+             result_buf_ptr: i32,
+             result_buf_len: i32|
+             -> i32 {
+                let memory = caller.get_export("memory").and_then(|e| e.into_memory());
+                let Some(memory) = memory else {
+                    return -1;
+                };
+
+                let requests: Vec<HostHttpBatchRequest> = if requests_len > 0 {
+                    let mut requests_buf = vec![0u8; requests_len as usize];
+                    let _ = memory.read(&caller, requests_ptr as usize, &mut requests_buf);
+                    match serde_json::from_slice(&requests_buf) {
+                        Ok(parsed) => parsed,
+                        Err(_) => return -1,
+                    }
+                } else {
+                    Vec::new()
+                };
+
+                let host = caller.data().host.clone();
+                let result = tokio::task::block_in_place(|| {
+                    tokio::runtime::Handle::current().block_on(
+                        host.http_call_batch(
+                            &requests
+                                .iter()
+                                .map(|request| crate::host_trait::HttpBatchRequest {
+                                    method: request.method.clone(),
+                                    url: request.url.clone(),
+                                    headers: request.headers.clone(),
+                                    body: request.body.clone(),
+                                })
+                                .collect::<Vec<_>>(),
+                        ),
+                    )
+                });
+
+                match result {
+                    Ok(responses) => {
+                        let response_json = serde_json::to_string(
+                            &responses
+                                .into_iter()
+                                .map(|response| HostHttpBatchResponse {
+                                    status: response.status,
+                                    body: response.body,
+                                })
+                                .collect::<Vec<_>>(),
+                        )
+                        .unwrap_or_else(|_| "[]".into());
+                        let response_bytes = response_json.as_bytes();
+                        if response_bytes.len() > result_buf_len as usize {
+                            return -2;
+                        }
+                        let _ = memory.write(&mut caller, result_buf_ptr as usize, response_bytes);
+                        response_bytes.len() as i32
+                    }
+                    Err(_) => -1,
+                }
+            },
+        )
+        .map_err(|e| WasmError::Compilation(format!("failed to link host_http_call_batch: {e}")))?;
 
     // host_connect_call(url_ptr, url_len, headers_ptr, headers_len,
     //                   body_ptr, body_len, result_buf_ptr, result_buf_len) -> i32

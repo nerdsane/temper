@@ -65,6 +65,42 @@ fn test_invariants_parsed() {
 }
 
 #[test]
+fn test_state_query_index_flag_parsed() {
+    let toml = r#"
+[automaton]
+name = "ProjectionAware"
+states = ["Open"]
+initial = "Open"
+
+[[state]]
+name = "title"
+type = "string"
+initial = ""
+
+[[state]]
+name = "last_progress_at"
+type = "string"
+initial = ""
+query_indexed = false
+"#;
+
+    let automaton = parse_automaton(toml).expect("should parse");
+    let title = automaton
+        .state
+        .iter()
+        .find(|state| state.name == "title")
+        .expect("title state");
+    let progress = automaton
+        .state
+        .iter()
+        .find(|state| state.name == "last_progress_at")
+        .expect("last_progress_at state");
+
+    assert_eq!(title.query_indexed, None);
+    assert_eq!(progress.query_indexed, Some(false));
+}
+
+#[test]
 fn test_convert_to_state_machine() {
     let automaton = parse_automaton(ORDER_IOA).unwrap();
     let state_machine = to_state_machine(&automaton);

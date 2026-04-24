@@ -21,7 +21,7 @@
 pub mod context;
 pub mod host;
 
-pub use context::{Context, HttpResponse};
+pub use context::{Context, HttpRequest, HttpResponse};
 
 /// Re-export serde_json types for convenience.
 pub use serde_json::{self, Value, json};
@@ -102,6 +102,6 @@ macro_rules! temper_module {
 /// use temper_wasm_sdk::prelude::*;
 /// ```
 pub mod prelude {
-    pub use crate::context::{Context, HttpResponse};
+    pub use crate::context::{Context, HttpRequest, HttpResponse};
     pub use crate::{Value, json, serde_json, set_error_result, set_success_result, temper_module};
 }
