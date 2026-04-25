@@ -6127,6 +6127,7 @@ dependencies = [
  "temper-store-turso",
  "temper-verify",
  "temper-wasm",
+ "tempfile",
  "thiserror 2.0.18",
  "tokio",
  "tokio-test",

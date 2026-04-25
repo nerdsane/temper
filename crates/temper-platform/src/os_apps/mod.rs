@@ -9,7 +9,7 @@
 //!
 //! Install reuses [`crate::bootstrap::bootstrap_tenant_specs`] so every app goes through the same verification cascade as system specs.
 
-use std::collections::{BTreeMap, HashSet};
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::sync::{OnceLock, RwLock};
 
@@ -24,8 +24,10 @@ use crate::state::PlatformState;
 
 mod agent_bootstrap;
 pub mod git_sources;
+mod reconcile;
 mod system_files;
 mod types;
+pub use reconcile::{os_app_bundle_digest, reconcile_os_app, resolve_os_app_install_order};
 pub use types::*;
 
 fn read_app_manifest(app_dir: &Path) -> Option<AppManifest> {
@@ -1167,27 +1169,6 @@ fn os_app_dependencies(name: &str) -> Vec<String> {
     }
 }
 
-fn collect_install_order(
-    app_name: &str,
-    visiting: &mut HashSet<String>,
-    visited: &mut HashSet<String>,
-    order: &mut Vec<String>,
-) -> Result<(), String> {
-    if visited.contains(app_name) {
-        return Ok(());
-    }
-    if !visiting.insert(app_name.to_string()) {
-        return Err(format!("Cyclic OS app dependency detected at '{app_name}'"));
-    }
-    for dependency in os_app_dependencies(app_name) {
-        collect_install_order(&dependency, visiting, visited, order)?;
-    }
-    visiting.remove(app_name);
-    visited.insert(app_name.to_string());
-    order.push(app_name.to_string());
-    Ok(())
-}
-
 /// Install an OS app into a tenant (workspace).
 ///
 /// Reads app files from disk, runs the verification cascade, registers
@@ -1202,10 +1183,7 @@ pub async fn install_os_app(
     tenant: &str,
     app_name: &str,
 ) -> Result<InstallResult, String> {
-    let mut visiting = HashSet::new();
-    let mut visited = HashSet::new();
-    let mut order = Vec::new();
-    collect_install_order(app_name, &mut visiting, &mut visited, &mut order)?;
+    let order = resolve_os_app_install_order(&[app_name.to_string()])?;
 
     let mut final_result = None;
     for app in order {
@@ -1579,6 +1557,8 @@ async fn install_os_app_without_dependencies(
 
     // ── Step 9: Create seed instances. ───────────────────────────────
     let seed_created = bootstrap_seed_data(state, &tenant_id, tenant, &bundle.seed_instances).await;
+
+    reconcile::record_app_install_metadata_for_bundle(state, tenant, app_name, &bundle).await;
 
     Ok(InstallResult {
         added,

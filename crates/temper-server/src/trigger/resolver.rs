@@ -24,12 +24,14 @@ pub(crate) fn resolve_target_id(
         TargetResolver::Field { field } => fields
             .get(field)
             .and_then(|v| v.as_str())
+            .filter(|value| !value.is_empty())
             .map(|s| s.to_string()),
         TargetResolver::SameId => Some(source_entity_id.to_string()),
         TargetResolver::Static { entity_id } => Some(entity_id.clone()),
         TargetResolver::CreateIfMissing { id_field } => fields
             .get(id_field)
             .and_then(|v| v.as_str())
+            .filter(|value| !value.is_empty())
             .map(|s| s.to_string())
             .or_else(|| Some(format!("{source_entity_id}-derived"))),
         // Fresh UUID on every dispatch. `sim_uuid()` is DST-safe: in
@@ -63,6 +65,17 @@ mod tests {
             field: "missing".to_string(),
         };
         assert_eq!(resolve_target_id(&resolver, "src-1", &json!({})), None);
+    }
+
+    #[test]
+    fn field_resolver_returns_none_when_field_is_empty() {
+        let resolver = TargetResolver::Field {
+            field: "workspace_id".to_string(),
+        };
+        assert_eq!(
+            resolve_target_id(&resolver, "src-1", &json!({"workspace_id": ""})),
+            None
+        );
     }
 
     #[test]

@@ -209,18 +209,8 @@ pub const CREATE_POLICY_DENIAL_PATTERNS_TENANT_INDEX: &str = "\
 CREATE INDEX IF NOT EXISTS idx_policy_denial_patterns_tenant
     ON policy_denial_patterns(tenant, last_seen DESC);";
 
-/// Tracks which OS apps are installed per tenant (workspace).
-///
-/// On boot, `restore_registry_from_turso()` reads the `specs` table to reload
-/// entity types. This table provides metadata for the UI ("Installed" badge)
-/// and future re-install logic.
-pub const CREATE_TENANT_INSTALLED_APPS_TABLE: &str = "\
-CREATE TABLE IF NOT EXISTS tenant_installed_apps (
-    tenant_id TEXT NOT NULL,
-    app_name TEXT NOT NULL,
-    installed_at TEXT NOT NULL DEFAULT (datetime('now')),
-    PRIMARY KEY (tenant_id, app_name)
-);";
+mod installed_apps;
+pub use installed_apps::*;
 
 // ---------------------------------------------------------------------------
 // Phase 0: Turso as single source of truth — new tables + trajectory extensions
