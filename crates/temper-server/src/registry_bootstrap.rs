@@ -4,10 +4,10 @@
 //! populating a `SpecRegistry` with tenant registrations and verification status.
 //! This keeps storage-specific row translation out of the CLI layer.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use temper_runtime::tenant::TenantId;
-use temper_spec::csdl::parse_csdl;
+use temper_spec::csdl::{CsdlDocument, emit_csdl_xml, merge_csdl, parse_csdl};
 use temper_store_turso::TursoEventStore;
 
 use crate::registry::{
@@ -134,22 +134,48 @@ fn row_to_registry_status(row: &impl SpecRowLike) -> VerificationStatus {
 }
 
 /// Helper: populate registry from grouped spec rows.
+fn restored_csdl_for_rows<R>(
+    tenant: &str,
+    rows: &[R],
+    get_csdl: &impl Fn(&R) -> Option<String>,
+) -> Result<Option<(CsdlDocument, String)>, String> {
+    let mut seen = BTreeSet::new();
+    let mut merged: Option<CsdlDocument> = None;
+
+    for csdl_xml in rows.iter().filter_map(get_csdl) {
+        let csdl_xml = csdl_xml.trim();
+        if csdl_xml.is_empty() || !seen.insert(csdl_xml.to_string()) {
+            continue;
+        }
+
+        let parsed = parse_csdl(csdl_xml)
+            .map_err(|e| format!("Failed to parse restored CSDL for tenant '{tenant}': {e}"))?;
+        merged = Some(match merged {
+            Some(existing) => merge_csdl(&existing, &parsed),
+            None => parsed,
+        });
+    }
+
+    Ok(merged.map(|csdl| {
+        let csdl_xml = emit_csdl_xml(&csdl);
+        (csdl, csdl_xml)
+    }))
+}
+
 fn populate_registry<R: SpecRowLike>(
     registry: &mut SpecRegistry,
     grouped: BTreeMap<String, Vec<R>>,
     constraints_by_tenant: &mut BTreeMap<String, String>,
-    get_csdl: impl Fn(&[R]) -> String,
+    get_csdl: impl Fn(&R) -> Option<String>,
     get_ioa: impl Fn(&R) -> (String, String),
 ) -> Result<usize, String> {
     let mut restored_specs = 0usize;
     for (tenant, tenant_rows) in grouped {
-        let csdl_xml = get_csdl(&tenant_rows);
-        if csdl_xml.trim().is_empty() {
+        let Some((csdl, csdl_xml)) = restored_csdl_for_rows(&tenant, &tenant_rows, &get_csdl)?
+        else {
             tracing::warn!(tenant = %tenant, "skipping restored tenant due to missing CSDL");
             continue;
-        }
-        let csdl = parse_csdl(&csdl_xml)
-            .map_err(|e| format!("Failed to parse restored CSDL for tenant '{tenant}': {e}"))?;
+        };
 
         let ioa_owned: Vec<(String, String)> = tenant_rows.iter().map(&get_ioa).collect();
         let ioa_pairs: Vec<(&str, &str)> = ioa_owned
@@ -230,11 +256,7 @@ pub async fn restore_registry_from_postgres(
         registry,
         grouped,
         &mut constraints_by_tenant,
-        |rows| {
-            rows.iter()
-                .find_map(|r| r.csdl_xml.clone())
-                .unwrap_or_default()
-        },
+        |rows| rows.csdl_xml.clone(),
         |row| (row.entity_type.clone(), row.ioa_source.clone()),
     )
 }
@@ -277,11 +299,7 @@ pub async fn restore_registry_from_turso(
         registry,
         grouped,
         &mut constraints_by_tenant,
-        |rows| {
-            rows.iter()
-                .find_map(|r| r.csdl_xml.clone())
-                .unwrap_or_default()
-        },
+        |rows| rows.csdl_xml.clone(),
         |row| (row.entity_type.clone(), row.ioa_source.clone()),
     )
 }
@@ -324,21 +342,17 @@ pub async fn restore_registry_from_platform_store(
     let mut orphaned_specs: Vec<(String, String)> = Vec::new();
 
     for (tenant, tenant_rows) in &grouped {
-        let csdl_xml = tenant_rows
-            .iter()
-            .find_map(|r| r.csdl_xml.clone())
-            .unwrap_or_default();
-
-        if csdl_xml.trim().is_empty() {
-            tracing::warn!(tenant = %tenant, "reconciling orphaned specs for tenant with missing CSDL");
-            for row in tenant_rows {
-                orphaned_specs.push((row.tenant.clone(), row.entity_type.clone()));
+        let (csdl, csdl_xml) = match restored_csdl_for_rows(tenant, tenant_rows, &|r| {
+            r.csdl_xml.clone()
+        }) {
+            Ok(Some(restored)) => restored,
+            Ok(None) => {
+                tracing::warn!(tenant = %tenant, "reconciling orphaned specs for tenant with missing CSDL");
+                for row in tenant_rows {
+                    orphaned_specs.push((row.tenant.clone(), row.entity_type.clone()));
+                }
+                continue;
             }
-            continue;
-        }
-
-        let csdl = match parse_csdl(&csdl_xml) {
-            Ok(csdl) => csdl,
             Err(e) => {
                 tracing::warn!(tenant = %tenant, "reconciling orphaned specs for tenant with invalid CSDL: {e}");
                 for row in tenant_rows {
@@ -422,6 +436,102 @@ mod tests {
         fn try_parse_verification_result(&self) -> Option<EntityVerificationResult> {
             self.verification_result.clone()
         }
+    }
+
+    struct MockSpecRow {
+        entity_type: String,
+        ioa_source: String,
+        csdl_xml: String,
+        status: String,
+        verified: bool,
+    }
+
+    impl SpecRowLike for MockSpecRow {
+        fn verification_status(&self) -> &str {
+            &self.status
+        }
+        fn verified(&self) -> bool {
+            self.verified
+        }
+        fn levels_passed(&self) -> Option<i32> {
+            None
+        }
+        fn levels_total(&self) -> Option<i32> {
+            None
+        }
+        fn updated_at_rfc3339(&self) -> String {
+            "2026-04-25T00:00:00Z".to_string()
+        }
+        fn try_parse_verification_result(&self) -> Option<EntityVerificationResult> {
+            None
+        }
+    }
+
+    fn csdl_xml_for(entity_type: &str, set_name: &str) -> String {
+        format!(
+            r#"<?xml version="1.0"?>
+        <edmx:Edmx Version="4.0" xmlns:edmx="http://docs.oasis-open.org/odata/ns/edmx">
+          <edmx:DataServices>
+            <Schema Namespace="Temper.Restore" xmlns="http://docs.oasis-open.org/odata/ns/edm">
+              <EntityType Name="{entity_type}">
+                <Key><PropertyRef Name="Id"/></Key>
+                <Property Name="Id" Type="Edm.String" Nullable="false"/>
+              </EntityType>
+              <EntityContainer Name="RestoreService">
+                <EntitySet Name="{set_name}" EntityType="Temper.Restore.{entity_type}"/>
+              </EntityContainer>
+            </Schema>
+          </edmx:DataServices>
+        </edmx:Edmx>"#
+        )
+    }
+
+    #[test]
+    fn populate_registry_merges_csdl_fragments_from_all_restored_rows() {
+        let order_ioa = include_str!("../../../test-fixtures/specs/order.ioa.toml").to_string();
+        let task_ioa = order_ioa.replace("name = \"Order\"", "name = \"Task\"");
+        let rows = vec![
+            MockSpecRow {
+                entity_type: "Order".to_string(),
+                ioa_source: order_ioa,
+                csdl_xml: csdl_xml_for("Order", "Orders"),
+                status: "passed".to_string(),
+                verified: true,
+            },
+            MockSpecRow {
+                entity_type: "Task".to_string(),
+                ioa_source: task_ioa,
+                csdl_xml: csdl_xml_for("Task", "Tasks"),
+                status: "passed".to_string(),
+                verified: true,
+            },
+        ];
+        let mut grouped = BTreeMap::new();
+        grouped.insert("default".to_string(), rows);
+        let mut constraints = BTreeMap::new();
+        let mut registry = SpecRegistry::new();
+
+        populate_registry(
+            &mut registry,
+            grouped,
+            &mut constraints,
+            |row| Some(row.csdl_xml.clone()),
+            |row| (row.entity_type.clone(), row.ioa_source.clone()),
+        )
+        .expect("restore should register tenant");
+
+        let tenant = TenantId::new("default");
+        assert!(registry.get_table(&tenant, "Order").is_some());
+        assert!(registry.get_table(&tenant, "Task").is_some());
+        assert_eq!(
+            registry.resolve_entity_type(&tenant, "Orders").as_deref(),
+            Some("Order")
+        );
+        assert_eq!(
+            registry.resolve_entity_type(&tenant, "Tasks").as_deref(),
+            Some("Task"),
+            "restore must preserve every app's OData entity-set mapping"
+        );
     }
 
     #[test]

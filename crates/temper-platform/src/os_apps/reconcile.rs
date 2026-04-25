@@ -4,6 +4,7 @@ use sha2::{Digest, Sha256};
 use temper_runtime::tenant::TenantId;
 use temper_server::platform_store::InstalledAppRecord;
 use temper_server::registry::VerificationStatus;
+use temper_spec::csdl::parse_csdl;
 
 use super::{
     AppBundle, AppEntry, OsAppBundleDigest, OsAppReconcileResult, catalog, get_os_app,
@@ -210,14 +211,45 @@ fn tenant_has_ready_app_specs_for_bundle(
 ) -> bool {
     let tenant_id = TenantId::new(tenant);
     let registry = state.registry.read().expect("Spec registry lock poisoned");
-    bundle.specs.iter().all(|(entity_type, _)| {
+    let specs_ready = bundle.specs.iter().all(|(entity_type, _)| {
         let has_table = registry.get_table(&tenant_id, entity_type).is_some();
         let is_ready = matches!(
             registry.get_verification_status(&tenant_id, entity_type),
             Some(VerificationStatus::Completed(_) | VerificationStatus::Restored(_))
         );
         has_table && is_ready
-    })
+    });
+    if !specs_ready {
+        return false;
+    }
+
+    let Some(csdl_xml) = bundle.csdl.as_deref() else {
+        return true;
+    };
+    let Ok(csdl) = parse_csdl(csdl_xml) else {
+        return false;
+    };
+
+    for schema in &csdl.schemas {
+        for container in &schema.entity_containers {
+            for entity_set in &container.entity_sets {
+                let expected_type = entity_set
+                    .entity_type
+                    .rsplit('.')
+                    .next()
+                    .unwrap_or(&entity_set.entity_type);
+                if registry
+                    .resolve_entity_type(&tenant_id, &entity_set.name)
+                    .as_deref()
+                    != Some(expected_type)
+                {
+                    return false;
+                }
+            }
+        }
+    }
+
+    true
 }
 
 async fn record_app_install_metadata(
