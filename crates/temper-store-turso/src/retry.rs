@@ -13,6 +13,7 @@
 //! returns `ConcurrencyViolation` which the caller handles via the
 //! normal event-store contract.
 
+use std::sync::OnceLock;
 use std::time::Duration;
 
 use temper_runtime::persistence::PersistenceError;
@@ -25,6 +26,32 @@ use crate::metrics::record_turso_write_retry;
 /// retries, which is below typical HTTP/gRPC client timeouts and above
 /// typical Turso transient-error recovery windows.
 pub(crate) const RETRY_DELAYS_MS: &[u64] = &[250, 500, 1000, 2000];
+
+/// Per-attempt timeout for remote Turso write operations.
+///
+/// A stalled Hrana request otherwise holds the caller open until the wider
+/// action/request budget expires. The event log has idempotent sequence keys,
+/// so cancelling a stuck attempt and retrying is safe: if the dropped attempt
+/// committed after the client stopped waiting, the retry observes the sequence
+/// advance and returns through the normal concurrency path.
+pub(crate) fn write_attempt_timeout() -> Duration {
+    static TIMEOUT: OnceLock<Duration> = OnceLock::new();
+    *TIMEOUT.get_or_init(|| {
+        std::env::var("TEMPER_TURSO_WRITE_ATTEMPT_TIMEOUT_MS")
+            .ok()
+            .and_then(|v| v.trim().parse::<u64>().ok())
+            .filter(|v| *v > 0)
+            .map(Duration::from_millis)
+            .unwrap_or_else(|| Duration::from_millis(2_000))
+    })
+}
+
+pub(crate) fn timeout_error(operation: &'static str, timeout: Duration) -> PersistenceError {
+    PersistenceError::Storage(format!(
+        "{operation} timed out after {}ms",
+        timeout.as_millis()
+    ))
+}
 
 /// Returns true if `err_msg` looks like a transient Turso/libSQL failure
 /// that retry with backoff can reasonably recover from.
@@ -101,14 +128,15 @@ where
             tokio::time::sleep(Duration::from_millis(delay_ms)).await;
         }
 
-        match f().await {
-            Ok(v) => {
+        let attempt_timeout = write_attempt_timeout();
+        match tokio::time::timeout(attempt_timeout, f()).await {
+            Ok(Ok(v)) => {
                 if attempt > 0 {
                     record_turso_write_retry(operation, attempt as u64, "succeeded");
                 }
                 return Ok(v);
             }
-            Err(err) => {
+            Ok(Err(err)) => {
                 let is_transient = error_text(&err)
                     .map(is_transient_write_error)
                     .unwrap_or(false);
@@ -116,6 +144,9 @@ where
                     return Err(err);
                 }
                 last_err = Some(err);
+            }
+            Err(_) => {
+                last_err = Some(timeout_error(operation, attempt_timeout));
             }
         }
     }

@@ -3,7 +3,9 @@
 use std::collections::BTreeMap;
 use std::sync::{Arc, OnceLock, RwLock};
 
-use tracing::instrument;
+use std::time::Instant;
+
+use tracing::{Instrument, instrument};
 
 use temper_observe::wide_event;
 use temper_runtime::persistence::{EventStore, PersistenceEnvelope};
@@ -73,6 +75,141 @@ pub(crate) struct AuthzResourceSnapshot {
 }
 
 impl ServerState {
+    fn enqueue_query_projection_upsert_for_entity_response(
+        &self,
+        tenant: &TenantId,
+        entity_type: &str,
+        entity_id: &str,
+        response: &EntityResponse,
+        source: &'static str,
+    ) {
+        let Some(store) = self.event_store.as_ref().cloned() else {
+            return;
+        };
+
+        let status = response.state.status.clone();
+        let fields = self.query_projection_fields(tenant, entity_type, &response.state.fields);
+        let sequence_nr = response.state.sequence_nr;
+        let operation = "upsert";
+        let tenant = tenant.to_string();
+        let entity_type = entity_type.to_string();
+        let entity_id = entity_id.to_string();
+
+        crate::query_projection_metrics::record_update_enqueued(&tenant, &entity_type, operation);
+
+        let span = tracing::info_span!(
+            "entity.phase.query_projection",
+            otel.name = "entity.phase.query_projection",
+            tenant = %tenant,
+            entity_type = %entity_type,
+            entity_id = %entity_id,
+            operation = operation,
+            source = source,
+        );
+
+        tokio::spawn(
+            async move {
+                let started_at = Instant::now();
+                let result = store
+                    .upsert_query_projection(
+                        &tenant,
+                        &entity_type,
+                        &entity_id,
+                        &status,
+                        &fields,
+                        sequence_nr,
+                    )
+                    .await;
+                let result_label = if result.is_ok() { "ok" } else { "error" };
+                crate::query_projection_metrics::record_update_duration(
+                    &tenant,
+                    &entity_type,
+                    operation,
+                    result_label,
+                    started_at.elapsed(),
+                );
+                if let Err(e) = result {
+                    crate::query_projection_metrics::record_update_error(
+                        &tenant,
+                        &entity_type,
+                        operation,
+                    );
+                    tracing::warn!(
+                        error = %e,
+                        tenant = %tenant,
+                        entity_type = %entity_type,
+                        entity_id = %entity_id,
+                        source = source,
+                        "failed to update query projection"
+                    );
+                }
+            }
+            .instrument(span),
+        );
+    }
+
+    fn enqueue_query_projection_remove(
+        &self,
+        tenant: &TenantId,
+        entity_type: &str,
+        entity_id: &str,
+        source: &'static str,
+    ) {
+        let Some(store) = self.event_store.as_ref().cloned() else {
+            return;
+        };
+
+        let tenant = tenant.to_string();
+        let entity_type = entity_type.to_string();
+        let entity_id = entity_id.to_string();
+        let operation = "remove";
+
+        crate::query_projection_metrics::record_update_enqueued(&tenant, &entity_type, operation);
+
+        let span = tracing::info_span!(
+            "entity.phase.query_projection",
+            otel.name = "entity.phase.query_projection",
+            tenant = %tenant,
+            entity_type = %entity_type,
+            entity_id = %entity_id,
+            operation = operation,
+            source = source,
+        );
+
+        tokio::spawn(
+            async move {
+                let started_at = Instant::now();
+                let result = store
+                    .remove_query_projection(&tenant, &entity_type, &entity_id)
+                    .await;
+                let result_label = if result.is_ok() { "ok" } else { "error" };
+                crate::query_projection_metrics::record_update_duration(
+                    &tenant,
+                    &entity_type,
+                    operation,
+                    result_label,
+                    started_at.elapsed(),
+                );
+                if let Err(e) = result {
+                    crate::query_projection_metrics::record_update_error(
+                        &tenant,
+                        &entity_type,
+                        operation,
+                    );
+                    tracing::warn!(
+                        error = %e,
+                        tenant = %tenant,
+                        entity_type = %entity_type,
+                        entity_id = %entity_id,
+                        source = source,
+                        "failed to remove query projection"
+                    );
+                }
+            }
+            .instrument(span),
+        );
+    }
+
     fn touch_actor_access(&self, actor_key: &str) {
         if let Ok(mut last_accessed) = self.last_accessed.write() {
             last_accessed.insert(actor_key.to_string(), sim_now());
@@ -583,30 +720,13 @@ impl ServerState {
         );
         let _ = self.event_tx.send(change);
 
-        if let Some(store) = self.event_store.as_ref() {
-            let status = response.state.status.clone();
-            let fields = self.query_projection_fields(tenant, entity_type, &response.state.fields);
-            let sequence_nr = response.state.sequence_nr;
-            if let Err(e) = store
-                .upsert_query_projection(
-                    tenant.as_str(),
-                    entity_type,
-                    entity_id,
-                    &status,
-                    &fields,
-                    sequence_nr,
-                )
-                .await
-            {
-                tracing::warn!(
-                    error = %e,
-                    tenant = %tenant,
-                    entity_type = %entity_type,
-                    entity_id = %entity_id,
-                    "failed to update query projection during create"
-                );
-            }
-        }
+        self.enqueue_query_projection_upsert_for_entity_response(
+            tenant,
+            entity_type,
+            entity_id,
+            &response,
+            "create",
+        );
 
         Ok(response)
     }
@@ -641,31 +761,14 @@ impl ServerState {
         .result
         .map_err(|e| format!("Actor update failed: {e}"))?;
 
-        if response.success
-            && let Some(store) = self.event_store.as_ref()
-        {
-            let status = response.state.status.clone();
-            let fields = self.query_projection_fields(tenant, entity_type, &response.state.fields);
-            let sequence_nr = response.state.sequence_nr;
-            if let Err(e) = store
-                .upsert_query_projection(
-                    tenant.as_str(),
-                    entity_type,
-                    entity_id,
-                    &status,
-                    &fields,
-                    sequence_nr,
-                )
-                .await
-            {
-                tracing::warn!(
-                    error = %e,
-                    tenant = %tenant,
-                    entity_type = %entity_type,
-                    entity_id = %entity_id,
-                    "failed to update query projection during field update"
-                );
-            }
+        if response.success {
+            self.enqueue_query_projection_upsert_for_entity_response(
+                tenant,
+                entity_type,
+                entity_id,
+                &response,
+                "field_update",
+            );
         }
 
         Ok(response)
@@ -696,19 +799,7 @@ impl ServerState {
         .map_err(|e| format!("Actor delete failed: {e}"))?;
 
         if response.success {
-            if let Some(store) = self.event_store.as_ref()
-                && let Err(e) = store
-                    .remove_query_projection(tenant.as_str(), entity_type, entity_id)
-                    .await
-            {
-                tracing::warn!(
-                    error = %e,
-                    tenant = %tenant,
-                    entity_type = %entity_type,
-                    entity_id = %entity_id,
-                    "failed to remove query projection during delete"
-                );
-            }
+            self.enqueue_query_projection_remove(tenant, entity_type, entity_id, "delete");
 
             // Tombstone persisted successfully; now it is safe to remove actor
             // and in-memory index entries.

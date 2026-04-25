@@ -11,7 +11,9 @@ use tracing::instrument;
 use super::TursoEventStore;
 use super::instrumentation::record_turso_query_duration;
 use crate::metrics::record_turso_write_retry;
-use crate::retry::{RETRY_DELAYS_MS, is_transient_write_error};
+use crate::retry::{
+    RETRY_DELAYS_MS, is_transient_write_error, timeout_error, write_attempt_timeout,
+};
 
 impl EventStore for TursoEventStore {
     #[instrument(skip_all, fields(
@@ -38,17 +40,20 @@ impl EventStore for TursoEventStore {
             if attempt > 0 {
                 tokio::time::sleep(Duration::from_millis(RETRY_DELAYS_MS[attempt - 1])).await;
             }
-            match self
-                .append_inner(persistence_id, expected_sequence, events)
-                .await
+            let attempt_timeout = write_attempt_timeout();
+            match tokio::time::timeout(
+                attempt_timeout,
+                self.append_inner(persistence_id, expected_sequence, events),
+            )
+            .await
             {
-                Ok(seq) => {
+                Ok(Ok(seq)) => {
                     if attempt > 0 {
                         record_turso_write_retry("turso.append", attempt as u64, "succeeded");
                     }
                     return Ok(seq);
                 }
-                Err(err) => {
+                Ok(Err(err)) => {
                     let transient = match &err {
                         PersistenceError::Storage(msg) => is_transient_write_error(msg),
                         _ => false,
@@ -57,6 +62,9 @@ impl EventStore for TursoEventStore {
                         return Err(err);
                     }
                     last_err = Some(err);
+                }
+                Err(_) => {
+                    last_err = Some(timeout_error("turso.append", attempt_timeout));
                 }
             }
         }

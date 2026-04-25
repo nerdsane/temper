@@ -5,7 +5,7 @@
 //! clauses. This avoids materializing every actor in a collection query
 //! just to evaluate filters in memory.
 
-use libsql::{TransactionBehavior, params};
+use libsql::params;
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet};
 use temper_runtime::persistence::{PersistenceError, storage_error};
@@ -13,6 +13,7 @@ use temper_runtime::scheduler::sim_now;
 use tracing::instrument;
 
 use super::TursoEventStore;
+use crate::retry::{timeout_error, write_attempt_timeout};
 
 fn projection_hash(status: &str, fields: &serde_json::Value) -> String {
     let mut hasher = Sha256::new();
@@ -65,14 +66,41 @@ impl TursoEventStore {
         fields: &serde_json::Value,
         sequence_nr: u64,
     ) -> Result<(), PersistenceError> {
+        let attempt_timeout = write_attempt_timeout();
+        match tokio::time::timeout(
+            attempt_timeout,
+            self.upsert_query_projection_inner(
+                tenant,
+                entity_type,
+                entity_id,
+                status,
+                fields,
+                sequence_nr,
+            ),
+        )
+        .await
+        {
+            Ok(result) => result,
+            Err(_) => Err(timeout_error(
+                "turso.upsert_query_projection",
+                attempt_timeout,
+            )),
+        }
+    }
+
+    async fn upsert_query_projection_inner(
+        &self,
+        tenant: &str,
+        entity_type: &str,
+        entity_id: &str,
+        status: &str,
+        fields: &serde_json::Value,
+        sequence_nr: u64,
+    ) -> Result<(), PersistenceError> {
         let conn = self.configured_connection().await?;
         let new_projection_hash = projection_hash(status, fields);
-        let tx = conn
-            .transaction_with_behavior(TransactionBehavior::Immediate)
-            .await
-            .map_err(storage_error)?;
 
-        let mut existing_rows = tx
+        let mut existing_rows = conn
             .query(
                 "SELECT projection_hash FROM entity_catalog \
                  WHERE tenant = ?1 AND entity_type = ?2 AND entity_id = ?3",
@@ -87,7 +115,7 @@ impl TursoEventStore {
             .and_then(|row| row.get::<String>(0).ok());
 
         if existing_projection_hash.as_deref() == Some(new_projection_hash.as_str()) {
-            tx.execute(
+            conn.execute(
                 "UPDATE entity_catalog \
                  SET status = ?4, updated_at = ?5, sequence_nr = ?6, projection_version = 2, projection_hash = ?7 \
                  WHERE tenant = ?1 AND entity_type = ?2 AND entity_id = ?3",
@@ -103,11 +131,10 @@ impl TursoEventStore {
             )
             .await
             .map_err(storage_error)?;
-            tx.commit().await.map_err(storage_error)?;
             return Ok(());
         }
 
-        tx.execute(
+        conn.execute(
             "INSERT OR REPLACE INTO entity_catalog \
              (tenant, entity_type, entity_id, status, updated_at, sequence_nr, projection_version, projection_hash) \
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, 2, ?7)",
@@ -127,7 +154,7 @@ impl TursoEventStore {
         // Delete existing rows for this entity, then re-insert.
         // This is simpler than tracking individual field changes and handles
         // field removal correctly.
-        tx.execute(
+        conn.execute(
             "DELETE FROM entity_field_index WHERE tenant = ?1 AND entity_type = ?2 AND entity_id = ?3",
             params![tenant, entity_type, entity_id],
         )
@@ -141,7 +168,7 @@ impl TursoEventStore {
                     // Non-null, non-scalar (object/array) — skip indexing.
                     continue;
                 }
-                tx.execute(
+                conn.execute(
                     "INSERT INTO entity_field_index (tenant, entity_type, entity_id, field_name, field_value, status) \
                      VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
                     params![tenant, entity_type, entity_id, field_name.as_str(), field_value, status],
@@ -152,7 +179,7 @@ impl TursoEventStore {
         }
 
         // Also index the status as a pseudo-field so `$filter=Status eq 'Active'` works.
-        tx.execute(
+        conn.execute(
             "INSERT OR REPLACE INTO entity_field_index (tenant, entity_type, entity_id, field_name, field_value, status) \
              VALUES (?1, ?2, ?3, 'Status', ?4, ?4)",
             params![tenant, entity_type, entity_id, status],
@@ -160,7 +187,6 @@ impl TursoEventStore {
         .await
         .map_err(storage_error)?;
 
-        tx.commit().await.map_err(storage_error)?;
         Ok(())
     }
 
@@ -192,24 +218,40 @@ impl TursoEventStore {
         entity_type: &str,
         entity_id: &str,
     ) -> Result<(), PersistenceError> {
+        let attempt_timeout = write_attempt_timeout();
+        match tokio::time::timeout(
+            attempt_timeout,
+            self.remove_query_projection_inner(tenant, entity_type, entity_id),
+        )
+        .await
+        {
+            Ok(result) => result,
+            Err(_) => Err(timeout_error(
+                "turso.remove_query_projection",
+                attempt_timeout,
+            )),
+        }
+    }
+
+    async fn remove_query_projection_inner(
+        &self,
+        tenant: &str,
+        entity_type: &str,
+        entity_id: &str,
+    ) -> Result<(), PersistenceError> {
         let conn = self.configured_connection().await?;
-        let tx = conn
-            .transaction_with_behavior(TransactionBehavior::Immediate)
-            .await
-            .map_err(storage_error)?;
-        tx.execute(
+        conn.execute(
             "DELETE FROM entity_catalog WHERE tenant = ?1 AND entity_type = ?2 AND entity_id = ?3",
             params![tenant, entity_type, entity_id],
         )
         .await
         .map_err(storage_error)?;
-        tx.execute(
+        conn.execute(
             "DELETE FROM entity_field_index WHERE tenant = ?1 AND entity_type = ?2 AND entity_id = ?3",
             params![tenant, entity_type, entity_id],
         )
         .await
         .map_err(storage_error)?;
-        tx.commit().await.map_err(storage_error)?;
         Ok(())
     }
 
