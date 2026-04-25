@@ -56,6 +56,14 @@ pub fn build_router(state: ServerState) -> Router {
         .route("/$metadata", get(odata::handle_metadata))
         .route("/$hints", get(odata::handle_hints))
         .route("/$events", get(events::handle_events))
+        // Content-addressed binary ingest. Registered as a specific
+        // route so axum routes it ahead of the generic `/{*path}`
+        // catch-all, and so the body extractor can take a streaming
+        // `Body` instead of a buffered `Bytes`.
+        .route(
+            "/Blobs/Temper.IngestRaw",
+            axum::routing::post(odata::handle_blob_ingest_raw),
+        )
         .route(
             "/{*path}",
             get(odata::handle_odata_get)
