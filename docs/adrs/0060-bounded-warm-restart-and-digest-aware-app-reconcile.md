@@ -75,7 +75,28 @@ Temper exposes a reconcile operation for startup callers. The result is explicit
 
 Callers should emit per-app timing, skip/reconcile counts, and startup phase durations around this API instead of inferring health from process liveness.
 
-### 5. Empty trigger target fields are not valid entity ids
+### 5. Runtime recovery is not content bootstrap
+
+Warm restart recovery has a runtime-only installed-app path.
+
+That path may:
+
+- recover Cedar policies
+- reload persisted WASM modules
+- inspect durable installed-app metadata
+- repair in-memory and durable spec readiness when the bundle digest matches and specs are registered
+
+That path must not write `APP.md`, agents, skills, system files, ADR files, or seed entities. If durable metadata cannot prove that an app bundle is unchanged, runtime recovery reports that reconcile is needed. The startup caller then runs digest-aware app reconcile for the required startup app surface.
+
+This separation prevents stale verification metadata from forcing a hot full install while still allowing changed app content to reconcile intentionally.
+
+### 6. Runtime indexes recover before content helpers
+
+Runtime entity indexes are recovered before app reconcile can run any content bootstrap helpers.
+
+App helpers that ensure files, directories, workspaces, agents, or seed entities exist must not make create/update decisions against an empty post-restart in-memory index. A changed or cold app may still need content bootstrap, but it now runs after durable entity state has been replayed into runtime indexes.
+
+### 7. Empty trigger target fields are not valid entity ids
 
 Trigger target resolution treats empty string fields as missing values.
 
@@ -85,12 +106,14 @@ This prevents invalid persistence ids with empty id segments and forces create-i
 
 1. **Phase 0** — Add durable installed-app digest metadata, deduped startup app ordering, digest-aware reconcile, and empty trigger-target guards.
 2. **Phase 1** — Move TemperPaw startup to the reconcile API and emit per-phase/per-app startup telemetry.
-3. **Phase 2** — Gate production readiness on the configured required surfaces for each deployment while keeping `/healthz` as process liveness.
-4. **Phase 3** — Move bulky content reconcile off the hot path where app semantics allow asynchronous post-ready repair.
+3. **Phase 2** — Use runtime-only installed-app recovery in the warm restart hot path, recover runtime indexes before app reconcile, and keep bulky content bootstrap behind digest-aware reconcile.
+4. **Phase 3** — Gate production readiness on the configured required surfaces for each deployment while keeping `/healthz` as process liveness.
+5. **Phase 4** — Move optional bulky content repair off the hot path where app semantics allow asynchronous post-ready repair.
 
 ## Readiness Gates
 
 - A warm restart must recover durable app metadata before app helpers rely on process-local indexes.
+- Runtime indexes must be recovered before any content helper performs an existence check.
 - A configured startup app must be either skipped with matching digest and ready specs or reconciled successfully.
 - Deployment readiness must not be satisfied by process liveness alone.
 - Required transports and external user-facing surfaces must report connected/usable status before the deployment marks itself ready.

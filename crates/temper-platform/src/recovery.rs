@@ -14,6 +14,31 @@ use temper_server::registry::VerificationStatus;
 use crate::os_apps;
 use crate::state::PlatformState;
 
+/// Runtime-only outcome for installed-app warm restart recovery.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum InstalledAppRuntimeRecoveryOutcome {
+    /// Specs were already registered and marked usable.
+    Ready,
+    /// Specs were registered and the durable bundle digest matched; runtime
+    /// verification readiness was repaired without reinstalling app content.
+    Healed,
+    /// The app should be reconciled by the digest-aware app reconcile path.
+    NeedsReconcile,
+    /// The durable installed-app row points at an app that is not in the catalog.
+    MissingBundle,
+    /// Durable metadata could not be read, so the caller should reconcile.
+    StoreError,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct InstalledAppsRuntimeRecoverySummary {
+    pub ready: usize,
+    pub healed: usize,
+    pub needs_reconcile: usize,
+    pub missing_bundle: usize,
+    pub store_error: usize,
+}
+
 /// Recover Cedar policies from the platform store into memory.
 ///
 /// Loads all tenant policies from the durable store, validates each one
@@ -78,8 +103,28 @@ pub async fn restore_installed_apps(state: &PlatformState, ps: &dyn PlatformStor
     };
 
     for (tenant, app_name) in installed {
-        // Only skip recovery if the app's specs are both present and in a
-        // stable verified/restored state. Pending specs must be healed.
+        match recover_installed_app_runtime_state(state, ps, &tenant, &app_name).await {
+            InstalledAppRuntimeRecoveryOutcome::Ready => {
+                continue;
+            }
+            InstalledAppRuntimeRecoveryOutcome::Healed => {
+                tracing::info!(
+                    tenant,
+                    app = %app_name,
+                    "Restored installed app runtime readiness without hot content bootstrap"
+                );
+                continue;
+            }
+            InstalledAppRuntimeRecoveryOutcome::NeedsReconcile
+            | InstalledAppRuntimeRecoveryOutcome::MissingBundle
+            | InstalledAppRuntimeRecoveryOutcome::StoreError => {}
+        }
+
+        // Legacy recovery still performs a full install when runtime-only
+        // recovery cannot prove the durable app bundle is unchanged. Startup
+        // callers that need bounded warm restart should call
+        // `recover_installed_apps_runtime_state` and then run
+        // `reconcile_os_app` for their required startup surface.
         if tenant_has_ready_app_specs(state, &tenant, &app_name) {
             continue;
         }
@@ -103,6 +148,90 @@ pub async fn restore_installed_apps(state: &PlatformState, ps: &dyn PlatformStor
             }
         }
     }
+}
+
+/// Recover warm-restart runtime state for one installed app without running the
+/// full OS-app install/bootstrap path.
+///
+/// This is intentionally bounded: it never writes APP.md, skills, agents, ADRs,
+/// system files, or seed entities. If durable metadata cannot prove the bundle
+/// is unchanged, callers get [`InstalledAppRuntimeRecoveryOutcome::NeedsReconcile`]
+/// and should use digest-aware reconcile for the required app surface.
+pub async fn recover_installed_app_runtime_state(
+    state: &PlatformState,
+    ps: &dyn PlatformStore,
+    tenant: &str,
+    app_name: &str,
+) -> InstalledAppRuntimeRecoveryOutcome {
+    let Some(bundle) = os_apps::get_os_app(app_name) else {
+        tracing::warn!(
+            tenant,
+            app = %app_name,
+            "Installed OS app is missing from catalog; runtime recovery cannot restore it"
+        );
+        return InstalledAppRuntimeRecoveryOutcome::MissingBundle;
+    };
+
+    if os_apps::tenant_has_ready_app_specs_for_bundle(state, tenant, &bundle) {
+        return InstalledAppRuntimeRecoveryOutcome::Ready;
+    }
+
+    let Some(digest) = os_apps::os_app_bundle_digest(app_name) else {
+        return InstalledAppRuntimeRecoveryOutcome::MissingBundle;
+    };
+
+    match ps.get_installed_app(tenant, app_name).await {
+        Ok(Some(record))
+            if record.bundle_digest == digest.bundle_digest
+                && os_apps::tenant_has_registered_app_specs_for_bundle(state, tenant, &bundle) =>
+        {
+            os_apps::mark_app_specs_restored_from_matching_digest(
+                state, ps, tenant, app_name, &bundle,
+            )
+            .await;
+            InstalledAppRuntimeRecoveryOutcome::Healed
+        }
+        Ok(Some(_)) | Ok(None) => InstalledAppRuntimeRecoveryOutcome::NeedsReconcile,
+        Err(error) => {
+            tracing::warn!(
+                tenant,
+                app = %app_name,
+                error = %error,
+                "Failed to read installed OS app metadata during runtime recovery"
+            );
+            InstalledAppRuntimeRecoveryOutcome::StoreError
+        }
+    }
+}
+
+/// Recover runtime readiness for all durable installed apps without reinstalling
+/// app content.
+pub async fn recover_installed_apps_runtime_state(
+    state: &PlatformState,
+    ps: &dyn PlatformStore,
+) -> InstalledAppsRuntimeRecoverySummary {
+    let installed = match ps.list_all_installed_apps().await {
+        Ok(apps) => apps,
+        Err(e) => {
+            tracing::warn!("Failed to load installed os-apps for runtime recovery: {e}");
+            return InstalledAppsRuntimeRecoverySummary {
+                store_error: 1,
+                ..InstalledAppsRuntimeRecoverySummary::default()
+            };
+        }
+    };
+
+    let mut summary = InstalledAppsRuntimeRecoverySummary::default();
+    for (tenant, app_name) in installed {
+        match recover_installed_app_runtime_state(state, ps, &tenant, &app_name).await {
+            InstalledAppRuntimeRecoveryOutcome::Ready => summary.ready += 1,
+            InstalledAppRuntimeRecoveryOutcome::Healed => summary.healed += 1,
+            InstalledAppRuntimeRecoveryOutcome::NeedsReconcile => summary.needs_reconcile += 1,
+            InstalledAppRuntimeRecoveryOutcome::MissingBundle => summary.missing_bundle += 1,
+            InstalledAppRuntimeRecoveryOutcome::StoreError => summary.store_error += 1,
+        }
+    }
+    summary
 }
 
 /// Backward-compatible alias.

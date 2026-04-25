@@ -987,6 +987,96 @@ async fn test_restore_installed_app_heals_pending_specs_on_restart() {
     let _ = std::fs::remove_file(format!("{db_path}-shm"));
 }
 
+#[tokio::test]
+async fn test_runtime_recovery_heals_matching_digest_without_hot_reinstall() {
+    let db_path = format!("/tmp/temper-test-runtime-heal-{}.db", uuid::Uuid::new_v4());
+    let db_url = format!("file:{db_path}");
+
+    let turso = temper_store_turso::TursoEventStore::new(&db_url, None)
+        .await
+        .unwrap();
+    let mut state = PlatformState::new(None);
+    state.server.event_store = Some(std::sync::Arc::new(
+        temper_server::event_store::ServerEventStore::Turso(turso),
+    ));
+
+    install_skill(&state, "test-runtime-heal", "project-management")
+        .await
+        .expect("install should succeed");
+
+    let turso_ref = state
+        .server
+        .event_store
+        .as_ref()
+        .unwrap()
+        .platform_turso_store()
+        .unwrap();
+
+    for entity_type in ["Issue", "Project", "Cycle", "Comment", "Label"] {
+        turso_ref
+            .persist_spec_verification(
+                "test-runtime-heal",
+                entity_type,
+                TursoSpecVerificationUpdate {
+                    status: "pending",
+                    verified: false,
+                    levels_passed: None,
+                    levels_total: None,
+                    verification_result_json: None,
+                },
+            )
+            .await
+            .unwrap();
+
+        state.registry.write().unwrap().set_verification_status(
+            &TenantId::new("test-runtime-heal"),
+            entity_type,
+            VerificationStatus::Pending,
+        );
+    }
+
+    let outcome = crate::recovery::recover_installed_app_runtime_state(
+        &state,
+        turso_ref,
+        "test-runtime-heal",
+        "project-management",
+    )
+    .await;
+
+    assert_eq!(
+        outcome,
+        crate::recovery::InstalledAppRuntimeRecoveryOutcome::Healed,
+        "matching digest recovery should heal runtime spec readiness without reinstalling content"
+    );
+
+    let result = reconcile_os_app(&state, "test-runtime-heal", "project-management")
+        .await
+        .expect("unchanged reconcile should succeed after runtime recovery");
+    assert!(
+        matches!(result, OsAppReconcileResult::Skipped { .. }),
+        "runtime-healed app should skip hot reinstall, got {result:?}"
+    );
+
+    let rows = turso_ref.load_specs().await.unwrap();
+    let issue_row = rows
+        .iter()
+        .find(|r| r.tenant == "test-runtime-heal" && r.entity_type == "Issue")
+        .expect("Issue row should exist");
+    assert!(
+        issue_row.verified,
+        "runtime heal should persist verified=true"
+    );
+    assert_ne!(
+        issue_row.verification_status.to_lowercase(),
+        "pending",
+        "runtime heal should durably move matching specs out of pending"
+    );
+
+    let _ = std::fs::remove_file(&db_path);
+    let _ = std::fs::remove_file(format!("{db_path}-wal"));
+    let _ = std::fs::remove_file(format!("{db_path}-shm"));
+}
+
 #[test]
 fn test_reload_picks_up_disk_changes() {
     reload_skills();

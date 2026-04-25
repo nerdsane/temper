@@ -2,8 +2,8 @@ use std::collections::HashSet;
 
 use sha2::{Digest, Sha256};
 use temper_runtime::tenant::TenantId;
-use temper_server::platform_store::InstalledAppRecord;
-use temper_server::registry::VerificationStatus;
+use temper_server::platform_store::{InstalledAppRecord, PlatformStore, SpecVerificationUpdate};
+use temper_server::registry::{EntityLevelSummary, EntityVerificationResult, VerificationStatus};
 use temper_spec::csdl::parse_csdl;
 
 use super::{
@@ -204,22 +204,18 @@ pub fn os_app_bundle_digest(app_name: &str) -> Option<OsAppBundleDigest> {
     get_os_app(app_name).map(|bundle| digest_app_bundle(app_name, &bundle))
 }
 
-fn tenant_has_ready_app_specs_for_bundle(
+pub(crate) fn tenant_has_registered_app_specs_for_bundle(
     state: &PlatformState,
     tenant: &str,
     bundle: &AppBundle,
 ) -> bool {
     let tenant_id = TenantId::new(tenant);
     let registry = state.registry.read().expect("Spec registry lock poisoned");
-    let specs_ready = bundle.specs.iter().all(|(entity_type, _)| {
-        let has_table = registry.get_table(&tenant_id, entity_type).is_some();
-        let is_ready = matches!(
-            registry.get_verification_status(&tenant_id, entity_type),
-            Some(VerificationStatus::Completed(_) | VerificationStatus::Restored(_))
-        );
-        has_table && is_ready
-    });
-    if !specs_ready {
+    let specs_registered = bundle
+        .specs
+        .iter()
+        .all(|(entity_type, _)| registry.get_table(&tenant_id, entity_type).is_some());
+    if !specs_registered {
         return false;
     }
 
@@ -250,6 +246,86 @@ fn tenant_has_ready_app_specs_for_bundle(
     }
 
     true
+}
+
+pub(crate) fn tenant_has_ready_app_specs_for_bundle(
+    state: &PlatformState,
+    tenant: &str,
+    bundle: &AppBundle,
+) -> bool {
+    if !tenant_has_registered_app_specs_for_bundle(state, tenant, bundle) {
+        return false;
+    }
+
+    let tenant_id = TenantId::new(tenant);
+    let registry = state.registry.read().expect("Spec registry lock poisoned");
+    bundle.specs.iter().all(|(entity_type, _)| {
+        matches!(
+            registry.get_verification_status(&tenant_id, entity_type),
+            Some(VerificationStatus::Completed(_) | VerificationStatus::Restored(_))
+        )
+    })
+}
+
+pub(crate) async fn mark_app_specs_restored_from_matching_digest(
+    state: &PlatformState,
+    ps: &dyn PlatformStore,
+    tenant: &str,
+    app_name: &str,
+    bundle: &AppBundle,
+) {
+    if bundle.specs.is_empty() {
+        return;
+    }
+
+    let tenant_id = TenantId::new(tenant);
+    let verified_at = temper_runtime::scheduler::sim_now().to_rfc3339();
+    let result = EntityVerificationResult {
+        all_passed: true,
+        levels: vec![EntityLevelSummary {
+            level: "BundleDigest".to_string(),
+            passed: true,
+            summary: format!("Restored from matching OS app bundle digest ({app_name})"),
+            details: None,
+        }],
+        verified_at,
+    };
+
+    {
+        let mut registry = state.registry.write().expect("Spec registry lock poisoned");
+        for (entity_type, _) in &bundle.specs {
+            registry.set_verification_status(
+                &tenant_id,
+                entity_type,
+                VerificationStatus::Restored(result.clone()),
+            );
+        }
+    }
+
+    for (entity_type, _) in &bundle.specs {
+        if let Err(error) = ps
+            .persist_spec_verification(
+                tenant,
+                entity_type,
+                SpecVerificationUpdate {
+                    status: "passed",
+                    verified: true,
+                    levels_passed: Some(1),
+                    levels_total: Some(1),
+                    verification_result_json: None,
+                },
+            )
+            .await
+        {
+            tracing::warn!(
+                tenant,
+                app = %app_name,
+                entity_type,
+                error = %error,
+                "Failed to persist restored OS app spec verification status"
+            );
+        }
+    }
 }
 
 async fn record_app_install_metadata(
@@ -319,20 +395,49 @@ pub async fn reconcile_os_app(
         .event_store
         .as_ref()
         .and_then(|store| store.platform_store())
-        && let Ok(Some(record)) = ps.get_installed_app(tenant, app_name).await
-        && record.bundle_digest == digest.bundle_digest
-        && tenant_has_ready_app_specs_for_bundle(state, tenant, &bundle)
     {
-        tracing::info!(
-            tenant,
-            app = %app_name,
-            bundle_digest = %digest.bundle_digest,
-            "OS app unchanged; skipping hot reconcile"
-        );
-        return Ok(OsAppReconcileResult::Skipped {
-            app_name: app_name.to_string(),
-            bundle_digest: digest.bundle_digest,
-        });
+        match ps.get_installed_app(tenant, app_name).await {
+            Ok(Some(record)) if record.bundle_digest == digest.bundle_digest => {
+                if tenant_has_ready_app_specs_for_bundle(state, tenant, &bundle) {
+                    tracing::info!(
+                        tenant,
+                        app = %app_name,
+                        bundle_digest = %digest.bundle_digest,
+                        "OS app unchanged; skipping hot reconcile"
+                    );
+                    return Ok(OsAppReconcileResult::Skipped {
+                        app_name: app_name.to_string(),
+                        bundle_digest: digest.bundle_digest,
+                    });
+                }
+
+                if tenant_has_registered_app_specs_for_bundle(state, tenant, &bundle) {
+                    mark_app_specs_restored_from_matching_digest(
+                        state, ps, tenant, app_name, &bundle,
+                    )
+                    .await;
+                    tracing::info!(
+                        tenant,
+                        app = %app_name,
+                        bundle_digest = %digest.bundle_digest,
+                        "OS app unchanged; restored spec readiness and skipped hot reconcile"
+                    );
+                    return Ok(OsAppReconcileResult::Skipped {
+                        app_name: app_name.to_string(),
+                        bundle_digest: digest.bundle_digest,
+                    });
+                }
+            }
+            Ok(Some(_)) | Ok(None) => {}
+            Err(error) => {
+                tracing::warn!(
+                    tenant,
+                    app = %app_name,
+                    error = %error,
+                    "Failed to read OS app digest metadata; falling back to reconcile"
+                );
+            }
+        }
     }
 
     let install = install_os_app_without_dependencies(state, tenant, app_name).await?;
