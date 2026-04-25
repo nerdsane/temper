@@ -268,6 +268,10 @@ struct GuestMetricInput {
     tags: BTreeMap<String, String>,
 }
 
+fn guest_metric_is_counter_kind(kind: Option<&str>) -> bool {
+    matches!(kind, Some("count" | "counter"))
+}
+
 const DEFAULT_BLOB_TRANSPORT_MAX_CONCURRENCY: usize = 32;
 
 fn blob_transport_max_concurrency() -> usize {
@@ -1104,19 +1108,16 @@ impl WasmHost for ProductionWasmHost {
             ));
         }
 
-        match payload.kind.as_deref() {
-            Some("counter") => {
-                meter
-                    .f64_counter(payload.name)
-                    .build()
-                    .add(payload.value, &attrs);
-            }
-            _ => {
-                meter
-                    .f64_histogram(payload.name)
-                    .build()
-                    .record(payload.value, &attrs);
-            }
+        if guest_metric_is_counter_kind(payload.kind.as_deref()) {
+            meter
+                .f64_counter(payload.name)
+                .build()
+                .add(payload.value, &attrs);
+        } else {
+            meter
+                .f64_histogram(payload.name)
+                .build()
+                .record(payload.value, &attrs);
         }
         Ok(())
     }
@@ -1754,6 +1755,14 @@ mod tests {
     use std::sync::{Arc, Mutex};
     use tracing_opentelemetry::OpenTelemetrySpanExt;
     use tracing_subscriber::prelude::*;
+
+    #[test]
+    fn guest_metric_count_kind_is_counter() {
+        assert!(guest_metric_is_counter_kind(Some("count")));
+        assert!(guest_metric_is_counter_kind(Some("counter")));
+        assert!(!guest_metric_is_counter_kind(Some("histogram")));
+        assert!(!guest_metric_is_counter_kind(None));
+    }
 
     /// Build a Connect frame: [flags(1)][length(4 big-endian)][payload].
     fn make_frame(flags: u8, payload: &[u8]) -> Vec<u8> {

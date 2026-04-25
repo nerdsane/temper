@@ -24,6 +24,7 @@ pub mod odata;
 pub mod platform_store;
 pub mod profiling;
 mod query_eval;
+mod query_projection_metrics;
 pub mod registry;
 pub mod registry_bootstrap;
 pub mod request_context;
