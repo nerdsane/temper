@@ -25,13 +25,13 @@ use crate::state::PlatformState;
 mod agent_bootstrap;
 pub mod git_sources;
 mod reconcile;
+mod runtime_heal;
 mod system_files;
 mod types;
-pub(crate) use reconcile::{
-    mark_app_specs_restored_from_matching_digest, tenant_has_ready_app_specs_for_bundle,
-    tenant_has_registered_app_specs_for_bundle,
-};
 pub use reconcile::{os_app_bundle_digest, reconcile_os_app, resolve_os_app_install_order};
+pub(crate) use runtime_heal::{
+    restore_app_specs_from_matching_digest, tenant_has_ready_app_specs_for_bundle,
+};
 pub use types::*;
 
 fn read_app_manifest(app_dir: &Path) -> Option<AppManifest> {
