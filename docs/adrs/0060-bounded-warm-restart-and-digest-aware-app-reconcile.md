@@ -85,16 +85,19 @@ That path may:
 - reload persisted WASM modules
 - inspect durable installed-app metadata
 - repair in-memory and durable spec readiness when the bundle digest matches and specs are registered
+- repair process-local CSDL/entity-set metadata from the matching app bundle when spec tables exist but runtime maps were not restored yet
 
 That path must not write `APP.md`, agents, skills, system files, ADR files, or seed entities. If durable metadata cannot prove that an app bundle is unchanged, runtime recovery reports that reconcile is needed. The startup caller then runs digest-aware app reconcile for the required startup app surface.
 
 This separation prevents stale verification metadata from forcing a hot full install while still allowing changed app content to reconcile intentionally.
 
-### 6. Runtime indexes recover before content helpers
+### 6. Runtime indexes are not required to prove unchanged apps
 
-Runtime entity indexes are recovered before app reconcile can run any content bootstrap helpers.
+Warm restart must not replay the entire event log just to prove that unchanged apps are usable.
 
-App helpers that ensure files, directories, workspaces, agents, or seed entities exist must not make create/update decisions against an empty post-restart in-memory index. A changed or cold app may still need content bootstrap, but it now runs after durable entity state has been replayed into runtime indexes.
+When durable app metadata shows a matching bundle digest, Temper repairs missing runtime-only spec metadata from the app bundle itself and marks the specs restored. This includes CSDL/entity-set mappings that OData and startup readiness need, but it does not run content bootstrap.
+
+Runtime entity indexes still recover before any changed or cold app path can run content helpers. App helpers that ensure files, directories, workspaces, agents, or seed entities exist must not make create/update decisions against an empty post-restart in-memory index.
 
 ### 7. Empty trigger target fields are not valid entity ids
 
@@ -113,7 +116,7 @@ This prevents invalid persistence ids with empty id segments and forces create-i
 ## Readiness Gates
 
 - A warm restart must recover durable app metadata before app helpers rely on process-local indexes.
-- Runtime indexes must be recovered before any content helper performs an existence check.
+- Runtime indexes must be recovered before any content helper performs an existence check, but they must not be required for matching-digest app skip/heal decisions.
 - A configured startup app must be either skipped with matching digest and ready specs or reconciled successfully.
 - Deployment readiness must not be satisfied by process liveness alone.
 - Required transports and external user-facing surfaces must report connected/usable status before the deployment marks itself ready.
@@ -137,7 +140,7 @@ This prevents invalid persistence ids with empty id segments and forces create-i
 ### Risks
 
 - A content class omitted from the digest could leave stale seeded state after restart. The implementation mitigates this by hashing manifest, specs, policies, WASM, seeded content, agents, skills, system files, ADRs, and seed data.
-- Runtime registry corruption with a matching durable digest could be skipped incorrectly. The reconcile API mitigates this by requiring recovered specs to be ready before skipping.
+- Runtime registry corruption with a matching durable digest could be skipped incorrectly. The reconcile API mitigates this by requiring spec tables plus restored CSDL/entity-set metadata before skipping.
 - New metadata columns must migrate existing tenant stores. The Turso migration adds nullable columns so existing rows continue to load.
 
 ### DST Compliance

@@ -181,15 +181,14 @@ pub async fn recover_installed_app_runtime_state(
     };
 
     match ps.get_installed_app(tenant, app_name).await {
-        Ok(Some(record))
-            if record.bundle_digest == digest.bundle_digest
-                && os_apps::tenant_has_registered_app_specs_for_bundle(state, tenant, &bundle) =>
-        {
-            os_apps::mark_app_specs_restored_from_matching_digest(
-                state, ps, tenant, app_name, &bundle,
-            )
-            .await;
-            InstalledAppRuntimeRecoveryOutcome::Healed
+        Ok(Some(record)) if record.bundle_digest == digest.bundle_digest => {
+            if os_apps::restore_app_specs_from_matching_digest(state, ps, tenant, app_name, &bundle)
+                .await
+            {
+                InstalledAppRuntimeRecoveryOutcome::Healed
+            } else {
+                InstalledAppRuntimeRecoveryOutcome::NeedsReconcile
+            }
         }
         Ok(Some(_)) | Ok(None) => InstalledAppRuntimeRecoveryOutcome::NeedsReconcile,
         Err(error) => {
