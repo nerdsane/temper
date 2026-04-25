@@ -1,7 +1,7 @@
 //! [`EventStore`] trait implementation for Turso/libSQL.
 
 use libsql::{TransactionBehavior, params};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use temper_runtime::persistence::{
     EventMetadata, EventStore, PersistenceEnvelope, PersistenceError, storage_error,
 };
@@ -14,7 +14,12 @@ use crate::metrics::record_turso_write_retry;
 use crate::retry::{RETRY_DELAYS_MS, is_transient_write_error};
 
 impl EventStore for TursoEventStore {
-    #[instrument(skip_all, fields(persistence_id, otel.name = "turso.append"))]
+    #[instrument(skip_all, fields(
+        persistence_id,
+        event_count = events.len(),
+        append_path = tracing::field::Empty,
+        otel.name = "turso.append",
+    ))]
     async fn append(
         &self,
         persistence_id: &str,
@@ -228,12 +233,29 @@ impl TursoEventStore {
         let (tenant, entity_type, entity_id) =
             parse_persistence_id_parts(persistence_id).map_err(PersistenceError::Storage)?;
         let conn = self.configured_connection().await?;
+
+        if events.len() == 1 {
+            tracing::Span::current().record("append_path", "single_statement");
+            return Self::append_one_fast_path(
+                &conn,
+                tenant,
+                entity_type,
+                entity_id,
+                expected_sequence,
+                &events[0],
+            )
+            .await;
+        }
+        tracing::Span::current().record("append_path", "explicit_transaction");
+
+        let begin_start = Instant::now();
         let tx = conn
             .transaction_with_behavior(TransactionBehavior::Immediate)
-            .await
-            .map_err(storage_error)?;
+            .await;
+        record_turso_query_duration(begin_start.elapsed(), "begin", "transaction", tx.is_ok());
+        let tx = tx.map_err(storage_error)?;
 
-        let select_start = std::time::Instant::now();
+        let select_start = Instant::now();
         let rows_result = tx
             .query(
                 "SELECT COALESCE(MAX(sequence_nr), 0)
@@ -262,7 +284,7 @@ impl TursoEventStore {
                 actual = current_seq,
                 "concurrency violation on append"
             );
-            let _ = tx.rollback().await;
+            Self::rollback_with_metric(tx).await;
             return Err(PersistenceError::ConcurrencyViolation {
                 expected: expected_sequence,
                 actual: current_seq,
@@ -272,16 +294,9 @@ impl TursoEventStore {
         let mut new_seq = expected_sequence;
         for event in events {
             new_seq += 1;
-            let payload_json = serde_json::to_string(&event.payload).map_err(|e| {
-                tracing::error!(error = %e, "failed to serialize event payload");
-                PersistenceError::Serialization(e.to_string())
-            })?;
-            let metadata_json = serde_json::to_string(&event.metadata).map_err(|e| {
-                tracing::error!(error = %e, "failed to serialize event metadata");
-                PersistenceError::Serialization(e.to_string())
-            })?;
+            let (payload_json, metadata_json) = Self::serialize_event(event)?;
 
-            let insert_start = std::time::Instant::now();
+            let insert_start = Instant::now();
             let insert_result = tx
                 .execute(
                     "INSERT INTO events
@@ -308,7 +323,7 @@ impl TursoEventStore {
             if let Err(e) = insert_result {
                 let msg = e.to_string();
                 tracing::error!(error = %e, "event insert failed");
-                let _ = tx.rollback().await;
+                Self::rollback_with_metric(tx).await;
                 if msg.contains("UNIQUE constraint failed") || msg.contains("UNIQUE") {
                     return Err(PersistenceError::ConcurrencyViolation {
                         expected: expected_sequence,
@@ -319,7 +334,126 @@ impl TursoEventStore {
             }
         }
 
-        tx.commit().await.map_err(storage_error)?;
+        let commit_start = Instant::now();
+        let commit_result = tx.commit().await;
+        record_turso_query_duration(
+            commit_start.elapsed(),
+            "commit",
+            "transaction",
+            commit_result.is_ok(),
+        );
+        commit_result.map_err(storage_error)?;
         Ok(new_seq)
+    }
+
+    async fn append_one_fast_path(
+        conn: &super::instrumentation::InstrumentedConnection,
+        tenant: &str,
+        entity_type: &str,
+        entity_id: &str,
+        expected_sequence: u64,
+        event: &PersistenceEnvelope,
+    ) -> Result<u64, PersistenceError> {
+        let new_seq = expected_sequence + 1;
+        let (payload_json, metadata_json) = Self::serialize_event(event)?;
+        let insert_result = conn
+            .execute(
+                "INSERT INTO events
+                 (tenant, entity_type, entity_id, sequence_nr, event_type, payload, metadata)
+                 SELECT ?1, ?2, ?3, ?4, ?5, ?6, ?7
+                 WHERE (
+                     SELECT COALESCE(MAX(sequence_nr), 0)
+                     FROM events
+                     WHERE tenant = ?1 AND entity_type = ?2 AND entity_id = ?3
+                 ) = ?8",
+                params![
+                    tenant,
+                    entity_type,
+                    entity_id,
+                    new_seq as i64,
+                    event.event_type.as_str(),
+                    payload_json,
+                    metadata_json,
+                    expected_sequence as i64,
+                ],
+            )
+            .await;
+
+        match insert_result {
+            Ok(1) => Ok(new_seq),
+            Ok(0) => {
+                let actual = Self::current_sequence(conn, tenant, entity_type, entity_id).await?;
+                tracing::error!(
+                    expected = expected_sequence,
+                    actual,
+                    "concurrency violation on append"
+                );
+                Err(PersistenceError::ConcurrencyViolation {
+                    expected: expected_sequence,
+                    actual,
+                })
+            }
+            Ok(rows) => Err(PersistenceError::Storage(format!(
+                "single-event append inserted unexpected row count {rows}"
+            ))),
+            Err(e) => {
+                let msg = e.to_string();
+                tracing::error!(error = %e, "event insert failed");
+                if msg.contains("UNIQUE constraint failed") || msg.contains("UNIQUE") {
+                    let actual = Self::current_sequence(conn, tenant, entity_type, entity_id)
+                        .await
+                        .unwrap_or(new_seq);
+                    return Err(PersistenceError::ConcurrencyViolation {
+                        expected: expected_sequence,
+                        actual,
+                    });
+                }
+                Err(PersistenceError::Storage(msg))
+            }
+        }
+    }
+
+    async fn current_sequence(
+        conn: &super::instrumentation::InstrumentedConnection,
+        tenant: &str,
+        entity_type: &str,
+        entity_id: &str,
+    ) -> Result<u64, PersistenceError> {
+        let mut rows = conn
+            .query(
+                "SELECT COALESCE(MAX(sequence_nr), 0)
+                 FROM events
+                 WHERE tenant = ?1 AND entity_type = ?2 AND entity_id = ?3",
+                params![tenant, entity_type, entity_id],
+            )
+            .await
+            .map_err(storage_error)?;
+        match rows.next().await.map_err(storage_error)? {
+            Some(row) => Ok(row.get::<i64>(0).map_err(storage_error)? as u64),
+            None => Ok(0),
+        }
+    }
+
+    fn serialize_event(event: &PersistenceEnvelope) -> Result<(String, String), PersistenceError> {
+        let payload_json = serde_json::to_string(&event.payload).map_err(|e| {
+            tracing::error!(error = %e, "failed to serialize event payload");
+            PersistenceError::Serialization(e.to_string())
+        })?;
+        let metadata_json = serde_json::to_string(&event.metadata).map_err(|e| {
+            tracing::error!(error = %e, "failed to serialize event metadata");
+            PersistenceError::Serialization(e.to_string())
+        })?;
+        Ok((payload_json, metadata_json))
+    }
+
+    async fn rollback_with_metric(tx: libsql::Transaction) {
+        let rollback_start = Instant::now();
+        let rollback_result = tx.rollback().await;
+        record_turso_query_duration(
+            rollback_start.elapsed(),
+            "rollback",
+            "transaction",
+            rollback_result.is_ok(),
+        );
     }
 }

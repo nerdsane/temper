@@ -32,8 +32,17 @@ enum QueryProjectionUpdateMode {
     Background,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TrajectoryPersistenceMode {
+    Background,
+}
+
 fn query_projection_update_mode() -> QueryProjectionUpdateMode {
     QueryProjectionUpdateMode::Background
+}
+
+fn trajectory_persistence_mode() -> TrajectoryPersistenceMode {
+    TrajectoryPersistenceMode::Background
 }
 
 impl crate::state::ServerState {
@@ -123,8 +132,35 @@ impl crate::state::ServerState {
         );
     }
 
+    fn enqueue_trajectory_persist(&self, entry: TrajectoryEntry) {
+        debug_assert_eq!(
+            trajectory_persistence_mode(),
+            TrajectoryPersistenceMode::Background
+        );
+
+        let state = self.clone();
+        let span = tracing::info_span!(
+            "dispatch.phase.trajectory_persist",
+            otel.name = "dispatch.phase.trajectory_persist",
+            tenant = %entry.tenant,
+            entity_type = %entry.entity_type,
+            entity_id = %entry.entity_id,
+            action = %entry.action,
+            success = entry.success,
+        );
+
+        tokio::spawn(
+            async move {
+                if let Err(e) = state.persist_trajectory_entry(&entry).await {
+                    tracing::error!(error = %e, "failed to persist trajectory entry");
+                }
+            }
+            .instrument(span),
+        );
+    }
+
     /// Record a trajectory entry for a completed dispatch (success or guard failure).
-    pub(crate) async fn record_dispatch_trajectory(
+    pub(crate) fn record_dispatch_trajectory(
         &self,
         ctx: &PostDispatchContext<'_>,
         response: &EntityResponse,
@@ -193,9 +229,7 @@ impl crate::state::ServerState {
                 "unmet_intent"
             );
         }
-        if let Err(e) = self.persist_trajectory_entry(&entry).await {
-            tracing::error!(error = %e, "failed to persist trajectory entry");
-        }
+        self.enqueue_trajectory_persist(entry);
     }
 
     /// Broadcast state change to SSE subscribers and update entity cache.
@@ -411,7 +445,7 @@ impl crate::state::ServerState {
             .record_transition(ctx.entity_type, ctx.action, response.success);
 
         // 2. Record trajectory
-        self.record_dispatch_trajectory(ctx, &response).await;
+        self.record_dispatch_trajectory(ctx, &response);
 
         if !response.success {
             return response;
@@ -596,6 +630,14 @@ mod tests {
         assert_eq!(
             query_projection_update_mode(),
             QueryProjectionUpdateMode::Background
+        );
+    }
+
+    #[test]
+    fn trajectory_persistence_is_not_on_the_dispatch_critical_path() {
+        assert_eq!(
+            trajectory_persistence_mode(),
+            TrajectoryPersistenceMode::Background
         );
     }
 }
