@@ -246,25 +246,38 @@ async fn dispatch_matched_route(
     let kernel_response_body = exchange.kernel_response_body;
 
     // Spawn task A: axum body → kernel_request_body handle.
+    // Streaming pump: each Frame::data() chunk is forwarded as it
+    // arrives, so guests reading via the WASM SDK's request_body()
+    // see bytes the moment axum hands them over rather than after
+    // the whole request has been buffered. This is what makes the
+    // ADR-0057 inbound exchange end-to-end streaming — without it,
+    // even SDK-streaming guests are bounded by the buffered limit.
     let pump_streams = streams.clone();
     tokio::spawn(async move {
-        use axum::body::to_bytes;
-        // TODO(slice 4): real streaming pump chunk-by-chunk. For
-        // v0 we collect to bytes (capped) then forward — simpler
-        // while we validate the dispatch path end-to-end.
-        const MAX_REQ_BODY: usize = 64 * 1024 * 1024;
-        match to_bytes(body, MAX_REQ_BODY).await {
-            Ok(bytes) => {
-                if !bytes.is_empty() {
-                    let _ = pump_streams.write(kernel_request_body, bytes.to_vec()).await;
+        use tokio_stream::StreamExt as _;
+        let mut stream = body.into_data_stream();
+        while let Some(chunk_result) = stream.next().await {
+            match chunk_result {
+                Ok(chunk) if chunk.is_empty() => {}
+                Ok(chunk) => {
+                    if pump_streams
+                        .write(kernel_request_body, chunk.to_vec())
+                        .await
+                        .is_err()
+                    {
+                        tracing::warn!(
+                            "axum body → stream pump: guest closed early"
+                        );
+                        break;
+                    }
                 }
-                let _ = pump_streams.close(kernel_request_body).await;
-            }
-            Err(e) => {
-                tracing::warn!(error = %e, "axum body → stream pump failed");
-                let _ = pump_streams.close(kernel_request_body).await;
+                Err(e) => {
+                    tracing::warn!(error = %e, "axum body → stream pump failed");
+                    break;
+                }
             }
         }
+        let _ = pump_streams.close(kernel_request_body).await;
     });
 
     // Build the invocation context.

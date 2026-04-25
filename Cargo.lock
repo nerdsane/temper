@@ -6185,8 +6185,10 @@ name = "temper-server"
 version = "0.1.0"
 dependencies = [
  "aes-gcm",
+ "async-stream",
  "async-trait",
  "axum 0.8.8",
+ "bytes",
  "cedar-policy",
  "chrono",
  "criterion",
