@@ -57,6 +57,23 @@ pub struct WasmModuleRow {
     pub sha256_hash: String,
 }
 
+/// Durable metadata for an installed OS app bundle.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct InstalledAppRecord {
+    pub tenant: String,
+    pub app_name: String,
+    pub app_version: String,
+    pub bundle_digest: String,
+    pub spec_digest: String,
+    pub policy_digest: String,
+    pub wasm_digest: String,
+    pub content_digest: String,
+    pub seed_digest: String,
+    pub installed_at: Option<String>,
+    pub last_reconciled_at: Option<String>,
+    pub status: String,
+}
+
 // ---------------------------------------------------------------------------
 // Trait
 // ---------------------------------------------------------------------------
@@ -131,6 +148,19 @@ pub trait PlatformStore: Send + Sync {
     /// Record that an OS app was installed in a tenant.
     async fn record_installed_app(&self, tenant: &str, app_name: &str) -> Result<(), String>;
 
+    /// Record digest metadata for an installed OS app bundle.
+    async fn record_installed_app_metadata(
+        &self,
+        record: &InstalledAppRecord,
+    ) -> Result<(), String>;
+
+    /// Load digest metadata for an installed OS app bundle.
+    async fn get_installed_app(
+        &self,
+        tenant: &str,
+        app_name: &str,
+    ) -> Result<Option<InstalledAppRecord>, String>;
+
     /// List all installed apps across all tenants (for boot + UI).
     async fn list_all_installed_apps(&self) -> Result<Vec<(String, String)>, String>;
 
@@ -170,7 +200,7 @@ pub trait PlatformStore: Send + Sync {
 // TursoEventStore implementation
 // ---------------------------------------------------------------------------
 
-use temper_store_turso::{TursoEventStore, TursoSpecVerificationUpdate};
+use temper_store_turso::{TursoEventStore, TursoInstalledAppRow, TursoSpecVerificationUpdate};
 
 #[async_trait::async_trait]
 impl PlatformStore for TursoEventStore {
@@ -273,6 +303,55 @@ impl PlatformStore for TursoEventStore {
     async fn record_installed_app(&self, tenant: &str, app_name: &str) -> Result<(), String> {
         self.record_installed_app(tenant, app_name)
             .await
+            .map_err(|e| e.to_string())
+    }
+
+    async fn record_installed_app_metadata(
+        &self,
+        record: &InstalledAppRecord,
+    ) -> Result<(), String> {
+        let row = TursoInstalledAppRow {
+            tenant_id: record.tenant.clone(),
+            app_name: record.app_name.clone(),
+            app_version: record.app_version.clone(),
+            bundle_digest: record.bundle_digest.clone(),
+            spec_digest: record.spec_digest.clone(),
+            policy_digest: record.policy_digest.clone(),
+            wasm_digest: record.wasm_digest.clone(),
+            content_digest: record.content_digest.clone(),
+            seed_digest: record.seed_digest.clone(),
+            installed_at: record.installed_at.clone().unwrap_or_default(),
+            last_reconciled_at: record.last_reconciled_at.clone(),
+            status: record.status.clone(),
+        };
+        self.record_installed_app_metadata(&row)
+            .await
+            .map_err(|e| e.to_string())
+    }
+
+    async fn get_installed_app(
+        &self,
+        tenant: &str,
+        app_name: &str,
+    ) -> Result<Option<InstalledAppRecord>, String> {
+        self.get_installed_app(tenant, app_name)
+            .await
+            .map(|row| {
+                row.map(|row| InstalledAppRecord {
+                    tenant: row.tenant_id,
+                    app_name: row.app_name,
+                    app_version: row.app_version,
+                    bundle_digest: row.bundle_digest,
+                    spec_digest: row.spec_digest,
+                    policy_digest: row.policy_digest,
+                    wasm_digest: row.wasm_digest,
+                    content_digest: row.content_digest,
+                    seed_digest: row.seed_digest,
+                    installed_at: Some(row.installed_at),
+                    last_reconciled_at: row.last_reconciled_at,
+                    status: row.status,
+                })
+            })
             .map_err(|e| e.to_string())
     }
 
@@ -454,6 +533,8 @@ mod sim_platform_store {
         constraints: BTreeMap<String, String>,
         /// Installed apps: (tenant, app_name).
         installed_apps: BTreeSet<(String, String)>,
+        /// Installed app digest metadata keyed by (tenant, app_name).
+        installed_app_records: BTreeMap<(String, String), InstalledAppRecord>,
         /// Pending decisions: id -> JSON data.
         pending_decisions: BTreeMap<String, (String, String, String)>,
         /// WASM modules keyed by (tenant, module_name).
@@ -472,6 +553,7 @@ mod sim_platform_store {
                     policies: BTreeMap::new(),
                     constraints: BTreeMap::new(),
                     installed_apps: BTreeSet::new(),
+                    installed_app_records: BTreeMap::new(),
                     pending_decisions: BTreeMap::new(),
                     wasm_modules: BTreeMap::new(),
                 })),
@@ -706,6 +788,41 @@ mod sim_platform_store {
                 .installed_apps
                 .insert((tenant.to_string(), app_name.to_string()));
             Ok(())
+        }
+
+        async fn record_installed_app_metadata(
+            &self,
+            record: &InstalledAppRecord,
+        ) -> Result<(), String> {
+            let mut inner = self.inner.lock().expect("SimPlatformStore lock poisoned"); // ci-ok: infallible lock
+
+            let prob = inner.faults.app_record_failure_prob;
+            if inner.rng.chance(prob) {
+                return Err("SimPlatformStore: injected app metadata record failure".into());
+            }
+
+            let key = (record.tenant.clone(), record.app_name.clone());
+            inner.installed_apps.insert(key.clone());
+            inner.installed_app_records.insert(key, record.clone());
+            Ok(())
+        }
+
+        async fn get_installed_app(
+            &self,
+            tenant: &str,
+            app_name: &str,
+        ) -> Result<Option<InstalledAppRecord>, String> {
+            let mut inner = self.inner.lock().expect("SimPlatformStore lock poisoned"); // ci-ok: infallible lock
+
+            let prob = inner.faults.app_list_failure_prob;
+            if inner.rng.chance(prob) {
+                return Err("SimPlatformStore: injected app metadata read failure".into());
+            }
+
+            Ok(inner
+                .installed_app_records
+                .get(&(tenant.to_string(), app_name.to_string()))
+                .cloned())
         }
 
         async fn list_all_installed_apps(&self) -> Result<Vec<(String, String)>, String> {

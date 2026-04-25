@@ -72,8 +72,8 @@ pub use metrics::init_metrics;
 pub use router::{TenantRegistryRow, TenantStoreRouter, TenantUserRow};
 pub use store::{
     ActionStats, AgentSummary, DesignTimeEventRow, EvolutionRecordRow, FeatureRequestRow,
-    PolicyDenialPatternRow, PolicyRow, TursoEventStore, TursoSpecRow, TursoTenantConstraintRow,
-    TursoTrajectoryRow, TursoWasmInvocationRow, TursoWasmModuleMetadataRow, TursoWasmModuleRow,
-    UnmetIntentAggRow,
+    PolicyDenialPatternRow, PolicyRow, TursoEventStore, TursoInstalledAppRow, TursoSpecRow,
+    TursoTenantConstraintRow, TursoTrajectoryRow, TursoWasmInvocationRow,
+    TursoWasmModuleMetadataRow, TursoWasmModuleRow, UnmetIntentAggRow,
     ots::{OtsTrajectoryParams, OtsTrajectoryRow},
 };
