@@ -27,6 +27,10 @@ pub mod git_sources;
 mod reconcile;
 mod system_files;
 mod types;
+pub(crate) use reconcile::{
+    mark_app_specs_restored_from_matching_digest, tenant_has_ready_app_specs_for_bundle,
+    tenant_has_registered_app_specs_for_bundle,
+};
 pub use reconcile::{os_app_bundle_digest, reconcile_os_app, resolve_os_app_install_order};
 pub use types::*;
 
