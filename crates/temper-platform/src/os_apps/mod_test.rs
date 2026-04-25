@@ -222,6 +222,104 @@ async fn test_reconcile_os_app_skips_unchanged_bundle_digest() {
     let _ = std::fs::remove_file(format!("{db_path}-shm"));
 }
 
+#[tokio::test]
+async fn test_reconcile_os_app_reinstalls_when_entity_set_map_is_missing() {
+    let db_path = format!("/tmp/temper-test-reconcile-map-{}.db", uuid::Uuid::new_v4());
+    let db_url = format!("file:{db_path}");
+
+    let turso = temper_store_turso::TursoEventStore::new(&db_url, None)
+        .await
+        .unwrap();
+    let mut state = PlatformState::new(None);
+    state.server.event_store = Some(std::sync::Arc::new(
+        temper_server::event_store::ServerEventStore::Turso(turso),
+    ));
+    let tenant_name = "test-reconcile-map";
+    let tenant = TenantId::new(tenant_name);
+
+    install_skill(&state, tenant_name, "project-management")
+        .await
+        .expect("initial install should succeed");
+
+    let bundle = get_os_app("project-management").expect("project-management app not found");
+    let mut broken_csdl = bundle
+        .csdl
+        .clone()
+        .expect("project-management should have CSDL");
+    broken_csdl = broken_csdl.replace(
+        r#"        <EntitySet Name="Issues" EntityType="Temper.ProjectManagement.Issue">
+          <NavigationPropertyBinding Path="ParentIssue" Target="Issues"/>
+          <NavigationPropertyBinding Path="SubIssues" Target="Issues"/>
+          <NavigationPropertyBinding Path="Project" Target="Projects"/>
+          <NavigationPropertyBinding Path="Cycle" Target="Cycles"/>
+          <NavigationPropertyBinding Path="Comments" Target="Comments"/>
+        </EntitySet>
+"#,
+        "",
+    );
+
+    {
+        let mut registry = state.registry.write().unwrap(); // ci-ok: infallible lock
+        let parsed = parse_csdl(&broken_csdl).expect("broken CSDL should still parse");
+        let specs: Vec<(&str, &str)> = bundle
+            .specs
+            .iter()
+            .map(|(entity_type, ioa_source)| (entity_type.as_str(), ioa_source.as_str()))
+            .collect();
+        registry
+            .try_register_tenant_with_reactions_and_constraints(
+                tenant.clone(),
+                parsed,
+                broken_csdl,
+                &specs,
+                Vec::new(),
+                None,
+                false,
+            )
+            .expect("replace tenant config with a broken entity-set map");
+
+        let verified_at = temper_runtime::scheduler::sim_now().to_rfc3339();
+        for (entity_type, _) in &bundle.specs {
+            registry.set_verification_status(
+                &tenant,
+                entity_type,
+                VerificationStatus::Completed(EntityVerificationResult {
+                    all_passed: true,
+                    levels: vec![EntityLevelSummary {
+                        level: "Test".to_string(),
+                        passed: true,
+                        summary: "Preserved verification for skipped reconcile".to_string(),
+                        details: None,
+                    }],
+                    verified_at: verified_at.clone(),
+                }),
+            );
+        }
+    }
+
+    let result = reconcile_os_app(&state, tenant_name, "project-management")
+        .await
+        .expect("reconcile should heal missing entity-set map");
+
+    assert!(
+        matches!(result, OsAppReconcileResult::Installed { .. }),
+        "missing OData entity-set mappings must force reinstall, got {result:?}"
+    );
+    assert_eq!(
+        state
+            .registry
+            .read()
+            .unwrap()
+            .resolve_entity_type(&tenant, "Issues")
+            .as_deref(),
+        Some("Issue")
+    );
+
+    let _ = std::fs::remove_file(&db_path);
+    let _ = std::fs::remove_file(format!("{db_path}-wal"));
+    let _ = std::fs::remove_file(format!("{db_path}-shm"));
+}
+
 #[test]
 fn test_intent_discovery_specs_parse() {
     let bundle = get_os_app("intent-discovery").expect("intent-discovery app not found");

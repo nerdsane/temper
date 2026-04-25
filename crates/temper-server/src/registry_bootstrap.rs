@@ -4,10 +4,10 @@
 //! populating a `SpecRegistry` with tenant registrations and verification status.
 //! This keeps storage-specific row translation out of the CLI layer.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use temper_runtime::tenant::TenantId;
-use temper_spec::csdl::parse_csdl;
+use temper_spec::csdl::{CsdlDocument, emit_csdl_xml, merge_csdl, parse_csdl};
 use temper_store_turso::TursoEventStore;
 
 use crate::registry::{
@@ -134,22 +134,48 @@ fn row_to_registry_status(row: &impl SpecRowLike) -> VerificationStatus {
 }
 
 /// Helper: populate registry from grouped spec rows.
+fn restored_csdl_for_rows<R>(
+    tenant: &str,
+    rows: &[R],
+    get_csdl: &impl Fn(&R) -> Option<String>,
+) -> Result<Option<(CsdlDocument, String)>, String> {
+    let mut seen = BTreeSet::new();
+    let mut merged: Option<CsdlDocument> = None;
+
+    for csdl_xml in rows.iter().filter_map(get_csdl) {
+        let csdl_xml = csdl_xml.trim();
+        if csdl_xml.is_empty() || !seen.insert(csdl_xml.to_string()) {
+            continue;
+        }
+
+        let parsed = parse_csdl(csdl_xml)
+            .map_err(|e| format!("Failed to parse restored CSDL for tenant '{tenant}': {e}"))?;
+        merged = Some(match merged {
+            Some(existing) => merge_csdl(&existing, &parsed),
+            None => parsed,
+        });
+    }
+
+    Ok(merged.map(|csdl| {
+        let csdl_xml = emit_csdl_xml(&csdl);
+        (csdl, csdl_xml)
+    }))
+}
+
 fn populate_registry<R: SpecRowLike>(
     registry: &mut SpecRegistry,
     grouped: BTreeMap<String, Vec<R>>,
     constraints_by_tenant: &mut BTreeMap<String, String>,
-    get_csdl: impl Fn(&[R]) -> String,
+    get_csdl: impl Fn(&R) -> Option<String>,
     get_ioa: impl Fn(&R) -> (String, String),
 ) -> Result<usize, String> {
     let mut restored_specs = 0usize;
     for (tenant, tenant_rows) in grouped {
-        let csdl_xml = get_csdl(&tenant_rows);
-        if csdl_xml.trim().is_empty() {
+        let Some((csdl, csdl_xml)) = restored_csdl_for_rows(&tenant, &tenant_rows, &get_csdl)?
+        else {
             tracing::warn!(tenant = %tenant, "skipping restored tenant due to missing CSDL");
             continue;
-        }
-        let csdl = parse_csdl(&csdl_xml)
-            .map_err(|e| format!("Failed to parse restored CSDL for tenant '{tenant}': {e}"))?;
+        };
 
         let ioa_owned: Vec<(String, String)> = tenant_rows.iter().map(&get_ioa).collect();
         let ioa_pairs: Vec<(&str, &str)> = ioa_owned
@@ -230,11 +256,7 @@ pub async fn restore_registry_from_postgres(
         registry,
         grouped,
         &mut constraints_by_tenant,
-        |rows| {
-            rows.iter()
-                .find_map(|r| r.csdl_xml.clone())
-                .unwrap_or_default()
-        },
+        |rows| rows.csdl_xml.clone(),
         |row| (row.entity_type.clone(), row.ioa_source.clone()),
     )
 }
@@ -277,11 +299,7 @@ pub async fn restore_registry_from_turso(
         registry,
         grouped,
         &mut constraints_by_tenant,
-        |rows| {
-            rows.iter()
-                .find_map(|r| r.csdl_xml.clone())
-                .unwrap_or_default()
-        },
+        |rows| rows.csdl_xml.clone(),
         |row| (row.entity_type.clone(), row.ioa_source.clone()),
     )
 }
@@ -324,21 +342,17 @@ pub async fn restore_registry_from_platform_store(
     let mut orphaned_specs: Vec<(String, String)> = Vec::new();
 
     for (tenant, tenant_rows) in &grouped {
-        let csdl_xml = tenant_rows
-            .iter()
-            .find_map(|r| r.csdl_xml.clone())
-            .unwrap_or_default();
-
-        if csdl_xml.trim().is_empty() {
-            tracing::warn!(tenant = %tenant, "reconciling orphaned specs for tenant with missing CSDL");
-            for row in tenant_rows {
-                orphaned_specs.push((row.tenant.clone(), row.entity_type.clone()));
+        let (csdl, csdl_xml) = match restored_csdl_for_rows(tenant, tenant_rows, &|r| {
+            r.csdl_xml.clone()
+        }) {
+            Ok(Some(restored)) => restored,
+            Ok(None) => {
+                tracing::warn!(tenant = %tenant, "reconciling orphaned specs for tenant with missing CSDL");
+                for row in tenant_rows {
+                    orphaned_specs.push((row.tenant.clone(), row.entity_type.clone()));
+                }
+                continue;
             }
-            continue;
-        }
-
-        let csdl = match parse_csdl(&csdl_xml) {
-            Ok(csdl) => csdl,
             Err(e) => {
                 tracing::warn!(tenant = %tenant, "reconciling orphaned specs for tenant with invalid CSDL: {e}");
                 for row in tenant_rows {
@@ -390,100 +404,5 @@ pub async fn restore_registry_from_platform_store(
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    /// Mock implementation of SpecRowLike for testing row_to_registry_status.
-    struct MockRow {
-        status: String,
-        verified: bool,
-        levels_passed: Option<i32>,
-        levels_total: Option<i32>,
-        updated_at: String,
-        verification_result: Option<EntityVerificationResult>,
-    }
-
-    impl SpecRowLike for MockRow {
-        fn verification_status(&self) -> &str {
-            &self.status
-        }
-        fn verified(&self) -> bool {
-            self.verified
-        }
-        fn levels_passed(&self) -> Option<i32> {
-            self.levels_passed
-        }
-        fn levels_total(&self) -> Option<i32> {
-            self.levels_total
-        }
-        fn updated_at_rfc3339(&self) -> String {
-            self.updated_at.clone()
-        }
-        fn try_parse_verification_result(&self) -> Option<EntityVerificationResult> {
-            self.verification_result.clone()
-        }
-    }
-
-    #[test]
-    fn row_to_registry_status_pending() {
-        let status = row_to_registry_status(&MockRow {
-            status: "pending".into(),
-            verified: false,
-            levels_passed: None,
-            levels_total: None,
-            updated_at: "2024-01-01T00:00:00Z".into(),
-            verification_result: None,
-        });
-        assert!(matches!(status, VerificationStatus::Pending));
-    }
-
-    #[test]
-    fn row_to_registry_status_running() {
-        let status = row_to_registry_status(&MockRow {
-            status: "running".into(),
-            verified: false,
-            levels_passed: None,
-            levels_total: None,
-            updated_at: "2024-01-01T00:00:00Z".into(),
-            verification_result: None,
-        });
-        assert!(matches!(status, VerificationStatus::Running));
-    }
-
-    #[test]
-    fn row_to_registry_status_passed() {
-        let status = row_to_registry_status(&MockRow {
-            status: "passed".into(),
-            verified: true,
-            levels_passed: Some(3),
-            levels_total: Some(3),
-            updated_at: "2024-01-01T00:00:00Z".into(),
-            verification_result: None,
-        });
-        match status {
-            VerificationStatus::Restored(result) => assert!(result.all_passed),
-            other => panic!("Expected Restored, got {other:?}"),
-        }
-    }
-
-    #[test]
-    fn row_to_registry_status_failed() {
-        let status = row_to_registry_status(&MockRow {
-            status: "failed".into(),
-            verified: false,
-            levels_passed: Some(1),
-            levels_total: Some(3),
-            updated_at: "2024-01-01T00:00:00Z".into(),
-            verification_result: None,
-        });
-        match status {
-            VerificationStatus::Restored(result) => {
-                assert!(!result.all_passed);
-                assert_eq!(result.levels.len(), 3);
-                assert!(result.levels[0].passed);
-                assert!(!result.levels[1].passed);
-            }
-            other => panic!("Expected Restored, got {other:?}"),
-        }
-    }
-}
+#[path = "registry_bootstrap_test.rs"]
+mod tests;
