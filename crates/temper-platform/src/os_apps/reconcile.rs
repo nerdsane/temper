@@ -1,14 +1,12 @@
 use std::collections::HashSet;
 
 use sha2::{Digest, Sha256};
-use temper_runtime::tenant::TenantId;
-use temper_server::platform_store::{InstalledAppRecord, PlatformStore, SpecVerificationUpdate};
-use temper_server::registry::{EntityLevelSummary, EntityVerificationResult, VerificationStatus};
-use temper_spec::csdl::parse_csdl;
+use temper_server::platform_store::InstalledAppRecord;
 
 use super::{
     AppBundle, AppEntry, OsAppBundleDigest, OsAppReconcileResult, catalog, get_os_app,
     install_os_app_without_dependencies, os_app_dependencies,
+    restore_app_specs_from_matching_digest, tenant_has_ready_app_specs_for_bundle,
 };
 use crate::state::PlatformState;
 
@@ -204,130 +202,6 @@ pub fn os_app_bundle_digest(app_name: &str) -> Option<OsAppBundleDigest> {
     get_os_app(app_name).map(|bundle| digest_app_bundle(app_name, &bundle))
 }
 
-pub(crate) fn tenant_has_registered_app_specs_for_bundle(
-    state: &PlatformState,
-    tenant: &str,
-    bundle: &AppBundle,
-) -> bool {
-    let tenant_id = TenantId::new(tenant);
-    let registry = state.registry.read().expect("Spec registry lock poisoned");
-    let specs_registered = bundle
-        .specs
-        .iter()
-        .all(|(entity_type, _)| registry.get_table(&tenant_id, entity_type).is_some());
-    if !specs_registered {
-        return false;
-    }
-
-    let Some(csdl_xml) = bundle.csdl.as_deref() else {
-        return true;
-    };
-    let Ok(csdl) = parse_csdl(csdl_xml) else {
-        return false;
-    };
-
-    for schema in &csdl.schemas {
-        for container in &schema.entity_containers {
-            for entity_set in &container.entity_sets {
-                let expected_type = entity_set
-                    .entity_type
-                    .rsplit('.')
-                    .next()
-                    .unwrap_or(&entity_set.entity_type);
-                if registry
-                    .resolve_entity_type(&tenant_id, &entity_set.name)
-                    .as_deref()
-                    != Some(expected_type)
-                {
-                    return false;
-                }
-            }
-        }
-    }
-
-    true
-}
-
-pub(crate) fn tenant_has_ready_app_specs_for_bundle(
-    state: &PlatformState,
-    tenant: &str,
-    bundle: &AppBundle,
-) -> bool {
-    if !tenant_has_registered_app_specs_for_bundle(state, tenant, bundle) {
-        return false;
-    }
-
-    let tenant_id = TenantId::new(tenant);
-    let registry = state.registry.read().expect("Spec registry lock poisoned");
-    bundle.specs.iter().all(|(entity_type, _)| {
-        matches!(
-            registry.get_verification_status(&tenant_id, entity_type),
-            Some(VerificationStatus::Completed(_) | VerificationStatus::Restored(_))
-        )
-    })
-}
-
-pub(crate) async fn mark_app_specs_restored_from_matching_digest(
-    state: &PlatformState,
-    ps: &dyn PlatformStore,
-    tenant: &str,
-    app_name: &str,
-    bundle: &AppBundle,
-) {
-    if bundle.specs.is_empty() {
-        return;
-    }
-
-    let tenant_id = TenantId::new(tenant);
-    let verified_at = temper_runtime::scheduler::sim_now().to_rfc3339();
-    let result = EntityVerificationResult {
-        all_passed: true,
-        levels: vec![EntityLevelSummary {
-            level: "BundleDigest".to_string(),
-            passed: true,
-            summary: format!("Restored from matching OS app bundle digest ({app_name})"),
-            details: None,
-        }],
-        verified_at,
-    };
-
-    {
-        let mut registry = state.registry.write().expect("Spec registry lock poisoned");
-        for (entity_type, _) in &bundle.specs {
-            registry.set_verification_status(
-                &tenant_id,
-                entity_type,
-                VerificationStatus::Restored(result.clone()),
-            );
-        }
-    }
-
-    for (entity_type, _) in &bundle.specs {
-        if let Err(error) = ps
-            .persist_spec_verification(
-                tenant,
-                entity_type,
-                SpecVerificationUpdate {
-                    status: "passed",
-                    verified: true,
-                    levels_passed: Some(1),
-                    levels_total: Some(1),
-                    verification_result_json: None,
-                },
-            )
-            .await
-        {
-            tracing::warn!(
-                tenant,
-                app = %app_name,
-                entity_type,
-                error = %error,
-                "Failed to persist restored OS app spec verification status"
-            );
-        }
-    }
-}
-
 async fn record_app_install_metadata(
     state: &PlatformState,
     tenant: &str,
@@ -411,11 +285,9 @@ pub async fn reconcile_os_app(
                     });
                 }
 
-                if tenant_has_registered_app_specs_for_bundle(state, tenant, &bundle) {
-                    mark_app_specs_restored_from_matching_digest(
-                        state, ps, tenant, app_name, &bundle,
-                    )
-                    .await;
+                if restore_app_specs_from_matching_digest(state, ps, tenant, app_name, &bundle)
+                    .await
+                {
                     tracing::info!(
                         tenant,
                         app = %app_name,
