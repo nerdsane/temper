@@ -5,6 +5,7 @@
 //! dispatch path focused on transition execution.
 
 use std::sync::Arc;
+use std::time::Instant;
 
 use tracing::Instrument;
 
@@ -26,7 +27,102 @@ pub(crate) struct PostDispatchContext<'a> {
     pub await_integration: bool,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum QueryProjectionUpdateMode {
+    Background,
+}
+
+fn query_projection_update_mode() -> QueryProjectionUpdateMode {
+    QueryProjectionUpdateMode::Background
+}
+
 impl crate::state::ServerState {
+    fn enqueue_query_projection_update(
+        &self,
+        ctx: &PostDispatchContext<'_>,
+        response: &EntityResponse,
+    ) {
+        debug_assert_eq!(
+            query_projection_update_mode(),
+            QueryProjectionUpdateMode::Background
+        );
+        let Some(store) = self.event_store.as_ref().cloned() else {
+            return;
+        };
+
+        let tenant = ctx.tenant.to_string();
+        let entity_type = ctx.entity_type.to_string();
+        let entity_id = ctx.entity_id.to_string();
+        let status = response.state.status.clone();
+        let fields =
+            self.query_projection_fields(ctx.tenant, ctx.entity_type, &response.state.fields);
+        let sequence_nr = response.state.sequence_nr;
+        let operation = if status == "Deleted" {
+            "remove"
+        } else {
+            "upsert"
+        }
+        .to_string();
+
+        crate::query_projection_metrics::record_update_enqueued(&tenant, &entity_type, &operation);
+
+        let span = tracing::info_span!(
+            "dispatch.phase.query_projection",
+            otel.name = "dispatch.phase.query_projection",
+            tenant = %tenant,
+            entity_type = %entity_type,
+            entity_id = %entity_id,
+            operation = %operation,
+        );
+
+        tokio::spawn(
+            async move {
+                let started_at = Instant::now();
+                let result = if status == "Deleted" {
+                    store
+                        .remove_query_projection(&tenant, &entity_type, &entity_id)
+                        .await
+                } else {
+                    store
+                        .upsert_query_projection(
+                            &tenant,
+                            &entity_type,
+                            &entity_id,
+                            &status,
+                            &fields,
+                            sequence_nr,
+                        )
+                        .await
+                };
+                let result_label = if result.is_ok() { "ok" } else { "error" };
+                crate::query_projection_metrics::record_update_duration(
+                    &tenant,
+                    &entity_type,
+                    &operation,
+                    result_label,
+                    started_at.elapsed(),
+                );
+
+                if let Err(e) = result {
+                    crate::query_projection_metrics::record_update_error(
+                        &tenant,
+                        &entity_type,
+                        &operation,
+                    );
+                    tracing::warn!(
+                        error = %e,
+                        tenant = %tenant,
+                        entity_type = %entity_type,
+                        entity_id = %entity_id,
+                        operation = %operation,
+                        "failed to update query projection"
+                    );
+                }
+            }
+            .instrument(span),
+        );
+    }
+
     /// Record a trajectory entry for a completed dispatch (success or guard failure).
     pub(crate) async fn record_dispatch_trajectory(
         &self,
@@ -482,43 +578,24 @@ impl crate::state::ServerState {
         // cancellation ensures stale timers become no-ops.
         self.arm_state_timeouts_if_needed(ctx, &response);
 
-        // 8. Update the durable query plane for collection reads
-        if let Some(store) = self.event_store.as_ref() {
-            let tenant = ctx.tenant.to_string();
-            let entity_type = ctx.entity_type.to_string();
-            let entity_id = ctx.entity_id.to_string();
-            let status = response.state.status.clone();
-            let fields =
-                self.query_projection_fields(ctx.tenant, ctx.entity_type, &response.state.fields);
-            let sequence_nr = response.state.sequence_nr;
-            let result = if status == "Deleted" {
-                store
-                    .remove_query_projection(&tenant, &entity_type, &entity_id)
-                    .await
-            } else {
-                store
-                    .upsert_query_projection(
-                        &tenant,
-                        &entity_type,
-                        &entity_id,
-                        &status,
-                        &fields,
-                        sequence_nr,
-                    )
-                    .await
-            };
-
-            if let Err(e) = result {
-                tracing::warn!(
-                    error = %e,
-                    tenant = %tenant,
-                    entity_type = %entity_type,
-                    entity_id = %entity_id,
-                    "failed to update query projection"
-                );
-            }
-        }
+        // 8. Update the durable query plane for collection reads. This must not
+        // sit on the action-dispatch critical path; the entity transition is
+        // already durable, and projection lag is tracked by explicit metrics.
+        self.enqueue_query_projection_update(ctx, &response);
 
         response
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn query_projection_updates_are_not_on_the_dispatch_critical_path() {
+        assert_eq!(
+            query_projection_update_mode(),
+            QueryProjectionUpdateMode::Background
+        );
     }
 }
