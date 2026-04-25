@@ -95,7 +95,7 @@ pub fn sync_git_source(source: &GitAppSource, cache_dir: &Path) -> Result<PathBu
             &["fetch", "--depth", "1", "origin", &source.git_ref],
             &repo_dir,
         )?;
-        run_git(&["checkout", "FETCH_HEAD"], &repo_dir)?;
+        reset_worktree_to_fetch_head(&repo_dir)?;
     } else {
         // Fresh clone.
         tracing::info!(
@@ -121,6 +121,11 @@ pub fn sync_git_source(source: &GitAppSource, cache_dir: &Path) -> Result<PathBu
     }
 
     Ok(repo_dir)
+}
+
+fn reset_worktree_to_fetch_head(repo_dir: &Path) -> Result<(), String> {
+    run_git(&["reset", "--hard", "FETCH_HEAD"], repo_dir)?;
+    run_git(&["clean", "-ffdx"], repo_dir)
 }
 
 /// Parse `TEMPER_APP_SOURCES`, sync all repos, and register each as an app directory.
@@ -337,6 +342,57 @@ mod tests {
             "second sync (update) failed: {:?}",
             second.err()
         );
+    }
+
+    #[test]
+    fn sync_update_removes_untracked_stale_files_from_cached_clone() {
+        let remote = make_temp_dir("git-local-remote");
+        let cache = make_temp_dir("git-cache");
+
+        run_git(&["init", "--initial-branch", "main"], &remote).expect("init remote repo");
+        let app_dir = remote.join("os-apps/katagami-curation");
+        std::fs::create_dir_all(&app_dir).expect("create app dir");
+        std::fs::write(app_dir.join("app.toml"), "name = \"katagami-curation\"\n")
+            .expect("write app");
+        run_git(&["add", "."], &remote).expect("git add");
+        run_git(
+            &[
+                "-c",
+                "user.name=Temper Test",
+                "-c",
+                "user.email=temper@example.test",
+                "commit",
+                "-m",
+                "initial app",
+            ],
+            &remote,
+        )
+        .expect("commit");
+
+        let source = GitAppSource {
+            url: remote.to_string_lossy().into_owned(),
+            git_ref: "main".to_string(),
+        };
+        let repo_dir = sync_git_source(&source, &cache).expect("initial sync");
+
+        let stale_reactions = repo_dir.join("os-apps/katagami-curation/reactions/reactions.toml");
+        std::fs::create_dir_all(stale_reactions.parent().expect("stale parent"))
+            .expect("create stale reactions dir");
+        std::fs::write(&stale_reactions, "[[reaction]]\n").expect("write stale reactions");
+        assert!(
+            stale_reactions.exists(),
+            "test setup should create stale file"
+        );
+
+        let updated_repo_dir = sync_git_source(&source, &cache).expect("second sync");
+        assert_eq!(updated_repo_dir, repo_dir);
+        assert!(
+            !stale_reactions.exists(),
+            "sync must remove stale untracked files from cached git app sources"
+        );
+
+        let _ = std::fs::remove_dir_all(&remote);
+        let _ = std::fs::remove_dir_all(&cache);
     }
 
     #[test]
