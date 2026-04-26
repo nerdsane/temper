@@ -397,6 +397,11 @@ impl EntityActor {
                                 field_sync_mode,
                                 Some(&table.state_var_metadata),
                             );
+                            super::effects::project_action_fields(
+                                state,
+                                &event.action,
+                                &event.params,
+                            );
                             // Persist replayed overflow blobs so blob-ref envelopes
                             // resolve on subsequent OData reads. Content-addressed
                             // dedup makes this idempotent — if the original live

@@ -210,6 +210,18 @@ pub fn process_action_with_xref_and_field_mode(
         };
     }
 
+    if let Err(error) = enforce_action_preconditions(state, action, params) {
+        return ProcessResult {
+            success: false,
+            event: None,
+            custom_effects: vec![],
+            scheduled_actions: vec![],
+            spawn_requests: vec![],
+            overflow_blobs: vec![],
+            error: Some(error),
+        };
+    }
+
     let ctx = build_eval_context_with_xref(state, cross_entity_booleans);
     let result = table.evaluate_ctx(&state.status, &ctx, action);
 
@@ -227,6 +239,7 @@ pub fn process_action_with_xref_and_field_mode(
                 field_sync_mode,
                 Some(&table.state_var_metadata),
             );
+            project_action_fields(state, action, params);
 
             // Resolve deferred schedule_at requests now that fields are synced
             let mut all_scheduled = scheduled_actions;
@@ -716,6 +729,75 @@ fn project_field_value(
         }
     }
 }
+
+pub fn enforce_action_preconditions(
+    state: &EntityState,
+    action: &str,
+    params: &serde_json::Value,
+) -> Result<(), String> {
+    if state.entity_type != "Ref" {
+        return Ok(());
+    }
+
+    match action {
+        "Update" => enforce_ref_compare_and_swap(state, params),
+        "Delete" => enforce_ref_compare_and_swap(state, params),
+        _ => Ok(()),
+    }
+}
+
+pub fn project_action_fields(state: &mut EntityState, action: &str, params: &serde_json::Value) {
+    if state.entity_type != "Ref" {
+        return;
+    }
+
+    if !matches!(action, "Update" | "ForceUpdate") {
+        return;
+    }
+
+    let Some(new_sha) = string_param(params, "NewCommitSha") else {
+        return;
+    };
+
+    if let Some(obj) = state.fields.as_object_mut() {
+        obj.insert(
+            "TargetCommitSha".to_string(),
+            serde_json::Value::String(new_sha.to_string()),
+        );
+    }
+}
+
+fn enforce_ref_compare_and_swap(
+    state: &EntityState,
+    params: &serde_json::Value,
+) -> Result<(), String> {
+    let Some(previous_sha) = string_param(params, "PreviousCommitSha") else {
+        return Err("ref compare-and-swap requires PreviousCommitSha".to_string());
+    };
+    let Some(current_sha) = state
+        .fields
+        .get("TargetCommitSha")
+        .and_then(|value| value.as_str())
+    else {
+        return Err("ref compare-and-swap missing current TargetCommitSha".to_string());
+    };
+
+    if previous_sha == current_sha {
+        Ok(())
+    } else {
+        Err(format!(
+            "stale ref compare-and-swap: expected {previous_sha}, current {current_sha}"
+        ))
+    }
+}
+
+fn string_param<'a>(params: &'a serde_json::Value, name: &str) -> Option<&'a str> {
+    params.get(name).and_then(|value| value.as_str())
+}
+
+#[cfg(test)]
+#[path = "effects_ref_cas_test.rs"]
+mod effects_ref_cas_test;
 
 #[cfg(test)]
 mod tests {
