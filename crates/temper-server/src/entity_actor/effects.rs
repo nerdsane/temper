@@ -210,6 +210,18 @@ pub fn process_action_with_xref_and_field_mode(
         };
     }
 
+    if let Err(error) = enforce_action_preconditions(state, action, params) {
+        return ProcessResult {
+            success: false,
+            event: None,
+            custom_effects: vec![],
+            scheduled_actions: vec![],
+            spawn_requests: vec![],
+            overflow_blobs: vec![],
+            error: Some(error),
+        };
+    }
+
     let ctx = build_eval_context_with_xref(state, cross_entity_booleans);
     let result = table.evaluate_ctx(&state.status, &ctx, action);
 
@@ -227,6 +239,7 @@ pub fn process_action_with_xref_and_field_mode(
                 field_sync_mode,
                 Some(&table.state_var_metadata),
             );
+            project_action_fields(state, action, params);
 
             // Resolve deferred schedule_at requests now that fields are synced
             let mut all_scheduled = scheduled_actions;
@@ -717,9 +730,217 @@ fn project_field_value(
     }
 }
 
+pub fn enforce_action_preconditions(
+    state: &EntityState,
+    action: &str,
+    params: &serde_json::Value,
+) -> Result<(), String> {
+    if state.entity_type != "Ref" {
+        return Ok(());
+    }
+
+    match action {
+        "Update" => enforce_ref_compare_and_swap(state, params),
+        "Delete" => enforce_ref_compare_and_swap(state, params),
+        _ => Ok(()),
+    }
+}
+
+pub fn project_action_fields(state: &mut EntityState, action: &str, params: &serde_json::Value) {
+    if state.entity_type != "Ref" {
+        return;
+    }
+
+    if !matches!(action, "Update" | "ForceUpdate") {
+        return;
+    }
+
+    let Some(new_sha) = string_param(params, "NewCommitSha") else {
+        return;
+    };
+
+    if let Some(obj) = state.fields.as_object_mut() {
+        obj.insert(
+            "TargetCommitSha".to_string(),
+            serde_json::Value::String(new_sha.to_string()),
+        );
+    }
+}
+
+fn enforce_ref_compare_and_swap(
+    state: &EntityState,
+    params: &serde_json::Value,
+) -> Result<(), String> {
+    let Some(previous_sha) = string_param(params, "PreviousCommitSha") else {
+        return Err("ref compare-and-swap requires PreviousCommitSha".to_string());
+    };
+    let Some(current_sha) = state
+        .fields
+        .get("TargetCommitSha")
+        .and_then(|value| value.as_str())
+    else {
+        return Err("ref compare-and-swap missing current TargetCommitSha".to_string());
+    };
+
+    if previous_sha == current_sha {
+        Ok(())
+    } else {
+        Err(format!(
+            "stale ref compare-and-swap: expected {previous_sha}, current {current_sha}"
+        ))
+    }
+}
+
+fn string_param<'a>(params: &'a serde_json::Value, name: &str) -> Option<&'a str> {
+    params.get(name).and_then(|value| value.as_str())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn ref_table() -> TransitionTable {
+        let spec = r#"
+[automaton]
+name = "Ref"
+states = ["Active", "Deleted"]
+initial = "Active"
+
+[[action]]
+name = "Update"
+from = ["Active"]
+to = "Active"
+params = ["PreviousCommitSha", "NewCommitSha"]
+
+[[action]]
+name = "ForceUpdate"
+from = ["Active"]
+to = "Active"
+params = ["NewCommitSha"]
+
+[[action]]
+name = "Delete"
+from = ["Active"]
+to = "Deleted"
+params = ["PreviousCommitSha"]
+"#;
+        temper_jit::table::TransitionTable::from_ioa_source(spec)
+    }
+
+    fn ref_state(target_sha: &str) -> EntityState {
+        EntityState {
+            entity_type: "Ref".into(),
+            entity_id: "ref-main".into(),
+            status: "Active".into(),
+            item_count: 0,
+            counters: std::collections::BTreeMap::new(),
+            booleans: std::collections::BTreeMap::new(),
+            lists: std::collections::BTreeMap::new(),
+            fields: serde_json::json!({
+                "RepositoryId": "rp-owner-repo",
+                "Name": "refs/heads/main",
+                "TargetCommitSha": target_sha,
+                "Status": "Active",
+            }),
+            events: std::collections::VecDeque::new(),
+            total_event_count: 0,
+            sequence_nr: 0,
+        }
+    }
+
+    #[test]
+    fn ref_update_requires_matching_previous_sha_and_projects_target() {
+        let table = ref_table();
+        let old_sha = "1111111111111111111111111111111111111111";
+        let new_sha = "2222222222222222222222222222222222222222";
+        let mut state = ref_state(old_sha);
+
+        let result = process_action(
+            &mut state,
+            &table,
+            "Update",
+            &serde_json::json!({
+                "PreviousCommitSha": old_sha,
+                "NewCommitSha": new_sha,
+            }),
+        );
+
+        assert!(result.success, "matching CAS update should succeed");
+        assert_eq!(
+            state.fields["TargetCommitSha"].as_str(),
+            Some(new_sha),
+            "Update should advance the Git-visible target field"
+        );
+    }
+
+    #[test]
+    fn ref_update_rejects_stale_previous_sha() {
+        let table = ref_table();
+        let current_sha = "1111111111111111111111111111111111111111";
+        let stale_sha = "0000000000000000000000000000000000000000";
+        let new_sha = "2222222222222222222222222222222222222222";
+        let mut state = ref_state(current_sha);
+
+        let result = process_action(
+            &mut state,
+            &table,
+            "Update",
+            &serde_json::json!({
+                "PreviousCommitSha": stale_sha,
+                "NewCommitSha": new_sha,
+            }),
+        );
+
+        assert!(!result.success, "stale CAS update should fail");
+        assert_eq!(state.fields["TargetCommitSha"].as_str(), Some(current_sha));
+        assert_eq!(
+            result.error.as_deref(),
+            Some(
+                "stale ref compare-and-swap: expected 0000000000000000000000000000000000000000, current 1111111111111111111111111111111111111111"
+            )
+        );
+    }
+
+    #[test]
+    fn ref_delete_requires_matching_previous_sha() {
+        let table = ref_table();
+        let current_sha = "1111111111111111111111111111111111111111";
+        let stale_sha = "0000000000000000000000000000000000000000";
+        let mut state = ref_state(current_sha);
+
+        let result = process_action(
+            &mut state,
+            &table,
+            "Delete",
+            &serde_json::json!({
+                "PreviousCommitSha": stale_sha,
+            }),
+        );
+
+        assert!(!result.success, "stale CAS delete should fail");
+        assert_eq!(state.status, "Active");
+        assert_eq!(state.fields["TargetCommitSha"].as_str(), Some(current_sha));
+    }
+
+    #[test]
+    fn ref_force_update_projects_target_without_cas() {
+        let table = ref_table();
+        let old_sha = "1111111111111111111111111111111111111111";
+        let new_sha = "2222222222222222222222222222222222222222";
+        let mut state = ref_state(old_sha);
+
+        let result = process_action(
+            &mut state,
+            &table,
+            "ForceUpdate",
+            &serde_json::json!({
+                "NewCommitSha": new_sha,
+            }),
+        );
+
+        assert!(result.success, "force update should bypass CAS");
+        assert_eq!(state.fields["TargetCommitSha"].as_str(), Some(new_sha));
+    }
 
     #[test]
     fn test_process_action_returns_scheduled_actions() {
