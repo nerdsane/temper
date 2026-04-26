@@ -71,10 +71,7 @@ async fn outbound_streaming_echoes_request_body() {
 
     let mut echoed = Vec::new();
     loop {
-        let chunk = host
-            .http_stream_read(handles.response_body)
-            .await
-            .unwrap();
+        let chunk = host.http_stream_read(handles.response_body).await.unwrap();
         if chunk.is_empty() {
             break;
         }
@@ -137,10 +134,7 @@ async fn outbound_streaming_1mib_roundtrip() {
 
     let mut received: usize = 0;
     loop {
-        let chunk = host
-            .http_stream_read(handles.response_body)
-            .await
-            .unwrap();
+        let chunk = host.http_stream_read(handles.response_body).await.unwrap();
         if chunk.is_empty() {
             break;
         }
