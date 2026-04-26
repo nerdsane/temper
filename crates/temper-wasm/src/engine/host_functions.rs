@@ -992,31 +992,25 @@ pub(super) fn link_host_functions(linker: &mut Linker<HostState>) -> Result<(), 
         .func_wrap(
             "env",
             "host_http_stream_read",
-            |mut caller: Caller<'_, HostState>,
-             handle: i32,
-             buf_ptr: i32,
-             buf_cap: i32|
-             -> i32 {
+            |mut caller: Caller<'_, HostState>, handle: i32, buf_ptr: i32, buf_cap: i32| -> i32 {
                 let memory = caller.get_export("memory").and_then(|e| e.into_memory());
                 let Some(memory) = memory else { return -4 };
+                if buf_cap <= 0 {
+                    return -4;
+                }
 
                 let host = caller.data().host.clone();
                 let sh = crate::http_stream::StreamHandle(handle as u32);
                 let result = tokio::task::block_in_place(|| {
-                    tokio::runtime::Handle::current().block_on(host.http_stream_read(sh))
+                    tokio::runtime::Handle::current()
+                        .block_on(host.http_stream_read_bounded(sh, buf_cap as usize))
                 });
                 match result {
                     Ok(chunk) => {
                         if chunk.is_empty() {
                             return 0;
                         }
-                        if chunk.len() > buf_cap as usize {
-                            return -4; // guest buffer too small
-                        }
-                        if memory
-                            .write(&mut caller, buf_ptr as usize, &chunk)
-                            .is_err()
-                        {
+                        if memory.write(&mut caller, buf_ptr as usize, &chunk).is_err() {
                             return -4;
                         }
                         chunk.len() as i32
@@ -1038,11 +1032,7 @@ pub(super) fn link_host_functions(linker: &mut Linker<HostState>) -> Result<(), 
         .func_wrap(
             "env",
             "host_http_stream_try_write",
-            |mut caller: Caller<'_, HostState>,
-             handle: i32,
-             data_ptr: i32,
-             data_len: i32|
-             -> i32 {
+            |mut caller: Caller<'_, HostState>, handle: i32, data_ptr: i32, data_len: i32| -> i32 {
                 let memory = caller.get_export("memory").and_then(|e| e.into_memory());
                 let Some(memory) = memory else { return -4 };
 
@@ -1052,8 +1042,7 @@ pub(super) fn link_host_functions(linker: &mut Linker<HostState>) -> Result<(), 
                 let host = caller.data().host.clone();
                 let sh = crate::http_stream::StreamHandle(handle as u32);
                 let result = tokio::task::block_in_place(|| {
-                    tokio::runtime::Handle::current()
-                        .block_on(host.http_stream_try_write(sh, buf))
+                    tokio::runtime::Handle::current().block_on(host.http_stream_try_write(sh, buf))
                 });
                 match result {
                     Ok(n) => n as i32,
@@ -1110,8 +1099,7 @@ pub(super) fn link_host_functions(linker: &mut Linker<HostState>) -> Result<(), 
                 let host = caller.data().host.clone();
                 let sh = crate::http_stream::StreamHandle(resp_handle as u32);
                 let result = tokio::task::block_in_place(|| {
-                    tokio::runtime::Handle::current()
-                        .block_on(host.http_stream_response_head(sh))
+                    tokio::runtime::Handle::current().block_on(host.http_stream_response_head(sh))
                 });
                 let head = match result {
                     Ok(h) => h,

@@ -83,6 +83,49 @@ fn test_customer_denied_without_matching_policy() {
 }
 
 #[test]
+fn test_scoped_customer_principal_exposes_account_id() {
+    let policy = r#"
+        permit(
+            principal is Customer,
+            action == Action::"Update",
+            resource is Ref
+        ) when {
+            principal.scopes.contains("repo:write") &&
+            context.repositoryOwnerAccountId == principal.accountId
+        };
+    "#;
+
+    let engine = AuthzEngine::new(policy).unwrap();
+    let ctx = SecurityContext::from_headers(&[
+        ("X-Temper-Principal-Id".to_string(), "acct-1".to_string()),
+        (
+            "X-Temper-Principal-Kind".to_string(),
+            "customer".to_string(),
+        ),
+        (
+            "X-Temper-Principal-Scopes".to_string(),
+            "repo:read,repo:write".to_string(),
+        ),
+    ]);
+    let attrs = HashMap::from([
+        (
+            "Id".to_string(),
+            serde_json::Value::String("rf-rp-acct-repo-refs-heads-main".to_string()),
+        ),
+        (
+            "repositoryOwnerAccountId".to_string(),
+            serde_json::Value::String("acct-1".to_string()),
+        ),
+    ]);
+
+    let decision = engine.authorize(&ctx, "Update", "Ref", &attrs);
+    assert!(
+        decision.is_allowed(),
+        "scoped owner should be allowed, got {decision:?}"
+    );
+}
+
+#[test]
 fn test_invalid_policy_returns_error() {
     let result = AuthzEngine::new("this is not valid cedar");
     assert!(result.is_err());

@@ -20,7 +20,7 @@
 //! parameters of the handler.
 
 use axum::body::Body;
-use axum::extract::{Path, State};
+use axum::extract::State;
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::IntoResponse;
 use sha1::Digest;
@@ -49,7 +49,6 @@ const MAX_OBJECT_BYTES: usize = 2 * 1024 * 1024 * 1024;
 pub async fn handle_blob_ingest_raw(
     State(state): State<ServerState>,
     headers: HeaderMap,
-    Path(_path): Path<String>,
     body: Body,
 ) -> impl IntoResponse {
     ingest_raw_inner(state, headers, body, "Blob", "blob").await
@@ -145,10 +144,7 @@ async fn ingest_raw_inner(
         return odata_error(
             StatusCode::BAD_REQUEST,
             "BodyShorterThanContentLength",
-            &format!(
-                "expected {declared_len} body bytes, got {}",
-                content.len()
-            ),
+            &format!("expected {declared_len} body bytes, got {}", content.len()),
         )
         .into_response();
     }

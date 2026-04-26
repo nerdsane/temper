@@ -79,6 +79,14 @@ impl SecurityContext {
                 "x-temper-agent-role" => role = Some(value.clone()),
                 "x-temper-acting-for" => acting_for = Some(value.clone()),
                 "x-temper-agent-type" => agent_type = Some(value.clone()),
+                "x-temper-principal-scopes" => {
+                    let scopes: Vec<serde_json::Value> = value
+                        .split(|c: char| c == ',' || c == ';' || c.is_whitespace())
+                        .filter(|s| !s.is_empty())
+                        .map(|s| serde_json::Value::String(s.to_string()))
+                        .collect();
+                    attributes.insert("scopes".to_string(), serde_json::Value::Array(scopes));
+                }
                 "x-temper-correlation-id" => correlation_id = value.clone(),
                 k if k.starts_with("x-temper-attr-") => {
                     let attr_name = k.strip_prefix("x-temper-attr-").unwrap(); // ci-ok: guarded by starts_with
@@ -368,5 +376,25 @@ mod tests {
         ];
         let ctx = SecurityContext::from_headers(&headers);
         assert_eq!(ctx.principal.agent_type, Some("claude-code".to_string()));
+    }
+
+    #[test]
+    fn test_from_headers_with_principal_scopes() {
+        let headers = vec![
+            ("X-Temper-Principal-Id".to_string(), "cust-123".to_string()),
+            (
+                "X-Temper-Principal-Kind".to_string(),
+                "customer".to_string(),
+            ),
+            (
+                "X-Temper-Principal-Scopes".to_string(),
+                "repo:read,repo:write force".to_string(),
+            ),
+        ];
+        let ctx = SecurityContext::from_headers(&headers);
+        assert_eq!(
+            ctx.principal.attributes.get("scopes"),
+            Some(&serde_json::json!(["repo:read", "repo:write", "force"]))
+        );
     }
 }

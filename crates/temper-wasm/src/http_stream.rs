@@ -15,17 +15,16 @@
 //! explicit close, request completion, or timeout), reads/writes
 //! return [`StreamError::Closed`].
 //!
-//! Capacity: 64 chunks × 16 KiB = 1 MiB per handle. A full exchange
-//! (request + response) thus caps at 2 MiB of in-flight bytes — well
-//! within ADR-0057's <4 MiB per-request budget.
+//! Capacity: 64 chunks × 16 KiB = 1 MiB per handle for SDK-originated
+//! writes. Host-originated chunks can be larger; bounded reads split
+//! those chunks across guest buffers while preserving stream order.
 
 use std::collections::BTreeMap;
 use std::sync::Arc;
 use tokio::sync::{Mutex, mpsc, oneshot};
 
 /// Chunk size used by SDK adapters when splitting writes. A single
-/// chunk may be smaller (short writes), but never larger — the
-/// receiving side relies on this for its bookkeeping.
+/// SDK-originated chunk may be smaller (short writes), but never larger.
 pub const STREAM_CHUNK_BYTES: usize = 16 * 1024;
 
 /// Per-handle channel capacity in chunks. Total resident bytes per
@@ -180,6 +179,7 @@ struct RegistryState {
     /// receiver via `await_inbound_response_head`.
     inbound_head_senders: BTreeMap<u32, oneshot::Sender<HttpResponseHead>>,
     inbound_head_receivers: BTreeMap<u32, oneshot::Receiver<HttpResponseHead>>,
+    pending_reads: BTreeMap<u32, Vec<u8>>,
 }
 
 impl HttpStreamRegistry {
@@ -191,6 +191,7 @@ impl HttpStreamRegistry {
                 response_head_receivers: BTreeMap::new(),
                 inbound_head_senders: BTreeMap::new(),
                 inbound_head_receivers: BTreeMap::new(),
+                pending_reads: BTreeMap::new(),
             }),
         }
     }
@@ -206,10 +207,9 @@ impl HttpStreamRegistry {
         let read_id = state.next_id;
         state.next_id += 1;
         state.handles.insert(write_id, ChannelEnd::Sender(tx));
-        state.handles.insert(
-            read_id,
-            ChannelEnd::Receiver(Arc::new(Mutex::new(rx))),
-        );
+        state
+            .handles
+            .insert(read_id, ChannelEnd::Receiver(Arc::new(Mutex::new(rx))));
         (StreamHandle(write_id), StreamHandle(read_id))
     }
 
@@ -242,10 +242,32 @@ impl HttpStreamRegistry {
     /// `Ok(Vec::new())` for clean EOF (peer closed after sending
     /// all data).
     pub async fn read(&self, handle: StreamHandle) -> Result<Vec<u8>, StreamError> {
+        self.read_bounded(handle, usize::MAX).await
+    }
+
+    /// Read up to `max_bytes` from the handle's receiver. If the next
+    /// channel chunk is larger than the guest-provided buffer, return
+    /// only the prefix and retain the remainder for subsequent reads.
+    pub async fn read_bounded(
+        &self,
+        handle: StreamHandle,
+        max_bytes: usize,
+    ) -> Result<Vec<u8>, StreamError> {
+        if max_bytes == 0 {
+            return Err(StreamError::Aborted(
+                "read buffer capacity must be greater than zero".into(),
+            ));
+        }
+
         let rx_mutex = self.receiver_for(handle).await?;
         let mut rx = rx_mutex.lock().await;
+
+        if let Some(chunk) = self.take_pending_read(handle, max_bytes).await {
+            return Ok(chunk);
+        }
+
         match rx.recv().await {
-            Some(chunk) => Ok(chunk),
+            Some(chunk) => Ok(self.split_for_bounded_read(handle, chunk, max_bytes).await),
             None => Ok(Vec::new()), // clean EOF
         }
     }
@@ -255,6 +277,7 @@ impl HttpStreamRegistry {
     /// Closed error on its next write.
     pub async fn close(&self, handle: StreamHandle) -> Result<(), StreamError> {
         let mut state = self.inner.lock().await;
+        state.pending_reads.remove(&handle.0);
         match state.handles.remove(&handle.0) {
             Some(_) => Ok(()),
             None => Err(StreamError::InvalidHandle),
@@ -274,9 +297,7 @@ impl HttpStreamRegistry {
         let (head_tx, head_rx) = oneshot::channel();
         {
             let mut state = self.inner.lock().await;
-            state
-                .response_head_receivers
-                .insert(resp_reader.0, head_rx);
+            state.response_head_receivers.insert(resp_reader.0, head_rx);
         }
         OutboundExchange {
             guest_request_body: req_writer,
@@ -378,10 +399,7 @@ impl HttpStreamRegistry {
 
     // --- Private helpers ---
 
-    async fn sender_for(
-        &self,
-        handle: StreamHandle,
-    ) -> Result<mpsc::Sender<Vec<u8>>, StreamError> {
+    async fn sender_for(&self, handle: StreamHandle) -> Result<mpsc::Sender<Vec<u8>>, StreamError> {
         let state = self.inner.lock().await;
         match state.handles.get(&handle.0) {
             Some(ChannelEnd::Sender(tx)) => Ok(tx.clone()),
@@ -400,6 +418,37 @@ impl HttpStreamRegistry {
             Some(ChannelEnd::Sender(_)) => Err(StreamError::InvalidHandle),
             None => Err(StreamError::InvalidHandle),
         }
+    }
+
+    async fn take_pending_read(&self, handle: StreamHandle, max_bytes: usize) -> Option<Vec<u8>> {
+        let mut state = self.inner.lock().await;
+        let pending = state.pending_reads.remove(&handle.0)?;
+        Some(Self::split_for_bounded_read_locked(
+            &mut state, handle, pending, max_bytes,
+        ))
+    }
+
+    async fn split_for_bounded_read(
+        &self,
+        handle: StreamHandle,
+        chunk: Vec<u8>,
+        max_bytes: usize,
+    ) -> Vec<u8> {
+        let mut state = self.inner.lock().await;
+        Self::split_for_bounded_read_locked(&mut state, handle, chunk, max_bytes)
+    }
+
+    fn split_for_bounded_read_locked(
+        state: &mut RegistryState,
+        handle: StreamHandle,
+        mut chunk: Vec<u8>,
+        max_bytes: usize,
+    ) -> Vec<u8> {
+        if chunk.len() > max_bytes {
+            let remainder = chunk.split_off(max_bytes);
+            state.pending_reads.insert(handle.0, remainder);
+        }
+        chunk
     }
 }
 
@@ -429,6 +478,24 @@ mod tests {
         assert_eq!(n, 5);
         let chunk = reg.read(r).await.unwrap();
         assert_eq!(&chunk, b"hello");
+    }
+
+    #[tokio::test]
+    async fn bounded_read_splits_oversized_chunk_and_preserves_order() {
+        let reg = HttpStreamRegistry::new();
+        let (w, r) = reg.create_pair().await;
+        reg.write(w, b"abcdefghij".to_vec()).await.unwrap();
+        reg.write(w, b"next".to_vec()).await.unwrap();
+
+        let first = reg.read_bounded(r, 4).await.unwrap();
+        let second = reg.read_bounded(r, 4).await.unwrap();
+        let third = reg.read_bounded(r, 4).await.unwrap();
+        let fourth = reg.read_bounded(r, 4).await.unwrap();
+
+        assert_eq!(&first, b"abcd");
+        assert_eq!(&second, b"efgh");
+        assert_eq!(&third, b"ij");
+        assert_eq!(&fourth, b"next");
     }
 
     #[tokio::test]
@@ -495,9 +562,12 @@ mod tests {
         let exchange = reg.open_inbound_exchange().await;
 
         // Kernel pushes request body.
-        reg.write(exchange.kernel_request_body, b"git-upload-pack-request-body".to_vec())
-            .await
-            .unwrap();
+        reg.write(
+            exchange.kernel_request_body,
+            b"git-upload-pack-request-body".to_vec(),
+        )
+        .await
+        .unwrap();
         reg.close(exchange.kernel_request_body).await.unwrap();
 
         // Guest reads request, produces response body + head.

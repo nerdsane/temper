@@ -126,6 +126,23 @@ pub trait WasmHost: Send + Sync {
         ))
     }
 
+    /// Read at most `max_bytes` from a stream handle, retaining any
+    /// unread suffix for the next read. Hosts that can receive chunks
+    /// larger than a guest buffer should override this.
+    async fn http_stream_read_bounded(
+        &self,
+        handle: crate::http_stream::StreamHandle,
+        max_bytes: usize,
+    ) -> Result<Vec<u8>, crate::http_stream::StreamError> {
+        let chunk = self.http_stream_read(handle).await?;
+        if chunk.len() > max_bytes {
+            return Err(crate::http_stream::StreamError::Aborted(
+                "stream chunk exceeded guest buffer capacity".into(),
+            ));
+        }
+        Ok(chunk)
+    }
+
     /// Non-blocking write to a stream handle. Returns WouldBlock
     /// if the channel is full.
     async fn http_stream_try_write(
@@ -1196,11 +1213,7 @@ impl WasmHost for ProductionWasmHost {
             while let Some(chunk) = body_stream.next().await {
                 match chunk {
                     Ok(bytes) => {
-                        if streams
-                            .write(bridge_resp, bytes.to_vec())
-                            .await
-                            .is_err()
-                        {
+                        if streams.write(bridge_resp, bytes.to_vec()).await.is_err() {
                             break; // guest hung up
                         }
                     }
@@ -1218,6 +1231,14 @@ impl WasmHost for ProductionWasmHost {
         handle: crate::http_stream::StreamHandle,
     ) -> Result<Vec<u8>, crate::http_stream::StreamError> {
         self.http_streams.read(handle).await
+    }
+
+    async fn http_stream_read_bounded(
+        &self,
+        handle: crate::http_stream::StreamHandle,
+        max_bytes: usize,
+    ) -> Result<Vec<u8>, crate::http_stream::StreamError> {
+        self.http_streams.read_bounded(handle, max_bytes).await
     }
 
     async fn http_stream_try_write(
