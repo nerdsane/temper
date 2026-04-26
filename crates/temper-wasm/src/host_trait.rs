@@ -2194,6 +2194,7 @@ mod tests {
                 session_id: None,
                 integration_config: BTreeMap::new(),
                 trace_id: String::new(),
+                http_request: None,
             });
 
         let headers = vec![
@@ -2264,6 +2265,7 @@ mod tests {
                 session_id: None,
                 integration_config: BTreeMap::new(),
                 trace_id: String::new(),
+                http_request: None,
             });
 
         let headers = vec![("X-Tenant-Id".to_string(), "default".to_string())];
@@ -2324,6 +2326,7 @@ mod tests {
                 session_id: Some("ss-1".to_string()),
                 integration_config: BTreeMap::new(),
                 trace_id: String::new(),
+                http_request: None,
             });
 
         let (status, _) = tokio_test::block_on(host.http_call(
@@ -2357,6 +2360,7 @@ mod tests {
             session_id: Some("ss-1".to_string()),
             integration_config: BTreeMap::new(),
             trace_id: "0123456789abcdef0123456789abcdef".to_string(),
+            http_request: None,
         };
 
         let attrs = guest_log_span_attrs(
@@ -2417,6 +2421,7 @@ mod tests {
             session_id: Some("ss-1".to_string()),
             integration_config: BTreeMap::new(),
             trace_id: "0123456789abcdef0123456789abcdef".to_string(),
+            http_request: None,
         };
 
         {
