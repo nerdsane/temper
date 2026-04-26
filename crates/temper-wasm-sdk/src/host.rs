@@ -179,11 +179,7 @@ unsafe extern "C" {
     /// `buf_ptr` up to `buf_cap` bytes.
     /// Returns: positive = bytes written, -2 = buffer too small,
     /// -4 = other error.
-    pub fn host_http_stream_response_head(
-        resp_handle: i32,
-        buf_ptr: i32,
-        buf_cap: i32,
-    ) -> i32;
+    pub fn host_http_stream_response_head(resp_handle: i32, buf_ptr: i32, buf_cap: i32) -> i32;
 
     /// Submit the HTTP response head for an inbound (HttpEndpoint)
     /// dispatch. Guests call this once per invocation before
