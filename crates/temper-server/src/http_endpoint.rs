@@ -205,21 +205,19 @@ pub async fn rebuild_tenant_table(state: &crate::state::ServerState, tenant: &Te
         let Some(actor_ref) = actor_ref else {
             continue; // actor passivated — will rematerialize on next request
         };
-        let response: EntityResponse = match actor_ref
-            .ask(EntityMsg::GetState, ACTOR_ASK_TIMEOUT)
-            .await
-        {
-            Ok(r) => r,
-            Err(e) => {
-                tracing::warn!(
-                    tenant = %tenant.as_str(),
-                    entity_id,
-                    error = %e,
-                    "HttpEndpoint actor ask failed during rebuild"
-                );
-                continue;
-            }
-        };
+        let response: EntityResponse =
+            match actor_ref.ask(EntityMsg::GetState, ACTOR_ASK_TIMEOUT).await {
+                Ok(r) => r,
+                Err(e) => {
+                    tracing::warn!(
+                        tenant = %tenant.as_str(),
+                        entity_id,
+                        error = %e,
+                        "HttpEndpoint actor ask failed during rebuild"
+                    );
+                    continue;
+                }
+            };
         if response.state.status != "Active" {
             continue;
         }
@@ -292,10 +290,7 @@ pub fn spawn_reconciler(state: crate::state::ServerState) {
 /// entity row into a typed [`HttpEndpointRoute`]. Returns `None`
 /// if required fields are missing or malformed — caller treats
 /// that as "skip this row" in the reconciler path.
-pub fn route_from_entity_fields(
-    id: &str,
-    fields: &serde_json::Value,
-) -> Option<HttpEndpointRoute> {
+pub fn route_from_entity_fields(id: &str, fields: &serde_json::Value) -> Option<HttpEndpointRoute> {
     let obj = fields.as_object()?;
     let path_prefix = obj.get("PathPrefix")?.as_str()?.to_string();
     let methods_raw = obj.get("Methods")?.as_str()?;
@@ -364,13 +359,12 @@ fn match_path_prefix(template: &str, path: &str) -> Option<BTreeMap<String, Stri
 /// mismatch.
 ///
 /// Supports two shapes:
-///   1. Pure literal:    `repos` matches only `repos`.
-///   2. Templated:       exactly one `{name}` placeholder, with
-///                        optional literal prefix + suffix.
-///                        `{owner}` matches any non-empty segment.
-///                        `{repo}.git` matches segments ending in
-///                        `.git`, with the prefix captured as `repo`.
-///                        `v{ver}` matches `v1`, `v2.0`, etc.
+///   1. Pure literal: `repos` matches only `repos`.
+///   2. Templated: exactly one `{name}` placeholder, with optional
+///      literal prefix + suffix. `{owner}` matches any non-empty
+///      segment. `{repo}.git` matches segments ending in `.git`, with
+///      the prefix captured as `repo`. `v{ver}` matches `v1`, `v2.0`,
+///      etc.
 fn match_segment(template: &str, path: &str) -> Option<Vec<(String, String)>> {
     if !template.contains('{') {
         return if template == path {
@@ -436,12 +430,7 @@ mod tests {
     async fn exact_path_match() {
         let table = HttpEndpointTable::new();
         table
-            .replace(vec![route(
-                "he-1",
-                "/hello",
-                &["GET"],
-                "hello_handler",
-            )])
+            .replace(vec![route("he-1", "/hello", &["GET"], "hello_handler")])
             .await;
         let m = table.match_request("GET", "/hello").await.unwrap();
         assert_eq!(m.route.integration_module, "hello_handler");
@@ -484,12 +473,7 @@ mod tests {
     async fn method_mismatch_rejects() {
         let table = HttpEndpointTable::new();
         table
-            .replace(vec![route(
-                "he-1",
-                "/refs",
-                &["GET"],
-                "refs_read",
-            )])
+            .replace(vec![route("he-1", "/refs", &["GET"], "refs_read")])
             .await;
         assert!(table.match_request("POST", "/refs").await.is_none());
     }
@@ -498,12 +482,7 @@ mod tests {
     async fn method_match_case_insensitive() {
         let table = HttpEndpointTable::new();
         table
-            .replace(vec![route(
-                "he-1",
-                "/refs",
-                &["POST"],
-                "refs_write",
-            )])
+            .replace(vec![route("he-1", "/refs", &["POST"], "refs_write")])
             .await;
         assert!(table.match_request("post", "/refs").await.is_some());
     }
@@ -525,12 +504,7 @@ mod tests {
     async fn empty_param_segment_rejects() {
         let table = HttpEndpointTable::new();
         table
-            .replace(vec![route(
-                "he-1",
-                "/{owner}/repos",
-                &["GET"],
-                "h",
-            )])
+            .replace(vec![route("he-1", "/{owner}/repos", &["GET"], "h")])
             .await;
         assert!(table.match_request("GET", "//repos").await.is_none());
     }
@@ -654,12 +628,7 @@ mod tests {
     async fn multiple_placeholders_in_segment_rejected() {
         let table = HttpEndpointTable::new();
         table
-            .replace(vec![route(
-                "he-1",
-                "/{a}{b}",
-                &["GET"],
-                "bad",
-            )])
+            .replace(vec![route("he-1", "/{a}{b}", &["GET"], "bad")])
             .await;
         // Multi-placeholder segments are intentionally unsupported —
         // the extraction is ambiguous.

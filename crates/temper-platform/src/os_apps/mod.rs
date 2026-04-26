@@ -2198,7 +2198,8 @@ pub(super) async fn ensure_app_docs_workspace(
 ) -> Result<(), String> {
     if !state
         .server
-        .entity_exists(tenant_id, "Workspace", APP_DOCS_WORKSPACE_ID)
+        .ensure_entity_loaded(tenant_id, "Workspace", APP_DOCS_WORKSPACE_ID)
+        .await
     {
         state
             .server
@@ -2259,7 +2260,8 @@ pub(super) async fn ensure_directory(
 ) -> Result<(), String> {
     if state
         .server
-        .entity_exists(tenant_id, "Directory", target.directory_id)
+        .ensure_entity_loaded(tenant_id, "Directory", target.directory_id)
+        .await
     {
         return Ok(());
     }
@@ -2344,7 +2346,8 @@ pub(super) async fn ensure_markdown_file(
 ) -> Result<(), String> {
     let existed = state
         .server
-        .entity_exists(tenant_id, "File", target.file_id);
+        .ensure_entity_loaded(tenant_id, "File", target.file_id)
+        .await;
     if !existed {
         state
             .server

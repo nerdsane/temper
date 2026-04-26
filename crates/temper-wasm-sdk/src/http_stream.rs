@@ -124,10 +124,7 @@ impl HttpResponseBodyReader {
 
     /// Read the next chunk from the host. Returns `Ok(None)` on
     /// clean EOF, `Ok(Some(..))` otherwise.
-    pub fn read_next_chunk(
-        &mut self,
-        buf: &mut [u8],
-    ) -> Result<Option<usize>, StreamError> {
+    pub fn read_next_chunk(&mut self, buf: &mut [u8]) -> Result<Option<usize>, StreamError> {
         let rc = unsafe {
             host::host_http_stream_read(
                 self.handle.0 as i32,
@@ -315,7 +312,9 @@ pub fn streaming_call(
 
     Ok((
         HttpRequestBodyWriter { handle: req_handle },
-        HttpResponseBodyReader { handle: resp_handle },
+        HttpResponseBodyReader {
+            handle: resp_handle,
+        },
         head_fetcher,
     ))
 }
