@@ -644,12 +644,10 @@ pub(super) fn link_host_functions(linker: &mut Linker<HostState>) -> Result<(), 
                 // Bridge async -> sync with an outer deadline so a hanging
                 // host call can never pin the actor indefinitely.
                 let host = caller.data().host.clone();
-                let Ok(result) =
-                    run_host_call_with_timeout("host_http_call_stream", async move {
-                        host.http_call_binary(&method, &url, &headers, &body_bytes)
-                            .await
-                    })
-                else {
+                let Ok(result) = run_host_call_with_timeout("host_http_call_stream", async move {
+                    host.http_call_binary(&method, &url, &headers, &body_bytes)
+                        .await
+                }) else {
                     return -1;
                 };
 
@@ -1457,14 +1455,11 @@ mod tests {
     /// not deadlock against the runtime that owns it.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn run_host_call_survives_runtime_spawned_work() {
-        let result = run_host_call_with_timeout_impl(
-            "test_spawned",
-            Duration::from_secs(5),
-            async {
+        let result =
+            run_host_call_with_timeout_impl("test_spawned", Duration::from_secs(5), async {
                 let handle = tokio::spawn(async { "ok" });
                 handle.await.unwrap_or("err")
-            },
-        );
+            });
         assert_eq!(result, Ok("ok"));
     }
 

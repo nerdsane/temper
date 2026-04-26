@@ -221,14 +221,10 @@ async fn dispatch_matched_route(
 
     // Resolve the integration module hash. The WASM module must
     // already be registered for this tenant (via app install).
-    let module_hash: Option<String> = state
-        .wasm_module_registry
-        .read()
-        .ok()
-        .and_then(|reg| {
-            reg.get_hash(&tenant_id, &route.route.integration_module)
-                .map(|s| s.to_string())
-        });
+    let module_hash: Option<String> = state.wasm_module_registry.read().ok().and_then(|reg| {
+        reg.get_hash(&tenant_id, &route.route.integration_module)
+            .map(|s| s.to_string())
+    });
     let Some(module_hash) = module_hash else {
         tracing::warn!(
             tenant = %tenant_id.as_str(),
@@ -273,9 +269,7 @@ async fn dispatch_matched_route(
                         .await
                         .is_err()
                     {
-                        tracing::warn!(
-                            "axum body → stream pump: guest closed early"
-                        );
+                        tracing::warn!("axum body → stream pump: guest closed early");
                         break;
                     }
                 }
@@ -291,7 +285,11 @@ async fn dispatch_matched_route(
     // Build the invocation context.
     let header_pairs: Vec<(String, String)> = headers
         .iter()
-        .filter_map(|(k, v)| v.to_str().ok().map(|s| (k.as_str().to_string(), s.to_string())))
+        .filter_map(|(k, v)| {
+            v.to_str()
+                .ok()
+                .map(|s| (k.as_str().to_string(), s.to_string()))
+        })
         .collect();
     let ctx = WasmInvocationContext {
         tenant: tenant_id.as_str().to_string(),
@@ -383,8 +381,7 @@ async fn dispatch_matched_route(
 
     // Await the guest's response head — bounded by the route's
     // configured timeout so a bad guest doesn't wedge the request.
-    let head_timeout =
-        std::time::Duration::from_secs(route.route.timeout_secs as u64);
+    let head_timeout = std::time::Duration::from_secs(route.route.timeout_secs as u64);
     let head_result = tokio::time::timeout(
         head_timeout,
         streams.await_inbound_response_head(guest_response_body),
