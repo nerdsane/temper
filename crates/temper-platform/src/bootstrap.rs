@@ -33,6 +33,7 @@ const EVOLUTION_DECISION_IOA: &str = include_str!("specs/EvolutionDecision.ioa.t
 const INSIGHT_IOA: &str = include_str!("specs/Insight.ioa.toml");
 const FEATURE_REQUEST_IOA: &str = include_str!("specs/FeatureRequest.ioa.toml");
 const GOVERNANCE_DECISION_IOA: &str = include_str!("specs/GovernanceDecision.ioa.toml");
+const HTTP_ENDPOINT_IOA: &str = include_str!("specs/HttpEndpoint.ioa.toml");
 const SYSTEM_CSDL: &str = include_str!("specs/model.csdl.xml");
 
 /// All system entity specs as (entity_type, ioa_source) pairs.
@@ -49,6 +50,7 @@ const SYSTEM_SPECS: &[(&str, &str)] = &[
     ("Insight", INSIGHT_IOA),
     ("FeatureRequest", FEATURE_REQUEST_IOA),
     ("GovernanceDecision", GOVERNANCE_DECISION_IOA),
+    ("HttpEndpoint", HTTP_ENDPOINT_IOA),
 ];
 
 // Embed agent specs at compile time.
@@ -488,7 +490,7 @@ mod tests {
 
     #[test]
     fn test_entity_types_count() {
-        assert_eq!(SYSTEM_SPECS.len(), 12);
+        assert_eq!(SYSTEM_SPECS.len(), 13);
     }
 
     #[test]
@@ -541,6 +543,13 @@ mod tests {
     }
 
     #[test]
+    fn test_http_endpoint_initial_state() {
+        let automaton = automaton::parse_automaton(HTTP_ENDPOINT_IOA).unwrap();
+        assert_eq!(automaton.automaton.initial, "Active");
+        assert_eq!(automaton.automaton.states.len(), 3);
+    }
+
+    #[test]
     fn test_bootstrap_registers_new_entities() {
         let state = PlatformState::new(None);
 
@@ -556,6 +565,7 @@ mod tests {
         assert!(registry.get_table(&tenant, "Insight").is_some());
         assert!(registry.get_table(&tenant, "FeatureRequest").is_some());
         assert!(registry.get_table(&tenant, "GovernanceDecision").is_some());
+        assert!(registry.get_table(&tenant, "HttpEndpoint").is_some());
     }
 
     // ── Agent Spec Tests ────────────────────────────────────────────

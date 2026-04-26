@@ -980,6 +980,295 @@ pub(super) fn link_host_functions(linker: &mut Linker<HostState>) -> Result<(), 
         )
         .map_err(|e| WasmError::Compilation(format!("failed to link host_evaluate_spec: {e}")))?;
 
+    // --- ADR-0057 streaming primitive FFI (outbound, Phase 1) ---
+    //
+    // Five imports give WASM guests access to the bidirectional
+    // streaming channels maintained by WasmHost::http_streams.
+    // Handle IDs are opaque u32s packed into i32 return values.
+    //
+    // Return code convention for byte-returning functions:
+    //   >= 0   : bytes read / written
+    //   -1     : WouldBlock
+    //   -2     : Closed
+    //   -3     : InvalidHandle
+    //   -4     : other error (Aborted, network fault)
+
+    // host_http_stream_begin_outbound(method_ptr, method_len,
+    //                                  url_ptr, url_len,
+    //                                  headers_ptr, headers_len,
+    //                                  out_req_handle_ptr,
+    //                                  out_resp_handle_ptr) -> i32
+    // Returns 0 on success (handles written at out_*_handle_ptr),
+    // negative on error per the convention above.
+    #[allow(clippy::too_many_arguments)]
+    linker
+        .func_wrap(
+            "env",
+            "host_http_stream_begin_outbound",
+            |mut caller: Caller<'_, HostState>,
+             method_ptr: i32,
+             method_len: i32,
+             url_ptr: i32,
+             url_len: i32,
+             headers_ptr: i32,
+             headers_len: i32,
+             out_req_handle_ptr: i32,
+             out_resp_handle_ptr: i32|
+             -> i32 {
+                let memory = caller.get_export("memory").and_then(|e| e.into_memory());
+                let Some(memory) = memory else { return -4 };
+
+                let mut method_buf = vec![0u8; method_len as usize];
+                let _ = memory.read(&caller, method_ptr as usize, &mut method_buf);
+                let method = String::from_utf8_lossy(&method_buf).to_string();
+
+                let mut url_buf = vec![0u8; url_len as usize];
+                let _ = memory.read(&caller, url_ptr as usize, &mut url_buf);
+                let url = String::from_utf8_lossy(&url_buf).to_string();
+
+                let headers: Vec<(String, String)> = if headers_len > 0 {
+                    let mut hdr_buf = vec![0u8; headers_len as usize];
+                    let _ = memory.read(&caller, headers_ptr as usize, &mut hdr_buf);
+                    serde_json::from_slice(&hdr_buf).unwrap_or_default()
+                } else {
+                    Vec::new()
+                };
+
+                let host = caller.data().host.clone();
+                let head = crate::http_stream::HttpRequestHead {
+                    method,
+                    url,
+                    headers,
+                };
+                let result = tokio::task::block_in_place(|| {
+                    tokio::runtime::Handle::current()
+                        .block_on(host.http_stream_begin_outbound(head))
+                });
+
+                let handles = match result {
+                    Ok(h) => h,
+                    Err(_) => return -4,
+                };
+
+                let req_bytes = handles.request_body.0.to_le_bytes();
+                let resp_bytes = handles.response_body.0.to_le_bytes();
+                if memory
+                    .write(&mut caller, out_req_handle_ptr as usize, &req_bytes)
+                    .is_err()
+                {
+                    return -4;
+                }
+                if memory
+                    .write(&mut caller, out_resp_handle_ptr as usize, &resp_bytes)
+                    .is_err()
+                {
+                    return -4;
+                }
+                0
+            },
+        )
+        .map_err(|e| {
+            WasmError::Compilation(format!(
+                "failed to link host_http_stream_begin_outbound: {e}"
+            ))
+        })?;
+
+    // host_http_stream_read(handle, buf_ptr, buf_cap) -> i32
+    // Blocks until a chunk is available. 0 means clean EOF.
+    linker
+        .func_wrap(
+            "env",
+            "host_http_stream_read",
+            |mut caller: Caller<'_, HostState>, handle: i32, buf_ptr: i32, buf_cap: i32| -> i32 {
+                let memory = caller.get_export("memory").and_then(|e| e.into_memory());
+                let Some(memory) = memory else { return -4 };
+                if buf_cap <= 0 {
+                    return -4;
+                }
+
+                let host = caller.data().host.clone();
+                let sh = crate::http_stream::StreamHandle(handle as u32);
+                let result = tokio::task::block_in_place(|| {
+                    tokio::runtime::Handle::current()
+                        .block_on(host.http_stream_read_bounded(sh, buf_cap as usize))
+                });
+                match result {
+                    Ok(chunk) => {
+                        if chunk.is_empty() {
+                            return 0;
+                        }
+                        if memory.write(&mut caller, buf_ptr as usize, &chunk).is_err() {
+                            return -4;
+                        }
+                        chunk.len() as i32
+                    }
+                    Err(crate::http_stream::StreamError::WouldBlock) => -1,
+                    Err(crate::http_stream::StreamError::Closed) => -2,
+                    Err(crate::http_stream::StreamError::InvalidHandle) => -3,
+                    Err(crate::http_stream::StreamError::Aborted(_)) => -4,
+                }
+            },
+        )
+        .map_err(|e| {
+            WasmError::Compilation(format!("failed to link host_http_stream_read: {e}"))
+        })?;
+
+    // host_http_stream_try_write(handle, data_ptr, data_len) -> i32
+    // Non-blocking — returns -1 (WouldBlock) when channel is full.
+    linker
+        .func_wrap(
+            "env",
+            "host_http_stream_try_write",
+            |mut caller: Caller<'_, HostState>, handle: i32, data_ptr: i32, data_len: i32| -> i32 {
+                let memory = caller.get_export("memory").and_then(|e| e.into_memory());
+                let Some(memory) = memory else { return -4 };
+
+                let mut buf = vec![0u8; data_len as usize];
+                let _ = memory.read(&caller, data_ptr as usize, &mut buf);
+
+                let host = caller.data().host.clone();
+                let sh = crate::http_stream::StreamHandle(handle as u32);
+                let result = tokio::task::block_in_place(|| {
+                    tokio::runtime::Handle::current().block_on(host.http_stream_try_write(sh, buf))
+                });
+                match result {
+                    Ok(n) => n as i32,
+                    Err(crate::http_stream::StreamError::WouldBlock) => -1,
+                    Err(crate::http_stream::StreamError::Closed) => -2,
+                    Err(crate::http_stream::StreamError::InvalidHandle) => -3,
+                    Err(crate::http_stream::StreamError::Aborted(_)) => -4,
+                }
+            },
+        )
+        .map_err(|e| {
+            WasmError::Compilation(format!("failed to link host_http_stream_try_write: {e}"))
+        })?;
+
+    // host_http_stream_close(handle) -> i32
+    linker
+        .func_wrap(
+            "env",
+            "host_http_stream_close",
+            |caller: Caller<'_, HostState>, handle: i32| -> i32 {
+                let host = caller.data().host.clone();
+                let sh = crate::http_stream::StreamHandle(handle as u32);
+                let result = tokio::task::block_in_place(|| {
+                    tokio::runtime::Handle::current().block_on(host.http_stream_close(sh))
+                });
+                match result {
+                    Ok(()) => 0,
+                    Err(crate::http_stream::StreamError::InvalidHandle) => -3,
+                    Err(_) => -4,
+                }
+            },
+        )
+        .map_err(|e| {
+            WasmError::Compilation(format!("failed to link host_http_stream_close: {e}"))
+        })?;
+
+    // host_http_stream_response_head(resp_handle, buf_ptr, buf_cap) -> i32
+    // Blocks until the response head is available. Writes JSON
+    // `{"status":N,"headers":[["k","v"]...]}` to buf_ptr up to
+    // buf_cap bytes. Returns bytes written, -2 if buf too small,
+    // -4 on other error.
+    linker
+        .func_wrap(
+            "env",
+            "host_http_stream_response_head",
+            |mut caller: Caller<'_, HostState>,
+             resp_handle: i32,
+             buf_ptr: i32,
+             buf_cap: i32|
+             -> i32 {
+                let memory = caller.get_export("memory").and_then(|e| e.into_memory());
+                let Some(memory) = memory else { return -4 };
+
+                let host = caller.data().host.clone();
+                let sh = crate::http_stream::StreamHandle(resp_handle as u32);
+                let result = tokio::task::block_in_place(|| {
+                    tokio::runtime::Handle::current().block_on(host.http_stream_response_head(sh))
+                });
+                let head = match result {
+                    Ok(h) => h,
+                    Err(_) => return -4,
+                };
+                let encoded = serde_json::json!({
+                    "status": head.status,
+                    "headers": head.headers,
+                });
+                let encoded_bytes = encoded.to_string().into_bytes();
+                if encoded_bytes.len() > buf_cap as usize {
+                    return -2;
+                }
+                if memory
+                    .write(&mut caller, buf_ptr as usize, &encoded_bytes)
+                    .is_err()
+                {
+                    return -4;
+                }
+                encoded_bytes.len() as i32
+            },
+        )
+        .map_err(|e| {
+            WasmError::Compilation(format!(
+                "failed to link host_http_stream_response_head: {e}"
+            ))
+        })?;
+
+    // host_http_stream_send_response_head(resp_handle, head_ptr, head_len) -> i32
+    // Inbound-dispatch counterpart. Guest calls this once per
+    // invocation to hand the kernel the HTTP response head
+    // (status + headers as JSON). Returns 0 on success, negative
+    // on error per the stream convention.
+    linker
+        .func_wrap(
+            "env",
+            "host_http_stream_send_response_head",
+            |mut caller: Caller<'_, HostState>,
+             resp_handle: i32,
+             head_ptr: i32,
+             head_len: i32|
+             -> i32 {
+                let memory = caller.get_export("memory").and_then(|e| e.into_memory());
+                let Some(memory) = memory else { return -4 };
+
+                let mut buf = vec![0u8; head_len as usize];
+                if memory.read(&caller, head_ptr as usize, &mut buf).is_err() {
+                    return -4;
+                }
+                #[derive(serde::Deserialize)]
+                struct RawHead {
+                    status: u16,
+                    #[serde(default)]
+                    headers: Vec<(String, String)>,
+                }
+                let raw: RawHead = match serde_json::from_slice(&buf) {
+                    Ok(r) => r,
+                    Err(_) => return -4,
+                };
+                let head = crate::http_stream::HttpResponseHead {
+                    status: raw.status,
+                    headers: raw.headers,
+                };
+                let host = caller.data().host.clone();
+                let sh = crate::http_stream::StreamHandle(resp_handle as u32);
+                let result = tokio::task::block_in_place(|| {
+                    tokio::runtime::Handle::current()
+                        .block_on(host.http_stream_send_response_head(sh, head))
+                });
+                match result {
+                    Ok(()) => 0,
+                    Err(crate::http_stream::StreamError::InvalidHandle) => -3,
+                    Err(_) => -4,
+                }
+            },
+        )
+        .map_err(|e| {
+            WasmError::Compilation(format!(
+                "failed to link host_http_stream_send_response_head: {e}"
+            ))
+        })?;
+
     Ok(())
 }
 

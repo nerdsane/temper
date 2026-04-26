@@ -218,6 +218,7 @@ pub async fn handle_odata_post(
 
             let entity_id = body_json
                 .get("id")
+                .or_else(|| body_json.get("Id"))
                 .and_then(|v| v.as_str())
                 .map(String::from)
                 .unwrap_or_else(|| {
@@ -693,6 +694,7 @@ async fn handle_stream_put(
         session_id: agent_ctx.session_id.clone(),
         integration_config: std::collections::BTreeMap::new(),
         trace_id: agent_ctx.trace_id.clone().unwrap_or_default(),
+        http_request: None,
     };
 
     let wasm_result = match state

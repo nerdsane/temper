@@ -27,6 +27,8 @@ temper-sandbox = { workspace = true }
 temper-verify = { workspace = true, optional = true }
 temper-store-sim = { workspace = true, optional = true }
 axum = { workspace = true }
+async-stream = "0.3"
+bytes = "1"
 hyper = { workspace = true }
 tower = { workspace = true }
 tower-http = { workspace = true }
@@ -49,6 +51,8 @@ async-trait = { workspace = true }
 tokio-tungstenite = { version = "0.27", features = ["native-tls"] }
 ed25519-dalek = "2.1"
 futures-util = "0.3"
+sha1 = "0.10"
+base64 = "0.22"
 lru = { workspace = true }
 sha2 = { workspace = true }
 hmac = "0.12"

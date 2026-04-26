@@ -6186,8 +6186,11 @@ name = "temper-server"
 version = "0.1.0"
 dependencies = [
  "aes-gcm",
+ "async-stream",
  "async-trait",
  "axum 0.8.8",
+ "base64 0.22.1",
+ "bytes",
  "cedar-policy",
  "chrono",
  "criterion",
@@ -6203,6 +6206,7 @@ dependencies = [
  "reqwest",
  "serde",
  "serde_json",
+ "sha1",
  "sha2",
  "sqlx",
  "temper-authz",
@@ -6341,7 +6345,10 @@ dependencies = [
 name = "temper-wasm"
 version = "0.1.0"
 dependencies = [
+ "async-stream",
  "async-trait",
+ "axum 0.8.8",
+ "bytes",
  "chrono",
  "futures-util",
  "opentelemetry",
@@ -6353,6 +6360,7 @@ dependencies = [
  "temper-observe",
  "thiserror 2.0.18",
  "tokio",
+ "tokio-stream",
  "tokio-test",
  "tracing",
  "tracing-opentelemetry",

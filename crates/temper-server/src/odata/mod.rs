@@ -3,6 +3,7 @@
 mod bindings;
 mod common;
 pub(crate) mod constraints;
+mod content_addressed;
 mod filter_sql;
 mod read;
 mod read_support;
@@ -11,6 +12,7 @@ mod write;
 
 #[cfg(feature = "observe")]
 pub(crate) use common::extract_tenant;
+pub use content_addressed::handle_blob_ingest_raw;
 pub use read::handle_hints;
 pub use read::handle_metadata;
 pub use read::handle_odata_get;
