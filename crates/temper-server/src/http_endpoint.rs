@@ -359,13 +359,12 @@ fn match_path_prefix(template: &str, path: &str) -> Option<BTreeMap<String, Stri
 /// mismatch.
 ///
 /// Supports two shapes:
-///   1. Pure literal:    `repos` matches only `repos`.
-///   2. Templated:       exactly one `{name}` placeholder, with
-///                        optional literal prefix + suffix.
-///                        `{owner}` matches any non-empty segment.
-///                        `{repo}.git` matches segments ending in
-///                        `.git`, with the prefix captured as `repo`.
-///                        `v{ver}` matches `v1`, `v2.0`, etc.
+///   1. Pure literal: `repos` matches only `repos`.
+///   2. Templated: exactly one `{name}` placeholder, with optional
+///      literal prefix + suffix. `{owner}` matches any non-empty
+///      segment. `{repo}.git` matches segments ending in `.git`, with
+///      the prefix captured as `repo`. `v{ver}` matches `v1`, `v2.0`,
+///      etc.
 fn match_segment(template: &str, path: &str) -> Option<Vec<(String, String)>> {
     if !template.contains('{') {
         return if template == path {
