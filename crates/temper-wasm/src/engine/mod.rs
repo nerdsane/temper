@@ -15,7 +15,7 @@ use std::thread;
 use std::time::Duration;
 
 use sha2::{Digest, Sha256};
-use wasmtime::{Config, Engine, Linker, Module, ResourceLimiter, Store};
+use wasmtime::{Config, Engine, Linker, Module, ProfilingStrategy, ResourceLimiter, Store};
 use wasmtime_wasi::preview1::WasiP1Ctx;
 use wasmtime_wasi::{WasiCtxBuilder, preview1};
 
@@ -205,6 +205,9 @@ impl WasmEngine {
         config.consume_fuel(true);
         config.epoch_interruption(true);
         config.wasm_component_model(true);
+        if let Some(strategy) = configured_profiling_strategy() {
+            config.profiler(strategy);
+        }
 
         let engine = Engine::new(&config).map_err(|e| WasmError::Compilation(e.to_string()))?;
         let epoch_ticker = EpochTicker::start(engine.clone())?;
@@ -545,6 +548,27 @@ impl WasmEngine {
     pub fn cache_size(&self) -> usize {
         let cache = self.cache.read().expect("cache lock poisoned");
         cache.len()
+    }
+}
+
+fn configured_profiling_strategy() -> Option<ProfilingStrategy> {
+    match std::env::var("TEMPER_WASM_PROFILING") {
+        Ok(value) => match value.trim().to_ascii_lowercase().as_str() {
+            "" | "0" | "false" | "off" | "none" => None,
+            "1" | "true" | "on" | "perf" | "perfmap" | "perf-map" => {
+                Some(ProfilingStrategy::PerfMap)
+            }
+            "jitdump" | "jit-dump" => Some(ProfilingStrategy::JitDump),
+            "vtune" => Some(ProfilingStrategy::VTune),
+            other => {
+                tracing::warn!(
+                    temper_wasm_profiling = other,
+                    "unknown TEMPER_WASM_PROFILING value; WASM guest profiling disabled"
+                );
+                None
+            }
+        },
+        Err(_) => None,
     }
 }
 
