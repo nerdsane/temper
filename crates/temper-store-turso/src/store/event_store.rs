@@ -6,7 +6,7 @@ use temper_runtime::persistence::{
     EventMetadata, EventStore, PersistenceEnvelope, PersistenceError, storage_error,
 };
 use temper_runtime::tenant::parse_persistence_id_parts;
-use tracing::instrument;
+use tracing::{instrument, warn};
 
 use super::TursoEventStore;
 use super::instrumentation::record_turso_query_duration;
@@ -27,16 +27,32 @@ impl EventStore for TursoEventStore {
         // makes retries safe — if a prior attempt partially committed before
         // erroring, the retry's pre-check detects it as ConcurrencyViolation
         // (non-transient, propagates to caller via normal event-store contract).
+        let attempt_timeout = append_attempt_timeout();
         let total_attempts = RETRY_DELAYS_MS.len() + 1;
         let mut last_err: Option<PersistenceError> = None;
         for attempt in 0..total_attempts {
             if attempt > 0 {
                 tokio::time::sleep(Duration::from_millis(RETRY_DELAYS_MS[attempt - 1])).await;
             }
-            match self
-                .append_inner(persistence_id, expected_sequence, events)
-                .await
-            {
+            let attempt_result = tokio::time::timeout(
+                attempt_timeout,
+                self.append_inner(persistence_id, expected_sequence, events),
+            )
+            .await
+            .unwrap_or_else(|_| {
+                warn!(
+                    persistence_id,
+                    attempt,
+                    timeout_ms = attempt_timeout.as_millis() as u64,
+                    "turso.append attempt timed out"
+                );
+                Err(PersistenceError::Storage(format!(
+                    "turso.append timed out after {}ms",
+                    attempt_timeout.as_millis()
+                )))
+            });
+
+            match attempt_result {
                 Ok(seq) => {
                     if attempt > 0 {
                         record_turso_write_retry("turso.append", attempt as u64, "succeeded");
@@ -205,6 +221,18 @@ impl EventStore for TursoEventStore {
         }
         Ok(out)
     }
+}
+
+fn append_attempt_timeout() -> Duration {
+    const DEFAULT_APPEND_ATTEMPT_TIMEOUT_MS: u64 = 5_000;
+    const MIN_APPEND_ATTEMPT_TIMEOUT_MS: u64 = 500;
+
+    let configured = std::env::var("TEMPER_TURSO_APPEND_TIMEOUT_MS")
+        .ok()
+        .and_then(|value| value.parse::<u64>().ok())
+        .unwrap_or(DEFAULT_APPEND_ATTEMPT_TIMEOUT_MS);
+
+    Duration::from_millis(configured.max(MIN_APPEND_ATTEMPT_TIMEOUT_MS))
 }
 
 impl TursoEventStore {
