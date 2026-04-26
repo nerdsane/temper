@@ -16,6 +16,7 @@ struct RuntimeMetricInstruments {
     indexed_entities: Gauge<u64>,
     projected_entities: Gauge<u64>,
     projection_coverage_ratio: Gauge<f64>,
+    durable_store_timeout: Duration,
 }
 
 impl RuntimeMetricInstruments {
@@ -51,6 +52,12 @@ impl RuntimeMetricInstruments {
                     "Projected entity count divided by indexed entity count for the current process.",
                 )
                 .build(),
+            durable_store_timeout: configured_duration(
+                "TEMPER_RUNTIME_METRICS_STORE_TIMEOUT_MS",
+                2_000,
+                100,
+                60_000,
+            ),
         }
     }
 
@@ -65,7 +72,11 @@ impl RuntimeMetricInstruments {
         self.indexed_entities.record(indexed_total, &[]);
 
         if let Some(store) = state.event_store.as_ref()
-            && let Ok(Some(projected_by_tenant)) = store.projected_entity_counts_by_tenant().await
+            && let Ok(Ok(Some(projected_by_tenant))) = tokio::time::timeout(
+                self.durable_store_timeout,
+                store.projected_entity_counts_by_tenant(),
+            )
+            .await
         {
             let projected_total: u64 = projected_by_tenant.iter().map(|(_, count)| *count).sum();
             self.projected_entities.record(projected_total, &[]);
@@ -139,11 +150,7 @@ fn allow_indefinite_state_counts(state: &ServerState) -> Vec<(String, u64)> {
 impl ServerState {
     /// Start periodic runtime metric export for process + actor-system state.
     pub fn spawn_runtime_metrics_loop(&self) {
-        let interval_secs = std::env::var("TEMPER_RUNTIME_METRICS_INTERVAL_SECS") // determinism-ok: read once at startup
-            .ok()
-            .and_then(|v| v.parse::<u64>().ok())
-            .unwrap_or(10)
-            .clamp(1, 86_400);
+        let interval_secs = configured_u64("TEMPER_RUNTIME_METRICS_INTERVAL_SECS", 60, 1, 86_400);
 
         let state = self.clone();
         tokio::spawn(async move {
@@ -159,6 +166,18 @@ impl ServerState {
             }
         });
     }
+}
+
+fn configured_duration(env_name: &str, default_ms: u64, min_ms: u64, max_ms: u64) -> Duration {
+    Duration::from_millis(configured_u64(env_name, default_ms, min_ms, max_ms))
+}
+
+fn configured_u64(env_name: &str, default: u64, min: u64, max: u64) -> u64 {
+    std::env::var(env_name) // determinism-ok: read once at startup
+        .ok()
+        .and_then(|v| v.parse::<u64>().ok())
+        .unwrap_or(default)
+        .clamp(min, max)
 }
 
 fn coverage_ratio(projected: u64, indexed: u64) -> f64 {
