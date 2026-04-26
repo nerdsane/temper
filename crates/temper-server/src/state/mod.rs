@@ -951,6 +951,7 @@ impl ServerState {
             session_id: agent_ctx.session_id.clone(),
             integration_config: std::collections::BTreeMap::new(),
             trace_id: agent_ctx.trace_id.clone().unwrap_or_default(),
+            http_request: None,
         };
 
         let wasm_result = self
