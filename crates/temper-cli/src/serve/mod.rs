@@ -294,6 +294,26 @@ pub async fn run(
         println!("    Set DISCORD_BOT_TOKEN env var or store 'discord_bot_token' in vault");
     }
 
+    // Spawn the HttpEndpoint reconciler (ADR-0056 Phase 2 slice 3b).
+    // Subscribes to entity state changes; rebuilds the per-tenant
+    // route table on every HttpEndpoint transition. Must run before
+    // axum::serve so the first request sees a populated table.
+    temper_server::http_endpoint::spawn_reconciler(state.server.clone());
+
+    // Prime the route tables for all existing tenants so
+    // HttpEndpoint rows already in the event store are routable on
+    // the first request (the reconciler only reacts to changes
+    // after startup).
+    {
+        let tenants: Vec<temper_runtime::tenant::TenantId> = {
+            let reg = state.server.registry.read().unwrap();
+            reg.tenant_ids().iter().map(|t| (*t).clone()).collect()
+        };
+        for tenant in tenants {
+            temper_server::http_endpoint::rebuild_tenant_table(&state.server, &tenant).await;
+        }
+    }
+
     println!("Listening on http://0.0.0.0:{actual_port}");
     axum::serve(listener, router)
         .await

@@ -36,6 +36,47 @@ fn test_state_with_order_and_payment_ioa() -> ServerState {
     ServerState::with_specs(system, csdl, csdl_xml.to_string(), specs).unwrap()
 }
 
+fn test_state_with_blob_ioa() -> ServerState {
+    let csdl_xml = r#"<?xml version="1.0" encoding="utf-8"?>
+<edmx:Edmx Version="4.0" xmlns:edmx="http://docs.oasis-open.org/odata/ns/edmx">
+  <edmx:DataServices>
+    <Schema Namespace="Temper.Git" xmlns="http://docs.oasis-open.org/odata/ns/edm">
+      <EntityType Name="Blob">
+        <Key><PropertyRef Name="Id"/></Key>
+        <Property Name="Id" Type="Edm.String" Nullable="false"/>
+        <Property Name="RepositoryId" Type="Edm.String" Nullable="false"/>
+        <Property Name="Size" Type="Edm.Int64" Nullable="false"/>
+        <Property Name="Content" Type="Edm.Binary" Nullable="false"/>
+        <Property Name="CanonicalBytes" Type="Edm.Binary" Nullable="false"/>
+        <Property Name="Status" Type="Edm.String" Nullable="false"/>
+        <Property Name="CreatedAt" Type="Edm.DateTimeOffset" Nullable="false"/>
+      </EntityType>
+      <EntityContainer Name="Container">
+        <EntitySet Name="Blobs" EntityType="Temper.Git.Blob"/>
+      </EntityContainer>
+    </Schema>
+  </edmx:DataServices>
+</edmx:Edmx>"#;
+    let blob_ioa = r#"
+[automaton]
+name = "Blob"
+states = ["Durable"]
+initial = "Durable"
+
+[[action]]
+name = "Create"
+kind = "input"
+from = ["Durable"]
+to = "Durable"
+params = ["RepositoryId", "Size", "Content", "CanonicalBytes", "CreatedAt"]
+"#;
+    let csdl = parse_csdl(csdl_xml).unwrap();
+    let system = ActorSystem::new("test-blob-ingest");
+    let mut specs = std::collections::BTreeMap::new();
+    specs.insert("Blob".to_string(), blob_ioa.to_string());
+    ServerState::with_specs(system, csdl, csdl_xml.to_string(), specs).unwrap()
+}
+
 #[tokio::test]
 async fn test_service_document() {
     let app = build_router(test_state());
@@ -172,6 +213,60 @@ async fn test_post_entity_creation() {
         .unwrap();
 
     assert_eq!(response.status(), StatusCode::CREATED);
+}
+
+#[tokio::test]
+async fn test_post_entity_creation_uses_odata_id_property() {
+    let app = build_router(test_state_with_ioa());
+    let create_response = app
+        .clone()
+        .oneshot(
+            Request::post("/tdata/Orders")
+                .header("Content-Type", "application/json")
+                .body(Body::from(r#"{"Id": "upper-1", "Status": "Draft"}"#))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(create_response.status(), StatusCode::CREATED);
+
+    let get_response = app
+        .oneshot(
+            Request::get("/tdata/Orders('upper-1')")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(get_response.status(), StatusCode::OK);
+}
+
+#[tokio::test]
+async fn test_blob_ingest_raw_route_streams_body_without_path_param() {
+    let app = build_router(test_state_with_blob_ioa());
+    let response = app
+        .oneshot(
+            Request::post("/tdata/Blobs/Temper.IngestRaw")
+                .header("Content-Type", "application/octet-stream")
+                .header("Content-Length", "3")
+                .header("X-Repository-Id", "rp-acme-demo")
+                .body(Body::from("abc"))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::CREATED);
+    let body = axum::body::to_bytes(response.into_body(), 1024 * 1024)
+        .await
+        .unwrap();
+    let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(
+        json["fields"]["Id"],
+        "f2ba8f84ab5c1bce84a7b441cb1959cfc7093b7f"
+    );
+    assert_eq!(json["fields"]["RepositoryId"], "rp-acme-demo");
+    assert_eq!(json["fields"]["Size"], 3);
 }
 
 #[tokio::test]

@@ -20,6 +20,7 @@
 
 pub mod context;
 pub mod host;
+pub mod http_stream;
 
 pub use context::{Context, HttpRequest, HttpResponse};
 

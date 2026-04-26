@@ -1,0 +1,65 @@
+# HttpEndpoint — platform-level inbound route registration.
+#
+# See ADR-0056. Registers a path prefix with a WASM integration. The
+# kernel's router fallback does longest-prefix match against Active
+# endpoints and dispatches with a streaming request/response channel.
+#
+# Phase 1 (this spec): entity + state machine + CSDL + Cedar.
+#   Dispatch is stubbed — matched requests return 501 until Phase 2.
+# Phase 2: wire end-to-end on top of ADR-0057 http_call_streaming.
+#
+# Field-level shape invariants (path_prefix starts with '/', methods
+# non-empty, timeout_secs in [1, 600], reserved-namespace check) are
+# enforced in the action handler at runtime. IOA field_invariant
+# grammar today supports only absent/equals/empty combinators — a
+# follow-up ADR will extend it with `matches` + `gte`/`lte` so these
+# invariants can move into the spec and become DST-verifiable.
+
+[automaton]
+name = "HttpEndpoint"
+initial = "Active"
+states = ["Active", "Paused", "Deleted"]
+
+# --- Actions ---
+
+[[action]]
+name = "Create"
+kind = "input"
+from = ["Active"]
+params = ["path_prefix", "methods", "integration_module", "requires_auth", "timeout_secs"]
+hint = "Initialize endpoint fields. Self-loop on initial state; from_states follow IOA convention."
+
+[[action]]
+name = "Pause"
+kind = "input"
+from = ["Active"]
+to = "Paused"
+
+[[action]]
+name = "Resume"
+kind = "input"
+from = ["Paused"]
+to = "Active"
+
+[[action]]
+name = "Delete"
+kind = "input"
+from = ["Active", "Paused"]
+to = "Deleted"
+
+# --- Output events ---
+
+[[action]]
+name = "HttpEndpointRegisteredEvent"
+kind = "output"
+
+[[action]]
+name = "HttpEndpointDeletedEvent"
+kind = "output"
+
+# --- Safety invariants ---
+
+[[invariant]]
+name = "DeletedIsFinal"
+when = ["Deleted"]
+assert = "no_further_transitions"

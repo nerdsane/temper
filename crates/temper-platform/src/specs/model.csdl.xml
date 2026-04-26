@@ -271,6 +271,28 @@
         <Parameter Name="CallbackOnDeny" Type="Edm.String" Nullable="true"/>
       </Action>
 
+      <EntityType Name="HttpEndpoint">
+        <Key>
+          <PropertyRef Name="Id" />
+        </Key>
+        <Property Name="Id" Type="Edm.String" Nullable="false" />
+        <Property Name="Status" Type="Edm.String" />
+        <Property Name="PathPrefix" Type="Edm.String" />
+        <Property Name="Methods" Type="Edm.String" />
+        <Property Name="IntegrationModule" Type="Edm.String" />
+        <Property Name="RequiresAuth" Type="Edm.Boolean" />
+        <Property Name="TimeoutSecs" Type="Edm.Int32" />
+      </EntityType>
+      <Action Name="PauseHttpEndpoint" IsBound="true">
+        <Parameter Name="bindingParameter" Type="Temper.System.HttpEndpoint" />
+      </Action>
+      <Action Name="ResumeHttpEndpoint" IsBound="true">
+        <Parameter Name="bindingParameter" Type="Temper.System.HttpEndpoint" />
+      </Action>
+      <Action Name="DeleteHttpEndpoint" IsBound="true">
+        <Parameter Name="bindingParameter" Type="Temper.System.HttpEndpoint" />
+      </Action>
+
       <EntityContainer Name="Container">
         <EntitySet Name="Projects" EntityType="Temper.System.Project" />
         <EntitySet Name="Tenants" EntityType="Temper.System.Tenant" />
@@ -284,6 +306,7 @@
         <EntitySet Name="Insights" EntityType="Temper.System.Insight" />
         <EntitySet Name="FeatureRequests" EntityType="Temper.System.FeatureRequest" />
         <EntitySet Name="GovernanceDecisions" EntityType="Temper.System.GovernanceDecision" />
+        <EntitySet Name="HttpEndpoints" EntityType="Temper.System.HttpEndpoint" />
       </EntityContainer>
     </Schema>
   </edmx:DataServices>

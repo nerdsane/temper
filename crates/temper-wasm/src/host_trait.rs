@@ -124,6 +124,108 @@ pub trait WasmHost: Send + Sync {
         self.http_call(method, url, headers, body).await
     }
 
+    // --- ADR-0057 streaming primitive (outbound, Phase 1) ---
+    //
+    // Opens a bidirectional streaming exchange for a single HTTP
+    // call. Guests write request body chunks into
+    // `handles.request_body` (closing it to signal end of request),
+    // retrieve response head once available via
+    // `http_stream_response_head`, then read response body chunks
+    // from `handles.response_body` (empty chunk = EOF).
+    //
+    // Default impl: "not supported" — hosts opt in by overriding.
+
+    /// Open an outbound streaming HTTP exchange. Returns handles
+    /// the guest uses to push request body + pull response body.
+    /// The host begins sending the request as soon as the first
+    /// chunk is written (or immediately if body is empty and the
+    /// guest closes `handles.request_body`).
+    async fn http_stream_begin_outbound(
+        &self,
+        _request: crate::http_stream::HttpRequestHead,
+    ) -> Result<crate::http_stream::HttpStreamHandles, String> {
+        Err("http_stream_begin_outbound not supported by this host".to_string())
+    }
+
+    /// Read the next chunk from a stream handle. Returns empty
+    /// vector on clean EOF. Blocks if no chunk is available and
+    /// the peer has not closed.
+    async fn http_stream_read(
+        &self,
+        _handle: crate::http_stream::StreamHandle,
+    ) -> Result<Vec<u8>, crate::http_stream::StreamError> {
+        Err(crate::http_stream::StreamError::Aborted(
+            "http_stream_read not supported by this host".into(),
+        ))
+    }
+
+    /// Read at most `max_bytes` from a stream handle, retaining any
+    /// unread suffix for the next read. Hosts that can receive chunks
+    /// larger than a guest buffer should override this.
+    async fn http_stream_read_bounded(
+        &self,
+        handle: crate::http_stream::StreamHandle,
+        max_bytes: usize,
+    ) -> Result<Vec<u8>, crate::http_stream::StreamError> {
+        let chunk = self.http_stream_read(handle).await?;
+        if chunk.len() > max_bytes {
+            return Err(crate::http_stream::StreamError::Aborted(
+                "stream chunk exceeded guest buffer capacity".into(),
+            ));
+        }
+        Ok(chunk)
+    }
+
+    /// Non-blocking write to a stream handle. Returns WouldBlock
+    /// if the channel is full.
+    async fn http_stream_try_write(
+        &self,
+        _handle: crate::http_stream::StreamHandle,
+        _chunk: Vec<u8>,
+    ) -> Result<usize, crate::http_stream::StreamError> {
+        Err(crate::http_stream::StreamError::Aborted(
+            "http_stream_try_write not supported by this host".into(),
+        ))
+    }
+
+    /// Close a stream handle. Release of a sender signals EOF to
+    /// the receiver; release of a receiver turns subsequent sender
+    /// writes into Closed errors.
+    async fn http_stream_close(
+        &self,
+        _handle: crate::http_stream::StreamHandle,
+    ) -> Result<(), crate::http_stream::StreamError> {
+        Err(crate::http_stream::StreamError::Aborted(
+            "http_stream_close not supported by this host".into(),
+        ))
+    }
+
+    /// Block until the response head (status + headers) is
+    /// available for the given response-body handle, then return
+    /// it. Guests typically call this once, after closing the
+    /// request body, and before reading the response body.
+    async fn http_stream_response_head(
+        &self,
+        _response_body: crate::http_stream::StreamHandle,
+    ) -> Result<crate::http_stream::HttpResponseHead, String> {
+        Err("http_stream_response_head not supported by this host".to_string())
+    }
+
+    /// Submit the response head for an inbound exchange (ADR-0056
+    /// dispatch). The guest calls this once — keyed on the
+    /// response-body handle it was given — before writing the
+    /// response body. The kernel dispatcher blocks on
+    /// `await_inbound_response_head` until this fires.
+    async fn http_stream_send_response_head(
+        &self,
+        _response_body: crate::http_stream::StreamHandle,
+        _head: crate::http_stream::HttpResponseHead,
+    ) -> Result<(), crate::http_stream::StreamError> {
+        Err(crate::http_stream::StreamError::Aborted(
+            "http_stream_send_response_head not supported by this host".into(),
+        ))
+    }
+
     /// Log a message at the given level.
     fn log(&self, level: &str, message: &str);
 
@@ -227,6 +329,9 @@ pub struct ProductionWasmHost {
     text_http_interceptor: Option<TextHttpInterceptorFn>,
     /// Invocation context for auto-enriching guest telemetry.
     invocation_context: Option<WasmInvocationContext>,
+    /// Registry of active streaming HTTP exchanges (ADR-0057).
+    /// One per host instance; handle IDs are unique within the host.
+    http_streams: Arc<crate::http_stream::HttpStreamRegistry>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -325,6 +430,25 @@ impl ProductionWasmHost {
         Self::with_timeout(secrets, crate::WasmResourceLimits::default().max_duration)
     }
 
+    /// Create with a pre-existing [`HttpStreamRegistry`] so the
+    /// ADR-0056 Phase 2 dispatcher and the per-request host share
+    /// the same registry — handles minted by the dispatcher are
+    /// reachable via FFI from the guest.
+    pub fn with_shared_streams(
+        secrets: BTreeMap<String, String>,
+        http_streams: Arc<crate::http_stream::HttpStreamRegistry>,
+    ) -> Self {
+        let mut host = Self::new(secrets);
+        host.http_streams = http_streams;
+        host
+    }
+
+    /// Borrow the host's shared stream registry. Used by the HTTP
+    /// dispatcher to mint inbound exchanges.
+    pub fn http_streams(&self) -> Arc<crate::http_stream::HttpStreamRegistry> {
+        self.http_streams.clone()
+    }
+
     /// Create with pre-loaded secrets and a custom HTTP request timeout.
     ///
     /// Secrets whose key starts with `ca_cert:` are treated as PEM-encoded
@@ -362,6 +486,7 @@ impl ProductionWasmHost {
             binary_http_interceptor: None,
             text_http_interceptor: None,
             invocation_context: None,
+            http_streams: Arc::new(crate::http_stream::HttpStreamRegistry::new()),
         }
     }
 
@@ -1120,6 +1245,159 @@ impl WasmHost for ProductionWasmHost {
                 .record(payload.value, &attrs);
         }
         Ok(())
+    }
+
+    // --- ADR-0057 streaming primitive (outbound, Phase 1) ---
+    //
+    // Flow on begin_outbound:
+    //   1. Registry mints an OutboundExchange — two paired mpsc
+    //      channels and a oneshot for the response head.
+    //   2. Spawn a tokio task that bridges to reqwest:
+    //        * Reads request body chunks from bridge_request_body,
+    //          feeds them into reqwest::Body::wrap_stream.
+    //        * Sends the HTTP request.
+    //        * On response, fires the head oneshot, then streams
+    //          response.bytes_stream() into bridge_response_body.
+    //        * Closes both bridge handles on completion / error.
+    //   3. Return guest_handles to the guest.
+    //
+    // Guest sees the handle pair and the head delivery promise; the
+    // bridge task owns the reqwest call for its entire lifetime.
+
+    async fn http_stream_begin_outbound(
+        &self,
+        request: crate::http_stream::HttpRequestHead,
+    ) -> Result<crate::http_stream::HttpStreamHandles, String> {
+        use futures_util::StreamExt;
+
+        let exchange = self.http_streams.open_outbound_exchange().await;
+        let guest = exchange.guest_handles();
+        let bridge_req = exchange.bridge_request_body;
+        let bridge_resp = exchange.bridge_response_body;
+        let head_tx = exchange.bridge_head_sender;
+        let streams = self.http_streams.clone();
+        let client = self.client.clone();
+
+        // Build the request head before moving into the task so we
+        // can surface malformed-method errors synchronously.
+        let builder = match request.method.to_uppercase().as_str() {
+            "GET" => client.get(&request.url),
+            "POST" => client.post(&request.url),
+            "PUT" => client.put(&request.url),
+            "DELETE" => client.delete(&request.url),
+            "PATCH" => client.patch(&request.url),
+            other => return Err(format!("unsupported HTTP method: {other}")),
+        };
+        let mut builder = builder;
+        for (k, v) in &request.headers {
+            builder = builder.header(k.as_str(), v.as_str());
+        }
+
+        tokio::spawn(async move {
+            // Pull request body chunks from the registry; wrap as a
+            // Stream<Item = Result<Bytes, _>> for reqwest.
+            let req_streams = streams.clone();
+            let body_stream = async_stream::stream! {
+                loop {
+                    match req_streams.read(bridge_req).await {
+                        Ok(chunk) if chunk.is_empty() => break, // EOF
+                        Ok(chunk) => yield Ok::<_, std::io::Error>(bytes::Bytes::from(chunk)),
+                        Err(_) => break,
+                    }
+                }
+            };
+            let req_body = reqwest::Body::wrap_stream(body_stream);
+
+            let send_result = builder.body(req_body).send().await;
+            let resp = match send_result {
+                Ok(r) => r,
+                Err(e) => {
+                    let _ = head_tx.send(crate::http_stream::HttpResponseHead {
+                        status: 0,
+                        headers: vec![("x-temper-stream-error".into(), format!("{e}"))],
+                    });
+                    let _ = streams.close(bridge_resp).await;
+                    return;
+                }
+            };
+
+            let status = resp.status().as_u16();
+            let headers: Vec<(String, String)> = resp
+                .headers()
+                .iter()
+                .filter_map(|(k, v)| {
+                    v.to_str()
+                        .ok()
+                        .map(|s| (k.as_str().to_string(), s.to_string()))
+                })
+                .collect();
+            let _ = head_tx.send(crate::http_stream::HttpResponseHead { status, headers });
+
+            let mut body_stream = resp.bytes_stream();
+            while let Some(chunk) = body_stream.next().await {
+                match chunk {
+                    Ok(bytes) => {
+                        if streams.write(bridge_resp, bytes.to_vec()).await.is_err() {
+                            break; // guest hung up
+                        }
+                    }
+                    Err(_) => break,
+                }
+            }
+            let _ = streams.close(bridge_resp).await;
+        });
+
+        Ok(guest)
+    }
+
+    async fn http_stream_read(
+        &self,
+        handle: crate::http_stream::StreamHandle,
+    ) -> Result<Vec<u8>, crate::http_stream::StreamError> {
+        self.http_streams.read(handle).await
+    }
+
+    async fn http_stream_read_bounded(
+        &self,
+        handle: crate::http_stream::StreamHandle,
+        max_bytes: usize,
+    ) -> Result<Vec<u8>, crate::http_stream::StreamError> {
+        self.http_streams.read_bounded(handle, max_bytes).await
+    }
+
+    async fn http_stream_try_write(
+        &self,
+        handle: crate::http_stream::StreamHandle,
+        chunk: Vec<u8>,
+    ) -> Result<usize, crate::http_stream::StreamError> {
+        self.http_streams.try_write(handle, chunk).await
+    }
+
+    async fn http_stream_close(
+        &self,
+        handle: crate::http_stream::StreamHandle,
+    ) -> Result<(), crate::http_stream::StreamError> {
+        self.http_streams.close(handle).await
+    }
+
+    async fn http_stream_response_head(
+        &self,
+        response_body: crate::http_stream::StreamHandle,
+    ) -> Result<crate::http_stream::HttpResponseHead, String> {
+        self.http_streams
+            .await_response_head(response_body)
+            .await
+            .map_err(|e| e.to_string())
+    }
+
+    async fn http_stream_send_response_head(
+        &self,
+        response_body: crate::http_stream::StreamHandle,
+        head: crate::http_stream::HttpResponseHead,
+    ) -> Result<(), crate::http_stream::StreamError> {
+        self.http_streams
+            .submit_inbound_response_head(response_body, head)
+            .await
     }
 }
 

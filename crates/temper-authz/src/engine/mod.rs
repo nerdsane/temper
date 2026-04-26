@@ -426,6 +426,10 @@ impl AuthzEngine {
             "id".to_string(),
             cedar_policy::RestrictedExpression::new_string(security_ctx.principal.id.clone()),
         );
+        principal_attrs.insert(
+            "accountId".to_string(),
+            cedar_policy::RestrictedExpression::new_string(security_ctx.principal.id.clone()),
+        );
         if let Some(ref agent_type) = security_ctx.principal.agent_type {
             principal_attrs.insert(
                 "agent_type".to_string(),
