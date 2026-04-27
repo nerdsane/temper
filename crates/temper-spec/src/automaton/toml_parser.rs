@@ -217,7 +217,10 @@ pub(super) fn parse_toml_to_automaton(input: &str) -> Result<Automaton, Automato
                             "kind" => a.kind = value.clone(),
                             "from" => a.from = parse_string_array(&value),
                             "to" => a.to = Some(value.clone()),
-                            "params" => a.params = parse_string_array(&value),
+                            "params" => {
+                                // Try typed params first ({ name, type }), fall back to plain strings.
+                                a.params = parse_action_params(&value);
+                            }
                             "hint" => a.hint = Some(value.clone()),
                             "guard" => {
                                 // Guard can be a string ("min count 2") or
@@ -760,6 +763,28 @@ pub(super) fn parse_string_array(value: &str) -> Vec<String> {
     } else {
         vec![trimmed.trim_matches('"').to_string()]
     }
+}
+
+/// Parse action params — supports both plain string arrays and typed params.
+///
+/// Plain:  `["user_prompt", "token_count"]`
+/// Typed:  `[{ name = "user_prompt", type = "string" }, ...]`
+pub(super) fn parse_action_params(value: &str) -> Vec<super::types::ActionParam> {
+    let trimmed = value.trim();
+    if trimmed.contains('{') {
+        let toml_str = format!("params = {trimmed}");
+        #[derive(serde::Deserialize)]
+        struct Wrapper {
+            params: Vec<super::types::ActionParam>,
+        }
+        if let Ok(w) = toml::from_str::<Wrapper>(&toml_str) {
+            return w.params;
+        }
+    }
+    parse_string_array(trimmed)
+        .into_iter()
+        .map(super::types::ActionParam::Named)
+        .collect()
 }
 
 /// Join multiline array values into single logical lines.

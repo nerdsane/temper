@@ -1,0 +1,175 @@
+# Agent system reaction rules.
+# Wires the Actor state machines together via addressed messages.
+#
+# Specs emit events; reaction rules route them to the right actor.
+# Convention: action name = message_type string.
+
+# ─── Agent → ContextManager ───────────────────────────────────────────────────
+
+[[reaction]]
+name = "process_start_requests_context"
+[reaction.when]
+entity_type = "Process"
+action = "PrepareContext"
+[reaction.then]
+entity_type = "ContextManager"
+action = "PrepareContext"
+[reaction.resolve_target]
+type = "SameId"
+
+# ─── ContextManager → Agent ───────────────────────────────────────────────────
+
+[[reaction]]
+name = "context_ready_to_agent"
+[reaction.when]
+entity_type = "ContextManager"
+action = "ContextReady"
+[reaction.then]
+entity_type = "Process"
+action = "ContextReady"
+[reaction.resolve_target]
+type = "SameId"
+
+[[reaction]]
+name = "context_overflow_to_agent"
+[reaction.when]
+entity_type = "ContextManager"
+action = "ContextOverflow"
+[reaction.then]
+entity_type = "Process"
+action = "ContextOverflow"
+[reaction.resolve_target]
+type = "SameId"
+
+# ─── Agent → ToolRouter ───────────────────────────────────────────────────────
+
+[[reaction]]
+name = "process_tool_calls_to_router"
+[reaction.when]
+entity_type = "Process"
+action = "ToolCallBatchRequested"
+[reaction.then]
+entity_type = "ToolRouter"
+action = "ToolCallBatchRequested"
+[reaction.resolve_target]
+type = "SameId"
+
+# ─── ToolRouter → Agent ───────────────────────────────────────────────────────
+
+[[reaction]]
+name = "tools_complete_to_agent"
+[reaction.when]
+entity_type = "ToolRouter"
+action = "ToolCallBatchComplete"
+[reaction.then]
+entity_type = "Process"
+action = "ToolCallBatchComplete"
+[reaction.resolve_target]
+type = "SameId"
+
+[[reaction]]
+name = "tools_failed_to_agent"
+[reaction.when]
+entity_type = "ToolRouter"
+action = "ToolCallBatchFailed"
+[reaction.then]
+entity_type = "Process"
+action = "ToolCallBatchFailed"
+[reaction.resolve_target]
+type = "SameId"
+
+[[reaction]]
+name = "approval_required_to_agent"
+[reaction.when]
+entity_type = "ToolRouter"
+action = "ApprovalRequired"
+[reaction.then]
+entity_type = "Process"
+action = "ApprovalRequired"
+[reaction.resolve_target]
+type = "SameId"
+
+# ─── Agent → Compactor ────────────────────────────────────────────────────────
+
+[[reaction]]
+name = "process_compaction_needed"
+[reaction.when]
+entity_type = "Process"
+action = "CompactionNeeded"
+[reaction.then]
+entity_type = "Compactor"
+action = "CompactionNeeded"
+[reaction.resolve_target]
+type = "SameId"
+
+# ─── Compactor → Agent ────────────────────────────────────────────────────────
+
+[[reaction]]
+name = "compaction_complete_to_agent"
+[reaction.when]
+entity_type = "Compactor"
+action = "CompactionComplete"
+[reaction.then]
+entity_type = "Process"
+action = "CompactionComplete"
+[reaction.resolve_target]
+type = "SameId"
+
+[[reaction]]
+name = "compaction_failed_to_agent"
+[reaction.when]
+entity_type = "Compactor"
+action = "CompactionFailed"
+[reaction.then]
+entity_type = "Process"
+action = "CompactionFailed"
+[reaction.resolve_target]
+type = "SameId"
+
+# ─── Integration routing (triggers → integration actors) ─────────────────────
+# These wire spec trigger effects to the integration actor implementations.
+# The integration actors handle the actual I/O and reply back.
+
+[[reaction]]
+name = "llm_invoke_trigger"
+[reaction.when]
+entity_type = "Process"
+action = "invoke_llm"
+[reaction.then]
+entity_type = "LlmIntegration"
+action = "invoke_llm"
+[reaction.resolve_target]
+type = "SameId"
+
+[[reaction]]
+name = "context_assemble_trigger"
+[reaction.when]
+entity_type = "ContextManager"
+action = "assemble_context"
+[reaction.then]
+entity_type = "ContextAssemblerIntegration"
+action = "assemble_context"
+[reaction.resolve_target]
+type = "SameId"
+
+[[reaction]]
+name = "tool_execute_trigger"
+[reaction.when]
+entity_type = "ToolRouter"
+action = "execute_tool_batch"
+[reaction.then]
+entity_type = "ToolExecutorIntegration"
+action = "execute_tool_batch"
+[reaction.resolve_target]
+type = "SameId"
+
+[[reaction]]
+name = "compaction_run_trigger"
+[reaction.when]
+entity_type = "Compactor"
+action = "run_compaction"
+[reaction.then]
+entity_type = "CompactionIntegration"
+action = "run_compaction"
+[reaction.resolve_target]
+type = "SameId"

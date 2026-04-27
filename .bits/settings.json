@@ -1,0 +1,30 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(git show:*)",
+      "Bash(git fetch:*)",
+      "Bash(git add:*)",
+      "Bash(git commit:*)",
+      "Bash(git push:*)",
+      "Bash(gh:*)",
+      "Bash(git branch:*)",
+      "Bash(git checkout:*)",
+      "Bash(git cherry-pick:*)",
+      "Bash(git ls-remote:*)",
+      "Write(**)",
+      "Bash(mkdir:*)",
+      "Edit(//Users/gabriele.baldoni/dd/ws/dd-source-temper-server/domains/odp/apps/apis/temper/docs/plans/pluggable-context/**)",
+      "Bash(ls:*)",
+      "Edit(**)",
+      "mcp_local_atlassian_getConfluencePage",
+      "mcp_local_atlassian_createConfluencePage",
+      "Bash(git diff:*)",
+      "mcp_local_altassian_create_issue",
+      "mcp_local_altassian_update_issue",
+      "Bash(git rebase:*)",
+      "Bash(source:*)",
+      "Bash(git pull:*)",
+      "Bash(sed:*)"
+    ]
+  }
+}

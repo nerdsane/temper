@@ -1,0 +1,57 @@
+# Tool Router — dispatches and executes tool call batches.
+# Integration (execute_tool_batch) handles fan-out and execution.
+
+[automaton]
+name = "ToolRouter"
+states = ["Idle", "Executing", "WaitingApproval"]
+initial = "Idle"
+
+[[state]]
+name = "batches_executed"
+type = "counter"
+initial = "0"
+
+[[action]]
+name = "ToolCallBatchRequested"
+kind = "input"
+from = ["Idle"]
+to = "Executing"
+effect = [{ type = "trigger", name = "execute_tool_batch" }]
+
+[[action]]
+name = "ToolCallBatchComplete"
+kind = "input"
+from = ["Executing"]
+to = "Idle"
+effect = [{ type = "increment", var = "batches_executed" }]
+
+[[action]]
+name = "ToolCallBatchFailed"
+kind = "input"
+from = ["Executing"]
+to = "Idle"
+
+[[action]]
+name = "BatchNeedsApproval"
+kind = "input"
+from = ["Executing"]
+to = "WaitingApproval"
+
+[[action]]
+name = "ApprovalGranted"
+kind = "input"
+from = ["WaitingApproval"]
+to = "Executing"
+effect = [{ type = "trigger", name = "execute_tool_batch" }]
+
+[[action]]
+name = "ApprovalDenied"
+kind = "input"
+from = ["WaitingApproval"]
+to = "Idle"
+
+[[integration]]
+name = "execute_tool_batch"
+trigger = "execute_tool_batch"
+type = "tool_executor"
+emits = ["ToolCallBatchComplete", "ToolCallBatchFailed", "BatchNeedsApproval"]

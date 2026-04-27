@@ -1,0 +1,28 @@
+[package]
+name = "temper-actor-runtime"
+version.workspace = true
+edition.workspace = true
+description = "PG-backed mailbox actor runtime for Temper"
+
+[dependencies]
+tokio = { workspace = true }
+tokio-postgres = { workspace = true }
+deadpool-postgres = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+tracing = { workspace = true }
+anyhow = { workspace = true }
+thiserror = { workspace = true }
+uuid = { workspace = true }
+chrono = { workspace = true }
+async-trait = { workspace = true }
+prost = { workspace = true }
+prost-types = { workspace = true }
+temper-runtime = { workspace = true }
+temper-spec = { workspace = true }
+temper-jit = { workspace = true }
+
+[dev-dependencies]
+tokio = { workspace = true }
+tokio-postgres = { workspace = true }
+serde_json = { workspace = true }

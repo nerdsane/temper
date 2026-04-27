@@ -1,0 +1,19 @@
+[package]
+name = "temper-agents"
+version.workspace = true
+edition.workspace = true
+description = "Agent system actors built on temper-actor-runtime"
+
+[dependencies]
+temper-actor-runtime = { workspace = true }
+temper-runtime = { workspace = true }
+tokio = { workspace = true }
+async-trait = { workspace = true }
+tracing = { workspace = true }
+serde_json = { workspace = true }
+serde = { workspace = true }
+reqwest = { workspace = true }
+futures = { workspace = true }
+
+[dev-dependencies]
+tokio = { workspace = true }
