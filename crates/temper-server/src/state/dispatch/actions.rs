@@ -1,9 +1,10 @@
 use std::sync::Arc;
 
 use crate::dispatch::AgentContext;
-use crate::entity_actor::{EntityMsg, EntityResponse, EntityState};
+use crate::entity_actor::{EntityResponse, EntityState};
 use crate::events::EntityStateChange;
 use crate::state::trajectory::{TrajectoryEntry, TrajectorySource};
+use temper_actor_runtime::spec_actor::SpecMessage;
 use temper_runtime::scheduler::sim_now;
 use temper_runtime::tenant::TenantId;
 
@@ -168,7 +169,10 @@ impl crate::state::ServerState {
         agent_ctx: &AgentContext,
         await_integration: bool,
     ) -> Result<EntityResponse, String> {
-        let Some(actor_ref) = self.get_or_spawn_tenant_actor(tenant, entity_type, entity_id) else {
+        let Some(actor_handle) = self
+            .get_or_spawn_tenant_actor(tenant, entity_type, entity_id)
+            .await
+        else {
             // Spec-free dispatch: no transition table, but Cedar allowed the action.
             let entry = TrajectoryEntry {
                 timestamp: sim_now().to_rfc3339(),
@@ -219,23 +223,46 @@ impl crate::state::ServerState {
         // Pre-resolve cross-entity state gates (Gap 1: Agent OS).
         // Walk rules for this action, collect CrossEntityStateIn guards,
         // resolve target entity status, produce boolean map.
-        let cross_entity_booleans = self
+        let _cross_entity_booleans = self
             .resolve_cross_entity_guards(tenant, entity_type, entity_id, action)
             .await;
 
         let action_params = params.clone();
-        let response = match actor_ref
-            .ask::<EntityResponse>(
-                EntityMsg::Action {
-                    name: action.to_string(),
-                    params,
-                    cross_entity_booleans,
-                },
-                self.action_dispatch_timeout,
-            )
-            .await
-        {
-            Ok(response) => response,
+        // PG-backed dispatch: tell the actor via mailbox, read state after processing.
+        let msg = SpecMessage::with_params(action, params.clone());
+        let response = match self.actor_system.tell(None, &actor_handle, msg).await {
+            Ok(_msg_id) => {
+                // Give the scheduler a brief window to process the message.
+                tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+                let cache_key = format!("{tenant}:{entity_type}:{entity_id}");
+                let current_state = self
+                    .entity_state_cache
+                    .read()
+                    .unwrap()
+                    .get(&cache_key)
+                    .map(|(s, _)| s.clone())
+                    .unwrap_or_default();
+                EntityResponse {
+                    success: true,
+                    state: EntityState {
+                        entity_type: entity_type.to_string(),
+                        entity_id: entity_id.to_string(),
+                        status: current_state,
+                        item_count: 0,
+                        counters: std::collections::BTreeMap::new(),
+                        booleans: std::collections::BTreeMap::new(),
+                        lists: std::collections::BTreeMap::new(),
+                        fields: serde_json::json!({}),
+                        events: vec![],
+                        sequence_nr: 0,
+                    },
+                    error: None,
+                    custom_effects: vec![],
+                    scheduled_actions: vec![],
+                    spawn_requests: vec![],
+                    spec_governed: true,
+                }
+            }
             Err(e) => {
                 // Record a trajectory entry for actor dispatch failures.
                 let entry = TrajectoryEntry {

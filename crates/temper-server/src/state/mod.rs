@@ -19,16 +19,14 @@ pub use wasm_invocation_log::{WasmInvocationEntry, WasmInvocationLog};
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::{Arc, RwLock};
 use std::time::Duration;
+use temper_actor_runtime::ActorSystem;
 use temper_authz::AuthzEngine;
 use temper_evolution::{FeatureRequestRecord, PostgresRecordStore, RecordStore};
 use temper_jit::table::TransitionTable;
-use temper_runtime::ActorSystem;
-use temper_runtime::actor::ActorRef;
 use temper_runtime::scheduler::sim_now;
 use temper_spec::csdl::CsdlDocument;
 use temper_store_postgres::PostgresEventStore;
 
-use crate::entity_actor::EntityMsg;
 use crate::event_store::ServerEventStore;
 use crate::events::EntityStateChange;
 use crate::idempotency::IdempotencyCache;
@@ -97,7 +95,7 @@ fn env_timeout() -> Duration {
 /// Shared state for the Temper HTTP server.
 #[derive(Clone)]
 pub struct ServerState {
-    /// The actor system for spawning and managing entity actors.
+    /// The PG-backed actor system: scheduler, mailbox, spec-driven actors.
     pub actor_system: Arc<ActorSystem>,
     /// Parsed CSDL document describing the entity model (legacy single-tenant).
     pub csdl: Arc<CsdlDocument>,
@@ -107,8 +105,8 @@ pub struct ServerState {
     pub entity_set_map: Arc<BTreeMap<String, String>>,
     /// Transition table per entity type (legacy single-tenant).
     pub transition_tables: Arc<BTreeMap<String, Arc<TransitionTable>>>,
-    /// Live actor registry: actor_key -> ActorRef.
-    pub actor_registry: Arc<RwLock<BTreeMap<String, ActorRef<EntityMsg>>>>,
+    /// Entity types routed through the PG actor system (all entity types in the new arch).
+    pub actor_backed_types: std::collections::HashSet<String>,
     /// Optional runtime event store backend for persistence.
     pub event_store: Option<Arc<ServerEventStore>>,
     /// Runtime data directory for persisted local metadata (e.g. specs registry).
@@ -181,7 +179,7 @@ pub struct ServerState {
 
 impl ServerState {
     /// Create ServerState from CSDL XML and optional specification sources.
-    pub fn new(system: ActorSystem, csdl: CsdlDocument, csdl_xml: String) -> Self {
+    pub fn new(system: Arc<ActorSystem>, csdl: CsdlDocument, csdl_xml: String) -> Self {
         let mut entity_set_map = BTreeMap::new();
         for schema in &csdl.schemas {
             for container in &schema.entity_containers {
@@ -200,12 +198,12 @@ impl ServerState {
         let (design_time_tx, _) = tokio::sync::broadcast::channel(256);
         let (pending_decision_tx, _) = tokio::sync::broadcast::channel(256);
         let state = Self {
-            actor_system: Arc::new(system),
+            actor_system: system,
             csdl: Arc::new(csdl),
             csdl_xml: Arc::new(csdl_xml),
             entity_set_map: Arc::new(entity_set_map),
             transition_tables: Arc::new(BTreeMap::new()),
-            actor_registry: Arc::new(RwLock::new(BTreeMap::new())),
+            actor_backed_types: std::collections::HashSet::new(),
             event_store: None,
             data_dir: std::path::PathBuf::new(),
             agent_hints: Arc::new(RwLock::new(BTreeMap::new())),
@@ -272,7 +270,7 @@ impl ServerState {
 
     /// Create ServerState with I/O Automaton TOML specs for transition table resolution.
     pub fn with_specs(
-        system: ActorSystem,
+        system: Arc<ActorSystem>,
         csdl: CsdlDocument,
         csdl_xml: String,
         ioa_sources: BTreeMap<String, String>,
@@ -289,7 +287,7 @@ impl ServerState {
 
     /// Create ServerState with specs AND Postgres persistence.
     pub fn with_persistence(
-        system: ActorSystem,
+        system: Arc<ActorSystem>,
         csdl: CsdlDocument,
         csdl_xml: String,
         ioa_sources: BTreeMap<String, String>,
@@ -302,7 +300,7 @@ impl ServerState {
 
     /// Create ServerState with specs and an explicit runtime event store.
     pub fn with_event_store(
-        system: ActorSystem,
+        system: Arc<ActorSystem>,
         csdl: CsdlDocument,
         csdl_xml: String,
         ioa_sources: BTreeMap<String, String>,
@@ -314,7 +312,7 @@ impl ServerState {
     }
 
     /// Create ServerState from a multi-tenant [`SpecRegistry`].
-    pub fn from_registry(system: ActorSystem, registry: SpecRegistry) -> Self {
+    pub fn from_registry(system: Arc<ActorSystem>, registry: SpecRegistry) -> Self {
         Self::from_registry_shared(system, Arc::new(RwLock::new(registry)))
     }
 
@@ -322,12 +320,15 @@ impl ServerState {
     ///
     /// Use this when the registry must be shared with another component
     /// (e.g. `PlatformState`) so that writes are visible to dispatch.
-    pub fn from_registry_shared(system: ActorSystem, registry: Arc<RwLock<SpecRegistry>>) -> Self {
+    pub fn from_registry_shared(
+        system: Arc<ActorSystem>,
+        registry: Arc<RwLock<SpecRegistry>>,
+    ) -> Self {
         let (event_tx, _) = tokio::sync::broadcast::channel(256);
         let (design_time_tx, _) = tokio::sync::broadcast::channel(256);
         let (pending_decision_tx, _) = tokio::sync::broadcast::channel(256);
         let state = Self {
-            actor_system: Arc::new(system),
+            actor_system: system,
             csdl: Arc::new(CsdlDocument {
                 version: "4.0".into(),
                 schemas: vec![],
@@ -335,7 +336,7 @@ impl ServerState {
             csdl_xml: Arc::new(String::new()),
             entity_set_map: Arc::new(BTreeMap::new()),
             transition_tables: Arc::new(BTreeMap::new()),
-            actor_registry: Arc::new(RwLock::new(BTreeMap::new())),
+            actor_backed_types: std::collections::HashSet::new(),
             event_store: None,
             data_dir: std::path::PathBuf::new(),
             agent_hints: Arc::new(RwLock::new(BTreeMap::new())),

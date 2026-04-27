@@ -22,23 +22,19 @@ use super::{EntityInstanceSummary, EventStreamParams};
 pub(crate) async fn list_entities(
     State(state): State<ServerState>,
 ) -> Json<Vec<EntityInstanceSummary>> {
-    let registry = state.actor_registry.read().unwrap(); // ci-ok: infallible lock
+    // PG-backed: entity state is tracked in entity_state_cache (updated by actor broadcasts).
     let cache = state.entity_state_cache.read().unwrap(); // ci-ok: infallible lock
-    let mut entities: Vec<EntityInstanceSummary> = registry
-        .keys()
-        .map(|key| {
-            // Actor keys are formatted as "{tenant}:{entity_type}:{entity_id}"
+    let entities: Vec<EntityInstanceSummary> = cache
+        .iter()
+        .map(|(key, (current_state, last_updated))| {
+            // Keys are "{tenant}:{entity_type}:{entity_id}"
             let parts: Vec<&str> = key.splitn(3, ':').collect();
-            let (current_state, last_updated) = cache
-                .get(key.as_str())
-                .map(|(s, t)| (Some(s.clone()), Some(t.to_rfc3339())))
-                .unwrap_or((None, None));
             EntityInstanceSummary {
                 entity_type: parts.get(1).unwrap_or(&"unknown").to_string(),
                 entity_id: parts.get(2).unwrap_or(&"unknown").to_string(),
                 actor_status: "active".to_string(),
-                current_state,
-                last_updated,
+                current_state: Some(current_state.clone()),
+                last_updated: Some(last_updated.to_rfc3339()),
             }
         })
         .collect();
@@ -59,39 +55,14 @@ pub(crate) async fn get_entity_history(
 ) -> Json<serde_json::Value> {
     let tenant = extract_tenant(&headers, &state);
 
-    // Path 1: If the actor is loaded, read events from in-memory state.
+    // PG-backed: read current state from entity_state_cache (populated by actor broadcasts).
     let actor_key = format!("{tenant}:{entity_type}:{entity_id}");
-    let actor_ref = {
-        let registry = state
-            .actor_registry
-            .read()
-            .unwrap_or_else(|e| e.into_inner());
-        registry.get(&actor_key).cloned()
-    };
-
-    if let Some(actor_ref) = actor_ref
-        && let Ok(response) = actor_ref
-            .ask::<EntityResponse>(EntityMsg::GetState, state.action_dispatch_timeout)
-            .await
-    {
-        let mut json = format_history_response(&entity_type, &entity_id, &response.state.events);
-        // Include entity properties from in-memory state.
-        if let Some(obj) = json.as_object_mut() {
-            obj.insert(
-                "current_state".to_string(),
-                serde_json::json!(response.state.status),
-            );
-            obj.insert("fields".to_string(), response.state.fields.clone());
-            obj.insert(
-                "counters".to_string(),
-                serde_json::json!(response.state.counters),
-            );
-            obj.insert(
-                "booleans".to_string(),
-                serde_json::json!(response.state.booleans),
-            );
-            obj.insert("lists".to_string(), serde_json::json!(response.state.lists));
-        }
+    if let Some((current_state, _)) = state.entity_state_cache.read().unwrap().get(&actor_key) {
+        let json = serde_json::json!({
+            "entity_type": entity_type,
+            "entity_id": entity_id,
+            "current_state": current_state,
+        });
         return Json(json);
     }
 

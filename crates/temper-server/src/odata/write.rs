@@ -208,6 +208,54 @@ pub async fn handle_odata_post(
                 return constraint_violation_response(v);
             }
 
+            // Actor-backed entity: route directly to PG actor system.
+            // Process spawns all session actors; other types spawn a single actor.
+            if state.actor_backed_types.contains(&entity_type) {
+                {
+                    let actor_sys = state.actor_system.as_ref();
+                    let namespace = format!("{tenant}/{entity_id}");
+                    let spawn_result = if entity_type == "Process" {
+                        actor_sys.spawn_all_registered(&namespace).await
+                    } else {
+                        actor_sys.spawn(&namespace, &entity_type).await.map(|_| ())
+                    };
+                    match spawn_result {
+                        Ok(_) => {
+                            let _ = actor_sys
+                                .tell(
+                                    None,
+                                    &temper_actor_runtime::ActorHandle::new(
+                                        namespace.clone(),
+                                        entity_type.clone(),
+                                    ),
+                                    temper_actor_runtime::spec_actor::SpecMessage::with_params(
+                                        "Initialize",
+                                        initial_fields,
+                                    ),
+                                )
+                                .await;
+                            return ODataResponse {
+                                status: StatusCode::CREATED,
+                                body: serde_json::json!({
+                                    "@odata.type": format!("#{entity_type}"),
+                                    "Id": entity_id,
+                                    "namespace": namespace,
+                                }),
+                            }
+                            .into_response();
+                        }
+                        Err(e) => {
+                            return odata_error(
+                                StatusCode::INTERNAL_SERVER_ERROR,
+                                "ActorSpawnError",
+                                &e.to_string(),
+                            )
+                            .into_response();
+                        }
+                    }
+                }
+            }
+
             match state
                 .get_or_create_tenant_entity(&tenant, &entity_type, &entity_id, initial_fields)
                 .await
@@ -253,6 +301,36 @@ pub async fn handle_odata_post(
             if let Err(resp) = check_verification_gate_or_423(&state, &tenant, &entity_type) {
                 return *resp;
             }
+
+            // Actor-backed action: route directly to PG actor system.
+            if state.actor_backed_types.contains(&entity_type) {
+                {
+                    let actor_sys = state.actor_system.as_ref();
+                    let namespace = format!("{tenant}/{key_str}");
+                    let handle = temper_actor_runtime::ActorHandle::new(
+                        namespace.clone(),
+                        entity_type.clone(),
+                    );
+                    let msg = temper_actor_runtime::spec_actor::SpecMessage::with_params(
+                        action.as_str(),
+                        body_json,
+                    );
+                    return match actor_sys.tell(None, &handle, msg).await {
+                        Ok(_) => ODataResponse {
+                            status: StatusCode::OK,
+                            body: serde_json::json!({ "Id": key_str, "action": action }),
+                        }
+                        .into_response(),
+                        Err(e) => odata_error(
+                            StatusCode::INTERNAL_SERVER_ERROR,
+                            "ActorDispatchError",
+                            &e.to_string(),
+                        )
+                        .into_response(),
+                    };
+                }
+            }
+
             dispatch_bound_action(
                 &state,
                 &tenant,

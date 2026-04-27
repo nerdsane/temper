@@ -1,0 +1,29 @@
+[package]
+name = "agent-runtime-reference"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+publish = false
+description = "Reference agent runtime demonstrating the PG-backed actor system"
+
+[[bin]]
+name = "agent-runtime"
+path = "src/main.rs"
+
+[dependencies]
+temper-server = { path = "../../crates/temper-server" }
+temper-actor-runtime = { path = "../../crates/temper-actor-runtime" }
+temper-agents = { path = "../../crates/temper-agents" }
+temper-runtime = { path = "../../crates/temper-runtime" }
+temper-spec = { path = "../../crates/temper-spec" }
+tokio = { workspace = true }
+serde_json = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+deadpool-postgres = { workspace = true }
+tokio-postgres = { workspace = true }
+anyhow = { workspace = true }
+chrono = { workspace = true }
+reqwest = { workspace = true }
+url = { workspace = true }
+axum = { workspace = true }

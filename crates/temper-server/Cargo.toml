@@ -13,6 +13,7 @@ sim = ["dep:temper-store-sim"]
 
 [dependencies]
 temper-runtime = { workspace = true }
+temper-actor-runtime = { workspace = true }
 temper-odata = { workspace = true }
 temper-spec = { workspace = true }
 temper-jit = { workspace = true }
@@ -44,6 +45,8 @@ sqlx = { workspace = true }
 aes-gcm = { workspace = true }
 
 [dev-dependencies]
+deadpool-postgres = { workspace = true }
+tokio-postgres = { workspace = true }
 tokio-test = { workspace = true }
 criterion = { workspace = true }
 tokio = { workspace = true, features = ["full"] }

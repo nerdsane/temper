@@ -1,14 +1,27 @@
 use super::*;
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
-use temper_runtime::ActorSystem;
+use std::sync::Arc;
+use temper_actor_runtime::{ActorSystem, SchedulerConfig};
 use temper_spec::csdl::parse_csdl;
 use tower::ServiceExt;
+
+/// Create a test ActorSystem backed by a lazy PG pool (no connection until query).
+fn test_actor_system() -> Arc<ActorSystem> {
+    let mut cfg = deadpool_postgres::Config::new();
+    cfg.host = Some("localhost".to_string());
+    cfg.dbname = Some("temper_test".to_string());
+    cfg.user = Some("postgres".to_string());
+    let pool = cfg
+        .create_pool(None, tokio_postgres::NoTls)
+        .expect("failed to create test pool");
+    Arc::new(ActorSystem::new(pool, SchedulerConfig::default()))
+}
 
 fn test_state() -> ServerState {
     let csdl_xml = include_str!("../../../test-fixtures/specs/model.csdl.xml");
     let csdl = parse_csdl(csdl_xml).unwrap();
-    let system = ActorSystem::new("test");
+    let system = test_actor_system();
     ServerState::new(system, csdl, csdl_xml.to_string())
 }
 
@@ -16,7 +29,7 @@ fn test_state_with_ioa() -> ServerState {
     let csdl_xml = include_str!("../../../test-fixtures/specs/model.csdl.xml");
     let order_ioa = include_str!("../../../test-fixtures/specs/order.ioa.toml");
     let csdl = parse_csdl(csdl_xml).unwrap();
-    let system = ActorSystem::new("test-ioa");
+    let system = test_actor_system();
     let mut specs = std::collections::BTreeMap::new();
     specs.insert("Order".to_string(), order_ioa.to_string());
     ServerState::with_specs(system, csdl, csdl_xml.to_string(), specs)
@@ -26,7 +39,7 @@ fn test_state_with_order_and_payment_ioa() -> ServerState {
     let csdl_xml = include_str!("../../../test-fixtures/specs/model.csdl.xml");
     let order_ioa = include_str!("../../../test-fixtures/specs/order.ioa.toml");
     let csdl = parse_csdl(csdl_xml).unwrap();
-    let system = ActorSystem::new("test-ioa-order-payment");
+    let system = test_actor_system();
     let mut specs = std::collections::BTreeMap::new();
     specs.insert("Order".to_string(), order_ioa.to_string());
     // For navigation tests we only need entity creation/read, so reuse the same minimal IOA.
@@ -540,7 +553,7 @@ const PROCESS_IOA: &str = include_str!("../../../test-fixtures/specs/process.ioa
 
 fn test_state_with_agent_definition_ioa() -> ServerState {
     let csdl = parse_csdl(AGENT_DEFINITION_CSDL_XML).unwrap();
-    let system = ActorSystem::new("test-agent-platform");
+    let system = test_actor_system();
     let mut specs = std::collections::BTreeMap::new();
     specs.insert(
         "AgentDefinition".to_string(),
@@ -551,12 +564,7 @@ fn test_state_with_agent_definition_ioa() -> ServerState {
         PROGRAM_DEFINITION_IOA.to_string(),
     );
     specs.insert("Process".to_string(), PROCESS_IOA.to_string());
-    ServerState::with_specs(
-        system,
-        csdl,
-        AGENT_DEFINITION_CSDL_XML.to_string(),
-        specs,
-    )
+    ServerState::with_specs(system, csdl, AGENT_DEFINITION_CSDL_XML.to_string(), specs)
 }
 
 #[tokio::test]

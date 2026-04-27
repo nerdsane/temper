@@ -123,13 +123,12 @@ pub fn default_rules() -> Vec<SentinelRule> {
             threshold_value: 1.0,
             check: Box::new(|state| {
                 let total = state.metrics.transitions_total.load(Ordering::Relaxed);
-                let active = {
-                    let reg = match state.actor_registry.read() {
-                        Ok(r) => r,
-                        Err(e) => e.into_inner(),
-                    };
-                    reg.len() as u64
-                };
+                // PG-backed: count from entity_state_cache (populated by actor broadcasts).
+                let active = state
+                    .entity_state_cache
+                    .read()
+                    .map(|c| c.len() as u64)
+                    .unwrap_or(0);
                 // If we have active entities but zero transitions, flag it.
                 if active > 0 && total == 0 {
                     Some(0.0)

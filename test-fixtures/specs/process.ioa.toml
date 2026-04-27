@@ -1,37 +1,190 @@
-# Process entity -- API-only lifecycle state machine for phase 1.
-# This defines surface semantics only (no background execution loop).
+# Agent (Process) — the orchestrator state machine.
+# Pure state machine: receives messages, transitions states, emits coordination events.
+# Routing is handled by reaction rules (agent.reactions.toml), not by this spec.
 
 [automaton]
 name = "Process"
-states = ["Ready", "Running", "Suspended", "Terminated", "Failed"]
-initial = "Ready"
+states = [
+    "Created", "Ready", "PreparingContext", "BlockedInference",
+    "BlockedToolCall", "BlockedApproval", "BlockedCompaction",
+    "Suspended", "Terminated", "Failed",
+]
+initial = "Created"
+
+[automaton.timeouts]
+BlockedInference = "120s"
+BlockedToolCall = "60s"
+BlockedCompaction = "30s"
+BlockedApproval = "3600s"
+
+[[state]]
+name = "turns"
+type = "counter"
+initial = "0"
+
+[[state]]
+name = "tool_call_rounds"
+type = "counter"
+initial = "0"
+
+# ─── Lifecycle ────────────────────────────────────────────────────────────────
+
+[[action]]
+name = "Initialize"
+kind = "input"
+from = ["Created"]
+to = "Ready"
+
+# ─── Start / User Input ──────────────────────────────────────────────────────
 
 [[action]]
 name = "StartProcess"
 kind = "input"
 from = ["Ready"]
-to = "Running"
+to = "PreparingContext"
+params = [{ name = "user_prompt", type = "string" }]
+effect = [{ type = "emit", event = "PrepareContext" }]
 
 [[action]]
 name = "SendInput"
 kind = "input"
-from = ["Running"]
-to = "Running"
+from = ["Ready", "Failed"]
+to = "PreparingContext"
+params = [{ name = "user_prompt", type = "string" }]
+effect = [{ type = "emit", event = "PrepareContext" }]
+
+# ─── Context Preparation Results ─────────────────────────────────────────────
+
+[[action]]
+name = "ContextReady"
+kind = "input"
+from = ["PreparingContext"]
+to = "BlockedInference"
+effect = [{ type = "trigger", name = "invoke_llm" }]
+
+[[action]]
+name = "ContextOverflow"
+kind = "input"
+from = ["PreparingContext"]
+to = "BlockedCompaction"
+effect = [{ type = "emit", event = "CompactionNeeded" }]
+
+# ─── Inference Results ────────────────────────────────────────────────────────
+
+[[action]]
+name = "InferenceCompleteEndTurn"
+kind = "input"
+from = ["BlockedInference"]
+to = "Ready"
+effect = [{ type = "increment", var = "turns" }]
+
+[[action]]
+name = "InferenceCompleteToolCalls"
+kind = "input"
+from = ["BlockedInference"]
+to = "BlockedToolCall"
+effect = [
+    { type = "increment", var = "turns" },
+    { type = "emit", event = "ToolCallBatchRequested" },
+]
+
+[[action]]
+name = "InferenceContextOverflow"
+kind = "input"
+from = ["BlockedInference"]
+to = "BlockedCompaction"
+effect = [{ type = "emit", event = "CompactionNeeded" }]
+
+[[action]]
+name = "InferenceFailed"
+kind = "input"
+from = ["BlockedInference"]
+to = "Failed"
+
+# ─── Tool Call Results ────────────────────────────────────────────────────────
+
+[[action]]
+name = "ToolCallBatchComplete"
+kind = "input"
+from = ["BlockedToolCall"]
+to = "BlockedInference"
+effect = [
+    { type = "increment", var = "tool_call_rounds" },
+    { type = "trigger", name = "invoke_llm" },
+]
+
+[[action]]
+name = "ToolCallBatchFailed"
+kind = "input"
+from = ["BlockedToolCall"]
+to = "Failed"
+
+[[action]]
+name = "ApprovalRequired"
+kind = "input"
+from = ["BlockedToolCall"]
+to = "BlockedApproval"
+
+[[action]]
+name = "ApproveToolCall"
+kind = "input"
+from = ["BlockedApproval"]
+to = "BlockedToolCall"
+effect = [{ type = "emit", event = "ToolCallBatchRequested" }]
+
+[[action]]
+name = "DenyToolCall"
+kind = "input"
+from = ["BlockedApproval"]
+to = "BlockedInference"
+effect = [{ type = "trigger", name = "invoke_llm" }]
+
+# ─── Compaction Results ───────────────────────────────────────────────────────
+
+[[action]]
+name = "CompactionComplete"
+kind = "input"
+from = ["BlockedCompaction"]
+to = "PreparingContext"
+effect = [{ type = "emit", event = "PrepareContext" }]
+
+[[action]]
+name = "CompactionFailed"
+kind = "input"
+from = ["BlockedCompaction"]
+to = "Failed"
+
+# ─── Control ──────────────────────────────────────────────────────────────────
 
 [[action]]
 name = "SuspendProcess"
 kind = "input"
-from = ["Running"]
+from = ["Ready", "PreparingContext", "BlockedInference", "BlockedToolCall", "BlockedApproval", "BlockedCompaction"]
 to = "Suspended"
 
 [[action]]
 name = "ResumeProcess"
 kind = "input"
 from = ["Suspended"]
-to = "Running"
+to = "Ready"
 
 [[action]]
 name = "TerminateProcess"
 kind = "input"
-from = ["Ready", "Running", "Suspended", "Failed"]
+from = ["Created", "Ready", "PreparingContext", "BlockedInference", "BlockedToolCall", "BlockedApproval", "BlockedCompaction", "Suspended", "Failed"]
 to = "Terminated"
+params = [{ name = "reason", type = "string" }]
+
+[[action]]
+name = "TimeoutExpired"
+kind = "input"
+from = ["BlockedInference", "BlockedToolCall", "BlockedApproval", "BlockedCompaction"]
+to = "Failed"
+
+# ─── Integrations ─────────────────────────────────────────────────────────────
+
+[[integration]]
+name = "invoke_llm"
+trigger = "invoke_llm"
+type = "llm"
+emits = ["InferenceCompleteEndTurn", "InferenceCompleteToolCalls", "InferenceContextOverflow", "InferenceFailed"]

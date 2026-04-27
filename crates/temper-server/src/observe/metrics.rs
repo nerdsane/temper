@@ -23,13 +23,8 @@ pub(crate) async fn handle_health(State(state): State<ServerState>) -> Json<serd
         count
     };
 
-    let active_entities = {
-        let reg = state
-            .actor_registry
-            .read()
-            .unwrap_or_else(|e| e.into_inner());
-        reg.len() as u64
-    };
+    // Active actors tracked in PG actor_instances — count from DB in a follow-up.
+    let active_entities: u64 = 0;
 
     let transitions_total = state.metrics.transitions_total.load(Ordering::Relaxed);
     let errors_total = state.metrics.errors_total.load(Ordering::Relaxed);

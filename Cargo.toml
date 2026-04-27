@@ -27,6 +27,7 @@ members = [
     "crates/temper-agents",
     "reference-apps/ecommerce",
     "reference-apps/oncall",
+    "reference-apps/agent-runtime",
 ]
 
 [workspace.package]
@@ -95,6 +96,7 @@ chrono = { version = "0.4", features = ["serde"] }
 
 # HTTP client (for ClickHouse adapter + LLM API calls)
 reqwest = { version = "0.12", features = ["json", "stream"] }
+url = "2"
 
 # PostgreSQL (raw — used by actor runtime alongside sqlx)
 tokio-postgres = { version = "0.7", features = ["with-serde_json-1", "with-chrono-0_4", "with-uuid-1"] }

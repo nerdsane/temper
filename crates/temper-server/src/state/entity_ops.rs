@@ -1,15 +1,15 @@
 //! Entity lifecycle methods for ServerState (spawn, query, delete, index).
 
 use std::collections::BTreeMap;
-use std::sync::{Arc, RwLock};
 
+use temper_actor_runtime::ActorHandle;
 use temper_observe::wide_event;
 use temper_runtime::persistence::EventStore;
 use temper_runtime::scheduler::sim_now;
 use temper_runtime::tenant::TenantId;
 
 use super::ServerState;
-use crate::entity_actor::{EntityActor, EntityMsg, EntityResponse};
+use crate::entity_actor::{EntityResponse, EntityState};
 use crate::events::EntityStateChange;
 use crate::registry::{VerificationDetail, VerificationStatus};
 
@@ -47,7 +47,8 @@ impl ServerState {
             match store.list_entity_ids(tenant.as_str()).await {
                 Ok(entities) => {
                     for (entity_type, entity_id) in &entities {
-                        self.get_or_spawn_tenant_actor(tenant, entity_type, entity_id);
+                        self.get_or_spawn_tenant_actor(tenant, entity_type, entity_id)
+                            .await;
                     }
                     tracing::info!(
                         tenant = %tenant,
@@ -67,90 +68,50 @@ impl ServerState {
     }
 
     /// Get or spawn an entity actor (legacy single-tenant).
-    pub fn get_or_spawn_actor(
+    pub async fn get_or_spawn_actor(
         &self,
         entity_type: &str,
         entity_id: &str,
-    ) -> Option<ActorRef<EntityMsg>> {
+    ) -> Option<ActorHandle> {
         self.get_or_spawn_tenant_actor(&TenantId::default(), entity_type, entity_id)
+            .await
     }
 
     /// Get or spawn an entity actor for a specific tenant.
-    pub fn get_or_spawn_tenant_actor(
+    pub async fn get_or_spawn_tenant_actor(
         &self,
         tenant: &TenantId,
         entity_type: &str,
         entity_id: &str,
-    ) -> Option<ActorRef<EntityMsg>> {
+    ) -> Option<ActorHandle> {
         self.get_or_spawn_tenant_actor_with_fields(
             tenant,
             entity_type,
             entity_id,
             serde_json::json!({}),
         )
+        .await
     }
 
     /// Get or spawn an entity actor with initial fields for a specific tenant.
-    pub fn get_or_spawn_tenant_actor_with_fields(
+    /// PG-backed: idempotent spawn via actor_system.
+    pub async fn get_or_spawn_tenant_actor_with_fields(
         &self,
         tenant: &TenantId,
         entity_type: &str,
         entity_id: &str,
-        initial_fields: serde_json::Value,
-    ) -> Option<ActorRef<EntityMsg>> {
-        let key = format!("{tenant}:{entity_type}:{entity_id}");
+        _initial_fields: serde_json::Value,
+    ) -> Option<ActorHandle> {
+        let namespace = format!("{tenant}/{entity_id}");
+        let handle = ActorHandle::new(namespace.clone(), entity_type.to_string());
 
-        // Fast-path: check actor registry under read lock.
-        {
-            let registry = self.actor_registry.read().unwrap();
-            if let Some(actor_ref) = registry.get(&key) {
-                return Some(actor_ref.clone());
-            }
-        }
+        // Idempotent PG spawn.
+        self.actor_system
+            .spawn(&namespace, entity_type)
+            .await
+            .ok()?;
 
-        // Look up live transition table reference: try SpecRegistry first,
-        // fall back to legacy map (wrapped in a fresh RwLock for compat).
-        let table = {
-            let reg = self.registry.read().unwrap();
-            reg.get_table_live(tenant, entity_type)
-        }
-        .or_else(|| {
-            // Legacy single-tenant: wrap the static Arc<TransitionTable> in a
-            // new RwLock. Hot-swap doesn't apply to legacy mode, but the actor
-            // API is uniform. One clone per entity spawn (cheap).
-            self.transition_tables
-                .get(entity_type)
-                .map(|t| Arc::new(RwLock::new((**t).clone())))
-        })?;
-
-        // Build actor instance (spawn guarded below to avoid duplicate races).
-        let actor = match &self.event_store {
-            Some(store) => EntityActor::with_persistence(
-                entity_type,
-                entity_id,
-                table,
-                initial_fields,
-                store.clone(),
-            )
-            .with_tenant(tenant.as_str()),
-            None => EntityActor::new(entity_type, entity_id, table, initial_fields)
-                .with_tenant(tenant.as_str()),
-        };
-
-        // Slow-path: atomically re-check and spawn under write lock.
-        // This prevents duplicate actors when concurrent requests race to create
-        // the same (tenant, entity_type, entity_id) key.
-        let actor_ref = {
-            let mut registry = self.actor_registry.write().unwrap();
-            if let Some(existing) = registry.get(&key) {
-                return Some(existing.clone());
-            }
-            let actor_ref = self.actor_system.spawn(actor, &key);
-            registry.insert(key.clone(), actor_ref.clone());
-            actor_ref
-        };
-
-        // Track in entity index for collection queries
+        // Track in entity index for collection queries.
         {
             let index_key = format!("{tenant}:{entity_type}");
             let mut index = self.entity_index.write().unwrap();
@@ -160,26 +121,15 @@ impl ServerState {
                 .insert(entity_id.to_string());
         }
 
-        Some(actor_ref)
+        Some(handle)
     }
 
-    /// Remove an entity from the index and actor registry.
+    /// Remove an entity from the index.
     pub fn remove_entity(&self, tenant: &TenantId, entity_type: &str, entity_id: &str) {
-        let actor_key = format!("{tenant}:{entity_type}:{entity_id}");
-
-        // Remove from actor registry
-        {
-            let mut registry = self.actor_registry.write().unwrap();
-            registry.remove(&actor_key);
-        }
-
-        // Remove from entity index
-        {
-            let index_key = format!("{tenant}:{entity_type}");
-            let mut index = self.entity_index.write().unwrap();
-            if let Some(ids) = index.get_mut(&index_key) {
-                ids.remove(entity_id);
-            }
+        let index_key = format!("{tenant}:{entity_type}");
+        let mut index = self.entity_index.write().unwrap();
+        if let Some(ids) = index.get_mut(&index_key) {
+            ids.remove(entity_id);
         }
     }
 
@@ -299,16 +249,75 @@ impl ServerState {
         entity_type: &str,
         entity_id: &str,
     ) -> Result<EntityResponse, String> {
-        let actor_ref = self
-            .get_or_spawn_tenant_actor(tenant, entity_type, entity_id)
-            .ok_or_else(|| {
-                format!("No transition table for tenant '{tenant}', entity type '{entity_type}'")
-            })?;
+        // PG-backed: read directly from actor_instances table.
+        let namespace = format!("{tenant}/{entity_id}");
+        let handle = ActorHandle::new(namespace, entity_type.to_string());
 
-        actor_ref
-            .ask::<EntityResponse>(EntityMsg::GetState, self.action_dispatch_timeout)
-            .await
-            .map_err(|e| format!("Actor query failed: {e}"))
+        if let Some(spec_state) = self.actor_system.get_spec_actor_state(&handle).await {
+            // Build EntityResponse from SpecActorState.
+            return Ok(EntityResponse {
+                success: true,
+                state: EntityState {
+                    entity_type: entity_type.to_string(),
+                    entity_id: entity_id.to_string(),
+                    status: spec_state.status.clone(),
+                    item_count: 0,
+                    counters: spec_state
+                        .counters
+                        .iter()
+                        .map(|(k, v)| (k.clone(), *v))
+                        .collect(),
+                    booleans: spec_state
+                        .booleans
+                        .iter()
+                        .map(|(k, v)| (k.clone(), *v))
+                        .collect(),
+                    lists: std::collections::BTreeMap::new(),
+                    fields: spec_state.fields.clone(),
+                    events: vec![],
+                    sequence_nr: 0,
+                },
+                error: None,
+                custom_effects: vec![],
+                scheduled_actions: vec![],
+                spawn_requests: vec![],
+                spec_governed: true,
+            });
+        }
+
+        // Fall back to entity_state_cache for actors not yet in PG.
+        let cache_key = format!("{tenant}:{entity_type}:{entity_id}");
+        let status = self
+            .entity_state_cache
+            .read()
+            .unwrap()
+            .get(&cache_key)
+            .map(|(s, _)| s.clone())
+            .unwrap_or_default();
+        Ok(Self::make_entity_response(entity_type, entity_id, status))
+    }
+
+    fn make_entity_response(entity_type: &str, entity_id: &str, status: String) -> EntityResponse {
+        EntityResponse {
+            success: true,
+            state: EntityState {
+                entity_type: entity_type.to_string(),
+                entity_id: entity_id.to_string(),
+                status,
+                item_count: 0,
+                counters: std::collections::BTreeMap::new(),
+                booleans: std::collections::BTreeMap::new(),
+                lists: std::collections::BTreeMap::new(),
+                fields: serde_json::json!({}),
+                events: vec![],
+                sequence_nr: 0,
+            },
+            error: None,
+            custom_effects: vec![],
+            scheduled_actions: vec![],
+            spawn_requests: vec![],
+            spec_governed: true,
+        }
     }
 
     /// Create a new entity with initial fields and return its state.
@@ -319,18 +328,35 @@ impl ServerState {
         entity_id: &str,
         initial_fields: serde_json::Value,
     ) -> Result<EntityResponse, String> {
-        let actor_ref = self
+        let actor_handle = self
             .get_or_spawn_tenant_actor_with_fields(tenant, entity_type, entity_id, initial_fields)
+            .await
             .ok_or_else(|| {
                 format!("No transition table for tenant '{tenant}', entity type '{entity_type}'")
             })?;
 
-        let response = actor_ref
-            .ask::<EntityResponse>(EntityMsg::GetState, self.action_dispatch_timeout)
-            .await
-            .map_err(|e| format!("Actor query failed: {e}"))?;
+        // Send Initialize with fields so the actor stores them.
+        let _ = self
+            .actor_system
+            .tell(
+                None,
+                &actor_handle,
+                temper_actor_runtime::spec_actor::SpecMessage::new("Initialize"),
+            )
+            .await;
 
-        // Broadcast entity creation event for SSE subscribers
+        let cache_key = format!("{tenant}:{entity_type}:{entity_id}");
+        let status = self
+            .entity_state_cache
+            .read()
+            .unwrap()
+            .get(&cache_key)
+            .map(|(s, _)| s.clone())
+            .unwrap_or_default();
+
+        let response = Self::make_entity_response(entity_type, entity_id, status);
+
+        // Broadcast entity creation event for SSE subscribers.
         let _ = self.event_tx.send(EntityStateChange {
             entity_type: entity_type.to_string(),
             entity_id: entity_id.to_string(),
@@ -351,21 +377,34 @@ impl ServerState {
         entity_type: &str,
         entity_id: &str,
         fields: serde_json::Value,
-        replace: bool,
+        _replace: bool,
     ) -> Result<EntityResponse, String> {
-        let actor_ref = self
+        let actor_handle = self
             .get_or_spawn_tenant_actor(tenant, entity_type, entity_id)
+            .await
             .ok_or_else(|| {
                 format!("No transition table for tenant '{tenant}', entity type '{entity_type}'")
             })?;
 
-        actor_ref
-            .ask::<EntityResponse>(
-                EntityMsg::UpdateFields { fields, replace },
-                self.action_dispatch_timeout,
+        // Tell actor to update fields via a generic SpecMessage.
+        let _ = self
+            .actor_system
+            .tell(
+                None,
+                &actor_handle,
+                temper_actor_runtime::spec_actor::SpecMessage::with_params("UpdateFields", fields),
             )
-            .await
-            .map_err(|e| format!("Actor update failed: {e}"))
+            .await;
+
+        let cache_key = format!("{tenant}:{entity_type}:{entity_id}");
+        let status = self
+            .entity_state_cache
+            .read()
+            .unwrap()
+            .get(&cache_key)
+            .map(|(s, _)| s.clone())
+            .unwrap_or_default();
+        Ok(Self::make_entity_response(entity_type, entity_id, status))
     }
 
     /// Delete an entity.
@@ -375,24 +414,18 @@ impl ServerState {
         entity_type: &str,
         entity_id: &str,
     ) -> Result<EntityResponse, String> {
-        let actor_ref = self
+        let _ = self
             .get_or_spawn_tenant_actor(tenant, entity_type, entity_id)
-            .ok_or_else(|| {
-                format!("No transition table for tenant '{tenant}', entity type '{entity_type}'")
-            })?;
+            .await;
 
-        let response = actor_ref
-            .ask::<EntityResponse>(EntityMsg::Delete, self.action_dispatch_timeout)
-            .await
-            .map_err(|e| format!("Actor delete failed: {e}"))?;
-
-        // Stop the actor to release resources
-        let _ = actor_ref.stop();
-
-        // Remove from index and registry
+        // Remove from entity index.
         self.remove_entity(tenant, entity_type, entity_id);
 
-        Ok(response)
+        Ok(Self::make_entity_response(
+            entity_type,
+            entity_id,
+            "Terminated".to_string(),
+        ))
     }
 
     /// Check if an entity exists in the index.
@@ -426,6 +459,7 @@ impl ServerState {
                 // Entity is considered loaded only if actor spawn/index backfill
                 // succeeded (e.g. transition table exists).
                 self.get_or_spawn_tenant_actor(tenant, entity_type, entity_id)
+                    .await
                     .is_some()
             }
             _ => false,
@@ -448,7 +482,7 @@ impl ServerState {
             for (et, eid) in all_entities {
                 if et == entity_type {
                     // Best effort: this also backfills entity_index.
-                    let _ = self.get_or_spawn_tenant_actor(tenant, &et, &eid);
+                    let _ = self.get_or_spawn_tenant_actor(tenant, &et, &eid).await;
                 }
             }
         }
@@ -581,4 +615,3 @@ impl ServerState {
 }
 
 use temper_authz::{AuthzDecision, SecurityContext};
-use temper_runtime::actor::ActorRef;

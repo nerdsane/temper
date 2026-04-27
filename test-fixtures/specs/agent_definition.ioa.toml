@@ -1,13 +1,38 @@
-# AgentDefinition entity -- minimal state machine to enable actor-backed CRUD
-# through /tdata/AgentDefinitions.
+# AgentDefinition — agent configuration template.
+# A single AgentDefinition can spawn multiple Process instances (conversations).
+# Mirrors the AgentDefinition entity from model.csdl.xml.
 
 [automaton]
 name = "AgentDefinition"
-states = ["Ready"]
-initial = "Ready"
+states = ["Active", "Archived"]
+initial = "Active"
+
+[[state]]
+name = "processes_started"
+type = "counter"
+initial = "0"
 
 [[action]]
-name = "Touch"
+name = "Initialize"
 kind = "input"
-from = ["Ready"]
-to = "Ready"
+from = ["Active"]
+
+[[action]]
+name = "StartProcess"
+kind = "input"
+from = ["Active"]
+effect = [{ type = "increment", var = "processes_started" }]
+hint = "Spawn a Process instance from this AgentDefinition."
+
+[[action]]
+name = "Archive"
+kind = "input"
+from = ["Active"]
+to = "Archived"
+hint = "Deactivate this agent definition."
+
+[[action]]
+name = "Restore"
+kind = "input"
+from = ["Archived"]
+to = "Active"

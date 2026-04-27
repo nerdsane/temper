@@ -242,7 +242,15 @@ impl ServerState {
 mod tests {
     use std::sync::Arc;
 
-    use temper_runtime::ActorSystem;
+    use temper_actor_runtime::{ActorSystem, SchedulerConfig};
+    fn test_actor_system() -> std::sync::Arc<ActorSystem> {
+        let mut cfg = deadpool_postgres::Config::new();
+        cfg.host = Some("localhost".to_string());
+        cfg.dbname = Some("temper_test".to_string());
+        cfg.user = Some("postgres".to_string());
+        let pool = cfg.create_pool(None, tokio_postgres::NoTls).expect("pool");
+        std::sync::Arc::new(ActorSystem::new(pool, SchedulerConfig::default()))
+    }
     use temper_store_turso::TursoEventStore;
 
     use crate::event_store::ServerEventStore;
@@ -251,7 +259,7 @@ mod tests {
     use crate::state::ServerState;
 
     fn make_state() -> ServerState {
-        let system = ActorSystem::new("test-secrets-persistence");
+        let system = test_actor_system();
         ServerState::from_registry(system, SpecRegistry::new())
             .with_secrets_vault(SecretsVault::new(&[7u8; 32]))
     }

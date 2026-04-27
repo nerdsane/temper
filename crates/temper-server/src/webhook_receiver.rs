@@ -144,7 +144,15 @@ mod tests {
     use super::*;
     use axum::body::Body;
     use axum::http::Request;
-    use temper_runtime::ActorSystem;
+    use temper_actor_runtime::{ActorSystem, SchedulerConfig};
+    fn test_actor_system() -> std::sync::Arc<ActorSystem> {
+        let mut cfg = deadpool_postgres::Config::new();
+        cfg.host = Some("localhost".to_string());
+        cfg.dbname = Some("temper_test".to_string());
+        cfg.user = Some("postgres".to_string());
+        let pool = cfg.create_pool(None, tokio_postgres::NoTls).expect("pool");
+        std::sync::Arc::new(ActorSystem::new(pool, SchedulerConfig::default()))
+    }
     use temper_spec::csdl::parse_csdl;
     use tower::ServiceExt;
 
@@ -196,7 +204,7 @@ code = "query.code"
 
     fn build_test_state() -> ServerState {
         let csdl = parse_csdl(CSDL_XML).unwrap();
-        let system = ActorSystem::new("webhook-test");
+        let system = test_actor_system();
         let state = ServerState::new(system, csdl, CSDL_XML.to_string());
 
         // Register tenant with webhook-enabled spec.

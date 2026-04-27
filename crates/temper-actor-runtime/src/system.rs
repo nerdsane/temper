@@ -202,4 +202,16 @@ impl ActorSystem {
 
         Ok(rows.first().map(|row| row.get::<_, Vec<u8>>("state")))
     }
+
+    /// Load and deserialize spec actor state. Returns None if not found.
+    pub async fn get_spec_actor_state(
+        &self,
+        handle: &ActorHandle,
+    ) -> Option<crate::spec_actor::SpecActorState> {
+        let bytes = self
+            .load_state(&handle.namespace, &handle.actor_type)
+            .await
+            .ok()??;
+        serde_json::from_slice(&bytes).ok()
+    }
 }
