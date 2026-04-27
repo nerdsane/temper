@@ -8,6 +8,8 @@ use crate::TursoEventStore;
 use libsql::params;
 use std::time::Duration;
 
+use super::write_gate::WritePriority;
+
 const BLOB_STORE_ATTEMPTS: usize = 6;
 
 fn is_blob_lock_error(error: &str) -> bool {
@@ -51,7 +53,7 @@ impl TursoEventStore {
         let ttl_seconds = ttl.map(|d| d.as_secs() as i64);
         for attempt in 1..=BLOB_STORE_ATTEMPTS {
             let _write_permit = self
-                .acquire_write_permit("turso.put_blob")
+                .acquire_write_permit("turso.put_blob", WritePriority::Low)
                 .await
                 .map_err(|e| e.to_string())?;
             let conn = self
@@ -108,7 +110,7 @@ impl TursoEventStore {
     /// ADR-0047.
     pub async fn sweep_expired_blobs(&self, max_rows: u64) -> Result<u64, String> {
         let _write_permit = self
-            .acquire_write_permit("turso.sweep_expired_blobs")
+            .acquire_write_permit("turso.sweep_expired_blobs", WritePriority::Low)
             .await
             .map_err(|e| e.to_string())?;
         let conn = self

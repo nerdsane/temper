@@ -5,6 +5,7 @@ use std::time::Duration;
 use temper_runtime::persistence::{PersistenceError, storage_error};
 use tracing::instrument;
 
+use super::write_gate::WritePriority;
 use super::{
     ActionStats, AgentSummary, TrajectoryStats, TursoEventStore, TursoTrajectoryRow,
     UnmetIntentAggRow,
@@ -39,7 +40,9 @@ impl TursoEventStore {
             "turso.persist_trajectory",
             trajectory_max_attempts(),
             || async {
-                let _write_permit = self.acquire_write_permit("turso.persist_trajectory").await?;
+                let _write_permit = self
+                    .acquire_write_permit("turso.persist_trajectory", WritePriority::Low)
+                    .await?;
                 tokio::time::timeout(attempt_timeout, async {
                     let conn = self.configured_connection().await?;
                     let execute_res = conn
