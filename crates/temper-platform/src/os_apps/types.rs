@@ -37,6 +37,28 @@ pub struct InstallResult {
     pub seed_instances: Vec<String>,
 }
 
+/// Component phases an OS-app install/reconcile should execute.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct OsAppInstallPlan {
+    pub specs: bool,
+    pub policies: bool,
+    pub wasm: bool,
+    pub content: bool,
+    pub seed: bool,
+}
+
+impl OsAppInstallPlan {
+    pub(crate) const fn all() -> Self {
+        Self {
+            specs: true,
+            policies: true,
+            wasm: true,
+            content: true,
+            seed: true,
+        }
+    }
+}
+
 /// Stable digest breakdown for an OS app bundle.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 pub struct OsAppBundleDigest {

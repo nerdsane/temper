@@ -164,9 +164,21 @@ pub fn sync_and_register_git_sources(cache_dir: &Path) -> Result<Vec<String>, St
 
 /// Run a git command and return Ok(()) on success, Err(stderr) on failure.
 fn run_git(args: &[&str], working_dir: &Path) -> Result<(), String> {
-    let output = Command::new("git")
-        .args(args)
-        .current_dir(working_dir)
+    let mut command = Command::new("git");
+    command.args(args).current_dir(working_dir);
+    for key in [
+        "GIT_DIR",
+        "GIT_WORK_TREE",
+        "GIT_INDEX_FILE",
+        "GIT_PREFIX",
+        "GIT_COMMON_DIR",
+        "GIT_OBJECT_DIRECTORY",
+        "GIT_ALTERNATE_OBJECT_DIRECTORIES",
+    ] {
+        command.env_remove(key);
+    }
+
+    let output = command
         .output()
         .map_err(|e| format!("failed to run git {}: {e}", args.first().unwrap_or(&"")))?;
 
@@ -302,7 +314,15 @@ mod tests {
     // ── sync_git_source (integration) ──────────────────────────────────
 
     fn make_temp_dir(prefix: &str) -> PathBuf {
-        let dir = std::env::temp_dir().join(format!("temper-{prefix}-{}", uuid::Uuid::new_v4()));
+        let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        let root = manifest_dir
+            .parent()
+            .and_then(|path| path.parent())
+            .and_then(|path| path.parent())
+            .map(Path::to_path_buf)
+            .unwrap_or_else(std::env::temp_dir)
+            .join(".temper-test-tmp/temper-platform");
+        let dir = root.join(format!("temper-{prefix}-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&dir).expect("create temp dir");
         dir
     }
