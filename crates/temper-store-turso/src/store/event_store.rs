@@ -22,22 +22,38 @@ impl EventStore for TursoEventStore {
         expected_sequence: u64,
         events: &[PersistenceEnvelope],
     ) -> Result<u64, PersistenceError> {
+        if events.is_empty() {
+            return Ok(expected_sequence);
+        }
+
         // Retry transient Hrana BLOCKED / stream errors with backoff (ADR-0056).
-        // The whole function body is the retry unit: each attempt opens a fresh
-        // transaction. Event-store's UNIQUE (entity_type, entity_id, sequence_nr)
-        // makes retries safe — if a prior attempt partially committed before
-        // erroring, the retry's pre-check detects it as ConcurrencyViolation
+        // Each attempt is a complete append unit. Single-event appends use an
+        // atomic conditional insert; multi-event appends open a transaction.
+        // Event-store's UNIQUE (entity_type, entity_id, sequence_nr) makes
+        // retries safe — if a prior attempt partially committed before erroring,
+        // the retry's pre-check detects it as ConcurrencyViolation
         // (non-transient, propagates to caller via normal event-store contract).
         let attempt_timeout = append_attempt_timeout();
         let total_attempts = append_max_attempts();
         let mut last_err: Option<PersistenceError> = None;
+        let bypass_write_gate = events.len() == 1;
         for attempt in 0..total_attempts {
             if attempt > 0 {
                 tokio::time::sleep(Duration::from_millis(retry_delay_ms(attempt - 1))).await;
             }
-            let _write_permit = self
-                .acquire_write_permit("turso.append", WritePriority::High)
-                .await?;
+            let _high_priority_marker = if bypass_write_gate {
+                Some(self.mark_high_priority_write("turso.append"))
+            } else {
+                None
+            };
+            let _write_permit = if bypass_write_gate {
+                None
+            } else {
+                Some(
+                    self.acquire_write_permit("turso.append", WritePriority::High)
+                        .await?,
+                )
+            };
             let attempt_result = tokio::time::timeout(
                 attempt_timeout,
                 self.append_inner(persistence_id, expected_sequence, events),
