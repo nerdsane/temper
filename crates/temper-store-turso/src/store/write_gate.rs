@@ -5,6 +5,21 @@ use tokio::sync::OwnedSemaphorePermit;
 
 use super::TursoEventStore;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum WritePriority {
+    High,
+    Low,
+}
+
+impl WritePriority {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::High => "high",
+            Self::Low => "low",
+        }
+    }
+}
+
 pub(super) fn configured_write_concurrency(is_remote: bool) -> usize {
     let default = if is_remote { 1 } else { 4 };
     std::env::var("TEMPER_TURSO_WRITE_CONCURRENCY")
@@ -25,35 +40,103 @@ impl TursoEventStore {
     pub(super) async fn acquire_write_permit(
         &self,
         operation: &'static str,
+        priority: WritePriority,
     ) -> Result<OwnedSemaphorePermit, PersistenceError> {
         let started = std::time::Instant::now();
         let timeout = write_gate_wait_timeout();
-        let permit = tokio::time::timeout(timeout, self.write_gate.clone().acquire_owned())
+
+        if priority == WritePriority::Low {
+            self.wait_for_high_priority_writers(operation, started, timeout)
+                .await?;
+        }
+
+        let remaining = timeout.saturating_sub(started.elapsed());
+        if remaining.is_zero() {
+            return Err(write_gate_timeout_error(operation, priority, timeout));
+        }
+
+        let high_priority_waiter = if priority == WritePriority::High {
+            Some(HighPriorityWaiter::new(self))
+        } else {
+            None
+        };
+        let permit = tokio::time::timeout(remaining, self.write_gate.clone().acquire_owned())
             .await
-            .map_err(|_| {
-                PersistenceError::Storage(format!(
-                    "{operation} waited more than {}ms for Turso write gate",
-                    timeout.as_millis()
-                ))
-            })?
+            .map_err(|_| write_gate_timeout_error(operation, priority, timeout))?
             .map_err(|_| PersistenceError::Storage("Turso write gate closed".to_string()))?;
+        if let Some(waiter) = high_priority_waiter {
+            waiter.done_waiting();
+        }
 
         let waited = started.elapsed();
         if waited >= Duration::from_millis(100) {
             tracing::warn!(
                 operation,
+                priority = priority.as_str(),
                 wait_ms = waited.as_millis() as u64,
                 "turso.write_gate waited"
             );
         } else {
             tracing::debug!(
                 operation,
+                priority = priority.as_str(),
                 wait_ms = waited.as_millis() as u64,
                 "turso.write_gate acquired"
             );
         }
 
         Ok(permit)
+    }
+
+    async fn wait_for_high_priority_writers(
+        &self,
+        operation: &'static str,
+        started: std::time::Instant,
+        timeout: Duration,
+    ) -> Result<(), PersistenceError> {
+        while self.has_high_priority_waiters() {
+            let remaining = timeout.saturating_sub(started.elapsed());
+            if remaining.is_zero() {
+                return Err(write_gate_timeout_error(
+                    operation,
+                    WritePriority::Low,
+                    timeout,
+                ));
+            }
+            tokio::time::sleep(remaining.min(Duration::from_millis(25))).await;
+        }
+        Ok(())
+    }
+
+    fn has_high_priority_waiters(&self) -> bool {
+        self.high_priority_write_waiters
+            .load(std::sync::atomic::Ordering::Acquire)
+            > 0
+    }
+}
+
+struct HighPriorityWaiter<'a> {
+    store: &'a TursoEventStore,
+}
+
+impl<'a> HighPriorityWaiter<'a> {
+    fn new(store: &'a TursoEventStore) -> Self {
+        store
+            .high_priority_write_waiters
+            .fetch_add(1, std::sync::atomic::Ordering::AcqRel);
+        Self { store }
+    }
+
+    fn done_waiting(self) {
+        drop(self);
+    }
+}
+
+impl Drop for HighPriorityWaiter<'_> {
+    fn drop(&mut self) {
+        self.store
+            .high_priority_write_waiters
+            .fetch_sub(1, std::sync::atomic::Ordering::AcqRel);
     }
 }
 
@@ -67,4 +150,16 @@ fn write_gate_wait_timeout() -> Duration {
         .unwrap_or(DEFAULT_WRITE_GATE_WAIT_TIMEOUT_MS);
 
     Duration::from_millis(configured.max(MIN_WRITE_GATE_WAIT_TIMEOUT_MS))
+}
+
+fn write_gate_timeout_error(
+    operation: &'static str,
+    priority: WritePriority,
+    timeout: Duration,
+) -> PersistenceError {
+    PersistenceError::Storage(format!(
+        "{operation} ({}) waited more than {}ms for Turso write gate",
+        priority.as_str(),
+        timeout.as_millis()
+    ))
 }
