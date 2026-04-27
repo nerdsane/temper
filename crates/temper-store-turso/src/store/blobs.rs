@@ -50,6 +50,10 @@ impl TursoEventStore {
     ) -> Result<(), String> {
         let ttl_seconds = ttl.map(|d| d.as_secs() as i64);
         for attempt in 1..=BLOB_STORE_ATTEMPTS {
+            let _write_permit = self
+                .acquire_write_permit("turso.put_blob")
+                .await
+                .map_err(|e| e.to_string())?;
             let conn = self
                 .configured_connection()
                 .await
@@ -103,6 +107,10 @@ impl TursoEventStore {
     /// Rows with `expires_at = NULL` (the default) are never touched. See
     /// ADR-0047.
     pub async fn sweep_expired_blobs(&self, max_rows: u64) -> Result<u64, String> {
+        let _write_permit = self
+            .acquire_write_permit("turso.sweep_expired_blobs")
+            .await
+            .map_err(|e| e.to_string())?;
         let conn = self
             .configured_connection()
             .await

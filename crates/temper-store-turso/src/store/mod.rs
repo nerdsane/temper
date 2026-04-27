@@ -12,6 +12,7 @@
 use libsql::{Builder, Database};
 use std::sync::Arc;
 use temper_runtime::persistence::{PersistenceError, storage_error};
+use tokio::sync::Semaphore;
 use tracing::instrument;
 
 use crate::schema;
@@ -31,12 +32,14 @@ mod specs;
 mod tests;
 mod trajectory;
 mod wasm;
+mod write_gate;
 
 use instrumentation::InstrumentedConnection;
 
 #[derive(Clone, Debug)]
 pub struct TursoEventStore {
     db: Arc<Database>,
+    write_gate: Arc<Semaphore>,
     /// True when connected to a remote Turso Cloud instance (libsql:// URL).
     /// PRAGMAs are skipped for remote connections.
     is_remote: bool,
@@ -69,6 +72,9 @@ impl TursoEventStore {
         let is_remote = url.starts_with("libsql://");
         let store = Self {
             db: Arc::new(db),
+            write_gate: Arc::new(Semaphore::new(write_gate::configured_write_concurrency(
+                is_remote,
+            ))),
             is_remote,
         };
         store.migrate().await?;
