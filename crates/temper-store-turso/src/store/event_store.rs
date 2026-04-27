@@ -34,6 +34,7 @@ impl EventStore for TursoEventStore {
             if attempt > 0 {
                 tokio::time::sleep(Duration::from_millis(retry_delay_ms(attempt - 1))).await;
             }
+            let _write_permit = self.acquire_write_permit("turso.append").await?;
             let attempt_result = tokio::time::timeout(
                 attempt_timeout,
                 self.append_inner(persistence_id, expected_sequence, events),
@@ -136,6 +137,7 @@ impl EventStore for TursoEventStore {
     ) -> Result<(), PersistenceError> {
         let (tenant, entity_type, entity_id) =
             parse_persistence_id_parts(persistence_id).map_err(PersistenceError::Storage)?;
+        let _write_permit = self.acquire_write_permit("turso.save_snapshot").await?;
         let conn = self.configured_connection().await?;
 
         conn.execute(
