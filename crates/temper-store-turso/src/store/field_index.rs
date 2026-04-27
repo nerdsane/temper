@@ -65,6 +65,9 @@ impl TursoEventStore {
         fields: &serde_json::Value,
         sequence_nr: u64,
     ) -> Result<(), PersistenceError> {
+        let _write_permit = self
+            .acquire_write_permit("turso.upsert_query_projection")
+            .await?;
         let conn = self.configured_connection().await?;
         let new_projection_hash = projection_hash(status, fields);
         let tx = conn
@@ -192,6 +195,9 @@ impl TursoEventStore {
         entity_type: &str,
         entity_id: &str,
     ) -> Result<(), PersistenceError> {
+        let _write_permit = self
+            .acquire_write_permit("turso.remove_query_projection")
+            .await?;
         let conn = self.configured_connection().await?;
         let tx = conn
             .transaction_with_behavior(TransactionBehavior::Immediate)
