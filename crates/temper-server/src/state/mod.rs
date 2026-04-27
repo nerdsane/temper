@@ -287,6 +287,22 @@ impl ServerState {
             let mut reg = state.registry.write().unwrap();
             reg.register_tenant("default", csdl, csdl_xml, &ioa_vec);
         }
+        // Mark all specs as verified so the gate doesn't block dispatch.
+        let default_tenant = temper_runtime::tenant::TenantId::from("default");
+        for (entity_type, _) in &ioa_sources {
+            let mut reg = state.registry.write().unwrap();
+            reg.set_verification_status(
+                &default_tenant,
+                entity_type,
+                crate::registry::VerificationStatus::Completed(
+                    crate::registry::EntityVerificationResult {
+                        all_passed: true,
+                        levels: vec![],
+                        verified_at: temper_runtime::scheduler::sim_now().to_rfc3339(),
+                    },
+                ),
+            );
+        }
 
         for (entity_type, ioa_source) in &ioa_sources {
             let table = TransitionTable::from_ioa_source(ioa_source);

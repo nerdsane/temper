@@ -230,6 +230,61 @@ impl crate::state::ServerState {
         let action_params = params.clone();
         // Strip OData namespace prefix: "Temper.Example.CancelOrder" → "CancelOrder"
         let action_name = action.rsplit('.').next().unwrap_or(action);
+
+        // Pre-validate: check if action is valid from the current state.
+        // If not valid, return 409 Conflict before touching the mailbox.
+        let current_status = self
+            .actor_system
+            .get_spec_actor_state(&actor_handle)
+            .await
+            .map(|s| s.status)
+            .unwrap_or_default();
+        let table_valid = {
+            let reg = self.registry.read().unwrap();
+            let tbl = reg.get_table_live(tenant, entity_type).or_else(|| {
+                self.transition_tables
+                    .get(entity_type)
+                    .map(|t| std::sync::Arc::new(std::sync::RwLock::new((**t).clone())))
+            });
+            match tbl {
+                Some(t) => t
+                    .read()
+                    .unwrap()
+                    .evaluate_ctx(
+                        &current_status,
+                        &temper_jit::table::EvalContext::default(),
+                        action_name,
+                    )
+                    .map_or(false, |r| r.success), // success=false → invalid transition
+                None => true, // No table → allow (spec-free)
+            }
+        };
+        if !table_valid {
+            return Ok(EntityResponse {
+                success: false,
+                state: EntityState {
+                    entity_type: entity_type.to_string(),
+                    entity_id: entity_id.to_string(),
+                    status: current_status.clone(),
+                    item_count: 0,
+                    counters: std::collections::BTreeMap::new(),
+                    booleans: std::collections::BTreeMap::new(),
+                    lists: std::collections::BTreeMap::new(),
+                    fields: serde_json::json!({}),
+                    events: vec![],
+                    sequence_nr: 0,
+                },
+                error: Some(format!(
+                    "Action '{}' is not valid from state '{}'",
+                    action_name, current_status
+                )),
+                custom_effects: vec![],
+                scheduled_actions: vec![],
+                spawn_requests: vec![],
+                spec_governed: true,
+            });
+        }
+
         let msg = SpecMessage::with_params(action_name, params.clone());
         let response = match self.actor_system.tell(None, &actor_handle, msg).await {
             Ok(_msg_id) => {

@@ -605,6 +605,9 @@ const AGENT_DEFINITION_IOA: &str =
 const PROGRAM_DEFINITION_IOA: &str =
     include_str!("../../../test-fixtures/specs/program_definition.ioa.toml");
 const PROCESS_IOA: &str = include_str!("../../../test-fixtures/specs/process.ioa.toml");
+/// Simplified process spec for API-only lifecycle tests.
+const PROCESS_API_ONLY_IOA: &str =
+    include_str!("../../../test-fixtures/specs/process_api_only.ioa.toml");
 
 async fn test_state_with_agent_definition_ioa() -> (ServerState, ContainerAsync<Postgres>) {
     let csdl = parse_csdl(AGENT_DEFINITION_CSDL_XML).unwrap();
@@ -618,7 +621,7 @@ async fn test_state_with_agent_definition_ioa() -> (ServerState, ContainerAsync<
         "ProgramDefinition".to_string(),
         PROGRAM_DEFINITION_IOA.to_string(),
     );
-    specs.insert("Process".to_string(), PROCESS_IOA.to_string());
+    specs.insert("Process".to_string(), PROCESS_API_ONLY_IOA.to_string());
     let state = ServerState::with_specs(system, csdl, AGENT_DEFINITION_CSDL_XML.to_string(), specs);
     state
         .register_specs_as_actors()
