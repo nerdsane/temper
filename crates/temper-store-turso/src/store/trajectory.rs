@@ -39,6 +39,7 @@ impl TursoEventStore {
             "turso.persist_trajectory",
             trajectory_max_attempts(),
             || async {
+                let _write_permit = self.acquire_write_permit("turso.persist_trajectory").await?;
                 tokio::time::timeout(attempt_timeout, async {
                     let conn = self.configured_connection().await?;
                     let execute_res = conn
