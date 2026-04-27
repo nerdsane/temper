@@ -7,7 +7,7 @@ name = "Process"
 states = [
     "Created", "Ready", "PreparingContext", "BlockedInference",
     "BlockedToolCall", "BlockedApproval", "BlockedCompaction",
-    "Suspended", "Terminated", "Failed",
+    "BlockedChild", "Suspended", "Terminated", "Failed",
 ]
 initial = "Created"
 
@@ -188,3 +188,72 @@ name = "invoke_llm"
 trigger = "invoke_llm"
 type = "llm"
 emits = ["InferenceCompleteEndTurn", "InferenceCompleteToolCalls", "InferenceContextOverflow", "InferenceFailed"]
+
+# ─── Child process primitives ─────────────────────────────────────────────────
+
+[[action]]
+name = "SpawnChild"
+kind = "input"
+from = ["Ready", "BlockedInference", "BlockedToolCall"]
+params = [
+    { name = "child_definition_id", type = "string" },
+    { name = "child_user_prompt",   type = "string" },
+]
+effect = [
+    { type = "increment", var = "child_count" },
+    { type = "trigger",   name = "spawn_child" },
+]
+hint = "Spawn a child Process. The child runs independently; parent can wait via BlockOnChild."
+
+[[action]]
+name = "BlockOnChild"
+kind = "input"
+from = ["Ready"]
+to = "BlockedChild"
+hint = "Block until a child Process completes."
+
+[[action]]
+name = "UnblockFromChild"
+kind = "input"
+from = ["BlockedChild"]
+to = "Ready"
+params = [{ name = "child_result", type = "string" }]
+hint = "Unblock parent when a child Process completes."
+
+# ─── Sleep primitive ──────────────────────────────────────────────────────────
+
+[[action]]
+name = "SleepProcess"
+kind = "input"
+from = ["Ready"]
+to = "Ready"
+params = [{ name = "sleep_seconds", type = "uint64" }]
+effect = [{ type = "trigger", name = "schedule_wakeup" }]
+hint = "Suspend execution for N seconds, then resume."
+
+# ─── Completion with parent notification ─────────────────────────────────────
+
+[[action]]
+name = "CompleteProcess"
+kind = "input"
+from = ["Ready"]
+to = "Terminated"
+params = [{ name = "final_answer", type = "string" }]
+effect = [{ type = "trigger", name = "notify_parent" }]
+
+# ─── Integrations for new primitives ─────────────────────────────────────────
+
+[[integration]]
+name = "spawn_child"
+trigger = "spawn_child"
+type = "child_spawner"
+
+[[integration]]
+name = "schedule_wakeup"
+trigger = "schedule_wakeup"
+type = "wakeup_scheduler"
+
+[[integration]]
+name = "notify_parent"
+trigger = "notify_parent"
+type = "child_completion"
