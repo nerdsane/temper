@@ -173,3 +173,40 @@ entity_type = "CompactionIntegration"
 action = "run_compaction"
 [reaction.resolve_target]
 type = "SameId"
+
+# ─── Child process primitives ─────────────────────────────────────────────────
+
+[[reaction]]
+name = "process_spawn_child"
+[reaction.when]
+entity_type = "Process"
+action = "spawn_child"
+[reaction.then]
+entity_type = "ChildSpawnerIntegration"
+action = "spawn_child"
+[reaction.resolve_target]
+type = "SameId"
+
+[[reaction]]
+name = "process_notify_parent"
+[reaction.when]
+entity_type = "Process"
+action = "notify_parent"
+[reaction.then]
+entity_type = "ChildCompletionIntegration"
+action = "notify_parent_completion"
+[reaction.resolve_target]
+type = "SameId"
+
+# ─── Sleep primitive ──────────────────────────────────────────────────────────
+
+[[reaction]]
+name = "process_schedule_wakeup"
+[reaction.when]
+entity_type = "Process"
+action = "schedule_wakeup"
+[reaction.then]
+entity_type = "WakeupSchedulerIntegration"
+action = "schedule_wakeup"
+[reaction.resolve_target]
+type = "SameId"

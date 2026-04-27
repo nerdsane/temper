@@ -5646,14 +5646,18 @@ name = "temper-agents"
 version = "0.1.0"
 dependencies = [
  "async-trait",
+ "deadpool-postgres",
  "futures",
  "reqwest",
  "serde",
  "serde_json",
  "temper-actor-runtime",
  "temper-runtime",
+ "testcontainers",
+ "testcontainers-modules",
  "tokio",
  "tracing",
+ "uuid",
 ]
 
 [[package]]

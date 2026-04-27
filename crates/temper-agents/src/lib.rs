@@ -8,10 +8,13 @@
 //! - ToolRegistryActor — maps (session, tool_name) → client_id
 //! - Mock integration actors for testing
 
+pub mod child_completion;
+pub mod child_spawner;
 pub mod common;
 pub mod llm;
 pub mod tool_executor;
 pub mod tool_registry;
+pub mod wakeup;
 
 use std::sync::Arc;
 
@@ -49,13 +52,19 @@ pub const AGENT_ACTOR_TYPES: &[&str] = &[
     "ToolExecutorIntegration",
     "CompactionIntegration",
     "ToolRegistry",
+    // Primitive integrations
+    "WakeupSchedulerIntegration",
+    "ChildSpawnerIntegration",
+    "ChildCompletionIntegration",
 ];
 
 // ─── Agent system setup ───────────────────────────────────────────────────────
 
 /// Register spec-driven actors (Process, AgentDefinition, Message, ContextManager,
 /// ToolRouter, Compactor) and mock integration actors.
-pub async fn register_agent_actors(system: &ActorSystem) -> Result<(), Box<dyn std::error::Error>> {
+pub async fn register_agent_actors(
+    system: &Arc<ActorSystem>,
+) -> Result<(), Box<dyn std::error::Error>> {
     let rules = parse_reactions(PROCESS_REACTIONS)
         .map_err(|e| format!("failed to parse reactions: {e}"))?;
 
@@ -109,10 +118,10 @@ pub async fn register_agent_actors(system: &ActorSystem) -> Result<(), Box<dyn s
     Ok(())
 }
 
-/// Register real LLM + ToolExecutor integrations (require Bus actor).
+/// Register real LLM + ToolExecutor + primitive integrations.
 /// Call after register_agent_actors() and after registering the BusActor.
 pub async fn register_real_integrations(
-    system: &ActorSystem,
+    system: &Arc<ActorSystem>,
     http: reqwest::Client,
     driver: Option<Arc<dyn ToolDriver>>,
 ) -> Result<(), Box<dyn std::error::Error>> {
@@ -124,6 +133,22 @@ pub async fn register_real_integrations(
         None => ToolExecutorActor::new(),
     };
     system.register(Arc::new(executor)).await?;
+
+    // Primitive integrations (spawn, sleep, child completion).
+    let system_arc = system.clone();
+    system
+        .register(Arc::new(wakeup::WakeupSchedulerIntegration))
+        .await?;
+    system
+        .register(Arc::new(child_spawner::ChildSpawnerIntegration {
+            actor_system: system_arc.clone(),
+        }))
+        .await?;
+    system
+        .register(Arc::new(child_completion::ChildCompletionIntegration {
+            actor_system: system_arc,
+        }))
+        .await?;
     Ok(())
 }
 
