@@ -270,6 +270,16 @@ impl TursoEventStore {
         expected_sequence: u64,
         events: &[PersistenceEnvelope],
     ) -> Result<u64, PersistenceError> {
+        if events.is_empty() {
+            return Ok(expected_sequence);
+        }
+
+        if let [event] = events {
+            return self
+                .append_single_event_inner(persistence_id, expected_sequence, event)
+                .await;
+        }
+
         let (tenant, entity_type, entity_id) =
             parse_persistence_id_parts(persistence_id).map_err(PersistenceError::Storage)?;
         let conn = self.configured_connection().await?;
@@ -366,5 +376,108 @@ impl TursoEventStore {
 
         tx.commit().await.map_err(storage_error)?;
         Ok(new_seq)
+    }
+
+    /// Atomic fast path for the common event-store case: one entity action
+    /// produces one event. On remote Turso this avoids holding an explicit
+    /// Hrana transaction across BEGIN/SELECT/INSERT/COMMIT round trips.
+    async fn append_single_event_inner(
+        &self,
+        persistence_id: &str,
+        expected_sequence: u64,
+        event: &PersistenceEnvelope,
+    ) -> Result<u64, PersistenceError> {
+        let (tenant, entity_type, entity_id) =
+            parse_persistence_id_parts(persistence_id).map_err(PersistenceError::Storage)?;
+        let new_seq = expected_sequence + 1;
+        let payload_json = serde_json::to_string(&event.payload).map_err(|e| {
+            tracing::error!(error = %e, "failed to serialize event payload");
+            PersistenceError::Serialization(e.to_string())
+        })?;
+        let metadata_json = serde_json::to_string(&event.metadata).map_err(|e| {
+            tracing::error!(error = %e, "failed to serialize event metadata");
+            PersistenceError::Serialization(e.to_string())
+        })?;
+
+        let conn = self.configured_connection().await?;
+        let insert_result = conn
+            .execute(
+                "INSERT INTO events
+                 (tenant, entity_type, entity_id, sequence_nr, event_type, payload, metadata)
+                 SELECT ?1, ?2, ?3, ?4, ?5, ?6, ?7
+                 WHERE (
+                     SELECT COALESCE(MAX(sequence_nr), 0)
+                     FROM events
+                     WHERE tenant = ?1 AND entity_type = ?2 AND entity_id = ?3
+                 ) = ?8",
+                params![
+                    tenant,
+                    entity_type,
+                    entity_id,
+                    new_seq as i64,
+                    event.event_type.as_str(),
+                    payload_json,
+                    metadata_json,
+                    expected_sequence as i64
+                ],
+            )
+            .await;
+
+        let affected = match insert_result {
+            Ok(affected) => affected,
+            Err(e) => {
+                let msg = e.to_string();
+                tracing::error!(error = %e, "single event insert failed");
+                if msg.contains("UNIQUE constraint failed") || msg.contains("UNIQUE") {
+                    let actual = current_sequence(&conn, tenant, entity_type, entity_id).await?;
+                    return Err(PersistenceError::ConcurrencyViolation {
+                        expected: expected_sequence,
+                        actual,
+                    });
+                }
+                return Err(PersistenceError::Storage(msg));
+            }
+        };
+
+        if affected == 1 {
+            return Ok(new_seq);
+        }
+
+        let actual = current_sequence(&conn, tenant, entity_type, entity_id).await?;
+        tracing::error!(
+            expected = expected_sequence,
+            actual,
+            affected,
+            "concurrency violation on single event append"
+        );
+        Err(PersistenceError::ConcurrencyViolation {
+            expected: expected_sequence,
+            actual,
+        })
+    }
+}
+
+async fn current_sequence(
+    conn: &super::instrumentation::InstrumentedConnection,
+    tenant: &str,
+    entity_type: &str,
+    entity_id: &str,
+) -> Result<u64, PersistenceError> {
+    let mut rows = conn
+        .query(
+            "SELECT COALESCE(MAX(sequence_nr), 0)
+             FROM events
+             WHERE tenant = ?1 AND entity_type = ?2 AND entity_id = ?3",
+            params![tenant, entity_type, entity_id],
+        )
+        .await
+        .map_err(storage_error)?;
+
+    match rows.next().await.map_err(storage_error)? {
+        Some(row) => row
+            .get::<i64>(0)
+            .map_err(storage_error)
+            .map(|seq| seq as u64),
+        None => Ok(0),
     }
 }
