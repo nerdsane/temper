@@ -4,7 +4,7 @@ use libsql::{TransactionBehavior, params};
 use temper_runtime::persistence::{PersistenceError, storage_error};
 use tracing::instrument;
 
-use super::{TursoEventStore, TursoInstalledAppRow, TursoSpecRow};
+use super::{TursoEventStore, TursoInstalledAppRow, TursoSpecRow, write_gate::WritePriority};
 use crate::TursoSpecVerificationUpdate;
 use crate::metrics::TursoQueryTimer;
 
@@ -24,6 +24,9 @@ impl TursoEventStore {
         content_hash: &str,
     ) -> Result<(), PersistenceError> {
         let _query_timer = TursoQueryTimer::start("turso.upsert_spec");
+        let _write_permit = self
+            .acquire_write_permit("turso.upsert_spec", WritePriority::High)
+            .await?;
         let conn = self.configured_connection().await?;
         // When content_hash matches the existing row, keep verification intact.
         // Otherwise reset to pending so the cascade re-runs.
@@ -31,17 +34,39 @@ impl TursoEventStore {
             "INSERT INTO specs (tenant, entity_type, ioa_source, csdl_xml, content_hash, committed, version, verified, verification_status, updated_at)
              VALUES (?1, ?2, ?3, ?4, ?5, 0, 1, 0, 'pending', datetime('now'))
              ON CONFLICT (tenant, entity_type) DO UPDATE SET
-                 ioa_source = excluded.ioa_source,
-                 csdl_xml = excluded.csdl_xml,
-                 content_hash = excluded.content_hash,
-                 committed = 0,
-                 version = specs.version + 1,
-                 verified = CASE WHEN specs.content_hash = excluded.content_hash THEN specs.verified ELSE 0 END,
-                 verification_status = CASE WHEN specs.content_hash = excluded.content_hash THEN specs.verification_status ELSE 'pending' END,
-                 levels_passed = CASE WHEN specs.content_hash = excluded.content_hash THEN specs.levels_passed ELSE NULL END,
-                 levels_total = CASE WHEN specs.content_hash = excluded.content_hash THEN specs.levels_total ELSE NULL END,
-                 verification_result = CASE WHEN specs.content_hash = excluded.content_hash THEN specs.verification_result ELSE NULL END,
-                 updated_at = datetime('now')",
+                 ioa_source = CASE
+                     WHEN specs.content_hash IS NOT excluded.content_hash OR specs.csdl_xml IS NOT excluded.csdl_xml
+                     THEN excluded.ioa_source ELSE specs.ioa_source END,
+                 csdl_xml = CASE
+                     WHEN specs.content_hash IS NOT excluded.content_hash OR specs.csdl_xml IS NOT excluded.csdl_xml
+                     THEN excluded.csdl_xml ELSE specs.csdl_xml END,
+                 content_hash = CASE
+                     WHEN specs.content_hash IS NOT excluded.content_hash OR specs.csdl_xml IS NOT excluded.csdl_xml
+                     THEN excluded.content_hash ELSE specs.content_hash END,
+                 committed = CASE
+                     WHEN specs.content_hash IS NOT excluded.content_hash OR specs.csdl_xml IS NOT excluded.csdl_xml
+                     THEN 0 ELSE specs.committed END,
+                 version = CASE
+                     WHEN specs.content_hash IS NOT excluded.content_hash OR specs.csdl_xml IS NOT excluded.csdl_xml
+                     THEN specs.version + 1 ELSE specs.version END,
+                 verified = CASE
+                     WHEN specs.content_hash IS NOT excluded.content_hash OR specs.csdl_xml IS NOT excluded.csdl_xml
+                     THEN 0 ELSE specs.verified END,
+                 verification_status = CASE
+                     WHEN specs.content_hash IS NOT excluded.content_hash OR specs.csdl_xml IS NOT excluded.csdl_xml
+                     THEN 'pending' ELSE specs.verification_status END,
+                 levels_passed = CASE
+                     WHEN specs.content_hash IS NOT excluded.content_hash OR specs.csdl_xml IS NOT excluded.csdl_xml
+                     THEN NULL ELSE specs.levels_passed END,
+                 levels_total = CASE
+                     WHEN specs.content_hash IS NOT excluded.content_hash OR specs.csdl_xml IS NOT excluded.csdl_xml
+                     THEN NULL ELSE specs.levels_total END,
+                 verification_result = CASE
+                     WHEN specs.content_hash IS NOT excluded.content_hash OR specs.csdl_xml IS NOT excluded.csdl_xml
+                     THEN NULL ELSE specs.verification_result END,
+                 updated_at = CASE
+                     WHEN specs.content_hash IS NOT excluded.content_hash OR specs.csdl_xml IS NOT excluded.csdl_xml
+                     THEN datetime('now') ELSE specs.updated_at END",
             params![tenant, entity_type, ioa_source, csdl_xml, content_hash],
         )
         .await
@@ -64,6 +89,9 @@ impl TursoEventStore {
         app_name: &str,
     ) -> Result<(), PersistenceError> {
         let _query_timer = TursoQueryTimer::start("turso.upsert_specs_and_commit");
+        let _write_permit = self
+            .acquire_write_permit("turso.upsert_specs_and_commit", WritePriority::High)
+            .await?;
         let conn = self.configured_connection().await?;
         let tx = conn
             .transaction_with_behavior(TransactionBehavior::Immediate)
@@ -73,19 +101,39 @@ impl TursoEventStore {
         for (entity_type, ioa_source, csdl_xml, content_hash) in specs {
             tx.execute(
                 "INSERT INTO specs (tenant, entity_type, ioa_source, csdl_xml, content_hash, committed, version, verified, verification_status, updated_at)
-                 VALUES (?1, ?2, ?3, ?4, ?5, 0, 1, 0, 'pending', datetime('now'))
+                 VALUES (?1, ?2, ?3, ?4, ?5, 1, 1, 0, 'pending', datetime('now'))
                  ON CONFLICT (tenant, entity_type) DO UPDATE SET
-                     ioa_source = excluded.ioa_source,
-                     csdl_xml = excluded.csdl_xml,
-                     content_hash = excluded.content_hash,
-                     committed = 0,
-                     version = specs.version + 1,
-                     verified = CASE WHEN specs.content_hash = excluded.content_hash THEN specs.verified ELSE 0 END,
-                     verification_status = CASE WHEN specs.content_hash = excluded.content_hash THEN specs.verification_status ELSE 'pending' END,
-                     levels_passed = CASE WHEN specs.content_hash = excluded.content_hash THEN specs.levels_passed ELSE NULL END,
-                     levels_total = CASE WHEN specs.content_hash = excluded.content_hash THEN specs.levels_total ELSE NULL END,
-                     verification_result = CASE WHEN specs.content_hash = excluded.content_hash THEN specs.verification_result ELSE NULL END,
-                     updated_at = datetime('now')",
+                     ioa_source = CASE
+                         WHEN specs.content_hash IS NOT excluded.content_hash OR specs.csdl_xml IS NOT excluded.csdl_xml
+                         THEN excluded.ioa_source ELSE specs.ioa_source END,
+                     csdl_xml = CASE
+                         WHEN specs.content_hash IS NOT excluded.content_hash OR specs.csdl_xml IS NOT excluded.csdl_xml
+                         THEN excluded.csdl_xml ELSE specs.csdl_xml END,
+                     content_hash = CASE
+                         WHEN specs.content_hash IS NOT excluded.content_hash OR specs.csdl_xml IS NOT excluded.csdl_xml
+                         THEN excluded.content_hash ELSE specs.content_hash END,
+                     committed = 1,
+                     version = CASE
+                         WHEN specs.content_hash IS NOT excluded.content_hash OR specs.csdl_xml IS NOT excluded.csdl_xml
+                         THEN specs.version + 1 ELSE specs.version END,
+                     verified = CASE
+                         WHEN specs.content_hash IS NOT excluded.content_hash OR specs.csdl_xml IS NOT excluded.csdl_xml
+                         THEN 0 ELSE specs.verified END,
+                     verification_status = CASE
+                         WHEN specs.content_hash IS NOT excluded.content_hash OR specs.csdl_xml IS NOT excluded.csdl_xml
+                         THEN 'pending' ELSE specs.verification_status END,
+                     levels_passed = CASE
+                         WHEN specs.content_hash IS NOT excluded.content_hash OR specs.csdl_xml IS NOT excluded.csdl_xml
+                         THEN NULL ELSE specs.levels_passed END,
+                     levels_total = CASE
+                         WHEN specs.content_hash IS NOT excluded.content_hash OR specs.csdl_xml IS NOT excluded.csdl_xml
+                         THEN NULL ELSE specs.levels_total END,
+                     verification_result = CASE
+                         WHEN specs.content_hash IS NOT excluded.content_hash OR specs.csdl_xml IS NOT excluded.csdl_xml
+                         THEN NULL ELSE specs.verification_result END,
+                     updated_at = CASE
+                         WHEN specs.content_hash IS NOT excluded.content_hash OR specs.csdl_xml IS NOT excluded.csdl_xml OR specs.committed != 1
+                         THEN datetime('now') ELSE specs.updated_at END",
                 params![tenant, entity_type, ioa_source, csdl_xml, content_hash],
             )
             .await
@@ -106,13 +154,6 @@ impl TursoEventStore {
         tx.execute(
             "INSERT OR IGNORE INTO tenant_installed_apps (tenant_id, app_name) VALUES (?1, ?2)",
             params![tenant, app_name],
-        )
-        .await
-        .map_err(storage_error)?;
-
-        tx.execute(
-            "UPDATE specs SET committed = 1, updated_at = datetime('now') WHERE tenant = ?1",
-            params![tenant],
         )
         .await
         .map_err(storage_error)?;

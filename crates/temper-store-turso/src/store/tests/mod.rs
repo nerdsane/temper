@@ -6,6 +6,7 @@ use temper_runtime::persistence::{
 };
 
 use super::TursoEventStore;
+use crate::TursoSpecVerificationUpdate;
 
 fn test_envelope(event_type: &str, payload: serde_json::Value) -> PersistenceEnvelope {
     PersistenceEnvelope {
@@ -668,4 +669,149 @@ async fn load_wasm_module_metadata_all_tenants_returns_metadata_without_bulk_byt
         .expect("load full wasm row")
         .expect("full row should exist");
     assert_eq!(full_row.wasm_bytes, b"hello-a");
+}
+
+#[tokio::test]
+async fn upsert_specs_and_commit_preserves_identical_spec_version() {
+    let store = make_store("spec-idempotent").await;
+    let tenant = format!("tenant-{}", uuid::Uuid::new_v4());
+    let ioa_source = "[automaton]\nname = \"Issue\"\n";
+    let csdl_xml = "<Schema Namespace=\"Temper.Tests\" />";
+    let content_hash = "sha256:issue-v1";
+
+    store
+        .upsert_specs_and_commit(
+            &tenant,
+            &[("Issue", ioa_source, csdl_xml, content_hash)],
+            None,
+            "test-app",
+        )
+        .await
+        .expect("initial spec commit");
+    store
+        .persist_spec_verification(
+            &tenant,
+            "Issue",
+            TursoSpecVerificationUpdate {
+                status: "passed",
+                verified: true,
+                levels_passed: Some(1),
+                levels_total: Some(1),
+                verification_result_json: Some(r#"{"all_passed":true}"#),
+            },
+        )
+        .await
+        .expect("persist verification");
+
+    store
+        .upsert_specs_and_commit(
+            &tenant,
+            &[("Issue", ioa_source, csdl_xml, content_hash)],
+            None,
+            "test-app",
+        )
+        .await
+        .expect("identical spec commit");
+
+    let conn = store.connection().expect("connection");
+    let mut rows = conn
+        .query(
+            "SELECT version, verified, verification_status, committed \
+             FROM specs WHERE tenant = ?1 AND entity_type = 'Issue'",
+            params![tenant],
+        )
+        .await
+        .expect("query spec");
+    let row = rows
+        .next()
+        .await
+        .expect("row result")
+        .expect("spec row exists");
+    let version: i64 = row.get(0).expect("version");
+    let verified: i64 = row.get(1).expect("verified");
+    let status: String = row.get(2).expect("verification status");
+    let committed: i64 = row.get(3).expect("committed");
+
+    assert_eq!(version, 1, "identical spec commit must not bump version");
+    assert_eq!(
+        verified, 1,
+        "identical spec commit must preserve verification"
+    );
+    assert_eq!(status, "passed");
+    assert_eq!(committed, 1);
+}
+
+#[tokio::test]
+async fn upsert_wasm_module_preserves_version_for_identical_hash() {
+    let store = make_store("wasm-idempotent").await;
+
+    store
+        .upsert_wasm_module("tenant-a", "mod-a", b"hello-a", "hash-a")
+        .await
+        .expect("initial wasm upsert");
+    store
+        .upsert_wasm_module("tenant-a", "mod-a", b"hello-a", "hash-a")
+        .await
+        .expect("identical wasm upsert");
+
+    let conn = store.connection().expect("connection");
+    let mut rows = conn
+        .query(
+            "SELECT version FROM wasm_modules WHERE tenant = ?1 AND module_name = ?2",
+            params!["tenant-a", "mod-a"],
+        )
+        .await
+        .expect("query wasm version");
+    let row = rows
+        .next()
+        .await
+        .expect("row result")
+        .expect("wasm row exists");
+    let version: i64 = row.get(0).expect("version");
+
+    assert_eq!(version, 1, "identical WASM hash must not bump version");
+}
+
+#[tokio::test]
+async fn upsert_wasm_module_stores_artifact_outside_metadata_row() {
+    let store = make_store("wasm-artifact").await;
+
+    store
+        .upsert_wasm_module("tenant-a", "mod-a", b"hello-a", "hash-a")
+        .await
+        .expect("persist wasm artifact");
+
+    let conn = store.connection().expect("connection");
+    let mut rows = conn
+        .query(
+            "SELECT length(wasm_bytes) FROM wasm_modules WHERE tenant = ?1 AND module_name = ?2",
+            params!["tenant-a", "mod-a"],
+        )
+        .await
+        .expect("query inline wasm length");
+    let row = rows
+        .next()
+        .await
+        .expect("row result")
+        .expect("wasm row exists");
+    let inline_len: i64 = row.get(0).expect("inline wasm length");
+
+    assert_eq!(
+        inline_len, 0,
+        "new WASM metadata rows should point at artifact storage, not inline bytes"
+    );
+
+    let artifact = store
+        .get_blob("wasm-modules/hash-a")
+        .await
+        .expect("load wasm artifact")
+        .expect("artifact exists");
+    assert_eq!(artifact, b"hello-a");
+
+    let loaded = store
+        .load_wasm_module("tenant-a", "mod-a")
+        .await
+        .expect("load wasm row")
+        .expect("wasm row exists");
+    assert_eq!(loaded.wasm_bytes, b"hello-a");
 }

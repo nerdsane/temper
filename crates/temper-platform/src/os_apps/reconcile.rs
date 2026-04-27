@@ -1,20 +1,22 @@
 use std::collections::HashSet;
 
 use sha2::{Digest, Sha256};
+use temper_runtime::tenant::TenantId;
 use temper_server::platform_store::InstalledAppRecord;
 
 use super::{
-    AppBundle, AppEntry, OsAppBundleDigest, OsAppReconcileResult, catalog, get_os_app,
-    install_os_app_without_dependencies, os_app_dependencies,
+    AppBundle, AppEntry, OsAppBundleDigest, OsAppInstallPlan, OsAppReconcileResult, catalog,
+    get_os_app, install_os_app_with_plan, os_app_dependencies,
     restore_app_specs_from_matching_digest, tenant_has_ready_app_specs_for_bundle,
 };
 use crate::state::PlatformState;
 
-pub(super) fn collect_install_order(
+fn collect_install_order_with_dependencies(
     app_name: &str,
     visiting: &mut HashSet<String>,
     visited: &mut HashSet<String>,
     order: &mut Vec<String>,
+    dependencies: &impl Fn(&str) -> Vec<String>,
 ) -> Result<(), String> {
     if visited.contains(app_name) {
         return Ok(());
@@ -22,8 +24,14 @@ pub(super) fn collect_install_order(
     if !visiting.insert(app_name.to_string()) {
         return Err(format!("Cyclic OS app dependency detected at '{app_name}'"));
     }
-    for dependency in os_app_dependencies(app_name) {
-        collect_install_order(&dependency, visiting, visited, order)?;
+    for dependency in dependencies(app_name) {
+        collect_install_order_with_dependencies(
+            &dependency,
+            visiting,
+            visited,
+            order,
+            dependencies,
+        )?;
     }
     visiting.remove(app_name);
     visited.insert(app_name.to_string());
@@ -33,11 +41,26 @@ pub(super) fn collect_install_order(
 
 /// Resolve a deduplicated dependency-first install order for a set of apps.
 pub fn resolve_os_app_install_order(app_names: &[String]) -> Result<Vec<String>, String> {
+    resolve_os_app_install_order_with_dependencies(app_names, |app_name| {
+        os_app_dependencies(app_name)
+    })
+}
+
+pub(super) fn resolve_os_app_install_order_with_dependencies(
+    app_names: &[String],
+    dependencies: impl Fn(&str) -> Vec<String>,
+) -> Result<Vec<String>, String> {
     let mut visiting = HashSet::new();
     let mut visited = HashSet::new();
     let mut order = Vec::new();
     for app_name in app_names {
-        collect_install_order(app_name, &mut visiting, &mut visited, &mut order)?;
+        collect_install_order_with_dependencies(
+            app_name,
+            &mut visiting,
+            &mut visited,
+            &mut order,
+            &dependencies,
+        )?;
     }
     Ok(order)
 }
@@ -202,6 +225,38 @@ pub fn os_app_bundle_digest(app_name: &str) -> Option<OsAppBundleDigest> {
     get_os_app(app_name).map(|bundle| digest_app_bundle(app_name, &bundle))
 }
 
+pub(super) fn plan_reconcile_from_installed_record(
+    record: &InstalledAppRecord,
+    digest: &OsAppBundleDigest,
+    specs_ready: bool,
+    wasm_registered: bool,
+) -> OsAppInstallPlan {
+    OsAppInstallPlan {
+        specs: record.spec_digest != digest.spec_digest || !specs_ready,
+        policies: record.policy_digest != digest.policy_digest,
+        wasm: record.wasm_digest != digest.wasm_digest || !wasm_registered,
+        content: record.content_digest != digest.content_digest,
+        seed: record.seed_digest != digest.seed_digest,
+    }
+}
+
+fn tenant_has_registered_wasm_for_bundle(
+    state: &PlatformState,
+    tenant: &str,
+    bundle: &AppBundle,
+) -> bool {
+    let tenant_id = TenantId::new(tenant);
+    let registry = state
+        .server
+        .wasm_module_registry
+        .read()
+        .expect("WASM module registry lock poisoned");
+    bundle.wasm_modules.iter().all(|(module_name, wasm_bytes)| {
+        let hash = temper_wasm::WasmEngine::hash_module(wasm_bytes);
+        registry.get_hash(&tenant_id, module_name) == Some(hash.as_str())
+    })
+}
+
 async fn record_app_install_metadata(
     state: &PlatformState,
     tenant: &str,
@@ -271,8 +326,18 @@ pub async fn reconcile_os_app(
         .and_then(|store| store.platform_store())
     {
         match ps.get_installed_app(tenant, app_name).await {
-            Ok(Some(record)) if record.bundle_digest == digest.bundle_digest => {
-                if tenant_has_ready_app_specs_for_bundle(state, tenant, &bundle) {
+            Ok(Some(record)) => {
+                let mut specs_ready = tenant_has_ready_app_specs_for_bundle(state, tenant, &bundle);
+                let wasm_registered = tenant_has_registered_wasm_for_bundle(state, tenant, &bundle);
+
+                if record.bundle_digest == digest.bundle_digest && !specs_ready {
+                    specs_ready = restore_app_specs_from_matching_digest(
+                        state, ps, tenant, app_name, &bundle,
+                    )
+                    .await;
+                }
+
+                if record.bundle_digest == digest.bundle_digest && specs_ready && wasm_registered {
                     tracing::info!(
                         tenant,
                         app = %app_name,
@@ -285,22 +350,38 @@ pub async fn reconcile_os_app(
                     });
                 }
 
-                if restore_app_specs_from_matching_digest(state, ps, tenant, app_name, &bundle)
-                    .await
-                {
-                    tracing::info!(
-                        tenant,
-                        app = %app_name,
-                        bundle_digest = %digest.bundle_digest,
-                        "OS app unchanged; restored spec readiness and skipped hot reconcile"
-                    );
-                    return Ok(OsAppReconcileResult::Skipped {
-                        app_name: app_name.to_string(),
-                        bundle_digest: digest.bundle_digest,
-                    });
+                if !specs_ready && record.spec_digest == digest.spec_digest {
+                    specs_ready = restore_app_specs_from_matching_digest(
+                        state, ps, tenant, app_name, &bundle,
+                    )
+                    .await;
                 }
+                let plan = plan_reconcile_from_installed_record(
+                    &record,
+                    &digest,
+                    specs_ready,
+                    wasm_registered,
+                );
+
+                tracing::info!(
+                    tenant,
+                    app = %app_name,
+                    bundle_digest = %digest.bundle_digest,
+                    specs = plan.specs,
+                    policies = plan.policies,
+                    wasm = plan.wasm,
+                    content = plan.content,
+                    seed = plan.seed,
+                    "OS app changed; running delta reconcile"
+                );
+                let install = install_os_app_with_plan(state, tenant, app_name, plan).await?;
+                return Ok(OsAppReconcileResult::Installed {
+                    app_name: app_name.to_string(),
+                    bundle_digest: digest.bundle_digest,
+                    install: Box::new(install),
+                });
             }
-            Ok(Some(_)) | Ok(None) => {}
+            Ok(None) => {}
             Err(error) => {
                 tracing::warn!(
                     tenant,
@@ -312,7 +393,8 @@ pub async fn reconcile_os_app(
         }
     }
 
-    let install = install_os_app_without_dependencies(state, tenant, app_name).await?;
+    let install =
+        install_os_app_with_plan(state, tenant, app_name, OsAppInstallPlan::all()).await?;
     Ok(OsAppReconcileResult::Installed {
         app_name: app_name.to_string(),
         bundle_digest: digest.bundle_digest,

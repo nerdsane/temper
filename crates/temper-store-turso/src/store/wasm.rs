@@ -6,9 +6,16 @@ use tracing::instrument;
 
 use super::{
     TursoEventStore, TursoWasmInvocationRow, TursoWasmModuleMetadataRow, TursoWasmModuleRow,
+    write_gate::WritePriority,
 };
 use crate::TursoWasmInvocationInsert;
 use crate::metrics::TursoQueryTimer;
+
+const WASM_ARTIFACT_PREFIX: &str = "wasm-modules/";
+
+fn wasm_artifact_key(sha256_hash: &str) -> String {
+    format!("{WASM_ARTIFACT_PREFIX}{sha256_hash}")
+}
 
 impl TursoEventStore {
     /// Upsert a WASM module binary for a tenant.
@@ -25,16 +32,68 @@ impl TursoEventStore {
     ) -> Result<(), PersistenceError> {
         let _query_timer = TursoQueryTimer::start("turso.upsert_wasm_module");
         let conn = self.configured_connection().await?;
+        let mut existing_rows = conn
+            .query(
+                "SELECT sha256_hash, length(wasm_bytes) \
+                 FROM wasm_modules \
+                 WHERE tenant = ?1 AND module_name = ?2",
+                params![tenant, module_name],
+            )
+            .await
+            .map_err(storage_error)?;
+
+        if let Some(row) = existing_rows.next().await.map_err(storage_error)? {
+            let existing_hash: String = row.get(0).map_err(storage_error)?;
+            let inline_len: i64 = row
+                .get::<Option<i64>>(1)
+                .map_err(storage_error)?
+                .unwrap_or(0);
+            if existing_hash == sha256_hash {
+                if inline_len > 0
+                    || self
+                        .get_blob(&wasm_artifact_key(sha256_hash))
+                        .await
+                        .map_err(PersistenceError::Storage)?
+                        .is_some()
+                {
+                    return Ok(());
+                }
+
+                self.put_blob(&wasm_artifact_key(sha256_hash), wasm_bytes)
+                    .await
+                    .map_err(PersistenceError::Storage)?;
+                return Ok(());
+            }
+        }
+        drop(existing_rows);
+
+        self.put_blob(&wasm_artifact_key(sha256_hash), wasm_bytes)
+            .await
+            .map_err(PersistenceError::Storage)?;
+
+        let _write_permit = self
+            .acquire_write_permit("turso.upsert_wasm_module", WritePriority::High)
+            .await?;
         conn.execute(
             "INSERT INTO wasm_modules (tenant, module_name, wasm_bytes, sha256_hash, version, size_bytes, updated_at)
              VALUES (?1, ?2, ?3, ?4, 1, ?5, datetime('now'))
              ON CONFLICT (tenant, module_name) DO UPDATE SET
-                 wasm_bytes = excluded.wasm_bytes,
-                 sha256_hash = excluded.sha256_hash,
-                 version = wasm_modules.version + 1,
-                 size_bytes = excluded.size_bytes,
-                 updated_at = datetime('now')",
-            params![tenant, module_name, wasm_bytes.to_vec(), sha256_hash, wasm_bytes.len() as i64],
+                 wasm_bytes = CASE
+                     WHEN wasm_modules.sha256_hash IS NOT excluded.sha256_hash
+                     THEN excluded.wasm_bytes ELSE wasm_modules.wasm_bytes END,
+                 sha256_hash = CASE
+                     WHEN wasm_modules.sha256_hash IS NOT excluded.sha256_hash
+                     THEN excluded.sha256_hash ELSE wasm_modules.sha256_hash END,
+                 version = CASE
+                     WHEN wasm_modules.sha256_hash IS NOT excluded.sha256_hash
+                     THEN wasm_modules.version + 1 ELSE wasm_modules.version END,
+                 size_bytes = CASE
+                     WHEN wasm_modules.sha256_hash IS NOT excluded.sha256_hash
+                     THEN excluded.size_bytes ELSE wasm_modules.size_bytes END,
+                 updated_at = CASE
+                     WHEN wasm_modules.sha256_hash IS NOT excluded.sha256_hash
+                     THEN datetime('now') ELSE wasm_modules.updated_at END",
+            params![tenant, module_name, Vec::<u8>::new(), sha256_hash, wasm_bytes.len() as i64],
         )
         .await
         .map_err(storage_error)?;
@@ -64,7 +123,9 @@ impl TursoEventStore {
             return Ok(None);
         };
 
-        Ok(Some(Self::row_to_wasm_module(&row)?))
+        self.hydrate_wasm_module(Self::row_to_wasm_module(&row)?)
+            .await
+            .map(Some)
     }
 
     /// Load all WASM modules for a tenant.
@@ -88,7 +149,8 @@ impl TursoEventStore {
 
         let mut out = Vec::new();
         while let Some(row) = rows.next().await.map_err(storage_error)? {
-            out.push(Self::row_to_wasm_module(&row)?);
+            let row = Self::row_to_wasm_module(&row)?;
+            out.push(self.hydrate_wasm_module(row).await?);
         }
         Ok(out)
     }
@@ -112,7 +174,8 @@ impl TursoEventStore {
 
         let mut out = Vec::new();
         while let Some(row) = rows.next().await.map_err(storage_error)? {
-            out.push(Self::row_to_wasm_module(&row)?);
+            let row = Self::row_to_wasm_module(&row)?;
+            out.push(self.hydrate_wasm_module(row).await?);
         }
         Ok(out)
     }
@@ -244,6 +307,28 @@ impl TursoEventStore {
             size_bytes: row.get::<i64>(5).map_err(storage_error)? as i32,
             updated_at: row.get::<String>(6).map_err(storage_error)?,
         })
+    }
+
+    async fn hydrate_wasm_module(
+        &self,
+        mut row: TursoWasmModuleRow,
+    ) -> Result<TursoWasmModuleRow, PersistenceError> {
+        if row.wasm_bytes.is_empty() && row.size_bytes > 0 {
+            let artifact_key = wasm_artifact_key(&row.sha256_hash);
+            let artifact = self
+                .get_blob(&artifact_key)
+                .await
+                .map_err(PersistenceError::Storage)?
+                .ok_or_else(|| {
+                    PersistenceError::Storage(format!(
+                        "WASM artifact missing for {}/{} at {artifact_key}",
+                        row.tenant, row.module_name
+                    ))
+                })?;
+            row.wasm_bytes = artifact;
+        }
+
+        Ok(row)
     }
 
     /// Parse a WASM module metadata row from a libsql Row (5 columns).

@@ -4,11 +4,11 @@ use super::agent_bootstrap::{
 use super::*;
 use std::collections::HashMap;
 use std::fs;
-use std::path::PathBuf;
 use std::time::Duration;
 
 use temper_authz::SecurityContext;
 use temper_runtime::tenant::TenantId;
+use temper_server::platform_store::InstalledAppRecord;
 use temper_server::registry::{EntityLevelSummary, EntityVerificationResult, VerificationStatus};
 use temper_server::request_context::AgentContext;
 use temper_spec::automaton;
@@ -160,35 +160,60 @@ fn test_list_skills_returns_catalog() {
 
 #[test]
 fn test_resolve_os_app_install_order_dedupes_shared_dependencies() {
-    let temp = tempfile::tempdir().unwrap();
-
-    for (name, deps) in [
-        ("base", Vec::<&str>::new()),
-        ("left", vec!["base"]),
-        ("right", vec!["base"]),
-        ("top", vec!["left", "right"]),
-    ] {
-        let app_dir = temp.path().join(name);
-        fs::create_dir_all(&app_dir).unwrap();
-        fs::write(
-            app_dir.join("app.toml"),
-            format!(
-                "name = \"{name}\"\ndescription = \"{name}\"\nversion = \"0.1.0\"\ndependencies = [{}]\n",
-                deps.into_iter()
-                    .map(|dep| format!("\"{dep}\""))
-                    .collect::<Vec<_>>()
-                    .join(", ")
-            ),
-        )
-        .unwrap();
-        fs::write(app_dir.join("APP.md"), format!("# {name}\n")).unwrap();
-    }
-
-    set_os_apps_dir(temp.path().to_path_buf());
-    let order = resolve_os_app_install_order(&["top".to_string(), "right".to_string()]).unwrap();
+    let dependencies = HashMap::from([
+        ("base", Vec::<String>::new()),
+        ("left", vec!["base".to_string()]),
+        ("right", vec!["base".to_string()]),
+        ("top", vec!["left".to_string(), "right".to_string()]),
+    ]);
+    let order = reconcile::resolve_os_app_install_order_with_dependencies(
+        &["top".to_string(), "right".to_string()],
+        |app_name| dependencies.get(app_name).cloned().unwrap_or_default(),
+    )
+    .unwrap();
 
     assert_eq!(order, vec!["base", "left", "right", "top"]);
-    set_os_apps_dir(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../os-apps"));
+}
+
+#[test]
+fn test_reconcile_plan_for_wasm_only_digest_skips_unrelated_phases() {
+    let current = OsAppBundleDigest {
+        app_name: "paw-agent".to_string(),
+        app_version: "0.1.0".to_string(),
+        bundle_digest: "sha256:bundle-current".to_string(),
+        spec_digest: "sha256:spec-current".to_string(),
+        policy_digest: "sha256:policy-current".to_string(),
+        wasm_digest: "sha256:wasm-current".to_string(),
+        content_digest: "sha256:content-current".to_string(),
+        seed_digest: "sha256:seed-current".to_string(),
+    };
+    let installed = InstalledAppRecord {
+        tenant: "default".to_string(),
+        app_name: current.app_name.clone(),
+        app_version: current.app_version.clone(),
+        bundle_digest: "sha256:bundle-old".to_string(),
+        spec_digest: current.spec_digest.clone(),
+        policy_digest: current.policy_digest.clone(),
+        wasm_digest: "sha256:wasm-old".to_string(),
+        content_digest: current.content_digest.clone(),
+        seed_digest: current.seed_digest.clone(),
+        installed_at: None,
+        last_reconciled_at: None,
+        status: "installed".to_string(),
+    };
+
+    let plan = reconcile::plan_reconcile_from_installed_record(&installed, &current, true, true);
+
+    assert_eq!(
+        plan,
+        OsAppInstallPlan {
+            specs: false,
+            policies: false,
+            wasm: true,
+            content: false,
+            seed: false,
+        }
+    );
 }
 
 #[tokio::test]
@@ -216,6 +241,200 @@ async fn test_reconcile_os_app_skips_unchanged_bundle_digest() {
         matches!(result, OsAppReconcileResult::Skipped { .. }),
         "unchanged app should skip hot reinstall, got {result:?}"
     );
+
+    let _ = std::fs::remove_file(&db_path);
+    let _ = std::fs::remove_file(format!("{db_path}-wal"));
+    let _ = std::fs::remove_file(format!("{db_path}-shm"));
+}
+
+#[tokio::test]
+async fn test_install_plan_without_spec_phase_does_not_reclassify_specs() {
+    let state = PlatformState::new(None);
+    let tenant = "test-install-plan-skip-specs";
+
+    install_skill(&state, tenant, "project-management")
+        .await
+        .expect("initial install should succeed");
+
+    let result = install_os_app_with_plan(
+        &state,
+        tenant,
+        "project-management",
+        OsAppInstallPlan {
+            specs: false,
+            policies: false,
+            wasm: false,
+            content: false,
+            seed: false,
+        },
+    )
+    .await
+    .expect("planned no-op install should succeed");
+
+    assert!(result.added.is_empty());
+    assert!(result.updated.is_empty());
+    assert!(
+        result.skipped.is_empty(),
+        "spec classification should not run when the spec phase is disabled"
+    );
+    assert!(result.wasm_modules.is_empty());
+    assert!(result.agents.is_empty());
+    assert!(result.skills.is_empty());
+    assert!(result.seed_instances.is_empty());
+}
+
+#[tokio::test]
+async fn test_reconcile_os_app_delta_content_change_skips_specs() {
+    let db_path = format!("/tmp/temper-test-delta-content-{}.db", uuid::Uuid::new_v4());
+    let db_url = format!("file:{db_path}");
+
+    let turso = temper_store_turso::TursoEventStore::new(&db_url, None)
+        .await
+        .unwrap();
+    let mut state = PlatformState::new(None);
+    state.server.event_store = Some(std::sync::Arc::new(
+        temper_server::event_store::ServerEventStore::Turso(turso),
+    ));
+    let tenant = "test-delta-content";
+
+    install_skill(&state, tenant, "project-management")
+        .await
+        .expect("initial install should succeed");
+
+    let current = os_app_bundle_digest("project-management").expect("project-management digest");
+    let ps = state
+        .server
+        .event_store
+        .as_ref()
+        .and_then(|store| store.platform_store())
+        .expect("platform store");
+    ps.record_installed_app_metadata(&InstalledAppRecord {
+        tenant: tenant.to_string(),
+        app_name: current.app_name.clone(),
+        app_version: current.app_version.clone(),
+        bundle_digest: "sha256:previous-bundle".to_string(),
+        spec_digest: current.spec_digest.clone(),
+        policy_digest: current.policy_digest.clone(),
+        wasm_digest: current.wasm_digest.clone(),
+        content_digest: "sha256:previous-content".to_string(),
+        seed_digest: current.seed_digest.clone(),
+        installed_at: None,
+        last_reconciled_at: None,
+        status: "installed".to_string(),
+    })
+    .await
+    .expect("overwrite installed-app metadata");
+
+    let result = reconcile_os_app(&state, tenant, "project-management")
+        .await
+        .expect("delta reconcile should succeed");
+
+    let OsAppReconcileResult::Installed { install, .. } = result else {
+        panic!("content digest change should run delta install");
+    };
+    assert!(install.added.is_empty());
+    assert!(install.updated.is_empty());
+    assert!(
+        install.skipped.is_empty(),
+        "content-only reconcile should not reclassify or bootstrap specs"
+    );
+
+    let _ = std::fs::remove_file(&db_path);
+    let _ = std::fs::remove_file(format!("{db_path}-wal"));
+    let _ = std::fs::remove_file(format!("{db_path}-shm"));
+}
+
+#[tokio::test]
+async fn test_reconcile_os_app_repairs_spec_content_drift_despite_matching_digest() {
+    let db_path = format!("/tmp/temper-test-spec-drift-{}.db", uuid::Uuid::new_v4());
+    let db_url = format!("file:{db_path}");
+
+    let turso = temper_store_turso::TursoEventStore::new(&db_url, None)
+        .await
+        .unwrap();
+    let mut state = PlatformState::new(None);
+    state.server.event_store = Some(std::sync::Arc::new(
+        temper_server::event_store::ServerEventStore::Turso(turso),
+    ));
+    let tenant_name = "test-spec-drift";
+    let tenant = TenantId::new(tenant_name);
+
+    install_skill(&state, tenant_name, "project-management")
+        .await
+        .expect("initial install should succeed");
+
+    let bundle = get_os_app("project-management").expect("project-management app not found");
+    let csdl = bundle
+        .csdl
+        .clone()
+        .expect("project-management should have CSDL");
+    let mut drifted_specs = bundle.specs.clone();
+    let drifted_entity = drifted_specs
+        .first()
+        .map(|(entity_type, _)| entity_type.clone())
+        .expect("project-management should have specs");
+    drifted_specs[0].1.push_str("\n# test-only spec drift\n");
+
+    {
+        let mut registry = state.registry.write().unwrap(); // ci-ok: infallible lock
+        let parsed = parse_csdl(&csdl).expect("CSDL should parse");
+        let specs: Vec<(&str, &str)> = drifted_specs
+            .iter()
+            .map(|(entity_type, ioa_source)| (entity_type.as_str(), ioa_source.as_str()))
+            .collect();
+        registry
+            .try_register_tenant_with_reactions_and_constraints(
+                tenant.clone(),
+                parsed,
+                csdl,
+                &specs,
+                Vec::new(),
+                bundle.cross_invariants_toml.clone(),
+                true,
+            )
+            .expect("replace tenant config with drifted spec source");
+
+        let verified_at = temper_runtime::scheduler::sim_now().to_rfc3339();
+        for (entity_type, _) in &bundle.specs {
+            registry.set_verification_status(
+                &tenant,
+                entity_type,
+                VerificationStatus::Completed(EntityVerificationResult {
+                    all_passed: true,
+                    levels: vec![EntityLevelSummary {
+                        level: "Test".to_string(),
+                        passed: true,
+                        summary: "Spec drift should still force app reconcile".to_string(),
+                        details: None,
+                    }],
+                    verified_at: verified_at.clone(),
+                }),
+            );
+        }
+    }
+
+    let result = reconcile_os_app(&state, tenant_name, "project-management")
+        .await
+        .expect("reconcile should repair spec content drift");
+
+    let OsAppReconcileResult::Installed { install, .. } = result else {
+        panic!("matching digest with drifted runtime spec content must not skip reconcile");
+    };
+    assert!(
+        install.updated.contains(&drifted_entity),
+        "drifted spec should be reclassified as updated: {install:?}"
+    );
+    let registry = state.registry.read().unwrap(); // ci-ok: infallible lock
+    let repaired = registry
+        .get_spec(&tenant, &drifted_entity)
+        .expect("drifted spec should still be registered");
+    let expected = bundle
+        .specs
+        .iter()
+        .find(|(entity_type, _)| entity_type == &drifted_entity)
+        .map(|(_, ioa_source)| ioa_source.as_str())
+        .expect("bundle should still contain drifted entity");
+    assert_eq!(repaired.ioa_source, expected);
 
     let _ = std::fs::remove_file(&db_path);
     let _ = std::fs::remove_file(format!("{db_path}-wal"));
