@@ -9,10 +9,11 @@ use temper_runtime::tenant::parse_persistence_id_parts;
 use tracing::{instrument, warn};
 
 use super::TursoEventStore;
+use super::append_config::{append_attempt_timeout, append_max_attempts};
 use super::instrumentation::record_turso_query_duration;
 use super::write_gate::WritePriority;
 use crate::metrics::record_turso_write_retry;
-use crate::retry::{RETRY_DELAYS_MS, is_transient_write_error, retry_delay_ms};
+use crate::retry::{is_transient_write_error, retry_delay_ms};
 
 impl EventStore for TursoEventStore {
     #[instrument(skip_all, fields(persistence_id, otel.name = "turso.append"))]
@@ -244,28 +245,15 @@ impl EventStore for TursoEventStore {
         }
         Ok(out)
     }
-}
 
-fn append_attempt_timeout() -> Duration {
-    const DEFAULT_APPEND_ATTEMPT_TIMEOUT_MS: u64 = 5_000;
-    const MIN_APPEND_ATTEMPT_TIMEOUT_MS: u64 = 500;
-
-    let configured = std::env::var("TEMPER_TURSO_APPEND_TIMEOUT_MS")
-        .ok()
-        .and_then(|value| value.parse::<u64>().ok())
-        .unwrap_or(DEFAULT_APPEND_ATTEMPT_TIMEOUT_MS);
-
-    Duration::from_millis(configured.max(MIN_APPEND_ATTEMPT_TIMEOUT_MS))
-}
-
-fn append_max_attempts() -> usize {
-    const DEFAULT_APPEND_MAX_ATTEMPTS: usize = RETRY_DELAYS_MS.len() + 1;
-
-    std::env::var("TEMPER_TURSO_APPEND_MAX_ATTEMPTS")
-        .ok()
-        .and_then(|value| value.parse::<usize>().ok())
-        .unwrap_or(DEFAULT_APPEND_MAX_ATTEMPTS)
-        .max(1)
+    async fn list_entity_ids_by_type(
+        &self,
+        tenant: &str,
+        entity_type: &str,
+    ) -> Result<Vec<String>, PersistenceError> {
+        self.list_entity_ids_by_type_catalog_first(tenant, entity_type)
+            .await
+    }
 }
 
 impl TursoEventStore {

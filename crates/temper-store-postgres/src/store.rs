@@ -231,6 +231,36 @@ impl EventStore for PostgresEventStore {
 
         Ok(rows)
     }
+
+    /// List distinct entity IDs for one entity type in the given tenant.
+    async fn list_entity_ids_by_type(
+        &self,
+        tenant: &str,
+        entity_type: &str,
+    ) -> Result<Vec<String>, PersistenceError> {
+        let rows: Vec<String> = sqlx::query_scalar(
+            "SELECT DISTINCT e.entity_id \
+             FROM events e \
+             WHERE e.tenant = $1 \
+               AND e.entity_type = $2 \
+               AND NOT EXISTS ( \
+                 SELECT 1 \
+                 FROM events d \
+                 WHERE d.tenant = e.tenant \
+                   AND d.entity_type = e.entity_type \
+                   AND d.entity_id = e.entity_id \
+                   AND d.event_type = 'Deleted' \
+               ) \
+             ORDER BY e.entity_id",
+        )
+        .bind(tenant)
+        .bind(entity_type)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(|e| PersistenceError::Storage(e.to_string()))?;
+
+        Ok(rows)
+    }
 }
 
 // ---------------------------------------------------------------------------
