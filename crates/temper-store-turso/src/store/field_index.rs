@@ -5,7 +5,7 @@
 //! clauses. This avoids materializing every actor in a collection query
 //! just to evaluate filters in memory.
 
-use libsql::{TransactionBehavior, params};
+use libsql::{TransactionBehavior, Value, params, params_from_iter};
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet};
 use temper_runtime::persistence::{PersistenceError, storage_error};
@@ -71,58 +71,54 @@ impl TursoEventStore {
             .await?;
         let conn = self.configured_connection().await?;
         let new_projection_hash = projection_hash(status, fields);
-        let tx = conn
-            .transaction_with_behavior(TransactionBehavior::Immediate)
-            .await
-            .map_err(storage_error)?;
+        let updated_at = sim_now().to_rfc3339();
+        let sequence_nr = i64::try_from(sequence_nr).unwrap_or(i64::MAX);
 
-        let mut existing_rows = tx
-            .query(
-                "SELECT projection_hash FROM entity_catalog \
-                 WHERE tenant = ?1 AND entity_type = ?2 AND entity_id = ?3",
-                params![tenant, entity_type, entity_id],
-            )
-            .await
-            .map_err(storage_error)?;
-        let existing_projection_hash = existing_rows
-            .next()
-            .await
-            .map_err(storage_error)?
-            .and_then(|row| row.get::<String>(0).ok());
-
-        if existing_projection_hash.as_deref() == Some(new_projection_hash.as_str()) {
-            tx.execute(
+        let unchanged_rows = conn
+            .execute(
                 "UPDATE entity_catalog \
-                 SET status = ?4, updated_at = ?5, sequence_nr = ?6, projection_version = 2, projection_hash = ?7 \
-                 WHERE tenant = ?1 AND entity_type = ?2 AND entity_id = ?3",
+                 SET status = ?4, updated_at = ?5, sequence_nr = ?6, projection_version = 2 \
+                 WHERE tenant = ?1 AND entity_type = ?2 AND entity_id = ?3 AND projection_hash = ?7",
                 params![
                     tenant,
                     entity_type,
                     entity_id,
                     status,
-                    sim_now().to_rfc3339(),
-                    i64::try_from(sequence_nr).unwrap_or(i64::MAX),
-                    new_projection_hash,
+                    updated_at.as_str(),
+                    sequence_nr,
+                    new_projection_hash.as_str(),
                 ],
             )
             .await
             .map_err(storage_error)?;
-            tx.commit().await.map_err(storage_error)?;
+
+        if unchanged_rows > 0 {
             return Ok(());
         }
 
+        let tx = conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .await
+            .map_err(storage_error)?;
+
         tx.execute(
-            "INSERT OR REPLACE INTO entity_catalog \
+            "INSERT INTO entity_catalog \
              (tenant, entity_type, entity_id, status, updated_at, sequence_nr, projection_version, projection_hash) \
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, 2, ?7)",
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, 2, ?7) \
+             ON CONFLICT(tenant, entity_type, entity_id) DO UPDATE SET \
+                 status = excluded.status, \
+                 updated_at = excluded.updated_at, \
+                 sequence_nr = excluded.sequence_nr, \
+                 projection_version = excluded.projection_version, \
+                 projection_hash = excluded.projection_hash",
             params![
                 tenant,
                 entity_type,
                 entity_id,
                 status,
-                sim_now().to_rfc3339(),
-                i64::try_from(sequence_nr).unwrap_or(i64::MAX),
-                new_projection_hash,
+                updated_at,
+                sequence_nr,
+                new_projection_hash.as_str(),
             ],
         )
         .await
@@ -138,31 +134,36 @@ impl TursoEventStore {
         .await
         .map_err(storage_error)?;
 
-        if let Some(obj) = fields.as_object() {
-            for (field_name, value) in obj {
-                let field_value = scalar_to_text(value);
-                if field_value.is_none() && !value.is_null() {
-                    // Non-null, non-scalar (object/array) — skip indexing.
-                    continue;
+        let indexed_fields = indexed_projection_fields(status, fields);
+        if !indexed_fields.is_empty() {
+            let mut sql = String::from(
+                "INSERT INTO entity_field_index \
+                 (tenant, entity_type, entity_id, field_name, field_value, status) VALUES ",
+            );
+            let mut values = Vec::with_capacity(indexed_fields.len() * 6);
+
+            for (index, (field_name, field_value)) in indexed_fields.iter().enumerate() {
+                if index > 0 {
+                    sql.push_str(", ");
                 }
-                tx.execute(
-                    "INSERT INTO entity_field_index (tenant, entity_type, entity_id, field_name, field_value, status) \
-                     VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-                    params![tenant, entity_type, entity_id, field_name.as_str(), field_value, status],
-                )
+                sql.push_str("(?, ?, ?, ?, ?, ?)");
+                values.push(Value::from(tenant.to_string()));
+                values.push(Value::from(entity_type.to_string()));
+                values.push(Value::from(entity_id.to_string()));
+                values.push(Value::from(field_name.clone()));
+                values.push(
+                    field_value
+                        .as_ref()
+                        .map(|value| Value::from(value.clone()))
+                        .unwrap_or(Value::Null),
+                );
+                values.push(Value::from(status.to_string()));
+            }
+
+            tx.execute(&sql, params_from_iter(values))
                 .await
                 .map_err(storage_error)?;
-            }
         }
-
-        // Also index the status as a pseudo-field so `$filter=Status eq 'Active'` works.
-        tx.execute(
-            "INSERT OR REPLACE INTO entity_field_index (tenant, entity_type, entity_id, field_name, field_value, status) \
-             VALUES (?1, ?2, ?3, 'Status', ?4, ?4)",
-            params![tenant, entity_type, entity_id, status],
-        )
-        .await
-        .map_err(storage_error)?;
 
         tx.commit().await.map_err(storage_error)?;
         Ok(())
@@ -413,6 +414,32 @@ fn scalar_to_text(value: &serde_json::Value) -> Option<String> {
         serde_json::Value::String(s) => Some(s.clone()),
         serde_json::Value::Array(_) | serde_json::Value::Object(_) => None,
     }
+}
+
+fn indexed_projection_fields(
+    status: &str,
+    fields: &serde_json::Value,
+) -> Vec<(String, Option<String>)> {
+    let mut indexed_fields = Vec::new();
+
+    if let Some(obj) = fields.as_object() {
+        for (field_name, value) in obj {
+            if field_name == "Status" {
+                continue;
+            }
+
+            let field_value = scalar_to_text(value);
+            if field_value.is_none() && !value.is_null() {
+                continue;
+            }
+
+            indexed_fields.push((field_name.clone(), field_value));
+        }
+    }
+
+    // Also index the status as a pseudo-field so `$filter=Status eq 'Active'` works.
+    indexed_fields.push(("Status".to_string(), Some(status.to_string())));
+    indexed_fields
 }
 
 #[cfg(test)]
