@@ -44,7 +44,12 @@ pub(crate) fn retry_delay_ms(retry_index: usize) -> u64 {
 ///   code: "BLOCKED" }`.
 /// - Generic `stream error` from Hrana without an explicit code —
 ///   usually transient socket/TLS issues.
-/// - Connection reset / broken pipe / timeout.
+/// - Connection reset / broken pipe.
+///
+/// Local operation timeouts are intentionally not considered transient here.
+/// Once the client-side timeout fires, the remote Hrana operation may still be
+/// unwinding; immediately starting another write can multiply writer-lock
+/// pressure and turn one slow write into a retry storm.
 ///
 /// Non-transient (returns false): SQL syntax errors, UNIQUE constraint
 /// violations (caller-semantic, not retry-fixable), permission denials.
@@ -60,8 +65,6 @@ pub(crate) fn is_transient_write_error(err_msg: &str) -> bool {
         || lower.contains("stream error")
         || lower.contains("connection reset")
         || lower.contains("broken pipe")
-        || lower.contains("timed out")
-        || lower.contains("timeout")
         || lower.contains("try again")
 }
 
@@ -166,8 +169,11 @@ mod tests {
     }
 
     #[test]
-    fn is_transient_matches_timeout() {
-        assert!(is_transient_write_error("operation timed out after 10s"));
+    fn is_transient_rejects_local_timeout() {
+        assert!(!is_transient_write_error("operation timed out after 10s"));
+        assert!(!is_transient_write_error(
+            "turso.append timed out after 2000ms"
+        ));
     }
 
     #[test]
