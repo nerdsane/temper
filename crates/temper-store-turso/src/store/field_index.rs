@@ -13,6 +13,7 @@ use temper_runtime::scheduler::sim_now;
 use tracing::instrument;
 
 use super::TursoEventStore;
+use super::write_gate::WritePriority;
 
 fn projection_hash(status: &str, fields: &serde_json::Value) -> String {
     let mut hasher = Sha256::new();
@@ -66,7 +67,7 @@ impl TursoEventStore {
         sequence_nr: u64,
     ) -> Result<(), PersistenceError> {
         let _write_permit = self
-            .acquire_write_permit("turso.upsert_query_projection")
+            .acquire_write_permit("turso.upsert_query_projection", WritePriority::Low)
             .await?;
         let conn = self.configured_connection().await?;
         let new_projection_hash = projection_hash(status, fields);
@@ -196,7 +197,7 @@ impl TursoEventStore {
         entity_id: &str,
     ) -> Result<(), PersistenceError> {
         let _write_permit = self
-            .acquire_write_permit("turso.remove_query_projection")
+            .acquire_write_permit("turso.remove_query_projection", WritePriority::Low)
             .await?;
         let conn = self.configured_connection().await?;
         let tx = conn

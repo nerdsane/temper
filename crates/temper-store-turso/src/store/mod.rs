@@ -11,6 +11,7 @@
 
 use libsql::{Builder, Database};
 use std::sync::Arc;
+use std::sync::atomic::AtomicUsize;
 use temper_runtime::persistence::{PersistenceError, storage_error};
 use tokio::sync::Semaphore;
 use tracing::instrument;
@@ -40,6 +41,7 @@ use instrumentation::InstrumentedConnection;
 pub struct TursoEventStore {
     db: Arc<Database>,
     write_gate: Arc<Semaphore>,
+    high_priority_write_waiters: Arc<AtomicUsize>,
     /// True when connected to a remote Turso Cloud instance (libsql:// URL).
     /// PRAGMAs are skipped for remote connections.
     is_remote: bool,
@@ -75,6 +77,7 @@ impl TursoEventStore {
             write_gate: Arc::new(Semaphore::new(write_gate::configured_write_concurrency(
                 is_remote,
             ))),
+            high_priority_write_waiters: Arc::new(AtomicUsize::new(0)),
             is_remote,
         };
         store.migrate().await?;
