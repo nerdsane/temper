@@ -801,8 +801,10 @@ initial = "[]"
 name = "ConflictingContains"
 from = ["S"]
 to = "S"
-guard = "list_contains labels urgent"
-guard = "list_contains labels normal"
+guard = [
+    { type = "list_contains", var = "labels", value = "urgent" },
+    { type = "list_contains", var = "labels", value = "normal" },
+]
 "#;
 
         // With max_counter=1, a single-slot list cannot contain two distinct

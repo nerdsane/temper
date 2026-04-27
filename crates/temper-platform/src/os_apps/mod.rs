@@ -1204,6 +1204,15 @@ async fn install_os_app_without_dependencies(
     tenant: &str,
     app_name: &str,
 ) -> Result<InstallResult, String> {
+    install_os_app_with_plan(state, tenant, app_name, OsAppInstallPlan::all()).await
+}
+
+pub(super) async fn install_os_app_with_plan(
+    state: &PlatformState,
+    tenant: &str,
+    app_name: &str,
+    plan: OsAppInstallPlan,
+) -> Result<InstallResult, String> {
     let app_dir = {
         let cat = catalog().read().unwrap(); // ci-ok: infallible lock
         cat.paths.get(app_name).cloned().ok_or_else(|| {
@@ -1228,8 +1237,8 @@ async fn install_os_app_without_dependencies(
     }
 
     // Classify each bundle spec as added / updated / skipped, and compute the
-    // merged CSDL — both require the registry read lock, so we do them together.
-    let (mut added, mut updated, mut skipped, merged_csdl) = {
+    // merged CSDL only when the reconcile plan needs spec work.
+    let (mut added, mut updated, mut skipped, merged_csdl) = if plan.specs {
         let registry = state.registry.read().unwrap(); // ci-ok: infallible lock
         let mut added = Vec::new();
         let mut updated = Vec::new();
@@ -1270,6 +1279,8 @@ async fn install_os_app_without_dependencies(
                 .map(|t| emit_csdl_xml(&t.csdl))
         };
         (added, updated, skipped, merged_csdl)
+    } else {
+        (Vec::new(), Vec::new(), Vec::new(), None)
     };
     // Sort for deterministic output.
     added.sort();
@@ -1277,7 +1288,7 @@ async fn install_os_app_without_dependencies(
     skipped.sort();
 
     // Build the full Cedar policy text for this tenant (existing + new).
-    let combined_policy = if !bundle.cedar_policies.is_empty() {
+    let combined_policy = if plan.policies && !bundle.cedar_policies.is_empty() {
         let combined: String = bundle.cedar_policies.join("\n");
         let policies = state.server.tenant_policies.read().unwrap(); // ci-ok: infallible lock
         let existing = policies.get(tenant).cloned().unwrap_or_default();
@@ -1296,28 +1307,18 @@ async fn install_os_app_without_dependencies(
     if let Some(ref store) = state.server.event_store
         && let Some(turso) = store.platform_turso_store()
     {
-        let mut spec_sources: BTreeMap<String, String> = turso
-            .load_specs()
-            .await
-            .map_err(|e| format!("Failed to load existing specs for tenant '{tenant}': {e}"))?
-            .into_iter()
-            .filter(|row| row.tenant == tenant)
-            .map(|row| (row.entity_type, row.ioa_source))
-            .collect();
-
-        for (entity_type, ioa_source) in &bundle.specs {
-            spec_sources.insert(entity_type.clone(), ioa_source.clone());
-        }
-
-        if let Some(ref merged) = merged_csdl {
-            // Collect all specs with their content hashes for a single
-            // transactional write — eliminates the crash window between
-            // individual upserts (committed=0) and the commit step.
-            let owned: Vec<(String, String, String, String)> = spec_sources
-                .into_iter()
+        if plan.specs
+            && let Some(ref merged) = merged_csdl
+        {
+            // Collect only this app's specs with their content hashes for a
+            // single transactional write. Existing tenant specs are preserved by
+            // the merged CSDL, but no longer re-written on every app install.
+            let owned: Vec<(String, String, String, String)> = bundle
+                .specs
+                .iter()
                 .map(|(et, ioa)| {
-                    let hash = temper_store_turso::spec_content_hash(&ioa);
-                    (et, ioa, merged.clone(), hash)
+                    let hash = temper_store_turso::spec_content_hash(ioa);
+                    (et.clone(), ioa.clone(), merged.clone(), hash)
                 })
                 .collect();
             let refs: Vec<(&str, &str, &str, &str)> = owned
@@ -1328,8 +1329,19 @@ async fn install_os_app_without_dependencies(
                 .upsert_specs_and_commit(tenant, &refs, combined_policy.as_deref(), app_name)
                 .await
                 .map_err(|e| format!("Failed to persist and commit specs: {e}"))?;
+        } else if let Some(ref policy_text) = combined_policy {
+            turso
+                .upsert_tenant_policy(tenant, policy_text)
+                .await
+                .map_err(|e| format!("Failed to persist Cedar policy: {e}"))?;
+            turso
+                .record_installed_app(tenant, app_name)
+                .await
+                .map_err(|e| format!("Failed to record os-app installation: {e}"))?;
         }
-        if let Some(ref cross_invariants_toml) = bundle.cross_invariants_toml {
+        if plan.specs
+            && let Some(ref cross_invariants_toml) = bundle.cross_invariants_toml
+        {
             turso
                 .upsert_tenant_constraints(tenant, cross_invariants_toml)
                 .await
@@ -1338,7 +1350,9 @@ async fn install_os_app_without_dependencies(
     } else if let Some(ref store) = state.server.event_store
         && let Some(ps) = store.platform_store()
     {
-        if let Some(ref merged) = merged_csdl {
+        if plan.specs
+            && let Some(ref merged) = merged_csdl
+        {
             for (entity_type, ioa_source) in &bundle.specs {
                 let hash = temper_store_turso::spec_content_hash(ioa_source);
                 ps.upsert_spec(tenant, entity_type, ioa_source, merged, &hash)
@@ -1351,7 +1365,9 @@ async fn install_os_app_without_dependencies(
                 .await
                 .map_err(|e| format!("Failed to persist Cedar policy: {e}"))?;
         }
-        if let Some(ref cross_invariants_toml) = bundle.cross_invariants_toml {
+        if plan.specs
+            && let Some(ref cross_invariants_toml) = bundle.cross_invariants_toml
+        {
             ps.upsert_tenant_constraints(tenant, cross_invariants_toml)
                 .await
                 .map_err(|e| format!("Failed to persist cross-invariants: {e}"))?;
@@ -1359,16 +1375,18 @@ async fn install_os_app_without_dependencies(
         ps.record_installed_app(tenant, app_name)
             .await
             .map_err(|e| format!("Failed to record os-app installation: {e}"))?;
-        // Commit all specs atomically after all writes succeed.
-        ps.commit_specs(tenant)
-            .await
-            .map_err(|e| format!("Failed to commit specs: {e}"))?;
+        if plan.specs {
+            // Commit only when this path used individual spec writes.
+            ps.commit_specs(tenant)
+                .await
+                .map_err(|e| format!("Failed to commit specs: {e}"))?;
+        }
     }
 
     // ── Step 2: Bootstrap into memory (verification + registry). ────
     // Only process specs whose content has changed (added or updated);
     // skipped specs are already loaded with identical content.
-    if !bundle.specs.is_empty() {
+    if plan.specs && !bundle.specs.is_empty() {
         let specs_to_bootstrap: Vec<(&str, &str)> = bundle
             .specs
             .iter()
@@ -1430,7 +1448,9 @@ async fn install_os_app_without_dependencies(
     // App installs can add or change cross-entity reactions. Refresh the live
     // dispatcher immediately so the newly registered tenant config takes effect
     // without requiring a process restart or a separate specs reload.
-    state.server.rebuild_reaction_dispatcher();
+    if plan.specs {
+        state.server.rebuild_reaction_dispatcher();
+    }
 
     // ── Step 3: Load Cedar policies into memory. ────────────────────
     if let Some(ref policy_text) = combined_policy {
@@ -1454,75 +1474,77 @@ async fn install_os_app_without_dependencies(
     let mut wasm_registered = Vec::new();
     let mut wasm_skipped = Vec::new();
     let mut wasm_failures = Vec::new();
-    for (module_name, wasm_bytes) in &bundle.wasm_modules {
-        let module_config = bundle.wasm_module_configs.get(module_name);
-        let hash = temper_wasm::WasmEngine::hash_module(wasm_bytes);
+    if plan.wasm {
+        for (module_name, wasm_bytes) in &bundle.wasm_modules {
+            let module_config = bundle.wasm_module_configs.get(module_name);
+            let hash = temper_wasm::WasmEngine::hash_module(wasm_bytes);
 
-        if let Err(e) = state
-            .server
-            .upsert_wasm_module(tenant, module_name, wasm_bytes, &hash)
-            .await
-        {
-            tracing::warn!(
-                tenant,
-                module = %module_name,
-                error = %e,
-                "Failed to persist WASM module to durable store (continuing in-memory only)"
-            );
-        }
-        {
-            let mut wasm_reg = state.server.wasm_module_registry.write().unwrap(); // ci-ok: infallible lock
-            wasm_reg.register(&tenant_id, module_name, &hash);
-        }
-
-        if matches!(
-            module_config.map(|config| config.startup_loading),
-            Some(WasmStartupLoading::Eager)
-        ) && let Err(e) = state.server.wasm_engine.compile_and_cache(wasm_bytes)
-        {
-            wasm_failures.push(module_name.clone());
-            tracing::warn!(
-                tenant,
-                module = %module_name,
-                error = %e,
-                "Failed to eagerly compile WASM module from OS app"
-            );
-        }
-
-        tracing::info!(
-            tenant,
-            module = %module_name,
-            hash = %hash,
-            size = wasm_bytes.len(),
-            startup_loading = ?module_config
-                .map(|config| config.startup_loading)
-                .unwrap_or_default(),
-            "WASM module registered from OS app"
-        );
-        wasm_registered.push(module_name.clone());
-    }
-
-    for (module_name, module_config) in &bundle.wasm_module_configs {
-        if bundle.wasm_modules.contains_key(module_name) {
-            continue;
-        }
-        match module_config.criticality {
-            WasmModuleCriticality::Optional => {
-                wasm_skipped.push(module_name.clone());
+            if let Err(e) = state
+                .server
+                .upsert_wasm_module(tenant, module_name, wasm_bytes, &hash)
+                .await
+            {
                 tracing::warn!(
                     tenant,
                     module = %module_name,
-                    "Configured optional WASM module artifact is missing from the app bundle"
+                    error = %e,
+                    "Failed to persist WASM module to durable store (continuing in-memory only)"
                 );
             }
-            WasmModuleCriticality::PlatformRequired | WasmModuleCriticality::AppRequired => {
+            {
+                let mut wasm_reg = state.server.wasm_module_registry.write().unwrap(); // ci-ok: infallible lock
+                wasm_reg.register(&tenant_id, module_name, &hash);
+            }
+
+            if matches!(
+                module_config.map(|config| config.startup_loading),
+                Some(WasmStartupLoading::Eager)
+            ) && let Err(e) = state.server.wasm_engine.compile_and_cache(wasm_bytes)
+            {
                 wasm_failures.push(module_name.clone());
-                tracing::error!(
+                tracing::warn!(
                     tenant,
                     module = %module_name,
-                    criticality = ?module_config.criticality,
-                    "Configured required WASM module artifact is missing from the app bundle"
+                    error = %e,
+                    "Failed to eagerly compile WASM module from OS app"
                 );
+            }
+
+            tracing::info!(
+                tenant,
+                module = %module_name,
+                hash = %hash,
+                size = wasm_bytes.len(),
+                startup_loading = ?module_config
+                    .map(|config| config.startup_loading)
+                    .unwrap_or_default(),
+                "WASM module registered from OS app"
+            );
+            wasm_registered.push(module_name.clone());
+        }
+
+        for (module_name, module_config) in &bundle.wasm_module_configs {
+            if bundle.wasm_modules.contains_key(module_name) {
+                continue;
+            }
+            match module_config.criticality {
+                WasmModuleCriticality::Optional => {
+                    wasm_skipped.push(module_name.clone());
+                    tracing::warn!(
+                        tenant,
+                        module = %module_name,
+                        "Configured optional WASM module artifact is missing from the app bundle"
+                    );
+                }
+                WasmModuleCriticality::PlatformRequired | WasmModuleCriticality::AppRequired => {
+                    wasm_failures.push(module_name.clone());
+                    tracing::error!(
+                        tenant,
+                        module = %module_name,
+                        criticality = ?module_config.criticality,
+                        "Configured required WASM module artifact is missing from the app bundle"
+                    );
+                }
             }
         }
     }
@@ -1537,30 +1559,41 @@ async fn install_os_app_without_dependencies(
     );
 
     // ── Step 5: Bootstrap App entity + APP.md. ──────────────────────────
-    let app_id = bootstrap_app_entity(state, &tenant_id, tenant, app_name).await;
+    let (agents_bootstrapped, skills_bootstrapped, adrs_bootstrapped) = if plan.content {
+        let app_id = bootstrap_app_entity(state, &tenant_id, tenant, app_name).await;
 
-    // ── Step 6: Bootstrap agents (returns name→uuid map). ──────────────
-    let (agents_bootstrapped, agent_uuid_map) = agent_bootstrap::bootstrap_agents(
-        state,
-        &tenant_id,
-        tenant,
-        &bundle.agents,
-        app_id.as_deref(),
-    )
-    .await;
+        // ── Step 6: Bootstrap agents (returns name→uuid map). ──────────
+        let (agents_bootstrapped, agent_uuid_map) = agent_bootstrap::bootstrap_agents(
+            state,
+            &tenant_id,
+            tenant,
+            &bundle.agents,
+            app_id.as_deref(),
+        )
+        .await;
 
-    // ── Step 7: Bootstrap skills (agent-scoped + system). ──────────────
-    let skills_bootstrapped =
-        bootstrap_skills(state, &tenant_id, tenant, &bundle.skills, &agent_uuid_map).await;
+        // ── Step 7: Bootstrap skills (agent-scoped + system). ──────────
+        let skills_bootstrapped =
+            bootstrap_skills(state, &tenant_id, tenant, &bundle.skills, &agent_uuid_map).await;
 
-    // ── Step 7b: Bootstrap system files (e.g. mode-instructions). ─────
-    system_files::bootstrap_system_files(state, &tenant_id, tenant, &bundle.system_files).await;
+        // ── Step 7b: Bootstrap system files (e.g. mode-instructions). ─
+        system_files::bootstrap_system_files(state, &tenant_id, tenant, &bundle.system_files).await;
 
-    // ── Step 8: Bootstrap ADRs into TemperFS. ────────────────────────
-    let adrs_bootstrapped = bootstrap_adrs(state, &tenant_id, tenant, app_name, &bundle.adrs).await;
+        // ── Step 8: Bootstrap ADRs into TemperFS. ─────────────────────
+        let adrs_bootstrapped =
+            bootstrap_adrs(state, &tenant_id, tenant, app_name, &bundle.adrs).await;
+
+        (agents_bootstrapped, skills_bootstrapped, adrs_bootstrapped)
+    } else {
+        (Vec::new(), Vec::new(), Vec::new())
+    };
 
     // ── Step 9: Create seed instances. ───────────────────────────────
-    let seed_created = bootstrap_seed_data(state, &tenant_id, tenant, &bundle.seed_instances).await;
+    let seed_created = if plan.seed {
+        bootstrap_seed_data(state, &tenant_id, tenant, &bundle.seed_instances).await
+    } else {
+        Vec::new()
+    };
 
     reconcile::record_app_install_metadata_for_bundle(state, tenant, app_name, &bundle).await;
 

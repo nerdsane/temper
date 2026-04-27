@@ -11,6 +11,9 @@ fn tenant_has_registered_app_specs_for_bundle(
     tenant: &str,
     bundle: &AppBundle,
 ) -> bool {
+    if !tenant_has_app_spec_content_for_bundle(state, tenant, bundle) {
+        return false;
+    }
     if !tenant_has_app_spec_tables_for_bundle(state, tenant, bundle) {
         return false;
     }
@@ -44,6 +47,22 @@ fn tenant_has_registered_app_specs_for_bundle(
     }
 
     true
+}
+
+fn tenant_has_app_spec_content_for_bundle(
+    state: &PlatformState,
+    tenant: &str,
+    bundle: &AppBundle,
+) -> bool {
+    let tenant_id = TenantId::new(tenant);
+    let registry = state.registry.read().expect("Spec registry lock poisoned");
+    bundle.specs.iter().all(|(entity_type, ioa_source)| {
+        let Some(existing) = registry.get_spec(&tenant_id, entity_type) else {
+            return false;
+        };
+        temper_store_turso::spec_content_hash(&existing.ioa_source)
+            == temper_store_turso::spec_content_hash(ioa_source)
+    })
 }
 
 fn tenant_has_app_spec_tables_for_bundle(
@@ -193,6 +212,10 @@ pub(crate) async fn restore_app_specs_from_matching_digest(
     app_name: &str,
     bundle: &AppBundle,
 ) -> bool {
+    if !tenant_has_app_spec_content_for_bundle(state, tenant, bundle) {
+        return false;
+    }
+
     if tenant_has_registered_app_specs_for_bundle(state, tenant, bundle) {
         mark_app_specs_restored_from_matching_digest(state, ps, tenant, app_name, bundle).await;
         return true;
