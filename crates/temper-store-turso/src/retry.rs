@@ -26,6 +26,14 @@ use crate::metrics::record_turso_write_retry;
 /// typical Turso transient-error recovery windows.
 pub(crate) const RETRY_DELAYS_MS: &[u64] = &[250, 500, 1000, 2000];
 
+pub(crate) fn retry_delay_ms(retry_index: usize) -> u64 {
+    RETRY_DELAYS_MS
+        .get(retry_index)
+        .copied()
+        .or_else(|| RETRY_DELAYS_MS.last().copied())
+        .unwrap_or(0)
+}
+
 /// Returns true if `err_msg` looks like a transient Turso/libSQL failure
 /// that retry with backoff can reasonably recover from.
 ///
@@ -84,6 +92,7 @@ fn error_text(err: &PersistenceError) -> Option<&str> {
 /// Not intended for reads — those are typically idempotent but also
 /// rarely benefit from retry in the same way (they're not the root of
 /// entity-state correctness). Scoped to write paths explicitly.
+#[cfg(test)]
 pub(crate) async fn retry_persistence<F, Fut, T>(
     operation: &'static str,
     mut f: F,
@@ -92,12 +101,24 @@ where
     F: FnMut() -> Fut,
     Fut: std::future::Future<Output = Result<T, PersistenceError>>,
 {
-    let total_attempts = RETRY_DELAYS_MS.len() + 1;
+    retry_persistence_with_max_attempts(operation, RETRY_DELAYS_MS.len() + 1, &mut f).await
+}
+
+pub(crate) async fn retry_persistence_with_max_attempts<F, Fut, T>(
+    operation: &'static str,
+    max_attempts: usize,
+    mut f: F,
+) -> Result<T, PersistenceError>
+where
+    F: FnMut() -> Fut,
+    Fut: std::future::Future<Output = Result<T, PersistenceError>>,
+{
+    let total_attempts = max_attempts.max(1);
     let mut last_err: Option<PersistenceError> = None;
 
     for attempt in 0..total_attempts {
         if attempt > 0 {
-            let delay_ms = RETRY_DELAYS_MS[attempt - 1];
+            let delay_ms = retry_delay_ms(attempt - 1);
             tokio::time::sleep(Duration::from_millis(delay_ms)).await;
         }
 

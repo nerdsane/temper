@@ -11,7 +11,7 @@ use tracing::{instrument, warn};
 use super::TursoEventStore;
 use super::instrumentation::record_turso_query_duration;
 use crate::metrics::record_turso_write_retry;
-use crate::retry::{RETRY_DELAYS_MS, is_transient_write_error};
+use crate::retry::{RETRY_DELAYS_MS, is_transient_write_error, retry_delay_ms};
 
 impl EventStore for TursoEventStore {
     #[instrument(skip_all, fields(persistence_id, otel.name = "turso.append"))]
@@ -28,11 +28,11 @@ impl EventStore for TursoEventStore {
         // erroring, the retry's pre-check detects it as ConcurrencyViolation
         // (non-transient, propagates to caller via normal event-store contract).
         let attempt_timeout = append_attempt_timeout();
-        let total_attempts = RETRY_DELAYS_MS.len() + 1;
+        let total_attempts = append_max_attempts();
         let mut last_err: Option<PersistenceError> = None;
         for attempt in 0..total_attempts {
             if attempt > 0 {
-                tokio::time::sleep(Duration::from_millis(RETRY_DELAYS_MS[attempt - 1])).await;
+                tokio::time::sleep(Duration::from_millis(retry_delay_ms(attempt - 1))).await;
             }
             let attempt_result = tokio::time::timeout(
                 attempt_timeout,
@@ -233,6 +233,16 @@ fn append_attempt_timeout() -> Duration {
         .unwrap_or(DEFAULT_APPEND_ATTEMPT_TIMEOUT_MS);
 
     Duration::from_millis(configured.max(MIN_APPEND_ATTEMPT_TIMEOUT_MS))
+}
+
+fn append_max_attempts() -> usize {
+    const DEFAULT_APPEND_MAX_ATTEMPTS: usize = RETRY_DELAYS_MS.len() + 1;
+
+    std::env::var("TEMPER_TURSO_APPEND_MAX_ATTEMPTS")
+        .ok()
+        .and_then(|value| value.parse::<usize>().ok())
+        .unwrap_or(DEFAULT_APPEND_MAX_ATTEMPTS)
+        .max(1)
 }
 
 impl TursoEventStore {
