@@ -144,17 +144,33 @@ mod tests {
     use super::*;
     use axum::body::Body;
     use axum::http::Request;
+    use serial_test::serial;
+    use std::sync::Arc;
+    use temper_actor_runtime::test_utils::setup_test_pg;
     use temper_actor_runtime::{ActorSystem, SchedulerConfig};
-    fn test_actor_system() -> std::sync::Arc<ActorSystem> {
+    use temper_spec::csdl::parse_csdl;
+    use testcontainers::ContainerAsync;
+    use testcontainers_modules::postgres::Postgres;
+    use tower::ServiceExt;
+
+    /// Lazy pool — for routing-only tests that don't hit PG.
+    fn test_actor_system() -> Arc<ActorSystem> {
         let mut cfg = deadpool_postgres::Config::new();
         cfg.host = Some("localhost".to_string());
         cfg.dbname = Some("temper_test".to_string());
         cfg.user = Some("postgres".to_string());
         let pool = cfg.create_pool(None, tokio_postgres::NoTls).expect("pool");
-        std::sync::Arc::new(ActorSystem::new(pool, SchedulerConfig::default()))
+        Arc::new(ActorSystem::new(pool, SchedulerConfig::default()))
     }
-    use temper_spec::csdl::parse_csdl;
-    use tower::ServiceExt;
+
+    /// Real PG container — for tests that create/dispatch entities.
+    async fn test_actor_system_pg() -> (Arc<ActorSystem>, ContainerAsync<Postgres>) {
+        let (pool, container) = setup_test_pg().await;
+        (
+            Arc::new(ActorSystem::new(pool, SchedulerConfig::default())),
+            container,
+        )
+    }
 
     const CSDL_XML: &str = include_str!("../../../test-fixtures/specs/model.csdl.xml");
 
@@ -226,9 +242,28 @@ code = "query.code"
         crate::router::build_router(build_test_state())
     }
 
+    #[serial]
     #[tokio::test]
     async fn webhook_dispatches_action() {
-        let state = build_test_state();
+        // Use real PG for this test — entity creation requires it.
+        let (system_pg, _pg) = test_actor_system_pg().await;
+        let csdl = parse_csdl(CSDL_XML).unwrap();
+        let state = ServerState::new(system_pg, csdl, CSDL_XML.to_string());
+        {
+            let mut registry = state.registry.write().unwrap();
+            let csdl2 = parse_csdl(CSDL_XML).unwrap();
+            registry.register_tenant(
+                "test-tenant",
+                csdl2,
+                CSDL_XML.to_string(),
+                &[("Order", ORDER_IOA_WITH_WEBHOOK)],
+            );
+        }
+        // Register all specs as actor handlers.
+        state
+            .register_specs_as_actors()
+            .await
+            .expect("register specs");
         let tenant = TenantId::new("test-tenant");
 
         // Create entity directly via dispatch.

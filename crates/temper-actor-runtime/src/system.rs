@@ -91,7 +91,49 @@ impl ActorSystem {
         Ok(handle)
     }
 
-    /// Send a fire-and-forget message from outside the actor system.
+    /// Spawn with initial fields merged into actor state.
+    /// Fields are embedded so they're visible immediately on first read.
+    pub async fn spawn_with_fields(
+        &self,
+        namespace: &str,
+        actor_type: &str,
+        fields: serde_json::Value,
+    ) -> Result<ActorHandle, ActorError> {
+        let handle = ActorHandle::new(namespace, actor_type);
+
+        // Build initial state with fields pre-populated.
+        let initial_state = {
+            let handlers = self.handlers.read().unwrap();
+            let raw = handlers
+                .get(actor_type)
+                .map(|h| h.initial_state())
+                .unwrap_or_default();
+            if fields.is_null() || fields.as_object().is_some_and(|o| o.is_empty()) {
+                raw
+            } else {
+                let mut state: crate::spec_actor::SpecActorState =
+                    serde_json::from_slice(&raw).unwrap_or_default();
+                state.fields = fields;
+                serde_json::to_vec(&state).unwrap_or(raw)
+            }
+        };
+
+        let client = self
+            .pool
+            .get()
+            .await
+            .map_err(|e| ActorError::Internal(format!("pool: {e}")))?;
+
+        client
+            .execute(
+                schema::CREATE_ACTOR,
+                &[&handle.namespace, &handle.actor_type, &initial_state],
+            )
+            .await
+            .map_err(|e| ActorError::Internal(format!("spawn_with_fields: {e}")))?;
+
+        Ok(handle)
+    }
     pub async fn tell<M: prost::Message>(
         &self,
         from: Option<&ActorHandle>,
@@ -146,6 +188,26 @@ impl ActorSystem {
         scheduler.poll_once().await
     }
 
+    /// Directly activate an actor (synchronous — waits for activation to complete).
+    /// Used in request handlers to process a message inline without spawning tasks.
+    pub async fn activate_now(
+        &self,
+        handle: &ActorHandle,
+    ) -> Result<bool, crate::pg::ActivationError> {
+        let handler = {
+            let handlers = self.handlers.read().unwrap();
+            handlers.get(&handle.actor_type).cloned()
+        };
+        let handler = match handler {
+            Some(h) => h,
+            None => {
+                return Ok(false);
+            }
+        };
+        let result = self.activator.activate(handle, handler.as_ref()).await?;
+        Ok(result.activated)
+    }
+
     /// Spawn all registered actor types in a namespace (idempotent — skips existing instances).
     pub async fn spawn_all_registered(&self, namespace: &str) -> Result<(), ActorError> {
         let actor_types: Vec<String> = { self.handlers.read().unwrap().keys().cloned().collect() };
@@ -181,6 +243,50 @@ impl ActorSystem {
     /// Get a reference to the mailbox (for advanced use).
     pub fn mailbox(&self) -> &Arc<dyn Mailbox> {
         &self.mailbox
+    }
+
+    /// Check whether a handler is registered for the given actor type.
+    pub fn has_handler(&self, actor_type: &str) -> bool {
+        self.handlers.read().unwrap().contains_key(actor_type)
+    }
+
+    /// Directly update the `fields` of an actor's state in PG (bypass state machine).
+    /// Used for PATCH operations — merges or replaces fields without triggering a transition.
+    pub async fn update_actor_fields(
+        &self,
+        handle: &ActorHandle,
+        fields: serde_json::Value,
+        replace: bool,
+    ) -> Result<(), ActorError> {
+        let mut state = self.get_spec_actor_state(handle).await.unwrap_or_default();
+        if replace {
+            state.fields = fields;
+        } else {
+            // Merge: new fields overwrite existing keys, others kept.
+            if let (Some(existing), Some(new)) = (state.fields.as_object_mut(), fields.as_object())
+            {
+                for (k, v) in new {
+                    existing.insert(k.clone(), v.clone());
+                }
+            } else {
+                state.fields = fields;
+            }
+        }
+        let state_bytes = serde_json::to_vec(&state)
+            .map_err(|e| ActorError::Internal(format!("serialize: {e}")))?;
+        let client = self
+            .pool
+            .get()
+            .await
+            .map_err(|e| ActorError::Internal(format!("pool: {e}")))?;
+        client
+            .execute(
+                "UPDATE odp_temper.actor_instances SET state = $1 WHERE namespace = $2 AND actor_type = $3",
+                &[&state_bytes, &handle.namespace, &handle.actor_type],
+            )
+            .await
+            .map_err(|e| ActorError::Internal(format!("update fields: {e}")))?;
+        Ok(())
     }
 
     /// Load actor state bytes. Returns None if actor instance doesn't exist.

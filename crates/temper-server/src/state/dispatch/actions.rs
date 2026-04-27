@@ -228,31 +228,38 @@ impl crate::state::ServerState {
             .await;
 
         let action_params = params.clone();
-        // PG-backed dispatch: tell the actor via mailbox, read state after processing.
-        let msg = SpecMessage::with_params(action, params.clone());
+        // Strip OData namespace prefix: "Temper.Example.CancelOrder" → "CancelOrder"
+        let action_name = action.rsplit('.').next().unwrap_or(action);
+        let msg = SpecMessage::with_params(action_name, params.clone());
         let response = match self.actor_system.tell(None, &actor_handle, msg).await {
             Ok(_msg_id) => {
-                // Give the scheduler a brief window to process the message.
-                tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-                let cache_key = format!("{tenant}:{entity_type}:{entity_id}");
-                let current_state = self
-                    .entity_state_cache
-                    .read()
-                    .unwrap()
-                    .get(&cache_key)
-                    .map(|(s, _)| s.clone())
+                // Directly activate the actor inline (synchronous — no background task).
+                let activated = self.actor_system.activate_now(&actor_handle).await;
+                // Read updated state from PG directly.
+                let spec_state = self
+                    .actor_system
+                    .get_spec_actor_state(&actor_handle)
+                    .await
                     .unwrap_or_default();
                 EntityResponse {
                     success: true,
                     state: EntityState {
                         entity_type: entity_type.to_string(),
                         entity_id: entity_id.to_string(),
-                        status: current_state,
+                        status: spec_state.status,
                         item_count: 0,
-                        counters: std::collections::BTreeMap::new(),
-                        booleans: std::collections::BTreeMap::new(),
+                        counters: spec_state
+                            .counters
+                            .iter()
+                            .map(|(k, v)| (k.clone(), *v))
+                            .collect(),
+                        booleans: spec_state
+                            .booleans
+                            .iter()
+                            .map(|(k, v)| (k.clone(), *v))
+                            .collect(),
                         lists: std::collections::BTreeMap::new(),
-                        fields: serde_json::json!({}),
+                        fields: spec_state.fields,
                         events: vec![],
                         sequence_nr: 0,
                     },

@@ -275,8 +275,19 @@ impl ServerState {
         csdl_xml: String,
         ioa_sources: BTreeMap<String, String>,
     ) -> Self {
-        let mut state = Self::new(system, csdl, csdl_xml);
+        let mut state = Self::new(system, csdl.clone(), csdl_xml.clone());
         let mut tables = BTreeMap::new();
+
+        // Build legacy transition tables AND register in SpecRegistry for actor dispatch.
+        let ioa_vec: Vec<(&str, &str)> = ioa_sources
+            .iter()
+            .map(|(k, v)| (k.as_str(), v.as_str()))
+            .collect();
+        {
+            let mut reg = state.registry.write().unwrap();
+            reg.register_tenant("default", csdl, csdl_xml, &ioa_vec);
+        }
+
         for (entity_type, ioa_source) in &ioa_sources {
             let table = TransitionTable::from_ioa_source(ioa_source);
             tables.insert(entity_type.clone(), Arc::new(table));
@@ -427,5 +438,31 @@ impl ServerState {
     pub fn with_secrets_vault(mut self, vault: SecretsVault) -> Self {
         self.secrets_vault = Some(Arc::new(vault));
         self
+    }
+
+    /// Register all specs currently in the SpecRegistry as SpecDrivenActors in the actor system.
+    ///
+    /// Call this after building a ServerState that has IOA specs so the scheduler
+    /// can process messages for those entity types. Required for tests and for
+    /// non-agent entity types (e.g. "Order") that aren't registered by register_agent_actors().
+    pub async fn register_specs_as_actors(&self) -> Result<(), Box<dyn std::error::Error>> {
+        use temper_actor_runtime::spec_actor::SpecDrivenActor;
+
+        // Collect specs from SpecRegistry (covers both multi-tenant and with_specs paths).
+        let specs: Vec<(String, String)> = {
+            let reg = self.registry.read().unwrap();
+            reg.all_specs()
+        };
+
+        for (entity_type, ioa_src) in specs {
+            if self.actor_system.has_handler(&entity_type) {
+                continue; // Already registered (e.g. by register_agent_actors).
+            }
+            let actor = SpecDrivenActor::from_ioa(&ioa_src, std::collections::HashMap::new())?;
+            self.actor_system
+                .register(std::sync::Arc::new(actor))
+                .await?;
+        }
+        Ok(())
     }
 }

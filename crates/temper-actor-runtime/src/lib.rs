@@ -16,6 +16,8 @@ pub mod scheduler;
 pub mod schema;
 pub mod spec_actor;
 pub mod system;
+#[cfg(any(test, feature = "test-utils"))]
+pub mod test_utils;
 
 pub use actor::{Actor, ActorContext, ActorError, ActorHandle, Message};
 pub use bus::{BUS_ACTOR_TYPE, CallMsg, CallReply, StreamMsg};

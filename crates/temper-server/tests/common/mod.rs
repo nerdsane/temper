@@ -6,13 +6,27 @@
 
 use std::sync::Arc;
 
-use temper_runtime::ActorSystem;
+use deadpool_postgres::Config as PgConfig;
+use temper_actor_runtime::{ActorSystem, SchedulerConfig};
 use temper_runtime::tenant::TenantId;
 use temper_server::dispatch::AgentContext;
 use temper_server::registry::SpecRegistry;
 use temper_server::{ServerEventStore, ServerState};
 use temper_spec::csdl::parse_csdl;
 use temper_store_sim::SimEventStore;
+
+/// Create a minimal ActorSystem with a lazy PG pool (no connection until query).
+/// Used by simulation tests that don't dispatch through the actor system.
+fn sim_actor_system() -> Arc<ActorSystem> {
+    let mut cfg = PgConfig::new();
+    cfg.host = Some("localhost".to_string());
+    cfg.dbname = Some("temper_test".to_string());
+    cfg.user = Some("postgres".to_string());
+    let pool = cfg
+        .create_pool(None, tokio_postgres::NoTls)
+        .expect("create lazy pool");
+    Arc::new(ActorSystem::new(pool, SchedulerConfig::default()))
+}
 
 // ── Shared fixtures ─────────────────────────────────────────────────────
 
@@ -43,7 +57,7 @@ pub fn build_single_tenant_state_with_store(
     let csdl = parse_csdl(CSDL_XML).expect("CSDL parse");
     registry.register_tenant(tenant, csdl, CSDL_XML.to_string(), entities);
 
-    let system = ActorSystem::new(system_name);
+    let system = sim_actor_system();
     let mut state = ServerState::from_registry(system, registry);
     state.event_store = Some(Arc::new(store));
     state
@@ -68,7 +82,7 @@ pub fn build_single_tenant_state(
     let csdl = parse_csdl(CSDL_XML).expect("CSDL parse");
     registry.register_tenant(tenant, csdl, CSDL_XML.to_string(), entities);
 
-    let system = ActorSystem::new(system_name);
+    let system = sim_actor_system();
     let mut state = ServerState::from_registry(system, registry);
     state.event_store = Some(Arc::new(store));
     (state, sim_store)
@@ -93,7 +107,7 @@ pub fn build_two_tenant_state(
     let csdl_b = parse_csdl(CSDL_XML).expect("CSDL parse");
     registry.register_tenant(tenant_b, csdl_b, CSDL_XML.to_string(), entities_b);
 
-    let system = ActorSystem::new(system_name);
+    let system = sim_actor_system();
     let mut state = ServerState::from_registry(system, registry);
     state.event_store = Some(Arc::new(store));
     state

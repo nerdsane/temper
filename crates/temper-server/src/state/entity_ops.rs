@@ -105,9 +105,9 @@ impl ServerState {
         let namespace = format!("{tenant}/{entity_id}");
         let handle = ActorHandle::new(namespace.clone(), entity_type.to_string());
 
-        // Idempotent PG spawn.
+        // Idempotent PG spawn with initial fields embedded.
         self.actor_system
-            .spawn(&namespace, entity_type)
+            .spawn_with_fields(&namespace, entity_type, _initial_fields)
             .await
             .ok()?;
 
@@ -335,26 +335,41 @@ impl ServerState {
                 format!("No transition table for tenant '{tenant}', entity type '{entity_type}'")
             })?;
 
-        // Send Initialize with fields so the actor stores them.
-        let _ = self
+        // Read state from PG immediately — fields pre-populated by spawn_with_fields.
+        let spec_state = self
             .actor_system
-            .tell(
-                None,
-                &actor_handle,
-                temper_actor_runtime::spec_actor::SpecMessage::new("Initialize"),
-            )
-            .await;
-
-        let cache_key = format!("{tenant}:{entity_type}:{entity_id}");
-        let status = self
-            .entity_state_cache
-            .read()
-            .unwrap()
-            .get(&cache_key)
-            .map(|(s, _)| s.clone())
+            .get_spec_actor_state(&actor_handle)
+            .await
             .unwrap_or_default();
 
-        let response = Self::make_entity_response(entity_type, entity_id, status);
+        let response = EntityResponse {
+            success: true,
+            state: EntityState {
+                entity_type: entity_type.to_string(),
+                entity_id: entity_id.to_string(),
+                status: spec_state.status,
+                item_count: 0,
+                counters: spec_state
+                    .counters
+                    .iter()
+                    .map(|(k, v)| (k.clone(), *v))
+                    .collect(),
+                booleans: spec_state
+                    .booleans
+                    .iter()
+                    .map(|(k, v)| (k.clone(), *v))
+                    .collect(),
+                lists: std::collections::BTreeMap::new(),
+                fields: spec_state.fields,
+                events: vec![],
+                sequence_nr: 0,
+            },
+            error: None,
+            custom_effects: vec![],
+            scheduled_actions: vec![],
+            spawn_requests: vec![],
+            spec_governed: true,
+        };
 
         // Broadcast entity creation event for SSE subscribers.
         let _ = self.event_tx.send(EntityStateChange {
@@ -386,25 +401,46 @@ impl ServerState {
                 format!("No transition table for tenant '{tenant}', entity type '{entity_type}'")
             })?;
 
-        // Tell actor to update fields via a generic SpecMessage.
-        let _ = self
-            .actor_system
-            .tell(
-                None,
-                &actor_handle,
-                temper_actor_runtime::spec_actor::SpecMessage::with_params("UpdateFields", fields),
-            )
-            .await;
+        // Direct PG field update — bypasses state machine (PATCH semantics).
+        self.actor_system
+            .update_actor_fields(&actor_handle, fields, _replace)
+            .await
+            .map_err(|e| format!("update fields: {e}"))?;
 
-        let cache_key = format!("{tenant}:{entity_type}:{entity_id}");
-        let status = self
-            .entity_state_cache
-            .read()
-            .unwrap()
-            .get(&cache_key)
-            .map(|(s, _)| s.clone())
+        // Return updated state directly from PG.
+        let spec_state = self
+            .actor_system
+            .get_spec_actor_state(&actor_handle)
+            .await
             .unwrap_or_default();
-        Ok(Self::make_entity_response(entity_type, entity_id, status))
+        Ok(EntityResponse {
+            success: true,
+            state: EntityState {
+                entity_type: entity_type.to_string(),
+                entity_id: entity_id.to_string(),
+                status: spec_state.status,
+                item_count: 0,
+                counters: spec_state
+                    .counters
+                    .iter()
+                    .map(|(k, v)| (k.clone(), *v))
+                    .collect(),
+                booleans: spec_state
+                    .booleans
+                    .iter()
+                    .map(|(k, v)| (k.clone(), *v))
+                    .collect(),
+                lists: std::collections::BTreeMap::new(),
+                fields: spec_state.fields,
+                events: vec![],
+                sequence_nr: 0,
+            },
+            error: None,
+            custom_effects: vec![],
+            scheduled_actions: vec![],
+            spawn_requests: vec![],
+            spec_governed: true,
+        })
     }
 
     /// Delete an entity.

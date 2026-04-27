@@ -7,7 +7,8 @@
 //! - Actions on one tenant don't affect the other
 //! - The SpecRegistry correctly routes lookups
 
-use temper_runtime::ActorSystem;
+use deadpool_postgres::Config as PgCfg;
+use temper_actor_runtime::{ActorSystem, SchedulerConfig};
 use temper_runtime::tenant::TenantId;
 use temper_server::ServerState;
 use temper_server::dispatch::AgentContext;
@@ -59,7 +60,14 @@ fn build_multi_tenant_state() -> ServerState {
     let csdl2 = parse_csdl(CSDL_XML).expect("CSDL should parse");
     registry.register_tenant("beta", csdl2, CSDL_XML.to_string(), &[("Task", TASK_IOA)]);
 
-    let system = ActorSystem::new("multi-tenant-test");
+    let system = {
+        let mut c = PgCfg::new();
+        c.host = Some("localhost".to_string());
+        c.dbname = Some("temper_test".to_string());
+        c.user = Some("postgres".to_string());
+        let p = c.create_pool(None, tokio_postgres::NoTls).unwrap();
+        std::sync::Arc::new(ActorSystem::new(p, SchedulerConfig::default()))
+    };
     ServerState::from_registry(system, registry)
 }
 
@@ -216,7 +224,14 @@ async fn same_entity_type_different_tenants() {
         &[("Order", ORDER_IOA)],
     );
 
-    let system = ActorSystem::new("dual-tenant");
+    let system = {
+        let mut c = PgCfg::new();
+        c.host = Some("localhost".to_string());
+        c.dbname = Some("temper_test".to_string());
+        c.user = Some("postgres".to_string());
+        let p = c.create_pool(None, tokio_postgres::NoTls).unwrap();
+        std::sync::Arc::new(ActorSystem::new(p, SchedulerConfig::default()))
+    };
     let state = ServerState::from_registry(system, registry);
 
     let a = TenantId::new("tenant-a");

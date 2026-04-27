@@ -4,7 +4,8 @@
 //! action → custom_effects → dispatch_wasm_integrations → WasmEngine.invoke()
 //! → callback dispatched → entity state transitions.
 
-use temper_runtime::ActorSystem;
+use deadpool_postgres::Config as PgCfg;
+use temper_actor_runtime::{ActorSystem, SchedulerConfig};
 use temper_runtime::tenant::TenantId;
 use temper_server::ServerState;
 use temper_server::dispatch::AgentContext;
@@ -81,7 +82,14 @@ fn build_echo_test_state() -> ServerState {
         &[("EchoTest", ECHO_IOA)],
     );
 
-    let system = ActorSystem::new("wasm-dispatch-test");
+    let system = {
+        let mut c = PgCfg::new();
+        c.host = Some("localhost".to_string());
+        c.dbname = Some("temper_test".to_string());
+        c.user = Some("postgres".to_string());
+        let p = c.create_pool(None, tokio_postgres::NoTls).unwrap();
+        std::sync::Arc::new(ActorSystem::new(p, SchedulerConfig::default()))
+    };
     ServerState::from_registry(system, registry)
 }
 

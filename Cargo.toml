@@ -113,6 +113,9 @@ futures = "0.3"
 tokio-test = "0.4"
 criterion = { version = "0.5", features = ["html_reports"] }
 wiremock = "0.6"
+testcontainers = "0.23"
+testcontainers-modules = { version = "0.11", features = ["postgres"] }
+serial_test = "3"
 
 # Internal crates
 temper-macros = { path = "crates/temper-macros" }

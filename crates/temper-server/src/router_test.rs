@@ -1,55 +1,70 @@
 use super::*;
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
+use serial_test::serial;
 use std::sync::Arc;
+use temper_actor_runtime::test_utils::setup_test_pg;
 use temper_actor_runtime::{ActorSystem, SchedulerConfig};
 use temper_spec::csdl::parse_csdl;
+use testcontainers::ContainerAsync;
+use testcontainers_modules::postgres::Postgres;
 use tower::ServiceExt;
 
-/// Create a test ActorSystem backed by a lazy PG pool (no connection until query).
-fn test_actor_system() -> Arc<ActorSystem> {
-    let mut cfg = deadpool_postgres::Config::new();
-    cfg.host = Some("localhost".to_string());
-    cfg.dbname = Some("temper_test".to_string());
-    cfg.user = Some("postgres".to_string());
-    let pool = cfg
-        .create_pool(None, tokio_postgres::NoTls)
-        .expect("failed to create test pool");
-    Arc::new(ActorSystem::new(pool, SchedulerConfig::default()))
+/// Each test gets its own isolated PG container — no state pollution.
+async fn test_actor_system() -> (Arc<ActorSystem>, ContainerAsync<Postgres>) {
+    let (pool, container) = setup_test_pg().await;
+    let system = Arc::new(ActorSystem::new(pool, SchedulerConfig::default()));
+    (system, container)
 }
 
-fn test_state() -> ServerState {
+async fn test_state() -> (ServerState, ContainerAsync<Postgres>) {
     let csdl_xml = include_str!("../../../test-fixtures/specs/model.csdl.xml");
     let csdl = parse_csdl(csdl_xml).unwrap();
-    let system = test_actor_system();
-    ServerState::new(system, csdl, csdl_xml.to_string())
+    let (system, container) = test_actor_system().await;
+    (
+        ServerState::new(system, csdl, csdl_xml.to_string()),
+        container,
+    )
 }
 
-fn test_state_with_ioa() -> ServerState {
+async fn test_state_with_ioa() -> (ServerState, ContainerAsync<Postgres>) {
     let csdl_xml = include_str!("../../../test-fixtures/specs/model.csdl.xml");
     let order_ioa = include_str!("../../../test-fixtures/specs/order.ioa.toml");
     let csdl = parse_csdl(csdl_xml).unwrap();
-    let system = test_actor_system();
+    let (system, container) = test_actor_system().await;
     let mut specs = std::collections::BTreeMap::new();
     specs.insert("Order".to_string(), order_ioa.to_string());
-    ServerState::with_specs(system, csdl, csdl_xml.to_string(), specs)
+    let state = ServerState::with_specs(system, csdl, csdl_xml.to_string(), specs);
+    // Register all specs as actor handlers so the scheduler can process them.
+    state
+        .register_specs_as_actors()
+        .await
+        .expect("register specs");
+    (state, container)
 }
 
-fn test_state_with_order_and_payment_ioa() -> ServerState {
+async fn test_state_with_order_and_payment_ioa() -> (ServerState, ContainerAsync<Postgres>) {
     let csdl_xml = include_str!("../../../test-fixtures/specs/model.csdl.xml");
     let order_ioa = include_str!("../../../test-fixtures/specs/order.ioa.toml");
     let csdl = parse_csdl(csdl_xml).unwrap();
-    let system = test_actor_system();
+    let (system, container) = test_actor_system().await;
     let mut specs = std::collections::BTreeMap::new();
     specs.insert("Order".to_string(), order_ioa.to_string());
     // For navigation tests we only need entity creation/read, so reuse the same minimal IOA.
     specs.insert("Payment".to_string(), order_ioa.to_string());
-    ServerState::with_specs(system, csdl, csdl_xml.to_string(), specs)
+    let state = ServerState::with_specs(system, csdl, csdl_xml.to_string(), specs);
+    state
+        .register_specs_as_actors()
+        .await
+        .expect("register specs");
+    (state, container)
 }
 
+#[serial]
 #[tokio::test]
 async fn test_service_document() {
-    let app = build_router(test_state());
+    let (state, _pg) = test_state().await;
+    let app = build_router(state);
     let response = app
         .oneshot(Request::get("/tdata").body(Body::empty()).unwrap())
         .await
@@ -64,9 +79,11 @@ async fn test_service_document() {
     assert_eq!(json["@odata.context"], "$metadata");
 }
 
+#[serial]
 #[tokio::test]
 async fn test_metadata_endpoint() {
-    let app = build_router(test_state());
+    let (state, _pg) = test_state().await;
+    let app = build_router(state);
     let response = app
         .oneshot(
             Request::get("/tdata/$metadata")
@@ -87,9 +104,11 @@ async fn test_metadata_endpoint() {
     assert!(body_str.contains("Temper.Example"));
 }
 
+#[serial]
 #[tokio::test]
 async fn test_entity_set_listing() {
-    let app = build_router(test_state());
+    let (state, _pg) = test_state().await;
+    let app = build_router(state);
     let response = app
         .oneshot(Request::get("/tdata/Orders").body(Body::empty()).unwrap())
         .await
@@ -103,9 +122,11 @@ async fn test_entity_set_listing() {
     assert_eq!(json["@odata.context"], "$metadata#Orders");
 }
 
+#[serial]
 #[tokio::test]
 async fn test_entity_by_key_not_found() {
-    let app = build_router(test_state());
+    let (state, _pg) = test_state().await;
+    let app = build_router(state);
     let response = app
         .oneshot(
             Request::get("/tdata/Orders('abc-123')")
@@ -119,9 +140,11 @@ async fn test_entity_by_key_not_found() {
     assert_eq!(response.status(), StatusCode::NOT_FOUND);
 }
 
+#[serial]
 #[tokio::test]
 async fn test_entity_by_key_found() {
-    let app = build_router(test_state_with_ioa());
+    let (state, _pg) = test_state_with_ioa().await;
+    let app = build_router(state);
 
     // First create an entity via POST
     let create_response = app
@@ -154,9 +177,11 @@ async fn test_entity_by_key_found() {
     assert_eq!(json["@odata.context"], "$metadata#Orders/$entity");
 }
 
+#[serial]
 #[tokio::test]
 async fn test_unknown_entity_set_returns_404() {
-    let app = build_router(test_state());
+    let (state, _pg) = test_state().await;
+    let app = build_router(state);
     let response = app
         .oneshot(
             Request::get("/tdata/NonExistent")
@@ -169,9 +194,11 @@ async fn test_unknown_entity_set_returns_404() {
     assert_eq!(response.status(), StatusCode::NOT_FOUND);
 }
 
+#[serial]
 #[tokio::test]
 async fn test_post_entity_creation() {
-    let app = build_router(test_state_with_ioa());
+    let (state, _pg) = test_state_with_ioa().await;
+    let app = build_router(state);
     let response = app
         .oneshot(
             Request::post("/tdata/Orders")
@@ -185,9 +212,11 @@ async fn test_post_entity_creation() {
     assert_eq!(response.status(), StatusCode::CREATED);
 }
 
+#[serial]
 #[tokio::test]
 async fn test_post_bound_action() {
-    let app = build_router(test_state_with_ioa());
+    let (state, _pg) = test_state_with_ioa().await;
+    let app = build_router(state);
     let response = app
         .oneshot(
             Request::post("/tdata/Orders('abc-123')/Temper.Example.CancelOrder")
@@ -206,9 +235,11 @@ async fn test_post_bound_action() {
     assert_eq!(json["status"], "Cancelled");
 }
 
+#[serial]
 #[tokio::test]
 async fn test_odata_version_header() {
-    let app = build_router(test_state());
+    let (state, _pg) = test_state().await;
+    let app = build_router(state);
     let response = app
         .oneshot(Request::get("/tdata/Orders").body(Body::empty()).unwrap())
         .await
@@ -218,9 +249,11 @@ async fn test_odata_version_header() {
     assert_eq!(odata_version, "4.0");
 }
 
+#[serial]
 #[tokio::test]
 async fn test_old_odata_path_returns_404() {
-    let app = build_router(test_state());
+    let (state, _pg) = test_state().await;
+    let app = build_router(state);
     let response = app
         .oneshot(Request::get("/odata").body(Body::empty()).unwrap())
         .await
@@ -229,9 +262,11 @@ async fn test_old_odata_path_returns_404() {
     assert_eq!(response.status(), StatusCode::NOT_FOUND);
 }
 
+#[serial]
 #[tokio::test]
 async fn test_post_body_used_for_entity_creation() {
-    let app = build_router(test_state_with_ioa());
+    let (state, _pg) = test_state_with_ioa().await;
+    let app = build_router(state);
 
     // Create with specific ID and fields
     let response = app
@@ -255,9 +290,11 @@ async fn test_post_body_used_for_entity_creation() {
     assert_eq!(json["fields"]["id"], "order-42");
 }
 
+#[serial]
 #[tokio::test]
 async fn test_entity_set_returns_created_entities() {
-    let app = build_router(test_state_with_ioa());
+    let (state, _pg) = test_state_with_ioa().await;
+    let app = build_router(state);
 
     // Create two entities
     let _ = app
@@ -296,9 +333,11 @@ async fn test_entity_set_returns_created_entities() {
     assert_eq!(values.len(), 2);
 }
 
+#[serial]
 #[tokio::test]
 async fn test_patch_updates_entity() {
-    let app = build_router(test_state_with_ioa());
+    let (state, _pg) = test_state_with_ioa().await;
+    let app = build_router(state);
 
     // Create entity
     let _ = app
@@ -332,9 +371,11 @@ async fn test_patch_updates_entity() {
     assert_eq!(json["fields"]["customer"], "Bob");
 }
 
+#[serial]
 #[tokio::test]
 async fn test_delete_removes_entity() {
-    let app = build_router(test_state_with_ioa());
+    let (state, _pg) = test_state_with_ioa().await;
+    let app = build_router(state);
 
     // Create entity
     let _ = app
@@ -372,9 +413,11 @@ async fn test_delete_removes_entity() {
     assert_eq!(response.status(), StatusCode::NOT_FOUND);
 }
 
+#[serial]
 #[tokio::test]
 async fn test_patch_nonexistent_returns_404() {
-    let app = build_router(test_state_with_ioa());
+    let (state, _pg) = test_state_with_ioa().await;
+    let app = build_router(state);
     let response = app
         .oneshot(
             Request::patch("/tdata/Orders('nope')")
@@ -387,9 +430,11 @@ async fn test_patch_nonexistent_returns_404() {
     assert_eq!(response.status(), StatusCode::NOT_FOUND);
 }
 
+#[serial]
 #[tokio::test]
 async fn test_delete_nonexistent_returns_404() {
-    let app = build_router(test_state_with_ioa());
+    let (state, _pg) = test_state_with_ioa().await;
+    let app = build_router(state);
     let response = app
         .oneshot(
             Request::delete("/tdata/Orders('nope')")
@@ -401,9 +446,11 @@ async fn test_delete_nonexistent_returns_404() {
     assert_eq!(response.status(), StatusCode::NOT_FOUND);
 }
 
+#[serial]
 #[tokio::test]
 async fn test_navigation_property_single_entity() {
-    let app = build_router(test_state_with_order_and_payment_ioa());
+    let (state, _pg) = test_state_with_order_and_payment_ioa().await;
+    let app = build_router(state);
 
     // Create parent order.
     let order_create = app
@@ -449,9 +496,11 @@ async fn test_navigation_property_single_entity() {
     assert_eq!(json["fields"]["OrderId"], "ord-nav-1");
 }
 
+#[serial]
 #[tokio::test]
 async fn test_navigation_property_not_found_returns_404() {
-    let app = build_router(test_state_with_ioa());
+    let (state, _pg) = test_state_with_ioa().await;
+    let app = build_router(state);
     let _ = app
         .clone()
         .oneshot(
@@ -474,9 +523,11 @@ async fn test_navigation_property_not_found_returns_404() {
     assert_eq!(response.status(), StatusCode::NOT_FOUND);
 }
 
+#[serial]
 #[tokio::test]
 async fn test_temper_client_script_served() {
-    let app = build_router(test_state());
+    let (state, _pg) = test_state().await;
+    let app = build_router(state);
     let response = app
         .oneshot(
             Request::get("/temper-client.js")
@@ -502,9 +553,11 @@ async fn test_temper_client_script_served() {
     assert!(body_str.contains("Temper"));
 }
 
+#[serial]
 #[tokio::test]
 async fn test_temper_client_script_alias_served() {
-    let app = build_router(test_state());
+    let (state, _pg) = test_state().await;
+    let app = build_router(state);
     let response = app
         .oneshot(
             Request::get("/static/temper-client.js")
@@ -521,9 +574,11 @@ async fn test_temper_client_script_alias_served() {
     );
 }
 
+#[serial]
 #[tokio::test]
 async fn test_cors_header_present() {
-    let app = build_router(test_state());
+    let (state, _pg) = test_state().await;
+    let app = build_router(state);
     let response = app
         .oneshot(
             Request::get("/tdata/Orders")
@@ -551,9 +606,9 @@ const PROGRAM_DEFINITION_IOA: &str =
     include_str!("../../../test-fixtures/specs/program_definition.ioa.toml");
 const PROCESS_IOA: &str = include_str!("../../../test-fixtures/specs/process.ioa.toml");
 
-fn test_state_with_agent_definition_ioa() -> ServerState {
+async fn test_state_with_agent_definition_ioa() -> (ServerState, ContainerAsync<Postgres>) {
     let csdl = parse_csdl(AGENT_DEFINITION_CSDL_XML).unwrap();
-    let system = test_actor_system();
+    let (system, container) = test_actor_system().await;
     let mut specs = std::collections::BTreeMap::new();
     specs.insert(
         "AgentDefinition".to_string(),
@@ -564,12 +619,19 @@ fn test_state_with_agent_definition_ioa() -> ServerState {
         PROGRAM_DEFINITION_IOA.to_string(),
     );
     specs.insert("Process".to_string(), PROCESS_IOA.to_string());
-    ServerState::with_specs(system, csdl, AGENT_DEFINITION_CSDL_XML.to_string(), specs)
+    let state = ServerState::with_specs(system, csdl, AGENT_DEFINITION_CSDL_XML.to_string(), specs);
+    state
+        .register_specs_as_actors()
+        .await
+        .expect("register specs");
+    (state, container)
 }
 
+#[serial]
 #[tokio::test]
 async fn test_agent_definition_csdl_crud_over_tdata() {
-    let app = build_router(test_state_with_agent_definition_ioa());
+    let (state, _pg) = test_state_with_agent_definition_ioa().await;
+    let app = build_router(state);
 
     let create_response = app
         .clone()
@@ -681,9 +743,12 @@ async fn test_agent_definition_csdl_crud_over_tdata() {
     assert_eq!(missing_response.status(), StatusCode::NOT_FOUND);
 }
 
+#[serial]
+#[serial]
 #[tokio::test]
 async fn test_processes_csdl_api_only_lifecycle() {
-    let app = build_router(test_state_with_agent_definition_ioa());
+    let (state, _pg) = test_state_with_agent_definition_ioa().await;
+    let app = build_router(state);
 
     let create_response = app
         .clone()

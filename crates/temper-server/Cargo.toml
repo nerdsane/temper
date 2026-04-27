@@ -47,6 +47,10 @@ aes-gcm = { workspace = true }
 [dev-dependencies]
 deadpool-postgres = { workspace = true }
 tokio-postgres = { workspace = true }
+testcontainers = { workspace = true }
+testcontainers-modules = { workspace = true }
+serial_test = { workspace = true }
+temper-actor-runtime = { path = "../temper-actor-runtime", features = ["test-utils"] }
 tokio-test = { workspace = true }
 criterion = { workspace = true }
 tokio = { workspace = true, features = ["full"] }

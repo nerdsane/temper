@@ -498,6 +498,20 @@ impl SpecRegistry {
 
     /// Look up a transition table for a specific tenant and entity type.
     ///
+    /// Returns all (entity_type, ioa_source) pairs across all tenants (deduplicated by entity type).
+    pub fn all_specs(&self) -> Vec<(String, String)> {
+        let mut seen = std::collections::BTreeSet::new();
+        let mut result = Vec::new();
+        for tc in self.tenants.values() {
+            for (entity_type, spec) in &tc.entities {
+                if seen.insert(entity_type.clone()) {
+                    result.push((entity_type.clone(), spec.ioa_source.clone()));
+                }
+            }
+        }
+        result
+    }
+
     /// Returns a snapshot of the current table. If a hot-swap has occurred
     /// since the last call, this returns the new table.
     pub fn get_table(&self, tenant: &TenantId, entity_type: &str) -> Option<Arc<TransitionTable>> {

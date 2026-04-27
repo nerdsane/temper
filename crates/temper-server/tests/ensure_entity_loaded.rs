@@ -1,6 +1,7 @@
 use std::sync::Arc;
 
-use temper_runtime::ActorSystem;
+use deadpool_postgres::Config as PgCfg;
+use temper_actor_runtime::{ActorSystem, SchedulerConfig};
 use temper_runtime::persistence::{EventMetadata, EventStore, PersistenceEnvelope};
 use temper_runtime::scheduler::sim_now;
 use temper_runtime::tenant::TenantId;
@@ -37,8 +38,17 @@ async fn ensure_entity_loaded_returns_false_when_no_transition_table_exists() {
         .await
         .expect("append seed event");
 
-    let mut state =
-        ServerState::from_registry(ActorSystem::new("test-ensure-loaded"), SpecRegistry::new());
+    let mut state = ServerState::from_registry(
+        {
+            let mut c = PgCfg::new();
+            c.host = Some("localhost".to_string());
+            c.dbname = Some("temper_test".to_string());
+            c.user = Some("postgres".to_string());
+            let p = c.create_pool(None, tokio_postgres::NoTls).unwrap();
+            std::sync::Arc::new(ActorSystem::new(p, SchedulerConfig::default()))
+        },
+        SpecRegistry::new(),
+    );
     state.event_store = Some(Arc::new(ServerEventStore::Turso(store)));
 
     let loaded = state
