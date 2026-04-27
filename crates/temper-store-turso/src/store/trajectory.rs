@@ -1,6 +1,7 @@
 //! Trajectory persistence and query methods.
 
 use libsql::params;
+use std::time::Duration;
 use temper_runtime::persistence::{PersistenceError, storage_error};
 use tracing::instrument;
 
@@ -10,7 +11,7 @@ use super::{
 };
 use crate::TursoTrajectoryInsert;
 use crate::metrics::TursoQueryTimer;
-use crate::retry::retry_persistence;
+use crate::retry::retry_persistence_with_max_attempts;
 
 impl TursoEventStore {
     /// Persist a trajectory entry (all columns including agent/authz fields).
@@ -33,54 +34,79 @@ impl TursoEventStore {
         // duplicate row with identical fields is acceptable and rare. The
         // alternative (losing the trajectory during Turso wobbles) is worse —
         // trajectories are the observability record of what the entity did.
-        retry_persistence("turso.persist_trajectory", || async {
-            let conn = self.configured_connection().await?;
-            let execute_res = conn
-                .execute(
-                "INSERT INTO trajectories \
-                 (tenant, entity_type, entity_id, action, success, from_status, to_status, error, \
-                  agent_id, session_id, authz_denied, denied_resource, denied_module, source, spec_governed, created_at, request_body, intent, matched_policy_ids) \
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19)",
-                params![
-                    entry.tenant,
-                    entry.entity_type,
-                    entry.entity_id,
-                    entry.action,
-                    entry.success as i64,
-                    entry.from_status,
-                    entry.to_status,
-                    entry.error,
-                    entry.agent_id,
-                    entry.session_id,
-                    entry.authz_denied.map(|b| b as i64),
-                    entry.denied_resource,
-                    entry.denied_module,
-                    entry.source,
-                    entry.spec_governed.map(|b| b as i64),
-                    entry.created_at,
-                    entry.request_body,
-                    entry.intent,
-                    entry.matched_policy_ids
-                ],
-            )
-            .await
-            .map_err(storage_error);
-            if let Err(ref error) = execute_res {
-                tracing::warn!(
-                    tenant = entry.tenant,
-                    entity_type = entry.entity_type,
-                    entity_id = entry.entity_id,
-                    action = entry.action,
-                    success = entry.success,
-                    source = ?entry.source,
-                    authz_denied = ?entry.authz_denied,
-                    error = %error,
-                    "trajectory.store.write"
-                );
-            }
-            execute_res?;
-            Ok(())
-        })
+        let attempt_timeout = trajectory_attempt_timeout();
+        retry_persistence_with_max_attempts(
+            "turso.persist_trajectory",
+            trajectory_max_attempts(),
+            || async {
+                tokio::time::timeout(attempt_timeout, async {
+                    let conn = self.configured_connection().await?;
+                    let execute_res = conn
+                        .execute(
+                        "INSERT INTO trajectories \
+                         (tenant, entity_type, entity_id, action, success, from_status, to_status, error, \
+                          agent_id, session_id, authz_denied, denied_resource, denied_module, source, spec_governed, created_at, request_body, intent, matched_policy_ids) \
+                         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19)",
+                        params![
+                            entry.tenant,
+                            entry.entity_type,
+                            entry.entity_id,
+                            entry.action,
+                            entry.success as i64,
+                            entry.from_status,
+                            entry.to_status,
+                            entry.error,
+                            entry.agent_id,
+                            entry.session_id,
+                            entry.authz_denied.map(|b| b as i64),
+                            entry.denied_resource,
+                            entry.denied_module,
+                            entry.source,
+                            entry.spec_governed.map(|b| b as i64),
+                            entry.created_at,
+                            entry.request_body,
+                            entry.intent,
+                            entry.matched_policy_ids
+                        ],
+                    )
+                    .await
+                    .map_err(storage_error);
+                    if let Err(ref error) = execute_res {
+                        tracing::warn!(
+                            tenant = entry.tenant,
+                            entity_type = entry.entity_type,
+                            entity_id = entry.entity_id,
+                            action = entry.action,
+                            success = entry.success,
+                            source = ?entry.source,
+                            authz_denied = ?entry.authz_denied,
+                            error = %error,
+                            "trajectory.store.write"
+                        );
+                    }
+                    execute_res?;
+                    Ok(())
+                })
+                .await
+                .unwrap_or_else(|_| {
+                    tracing::warn!(
+                        tenant = entry.tenant,
+                        entity_type = entry.entity_type,
+                        entity_id = entry.entity_id,
+                        action = entry.action,
+                        success = entry.success,
+                        source = ?entry.source,
+                        authz_denied = ?entry.authz_denied,
+                        timeout_ms = attempt_timeout.as_millis() as u64,
+                        "trajectory.store.write timed out"
+                    );
+                    Err(PersistenceError::Storage(format!(
+                        "turso.persist_trajectory timed out after {}ms",
+                        attempt_timeout.as_millis()
+                    )))
+                })
+            },
+        )
         .await?;
         tracing::Span::current().record("rows_written", 1u64);
         tracing::info!(
@@ -462,4 +488,26 @@ impl TursoEventStore {
         tracing::info!(tenant, count = out.len(), "trajectory.store.read");
         Ok(out)
     }
+}
+
+fn trajectory_attempt_timeout() -> Duration {
+    const DEFAULT_TRAJECTORY_ATTEMPT_TIMEOUT_MS: u64 = 1_000;
+    const MIN_TRAJECTORY_ATTEMPT_TIMEOUT_MS: u64 = 100;
+
+    let configured = std::env::var("TEMPER_TURSO_TRAJECTORY_TIMEOUT_MS")
+        .ok()
+        .and_then(|value| value.parse::<u64>().ok())
+        .unwrap_or(DEFAULT_TRAJECTORY_ATTEMPT_TIMEOUT_MS);
+
+    Duration::from_millis(configured.max(MIN_TRAJECTORY_ATTEMPT_TIMEOUT_MS))
+}
+
+fn trajectory_max_attempts() -> usize {
+    const DEFAULT_TRAJECTORY_MAX_ATTEMPTS: usize = 1;
+
+    std::env::var("TEMPER_TURSO_TRAJECTORY_MAX_ATTEMPTS")
+        .ok()
+        .and_then(|value| value.parse::<usize>().ok())
+        .unwrap_or(DEFAULT_TRAJECTORY_MAX_ATTEMPTS)
+        .max(1)
 }
