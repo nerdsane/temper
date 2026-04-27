@@ -92,6 +92,13 @@ pub trait EventStore: Send + Sync + 'static {
         &self,
         tenant: &str,
     ) -> impl std::future::Future<Output = Result<Vec<(String, String)>, PersistenceError>> + Send;
+
+    /// List distinct entity IDs for one `(tenant, entity_type)` pair.
+    fn list_entity_ids_by_type(
+        &self,
+        tenant: &str,
+        entity_type: &str,
+    ) -> impl std::future::Future<Output = Result<Vec<String>, PersistenceError>> + Send;
 }
 
 /// A persisted event with metadata.

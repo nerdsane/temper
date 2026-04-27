@@ -298,6 +298,28 @@ impl EventStore for RedisEventStore {
         out.dedup();
         Ok(out)
     }
+
+    async fn list_entity_ids_by_type(
+        &self,
+        tenant: &str,
+        entity_type: &str,
+    ) -> Result<Vec<String>, PersistenceError> {
+        let key = Self::tenant_entities_key(tenant);
+        let members: Vec<String> = self.client.smembers(&key).await.map_err(storage_error)?;
+
+        let mut out = Vec::new();
+        for encoded in members {
+            let entity_ref: EntityRef = serde_json::from_str(&encoded)
+                .map_err(|e| PersistenceError::Serialization(e.to_string()))?;
+            if entity_ref.entity_type == entity_type {
+                out.push(entity_ref.entity_id);
+            }
+        }
+
+        out.sort();
+        out.dedup();
+        Ok(out)
+    }
 }
 
 #[cfg(test)]
