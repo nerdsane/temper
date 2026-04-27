@@ -107,6 +107,70 @@ async fn ensure_entity_loaded_returns_true_for_indexed_entity_without_persistenc
 }
 
 #[tokio::test]
+async fn list_entity_ids_lazy_populates_only_requested_type() {
+    let db_path = std::env::temp_dir().join(format!(
+        "temper-lazy-list-scoped-{}.db",
+        uuid::Uuid::new_v4()
+    ));
+    let db_url = format!("file:{}", db_path.display());
+    let store = TursoEventStore::new(&db_url, None)
+        .await
+        .expect("create local turso db");
+
+    store
+        .append(
+            "tenant-a:Order:ord-1",
+            0,
+            &[PersistenceEnvelope {
+                sequence_nr: 0,
+                event_type: "Created".to_string(),
+                payload: serde_json::json!({"id": "ord-1"}),
+                metadata: EventMetadata {
+                    event_id: uuid::Uuid::new_v4(),
+                    causation_id: uuid::Uuid::new_v4(),
+                    correlation_id: uuid::Uuid::new_v4(),
+                    timestamp: sim_now(),
+                    actor_id: "tenant-a:Order:ord-1".to_string(),
+                },
+            }],
+        )
+        .await
+        .expect("append order event");
+    store
+        .append(
+            "tenant-a:Task:task-1",
+            0,
+            &[PersistenceEnvelope {
+                sequence_nr: 0,
+                event_type: "Created".to_string(),
+                payload: serde_json::json!({"id": "task-1"}),
+                metadata: EventMetadata {
+                    event_id: uuid::Uuid::new_v4(),
+                    causation_id: uuid::Uuid::new_v4(),
+                    correlation_id: uuid::Uuid::new_v4(),
+                    timestamp: sim_now(),
+                    actor_id: "tenant-a:Task:task-1".to_string(),
+                },
+            }],
+        )
+        .await
+        .expect("append task event");
+
+    let state = build_state_with_turso("test-lazy-list-scoped", store);
+    let tenant = TenantId::new("tenant-a");
+
+    let order_ids = state.list_entity_ids_lazy(&tenant, "Order").await;
+
+    assert_eq!(order_ids, vec!["ord-1".to_string()]);
+    assert!(
+        state.list_entity_ids(&tenant, "Task").is_empty(),
+        "lazy listing one entity type should not populate unrelated types"
+    );
+
+    let _ = std::fs::remove_file(db_path);
+}
+
+#[tokio::test]
 async fn delete_writes_tombstone_and_deleted_entity_stays_out_of_list_after_restart() {
     let db_path = std::env::temp_dir().join(format!(
         "temper-delete-tombstone-list-{}.db",

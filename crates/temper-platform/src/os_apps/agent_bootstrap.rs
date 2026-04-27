@@ -131,7 +131,7 @@ pub(super) async fn bootstrap_agents(
             continue;
         }
 
-        let existing_ids = state.server.list_entity_ids(tenant_id, "Soul");
+        let existing_ids = state.server.list_entity_ids_lazy(tenant_id, "Soul").await;
         let mut found_soul_id: Option<String> = None;
         for id in &existing_ids {
             if let Ok(resp) = state
@@ -316,7 +316,7 @@ async fn set_agent_source_app(
     agent_name: &str,
     app_id: &str,
 ) {
-    let agent_ids = state.server.list_entity_ids(tenant_id, "Agent");
+    let agent_ids = state.server.list_entity_ids_lazy(tenant_id, "Agent").await;
     for id in &agent_ids {
         if let Ok(resp) = state
             .server

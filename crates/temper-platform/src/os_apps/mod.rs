@@ -1649,7 +1649,7 @@ async fn bootstrap_app_entity(
     let agent_ctx = temper_server::request_context::AgentContext::for_service("platform-bootstrap");
 
     // Look for an existing App entity with this name.
-    let existing_ids = state.server.list_entity_ids(tenant_id, "App");
+    let existing_ids = state.server.list_entity_ids_lazy(tenant_id, "App").await;
     let mut existing_app_id = None;
     for id in &existing_ids {
         if let Ok(resp) = state

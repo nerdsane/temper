@@ -705,6 +705,16 @@ impl EventStore for TenantStoreRouter {
         let store = self.store_for_tenant(tenant).await?;
         store.list_entity_ids(tenant).await
     }
+
+    #[instrument(skip_all, fields(tenant, entity_type, otel.name = "router.list_entity_ids_by_type"))]
+    async fn list_entity_ids_by_type(
+        &self,
+        tenant: &str,
+        entity_type: &str,
+    ) -> Result<Vec<String>, PersistenceError> {
+        let store = self.store_for_tenant(tenant).await?;
+        store.list_entity_ids_by_type(tenant, entity_type).await
+    }
 }
 
 #[cfg(test)]

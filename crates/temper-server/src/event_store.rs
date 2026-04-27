@@ -365,4 +365,19 @@ impl EventStore for ServerEventStore {
             Self::Sim(store, _) => store.list_entity_ids(tenant).await,
         }
     }
+
+    async fn list_entity_ids_by_type(
+        &self,
+        tenant: &str,
+        entity_type: &str,
+    ) -> Result<Vec<String>, PersistenceError> {
+        match self {
+            Self::Postgres(store) => store.list_entity_ids_by_type(tenant, entity_type).await,
+            Self::Turso(store) => store.list_entity_ids_by_type(tenant, entity_type).await,
+            Self::Redis(store) => store.list_entity_ids_by_type(tenant, entity_type).await,
+            Self::TenantRouted(router) => router.list_entity_ids_by_type(tenant, entity_type).await,
+            #[cfg(feature = "sim")]
+            Self::Sim(store, _) => store.list_entity_ids_by_type(tenant, entity_type).await,
+        }
+    }
 }

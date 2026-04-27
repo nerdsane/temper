@@ -18,9 +18,11 @@ use tracing::instrument;
 
 use crate::schema;
 
+mod append_config;
 mod authz;
 mod blobs;
 mod constraints;
+mod entity_listing;
 mod event_store;
 mod evolution;
 pub mod field_index;

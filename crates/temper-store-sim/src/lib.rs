@@ -445,6 +445,28 @@ impl EventStore for SimEventStore {
 
         Ok(result)
     }
+
+    async fn list_entity_ids_by_type(
+        &self,
+        tenant: &str,
+        entity_type: &str,
+    ) -> Result<Vec<String>, PersistenceError> {
+        let inner = self.inner.lock().expect("SimEventStore lock poisoned"); // ci-ok: infallible lock
+        let mut result = Vec::new();
+        let mut seen = std::collections::BTreeSet::new();
+
+        for persistence_id in inner.journals.keys() {
+            if let Ok((t, found_type, entity_id)) = parse_persistence_id_parts(persistence_id)
+                && t == tenant
+                && found_type == entity_type
+                && seen.insert(entity_id.to_string())
+            {
+                result.push(entity_id.to_string());
+            }
+        }
+
+        Ok(result)
+    }
 }
 
 #[cfg(test)]

@@ -213,7 +213,10 @@ impl ServerState {
         match store.list_entity_ids(tenant.as_str()).await {
             Ok(entities) => {
                 {
-                    let mut index = self.entity_index.write().unwrap(); // ci-ok: infallible lock
+                    let mut index = self
+                        .entity_index
+                        .write()
+                        .expect("entity index lock poisoned");
                     for (entity_type, entity_id) in &entities {
                         let index_key = format!("{tenant}:{entity_type}");
                         index
@@ -235,6 +238,59 @@ impl ServerState {
                     error = %e,
                     "failed to populate entity index from event store"
                 );
+            }
+        }
+    }
+
+    /// Populate `entity_index` for one entity type from the event store.
+    #[instrument(skip_all, fields(
+        otel.name = "entity.populate_index_from_store_by_type",
+        tenant = %tenant,
+        entity_type,
+    ))]
+    pub async fn populate_index_from_store_by_type(
+        &self,
+        tenant: &TenantId,
+        entity_type: &str,
+    ) -> usize {
+        let Some(store) = self.event_store.as_ref() else {
+            return 0;
+        };
+
+        match store
+            .list_entity_ids_by_type(tenant.as_str(), entity_type)
+            .await
+        {
+            Ok(entity_ids) => {
+                let count = entity_ids.len();
+                {
+                    let mut index = self
+                        .entity_index
+                        .write()
+                        .expect("entity index lock poisoned");
+                    let index_key = format!("{tenant}:{entity_type}");
+                    let ids = index.entry(index_key).or_default();
+                    for entity_id in entity_ids {
+                        ids.insert(entity_id);
+                    }
+                }
+                tracing::info!(
+                    tenant = %tenant,
+                    entity_type,
+                    count,
+                    "populated typed entity index from event store"
+                );
+                runtime_metrics::record_server_state_metrics(self);
+                count
+            }
+            Err(e) => {
+                tracing::error!(
+                    tenant = %tenant,
+                    entity_type,
+                    error = %e,
+                    "failed to populate typed entity index from event store"
+                );
+                0
             }
         }
     }
@@ -808,7 +864,8 @@ impl ServerState {
         if self.event_store.is_none() {
             return ids;
         }
-        self.populate_index_from_store(tenant).await;
+        self.populate_index_from_store_by_type(tenant, entity_type)
+            .await;
 
         self.list_entity_ids(tenant, entity_type)
     }

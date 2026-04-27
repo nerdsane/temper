@@ -238,6 +238,88 @@ async fn list_entity_ids_returns_distinct_pairs() {
 }
 
 #[tokio::test]
+async fn list_entity_ids_by_type_uses_entity_catalog() {
+    let store = make_store("entity-list-by-type-catalog").await;
+    let tenant = format!("tenant-{}", uuid::Uuid::new_v4());
+
+    store
+        .upsert_query_projection(
+            &tenant,
+            "AgentRoute",
+            "route-main",
+            "Ready",
+            &serde_json::json!({ "Name": "main" }),
+            3,
+        )
+        .await
+        .expect("upsert AgentRoute projection");
+    store
+        .upsert_query_projection(
+            &tenant,
+            "Session",
+            "session-1",
+            "Completed",
+            &serde_json::json!({ "Name": "session" }),
+            1,
+        )
+        .await
+        .expect("upsert Session projection");
+
+    let ids = store
+        .list_entity_ids_by_type(&tenant, "AgentRoute")
+        .await
+        .expect("list AgentRoute IDs by type");
+
+    assert_eq!(ids, vec!["route-main".to_string()]);
+}
+
+#[tokio::test]
+async fn list_entity_ids_by_type_falls_back_to_events_and_excludes_deleted() {
+    let store = make_store("entity-list-by-type-events").await;
+    let tenant = format!("tenant-{}", uuid::Uuid::new_v4());
+
+    let deleted_order = format!("{tenant}:Order:ord-deleted");
+    let active_order = format!("{tenant}:Order:ord-active");
+    let task = format!("{tenant}:Task:task-1");
+
+    store
+        .append(
+            &deleted_order,
+            0,
+            &[test_envelope("Created", serde_json::json!({}))],
+        )
+        .await
+        .unwrap();
+    store
+        .append(
+            &deleted_order,
+            1,
+            &[test_envelope("Deleted", serde_json::json!({}))],
+        )
+        .await
+        .unwrap();
+    store
+        .append(
+            &active_order,
+            0,
+            &[test_envelope("Created", serde_json::json!({}))],
+        )
+        .await
+        .unwrap();
+    store
+        .append(&task, 0, &[test_envelope("Created", serde_json::json!({}))])
+        .await
+        .unwrap();
+
+    let ids = store
+        .list_entity_ids_by_type(&tenant, "Order")
+        .await
+        .expect("list Order IDs by type from event fallback");
+
+    assert_eq!(ids, vec!["ord-active".to_string()]);
+}
+
+#[tokio::test]
 async fn list_entity_ids_excludes_entities_with_deleted_tombstones() {
     let store = make_store("entity-list-deleted").await;
     let tenant = format!("tenant-{}", uuid::Uuid::new_v4());
