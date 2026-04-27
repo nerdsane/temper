@@ -103,6 +103,37 @@ async fn append_with_wrong_sequence_fails_with_concurrency_violation() {
 }
 
 #[tokio::test]
+async fn single_event_append_bypasses_process_write_gate() {
+    let mut store = make_store("single-append-bypasses-gate").await;
+    store.write_gate = std::sync::Arc::new(tokio::sync::Semaphore::new(1));
+    let held_gate = store
+        .write_gate
+        .clone()
+        .acquire_owned()
+        .await
+        .expect("hold gate");
+
+    let result = tokio::time::timeout(
+        std::time::Duration::from_secs(2),
+        store.append(
+            "tenant-a:Order:ord-bypass",
+            0,
+            &[test_envelope(
+                "OrderCreated",
+                serde_json::json!({ "id": "ord-bypass" }),
+            )],
+        ),
+    )
+    .await;
+    drop(held_gate);
+
+    let new_seq = result
+        .expect("single-event append should not wait for the process write gate")
+        .expect("append should succeed");
+    assert_eq!(new_seq, 1);
+}
+
+#[tokio::test]
 async fn snapshot_save_and_load_roundtrip() {
     let store = make_store("snapshot").await;
     let persistence_id = "tenant-a:Order:ord-3";
