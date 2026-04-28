@@ -126,6 +126,9 @@ fn make_context() -> WasmInvocationContext {
         session_id: None,
         integration_config: std::collections::BTreeMap::new(),
         trace_id: String::new(),
+        workflow_root_entity_type: None,
+        workflow_root_entity_id: None,
+        workflow_run_id: None,
         http_request: None,
     }
 }

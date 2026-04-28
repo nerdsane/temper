@@ -12,6 +12,7 @@ pub mod http_stream;
 pub(crate) mod metrics;
 pub mod stream;
 pub mod types;
+mod workflow_headers;
 
 pub use authorized_host::{AuthorizedWasmHost, WasmAuthzDecision, WasmAuthzGate, extract_domain};
 pub use engine::{WasmEngine, WasmError};

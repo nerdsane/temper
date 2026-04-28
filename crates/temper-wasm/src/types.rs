@@ -29,6 +29,15 @@ pub struct WasmInvocationContext {
     /// W3C trace ID for cross-request trace correlation.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub trace_id: String,
+    /// Logical workflow root entity type for cross-request observability.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub workflow_root_entity_type: Option<String>,
+    /// Logical workflow root entity id for cross-request observability.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub workflow_root_entity_id: Option<String>,
+    /// Stable workflow run id for grouping async work in APM/logs.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub workflow_run_id: Option<String>,
     /// When the invocation was triggered by an HttpEndpoint dispatch
     /// (ADR-0056 Phase 2), carries the HTTP-specific context so the
     /// guest can unpack method, path params, headers, and the stream
@@ -175,6 +184,9 @@ mod tests {
             session_id: None,
             integration_config: std::collections::BTreeMap::new(),
             trace_id: String::new(),
+            workflow_root_entity_type: None,
+            workflow_root_entity_id: None,
+            workflow_run_id: None,
             http_request: None,
         };
         let json = serde_json::to_string(&ctx).unwrap();
@@ -198,12 +210,18 @@ mod tests {
             session_id: None,
             integration_config: std::collections::BTreeMap::new(),
             trace_id: String::new(),
+            workflow_root_entity_type: None,
+            workflow_root_entity_id: None,
+            workflow_run_id: None,
             http_request: None,
         };
         let json = serde_json::to_string(&ctx).unwrap();
         assert!(!json.contains("agent_id"));
         assert!(!json.contains("session_id"));
         assert!(!json.contains("integration_config"));
+        assert!(!json.contains("workflow_root_entity_type"));
+        assert!(!json.contains("workflow_root_entity_id"));
+        assert!(!json.contains("workflow_run_id"));
         assert!(!json.contains("http_request"));
     }
 
@@ -245,6 +263,9 @@ mod tests {
             session_id: None,
             integration_config: std::collections::BTreeMap::new(),
             trace_id: String::new(),
+            workflow_root_entity_type: None,
+            workflow_root_entity_id: None,
+            workflow_run_id: None,
             http_request: Some(HttpDispatchContext {
                 method: "GET".into(),
                 path: "/repos/acme/widgets.git/info/refs".into(),
