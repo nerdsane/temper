@@ -10,6 +10,7 @@ description = "Actor runtime for the Temper framework — custom, tokio-based, E
 tokio = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
+toml = { workspace = true }
 thiserror = { workspace = true }
 anyhow = { workspace = true }
 tracing = { workspace = true }

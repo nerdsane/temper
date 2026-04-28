@@ -1,0 +1,44 @@
+# Context Manager — assembles context for inference.
+# Integration (assemble_context) does the actual I/O work.
+
+[automaton]
+name = "ContextManager"
+states = ["Idle", "Assembling", "Failed"]
+initial = "Idle"
+
+[[state]]
+name = "preparations_done"
+type = "counter"
+initial = "0"
+
+[[action]]
+name = "PrepareContext"
+kind = "input"
+from = ["Idle"]
+to = "Assembling"
+effect = [{ type = "trigger", name = "assemble_context" }]
+
+[[action]]
+name = "ContextReady"
+kind = "input"
+from = ["Assembling"]
+to = "Idle"
+effect = [{ type = "increment", var = "preparations_done" }]
+
+[[action]]
+name = "ContextOverflow"
+kind = "input"
+from = ["Assembling"]
+to = "Idle"
+
+[[action]]
+name = "AssemblyFailed"
+kind = "input"
+from = ["Assembling"]
+to = "Failed"
+
+[[integration]]
+name = "assemble_context"
+trigger = "assemble_context"
+type = "context_assembler"
+emits = ["ContextReady", "ContextOverflow", "AssemblyFailed"]

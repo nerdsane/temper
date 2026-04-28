@@ -20,6 +20,24 @@ pub(super) fn parse_string_array(value: &str) -> Vec<String> {
     vec![trimmed.trim_matches('"').trim_matches('\'').to_string()]
 }
 
+pub(super) fn parse_action_params(value: &str) -> Vec<super::super::types::ActionParam> {
+    let trimmed = value.trim();
+    if trimmed.contains('{') {
+        let toml_str = format!("params = {trimmed}");
+        #[derive(serde::Deserialize)]
+        struct Wrapper {
+            params: Vec<super::super::types::ActionParam>,
+        }
+        if let Ok(w) = toml::from_str::<Wrapper>(&toml_str) {
+            return w.params;
+        }
+    }
+    parse_string_array(trimmed)
+        .into_iter()
+        .map(super::super::types::ActionParam::Named)
+        .collect()
+}
+
 pub(super) fn split_inline_tables(s: &str) -> Vec<&str> {
     let mut result = Vec::new();
     let mut depth: usize = 0;

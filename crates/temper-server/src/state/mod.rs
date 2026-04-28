@@ -33,6 +33,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::num::NonZeroUsize;
 use std::sync::{Arc, Mutex, OnceLock, RwLock};
 use std::time::Duration;
+use temper_actor_runtime::ActorSystem as PgActorSystem;
 use temper_authz::AuthzEngine;
 use temper_evolution::PostgresRecordStore;
 #[allow(deprecated)]
@@ -194,8 +195,13 @@ fn state_cache_budget() -> usize {
 #[derive(Clone)]
 // ADR-0025 Phase 4: remove record_store field after IOA entity migration complete
 pub struct ServerState {
-    /// The actor system for spawning and managing entity actors.
+    /// The actor system for spawning and managing legacy in-memory entity actors.
     pub actor_system: Arc<ActorSystem>,
+    /// Optional PG-backed actor system. When configured and an entity type is in
+    /// actor_backed_types, OData reads/writes dispatch through this runtime.
+    pub pg_actor_system: Option<Arc<PgActorSystem>>,
+    /// Entity types backed by pg_actor_system.
+    pub actor_backed_types: std::collections::HashSet<String>,
     /// Parsed CSDL document describing the entity model (legacy single-tenant).
     pub csdl: Arc<CsdlDocument>,
     /// Raw CSDL XML string for serving via `$metadata` (legacy single-tenant).
@@ -360,6 +366,8 @@ impl ServerState {
         let (observe_refresh_tx, _) = tokio::sync::broadcast::channel(64); // determinism-ok: broadcast for external observation
         let state = Self {
             actor_system: Arc::new(system),
+            pg_actor_system: None,
+            actor_backed_types: std::collections::HashSet::new(),
             csdl: Arc::new(csdl),
             csdl_xml: Arc::new(csdl_xml),
             entity_set_map: Arc::new(entity_set_map),
@@ -590,6 +598,8 @@ impl ServerState {
         let (observe_refresh_tx, _) = tokio::sync::broadcast::channel(64); // determinism-ok: broadcast for external observation
         let state = Self {
             actor_system: Arc::new(system),
+            pg_actor_system: None,
+            actor_backed_types: std::collections::HashSet::new(),
             csdl: Arc::new(CsdlDocument {
                 version: "4.0".into(),
                 schemas: vec![],
@@ -713,6 +723,15 @@ impl ServerState {
     pub fn with_pg_record_store(mut self, store: PostgresRecordStore) -> Self {
         self.pg_record_store = Some(Arc::new(store));
         self
+    }
+
+    /// Create ServerState from SpecRegistry using the PG-backed actor system.
+    /// This is the actorized runtime path: actor_instances + actor_messages are source of truth.
+    pub fn from_pg_registry(system: Arc<PgActorSystem>, registry: SpecRegistry) -> Self {
+        let legacy = ActorSystem::new("pg-actor-compat");
+        let mut state = Self::from_registry(legacy, registry);
+        state.pg_actor_system = Some(system);
+        state
     }
 
     /// Attach an encrypted secrets vault.

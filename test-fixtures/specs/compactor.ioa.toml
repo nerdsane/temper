@@ -1,0 +1,38 @@
+# Compactor — compresses context when the window is too large.
+# Integration (run_compaction) calls the LLM to summarize.
+
+[automaton]
+name = "Compactor"
+states = ["Idle", "Compacting", "Failed"]
+initial = "Idle"
+
+[[state]]
+name = "compactions_done"
+type = "counter"
+initial = "0"
+
+[[action]]
+name = "CompactionNeeded"
+kind = "input"
+from = ["Idle"]
+to = "Compacting"
+effect = [{ type = "trigger", name = "run_compaction" }]
+
+[[action]]
+name = "CompactionComplete"
+kind = "input"
+from = ["Compacting"]
+to = "Idle"
+effect = [{ type = "increment", var = "compactions_done" }]
+
+[[action]]
+name = "CompactionFailed"
+kind = "input"
+from = ["Compacting"]
+to = "Failed"
+
+[[integration]]
+name = "run_compaction"
+trigger = "run_compaction"
+type = "compaction_llm"
+emits = ["CompactionComplete", "CompactionFailed"]
