@@ -290,8 +290,12 @@ pub(crate) async fn persist_bootstrap_verification(
     specs: &[(&str, &str)],
     csdl_source: &str,
     hashes: &[(String, String)],
+    verified_cache: &BTreeMap<String, (String, bool)>,
 ) {
-    for (entity_type, content_hash) in hashes {
+    let hashes_to_persist = hashes_requiring_persistence(hashes, verified_cache);
+    let mut wrote_specs = false;
+
+    for (entity_type, content_hash) in &hashes_to_persist {
         // Find the IOA source for this entity type.
         let ioa_source = specs
             .iter()
@@ -307,6 +311,7 @@ pub(crate) async fn persist_bootstrap_verification(
             tracing::warn!("Failed to persist bootstrap spec {tenant}/{entity_type}: {e}");
             continue;
         }
+        wrote_specs = true;
 
         // Mark as verified (bootstrap panics on failure, so all specs here passed).
         if let Err(e) = store
@@ -330,14 +335,41 @@ pub(crate) async fn persist_bootstrap_verification(
     // `upsert_spec` marks rows as uncommitted while content is rewritten. Once
     // bootstrap verification succeeds, promote the tenant's spec set back to a
     // durable committed state so restart recovery can actually see the rows.
-    if let Err(e) = store.commit_specs(tenant).await {
+    if wrote_specs && let Err(e) = store.commit_specs(tenant).await {
         tracing::warn!("Failed to commit bootstrap specs for tenant '{tenant}': {e}");
     }
 }
 
+fn hashes_requiring_persistence(
+    hashes: &[(String, String)],
+    verified_cache: &BTreeMap<String, (String, bool)>,
+) -> Vec<(String, String)> {
+    hashes
+        .iter()
+        .filter(|(entity_type, content_hash)| {
+            !verified_cache
+                .get(entity_type)
+                .is_some_and(|(cached_hash, verified)| *verified && cached_hash == content_hash)
+        })
+        .cloned()
+        .collect()
+}
+
 /// Persist system tenant spec verification to the platform store.
-pub async fn persist_system_verification(store: &dyn PlatformStore, hashes: &[(String, String)]) {
-    persist_bootstrap_verification(store, SYSTEM_TENANT, SYSTEM_SPECS, SYSTEM_CSDL, hashes).await;
+pub async fn persist_system_verification(
+    store: &dyn PlatformStore,
+    hashes: &[(String, String)],
+    verified_cache: &BTreeMap<String, (String, bool)>,
+) {
+    persist_bootstrap_verification(
+        store,
+        SYSTEM_TENANT,
+        SYSTEM_SPECS,
+        SYSTEM_CSDL,
+        hashes,
+        verified_cache,
+    )
+    .await;
 }
 
 /// Persist agent spec verification to the platform store.
@@ -345,8 +377,17 @@ pub async fn persist_agent_verification(
     store: &dyn PlatformStore,
     tenant: &str,
     hashes: &[(String, String)],
+    verified_cache: &BTreeMap<String, (String, bool)>,
 ) {
-    persist_bootstrap_verification(store, tenant, AGENT_SPECS, AGENT_CSDL, hashes).await;
+    persist_bootstrap_verification(
+        store,
+        tenant,
+        AGENT_SPECS,
+        AGENT_CSDL,
+        hashes,
+        verified_cache,
+    )
+    .await;
 }
 
 /// Auto-register an `AgentCredential` for the global API key on bootstrap.
@@ -706,6 +747,28 @@ initial = "Created"
             registry.resolve_entity_type(&tenant, "Widgets").as_deref(),
             Some("Widget"),
             "existing app entity-set mapping should survive merged bootstrap"
+        );
+    }
+
+    #[test]
+    fn test_hashes_requiring_persistence_skip_cached_verified_specs() {
+        let hashes = vec![
+            ("Agent".to_string(), "sha256:agent".to_string()),
+            ("Plan".to_string(), "sha256:plan".to_string()),
+            ("Task".to_string(), "sha256:task".to_string()),
+        ];
+        let mut verified_cache = BTreeMap::new();
+        verified_cache.insert("Agent".to_string(), ("sha256:agent".to_string(), true));
+        verified_cache.insert("Plan".to_string(), ("sha256:plan".to_string(), false));
+
+        let pending = hashes_requiring_persistence(&hashes, &verified_cache);
+
+        assert_eq!(
+            pending,
+            vec![
+                ("Plan".to_string(), "sha256:plan".to_string()),
+                ("Task".to_string(), "sha256:task".to_string()),
+            ]
         );
     }
 
