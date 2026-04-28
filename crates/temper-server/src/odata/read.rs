@@ -17,8 +17,8 @@ use super::common::{
     resolve_value_parent, tenant_csdl_xml, tenant_entity_sets,
 };
 use super::read_support::{
-    odata_default_page_size, odata_max_entities, record_entity_set_not_found,
-    resolve_entity_set_name, select_entity_ids_for_materialization,
+    materialize_entity_set_entities, odata_default_page_size, odata_max_entities,
+    record_entity_set_not_found, resolve_entity_set_name, select_entity_ids_for_materialization,
 };
 use super::response::annotate_entity;
 use crate::blobs::hydrate_blob_refs_for_tenant;
@@ -503,23 +503,8 @@ async fn handle_entity_set(
         )
     };
 
-    let mut entities = Vec::new();
-    for id in &entity_ids {
-        if let Ok(response) = state
-            .get_tenant_entity_state(tenant, &entity_type, id)
-            .await
-        {
-            let mut entity = serde_json::to_value(&response.state).unwrap_or_default();
-            hydrate_blob_refs_for_tenant(state, tenant, &mut entity).await;
-            if let Some(obj) = entity.as_object_mut() {
-                obj.insert(
-                    "@odata.id".into(),
-                    serde_json::json!(format!("{name}('{id}')")),
-                );
-            }
-            entities.push(entity);
-        }
-    }
+    let entities =
+        materialize_entity_set_entities(state, tenant, &entity_type, name, &entity_ids).await;
 
     let (mut result, mut count) = apply_query_options(entities, &apply_options);
     if count.is_none() {

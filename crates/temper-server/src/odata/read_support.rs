@@ -2,8 +2,10 @@
 
 use std::sync::OnceLock;
 
+use futures_util::stream::{self, StreamExt};
 use temper_runtime::tenant::TenantId;
 
+use crate::blobs::hydrate_blob_refs_for_tenant;
 use crate::state::ServerState;
 
 fn env_usize(name: &str, default: usize) -> usize {
@@ -22,6 +24,63 @@ pub(super) fn odata_default_page_size() -> usize {
 pub(super) fn odata_max_entities() -> usize {
     static MAX_ENTITIES: OnceLock<usize> = OnceLock::new();
     *MAX_ENTITIES.get_or_init(|| env_usize("TEMPER_ODATA_MAX_ENTITIES", 1000))
+}
+
+fn entity_set_materialization_concurrency() -> usize {
+    static CONCURRENCY: OnceLock<usize> = OnceLock::new();
+    *CONCURRENCY
+        .get_or_init(|| env_usize("TEMPER_ODATA_ENTITY_SET_MATERIALIZATION_CONCURRENCY", 16))
+}
+
+pub(super) async fn materialize_entity_set_entities(
+    state: &ServerState,
+    tenant: &TenantId,
+    entity_type: &str,
+    entity_set_name: &str,
+    entity_ids: &[String],
+) -> Vec<serde_json::Value> {
+    let concurrency = entity_set_materialization_concurrency();
+    stream::iter(entity_ids.iter().cloned())
+        .map(|id| {
+            let state = state.clone();
+            let tenant = tenant.clone();
+            let entity_type = entity_type.to_string();
+            let entity_set_name = entity_set_name.to_string();
+            async move {
+                match state
+                    .get_tenant_entity_state(&tenant, &entity_type, &id)
+                    .await
+                {
+                    Ok(response) => {
+                        let mut entity = serde_json::to_value(&response.state).unwrap_or_default();
+                        hydrate_blob_refs_for_tenant(&state, &tenant, &mut entity).await;
+                        if let Some(obj) = entity.as_object_mut() {
+                            obj.insert(
+                                "@odata.id".into(),
+                                serde_json::json!(format!("{entity_set_name}('{id}')")),
+                            );
+                        }
+                        Some(entity)
+                    }
+                    Err(error) => {
+                        tracing::debug!(
+                            error = %error,
+                            tenant = %tenant,
+                            entity_type = %entity_type,
+                            entity_id = %id,
+                            "failed to materialize entity for OData collection"
+                        );
+                        None
+                    }
+                }
+            }
+        })
+        .buffered(concurrency)
+        .collect::<Vec<_>>()
+        .await
+        .into_iter()
+        .flatten()
+        .collect::<Vec<_>>()
 }
 
 pub(super) fn select_entity_ids_for_materialization(
