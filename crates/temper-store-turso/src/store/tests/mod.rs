@@ -716,6 +716,71 @@ async fn load_query_projection_fields_many_returns_requested_fields_by_entity() 
 }
 
 #[tokio::test]
+async fn export_query_projections_returns_all_fields_for_migration() {
+    let store = make_store("query-projection-export").await;
+    let tenant = format!("tenant-{}", uuid::Uuid::new_v4());
+
+    store
+        .upsert_query_projection(
+            &tenant,
+            "File",
+            "file-a",
+            "Ready",
+            &serde_json::json!({
+                "content_hash": "sha256:file-a",
+                "has_content": true,
+                "size_bytes": 12,
+            }),
+            9,
+        )
+        .await
+        .expect("upsert projection");
+
+    let rows = store
+        .export_query_projections(Some(&tenant))
+        .await
+        .expect("export query projections");
+
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].tenant, tenant);
+    assert_eq!(rows[0].entity_type, "File");
+    assert_eq!(rows[0].entity_id, "file-a");
+    assert_eq!(rows[0].status, "Ready");
+    assert_eq!(rows[0].sequence_nr, 9);
+    assert_eq!(
+        rows[0].fields.get("content_hash").and_then(|v| v.as_str()),
+        Some("sha256:file-a")
+    );
+    assert_eq!(
+        rows[0].fields.get("has_content").and_then(|v| v.as_str()),
+        Some("true")
+    );
+    assert_eq!(
+        rows[0].fields.get("size_bytes").and_then(|v| v.as_str()),
+        Some("12")
+    );
+}
+
+#[tokio::test]
+async fn list_blobs_returns_rows_for_migration() {
+    let store = make_store("blob-list").await;
+
+    store
+        .put_blob("temper-fs/sha256:abc", b"hello")
+        .await
+        .expect("put blob");
+
+    let rows = store.list_blobs(100).await.expect("list blobs");
+
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].blob_key, "temper-fs/sha256:abc");
+    assert_eq!(rows[0].data, b"hello");
+    assert_eq!(rows[0].size_bytes, 5);
+    assert!(!rows[0].created_at.is_empty());
+    assert_eq!(rows[0].expires_at, None);
+}
+
+#[tokio::test]
 async fn load_wasm_module_metadata_all_tenants_returns_metadata_without_bulk_bytes() {
     let store = make_store("wasm-metadata").await;
 

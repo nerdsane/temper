@@ -357,6 +357,38 @@ pub struct PolicyDenialPatternRow {
     pub distinct_resource_ids_json: String,
 }
 
+/// Complete query-plane projection row used by storage migrations.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct TursoQueryProjectionRow {
+    /// Tenant name.
+    pub tenant: String,
+    /// Entity type name.
+    pub entity_type: String,
+    /// Entity identifier.
+    pub entity_id: String,
+    /// Current entity status.
+    pub status: String,
+    /// Top-level scalar fields reconstructed from the durable EAV index.
+    pub fields: serde_json::Value,
+    /// Latest sequence number represented by this projection.
+    pub sequence_nr: u64,
+}
+
+/// Blob row used by storage migrations.
+#[derive(Debug, Clone)]
+pub struct TursoBlobRow {
+    /// Content-addressed blob key.
+    pub blob_key: String,
+    /// Raw blob bytes.
+    pub data: Vec<u8>,
+    /// Stored size in bytes.
+    pub size_bytes: i64,
+    /// Source creation timestamp.
+    pub created_at: String,
+    /// Optional source expiration timestamp.
+    pub expires_at: Option<String>,
+}
+
 /// Row returned by [`TursoEventStore::load_specs()`].
 #[derive(Debug, Clone)]
 pub struct TursoSpecRow {
