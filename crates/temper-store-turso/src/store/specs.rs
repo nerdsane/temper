@@ -1,5 +1,7 @@
 //! Spec persistence: upsert, verification updates, and startup loading.
 
+use std::collections::BTreeMap;
+
 use libsql::{TransactionBehavior, params};
 use temper_runtime::persistence::{PersistenceError, storage_error};
 use tracing::instrument;
@@ -7,6 +9,13 @@ use tracing::instrument;
 use super::{TursoEventStore, TursoInstalledAppRow, TursoSpecRow, write_gate::WritePriority};
 use crate::TursoSpecVerificationUpdate;
 use crate::metrics::TursoQueryTimer;
+
+#[derive(Debug)]
+struct ExistingSpecFingerprint {
+    content_hash: Option<String>,
+    csdl_xml: Option<String>,
+    committed: bool,
+}
 
 impl TursoEventStore {
     /// Upsert a spec source (IOA + CSDL) for a tenant/entity_type.
@@ -89,16 +98,27 @@ impl TursoEventStore {
         app_name: &str,
     ) -> Result<(), PersistenceError> {
         let _query_timer = TursoQueryTimer::start("turso.upsert_specs_and_commit");
+        let conn = self.configured_connection().await?;
+        let spec_indices = self
+            .spec_indices_requiring_upsert(&conn, tenant, specs)
+            .await?;
+        let policy_needs_write = Self::tenant_policy_needs_write(&conn, tenant, policy).await?;
+        let app_needs_write = Self::installed_app_needs_write(&conn, tenant, app_name).await?;
+
+        if spec_indices.is_empty() && !policy_needs_write && !app_needs_write {
+            return Ok(());
+        }
+
         let _write_permit = self
             .acquire_write_permit("turso.upsert_specs_and_commit", WritePriority::High)
             .await?;
-        let conn = self.configured_connection().await?;
         let tx = conn
             .transaction_with_behavior(TransactionBehavior::Immediate)
             .await
             .map_err(storage_error)?;
 
-        for (entity_type, ioa_source, csdl_xml, content_hash) in specs {
+        for index in spec_indices {
+            let (entity_type, ioa_source, csdl_xml, content_hash) = specs[index];
             tx.execute(
                 "INSERT INTO specs (tenant, entity_type, ioa_source, csdl_xml, content_hash, committed, version, verified, verification_status, updated_at)
                  VALUES (?1, ?2, ?3, ?4, ?5, 1, 1, 0, 'pending', datetime('now'))
@@ -140,7 +160,7 @@ impl TursoEventStore {
             .map_err(storage_error)?;
         }
 
-        if let Some(policy_text) = policy {
+        if policy_needs_write && let Some(policy_text) = policy {
             tx.execute(
                 "INSERT INTO tenant_policies (tenant, policy_text, updated_at) \
                  VALUES (?1, ?2, datetime('now')) \
@@ -151,15 +171,137 @@ impl TursoEventStore {
             .map_err(storage_error)?;
         }
 
-        tx.execute(
-            "INSERT OR IGNORE INTO tenant_installed_apps (tenant_id, app_name) VALUES (?1, ?2)",
-            params![tenant, app_name],
-        )
-        .await
-        .map_err(storage_error)?;
+        if app_needs_write {
+            tx.execute(
+                "INSERT OR IGNORE INTO tenant_installed_apps (tenant_id, app_name) VALUES (?1, ?2)",
+                params![tenant, app_name],
+            )
+            .await
+            .map_err(storage_error)?;
+        }
 
         tx.commit().await.map_err(storage_error)?;
         Ok(())
+    }
+
+    async fn spec_indices_requiring_upsert(
+        &self,
+        conn: &libsql::Connection,
+        tenant: &str,
+        specs: &[(&str, &str, &str, &str)],
+    ) -> Result<Vec<usize>, PersistenceError> {
+        if specs.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        let entity_types = specs
+            .iter()
+            .map(|(entity_type, _, _, _)| *entity_type)
+            .collect::<Vec<_>>();
+        let existing = Self::load_spec_fingerprints(conn, tenant, &entity_types).await?;
+        Ok(specs
+            .iter()
+            .enumerate()
+            .filter_map(
+                |(index, (entity_type, _ioa_source, csdl_xml, content_hash))| {
+                    let needs_upsert = existing.get(*entity_type).is_none_or(|fingerprint| {
+                        fingerprint.content_hash.as_deref() != Some(*content_hash)
+                            || fingerprint.csdl_xml.as_deref() != Some(*csdl_xml)
+                            || !fingerprint.committed
+                    });
+                    needs_upsert.then_some(index)
+                },
+            )
+            .collect())
+    }
+
+    async fn load_spec_fingerprints(
+        conn: &libsql::Connection,
+        tenant: &str,
+        entity_types: &[&str],
+    ) -> Result<BTreeMap<String, ExistingSpecFingerprint>, PersistenceError> {
+        if entity_types.is_empty() {
+            return Ok(BTreeMap::new());
+        }
+
+        let placeholders = (2..entity_types.len() + 2)
+            .map(|index| format!("?{index}"))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let sql = format!(
+            "SELECT entity_type, content_hash, csdl_xml, committed \
+             FROM specs \
+             WHERE tenant = ?1 AND entity_type IN ({placeholders})"
+        );
+        let mut values: Vec<libsql::Value> = vec![tenant.to_string().into()];
+        values.extend(
+            entity_types
+                .iter()
+                .map(|entity_type| (*entity_type).to_string().into()),
+        );
+
+        let mut rows = conn
+            .query(&sql, libsql::params_from_iter(values))
+            .await
+            .map_err(storage_error)?;
+        let mut existing = BTreeMap::new();
+        while let Some(row) = rows.next().await.map_err(storage_error)? {
+            let entity_type: String = row.get(0).map_err(storage_error)?;
+            let content_hash: Option<String> = row.get(1).map_err(storage_error)?;
+            let csdl_xml: Option<String> = row.get(2).map_err(storage_error)?;
+            let committed = row
+                .get::<Option<i64>>(3)
+                .map_err(storage_error)?
+                .unwrap_or(1)
+                != 0;
+            existing.insert(
+                entity_type,
+                ExistingSpecFingerprint {
+                    content_hash,
+                    csdl_xml,
+                    committed,
+                },
+            );
+        }
+        Ok(existing)
+    }
+
+    async fn tenant_policy_needs_write(
+        conn: &libsql::Connection,
+        tenant: &str,
+        policy: Option<&str>,
+    ) -> Result<bool, PersistenceError> {
+        let Some(policy_text) = policy else {
+            return Ok(false);
+        };
+
+        let mut rows = conn
+            .query(
+                "SELECT policy_text FROM tenant_policies WHERE tenant = ?1 LIMIT 1",
+                params![tenant],
+            )
+            .await
+            .map_err(storage_error)?;
+        let Some(row) = rows.next().await.map_err(storage_error)? else {
+            return Ok(true);
+        };
+        let existing: String = row.get(0).map_err(storage_error)?;
+        Ok(existing != policy_text)
+    }
+
+    async fn installed_app_needs_write(
+        conn: &libsql::Connection,
+        tenant: &str,
+        app_name: &str,
+    ) -> Result<bool, PersistenceError> {
+        let mut rows = conn
+            .query(
+                "SELECT 1 FROM tenant_installed_apps WHERE tenant_id = ?1 AND app_name = ?2 LIMIT 1",
+                params![tenant, app_name],
+            )
+            .await
+            .map_err(storage_error)?;
+        Ok(rows.next().await.map_err(storage_error)?.is_none())
     }
 
     /// Delete a spec for a given tenant/entity_type.
@@ -198,7 +340,20 @@ impl TursoEventStore {
                  levels_total = ?6,
                  verification_result = ?7,
                  updated_at = datetime('now')
-             WHERE tenant = ?1 AND entity_type = ?2",
+             WHERE tenant = ?1 AND entity_type = ?2
+               AND (
+                   verified IS NOT ?3
+                   OR verification_status IS NOT ?4
+                   OR levels_passed IS NOT ?5
+                   OR levels_total IS NOT ?6
+                   OR CASE
+                       WHEN verification_result IS NULL AND ?7 IS NULL THEN 0
+                       WHEN verification_result IS NULL OR ?7 IS NULL THEN 1
+                       WHEN json_valid(verification_result) != 0 AND json_valid(?7) != 0
+                       THEN json_remove(verification_result, '$.verified_at') IS NOT json_remove(?7, '$.verified_at')
+                       ELSE verification_result IS NOT ?7
+                   END
+               )",
             params![
                 tenant,
                 entity_type,
@@ -227,7 +382,7 @@ impl TursoEventStore {
         let conn = self.configured_connection().await?;
         let mut rows = conn
             .query(
-                "SELECT entity_type, content_hash, verified FROM specs WHERE tenant = ?1",
+                "SELECT entity_type, content_hash, verified FROM specs WHERE tenant = ?1 AND committed = 1",
                 params![tenant],
             )
             .await
@@ -459,7 +614,7 @@ impl TursoEventStore {
         let _query_timer = TursoQueryTimer::start("turso.commit_specs");
         let conn = self.configured_connection().await?;
         conn.execute(
-            "UPDATE specs SET committed = 1, updated_at = datetime('now') WHERE tenant = ?1",
+            "UPDATE specs SET committed = 1, updated_at = datetime('now') WHERE tenant = ?1 AND committed != 1",
             params![tenant],
         )
         .await

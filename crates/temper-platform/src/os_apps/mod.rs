@@ -1436,6 +1436,7 @@ pub(super) async fn install_os_app_with_plan(
                     &specs_to_bootstrap,
                     merged,
                     &spec_hashes,
+                    &verified_cache,
                 )
                 .await;
             }
