@@ -92,6 +92,18 @@ pub(crate) struct BootstrapTenantSpecsOptions<'a> {
     pub(crate) label: &'a str,
     pub(crate) verified_cache: &'a BTreeMap<String, (String, bool)>,
     pub(crate) cross_invariants_source: Option<&'a str>,
+    pub(crate) verification_mode: BootstrapSpecVerificationMode,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum BootstrapSpecVerificationMode {
+    /// Run the full parse + formal/property verification cascade for changed specs.
+    FullCascade,
+    /// Trust the already-built app bundle after parse/CSDL registration.
+    ///
+    /// Production OS-app startup must not block readiness on the expensive verifier.
+    /// CI/offline gates own that deeper proof; startup owns loading known bundle content.
+    TrustBundle,
 }
 
 pub(crate) fn bootstrap_tenant_specs(
@@ -116,6 +128,7 @@ fn bootstrap_tenant_specs_inner(
         label,
         verified_cache,
         cross_invariants_source,
+        verification_mode,
     } = options;
 
     tracing::info!(
@@ -141,6 +154,11 @@ fn bootstrap_tenant_specs_inner(
         if already_verified {
             tracing::info!(
                 "Spec {entity_type} unchanged (hash={}…), skipping verification",
+                &hash[..8]
+            );
+        } else if verification_mode == BootstrapSpecVerificationMode::TrustBundle {
+            tracing::info!(
+                "Spec {entity_type} changed (hash={}…), trusting prebuilt bundle at bootstrap",
                 &hash[..8]
             );
         } else {
@@ -225,6 +243,7 @@ pub fn bootstrap_system_tenant(
             label: "System",
             verified_cache,
             cross_invariants_source: None,
+            verification_mode: BootstrapSpecVerificationMode::FullCascade,
         },
     )
 }
@@ -250,6 +269,7 @@ pub fn bootstrap_agent_specs(
             label: "Agent",
             verified_cache,
             cross_invariants_source: None,
+            verification_mode: BootstrapSpecVerificationMode::FullCascade,
         },
     )
 }
