@@ -216,7 +216,7 @@ pub(crate) async fn handle_intent_evidence(
     })))
 }
 
-/// GET /observe/evolution/feature-requests -- list feature request records from Turso.
+/// GET /observe/evolution/feature-requests -- list durable feature request records.
 ///
 /// Supports optional `disposition` query parameter to filter by status.
 #[instrument(skip_all, fields(otel.name = "GET /observe/evolution/feature-requests"))]
@@ -230,7 +230,7 @@ pub(crate) async fn handle_feature_requests(
 
     let trajectory_entries = state.load_trajectory_entries(1_000).await;
 
-    if let Some(turso) = state.platform_persistent_store() {
+    if let Some(store) = state.platform_metadata_store() {
         let generated = insight_generator::generate_feature_requests(&trajectory_entries);
         for feature_request in &generated {
             let refs_json = serde_json::to_string(&feature_request.trajectory_refs)
@@ -242,7 +242,7 @@ pub(crate) async fn handle_feature_requests(
                 FeatureRequestDisposition::WontFix => "WontFix",
                 FeatureRequestDisposition::Resolved => "Resolved",
             };
-            if let Err(error) = turso
+            if let Err(error) = store
                 .upsert_feature_request(
                     &feature_request.header.id,
                     &format!("{:?}", feature_request.category),
@@ -254,7 +254,7 @@ pub(crate) async fn handle_feature_requests(
                 )
                 .await
             {
-                tracing::warn!(error = %error, "failed to upsert feature request to Turso");
+                tracing::warn!(error = %error, backend = store.backend_name(), "failed to upsert feature request");
             }
 
             create_system_entity_logged(
@@ -273,7 +273,7 @@ pub(crate) async fn handle_feature_requests(
             .await;
         }
 
-        return match turso.list_feature_requests(disposition_filter).await {
+        return match store.list_feature_requests(disposition_filter).await {
             Ok(rows) => {
                 let feature_requests = rows
                     .iter()
@@ -296,7 +296,7 @@ pub(crate) async fn handle_feature_requests(
                 })))
             }
             Err(error) => {
-                tracing::warn!(error = %error, "failed to query feature requests from Turso");
+                tracing::warn!(error = %error, backend = store.backend_name(), "failed to query feature requests");
                 Err(StatusCode::SERVICE_UNAVAILABLE)
             }
         };
@@ -307,7 +307,7 @@ pub(crate) async fn handle_feature_requests(
     ))
 }
 
-/// PATCH /observe/evolution/feature-requests/:id -- update disposition + notes in Turso.
+/// PATCH /observe/evolution/feature-requests/:id -- update disposition + notes.
 ///
 /// Admin principals bypass Cedar; other principals require "manage_feature_requests"
 /// on "FeatureRequest".
@@ -340,11 +340,11 @@ pub(crate) async fn handle_update_feature_request(
         }
     }
 
-    let Some(turso) = state.platform_persistent_store() else {
+    let Some(store) = state.platform_metadata_store() else {
         return Err(StatusCode::SERVICE_UNAVAILABLE);
     };
 
-    turso
+    store
         .update_feature_request(&id, disposition.unwrap_or(""), notes)
         .await
         .map_err(|error| {

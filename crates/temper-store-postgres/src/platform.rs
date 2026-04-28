@@ -1,12 +1,15 @@
 //! PostgreSQL platform-store methods.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
+use std::time::Duration;
 
 use sha2::{Digest, Sha256};
 use sqlx::Row;
 use temper_runtime::persistence::PersistenceError;
 
 use crate::PostgresEventStore;
+
+const DISTINCT_RESOURCE_IDS_BUDGET: usize = 100;
 
 #[derive(Clone, Copy, Debug)]
 pub struct PostgresSpecVerificationUpdate<'a> {
@@ -58,6 +61,43 @@ pub struct PostgresWasmModuleRow {
 }
 
 #[derive(Debug, Clone)]
+pub struct PostgresWasmModuleMetadataRow {
+    pub tenant: String,
+    pub module_name: String,
+    pub sha256_hash: String,
+    pub size_bytes: i32,
+    pub updated_at: String,
+}
+
+#[derive(Clone, Copy, Debug)]
+pub struct PostgresWasmInvocationInsert<'a> {
+    pub tenant: &'a str,
+    pub entity_type: &'a str,
+    pub entity_id: &'a str,
+    pub module_name: &'a str,
+    pub trigger_action: &'a str,
+    pub callback_action: Option<&'a str>,
+    pub success: bool,
+    pub error: Option<&'a str>,
+    pub duration_ms: u64,
+    pub created_at: &'a str,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct PostgresWasmInvocationRow {
+    pub tenant: String,
+    pub entity_type: String,
+    pub entity_id: String,
+    pub module_name: String,
+    pub trigger_action: String,
+    pub callback_action: Option<String>,
+    pub success: bool,
+    pub error: Option<String>,
+    pub duration_ms: u64,
+    pub created_at: String,
+}
+
+#[derive(Debug, Clone)]
 pub struct PostgresPolicyRow {
     pub tenant: String,
     pub policy_id: String,
@@ -66,6 +106,141 @@ pub struct PostgresPolicyRow {
     pub created_at: String,
     pub created_by: String,
     pub enabled: bool,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct PostgresPolicyDenialPatternRow {
+    pub tenant: String,
+    pub agent_type: Option<String>,
+    pub action: String,
+    pub resource_type: String,
+    pub count: i64,
+    pub first_seen: String,
+    pub last_seen: String,
+    pub distinct_resource_ids_json: String,
+}
+
+pub type PostgresSecretRow = (String, Vec<u8>, Vec<u8>);
+
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct PostgresTrajectoryRow {
+    pub tenant: String,
+    pub entity_type: String,
+    pub entity_id: String,
+    pub action: String,
+    pub success: bool,
+    pub from_status: Option<String>,
+    pub to_status: Option<String>,
+    pub error: Option<String>,
+    pub agent_id: Option<String>,
+    pub session_id: Option<String>,
+    pub authz_denied: Option<bool>,
+    pub denied_resource: Option<String>,
+    pub denied_module: Option<String>,
+    pub source: Option<String>,
+    pub spec_governed: Option<bool>,
+    pub created_at: String,
+    pub request_body: Option<String>,
+    pub intent: Option<String>,
+    pub matched_policy_ids: Option<Vec<String>>,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct PostgresTrajectoryStats {
+    pub total: u64,
+    pub success_count: u64,
+    pub error_count: u64,
+    pub success_rate: f64,
+    pub by_action: BTreeMap<String, PostgresActionStats>,
+    pub failed_intents: Vec<PostgresTrajectoryRow>,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct PostgresActionStats {
+    pub total: u64,
+    pub success: u64,
+    pub error: u64,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct PostgresAgentSummary {
+    pub agent_id: String,
+    pub total_actions: u64,
+    pub success_count: u64,
+    pub error_count: u64,
+    pub denial_count: u64,
+    pub success_rate: f64,
+    pub last_active_at: String,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct PostgresUnmetIntentAggRow {
+    pub entity_type: String,
+    pub action: String,
+    pub error: Option<String>,
+    pub count: u64,
+    pub first_seen: String,
+    pub last_seen: String,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct PostgresFeatureRequestRow {
+    pub id: String,
+    pub category: String,
+    pub description: String,
+    pub frequency: i64,
+    pub trajectory_refs: String,
+    pub disposition: String,
+    pub developer_notes: Option<String>,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct PostgresEvolutionRecordRow {
+    pub id: String,
+    pub record_type: String,
+    pub status: String,
+    pub created_by: String,
+    pub derived_from: Option<String>,
+    pub data: String,
+    pub timestamp: String,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct PostgresDesignTimeEventRow {
+    pub id: i64,
+    pub kind: String,
+    pub entity_type: String,
+    pub tenant: String,
+    pub summary: String,
+    pub level: Option<String>,
+    pub passed: Option<bool>,
+    pub step_number: Option<i64>,
+    pub total_steps: Option<i64>,
+    pub created_at: String,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct PostgresOtsTrajectoryRow {
+    pub trajectory_id: String,
+    pub tenant: String,
+    pub agent_id: String,
+    pub session_id: String,
+    pub outcome: String,
+    pub turn_count: i64,
+    pub created_at: String,
+}
+
+#[derive(Clone, Copy, Debug)]
+pub struct PostgresOtsTrajectoryParams<'a> {
+    pub trajectory_id: &'a str,
+    pub tenant: &'a str,
+    pub agent_id: &'a str,
+    pub session_id: &'a str,
+    pub outcome: &'a str,
+    pub turn_count: i64,
+    pub data: &'a str,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -742,6 +917,787 @@ impl PostgresEventStore {
     }
 }
 
+impl PostgresEventStore {
+    pub async fn load_recent_trajectories(
+        &self,
+        limit: i64,
+    ) -> Result<Vec<PostgresTrajectoryRow>, PersistenceError> {
+        let rows = sqlx::query(
+            "SELECT tenant, entity_type, entity_id, action, success, from_status, to_status, error, \
+                    agent_id, session_id, authz_denied, denied_resource, denied_module, source, spec_governed, \
+                    created_at, request_body, intent, matched_policy_ids \
+             FROM trajectories \
+             ORDER BY created_at DESC \
+             LIMIT $1",
+        )
+        .bind(limit)
+        .fetch_all(self.pool())
+        .await
+        .map_err(storage_error)?;
+        Ok(rows.into_iter().map(row_to_trajectory).collect())
+    }
+
+    pub async fn load_unmet_intent_rows(
+        &self,
+    ) -> Result<Vec<PostgresUnmetIntentAggRow>, PersistenceError> {
+        let rows = sqlx::query(
+            "SELECT entity_type, MAX(action) AS action, error, COUNT(*)::bigint AS cnt, \
+                    MIN(created_at) AS first_seen, MAX(created_at) AS last_seen \
+             FROM trajectories \
+             WHERE success = false AND (authz_denied IS NULL OR authz_denied = false) \
+             GROUP BY entity_type, error \
+             ORDER BY cnt DESC \
+             LIMIT 100",
+        )
+        .fetch_all(self.pool())
+        .await
+        .map_err(storage_error)?;
+        Ok(rows.into_iter().map(row_to_unmet_intent).collect())
+    }
+
+    pub async fn load_submit_spec_timestamps(
+        &self,
+    ) -> Result<BTreeMap<String, String>, PersistenceError> {
+        let rows: Vec<(String, chrono::DateTime<chrono::Utc>)> = sqlx::query_as(
+            "SELECT entity_type, MAX(created_at) AS latest_at \
+             FROM trajectories \
+             WHERE success = true AND action = 'SubmitSpec' \
+             GROUP BY entity_type",
+        )
+        .fetch_all(self.pool())
+        .await
+        .map_err(storage_error)?;
+        Ok(rows
+            .into_iter()
+            .map(|(entity_type, latest_at)| (entity_type, latest_at.to_rfc3339()))
+            .collect())
+    }
+
+    pub async fn count_trajectories_by_tenant(
+        &self,
+    ) -> Result<BTreeMap<String, u64>, PersistenceError> {
+        let rows: Vec<(String, i64)> =
+            sqlx::query_as("SELECT tenant, COUNT(*)::bigint FROM trajectories GROUP BY tenant")
+                .fetch_all(self.pool())
+                .await
+                .map_err(storage_error)?;
+        Ok(rows
+            .into_iter()
+            .map(|(tenant, count)| (tenant, count as u64))
+            .collect())
+    }
+
+    pub async fn query_trajectory_stats(
+        &self,
+        entity_type: Option<&str>,
+        action: Option<&str>,
+        success_filter: Option<bool>,
+        failed_limit: i64,
+    ) -> Result<PostgresTrajectoryStats, PersistenceError> {
+        let row: (i64, i64) = sqlx::query_as(
+            "SELECT COUNT(*)::bigint AS total, \
+                    COALESCE(SUM(CASE WHEN success = true THEN 1 ELSE 0 END), 0)::bigint AS success_count \
+             FROM trajectories \
+             WHERE ($1::text IS NULL OR entity_type = $1) \
+               AND ($2::text IS NULL OR action = $2) \
+               AND ($3::boolean IS NULL OR success = $3)",
+        )
+        .bind(entity_type)
+        .bind(action)
+        .bind(success_filter)
+        .fetch_one(self.pool())
+        .await
+        .map_err(storage_error)?;
+        let total = row.0 as u64;
+        let success_count = row.1 as u64;
+
+        let action_rows: Vec<(String, i64, i64, i64)> = sqlx::query_as(
+            "SELECT action, COUNT(*)::bigint AS total, \
+                    COALESCE(SUM(CASE WHEN success = true THEN 1 ELSE 0 END), 0)::bigint AS success, \
+                    COALESCE(SUM(CASE WHEN success = false THEN 1 ELSE 0 END), 0)::bigint AS error \
+             FROM trajectories \
+             GROUP BY action",
+        )
+        .fetch_all(self.pool())
+        .await
+        .map_err(storage_error)?;
+        let by_action = action_rows
+            .into_iter()
+            .map(|(name, total, success, error)| {
+                (
+                    name,
+                    PostgresActionStats {
+                        total: total as u64,
+                        success: success as u64,
+                        error: error as u64,
+                    },
+                )
+            })
+            .collect();
+
+        let failed_rows = sqlx::query(
+            "SELECT tenant, entity_type, entity_id, action, success, from_status, to_status, error, \
+                    agent_id, session_id, authz_denied, denied_resource, denied_module, source, spec_governed, \
+                    created_at, request_body, intent, matched_policy_ids \
+             FROM trajectories \
+             WHERE success = false \
+             ORDER BY created_at DESC \
+             LIMIT $1",
+        )
+        .bind(failed_limit)
+        .fetch_all(self.pool())
+        .await
+        .map_err(storage_error)?;
+        let failed_intents = failed_rows.into_iter().map(row_to_trajectory).collect();
+        let error_count = total.saturating_sub(success_count);
+        Ok(PostgresTrajectoryStats {
+            total,
+            success_count,
+            error_count,
+            success_rate: if total > 0 {
+                success_count as f64 / total as f64
+            } else {
+                0.0
+            },
+            by_action,
+            failed_intents,
+        })
+    }
+
+    pub async fn query_trajectories_by_agent(
+        &self,
+        agent_id: &str,
+        tenant: Option<&str>,
+        entity_type: Option<&str>,
+        limit: i64,
+    ) -> Result<Vec<PostgresTrajectoryRow>, PersistenceError> {
+        let rows = sqlx::query(
+            "SELECT tenant, entity_type, entity_id, action, success, from_status, to_status, error, \
+                    agent_id, session_id, authz_denied, denied_resource, denied_module, source, spec_governed, \
+                    created_at, request_body, intent, matched_policy_ids \
+             FROM trajectories \
+             WHERE agent_id = $1 \
+               AND ($2::text IS NULL OR tenant = $2) \
+               AND ($3::text IS NULL OR entity_type = $3) \
+             ORDER BY created_at DESC \
+             LIMIT $4",
+        )
+        .bind(agent_id)
+        .bind(tenant)
+        .bind(entity_type)
+        .bind(limit)
+        .fetch_all(self.pool())
+        .await
+        .map_err(storage_error)?;
+        Ok(rows.into_iter().map(row_to_trajectory).collect())
+    }
+
+    pub async fn query_agent_summaries(
+        &self,
+        tenant: Option<&str>,
+    ) -> Result<Vec<PostgresAgentSummary>, PersistenceError> {
+        let rows = sqlx::query(
+            "SELECT agent_id, COUNT(*)::bigint AS total_actions, \
+                    COALESCE(SUM(CASE WHEN success = true THEN 1 ELSE 0 END), 0)::bigint AS success_count, \
+                    COALESCE(SUM(CASE WHEN success = false THEN 1 ELSE 0 END), 0)::bigint AS error_count, \
+                    COALESCE(SUM(CASE WHEN authz_denied = true THEN 1 ELSE 0 END), 0)::bigint AS denial_count, \
+                    MAX(created_at) AS last_active_at \
+             FROM trajectories \
+             WHERE agent_id IS NOT NULL AND ($1::text IS NULL OR tenant = $1) \
+             GROUP BY agent_id \
+             ORDER BY last_active_at DESC",
+        )
+        .bind(tenant)
+        .fetch_all(self.pool())
+        .await
+        .map_err(storage_error)?;
+        Ok(rows.into_iter().map(row_to_agent_summary).collect())
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub async fn upsert_feature_request(
+        &self,
+        id: &str,
+        category: &str,
+        description: &str,
+        frequency: i64,
+        trajectory_refs_json: &str,
+        disposition: &str,
+        developer_notes: Option<&str>,
+    ) -> Result<(), PersistenceError> {
+        let trajectory_refs = parse_json(trajectory_refs_json)?;
+        sqlx::query(
+            "INSERT INTO feature_requests \
+             (id, category, description, frequency, trajectory_refs, disposition, developer_notes, updated_at) \
+             VALUES ($1, $2, $3, $4, $5, $6, $7, now()) \
+             ON CONFLICT (id) DO UPDATE SET \
+                 category = EXCLUDED.category, description = EXCLUDED.description, frequency = EXCLUDED.frequency, \
+                 trajectory_refs = EXCLUDED.trajectory_refs, disposition = EXCLUDED.disposition, \
+                 developer_notes = EXCLUDED.developer_notes, updated_at = now()",
+        )
+        .bind(id)
+        .bind(category)
+        .bind(description)
+        .bind(frequency)
+        .bind(trajectory_refs)
+        .bind(disposition)
+        .bind(developer_notes)
+        .execute(self.pool())
+        .await
+        .map_err(storage_error)?;
+        Ok(())
+    }
+
+    pub async fn list_feature_requests(
+        &self,
+        disposition: Option<&str>,
+    ) -> Result<Vec<PostgresFeatureRequestRow>, PersistenceError> {
+        let rows = sqlx::query(
+            "SELECT id, category, description, frequency, trajectory_refs, disposition, developer_notes, created_at, updated_at \
+             FROM feature_requests \
+             WHERE ($1::text IS NULL OR disposition = $1) \
+             ORDER BY frequency DESC, created_at DESC",
+        )
+        .bind(disposition)
+        .fetch_all(self.pool())
+        .await
+        .map_err(storage_error)?;
+        Ok(rows.into_iter().map(row_to_feature_request).collect())
+    }
+
+    pub async fn update_feature_request(
+        &self,
+        id: &str,
+        disposition: &str,
+        developer_notes: Option<&str>,
+    ) -> Result<bool, PersistenceError> {
+        let result = sqlx::query(
+            "UPDATE feature_requests SET disposition = $2, developer_notes = $3, updated_at = now() \
+             WHERE id = $1",
+        )
+        .bind(id)
+        .bind(disposition)
+        .bind(developer_notes)
+        .execute(self.pool())
+        .await
+        .map_err(storage_error)?;
+        Ok(result.rows_affected() > 0)
+    }
+
+    pub async fn insert_evolution_record(
+        &self,
+        id: &str,
+        record_type: &str,
+        status: &str,
+        created_by: &str,
+        derived_from: Option<&str>,
+        data_json: &str,
+    ) -> Result<(), PersistenceError> {
+        let payload = parse_json(data_json)?;
+        sqlx::query(
+            "INSERT INTO evolution_records (id, record_type, status, created_by, derived_from, payload, timestamp) \
+             VALUES ($1, $2, $3, $4, $5, $6, now())",
+        )
+        .bind(id)
+        .bind(record_type)
+        .bind(status)
+        .bind(created_by)
+        .bind(derived_from)
+        .bind(payload)
+        .execute(self.pool())
+        .await
+        .map_err(storage_error)?;
+        Ok(())
+    }
+
+    pub async fn get_evolution_record(
+        &self,
+        id: &str,
+    ) -> Result<Option<PostgresEvolutionRecordRow>, PersistenceError> {
+        let row = sqlx::query(
+            "SELECT id, record_type, status, created_by, derived_from, payload, timestamp \
+             FROM evolution_records WHERE id = $1",
+        )
+        .bind(id)
+        .fetch_optional(self.pool())
+        .await
+        .map_err(storage_error)?;
+        Ok(row.map(row_to_evolution_record))
+    }
+
+    pub async fn list_evolution_records(
+        &self,
+        record_type: Option<&str>,
+        status: Option<&str>,
+    ) -> Result<Vec<PostgresEvolutionRecordRow>, PersistenceError> {
+        let rows = sqlx::query(
+            "SELECT id, record_type, status, created_by, derived_from, payload, timestamp \
+             FROM evolution_records \
+             WHERE ($1::text IS NULL OR record_type = $1) \
+               AND ($2::text IS NULL OR status = $2) \
+             ORDER BY timestamp DESC",
+        )
+        .bind(record_type)
+        .bind(status)
+        .fetch_all(self.pool())
+        .await
+        .map_err(storage_error)?;
+        Ok(rows.into_iter().map(row_to_evolution_record).collect())
+    }
+
+    pub async fn list_ranked_insights(
+        &self,
+    ) -> Result<Vec<PostgresEvolutionRecordRow>, PersistenceError> {
+        let mut rows = self.list_evolution_records(Some("Insight"), None).await?;
+        rows.sort_by(|a, b| {
+            let score_a = serde_json::from_str::<serde_json::Value>(&a.data)
+                .ok()
+                .and_then(|v| v.get("priority_score").and_then(|s| s.as_f64()))
+                .unwrap_or(0.0);
+            let score_b = serde_json::from_str::<serde_json::Value>(&b.data)
+                .ok()
+                .and_then(|v| v.get("priority_score").and_then(|s| s.as_f64()))
+                .unwrap_or(0.0);
+            score_b
+                .partial_cmp(&score_a)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
+        Ok(rows)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub async fn insert_design_time_event(
+        &self,
+        kind: &str,
+        entity_type: &str,
+        tenant: &str,
+        summary: &str,
+        level: Option<&str>,
+        passed: Option<bool>,
+        step_number: Option<i64>,
+        total_steps: Option<i64>,
+    ) -> Result<(), PersistenceError> {
+        sqlx::query(
+            "INSERT INTO design_time_events \
+             (kind, entity_type, tenant, summary, level, passed, step_number, total_steps) \
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8)",
+        )
+        .bind(kind)
+        .bind(entity_type)
+        .bind(tenant)
+        .bind(summary)
+        .bind(level)
+        .bind(passed)
+        .bind(step_number.map(|value| value as i16))
+        .bind(total_steps.map(|value| value as i16))
+        .execute(self.pool())
+        .await
+        .map_err(storage_error)?;
+        Ok(())
+    }
+
+    pub async fn list_design_time_events(
+        &self,
+        tenant: Option<&str>,
+        limit: i64,
+    ) -> Result<Vec<PostgresDesignTimeEventRow>, PersistenceError> {
+        let rows = sqlx::query(
+            "SELECT id, kind, entity_type, tenant, summary, level, passed, step_number, total_steps, created_at \
+             FROM design_time_events \
+             WHERE ($1::text IS NULL OR tenant = $1) \
+             ORDER BY created_at DESC \
+             LIMIT $2",
+        )
+        .bind(tenant)
+        .bind(limit)
+        .fetch_all(self.pool())
+        .await
+        .map_err(storage_error)?;
+        Ok(rows.into_iter().map(row_to_design_time_event).collect())
+    }
+
+    pub async fn persist_ots_trajectory(
+        &self,
+        p: &PostgresOtsTrajectoryParams<'_>,
+    ) -> Result<(), PersistenceError> {
+        let data = parse_json(p.data)?;
+        sqlx::query(
+            "INSERT INTO ots_trajectories \
+             (trajectory_id, tenant, agent_id, session_id, outcome, turn_count, data, created_at) \
+             VALUES ($1, $2, $3, $4, $5, $6, $7, now()) \
+             ON CONFLICT (trajectory_id) DO UPDATE SET \
+                 tenant = EXCLUDED.tenant, agent_id = EXCLUDED.agent_id, session_id = EXCLUDED.session_id, \
+                 outcome = EXCLUDED.outcome, turn_count = EXCLUDED.turn_count, data = EXCLUDED.data, created_at = now()",
+        )
+        .bind(p.trajectory_id)
+        .bind(p.tenant)
+        .bind(p.agent_id)
+        .bind(p.session_id)
+        .bind(p.outcome)
+        .bind(p.turn_count)
+        .bind(data)
+        .execute(self.pool())
+        .await
+        .map_err(storage_error)?;
+        Ok(())
+    }
+
+    pub async fn list_ots_trajectories(
+        &self,
+        tenant: &str,
+        agent_id: Option<&str>,
+        outcome: Option<&str>,
+        limit: i64,
+    ) -> Result<Vec<PostgresOtsTrajectoryRow>, PersistenceError> {
+        let rows = sqlx::query(
+            "SELECT trajectory_id, tenant, agent_id, COALESCE(session_id, '') AS session_id, outcome, turn_count, created_at \
+             FROM ots_trajectories \
+             WHERE tenant = $1 \
+               AND ($2::text IS NULL OR agent_id = $2) \
+               AND ($3::text IS NULL OR outcome = $3) \
+             ORDER BY created_at DESC \
+             LIMIT $4",
+        )
+        .bind(tenant)
+        .bind(agent_id)
+        .bind(outcome)
+        .bind(limit)
+        .fetch_all(self.pool())
+        .await
+        .map_err(storage_error)?;
+        Ok(rows.into_iter().map(row_to_ots_trajectory).collect())
+    }
+
+    pub async fn get_ots_trajectory(
+        &self,
+        trajectory_id: &str,
+    ) -> Result<Option<String>, PersistenceError> {
+        let row: Option<serde_json::Value> =
+            sqlx::query_scalar("SELECT data FROM ots_trajectories WHERE trajectory_id = $1")
+                .bind(trajectory_id)
+                .fetch_optional(self.pool())
+                .await
+                .map_err(storage_error)?;
+        Ok(row.map(|value| value.to_string()))
+    }
+
+    pub async fn put_blob(&self, key: &str, data: &[u8]) -> Result<(), String> {
+        self.put_blob_with_ttl(key, data, None).await
+    }
+
+    pub async fn put_blob_with_ttl(
+        &self,
+        key: &str,
+        data: &[u8],
+        ttl: Option<Duration>,
+    ) -> Result<(), String> {
+        let ttl_seconds = ttl.map(|duration| duration.as_secs() as i64);
+        sqlx::query(
+            "INSERT INTO blobs (blob_key, data, size_bytes, expires_at) \
+             VALUES ($1, $2, $3, CASE WHEN $4::bigint IS NULL THEN NULL ELSE now() + ($4::bigint * interval '1 second') END) \
+             ON CONFLICT (blob_key) DO NOTHING",
+        )
+        .bind(key)
+        .bind(data)
+        .bind(data.len() as i64)
+        .bind(ttl_seconds)
+        .execute(self.pool())
+        .await
+        .map(|_| ())
+        .map_err(|e| format!("blob put failed: {e}"))
+    }
+
+    pub async fn sweep_expired_blobs(&self, max_rows: u64) -> Result<u64, String> {
+        let result = sqlx::query(
+            "WITH doomed AS ( \
+                 SELECT blob_key FROM blobs \
+                 WHERE expires_at IS NOT NULL AND expires_at < now() \
+                 LIMIT $1 \
+             ) \
+             DELETE FROM blobs USING doomed WHERE blobs.blob_key = doomed.blob_key",
+        )
+        .bind(max_rows as i64)
+        .execute(self.pool())
+        .await
+        .map_err(|e| format!("blob sweep failed: {e}"))?;
+        Ok(result.rows_affected())
+    }
+
+    pub async fn get_blob(&self, key: &str) -> Result<Option<Vec<u8>>, String> {
+        sqlx::query_scalar("SELECT data FROM blobs WHERE blob_key = $1")
+            .bind(key)
+            .fetch_optional(self.pool())
+            .await
+            .map_err(|e| format!("blob get failed: {e}"))
+    }
+
+    pub async fn upsert_secret(
+        &self,
+        tenant: &str,
+        key_name: &str,
+        ciphertext: &[u8],
+        nonce: &[u8],
+    ) -> Result<(), PersistenceError> {
+        sqlx::query(
+            "INSERT INTO tenant_secrets (tenant, key_name, ciphertext, nonce, created_at, updated_at) \
+             VALUES ($1, $2, $3, $4, now(), now()) \
+             ON CONFLICT (tenant, key_name) DO UPDATE SET ciphertext = EXCLUDED.ciphertext, nonce = EXCLUDED.nonce, updated_at = now()",
+        )
+        .bind(tenant)
+        .bind(key_name)
+        .bind(ciphertext)
+        .bind(nonce)
+        .execute(self.pool())
+        .await
+        .map_err(storage_error)?;
+        Ok(())
+    }
+
+    pub async fn delete_secret(
+        &self,
+        tenant: &str,
+        key_name: &str,
+    ) -> Result<bool, PersistenceError> {
+        let result = sqlx::query("DELETE FROM tenant_secrets WHERE tenant = $1 AND key_name = $2")
+            .bind(tenant)
+            .bind(key_name)
+            .execute(self.pool())
+            .await
+            .map_err(storage_error)?;
+        Ok(result.rows_affected() > 0)
+    }
+
+    pub async fn load_secrets_for_tenant(
+        &self,
+        tenant: &str,
+    ) -> Result<Vec<PostgresSecretRow>, PersistenceError> {
+        sqlx::query_as("SELECT key_name, ciphertext, nonce FROM tenant_secrets WHERE tenant = $1")
+            .bind(tenant)
+            .fetch_all(self.pool())
+            .await
+            .map_err(storage_error)
+    }
+
+    pub async fn upsert_policy_denial_pattern(
+        &self,
+        tenant: &str,
+        agent_type: Option<&str>,
+        action: &str,
+        resource_type: &str,
+        resource_id: &str,
+        timestamp: &str,
+    ) -> Result<(), PersistenceError> {
+        let agent_type_key = agent_type.unwrap_or("");
+        let timestamp = parse_rfc3339(timestamp)?;
+        let existing = sqlx::query(
+            "SELECT count, first_seen, last_seen, distinct_resource_ids_json \
+             FROM policy_denial_patterns \
+             WHERE tenant = $1 AND agent_type = $2 AND action = $3 AND resource_type = $4",
+        )
+        .bind(tenant)
+        .bind(agent_type_key)
+        .bind(action)
+        .bind(resource_type)
+        .fetch_optional(self.pool())
+        .await
+        .map_err(storage_error)?;
+
+        let mut count = 1_i64;
+        let mut first_seen = timestamp;
+        let mut last_seen = timestamp;
+        let mut distinct_resource_ids = BTreeSet::new();
+        if let Some(row) = existing {
+            count = row.get::<i64, _>("count") + 1;
+            first_seen = row.get("first_seen");
+            let existing_last_seen: chrono::DateTime<chrono::Utc> = row.get("last_seen");
+            last_seen = existing_last_seen.max(timestamp);
+            let ids: serde_json::Value = row.get("distinct_resource_ids_json");
+            if let Ok(values) = serde_json::from_value::<Vec<String>>(ids) {
+                distinct_resource_ids.extend(values);
+            }
+        }
+        distinct_resource_ids.insert(resource_id.to_string());
+        while distinct_resource_ids.len() > DISTINCT_RESOURCE_IDS_BUDGET {
+            if let Some(oldest) = distinct_resource_ids.iter().next().cloned() {
+                distinct_resource_ids.remove(&oldest);
+            } else {
+                break;
+            }
+        }
+        let ids_json = serde_json::to_value(distinct_resource_ids.into_iter().collect::<Vec<_>>())
+            .map_err(|e| PersistenceError::Serialization(e.to_string()))?;
+
+        sqlx::query(
+            "INSERT INTO policy_denial_patterns \
+             (tenant, agent_type, action, resource_type, count, first_seen, last_seen, distinct_resource_ids_json) \
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8) \
+             ON CONFLICT (tenant, agent_type, action, resource_type) DO UPDATE SET \
+                 count = EXCLUDED.count, first_seen = EXCLUDED.first_seen, last_seen = EXCLUDED.last_seen, \
+                 distinct_resource_ids_json = EXCLUDED.distinct_resource_ids_json",
+        )
+        .bind(tenant)
+        .bind(agent_type_key)
+        .bind(action)
+        .bind(resource_type)
+        .bind(count)
+        .bind(first_seen)
+        .bind(last_seen)
+        .bind(ids_json)
+        .execute(self.pool())
+        .await
+        .map_err(storage_error)?;
+        Ok(())
+    }
+
+    pub async fn load_policy_denial_patterns(
+        &self,
+        tenant: &str,
+    ) -> Result<Vec<PostgresPolicyDenialPatternRow>, PersistenceError> {
+        let rows = sqlx::query(
+            "SELECT tenant, agent_type, action, resource_type, count, first_seen, last_seen, distinct_resource_ids_json \
+             FROM policy_denial_patterns \
+             WHERE tenant = $1 \
+             ORDER BY last_seen DESC, count DESC",
+        )
+        .bind(tenant)
+        .fetch_all(self.pool())
+        .await
+        .map_err(storage_error)?;
+        Ok(rows.into_iter().map(row_to_policy_denial_pattern).collect())
+    }
+
+    pub async fn query_decisions(
+        &self,
+        tenant: &str,
+        status: Option<&str>,
+    ) -> Result<Vec<String>, PersistenceError> {
+        let rows: Vec<serde_json::Value> = sqlx::query_scalar(
+            "SELECT data FROM pending_decisions \
+             WHERE tenant = $1 AND ($2::text IS NULL OR status = $2) \
+             ORDER BY created_at DESC",
+        )
+        .bind(tenant)
+        .bind(status)
+        .fetch_all(self.pool())
+        .await
+        .map_err(storage_error)?;
+        Ok(rows.into_iter().map(|value| value.to_string()).collect())
+    }
+
+    pub async fn query_all_decisions(
+        &self,
+        status: Option<&str>,
+    ) -> Result<Vec<String>, PersistenceError> {
+        let rows: Vec<serde_json::Value> = sqlx::query_scalar(
+            "SELECT data FROM pending_decisions \
+             WHERE ($1::text IS NULL OR status = $1) \
+             ORDER BY created_at DESC",
+        )
+        .bind(status)
+        .fetch_all(self.pool())
+        .await
+        .map_err(storage_error)?;
+        Ok(rows.into_iter().map(|value| value.to_string()).collect())
+    }
+
+    pub async fn get_pending_decision(&self, id: &str) -> Result<Option<String>, PersistenceError> {
+        let row: Option<serde_json::Value> =
+            sqlx::query_scalar("SELECT data FROM pending_decisions WHERE id = $1")
+                .bind(id)
+                .fetch_optional(self.pool())
+                .await
+                .map_err(storage_error)?;
+        Ok(row.map(|value| value.to_string()))
+    }
+
+    pub async fn load_wasm_module(
+        &self,
+        tenant: &str,
+        module_name: &str,
+    ) -> Result<Option<PostgresWasmModuleRow>, PersistenceError> {
+        let row = sqlx::query(
+            "SELECT tenant, module_name, wasm_bytes, sha256_hash \
+             FROM wasm_modules WHERE tenant = $1 AND module_name = $2",
+        )
+        .bind(tenant)
+        .bind(module_name)
+        .fetch_optional(self.pool())
+        .await
+        .map_err(storage_error)?;
+        Ok(row.map(row_to_wasm_module))
+    }
+
+    pub async fn load_wasm_module_metadata_all_tenants(
+        &self,
+    ) -> Result<Vec<PostgresWasmModuleMetadataRow>, PersistenceError> {
+        let rows = sqlx::query(
+            "SELECT tenant, module_name, sha256_hash, size_bytes, updated_at \
+             FROM wasm_modules ORDER BY tenant, module_name",
+        )
+        .fetch_all(self.pool())
+        .await
+        .map_err(storage_error)?;
+        Ok(rows.into_iter().map(row_to_wasm_module_metadata).collect())
+    }
+
+    pub async fn persist_wasm_invocation(
+        &self,
+        entry: &PostgresWasmInvocationInsert<'_>,
+    ) -> Result<(), PersistenceError> {
+        let created_at = parse_rfc3339(entry.created_at)?;
+        sqlx::query(
+            "INSERT INTO wasm_invocation_logs \
+             (tenant, entity_type, entity_id, module_name, trigger_action, callback_action, success, error, duration_ms, created_at) \
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)",
+        )
+        .bind(entry.tenant)
+        .bind(entry.entity_type)
+        .bind(entry.entity_id)
+        .bind(entry.module_name)
+        .bind(entry.trigger_action)
+        .bind(entry.callback_action)
+        .bind(entry.success)
+        .bind(entry.error)
+        .bind(entry.duration_ms as i64)
+        .bind(created_at)
+        .execute(self.pool())
+        .await
+        .map_err(storage_error)?;
+        Ok(())
+    }
+
+    pub async fn load_recent_wasm_invocations(
+        &self,
+        limit: i64,
+    ) -> Result<Vec<PostgresWasmInvocationRow>, PersistenceError> {
+        let rows = sqlx::query(
+            "SELECT tenant, entity_type, entity_id, module_name, trigger_action, callback_action, success, error, duration_ms, created_at \
+             FROM wasm_invocation_logs \
+             ORDER BY created_at DESC \
+             LIMIT $1",
+        )
+        .bind(limit)
+        .fetch_all(self.pool())
+        .await
+        .map_err(storage_error)?;
+        Ok(rows.into_iter().map(row_to_wasm_invocation).collect())
+    }
+
+    pub async fn delete_wasm_module(
+        &self,
+        tenant: &str,
+        module_name: &str,
+    ) -> Result<bool, PersistenceError> {
+        let result = sqlx::query("DELETE FROM wasm_modules WHERE tenant = $1 AND module_name = $2")
+            .bind(tenant)
+            .bind(module_name)
+            .execute(self.pool())
+            .await
+            .map_err(storage_error)?;
+        Ok(result.rows_affected() > 0)
+    }
+}
+
 fn storage_error(err: impl std::fmt::Display) -> PersistenceError {
     PersistenceError::Storage(err.to_string())
 }
@@ -843,6 +1799,34 @@ fn row_to_wasm_module(row: sqlx::postgres::PgRow) -> PostgresWasmModuleRow {
     }
 }
 
+fn row_to_wasm_module_metadata(row: sqlx::postgres::PgRow) -> PostgresWasmModuleMetadataRow {
+    let updated_at: chrono::DateTime<chrono::Utc> = row.get("updated_at");
+    PostgresWasmModuleMetadataRow {
+        tenant: row.get("tenant"),
+        module_name: row.get("module_name"),
+        sha256_hash: row.get("sha256_hash"),
+        size_bytes: row.get("size_bytes"),
+        updated_at: updated_at.to_rfc3339(),
+    }
+}
+
+fn row_to_wasm_invocation(row: sqlx::postgres::PgRow) -> PostgresWasmInvocationRow {
+    let created_at: chrono::DateTime<chrono::Utc> = row.get("created_at");
+    let duration_ms: i64 = row.get("duration_ms");
+    PostgresWasmInvocationRow {
+        tenant: row.get("tenant"),
+        entity_type: row.get("entity_type"),
+        entity_id: row.get("entity_id"),
+        module_name: row.get("module_name"),
+        trigger_action: row.get("trigger_action"),
+        callback_action: row.get("callback_action"),
+        success: row.get("success"),
+        error: row.get("error"),
+        duration_ms: duration_ms as u64,
+        created_at: created_at.to_rfc3339(),
+    }
+}
+
 fn row_to_policy(row: sqlx::postgres::PgRow) -> PostgresPolicyRow {
     let created_at: chrono::DateTime<chrono::Utc> = row.get("created_at");
     PostgresPolicyRow {
@@ -853,5 +1837,149 @@ fn row_to_policy(row: sqlx::postgres::PgRow) -> PostgresPolicyRow {
         created_at: created_at.to_rfc3339(),
         created_by: row.get("created_by"),
         enabled: row.get("enabled"),
+    }
+}
+
+fn row_to_policy_denial_pattern(row: sqlx::postgres::PgRow) -> PostgresPolicyDenialPatternRow {
+    let first_seen: chrono::DateTime<chrono::Utc> = row.get("first_seen");
+    let last_seen: chrono::DateTime<chrono::Utc> = row.get("last_seen");
+    let agent_type_raw: String = row.get("agent_type");
+    let distinct_resource_ids_json: serde_json::Value = row.get("distinct_resource_ids_json");
+    PostgresPolicyDenialPatternRow {
+        tenant: row.get("tenant"),
+        agent_type: if agent_type_raw.is_empty() {
+            None
+        } else {
+            Some(agent_type_raw)
+        },
+        action: row.get("action"),
+        resource_type: row.get("resource_type"),
+        count: row.get("count"),
+        first_seen: first_seen.to_rfc3339(),
+        last_seen: last_seen.to_rfc3339(),
+        distinct_resource_ids_json: distinct_resource_ids_json.to_string(),
+    }
+}
+
+fn row_to_trajectory(row: sqlx::postgres::PgRow) -> PostgresTrajectoryRow {
+    let created_at: chrono::DateTime<chrono::Utc> = row.get("created_at");
+    let request_body: Option<serde_json::Value> = row.get("request_body");
+    let matched_policy_ids: Option<serde_json::Value> = row.get("matched_policy_ids");
+    PostgresTrajectoryRow {
+        tenant: row.get("tenant"),
+        entity_type: row.get("entity_type"),
+        entity_id: row.get("entity_id"),
+        action: row.get("action"),
+        success: row.get("success"),
+        from_status: row.get("from_status"),
+        to_status: row.get("to_status"),
+        error: row.get("error"),
+        agent_id: row.get("agent_id"),
+        session_id: row.get("session_id"),
+        authz_denied: row.get("authz_denied"),
+        denied_resource: row.get("denied_resource"),
+        denied_module: row.get("denied_module"),
+        source: row.get("source"),
+        spec_governed: row.get("spec_governed"),
+        created_at: created_at.to_rfc3339(),
+        request_body: request_body.map(|value| value.to_string()),
+        intent: row.get("intent"),
+        matched_policy_ids: matched_policy_ids
+            .and_then(|value| serde_json::from_value::<Vec<String>>(value).ok()),
+    }
+}
+
+fn row_to_unmet_intent(row: sqlx::postgres::PgRow) -> PostgresUnmetIntentAggRow {
+    let count: i64 = row.get("cnt");
+    let first_seen: chrono::DateTime<chrono::Utc> = row.get("first_seen");
+    let last_seen: chrono::DateTime<chrono::Utc> = row.get("last_seen");
+    PostgresUnmetIntentAggRow {
+        entity_type: row.get("entity_type"),
+        action: row.get("action"),
+        error: row.get("error"),
+        count: count as u64,
+        first_seen: first_seen.to_rfc3339(),
+        last_seen: last_seen.to_rfc3339(),
+    }
+}
+
+fn row_to_agent_summary(row: sqlx::postgres::PgRow) -> PostgresAgentSummary {
+    let total = row.get::<i64, _>("total_actions") as u64;
+    let success = row.get::<i64, _>("success_count") as u64;
+    let last_active_at: chrono::DateTime<chrono::Utc> = row.get("last_active_at");
+    PostgresAgentSummary {
+        agent_id: row.get("agent_id"),
+        total_actions: total,
+        success_count: success,
+        error_count: row.get::<i64, _>("error_count") as u64,
+        denial_count: row.get::<i64, _>("denial_count") as u64,
+        success_rate: if total > 0 {
+            success as f64 / total as f64
+        } else {
+            0.0
+        },
+        last_active_at: last_active_at.to_rfc3339(),
+    }
+}
+
+fn row_to_feature_request(row: sqlx::postgres::PgRow) -> PostgresFeatureRequestRow {
+    let trajectory_refs: serde_json::Value = row.get("trajectory_refs");
+    let created_at: chrono::DateTime<chrono::Utc> = row.get("created_at");
+    let updated_at: chrono::DateTime<chrono::Utc> = row.get("updated_at");
+    PostgresFeatureRequestRow {
+        id: row.get("id"),
+        category: row.get("category"),
+        description: row.get("description"),
+        frequency: row.get("frequency"),
+        trajectory_refs: trajectory_refs.to_string(),
+        disposition: row.get("disposition"),
+        developer_notes: row.get("developer_notes"),
+        created_at: created_at.to_rfc3339(),
+        updated_at: updated_at.to_rfc3339(),
+    }
+}
+
+fn row_to_evolution_record(row: sqlx::postgres::PgRow) -> PostgresEvolutionRecordRow {
+    let payload: serde_json::Value = row.get("payload");
+    let timestamp: chrono::DateTime<chrono::Utc> = row.get("timestamp");
+    PostgresEvolutionRecordRow {
+        id: row.get("id"),
+        record_type: row.get("record_type"),
+        status: row.get("status"),
+        created_by: row.get("created_by"),
+        derived_from: row.get("derived_from"),
+        data: payload.to_string(),
+        timestamp: timestamp.to_rfc3339(),
+    }
+}
+
+fn row_to_design_time_event(row: sqlx::postgres::PgRow) -> PostgresDesignTimeEventRow {
+    let created_at: chrono::DateTime<chrono::Utc> = row.get("created_at");
+    let step_number: Option<i16> = row.get("step_number");
+    let total_steps: Option<i16> = row.get("total_steps");
+    PostgresDesignTimeEventRow {
+        id: row.get("id"),
+        kind: row.get("kind"),
+        entity_type: row.get("entity_type"),
+        tenant: row.get("tenant"),
+        summary: row.get("summary"),
+        level: row.get("level"),
+        passed: row.get("passed"),
+        step_number: step_number.map(i64::from),
+        total_steps: total_steps.map(i64::from),
+        created_at: created_at.to_rfc3339(),
+    }
+}
+
+fn row_to_ots_trajectory(row: sqlx::postgres::PgRow) -> PostgresOtsTrajectoryRow {
+    let created_at: chrono::DateTime<chrono::Utc> = row.get("created_at");
+    PostgresOtsTrajectoryRow {
+        trajectory_id: row.get("trajectory_id"),
+        tenant: row.get("tenant"),
+        agent_id: row.get("agent_id"),
+        session_id: row.get("session_id"),
+        outcome: row.get("outcome"),
+        turn_count: row.get("turn_count"),
+        created_at: created_at.to_rfc3339(),
     }
 }

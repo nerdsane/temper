@@ -187,7 +187,7 @@ impl ServerState {
             }
         }
 
-        let Some(store) = self.persistent_store_for_tenant(tenant.as_str()).await else {
+        let Some(store) = self.metadata_store_for_tenant(tenant.as_str()).await else {
             return Ok(None);
         };
         store
