@@ -302,6 +302,9 @@ async fn dispatch_matched_route(
         session_id: None,
         integration_config: std::collections::BTreeMap::new(),
         trace_id: String::new(),
+        workflow_root_entity_type: None,
+        workflow_root_entity_id: None,
+        workflow_run_id: None,
         http_request: Some(HttpDispatchContext {
             method: method.as_str().to_uppercase(),
             // Include the query string so guests can parse

@@ -375,6 +375,9 @@ impl crate::state::ServerState {
             trace_id: current_otel_trace_id(active_span)
                 .or_else(|| ctx.agent_ctx.trace_id.clone())
                 .unwrap_or_default(),
+            workflow_root_entity_type: ctx.agent_ctx.workflow_root_entity_type.clone(),
+            workflow_root_entity_id: ctx.agent_ctx.workflow_root_entity_id.clone(),
+            workflow_run_id: ctx.agent_ctx.workflow_run_id.clone(),
             http_request: None,
         };
         // ADR-0046: inline-hydrate blob refs below the 128KB ceiling; defer

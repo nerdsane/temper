@@ -321,13 +321,50 @@ impl crate::state::ServerState {
             let agent_ctx = ctx.agent_ctx.clone();
             let key_for_task = key.clone();
             let entity_type_for_dec = ctx.entity_type.to_string();
+            let workflow_root_entity_type = agent_ctx
+                .workflow_root_entity_type
+                .clone()
+                .unwrap_or_else(|| entity_type.clone());
+            let workflow_root_entity_id = agent_ctx
+                .workflow_root_entity_id
+                .clone()
+                .unwrap_or_else(|| entity_id.clone());
+            let workflow_run_id = agent_ctx
+                .workflow_run_id
+                .clone()
+                .unwrap_or_else(|| format!("{entity_type}:{entity_id}"));
 
-            tokio::spawn(
+            tracing::debug!(
+                tenant = %ctx.tenant,
+                entity_type = ctx.entity_type,
+                entity_id = ctx.entity_id,
+                target_state = st.state.as_str(),
+                target_action = st.on_timeout.as_str(),
+                delay_ms = delay.as_millis() as u64,
+                workflow.root_entity_type = %workflow_root_entity_type,
+                workflow.root_entity_id = %workflow_root_entity_id,
+                workflow.run_id = %workflow_run_id,
+                "armed state timeout"
+            );
+
+            tokio::spawn(async move {
                 // determinism-ok: wall-clock timer fires a side-effect action;
                 // the action itself is deterministic under DST via sim_now().
-                async move {
-                    tokio::time::sleep(delay).await; // determinism-ok: scheduled delay
+                tokio::time::sleep(delay).await; // determinism-ok: scheduled delay
 
+                let span = tracing::info_span!(
+                    "dispatch.state_timeout.fire",
+                    tenant = %tenant,
+                    entity_type = %entity_type,
+                    entity_id = %entity_id,
+                    target_state = %target_state,
+                    target_action = %target_action,
+                    workflow.root_entity_type = %workflow_root_entity_type,
+                    workflow.root_entity_id = %workflow_root_entity_id,
+                    workflow.run_id = %workflow_run_id,
+                );
+
+                async move {
                     // Sequence-based cancellation check. A newer arm (or a
                     // state change that bumped the seq on exit) renders
                     // this timer a no-op.
@@ -369,15 +406,9 @@ impl crate::state::ServerState {
                     }
                     tracker.dec_pending(&entity_type_for_dec);
                 }
-                .instrument(tracing::info_span!(
-                    "dispatch.state_timeout",
-                    tenant = %ctx.tenant,
-                    entity_type = ctx.entity_type,
-                    entity_id = ctx.entity_id,
-                    target_state = st.state.as_str(),
-                    target_action = st.on_timeout.as_str(),
-                )),
-            );
+                .instrument(span)
+                .await;
+            });
         }
     }
 }
