@@ -1,6 +1,3 @@
-use temper_store_postgres::PostgresTrajectoryInsert;
-use temper_store_turso::TursoTrajectoryInsert;
-
 use super::super::trajectory::TrajectoryEntry;
 use super::super::{DesignTimeEvent, ServerState};
 use super::TenantMetadataBackend;
@@ -75,99 +72,10 @@ impl ServerState {
 
     /// Persist a trajectory entry to the tenant's metadata store.
     pub async fn persist_trajectory_entry(&self, entry: &TrajectoryEntry) -> Result<(), String> {
-        let Some(backend) = self.metadata_backend_for_tenant(&entry.tenant).await else {
+        let Some(store) = self.event_store.as_ref() else {
             return Ok(());
         };
-        let matched_policy_ids_json = entry
-            .matched_policy_ids
-            .as_ref()
-            .map(|ids| serde_json::to_string(ids).unwrap_or_default());
-        let request_body_json = entry.request_body.as_ref().and_then(|v| {
-            let s = serde_json::to_string(v).ok()?;
-            Some(if s.len() > 4096 {
-                // Truncate at a valid UTF-8 char boundary at or below 4096 bytes.
-                let mut end = 4096;
-                while !s.is_char_boundary(end) {
-                    end -= 1;
-                }
-                s[..end].to_string()
-            } else {
-                s
-            })
-        });
-        let source = entry.source.as_ref().map(|s| match s {
-            super::super::TrajectorySource::Entity => "Entity",
-            super::super::TrajectorySource::Platform => "Platform",
-            super::super::TrajectorySource::Authz => "Authz",
-        });
-        match backend {
-            TenantMetadataBackend::Postgres(pool) => {
-                temper_store_postgres::PostgresEventStore::new(pool)
-                    .persist_trajectory(PostgresTrajectoryInsert {
-                        tenant: &entry.tenant,
-                        entity_type: &entry.entity_type,
-                        entity_id: &entry.entity_id,
-                        action: &entry.action,
-                        success: entry.success,
-                        from_status: entry.from_status.as_deref(),
-                        to_status: entry.to_status.as_deref(),
-                        error: entry.error.as_deref(),
-                        agent_id: entry.agent_id.as_deref(),
-                        session_id: entry.session_id.as_deref(),
-                        authz_denied: entry.authz_denied,
-                        denied_resource: entry.denied_resource.as_deref(),
-                        denied_module: entry.denied_module.as_deref(),
-                        source,
-                        spec_governed: entry.spec_governed,
-                        created_at: &entry.timestamp,
-                        request_body: request_body_json.as_deref(),
-                        intent: entry.intent.as_deref(),
-                        matched_policy_ids: matched_policy_ids_json.as_deref(),
-                    })
-                    .await
-                    .map_err(|e| {
-                        format!(
-                            "failed to persist trajectory entry for {}/{}/{} action {} in postgres: {e}",
-                            entry.tenant, entry.entity_type, entry.entity_id, entry.action
-                        )
-                    })?;
-            }
-            TenantMetadataBackend::Turso(turso) => {
-                turso
-                    .persist_trajectory(TursoTrajectoryInsert {
-                        tenant: &entry.tenant,
-                        entity_type: &entry.entity_type,
-                        entity_id: &entry.entity_id,
-                        action: &entry.action,
-                        success: entry.success,
-                        from_status: entry.from_status.as_deref(),
-                        to_status: entry.to_status.as_deref(),
-                        error: entry.error.as_deref(),
-                        agent_id: entry.agent_id.as_deref(),
-                        session_id: entry.session_id.as_deref(),
-                        authz_denied: entry.authz_denied,
-                        denied_resource: entry.denied_resource.as_deref(),
-                        denied_module: entry.denied_module.as_deref(),
-                        source,
-                        spec_governed: entry.spec_governed,
-                        created_at: &entry.timestamp,
-                        request_body: request_body_json.as_deref(),
-                        intent: entry.intent.as_deref(),
-                        matched_policy_ids: matched_policy_ids_json.as_deref(),
-                    })
-                    .await
-                    .map_err(|e| {
-                        format!(
-                            "failed to persist trajectory entry for {}/{}/{} action {} in turso: {e}",
-                            entry.tenant, entry.entity_type, entry.entity_id, entry.action
-                        )
-                    })?;
-            }
-            TenantMetadataBackend::Redis => {
-                return Err(Self::redis_ephemeral_error("Trajectory persistence"));
-            }
-        }
-        Ok(())
+        store.persist_trajectory_entry(entry).await
     }
 
     /// Persist a pending decision to the tenant's storage backend.

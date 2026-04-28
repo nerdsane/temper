@@ -231,7 +231,7 @@ pub(crate) async fn record_authz_denial(
         tracing::warn!(error = %e, id = %pd.id, "failed to persist PD with governance_decision_id");
     }
 
-    // Record trajectory to Turso synchronously.
+    // Record authorization denials as observability without back-pressuring the caller.
     let traj = TrajectoryEntry {
         timestamp: sim_now().to_rfc3339(),
         tenant: input.tenant.to_string(),
@@ -254,8 +254,8 @@ pub(crate) async fn record_authz_denial(
         intent: None,
         matched_policy_ids: None,
     };
-    if let Err(e) = state.persist_trajectory_entry(&traj).await {
-        tracing::warn!(error = %e, "failed to persist authz trajectory");
+    if !state.enqueue_trajectory_entry(traj.clone()) {
+        tracing::warn!("failed to enqueue authz trajectory");
     }
 
     // Feed denial into suggestion engine for pattern detection.

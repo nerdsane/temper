@@ -195,10 +195,9 @@ pub(crate) async fn handle_unmet_intent(
             .or_else(|| Some(intent.to_string())),
         matched_policy_ids: None,
     };
-    state
-        .persist_trajectory_entry(&entry)
-        .await
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
+    if !state.enqueue_trajectory_entry(entry) {
+        tracing::warn!("failed to enqueue unmet-intent trajectory");
+    }
 
     Ok(StatusCode::CREATED)
 }
