@@ -488,7 +488,7 @@ pub(super) async fn bootstrap_tenants(state: &PlatformState, apps: &[(String, St
     if let Some(ref store) = state.server.event_store
         && let Some(turso) = store.turso_for_tenant("temper-system").await
     {
-        temper_platform::persist_system_verification(&turso, &sys_hashes).await;
+        temper_platform::persist_system_verification(&turso, &sys_hashes, &sys_cache).await;
     }
 
     let default_cache = load_verified_cache(state, "default").await;
@@ -497,7 +497,13 @@ pub(super) async fn bootstrap_tenants(state: &PlatformState, apps: &[(String, St
     if let Some(ref store) = state.server.event_store
         && let Some(turso) = store.turso_for_tenant("default").await
     {
-        temper_platform::persist_agent_verification(&turso, "default", &default_hashes).await;
+        temper_platform::persist_agent_verification(
+            &turso,
+            "default",
+            &default_hashes,
+            &default_cache,
+        )
+        .await;
     }
 
     for (tenant, _dir) in apps {
@@ -508,7 +514,7 @@ pub(super) async fn bootstrap_tenants(state: &PlatformState, apps: &[(String, St
         if let Some(ref store) = state.server.event_store
             && let Some(turso) = store.turso_for_tenant(tenant).await
         {
-            temper_platform::persist_agent_verification(&turso, tenant, &hashes).await;
+            temper_platform::persist_agent_verification(&turso, tenant, &hashes, &cache).await;
         }
     }
     // In TenantRouted mode, bootstrap agent specs for all registered tenants.
@@ -522,7 +528,7 @@ pub(super) async fn bootstrap_tenants(state: &PlatformState, apps: &[(String, St
             let cache = load_verified_cache(state, &tenant).await;
             let hashes = temper_platform::bootstrap_agent_specs(state, &tenant, true, &cache);
             if let Some(turso) = store.turso_for_tenant(&tenant).await {
-                temper_platform::persist_agent_verification(&turso, &tenant, &hashes).await;
+                temper_platform::persist_agent_verification(&turso, &tenant, &hashes, &cache).await;
             }
         }
     }

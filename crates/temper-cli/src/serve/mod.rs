@@ -594,7 +594,7 @@ fn emit_ephemeral_info(message: &str) {
 /// updates the registry while persisting workflow history/status to Postgres.
 async fn spawn_background_verification(state: &PlatformState, specs_dir: &str, tenant: &str) {
     let specs_path = Path::new(specs_dir);
-    let ioa_sources = match read_ioa_sources(specs_path) {
+    let mut ioa_sources = match read_ioa_sources(specs_path) {
         Ok(sources) => sources,
         Err(e) => {
             eprintln!("Warning: failed to read IOA sources for background verification: {e}");
@@ -605,6 +605,18 @@ async fn spawn_background_verification(state: &PlatformState, specs_dir: &str, t
     let registry = state.registry.clone();
     let server = state.server.clone();
     let tenant_str = tenant.to_string();
+    let verification_cache = match server.persistent_store_for_tenant(tenant).await {
+        Some(store) => match store.load_verification_cache(tenant).await {
+            Ok(cache) => cache,
+            Err(e) => {
+                eprintln!(
+                    "Warning: failed to load verification cache for background verification ({tenant}): {e}"
+                );
+                BTreeMap::new()
+            }
+        },
+        None => BTreeMap::new(),
+    };
 
     // Emit spec_loaded events for each entity
     for entity_name in ioa_sources.keys() {
@@ -626,6 +638,15 @@ async fn spawn_background_verification(state: &PlatformState, specs_dir: &str, t
                 "Warning: failed to persist/emit spec_loaded for {tenant_str}/{entity_name}: {e}"
             );
         }
+    }
+
+    let source_count = ioa_sources.len();
+    ioa_sources = ioa_sources_requiring_background_verification(ioa_sources, &verification_cache);
+    let skipped_count = source_count.saturating_sub(ioa_sources.len());
+    if skipped_count > 0 {
+        println!(
+            "  [verify] Skipped {skipped_count} unchanged verified specs for tenant {tenant_str}"
+        );
     }
 
     for (entity_name, ioa_source) in ioa_sources {
@@ -876,9 +897,26 @@ async fn spawn_background_verification(state: &PlatformState, specs_dir: &str, t
     }
 }
 
+fn ioa_sources_requiring_background_verification(
+    ioa_sources: HashMap<String, String>,
+    verification_cache: &BTreeMap<String, (String, bool)>,
+) -> HashMap<String, String> {
+    ioa_sources
+        .into_iter()
+        .filter(|(entity_name, ioa_source)| {
+            !verification_cache
+                .get(entity_name)
+                .is_some_and(|(cached_hash, verified)| {
+                    *verified && cached_hash == &temper_store_turso::spec_content_hash(ioa_source)
+                })
+        })
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
-    use super::cache_platform_secret_if_present;
+    use super::{cache_platform_secret_if_present, ioa_sources_requiring_background_verification};
+    use std::collections::{BTreeMap, HashMap};
     use temper_server::secrets::vault::SecretsVault;
 
     fn test_vault() -> SecretsVault {
@@ -904,5 +942,42 @@ mod tests {
         cache_platform_secret_if_present(&vault, "exa_api_key", None);
 
         assert_eq!(vault.get_platform_secret("exa_api_key"), None);
+    }
+
+    #[test]
+    fn background_verification_skips_cached_verified_hashes() {
+        let mut ioa_sources = HashMap::new();
+        ioa_sources.insert(
+            "Issue".to_string(),
+            "[automaton]\nname = \"Issue\"\n".to_string(),
+        );
+        ioa_sources.insert(
+            "Task".to_string(),
+            "[automaton]\nname = \"Task\"\n".to_string(),
+        );
+
+        let mut verification_cache = BTreeMap::new();
+        verification_cache.insert(
+            "Issue".to_string(),
+            (
+                temper_store_turso::spec_content_hash(
+                    ioa_sources.get("Issue").expect("Issue source"),
+                ),
+                true,
+            ),
+        );
+        verification_cache.insert(
+            "Task".to_string(),
+            (
+                temper_store_turso::spec_content_hash("different source"),
+                true,
+            ),
+        );
+
+        let pending =
+            ioa_sources_requiring_background_verification(ioa_sources, &verification_cache);
+
+        assert_eq!(pending.len(), 1);
+        assert!(pending.contains_key("Task"));
     }
 }
