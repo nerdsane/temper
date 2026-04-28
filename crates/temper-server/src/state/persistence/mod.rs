@@ -2,6 +2,7 @@
 
 use sqlx::PgPool;
 use temper_runtime::scheduler::sim_now;
+use temper_runtime::tenant::TenantId;
 use temper_store_turso::{TursoEventStore, TursoWasmInvocationInsert};
 
 use super::ServerState;
@@ -62,6 +63,21 @@ impl ServerState {
             return Ok(());
         };
 
+        let effective_hash = if sha256_hash.is_empty() {
+            temper_wasm::WasmEngine::hash_module(wasm_bytes)
+        } else {
+            sha256_hash.to_string()
+        };
+        let tenant_id = TenantId::new(tenant);
+        let artifact_key = crate::blob_store::wasm_artifact_key(&effective_hash);
+        self.put_blob_object(&tenant_id, &artifact_key, wasm_bytes, None)
+            .await
+            .map_err(|e| {
+                format!(
+                    "failed to persist WASM artifact {tenant}/{module_name} to object store: {e}"
+                )
+            })?;
+
         match backend {
             TenantMetadataBackend::Postgres(pool) => {
                 sqlx::query(
@@ -76,8 +92,8 @@ impl ServerState {
                 )
                 .bind(tenant)
                 .bind(module_name)
-                .bind(wasm_bytes)
-                .bind(sha256_hash)
+                .bind(Vec::<u8>::new())
+                .bind(&effective_hash)
                 .bind(wasm_bytes.len() as i32)
                 .execute(&pool)
                 .await
@@ -85,7 +101,7 @@ impl ServerState {
                 .map_err(|e| format!("failed to upsert WASM module {tenant}/{module_name}: {e}"))
             }
             TenantMetadataBackend::Turso(turso) => turso
-                .upsert_wasm_module(tenant, module_name, wasm_bytes, sha256_hash)
+                .upsert_wasm_module(tenant, module_name, wasm_bytes, &effective_hash)
                 .await
                 .map_err(|e| {
                     format!("failed to upsert WASM module {tenant}/{module_name} in turso: {e}")
@@ -169,6 +185,9 @@ impl ServerState {
                         "WASM module '{module_name}' not found in persistence for tenant '{tenant_name}'"
                     ));
                 };
+                let wasm_bytes = self
+                    .resolve_wasm_artifact_bytes(tenant, module_name, &sha256_hash, wasm_bytes)
+                    .await?;
                 (wasm_bytes, sha256_hash)
             }
             TenantMetadataBackend::Turso(turso) => {
@@ -185,7 +204,15 @@ impl ServerState {
                         "WASM module '{module_name}' not found in persistence for tenant '{tenant_name}'"
                     ));
                 };
-                (row.wasm_bytes, row.sha256_hash)
+                let wasm_bytes = self
+                    .resolve_wasm_artifact_bytes(
+                        tenant,
+                        module_name,
+                        &row.sha256_hash,
+                        row.wasm_bytes,
+                    )
+                    .await?;
+                (wasm_bytes, row.sha256_hash)
             }
             TenantMetadataBackend::Redis => {
                 return Err(Self::redis_ephemeral_error("WASM lazy-load"));
@@ -216,6 +243,32 @@ impl ServerState {
             .map_err(|e| {
                 format!(
                     "failed to compile lazy-loaded WASM module {tenant_name}/{module_name}: {e}"
+                )
+            })
+    }
+
+    async fn resolve_wasm_artifact_bytes(
+        &self,
+        tenant: &TenantId,
+        module_name: &str,
+        sha256_hash: &str,
+        inline_bytes: Vec<u8>,
+    ) -> Result<Vec<u8>, String> {
+        if !inline_bytes.is_empty() {
+            return Ok(inline_bytes);
+        }
+        if sha256_hash.is_empty() {
+            return Err(format!(
+                "WASM module '{module_name}' for tenant '{tenant}' has no inline bytes and no artifact hash"
+            ));
+        }
+
+        let artifact_key = crate::blob_store::wasm_artifact_key(sha256_hash);
+        self.get_blob_with_legacy_fallback(tenant, &artifact_key)
+            .await?
+            .ok_or_else(|| {
+                format!(
+                    "WASM artifact missing for tenant '{tenant}' module '{module_name}' at '{artifact_key}'"
                 )
             })
     }

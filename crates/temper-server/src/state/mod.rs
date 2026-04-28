@@ -787,8 +787,9 @@ impl ServerState {
             .as_ref()
             .and_then(|vault| vault.get_secret(&tenant.to_string(), "blob_endpoint"));
 
-        if blob_endpoint.is_none()
-            && let Some(store) = self.persistent_store_for_tenant(tenant.as_str()).await
+        if blob_endpoint
+            .as_deref()
+            .is_none_or(crate::blob_store::is_local_internal_blob_endpoint)
         {
             let file_state = self
                 .get_tenant_entity_state(tenant, "File", file_id)
@@ -798,8 +799,7 @@ impl ServerState {
             hasher.update(body);
             let content_hash = format!("sha256:{:x}", hasher.finalize());
             let blob_key = format!("temper-fs/{content_hash}");
-            store
-                .put_blob(&blob_key, body)
+            self.put_blob_object(tenant, &blob_key, body, None)
                 .await
                 .map_err(|e| format!("failed to persist local blob '{blob_key}': {e}"))?;
 

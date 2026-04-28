@@ -48,25 +48,20 @@ fn is_http_call_authz_denial(error: &str) -> bool {
     error.contains(HTTP_CALL_AUTHZ_DENIED_PREFIX)
 }
 
-fn is_local_internal_blob_endpoint(endpoint: &str) -> bool {
-    let normalized = endpoint.trim_end_matches('/');
-    (normalized.starts_with("http://127.0.0.1:") || normalized.starts_with("http://localhost:"))
-        && normalized.contains("/_internal/blobs")
-}
-
 fn local_blob_binary_interceptor(
-    store: Option<temper_store_turso::TursoEventStore>,
+    state: crate::state::ServerState,
+    tenant: TenantId,
     blob_endpoint: Option<String>,
 ) -> Option<BinaryHttpInterceptorFn> {
-    let store = store?;
     let endpoint = blob_endpoint?;
-    if !is_local_internal_blob_endpoint(&endpoint) {
+    if !crate::blob_store::is_local_internal_blob_endpoint(&endpoint) {
         return None;
     }
 
     let endpoint = endpoint.trim_end_matches('/').to_string();
     Some(Arc::new(move |method, url, _headers, body| {
-        let store = store.clone();
+        let state = state.clone();
+        let tenant = tenant.clone();
         let endpoint = endpoint.clone();
         Box::pin(async move {
             let prefix = format!("{endpoint}/");
@@ -80,10 +75,12 @@ fn local_blob_binary_interceptor(
             );
 
             let result = match method.as_str() {
-                "PUT" => crate::blobs::put_blob_bytes(&store, &blob_key, &body)
+                "PUT" => state
+                    .put_blob_object(&tenant, &blob_key, &body, None)
                     .await
                     .map(|()| (204, Vec::new())),
-                "GET" => crate::blobs::get_blob_bytes(&store, &blob_key)
+                "GET" => state
+                    .get_blob_with_legacy_fallback(&tenant, &blob_key)
                     .await
                     .map(|maybe| match maybe {
                         Some(bytes) => (200, bytes),
@@ -398,7 +395,8 @@ impl crate::state::ServerState {
         let tenant_secrets =
             self.get_authorized_wasm_secrets(ctx.entity_ref.tenant, &*gate, &authz_ctx);
         let local_blob_interceptor = local_blob_binary_interceptor(
-            self.platform_persistent_store().cloned(),
+            self.clone(),
+            ctx.entity_ref.tenant.clone(),
             tenant_secrets.get("blob_endpoint").cloned(),
         );
         let local_file_interceptor = local_file_value_text_interceptor(
@@ -1000,7 +998,8 @@ impl crate::state::ServerState {
         };
         let tenant_secrets = self.get_authorized_wasm_secrets(tenant, &*base_gate, &authz_ctx);
         let local_blob_interceptor = local_blob_binary_interceptor(
-            self.platform_persistent_store().cloned(),
+            self.clone(),
+            tenant.clone(),
             tenant_secrets.get("blob_endpoint").cloned(),
         );
         let progress_emitter = progress_emitter_fn(

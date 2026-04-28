@@ -406,6 +406,7 @@ impl ServerState {
         // Build actor instance (spawn guarded below to avoid duplicate races).
         // ADR-0048 sub-decision 5: every actor gets the shared idempotency
         // cache so it can dedupe duplicate asks produced by retry storms.
+        let tenant_blob_store = self.blob_store_for_tenant(tenant).ok();
         let actor = match &self.event_store {
             Some(store) => EntityActor::with_persistence(
                 entity_type,
@@ -415,10 +416,12 @@ impl ServerState {
                 store.clone(),
             )
             .with_tenant(tenant.as_str())
-            .with_idempotency_cache(self.idempotency_cache.clone()),
+            .with_idempotency_cache(self.idempotency_cache.clone())
+            .with_blob_store(tenant_blob_store.clone()),
             None => EntityActor::new(entity_type, entity_id, table, initial_fields)
                 .with_tenant(tenant.as_str())
-                .with_idempotency_cache(self.idempotency_cache.clone()),
+                .with_idempotency_cache(self.idempotency_cache.clone())
+                .with_blob_store(tenant_blob_store),
         };
 
         // Slow-path: atomically re-check and spawn under write lock.
