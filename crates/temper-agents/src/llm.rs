@@ -14,7 +14,7 @@ use temper_actor_runtime::bus::{BUS_ACTOR_TYPE, StreamMsg};
 use temper_actor_runtime::spec_actor::SpecMessage;
 use temper_actor_runtime::{Actor, ActorContext, ActorError, ActorHandle, Message};
 
-use crate::common::{decode_params, message_action, session_id_from_namespace};
+use crate::common::{append_message, decode_params, message_action, session_id_from_namespace};
 
 const AI_GATEWAY_URL: &str = "https://ai-gateway.us1.staging.dog/v1/chat/completions";
 const MODEL: &str = "claude-haiku-4-5";
@@ -135,7 +135,8 @@ impl Actor for LlmIntegrationActor {
         };
 
         let params = decode_params(message);
-        let session_id = session_id_from_namespace(&ctx.self_handle().namespace).to_string();
+        let namespace = ctx.self_handle().namespace.clone();
+        let session_id = session_id_from_namespace(&namespace).to_string();
 
         // Load conversation history from state.
         let mut history: Vec<ChatMessage> = if state.is_empty() {
@@ -146,12 +147,15 @@ impl Actor for LlmIntegrationActor {
 
         // Add new turn.
         if let Some(prompt) = params["user_prompt"].as_str() {
+            append_message(ctx, &namespace, "user", prompt.to_string()).await;
             history.push(user_msg(json!(prompt)));
         } else if let Some(results) = params["tool_results"].as_array() {
             for r in results {
+                let content = r["content"].as_str().unwrap_or("").to_string();
+                append_message(ctx, &namespace, "tool", content.clone()).await;
                 history.push(tool_result_msg(
                     r["tool_use_id"].as_str().unwrap_or("").to_string(),
-                    r["content"].as_str().unwrap_or("").to_string(),
+                    content,
                 ));
             }
         } else if history.is_empty() {
@@ -316,6 +320,13 @@ impl Actor for LlmIntegrationActor {
                 .collect();
 
             *state = serde_json::to_vec(&history).unwrap_or_default();
+            append_message(
+                ctx,
+                &namespace,
+                "assistant",
+                json!({ "tool_calls": calls }).to_string(),
+            )
+            .await;
             ctx.tell(
                 &from,
                 SpecMessage::with_params(
@@ -326,6 +337,7 @@ impl Actor for LlmIntegrationActor {
             .await;
         } else {
             tracing::info!("[LLM] response ({} chars)", full_text.len());
+            append_message(ctx, &namespace, "assistant", full_text.clone()).await;
             history.push(assistant_msg(json!(full_text.clone())));
             *state = serde_json::to_vec(&history).unwrap_or_default();
 

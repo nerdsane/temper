@@ -24,7 +24,7 @@ impl Actor for ChildCompletionIntegration {
 
     async fn handle(
         &self,
-        ctx: &ActorContext,
+        _ctx: &ActorContext,
         _state: &mut Vec<u8>,
         message: &Message,
     ) -> Result<(), ActorError> {

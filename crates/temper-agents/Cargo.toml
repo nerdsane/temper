@@ -15,6 +15,7 @@ serde = { workspace = true }
 reqwest = { workspace = true }
 futures = { workspace = true }
 uuid = { workspace = true }
+chrono = { workspace = true }
 
 [dev-dependencies]
 tokio = { workspace = true }

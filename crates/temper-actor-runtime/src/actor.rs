@@ -133,6 +133,32 @@ impl ActorContext {
         &self.self_handle
     }
 
+    /// Best-effort spawn/update of an actor instance with explicit state bytes.
+    /// Used by integrations to persist auxiliary entities (e.g. Message).
+    pub async fn upsert_actor_state(
+        &self,
+        namespace: &str,
+        actor_type: &str,
+        state: Vec<u8>,
+    ) -> Result<(), ActorError> {
+        let Some(pool) = &self.pool else {
+            return Err(ActorError::Internal("no pool in ActorContext".into()));
+        };
+        let client = pool
+            .get()
+            .await
+            .map_err(|e| ActorError::Internal(format!("pool: {e}")))?;
+        client
+            .execute(
+                "INSERT INTO odp_temper.actor_instances (namespace, actor_type, state) VALUES ($1, $2, $3)
+                 ON CONFLICT (namespace, actor_type) DO UPDATE SET state = EXCLUDED.state",
+                &[&namespace, &actor_type, &state],
+            )
+            .await
+            .map_err(|e| ActorError::Internal(format!("upsert actor state: {e}")))?;
+        Ok(())
+    }
+
     /// Fire-and-forget message. Buffered — only committed to PG when the
     /// activation transaction succeeds. If handle() fails, tells are discarded.
     /// Message type is auto-derived from the proto type name.
