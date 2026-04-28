@@ -501,9 +501,7 @@ impl crate::state::ServerState {
                 if let Some(ref err) = entry.error {
                     tracing::Span::current().record("error_msg", err.as_str());
                 }
-                if let Err(persist_err) = self.persist_trajectory_entry(&entry).await {
-                    tracing::error!(error = %persist_err, "failed to persist trajectory entry");
-                }
+                self.persist_trajectory_entry_background(entry);
                 return Err(DispatchError::from_actor_error(e, outcome.attempts));
             }
         };
