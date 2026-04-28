@@ -1,7 +1,7 @@
 //! Agent audit endpoints for the observe API.
 //!
-//! Provides per-agent action history and summary statistics derived
-//! from Turso (single source of truth).
+//! Provides per-agent action history and summary statistics derived from the
+//! configured durable metadata backend.
 
 use axum::extract::{Path, Query, State};
 use axum::http::{HeaderMap, StatusCode};
@@ -91,20 +91,19 @@ pub(crate) async fn handle_list_agents(
         .as_ref()
         .map(|t| t.as_str().to_string())
         .or(params.tenant);
-    // Determine which stores to query: tenant-scoped or fan-out.
     let stores = if let Some(ref tf) = tenant_filter {
-        match state.persistent_store_for_tenant(tf).await {
-            Some(turso) => vec![turso],
+        match state.metadata_store_for_tenant(tf).await {
+            Some(store) => vec![store],
             None => Vec::new(),
         }
     } else {
-        state.collect_all_turso_stores().await
+        state.collect_all_metadata_stores().await
     };
 
     if !stores.is_empty() {
         let mut all_agents: Vec<AgentSummary> = Vec::new();
-        for turso in &stores {
-            match turso.query_agent_summaries(tenant_filter.as_deref()).await {
+        for store in &stores {
+            match store.query_agent_summaries(tenant_filter.as_deref()).await {
                 Ok(summaries) => {
                     all_agents.extend(summaries.into_iter().map(|s| AgentSummary {
                         agent_id: s.agent_id,
@@ -119,7 +118,7 @@ pub(crate) async fn handle_list_agents(
                     }));
                 }
                 Err(e) => {
-                    tracing::warn!(error = %e, "failed to query agent summaries from Turso");
+                    tracing::warn!(error = %e, backend = store.backend_name(), "failed to query agent summaries");
                 }
             }
         }
@@ -186,19 +185,18 @@ pub(crate) async fn handle_get_agent_history(
         .or(params.tenant);
     let limit = params.limit.unwrap_or(100).min(500);
 
-    // Query the tenant-scoped or fan-out stores.
     let stores = if let Some(ref tf) = tenant_filter {
-        match state.persistent_store_for_tenant(tf).await {
-            Some(turso) => vec![turso],
+        match state.metadata_store_for_tenant(tf).await {
+            Some(store) => vec![store],
             None => Vec::new(),
         }
     } else {
-        state.collect_all_turso_stores().await
+        state.collect_all_metadata_stores().await
     };
 
     let mut all_history: Vec<AgentHistoryEntry> = Vec::new();
-    for turso in &stores {
-        match turso
+    for store in &stores {
+        match store
             .query_trajectories_by_agent(
                 &agent_id,
                 tenant_filter.as_deref(),
@@ -223,7 +221,7 @@ pub(crate) async fn handle_get_agent_history(
                 }));
             }
             Err(e) => {
-                tracing::warn!(error = %e, "failed to query agent history from Turso");
+                tracing::warn!(error = %e, backend = store.backend_name(), "failed to query agent history");
             }
         }
     }

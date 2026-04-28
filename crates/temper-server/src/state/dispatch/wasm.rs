@@ -613,17 +613,17 @@ impl crate::state::ServerState {
         ctx: &WasmDispatchCtx<'_>,
     ) -> Option<(Vec<Value>, Vec<Value>)> {
         let tenant = ctx.entity_ref.tenant.as_str();
-        let turso = self.persistent_store_for_tenant(tenant).await?;
+        let store = self.metadata_store_for_tenant(tenant).await?;
         let agent_id = ctx.agent_ctx.agent_id.as_deref();
 
-        let mut rows = turso
+        let mut rows = store
             .list_ots_trajectories(tenant, agent_id, None, 50)
             .await
             .ok()?;
 
         // Fallback when identity resolution was unavailable at upload time.
         if rows.is_empty() && agent_id.is_some() {
-            rows = turso
+            rows = store
                 .list_ots_trajectories(tenant, None, None, 50)
                 .await
                 .ok()?;
@@ -638,7 +638,7 @@ impl crate::state::ServerState {
         let mut actions = Vec::new();
 
         for row in rows {
-            let data = match turso
+            let data = match store
                 .get_ots_trajectory(&row.trajectory_id)
                 .await
                 .ok()

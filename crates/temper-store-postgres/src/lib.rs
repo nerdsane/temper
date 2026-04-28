@@ -18,7 +18,12 @@ pub mod schema;
 pub mod store;
 
 pub use platform::{
-    PostgresInstalledAppRow, PostgresPolicyRow, PostgresSpecRow, PostgresSpecVerificationUpdate,
-    PostgresTrajectoryInsert, PostgresWasmModuleRow,
+    PostgresActionStats, PostgresAgentSummary, PostgresDesignTimeEventRow,
+    PostgresEvolutionRecordRow, PostgresFeatureRequestRow, PostgresInstalledAppRow,
+    PostgresOtsTrajectoryParams, PostgresOtsTrajectoryRow, PostgresPolicyDenialPatternRow,
+    PostgresPolicyRow, PostgresSecretRow, PostgresSpecRow, PostgresSpecVerificationUpdate,
+    PostgresTrajectoryInsert, PostgresTrajectoryRow, PostgresTrajectoryStats,
+    PostgresUnmetIntentAggRow, PostgresWasmInvocationInsert, PostgresWasmInvocationRow,
+    PostgresWasmModuleMetadataRow, PostgresWasmModuleRow,
 };
 pub use store::PostgresEventStore;

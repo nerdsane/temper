@@ -43,7 +43,7 @@ pub(in crate::observe) struct WorkflowsResponse {
     workflows: Vec<AppWorkflow>,
 }
 
-/// Fetch design-time events from Postgres or Turso fallback.
+/// Fetch design-time events from the durable metadata backend.
 async fn fetch_event_log(state: &ServerState) -> Vec<crate::state::DesignTimeEvent> {
     // Try Postgres first.
     if let Some(pool) = state
@@ -105,11 +105,10 @@ async fn fetch_event_log(state: &ServerState) -> Vec<crate::state::DesignTimeEve
         }
     }
 
-    // Turso fallback: fan-out across all tenant stores.
-    let stores = state.collect_all_turso_stores().await;
+    let stores = state.collect_all_metadata_stores().await;
     let mut all_events = Vec::new();
-    for turso in &stores {
-        match turso.list_design_time_events(None, 10_000).await {
+    for store in &stores {
+        match store.list_design_time_events(None, 10_000).await {
             Ok(rows) => {
                 all_events.extend(rows.into_iter().map(|r| crate::state::DesignTimeEvent {
                     kind: r.kind,
@@ -124,14 +123,14 @@ async fn fetch_event_log(state: &ServerState) -> Vec<crate::state::DesignTimeEve
                 }));
             }
             Err(e) => {
-                tracing::warn!(error = %e, "failed to read design_time_events from Turso");
+                tracing::warn!(error = %e, backend = store.backend_name(), "failed to read design_time_events");
             }
         }
     }
     all_events
 }
 
-/// Fetch per-tenant trajectory counts from Turso using a SQL aggregate query.
+/// Fetch per-tenant trajectory counts using a SQL aggregate query.
 ///
 /// Previously loaded up to 100,000 raw rows just to count them in Rust.
 async fn fetch_runtime_counts(state: &ServerState) -> std::collections::BTreeMap<String, u64> {

@@ -1,13 +1,13 @@
 //! Background sweeper for expired overflow blobs (ADR-0047).
 //!
 //! Every `interval` the sweeper calls `sweep_expired_blobs` on the platform
-//! Turso store, deleting rows whose `expires_at` is in the past. Blobs written
+//! metadata store, deleting rows whose `expires_at` is in the past. Blobs written
 //! without TTL (`expires_at = NULL`) are untouched — only fields that declared
 //! `overflow_ttl_seconds` on their `[[state]]` block hit this path.
 //!
 //! The sweeper is an opt-in platform service. It is spawned from
 //! `temper-server::state::ServerState::spawn_blob_sweeper`, which the
-//! production startup calls once the Turso store is configured. Simulation
+//! production startup calls once a durable metadata store is configured. Simulation
 //! configs do not call it, matching ADR-0047's non-goal on simulation
 //! visibility (the storage layer is not sim-tracked and `datetime('now')` is
 //! a SQL-side wall-clock read).
@@ -83,13 +83,9 @@ pub fn spawn_blob_sweeper(state: ServerState) -> tokio::task::JoinHandle<()> {
 }
 
 async fn sweep_once(state: &ServerState, batch: u64) {
-    // In single-DB Turso mode the platform store IS the shared store for all
-    // tenants, so a single sweep covers everything. Tenant-routed deployments
-    // will need a second pass per routed tenant DB; that can be layered on
-    // when the use case appears.
     let mut iterations = 0u64;
-    let total_deleted = if let Some(store) = state.platform_persistent_store() {
-        drain(store, batch, &mut iterations).await
+    let total_deleted = if let Some(store) = state.platform_metadata_store() {
+        drain(&store, batch, &mut iterations).await
     } else {
         0
     };
@@ -100,7 +96,7 @@ async fn sweep_once(state: &ServerState, batch: u64) {
 }
 
 async fn drain(
-    store: &temper_store_turso::TursoEventStore,
+    store: &crate::event_store::ServerEventStore,
     batch: u64,
     iterations: &mut u64,
 ) -> u64 {

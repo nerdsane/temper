@@ -17,7 +17,7 @@ pub(super) async fn persist_evolution_record(
     derived_from: Option<&str>,
     data_json: &str,
 ) -> Result<(), String> {
-    let Some(turso) = state.platform_persistent_store() else {
+    let Some(store) = state.platform_metadata_store() else {
         tracing::debug!(
             record_id,
             record_type,
@@ -28,7 +28,7 @@ pub(super) async fn persist_evolution_record(
         return Ok(());
     };
 
-    turso
+    store
         .insert_evolution_record(
             record_id,
             record_type,
@@ -44,6 +44,7 @@ pub(super) async fn persist_evolution_record(
                 record_type,
                 status,
                 created_by,
+                backend = store.backend_name(),
                 error = %error,
                 "evolution.store.write"
             );

@@ -769,6 +769,41 @@ impl ServerState {
         store.turso_for_tenant(tenant).await
     }
 
+    /// Return a backend-neutral metadata store for one tenant.
+    ///
+    /// Postgres is a shared platform store with tenant columns; Turso may be
+    /// single-DB or tenant-routed. This helper lets read/write paths avoid
+    /// branching on Turso-only accessors.
+    pub async fn metadata_store_for_tenant(
+        &self,
+        tenant: &str,
+    ) -> Option<crate::event_store::ServerEventStore> {
+        let store = self.event_store.as_ref()?;
+        match store.as_ref() {
+            crate::event_store::ServerEventStore::Postgres(_) => Some((**store).clone()),
+            crate::event_store::ServerEventStore::Turso(_) => Some((**store).clone()),
+            crate::event_store::ServerEventStore::TenantRouted(router) => router
+                .store_for_tenant(tenant)
+                .await
+                .ok()
+                .map(crate::event_store::ServerEventStore::Turso),
+            _ => None,
+        }
+    }
+
+    /// Return the platform metadata store for system-wide tables.
+    pub fn platform_metadata_store(&self) -> Option<crate::event_store::ServerEventStore> {
+        let store = self.event_store.as_ref()?;
+        match store.as_ref() {
+            crate::event_store::ServerEventStore::Postgres(_) => Some((**store).clone()),
+            crate::event_store::ServerEventStore::Turso(_) => Some((**store).clone()),
+            crate::event_store::ServerEventStore::TenantRouted(router) => Some(
+                crate::event_store::ServerEventStore::Turso(router.platform_store().clone()),
+            ),
+            _ => None,
+        }
+    }
+
     /// Upload stream content for a TemperFS `File` entity using the standard
     /// `blob_adapter` path, then dispatch the callback action it returns.
     ///
@@ -997,7 +1032,7 @@ impl ServerState {
         None
     }
 
-    /// Load aggregated unmet-intent failure groups from Turso.
+    /// Load aggregated unmet-intent failure groups from durable metadata stores.
     ///
     /// Uses fan-out across all tenant stores in TenantRouted mode.
     /// Returns an empty vec when Turso is not configured.
@@ -1007,7 +1042,7 @@ impl ServerState {
         Vec<temper_store_turso::UnmetIntentAggRow>,
         std::collections::BTreeMap<String, String>,
     ) {
-        let stores = self.collect_all_turso_stores().await;
+        let stores = self.collect_all_metadata_stores().await;
         if stores.is_empty() {
             return (Vec::new(), std::collections::BTreeMap::new());
         }
@@ -1015,60 +1050,60 @@ impl ServerState {
         let mut failures = Vec::new();
         let mut submitted_specs = std::collections::BTreeMap::new();
 
-        for turso in &stores {
-            match turso.load_unmet_intent_rows().await {
+        for store in &stores {
+            match store.load_unmet_intent_rows().await {
                 Ok(rows) => failures.extend(rows),
                 Err(e) => {
-                    tracing::warn!(error = %e, "failed to load unmet intent rows from Turso");
+                    tracing::warn!(error = %e, backend = store.backend_name(), "failed to load unmet intent rows");
                 }
             }
-            match turso.load_submit_spec_timestamps().await {
+            match store.load_submit_spec_timestamps().await {
                 Ok(map) => submitted_specs.extend(map),
                 Err(e) => {
-                    tracing::warn!(error = %e, "failed to load submit-spec timestamps from Turso");
+                    tracing::warn!(error = %e, backend = store.backend_name(), "failed to load submit-spec timestamps");
                 }
             }
         }
         (failures, submitted_specs)
     }
 
-    /// Count trajectory rows per tenant using fan-out across all stores.
+    /// Count trajectory rows per tenant using fan-out across all metadata stores.
     ///
     /// Returns an empty map when Turso is not configured.
     pub async fn count_trajectories_by_tenant(&self) -> std::collections::BTreeMap<String, u64> {
-        let stores = self.collect_all_turso_stores().await;
+        let stores = self.collect_all_metadata_stores().await;
         if stores.is_empty() {
             return std::collections::BTreeMap::new();
         }
 
         let mut counts = std::collections::BTreeMap::new();
-        for turso in &stores {
-            match turso.count_trajectories_by_tenant().await {
+        for store in &stores {
+            match store.count_trajectories_by_tenant().await {
                 Ok(c) => {
                     for (tenant, count) in c {
                         *counts.entry(tenant).or_insert(0) += count;
                     }
                 }
                 Err(e) => {
-                    tracing::warn!(error = %e, "failed to count trajectories by tenant from Turso");
+                    tracing::warn!(error = %e, backend = store.backend_name(), "failed to count trajectories by tenant");
                 }
             }
         }
         counts
     }
 
-    /// Load trajectory entries from Turso, converting to domain TrajectoryEntry.
+    /// Load trajectory entries from durable metadata stores.
     ///
     /// Uses fan-out across all tenant stores in TenantRouted mode.
     pub async fn load_trajectory_entries(&self, limit: i64) -> Vec<TrajectoryEntry> {
-        let stores = self.collect_all_turso_stores().await;
+        let stores = self.collect_all_metadata_stores().await;
         if stores.is_empty() {
             return Vec::new();
         }
 
         let mut all_entries = Vec::new();
-        for turso in &stores {
-            match turso.load_recent_trajectories(limit).await {
+        for store in &stores {
+            match store.load_recent_trajectories(limit).await {
                 Ok(rows) => {
                     all_entries.extend(rows.into_iter().map(|r| TrajectoryEntry {
                         timestamp: r.created_at,
@@ -1099,7 +1134,7 @@ impl ServerState {
                     }));
                 }
                 Err(e) => {
-                    tracing::warn!(error = %e, "failed to load trajectories from Turso");
+                    tracing::warn!(error = %e, backend = store.backend_name(), "failed to load trajectories");
                 }
             }
         }
@@ -1134,5 +1169,29 @@ impl ServerState {
         }
 
         Vec::new()
+    }
+
+    /// Collect backend-neutral platform/tenant stores for cross-tenant reads.
+    pub async fn collect_all_metadata_stores(&self) -> Vec<crate::event_store::ServerEventStore> {
+        let Some(store) = self.event_store.as_ref() else {
+            return Vec::new();
+        };
+
+        match store.as_ref() {
+            crate::event_store::ServerEventStore::Postgres(_) => vec![(**store).clone()],
+            crate::event_store::ServerEventStore::Turso(_) => vec![(**store).clone()],
+            crate::event_store::ServerEventStore::TenantRouted(router) => {
+                let mut stores = vec![crate::event_store::ServerEventStore::Turso(
+                    router.platform_store().clone(),
+                )];
+                for tid in router.connected_tenants().await {
+                    if let Ok(s) = router.store_for_tenant(&tid).await {
+                        stores.push(crate::event_store::ServerEventStore::Turso(s));
+                    }
+                }
+                stores
+            }
+            _ => Vec::new(),
+        }
     }
 }

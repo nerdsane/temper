@@ -114,20 +114,17 @@ pub(crate) async fn handle_load_inline(
             }),
         };
         let o_id = o_record.header.id.clone();
-        // Persist observation to Turso (evolution records stay on platform).
-        if let Some(turso) = state.platform_persistent_store() {
-            let data_json = serde_json::to_string(&o_record).unwrap_or_default();
-            let _ = turso
-                .insert_evolution_record(
-                    &o_record.header.id,
-                    "Observation",
-                    &format!("{:?}", o_record.header.status),
-                    &o_record.header.created_by,
-                    o_record.header.derived_from.as_deref(),
-                    &data_json,
-                )
-                .await;
-        }
+        let data_json = serde_json::to_string(&o_record).unwrap_or_default();
+        let _ = state
+            .insert_evolution_record(
+                &o_record.header.id,
+                "Observation",
+                &format!("{:?}", o_record.header.status),
+                &o_record.header.created_by,
+                o_record.header.derived_from.as_deref(),
+                &data_json,
+            )
+            .await;
 
         // Create A-Record with the proposed spec as spec_diff.
         let spec_summary: String = body
@@ -153,41 +150,29 @@ pub(crate) async fn handle_load_inline(
             recommendation: Some(0),
         };
         let a_record_id = a_record.header.id.clone();
-        // Persist analysis to Turso (evolution records stay on platform).
-        if let Some(turso) = state.platform_persistent_store() {
-            let data_json = serde_json::to_string(&a_record).unwrap_or_default();
-            let _ = turso
-                .insert_evolution_record(
-                    &a_record.header.id,
-                    "Analysis",
-                    &format!("{:?}", a_record.header.status),
-                    &a_record.header.created_by,
-                    a_record.header.derived_from.as_deref(),
-                    &data_json,
-                )
-                .await;
-        }
+        let data_json = serde_json::to_string(&a_record).unwrap_or_default();
+        let _ = state
+            .insert_evolution_record(
+                &a_record.header.id,
+                "Analysis",
+                &format!("{:?}", a_record.header.status),
+                &a_record.header.created_by,
+                a_record.header.derived_from.as_deref(),
+                &data_json,
+            )
+            .await;
 
         // Link the PendingDecision to the A-Record for O-A-D chain tracing.
         // Decisions are persisted to the tenant store; the evolution_record_id
-        // link will be available when the decision is read back from Turso.
-        if let Some(turso) = state.persistent_store_for_tenant(&tenant).await {
+        // link will be available when the decision is read back from the durable backend.
+        if let Some(store) = state.metadata_store_for_tenant(&tenant).await {
             for decision_id in &decision_ids {
-                if let Ok(Some(data_str)) = turso.get_pending_decision(decision_id).await
+                if let Ok(Some(data_str)) = store.get_pending_decision(decision_id).await
                     && let Ok(mut pd) =
                         serde_json::from_str::<crate::state::PendingDecision>(&data_str)
                 {
                     pd.evolution_record_id = Some(a_record_id.clone());
-                    let updated_json = serde_json::to_string(&pd).unwrap_or_default();
-                    let status_str = match pd.status {
-                        crate::state::DecisionStatus::Pending => "pending",
-                        crate::state::DecisionStatus::Approved => "approved",
-                        crate::state::DecisionStatus::Denied => "denied",
-                        crate::state::DecisionStatus::Expired => "expired",
-                    };
-                    let _ = turso
-                        .upsert_pending_decision(decision_id, &pd.tenant, status_str, &updated_json)
-                        .await;
+                    let _ = state.persist_pending_decision(&pd).await;
                 }
             }
         }

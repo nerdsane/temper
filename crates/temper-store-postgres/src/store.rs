@@ -489,4 +489,51 @@ mod tests {
 
         let _ = assert_methods;
     }
+
+    #[test]
+    fn postgres_long_tail_methods_are_part_of_the_store_surface() {
+        let _ = PostgresEventStore::load_recent_trajectories;
+        let _ = PostgresEventStore::load_unmet_intent_rows;
+        let _ = PostgresEventStore::load_submit_spec_timestamps;
+        let _ = PostgresEventStore::count_trajectories_by_tenant;
+        let _ = PostgresEventStore::query_trajectory_stats;
+        let _ = PostgresEventStore::query_trajectories_by_agent;
+        let _ = PostgresEventStore::query_agent_summaries;
+
+        let _ = PostgresEventStore::upsert_feature_request;
+        let _ = PostgresEventStore::list_feature_requests;
+        let _ = PostgresEventStore::update_feature_request;
+        let _ = PostgresEventStore::insert_evolution_record;
+        let _ = PostgresEventStore::get_evolution_record;
+        let _ = PostgresEventStore::list_evolution_records;
+        let _ = PostgresEventStore::list_ranked_insights;
+        let _ = PostgresEventStore::insert_design_time_event;
+        let _ = PostgresEventStore::list_design_time_events;
+
+        let _ = PostgresEventStore::persist_ots_trajectory;
+        let _ = PostgresEventStore::list_ots_trajectories;
+        let _ = PostgresEventStore::get_ots_trajectory;
+
+        let _ = PostgresEventStore::put_blob;
+        let _ = PostgresEventStore::put_blob_with_ttl;
+        let _ = PostgresEventStore::get_blob;
+        let _ = PostgresEventStore::sweep_expired_blobs;
+
+        let _ = PostgresEventStore::upsert_secret;
+        let _ = PostgresEventStore::delete_secret;
+        let _ = PostgresEventStore::load_secrets_for_tenant;
+
+        let _ = PostgresEventStore::upsert_policy_denial_pattern;
+        let _ = PostgresEventStore::load_policy_denial_patterns;
+
+        let _ = PostgresEventStore::query_decisions;
+        let _ = PostgresEventStore::query_all_decisions;
+        let _ = PostgresEventStore::get_pending_decision;
+
+        let _ = PostgresEventStore::load_wasm_module;
+        let _ = PostgresEventStore::load_wasm_module_metadata_all_tenants;
+        let _ = PostgresEventStore::persist_wasm_invocation;
+        let _ = PostgresEventStore::load_recent_wasm_invocations;
+        let _ = PostgresEventStore::delete_wasm_module;
+    }
 }

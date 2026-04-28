@@ -127,7 +127,7 @@ pub async fn handle_upload_wasm_module(
         )
     })?;
 
-    // Persist to Turso FIRST — if durability fails, refuse the upload.
+    // Persist to durable storage first — if durability fails, refuse the upload.
     // This ensures the module survives restarts before we expose it in memory.
     if let Err(e) = state
         .upsert_wasm_module(tenant.as_str(), &module_name, &body, &hash)
@@ -235,7 +235,7 @@ pub async fn handle_delete_wasm_module(
         ));
     }
 
-    // Delete from Turso FIRST — if durability fails, refuse the delete
+    // Delete from durable storage first — if durability fails, refuse the delete
     // so memory stays consistent with the durable store.
     if let Err(e) = state
         .delete_wasm_module(tenant.as_str(), &module_name)
@@ -286,9 +286,9 @@ pub async fn handle_list_wasm_modules(
     let invocation_stats: std::collections::BTreeMap<String, (usize, usize, Option<String>)> = {
         let mut stats: std::collections::BTreeMap<String, (usize, usize, Option<String>)> =
             std::collections::BTreeMap::new();
-        let stores = state.collect_all_turso_stores().await;
-        for turso in &stores {
-            if let Ok(rows) = turso.load_recent_wasm_invocations(10_000).await {
+        let stores = state.collect_all_metadata_stores().await;
+        for store in &stores {
+            if let Ok(rows) = store.load_recent_wasm_invocations(10_000).await {
                 for row in rows {
                     let module = row.module_name.clone();
                     let success = row.success;
@@ -357,7 +357,7 @@ pub async fn handle_list_wasm_modules(
     })))
 }
 
-/// GET /observe/wasm/invocations — query WASM invocation history from Turso.
+/// GET /observe/wasm/invocations — query WASM invocation history.
 #[instrument(skip_all, fields(otel.name = "GET /observe/wasm/invocations"))]
 pub async fn handle_list_wasm_invocations(
     State(state): State<ServerState>,
@@ -367,11 +367,10 @@ pub async fn handle_list_wasm_invocations(
     require_observe_auth(&state, &headers, "read_wasm", "WasmModule")?;
     let limit = params.limit.unwrap_or(100).min(10_000);
 
-    // Fan-out across all tenant stores.
-    let stores = state.collect_all_turso_stores().await;
+    let stores = state.collect_all_metadata_stores().await;
     let mut all_filtered: Vec<serde_json::Value> = Vec::new();
-    for turso in &stores {
-        match turso.load_recent_wasm_invocations(limit as i64).await {
+    for store in &stores {
+        match store.load_recent_wasm_invocations(limit as i64).await {
             Ok(rows) => {
                 let filtered: Vec<serde_json::Value> = rows
                     .into_iter()
@@ -393,7 +392,7 @@ pub async fn handle_list_wasm_invocations(
                 all_filtered.extend(filtered);
             }
             Err(e) => {
-                tracing::warn!(error = %e, "failed to query WASM invocations from Turso");
+                tracing::warn!(error = %e, backend = store.backend_name(), "failed to query WASM invocations");
             }
         }
     }

@@ -219,8 +219,8 @@ async fn handle_policy_suggestions(
     if let Some(resp) = require_policy_auth(&state, &headers, &tenant).await {
         return resp;
     }
-    let suggestions = if let Some(turso) = state.persistent_store_for_tenant(&tenant).await {
-        match turso.load_policy_denial_patterns(&tenant).await {
+    let suggestions = if let Some(store) = state.metadata_store_for_tenant(&tenant).await {
+        match store.load_policy_denial_patterns(&tenant).await {
             Ok(rows) if !rows.is_empty() => {
                 let mut engine = crate::state::policy_suggestions::PolicySuggestionEngine::new();
                 for row in rows {
@@ -246,7 +246,7 @@ async fn handle_policy_suggestions(
                 Err(_) => vec![],
             },
             Err(e) => {
-                tracing::warn!(error = %e, tenant, "failed to load persisted policy suggestions");
+                tracing::warn!(error = %e, tenant, backend = store.backend_name(), "failed to load persisted policy suggestions");
                 match state.suggestion_engine.read() {
                     Ok(engine) => engine.suggestions(),
                     Err(_) => vec![],
