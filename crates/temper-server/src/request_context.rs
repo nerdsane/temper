@@ -179,6 +179,15 @@ impl AgentContext {
 /// self-declared headers — they come from credential resolution (ADR-0033)
 /// or are set to `None` for anonymous/operator access.
 pub(crate) fn extract_agent_context(headers: &HeaderMap) -> AgentContext {
+    fn header_string(headers: &HeaderMap, name: &str) -> Option<String> {
+        headers
+            .get(name)
+            .and_then(|v| v.to_str().ok())
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(String::from)
+    }
+
     let session_id = headers
         .get("x-session-id")
         .and_then(|v| v.to_str().ok())
@@ -209,6 +218,9 @@ pub(crate) fn extract_agent_context(headers: &HeaderMap) -> AgentContext {
         .and_then(|v| v.to_str().ok())
         .filter(|s| !s.is_empty())
         .map(String::from);
+    let workflow_root_entity_type = header_string(headers, "x-temper-workflow-root-entity-type");
+    let workflow_root_entity_id = header_string(headers, "x-temper-workflow-root-entity-id");
+    let workflow_run_id = header_string(headers, "x-temper-workflow-run-id");
 
     AgentContext {
         security_ctx: None,
@@ -218,9 +230,9 @@ pub(crate) fn extract_agent_context(headers: &HeaderMap) -> AgentContext {
         intent,
         trace_id,
         parent_span_id,
-        workflow_root_entity_type: None,
-        workflow_root_entity_id: None,
-        workflow_run_id: None,
+        workflow_root_entity_type,
+        workflow_root_entity_id,
+        workflow_run_id,
         idempotency_key,
     }
 }
@@ -270,6 +282,31 @@ mod tests {
         // Identity fields are never extracted from headers (ADR-0033).
         assert!(ctx.agent_id.is_none());
         assert!(ctx.agent_type.is_none());
+    }
+
+    #[test]
+    fn extract_agent_context_workflow_observability_headers() {
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            "x-temper-workflow-root-entity-type",
+            HeaderValue::from_static("CurationQuery"),
+        );
+        headers.insert(
+            "x-temper-workflow-root-entity-id",
+            HeaderValue::from_static("cq-1"),
+        );
+        headers.insert(
+            "x-temper-workflow-run-id",
+            HeaderValue::from_static("CurationQuery:cq-1"),
+        );
+
+        let ctx = extract_agent_context(&headers);
+        assert_eq!(
+            ctx.workflow_root_entity_type.as_deref(),
+            Some("CurationQuery")
+        );
+        assert_eq!(ctx.workflow_root_entity_id.as_deref(), Some("cq-1"));
+        assert_eq!(ctx.workflow_run_id.as_deref(), Some("CurationQuery:cq-1"));
     }
 
     #[test]

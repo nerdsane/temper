@@ -225,23 +225,12 @@ pub(super) fn record_workflow_span_attrs(
     action: Option<&str>,
 ) {
     let span = tracing::Span::current();
-    span.record(
-        "workflow.root_entity_type",
-        agent_ctx
-            .workflow_root_entity_type
-            .as_deref()
-            .unwrap_or(entity_type),
-    );
-    span.record(
-        "workflow.root_entity_id",
-        agent_ctx
-            .workflow_root_entity_id
-            .as_deref()
-            .unwrap_or(entity_id),
-    );
-    if let Some(run_id) = agent_ctx.workflow_run_id.as_deref() {
-        span.record("workflow.run_id", run_id);
-    }
+    let root_type = workflow_root_type(agent_ctx, entity_type);
+    let root_id = workflow_root_id(agent_ctx, entity_id);
+    let run_id = workflow_run_id(agent_ctx, entity_type, entity_id);
+    span.record("workflow.root_entity_type", root_type.as_str());
+    span.record("workflow.root_entity_id", root_id.as_str());
+    span.record("workflow.run_id", run_id.as_str());
     if let Some(action) = action {
         span.record("temper.action", action);
     }
@@ -265,10 +254,13 @@ fn workflow_root_id(agent_ctx: &AgentContext, fallback: &str) -> String {
 }
 
 fn workflow_run_id(agent_ctx: &AgentContext, entity_type: &str, entity_id: &str) -> String {
-    agent_ctx
-        .workflow_run_id
-        .clone()
-        .unwrap_or_else(|| format!("{entity_type}:{entity_id}"))
+    agent_ctx.workflow_run_id.clone().unwrap_or_else(|| {
+        format!(
+            "{}:{}",
+            workflow_root_type(agent_ctx, entity_type),
+            workflow_root_id(agent_ctx, entity_id)
+        )
+    })
 }
 
 #[derive(Clone, Default)]

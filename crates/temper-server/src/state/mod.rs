@@ -869,6 +869,9 @@ impl ServerState {
             session_id: agent_ctx.session_id.clone(),
             integration_config: std::collections::BTreeMap::new(),
             trace_id: agent_ctx.trace_id.clone().unwrap_or_default(),
+            workflow_root_entity_type: agent_ctx.workflow_root_entity_type.clone(),
+            workflow_root_entity_id: agent_ctx.workflow_root_entity_id.clone(),
+            workflow_run_id: agent_ctx.workflow_run_id.clone(),
             http_request: None,
         };
 
@@ -951,6 +954,9 @@ impl ServerState {
             session_id: agent_ctx.session_id.clone(),
             integration_config: std::collections::BTreeMap::new(),
             trace_id: agent_ctx.trace_id.clone().unwrap_or_default(),
+            workflow_root_entity_type: agent_ctx.workflow_root_entity_type.clone(),
+            workflow_root_entity_id: agent_ctx.workflow_root_entity_id.clone(),
+            workflow_run_id: agent_ctx.workflow_run_id.clone(),
             http_request: None,
         };
 
