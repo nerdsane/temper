@@ -71,9 +71,8 @@ enum Commands {
         port: u16,
         /// Storage backend (`postgres`, `turso`, `redis`).
         ///
-        /// If omitted, startup preserves legacy behavior:
-        /// - use Postgres when `DATABASE_URL` is set
-        /// - otherwise run in-memory only
+        /// If omitted, `TEMPER_EVENT_STORE` can select the backend. When neither
+        /// is set, startup preserves today's default Turso/libSQL backend.
         #[arg(long, value_enum, default_value = "turso")]
         storage: StorageBackend,
         /// Load an app: --app name=specs-dir (repeatable)
@@ -127,6 +126,29 @@ enum Commands {
     },
 }
 
+fn resolve_storage_backend(
+    cli_storage: StorageBackend,
+    storage_explicit: bool,
+    env_storage: Option<&str>,
+) -> Result<StorageBackend, String> {
+    if storage_explicit {
+        return Ok(cli_storage);
+    }
+
+    let Some(value) = env_storage.map(str::trim).filter(|value| !value.is_empty()) else {
+        return Ok(cli_storage);
+    };
+
+    match value.to_ascii_lowercase().as_str() {
+        "postgres" | "pg" => Ok(StorageBackend::Postgres),
+        "turso" | "libsql" => Ok(StorageBackend::Turso),
+        "redis" => Ok(StorageBackend::Redis),
+        other => Err(format!(
+            "TEMPER_EVENT_STORE must be one of postgres, turso, redis; got {other:?}"
+        )),
+    }
+}
+
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     // Load .env file from project root (silently ignored if missing).
@@ -157,6 +179,14 @@ async fn main() -> anyhow::Result<()> {
         } => {
             let storage_explicit =
                 std::env::args().any(|arg| arg == "--storage" || arg.starts_with("--storage="));
+            let storage_env = std::env::var("TEMPER_EVENT_STORE").ok();
+            let storage_config_explicit = storage_explicit
+                || storage_env
+                    .as_deref()
+                    .is_some_and(|value| !value.trim().is_empty());
+            let storage =
+                resolve_storage_backend(storage, storage_explicit, storage_env.as_deref())
+                    .map_err(|err| anyhow::anyhow!(err))?;
             // Build app list from --app flags, fall back to --specs-dir/--tenant
             let mut apps: Vec<(String, String)> = Vec::new();
             for entry in &app {
@@ -178,7 +208,7 @@ async fn main() -> anyhow::Result<()> {
                 apps,
                 skill,
                 storage,
-                storage_explicit,
+                storage_config_explicit,
                 !no_observe,
                 verify_subprocess,
                 discord_token,
@@ -349,6 +379,29 @@ mod tests {
             } => {}
             _ => panic!("expected Serve command with default turso storage"),
         }
+    }
+
+    #[test]
+    fn storage_backend_env_is_used_when_cli_storage_is_not_explicit() {
+        assert_eq!(
+            resolve_storage_backend(StorageBackend::Turso, false, Some("postgres")).unwrap(),
+            StorageBackend::Postgres
+        );
+        assert_eq!(
+            resolve_storage_backend(StorageBackend::Turso, false, Some("redis")).unwrap(),
+            StorageBackend::Redis
+        );
+        assert_eq!(
+            resolve_storage_backend(StorageBackend::Turso, true, Some("postgres")).unwrap(),
+            StorageBackend::Turso
+        );
+    }
+
+    #[test]
+    fn storage_backend_env_rejects_unknown_values() {
+        let error = resolve_storage_backend(StorageBackend::Turso, false, Some("sqlite"))
+            .expect_err("unknown storage backend should fail");
+        assert!(error.contains("TEMPER_EVENT_STORE"));
     }
 
     #[test]
