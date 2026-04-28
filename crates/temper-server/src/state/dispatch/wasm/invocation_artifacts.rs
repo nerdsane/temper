@@ -10,7 +10,7 @@ use crate::state::wasm_invocation_log::WasmInvocationEntry;
 use temper_observe::wide_event;
 use temper_runtime::scheduler::{sim_now, sim_uuid};
 use temper_runtime::tenant::TenantId;
-use tracing::instrument;
+use tracing::{Instrument, instrument};
 
 impl crate::state::ServerState {
     /// Record a WASM invocation (persist log entry + emit observability events).
@@ -39,7 +39,26 @@ impl crate::state::ServerState {
             duration_ms,
             authz_denied,
         };
-        let _ = self.persist_wasm_invocation(&log_entry).await;
+        let state = self.clone();
+        let persist_entry = log_entry.clone();
+        let span = tracing::info_span!(
+            "dispatch.phase.persist_wasm_invocation",
+            otel.name = "dispatch.phase.persist_wasm_invocation",
+            tenant = %persist_entry.tenant,
+            entity_type = %persist_entry.entity_type,
+            entity_id = %persist_entry.entity_id,
+            module_name = %persist_entry.module_name,
+            trigger_action = %persist_entry.trigger_action,
+            success = persist_entry.success,
+        );
+        tokio::spawn(
+            async move {
+                if let Err(e) = state.persist_wasm_invocation(&persist_entry).await {
+                    tracing::error!(error = %e, "failed to persist WASM invocation");
+                }
+            }
+            .instrument(span),
+        );
 
         let wide = wide_event::from_wasm_invocation(wide_event::WasmInvocationInput {
             module_name,

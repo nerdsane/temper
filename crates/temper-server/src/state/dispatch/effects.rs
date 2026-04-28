@@ -32,11 +32,46 @@ enum QueryProjectionUpdateMode {
     Background,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DispatchTrajectoryPersistenceMode {
+    Background,
+}
+
 fn query_projection_update_mode() -> QueryProjectionUpdateMode {
     QueryProjectionUpdateMode::Background
 }
 
+fn dispatch_trajectory_persistence_mode() -> DispatchTrajectoryPersistenceMode {
+    DispatchTrajectoryPersistenceMode::Background
+}
+
 impl crate::state::ServerState {
+    pub(super) fn persist_trajectory_entry_background(&self, entry: TrajectoryEntry) {
+        debug_assert_eq!(
+            dispatch_trajectory_persistence_mode(),
+            DispatchTrajectoryPersistenceMode::Background
+        );
+        let state = self.clone();
+        let span = tracing::info_span!(
+            "dispatch.phase.persist_trajectory",
+            otel.name = "dispatch.phase.persist_trajectory",
+            tenant = %entry.tenant,
+            entity_type = %entry.entity_type,
+            entity_id = %entry.entity_id,
+            action = %entry.action,
+            success = entry.success,
+        );
+
+        tokio::spawn(
+            async move {
+                if let Err(e) = state.persist_trajectory_entry(&entry).await {
+                    tracing::error!(error = %e, "failed to persist trajectory entry");
+                }
+            }
+            .instrument(span),
+        );
+    }
+
     fn enqueue_query_projection_update(
         &self,
         ctx: &PostDispatchContext<'_>,
@@ -124,7 +159,7 @@ impl crate::state::ServerState {
     }
 
     /// Record a trajectory entry for a completed dispatch (success or guard failure).
-    pub(crate) async fn record_dispatch_trajectory(
+    pub(crate) fn record_dispatch_trajectory(
         &self,
         ctx: &PostDispatchContext<'_>,
         response: &EntityResponse,
@@ -193,9 +228,7 @@ impl crate::state::ServerState {
                 "unmet_intent"
             );
         }
-        if let Err(e) = self.persist_trajectory_entry(&entry).await {
-            tracing::error!(error = %e, "failed to persist trajectory entry");
-        }
+        self.persist_trajectory_entry_background(entry);
     }
 
     /// Broadcast state change to SSE subscribers and update entity cache.
@@ -410,8 +443,10 @@ impl crate::state::ServerState {
         self.metrics
             .record_transition(ctx.entity_type, ctx.action, response.success);
 
-        // 2. Record trajectory
-        self.record_dispatch_trajectory(ctx, &response).await;
+        // 2. Record trajectory outside the action critical path. The entity
+        // transition is already durable; trajectory persistence is an
+        // observability/audit side effect.
+        self.record_dispatch_trajectory(ctx, &response);
 
         if !response.success {
             return response;
@@ -596,6 +631,14 @@ mod tests {
         assert_eq!(
             query_projection_update_mode(),
             QueryProjectionUpdateMode::Background
+        );
+    }
+
+    #[test]
+    fn dispatch_trajectory_persistence_is_not_on_the_dispatch_critical_path() {
+        assert_eq!(
+            dispatch_trajectory_persistence_mode(),
+            DispatchTrajectoryPersistenceMode::Background
         );
     }
 }
