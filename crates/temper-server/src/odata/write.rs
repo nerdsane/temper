@@ -240,6 +240,123 @@ pub async fn handle_odata_post(
                 return resp;
             }
 
+            // ToolDefinition: forward tool metadata to the session's ToolRegistry.
+            if entity_type == "ToolDefinition"
+                && let Some(actor_sys) = &state.pg_actor_system
+            {
+                let session_id = initial_fields
+                    .get("session_id")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or(&entity_id)
+                    .to_string();
+                let namespace = format!("{tenant}/{session_id}");
+                let registry =
+                    temper_actor_runtime::ActorHandle::new(namespace, "ToolRegistry".to_string());
+                let mut tool_info = initial_fields.clone();
+                if tool_info.get("name").is_none()
+                    && let Some(obj) = tool_info.as_object_mut()
+                {
+                    obj.insert("name".to_string(), serde_json::json!(entity_id));
+                }
+                let source = tool_info
+                    .get("source_type")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("builtin");
+                let action = if source == "client" {
+                    "RegisterTool"
+                } else {
+                    "RegisterServerTool"
+                };
+                let msg_params = if source == "client" {
+                    serde_json::json!({
+                        "client_id": tool_info.get("client_id").and_then(|v| v.as_str()).unwrap_or(""),
+                        "tool_names": [entity_id],
+                    })
+                } else {
+                    let mut p = tool_info.clone();
+                    p["source"] = serde_json::json!(source);
+                    p["name"] = serde_json::json!(entity_id);
+                    p
+                };
+                match actor_sys
+                    .tell(
+                        None,
+                        &registry,
+                        temper_actor_runtime::spec_actor::SpecMessage::with_params(
+                            action, msg_params,
+                        ),
+                    )
+                    .await
+                {
+                    Ok(_) => {
+                        let _ = actor_sys.activate_now(&registry).await;
+                        return ODataResponse {
+                            status: StatusCode::CREATED,
+                            body: serde_json::json!({
+                                "@odata.type": "#ToolDefinition",
+                                "Id": entity_id,
+                                "session_id": session_id,
+                                "source_type": source,
+                            }),
+                        }
+                        .into_response();
+                    }
+                    Err(e) => {
+                        return odata_error(
+                            StatusCode::INTERNAL_SERVER_ERROR,
+                            "ToolRegistrationError",
+                            &e.to_string(),
+                        )
+                        .into_response();
+                    }
+                }
+            }
+
+            // PG-backed entity creation.
+            if state.actor_backed_types.contains(&entity_type)
+                && let Some(actor_sys) = &state.pg_actor_system
+            {
+                let namespace = format!("{tenant}/{entity_id}");
+                let spawn_result = if entity_type == "Process" {
+                    actor_sys.spawn_all_registered(&namespace).await
+                } else {
+                    actor_sys
+                        .spawn_with_fields(&namespace, &entity_type, initial_fields.clone())
+                        .await
+                        .map(|_| ())
+                };
+                match spawn_result {
+                    Ok(_) => {
+                        if entity_type == "Process" {
+                            let handle = temper_actor_runtime::ActorHandle::new(
+                                namespace.clone(),
+                                entity_type.clone(),
+                            );
+                            let _ = actor_sys
+                                .update_actor_fields(&handle, initial_fields.clone(), false)
+                                .await;
+                        }
+                        return ODataResponse {
+                            status: StatusCode::CREATED,
+                            body: serde_json::json!({
+                                "@odata.type": format!("#{entity_type}"),
+                                "Id": entity_id,
+                                "namespace": namespace,
+                            }),
+                        }
+                        .into_response();
+                    }
+                    Err(e) => {
+                        return odata_error(
+                            StatusCode::INTERNAL_SERVER_ERROR,
+                            "ActorSpawnError",
+                            &e.to_string(),
+                        )
+                        .into_response();
+                    }
+                }
+            }
+
             match state
                 .get_or_create_tenant_entity(&tenant, &entity_type, &entity_id, initial_fields)
                 .await
@@ -293,6 +410,58 @@ pub async fn handle_odata_post(
             if let Err(resp) = check_verification_gate_or_423(&state, &tenant, &entity_type) {
                 return *resp;
             }
+
+            if state.actor_backed_types.contains(&entity_type)
+                && let Some(actor_sys) = &state.pg_actor_system
+            {
+                let namespace = format!("{tenant}/{key_str}");
+                let handle = temper_actor_runtime::ActorHandle::new(namespace, entity_type.clone());
+                let action_name = action.rsplit('.').next().unwrap_or(&action);
+                match actor_sys
+                    .tell(
+                        None,
+                        &handle,
+                        temper_actor_runtime::spec_actor::SpecMessage::with_params(
+                            action_name,
+                            body_json.clone(),
+                        ),
+                    )
+                    .await
+                {
+                    Ok(_) => {
+                        let _ = actor_sys.activate_now(&handle).await;
+                        let body = if let Some(actor_state) =
+                            actor_sys.get_spec_actor_state(&handle).await
+                        {
+                            serde_json::json!({
+                                "entity_type": entity_type,
+                                "entity_id": key_str,
+                                "status": actor_state.status,
+                                "counters": actor_state.counters,
+                                "booleans": actor_state.booleans,
+                                "lists": actor_state.lists,
+                                "fields": actor_state.fields,
+                            })
+                        } else {
+                            serde_json::json!({ "Id": key_str, "action": action_name })
+                        };
+                        return ODataResponse {
+                            status: StatusCode::OK,
+                            body,
+                        }
+                        .into_response();
+                    }
+                    Err(e) => {
+                        return odata_error(
+                            StatusCode::INTERNAL_SERVER_ERROR,
+                            "ActorDispatchError",
+                            &e.to_string(),
+                        )
+                        .into_response();
+                    }
+                }
+            }
+
             dispatch_bound_action(
                 &state,
                 &tenant,

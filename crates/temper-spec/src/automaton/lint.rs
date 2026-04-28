@@ -409,8 +409,8 @@ fn lint_spawn_param_mapping(
     let missing_params: Vec<String> = target_action
         .params
         .iter()
-        .filter(|param| !available_params.contains(*param))
-        .cloned()
+        .map(|p| p.name().to_string())
+        .filter(|param| !available_params.contains(param))
         .collect();
 
     if missing_params.is_empty() {
@@ -433,7 +433,8 @@ fn available_spawn_params(
     parent_snake: &str,
     copy_fields: Option<&[String]>,
 ) -> BTreeSet<String> {
-    let mut available_params: BTreeSet<String> = action.params.iter().cloned().collect();
+    let mut available_params: BTreeSet<String> =
+        action.params.iter().map(|p| p.name().to_string()).collect();
     available_params.insert("parent_id".to_string());
     available_params.insert("parent_type".to_string());
     available_params.insert(format!("{parent_snake}_id"));

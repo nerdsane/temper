@@ -96,6 +96,38 @@ pub struct StateVar {
     pub query_indexed: Option<bool>,
 }
 
+/// A parameter on an action — either a plain name (defaults to string type)
+/// or a typed declaration.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum ActionParam {
+    Named(String),
+    Typed {
+        name: String,
+        #[serde(rename = "type", default = "default_param_type")]
+        param_type: String,
+    },
+}
+
+fn default_param_type() -> String {
+    "string".to_string()
+}
+
+impl ActionParam {
+    pub fn name(&self) -> &str {
+        match self {
+            Self::Named(n) => n,
+            Self::Typed { name, .. } => name,
+        }
+    }
+    pub fn param_type(&self) -> &str {
+        match self {
+            Self::Named(_) => "string",
+            Self::Typed { param_type, .. } => param_type,
+        }
+    }
+}
+
 /// An action in the I/O Automaton.
 ///
 /// Actions are classified by `kind`:
@@ -124,7 +156,7 @@ pub struct Action {
     pub effect: Vec<Effect>,
     /// Parameters this action accepts.
     #[serde(default)]
-    pub params: Vec<String>,
+    pub params: Vec<ActionParam>,
     /// Agent hint for this action.
     pub hint: Option<String>,
     /// Outgoing triggers fired post-commit of this action (ADR-0046).
