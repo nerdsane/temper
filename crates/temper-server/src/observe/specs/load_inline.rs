@@ -312,8 +312,8 @@ pub(crate) async fn handle_load_inline(
                 intent: None,
                 matched_policy_ids: None,
             };
-            if let Err(e) = state.persist_trajectory_entry(&traj).await {
-                tracing::error!(error = %e, "failed to persist spec submission trajectory");
+            if !state.enqueue_trajectory_entry(traj) {
+                tracing::warn!("failed to enqueue spec submission trajectory");
             }
         }
     }

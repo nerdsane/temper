@@ -51,25 +51,7 @@ impl crate::state::ServerState {
             dispatch_trajectory_persistence_mode(),
             DispatchTrajectoryPersistenceMode::Background
         );
-        let state = self.clone();
-        let span = tracing::info_span!(
-            "dispatch.phase.persist_trajectory",
-            otel.name = "dispatch.phase.persist_trajectory",
-            tenant = %entry.tenant,
-            entity_type = %entry.entity_type,
-            entity_id = %entry.entity_id,
-            action = %entry.action,
-            success = entry.success,
-        );
-
-        tokio::spawn(
-            async move {
-                if let Err(e) = state.persist_trajectory_entry(&entry).await {
-                    tracing::error!(error = %e, "failed to persist trajectory entry");
-                }
-            }
-            .instrument(span),
-        );
+        self.enqueue_trajectory_entry(entry);
     }
 
     fn enqueue_query_projection_update(

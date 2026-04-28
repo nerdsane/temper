@@ -286,13 +286,7 @@ impl crate::state::ServerState {
                 "unmet_intent"
             );
         }
-        let state_c = self.clone();
-        #[rustfmt::skip]
-        tokio::spawn(async move { // determinism-ok: background persist
-            if let Err(e) = state_c.persist_trajectory_entry(&traj).await {
-                tracing::error!(error = %e, "failed to persist WASM authz trajectory");
-            }
-        });
+        self.enqueue_trajectory_entry(traj);
         Some(decision_id)
     }
 }
