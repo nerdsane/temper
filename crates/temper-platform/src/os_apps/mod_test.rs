@@ -1035,6 +1035,11 @@ async fn test_skill_install_survives_restart() {
     let turso = TursoEventStore::new(&db_url, None).await.unwrap();
     let mut state = PlatformState::new(None);
     state.server.event_store = Some(Arc::new(ServerEventStore::Turso(turso)));
+    state.server.data_dir = std::path::PathBuf::from(format!(
+        "/tmp/temper-adr-test-{}-data",
+        uuid::Uuid::new_v4()
+    ));
+    std::fs::create_dir_all(&state.server.data_dir).unwrap();
 
     let result = install_skill(&state, "test-ws", "project-management").await;
     assert!(result.is_ok(), "install failed: {:?}", result.err());
@@ -1711,6 +1716,11 @@ async fn test_install_app_bootstraps_adrs_into_temper_fs() {
     let turso = TursoEventStore::new(&db_url, None).await.unwrap();
     let mut state = PlatformState::new(None);
     state.server.event_store = Some(Arc::new(ServerEventStore::Turso(turso)));
+    state.server.data_dir = std::path::PathBuf::from(format!(
+        "/tmp/temper-adr-test-{}-data",
+        uuid::Uuid::new_v4()
+    ));
+    std::fs::create_dir_all(&state.server.data_dir).unwrap();
 
     // Re-add the temp dir before each install — the concurrent
     // `test_reload_picks_up_disk_changes` test calls `reload_skills()`
@@ -1958,6 +1968,11 @@ async fn test_local_stream_uploads_create_real_file_version_lineage() {
     let turso = TursoEventStore::new(&db_url, None).await.unwrap();
     let mut state = PlatformState::new(None);
     state.server.event_store = Some(Arc::new(ServerEventStore::Turso(turso)));
+    state.server.data_dir = std::path::PathBuf::from(format!(
+        "/tmp/temper-file-version-lineage-{}-data",
+        uuid::Uuid::new_v4()
+    ));
+    std::fs::create_dir_all(&state.server.data_dir).unwrap();
 
     install_os_app(&state, "test-file-lineage", "temper-fs")
         .await

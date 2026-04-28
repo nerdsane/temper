@@ -61,6 +61,8 @@ pub struct EntityActor {
     /// executing an action whose `idempotency_key` is set, so dispatch-layer
     /// retries that race past the caller's timeout cannot double-execute.
     idempotency_cache: Option<Arc<crate::idempotency::IdempotencyCache>>,
+    /// Object store for field-overflow blob bytes. SQL stores only refs.
+    blob_store: Option<crate::blob_store::BlobStore>,
 }
 
 impl EntityActor {
@@ -162,6 +164,7 @@ impl EntityActor {
             event_store: None,
             trace_id: sim_uuid().to_string(),
             idempotency_cache: None,
+            blob_store: None,
         }
     }
 
@@ -182,6 +185,7 @@ impl EntityActor {
             event_store: Some(store),
             trace_id: sim_uuid().to_string(),
             idempotency_cache: None,
+            blob_store: None,
         }
     }
 
@@ -199,6 +203,25 @@ impl EntityActor {
     ) -> Self {
         self.idempotency_cache = Some(cache);
         self
+    }
+
+    /// Attach the object store used for field-overflow blob writes.
+    pub(crate) fn with_blob_store(
+        mut self,
+        blob_store: Option<crate::blob_store::BlobStore>,
+    ) -> Self {
+        self.blob_store = blob_store;
+        self
+    }
+
+    async fn persist_overflow_blobs(
+        blob_store: Option<&crate::blob_store::BlobStore>,
+        blobs: &[crate::blobs::OverflowBlobWrite],
+    ) -> Result<(), String> {
+        let Some(blob_store) = blob_store else {
+            return Err("field-overflow blobs require a configured object blob store".to_string());
+        };
+        crate::blobs::put_overflow_blobs(blob_store, blobs).await
     }
 
     /// Persistence ID for this entity: "tenant:EntityType:EntityId".
@@ -288,6 +311,7 @@ impl EntityActor {
         persistence_id: &str,
         state: &mut EntityState,
         tenant: &str,
+        blob_store: Option<&crate::blob_store::BlobStore>,
     ) {
         let replay_start = Instant::now(); // determinism-ok: wall-clock for production replay duration metric only
         let mut from_sequence = 0;
@@ -389,6 +413,7 @@ impl EntityActor {
                                 ServerEventStore::Turso(_) | ServerEventStore::TenantRouted(_) => {
                                     FieldSyncMode::blob_refs_default()
                                 }
+                                _ if blob_store.is_some() => FieldSyncMode::blob_refs_default(),
                                 _ => FieldSyncMode::InlineTruncate,
                             };
                             let overflow_blobs = super::effects::sync_fields_with_metadata(
@@ -404,28 +429,16 @@ impl EntityActor {
                             // is a no-op. If the prior server died between emitting
                             // the event and persisting the blob, this is the
                             // recovery path. See ADR-0040, ADR-0045.
-                            if !overflow_blobs.is_empty() {
-                                if let Some(blob_store) = store.turso_for_tenant(tenant).await {
-                                    if let Err(e) = crate::blobs::put_overflow_blobs(
-                                        &blob_store,
-                                        &overflow_blobs,
-                                    )
-                                    .await
-                                    {
-                                        tracing::warn!(
-                                            entity = %state.entity_id,
-                                            error = %e,
-                                            overflow_count = overflow_blobs.len(),
-                                            "failed to persist replayed overflow blobs — blob-ref envelopes may dangle"
-                                        );
-                                    }
-                                } else {
-                                    tracing::warn!(
-                                        entity = %state.entity_id,
-                                        overflow_count = overflow_blobs.len(),
-                                        "replay produced overflow blobs but no Turso store available for tenant"
-                                    );
-                                }
+                            if !overflow_blobs.is_empty()
+                                && let Err(e) =
+                                    Self::persist_overflow_blobs(blob_store, &overflow_blobs).await
+                            {
+                                tracing::warn!(
+                                    entity = %state.entity_id,
+                                    error = %e,
+                                    overflow_count = overflow_blobs.len(),
+                                    "failed to persist replayed overflow blobs — blob-ref envelopes may dangle"
+                                );
                             }
 
                             state.push_event_bounded(event);
@@ -491,10 +504,19 @@ pub(crate) async fn recover_entity_state_from_store(
     table: &TransitionTable,
     store: &ServerEventStore,
     initial_fields: &serde_json::Value,
+    blob_store: Option<&crate::blob_store::BlobStore>,
 ) -> EntityState {
     let persistence_id = format!("{tenant}:{entity_type}:{entity_id}");
     let mut state = EntityActor::build_initial_state(entity_type, entity_id, table, initial_fields);
-    EntityActor::replay_events(table, store, &persistence_id, &mut state, tenant).await;
+    EntityActor::replay_events(
+        table,
+        store,
+        &persistence_id,
+        &mut state,
+        tenant,
+        blob_store,
+    )
+    .await;
     state
 }
 
@@ -525,6 +547,7 @@ impl Actor for EntityActor {
                 &table,
                 store,
                 &self.initial_fields,
+                self.blob_store.as_ref(),
             )
             .await;
         }
@@ -643,6 +666,7 @@ impl Actor for EntityActor {
                     Some(ServerEventStore::Turso(_) | ServerEventStore::TenantRouted(_)) => {
                         FieldSyncMode::blob_refs_default()
                     }
+                    Some(_) if self.blob_store.is_some() => FieldSyncMode::blob_refs_default(),
                     _ => FieldSyncMode::InlineTruncate,
                 };
 
@@ -668,55 +692,24 @@ impl Actor for EntityActor {
                         .clone()
                         .expect("successful process_action always returns event"); // ci-ok: post-assertion, success guarantees Some
 
-                    if !result.overflow_blobs.is_empty() {
-                        let Some(ref store) = self.event_store else {
-                            *state = state_before;
-                            ctx.reply(EntityResponse {
-                                success: false,
-                                state: state.clone(),
-                                error: Some(
-                                    "field-overflow blobs require a Turso-backed store".to_string(),
-                                ),
-                                custom_effects: vec![],
-                                scheduled_actions: vec![],
-                                spawn_requests: vec![],
-                                spec_governed: true,
-                            });
-                            return Ok(());
-                        };
-
-                        let Some(blob_store) = store.turso_for_tenant(&self.tenant).await else {
-                            *state = state_before;
-                            ctx.reply(EntityResponse {
-                                success: false,
-                                state: state.clone(),
-                                error: Some(
-                                    "field-overflow blobs require a Turso-backed store".to_string(),
-                                ),
-                                custom_effects: vec![],
-                                scheduled_actions: vec![],
-                                spawn_requests: vec![],
-                                spec_governed: true,
-                            });
-                            return Ok(());
-                        };
-
-                        if let Err(e) =
-                            crate::blobs::put_overflow_blobs(&blob_store, &result.overflow_blobs)
-                                .await
-                        {
-                            *state = state_before;
-                            ctx.reply(EntityResponse {
-                                success: false,
-                                state: state.clone(),
-                                error: Some(format!("field-overflow blob persistence failed: {e}")),
-                                custom_effects: vec![],
-                                scheduled_actions: vec![],
-                                spawn_requests: vec![],
-                                spec_governed: true,
-                            });
-                            return Ok(());
-                        }
+                    if !result.overflow_blobs.is_empty()
+                        && let Err(e) = Self::persist_overflow_blobs(
+                            self.blob_store.as_ref(),
+                            &result.overflow_blobs,
+                        )
+                        .await
+                    {
+                        *state = state_before;
+                        ctx.reply(EntityResponse {
+                            success: false,
+                            state: state.clone(),
+                            error: Some(format!("field-overflow blob persistence failed: {e}")),
+                            custom_effects: vec![],
+                            scheduled_actions: vec![],
+                            spawn_requests: vec![],
+                            spec_governed: true,
+                        });
+                        return Ok(());
                     }
 
                     // Persist to Postgres (if configured). On
@@ -787,6 +780,7 @@ impl Actor for EntityActor {
                                         &self.persistence_id(),
                                         state,
                                         &self.tenant,
+                                        self.blob_store.as_ref(),
                                     )
                                     .await;
 
@@ -840,35 +834,20 @@ impl Actor for EntityActor {
                                         .expect("successful process_action always returns event"); // ci-ok: post-assertion, success guarantees Some
 
                                     // Overflow blobs for the re-evaluated result.
-                                    if !retry_result.overflow_blobs.is_empty() {
-                                        match store.turso_for_tenant(&self.tenant).await {
-                                            Some(blob_store) => {
-                                                if let Err(e) = crate::blobs::put_overflow_blobs(
-                                                    &blob_store,
-                                                    &retry_result.overflow_blobs,
-                                                )
-                                                .await
-                                                {
-                                                    retry_final = Some((
-                                                        crate::runtime_metrics::ConcurrencyRetryOutcome::Exhausted,
-                                                        Some(format!(
-                                                            "field-overflow blob persistence failed during retry: {e}"
-                                                        )),
-                                                    ));
-                                                    break;
-                                                }
-                                            }
-                                            None => {
-                                                retry_final = Some((
-                                                    crate::runtime_metrics::ConcurrencyRetryOutcome::Exhausted,
-                                                    Some(
-                                                        "field-overflow blobs require a Turso-backed store"
-                                                            .to_string(),
-                                                    ),
-                                                ));
-                                                break;
-                                            }
-                                        }
+                                    if !retry_result.overflow_blobs.is_empty()
+                                        && let Err(e) = Self::persist_overflow_blobs(
+                                            self.blob_store.as_ref(),
+                                            &retry_result.overflow_blobs,
+                                        )
+                                        .await
+                                    {
+                                        retry_final = Some((
+                                            crate::runtime_metrics::ConcurrencyRetryOutcome::Exhausted,
+                                            Some(format!(
+                                                "field-overflow blob persistence failed during retry: {e}"
+                                            )),
+                                        ));
+                                        break;
                                     }
 
                                     // Backoff: retry 1 → 10ms, retry 2 → 50ms.

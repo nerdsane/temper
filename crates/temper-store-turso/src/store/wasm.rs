@@ -11,12 +11,6 @@ use super::{
 use crate::TursoWasmInvocationInsert;
 use crate::metrics::TursoQueryTimer;
 
-const WASM_ARTIFACT_PREFIX: &str = "wasm-modules/";
-
-fn wasm_artifact_key(sha256_hash: &str) -> String {
-    format!("{WASM_ARTIFACT_PREFIX}{sha256_hash}")
-}
-
 impl TursoEventStore {
     /// Upsert a WASM module binary for a tenant.
     ///
@@ -34,7 +28,7 @@ impl TursoEventStore {
         let conn = self.configured_connection().await?;
         let mut existing_rows = conn
             .query(
-                "SELECT sha256_hash, length(wasm_bytes) \
+                "SELECT sha256_hash \
                  FROM wasm_modules \
                  WHERE tenant = ?1 AND module_name = ?2",
                 params![tenant, module_name],
@@ -44,32 +38,11 @@ impl TursoEventStore {
 
         if let Some(row) = existing_rows.next().await.map_err(storage_error)? {
             let existing_hash: String = row.get(0).map_err(storage_error)?;
-            let inline_len: i64 = row
-                .get::<Option<i64>>(1)
-                .map_err(storage_error)?
-                .unwrap_or(0);
             if existing_hash == sha256_hash {
-                if inline_len > 0
-                    || self
-                        .get_blob(&wasm_artifact_key(sha256_hash))
-                        .await
-                        .map_err(PersistenceError::Storage)?
-                        .is_some()
-                {
-                    return Ok(());
-                }
-
-                self.put_blob(&wasm_artifact_key(sha256_hash), wasm_bytes)
-                    .await
-                    .map_err(PersistenceError::Storage)?;
                 return Ok(());
             }
         }
         drop(existing_rows);
-
-        self.put_blob(&wasm_artifact_key(sha256_hash), wasm_bytes)
-            .await
-            .map_err(PersistenceError::Storage)?;
 
         let _write_permit = self
             .acquire_write_permit("turso.upsert_wasm_module", WritePriority::High)
@@ -123,9 +96,7 @@ impl TursoEventStore {
             return Ok(None);
         };
 
-        self.hydrate_wasm_module(Self::row_to_wasm_module(&row)?)
-            .await
-            .map(Some)
+        Self::row_to_wasm_module(&row).map(Some)
     }
 
     /// Load all WASM modules for a tenant.
@@ -149,8 +120,7 @@ impl TursoEventStore {
 
         let mut out = Vec::new();
         while let Some(row) = rows.next().await.map_err(storage_error)? {
-            let row = Self::row_to_wasm_module(&row)?;
-            out.push(self.hydrate_wasm_module(row).await?);
+            out.push(Self::row_to_wasm_module(&row)?);
         }
         Ok(out)
     }
@@ -174,8 +144,7 @@ impl TursoEventStore {
 
         let mut out = Vec::new();
         while let Some(row) = rows.next().await.map_err(storage_error)? {
-            let row = Self::row_to_wasm_module(&row)?;
-            out.push(self.hydrate_wasm_module(row).await?);
+            out.push(Self::row_to_wasm_module(&row)?);
         }
         Ok(out)
     }
@@ -307,28 +276,6 @@ impl TursoEventStore {
             size_bytes: row.get::<i64>(5).map_err(storage_error)? as i32,
             updated_at: row.get::<String>(6).map_err(storage_error)?,
         })
-    }
-
-    async fn hydrate_wasm_module(
-        &self,
-        mut row: TursoWasmModuleRow,
-    ) -> Result<TursoWasmModuleRow, PersistenceError> {
-        if row.wasm_bytes.is_empty() && row.size_bytes > 0 {
-            let artifact_key = wasm_artifact_key(&row.sha256_hash);
-            let artifact = self
-                .get_blob(&artifact_key)
-                .await
-                .map_err(PersistenceError::Storage)?
-                .ok_or_else(|| {
-                    PersistenceError::Storage(format!(
-                        "WASM artifact missing for {}/{} at {artifact_key}",
-                        row.tenant, row.module_name
-                    ))
-                })?;
-            row.wasm_bytes = artifact;
-        }
-
-        Ok(row)
     }
 
     /// Parse a WASM module metadata row from a libsql Row (5 columns).

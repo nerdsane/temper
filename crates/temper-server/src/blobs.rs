@@ -1,22 +1,18 @@
-//! Internal blob storage endpoint for TemperFS.
+//! Internal blob storage endpoint and field-overflow helpers.
 //!
-//! Provides `PUT/GET /_internal/blobs/{*path}` backed by Turso.
-//! The blob_adapter WASM module uploads/downloads through these endpoints
-//! when no external blob storage (R2/S3) is configured.
+//! New writes go through the Temper object-store boundary. Turso DB blobs are
+//! read only as a legacy fallback for data written by older releases.
 
 use axum::body::Bytes;
 use axum::extract::{Path, State};
 use axum::http::StatusCode;
 use axum::response::IntoResponse;
 use serde_json::Value;
-use std::sync::OnceLock;
-use std::time::Instant;
 use temper_runtime::tenant::TenantId;
-use tokio::sync::Semaphore;
 
+use crate::blob_store::BlobStore;
 use crate::state::ServerState;
 
-const DEFAULT_BLOB_IO_MAX_CONCURRENCY: usize = 32;
 pub(crate) const FIELD_OVERFLOW_BLOB_PREFIX: &str = "field-overflow/sha256/";
 pub(crate) const FIELD_OVERFLOW_REF_KEY: &str = "__temper_blob_ref";
 pub(crate) const FIELD_OVERFLOW_SIZE_KEY: &str = "__temper_blob_size";
@@ -31,59 +27,16 @@ pub struct OverflowBlobWrite {
     pub ttl_seconds: Option<u64>,
 }
 
-fn blob_io_semaphore() -> &'static Semaphore {
-    static SEMAPHORE: OnceLock<Semaphore> = OnceLock::new();
-    SEMAPHORE.get_or_init(|| {
-        let limit = std::env::var("TEMPER_BLOB_IO_MAX_CONCURRENCY")
-            .ok()
-            .and_then(|v| v.parse::<usize>().ok())
-            .filter(|v| *v > 0)
-            .unwrap_or(DEFAULT_BLOB_IO_MAX_CONCURRENCY);
-        Semaphore::new(limit)
-    })
-}
-
-pub(crate) async fn put_blob_bytes(
-    store: &temper_store_turso::TursoEventStore,
-    key: &str,
-    body: &[u8],
-) -> Result<(), String> {
-    let queued_at = Instant::now();
-    let _permit = blob_io_semaphore()
-        .acquire()
-        .await
-        .expect("blob semaphore closed"); // ci-ok: semaphore is process-global and never closed
-    let wait_duration = queued_at.elapsed();
-    let wait_ms = wait_duration.as_millis() as u64;
-    crate::runtime_metrics::record_blob_io_wait_duration(wait_duration, "put");
-    if wait_ms > 0 {
-        tracing::info!(path = %key, wait_ms, "blob put queued");
-    }
-
-    store.put_blob(key, body).await
-}
-
+#[cfg(test)]
 pub(crate) async fn get_blob_bytes(
-    store: &temper_store_turso::TursoEventStore,
+    store: &BlobStore,
     key: &str,
 ) -> Result<Option<Vec<u8>>, String> {
-    let queued_at = Instant::now();
-    let _permit = blob_io_semaphore()
-        .acquire()
-        .await
-        .expect("blob semaphore closed"); // ci-ok: semaphore is process-global and never closed
-    let wait_duration = queued_at.elapsed();
-    let wait_ms = wait_duration.as_millis() as u64;
-    crate::runtime_metrics::record_blob_io_wait_duration(wait_duration, "get");
-    if wait_ms > 0 {
-        tracing::info!(path = %key, wait_ms, "blob get queued");
-    }
-
-    store.get_blob(key).await
+    store.get(key).await
 }
 
 pub(crate) async fn put_overflow_blobs(
-    store: &temper_store_turso::TursoEventStore,
+    store: &BlobStore,
     blobs: &[OverflowBlobWrite],
 ) -> Result<(), String> {
     for blob in blobs {
@@ -95,24 +48,12 @@ pub(crate) async fn put_overflow_blobs(
 
 /// TTL-aware variant of `put_blob_bytes` (ADR-0047).
 pub(crate) async fn put_blob_bytes_with_ttl(
-    store: &temper_store_turso::TursoEventStore,
+    store: &BlobStore,
     key: &str,
     body: &[u8],
     ttl: Option<std::time::Duration>,
 ) -> Result<(), String> {
-    let queued_at = Instant::now();
-    let _permit = blob_io_semaphore()
-        .acquire()
-        .await
-        .expect("blob semaphore closed"); // ci-ok: semaphore is process-global and never closed
-    let wait_duration = queued_at.elapsed();
-    let wait_ms = wait_duration.as_millis() as u64;
-    crate::runtime_metrics::record_blob_io_wait_duration(wait_duration, "put");
-    if wait_ms > 0 {
-        tracing::info!(path = %key, wait_ms, ttl = ?ttl, "blob put queued");
-    }
-
-    store.put_blob_with_ttl(key, body, ttl).await
+    store.put_if_absent(key, body, ttl).await
 }
 
 pub(crate) fn blob_ref_value(key: &str, size_bytes: usize) -> Value {
@@ -154,10 +95,30 @@ fn collect_blob_ref_pointers(value: &Value, pointer: &str, out: &mut Vec<String>
     }
 }
 
-pub(crate) async fn hydrate_blob_refs_in_value(
-    store: &temper_store_turso::TursoEventStore,
-    value: &mut Value,
-) {
+enum BlobReadSource<'a> {
+    #[cfg(test)]
+    Store(&'a BlobStore),
+    Tenant {
+        state: &'a ServerState,
+        tenant: &'a TenantId,
+    },
+}
+
+async fn read_blob_ref_bytes(
+    source: &BlobReadSource<'_>,
+    key: &str,
+) -> Result<Option<Vec<u8>>, String> {
+    match source {
+        #[cfg(test)]
+        BlobReadSource::Store(store) => get_blob_bytes(store, key).await,
+        BlobReadSource::Tenant { state, tenant } => {
+            state.get_blob_with_legacy_fallback(tenant, key).await
+        }
+    }
+}
+
+#[cfg(test)]
+pub(crate) async fn hydrate_blob_refs_in_value(store: &BlobStore, value: &mut Value) {
     // OData callers want full inline hydration regardless of size.
     let _deferred = hydrate_blob_refs_in_value_with_ceiling(store, value, usize::MAX).await;
 }
@@ -167,8 +128,17 @@ pub(crate) async fn hydrate_blob_refs_in_value(
 /// "deferred" set). Callers that hand `value` off to a WASM guest forward
 /// the deferred map as `blob_cache` so guests can resolve oversize fields
 /// via `host_read_field_stream`. See ADR-0046.
+#[cfg(test)]
 pub(crate) async fn hydrate_blob_refs_in_value_with_ceiling(
-    store: &temper_store_turso::TursoEventStore,
+    store: &BlobStore,
+    value: &mut Value,
+    max_inline_bytes: usize,
+) -> std::collections::BTreeMap<String, Vec<u8>> {
+    hydrate_blob_refs_with_source(&BlobReadSource::Store(store), value, max_inline_bytes).await
+}
+
+async fn hydrate_blob_refs_with_source(
+    source: &BlobReadSource<'_>,
     value: &mut Value,
     max_inline_bytes: usize,
 ) -> std::collections::BTreeMap<String, Vec<u8>> {
@@ -211,7 +181,7 @@ pub(crate) async fn hydrate_blob_refs_in_value_with_ceiling(
         if let Some(size) = declared_size
             && size > max_inline_bytes
         {
-            match get_blob_bytes(store, &key).await {
+            match read_blob_ref_bytes(source, &key).await {
                 Ok(Some(bytes)) => {
                     deferred_blobs.insert(key, bytes);
                 }
@@ -225,7 +195,7 @@ pub(crate) async fn hydrate_blob_refs_in_value_with_ceiling(
             continue;
         }
 
-        match get_blob_bytes(store, &key).await {
+        match read_blob_ref_bytes(source, &key).await {
             Ok(Some(bytes)) => {
                 // Post-fetch size check in case the envelope lied (missing size key).
                 if bytes.len() > max_inline_bytes {
@@ -262,10 +232,9 @@ pub(crate) async fn hydrate_blob_refs_for_tenant(
     tenant: &TenantId,
     value: &mut Value,
 ) {
-    let Some(store) = state.persistent_store_for_tenant(tenant.as_str()).await else {
-        return;
-    };
-    hydrate_blob_refs_in_value(&store, value).await;
+    let _deferred =
+        hydrate_blob_refs_with_source(&BlobReadSource::Tenant { state, tenant }, value, usize::MAX)
+            .await;
 }
 
 /// Tenant-scoped variant of `hydrate_blob_refs_in_value_with_ceiling`.
@@ -279,10 +248,12 @@ pub(crate) async fn hydrate_blob_refs_for_tenant_with_ceiling(
     value: &mut Value,
     max_inline_bytes: usize,
 ) -> std::collections::BTreeMap<String, Vec<u8>> {
-    let Some(store) = state.persistent_store_for_tenant(tenant.as_str()).await else {
-        return std::collections::BTreeMap::new();
-    };
-    hydrate_blob_refs_in_value_with_ceiling(&store, value, max_inline_bytes).await
+    hydrate_blob_refs_with_source(
+        &BlobReadSource::Tenant { state, tenant },
+        value,
+        max_inline_bytes,
+    )
+    .await
 }
 
 /// `PUT /_internal/blobs/{*path}` — store a blob.
@@ -291,15 +262,9 @@ pub async fn put_blob(
     Path(path): Path<String>,
     body: Bytes,
 ) -> impl IntoResponse {
-    let Some(store) = state.platform_persistent_store().cloned() else {
-        return (
-            StatusCode::SERVICE_UNAVAILABLE,
-            "Blob storage requires Turso".to_string(),
-        )
-            .into_response();
-    };
+    let tenant = TenantId::new("default");
 
-    match put_blob_bytes(&store, &path, &body).await {
+    match state.put_blob_object(&tenant, &path, &body, None).await {
         Ok(()) => StatusCode::NO_CONTENT.into_response(),
         Err(e) => {
             tracing::error!(error = %e, path = %path, "blob put failed");
@@ -313,15 +278,9 @@ pub async fn get_blob(
     State(state): State<ServerState>,
     Path(path): Path<String>,
 ) -> impl IntoResponse {
-    let Some(store) = state.platform_persistent_store().cloned() else {
-        return (
-            StatusCode::SERVICE_UNAVAILABLE,
-            "Blob storage requires Turso".to_string(),
-        )
-            .into_response();
-    };
+    let tenant = TenantId::new("default");
 
-    match get_blob_bytes(&store, &path).await {
+    match state.get_blob_with_legacy_fallback(&tenant, &path).await {
         Ok(Some(data)) => (
             StatusCode::OK,
             [(axum::http::header::CONTENT_TYPE, "application/octet-stream")],
@@ -344,13 +303,9 @@ mod tests {
     use serde_json::json;
     use tempfile::TempDir;
 
-    async fn open_store() -> (temper_store_turso::TursoEventStore, TempDir) {
+    async fn open_store() -> (BlobStore, TempDir) {
         let dir = tempfile::tempdir().expect("tempdir");
-        let db_path = dir.path().join("e2e.db");
-        let url = format!("file:{}", db_path.display());
-        let store = temper_store_turso::TursoEventStore::new(&url, None)
-            .await
-            .expect("TursoEventStore::new");
+        let store = BlobStore::local_fs(dir.path().join("objects"));
         (store, dir)
     }
 
@@ -510,13 +465,12 @@ mod tests {
     }
 
     /// Per-field `overflow_ttl_seconds` propagates through `OverflowBlobWrite`
-    /// into `put_blob_with_ttl`. The blob should be swept after its TTL
-    /// expires. ADR-0047 Phase 4b.
+    /// into object-store persistence without requiring a DB blob row.
+    /// Object-store retention is delegated to the provider lifecycle policy.
     #[tokio::test]
-    async fn per_field_ttl_propagates_to_sweep() {
+    async fn per_field_ttl_persists_to_object_store() {
         use crate::entity_actor::effects::sync_fields_with_metadata;
         use std::collections::BTreeMap;
-        use std::time::Duration;
         use temper_jit::table::StateVarMetadata;
 
         let (store, _dir) = open_store().await;
@@ -554,18 +508,8 @@ mod tests {
         // The blob should exist immediately.
         let key = &overflow[0].key;
         assert!(
-            store.get_blob(key).await.unwrap().is_some(),
+            store.get(key).await.unwrap().is_some(),
             "freshly-written blob is readable"
-        );
-
-        // Wait past the 1-second TTL + margin, then sweep. Use 2.5s to
-        // clear any sub-second boundary effects in SQLite's datetime('now').
-        tokio::time::sleep(Duration::from_millis(2500)).await;
-        let deleted = store.sweep_expired_blobs(1000).await.unwrap();
-        assert_eq!(deleted, 1, "TTL'd blob swept");
-        assert!(
-            store.get_blob(key).await.unwrap().is_none(),
-            "blob gone after sweep"
         );
     }
 
