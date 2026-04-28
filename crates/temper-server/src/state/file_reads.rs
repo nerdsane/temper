@@ -136,8 +136,8 @@ impl ServerState {
     ) -> Result<BTreeMap<String, FileProjectionMeta>, String> {
         let mut by_id = BTreeMap::new();
 
-        if let Some(turso) = self.persistent_store_for_tenant(tenant.as_str()).await {
-            let rows = turso
+        if let Some(store) = self.metadata_store_for_tenant(tenant.as_str()).await {
+            let rows = store
                 .load_query_projection_fields_many(
                     tenant.as_str(),
                     "File",
@@ -145,7 +145,8 @@ impl ServerState {
                     &["content_hash", "mime_type", "has_content"],
                 )
                 .await
-                .map_err(|e| format!("failed to load File projections: {e}"))?;
+                .map_err(|e| format!("failed to load File projections: {e}"))?
+                .unwrap_or_default();
             for row in rows {
                 by_id.insert(row.entity_id.clone(), file_projection_from_row(row));
             }
@@ -173,8 +174,8 @@ impl ServerState {
     ) -> Result<BTreeMap<String, FileProjectionMeta>, String> {
         let mut by_id = BTreeMap::new();
 
-        if let Some(turso) = self.persistent_store_for_tenant(tenant.as_str()).await {
-            let rows = turso
+        if let Some(store) = self.metadata_store_for_tenant(tenant.as_str()).await {
+            let rows = store
                 .load_query_projection_fields_many(
                     tenant.as_str(),
                     "FileVersion",
@@ -182,7 +183,8 @@ impl ServerState {
                     &["content_hash", "mime_type"],
                 )
                 .await
-                .map_err(|e| format!("failed to load FileVersion projections: {e}"))?;
+                .map_err(|e| format!("failed to load FileVersion projections: {e}"))?
+                .unwrap_or_default();
             for row in rows {
                 by_id.insert(row.entity_id.clone(), file_version_projection_from_row(row));
             }

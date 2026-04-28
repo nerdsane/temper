@@ -536,4 +536,82 @@ mod tests {
         let _ = PostgresEventStore::load_recent_wasm_invocations;
         let _ = PostgresEventStore::delete_wasm_module;
     }
+
+    #[test]
+    fn postgres_query_projection_batch_method_is_part_of_the_store_surface() {
+        let _ = PostgresEventStore::load_query_projection_fields_many;
+    }
+
+    #[test]
+    fn load_query_projection_fields_many_returns_requested_fields() {
+        let database_url = match std::env::var("DATABASE_URL") {
+            Ok(url) => url,
+            Err(_) => {
+                eprintln!("skipping Postgres integration test: DATABASE_URL is not set");
+                return;
+            }
+        };
+
+        sqlx::test_block_on(async {
+            let pool = PgPool::connect(&database_url).await.unwrap();
+            run_migrations(&pool).await.unwrap();
+            let store = PostgresEventStore::new(pool.clone());
+            let tenant = format!("tenant-projection-{}", uuid::Uuid::new_v4());
+
+            store
+                .upsert_query_projection(
+                    &tenant,
+                    "File",
+                    "file-a",
+                    "Ready",
+                    &serde_json::json!({
+                        "content_hash": "sha256:file-a",
+                        "mime_type": "text/plain",
+                        "has_content": true,
+                    }),
+                    12,
+                )
+                .await
+                .unwrap();
+
+            let rows = store
+                .load_query_projection_fields_many(
+                    &tenant,
+                    "File",
+                    &["file-a".to_string(), "missing".to_string()],
+                    &["content_hash", "has_content"],
+                )
+                .await
+                .unwrap();
+
+            assert_eq!(rows.len(), 1);
+            assert_eq!(rows[0].entity_id, "file-a");
+            assert_eq!(rows[0].status, "Ready");
+            assert_eq!(
+                rows[0]
+                    .fields
+                    .get("content_hash")
+                    .and_then(|value| value.as_deref()),
+                Some("sha256:file-a")
+            );
+            assert_eq!(
+                rows[0]
+                    .fields
+                    .get("has_content")
+                    .and_then(|value| value.as_deref()),
+                Some("true")
+            );
+
+            sqlx::query("DELETE FROM entity_field_index WHERE tenant = $1")
+                .bind(&tenant)
+                .execute(&pool)
+                .await
+                .unwrap();
+            sqlx::query("DELETE FROM entity_catalog WHERE tenant = $1")
+                .bind(&tenant)
+                .execute(&pool)
+                .await
+                .unwrap();
+        });
+    }
 }

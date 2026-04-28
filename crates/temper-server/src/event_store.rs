@@ -12,6 +12,7 @@ use temper_store_redis::RedisEventStore;
 use temper_store_turso::PolicyRow as TursoPolicyRow;
 use temper_store_turso::TursoTrajectoryInsert;
 use temper_store_turso::store::TrajectoryStats;
+use temper_store_turso::store::field_index::ProjectedEntityFieldsRow;
 use temper_store_turso::{
     ActionStats, AgentSummary, DesignTimeEventRow, EvolutionRecordRow, FeatureRequestRow,
     OtsTrajectoryParams, OtsTrajectoryRow, PolicyDenialPatternRow, TursoTrajectoryRow,
@@ -629,6 +630,51 @@ impl ServerEventStore {
                 }
             }
             _ => Ok(None), // field index unsupported on Redis/sim
+        }
+    }
+
+    pub async fn load_query_projection_fields_many(
+        &self,
+        tenant: &str,
+        entity_type: &str,
+        entity_ids: &[String],
+        field_names: &[&str],
+    ) -> Result<Option<Vec<ProjectedEntityFieldsRow>>, PersistenceError> {
+        match self {
+            Self::Postgres(store) => store
+                .load_query_projection_fields_many(tenant, entity_type, entity_ids, field_names)
+                .await
+                .map(|rows| {
+                    Some(
+                        rows.into_iter()
+                            .map(|row| ProjectedEntityFieldsRow {
+                                entity_id: row.entity_id,
+                                status: row.status,
+                                fields: row.fields,
+                            })
+                            .collect(),
+                    )
+                }),
+            Self::Turso(store) => store
+                .load_query_projection_fields_many(tenant, entity_type, entity_ids, field_names)
+                .await
+                .map(Some),
+            Self::TenantRouted(router) => {
+                if let Ok(store) = router.store_for_tenant(tenant).await {
+                    store
+                        .load_query_projection_fields_many(
+                            tenant,
+                            entity_type,
+                            entity_ids,
+                            field_names,
+                        )
+                        .await
+                        .map(Some)
+                } else {
+                    Ok(None)
+                }
+            }
+            _ => Ok(None),
         }
     }
 

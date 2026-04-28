@@ -120,6 +120,13 @@ pub struct PostgresPolicyDenialPatternRow {
     pub distinct_resource_ids_json: String,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PostgresProjectedEntityFieldsRow {
+    pub entity_id: String,
+    pub status: String,
+    pub fields: BTreeMap<String, Option<String>>,
+}
+
 pub type PostgresSecretRow = (String, Vec<u8>, Vec<u8>);
 
 #[derive(Debug, Clone, serde::Serialize)]
@@ -418,6 +425,72 @@ impl PostgresEventStore {
             query = query.bind(param);
         }
         query.fetch_all(self.pool()).await.map_err(storage_error)
+    }
+
+    pub async fn load_query_projection_fields_many(
+        &self,
+        tenant: &str,
+        entity_type: &str,
+        entity_ids: &[String],
+        field_names: &[&str],
+    ) -> Result<Vec<PostgresProjectedEntityFieldsRow>, PersistenceError> {
+        if entity_ids.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        let requested_fields: BTreeSet<String> = field_names
+            .iter()
+            .map(|field| (*field).to_string())
+            .collect();
+        let field_names = requested_fields.iter().cloned().collect::<Vec<_>>();
+        let rows = sqlx::query(
+            "SELECT c.entity_id, c.status, f.field_name, f.field_value \
+             FROM entity_catalog c \
+             LEFT JOIN entity_field_index f \
+               ON c.tenant = f.tenant \
+              AND c.entity_type = f.entity_type \
+              AND c.entity_id = f.entity_id \
+              AND f.field_name = ANY($4) \
+             WHERE c.tenant = $1 \
+               AND c.entity_type = $2 \
+               AND c.entity_id = ANY($3) \
+             ORDER BY c.entity_id, f.field_name",
+        )
+        .bind(tenant)
+        .bind(entity_type)
+        .bind(entity_ids)
+        .bind(&field_names)
+        .fetch_all(self.pool())
+        .await
+        .map_err(storage_error)?;
+
+        let mut by_entity = BTreeMap::<String, PostgresProjectedEntityFieldsRow>::new();
+        for row in rows {
+            let entity_id: String = row.get("entity_id");
+            let status: String = row.get("status");
+            let field_name: Option<String> = row.get("field_name");
+            let field_value: Option<String> = row.get("field_value");
+            let entry = by_entity.entry(entity_id.clone()).or_insert_with(|| {
+                PostgresProjectedEntityFieldsRow {
+                    entity_id: entity_id.clone(),
+                    status,
+                    fields: requested_fields
+                        .iter()
+                        .map(|field| (field.clone(), None))
+                        .collect(),
+                }
+            });
+            if let Some(field_name) = field_name
+                && requested_fields.contains(&field_name)
+            {
+                entry.fields.insert(field_name, field_value);
+            }
+        }
+
+        Ok(entity_ids
+            .iter()
+            .filter_map(|entity_id| by_entity.remove(entity_id))
+            .collect())
     }
 
     pub async fn projected_entity_counts_by_tenant(

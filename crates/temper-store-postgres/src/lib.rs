@@ -21,9 +21,9 @@ pub use platform::{
     PostgresActionStats, PostgresAgentSummary, PostgresDesignTimeEventRow,
     PostgresEvolutionRecordRow, PostgresFeatureRequestRow, PostgresInstalledAppRow,
     PostgresOtsTrajectoryParams, PostgresOtsTrajectoryRow, PostgresPolicyDenialPatternRow,
-    PostgresPolicyRow, PostgresSecretRow, PostgresSpecRow, PostgresSpecVerificationUpdate,
-    PostgresTrajectoryInsert, PostgresTrajectoryRow, PostgresTrajectoryStats,
-    PostgresUnmetIntentAggRow, PostgresWasmInvocationInsert, PostgresWasmInvocationRow,
-    PostgresWasmModuleMetadataRow, PostgresWasmModuleRow,
+    PostgresPolicyRow, PostgresProjectedEntityFieldsRow, PostgresSecretRow, PostgresSpecRow,
+    PostgresSpecVerificationUpdate, PostgresTrajectoryInsert, PostgresTrajectoryRow,
+    PostgresTrajectoryStats, PostgresUnmetIntentAggRow, PostgresWasmInvocationInsert,
+    PostgresWasmInvocationRow, PostgresWasmModuleMetadataRow, PostgresWasmModuleRow,
 };
 pub use store::PostgresEventStore;
