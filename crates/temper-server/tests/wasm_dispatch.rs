@@ -107,11 +107,18 @@ async fn build_echo_test_state_with_turso() -> ServerState {
     let _ = std::fs::remove_file(db_path);
     let _ = std::fs::remove_file(format!("{db_path}-wal"));
     let _ = std::fs::remove_file(format!("{db_path}-shm"));
+    let data_dir = std::path::PathBuf::from(format!(
+        "/tmp/temper-wasm-dispatch-test-{}-{ts}-data",
+        std::process::id()
+    ));
+    let _ = std::fs::remove_dir_all(&data_dir);
+    std::fs::create_dir_all(&data_dir).expect("create local blob data dir");
     let turso = TursoEventStore::new(&db_url, None)
         .await
         .expect("create local turso db");
     let mut state = build_echo_test_state();
     state.event_store = Some(Arc::new(ServerEventStore::Turso(turso)));
+    state.data_dir = data_dir;
     state
 }
 
@@ -359,17 +366,22 @@ async fn persisted_wasm_modules_are_lazy_compiled_on_first_invoke() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn persisted_wasm_modules_with_missing_hash_still_execute_after_startup_restore() {
+async fn persisted_wasm_modules_with_legacy_db_blob_fallback_execute_after_startup_restore() {
     let state = build_echo_test_state_with_turso().await;
     let tenant = TenantId::default();
     let turso = state
         .platform_persistent_store()
         .expect("turso backend required");
+    let hash = temper_wasm::WasmEngine::hash_module(ECHO_WASM);
 
     turso
-        .upsert_wasm_module("default", "echo_integration", ECHO_WASM, "")
+        .upsert_wasm_module("default", "echo_integration", ECHO_WASM, &hash)
         .await
-        .expect("persist legacy echo module with missing hash");
+        .expect("persist metadata-only echo module");
+    turso
+        .put_blob(&format!("wasm-modules/{hash}"), ECHO_WASM)
+        .await
+        .expect("persist legacy DB-backed artifact");
 
     state
         .load_wasm_modules()
@@ -383,17 +395,14 @@ async fn persisted_wasm_modules_with_missing_hash_still_execute_after_startup_re
             .expect("wasm registry lock"); // ci-ok: infallible lock
         wasm_reg
             .get_hash(&tenant, "echo_integration")
-            .expect("legacy module should still be registered")
+            .expect("legacy DB-backed module should still be registered")
             .to_string()
     };
 
-    assert!(
-        !recovered_hash.is_empty(),
-        "startup restore should recover a usable hash even for legacy rows"
-    );
+    assert_eq!(recovered_hash, hash);
     assert!(
         !state.wasm_engine.is_cached(&recovered_hash),
-        "startup restore should still avoid eager compilation for legacy rows"
+        "startup restore should still avoid eager compilation for legacy DB-backed rows"
     );
 
     let response = state
@@ -421,7 +430,7 @@ async fn persisted_wasm_modules_with_missing_hash_still_execute_after_startup_re
     assert_eq!(final_status, "Done");
     assert!(
         state.wasm_engine.is_cached(&recovered_hash),
-        "legacy recovered modules should still lazy-compile on first invoke"
+        "legacy DB-backed modules should still lazy-compile on first invoke"
     );
 }
 

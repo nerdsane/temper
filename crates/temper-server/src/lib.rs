@@ -9,6 +9,7 @@ mod admin;
 #[cfg(feature = "observe")]
 mod api;
 pub mod authz;
+pub mod blob_store;
 pub mod blob_sweeper;
 pub mod blobs;
 pub mod channels;
