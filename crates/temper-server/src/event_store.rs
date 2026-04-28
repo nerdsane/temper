@@ -78,11 +78,12 @@ impl ServerEventStore {
 
     /// Return a reference to the platform store abstraction.
     ///
-    /// Works for Turso (single-DB and tenant-routed), and Sim (when a
+    /// Works for Postgres, Turso (single-DB and tenant-routed), and Sim (when a
     /// `SimPlatformStore` is attached). Returns `None` for backends without
-    /// platform-level storage (plain Postgres, Redis).
+    /// platform-level storage (Redis).
     pub fn platform_store(&self) -> Option<&dyn PlatformStore> {
         match self {
+            Self::Postgres(store) => Some(store as &dyn PlatformStore),
             Self::Turso(store) => Some(store as &dyn PlatformStore),
             Self::TenantRouted(router) => Some(router.platform_store() as &dyn PlatformStore),
             #[cfg(feature = "sim")]
@@ -132,6 +133,18 @@ impl ServerEventStore {
         sequence_nr: u64,
     ) -> Result<(), PersistenceError> {
         match self {
+            Self::Postgres(store) => {
+                store
+                    .upsert_query_projection(
+                        tenant,
+                        entity_type,
+                        entity_id,
+                        status,
+                        fields,
+                        sequence_nr,
+                    )
+                    .await
+            }
             Self::Turso(store) => {
                 store
                     .upsert_query_projection(
@@ -160,7 +173,7 @@ impl ServerEventStore {
                     Ok(()) // no tenant store → no-op
                 }
             }
-            _ => Ok(()), // query-plane projections only supported on Turso backends
+            _ => Ok(()), // Redis/sim have no durable query plane
         }
     }
 
@@ -172,6 +185,11 @@ impl ServerEventStore {
         entity_id: &str,
     ) -> Result<(), PersistenceError> {
         match self {
+            Self::Postgres(store) => {
+                store
+                    .remove_query_projection(tenant, entity_type, entity_id)
+                    .await
+            }
             Self::Turso(store) => {
                 store
                     .remove_query_projection(tenant, entity_type, entity_id)
@@ -190,11 +208,11 @@ impl ServerEventStore {
         }
     }
 
-    /// Query the field index (delegates to Turso backends only).
+    /// Query the field index.
     ///
     /// Returns `Ok(Some(ids))` when the backend supports field indexing and
     /// the query succeeded. Returns `Ok(None)` when the backend doesn't
-    /// support field indexing (Postgres, Redis, Sim).
+    /// support field indexing (Redis, Sim).
     pub async fn query_field_index(
         &self,
         tenant: &str,
@@ -203,6 +221,10 @@ impl ServerEventStore {
         params: Vec<String>,
     ) -> Result<Option<Vec<String>>, PersistenceError> {
         match self {
+            Self::Postgres(store) => store
+                .query_field_index(tenant, entity_type, where_clause, params)
+                .await
+                .map(Some),
             Self::Turso(store) => store
                 .query_field_index(tenant, entity_type, where_clause, params)
                 .await
@@ -217,7 +239,7 @@ impl ServerEventStore {
                     Ok(None)
                 }
             }
-            _ => Ok(None), // field index only supported on Turso backends
+            _ => Ok(None), // field index unsupported on Redis/sim
         }
     }
 
@@ -229,6 +251,7 @@ impl ServerEventStore {
         &self,
     ) -> Result<Option<Vec<(String, u64)>>, PersistenceError> {
         match self {
+            Self::Postgres(store) => store.projected_entity_counts_by_tenant().await.map(Some),
             Self::Turso(store) => store.projected_entity_counts_by_tenant().await.map(Some),
             Self::TenantRouted(router) => {
                 let mut counts = Vec::new();

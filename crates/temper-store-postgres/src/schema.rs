@@ -65,10 +65,20 @@ CREATE TABLE IF NOT EXISTS specs (
     levels_passed       INT,
     levels_total        INT,
     verification_result JSONB,
+    content_hash        TEXT         NOT NULL DEFAULT '',
+    committed           BOOLEAN      NOT NULL DEFAULT true,
     created_at          TIMESTAMPTZ  NOT NULL DEFAULT now(),
     updated_at          TIMESTAMPTZ  NOT NULL DEFAULT now(),
     UNIQUE (tenant, entity_type)
 );";
+
+/// Add content hash to existing `specs` tables created before ADR-0065.
+pub const ALTER_SPECS_ADD_CONTENT_HASH: &str =
+    "ALTER TABLE specs ADD COLUMN IF NOT EXISTS content_hash TEXT NOT NULL DEFAULT '';";
+
+/// Add commit flag to existing `specs` tables created before ADR-0065.
+pub const ALTER_SPECS_ADD_COMMITTED: &str =
+    "ALTER TABLE specs ADD COLUMN IF NOT EXISTS committed BOOLEAN NOT NULL DEFAULT true;";
 
 /// CREATE TABLE statement for persisted trajectory action outcomes.
 pub const CREATE_TRAJECTORIES_TABLE: &str = "\
@@ -84,6 +94,15 @@ CREATE TABLE IF NOT EXISTS trajectories (
     error         TEXT,
     agent_id      TEXT,
     session_id    TEXT,
+    authz_denied  BOOLEAN,
+    denied_resource TEXT,
+    denied_module TEXT,
+    source        TEXT,
+    spec_governed BOOLEAN,
+    request_body  JSONB,
+    intent        TEXT,
+    matched_policy_ids JSONB,
+    agent_type    TEXT,
     created_at    TIMESTAMPTZ  NOT NULL DEFAULT now()
 );";
 
@@ -188,6 +207,223 @@ CREATE TABLE IF NOT EXISTS tenant_secrets (
     PRIMARY KEY (tenant, key_name)
 );";
 
+/// CREATE TABLE statement for pending authorization decisions.
+pub const CREATE_PENDING_DECISIONS_TABLE: &str = "\
+CREATE TABLE IF NOT EXISTS pending_decisions (
+    id         TEXT         PRIMARY KEY,
+    tenant     TEXT         NOT NULL,
+    status     TEXT         NOT NULL DEFAULT 'pending',
+    data       JSONB        NOT NULL,
+    created_at TIMESTAMPTZ  NOT NULL DEFAULT now(),
+    updated_at TIMESTAMPTZ  NOT NULL DEFAULT now()
+);";
+
+/// CREATE INDEX for tenant-scoped decision reads.
+pub const CREATE_PENDING_DECISIONS_TENANT_INDEX: &str = "\
+CREATE INDEX IF NOT EXISTS idx_pending_decisions_tenant
+    ON pending_decisions (tenant);";
+
+/// CREATE INDEX for decision status filtering.
+pub const CREATE_PENDING_DECISIONS_STATUS_INDEX: &str = "\
+CREATE INDEX IF NOT EXISTS idx_pending_decisions_status
+    ON pending_decisions (status);";
+
+/// Legacy per-tenant Cedar policy blob.
+pub const CREATE_TENANT_POLICIES_TABLE: &str = "\
+CREATE TABLE IF NOT EXISTS tenant_policies (
+    tenant      TEXT         PRIMARY KEY,
+    policy_text TEXT         NOT NULL,
+    updated_at  TIMESTAMPTZ  NOT NULL DEFAULT now()
+);";
+
+/// Granular Cedar policy storage with one row per policy entry.
+pub const CREATE_POLICIES_TABLE: &str = "\
+CREATE TABLE IF NOT EXISTS policies (
+    tenant      TEXT         NOT NULL,
+    policy_id   TEXT         NOT NULL,
+    cedar_text  TEXT         NOT NULL,
+    policy_hash TEXT         NOT NULL DEFAULT '',
+    created_at  TIMESTAMPTZ  NOT NULL DEFAULT now(),
+    created_by  TEXT         NOT NULL DEFAULT 'system',
+    enabled     BOOLEAN      NOT NULL DEFAULT true,
+    PRIMARY KEY (tenant, policy_id)
+);";
+
+/// Durable authorization denial patterns for policy suggestion reconstruction.
+pub const CREATE_POLICY_DENIAL_PATTERNS_TABLE: &str = "\
+CREATE TABLE IF NOT EXISTS policy_denial_patterns (
+    tenant                     TEXT         NOT NULL,
+    agent_type                 TEXT         NOT NULL DEFAULT '',
+    action                     TEXT         NOT NULL,
+    resource_type              TEXT         NOT NULL,
+    count                      BIGINT       NOT NULL DEFAULT 0,
+    first_seen                 TIMESTAMPTZ  NOT NULL,
+    last_seen                  TIMESTAMPTZ  NOT NULL,
+    distinct_resource_ids_json JSONB        NOT NULL DEFAULT '[]'::jsonb,
+    PRIMARY KEY (tenant, agent_type, action, resource_type)
+);";
+
+/// CREATE INDEX for newest denial patterns by tenant.
+pub const CREATE_POLICY_DENIAL_PATTERNS_TENANT_INDEX: &str = "\
+CREATE INDEX IF NOT EXISTS idx_policy_denial_patterns_tenant
+    ON policy_denial_patterns (tenant, last_seen DESC);";
+
+/// Tracks installed OS apps per tenant.
+pub const CREATE_TENANT_INSTALLED_APPS_TABLE: &str = "\
+CREATE TABLE IF NOT EXISTS tenant_installed_apps (
+    tenant              TEXT         NOT NULL,
+    app_name            TEXT         NOT NULL,
+    app_version         TEXT         NOT NULL DEFAULT '',
+    bundle_digest       TEXT         NOT NULL DEFAULT '',
+    spec_digest         TEXT         NOT NULL DEFAULT '',
+    policy_digest       TEXT         NOT NULL DEFAULT '',
+    wasm_digest         TEXT         NOT NULL DEFAULT '',
+    content_digest      TEXT         NOT NULL DEFAULT '',
+    seed_digest         TEXT         NOT NULL DEFAULT '',
+    installed_at        TIMESTAMPTZ  NOT NULL DEFAULT now(),
+    last_reconciled_at  TIMESTAMPTZ,
+    status              TEXT         NOT NULL DEFAULT 'installed',
+    PRIMARY KEY (tenant, app_name)
+);";
+
+/// One row per live entity in the durable query plane.
+pub const CREATE_ENTITY_CATALOG_TABLE: &str = "\
+CREATE TABLE IF NOT EXISTS entity_catalog (
+    tenant             TEXT         NOT NULL,
+    entity_type        TEXT         NOT NULL,
+    entity_id          TEXT         NOT NULL,
+    status             TEXT         NOT NULL,
+    fields             JSONB        NOT NULL DEFAULT '{}'::jsonb,
+    updated_at         TIMESTAMPTZ  NOT NULL DEFAULT now(),
+    sequence_nr        BIGINT       NOT NULL DEFAULT 0,
+    projection_version INT          NOT NULL DEFAULT 2,
+    projection_hash    TEXT         NOT NULL DEFAULT '',
+    PRIMARY KEY (tenant, entity_type, entity_id)
+);";
+
+/// Fast path for collection lookups by tenant/entity type.
+pub const CREATE_ENTITY_CATALOG_TYPE_INDEX: &str = "\
+CREATE INDEX IF NOT EXISTS idx_entity_catalog_type
+    ON entity_catalog (tenant, entity_type);";
+
+/// Fast path for status-based collection filtering.
+pub const CREATE_ENTITY_CATALOG_STATUS_INDEX: &str = "\
+CREATE INDEX IF NOT EXISTS idx_entity_catalog_status
+    ON entity_catalog (tenant, entity_type, status);";
+
+/// GIN index for JSONB field containment queries.
+pub const CREATE_ENTITY_CATALOG_FIELDS_GIN_INDEX: &str = "\
+CREATE INDEX IF NOT EXISTS idx_entity_catalog_fields_gin
+    ON entity_catalog USING GIN (fields);";
+
+/// EAV field index for existing OData SQL push-down translator.
+pub const CREATE_ENTITY_FIELD_INDEX_TABLE: &str = "\
+CREATE TABLE IF NOT EXISTS entity_field_index (
+    tenant       TEXT NOT NULL,
+    entity_type  TEXT NOT NULL,
+    entity_id    TEXT NOT NULL,
+    field_name   TEXT NOT NULL,
+    field_value  TEXT,
+    status       TEXT,
+    PRIMARY KEY (tenant, entity_type, entity_id, field_name)
+);";
+
+/// Composite index for field-value lookups.
+pub const CREATE_ENTITY_FIELD_INDEX_LOOKUP: &str = "\
+CREATE INDEX IF NOT EXISTS idx_efi_lookup
+    ON entity_field_index (tenant, entity_type, field_name, field_value);";
+
+/// Index for status-based EAV filtering.
+pub const CREATE_ENTITY_FIELD_INDEX_STATUS: &str = "\
+CREATE INDEX IF NOT EXISTS idx_efi_status
+    ON entity_field_index (tenant, entity_type, status);";
+
+/// Feature request records generated from trajectory analysis.
+pub const CREATE_FEATURE_REQUESTS_TABLE: &str = "\
+CREATE TABLE IF NOT EXISTS feature_requests (
+    id              TEXT         PRIMARY KEY,
+    tenant          TEXT         NOT NULL DEFAULT 'default',
+    category        TEXT         NOT NULL,
+    description     TEXT         NOT NULL,
+    frequency       BIGINT       NOT NULL DEFAULT 0,
+    trajectory_refs JSONB        NOT NULL DEFAULT '[]'::jsonb,
+    disposition     TEXT         NOT NULL DEFAULT 'Open',
+    developer_notes TEXT,
+    created_at      TIMESTAMPTZ  NOT NULL DEFAULT now(),
+    updated_at      TIMESTAMPTZ  NOT NULL DEFAULT now()
+);";
+
+/// Evolution record chain table. Compatible with `temper-evolution`'s
+/// `PostgresRecordStore` (`payload` JSONB column) while adding tenant for RLS.
+pub const CREATE_EVOLUTION_RECORDS_TABLE: &str = "\
+CREATE TABLE IF NOT EXISTS evolution_records (
+    id           TEXT         PRIMARY KEY,
+    tenant       TEXT         NOT NULL DEFAULT 'default',
+    record_type  TEXT         NOT NULL,
+    status       TEXT         NOT NULL DEFAULT 'Open',
+    created_by   TEXT         NOT NULL,
+    derived_from TEXT,
+    timestamp    TIMESTAMPTZ  NOT NULL DEFAULT now(),
+    payload      JSONB        NOT NULL
+);";
+
+/// Add tenant to existing `evolution_records` tables.
+pub const ALTER_EVOLUTION_RECORDS_ADD_TENANT: &str = "ALTER TABLE evolution_records ADD COLUMN IF NOT EXISTS tenant TEXT NOT NULL DEFAULT 'default';";
+
+/// CREATE INDEX for evolution records by type/status.
+pub const CREATE_EVOLUTION_RECORDS_TYPE_STATUS_INDEX: &str = "\
+CREATE INDEX IF NOT EXISTS idx_evolution_records_type_status
+    ON evolution_records (record_type, status);";
+
+/// CREATE INDEX for derived evolution records.
+pub const CREATE_EVOLUTION_RECORDS_DERIVED_FROM_INDEX: &str = "\
+CREATE INDEX IF NOT EXISTS idx_evolution_records_derived_from
+    ON evolution_records (derived_from);";
+
+/// Full OTS trajectory storage for agent execution traces.
+pub const CREATE_OTS_TRAJECTORIES_TABLE: &str = "\
+CREATE TABLE IF NOT EXISTS ots_trajectories (
+    trajectory_id TEXT         PRIMARY KEY,
+    tenant        TEXT         NOT NULL,
+    agent_id      TEXT         NOT NULL,
+    session_id    TEXT,
+    outcome       TEXT         NOT NULL DEFAULT 'unknown',
+    entity_type   TEXT,
+    turn_count    BIGINT       NOT NULL DEFAULT 0,
+    data          JSONB        NOT NULL,
+    created_at    TIMESTAMPTZ  NOT NULL DEFAULT now()
+);";
+
+/// CREATE INDEX for OTS lookup by agent.
+pub const CREATE_OTS_TRAJECTORIES_AGENT_INDEX: &str = "\
+CREATE INDEX IF NOT EXISTS idx_ots_trajectories_agent
+    ON ots_trajectories (agent_id);";
+
+/// CREATE INDEX for OTS lookup by tenant.
+pub const CREATE_OTS_TRAJECTORIES_TENANT_INDEX: &str = "\
+CREATE INDEX IF NOT EXISTS idx_ots_trajectories_tenant
+    ON ots_trajectories (tenant);";
+
+/// CREATE INDEX for OTS lookup by outcome.
+pub const CREATE_OTS_TRAJECTORIES_OUTCOME_INDEX: &str = "\
+CREATE INDEX IF NOT EXISTS idx_ots_trajectories_outcome
+    ON ots_trajectories (outcome);";
+
+/// Content-addressed blob storage for development/local deployments.
+pub const CREATE_BLOBS_TABLE: &str = "\
+CREATE TABLE IF NOT EXISTS blobs (
+    blob_key   TEXT         PRIMARY KEY,
+    data       BYTEA        NOT NULL,
+    size_bytes BIGINT       NOT NULL,
+    created_at TIMESTAMPTZ  NOT NULL DEFAULT now(),
+    expires_at TIMESTAMPTZ
+);";
+
+/// Partial index for blob TTL sweeps.
+pub const CREATE_BLOBS_EXPIRES_AT_INDEX: &str = "\
+CREATE INDEX IF NOT EXISTS idx_blobs_expires_at
+    ON blobs (expires_at) WHERE expires_at IS NOT NULL;";
+
 // ---------------------------------------------------------------------------
 // Row-Level Security (RLS) — tenant isolation
 // ---------------------------------------------------------------------------
@@ -273,6 +509,76 @@ pub const ENABLE_TENANT_RLS: &[&str] = &[
     "DO $$ BEGIN \
        IF NOT EXISTS (SELECT 1 FROM pg_policies WHERE tablename = 'tenant_secrets' AND policyname = 'tenant_isolation') THEN \
          EXECUTE 'CREATE POLICY tenant_isolation ON tenant_secrets USING (tenant = current_setting(''app.current_tenant'', true))'; \
+       END IF; \
+     END $$",
+    // -- pending_decisions --
+    "ALTER TABLE pending_decisions ENABLE ROW LEVEL SECURITY",
+    "DO $$ BEGIN \
+       IF NOT EXISTS (SELECT 1 FROM pg_policies WHERE tablename = 'pending_decisions' AND policyname = 'tenant_isolation') THEN \
+         EXECUTE 'CREATE POLICY tenant_isolation ON pending_decisions USING (tenant = current_setting(''app.current_tenant'', true))'; \
+       END IF; \
+     END $$",
+    // -- tenant_policies --
+    "ALTER TABLE tenant_policies ENABLE ROW LEVEL SECURITY",
+    "DO $$ BEGIN \
+       IF NOT EXISTS (SELECT 1 FROM pg_policies WHERE tablename = 'tenant_policies' AND policyname = 'tenant_isolation') THEN \
+         EXECUTE 'CREATE POLICY tenant_isolation ON tenant_policies USING (tenant = current_setting(''app.current_tenant'', true))'; \
+       END IF; \
+     END $$",
+    // -- policies --
+    "ALTER TABLE policies ENABLE ROW LEVEL SECURITY",
+    "DO $$ BEGIN \
+       IF NOT EXISTS (SELECT 1 FROM pg_policies WHERE tablename = 'policies' AND policyname = 'tenant_isolation') THEN \
+         EXECUTE 'CREATE POLICY tenant_isolation ON policies USING (tenant = current_setting(''app.current_tenant'', true))'; \
+       END IF; \
+     END $$",
+    // -- policy_denial_patterns --
+    "ALTER TABLE policy_denial_patterns ENABLE ROW LEVEL SECURITY",
+    "DO $$ BEGIN \
+       IF NOT EXISTS (SELECT 1 FROM pg_policies WHERE tablename = 'policy_denial_patterns' AND policyname = 'tenant_isolation') THEN \
+         EXECUTE 'CREATE POLICY tenant_isolation ON policy_denial_patterns USING (tenant = current_setting(''app.current_tenant'', true))'; \
+       END IF; \
+     END $$",
+    // -- tenant_installed_apps --
+    "ALTER TABLE tenant_installed_apps ENABLE ROW LEVEL SECURITY",
+    "DO $$ BEGIN \
+       IF NOT EXISTS (SELECT 1 FROM pg_policies WHERE tablename = 'tenant_installed_apps' AND policyname = 'tenant_isolation') THEN \
+         EXECUTE 'CREATE POLICY tenant_isolation ON tenant_installed_apps USING (tenant = current_setting(''app.current_tenant'', true))'; \
+       END IF; \
+     END $$",
+    // -- entity_catalog --
+    "ALTER TABLE entity_catalog ENABLE ROW LEVEL SECURITY",
+    "DO $$ BEGIN \
+       IF NOT EXISTS (SELECT 1 FROM pg_policies WHERE tablename = 'entity_catalog' AND policyname = 'tenant_isolation') THEN \
+         EXECUTE 'CREATE POLICY tenant_isolation ON entity_catalog USING (tenant = current_setting(''app.current_tenant'', true))'; \
+       END IF; \
+     END $$",
+    // -- entity_field_index --
+    "ALTER TABLE entity_field_index ENABLE ROW LEVEL SECURITY",
+    "DO $$ BEGIN \
+       IF NOT EXISTS (SELECT 1 FROM pg_policies WHERE tablename = 'entity_field_index' AND policyname = 'tenant_isolation') THEN \
+         EXECUTE 'CREATE POLICY tenant_isolation ON entity_field_index USING (tenant = current_setting(''app.current_tenant'', true))'; \
+       END IF; \
+     END $$",
+    // -- feature_requests --
+    "ALTER TABLE feature_requests ENABLE ROW LEVEL SECURITY",
+    "DO $$ BEGIN \
+       IF NOT EXISTS (SELECT 1 FROM pg_policies WHERE tablename = 'feature_requests' AND policyname = 'tenant_isolation') THEN \
+         EXECUTE 'CREATE POLICY tenant_isolation ON feature_requests USING (tenant = current_setting(''app.current_tenant'', true))'; \
+       END IF; \
+     END $$",
+    // -- evolution_records --
+    "ALTER TABLE evolution_records ENABLE ROW LEVEL SECURITY",
+    "DO $$ BEGIN \
+       IF NOT EXISTS (SELECT 1 FROM pg_policies WHERE tablename = 'evolution_records' AND policyname = 'tenant_isolation') THEN \
+         EXECUTE 'CREATE POLICY tenant_isolation ON evolution_records USING (tenant = current_setting(''app.current_tenant'', true))'; \
+       END IF; \
+     END $$",
+    // -- ots_trajectories --
+    "ALTER TABLE ots_trajectories ENABLE ROW LEVEL SECURITY",
+    "DO $$ BEGIN \
+       IF NOT EXISTS (SELECT 1 FROM pg_policies WHERE tablename = 'ots_trajectories' AND policyname = 'tenant_isolation') THEN \
+         EXECUTE 'CREATE POLICY tenant_isolation ON ots_trajectories USING (tenant = current_setting(''app.current_tenant'', true))'; \
        END IF; \
      END $$",
 ];
@@ -415,6 +721,50 @@ mod tests {
             CREATE_TENANT_SECRETS_TABLE.contains("IF NOT EXISTS"),
             "tenant_secrets schema should use IF NOT EXISTS"
         );
+        assert!(
+            CREATE_PENDING_DECISIONS_TABLE.contains("IF NOT EXISTS"),
+            "pending_decisions schema should use IF NOT EXISTS"
+        );
+        assert!(
+            CREATE_TENANT_POLICIES_TABLE.contains("IF NOT EXISTS"),
+            "tenant_policies schema should use IF NOT EXISTS"
+        );
+        assert!(
+            CREATE_POLICIES_TABLE.contains("IF NOT EXISTS"),
+            "policies schema should use IF NOT EXISTS"
+        );
+        assert!(
+            CREATE_POLICY_DENIAL_PATTERNS_TABLE.contains("IF NOT EXISTS"),
+            "policy_denial_patterns schema should use IF NOT EXISTS"
+        );
+        assert!(
+            CREATE_TENANT_INSTALLED_APPS_TABLE.contains("IF NOT EXISTS"),
+            "tenant_installed_apps schema should use IF NOT EXISTS"
+        );
+        assert!(
+            CREATE_ENTITY_CATALOG_TABLE.contains("IF NOT EXISTS"),
+            "entity_catalog schema should use IF NOT EXISTS"
+        );
+        assert!(
+            CREATE_ENTITY_FIELD_INDEX_TABLE.contains("IF NOT EXISTS"),
+            "entity_field_index schema should use IF NOT EXISTS"
+        );
+        assert!(
+            CREATE_FEATURE_REQUESTS_TABLE.contains("IF NOT EXISTS"),
+            "feature_requests schema should use IF NOT EXISTS"
+        );
+        assert!(
+            CREATE_EVOLUTION_RECORDS_TABLE.contains("IF NOT EXISTS"),
+            "evolution_records schema should use IF NOT EXISTS"
+        );
+        assert!(
+            CREATE_OTS_TRAJECTORIES_TABLE.contains("IF NOT EXISTS"),
+            "ots_trajectories schema should use IF NOT EXISTS"
+        );
+        assert!(
+            CREATE_BLOBS_TABLE.contains("IF NOT EXISTS"),
+            "blobs schema should use IF NOT EXISTS"
+        );
     }
 
     #[test]
@@ -478,6 +828,16 @@ mod tests {
             "wasm_modules",
             "wasm_invocation_logs",
             "tenant_secrets",
+            "pending_decisions",
+            "tenant_policies",
+            "policies",
+            "policy_denial_patterns",
+            "tenant_installed_apps",
+            "entity_catalog",
+            "entity_field_index",
+            "feature_requests",
+            "evolution_records",
+            "ots_trajectories",
         ];
         let all_sql: String = ENABLE_TENANT_RLS.iter().map(|s| s.to_lowercase()).collect();
         for table in &expected_tables {
@@ -525,6 +885,20 @@ mod tests {
         assert!(
             sql.contains("(TENANT, ENTITY_TYPE, ENTITY_ID)"),
             "index should cover tenant/entity_type/entity_id"
+        );
+    }
+
+    #[test]
+    fn query_projection_schema_uses_jsonb_and_gin() {
+        let catalog_sql = CREATE_ENTITY_CATALOG_TABLE.to_uppercase();
+        assert!(
+            catalog_sql.contains("FIELDS") && catalog_sql.contains("JSONB"),
+            "entity_catalog should store projected fields as JSONB"
+        );
+        let gin_sql = CREATE_ENTITY_CATALOG_FIELDS_GIN_INDEX.to_uppercase();
+        assert!(
+            gin_sql.contains("USING GIN"),
+            "entity_catalog fields index should use GIN for JSONB containment"
         );
     }
 }
