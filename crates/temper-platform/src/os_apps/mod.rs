@@ -1423,6 +1423,7 @@ pub(super) async fn install_os_app_with_plan(
                     label: &format!("OsApp({app_name})"),
                     verified_cache: &verified_cache,
                     cross_invariants_source: bundle.cross_invariants_toml.as_deref(),
+                    verification_mode: bootstrap::BootstrapSpecVerificationMode::TrustBundle,
                 },
             );
 
