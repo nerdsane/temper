@@ -18,7 +18,7 @@ pub mod schema;
 pub mod store;
 
 pub use platform::{
-    PostgresInstalledAppRow, PostgresSpecRow, PostgresSpecVerificationUpdate,
+    PostgresInstalledAppRow, PostgresPolicyRow, PostgresSpecRow, PostgresSpecVerificationUpdate,
     PostgresTrajectoryInsert, PostgresWasmModuleRow,
 };
 pub use store::PostgresEventStore;

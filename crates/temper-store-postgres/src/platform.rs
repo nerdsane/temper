@@ -57,6 +57,17 @@ pub struct PostgresWasmModuleRow {
     pub sha256_hash: String,
 }
 
+#[derive(Debug, Clone)]
+pub struct PostgresPolicyRow {
+    pub tenant: String,
+    pub policy_id: String,
+    pub cedar_text: String,
+    pub policy_hash: String,
+    pub created_at: String,
+    pub created_by: String,
+    pub enabled: bool,
+}
+
 #[derive(Clone, Copy, Debug)]
 pub struct PostgresTrajectoryInsert<'a> {
     pub tenant: &'a str,
@@ -394,6 +405,135 @@ impl PostgresEventStore {
             .map_err(storage_error)
     }
 
+    pub async fn save_policy(
+        &self,
+        tenant: &str,
+        policy_id: &str,
+        cedar_text: &str,
+        created_by: &str,
+    ) -> Result<bool, PersistenceError> {
+        let policy_hash = compute_policy_hash(cedar_text);
+        let existing_hash: Option<String> = sqlx::query_scalar(
+            "SELECT policy_hash FROM policies WHERE tenant = $1 AND policy_id = $2",
+        )
+        .bind(tenant)
+        .bind(policy_id)
+        .fetch_optional(self.pool())
+        .await
+        .map_err(storage_error)?;
+
+        if existing_hash.as_deref() == Some(policy_hash.as_str()) {
+            return Ok(false);
+        }
+
+        sqlx::query(
+            "INSERT INTO policies \
+             (tenant, policy_id, cedar_text, policy_hash, created_at, created_by, enabled) \
+             VALUES ($1, $2, $3, $4, now(), $5, true) \
+             ON CONFLICT (tenant, policy_id) DO UPDATE SET \
+                 cedar_text = EXCLUDED.cedar_text, \
+                 policy_hash = EXCLUDED.policy_hash, \
+                 created_by = EXCLUDED.created_by, \
+                 created_at = now()",
+        )
+        .bind(tenant)
+        .bind(policy_id)
+        .bind(cedar_text)
+        .bind(&policy_hash)
+        .bind(created_by)
+        .execute(self.pool())
+        .await
+        .map_err(storage_error)?;
+
+        Ok(true)
+    }
+
+    pub async fn load_policies_for_tenant(
+        &self,
+        tenant: &str,
+    ) -> Result<Vec<PostgresPolicyRow>, PersistenceError> {
+        sqlx::query(
+            "SELECT tenant, policy_id, cedar_text, policy_hash, created_at, created_by, enabled \
+             FROM policies \
+             WHERE tenant = $1 \
+             ORDER BY created_at ASC",
+        )
+        .bind(tenant)
+        .fetch_all(self.pool())
+        .await
+        .map(|rows| rows.into_iter().map(row_to_policy).collect())
+        .map_err(storage_error)
+    }
+
+    pub async fn load_all_policies(&self) -> Result<Vec<PostgresPolicyRow>, PersistenceError> {
+        sqlx::query(
+            "SELECT tenant, policy_id, cedar_text, policy_hash, created_at, created_by, enabled \
+             FROM policies \
+             ORDER BY tenant ASC, created_at ASC",
+        )
+        .fetch_all(self.pool())
+        .await
+        .map(|rows| rows.into_iter().map(row_to_policy).collect())
+        .map_err(storage_error)
+    }
+
+    pub async fn toggle_policy_enabled(
+        &self,
+        tenant: &str,
+        policy_id: &str,
+        enabled: bool,
+    ) -> Result<bool, PersistenceError> {
+        let result = sqlx::query(
+            "UPDATE policies SET enabled = $3 \
+             WHERE tenant = $1 AND policy_id = $2",
+        )
+        .bind(tenant)
+        .bind(policy_id)
+        .bind(enabled)
+        .execute(self.pool())
+        .await
+        .map_err(storage_error)?;
+        Ok(result.rows_affected() > 0)
+    }
+
+    pub async fn update_policy_text(
+        &self,
+        tenant: &str,
+        policy_id: &str,
+        cedar_text: &str,
+        created_by: &str,
+    ) -> Result<bool, PersistenceError> {
+        let policy_hash = compute_policy_hash(cedar_text);
+        let result = sqlx::query(
+            "UPDATE policies \
+             SET cedar_text = $3, policy_hash = $4, created_by = $5, created_at = now() \
+             WHERE tenant = $1 AND policy_id = $2",
+        )
+        .bind(tenant)
+        .bind(policy_id)
+        .bind(cedar_text)
+        .bind(&policy_hash)
+        .bind(created_by)
+        .execute(self.pool())
+        .await
+        .map_err(storage_error)?;
+        Ok(result.rows_affected() > 0)
+    }
+
+    pub async fn delete_policy(
+        &self,
+        tenant: &str,
+        policy_id: &str,
+    ) -> Result<(), PersistenceError> {
+        sqlx::query("DELETE FROM policies WHERE tenant = $1 AND policy_id = $2")
+            .bind(tenant)
+            .bind(policy_id)
+            .execute(self.pool())
+            .await
+            .map_err(storage_error)?;
+        Ok(())
+    }
+
     pub async fn upsert_tenant_constraints(
         &self,
         tenant: &str,
@@ -632,6 +772,12 @@ fn json_hash(value: &serde_json::Value) -> String {
     format!("{:x}", hasher.finalize())
 }
 
+fn compute_policy_hash(cedar_text: &str) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(cedar_text.as_bytes());
+    format!("{:x}", hasher.finalize())
+}
+
 fn scalar_field_value(value: &serde_json::Value) -> Option<String> {
     match value {
         serde_json::Value::Null => None,
@@ -694,5 +840,18 @@ fn row_to_wasm_module(row: sqlx::postgres::PgRow) -> PostgresWasmModuleRow {
         module_name: row.get("module_name"),
         wasm_bytes: row.get("wasm_bytes"),
         sha256_hash: row.get("sha256_hash"),
+    }
+}
+
+fn row_to_policy(row: sqlx::postgres::PgRow) -> PostgresPolicyRow {
+    let created_at: chrono::DateTime<chrono::Utc> = row.get("created_at");
+    PostgresPolicyRow {
+        tenant: row.get("tenant"),
+        policy_id: row.get("policy_id"),
+        cedar_text: row.get("cedar_text"),
+        policy_hash: row.get("policy_hash"),
+        created_at: created_at.to_rfc3339(),
+        created_by: row.get("created_by"),
+        enabled: row.get("enabled"),
     }
 }

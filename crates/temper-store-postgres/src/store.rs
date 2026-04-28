@@ -469,6 +469,22 @@ mod tests {
                 intent: Some("test"),
                 matched_policy_ids: Some("[\"policy:test\"]"),
             });
+            let _ = store.save_policy(
+                "tenant",
+                "primary",
+                "permit(principal, action, resource);",
+                "test",
+            );
+            let _ = store.load_policies_for_tenant("tenant");
+            let _ = store.load_all_policies();
+            let _ = store.toggle_policy_enabled("tenant", "primary", true);
+            let _ = store.update_policy_text(
+                "tenant",
+                "primary",
+                "permit(principal, action, resource);",
+                "test",
+            );
+            let _ = store.delete_policy("tenant", "primary");
         }
 
         let _ = assert_methods;

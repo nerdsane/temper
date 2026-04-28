@@ -325,22 +325,16 @@ pub(super) async fn recover_cedar_policies(state: &PlatformState) {
 
     let mut all_policy_rows: Vec<(String, String)> = Vec::new();
 
-    if let Some(turso) = store.turso_store() {
-        // Single-DB mode.
-        match turso.load_tenant_policies().await {
-            Ok(rows) => all_policy_rows.extend(rows),
-            Err(e) => {
-                eprintln!("  Warning: failed to load Cedar policies from Turso: {e}");
-            }
-        }
-    } else if let Some(router) = store.tenant_router() {
-        // Routed mode: load from platform store + each tenant store.
-        match router.platform_store().load_tenant_policies().await {
+    if let Some(platform_store) = store.platform_store() {
+        match platform_store.load_tenant_policies().await {
             Ok(rows) => all_policy_rows.extend(rows),
             Err(e) => {
                 eprintln!("  Warning: failed to load Cedar policies from platform store: {e}");
             }
         }
+    }
+    if let Some(router) = store.tenant_router() {
+        // Routed mode: also load legacy per-tenant policy blobs.
         for tenant_id in router.connected_tenants().await {
             if let Ok(turso) = router.store_for_tenant(&tenant_id).await {
                 match turso.load_tenant_policies().await {
@@ -396,16 +390,8 @@ pub(super) async fn recover_cedar_policies(state: &PlatformState) {
         })
         .unwrap_or_default();
 
-    if let Some(turso) = store.turso_store() {
-        for tenant in &tenants {
-            load_and_activate_tenant_policies(&state.server, tenant, turso).await;
-        }
-    } else if let Some(router) = store.tenant_router() {
-        for tenant in &tenants {
-            if let Ok(turso) = router.store_for_tenant(tenant).await {
-                load_and_activate_tenant_policies(&state.server, tenant, &turso).await;
-            }
-        }
+    for tenant in &tenants {
+        load_and_activate_tenant_policies(&state.server, tenant).await;
     }
 }
 

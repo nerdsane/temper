@@ -6,8 +6,10 @@
 use sqlx::PgPool;
 use temper_runtime::persistence::{EventStore, PersistenceEnvelope, PersistenceError};
 use temper_store_postgres::PostgresEventStore;
+use temper_store_postgres::PostgresPolicyRow;
 use temper_store_postgres::PostgresTrajectoryInsert;
 use temper_store_redis::RedisEventStore;
+use temper_store_turso::PolicyRow as TursoPolicyRow;
 use temper_store_turso::TursoTrajectoryInsert;
 use temper_store_turso::{TenantStoreRouter, TursoEventStore};
 
@@ -34,6 +36,46 @@ pub enum ServerEventStore {
     /// platform-level storage (specs, OS apps, decisions, etc.).
     #[cfg(feature = "sim")]
     Sim(SimEventStore, Option<Arc<SimPlatformStore>>),
+}
+
+/// Backend-neutral row for one granular Cedar policy entry.
+#[derive(Clone, Debug)]
+pub struct PolicyStoreRow {
+    pub tenant: String,
+    pub policy_id: String,
+    pub cedar_text: String,
+    pub policy_hash: String,
+    pub created_at: String,
+    pub created_by: String,
+    pub enabled: bool,
+}
+
+impl From<TursoPolicyRow> for PolicyStoreRow {
+    fn from(row: TursoPolicyRow) -> Self {
+        Self {
+            tenant: row.tenant,
+            policy_id: row.policy_id,
+            cedar_text: row.cedar_text,
+            policy_hash: row.policy_hash,
+            created_at: row.created_at,
+            created_by: row.created_by,
+            enabled: row.enabled,
+        }
+    }
+}
+
+impl From<PostgresPolicyRow> for PolicyStoreRow {
+    fn from(row: PostgresPolicyRow) -> Self {
+        Self {
+            tenant: row.tenant,
+            policy_id: row.policy_id,
+            cedar_text: row.cedar_text,
+            policy_hash: row.policy_hash,
+            created_at: row.created_at,
+            created_by: row.created_by,
+            enabled: row.enabled,
+        }
+    }
 }
 
 impl ServerEventStore {
@@ -125,6 +167,214 @@ impl ServerEventStore {
 }
 
 impl ServerEventStore {
+    pub async fn save_policy(
+        &self,
+        tenant: &str,
+        policy_id: &str,
+        cedar_text: &str,
+        created_by: &str,
+    ) -> Result<bool, String> {
+        match self {
+            Self::Postgres(store) => store
+                .save_policy(tenant, policy_id, cedar_text, created_by)
+                .await
+                .map_err(|e| e.to_string()),
+            Self::Turso(store) => store
+                .save_policy(tenant, policy_id, cedar_text, created_by)
+                .await
+                .map_err(|e| e.to_string()),
+            Self::TenantRouted(router) => {
+                let store = router
+                    .store_for_tenant(tenant)
+                    .await
+                    .map_err(|e| e.to_string())?;
+                store
+                    .save_policy(tenant, policy_id, cedar_text, created_by)
+                    .await
+                    .map_err(|e| e.to_string())
+            }
+            Self::Redis(_) => Err(
+                "Policy persistence is not supported on redis backend (explicit ephemeral mode: metadata is in-memory only)"
+                    .to_string(),
+            ),
+            #[cfg(feature = "sim")]
+            Self::Sim(_, _) => Ok(false),
+        }
+    }
+
+    pub async fn load_policies_for_tenant(
+        &self,
+        tenant: &str,
+    ) -> Result<Vec<PolicyStoreRow>, String> {
+        match self {
+            Self::Postgres(store) => store
+                .load_policies_for_tenant(tenant)
+                .await
+                .map(|rows| rows.into_iter().map(PolicyStoreRow::from).collect())
+                .map_err(|e| e.to_string()),
+            Self::Turso(store) => store
+                .load_policies_for_tenant(tenant)
+                .await
+                .map(|rows| rows.into_iter().map(PolicyStoreRow::from).collect())
+                .map_err(|e| e.to_string()),
+            Self::TenantRouted(router) => {
+                let store = router
+                    .store_for_tenant(tenant)
+                    .await
+                    .map_err(|e| e.to_string())?;
+                store
+                    .load_policies_for_tenant(tenant)
+                    .await
+                    .map(|rows| rows.into_iter().map(PolicyStoreRow::from).collect())
+                    .map_err(|e| e.to_string())
+            }
+            Self::Redis(_) => Err(
+                "Policy reads are not supported on redis backend (explicit ephemeral mode: metadata is in-memory only)"
+                    .to_string(),
+            ),
+            #[cfg(feature = "sim")]
+            Self::Sim(_, _) => Ok(Vec::new()),
+        }
+    }
+
+    pub async fn load_all_policies(&self) -> Result<Vec<PolicyStoreRow>, String> {
+        match self {
+            Self::Postgres(store) => store
+                .load_all_policies()
+                .await
+                .map(|rows| rows.into_iter().map(PolicyStoreRow::from).collect())
+                .map_err(|e| e.to_string()),
+            Self::Turso(store) => store
+                .load_all_policies()
+                .await
+                .map(|rows| rows.into_iter().map(PolicyStoreRow::from).collect())
+                .map_err(|e| e.to_string()),
+            Self::TenantRouted(router) => {
+                let mut rows: Vec<PolicyStoreRow> = router
+                    .platform_store()
+                    .load_all_policies()
+                    .await
+                    .map(|rows| rows.into_iter().map(PolicyStoreRow::from).collect())
+                    .map_err(|e| e.to_string())?;
+                for tenant_id in router.connected_tenants().await {
+                    if let Ok(store) = router.store_for_tenant(&tenant_id).await {
+                        let mut tenant_rows: Vec<PolicyStoreRow> = store
+                            .load_all_policies()
+                            .await
+                            .map(|rows| rows.into_iter().map(PolicyStoreRow::from).collect())
+                            .map_err(|e| e.to_string())?;
+                        rows.append(&mut tenant_rows);
+                    }
+                }
+                Ok(rows)
+            }
+            Self::Redis(_) => Err(
+                "Policy reads are not supported on redis backend (explicit ephemeral mode: metadata is in-memory only)"
+                    .to_string(),
+            ),
+            #[cfg(feature = "sim")]
+            Self::Sim(_, _) => Ok(Vec::new()),
+        }
+    }
+
+    pub async fn toggle_policy_enabled(
+        &self,
+        tenant: &str,
+        policy_id: &str,
+        enabled: bool,
+    ) -> Result<bool, String> {
+        match self {
+            Self::Postgres(store) => store
+                .toggle_policy_enabled(tenant, policy_id, enabled)
+                .await
+                .map_err(|e| e.to_string()),
+            Self::Turso(store) => store
+                .toggle_policy_enabled(tenant, policy_id, enabled)
+                .await
+                .map_err(|e| e.to_string()),
+            Self::TenantRouted(router) => {
+                let store = router
+                    .store_for_tenant(tenant)
+                    .await
+                    .map_err(|e| e.to_string())?;
+                store
+                    .toggle_policy_enabled(tenant, policy_id, enabled)
+                    .await
+                    .map_err(|e| e.to_string())
+            }
+            Self::Redis(_) => Err(
+                "Policy persistence is not supported on redis backend (explicit ephemeral mode: metadata is in-memory only)"
+                    .to_string(),
+            ),
+            #[cfg(feature = "sim")]
+            Self::Sim(_, _) => Ok(false),
+        }
+    }
+
+    pub async fn update_policy_text(
+        &self,
+        tenant: &str,
+        policy_id: &str,
+        cedar_text: &str,
+        created_by: &str,
+    ) -> Result<bool, String> {
+        match self {
+            Self::Postgres(store) => store
+                .update_policy_text(tenant, policy_id, cedar_text, created_by)
+                .await
+                .map_err(|e| e.to_string()),
+            Self::Turso(store) => store
+                .update_policy_text(tenant, policy_id, cedar_text, created_by)
+                .await
+                .map_err(|e| e.to_string()),
+            Self::TenantRouted(router) => {
+                let store = router
+                    .store_for_tenant(tenant)
+                    .await
+                    .map_err(|e| e.to_string())?;
+                store
+                    .update_policy_text(tenant, policy_id, cedar_text, created_by)
+                    .await
+                    .map_err(|e| e.to_string())
+            }
+            Self::Redis(_) => Err(
+                "Policy persistence is not supported on redis backend (explicit ephemeral mode: metadata is in-memory only)"
+                    .to_string(),
+            ),
+            #[cfg(feature = "sim")]
+            Self::Sim(_, _) => Ok(false),
+        }
+    }
+
+    pub async fn delete_policy(&self, tenant: &str, policy_id: &str) -> Result<(), String> {
+        match self {
+            Self::Postgres(store) => store
+                .delete_policy(tenant, policy_id)
+                .await
+                .map_err(|e| e.to_string()),
+            Self::Turso(store) => store
+                .delete_policy(tenant, policy_id)
+                .await
+                .map_err(|e| e.to_string()),
+            Self::TenantRouted(router) => {
+                let store = router
+                    .store_for_tenant(tenant)
+                    .await
+                    .map_err(|e| e.to_string())?;
+                store
+                    .delete_policy(tenant, policy_id)
+                    .await
+                    .map_err(|e| e.to_string())
+            }
+            Self::Redis(_) => Err(
+                "Policy persistence is not supported on redis backend (explicit ephemeral mode: metadata is in-memory only)"
+                    .to_string(),
+            ),
+            #[cfg(feature = "sim")]
+            Self::Sim(_, _) => Ok(()),
+        }
+    }
+
     /// Persist one observe trajectory entry to the durable metadata backend.
     pub async fn persist_trajectory_entry(&self, entry: &TrajectoryEntry) -> Result<(), String> {
         let matched_policy_ids_json = entry
