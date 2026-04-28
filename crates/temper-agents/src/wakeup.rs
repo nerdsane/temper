@@ -6,8 +6,7 @@
 use async_trait::async_trait;
 use temper_actor_runtime::{Actor, ActorContext, ActorError, ActorHandle, Message};
 
-use crate::common::message_action;
-use crate::common::session_id_from_namespace;
+use crate::common::{decode_params, message_action, session_id_from_namespace};
 
 pub struct WakeupSchedulerIntegration;
 
@@ -31,13 +30,9 @@ impl Actor for WakeupSchedulerIntegration {
             return Ok(());
         }
 
-        // Extract sleep_seconds from message params.
-        let sleep_secs =
-            if let Ok(params) = serde_json::from_slice::<serde_json::Value>(&message.payload) {
-                params["sleep_seconds"].as_u64().unwrap_or(1)
-            } else {
-                1
-            };
+        // Extract sleep_seconds from SpecMessage params.
+        let params = decode_params(message);
+        let sleep_secs = params["sleep_seconds"].as_u64().unwrap_or(1);
 
         tracing::info!(sleep_secs, "WakeupScheduler: sleeping");
         tokio::time::sleep(std::time::Duration::from_secs(sleep_secs)).await;

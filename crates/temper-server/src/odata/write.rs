@@ -376,35 +376,6 @@ pub async fn handle_odata_post(
                 return *resp;
             }
 
-            // Actor-backed action: route directly to PG actor system.
-            if state.actor_backed_types.contains(&entity_type) {
-                {
-                    let actor_sys = state.actor_system.as_ref();
-                    let namespace = format!("{tenant}/{key_str}");
-                    let handle = temper_actor_runtime::ActorHandle::new(
-                        namespace.clone(),
-                        entity_type.clone(),
-                    );
-                    let msg = temper_actor_runtime::spec_actor::SpecMessage::with_params(
-                        action.as_str(),
-                        body_json,
-                    );
-                    return match actor_sys.tell(None, &handle, msg).await {
-                        Ok(_) => ODataResponse {
-                            status: StatusCode::OK,
-                            body: serde_json::json!({ "Id": key_str, "action": action }),
-                        }
-                        .into_response(),
-                        Err(e) => odata_error(
-                            StatusCode::INTERNAL_SERVER_ERROR,
-                            "ActorDispatchError",
-                            &e.to_string(),
-                        )
-                        .into_response(),
-                    };
-                }
-            }
-
             dispatch_bound_action(
                 &state,
                 &tenant,

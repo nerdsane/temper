@@ -246,31 +246,53 @@ impl Actor for SpecDrivenActor {
                 .map_err(|e| ActorError::HandlerFailed(format!("state deser: {e}")))?
         };
 
+        // 2. Resolve action name + params.
+        // If the message carries a SpecMessage, extract the action from its payload.
+        // This handles both direct SpecMessage sends and raw action-name messages.
+        let spec_msg = if message.message_type.ends_with("SpecMessage") {
+            message.decode::<SpecMessage>().ok()
+        } else {
+            None
+        };
+        let action = spec_msg
+            .as_ref()
+            .filter(|m| !m.action.is_empty())
+            .map(|m| m.action.clone())
+            .unwrap_or_else(|| message.message_type.clone());
+
         // Store incoming params in state.fields so integrations can read them.
-        // Only update when params are non-empty to preserve context from prior steps.
-        if let Some(fields) = message
-            .decode::<SpecMessage>()
-            .ok()
+        // Merge non-empty params into fields to preserve context from prior steps
+        // (e.g. child Process keeps parent_pid while later messages add user_prompt/response).
+        // For a new user turn, clear transient scratchpad fields from prior turns.
+        if self.name == "Process" && matches!(action.as_str(), "StartProcess" | "SendInput") {
+            if let Some(obj) = actor_state.fields.as_object_mut() {
+                for key in [
+                    "tool_calls",
+                    "tool_results",
+                    "child_result",
+                    "response",
+                    "error",
+                ] {
+                    obj.remove(key);
+                }
+            }
+        }
+
+        if let Some(fields) = spec_msg
+            .as_ref()
             .filter(|m| !m.params.is_empty())
             .and_then(|m| serde_json::from_slice::<serde_json::Value>(&m.params).ok())
             .filter(|p| !p.as_object().is_some_and(|o| o.is_empty()))
         {
-            actor_state.fields = fields;
+            match (actor_state.fields.as_object_mut(), fields.as_object()) {
+                (Some(existing), Some(new_fields)) => {
+                    for (k, v) in new_fields {
+                        existing.insert(k.clone(), v.clone());
+                    }
+                }
+                _ => actor_state.fields = fields,
+            }
         }
-
-        // 2. Resolve action name.
-        // If the message carries a SpecMessage, extract the action from its payload.
-        // This handles both direct SpecMessage sends and raw action-name messages.
-        let action = if message.message_type.ends_with("SpecMessage") {
-            message
-                .decode::<SpecMessage>()
-                .ok()
-                .filter(|m| !m.action.is_empty())
-                .map(|m| m.action)
-                .unwrap_or_else(|| message.message_type.clone())
-        } else {
-            message.message_type.clone()
-        };
 
         let eval_ctx = actor_state.to_eval_context();
 
@@ -355,6 +377,7 @@ impl SpecDrivenActor {
             }
             temper_jit::table::Effect::EmitEvent(emit_name) => {
                 if let Some((target_type, target_action)) = self.routing.get(emit_name.as_str()) {
+                    tracing::info!(actor=%self.name, emit=%emit_name, target=%target_type, target_action=%target_action, "routing emit");
                     let target =
                         ActorHandle::new(ctx.self_handle().namespace.clone(), target_type.clone());
                     ctx.tell(
@@ -363,7 +386,7 @@ impl SpecDrivenActor {
                     )
                     .await;
                 } else {
-                    tracing::debug!(
+                    tracing::warn!(
                         actor = %self.name,
                         emit = %emit_name,
                         "no routing for emit (no reaction rule)"
@@ -373,6 +396,7 @@ impl SpecDrivenActor {
             temper_jit::table::Effect::Custom(trigger_name) => {
                 if let Some((target_type, target_action)) = self.routing.get(trigger_name.as_str())
                 {
+                    tracing::info!(actor=%self.name, trigger=%trigger_name, target=%target_type, target_action=%target_action, "routing trigger");
                     let target =
                         ActorHandle::new(ctx.self_handle().namespace.clone(), target_type.clone());
                     ctx.tell(
@@ -381,7 +405,7 @@ impl SpecDrivenActor {
                     )
                     .await;
                 } else {
-                    tracing::debug!(
+                    tracing::warn!(
                         actor = %self.name,
                         trigger = %trigger_name,
                         "no routing for trigger"

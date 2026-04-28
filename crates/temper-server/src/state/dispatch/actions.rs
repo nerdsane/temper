@@ -289,7 +289,8 @@ impl crate::state::ServerState {
         let response = match self.actor_system.tell(None, &actor_handle, msg).await {
             Ok(_msg_id) => {
                 // Directly activate the actor inline (synchronous — no background task).
-                let activated = self.actor_system.activate_now(&actor_handle).await;
+                let _activated = self.actor_system.activate_now(&actor_handle).await;
+
                 // Read updated state from PG directly.
                 let spec_state = self
                     .actor_system

@@ -154,6 +154,34 @@ pub async fn register_real_integrations(
 
 // ─── Mock integration actors (for testing) ───────────────────────────────────
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn process_reactions_route_core_effects() {
+        let rules = parse_reactions(PROCESS_REACTIONS).expect("parse reactions");
+        let routing = build_actor_routing("Process", &rules);
+        assert_eq!(routing.get("PrepareContext").unwrap().0, "ContextManager");
+        assert_eq!(
+            routing.get("ToolCallBatchRequested").unwrap().0,
+            "ToolRouter"
+        );
+        assert_eq!(
+            routing.get("spawn_child").unwrap().0,
+            "ChildSpawnerIntegration"
+        );
+        assert_eq!(
+            routing.get("schedule_wakeup").unwrap().0,
+            "WakeupSchedulerIntegration"
+        );
+        assert_eq!(
+            routing.get("notify_parent").unwrap().0,
+            "ChildCompletionIntegration"
+        );
+    }
+}
+
 fn message_action(message: &Message) -> String {
     common::message_action(message)
 }

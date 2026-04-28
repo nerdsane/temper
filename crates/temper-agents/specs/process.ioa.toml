@@ -76,7 +76,10 @@ name = "InferenceCompleteEndTurn"
 kind = "input"
 from = ["BlockedInference"]
 to = "Ready"
-effect = [{ type = "increment", var = "turns" }]
+effect = [
+    { type = "increment", var = "turns" },
+    { type = "trigger", name = "notify_parent" },
+]
 
 [[action]]
 name = "InferenceCompleteToolCalls"
@@ -118,6 +121,7 @@ name = "ToolCallBatchFailed"
 kind = "input"
 from = ["BlockedToolCall"]
 to = "Failed"
+effect = [{ type = "trigger", name = "notify_parent" }]
 
 [[action]]
 name = "ApprovalRequired"
@@ -153,6 +157,7 @@ name = "CompactionFailed"
 kind = "input"
 from = ["BlockedCompaction"]
 to = "Failed"
+effect = [{ type = "trigger", name = "notify_parent" }]
 
 # ─── Control ──────────────────────────────────────────────────────────────────
 
@@ -180,6 +185,7 @@ name = "TimeoutExpired"
 kind = "input"
 from = ["BlockedInference", "BlockedToolCall", "BlockedApproval", "BlockedCompaction"]
 to = "Failed"
+effect = [{ type = "trigger", name = "notify_parent" }]
 
 # ─── Integrations ─────────────────────────────────────────────────────────────
 
@@ -216,9 +222,10 @@ hint = "Block until a child Process completes."
 name = "UnblockFromChild"
 kind = "input"
 from = ["BlockedChild"]
-to = "Ready"
+to = "BlockedInference"
 params = [{ name = "child_result", type = "string" }]
-hint = "Unblock parent when a child Process completes."
+effect = [{ type = "trigger", name = "invoke_llm" }]
+hint = "Unblock parent when a child Process completes and resume inference with the child result."
 
 # ─── Sleep primitive ──────────────────────────────────────────────────────────
 

@@ -6,7 +6,7 @@ use async_trait::async_trait;
 use std::sync::Arc;
 use temper_actor_runtime::{Actor, ActorContext, ActorError, ActorHandle, ActorSystem, Message};
 
-use crate::common::message_action;
+use crate::common::{decode_params, message_action};
 
 pub struct ChildCompletionIntegration {
     pub actor_system: Arc<ActorSystem>,
@@ -24,7 +24,7 @@ impl Actor for ChildCompletionIntegration {
 
     async fn handle(
         &self,
-        _ctx: &ActorContext,
+        ctx: &ActorContext,
         _state: &mut Vec<u8>,
         message: &Message,
     ) -> Result<(), ActorError> {
@@ -34,15 +34,28 @@ impl Actor for ChildCompletionIntegration {
         }
 
         // Params: { parent_pid, child_result, tenant }
-        let params: serde_json::Value =
-            serde_json::from_slice(&message.payload).unwrap_or_default();
+        let params = decode_params(message);
 
         let parent_pid = match params["parent_pid"].as_str() {
             Some(p) if !p.is_empty() => p.to_string(),
             _ => return Ok(()), // No parent — nothing to notify.
         };
-        let child_result = params["child_result"].clone();
-        let tenant = params["tenant"].as_str().unwrap_or("default").to_string();
+        let child_result = if params.get("child_result").is_some() {
+            params["child_result"].clone()
+        } else {
+            params.clone()
+        };
+        let tenant = params["tenant"]
+            .as_str()
+            .map(str::to_string)
+            .unwrap_or_else(|| {
+                ctx.self_handle()
+                    .namespace
+                    .split('/')
+                    .next()
+                    .unwrap_or("default")
+                    .to_string()
+            });
 
         let parent_namespace = format!("{tenant}/{parent_pid}");
         let parent = ActorHandle::new(parent_namespace, "Process".to_string());

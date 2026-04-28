@@ -29,7 +29,64 @@ impl Actor for ToolRegistryActor {
     }
 
     fn initial_state(&self) -> Vec<u8> {
-        serde_json::to_vec(&json!({ "tools": {} })).unwrap()
+        serde_json::to_vec(&json!({
+            "tools": {
+                "spawn_child": {
+                    "source": "builtin",
+                    "description": "Spawn a child process to work on a subtask. The parent controls which tools the child can use.",
+                    "json_schema": {
+                        "type": "object",
+                        "properties": {
+                            "prompt": { "type": "string", "description": "Task prompt for the child process" },
+                            "tool_names": { "type": "array", "items": { "type": "string" }, "description": "Tools the child may use, e.g. ['bash']" }
+                        },
+                        "required": ["prompt"]
+                    }
+                },
+                "wait_child": {
+                    "source": "builtin",
+                    "description": "Wait for a child process to complete and return its result.",
+                    "json_schema": {
+                        "type": "object",
+                        "properties": {
+                            "child_id": { "type": "string", "description": "Optional child process id; if omitted, waits for latest child" }
+                        }
+                    }
+                },
+                "sleep": {
+                    "source": "builtin",
+                    "description": "Sleep for a number of seconds before continuing.",
+                    "json_schema": {
+                        "type": "object",
+                        "properties": { "seconds": { "type": "integer", "minimum": 1 } },
+                        "required": ["seconds"]
+                    }
+                },
+                "get_process_status": {
+                    "source": "builtin",
+                    "description": "Get status and fields for a Process by process id (pid). Useful for checking child progress.",
+                    "json_schema": {
+                        "type": "object",
+                        "properties": {
+                            "process_id": { "type": "string", "description": "Process id / pid to inspect" }
+                        },
+                        "required": ["process_id"]
+                    }
+                },
+                "get_process_output": {
+                    "source": "builtin",
+                    "description": "Get the output/result/error for a Process by process id (pid).",
+                    "json_schema": {
+                        "type": "object",
+                        "properties": {
+                            "process_id": { "type": "string", "description": "Process id / pid to inspect" }
+                        },
+                        "required": ["process_id"]
+                    }
+                }
+            }
+        }))
+        .unwrap()
     }
 
     async fn handle(

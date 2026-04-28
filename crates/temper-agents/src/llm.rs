@@ -146,10 +146,11 @@ impl Actor for LlmIntegrationActor {
         };
 
         // Add new turn.
-        if let Some(prompt) = params["user_prompt"].as_str() {
-            append_message(ctx, &namespace, "user", prompt.to_string()).await;
-            history.push(user_msg(json!(prompt)));
-        } else if let Some(results) = params["tool_results"].as_array() {
+        // Important: after tool execution, Process fields contain both the original
+        // user_prompt and tool_results (fields are merged to preserve parent_pid).
+        // Tool results must take precedence so the assistant tool_calls message is
+        // immediately followed by tool messages for every tool_call_id.
+        if let Some(results) = params["tool_results"].as_array() {
             for r in results {
                 let content = r["content"].as_str().unwrap_or("").to_string();
                 append_message(ctx, &namespace, "tool", content.clone()).await;
@@ -158,6 +159,15 @@ impl Actor for LlmIntegrationActor {
                     content,
                 ));
             }
+        } else if let Some(prompt) = params["user_prompt"].as_str() {
+            append_message(ctx, &namespace, "user", prompt.to_string()).await;
+            history.push(user_msg(json!(prompt)));
+        } else if !params["child_result"].is_null() {
+            let child_result = serde_json::to_string_pretty(&params["child_result"])
+                .unwrap_or_else(|_| params["child_result"].to_string());
+            let content = format!("Child process completed. Result:\n{child_result}");
+            append_message(ctx, &namespace, "system", content.clone()).await;
+            history.push(user_msg(json!(content)));
         } else if history.is_empty() {
             ctx.tell(&from, SpecMessage::new("InferenceCompleteEndTurn"))
                 .await;
@@ -202,14 +212,16 @@ impl Actor for LlmIntegrationActor {
 
         tracing::info!("[LLM] calling with {} tool(s)", tools.len());
 
-        let body = json!({
+        let mut body = json!({
             "model": MODEL,
             "max_tokens": 1024,
             "stream": true,
             "system": SYSTEM_PROMPT,
             "messages": history,
-            "tools": tools,
         });
+        if !tools.is_empty() {
+            body["tools"] = json!(tools);
+        }
 
         let response = self
             .http

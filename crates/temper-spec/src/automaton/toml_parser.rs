@@ -559,7 +559,13 @@ fn parse_effect_array(value: &str, effects: &mut Vec<Effect>) {
     // Split on "}, {" to separate inline table entries.
     // Simple approach: iterate over inline tables delimited by braces.
     for entry in split_inline_tables(inner) {
-        let entry = entry.trim().trim_matches('{').trim_matches('}').trim();
+        let entry = entry
+            .trim()
+            .trim_start_matches(',')
+            .trim()
+            .trim_matches('{')
+            .trim_matches('}')
+            .trim();
         let fields = parse_inline_fields(entry);
 
         let effect_type = fields.get("type").map(|s| s.as_str()).unwrap_or("");

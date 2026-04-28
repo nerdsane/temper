@@ -9,8 +9,7 @@ use async_trait::async_trait;
 use std::sync::Arc;
 use temper_actor_runtime::{Actor, ActorContext, ActorError, ActorHandle, ActorSystem, Message};
 
-use crate::common::message_action;
-use crate::common::session_id_from_namespace;
+use crate::common::{decode_params, message_action, session_id_from_namespace};
 
 pub struct ChildSpawnerIntegration {
     pub actor_system: Arc<ActorSystem>,
@@ -36,8 +35,7 @@ impl Actor for ChildSpawnerIntegration {
             return Ok(());
         }
 
-        let params: serde_json::Value =
-            serde_json::from_slice(&message.payload).unwrap_or_default();
+        let params = decode_params(message);
 
         let parent_namespace = ctx.self_handle().namespace.clone();
         let parent_id = session_id_from_namespace(&parent_namespace).to_string();
@@ -45,9 +43,21 @@ impl Actor for ChildSpawnerIntegration {
             .as_str()
             .unwrap_or("")
             .to_string();
+        // Parent-selected tool allowlist for the child. If absent, child gets no tools.
+        let child_tool_names: Vec<String> = params["tool_names"]
+            .as_array()
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(|v| v.as_str().map(str::to_string))
+                    .collect()
+            })
+            .unwrap_or_default();
 
-        // Generate a child process ID: parent_id + child counter.
-        let child_id = format!("{parent_id}-child-{}", uuid::Uuid::new_v4());
+        // Generate child process ID (or use caller-provided id).
+        let child_id = params["child_process_id"]
+            .as_str()
+            .map(str::to_string)
+            .unwrap_or_else(|| format!("{parent_id}-child-{}", uuid::Uuid::new_v4()));
 
         // Extract tenant from namespace: "tenant/parent_id" → "tenant"
         let tenant = parent_namespace
@@ -66,6 +76,68 @@ impl Actor for ChildSpawnerIntegration {
             .map_err(|e| ActorError::Internal(format!("spawn child: {e}")))?;
 
         let child_process = ActorHandle::new(child_namespace.clone(), "Process".to_string());
+
+        // Parent decides child tool access. Copy only explicitly allowed tools from
+        // parent ToolRegistry to child ToolRegistry.
+        if !child_tool_names.is_empty() {
+            let parent_registry =
+                ActorHandle::new(parent_namespace.clone(), "ToolRegistry".to_string());
+            let child_registry =
+                ActorHandle::new(child_namespace.clone(), "ToolRegistry".to_string());
+            if let Ok(resp) = self
+                .actor_system
+                .ask(
+                    ctx.self_handle(),
+                    &parent_registry,
+                    temper_actor_runtime::spec_actor::SpecMessage::new("GetAllTools"),
+                    std::time::Duration::from_secs(3),
+                )
+                .await
+            {
+                let all = resp
+                    .decode::<temper_actor_runtime::spec_actor::SpecMessage>()
+                    .ok()
+                    .and_then(|m| serde_json::from_slice::<serde_json::Value>(&m.params).ok())
+                    .unwrap_or(serde_json::json!({}));
+                if let Some(tools) = all["tools"].as_array() {
+                    for tool in tools {
+                        let Some(name) = tool["name"].as_str() else {
+                            continue;
+                        };
+                        if !child_tool_names.iter().any(|n| n == name) {
+                            continue;
+                        }
+                        let source = tool["source"].as_str().unwrap_or("builtin");
+                        if source == "client" {
+                            let client_id = tool["client_id"].as_str().unwrap_or("");
+                            let _ = self.actor_system.tell(
+                                None,
+                                &child_registry,
+                                temper_actor_runtime::spec_actor::SpecMessage::with_params(
+                                    "RegisterTool",
+                                    serde_json::json!({ "client_id": client_id, "tool_names": [name] }),
+                                ),
+                            ).await;
+                        } else {
+                            let mut info = tool.clone();
+                            info["name"] = serde_json::json!(name);
+                            let _ = self
+                                .actor_system
+                                .tell(
+                                    None,
+                                    &child_registry,
+                                    temper_actor_runtime::spec_actor::SpecMessage::with_params(
+                                        "RegisterServerTool",
+                                        info,
+                                    ),
+                                )
+                                .await;
+                        }
+                    }
+                    let _ = self.actor_system.activate_now(&child_registry).await;
+                }
+            }
+        }
 
         // Initialize with parent_pid so child can notify parent on completion.
         self.actor_system

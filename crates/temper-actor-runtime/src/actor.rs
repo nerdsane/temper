@@ -133,6 +133,29 @@ impl ActorContext {
         &self.self_handle
     }
 
+    /// Load raw state bytes for an actor instance.
+    pub async fn load_actor_state(
+        &self,
+        namespace: &str,
+        actor_type: &str,
+    ) -> Result<Option<Vec<u8>>, ActorError> {
+        let Some(pool) = &self.pool else {
+            return Err(ActorError::Internal("no pool in ActorContext".into()));
+        };
+        let client = pool
+            .get()
+            .await
+            .map_err(|e| ActorError::Internal(format!("pool: {e}")))?;
+        let rows = client
+            .query(
+                "SELECT state FROM odp_temper.actor_instances WHERE namespace = $1 AND actor_type = $2",
+                &[&namespace, &actor_type],
+            )
+            .await
+            .map_err(|e| ActorError::Internal(format!("load actor state: {e}")))?;
+        Ok(rows.first().map(|row| row.get::<_, Vec<u8>>("state")))
+    }
+
     /// Best-effort spawn/update of an actor instance with explicit state bytes.
     /// Used by integrations to persist auxiliary entities (e.g. Message).
     pub async fn upsert_actor_state(
