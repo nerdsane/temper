@@ -6260,6 +6260,7 @@ dependencies = [
  "chrono",
  "serde",
  "serde_json",
+ "sha2",
  "sqlx",
  "temper-runtime",
  "thiserror 2.0.18",

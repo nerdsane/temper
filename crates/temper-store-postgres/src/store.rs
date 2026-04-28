@@ -429,4 +429,48 @@ mod tests {
             );
         });
     }
+
+    #[test]
+    fn postgres_platform_methods_are_part_of_the_store_surface() {
+        fn assert_methods(store: &PostgresEventStore) {
+            let _ = store.upsert_query_projection(
+                "tenant",
+                "Session",
+                "s-1",
+                "Running",
+                &serde_json::json!({"phase":"Running"}),
+                1,
+            );
+            let _ = store.remove_query_projection("tenant", "Session", "s-1");
+            let _ = store.query_field_index(
+                "tenant",
+                "Session",
+                "fields @> $3::jsonb",
+                vec!["{\"phase\":\"Running\"}".to_string()],
+            );
+            let _ = store.persist_trajectory(crate::PostgresTrajectoryInsert {
+                tenant: "tenant",
+                entity_type: "Session",
+                entity_id: "s-1",
+                action: "ProgressMade",
+                success: true,
+                from_status: Some("Running"),
+                to_status: Some("Running"),
+                error: None,
+                agent_id: Some("agent"),
+                session_id: Some("session"),
+                authz_denied: None,
+                denied_resource: None,
+                denied_module: None,
+                source: Some("Entity"),
+                spec_governed: Some(true),
+                created_at: "2026-04-28T00:00:00Z",
+                request_body: Some("{\"ok\":true}"),
+                intent: Some("test"),
+                matched_policy_ids: Some("[\"policy:test\"]"),
+            });
+        }
+
+        let _ = assert_methods;
+    }
 }

@@ -13,7 +13,12 @@
 //!   creates the required tables on startup.
 
 pub mod migration;
+pub mod platform;
 pub mod schema;
 pub mod store;
 
+pub use platform::{
+    PostgresInstalledAppRow, PostgresSpecRow, PostgresSpecVerificationUpdate,
+    PostgresTrajectoryInsert, PostgresWasmModuleRow,
+};
 pub use store::PostgresEventStore;

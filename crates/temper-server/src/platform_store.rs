@@ -200,6 +200,9 @@ pub trait PlatformStore: Send + Sync {
 // TursoEventStore implementation
 // ---------------------------------------------------------------------------
 
+use temper_store_postgres::{
+    PostgresEventStore, PostgresInstalledAppRow, PostgresSpecVerificationUpdate,
+};
 use temper_store_turso::{TursoEventStore, TursoInstalledAppRow, TursoSpecVerificationUpdate};
 
 #[async_trait::async_trait]
@@ -339,6 +342,232 @@ impl PlatformStore for TursoEventStore {
             .map(|row| {
                 row.map(|row| InstalledAppRecord {
                     tenant: row.tenant_id,
+                    app_name: row.app_name,
+                    app_version: row.app_version,
+                    bundle_digest: row.bundle_digest,
+                    spec_digest: row.spec_digest,
+                    policy_digest: row.policy_digest,
+                    wasm_digest: row.wasm_digest,
+                    content_digest: row.content_digest,
+                    seed_digest: row.seed_digest,
+                    installed_at: Some(row.installed_at),
+                    last_reconciled_at: row.last_reconciled_at,
+                    status: row.status,
+                })
+            })
+            .map_err(|e| e.to_string())
+    }
+
+    async fn list_all_installed_apps(&self) -> Result<Vec<(String, String)>, String> {
+        self.list_all_installed_apps()
+            .await
+            .map_err(|e| e.to_string())
+    }
+
+    async fn upsert_pending_decision(
+        &self,
+        id: &str,
+        tenant: &str,
+        status: &str,
+        data: &str,
+    ) -> Result<(), String> {
+        self.upsert_pending_decision(id, tenant, status, data)
+            .await
+            .map_err(|e| e.to_string())
+    }
+
+    async fn load_pending_decisions(&self, limit: usize) -> Result<Vec<String>, String> {
+        self.load_pending_decisions(limit as i64)
+            .await
+            .map_err(|e| e.to_string())
+    }
+
+    async fn load_all_wasm_modules(&self, tenant: &str) -> Result<Vec<WasmModuleRow>, String> {
+        let rows = self
+            .load_all_wasm_modules(tenant)
+            .await
+            .map_err(|e| e.to_string())?;
+        Ok(rows
+            .into_iter()
+            .map(|r| WasmModuleRow {
+                tenant: r.tenant,
+                module_name: r.module_name,
+                wasm_bytes: r.wasm_bytes,
+                sha256_hash: r.sha256_hash,
+            })
+            .collect())
+    }
+
+    async fn load_wasm_modules_all_tenants(&self) -> Result<Vec<WasmModuleRow>, String> {
+        let rows = self
+            .load_wasm_modules_all_tenants()
+            .await
+            .map_err(|e| e.to_string())?;
+        Ok(rows
+            .into_iter()
+            .map(|r| WasmModuleRow {
+                tenant: r.tenant,
+                module_name: r.module_name,
+                wasm_bytes: r.wasm_bytes,
+                sha256_hash: r.sha256_hash,
+            })
+            .collect())
+    }
+
+    async fn upsert_wasm_module(
+        &self,
+        tenant: &str,
+        name: &str,
+        bytes: &[u8],
+        hash: &str,
+    ) -> Result<(), String> {
+        self.upsert_wasm_module(tenant, name, bytes, hash)
+            .await
+            .map_err(|e| e.to_string())
+    }
+}
+
+#[async_trait::async_trait]
+impl PlatformStore for PostgresEventStore {
+    async fn upsert_spec(
+        &self,
+        tenant: &str,
+        entity_type: &str,
+        ioa_source: &str,
+        csdl_xml: &str,
+        content_hash: &str,
+    ) -> Result<(), String> {
+        self.upsert_spec(tenant, entity_type, ioa_source, csdl_xml, content_hash)
+            .await
+            .map_err(|e| e.to_string())
+    }
+
+    async fn load_specs(&self) -> Result<Vec<SpecRow>, String> {
+        let rows = self.load_specs().await.map_err(|e| e.to_string())?;
+        Ok(rows
+            .into_iter()
+            .map(|r| SpecRow {
+                tenant: r.tenant,
+                entity_type: r.entity_type,
+                ioa_source: r.ioa_source,
+                csdl_xml: r.csdl_xml,
+                content_hash: r.content_hash.unwrap_or_default(),
+                committed: r.committed,
+            })
+            .collect())
+    }
+
+    async fn delete_spec(&self, tenant: &str, entity_type: &str) -> Result<(), String> {
+        self.delete_spec(tenant, entity_type)
+            .await
+            .map_err(|e| e.to_string())
+    }
+
+    async fn commit_specs(&self, tenant: &str) -> Result<(), String> {
+        self.commit_specs(tenant).await.map_err(|e| e.to_string())
+    }
+
+    async fn delete_uncommitted_specs(&self) -> Result<usize, String> {
+        self.delete_uncommitted_specs()
+            .await
+            .map_err(|e| e.to_string())
+    }
+
+    async fn load_verification_cache(
+        &self,
+        tenant: &str,
+    ) -> Result<BTreeMap<String, (String, bool)>, String> {
+        self.load_verification_cache(tenant)
+            .await
+            .map_err(|e| e.to_string())
+    }
+
+    async fn persist_spec_verification(
+        &self,
+        tenant: &str,
+        entity_type: &str,
+        update: SpecVerificationUpdate<'_>,
+    ) -> Result<(), String> {
+        self.persist_spec_verification(
+            tenant,
+            entity_type,
+            PostgresSpecVerificationUpdate {
+                status: update.status,
+                verified: update.verified,
+                levels_passed: update.levels_passed,
+                levels_total: update.levels_total,
+                verification_result_json: update.verification_result_json,
+            },
+        )
+        .await
+        .map_err(|e| e.to_string())
+    }
+
+    async fn upsert_tenant_policy(&self, tenant: &str, policy_text: &str) -> Result<(), String> {
+        self.upsert_tenant_policy(tenant, policy_text)
+            .await
+            .map_err(|e| e.to_string())
+    }
+
+    async fn upsert_tenant_constraints(
+        &self,
+        tenant: &str,
+        cross_invariants_toml: &str,
+    ) -> Result<(), String> {
+        self.upsert_tenant_constraints(tenant, cross_invariants_toml)
+            .await
+            .map_err(|e| e.to_string())
+    }
+
+    async fn load_tenant_policies(&self) -> Result<Vec<(String, String)>, String> {
+        self.load_tenant_policies().await.map_err(|e| e.to_string())
+    }
+
+    async fn is_app_installed(&self, tenant: &str, app_name: &str) -> Result<bool, String> {
+        self.is_app_installed(tenant, app_name)
+            .await
+            .map_err(|e| e.to_string())
+    }
+
+    async fn record_installed_app(&self, tenant: &str, app_name: &str) -> Result<(), String> {
+        self.record_installed_app(tenant, app_name)
+            .await
+            .map_err(|e| e.to_string())
+    }
+
+    async fn record_installed_app_metadata(
+        &self,
+        record: &InstalledAppRecord,
+    ) -> Result<(), String> {
+        let row = PostgresInstalledAppRow {
+            tenant: record.tenant.clone(),
+            app_name: record.app_name.clone(),
+            app_version: record.app_version.clone(),
+            bundle_digest: record.bundle_digest.clone(),
+            spec_digest: record.spec_digest.clone(),
+            policy_digest: record.policy_digest.clone(),
+            wasm_digest: record.wasm_digest.clone(),
+            content_digest: record.content_digest.clone(),
+            seed_digest: record.seed_digest.clone(),
+            installed_at: record.installed_at.clone().unwrap_or_default(),
+            last_reconciled_at: record.last_reconciled_at.clone(),
+            status: record.status.clone(),
+        };
+        self.record_installed_app_metadata(&row)
+            .await
+            .map_err(|e| e.to_string())
+    }
+
+    async fn get_installed_app(
+        &self,
+        tenant: &str,
+        app_name: &str,
+    ) -> Result<Option<InstalledAppRecord>, String> {
+        self.get_installed_app(tenant, app_name)
+            .await
+            .map(|row| {
+                row.map(|row| InstalledAppRecord {
+                    tenant: row.tenant,
                     app_name: row.app_name,
                     app_version: row.app_version,
                     bundle_digest: row.bundle_digest,
