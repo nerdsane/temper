@@ -208,6 +208,80 @@ pub async fn handle_odata_post(
                 return constraint_violation_response(v);
             }
 
+            // ToolDefinition: forward tool metadata to the session's ToolRegistry.
+            // Body must include session_id + source_type + optional client_id/mcp_url.
+            if entity_type == "ToolDefinition" {
+                let session_id = initial_fields
+                    .get("session_id")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or(&entity_id)
+                    .to_string();
+                let namespace = format!("{tenant}/{session_id}");
+                let registry = temper_actor_runtime::ActorHandle::new(
+                    namespace.clone(),
+                    "ToolRegistry".to_string(),
+                );
+                let mut tool_info = initial_fields.clone();
+                if tool_info.get("name").is_none()
+                    && let Some(obj) = tool_info.as_object_mut()
+                {
+                    obj.insert("name".to_string(), serde_json::json!(entity_id));
+                }
+                let source = tool_info
+                    .get("source_type")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("builtin");
+                let action = if source == "client" {
+                    "RegisterTool"
+                } else {
+                    "RegisterServerTool"
+                };
+                let msg_params = if source == "client" {
+                    serde_json::json!({
+                        "client_id": tool_info.get("client_id").and_then(|v| v.as_str()).unwrap_or(""),
+                        "tool_names": [entity_id],
+                    })
+                } else {
+                    let mut p = tool_info.clone();
+                    p["source"] = serde_json::json!(source);
+                    p["name"] = serde_json::json!(entity_id);
+                    p
+                };
+                match state
+                    .actor_system
+                    .tell(
+                        None,
+                        &registry,
+                        temper_actor_runtime::spec_actor::SpecMessage::with_params(
+                            action, msg_params,
+                        ),
+                    )
+                    .await
+                {
+                    Ok(_) => {
+                        let _ = state.actor_system.activate_now(&registry).await;
+                        return ODataResponse {
+                            status: StatusCode::CREATED,
+                            body: serde_json::json!({
+                                "@odata.type": "#ToolDefinition",
+                                "Id": entity_id,
+                                "session_id": session_id,
+                                "source_type": source,
+                            }),
+                        }
+                        .into_response();
+                    }
+                    Err(e) => {
+                        return odata_error(
+                            StatusCode::INTERNAL_SERVER_ERROR,
+                            "ToolRegistrationError",
+                            &e.to_string(),
+                        )
+                        .into_response();
+                    }
+                }
+            }
+
             // Actor-backed entity: route directly to PG actor system.
             // Process spawns all session actors; other types spawn a single actor.
             if state.actor_backed_types.contains(&entity_type) {

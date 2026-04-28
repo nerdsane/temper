@@ -160,7 +160,12 @@ pub(super) async fn handle_odata_get_for_tenant(
             };
             let key_str = extract_key(&key);
 
-            if !state.entity_exists(&tenant, &entity_type, &key_str) {
+            // For PG-backed actors, existence is checked by get_tenant_entity_state()
+            // against actor_instances. Legacy entity_exists() only checks the in-memory
+            // entity_index and will miss actor-backed rows.
+            if !state.actor_backed_types.contains(&entity_type)
+                && !state.entity_exists(&tenant, &entity_type, &key_str)
+            {
                 return odata_error(
                     StatusCode::NOT_FOUND,
                     "ResourceNotFound",
