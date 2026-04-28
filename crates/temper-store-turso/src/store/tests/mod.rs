@@ -745,12 +745,15 @@ async fn load_wasm_module_metadata_all_tenants_returns_metadata_without_bulk_byt
     assert_eq!(rows[1].size_bytes, 7);
     assert!(!rows[1].updated_at.is_empty());
 
-    let full_row = store
+    let metadata_row = store
         .load_wasm_module("tenant-a", "mod-a")
         .await
-        .expect("load full wasm row")
-        .expect("full row should exist");
-    assert_eq!(full_row.wasm_bytes, b"hello-a");
+        .expect("load wasm metadata row")
+        .expect("metadata row should exist");
+    assert!(
+        metadata_row.wasm_bytes.is_empty(),
+        "Turso rows stay metadata-only; artifact bytes live in object storage"
+    );
 }
 
 #[tokio::test]
@@ -855,7 +858,7 @@ async fn upsert_wasm_module_preserves_version_for_identical_hash() {
 }
 
 #[tokio::test]
-async fn upsert_wasm_module_stores_artifact_outside_metadata_row() {
+async fn upsert_wasm_module_stores_metadata_only_without_db_blob() {
     let store = make_store("wasm-artifact").await;
 
     store
@@ -886,14 +889,19 @@ async fn upsert_wasm_module_stores_artifact_outside_metadata_row() {
     let artifact = store
         .get_blob("wasm-modules/hash-a")
         .await
-        .expect("load wasm artifact")
-        .expect("artifact exists");
-    assert_eq!(artifact, b"hello-a");
+        .expect("query legacy db blob");
+    assert!(
+        artifact.is_none(),
+        "new WASM artifacts must not create Turso blob rows"
+    );
 
     let loaded = store
         .load_wasm_module("tenant-a", "mod-a")
         .await
         .expect("load wasm row")
         .expect("wasm row exists");
-    assert_eq!(loaded.wasm_bytes, b"hello-a");
+    assert!(
+        loaded.wasm_bytes.is_empty(),
+        "Turso store should return metadata-only rows for new WASM artifacts"
+    );
 }

@@ -117,6 +117,7 @@ pub(super) async fn populate_field_index_from_snapshots(state: &ServerState, ten
             continue;
         };
 
+        let tenant_blob_store = state.blob_store_for_tenant(tenant).ok();
         let replayed = recover_entity_state_from_store(
             tenant.as_str(),
             entity_type,
@@ -124,6 +125,7 @@ pub(super) async fn populate_field_index_from_snapshots(state: &ServerState, ten
             &table,
             store,
             &serde_json::json!({}),
+            tenant_blob_store.as_ref(),
         )
         .await;
 
