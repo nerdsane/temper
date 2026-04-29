@@ -5,6 +5,7 @@
 //! provides the boxed adapter used by the server-facing storage stack so
 //! backend selection is a composition step rather than business-code branching.
 
+use std::collections::BTreeMap;
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
@@ -15,6 +16,7 @@ use crate::event_store::ServerEventStore;
 use crate::platform_store::{
     InstalledAppRecord, PlatformStore, SpecRow, SpecVerificationUpdate, WasmModuleRow,
 };
+use crate::state::trajectory::TrajectoryEntry;
 
 pub type EventStoreFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
 
@@ -235,12 +237,60 @@ impl From<&ServerEventStore> for BackendLabel {
     }
 }
 
-/// Query-plane capability marker.
-///
-/// The current query projection calls still flow through compatibility methods
-/// on `ServerEventStore`; this marker gives the stack a dedicated concern slot
-/// so those methods can move without changing the outer server shape again.
-pub trait QueryPlaneStore: Send + Sync {}
+/// Backend-neutral projection row returned by [`QueryPlaneStore`].
+#[derive(Clone, Debug, PartialEq)]
+pub struct QueryProjectionFieldsRow {
+    pub entity_id: String,
+    pub status: String,
+    pub fields: BTreeMap<String, Option<String>>,
+}
+
+/// Durable query-plane capability.
+#[async_trait::async_trait]
+pub trait QueryPlaneStore: Send + Sync {
+    async fn upsert_projection(
+        &self,
+        tenant: &str,
+        entity_type: &str,
+        entity_id: &str,
+        status: &str,
+        fields: &serde_json::Value,
+        sequence_nr: u64,
+    ) -> Result<(), PersistenceError>;
+
+    async fn remove_projection(
+        &self,
+        tenant: &str,
+        entity_type: &str,
+        entity_id: &str,
+    ) -> Result<(), PersistenceError>;
+
+    async fn query_field_index(
+        &self,
+        tenant: &str,
+        entity_type: &str,
+        where_clause: &str,
+        params: Vec<String>,
+    ) -> Result<Option<Vec<String>>, PersistenceError>;
+
+    async fn load_projection_fields_many(
+        &self,
+        tenant: &str,
+        entity_type: &str,
+        entity_ids: &[String],
+        field_names: &[&str],
+    ) -> Result<Option<Vec<QueryProjectionFieldsRow>>, PersistenceError>;
+
+    async fn projected_entity_counts_by_tenant(
+        &self,
+    ) -> Result<Option<Vec<(String, u64)>>, PersistenceError>;
+}
+
+/// Durable observe trajectory sink.
+#[async_trait::async_trait]
+pub trait TrajectorySink: Send + Sync {
+    async fn persist_trajectory_entry(&self, entry: &TrajectoryEntry) -> Result<(), String>;
+}
 
 /// Composed storage capabilities selected at boot.
 #[derive(Clone)]
@@ -249,6 +299,7 @@ pub struct StorageStack {
     pub events: BoxedEventStore,
     pub platform: Option<Arc<dyn PlatformStore>>,
     pub query_plane: Option<Arc<dyn QueryPlaneStore>>,
+    pub trajectory: Option<Arc<dyn TrajectorySink>>,
     pub compatibility_store: Option<Arc<ServerEventStore>>,
 }
 
@@ -258,6 +309,7 @@ impl StorageStack {
         events: BoxedEventStore,
         platform: Option<Arc<dyn PlatformStore>>,
         query_plane: Option<Arc<dyn QueryPlaneStore>>,
+        trajectory: Option<Arc<dyn TrajectorySink>>,
         compatibility_store: Option<Arc<ServerEventStore>>,
     ) -> Self {
         Self {
@@ -265,6 +317,7 @@ impl StorageStack {
             events,
             platform,
             query_plane,
+            trajectory,
             compatibility_store,
         }
     }
@@ -278,7 +331,106 @@ impl StorageStack {
         } else {
             None
         };
-        Self::new(backend, events, platform, None, Some(store))
+        let query_plane = if matches!(
+            store.as_ref(),
+            ServerEventStore::Postgres(_)
+                | ServerEventStore::Turso(_)
+                | ServerEventStore::TenantRouted(_)
+        ) {
+            Some(store.clone() as Arc<dyn QueryPlaneStore>)
+        } else {
+            None
+        };
+        let trajectory = if matches!(
+            store.as_ref(),
+            ServerEventStore::Postgres(_)
+                | ServerEventStore::Turso(_)
+                | ServerEventStore::TenantRouted(_)
+        ) {
+            Some(store.clone() as Arc<dyn TrajectorySink>)
+        } else {
+            None
+        };
+        Self::new(
+            backend,
+            events,
+            platform,
+            query_plane,
+            trajectory,
+            Some(store),
+        )
+    }
+}
+
+#[async_trait::async_trait]
+impl QueryPlaneStore for ServerEventStore {
+    async fn upsert_projection(
+        &self,
+        tenant: &str,
+        entity_type: &str,
+        entity_id: &str,
+        status: &str,
+        fields: &serde_json::Value,
+        sequence_nr: u64,
+    ) -> Result<(), PersistenceError> {
+        self.upsert_query_projection(tenant, entity_type, entity_id, status, fields, sequence_nr)
+            .await
+    }
+
+    async fn remove_projection(
+        &self,
+        tenant: &str,
+        entity_type: &str,
+        entity_id: &str,
+    ) -> Result<(), PersistenceError> {
+        self.remove_query_projection(tenant, entity_type, entity_id)
+            .await
+    }
+
+    async fn query_field_index(
+        &self,
+        tenant: &str,
+        entity_type: &str,
+        where_clause: &str,
+        params: Vec<String>,
+    ) -> Result<Option<Vec<String>>, PersistenceError> {
+        self.query_field_index(tenant, entity_type, where_clause, params)
+            .await
+    }
+
+    async fn load_projection_fields_many(
+        &self,
+        tenant: &str,
+        entity_type: &str,
+        entity_ids: &[String],
+        field_names: &[&str],
+    ) -> Result<Option<Vec<QueryProjectionFieldsRow>>, PersistenceError> {
+        self.load_query_projection_fields_many(tenant, entity_type, entity_ids, field_names)
+            .await
+            .map(|rows| {
+                rows.map(|rows| {
+                    rows.into_iter()
+                        .map(|row| QueryProjectionFieldsRow {
+                            entity_id: row.entity_id,
+                            status: row.status,
+                            fields: row.fields,
+                        })
+                        .collect()
+                })
+            })
+    }
+
+    async fn projected_entity_counts_by_tenant(
+        &self,
+    ) -> Result<Option<Vec<(String, u64)>>, PersistenceError> {
+        self.projected_entity_counts_by_tenant().await
+    }
+}
+
+#[async_trait::async_trait]
+impl TrajectorySink for ServerEventStore {
+    async fn persist_trajectory_entry(&self, entry: &TrajectoryEntry) -> Result<(), String> {
+        self.persist_trajectory_entry(entry).await
     }
 }
 

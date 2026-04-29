@@ -3,10 +3,10 @@ use std::sync::Arc;
 
 use futures_util::stream::{self, StreamExt};
 use temper_runtime::tenant::TenantId;
-use temper_store_turso::store::field_index::ProjectedEntityFieldsRow;
 use tracing::instrument;
 
 use super::ServerState;
+use crate::storage::QueryProjectionFieldsRow;
 
 const FILE_BATCH_READ_CONCURRENCY: usize = 8;
 
@@ -136,9 +136,9 @@ impl ServerState {
     ) -> Result<BTreeMap<String, FileProjectionMeta>, String> {
         let mut by_id = BTreeMap::new();
 
-        if let Some(store) = self.metadata_store_for_tenant(tenant.as_str()).await {
-            let rows = store
-                .load_query_projection_fields_many(
+        if let Some(query_plane) = self.query_plane_store() {
+            let rows = query_plane
+                .load_projection_fields_many(
                     tenant.as_str(),
                     "File",
                     file_ids,
@@ -174,9 +174,9 @@ impl ServerState {
     ) -> Result<BTreeMap<String, FileProjectionMeta>, String> {
         let mut by_id = BTreeMap::new();
 
-        if let Some(store) = self.metadata_store_for_tenant(tenant.as_str()).await {
-            let rows = store
-                .load_query_projection_fields_many(
+        if let Some(query_plane) = self.query_plane_store() {
+            let rows = query_plane
+                .load_projection_fields_many(
                     tenant.as_str(),
                     "FileVersion",
                     file_version_ids,
@@ -345,7 +345,7 @@ fn local_file_blob_key(content_hash: &str) -> String {
     )
 }
 
-fn file_projection_from_row(row: ProjectedEntityFieldsRow) -> FileProjectionMeta {
+fn file_projection_from_row(row: QueryProjectionFieldsRow) -> FileProjectionMeta {
     FileProjectionMeta {
         content_hash: row
             .fields
@@ -386,7 +386,7 @@ fn file_projection_from_state(fields: &serde_json::Value) -> FileProjectionMeta 
     }
 }
 
-fn file_version_projection_from_row(row: ProjectedEntityFieldsRow) -> FileProjectionMeta {
+fn file_version_projection_from_row(row: QueryProjectionFieldsRow) -> FileProjectionMeta {
     let content_hash = row
         .fields
         .get("content_hash")

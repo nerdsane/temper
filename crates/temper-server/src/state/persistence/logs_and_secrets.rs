@@ -72,10 +72,10 @@ impl ServerState {
 
     /// Persist a trajectory entry to the tenant's metadata store.
     pub async fn persist_trajectory_entry(&self, entry: &TrajectoryEntry) -> Result<(), String> {
-        let Some(store) = self.event_store.as_ref() else {
+        let Some((_backend, sink)) = self.trajectory_sink() else {
             return Ok(());
         };
-        store.persist_trajectory_entry(entry).await
+        sink.persist_trajectory_entry(entry).await
     }
 
     /// Persist a pending decision to the tenant's storage backend.

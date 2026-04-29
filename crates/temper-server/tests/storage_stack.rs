@@ -1,12 +1,104 @@
+use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use temper_runtime::persistence::{
     EventMetadata, EventStore, PersistenceEnvelope, PersistenceError,
 };
-use temper_server::storage::{BackendLabel, BoxedEventStore, StorageStack};
+use temper_server::state::TrajectoryEntry;
+use temper_server::storage::{
+    BackendLabel, BoxedEventStore, QueryPlaneStore, QueryProjectionFieldsRow, StorageStack,
+    TrajectorySink,
+};
 
 #[derive(Clone)]
 struct RecordingEventStore;
+
+struct RecordingQueryPlane;
+
+#[async_trait::async_trait]
+impl QueryPlaneStore for RecordingQueryPlane {
+    async fn upsert_projection(
+        &self,
+        tenant: &str,
+        entity_type: &str,
+        entity_id: &str,
+        status: &str,
+        fields: &serde_json::Value,
+        sequence_nr: u64,
+    ) -> Result<(), PersistenceError> {
+        assert_eq!(
+            (tenant, entity_type, entity_id, status),
+            ("default", "Ticket", "t-1", "Open")
+        );
+        assert_eq!(fields["title"], "hello");
+        assert_eq!(sequence_nr, 7);
+        Ok(())
+    }
+
+    async fn remove_projection(
+        &self,
+        tenant: &str,
+        entity_type: &str,
+        entity_id: &str,
+    ) -> Result<(), PersistenceError> {
+        assert_eq!(
+            (tenant, entity_type, entity_id),
+            ("default", "Ticket", "t-1")
+        );
+        Ok(())
+    }
+
+    async fn query_field_index(
+        &self,
+        tenant: &str,
+        entity_type: &str,
+        where_clause: &str,
+        params: Vec<String>,
+    ) -> Result<Option<Vec<String>>, PersistenceError> {
+        assert_eq!(
+            (tenant, entity_type, where_clause),
+            ("default", "Ticket", "title = ?")
+        );
+        assert_eq!(params, vec!["hello".to_string()]);
+        Ok(Some(vec!["t-1".to_string()]))
+    }
+
+    async fn load_projection_fields_many(
+        &self,
+        tenant: &str,
+        entity_type: &str,
+        entity_ids: &[String],
+        field_names: &[&str],
+    ) -> Result<Option<Vec<QueryProjectionFieldsRow>>, PersistenceError> {
+        assert_eq!((tenant, entity_type), ("default", "Ticket"));
+        assert_eq!(entity_ids, &["t-1".to_string()]);
+        assert_eq!(field_names, &["title"]);
+        Ok(Some(vec![QueryProjectionFieldsRow {
+            entity_id: "t-1".to_string(),
+            status: "Open".to_string(),
+            fields: BTreeMap::from([("title".to_string(), Some("hello".to_string()))]),
+        }]))
+    }
+
+    async fn projected_entity_counts_by_tenant(
+        &self,
+    ) -> Result<Option<Vec<(String, u64)>>, PersistenceError> {
+        Ok(Some(vec![("default".to_string(), 1)]))
+    }
+}
+
+struct RecordingTrajectorySink;
+
+#[async_trait::async_trait]
+impl TrajectorySink for RecordingTrajectorySink {
+    async fn persist_trajectory_entry(&self, entry: &TrajectoryEntry) -> Result<(), String> {
+        assert_eq!(entry.tenant, "default");
+        assert_eq!(entry.entity_type, "Ticket");
+        assert_eq!(entry.entity_id, "t-1");
+        assert_eq!(entry.action, "Create");
+        Ok(())
+    }
+}
 
 impl EventStore for RecordingEventStore {
     async fn append(
@@ -121,13 +213,81 @@ async fn boxed_event_store_delegates_through_object_safe_adapter() {
 #[test]
 fn storage_stack_labels_backend_and_exposes_boxed_events() {
     let events = BoxedEventStore::new(RecordingEventStore);
-    let stack = StorageStack::new(BackendLabel::Postgres, events.clone(), None, None, None);
+    let stack = StorageStack::new(
+        BackendLabel::Postgres,
+        events.clone(),
+        None,
+        None,
+        None,
+        None,
+    );
 
     assert_eq!(stack.backend, BackendLabel::Postgres);
     assert!(Arc::ptr_eq(&stack.events.inner(), &events.inner()));
     assert!(stack.platform.is_none());
     assert!(stack.query_plane.is_none());
+    assert!(stack.trajectory.is_none());
     assert!(stack.compatibility_store.is_none());
+}
+
+#[tokio::test]
+async fn storage_stack_exposes_query_plane_and_trajectory_capabilities() {
+    let stack = StorageStack::new(
+        BackendLabel::Postgres,
+        BoxedEventStore::new(RecordingEventStore),
+        None,
+        Some(Arc::new(RecordingQueryPlane)),
+        Some(Arc::new(RecordingTrajectorySink)),
+        None,
+    );
+
+    let query_plane = stack.query_plane.as_ref().expect("query plane");
+    query_plane
+        .upsert_projection(
+            "default",
+            "Ticket",
+            "t-1",
+            "Open",
+            &serde_json::json!({"title": "hello"}),
+            7,
+        )
+        .await
+        .expect("upsert projection");
+    assert_eq!(
+        query_plane
+            .query_field_index("default", "Ticket", "title = ?", vec!["hello".to_string()])
+            .await
+            .expect("query field index"),
+        Some(vec!["t-1".to_string()])
+    );
+    assert_eq!(
+        query_plane
+            .load_projection_fields_many("default", "Ticket", &["t-1".to_string()], &["title"])
+            .await
+            .expect("load projection fields")
+            .expect("projection fields")[0]
+            .fields["title"],
+        Some("hello".to_string())
+    );
+    query_plane
+        .remove_projection("default", "Ticket", "t-1")
+        .await
+        .expect("remove projection");
+    assert_eq!(
+        query_plane
+            .projected_entity_counts_by_tenant()
+            .await
+            .expect("counts"),
+        Some(vec![("default".to_string(), 1)])
+    );
+
+    stack
+        .trajectory
+        .as_ref()
+        .expect("trajectory sink")
+        .persist_trajectory_entry(&trajectory_entry())
+        .await
+        .expect("trajectory persisted");
 }
 
 fn test_envelope(sequence_nr: u64) -> PersistenceEnvelope {
@@ -142,5 +302,30 @@ fn test_envelope(sequence_nr: u64) -> PersistenceEnvelope {
             timestamp: chrono::Utc::now(),
             actor_id: "test".to_string(),
         },
+    }
+}
+
+fn trajectory_entry() -> TrajectoryEntry {
+    TrajectoryEntry {
+        timestamp: "2026-04-29T00:00:00Z".to_string(),
+        tenant: "default".to_string(),
+        entity_type: "Ticket".to_string(),
+        entity_id: "t-1".to_string(),
+        action: "Create".to_string(),
+        success: true,
+        from_status: None,
+        to_status: Some("Open".to_string()),
+        error: None,
+        agent_id: None,
+        session_id: None,
+        authz_denied: None,
+        denied_resource: None,
+        denied_module: None,
+        source: None,
+        spec_governed: Some(true),
+        agent_type: None,
+        request_body: None,
+        intent: None,
+        matched_policy_ids: None,
     }
 }

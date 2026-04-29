@@ -26,9 +26,11 @@ Temper will treat storage as a composed stack with explicit backend labels and f
 
 - `DynEventStore`, an object-safe adapter over `temper_runtime::persistence::EventStore`.
 - `BoxedEventStore`, the cloneable journal/snapshot handle stored in the stack.
-- `StorageStack`, a composed value containing event, platform, query-plane, backend-label, and transitional compatibility handles.
+- `QueryPlaneStore`, the durable projection capability for projection writes, batched projection reads, OData filter push-down, and projection metrics.
+- `TrajectorySink`, the durable observe trajectory write capability.
+- `StorageStack`, a composed value containing event, platform, query-plane, trajectory, backend-label, and transitional compatibility handles.
 
-`ServerState::set_event_store` now derives a `StorageStack` whenever a runtime store is attached. The old `ServerEventStore` enum remains as a temporary compatibility handle for platform methods that have not yet moved to concern-specific traits, but object safety is no longer deferred: new code should depend on `StorageStack`/`BoxedEventStore` rather than matching directly on `ServerEventStore`.
+`ServerState::set_event_store` now derives a `StorageStack` whenever a runtime store is attached. Query-plane and trajectory callers use `ServerState::query_plane_store()` / `ServerState::trajectory_sink()` instead of reaching through the compatibility store. The old `ServerEventStore` enum remains as a temporary compatibility handle for backend-specific platform and cross-tenant read methods that have not yet moved to concern-specific traits, but object safety is no longer deferred: new code should depend on `StorageStack` capabilities rather than matching directly on `ServerEventStore`.
 
 Environment-driven bootstrap selects backend with:
 
@@ -44,14 +46,14 @@ Unset values preserve current behavior until cutover.
 2. Make `platform_store()` return Postgres once Postgres implements `PlatformStore`.
 3. Add tests that fail if Postgres platform branches no-op.
 4. Introduce `StorageStack` and `DynEventStore` so backend selection produces composed capabilities.
-5. Move remaining query-plane and trajectory callers from `ServerEventStore` compatibility methods onto dedicated stack traits.
+5. Move production query-plane and trajectory callers from `ServerEventStore` compatibility methods onto dedicated stack traits.
 
 ## Readiness Gates
 
 - Postgres query projection round-trips in tests.
 - Startup logs expose the selected backend label.
 - Redis remains explicit ephemeral mode and returns clear unsupported errors for platform metadata.
-- `cargo test -p temper-server --test storage_stack` proves event operations delegate through the object-safe adapter.
+- `cargo test -p temper-server --test storage_stack` proves event operations delegate through the object-safe adapter and that query-plane / trajectory capabilities can be consumed through the stack.
 
 ## Consequences
 
@@ -62,7 +64,7 @@ Unset values preserve current behavior until cutover.
 
 ### Negative
 
-- Existing callers still receive a compatibility `ServerEventStore` until query-plane and trajectory methods move to dedicated stack traits.
+- Existing backend-specific platform and observe-read helpers still receive a compatibility `ServerEventStore` until their own concern-specific traits exist.
 
 ### Risks
 
@@ -76,7 +78,7 @@ Unset values preserve current behavior until cutover.
 
 - This ADR does not remove Redis ephemeral mode.
 - This ADR does not add per-tenant Postgres schema routing; row-level tenant columns remain the first implementation.
-- This ADR does not complete the caller migration away from `ServerEventStore`; it removes the object-safety blocker and creates the target seam.
+- This ADR does not remove every compatibility-store use; event-journal, platform long-tail, and cross-tenant observe-read paths still need purpose-built capability traits before the enum can disappear entirely.
 
 ## Alternatives Considered
 
