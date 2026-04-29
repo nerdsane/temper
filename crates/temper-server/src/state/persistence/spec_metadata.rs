@@ -14,7 +14,7 @@ impl ServerState {
         ioa_source: &str,
         csdl_xml: &str,
     ) -> Result<(), String> {
-        let Some(backend) = self.metadata_backend_for_tenant(tenant).await else {
+        let Some(backend) = self.tenant_metadata_backend(tenant).await else {
             return Ok(());
         };
 
@@ -61,7 +61,7 @@ impl ServerState {
         tenant: &str,
         cross_invariants_toml: Option<&str>,
     ) -> Result<(), String> {
-        let Some(backend) = self.metadata_backend_for_tenant(tenant).await else {
+        let Some(backend) = self.tenant_metadata_backend(tenant).await else {
             return Ok(());
         };
 
@@ -123,7 +123,7 @@ impl ServerState {
         status: &str,
         result: Option<&EntityVerificationResult>,
     ) -> Result<(), String> {
-        let Some(backend) = self.metadata_backend_for_tenant(tenant).await else {
+        let Some(backend) = self.tenant_metadata_backend(tenant).await else {
             return Ok(());
         };
 

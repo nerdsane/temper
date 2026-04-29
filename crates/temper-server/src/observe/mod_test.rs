@@ -151,7 +151,7 @@ async fn batch_file_text_read_returns_projected_file_contents_in_request_order()
     let state = test_state_with_turso().await;
     let tenant = "default";
     let turso = state
-        .persistent_store_for_tenant(tenant)
+        .turso_store_for_tenant(tenant)
         .await
         .expect("tenant turso store");
 
@@ -227,7 +227,7 @@ async fn batch_file_version_text_read_returns_immutable_version_contents_in_requ
     let state = test_state_with_turso().await;
     let tenant = "default";
     let turso = state
-        .persistent_store_for_tenant(tenant)
+        .turso_store_for_tenant(tenant)
         .await
         .expect("tenant turso store");
 
@@ -301,7 +301,7 @@ async fn batch_file_version_text_read_uses_local_store_for_internal_blob_endpoin
     let mut state = test_state_with_turso().await;
     let tenant = "default";
     let turso = state
-        .persistent_store_for_tenant(tenant)
+        .turso_store_for_tenant(tenant)
         .await
         .expect("tenant turso store");
 
@@ -559,7 +559,7 @@ async fn test_approve_decision_reload_failure_keeps_pending_and_policies_unchang
     assert_eq!(response.status(), StatusCode::BAD_REQUEST);
 
     // Verify decision status unchanged in Turso.
-    let turso = state.platform_persistent_store().expect("turso configured");
+    let turso = state.platform_turso_store().expect("turso configured");
     let data_str = turso
         .get_pending_decision(&decision_id)
         .await
@@ -1234,7 +1234,7 @@ async fn test_evolution_decide_creates_d_record() {
     };
     let data_json = serde_json::to_string(&obs).unwrap();
     state
-        .platform_persistent_store()
+        .platform_turso_store()
         .expect("turso configured")
         .insert_evolution_record(
             &obs.header.id,
@@ -1553,7 +1553,7 @@ async fn test_load_dir_emits_design_time_events() {
         .unwrap();
 
     // Check that design-time events were persisted to Turso.
-    let turso = state.platform_persistent_store().expect("turso configured");
+    let turso = state.platform_turso_store().expect("turso configured");
     let events = turso
         .list_design_time_events(None, 1000)
         .await
