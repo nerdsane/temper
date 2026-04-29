@@ -302,7 +302,6 @@ pub struct StorageStack {
     pub platform: Option<Arc<dyn PlatformStore>>,
     pub query_plane: Option<Arc<dyn QueryPlaneStore>>,
     pub trajectory: Option<Arc<dyn TrajectorySink>>,
-    pub compatibility_store: Option<Arc<ServerEventStore>>,
 }
 
 impl StorageStack {
@@ -312,7 +311,6 @@ impl StorageStack {
         platform: Option<Arc<dyn PlatformStore>>,
         query_plane: Option<Arc<dyn QueryPlaneStore>>,
         trajectory: Option<Arc<dyn TrajectorySink>>,
-        compatibility_store: Option<Arc<ServerEventStore>>,
     ) -> Self {
         Self {
             backend,
@@ -320,14 +318,12 @@ impl StorageStack {
             platform,
             query_plane,
             trajectory,
-            compatibility_store,
         }
     }
 
     pub fn from_server_event_store(store: ServerEventStore) -> Self {
         match store {
             ServerEventStore::Postgres(store) => {
-                let compatibility_store = Arc::new(ServerEventStore::Postgres(store.clone()));
                 let store = Arc::new(store);
                 Self::new(
                     BackendLabel::Postgres,
@@ -335,11 +331,9 @@ impl StorageStack {
                     Some(store.clone() as Arc<dyn PlatformStore>),
                     Some(store.clone() as Arc<dyn QueryPlaneStore>),
                     Some(store.clone() as Arc<dyn TrajectorySink>),
-                    Some(compatibility_store),
                 )
             }
             ServerEventStore::Turso(store) => {
-                let compatibility_store = Arc::new(ServerEventStore::Turso(store.clone()));
                 let store = Arc::new(store);
                 Self::new(
                     BackendLabel::Turso,
@@ -347,11 +341,9 @@ impl StorageStack {
                     Some(store.clone() as Arc<dyn PlatformStore>),
                     Some(store.clone() as Arc<dyn QueryPlaneStore>),
                     Some(store.clone() as Arc<dyn TrajectorySink>),
-                    Some(compatibility_store),
                 )
             }
             ServerEventStore::TenantRouted(router) => {
-                let compatibility_store = Arc::new(ServerEventStore::TenantRouted(router.clone()));
                 let platform_store =
                     Arc::new(router.platform_store().clone()) as Arc<dyn PlatformStore>;
                 let router = Arc::new(router);
@@ -361,11 +353,9 @@ impl StorageStack {
                     Some(platform_store),
                     Some(router.clone() as Arc<dyn QueryPlaneStore>),
                     Some(router.clone() as Arc<dyn TrajectorySink>),
-                    Some(compatibility_store),
                 )
             }
             ServerEventStore::Redis(store) => {
-                let compatibility_store = Arc::new(ServerEventStore::Redis(store.clone()));
                 let store = Arc::new(store);
                 Self::new(
                     BackendLabel::Redis,
@@ -373,13 +363,10 @@ impl StorageStack {
                     None,
                     None,
                     None,
-                    Some(compatibility_store),
                 )
             }
             #[cfg(feature = "sim")]
             ServerEventStore::Sim(store, platform_store) => {
-                let compatibility_store =
-                    Arc::new(ServerEventStore::Sim(store.clone(), platform_store.clone()));
                 let store = Arc::new(store);
                 let platform = platform_store.map(|store| store as Arc<dyn PlatformStore>);
                 Self::new(
@@ -388,7 +375,6 @@ impl StorageStack {
                     platform,
                     None,
                     None,
-                    Some(compatibility_store),
                 )
             }
         }

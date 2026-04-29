@@ -215,21 +215,13 @@ async fn boxed_event_store_delegates_through_object_safe_adapter() {
 #[test]
 fn storage_stack_labels_backend_and_exposes_boxed_events() {
     let events = BoxedEventStore::new(RecordingEventStore);
-    let stack = StorageStack::new(
-        BackendLabel::Postgres,
-        events.clone(),
-        None,
-        None,
-        None,
-        None,
-    );
+    let stack = StorageStack::new(BackendLabel::Postgres, events.clone(), None, None, None);
 
     assert_eq!(stack.backend, BackendLabel::Postgres);
     assert!(Arc::ptr_eq(&stack.events.inner(), &events.inner()));
     assert!(stack.platform.is_none());
     assert!(stack.query_plane.is_none());
     assert!(stack.trajectory.is_none());
-    assert!(stack.compatibility_store.is_none());
 }
 
 #[tokio::test]
@@ -240,7 +232,6 @@ async fn storage_stack_exposes_query_plane_and_trajectory_capabilities() {
         None,
         Some(Arc::new(RecordingQueryPlane)),
         Some(Arc::new(RecordingTrajectorySink)),
-        None,
     );
 
     let query_plane = stack.query_plane.as_ref().expect("query plane");
@@ -302,37 +293,38 @@ async fn storage_stack_from_event_store_uses_concrete_capability_handles() {
         .expect("create turso store");
 
     let stack = StorageStack::from_server_event_store(ServerEventStore::Turso(turso));
-    let compatibility_store = stack
-        .compatibility_store
-        .as_ref()
-        .expect("compatibility store");
-    let compatibility_data = Arc::as_ptr(compatibility_store) as *const ();
+    let enum_store = Arc::new(ServerEventStore::Turso(
+        TursoEventStore::new(&db_url, None)
+            .await
+            .expect("create comparison turso store"),
+    ));
+    let enum_data = Arc::as_ptr(&enum_store) as *const ();
 
     let events = stack.events.inner();
     assert_ne!(
         Arc::as_ptr(&events) as *const (),
-        compatibility_data,
+        enum_data,
         "event journal capability must not be backed by ServerEventStore"
     );
 
     let platform = stack.platform.as_ref().expect("platform capability");
     assert_ne!(
         Arc::as_ptr(platform) as *const (),
-        compatibility_data,
+        enum_data,
         "platform capability must not be backed by ServerEventStore"
     );
 
     let query_plane = stack.query_plane.as_ref().expect("query-plane capability");
     assert_ne!(
         Arc::as_ptr(query_plane) as *const (),
-        compatibility_data,
+        enum_data,
         "query-plane capability must not be backed by ServerEventStore"
     );
 
     let trajectory = stack.trajectory.as_ref().expect("trajectory capability");
     assert_ne!(
         Arc::as_ptr(trajectory) as *const (),
-        compatibility_data,
+        enum_data,
         "trajectory capability must not be backed by ServerEventStore"
     );
 }
