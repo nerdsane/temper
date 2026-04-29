@@ -50,7 +50,7 @@ pub struct Context {
     /// The action that triggered this integration.
     pub trigger_action: String,
     /// HTTP dispatch context (present only when this invocation was
-    /// routed via an ADR-0056 HttpEndpoint). Guests serving HTTP
+    /// routed via an ADR-0069 HttpEndpoint). Guests serving HTTP
     /// unwrap this then drive the inbound exchange via
     /// `temper_wasm_sdk::http_stream::InboundHttp`.
     pub http_request: Option<Value>,

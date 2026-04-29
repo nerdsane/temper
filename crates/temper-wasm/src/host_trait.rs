@@ -212,7 +212,7 @@ pub trait WasmHost: Send + Sync {
         Err("http_stream_response_head not supported by this host".to_string())
     }
 
-    /// Submit the response head for an inbound exchange (ADR-0056
+    /// Submit the response head for an inbound exchange (ADR-0069
     /// dispatch). The guest calls this once — keyed on the
     /// response-body handle it was given — before writing the
     /// response body. The kernel dispatcher blocks on
@@ -432,7 +432,7 @@ impl ProductionWasmHost {
     }
 
     /// Create with a pre-existing [`HttpStreamRegistry`] so the
-    /// ADR-0056 Phase 2 dispatcher and the per-request host share
+    /// ADR-0069 Phase 2 dispatcher and the per-request host share
     /// the same registry — handles minted by the dispatcher are
     /// reachable via FFI from the guest.
     pub fn with_shared_streams(
