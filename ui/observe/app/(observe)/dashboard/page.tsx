@@ -2,7 +2,7 @@
 
 import { useEffect, useState, useCallback, useMemo, useRef } from "react";
 import { fetchSpecs, fetchEntities, fetchVerificationStatus, subscribeDesignTimeEvents, subscribeEntityEvents } from "@/lib/api";
-import { useSSERefresh, useRelativeTime } from "@/lib/hooks";
+import { useSSERefresh } from "@/lib/hooks";
 import type { SpecSummary, EntitySummary, AllVerificationStatus } from "@/lib/types";
 import SpecCard from "@/components/SpecCard";
 import ErrorDisplay from "@/components/ErrorDisplay";
@@ -166,8 +166,6 @@ export default function Dashboard() {
     enabled: !initialLoading && !initialError,
   });
   const entities = useMemo(() => entityPoll.data ?? [], [entityPoll.data]);
-  const lastUpdated = useRelativeTime(entityPoll.lastUpdated);
-
   // SSE-driven verification status refresh
   const verifyPoll = useSSERefresh<AllVerificationStatus>({
     fetcher: fetchVerificationStatus,
@@ -269,7 +267,6 @@ export default function Dashboard() {
           {/* Last updated indicator */}
           {lastUpdated && (
             <span className="text-xs text-[var(--color-text-muted)]">
-              Updated {lastUpdated}
             </span>
           )}
         </div>

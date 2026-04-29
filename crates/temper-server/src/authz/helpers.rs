@@ -231,6 +231,11 @@ pub(crate) async fn record_authz_denial(
         tracing::warn!(error = %e, id = %pd.id, "failed to persist PD with governance_decision_id");
     }
 
+    // Tell the Observe UI a new decision exists so the Decisions tab refreshes live.
+    let _ = state
+        .observe_refresh_tx
+        .send(crate::state::ObserveRefreshHint::Decisions);
+
     // Record trajectory to Turso synchronously.
     let traj = TrajectoryEntry {
         timestamp: sim_now().to_rfc3339(),
