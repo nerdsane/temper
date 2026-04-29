@@ -11,6 +11,7 @@ use std::pin::Pin;
 use std::sync::Arc;
 use std::time::Duration;
 
+use sqlx::PgPool;
 use temper_runtime::persistence::{EventStore, PersistenceEnvelope, PersistenceError};
 use temper_store_postgres::{PostgresEventStore, PostgresPolicyRow, PostgresTrajectoryInsert};
 use temper_store_turso::{
@@ -635,11 +636,25 @@ pub trait MetadataStoreProvider: Send + Sync {
     async fn all_stores(&self) -> Vec<Arc<dyn MetadataStore>>;
 }
 
+/// Explicit Turso tenant-store access for transitional boot/recovery paths.
+#[async_trait::async_trait]
+pub trait TursoStoreProvider: Send + Sync {
+    fn platform_store(&self) -> Option<TursoEventStore>;
+
+    async fn store_for_tenant(&self, tenant: &str) -> Option<TursoEventStore>;
+
+    async fn all_stores(&self) -> Vec<TursoEventStore>;
+
+    async fn connected_tenants(&self) -> Vec<String>;
+}
+
 /// Composed storage capabilities selected at boot.
 #[derive(Clone)]
 pub struct StorageStack {
     pub backend: BackendLabel,
     pub events: BoxedEventStore,
+    pub postgres_pool: Option<PgPool>,
+    pub turso: Option<Arc<dyn TursoStoreProvider>>,
     pub platform: Option<Arc<dyn PlatformStore>>,
     pub policies: Option<Arc<dyn PolicyStore>>,
     pub query_plane: Option<Arc<dyn QueryPlaneStore>>,
@@ -651,6 +666,8 @@ impl StorageStack {
     pub fn new(
         backend: BackendLabel,
         events: BoxedEventStore,
+        postgres_pool: Option<PgPool>,
+        turso: Option<Arc<dyn TursoStoreProvider>>,
         platform: Option<Arc<dyn PlatformStore>>,
         policies: Option<Arc<dyn PolicyStore>>,
         query_plane: Option<Arc<dyn QueryPlaneStore>>,
@@ -660,6 +677,8 @@ impl StorageStack {
         Self {
             backend,
             events,
+            postgres_pool,
+            turso,
             platform,
             policies,
             query_plane,
@@ -675,6 +694,8 @@ impl StorageStack {
                 Self::new(
                     BackendLabel::Postgres,
                     BoxedEventStore::from_arc(store.clone()),
+                    Some(store.pool().clone()),
+                    None,
                     Some(store.clone() as Arc<dyn PlatformStore>),
                     Some(store.clone() as Arc<dyn PolicyStore>),
                     Some(store.clone() as Arc<dyn QueryPlaneStore>),
@@ -687,6 +708,8 @@ impl StorageStack {
                 Self::new(
                     BackendLabel::Turso,
                     BoxedEventStore::from_arc(store.clone()),
+                    None,
+                    Some(Arc::new(SingleTursoStoreProvider::new(store.clone()))),
                     Some(store.clone() as Arc<dyn PlatformStore>),
                     Some(store.clone() as Arc<dyn PolicyStore>),
                     Some(store.clone() as Arc<dyn QueryPlaneStore>),
@@ -701,6 +724,10 @@ impl StorageStack {
                 Self::new(
                     BackendLabel::TursoRouted,
                     BoxedEventStore::from_arc(router.clone()),
+                    None,
+                    Some(Arc::new(TenantRoutedTursoStoreProvider::new(
+                        router.as_ref().clone(),
+                    ))),
                     Some(platform_store),
                     Some(router.clone() as Arc<dyn PolicyStore>),
                     Some(router.clone() as Arc<dyn QueryPlaneStore>),
@@ -720,6 +747,8 @@ impl StorageStack {
                     None,
                     None,
                     None,
+                    None,
+                    None,
                 )
             }
             #[cfg(feature = "sim")]
@@ -729,6 +758,8 @@ impl StorageStack {
                 Self::new(
                     BackendLabel::Sim,
                     BoxedEventStore::from_arc(store),
+                    None,
+                    None,
                     platform,
                     None,
                     None,
@@ -768,6 +799,35 @@ impl MetadataStoreProvider for SingleMetadataStoreProvider {
     }
 }
 
+struct SingleTursoStoreProvider {
+    store: Arc<TursoEventStore>,
+}
+
+impl SingleTursoStoreProvider {
+    fn new(store: Arc<TursoEventStore>) -> Self {
+        Self { store }
+    }
+}
+
+#[async_trait::async_trait]
+impl TursoStoreProvider for SingleTursoStoreProvider {
+    fn platform_store(&self) -> Option<TursoEventStore> {
+        Some(self.store.as_ref().clone())
+    }
+
+    async fn store_for_tenant(&self, _tenant: &str) -> Option<TursoEventStore> {
+        Some(self.store.as_ref().clone())
+    }
+
+    async fn all_stores(&self) -> Vec<TursoEventStore> {
+        vec![self.store.as_ref().clone()]
+    }
+
+    async fn connected_tenants(&self) -> Vec<String> {
+        Vec::new()
+    }
+}
+
 struct TenantRoutedMetadataStoreProvider {
     router: TenantStoreRouter,
 }
@@ -801,6 +861,41 @@ impl MetadataStoreProvider for TenantRoutedMetadataStoreProvider {
             }
         }
         stores
+    }
+}
+
+struct TenantRoutedTursoStoreProvider {
+    router: TenantStoreRouter,
+}
+
+impl TenantRoutedTursoStoreProvider {
+    fn new(router: TenantStoreRouter) -> Self {
+        Self { router }
+    }
+}
+
+#[async_trait::async_trait]
+impl TursoStoreProvider for TenantRoutedTursoStoreProvider {
+    fn platform_store(&self) -> Option<TursoEventStore> {
+        Some(self.router.platform_store().clone())
+    }
+
+    async fn store_for_tenant(&self, tenant: &str) -> Option<TursoEventStore> {
+        self.router.store_for_tenant(tenant).await.ok()
+    }
+
+    async fn all_stores(&self) -> Vec<TursoEventStore> {
+        let mut stores = vec![self.router.platform_store().clone()];
+        for tenant_id in self.router.connected_tenants().await {
+            if let Ok(store) = self.router.store_for_tenant(&tenant_id).await {
+                stores.push(store);
+            }
+        }
+        stores
+    }
+
+    async fn connected_tenants(&self) -> Vec<String> {
+        self.router.connected_tenants().await
     }
 }
 
