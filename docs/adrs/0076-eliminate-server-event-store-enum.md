@@ -1,33 +1,31 @@
 # ADR-0076: Eliminate ServerEventStore Enum Dispatch
 
-- Status: Accepted
+- Status: Implemented
 - Date: 2026-04-29
 - Deciders: Temper core maintainers
 - Related:
   - ADR-0065: Postgres Platform Store and Canonical Schema
   - ADR-0066: StorageStack Backend Selection
-  - `crates/temper-server/src/event_store.rs`
   - `crates/temper-server/src/storage/mod.rs`
 
 ## Context
 
-`ServerEventStore` still contains long-tail enum dispatch after the Postgres
-cutover work. The enum is safe enough for cutover only because Postgres arms
-delegate to real implementations, but it is still the wrong long-term boundary:
-new backend capabilities can be added with silent `Ok(())` or `Ok(None)` match
-arms.
+Before this ADR was implemented, `ServerEventStore` still contained long-tail
+enum dispatch after the Postgres cutover work. The enum was safe enough for
+cutover only because Postgres arms delegated to real implementations, but it was
+still the wrong long-term boundary: new backend capabilities could be added with
+silent `Ok(())` or `Ok(None)` match arms.
 
 ADR-0066 introduced `StorageStack`, `DynEventStore`, `QueryPlaneStore`, and
 `TrajectorySink`. That made the event journal object-safe and moved hot
 query-plane / trajectory write paths off business-code enum matching. This ADR
-defines the finite plan to remove the remaining compatibility enum entirely.
+defined the finite plan to remove the remaining compatibility enum entirely.
 
 ## Decision
 
-`ServerEventStore` is a transitional compatibility handle only. New production
-code must obtain storage through `StorageStack` capability traits, and
-`StorageStack::from_server_event_store` must populate those slots from concrete
-backend handles, not `Arc<ServerEventStore>` adapters.
+`ServerEventStore` is retired. Production code obtains storage through
+`StorageStack` capability traits, and boot-time backend selection constructs
+`StorageStack` directly from concrete backend handles.
 
 Unsupported features are represented as:
 
@@ -37,18 +35,18 @@ Unsupported features are represented as:
 
 Silent successful no-ops are not an acceptable storage capability fallback.
 
-## Current Inventory
+## Retired Inventory
 
-| Current method | Concern | Target capability |
+| Retired method | Concern | Target capability |
 | --- | --- | --- |
 | `backend_name` | diagnostics | `BackendLabel` |
-| `postgres_pool` | compatibility | delete after typed stores exist |
-| `turso_store` | compatibility | delete after typed stores exist |
-| `platform_turso_store` | compatibility | `PlatformStore` / typed observe stores |
+| `postgres_pool` | backend handle | `StorageStack::postgres_pool` |
+| `turso_store` | backend handle | `TursoStoreProvider` |
+| `platform_turso_store` | backend handle | `TursoStoreProvider` |
 | `platform_store` | platform metadata | `PlatformStore` |
-| `tenant_router` | compatibility | delete after `TenantQueryReader` |
-| `turso_for_tenant` | tenant routing | `TenantQueryReader` / typed tenant stores |
-| `redis_store` | compatibility | delete with enum |
+| `tenant_router` | tenant routing | `TursoStoreProvider` |
+| `turso_for_tenant` | tenant routing | `TursoStoreProvider` / typed tenant stores |
+| `redis_store` | backend handle | no public production accessor |
 | `save_policy` | policy management | `PolicyStore` |
 | `load_policies_for_tenant` | policy management | `PolicyStore` |
 | `load_all_policies` | policy management | `PolicyStore` |
@@ -94,44 +92,42 @@ Silent successful no-ops are not an acceptable storage capability fallback.
 | `load_recent_wasm_invocations` | WASM invocation log | `WasmInvocationStore` |
 | `delete_wasm_module` | WASM metadata | `WasmMetadataStore` |
 
-## Migration Plan
+## Implementation
 
-1. Keep the cutover-ready event/query/trajectory capabilities on
-   `StorageStack`, but ensure those trait objects are backed by concrete
-   `PostgresEventStore`, `TursoEventStore`, or `TenantStoreRouter` handles.
-2. Add one capability trait per remaining concern cluster:
+Implemented in the StorageStack migration series:
+
+1. Event/query/trajectory capabilities are backed by concrete
+   `PostgresEventStore`, `TursoEventStore`, `TenantStoreRouter`,
+   `RedisEventStore`, or `SimEventStore` handles.
+2. Concern clusters moved to capability traits:
    `PolicyStore`, `ObserveReadStore`, `EvolutionStore`,
    `DesignTimeEventStore`, `OtsStore`, `BlobStore`,
-   `AuthzAnalyticsStore`, `DecisionStore`, `WasmMetadataStore`, and
-   `WasmInvocationStore`.
-3. Migrate call sites one capability at a time. Each migration removes the
-   corresponding methods from `ServerEventStore`.
-4. Delete compatibility accessors (`postgres_pool`, `turso_store`,
-   `turso_for_tenant`, etc.) once no call site needs backend-specific handles.
-5. Delete `ServerEventStore` once it has no remaining business methods and
-   construct `StorageStack` directly from boot-time backend configuration.
+   `AuthzAnalyticsStore`, `DecisionStore`, `WasmMetadataStore`,
+   `WasmInvocationStore`, `MetadataStoreProvider`, and
+   `TursoStoreProvider`.
+3. Production call sites moved to `StorageStack` capabilities.
+4. `ServerState` no longer has an `event_store` field.
+5. `crates/temper-server/src/event_store.rs` was deleted.
+6. `temper serve` constructs `StorageStack` directly from boot-time backend
+   configuration.
 
 ## Definition of Done
 
-- `rg "match self" crates/temper-server/src/event_store.rs` returns no
-  storage business dispatch.
+- `crates/temper-server/src/event_store.rs` does not exist.
 - `ServerState` contains `storage_stack` as the only durable storage field.
 - Backend selection is matched exactly once at boot, when constructing
   `StorageStack`.
-- CI fails if a production module reintroduces backend enum dispatch outside
-  storage construction and tests.
+- CI fails if a production module reintroduces `ServerEventStore`,
+  `from_server_event_store`, or direct `event_store` storage access.
 - Redis/simulation unsupported capabilities return explicit absence or errors,
   never successful persistence no-ops.
 
 ## Readiness Gates
 
-- `cargo test -p temper-server --test storage_stack` includes a regression test
-  proving stack capabilities are not backed by `ServerEventStore` trait
-  adapters.
-- Each new capability trait has Postgres and Turso implementations before its
-  call sites move.
-- Every migrated concern deletes at least one `ServerEventStore` method in the
-  same change.
+- `cargo test -p temper-server --test storage_stack` verifies the object-safe
+  event adapter and concrete Turso stack capabilities.
+- `bash scripts/check-storage-dispatch-boundary.sh` reports `0/0` legacy
+  violations and fails if the retired compatibility surface returns.
 
 ## Consequences
 
@@ -143,10 +139,9 @@ Silent successful no-ops are not an acceptable storage capability fallback.
 
 ### Negative
 
-- The migration creates several small storage traits. Their boundaries must
+- The implementation creates several small storage traits. Their boundaries must
   remain concern-based, not one trait per method.
-- Until the final deletion, old compatibility methods remain available for
-  unmigrated code and tests.
+- Backends that do not implement a capability must surface absence explicitly.
 
 ### DST Compliance
 
