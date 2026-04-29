@@ -215,11 +215,19 @@ async fn boxed_event_store_delegates_through_object_safe_adapter() {
 #[test]
 fn storage_stack_labels_backend_and_exposes_boxed_events() {
     let events = BoxedEventStore::new(RecordingEventStore);
-    let stack = StorageStack::new(BackendLabel::Postgres, events.clone(), None, None, None);
+    let stack = StorageStack::new(
+        BackendLabel::Postgres,
+        events.clone(),
+        None,
+        None,
+        None,
+        None,
+    );
 
     assert_eq!(stack.backend, BackendLabel::Postgres);
     assert!(Arc::ptr_eq(&stack.events.inner(), &events.inner()));
     assert!(stack.platform.is_none());
+    assert!(stack.policies.is_none());
     assert!(stack.query_plane.is_none());
     assert!(stack.trajectory.is_none());
 }
@@ -229,6 +237,7 @@ async fn storage_stack_exposes_query_plane_and_trajectory_capabilities() {
     let stack = StorageStack::new(
         BackendLabel::Postgres,
         BoxedEventStore::new(RecordingEventStore),
+        None,
         None,
         Some(Arc::new(RecordingQueryPlane)),
         Some(Arc::new(RecordingTrajectorySink)),
