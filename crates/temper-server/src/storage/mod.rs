@@ -22,10 +22,7 @@ use temper_store_turso::{
     UnmetIntentAggRow, store::TrajectoryStats,
 };
 
-use crate::event_store::ServerEventStore;
-use crate::platform_store::{
-    InstalledAppRecord, PlatformStore, SpecRow, SpecVerificationUpdate, WasmModuleRow,
-};
+use crate::platform_store::PlatformStore;
 #[cfg(feature = "sim")]
 use crate::platform_store::SimPlatformStore;
 use crate::state::trajectory::{TrajectoryEntry, TrajectorySource};
@@ -232,19 +229,6 @@ impl BackendLabel {
             Self::Redis => "redis",
             Self::TursoRouted => "turso-routed",
             Self::Sim => "sim",
-        }
-    }
-}
-
-impl From<&ServerEventStore> for BackendLabel {
-    fn from(store: &ServerEventStore) -> Self {
-        match store {
-            ServerEventStore::Postgres(_) => Self::Postgres,
-            ServerEventStore::Turso(_) => Self::Turso,
-            ServerEventStore::Redis(_) => Self::Redis,
-            ServerEventStore::TenantRouted(_) => Self::TursoRouted,
-            #[cfg(feature = "sim")]
-            ServerEventStore::Sim(_, _) => Self::Sim,
         }
     }
 }
@@ -717,17 +701,6 @@ impl StorageStack {
             query_plane,
             trajectory,
             metadata,
-        }
-    }
-
-    pub fn from_server_event_store(store: ServerEventStore) -> Self {
-        match store {
-            ServerEventStore::Postgres(store) => Self::from_postgres(store),
-            ServerEventStore::Turso(store) => Self::from_turso(store),
-            ServerEventStore::TenantRouted(router) => Self::from_tenant_router(router),
-            ServerEventStore::Redis(store) => Self::from_redis(store),
-            #[cfg(feature = "sim")]
-            ServerEventStore::Sim(store, platform_store) => Self::from_sim(store, platform_store),
         }
     }
 
@@ -2475,201 +2448,5 @@ impl TrajectorySink for TenantStoreRouter {
                     entry.tenant, entry.entity_type, entry.entity_id, entry.action
                 )
             })
-    }
-}
-
-fn unsupported_platform_backend(store: &ServerEventStore) -> String {
-    format!(
-        "platform storage is not supported on {} backend",
-        store.backend_name()
-    )
-}
-
-#[async_trait::async_trait]
-impl PlatformStore for ServerEventStore {
-    async fn upsert_spec(
-        &self,
-        tenant: &str,
-        entity_type: &str,
-        ioa_source: &str,
-        csdl_xml: &str,
-        content_hash: &str,
-    ) -> Result<(), String> {
-        let store = self
-            .platform_store()
-            .ok_or_else(|| unsupported_platform_backend(self))?;
-        store
-            .upsert_spec(tenant, entity_type, ioa_source, csdl_xml, content_hash)
-            .await
-    }
-
-    async fn load_specs(&self) -> Result<Vec<SpecRow>, String> {
-        let store = self
-            .platform_store()
-            .ok_or_else(|| unsupported_platform_backend(self))?;
-        store.load_specs().await
-    }
-
-    async fn delete_spec(&self, tenant: &str, entity_type: &str) -> Result<(), String> {
-        let store = self
-            .platform_store()
-            .ok_or_else(|| unsupported_platform_backend(self))?;
-        store.delete_spec(tenant, entity_type).await
-    }
-
-    async fn commit_specs(&self, tenant: &str) -> Result<(), String> {
-        let store = self
-            .platform_store()
-            .ok_or_else(|| unsupported_platform_backend(self))?;
-        store.commit_specs(tenant).await
-    }
-
-    async fn delete_uncommitted_specs(&self) -> Result<usize, String> {
-        let store = self
-            .platform_store()
-            .ok_or_else(|| unsupported_platform_backend(self))?;
-        store.delete_uncommitted_specs().await
-    }
-
-    async fn load_verification_cache(
-        &self,
-        tenant: &str,
-    ) -> Result<std::collections::BTreeMap<String, (String, bool)>, String> {
-        let store = self
-            .platform_store()
-            .ok_or_else(|| unsupported_platform_backend(self))?;
-        store.load_verification_cache(tenant).await
-    }
-
-    async fn persist_spec_verification(
-        &self,
-        tenant: &str,
-        entity_type: &str,
-        update: SpecVerificationUpdate<'_>,
-    ) -> Result<(), String> {
-        let store = self
-            .platform_store()
-            .ok_or_else(|| unsupported_platform_backend(self))?;
-        store
-            .persist_spec_verification(tenant, entity_type, update)
-            .await
-    }
-
-    async fn upsert_tenant_policy(&self, tenant: &str, policy_text: &str) -> Result<(), String> {
-        let store = self
-            .platform_store()
-            .ok_or_else(|| unsupported_platform_backend(self))?;
-        store.upsert_tenant_policy(tenant, policy_text).await
-    }
-
-    async fn upsert_tenant_constraints(
-        &self,
-        tenant: &str,
-        cross_invariants_toml: &str,
-    ) -> Result<(), String> {
-        let store = self
-            .platform_store()
-            .ok_or_else(|| unsupported_platform_backend(self))?;
-        store
-            .upsert_tenant_constraints(tenant, cross_invariants_toml)
-            .await
-    }
-
-    async fn load_tenant_policies(&self) -> Result<Vec<(String, String)>, String> {
-        let store = self
-            .platform_store()
-            .ok_or_else(|| unsupported_platform_backend(self))?;
-        store.load_tenant_policies().await
-    }
-
-    async fn is_app_installed(&self, tenant: &str, app_name: &str) -> Result<bool, String> {
-        let store = self
-            .platform_store()
-            .ok_or_else(|| unsupported_platform_backend(self))?;
-        store.is_app_installed(tenant, app_name).await
-    }
-
-    async fn record_installed_app(&self, tenant: &str, app_name: &str) -> Result<(), String> {
-        let store = self
-            .platform_store()
-            .ok_or_else(|| unsupported_platform_backend(self))?;
-        store.record_installed_app(tenant, app_name).await
-    }
-
-    async fn record_installed_app_metadata(
-        &self,
-        record: &InstalledAppRecord,
-    ) -> Result<(), String> {
-        let store = self
-            .platform_store()
-            .ok_or_else(|| unsupported_platform_backend(self))?;
-        store.record_installed_app_metadata(record).await
-    }
-
-    async fn get_installed_app(
-        &self,
-        tenant: &str,
-        app_name: &str,
-    ) -> Result<Option<InstalledAppRecord>, String> {
-        let store = self
-            .platform_store()
-            .ok_or_else(|| unsupported_platform_backend(self))?;
-        store.get_installed_app(tenant, app_name).await
-    }
-
-    async fn list_all_installed_apps(&self) -> Result<Vec<(String, String)>, String> {
-        let store = self
-            .platform_store()
-            .ok_or_else(|| unsupported_platform_backend(self))?;
-        store.list_all_installed_apps().await
-    }
-
-    async fn upsert_pending_decision(
-        &self,
-        id: &str,
-        tenant: &str,
-        status: &str,
-        data: &str,
-    ) -> Result<(), String> {
-        let store = self
-            .platform_store()
-            .ok_or_else(|| unsupported_platform_backend(self))?;
-        store
-            .upsert_pending_decision(id, tenant, status, data)
-            .await
-    }
-
-    async fn load_pending_decisions(&self, limit: usize) -> Result<Vec<String>, String> {
-        let store = self
-            .platform_store()
-            .ok_or_else(|| unsupported_platform_backend(self))?;
-        store.load_pending_decisions(limit).await
-    }
-
-    async fn load_all_wasm_modules(&self, tenant: &str) -> Result<Vec<WasmModuleRow>, String> {
-        let store = self
-            .platform_store()
-            .ok_or_else(|| unsupported_platform_backend(self))?;
-        store.load_all_wasm_modules(tenant).await
-    }
-
-    async fn load_wasm_modules_all_tenants(&self) -> Result<Vec<WasmModuleRow>, String> {
-        let store = self
-            .platform_store()
-            .ok_or_else(|| unsupported_platform_backend(self))?;
-        store.load_wasm_modules_all_tenants().await
-    }
-
-    async fn upsert_wasm_module(
-        &self,
-        tenant: &str,
-        name: &str,
-        bytes: &[u8],
-        hash: &str,
-    ) -> Result<(), String> {
-        let store = self
-            .platform_store()
-            .ok_or_else(|| unsupported_platform_backend(self))?;
-        store.upsert_wasm_module(tenant, name, bytes, hash).await
     }
 }

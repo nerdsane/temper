@@ -287,12 +287,10 @@ async fn dst_multiple_actors_independent() {
 #[cfg(feature = "sim")]
 #[tokio::test]
 async fn replay_skips_schema_mismatched_events() {
+    use temper_runtime::persistence::EventStore;
     use temper_store_sim::SimEventStore;
 
-    let store = Arc::new(crate::event_store::ServerEventStore::Sim(
-        SimEventStore::no_faults(42),
-        None,
-    ));
+    let store = Arc::new(SimEventStore::no_faults(42));
     let pid = "default:Order:schema-evo-1";
 
     // Event 1: valid CancelOrder — parseable as EntityEvent.
