@@ -217,9 +217,6 @@ APP CATALOG:\n\
 \x20 await temper.list_apps() -> available pre-built apps (name, description, entity_types)\n\
 \x20 await temper.get_app(app_name) -> full app guide markdown (when to use, actions, examples)\n\
 \x20 await temper.install_app(app_name) -> install an app into the current tenant\n\
-\x20 await temper.list_skills() -> alias for list_apps (backward compatible)\n\
-\x20 await temper.get_skill(skill_name) -> alias for get_app (backward compatible)\n\
-\x20 await temper.install_skill(skill_name) -> alias for install_app (backward compatible)\n\
 \n\
 GOVERNANCE:\n\
 \x20 await temper.get_decisions(tenant, status?) -> list decisions\n\
