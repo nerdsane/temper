@@ -6,7 +6,7 @@ use std::sync::{Arc, OnceLock, RwLock};
 use tracing::instrument;
 
 use temper_observe::wide_event;
-use temper_runtime::persistence::{EventStore, PersistenceEnvelope};
+use temper_runtime::persistence::PersistenceEnvelope;
 use temper_runtime::scheduler::sim_now;
 use temper_runtime::tenant::TenantId;
 
@@ -206,7 +206,7 @@ impl ServerState {
     /// entities while deferring actor allocation until first access.
     #[instrument(skip_all, fields(otel.name = "entity.populate_index_from_store", tenant = %tenant))]
     pub async fn populate_index_from_store(&self, tenant: &TenantId) {
-        let Some(store) = self.event_store.as_ref() else {
+        let Some((store, _backend)) = self.event_journal() else {
             return;
         };
 
@@ -253,7 +253,7 @@ impl ServerState {
         tenant: &TenantId,
         entity_type: &str,
     ) -> usize {
-        let Some(store) = self.event_store.as_ref() else {
+        let Some((store, _backend)) = self.event_journal() else {
             return 0;
         };
 
@@ -312,7 +312,7 @@ impl ServerState {
     /// entities that have persisted events in this tenant.
     #[instrument(skip_all, fields(otel.name = "entity.hydrate_from_store", tenant = %tenant))]
     pub async fn hydrate_from_store(&self, tenant: &TenantId) {
-        if let Some(ref store) = self.event_store {
+        if let Some((store, _backend)) = self.event_journal() {
             match store.list_entity_ids(tenant.as_str()).await {
                 Ok(entities) => {
                     let mut hydrated = 0usize;
@@ -407,13 +407,14 @@ impl ServerState {
         // ADR-0048 sub-decision 5: every actor gets the shared idempotency
         // cache so it can dedupe duplicate asks produced by retry storms.
         let tenant_blob_store = self.blob_store_for_tenant(tenant).ok();
-        let actor = match &self.event_store {
-            Some(store) => EntityActor::with_persistence(
+        let actor = match self.event_journal() {
+            Some((store, backend)) => EntityActor::with_persistence(
                 entity_type,
                 entity_id,
                 table,
                 initial_fields,
-                store.clone(),
+                store,
+                backend,
             )
             .with_tenant(tenant.as_str())
             .with_idempotency_cache(self.idempotency_cache.clone())
@@ -797,9 +798,10 @@ impl ServerState {
         entity_id: &str,
     ) -> bool {
         let persistence_id = format!("{tenant}:{entity_type}:{entity_id}");
+        let journal = self.event_journal();
 
         if self.entity_exists(tenant, entity_type, entity_id) {
-            let Some(store) = self.event_store.as_ref() else {
+            let Some((store, _backend)) = journal.as_ref() else {
                 return true;
             };
 
@@ -816,7 +818,7 @@ impl ServerState {
             return true;
         }
 
-        let Some(store) = self.event_store.as_ref() else {
+        let Some((store, _backend)) = journal.as_ref() else {
             return false;
         };
 
@@ -864,7 +866,7 @@ impl ServerState {
             return ids;
         }
 
-        if self.event_store.is_none() {
+        if self.event_journal().is_none() {
             return ids;
         }
         self.populate_index_from_store_by_type(tenant, entity_type)
@@ -907,6 +909,7 @@ impl ServerState {
 
         let mut passivated = 0usize;
         let policy = self.dispatch_retry_policy();
+        let journal = self.event_journal();
         for (actor_key, actor_ref) in candidates {
             // ADR-0048: retry transient failures so passivation is not skipped
             // by a single AskTimeout under load.
@@ -916,7 +919,7 @@ impl ServerState {
                 &policy,
             )
             .await;
-            if let Some(ref store) = self.event_store
+            if let Some((store, _backend)) = journal.as_ref()
                 && let Ok(response) = snapshot_outcome.result
                 && response.state.sequence_nr > 0
             {
