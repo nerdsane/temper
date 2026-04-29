@@ -223,6 +223,8 @@ fn storage_stack_labels_backend_and_exposes_boxed_events() {
         None,
         None,
         None,
+        None,
+        None,
     );
 
     assert_eq!(stack.backend, BackendLabel::Postgres);
@@ -239,6 +241,8 @@ async fn storage_stack_exposes_query_plane_and_trajectory_capabilities() {
     let stack = StorageStack::new(
         BackendLabel::Postgres,
         BoxedEventStore::new(RecordingEventStore),
+        None,
+        None,
         None,
         None,
         Some(Arc::new(RecordingQueryPlane)),

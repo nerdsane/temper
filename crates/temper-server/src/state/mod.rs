@@ -350,47 +350,23 @@ impl ServerState {
 
     /// Return the durable query-plane capability for projection reads/writes.
     pub(crate) fn query_plane_store(&self) -> Option<Arc<dyn QueryPlaneStore>> {
-        if let Some(query_plane) = self
-            .storage_stack
+        self.storage_stack
             .as_ref()
             .and_then(|stack| stack.query_plane.clone())
-        {
-            return Some(query_plane);
-        }
-
-        // Compatibility for older tests that still assign `event_store`
-        // directly instead of calling `set_event_store`. Rebuild a stack from
-        // the cloned backend so the returned capability is still concrete.
-        StorageStack::from_server_event_store(self.event_store.as_ref()?.as_ref().clone())
-            .query_plane
     }
 
     /// Return the runtime event journal capability plus backend label.
     pub(crate) fn event_journal(&self) -> Option<(BoxedEventStore, BackendLabel)> {
-        if let Some(stack) = self.storage_stack.as_ref() {
-            return Some((stack.events.clone(), stack.backend));
-        }
-
-        // Compatibility for older tests that still assign `event_store`
-        // directly instead of calling `set_event_store`.
-        let stack =
-            StorageStack::from_server_event_store(self.event_store.as_ref()?.as_ref().clone());
-        Some((stack.events, stack.backend))
+        self.storage_stack
+            .as_ref()
+            .map(|stack| (stack.events.clone(), stack.backend))
     }
 
     /// Return the granular Cedar policy persistence capability.
     pub(crate) fn policy_store(&self) -> Option<Arc<dyn PolicyStore>> {
-        if let Some(policies) = self
-            .storage_stack
+        self.storage_stack
             .as_ref()
             .and_then(|stack| stack.policies.clone())
-        {
-            return Some(policies);
-        }
-
-        // Compatibility for older tests that still assign `event_store`
-        // directly instead of calling `set_event_store`.
-        StorageStack::from_server_event_store(self.event_store.as_ref()?.as_ref().clone()).policies
     }
 
     /// Return the observe trajectory sink plus backend label for metrics.
@@ -401,12 +377,7 @@ impl ServerState {
             return Some((stack.backend.as_str(), sink));
         }
 
-        // Compatibility for older tests that still assign `event_store`
-        // directly instead of calling `set_event_store`. Rebuild a stack from
-        // the cloned backend so the returned capability is still concrete.
-        let stack =
-            StorageStack::from_server_event_store(self.event_store.as_ref()?.as_ref().clone());
-        stack.trajectory.map(|sink| (stack.backend.as_str(), sink))
+        None
     }
 
     /// Create ServerState from CSDL XML and optional specification sources.
@@ -811,7 +782,7 @@ impl ServerState {
     /// Get a reference to the platform Turso event store.
     ///
     /// Panics if the event store is not configured or is not a Turso backend.
-    pub fn turso(&self) -> &temper_store_turso::TursoEventStore {
+    pub fn turso(&self) -> temper_store_turso::TursoEventStore {
         self.platform_persistent_store()
             .expect("Turso event store is not configured")
     }
@@ -824,10 +795,11 @@ impl ServerState {
     ///
     /// Returns `None` when the server is running without Turso (e.g. in-memory
     /// mode or tests). Callers should degrade gracefully to empty results.
-    pub fn platform_persistent_store(&self) -> Option<&temper_store_turso::TursoEventStore> {
-        self.event_store
+    pub fn platform_persistent_store(&self) -> Option<temper_store_turso::TursoEventStore> {
+        self.storage_stack
             .as_ref()
-            .and_then(|store| store.platform_turso_store())
+            .and_then(|stack| stack.turso.as_ref())
+            .and_then(|provider| provider.platform_store())
     }
 
     /// Get a Turso store for a specific tenant.
@@ -841,8 +813,8 @@ impl ServerState {
         &self,
         tenant: &str,
     ) -> Option<temper_store_turso::TursoEventStore> {
-        let store = self.event_store.as_ref()?;
-        store.turso_for_tenant(tenant).await
+        let provider = self.storage_stack.as_ref()?.turso.as_ref()?.clone();
+        provider.store_for_tenant(tenant).await
     }
 
     /// Return a backend-neutral metadata store for one tenant.
@@ -859,9 +831,7 @@ impl ServerState {
             return provider.store_for_tenant(tenant).await;
         }
 
-        let stack =
-            StorageStack::from_server_event_store(self.event_store.as_ref()?.as_ref().clone());
-        stack.metadata?.store_for_tenant(tenant).await
+        None
     }
 
     /// Return the platform metadata store for system-wide tables.
@@ -874,9 +844,7 @@ impl ServerState {
             return provider.platform_store();
         }
 
-        let stack =
-            StorageStack::from_server_event_store(self.event_store.as_ref()?.as_ref().clone());
-        stack.metadata?.platform_store()
+        None
     }
 
     /// Upload stream content for a TemperFS `File` entity using the standard
@@ -1225,42 +1193,23 @@ impl ServerState {
     /// In TenantRouted mode, returns the platform store + all connected tenant stores.
     /// Returns an empty vec when Turso is not configured.
     pub async fn collect_all_turso_stores(&self) -> Vec<temper_store_turso::TursoEventStore> {
-        let Some(store) = self.event_store.as_ref() else {
+        let Some(provider) = self
+            .storage_stack
+            .as_ref()
+            .and_then(|stack| stack.turso.clone())
+        else {
             return Vec::new();
         };
-
-        if let Some(turso) = store.turso_store() {
-            return vec![turso.clone()];
-        }
-
-        if let Some(router) = store.tenant_router() {
-            let mut stores = vec![router.platform_store().clone()];
-            for tid in router.connected_tenants().await {
-                if let Ok(s) = router.store_for_tenant(&tid).await {
-                    stores.push(s);
-                }
-            }
-            return stores;
-        }
-
-        Vec::new()
+        provider.all_stores().await
     }
 
     /// Collect backend-neutral platform/tenant stores for cross-tenant reads.
     pub async fn collect_all_metadata_stores(&self) -> Vec<Arc<dyn MetadataStore>> {
-        if let Some(provider) = self
+        let Some(provider) = self
             .storage_stack
             .as_ref()
             .and_then(|stack| stack.metadata.clone())
-        {
-            return provider.all_stores().await;
-        }
-
-        let Some(store) = self.event_store.as_ref() else {
-            return Vec::new();
-        };
-        let stack = StorageStack::from_server_event_store(store.as_ref().clone());
-        let Some(provider) = stack.metadata else {
+        else {
             return Vec::new();
         };
         provider.all_stores().await
