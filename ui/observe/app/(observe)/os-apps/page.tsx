@@ -2,7 +2,7 @@
 
 import { useState, useCallback, useEffect, useMemo } from "react";
 import { fetchOsApps, installOsApp, fetchSpecs } from "@/lib/api";
-import { usePolling } from "@/lib/hooks";
+import { useSSERefresh } from "@/lib/hooks";
 import type { SkillsResponse, SpecSummary } from "@/lib/types";
 import ErrorDisplay from "@/components/ErrorDisplay";
 import StatCard from "@/components/StatCard";
@@ -29,15 +29,15 @@ export default function OsAppsPage() {
     loadInitial();
   }, [loadInitial]);
 
-  const appsPoll = usePolling<SkillsResponse>({
+  const appsPoll = useSSERefresh<SkillsResponse>({
     fetcher: fetchOsApps,
-    interval: 10000,
+    sseKinds: ["OsApps", "Entities"],
     enabled: !initialLoading && !initialError,
   });
 
-  const specsPoll = usePolling<SpecSummary[]>({
+  const specsPoll = useSSERefresh<SpecSummary[]>({
     fetcher: fetchSpecs,
-    interval: 10000,
+    sseKinds: ["Specs"],
     enabled: !initialLoading && !initialError,
   });
 
