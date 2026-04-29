@@ -101,11 +101,13 @@ You are operating inside a governed sandbox. You cannot import libraries, access
 
 ## Quick Start
 
+> **Tenant placeholder.** Examples below pass `"<your-tenant>"` as the first argument. **Replace this with the tenant configured for the current project** — do not hardcode `"my-tenant"`, `"default"`, or any literal repository name. The active tenant is set per-project; if you don't know it, call `await temper.specs("<your-tenant>")` once with a guess and the server will tell you the correct tenant in the error if wrong, or check the project's `CLAUDE.md` / server config.
+
 ### 1. Discover what's deployed
 
 ```python
 # See all loaded specs and their verification status
-specs = await temper.specs("my-tenant")
+specs = await temper.specs("<your-tenant>")
 return specs
 ```
 
@@ -113,7 +115,7 @@ return specs
 
 ```python
 # Full spec details: actions, guards, invariants, state vars
-detail = await temper.spec_detail("my-tenant", "WeatherQuery")
+detail = await temper.spec_detail("<your-tenant>", "WeatherQuery")
 return detail
 ```
 
@@ -131,7 +133,18 @@ kind = "input"
 from = ["Idle"]
 to = "Fetching"
 params = ["city"]
-effect = "trigger fetch_weather"
+
+# Outgoing trigger — fires when FetchWeather commits.
+# `kind = "wasm"` runs a WASM module; `on_success`/`on_failure` name
+# actions on this entity to dispatch after the module returns.
+[[action.triggers]]
+name = "fetch_weather"
+kind = "wasm"
+module = "http_fetch"
+on_success = "FetchSucceeded"
+on_failure = "FetchFailed"
+url = "https://wttr.in/{city}?format=j1"
+method = "GET"
 
 [[action]]
 name = "FetchSucceeded"
@@ -151,16 +164,6 @@ name = "Reset"
 kind = "input"
 from = ["Ready"]
 to = "Idle"
-
-[[integration]]
-name = "fetch_weather"
-trigger = "fetch_weather"
-type = "wasm"
-module = "http_fetch"
-on_success = "FetchSucceeded"
-on_failure = "FetchFailed"
-url = "https://wttr.in/{city}?format=j1"
-method = "GET"
 """
 
 csdl = """<?xml version="1.0" encoding="utf-8"?>
@@ -180,7 +183,7 @@ csdl = """<?xml version="1.0" encoding="utf-8"?>
   </edmx:DataServices>
 </edmx:Edmx>"""
 
-result = await temper.submit_specs("my-tenant", {
+result = await temper.submit_specs("<your-tenant>", {
     "WeatherQuery.ioa.toml": ioa,
     "model.csdl.xml": csdl
 })
@@ -190,8 +193,8 @@ return result
 ### 4. Create an entity and invoke an action
 
 ```python
-created = await temper.create("my-tenant", "WeatherQueries", {"id": "q1", "city": "London"})
-result = await temper.action("my-tenant", "WeatherQueries", "q1", "FetchWeather", {"city": "London"})
+created = await temper.create("<your-tenant>", "WeatherQueries", {"id": "q1", "city": "London"})
+result = await temper.action("<your-tenant>", "WeatherQueries", "q1", "FetchWeather", {"city": "London"})
 return result
 ```
 
@@ -200,21 +203,21 @@ return result
 When Cedar denies an action, you get a structured response with `status == "authorization_denied"` and a `decision_id`. You MUST surface this to the user, then poll for approval and retry.
 
 ```python
-result = await temper.action("my-tenant", "WeatherQueries", "q1", "FetchWeather", {"city": "London"})
+result = await temper.action("<your-tenant>", "WeatherQueries", "q1", "FetchWeather", {"city": "London"})
 
 if isinstance(result, dict) and result.get("status") == "authorization_denied":
     decision_id = result["decision_id"]
 
     # Step 1: Tell the human what's pending
     print(f"Action denied by Cedar policy. Decision {decision_id} pending.")
-    print(f"Approve at: the Observe UI (served by your Temper instance)")
+    print(f"Approve at: your Temper Observe UI (configured per project)")
 
     # Step 2: Poll until the human resolves the decision
-    decision = await temper.poll_decision("my-tenant", decision_id)
+    decision = await temper.poll_decision("<your-tenant>", decision_id)
 
     if decision["status"] == "Approved":
         # Step 3: Retry the original action — now permitted
-        result = await temper.action("my-tenant", "WeatherQueries", "q1", "FetchWeather", {"city": "London"})
+        result = await temper.action("<your-tenant>", "WeatherQueries", "q1", "FetchWeather", {"city": "London"})
         return result
     else:
         return f"Decision {decision_id} was denied by the human."
@@ -222,7 +225,7 @@ if isinstance(result, dict) and result.get("status") == "authorization_denied":
 return result
 ```
 
-**You CANNOT self-approve.** Calling `approve_decision`, `deny_decision`, or `set_policy` will return an error. A human must approve via the **Observe UI** at the Observe UI (served by your Temper instance) — the agent cannot resolve governance decisions.
+**You CANNOT self-approve.** Calling `approve_decision`, `deny_decision`, or `set_policy` will return an error. A human must approve via the **Observe UI** at your Temper Observe UI (configured per project) — the agent cannot resolve governance decisions.
 
 ---
 
@@ -232,16 +235,16 @@ When you need a capability that doesn't exist yet (no matching entity type), you
 
 ```python
 # Step 1: Try to create the entity — expect 404 if type doesn't exist
-result = await temper.create("my-tenant", "EmailDrafts", {"id": "email-1"})
+result = await temper.create("<your-tenant>", "EmailDrafts", {"id": "email-1"})
 # If 404: entity type doesn't exist. This is an UNMET INTENT.
 # The system has recorded it as a trajectory.
 
 # Step 2: Check insights — has the evolution engine seen this pattern?
-insights = await temper.get_insights("my-tenant")
+insights = await temper.get_insights("<your-tenant>")
 # Look for insights recommending EmailDraft creation
 
 # Step 3: Propose specs — Cedar will gate this
-result = await temper.submit_specs("my-tenant", {
+result = await temper.submit_specs("<your-tenant>", {
     "EmailDraft.ioa.toml": ioa_spec,
     "model.csdl.xml": csdl
 })
@@ -250,14 +253,14 @@ if result.get("status") == "authorization_denied":
     decision_id = result["decision_id"]
     # Tell the human, then poll
     print(f"Spec submission denied. Decision {decision_id} pending.")
-    print(f"Approve at: the Observe UI (served by your Temper instance)")
-    decision = await temper.poll_decision("my-tenant", decision_id)
+    print(f"Approve at: your Temper Observe UI (configured per project)")
+    decision = await temper.poll_decision("<your-tenant>", decision_id)
     if decision["status"] == "Approved":
         # Retry submit_specs — now permitted
-        result = await temper.submit_specs("my-tenant", specs)
+        result = await temper.submit_specs("<your-tenant>", specs)
 
 # Step 4: Now create and act on the entity
-created = await temper.create("my-tenant", "EmailDrafts", {"id": "email-1"})
+created = await temper.create("<your-tenant>", "EmailDrafts", {"id": "email-1"})
 ```
 
 **This is how the governed creation flow works:**
@@ -345,9 +348,76 @@ These will return an error if called — only humans can perform governance writ
 
 ---
 
+## PM App Operations
+
+The Project Management OS app's planning workflow uses **entity actions, not Python methods**. `BeginPlanning`, `WritePlan`, `ApprovePlan`, `StartWork`, `SubmitForReview`, `Assign`, `AssignPlanner` are NOT methods on the `temper` object. They are action names you fire via `temper.action()`:
+
+```python
+# Wrong — these methods do not exist:
+# await temper.begin_planning(...)
+# await temper.write_plan(...)
+
+# Right — fire actions on Issue entities:
+await temper.action("<your-tenant>", "Issues", "issue-42", "BeginPlanning", {})
+await temper.action("<your-tenant>", "Issues", "issue-42", "WritePlan", {
+    "plan": "Step 1: ...\nStep 2: ...",
+    "acceptance_criteria": "All tests pass; lint clean."
+})
+```
+
+### Issue state machine
+
+```
+Backlog → Triage → Todo → Planning → Planned → InProgress → InReview → Done
+```
+
+### Planning workflow with role separation
+
+| Action | Who fires it | Notes |
+|--------|--------------|-------|
+| `AssignPlanner` | Supervisor / human | Sets `PlannerId` on the issue |
+| `Assign` | Supervisor / human | Sets `AssigneeId` (the implementer) |
+| `BeginPlanning` | Planner | Issue → `Planning` |
+| `WritePlan` | Planner | Records `plan` + `acceptance_criteria` |
+| `ApprovePlan` | Supervisor / human | Issue → `Planned`. Convention: planner should not self-approve (operational guidance — Cedar policy at `os-apps/project-management/policies/issue.cedar` does not currently `forbid` planner self-approval; treat as a norm, not a guarantee) |
+| `StartWork` | Implementer (assignee) | Requires approved plan; issue → `InProgress` |
+| `SubmitForReview` | Implementer | Issue → `InReview` |
+| `ApproveReview` | Supervisor / human | Issue → `Done`. Convention: implementer should not self-approve (same as above — not Cedar-enforced today) |
+
+### Typical agent flow
+
+```python
+# 1. List issues assigned to you
+agent_id = await temper.get_agent_id("<your-tenant>")
+my_issues = await temper.list("<your-tenant>", "Issues",
+    f"$filter=AssigneeId eq '{agent_id}'")
+
+# 2. For an issue with an approved plan (state = "Planned"), start work
+await temper.action("<your-tenant>", "Issues", issue_id, "StartWork", {})
+
+# 3. When done, submit for review
+await temper.action("<your-tenant>", "Issues", issue_id, "SubmitForReview", {
+    "review_notes": "Implemented per plan. All gates green."
+})
+
+# 4. Wait for human approval — `ApproveReview` is gated to humans/supervisors
+```
+
+### Installing the PM app
+
+```python
+await temper.install_app("project-management")
+```
+
+`install_app` takes a single argument — the app name. The tenant is the active connection's tenant.
+
+---
+
 ## IOA Spec Format
 
 **CRITICAL: Use `[automaton]` table header (NOT `automaton WeatherQuery` bare text).** Use `initial` (NOT `initial_state`).
+
+> **ADR-0046 (April 2026):** `[[integration]]` and `[[agent_trigger]]` are gone. All outgoing effects of an action — cross-entity dispatch, WASM modules, webhooks — are unified under `[[action.triggers]]` nested directly inside `[[action]]`. The `is_system → Allow` Cedar bypass is also removed: every trigger goes through Cedar with either the inherited principal or an explicit named principal.
 
 ```toml
 [automaton]
@@ -368,9 +438,26 @@ kind = "input"          # "input" | "internal" | "output"
 from = ["State1"]       # states this can fire from
 to = "State2"           # target state
 guard = "counter_var > 0"  # optional precondition
-effect = "trigger some_integration"  # optional
 params = ["Param1"]     # optional parameters
 hint = "Description."   # optional
+
+# Outgoing triggers — fire when DoSomething commits.
+# Repeat the block for multiple triggers on the same action.
+# `principal` is OPTIONAL: defaults to the invoking principal.
+# Name an explicit service to elevate (must match a registered AgentType).
+[[action.triggers]]
+name = "trigger_name"
+kind = "entity"               # "entity" | "wasm" | "webhook"
+principal = "my-service"      # optional elevation
+target_entity = "OtherEntity"
+target_action = "DoTargetThing"
+
+[action.triggers.resolve_target]
+type = "field"                # "same_id" | "field" | "create" | "create_if_missing"
+field = "other_entity_id"
+
+[action.triggers.params_from]
+target_param = "source_field"
 
 # Safety invariants
 [[invariant]]
@@ -383,43 +470,60 @@ assert = "no_further_transitions"
 name = "EventuallyDone"
 from = ["State1"]
 reaches = ["State3"]
-
-# WASM integrations for external API calls
-[[integration]]
-name = "some_integration"
-trigger = "some_integration"   # matches the effect trigger name
-type = "wasm"
-module = "http_fetch"          # built-in module for HTTP calls
-on_success = "CallbackOk"     # action to invoke on success
-on_failure = "CallbackFail"   # action to invoke on failure
-url = "https://api.example.com/endpoint"  # extra config for the module
-method = "GET"                 # extra config for the module
 ```
 
-### Built-in WASM Module: `http_fetch`
+### Trigger kinds
 
-The `http_fetch` module makes HTTP requests. Configure it via integration config keys:
+#### `kind = "entity"` — cross-entity dispatch
 
-| Key | Required | Description |
-|-----|----------|-------------|
-| `url` | Yes | URL template (supports `{param}` substitution from action params) |
-| `method` | Yes | HTTP method: `GET`, `POST`, `PUT`, `DELETE` |
-| `body` | No | Request body template (for POST/PUT) |
+Fire an action on another entity when this action commits. Required: `target_entity`, `target_action`. Optional: `principal`, `to_state` (only fire when source ends in this state), `liveness = "Required" | "BestEffort" | "None"`.
 
-Example — weather API:
+The resolver picks which target entity to fire on:
+
+| Resolver `type` | Behavior |
+|-----------------|----------|
+| `same_id` | Target has the same `id` as source |
+| `field` | Read target id from `field = "<source_field>"` |
+| `create` | Always create a new target entity |
+| `create_if_missing` | Create only if no target with that id exists; reads candidate id from `id_field = "<source_field>"` |
+
+Pass params with `[action.triggers.params_from]` — a map from target param name to source field name.
+
+#### `kind = "wasm"` — WASM module execution
+
+Run a WASM module when the action commits. The built-in `http_fetch` module makes HTTP requests:
+
 ```toml
-[[integration]]
+[[action.triggers]]
 name = "fetch_weather"
-trigger = "fetch_weather"
-type = "wasm"
+kind = "wasm"
 module = "http_fetch"
-on_success = "FetchSucceeded"
-on_failure = "FetchFailed"
+on_success = "FetchSucceeded"   # action on this entity if module returns Ok
+on_failure = "FetchFailed"      # action on this entity on failure
 url = "https://wttr.in/{city}?format=j1"
 method = "GET"
 ```
 
-The callback action receives `{"status_code": "200", "body": "...response..."}` as params.
+| Key | Required | Description |
+|-----|----------|-------------|
+| `module` | Yes | WASM module name (`http_fetch` is built-in) |
+| `url` | http_fetch | URL template (`{param}` substitution from action params) |
+| `method` | http_fetch | `GET` / `POST` / `PUT` / `DELETE` |
+| `body` | No | Request body template for POST/PUT |
+| `on_success` | No | Action on the source entity if module returns Ok |
+| `on_failure` | No | Action on the source entity on failure |
+
+Callback actions receive `{"status_code": "200", "body": "..."}` as params.
+
+#### `kind = "webhook"` — outbound HTTP (parse-only today)
+
+Currently parsed and expanded but **no runtime dispatcher matches it**. Until the webhook dispatcher lands, use `kind = "wasm"` with the `http_fetch` module instead.
+
+### Principal semantics (no more `is_system` bypass)
+
+`principal` is optional. When omitted, the trigger fires under the same `SecurityContext` that invoked the source action — Cedar evaluates the target action with the inherited principal. When present, a synthetic `SecurityContext` is built with `id = "service:<name>"`, `agent_type = "<name>"`, `agentTypeVerified = true`, and `attributes.dispatched_by_trigger = true`. The named service must match a registered `AgentType` in the tenant.
+
+**There is no `is_system → Allow` shortcut.** A trigger with no Cedar permit will be denied regardless of how it was dispatched. If you write a trigger that should run as a privileged service principal, you must (a) declare `principal = "<service-name>"` on the trigger, and (b) ensure that service's AgentType has Cedar policies permitting the target action.
 
 ---
 
@@ -438,7 +542,7 @@ You call action → Cedar evaluates policy → DENIED (403)
 **Rules:**
 - NEVER try to approve your own decisions — governance write methods are not exposed to agents
 - NEVER call `approve_decision`, `deny_decision`, or `set_policy` — they are blocked
-- ALWAYS surface the denial to the user with a link to the **Observe UI**: `the Observe UI (served by your Temper instance)`
+- ALWAYS surface the denial to the user with a link to the **Observe UI**: `your Temper Observe UI (configured per project)`
 - ALWAYS use `poll_decision` to wait after the user has been notified
 - The user approves in the Observe UI (browser) — not through this chat
 
@@ -476,27 +580,27 @@ Agent tries action → FAILS (404 entity not found / 409 invalid transition)
 
 ```python
 # Submit specs
-await temper.submit_specs("my-tenant", {
+await temper.submit_specs("<your-tenant>", {
     "WeatherQuery.ioa.toml": ioa_spec,
     "model.csdl.xml": csdl
 })
 
 # Create entity
-await temper.create("my-tenant", "WeatherQueries", {"id": "q1", "city": "London"})
+await temper.create("<your-tenant>", "WeatherQueries", {"id": "q1", "city": "London"})
 
 # Trigger weather fetch (may be denied by Cedar — handle it!)
-result = await temper.action("my-tenant", "WeatherQueries", "q1", "FetchWeather", {"city": "London"})
+result = await temper.action("<your-tenant>", "WeatherQueries", "q1", "FetchWeather", {"city": "London"})
 
 if isinstance(result, dict) and result.get("status") == "authorization_denied":
     decision_id = result["decision_id"]
     # Surface to user — they approve in the Observe UI, not here
     print(f"Denied by Cedar policy. Decision {decision_id} pending.")
-    print(f"Approve at: the Observe UI (served by your Temper instance)")
+    print(f"Approve at: your Temper Observe UI (configured per project)")
     # Poll until human resolves the decision
-    decision = await temper.poll_decision("my-tenant", decision_id)
+    decision = await temper.poll_decision("<your-tenant>", decision_id)
     if decision["status"] == "Approved":
         # Retry the action — now permitted
-        result = await temper.action("my-tenant", "WeatherQueries", "q1", "FetchWeather", {"city": "London"})
+        result = await temper.action("<your-tenant>", "WeatherQueries", "q1", "FetchWeather", {"city": "London"})
 
 return result
 ```
@@ -504,14 +608,14 @@ return result
 ### List and inspect entities
 
 ```python
-entities = await temper.list("my-tenant", "WeatherQueries")
+entities = await temper.list("<your-tenant>", "WeatherQueries")
 return entities
 ```
 
 ### Filter entities with OData
 
 ```python
-entities = await temper.list("my-tenant", "WeatherQueries", "state eq 'Ready'")
+entities = await temper.list("<your-tenant>", "WeatherQueries", "state eq 'Ready'")
 return entities
 ```
 
@@ -519,17 +623,17 @@ return entities
 
 ```python
 # All specs for a tenant
-specs = await temper.specs("my-tenant")
+specs = await temper.specs("<your-tenant>")
 
 # Full detail on one entity type
-detail = await temper.spec_detail("my-tenant", "WeatherQuery")
+detail = await temper.spec_detail("<your-tenant>", "WeatherQuery")
 return detail
 ```
 
 ### Check a single decision status
 
 ```python
-status = await temper.get_decision_status("my-tenant", "PD-abc123")
+status = await temper.get_decision_status("<your-tenant>", "PD-abc123")
 return status
 ```
 
