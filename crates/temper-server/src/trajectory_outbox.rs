@@ -16,8 +16,8 @@ use tokio::sync::mpsc;
 use tokio::sync::mpsc::error::TrySendError;
 use tracing::Instrument;
 
-use crate::event_store::ServerEventStore;
 use crate::state::trajectory::TrajectoryEntry;
+use crate::storage::TrajectorySink;
 
 const DEFAULT_CAPACITY: usize = 8_192;
 const DRAIN_BATCH_LIMIT: usize = 128;
@@ -137,7 +137,8 @@ fn record_persist_latency(
 }
 
 struct QueuedTrajectory {
-    store: Option<Arc<ServerEventStore>>,
+    sink: Option<Arc<dyn TrajectorySink>>,
+    backend: &'static str,
     entry: TrajectoryEntry,
 }
 
@@ -165,18 +166,28 @@ impl TrajectoryOutbox {
         }
     }
 
-    fn try_record(&self, store: Arc<ServerEventStore>, entry: TrajectoryEntry) -> bool {
-        self.try_enqueue(Some(store), entry)
+    fn try_record(
+        &self,
+        backend: &'static str,
+        sink: Arc<dyn TrajectorySink>,
+        entry: TrajectoryEntry,
+    ) -> bool {
+        self.try_enqueue(Some(sink), backend, entry)
     }
 
-    fn try_enqueue(&self, store: Option<Arc<ServerEventStore>>, entry: TrajectoryEntry) -> bool {
-        let backend = store
-            .as_ref()
-            .map(|store| store.backend_name())
-            .unwrap_or("test");
+    fn try_enqueue(
+        &self,
+        sink: Option<Arc<dyn TrajectorySink>>,
+        backend: &'static str,
+        entry: TrajectoryEntry,
+    ) -> bool {
         let metric_entry = entry.clone();
         self.depth.fetch_add(1, Ordering::Relaxed);
-        match self.sender.try_send(QueuedTrajectory { store, entry }) {
+        match self.sender.try_send(QueuedTrajectory {
+            sink,
+            backend,
+            entry,
+        }) {
             Ok(()) => {
                 record_enqueued(&metric_entry, backend);
                 record_depth(self.depth.load(Ordering::Relaxed));
@@ -229,7 +240,7 @@ impl TrajectoryOutbox {
     #[cfg(test)]
     fn try_record_for_test(&self, entry: TrajectoryEntry) -> bool {
         debug_assert!(self.receiver_guard.is_some());
-        self.try_enqueue(None, entry)
+        self.try_enqueue(None, "test", entry)
     }
 
     #[cfg(test)]
@@ -266,10 +277,10 @@ async fn drain(mut receiver: mpsc::Receiver<QueuedTrajectory>, depth: Arc<Atomic
 }
 
 async fn persist_drained(item: QueuedTrajectory) {
-    let Some(store) = item.store else {
+    let Some(sink) = item.sink else {
         return;
     };
-    let backend = store.backend_name();
+    let backend = item.backend;
     let entry = item.entry;
     let span = tracing::info_span!(
         "trajectory_outbox.persist",
@@ -282,7 +293,7 @@ async fn persist_drained(item: QueuedTrajectory) {
 
     async move {
         let started_at = Instant::now();
-        match store.persist_trajectory_entry(&entry).await {
+        match sink.persist_trajectory_entry(&entry).await {
             Ok(()) => {
                 record_persist_latency(&entry, backend, "ok", started_at.elapsed());
             }
@@ -301,16 +312,20 @@ fn global() -> &'static TrajectoryOutbox {
     OUTBOX.get_or_init(|| TrajectoryOutbox::spawn(outbox_capacity()))
 }
 
-pub(crate) fn try_record(store: Arc<ServerEventStore>, entry: TrajectoryEntry) -> bool {
-    global().try_record(store, entry)
+pub(crate) fn try_record(
+    backend: &'static str,
+    sink: Arc<dyn TrajectorySink>,
+    entry: TrajectoryEntry,
+) -> bool {
+    global().try_record(backend, sink, entry)
 }
 
 impl crate::state::ServerState {
     pub(crate) fn enqueue_trajectory_entry(&self, entry: TrajectoryEntry) -> bool {
-        let Some(store) = self.event_store.as_ref().cloned() else {
+        let Some((backend, sink)) = self.trajectory_sink() else {
             return true;
         };
-        try_record(store, entry)
+        try_record(backend, sink, entry)
     }
 }
 

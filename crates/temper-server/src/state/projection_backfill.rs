@@ -10,6 +10,9 @@ pub(super) async fn populate_field_index_from_snapshots(state: &ServerState, ten
     let Some(store) = state.event_store.as_ref() else {
         return;
     };
+    let Some(query_plane) = state.query_plane_store() else {
+        return;
+    };
 
     let entities = {
         let index = state.entity_index.read().unwrap();
@@ -37,8 +40,8 @@ pub(super) async fn populate_field_index_from_snapshots(state: &ServerState, ten
                 if let Ok(state_snapshot) =
                     serde_json::from_slice::<crate::entity_actor::EntityState>(&snapshot_bytes)
                 {
-                    if let Err(e) = store
-                        .upsert_query_projection(
+                    if let Err(e) = query_plane
+                        .upsert_projection(
                             tenant.as_str(),
                             entity_type,
                             entity_id,
@@ -137,8 +140,8 @@ pub(super) async fn populate_field_index_from_snapshots(state: &ServerState, ten
             );
             errors += 1;
         } else if replayed.status == "Deleted" {
-            if let Err(e) = store
-                .remove_query_projection(tenant.as_str(), entity_type, entity_id)
+            if let Err(e) = query_plane
+                .remove_projection(tenant.as_str(), entity_type, entity_id)
                 .await
             {
                 tracing::debug!(
@@ -150,8 +153,8 @@ pub(super) async fn populate_field_index_from_snapshots(state: &ServerState, ten
                 errors += 1;
             }
         } else {
-            match store
-                .upsert_query_projection(
+            match query_plane
+                .upsert_projection(
                     tenant.as_str(),
                     entity_type,
                     entity_id,

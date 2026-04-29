@@ -21,6 +21,7 @@ Branch: `codex/knuth-postgres-migration-full`
 - `42bfdd2` Record Postgres cutover ADR gates
 - `f43e0ab` Use versioned Postgres migrations
 - `a7fc9fd` Remove stale bootstrap import
+- `25d99c6` Record post-review migration proof
 
 ## Verification Run
 
@@ -29,12 +30,14 @@ Branch: `codex/knuth-postgres-migration-full`
   - `cargo test -p temper-cli test_cli_parse_migrate_turso_to_postgres` failed before the CLI command existed.
   - `cargo test -p temper-store-postgres postgres_query_projection_batch_method_is_part_of_the_store_surface` failed before the Postgres batch projection reader existed.
   - `cargo test -p temper-server --test storage_stack` failed before `temper_server::storage` existed.
+  - `cargo test -p temper-server --test storage_stack` failed again before `QueryPlaneStore`, `TrajectorySink`, and backend-neutral projection rows existed on `StorageStack`.
   - `cargo test -p temper-store-postgres versioned_migration_is_the_schema_source` failed before `migrations/0001_initial.sql` existed.
 - Green checks:
   - `cargo fmt`
   - `cargo check -p temper-server`
   - `cargo check -p temper-cli`
   - `cargo test -p temper-server --test storage_stack`
+  - `cargo test -p temper-server --test query_projection_backfill`
   - `cargo test -p temper-store-postgres`
   - `DATABASE_URL=postgres://temper:temper_dev@localhost:5432/temper cargo test -p temper-store-postgres`
   - `DATABASE_URL=postgres://temper:temper_dev@localhost:5432/temper cargo test -p temper-store-postgres query_projection`
@@ -60,7 +63,15 @@ Branch: `codex/knuth-postgres-migration-full`
 
 - Added `crates/temper-server/src/storage/mod.rs` with `DynEventStore`, `BoxedEventStore`, `BackendLabel`, and `StorageStack`.
 - Wired `ServerState::set_event_store` so serve/bootstrap paths derive a first-class storage stack alongside the transitional `ServerEventStore` compatibility handle.
-- Updated ADR-0066 to remove the object-safety deferral. Remaining work is caller migration from compatibility methods to dedicated query-plane and trajectory traits, not the object-safe adapter itself.
+- Updated ADR-0066 to remove the object-safety deferral and document the query-plane / trajectory capability split.
+- Added `QueryPlaneStore` and `TrajectorySink` capabilities to `StorageStack`, then moved production query-plane/trajectory writers and readers onto those traits:
+  - dispatch background projection updates
+  - entity create/update/delete projection writes
+  - projection backfill writes
+  - file metadata projection reads
+  - OData filter push-down
+  - runtime projection coverage metrics
+  - trajectory outbox and direct trajectory persistence
 - Replaced the hand-rolled Postgres migration runner with `sqlx::migrate!()` and added `crates/temper-store-postgres/migrations/0001_initial.sql`.
 - Added or corrected ADRs for the missing architectural records:
   - ADR-0069: HttpEndpoint (renumbered from the duplicate ADR-0056)
@@ -121,7 +132,7 @@ Queried Datadog on 2026-04-29 through the Datadog MCP connector. The local shell
 ## Not Exercised
 
 - Real Discord DM flow was not exercised because this local environment has no `DISCORD_BOT_TOKEN`.
-- Real Katagami `CurationJob` review loop was not exercised locally; the cutover runbook now gates production on that staging e2e.
+- Real Katagami `CurationJob` review loop remains the next OpenPaw-side gate; the Temper storage query/trajectory compatibility gap has been closed for production callers.
 - Production-shaped ETL into a disposable Railway Postgres database was not run from this environment.
 - Production cutover and 48-hour Postgres soak have not happened; Turso write-gate/priority/bypass removals remain correctly gated on that soak.
-- StorageStack is now present with an object-safe event adapter, but some callers still use the transitional `ServerEventStore` compatibility handle until query-plane and trajectory traits are split out.
+- `ServerEventStore` compatibility still exists for event-journal, platform long-tail, and observe-read paths that have not yet grown dedicated capability traits.

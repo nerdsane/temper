@@ -63,7 +63,7 @@ impl crate::state::ServerState {
             query_projection_update_mode(),
             QueryProjectionUpdateMode::Background
         );
-        let Some(store) = self.event_store.as_ref().cloned() else {
+        let Some(query_plane) = self.query_plane_store() else {
             return;
         };
 
@@ -96,12 +96,12 @@ impl crate::state::ServerState {
             async move {
                 let started_at = Instant::now();
                 let result = if status == "Deleted" {
-                    store
-                        .remove_query_projection(&tenant, &entity_type, &entity_id)
+                    query_plane
+                        .remove_projection(&tenant, &entity_type, &entity_id)
                         .await
                 } else {
-                    store
-                        .upsert_query_projection(
+                    query_plane
+                        .upsert_projection(
                             &tenant,
                             &entity_type,
                             &entity_id,

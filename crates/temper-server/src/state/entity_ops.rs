@@ -642,12 +642,12 @@ impl ServerState {
         );
         let _ = self.event_tx.send(change);
 
-        if let Some(store) = self.event_store.as_ref() {
+        if let Some(query_plane) = self.query_plane_store() {
             let status = response.state.status.clone();
             let fields = self.query_projection_fields(tenant, entity_type, &response.state.fields);
             let sequence_nr = response.state.sequence_nr;
-            if let Err(e) = store
-                .upsert_query_projection(
+            if let Err(e) = query_plane
+                .upsert_projection(
                     tenant.as_str(),
                     entity_type,
                     entity_id,
@@ -701,13 +701,13 @@ impl ServerState {
         .map_err(|e| format!("Actor update failed: {e}"))?;
 
         if response.success
-            && let Some(store) = self.event_store.as_ref()
+            && let Some(query_plane) = self.query_plane_store()
         {
             let status = response.state.status.clone();
             let fields = self.query_projection_fields(tenant, entity_type, &response.state.fields);
             let sequence_nr = response.state.sequence_nr;
-            if let Err(e) = store
-                .upsert_query_projection(
+            if let Err(e) = query_plane
+                .upsert_projection(
                     tenant.as_str(),
                     entity_type,
                     entity_id,
@@ -755,9 +755,9 @@ impl ServerState {
         .map_err(|e| format!("Actor delete failed: {e}"))?;
 
         if response.success {
-            if let Some(store) = self.event_store.as_ref()
-                && let Err(e) = store
-                    .remove_query_projection(tenant.as_str(), entity_type, entity_id)
+            if let Some(query_plane) = self.query_plane_store()
+                && let Err(e) = query_plane
+                    .remove_projection(tenant.as_str(), entity_type, entity_id)
                     .await
             {
                 tracing::warn!(

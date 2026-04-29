@@ -53,7 +53,7 @@ use crate::events::EntityStateChange;
 use crate::idempotency::IdempotencyCache;
 use crate::registry::SpecRegistry;
 use crate::secrets::vault::SecretsVault;
-use crate::storage::StorageStack;
+use crate::storage::{QueryPlaneStore, StorageStack, TrajectorySink};
 use crate::trigger::ReactionDispatcher;
 use crate::wasm_registry::WasmModuleRegistry;
 use crate::webhooks::WebhookDispatcher;
@@ -343,6 +343,53 @@ impl ServerState {
         let stack = Arc::new(StorageStack::from_server_event_store(store));
         self.event_store = stack.compatibility_store.clone();
         self.storage_stack = Some(stack);
+    }
+
+    /// Return the durable query-plane capability for projection reads/writes.
+    pub(crate) fn query_plane_store(&self) -> Option<Arc<dyn QueryPlaneStore>> {
+        if let Some(query_plane) = self
+            .storage_stack
+            .as_ref()
+            .and_then(|stack| stack.query_plane.clone())
+        {
+            return Some(query_plane);
+        }
+
+        let store = self.event_store.as_ref()?.clone();
+        if matches!(
+            store.as_ref(),
+            ServerEventStore::Postgres(_)
+                | ServerEventStore::Turso(_)
+                | ServerEventStore::TenantRouted(_)
+        ) {
+            Some(store as Arc<dyn QueryPlaneStore>)
+        } else {
+            None
+        }
+    }
+
+    /// Return the observe trajectory sink plus backend label for metrics.
+    pub(crate) fn trajectory_sink(&self) -> Option<(&'static str, Arc<dyn TrajectorySink>)> {
+        if let Some(stack) = self.storage_stack.as_ref()
+            && let Some(sink) = stack.trajectory.clone()
+        {
+            return Some((stack.backend.as_str(), sink));
+        }
+
+        let store = self.event_store.as_ref()?.clone();
+        if matches!(
+            store.as_ref(),
+            ServerEventStore::Postgres(_)
+                | ServerEventStore::Turso(_)
+                | ServerEventStore::TenantRouted(_)
+        ) {
+            Some((
+                crate::storage::BackendLabel::from(store.as_ref()).as_str(),
+                store as Arc<dyn TrajectorySink>,
+            ))
+        } else {
+            None
+        }
     }
 
     /// Create ServerState from CSDL XML and optional specification sources.
