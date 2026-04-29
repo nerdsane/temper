@@ -340,8 +340,8 @@ fn install_liveness_metrics_reporter_once() {
 impl ServerState {
     /// Attach a runtime event store and derive the composed storage stack.
     pub fn set_event_store(&mut self, store: ServerEventStore) {
+        self.event_store = Some(Arc::new(store.clone()));
         let stack = Arc::new(StorageStack::from_server_event_store(store));
-        self.event_store = stack.compatibility_store.clone();
         self.storage_stack = Some(stack);
     }
 
