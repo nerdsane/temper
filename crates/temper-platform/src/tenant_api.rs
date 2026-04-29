@@ -14,6 +14,8 @@ use axum::response::IntoResponse;
 use axum::{Json, Router, routing};
 
 use serde::{Deserialize, Serialize};
+use std::sync::Arc;
+use temper_server::storage::TursoStoreProvider;
 
 use crate::state::PlatformState;
 
@@ -63,6 +65,14 @@ pub struct UserInfo {
     pub role: String,
 }
 
+fn turso_provider(state: &PlatformState) -> Option<Arc<dyn TursoStoreProvider>> {
+    state
+        .server
+        .storage_stack
+        .as_ref()
+        .and_then(|stack| stack.turso.clone())
+}
+
 /// Build the tenant management API router.
 pub fn tenant_api_router() -> Router<PlatformState> {
     Router::new()
@@ -90,21 +100,21 @@ async fn create_tenant(
     State(state): State<PlatformState>,
     Json(req): Json<CreateTenantRequest>,
 ) -> impl IntoResponse {
-    let Some(ref store) = state.server.event_store else {
+    let Some(provider) = turso_provider(&state) else {
         return (
             StatusCode::SERVICE_UNAVAILABLE,
             Json(serde_json::json!({"error": "no event store configured"})),
         );
     };
 
-    let Some(router) = store.tenant_router() else {
+    if !provider.supports_tenant_admin() {
         return (
             StatusCode::BAD_REQUEST,
             Json(serde_json::json!({"error": "tenant management requires routed storage mode"})),
         );
-    };
+    }
 
-    match router.register_tenant(&req.tenant_id).await {
+    match provider.register_tenant(&req.tenant_id).await {
         Ok(_store) => {
             // Bootstrap agent specs for the new tenant.
             // New tenant — no prior verification cache.
@@ -131,21 +141,21 @@ async fn create_tenant(
 
 /// `GET /api/tenants` — list all registered tenants.
 async fn list_tenants(State(state): State<PlatformState>) -> impl IntoResponse {
-    let Some(ref store) = state.server.event_store else {
+    let Some(provider) = turso_provider(&state) else {
         return (
             StatusCode::SERVICE_UNAVAILABLE,
             Json(serde_json::json!({"error": "no event store configured"})),
         );
     };
 
-    let Some(router) = store.tenant_router() else {
+    if !provider.supports_tenant_admin() {
         return (
             StatusCode::OK,
             Json(serde_json::json!(TenantListResponse { tenants: vec![] })),
         );
-    };
+    }
 
-    match router.list_tenants().await {
+    match provider.list_tenants().await {
         Ok(ids) => {
             let tenants = ids
                 .into_iter()
@@ -171,22 +181,22 @@ pub(crate) async fn delete_tenant(
     State(state): State<PlatformState>,
     axum::extract::Path(tenant_id): axum::extract::Path<String>,
 ) -> impl IntoResponse {
-    let Some(ref store) = state.server.event_store else {
+    let Some(provider) = turso_provider(&state) else {
         return (
             StatusCode::SERVICE_UNAVAILABLE,
             Json(serde_json::json!({"error": "no event store configured"})),
         );
     };
 
-    let Some(router) = store.tenant_router() else {
+    if !provider.supports_tenant_admin() {
         return (
             StatusCode::BAD_REQUEST,
             Json(serde_json::json!({"error": "tenant management requires routed storage mode"})),
         );
-    };
+    }
 
     // Remove from persistence (Turso registry + users).
-    match router.remove_tenant(&tenant_id).await {
+    match provider.remove_tenant(&tenant_id).await {
         Ok(true) => {
             // Also remove from in-memory SpecRegistry.
             let tid = temper_runtime::tenant::TenantId::new(&tenant_id);
@@ -219,21 +229,21 @@ async fn add_user(
     axum::extract::Path(tenant_id): axum::extract::Path<String>,
     Json(req): Json<AddUserRequest>,
 ) -> impl IntoResponse {
-    let Some(ref store) = state.server.event_store else {
+    let Some(provider) = turso_provider(&state) else {
         return (
             StatusCode::SERVICE_UNAVAILABLE,
             Json(serde_json::json!({"error": "no event store configured"})),
         );
     };
 
-    let Some(router) = store.tenant_router() else {
+    if !provider.supports_tenant_admin() {
         return (
             StatusCode::BAD_REQUEST,
             Json(serde_json::json!({"error": "tenant management requires routed storage mode"})),
         );
-    };
+    }
 
-    match router
+    match provider
         .add_tenant_user(&tenant_id, &req.user_id, &req.role)
         .await
     {
@@ -257,18 +267,18 @@ async fn list_users(
     State(state): State<PlatformState>,
     axum::extract::Path(tenant_id): axum::extract::Path<String>,
 ) -> impl IntoResponse {
-    let Some(ref store) = state.server.event_store else {
+    let Some(provider) = turso_provider(&state) else {
         return (
             StatusCode::SERVICE_UNAVAILABLE,
             Json(serde_json::json!({"error": "no event store configured"})),
         );
     };
 
-    let Some(router) = store.tenant_router() else {
+    if !provider.supports_tenant_admin() {
         return (StatusCode::OK, Json(serde_json::json!({"users": []})));
-    };
+    }
 
-    match router.list_tenant_users(&tenant_id).await {
+    match provider.list_tenant_users(&tenant_id).await {
         Ok(rows) => {
             let users: Vec<UserInfo> = rows
                 .into_iter()
@@ -292,15 +302,15 @@ async fn remove_user(
     State(state): State<PlatformState>,
     axum::extract::Path((tenant_id, user_id)): axum::extract::Path<(String, String)>,
 ) -> impl IntoResponse {
-    let Some(ref store) = state.server.event_store else {
+    let Some(provider) = turso_provider(&state) else {
         return StatusCode::SERVICE_UNAVAILABLE;
     };
 
-    let Some(router) = store.tenant_router() else {
+    if !provider.supports_tenant_admin() {
         return StatusCode::BAD_REQUEST;
-    };
+    }
 
-    match router.remove_tenant_user(&tenant_id, &user_id).await {
+    match provider.remove_tenant_user(&tenant_id, &user_id).await {
         Ok(()) => StatusCode::NO_CONTENT,
         Err(_) => StatusCode::INTERNAL_SERVER_ERROR,
     }
@@ -352,9 +362,9 @@ pub(crate) async fn install_os_app(
     Json(req): Json<InstallAppRequest>,
 ) -> impl IntoResponse {
     // Ensure tenant exists in persistence before loading specs.
-    if let Some(ref store) = state.server.event_store
-        && let Some(router) = store.tenant_router()
-        && let Err(e) = router.ensure_tenant(&req.tenant).await
+    if let Some(provider) = turso_provider(&state)
+        && provider.supports_tenant_admin()
+        && let Err(e) = provider.ensure_tenant(&req.tenant).await
     {
         return (
             StatusCode::INTERNAL_SERVER_ERROR,

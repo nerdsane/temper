@@ -48,7 +48,6 @@ use temper_store_postgres::PostgresEventStore;
 
 use crate::adapters::AdapterRegistry;
 use crate::entity_actor::EntityMsg;
-use crate::event_store::ServerEventStore;
 use crate::events::EntityStateChange;
 use crate::idempotency::IdempotencyCache;
 use crate::registry::SpecRegistry;
@@ -212,8 +211,6 @@ pub struct ServerState {
     pub actor_registry: Arc<RwLock<BTreeMap<String, ActorRef<EntityMsg>>>>,
     /// Last access time per actor key (used for idle passivation).
     pub last_accessed: Arc<RwLock<BTreeMap<String, chrono::DateTime<chrono::Utc>>>>,
-    /// Optional runtime event store backend for persistence.
-    pub event_store: Option<Arc<ServerEventStore>>,
     /// First-class storage capabilities selected for this runtime.
     pub storage_stack: Option<Arc<StorageStack>>,
     /// Runtime data directory for persisted local metadata (e.g. specs registry).
@@ -341,11 +338,9 @@ fn install_liveness_metrics_reporter_once() {
 
 #[allow(deprecated)] // ADR-0025 Phase 4: RecordStore used until chain validation replaced
 impl ServerState {
-    /// Attach a runtime event store and derive the composed storage stack.
-    pub fn set_event_store(&mut self, store: ServerEventStore) {
-        self.event_store = Some(Arc::new(store.clone()));
-        let stack = Arc::new(StorageStack::from_server_event_store(store));
-        self.storage_stack = Some(stack);
+    /// Attach the composed runtime storage stack.
+    pub fn set_storage_stack(&mut self, stack: StorageStack) {
+        self.storage_stack = Some(Arc::new(stack));
     }
 
     /// Return the durable query-plane capability for projection reads/writes.
@@ -411,7 +406,6 @@ impl ServerState {
             transition_tables: Arc::new(BTreeMap::new()),
             actor_registry: Arc::new(RwLock::new(BTreeMap::new())),
             last_accessed: Arc::new(RwLock::new(BTreeMap::new())),
-            event_store: None,
             storage_stack: None,
             data_dir: std::path::PathBuf::new(),
             agent_hints: Arc::new(RwLock::new(BTreeMap::new())),
@@ -594,22 +588,22 @@ impl ServerState {
         store: PostgresEventStore,
     ) -> Result<Self, String> {
         let mut state = Self::with_specs(system, csdl, csdl_xml, ioa_sources)?;
-        state.set_event_store(ServerEventStore::Postgres(store));
+        state.set_storage_stack(StorageStack::from_postgres(store));
         Ok(state)
     }
 
-    /// Create ServerState with specs and an explicit runtime event store.
+    /// Create ServerState with specs and an explicit storage stack.
     ///
     /// Returns an error if any IOA spec fails to parse.
-    pub fn with_event_store(
+    pub fn with_storage_stack(
         system: ActorSystem,
         csdl: CsdlDocument,
         csdl_xml: String,
         ioa_sources: BTreeMap<String, String>,
-        store: ServerEventStore,
+        stack: StorageStack,
     ) -> Result<Self, String> {
         let mut state = Self::with_specs(system, csdl, csdl_xml, ioa_sources)?;
-        state.set_event_store(store);
+        state.set_storage_stack(stack);
         Ok(state)
     }
 
@@ -645,7 +639,6 @@ impl ServerState {
             transition_tables: Arc::new(BTreeMap::new()),
             actor_registry: Arc::new(RwLock::new(BTreeMap::new())),
             last_accessed: Arc::new(RwLock::new(BTreeMap::new())),
-            event_store: None,
             storage_stack: None,
             data_dir: std::path::PathBuf::new(),
             agent_hints: Arc::new(RwLock::new(BTreeMap::new())),

@@ -265,9 +265,9 @@ async fn record_app_install_metadata(
 ) {
     let Some(ps) = state
         .server
-        .event_store
+        .storage_stack
         .as_ref()
-        .and_then(|store| store.platform_store())
+        .and_then(|stack| stack.platform.clone())
     else {
         return;
     };
@@ -321,9 +321,9 @@ pub async fn reconcile_os_app(
 
     if let Some(ps) = state
         .server
-        .event_store
+        .storage_stack
         .as_ref()
-        .and_then(|store| store.platform_store())
+        .and_then(|stack| stack.platform.clone())
     {
         match ps.get_installed_app(tenant, app_name).await {
             Ok(Some(record)) => {
@@ -332,7 +332,11 @@ pub async fn reconcile_os_app(
 
                 if record.bundle_digest == digest.bundle_digest && !specs_ready {
                     specs_ready = restore_app_specs_from_matching_digest(
-                        state, ps, tenant, app_name, &bundle,
+                        state,
+                        ps.as_ref(),
+                        tenant,
+                        app_name,
+                        &bundle,
                     )
                     .await;
                 }
@@ -352,7 +356,11 @@ pub async fn reconcile_os_app(
 
                 if !specs_ready && record.spec_digest == digest.spec_digest {
                     specs_ready = restore_app_specs_from_matching_digest(
-                        state, ps, tenant, app_name, &bundle,
+                        state,
+                        ps.as_ref(),
+                        tenant,
+                        app_name,
+                        &bundle,
                     )
                     .await;
                 }

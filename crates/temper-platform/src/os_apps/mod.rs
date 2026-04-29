@@ -1304,8 +1304,12 @@ pub(super) async fn install_os_app_with_plan(
 
     // ── Step 1: Persist to Turso FIRST (if available). ──────────────
     // If any write fails, bail before touching in-memory state.
-    if let Some(ref store) = state.server.event_store
-        && let Some(turso) = store.platform_turso_store()
+    if let Some(turso) = state
+        .server
+        .storage_stack
+        .as_ref()
+        .and_then(|stack| stack.turso.as_ref())
+        .and_then(|provider| provider.platform_store())
     {
         if plan.specs
             && let Some(ref merged) = merged_csdl
@@ -1347,8 +1351,11 @@ pub(super) async fn install_os_app_with_plan(
                 .await
                 .map_err(|e| format!("Failed to persist cross-invariants: {e}"))?;
         }
-    } else if let Some(ref store) = state.server.event_store
-        && let Some(ps) = store.platform_store()
+    } else if let Some(ps) = state
+        .server
+        .storage_stack
+        .as_ref()
+        .and_then(|stack| stack.platform.clone())
     {
         if plan.specs
             && let Some(ref merged) = merged_csdl
@@ -1392,15 +1399,22 @@ pub(super) async fn install_os_app_with_plan(
             .iter()
             .map(|(et, src)| (et.as_str(), src.as_str()))
             .collect();
-        let verified_cache = if let Some(ref store) = state.server.event_store
-            && let Some(turso) = store.platform_turso_store()
+        let verified_cache = if let Some(turso) = state
+            .server
+            .storage_stack
+            .as_ref()
+            .and_then(|stack| stack.turso.as_ref())
+            .and_then(|provider| provider.platform_store())
         {
             turso
                 .load_verification_cache(tenant)
                 .await
                 .unwrap_or_default()
-        } else if let Some(ref store) = state.server.event_store
-            && let Some(ps) = store.platform_store()
+        } else if let Some(ps) = state
+            .server
+            .storage_stack
+            .as_ref()
+            .and_then(|stack| stack.platform.clone())
         {
             ps.load_verification_cache(tenant).await.unwrap_or_default()
         } else {
@@ -1427,11 +1441,14 @@ pub(super) async fn install_os_app_with_plan(
                 },
             );
 
-            if let Some(ref store) = state.server.event_store
-                && let Some(ps) = store.platform_store()
+            if let Some(ps) = state
+                .server
+                .storage_stack
+                .as_ref()
+                .and_then(|stack| stack.platform.clone())
             {
                 bootstrap::persist_bootstrap_verification(
-                    ps,
+                    ps.as_ref(),
                     tenant,
                     &specs_to_bootstrap,
                     merged,

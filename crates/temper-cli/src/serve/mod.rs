@@ -27,6 +27,7 @@ use temper_platform::state::PlatformState;
 use temper_runtime::tenant::TenantId;
 use temper_server::registry::{EntityLevelSummary, EntityVerificationResult, VerificationStatus};
 use temper_server::state::DesignTimeEvent;
+use temper_server::storage::StorageStack;
 use temper_verify::cascade::VerificationCascade;
 
 use crate::StorageBackend;
@@ -114,7 +115,9 @@ pub async fn run(
         if let Some(pool) = store.postgres_pool().cloned() {
             state.server.pg_record_store = Some(Arc::new(PostgresRecordStore::new(pool)));
         }
-        state.server.set_event_store(store);
+        state
+            .server
+            .set_storage_stack(StorageStack::from_server_event_store(store));
     }
 
     // Phase 5b: Secrets vault
