@@ -45,66 +45,6 @@ pub(in crate::observe) struct WorkflowsResponse {
 
 /// Fetch design-time events from the durable metadata backend.
 async fn fetch_event_log(state: &ServerState) -> Vec<crate::state::DesignTimeEvent> {
-    // Try Postgres first.
-    if let Some(pool) = state
-        .event_store
-        .as_ref()
-        .and_then(|store| store.postgres_pool())
-    {
-        type DtEventRow = (
-            String,
-            String,
-            String,
-            String,
-            Option<String>,
-            Option<bool>,
-            Option<i16>,
-            Option<i16>,
-            chrono::DateTime<chrono::Utc>,
-        );
-        let rows: Result<Vec<DtEventRow>, sqlx::Error> = sqlx::query_as(
-            "SELECT kind, entity_type, tenant, summary, level, passed, step_number, \
-                        total_steps, created_at \
-                 FROM design_time_events \
-                 ORDER BY created_at ASC, id ASC",
-        )
-        .fetch_all(pool)
-        .await;
-        match rows {
-            Ok(rows) => {
-                return rows
-                    .into_iter()
-                    .map(
-                        |(
-                            kind,
-                            entity_type,
-                            tenant,
-                            summary,
-                            level,
-                            passed,
-                            step_number,
-                            total_steps,
-                            created_at,
-                        )| crate::state::DesignTimeEvent {
-                            kind,
-                            entity_type,
-                            tenant,
-                            summary,
-                            level,
-                            passed,
-                            timestamp: created_at.to_rfc3339(),
-                            step_number: step_number.map(|n| n as u8),
-                            total_steps: total_steps.map(|n| n as u8),
-                        },
-                    )
-                    .collect();
-            }
-            Err(e) => {
-                tracing::warn!(error = %e, "failed to read design_time_events from postgres");
-            }
-        }
-    }
-
     let stores = state.collect_all_metadata_stores().await;
     let mut all_events = Vec::new();
     for store in &stores {
