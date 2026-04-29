@@ -6,22 +6,26 @@
 - Related:
   - ADR-0065: Postgres Platform Store and Canonical Schema
   - ADR-0076: Eliminate ServerEventStore Enum Dispatch
-  - `crates/temper-server/src/event_store.rs`
   - `crates/temper-server/src/storage/mod.rs`
   - `crates/temper-cli/src/serve/bootstrap.rs`
 
 ## Context
 
-`ServerEventStore` is a concrete enum. Platform helper methods match on that enum and historically returned `Ok(())` or `Ok(None)` for non-Turso variants. That was acceptable while Turso was the only full platform backend, but it becomes dangerous once Postgres is selected for production: unsupported branches can look healthy while dropping query-plane or platform writes.
+Historically, `ServerEventStore` was a concrete enum. Platform helper methods
+matched on that enum and returned `Ok(())` or `Ok(None)` for some unsupported
+variants. That was acceptable while Turso was the only full platform backend,
+but it became dangerous once Postgres was selected for production: unsupported
+branches could look healthy while dropping query-plane or platform writes.
 
 ## Decision
 
 Temper will treat storage as a composed stack with explicit backend labels and feature support:
 
 - Event journal and snapshots.
-- Platform metadata.
+- Platform metadata and policy metadata.
 - Durable query projection.
-- Trajectory sink.
+- Trajectory sink and observe reads.
+- Metadata, blob, authz, evolution, OTS, and WASM side stores.
 
 `crates/temper-server/src/storage/mod.rs` owns the server-facing stack:
 
@@ -29,9 +33,14 @@ Temper will treat storage as a composed stack with explicit backend labels and f
 - `BoxedEventStore`, the cloneable journal/snapshot handle stored in the stack.
 - `QueryPlaneStore`, the durable projection capability for projection writes, batched projection reads, OData filter push-down, and projection metrics.
 - `TrajectorySink`, the durable observe trajectory write capability.
-- `StorageStack`, a composed value containing event, platform, query-plane, trajectory, backend-label, and transitional compatibility handles.
+- `StorageStack`, a composed value containing event, platform, policy,
+  query-plane, trajectory, metadata, Turso-provider, Postgres pool, and
+  backend-label handles.
 
-`ServerState::set_event_store` now derives a `StorageStack` whenever a runtime store is attached. Query-plane and trajectory callers use `ServerState::query_plane_store()` / `ServerState::trajectory_sink()` instead of reaching through the compatibility store. The old `ServerEventStore` enum remains as a temporary compatibility handle for backend-specific platform and cross-tenant read methods that have not yet moved to concern-specific traits, but object safety is no longer deferred: new code should depend on `StorageStack` capabilities rather than matching directly on `ServerEventStore`.
+`ServerState::set_storage_stack` attaches the selected stack. Query-plane,
+trajectory, platform, metadata, observe, evolution, blob, authz, and WASM
+callers use stack capabilities instead of matching over backend enums. The old
+`ServerEventStore` enum has been removed by ADR-0076.
 
 Environment-driven bootstrap selects backend with:
 
@@ -47,7 +56,9 @@ Unset values preserve current behavior until cutover.
 2. Make `platform_store()` return Postgres once Postgres implements `PlatformStore`.
 3. Add tests that fail if Postgres platform branches no-op.
 4. Introduce `StorageStack` and `DynEventStore` so backend selection produces composed capabilities.
-5. Move production query-plane and trajectory callers from `ServerEventStore` compatibility methods onto dedicated stack traits.
+5. Move production query-plane and trajectory callers onto dedicated stack traits.
+6. Move long-tail platform/observe/evolution/blob/authz/WASM callers onto
+   capability traits and delete the enum dispatch layer.
 
 ## Readiness Gates
 
@@ -65,7 +76,9 @@ Unset values preserve current behavior until cutover.
 
 ### Negative
 
-- Existing backend-specific platform and observe-read helpers still receive a compatibility `ServerEventStore` until their own concern-specific traits exist.
+- The stack has several capability traits; new storage concerns should join an
+  existing concern-based trait where possible instead of creating method-sized
+  traits.
 
 ### Risks
 
@@ -79,7 +92,6 @@ Unset values preserve current behavior until cutover.
 
 - This ADR does not remove Redis ephemeral mode.
 - This ADR does not add per-tenant Postgres schema routing; row-level tenant columns remain the first implementation.
-- This ADR does not remove every compatibility-store use; event-journal, platform long-tail, and cross-tenant observe-read paths still need purpose-built capability traits before the enum can disappear entirely.
 
 ## Alternatives Considered
 
