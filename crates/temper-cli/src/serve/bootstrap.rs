@@ -624,8 +624,6 @@ pub(super) async fn bootstrap_installed_apps(state: &PlatformState, skills: &[St
 
 #[cfg(test)]
 mod tests {
-    use std::sync::Arc;
-
     use temper_platform::os_apps::get_os_app;
     use temper_platform::state::PlatformState;
     use temper_runtime::tenant::TenantId;
