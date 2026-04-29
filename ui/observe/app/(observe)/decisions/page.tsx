@@ -10,7 +10,7 @@ import {
   subscribeAllPendingDecisions,
   fetchSpecs,
 } from "@/lib/api";
-import { useSSERefresh, useRelativeTime } from "@/lib/hooks";
+import { useSSERefresh } from "@/lib/hooks";
 import type {
   DecisionsResponse,
   PendingDecision,
@@ -27,7 +27,6 @@ import {
   groupByDate,
 } from "@/lib/utils";
 import { groupDecisions, type GroupingStrategy } from "@/lib/decision-grouping";
-
 
 const ALL_TENANTS = "__all__";
 
@@ -285,8 +284,6 @@ export default function DecisionsPage() {
   });
 
   const data = decisionsPoll.data;
-  const lastUpdated = useRelativeTime(decisionsPoll.lastUpdated);
-
   // SSE for live pending decisions (best-effort — may fail without admin headers)
   useEffect(() => {
     if (initialLoading || initialError) return;
@@ -531,9 +528,6 @@ export default function DecisionsPage() {
             >
               Export
             </button>
-          )}
-          {lastUpdated && (
-            <span className="text-xs text-[var(--color-text-muted)]">Updated {lastUpdated}</span>
           )}
         </div>
       </div>

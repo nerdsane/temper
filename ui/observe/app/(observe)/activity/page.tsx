@@ -3,7 +3,7 @@
 import { useEffect, useState, useMemo, useCallback, useRef } from "react";
 import Link from "next/link";
 import { fetchTrajectories, fetchEntities, subscribeEntityEvents } from "@/lib/api";
-import { useSSERefresh, useRelativeTime } from "@/lib/hooks";
+import { useSSERefresh } from "@/lib/hooks";
 import type { TrajectoryResponse, EntityStateChange, EntitySummary } from "@/lib/types";
 import ErrorDisplay from "@/components/ErrorDisplay";
 import StatCard from "@/components/StatCard";
@@ -56,8 +56,6 @@ export default function ActivityPage() {
   });
 
   const data = trajectoryPoll.data;
-  const lastUpdated = useRelativeTime(trajectoryPoll.lastUpdated);
-
   // Live event feed
   useEffect(() => {
     if (initialLoading || initialError) return;
@@ -211,9 +209,6 @@ export default function ActivityPage() {
                 <option key={t} value={t}>{t}</option>
               ))}
             </select>
-          )}
-          {lastUpdated && (
-            <span className="text-xs text-[var(--color-text-muted)]">Updated {lastUpdated}</span>
           )}
         </div>
       </div>
