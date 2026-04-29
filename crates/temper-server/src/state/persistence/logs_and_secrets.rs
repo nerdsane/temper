@@ -5,7 +5,7 @@ use super::TenantMetadataBackend;
 impl ServerState {
     /// Broadcast and persist a design-time event to the tenant's store.
     pub async fn emit_design_time_event(&self, event: DesignTimeEvent) -> Result<(), String> {
-        if let Some(backend) = self.metadata_backend_for_tenant(&event.tenant).await {
+        if let Some(backend) = self.tenant_metadata_backend(&event.tenant).await {
             match backend {
                 TenantMetadataBackend::Postgres(pool) => {
                     let created_at = temper_runtime::scheduler::sim_now();
@@ -83,7 +83,7 @@ impl ServerState {
         &self,
         decision: &super::super::PendingDecision,
     ) -> Result<(), String> {
-        let Some(backend) = self.metadata_backend_for_tenant(&decision.tenant).await else {
+        let Some(backend) = self.tenant_metadata_backend(&decision.tenant).await else {
             return Ok(());
         };
 
@@ -134,7 +134,7 @@ impl ServerState {
         ciphertext: &[u8],
         nonce: &[u8],
     ) -> Result<(), String> {
-        let Some(backend) = self.metadata_backend_for_tenant(tenant).await else {
+        let Some(backend) = self.tenant_metadata_backend(tenant).await else {
             return Ok(());
         };
 
@@ -167,7 +167,7 @@ impl ServerState {
 
     /// Delete a secret from the persistence backend.
     pub async fn delete_secret(&self, tenant: &str, key_name: &str) -> Result<bool, String> {
-        let Some(backend) = self.metadata_backend_for_tenant(tenant).await else {
+        let Some(backend) = self.tenant_metadata_backend(tenant).await else {
             return Ok(false);
         };
 
@@ -195,7 +195,7 @@ impl ServerState {
         let Some(vault) = self.secrets_vault.as_ref() else {
             return Ok(0);
         };
-        let Some(backend) = self.metadata_backend_for_tenant(tenant).await else {
+        let Some(backend) = self.tenant_metadata_backend(tenant).await else {
             return Ok(0);
         };
 

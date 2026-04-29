@@ -4,7 +4,7 @@ use std::sync::Arc;
 use temper_runtime::persistence::{
     EventMetadata, EventStore, PersistenceEnvelope, PersistenceError,
 };
-use temper_server::ServerEventStore;
+use temper_server::event_store::ServerEventStore;
 use temper_server::state::TrajectoryEntry;
 use temper_server::storage::{
     BackendLabel, BoxedEventStore, QueryPlaneStore, QueryProjectionFieldsRow, StorageStack,

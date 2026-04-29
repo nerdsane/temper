@@ -26,6 +26,8 @@ use crate::event_store::ServerEventStore;
 use crate::platform_store::{
     InstalledAppRecord, PlatformStore, SpecRow, SpecVerificationUpdate, WasmModuleRow,
 };
+#[cfg(feature = "sim")]
+use crate::platform_store::SimPlatformStore;
 use crate::state::trajectory::{TrajectoryEntry, TrajectorySource};
 
 pub type EventStoreFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;

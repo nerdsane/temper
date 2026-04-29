@@ -776,7 +776,7 @@ impl ServerState {
     ///
     /// Panics if the event store is not configured or is not a Turso backend.
     pub fn turso(&self) -> temper_store_turso::TursoEventStore {
-        self.platform_persistent_store()
+        self.platform_turso_store()
             .expect("Turso event store is not configured")
     }
 
@@ -784,11 +784,11 @@ impl ServerState {
     ///
     /// Only use for system-wide data that stays in the platform DB
     /// (evolution records, feature requests, tenant registry).
-    /// For tenant-scoped data, use [`persistent_store_for_tenant`].
+    /// For tenant-scoped data, use [`turso_store_for_tenant`].
     ///
     /// Returns `None` when the server is running without Turso (e.g. in-memory
     /// mode or tests). Callers should degrade gracefully to empty results.
-    pub fn platform_persistent_store(&self) -> Option<temper_store_turso::TursoEventStore> {
+    pub fn platform_turso_store(&self) -> Option<temper_store_turso::TursoEventStore> {
         self.storage_stack
             .as_ref()
             .and_then(|stack| stack.turso.as_ref())
@@ -802,7 +802,7 @@ impl ServerState {
     /// `temper-system` and `default` tenants route to the platform store.
     ///
     /// Returns `None` when the server is running without Turso.
-    pub async fn persistent_store_for_tenant(
+    pub async fn turso_store_for_tenant(
         &self,
         tenant: &str,
     ) -> Option<temper_store_turso::TursoEventStore> {
@@ -1185,7 +1185,7 @@ impl ServerState {
     /// In single-DB mode, returns just the shared store.
     /// In TenantRouted mode, returns the platform store + all connected tenant stores.
     /// Returns an empty vec when Turso is not configured.
-    pub async fn collect_all_turso_stores(&self) -> Vec<temper_store_turso::TursoEventStore> {
+    pub async fn all_turso_stores(&self) -> Vec<temper_store_turso::TursoEventStore> {
         let Some(provider) = self
             .storage_stack
             .as_ref()

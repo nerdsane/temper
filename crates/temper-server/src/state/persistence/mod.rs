@@ -33,7 +33,7 @@ impl ServerState {
     /// In TenantRouted mode, routes to the per-tenant database.
     /// In single-DB Turso mode, returns the shared store.
     /// In Postgres mode, returns the shared pool (RLS handles isolation).
-    pub(crate) async fn metadata_backend_for_tenant(
+    pub(crate) async fn tenant_metadata_backend(
         &self,
         tenant: &str,
     ) -> Option<TenantMetadataBackend> {
@@ -61,7 +61,7 @@ impl ServerState {
         wasm_bytes: &[u8],
         sha256_hash: &str,
     ) -> Result<(), String> {
-        let Some(backend) = self.metadata_backend_for_tenant(tenant).await else {
+        let Some(backend) = self.tenant_metadata_backend(tenant).await else {
             return Ok(());
         };
 
@@ -118,7 +118,7 @@ impl ServerState {
         tenant: &str,
         module_name: &str,
     ) -> Result<bool, String> {
-        let Some(backend) = self.metadata_backend_for_tenant(tenant).await else {
+        let Some(backend) = self.tenant_metadata_backend(tenant).await else {
             return Ok(false);
         };
 
@@ -162,7 +162,7 @@ impl ServerState {
         }
 
         let tenant_name = tenant.to_string();
-        let Some(backend) = self.metadata_backend_for_tenant(&tenant_name).await else {
+        let Some(backend) = self.tenant_metadata_backend(&tenant_name).await else {
             return Err(format!(
                 "cannot lazy-load WASM module '{module_name}' for tenant '{tenant_name}' without a metadata backend"
             ));

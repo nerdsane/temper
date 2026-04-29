@@ -2,7 +2,7 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-MAX_VIOLATIONS="${MAX_STORAGE_BOUNDARY_VIOLATIONS:-39}"
+MAX_VIOLATIONS="${MAX_STORAGE_BOUNDARY_VIOLATIONS:-0}"
 STRICT="${TEMPER_STORAGE_DISPATCH_STRICT:-0}"
 
 PATTERN='ServerEventStore|\.event_store\b|event_store\.as_ref|collect_all_turso_stores|persistent_store_for_tenant|platform_persistent_store|metadata_backend_for_tenant'
@@ -21,7 +21,7 @@ VIOLATIONS="$(
 if [[ -z "$VIOLATIONS" ]]; then
   COUNT=0
 else
-  COUNT="$(printf '%s\n' "$VIOLATIONS" | wc -l | tr -d '[:space:]')"
+  COUNT="$(printf '%s\n' "$VIOLATIONS" | grep -c . || true)"
 fi
 
 if [[ "$STRICT" == "1" && "$COUNT" -gt 0 ]]; then

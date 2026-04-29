@@ -44,7 +44,6 @@ pub mod wasm_registry;
 pub mod webhooks;
 
 pub use entity_actor::{EntityActor, EntityActorHandler, EntityMsg, EntityResponse, EntityState};
-pub use event_store::ServerEventStore;
 pub use registry::SpecRegistry;
 pub use router::build_router;
 pub use state::ServerState;
