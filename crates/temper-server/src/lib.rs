@@ -37,6 +37,7 @@ pub mod secrets;
 #[cfg(feature = "observe")]
 pub mod sentinel;
 pub mod state;
+pub mod storage;
 pub(crate) mod trajectory_outbox;
 pub mod trigger;
 pub mod wasm_registry;
@@ -47,3 +48,4 @@ pub use event_store::ServerEventStore;
 pub use registry::SpecRegistry;
 pub use router::build_router;
 pub use state::ServerState;
+pub use storage::StorageStack;
