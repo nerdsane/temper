@@ -667,7 +667,7 @@ mod tests {
             .record_installed_app(tenant, app_name)
             .await
             .expect("installed app should persist");
-        state.server.event_store = Some(Arc::new(ServerEventStore::Turso(turso)));
+        state.server.set_event_store(ServerEventStore::Turso(turso));
 
         bootstrap_installed_apps(&state, &[]).await;
 

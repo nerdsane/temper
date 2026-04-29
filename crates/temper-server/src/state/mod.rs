@@ -53,6 +53,7 @@ use crate::events::EntityStateChange;
 use crate::idempotency::IdempotencyCache;
 use crate::registry::SpecRegistry;
 use crate::secrets::vault::SecretsVault;
+use crate::storage::StorageStack;
 use crate::trigger::ReactionDispatcher;
 use crate::wasm_registry::WasmModuleRegistry;
 use crate::webhooks::WebhookDispatcher;
@@ -210,6 +211,8 @@ pub struct ServerState {
     pub last_accessed: Arc<RwLock<BTreeMap<String, chrono::DateTime<chrono::Utc>>>>,
     /// Optional runtime event store backend for persistence.
     pub event_store: Option<Arc<ServerEventStore>>,
+    /// First-class storage capabilities selected for this runtime.
+    pub storage_stack: Option<Arc<StorageStack>>,
     /// Runtime data directory for persisted local metadata (e.g. specs registry).
     pub data_dir: std::path::PathBuf,
     /// Agent hints learned from trajectory analysis, keyed by action name.
@@ -335,6 +338,13 @@ fn install_liveness_metrics_reporter_once() {
 
 #[allow(deprecated)] // ADR-0025 Phase 4: RecordStore used until chain validation replaced
 impl ServerState {
+    /// Attach a runtime event store and derive the composed storage stack.
+    pub fn set_event_store(&mut self, store: ServerEventStore) {
+        let stack = Arc::new(StorageStack::from_server_event_store(store));
+        self.event_store = stack.compatibility_store.clone();
+        self.storage_stack = Some(stack);
+    }
+
     /// Create ServerState from CSDL XML and optional specification sources.
     pub fn new(system: ActorSystem, csdl: CsdlDocument, csdl_xml: String) -> Self {
         install_liveness_metrics_reporter_once();
@@ -367,6 +377,7 @@ impl ServerState {
             actor_registry: Arc::new(RwLock::new(BTreeMap::new())),
             last_accessed: Arc::new(RwLock::new(BTreeMap::new())),
             event_store: None,
+            storage_stack: None,
             data_dir: std::path::PathBuf::new(),
             agent_hints: Arc::new(RwLock::new(BTreeMap::new())),
             authz: Arc::new(AuthzEngine::permissive()),
@@ -548,7 +559,7 @@ impl ServerState {
         store: PostgresEventStore,
     ) -> Result<Self, String> {
         let mut state = Self::with_specs(system, csdl, csdl_xml, ioa_sources)?;
-        state.event_store = Some(Arc::new(ServerEventStore::Postgres(store)));
+        state.set_event_store(ServerEventStore::Postgres(store));
         Ok(state)
     }
 
@@ -563,7 +574,7 @@ impl ServerState {
         store: ServerEventStore,
     ) -> Result<Self, String> {
         let mut state = Self::with_specs(system, csdl, csdl_xml, ioa_sources)?;
-        state.event_store = Some(Arc::new(store));
+        state.set_event_store(store);
         Ok(state)
     }
 
@@ -600,6 +611,7 @@ impl ServerState {
             actor_registry: Arc::new(RwLock::new(BTreeMap::new())),
             last_accessed: Arc::new(RwLock::new(BTreeMap::new())),
             event_store: None,
+            storage_stack: None,
             data_dir: std::path::PathBuf::new(),
             agent_hints: Arc::new(RwLock::new(BTreeMap::new())),
             authz: Arc::new(AuthzEngine::permissive()),

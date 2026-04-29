@@ -1,0 +1,479 @@
+//! Runtime storage stack boundary.
+//!
+//! `temper_runtime::persistence::EventStore` uses `impl Future` return types,
+//! which is good for concrete backends but not dyn-object-safe. This module
+//! provides the boxed adapter used by the server-facing storage stack so
+//! backend selection is a composition step rather than business-code branching.
+
+use std::future::Future;
+use std::pin::Pin;
+use std::sync::Arc;
+
+use temper_runtime::persistence::{EventStore, PersistenceEnvelope, PersistenceError};
+
+use crate::event_store::ServerEventStore;
+use crate::platform_store::{
+    InstalledAppRecord, PlatformStore, SpecRow, SpecVerificationUpdate, WasmModuleRow,
+};
+
+pub type EventStoreFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
+
+/// Object-safe adapter for the runtime event journal.
+pub trait DynEventStore: Send + Sync {
+    fn append<'a>(
+        &'a self,
+        persistence_id: &'a str,
+        expected_sequence: u64,
+        events: &'a [PersistenceEnvelope],
+    ) -> EventStoreFuture<'a, Result<u64, PersistenceError>>;
+
+    fn read_events<'a>(
+        &'a self,
+        persistence_id: &'a str,
+        from_sequence: u64,
+    ) -> EventStoreFuture<'a, Result<Vec<PersistenceEnvelope>, PersistenceError>>;
+
+    fn save_snapshot<'a>(
+        &'a self,
+        persistence_id: &'a str,
+        sequence_nr: u64,
+        snapshot: &'a [u8],
+    ) -> EventStoreFuture<'a, Result<(), PersistenceError>>;
+
+    fn load_snapshot<'a>(
+        &'a self,
+        persistence_id: &'a str,
+    ) -> EventStoreFuture<'a, Result<Option<(u64, Vec<u8>)>, PersistenceError>>;
+
+    fn list_entity_ids<'a>(
+        &'a self,
+        tenant: &'a str,
+    ) -> EventStoreFuture<'a, Result<Vec<(String, String)>, PersistenceError>>;
+
+    fn list_entity_ids_by_type<'a>(
+        &'a self,
+        tenant: &'a str,
+        entity_type: &'a str,
+    ) -> EventStoreFuture<'a, Result<Vec<String>, PersistenceError>>;
+}
+
+impl<T> DynEventStore for T
+where
+    T: EventStore,
+{
+    fn append<'a>(
+        &'a self,
+        persistence_id: &'a str,
+        expected_sequence: u64,
+        events: &'a [PersistenceEnvelope],
+    ) -> EventStoreFuture<'a, Result<u64, PersistenceError>> {
+        Box::pin(EventStore::append(
+            self,
+            persistence_id,
+            expected_sequence,
+            events,
+        ))
+    }
+
+    fn read_events<'a>(
+        &'a self,
+        persistence_id: &'a str,
+        from_sequence: u64,
+    ) -> EventStoreFuture<'a, Result<Vec<PersistenceEnvelope>, PersistenceError>> {
+        Box::pin(EventStore::read_events(self, persistence_id, from_sequence))
+    }
+
+    fn save_snapshot<'a>(
+        &'a self,
+        persistence_id: &'a str,
+        sequence_nr: u64,
+        snapshot: &'a [u8],
+    ) -> EventStoreFuture<'a, Result<(), PersistenceError>> {
+        Box::pin(EventStore::save_snapshot(
+            self,
+            persistence_id,
+            sequence_nr,
+            snapshot,
+        ))
+    }
+
+    fn load_snapshot<'a>(
+        &'a self,
+        persistence_id: &'a str,
+    ) -> EventStoreFuture<'a, Result<Option<(u64, Vec<u8>)>, PersistenceError>> {
+        Box::pin(EventStore::load_snapshot(self, persistence_id))
+    }
+
+    fn list_entity_ids<'a>(
+        &'a self,
+        tenant: &'a str,
+    ) -> EventStoreFuture<'a, Result<Vec<(String, String)>, PersistenceError>> {
+        Box::pin(EventStore::list_entity_ids(self, tenant))
+    }
+
+    fn list_entity_ids_by_type<'a>(
+        &'a self,
+        tenant: &'a str,
+        entity_type: &'a str,
+    ) -> EventStoreFuture<'a, Result<Vec<String>, PersistenceError>> {
+        Box::pin(EventStore::list_entity_ids_by_type(
+            self,
+            tenant,
+            entity_type,
+        ))
+    }
+}
+
+/// Cloneable boxed event store handle.
+#[derive(Clone)]
+pub struct BoxedEventStore(Arc<dyn DynEventStore>);
+
+impl BoxedEventStore {
+    pub fn new<T>(store: T) -> Self
+    where
+        T: EventStore,
+    {
+        Self(Arc::new(store))
+    }
+
+    pub fn from_arc<T>(store: Arc<T>) -> Self
+    where
+        T: EventStore,
+    {
+        Self(store)
+    }
+
+    pub fn inner(&self) -> Arc<dyn DynEventStore> {
+        self.0.clone()
+    }
+
+    pub async fn append(
+        &self,
+        persistence_id: &str,
+        expected_sequence: u64,
+        events: &[PersistenceEnvelope],
+    ) -> Result<u64, PersistenceError> {
+        self.0
+            .append(persistence_id, expected_sequence, events)
+            .await
+    }
+
+    pub async fn read_events(
+        &self,
+        persistence_id: &str,
+        from_sequence: u64,
+    ) -> Result<Vec<PersistenceEnvelope>, PersistenceError> {
+        self.0.read_events(persistence_id, from_sequence).await
+    }
+
+    pub async fn save_snapshot(
+        &self,
+        persistence_id: &str,
+        sequence_nr: u64,
+        snapshot: &[u8],
+    ) -> Result<(), PersistenceError> {
+        self.0
+            .save_snapshot(persistence_id, sequence_nr, snapshot)
+            .await
+    }
+
+    pub async fn load_snapshot(
+        &self,
+        persistence_id: &str,
+    ) -> Result<Option<(u64, Vec<u8>)>, PersistenceError> {
+        self.0.load_snapshot(persistence_id).await
+    }
+
+    pub async fn list_entity_ids(
+        &self,
+        tenant: &str,
+    ) -> Result<Vec<(String, String)>, PersistenceError> {
+        self.0.list_entity_ids(tenant).await
+    }
+
+    pub async fn list_entity_ids_by_type(
+        &self,
+        tenant: &str,
+        entity_type: &str,
+    ) -> Result<Vec<String>, PersistenceError> {
+        self.0.list_entity_ids_by_type(tenant, entity_type).await
+    }
+}
+
+/// Backend label used for metrics and operator-facing diagnostics only.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum BackendLabel {
+    Postgres,
+    Turso,
+    Redis,
+    TursoRouted,
+    Sim,
+}
+
+impl BackendLabel {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Postgres => "postgres",
+            Self::Turso => "turso",
+            Self::Redis => "redis",
+            Self::TursoRouted => "turso-routed",
+            Self::Sim => "sim",
+        }
+    }
+}
+
+impl From<&ServerEventStore> for BackendLabel {
+    fn from(store: &ServerEventStore) -> Self {
+        match store {
+            ServerEventStore::Postgres(_) => Self::Postgres,
+            ServerEventStore::Turso(_) => Self::Turso,
+            ServerEventStore::Redis(_) => Self::Redis,
+            ServerEventStore::TenantRouted(_) => Self::TursoRouted,
+            #[cfg(feature = "sim")]
+            ServerEventStore::Sim(_, _) => Self::Sim,
+        }
+    }
+}
+
+/// Query-plane capability marker.
+///
+/// The current query projection calls still flow through compatibility methods
+/// on `ServerEventStore`; this marker gives the stack a dedicated concern slot
+/// so those methods can move without changing the outer server shape again.
+pub trait QueryPlaneStore: Send + Sync {}
+
+/// Composed storage capabilities selected at boot.
+#[derive(Clone)]
+pub struct StorageStack {
+    pub backend: BackendLabel,
+    pub events: BoxedEventStore,
+    pub platform: Option<Arc<dyn PlatformStore>>,
+    pub query_plane: Option<Arc<dyn QueryPlaneStore>>,
+    pub compatibility_store: Option<Arc<ServerEventStore>>,
+}
+
+impl StorageStack {
+    pub fn new(
+        backend: BackendLabel,
+        events: BoxedEventStore,
+        platform: Option<Arc<dyn PlatformStore>>,
+        query_plane: Option<Arc<dyn QueryPlaneStore>>,
+        compatibility_store: Option<Arc<ServerEventStore>>,
+    ) -> Self {
+        Self {
+            backend,
+            events,
+            platform,
+            query_plane,
+            compatibility_store,
+        }
+    }
+
+    pub fn from_server_event_store(store: ServerEventStore) -> Self {
+        let backend = BackendLabel::from(&store);
+        let store = Arc::new(store);
+        let events = BoxedEventStore::from_arc(store.clone());
+        let platform = if store.platform_store().is_some() {
+            Some(store.clone() as Arc<dyn PlatformStore>)
+        } else {
+            None
+        };
+        Self::new(backend, events, platform, None, Some(store))
+    }
+}
+
+fn unsupported_platform_backend(store: &ServerEventStore) -> String {
+    format!(
+        "platform storage is not supported on {} backend",
+        store.backend_name()
+    )
+}
+
+#[async_trait::async_trait]
+impl PlatformStore for ServerEventStore {
+    async fn upsert_spec(
+        &self,
+        tenant: &str,
+        entity_type: &str,
+        ioa_source: &str,
+        csdl_xml: &str,
+        content_hash: &str,
+    ) -> Result<(), String> {
+        let store = self
+            .platform_store()
+            .ok_or_else(|| unsupported_platform_backend(self))?;
+        store
+            .upsert_spec(tenant, entity_type, ioa_source, csdl_xml, content_hash)
+            .await
+    }
+
+    async fn load_specs(&self) -> Result<Vec<SpecRow>, String> {
+        let store = self
+            .platform_store()
+            .ok_or_else(|| unsupported_platform_backend(self))?;
+        store.load_specs().await
+    }
+
+    async fn delete_spec(&self, tenant: &str, entity_type: &str) -> Result<(), String> {
+        let store = self
+            .platform_store()
+            .ok_or_else(|| unsupported_platform_backend(self))?;
+        store.delete_spec(tenant, entity_type).await
+    }
+
+    async fn commit_specs(&self, tenant: &str) -> Result<(), String> {
+        let store = self
+            .platform_store()
+            .ok_or_else(|| unsupported_platform_backend(self))?;
+        store.commit_specs(tenant).await
+    }
+
+    async fn delete_uncommitted_specs(&self) -> Result<usize, String> {
+        let store = self
+            .platform_store()
+            .ok_or_else(|| unsupported_platform_backend(self))?;
+        store.delete_uncommitted_specs().await
+    }
+
+    async fn load_verification_cache(
+        &self,
+        tenant: &str,
+    ) -> Result<std::collections::BTreeMap<String, (String, bool)>, String> {
+        let store = self
+            .platform_store()
+            .ok_or_else(|| unsupported_platform_backend(self))?;
+        store.load_verification_cache(tenant).await
+    }
+
+    async fn persist_spec_verification(
+        &self,
+        tenant: &str,
+        entity_type: &str,
+        update: SpecVerificationUpdate<'_>,
+    ) -> Result<(), String> {
+        let store = self
+            .platform_store()
+            .ok_or_else(|| unsupported_platform_backend(self))?;
+        store
+            .persist_spec_verification(tenant, entity_type, update)
+            .await
+    }
+
+    async fn upsert_tenant_policy(&self, tenant: &str, policy_text: &str) -> Result<(), String> {
+        let store = self
+            .platform_store()
+            .ok_or_else(|| unsupported_platform_backend(self))?;
+        store.upsert_tenant_policy(tenant, policy_text).await
+    }
+
+    async fn upsert_tenant_constraints(
+        &self,
+        tenant: &str,
+        cross_invariants_toml: &str,
+    ) -> Result<(), String> {
+        let store = self
+            .platform_store()
+            .ok_or_else(|| unsupported_platform_backend(self))?;
+        store
+            .upsert_tenant_constraints(tenant, cross_invariants_toml)
+            .await
+    }
+
+    async fn load_tenant_policies(&self) -> Result<Vec<(String, String)>, String> {
+        let store = self
+            .platform_store()
+            .ok_or_else(|| unsupported_platform_backend(self))?;
+        store.load_tenant_policies().await
+    }
+
+    async fn is_app_installed(&self, tenant: &str, app_name: &str) -> Result<bool, String> {
+        let store = self
+            .platform_store()
+            .ok_or_else(|| unsupported_platform_backend(self))?;
+        store.is_app_installed(tenant, app_name).await
+    }
+
+    async fn record_installed_app(&self, tenant: &str, app_name: &str) -> Result<(), String> {
+        let store = self
+            .platform_store()
+            .ok_or_else(|| unsupported_platform_backend(self))?;
+        store.record_installed_app(tenant, app_name).await
+    }
+
+    async fn record_installed_app_metadata(
+        &self,
+        record: &InstalledAppRecord,
+    ) -> Result<(), String> {
+        let store = self
+            .platform_store()
+            .ok_or_else(|| unsupported_platform_backend(self))?;
+        store.record_installed_app_metadata(record).await
+    }
+
+    async fn get_installed_app(
+        &self,
+        tenant: &str,
+        app_name: &str,
+    ) -> Result<Option<InstalledAppRecord>, String> {
+        let store = self
+            .platform_store()
+            .ok_or_else(|| unsupported_platform_backend(self))?;
+        store.get_installed_app(tenant, app_name).await
+    }
+
+    async fn list_all_installed_apps(&self) -> Result<Vec<(String, String)>, String> {
+        let store = self
+            .platform_store()
+            .ok_or_else(|| unsupported_platform_backend(self))?;
+        store.list_all_installed_apps().await
+    }
+
+    async fn upsert_pending_decision(
+        &self,
+        id: &str,
+        tenant: &str,
+        status: &str,
+        data: &str,
+    ) -> Result<(), String> {
+        let store = self
+            .platform_store()
+            .ok_or_else(|| unsupported_platform_backend(self))?;
+        store
+            .upsert_pending_decision(id, tenant, status, data)
+            .await
+    }
+
+    async fn load_pending_decisions(&self, limit: usize) -> Result<Vec<String>, String> {
+        let store = self
+            .platform_store()
+            .ok_or_else(|| unsupported_platform_backend(self))?;
+        store.load_pending_decisions(limit).await
+    }
+
+    async fn load_all_wasm_modules(&self, tenant: &str) -> Result<Vec<WasmModuleRow>, String> {
+        let store = self
+            .platform_store()
+            .ok_or_else(|| unsupported_platform_backend(self))?;
+        store.load_all_wasm_modules(tenant).await
+    }
+
+    async fn load_wasm_modules_all_tenants(&self) -> Result<Vec<WasmModuleRow>, String> {
+        let store = self
+            .platform_store()
+            .ok_or_else(|| unsupported_platform_backend(self))?;
+        store.load_wasm_modules_all_tenants().await
+    }
+
+    async fn upsert_wasm_module(
+        &self,
+        tenant: &str,
+        name: &str,
+        bytes: &[u8],
+        hash: &str,
+    ) -> Result<(), String> {
+        let store = self
+            .platform_store()
+            .ok_or_else(|| unsupported_platform_backend(self))?;
+        store.upsert_wasm_module(tenant, name, bytes, hash).await
+    }
+}

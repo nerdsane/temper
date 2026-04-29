@@ -114,7 +114,7 @@ pub async fn run(
         if let Some(pool) = store.postgres_pool().cloned() {
             state.server.pg_record_store = Some(Arc::new(PostgresRecordStore::new(pool)));
         }
-        state.server.event_store = Some(Arc::new(store));
+        state.server.set_event_store(store);
     }
 
     // Phase 5b: Secrets vault
