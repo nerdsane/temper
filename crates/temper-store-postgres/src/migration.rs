@@ -1,191 +1,54 @@
-//! Lightweight schema migration runner.
+//! Versioned schema migration runner.
 //!
-//! Executes the `CREATE TABLE IF NOT EXISTS` statements defined in
-//! [`crate::schema`] against the provided connection pool.  This is
-//! intentionally simple — for production systems consider a full migration
-//! framework such as `sqlx migrate` or `refinery`.
+//! Postgres is the canonical schema source. The migration files under
+//! `crates/temper-store-postgres/migrations/` are executed through
+//! `sqlx::migrate!()` so production cutovers can reason about schema version,
+//! not just a bag of startup-time `CREATE TABLE IF NOT EXISTS` statements.
 
 use sqlx::PgPool;
 use temper_runtime::persistence::PersistenceError;
 
-use crate::schema;
-
 /// Run all schema migrations.
 ///
-/// Creates all persistence tables used by Temper if they do not already exist.
-/// The statements are idempotent so this function is safe to call on every
-/// application start-up.
+/// Creates or upgrades all persistence tables used by Temper. The initial
+/// migration remains idempotent because existing local/dev databases may have
+/// been created by the pre-ADR-0065 bootstrap runner before `_sqlx_migrations`
+/// existed.
 pub async fn run_migrations(pool: &PgPool) -> Result<(), PersistenceError> {
-    let statements = [
-        ("events table", schema::CREATE_EVENTS_TABLE),
-        ("snapshots table", schema::CREATE_SNAPSHOTS_TABLE),
-        ("specs table", schema::CREATE_SPECS_TABLE),
-        (
-            "specs content_hash migration",
-            schema::ALTER_SPECS_ADD_CONTENT_HASH,
-        ),
-        (
-            "specs committed migration",
-            schema::ALTER_SPECS_ADD_COMMITTED,
-        ),
-        ("trajectories table", schema::CREATE_TRAJECTORIES_TABLE),
-        (
-            "trajectories success index",
-            schema::CREATE_TRAJECTORIES_SUCCESS_INDEX,
-        ),
-        (
-            "trajectories entity index",
-            schema::CREATE_TRAJECTORIES_ENTITY_INDEX,
-        ),
-        (
-            "design_time_events table",
-            schema::CREATE_DESIGN_TIME_EVENTS_TABLE,
-        ),
-        (
-            "design_time_events tenant index",
-            schema::CREATE_DESIGN_TIME_EVENTS_TENANT_INDEX,
-        ),
-        (
-            "tenant_constraints table",
-            schema::CREATE_TENANT_CONSTRAINTS_TABLE,
-        ),
-        ("entity listing index", schema::CREATE_ENTITY_LISTING_INDEX),
-        ("wasm_modules table", schema::CREATE_WASM_MODULES_TABLE),
-        (
-            "wasm_invocation_logs table",
-            schema::CREATE_WASM_INVOCATION_LOGS_TABLE,
-        ),
-        (
-            "wasm_invocation_logs tenant index",
-            schema::CREATE_WASM_INVOCATION_LOGS_TENANT_INDEX,
-        ),
-        (
-            "wasm_invocation_logs module index",
-            schema::CREATE_WASM_INVOCATION_LOGS_MODULE_INDEX,
-        ),
-        (
-            "wasm_invocation_logs created index",
-            schema::CREATE_WASM_INVOCATION_LOGS_CREATED_INDEX,
-        ),
-        ("tenant_secrets table", schema::CREATE_TENANT_SECRETS_TABLE),
-        (
-            "pending_decisions table",
-            schema::CREATE_PENDING_DECISIONS_TABLE,
-        ),
-        (
-            "pending_decisions tenant index",
-            schema::CREATE_PENDING_DECISIONS_TENANT_INDEX,
-        ),
-        (
-            "pending_decisions status index",
-            schema::CREATE_PENDING_DECISIONS_STATUS_INDEX,
-        ),
-        (
-            "tenant_policies table",
-            schema::CREATE_TENANT_POLICIES_TABLE,
-        ),
-        ("policies table", schema::CREATE_POLICIES_TABLE),
-        (
-            "policy_denial_patterns table",
-            schema::CREATE_POLICY_DENIAL_PATTERNS_TABLE,
-        ),
-        (
-            "policy_denial_patterns tenant index",
-            schema::CREATE_POLICY_DENIAL_PATTERNS_TENANT_INDEX,
-        ),
-        (
-            "tenant_installed_apps table",
-            schema::CREATE_TENANT_INSTALLED_APPS_TABLE,
-        ),
-        ("entity_catalog table", schema::CREATE_ENTITY_CATALOG_TABLE),
-        (
-            "entity_catalog type index",
-            schema::CREATE_ENTITY_CATALOG_TYPE_INDEX,
-        ),
-        (
-            "entity_catalog status index",
-            schema::CREATE_ENTITY_CATALOG_STATUS_INDEX,
-        ),
-        (
-            "entity_catalog fields gin index",
-            schema::CREATE_ENTITY_CATALOG_FIELDS_GIN_INDEX,
-        ),
-        (
-            "entity_field_index table",
-            schema::CREATE_ENTITY_FIELD_INDEX_TABLE,
-        ),
-        (
-            "entity_field_index lookup index",
-            schema::CREATE_ENTITY_FIELD_INDEX_LOOKUP,
-        ),
-        (
-            "entity_field_index status index",
-            schema::CREATE_ENTITY_FIELD_INDEX_STATUS,
-        ),
-        (
-            "feature_requests table",
-            schema::CREATE_FEATURE_REQUESTS_TABLE,
-        ),
-        (
-            "evolution_records table",
-            schema::CREATE_EVOLUTION_RECORDS_TABLE,
-        ),
-        (
-            "evolution_records tenant migration",
-            schema::ALTER_EVOLUTION_RECORDS_ADD_TENANT,
-        ),
-        (
-            "evolution_records type/status index",
-            schema::CREATE_EVOLUTION_RECORDS_TYPE_STATUS_INDEX,
-        ),
-        (
-            "evolution_records derived_from index",
-            schema::CREATE_EVOLUTION_RECORDS_DERIVED_FROM_INDEX,
-        ),
-        (
-            "ots_trajectories table",
-            schema::CREATE_OTS_TRAJECTORIES_TABLE,
-        ),
-        (
-            "ots_trajectories agent index",
-            schema::CREATE_OTS_TRAJECTORIES_AGENT_INDEX,
-        ),
-        (
-            "ots_trajectories tenant index",
-            schema::CREATE_OTS_TRAJECTORIES_TENANT_INDEX,
-        ),
-        (
-            "ots_trajectories outcome index",
-            schema::CREATE_OTS_TRAJECTORIES_OUTCOME_INDEX,
-        ),
-        ("blobs table", schema::CREATE_BLOBS_TABLE),
-        (
-            "blobs expires_at index",
-            schema::CREATE_BLOBS_EXPIRES_AT_INDEX,
-        ),
-    ];
-
-    for (label, sql) in statements {
-        sqlx::query(sql)
-            .execute(pool)
-            .await
-            .map_err(|e| PersistenceError::Storage(format!("failed to create {label}: {e}")))?;
-    }
-
-    // Enable row-level security on all tenant-scoped tables.
-    for stmt in schema::ENABLE_TENANT_RLS {
-        sqlx::query(stmt)
-            .execute(pool)
-            .await
-            .map_err(|e| PersistenceError::Storage(format!("failed to enable tenant RLS: {e}")))?;
-    }
-
-    Ok(())
+    static MIGRATOR: sqlx::migrate::Migrator = sqlx::migrate!("./migrations");
+    MIGRATOR
+        .run(pool)
+        .await
+        .map_err(|e| PersistenceError::Storage(format!("failed to run Postgres migrations: {e}")))
 }
 
 #[cfg(test)]
 mod tests {
     use crate::schema;
+
+    #[test]
+    fn versioned_migration_is_the_schema_source() {
+        let migration = include_str!("../migrations/0001_initial.sql").to_lowercase();
+        for table in [
+            "events",
+            "snapshots",
+            "specs",
+            "trajectories",
+            "entity_catalog",
+            "entity_field_index",
+            "tenant_secrets",
+            "blobs",
+        ] {
+            assert!(
+                migration.contains(&format!("create table if not exists {table}")),
+                "versioned migration missing table: {table}"
+            );
+        }
+        assert!(
+            migration.contains("enable row level security"),
+            "versioned migration must carry tenant RLS setup"
+        );
+    }
 
     #[test]
     fn migration_sql_is_idempotent() {

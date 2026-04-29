@@ -8,6 +8,7 @@
   - ADR-0058: Query-plane hot field opt-out and stable projections
   - ADR-0063: Object store for blob bytes
   - `crates/temper-store-postgres`
+  - `crates/temper-store-postgres/migrations/0001_initial.sql`
   - `crates/temper-server/src/platform_store.rs`
 
 ## Context
@@ -18,7 +19,7 @@ The current Postgres schema is also not the canonical platform schema. It is a p
 
 ## Decision
 
-Postgres is the canonical schema source for platform storage. The Postgres crate owns a strict superset of the Turso platform tables using native Postgres types:
+Postgres is the canonical schema source for platform storage. The versioned SQL migrations in `crates/temper-store-postgres/migrations/` own the runtime schema, and `run_migrations` executes them through `sqlx::migrate!()`. The Postgres crate owns a strict superset of the Turso platform tables using native Postgres types:
 
 - `JSONB` for structured payloads and query projections.
 - `BYTEA` only for encrypted secrets and legacy inline WASM bytes.
@@ -29,7 +30,7 @@ Postgres is the canonical schema source for platform storage. The Postgres crate
 
 ## Rollout Plan
 
-1. Add schema constants and migration coverage for all platform tables.
+1. Add versioned `sqlx` migration coverage for all platform tables.
 2. Add Postgres implementations for specs, query projection, trajectories, apps, policies, pending decisions, WASM metadata, secrets, blobs, OTS, and evolution support tables.
 3. Wire `ServerEventStore` and `PlatformStore` so Postgres and Turso expose the same supported platform surface.
 4. Keep Turso code available as a selectable backend, but Railway production will set Postgres env vars only.
@@ -37,6 +38,7 @@ Postgres is the canonical schema source for platform storage. The Postgres crate
 ## Readiness Gates
 
 - Unit tests prove Postgres schema includes the full platform table set.
+- Unit tests prove the versioned migration includes the platform table set and RLS setup.
 - Query projection calls against `ServerEventStore::Postgres` execute SQL instead of no-oping.
 - Local Postgres boot runs migrations idempotently.
 - OpenPaw smoke flow persists trajectory, projection, and spec rows to Postgres.
@@ -56,7 +58,7 @@ Postgres is the canonical schema source for platform storage. The Postgres crate
 
 ### Risks
 
-- Schema drift between Turso and Postgres until Turso DDL is derived from Postgres.
+- Schema drift between the legacy Rust schema constants and versioned Postgres migrations until the constants are fully retired or generated from SQL.
 - Some existing callers still name Turso types. Those are compatibility shims and should be retired once the storage abstraction fully owns shared row types.
 
 ### DST Compliance
