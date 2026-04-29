@@ -5,6 +5,7 @@
 - Deciders: Temper core maintainers
 - Related:
   - ADR-0065: Postgres Platform Store and Canonical Schema
+  - ADR-0076: Eliminate ServerEventStore Enum Dispatch
   - `crates/temper-server/src/event_store.rs`
   - `crates/temper-server/src/storage/mod.rs`
   - `crates/temper-cli/src/serve/bootstrap.rs`

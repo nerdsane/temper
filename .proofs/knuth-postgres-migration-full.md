@@ -136,3 +136,29 @@ Queried Datadog on 2026-04-29 through the Datadog MCP connector. The local shell
 - Production-shaped ETL into a disposable Railway Postgres database was not run from this environment.
 - Production cutover and 48-hour Postgres soak have not happened; Turso write-gate/priority/bypass removals remain correctly gated on that soak.
 - `ServerEventStore` compatibility still exists for event-journal, platform long-tail, and observe-read paths that have not yet grown dedicated capability traits.
+
+## ServerEventStore Retirement Follow-Up
+
+Addressed the remaining abstraction concern on 2026-04-29:
+
+- `StorageStack::from_server_event_store` now fills event, platform,
+  query-plane, and trajectory slots from concrete backend handles
+  (`PostgresEventStore`, `TursoEventStore`, `TenantStoreRouter`) instead of
+  `Arc<ServerEventStore>` trait adapters.
+- Added direct `QueryPlaneStore` and `TrajectorySink` implementations for
+  Postgres, Turso, and tenant-routed Turso.
+- Kept `ServerEventStore` only as the explicit compatibility handle for
+  unmigrated methods.
+- Added `docs/adrs/0076-eliminate-server-event-store-enum.md` with the
+  complete method inventory, target traits, and definition of done for
+  deleting the enum.
+
+Verification:
+
+```bash
+cargo test -p temper-server --test storage_stack storage_stack_from_event_store_uses_concrete_capability_handles
+```
+
+Result: passed. The regression test failed before the implementation because
+the capability trait object data pointer matched the compatibility enum pointer;
+it now proves the stack capabilities are concrete handles.
