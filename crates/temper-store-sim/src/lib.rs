@@ -5,8 +5,8 @@
 //! is controlled by a seeded RNG for reproducible failures.
 //!
 //! This crate follows the FoundationDB pattern: swap the I/O, keep the code.
-//! The same `ServerEventStore` dispatch enum adds a `Sim` variant that routes
-//! to this implementation. Production code runs unchanged.
+//! Server tests route this implementation through the `StorageStack`
+//! event-journal capability so production actor code runs unchanged.
 
 use std::collections::{BTreeMap, VecDeque};
 use std::sync::{Arc, Mutex};

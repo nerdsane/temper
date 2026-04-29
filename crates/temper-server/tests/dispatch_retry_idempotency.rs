@@ -1,6 +1,5 @@
 //! Regression tests for dispatch retry idempotency around post-dispatch effects.
 
-use std::sync::Arc;
 use std::time::Duration;
 
 use temper_runtime::ActorSystem;
@@ -8,7 +7,7 @@ use temper_runtime::scheduler::install_deterministic_context;
 use temper_runtime::tenant::TenantId;
 use temper_server::registry::SpecRegistry;
 use temper_server::request_context::AgentContext;
-use temper_server::{ServerEventStore, ServerState};
+use temper_server::{ServerState, StorageStack};
 use temper_spec::csdl::parse_csdl;
 use temper_store_sim::SimEventStore;
 
@@ -41,7 +40,6 @@ on_timeout = "TimeoutFail"
 
 fn build_state_with_sim_store(seed: u64) -> (ServerState, SimEventStore) {
     let sim_store = SimEventStore::no_faults(seed);
-    let store = ServerEventStore::Sim(sim_store.clone(), None);
 
     let mut registry = SpecRegistry::new();
     let csdl = parse_csdl(CSDL_XML).expect("CSDL parse");
@@ -54,7 +52,7 @@ fn build_state_with_sim_store(seed: u64) -> (ServerState, SimEventStore) {
 
     let system = ActorSystem::new("dispatch-retry-idempotency");
     let mut state = ServerState::from_registry(system, registry);
-    state.event_store = Some(Arc::new(store));
+    state.set_storage_stack(StorageStack::from_sim(sim_store.clone(), None));
     state.action_dispatch_timeout = Duration::from_millis(5);
     (state, sim_store)
 }

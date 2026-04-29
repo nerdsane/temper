@@ -10,11 +10,20 @@
 use std::collections::BTreeSet;
 
 use temper_jit::table::TransitionTable;
-use temper_runtime::persistence::EventStore;
 use temper_runtime::tenant::{TenantId, parse_persistence_id_parts};
 use temper_server::platform_store::PlatformStore;
+use temper_server::storage::BoxedEventStore;
 
 use super::platform_harness::SimPlatformHarness;
+
+fn event_store(harness: &SimPlatformHarness) -> Option<BoxedEventStore> {
+    harness
+        .platform_state
+        .server
+        .storage_stack
+        .as_ref()
+        .map(|stack| stack.events.clone())
+}
 
 // ── P1: Registry-Store Consistency ──────────────────────────────────────
 
@@ -84,12 +93,7 @@ pub async fn assert_p2_store_registry_consistency(
 pub async fn assert_p3_index_store_agreement(harness: &SimPlatformHarness) -> Result<(), String> {
     let index = harness.platform_state.server.entity_index.read().unwrap(); // ci-ok: infallible lock
 
-    let store = harness
-        .platform_state
-        .server
-        .event_store
-        .as_ref()
-        .ok_or_else(|| "P3: no event store configured".to_string())?;
+    let store = event_store(harness).ok_or_else(|| "P3: no event store configured".to_string())?;
 
     for (index_key, entity_ids) in index.iter() {
         // index_key format: "{tenant}:{entity_type}"
@@ -125,12 +129,7 @@ pub async fn assert_p4_store_index_completeness(
 ) -> Result<(), String> {
     let index = harness.platform_state.server.entity_index.read().unwrap(); // ci-ok: infallible lock
 
-    let store = harness
-        .platform_state
-        .server
-        .event_store
-        .as_ref()
-        .ok_or_else(|| "P4: no event store configured".to_string())?;
+    let store = event_store(harness).ok_or_else(|| "P4: no event store configured".to_string())?;
 
     // Iterate all persistence IDs in the SimEventStore.
     let all_pids = harness.sim_event_store.list_all_persistence_ids();
@@ -190,12 +189,7 @@ pub async fn assert_p4_store_index_completeness(
 pub async fn assert_p5_tombstone_finality(harness: &SimPlatformHarness) -> Result<(), String> {
     let index = harness.platform_state.server.entity_index.read().unwrap(); // ci-ok: infallible lock
 
-    let store = harness
-        .platform_state
-        .server
-        .event_store
-        .as_ref()
-        .ok_or_else(|| "P5: no event store configured".to_string())?;
+    let store = event_store(harness).ok_or_else(|| "P5: no event store configured".to_string())?;
 
     // Check every indexed entity: if its last event is a deletion marker,
     // it should not be in the index.
@@ -323,12 +317,7 @@ pub async fn assert_p7_cedar_persistence(harness: &SimPlatformHarness) -> Result
 /// If a dispatch failed mid-write, the store must not contain partial entries
 /// that would confuse replay on restart.
 pub async fn assert_p8_state_store_sequence(harness: &SimPlatformHarness) -> Result<(), String> {
-    let store = harness
-        .platform_state
-        .server
-        .event_store
-        .as_ref()
-        .ok_or_else(|| "P8: no event store configured".to_string())?;
+    let store = event_store(harness).ok_or_else(|| "P8: no event store configured".to_string())?;
 
     let all_pids = harness.sim_event_store.list_all_persistence_ids();
 
@@ -365,12 +354,7 @@ pub async fn assert_p8_state_store_sequence(harness: &SimPlatformHarness) -> Res
 /// This catches situations where a failed persist left half-written data
 /// in the journal (which would corrupt state on replay).
 pub async fn assert_p9_rollback_completeness(harness: &SimPlatformHarness) -> Result<(), String> {
-    let store = harness
-        .platform_state
-        .server
-        .event_store
-        .as_ref()
-        .ok_or_else(|| "P9: no event store configured".to_string())?;
+    let store = event_store(harness).ok_or_else(|| "P9: no event store configured".to_string())?;
 
     let all_pids = harness.sim_event_store.list_all_persistence_ids();
 
@@ -422,12 +406,7 @@ pub async fn assert_p9_rollback_completeness(harness: &SimPlatformHarness) -> Re
 /// running the TransitionTable). It verifies the preconditions that make
 /// replay possible: events are readable, sequenced, and structurally valid.
 pub async fn assert_p10_field_replay_fidelity(harness: &SimPlatformHarness) -> Result<(), String> {
-    let store = harness
-        .platform_state
-        .server
-        .event_store
-        .as_ref()
-        .ok_or_else(|| "P10: no event store configured".to_string())?;
+    let store = event_store(harness).ok_or_else(|| "P10: no event store configured".to_string())?;
 
     let index = harness.platform_state.server.entity_index.read().unwrap(); // ci-ok: infallible lock
 
@@ -583,8 +562,8 @@ pub async fn assert_p13_sequence_monotonicity(harness: &SimPlatformHarness) -> R
 pub async fn assert_p14_tenant_isolation(harness: &SimPlatformHarness) -> Result<(), String> {
     let index = harness.platform_state.server.entity_index.read().unwrap(); // ci-ok: infallible lock
 
-    let store = match harness.platform_state.server.event_store.as_ref() {
-        Some(s) => s,
+    let store = match event_store(harness) {
+        Some(store) => store,
         None => return Ok(()), // No store, nothing to check.
     };
 
@@ -651,8 +630,8 @@ pub async fn assert_p15_initial_state_correctness(
 ) -> Result<(), String> {
     let index = harness.platform_state.server.entity_index.read().unwrap(); // ci-ok: infallible lock
 
-    let store = match harness.platform_state.server.event_store.as_ref() {
-        Some(s) => s,
+    let store = match event_store(harness) {
+        Some(store) => store,
         None => return Ok(()),
     };
 
@@ -711,8 +690,8 @@ pub async fn assert_p15_initial_state_correctness(
 pub async fn assert_p16_event_replay_fidelity(harness: &SimPlatformHarness) -> Result<(), String> {
     let index = harness.platform_state.server.entity_index.read().unwrap(); // ci-ok: infallible lock
 
-    let store = match harness.platform_state.server.event_store.as_ref() {
-        Some(s) => s,
+    let store = match event_store(harness) {
+        Some(store) => store,
         None => return Ok(()),
     };
 

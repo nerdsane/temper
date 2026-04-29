@@ -4,7 +4,6 @@ use std::sync::Arc;
 use temper_runtime::persistence::{
     EventMetadata, EventStore, PersistenceEnvelope, PersistenceError,
 };
-use temper_server::event_store::ServerEventStore;
 use temper_server::state::TrajectoryEntry;
 use temper_server::storage::{
     BackendLabel, BoxedEventStore, QueryPlaneStore, QueryProjectionFieldsRow, StorageStack,
@@ -300,7 +299,7 @@ async fn storage_stack_exposes_query_plane_and_trajectory_capabilities() {
 }
 
 #[tokio::test]
-async fn storage_stack_from_event_store_uses_concrete_capability_handles() {
+async fn storage_stack_from_turso_exposes_concrete_capability_handles() {
     let dir = tempfile::tempdir().expect("tempdir");
     let db_path = dir.path().join("stack.db");
     let db_url = format!("file:{}", db_path.display());
@@ -308,41 +307,16 @@ async fn storage_stack_from_event_store_uses_concrete_capability_handles() {
         .await
         .expect("create turso store");
 
-    let stack = StorageStack::from_server_event_store(ServerEventStore::Turso(turso));
-    let enum_store = Arc::new(ServerEventStore::Turso(
-        TursoEventStore::new(&db_url, None)
-            .await
-            .expect("create comparison turso store"),
-    ));
-    let enum_data = Arc::as_ptr(&enum_store) as *const ();
+    let stack = StorageStack::from_turso(turso);
 
-    let events = stack.events.inner();
-    assert_ne!(
-        Arc::as_ptr(&events) as *const (),
-        enum_data,
-        "event journal capability must not be backed by ServerEventStore"
-    );
-
-    let platform = stack.platform.as_ref().expect("platform capability");
-    assert_ne!(
-        Arc::as_ptr(platform) as *const (),
-        enum_data,
-        "platform capability must not be backed by ServerEventStore"
-    );
-
-    let query_plane = stack.query_plane.as_ref().expect("query-plane capability");
-    assert_ne!(
-        Arc::as_ptr(query_plane) as *const (),
-        enum_data,
-        "query-plane capability must not be backed by ServerEventStore"
-    );
-
-    let trajectory = stack.trajectory.as_ref().expect("trajectory capability");
-    assert_ne!(
-        Arc::as_ptr(trajectory) as *const (),
-        enum_data,
-        "trajectory capability must not be backed by ServerEventStore"
-    );
+    assert_eq!(stack.backend, BackendLabel::Turso);
+    assert!(stack.postgres_pool.is_none());
+    assert!(stack.turso.is_some());
+    assert!(stack.platform.is_some());
+    assert!(stack.policies.is_some());
+    assert!(stack.query_plane.is_some());
+    assert!(stack.trajectory.is_some());
+    assert!(stack.metadata.is_some());
 }
 
 fn test_envelope(sequence_nr: u64) -> PersistenceEnvelope {
