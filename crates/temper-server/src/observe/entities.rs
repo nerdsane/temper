@@ -8,7 +8,6 @@ use axum::http::{HeaderMap, StatusCode};
 use axum::response::Json;
 use axum::response::sse::{Event, KeepAlive, Sse};
 use serde::Deserialize;
-use temper_runtime::persistence::EventStore;
 use tokio_stream::StreamExt;
 use tokio_stream::wrappers::BroadcastStream;
 use tracing::instrument;
@@ -117,7 +116,7 @@ pub(crate) async fn handle_get_entity_history(
     }
 
     // Path 2: Query event store directly (for inactive entities).
-    if let Some(ref store) = state.event_store {
+    if let Some((store, _backend)) = state.event_journal() {
         let persistence_id = format!("{tenant}:{entity_type}:{entity_id}");
         if let Ok(envelopes) = store.read_events(&persistence_id, 0).await {
             let events: Vec<serde_json::Value> = envelopes

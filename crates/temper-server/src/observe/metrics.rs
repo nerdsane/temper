@@ -69,9 +69,9 @@ pub(crate) async fn handle_health(State(state): State<ServerState>) -> Json<serd
     let errors_total = state.metrics.errors_total.load(Ordering::Relaxed);
 
     let event_store_type = state
-        .event_store
+        .storage_stack
         .as_ref()
-        .map(|store| store.backend_name())
+        .map(|stack| stack.backend.as_str())
         .unwrap_or("none");
 
     Json(serde_json::json!({
