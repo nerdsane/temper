@@ -1,4 +1,3 @@
-use temper_runtime::persistence::EventStore;
 use temper_runtime::tenant::TenantId;
 
 use crate::entity_actor::recover_entity_state_from_store;
@@ -7,7 +6,7 @@ use crate::runtime_metrics;
 use super::ServerState;
 
 pub(super) async fn populate_field_index_from_snapshots(state: &ServerState, tenant: &TenantId) {
-    let Some(store) = state.event_store.as_ref() else {
+    let Some((store, backend)) = state.event_journal() else {
         return;
     };
     let Some(query_plane) = state.query_plane_store() else {
@@ -126,7 +125,8 @@ pub(super) async fn populate_field_index_from_snapshots(state: &ServerState, ten
             entity_type,
             entity_id,
             &table,
-            store,
+            &store,
+            backend,
             &serde_json::json!({}),
             tenant_blob_store.as_ref(),
         )

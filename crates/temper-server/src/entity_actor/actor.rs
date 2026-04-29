@@ -28,12 +28,10 @@ use std::time::Instant;
 use temper_jit::table::TransitionTable;
 use temper_observe::wide_event;
 use temper_runtime::actor::{Actor, ActorContext, ActorError};
-use temper_runtime::persistence::{
-    EventMetadata, EventStore, PersistenceEnvelope, PersistenceError,
-};
+use temper_runtime::persistence::{EventMetadata, PersistenceEnvelope, PersistenceError};
 use temper_runtime::scheduler::{sim_now, sim_uuid};
 
-use crate::event_store::ServerEventStore;
+use crate::storage::{BackendLabel, BoxedEventStore};
 
 use super::effects::{FieldSyncMode, process_action_with_xref_and_field_mode};
 use super::types::{
@@ -53,8 +51,10 @@ pub struct EntityActor {
     /// restarting the actor.
     table: Arc<RwLock<TransitionTable>>,
     initial_fields: serde_json::Value,
-    /// Optional event store for persistence. None = in-memory only.
-    event_store: Option<Arc<ServerEventStore>>,
+    /// Optional event journal for persistence. None = in-memory only.
+    event_journal: Option<BoxedEventStore>,
+    /// Persistence backend label used for metrics and backend-specific field sync.
+    event_backend: Option<BackendLabel>,
     /// Trace ID for correlating all events from this actor.
     trace_id: String,
     /// Shared idempotency cache (ADR-0048 sub-decision 5). Consulted before
@@ -161,7 +161,8 @@ impl EntityActor {
             entity_id: entity_id.into(),
             table,
             initial_fields,
-            event_store: None,
+            event_journal: None,
+            event_backend: None,
             trace_id: sim_uuid().to_string(),
             idempotency_cache: None,
             blob_store: None,
@@ -174,7 +175,8 @@ impl EntityActor {
         entity_id: impl Into<String>,
         table: Arc<RwLock<TransitionTable>>,
         initial_fields: serde_json::Value,
-        store: Arc<ServerEventStore>,
+        store: BoxedEventStore,
+        backend: BackendLabel,
     ) -> Self {
         Self {
             tenant: "default".into(),
@@ -182,7 +184,8 @@ impl EntityActor {
             entity_id: entity_id.into(),
             table,
             initial_fields,
-            event_store: Some(store),
+            event_journal: Some(store),
+            event_backend: Some(backend),
             trace_id: sim_uuid().to_string(),
             idempotency_cache: None,
             blob_store: None,
@@ -229,9 +232,23 @@ impl EntityActor {
         format!("{}:{}:{}", self.tenant, self.entity_type, self.entity_id)
     }
 
+    fn field_sync_mode_for_backend(
+        backend: Option<BackendLabel>,
+        blob_store: Option<&crate::blob_store::BlobStore>,
+    ) -> FieldSyncMode {
+        match backend {
+            Some(BackendLabel::Turso | BackendLabel::TursoRouted) => {
+                FieldSyncMode::blob_refs_default()
+            }
+            Some(_) if blob_store.is_some() => FieldSyncMode::blob_refs_default(),
+            _ => FieldSyncMode::InlineTruncate,
+        }
+    }
+
     /// Persist an event to the configured event store.
     async fn persist_event(
-        store: &ServerEventStore,
+        store: &BoxedEventStore,
+        backend: BackendLabel,
         persistence_id: &str,
         state: &mut EntityState,
         event: &EntityEvent,
@@ -254,12 +271,11 @@ impl EntityActor {
         // W2 / temper#146: measure append wait — the hypothesis is that
         // writer-lock / fsync serialization is a cold-start bottleneck.
         let append_start = Instant::now();
-        let backend = store.backend_name();
         let result = store
             .append(persistence_id, state.sequence_nr, &[envelope])
             .await;
         crate::runtime_metrics::record_event_store_append_wait(
-            backend,
+            backend.as_str(),
             "append",
             append_start.elapsed(),
         );
@@ -281,7 +297,7 @@ impl EntityActor {
 
     /// Save a snapshot when the configured interval is reached.
     async fn maybe_save_snapshot(
-        store: &ServerEventStore,
+        store: &BoxedEventStore,
         persistence_id: &str,
         state: &EntityState,
     ) -> Result<(), PersistenceError> {
@@ -307,7 +323,8 @@ impl EntityActor {
     /// effects, so replay produces the same state as the original execution.
     async fn replay_events(
         table: &TransitionTable,
-        store: &ServerEventStore,
+        store: &BoxedEventStore,
+        backend: BackendLabel,
         persistence_id: &str,
         state: &mut EntityState,
         tenant: &str,
@@ -409,13 +426,8 @@ impl EntityActor {
                             // Sync action params into fields — mirrors the live
                             // process_action() path (effects.rs:155) so data fields
                             // like Title, Description, Priority survive replay.
-                            let field_sync_mode = match store {
-                                ServerEventStore::Turso(_) | ServerEventStore::TenantRouted(_) => {
-                                    FieldSyncMode::blob_refs_default()
-                                }
-                                _ if blob_store.is_some() => FieldSyncMode::blob_refs_default(),
-                                _ => FieldSyncMode::InlineTruncate,
-                            };
+                            let field_sync_mode =
+                                Self::field_sync_mode_for_backend(Some(backend), blob_store);
                             let overflow_blobs = super::effects::sync_fields_with_metadata(
                                 state,
                                 &event.params,
@@ -502,7 +514,8 @@ pub(crate) async fn recover_entity_state_from_store(
     entity_type: &str,
     entity_id: &str,
     table: &TransitionTable,
-    store: &ServerEventStore,
+    store: &BoxedEventStore,
+    backend: BackendLabel,
     initial_fields: &serde_json::Value,
     blob_store: Option<&crate::blob_store::BlobStore>,
 ) -> EntityState {
@@ -511,6 +524,7 @@ pub(crate) async fn recover_entity_state_from_store(
     EntityActor::replay_events(
         table,
         store,
+        backend,
         &persistence_id,
         &mut state,
         tenant,
@@ -539,13 +553,14 @@ impl Actor for EntityActor {
         // Replay events from Postgres to rebuild state (if persistence is configured).
         // Re-evaluates each event through the TransitionTable to reconstruct
         // all state variables (status, counters, booleans) — not just item_count.
-        if let Some(ref store) = self.event_store {
+        if let (Some(store), Some(backend)) = (self.event_journal.as_ref(), self.event_backend) {
             state = recover_entity_state_from_store(
                 &self.tenant,
                 &self.entity_type,
                 &self.entity_id,
                 &table,
                 store,
+                backend,
                 &self.initial_fields,
                 self.blob_store.as_ref(),
             )
@@ -554,7 +569,7 @@ impl Actor for EntityActor {
 
         // Persist a bootstrap Created event for first-time entities so initial
         // fields are durable and replayable.
-        if self.event_store.is_some() && state.total_event_count == 0 {
+        if self.event_journal.is_some() && state.total_event_count == 0 {
             let created = EntityEvent {
                 action: "Created".to_string(),
                 from_status: String::new(),
@@ -563,8 +578,9 @@ impl Actor for EntityActor {
                 params: self.initial_fields.clone(),
             };
 
-            if let Some(ref store) = self.event_store {
-                Self::persist_event(store, &self.persistence_id(), &mut state, &created)
+            if let (Some(store), Some(backend)) = (self.event_journal.as_ref(), self.event_backend)
+            {
+                Self::persist_event(store, backend, &self.persistence_id(), &mut state, &created)
                     .await
                     .map_err(|e| {
                         ActorError::custom(format!(
@@ -662,13 +678,8 @@ impl Actor for EntityActor {
                 // across the race window.
                 let mut event_count_before = state.total_event_count;
                 let mut state_before = state.clone();
-                let field_sync_mode = match self.event_store.as_ref().map(Arc::as_ref) {
-                    Some(ServerEventStore::Turso(_) | ServerEventStore::TenantRouted(_)) => {
-                        FieldSyncMode::blob_refs_default()
-                    }
-                    Some(_) if self.blob_store.is_some() => FieldSyncMode::blob_refs_default(),
-                    _ => FieldSyncMode::InlineTruncate,
-                };
+                let field_sync_mode =
+                    Self::field_sync_mode_for_backend(self.event_backend, self.blob_store.as_ref());
 
                 // `result` and `event` are `mut` so that a successful ADR-0046
                 // retry can replace them with values re-evaluated against the
@@ -717,9 +728,17 @@ impl Actor for EntityActor {
                     // replay events, re-evaluate the action against the caught-up
                     // state, and retry the persist up to two more times. Other
                     // error variants fail immediately (same as before).
-                    if let Some(ref store) = self.event_store {
-                        let first_persist =
-                            Self::persist_event(store, &self.persistence_id(), state, &event).await;
+                    if let (Some(store), Some(backend)) =
+                        (self.event_journal.as_ref(), self.event_backend)
+                    {
+                        let first_persist = Self::persist_event(
+                            store,
+                            backend,
+                            &self.persistence_id(),
+                            state,
+                            &event,
+                        )
+                        .await;
 
                         match first_persist {
                             Ok(_) => {
@@ -777,6 +796,7 @@ impl Actor for EntityActor {
                                     Self::replay_events(
                                         &table,
                                         store,
+                                        backend,
                                         &self.persistence_id(),
                                         state,
                                         &self.tenant,
@@ -859,6 +879,7 @@ impl Actor for EntityActor {
 
                                     match Self::persist_event(
                                         store,
+                                        backend,
                                         &self.persistence_id(),
                                         state,
                                         &retry_event,
@@ -990,7 +1011,7 @@ impl Actor for EntityActor {
 
                     state.push_event_bounded(event);
 
-                    if let Some(ref store) = self.event_store
+                    if let Some(ref store) = self.event_journal
                         && let Err(e) =
                             Self::maybe_save_snapshot(store, &self.persistence_id(), state).await
                     {
@@ -1152,9 +1173,11 @@ impl Actor for EntityActor {
                     params: serde_json::json!({}),
                 };
 
-                if let Some(ref store) = self.event_store
+                if let (Some(store), Some(backend)) =
+                    (self.event_journal.as_ref(), self.event_backend)
                     && let Err(e) =
-                        Self::persist_event(store, &self.persistence_id(), state, &deleted).await
+                        Self::persist_event(store, backend, &self.persistence_id(), state, &deleted)
+                            .await
                 {
                     ctx.reply(EntityResponse {
                         success: false,

@@ -53,7 +53,10 @@ use crate::events::EntityStateChange;
 use crate::idempotency::IdempotencyCache;
 use crate::registry::SpecRegistry;
 use crate::secrets::vault::SecretsVault;
-use crate::storage::{MetadataStore, PolicyStore, QueryPlaneStore, StorageStack, TrajectorySink};
+use crate::storage::{
+    BackendLabel, BoxedEventStore, MetadataStore, PolicyStore, QueryPlaneStore, StorageStack,
+    TrajectorySink,
+};
 use crate::trigger::ReactionDispatcher;
 use crate::wasm_registry::WasmModuleRegistry;
 use crate::webhooks::WebhookDispatcher;
@@ -360,6 +363,19 @@ impl ServerState {
         // the cloned backend so the returned capability is still concrete.
         StorageStack::from_server_event_store(self.event_store.as_ref()?.as_ref().clone())
             .query_plane
+    }
+
+    /// Return the runtime event journal capability plus backend label.
+    pub(crate) fn event_journal(&self) -> Option<(BoxedEventStore, BackendLabel)> {
+        if let Some(stack) = self.storage_stack.as_ref() {
+            return Some((stack.events.clone(), stack.backend));
+        }
+
+        // Compatibility for older tests that still assign `event_store`
+        // directly instead of calling `set_event_store`.
+        let stack =
+            StorageStack::from_server_event_store(self.event_store.as_ref()?.as_ref().clone());
+        Some((stack.events, stack.backend))
     }
 
     /// Return the granular Cedar policy persistence capability.

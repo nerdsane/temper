@@ -342,7 +342,8 @@ async fn replay_skips_schema_mismatched_events() {
         "schema-evo-1",
         order_table(),
         serde_json::json!({}),
-        store,
+        crate::storage::BoxedEventStore::from_arc(store),
+        crate::storage::BackendLabel::Sim,
     );
     let actor_ref = system.spawn(actor, "schema-evo-1");
 
