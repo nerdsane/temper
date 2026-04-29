@@ -2080,71 +2080,6 @@ impl QueryPlaneStore for TenantStoreRouter {
     }
 }
 
-#[async_trait::async_trait]
-impl QueryPlaneStore for ServerEventStore {
-    async fn upsert_projection(
-        &self,
-        tenant: &str,
-        entity_type: &str,
-        entity_id: &str,
-        status: &str,
-        fields: &serde_json::Value,
-        sequence_nr: u64,
-    ) -> Result<(), PersistenceError> {
-        self.upsert_query_projection(tenant, entity_type, entity_id, status, fields, sequence_nr)
-            .await
-    }
-
-    async fn remove_projection(
-        &self,
-        tenant: &str,
-        entity_type: &str,
-        entity_id: &str,
-    ) -> Result<(), PersistenceError> {
-        self.remove_query_projection(tenant, entity_type, entity_id)
-            .await
-    }
-
-    async fn query_field_index(
-        &self,
-        tenant: &str,
-        entity_type: &str,
-        where_clause: &str,
-        params: Vec<String>,
-    ) -> Result<Option<Vec<String>>, PersistenceError> {
-        self.query_field_index(tenant, entity_type, where_clause, params)
-            .await
-    }
-
-    async fn load_projection_fields_many(
-        &self,
-        tenant: &str,
-        entity_type: &str,
-        entity_ids: &[String],
-        field_names: &[&str],
-    ) -> Result<Option<Vec<QueryProjectionFieldsRow>>, PersistenceError> {
-        self.load_query_projection_fields_many(tenant, entity_type, entity_ids, field_names)
-            .await
-            .map(|rows| {
-                rows.map(|rows| {
-                    rows.into_iter()
-                        .map(|row| QueryProjectionFieldsRow {
-                            entity_id: row.entity_id,
-                            status: row.status,
-                            fields: row.fields,
-                        })
-                        .collect()
-                })
-            })
-    }
-
-    async fn projected_entity_counts_by_tenant(
-        &self,
-    ) -> Result<Option<Vec<(String, u64)>>, PersistenceError> {
-        self.projected_entity_counts_by_tenant().await
-    }
-}
-
 fn trajectory_source_label(source: &TrajectorySource) -> &'static str {
     match source {
         TrajectorySource::Entity => "Entity",
@@ -2293,13 +2228,6 @@ impl TrajectorySink for TenantStoreRouter {
                     entry.tenant, entry.entity_type, entry.entity_id, entry.action
                 )
             })
-    }
-}
-
-#[async_trait::async_trait]
-impl TrajectorySink for ServerEventStore {
-    async fn persist_trajectory_entry(&self, entry: &TrajectoryEntry) -> Result<(), String> {
-        self.persist_trajectory_entry(entry).await
     }
 }
 
