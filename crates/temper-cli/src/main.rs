@@ -76,21 +76,24 @@ enum Commands {
         /// - otherwise run in-memory only
         #[arg(long, value_enum, default_value = "turso")]
         storage: StorageBackend,
-        /// Load an app: --app name=specs-dir (repeatable)
-        #[arg(long)]
+        /// Install or load an app at startup. Repeatable. Two formats:
+        ///   --app NAME           install a built-in OS app from the embedded catalog
+        ///                        (e.g. --app project-management)
+        ///   --app NAME=DIR       load a user app's specs from a directory
+        ///                        (e.g. --app ecommerce=reference-apps/ecommerce/specs)
+        ///
+        /// `--skill` and `--os-app` are accepted as aliases for backward compatibility.
+        #[arg(long, visible_aliases = ["os-app", "skill"])]
         app: Vec<String>,
         /// Skip the Observe UI (Next.js dev server in observe/)
         #[arg(long)]
         no_observe: bool,
-        /// Directory containing IOA TOML and CSDL specs to load at startup (legacy, use --app)
+        /// Directory containing IOA TOML and CSDL specs to load at startup (legacy, use --app NAME=DIR)
         #[arg(long)]
         specs_dir: Option<String>,
         /// Tenant name (used with --specs-dir to load user specs)
         #[arg(long, default_value = "default")]
         tenant: String,
-        /// Install a skill into the default tenant at startup (repeatable)
-        #[arg(long, alias = "os-app")]
-        skill: Vec<String>,
         /// Run spec verification in an isolated subprocess (panics/hangs won't crash the server).
         ///
         /// Each entity's IOA source is written to stdin of `temper verify-ioa`;
@@ -151,19 +154,21 @@ async fn main() -> anyhow::Result<()> {
             no_observe,
             specs_dir,
             tenant,
-            skill,
             verify_subprocess,
             discord_bot_token,
         } => {
             let storage_explicit =
                 std::env::args().any(|arg| arg == "--storage" || arg.starts_with("--storage="));
-            // Build app list from --app flags, fall back to --specs-dir/--tenant
+            // Split --app entries by format:
+            //   NAME=DIR  → load user app's specs from directory
+            //   NAME      → install a built-in OS app from the embedded catalog
             let mut apps: Vec<(String, String)> = Vec::new();
+            let mut os_app_installs: Vec<String> = Vec::new();
             for entry in &app {
                 if let Some((name, path)) = entry.split_once('=') {
                     apps.push((name.to_string(), path.to_string()));
                 } else {
-                    anyhow::bail!("Invalid --app format: '{entry}'. Expected name=specs-dir");
+                    os_app_installs.push(entry.clone());
                 }
             }
             if apps.is_empty()
@@ -176,7 +181,7 @@ async fn main() -> anyhow::Result<()> {
             serve::run(
                 port,
                 apps,
-                skill,
+                os_app_installs,
                 storage,
                 storage_explicit,
                 !no_observe,
@@ -352,12 +357,26 @@ mod tests {
     }
 
     #[test]
-    fn test_cli_parse_serve_with_skill() {
+    fn test_cli_parse_serve_with_app_install() {
+        // Bare `--app NAME` (no =) installs a built-in OS app.
+        let cli = Cli::parse_from(["temper", "serve", "--app", "project-management"]);
+        match cli.command {
+            Commands::Serve { app, .. } => {
+                assert_eq!(app.len(), 1);
+                assert_eq!(app[0], "project-management");
+            }
+            _ => panic!("expected Serve command"),
+        }
+    }
+
+    #[test]
+    fn test_cli_parse_serve_with_skill_alias() {
+        // --skill is a backward-compatible alias for --app.
         let cli = Cli::parse_from(["temper", "serve", "--skill", "project-management"]);
         match cli.command {
-            Commands::Serve { skill, .. } => {
-                assert_eq!(skill.len(), 1);
-                assert_eq!(skill[0], "project-management");
+            Commands::Serve { app, .. } => {
+                assert_eq!(app.len(), 1);
+                assert_eq!(app[0], "project-management");
             }
             _ => panic!("expected Serve command"),
         }
@@ -365,31 +384,33 @@ mod tests {
 
     #[test]
     fn test_cli_parse_serve_with_os_app_alias() {
+        // --os-app is also a backward-compatible alias for --app.
         let cli = Cli::parse_from(["temper", "serve", "--os-app", "project-management"]);
         match cli.command {
-            Commands::Serve { skill, .. } => {
-                assert_eq!(skill.len(), 1);
-                assert_eq!(skill[0], "project-management");
+            Commands::Serve { app, .. } => {
+                assert_eq!(app.len(), 1);
+                assert_eq!(app[0], "project-management");
             }
             _ => panic!("expected Serve command"),
         }
     }
 
     #[test]
-    fn test_cli_parse_serve_with_multiple_skills() {
+    fn test_cli_parse_serve_with_multiple_apps() {
+        // Multiple --app flags accumulate; both formats can mix.
         let cli = Cli::parse_from([
             "temper",
             "serve",
-            "--skill",
+            "--app",
             "project-management",
-            "--skill",
-            "crm",
+            "--app",
+            "crm=specs/crm",
         ]);
         match cli.command {
-            Commands::Serve { skill, .. } => {
-                assert_eq!(skill.len(), 2);
-                assert_eq!(skill[0], "project-management");
-                assert_eq!(skill[1], "crm");
+            Commands::Serve { app, .. } => {
+                assert_eq!(app.len(), 2);
+                assert_eq!(app[0], "project-management");
+                assert_eq!(app[1], "crm=specs/crm");
             }
             _ => panic!("expected Serve command"),
         }
