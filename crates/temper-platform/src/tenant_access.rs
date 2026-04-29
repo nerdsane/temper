@@ -81,16 +81,21 @@ pub async fn tenant_access_check(
         return Ok(next.run(req).await);
     }
 
-    // Check tenant access via the router.
-    let Some(ref store) = state.server.event_store else {
+    // Check tenant access via the routed Turso capability.
+    let Some(provider) = state
+        .server
+        .storage_stack
+        .as_ref()
+        .and_then(|stack| stack.turso.clone())
+    else {
         return Ok(next.run(req).await);
     };
-    let Some(router) = store.tenant_router() else {
+    if !provider.supports_tenant_admin() {
         // Not in routed mode — no per-tenant access control.
         return Ok(next.run(req).await);
-    };
+    }
 
-    match router.tenants_for_user(&principal_id).await {
+    match provider.tenants_for_user(&principal_id).await {
         Ok(user_tenants) => {
             if user_tenants.iter().any(|t| t.tenant_id == tenant_id) {
                 Ok(next.run(req).await)

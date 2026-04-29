@@ -265,15 +265,13 @@ impl ServerState {
 
 #[cfg(test)]
 mod tests {
-    use std::sync::Arc;
-
     use temper_runtime::ActorSystem;
     use temper_store_turso::TursoEventStore;
 
-    use crate::event_store::ServerEventStore;
     use crate::registry::SpecRegistry;
     use crate::secrets::vault::SecretsVault;
     use crate::state::ServerState;
+    use crate::storage::StorageStack;
 
     fn make_state() -> ServerState {
         let system = ActorSystem::new("test-secrets-persistence");
@@ -291,7 +289,7 @@ mod tests {
             .expect("create local turso db");
 
         let mut state = make_state();
-        state.event_store = Some(Arc::new(ServerEventStore::Turso(store)));
+        state.set_storage_stack(StorageStack::from_turso(store));
 
         let vault = state.secrets_vault.as_ref().expect("vault configured");
         let (ciphertext, nonce) = vault.encrypt(b"secret-value").expect("encrypt");

@@ -1,7 +1,6 @@
 use super::*;
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
-use std::sync::Arc;
 use std::time::Duration;
 use temper_runtime::ActorSystem;
 use temper_runtime::scheduler::sim_now;
@@ -10,11 +9,11 @@ use temper_spec::csdl::parse_csdl;
 use temper_store_turso::TursoEventStore;
 use tower::ServiceExt;
 
-use crate::event_store::ServerEventStore;
 use crate::registry::SpecRegistry;
 use crate::request_context::AgentContext;
 use crate::secrets::vault::SecretsVault;
 use crate::state::TrajectoryEntry;
+use crate::storage::StorageStack;
 
 const CSDL_XML: &str = include_str!("../../../../test-fixtures/specs/model.csdl.xml");
 const ORDER_IOA: &str = include_str!("../../../../test-fixtures/specs/order.ioa.toml");
@@ -48,7 +47,7 @@ async fn test_state_with_turso() -> ServerState {
         .await
         .expect("create local turso db");
     let mut state = test_state_with_registry();
-    state.event_store = Some(Arc::new(ServerEventStore::Turso(turso)));
+    state.set_storage_stack(StorageStack::from_turso(turso));
     state
 }
 
@@ -1521,7 +1520,7 @@ async fn test_load_dir_emits_design_time_events() {
     let system = ActorSystem::new("test-load-dir-events");
     let registry = SpecRegistry::new();
     let mut state = ServerState::from_registry(system, registry);
-    state.event_store = Some(Arc::new(ServerEventStore::Turso(turso)));
+    state.set_storage_stack(StorageStack::from_turso(turso));
 
     let app = Router::new()
         .nest("/observe", build_observe_router())

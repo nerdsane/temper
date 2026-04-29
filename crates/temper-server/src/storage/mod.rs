@@ -17,7 +17,7 @@ use temper_store_postgres::{PostgresEventStore, PostgresPolicyRow, PostgresTraje
 use temper_store_turso::{
     ActionStats, AgentSummary, DesignTimeEventRow, EvolutionRecordRow, FeatureRequestRow,
     OtsTrajectoryParams, OtsTrajectoryRow, PolicyDenialPatternRow, PolicyRow as TursoPolicyRow,
-    TenantStoreRouter, TursoEventStore, TursoTrajectoryInsert, TursoTrajectoryRow,
+    TenantStoreRouter, TenantUserRow, TursoEventStore, TursoTrajectoryInsert, TursoTrajectoryRow,
     TursoWasmInvocationInsert, TursoWasmInvocationRow, TursoWasmModuleMetadataRow,
     UnmetIntentAggRow, store::TrajectoryStats,
 };
@@ -639,6 +639,8 @@ pub trait MetadataStoreProvider: Send + Sync {
 /// Explicit Turso tenant-store access for transitional boot/recovery paths.
 #[async_trait::async_trait]
 pub trait TursoStoreProvider: Send + Sync {
+    fn supports_tenant_admin(&self) -> bool;
+
     fn platform_store(&self) -> Option<TursoEventStore>;
 
     async fn store_for_tenant(&self, tenant: &str) -> Option<TursoEventStore>;
@@ -646,6 +648,35 @@ pub trait TursoStoreProvider: Send + Sync {
     async fn all_stores(&self) -> Vec<TursoEventStore>;
 
     async fn connected_tenants(&self) -> Vec<String>;
+
+    async fn tenants_for_user(&self, user_id: &str)
+    -> Result<Vec<TenantUserRow>, PersistenceError>;
+
+    async fn register_tenant(&self, tenant_id: &str) -> Result<TursoEventStore, PersistenceError>;
+
+    async fn list_tenants(&self) -> Result<Vec<String>, PersistenceError>;
+
+    async fn remove_tenant(&self, tenant_id: &str) -> Result<bool, PersistenceError>;
+
+    async fn add_tenant_user(
+        &self,
+        tenant_id: &str,
+        user_id: &str,
+        role: &str,
+    ) -> Result<(), PersistenceError>;
+
+    async fn list_tenant_users(
+        &self,
+        tenant_id: &str,
+    ) -> Result<Vec<TenantUserRow>, PersistenceError>;
+
+    async fn remove_tenant_user(
+        &self,
+        tenant_id: &str,
+        user_id: &str,
+    ) -> Result<(), PersistenceError>;
+
+    async fn ensure_tenant(&self, tenant_id: &str) -> Result<bool, PersistenceError>;
 }
 
 /// Composed storage capabilities selected at boot.
@@ -689,85 +720,98 @@ impl StorageStack {
 
     pub fn from_server_event_store(store: ServerEventStore) -> Self {
         match store {
-            ServerEventStore::Postgres(store) => {
-                let store = Arc::new(store);
-                Self::new(
-                    BackendLabel::Postgres,
-                    BoxedEventStore::from_arc(store.clone()),
-                    Some(store.pool().clone()),
-                    None,
-                    Some(store.clone() as Arc<dyn PlatformStore>),
-                    Some(store.clone() as Arc<dyn PolicyStore>),
-                    Some(store.clone() as Arc<dyn QueryPlaneStore>),
-                    Some(store.clone() as Arc<dyn TrajectorySink>),
-                    Some(Arc::new(SingleMetadataStoreProvider::new(store))),
-                )
-            }
-            ServerEventStore::Turso(store) => {
-                let store = Arc::new(store);
-                Self::new(
-                    BackendLabel::Turso,
-                    BoxedEventStore::from_arc(store.clone()),
-                    None,
-                    Some(Arc::new(SingleTursoStoreProvider::new(store.clone()))),
-                    Some(store.clone() as Arc<dyn PlatformStore>),
-                    Some(store.clone() as Arc<dyn PolicyStore>),
-                    Some(store.clone() as Arc<dyn QueryPlaneStore>),
-                    Some(store.clone() as Arc<dyn TrajectorySink>),
-                    Some(Arc::new(SingleMetadataStoreProvider::new(store))),
-                )
-            }
-            ServerEventStore::TenantRouted(router) => {
-                let platform_store =
-                    Arc::new(router.platform_store().clone()) as Arc<dyn PlatformStore>;
-                let router = Arc::new(router);
-                Self::new(
-                    BackendLabel::TursoRouted,
-                    BoxedEventStore::from_arc(router.clone()),
-                    None,
-                    Some(Arc::new(TenantRoutedTursoStoreProvider::new(
-                        router.as_ref().clone(),
-                    ))),
-                    Some(platform_store),
-                    Some(router.clone() as Arc<dyn PolicyStore>),
-                    Some(router.clone() as Arc<dyn QueryPlaneStore>),
-                    Some(router.clone() as Arc<dyn TrajectorySink>),
-                    Some(Arc::new(TenantRoutedMetadataStoreProvider::new(
-                        router.as_ref().clone(),
-                    ))),
-                )
-            }
-            ServerEventStore::Redis(store) => {
-                let store = Arc::new(store);
-                Self::new(
-                    BackendLabel::Redis,
-                    BoxedEventStore::from_arc(store),
-                    None,
-                    None,
-                    None,
-                    None,
-                    None,
-                    None,
-                    None,
-                )
-            }
+            ServerEventStore::Postgres(store) => Self::from_postgres(store),
+            ServerEventStore::Turso(store) => Self::from_turso(store),
+            ServerEventStore::TenantRouted(router) => Self::from_tenant_router(router),
+            ServerEventStore::Redis(store) => Self::from_redis(store),
             #[cfg(feature = "sim")]
-            ServerEventStore::Sim(store, platform_store) => {
-                let store = Arc::new(store);
-                let platform = platform_store.map(|store| store as Arc<dyn PlatformStore>);
-                Self::new(
-                    BackendLabel::Sim,
-                    BoxedEventStore::from_arc(store),
-                    None,
-                    None,
-                    platform,
-                    None,
-                    None,
-                    None,
-                    None,
-                )
-            }
+            ServerEventStore::Sim(store, platform_store) => Self::from_sim(store, platform_store),
         }
+    }
+
+    pub fn from_postgres(store: PostgresEventStore) -> Self {
+        let store = Arc::new(store);
+        Self::new(
+            BackendLabel::Postgres,
+            BoxedEventStore::from_arc(store.clone()),
+            Some(store.pool().clone()),
+            None,
+            Some(store.clone() as Arc<dyn PlatformStore>),
+            Some(store.clone() as Arc<dyn PolicyStore>),
+            Some(store.clone() as Arc<dyn QueryPlaneStore>),
+            Some(store.clone() as Arc<dyn TrajectorySink>),
+            Some(Arc::new(SingleMetadataStoreProvider::new(store))),
+        )
+    }
+
+    pub fn from_turso(store: TursoEventStore) -> Self {
+        let store = Arc::new(store);
+        Self::new(
+            BackendLabel::Turso,
+            BoxedEventStore::from_arc(store.clone()),
+            None,
+            Some(Arc::new(SingleTursoStoreProvider::new(store.clone()))),
+            Some(store.clone() as Arc<dyn PlatformStore>),
+            Some(store.clone() as Arc<dyn PolicyStore>),
+            Some(store.clone() as Arc<dyn QueryPlaneStore>),
+            Some(store.clone() as Arc<dyn TrajectorySink>),
+            Some(Arc::new(SingleMetadataStoreProvider::new(store))),
+        )
+    }
+
+    pub fn from_tenant_router(router: TenantStoreRouter) -> Self {
+        let platform_store = Arc::new(router.platform_store().clone()) as Arc<dyn PlatformStore>;
+        let router = Arc::new(router);
+        Self::new(
+            BackendLabel::TursoRouted,
+            BoxedEventStore::from_arc(router.clone()),
+            None,
+            Some(Arc::new(TenantRoutedTursoStoreProvider::new(
+                router.as_ref().clone(),
+            ))),
+            Some(platform_store),
+            Some(router.clone() as Arc<dyn PolicyStore>),
+            Some(router.clone() as Arc<dyn QueryPlaneStore>),
+            Some(router.clone() as Arc<dyn TrajectorySink>),
+            Some(Arc::new(TenantRoutedMetadataStoreProvider::new(
+                router.as_ref().clone(),
+            ))),
+        )
+    }
+
+    pub fn from_redis(store: temper_store_redis::RedisEventStore) -> Self {
+        let store = Arc::new(store);
+        Self::new(
+            BackendLabel::Redis,
+            BoxedEventStore::from_arc(store),
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
+    }
+
+    #[cfg(feature = "sim")]
+    pub fn from_sim(
+        store: temper_store_sim::SimEventStore,
+        platform_store: Option<Arc<SimPlatformStore>>,
+    ) -> Self {
+        let store = Arc::new(store);
+        let platform = platform_store.map(|store| store as Arc<dyn PlatformStore>);
+        Self::new(
+            BackendLabel::Sim,
+            BoxedEventStore::from_arc(store),
+            None,
+            None,
+            platform,
+            None,
+            None,
+            None,
+            None,
+        )
     }
 }
 
@@ -809,8 +853,16 @@ impl SingleTursoStoreProvider {
     }
 }
 
+fn tenant_admin_unsupported() -> PersistenceError {
+    PersistenceError::Storage("tenant management requires routed Turso storage".to_string())
+}
+
 #[async_trait::async_trait]
 impl TursoStoreProvider for SingleTursoStoreProvider {
+    fn supports_tenant_admin(&self) -> bool {
+        false
+    }
+
     fn platform_store(&self) -> Option<TursoEventStore> {
         Some(self.store.as_ref().clone())
     }
@@ -825,6 +877,53 @@ impl TursoStoreProvider for SingleTursoStoreProvider {
 
     async fn connected_tenants(&self) -> Vec<String> {
         Vec::new()
+    }
+
+    async fn tenants_for_user(
+        &self,
+        _user_id: &str,
+    ) -> Result<Vec<TenantUserRow>, PersistenceError> {
+        Err(tenant_admin_unsupported())
+    }
+
+    async fn register_tenant(&self, _tenant_id: &str) -> Result<TursoEventStore, PersistenceError> {
+        Err(tenant_admin_unsupported())
+    }
+
+    async fn list_tenants(&self) -> Result<Vec<String>, PersistenceError> {
+        Err(tenant_admin_unsupported())
+    }
+
+    async fn remove_tenant(&self, _tenant_id: &str) -> Result<bool, PersistenceError> {
+        Err(tenant_admin_unsupported())
+    }
+
+    async fn add_tenant_user(
+        &self,
+        _tenant_id: &str,
+        _user_id: &str,
+        _role: &str,
+    ) -> Result<(), PersistenceError> {
+        Err(tenant_admin_unsupported())
+    }
+
+    async fn list_tenant_users(
+        &self,
+        _tenant_id: &str,
+    ) -> Result<Vec<TenantUserRow>, PersistenceError> {
+        Err(tenant_admin_unsupported())
+    }
+
+    async fn remove_tenant_user(
+        &self,
+        _tenant_id: &str,
+        _user_id: &str,
+    ) -> Result<(), PersistenceError> {
+        Err(tenant_admin_unsupported())
+    }
+
+    async fn ensure_tenant(&self, _tenant_id: &str) -> Result<bool, PersistenceError> {
+        Err(tenant_admin_unsupported())
     }
 }
 
@@ -876,6 +975,10 @@ impl TenantRoutedTursoStoreProvider {
 
 #[async_trait::async_trait]
 impl TursoStoreProvider for TenantRoutedTursoStoreProvider {
+    fn supports_tenant_admin(&self) -> bool {
+        true
+    }
+
     fn platform_store(&self) -> Option<TursoEventStore> {
         Some(self.router.platform_store().clone())
     }
@@ -896,6 +999,53 @@ impl TursoStoreProvider for TenantRoutedTursoStoreProvider {
 
     async fn connected_tenants(&self) -> Vec<String> {
         self.router.connected_tenants().await
+    }
+
+    async fn tenants_for_user(
+        &self,
+        user_id: &str,
+    ) -> Result<Vec<TenantUserRow>, PersistenceError> {
+        self.router.tenants_for_user(user_id).await
+    }
+
+    async fn register_tenant(&self, tenant_id: &str) -> Result<TursoEventStore, PersistenceError> {
+        self.router.register_tenant(tenant_id).await
+    }
+
+    async fn list_tenants(&self) -> Result<Vec<String>, PersistenceError> {
+        self.router.list_tenants().await
+    }
+
+    async fn remove_tenant(&self, tenant_id: &str) -> Result<bool, PersistenceError> {
+        self.router.remove_tenant(tenant_id).await
+    }
+
+    async fn add_tenant_user(
+        &self,
+        tenant_id: &str,
+        user_id: &str,
+        role: &str,
+    ) -> Result<(), PersistenceError> {
+        self.router.add_tenant_user(tenant_id, user_id, role).await
+    }
+
+    async fn list_tenant_users(
+        &self,
+        tenant_id: &str,
+    ) -> Result<Vec<TenantUserRow>, PersistenceError> {
+        self.router.list_tenant_users(tenant_id).await
+    }
+
+    async fn remove_tenant_user(
+        &self,
+        tenant_id: &str,
+        user_id: &str,
+    ) -> Result<(), PersistenceError> {
+        self.router.remove_tenant_user(tenant_id, user_id).await
+    }
+
+    async fn ensure_tenant(&self, tenant_id: &str) -> Result<bool, PersistenceError> {
+        self.router.ensure_tenant(tenant_id).await
     }
 }
 
