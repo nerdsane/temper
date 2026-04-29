@@ -53,7 +53,7 @@ use crate::events::EntityStateChange;
 use crate::idempotency::IdempotencyCache;
 use crate::registry::SpecRegistry;
 use crate::secrets::vault::SecretsVault;
-use crate::storage::{QueryPlaneStore, StorageStack, TrajectorySink};
+use crate::storage::{PolicyStore, QueryPlaneStore, StorageStack, TrajectorySink};
 use crate::trigger::ReactionDispatcher;
 use crate::wasm_registry::WasmModuleRegistry;
 use crate::webhooks::WebhookDispatcher;
@@ -360,6 +360,21 @@ impl ServerState {
         // the cloned backend so the returned capability is still concrete.
         StorageStack::from_server_event_store(self.event_store.as_ref()?.as_ref().clone())
             .query_plane
+    }
+
+    /// Return the granular Cedar policy persistence capability.
+    pub(crate) fn policy_store(&self) -> Option<Arc<dyn PolicyStore>> {
+        if let Some(policies) = self
+            .storage_stack
+            .as_ref()
+            .and_then(|stack| stack.policies.clone())
+        {
+            return Some(policies);
+        }
+
+        // Compatibility for older tests that still assign `event_store`
+        // directly instead of calling `set_event_store`.
+        StorageStack::from_server_event_store(self.event_store.as_ref()?.as_ref().clone()).policies
     }
 
     /// Return the observe trajectory sink plus backend label for metrics.

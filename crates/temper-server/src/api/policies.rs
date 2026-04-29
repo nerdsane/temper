@@ -10,8 +10,8 @@ use axum::response::IntoResponse;
 use tracing::instrument;
 
 use crate::authz::{load_and_activate_tenant_policies, persist_and_activate_policy};
-use crate::event_store::PolicyStoreRow;
 use crate::state::ServerState;
+use crate::storage::PolicyStoreRow;
 
 /// Derive a human-readable source label from a `policy_id`.
 fn policy_source(policy_id: &str) -> &'static str {
@@ -205,7 +205,7 @@ pub(crate) async fn handle_list_policies(
         return resp;
     }
 
-    let Some(store) = state.event_store.as_ref() else {
+    let Some(store) = state.policy_store() else {
         return (
             StatusCode::SERVICE_UNAVAILABLE,
             "Persistence backend not configured",
@@ -253,7 +253,7 @@ pub(crate) async fn handle_list_all_policies(
         return (status, "Authorization required for cross-tenant access").into_response();
     }
 
-    let Some(store) = state.event_store.as_ref() else {
+    let Some(store) = state.policy_store() else {
         return (
             StatusCode::SERVICE_UNAVAILABLE,
             "Persistence backend not configured",
@@ -384,7 +384,7 @@ pub(crate) async fn handle_patch_policy(
         return resp;
     }
 
-    let Some(store) = state.event_store.as_ref() else {
+    let Some(store) = state.policy_store() else {
         return (
             StatusCode::SERVICE_UNAVAILABLE,
             "Persistence backend not configured",
@@ -487,7 +487,7 @@ pub(crate) async fn handle_delete_policy_entry(
         return resp;
     }
 
-    let Some(store) = state.event_store.as_ref() else {
+    let Some(store) = state.policy_store() else {
         return (
             StatusCode::SERVICE_UNAVAILABLE,
             "Persistence backend not configured",
@@ -564,7 +564,7 @@ async fn build_prospective_enabled_text_with_override(
     override_enabled: Option<bool>,
 ) -> String {
     // Load all current policies from durable storage to get accurate per-entry data.
-    let rows = if let Some(store) = state.event_store.as_ref() {
+    let rows = if let Some(store) = state.policy_store() {
         store
             .load_policies_for_tenant(tenant)
             .await

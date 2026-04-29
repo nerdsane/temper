@@ -38,7 +38,7 @@ pub async fn persist_and_activate_policy(
     cedar_text: &str,
     created_by: &str,
 ) -> bool {
-    let Some(store) = state.event_store.as_ref() else {
+    let Some(store) = state.policy_store() else {
         tracing::debug!(
             tenant,
             policy_id,
@@ -112,7 +112,7 @@ pub async fn persist_and_activate_policy(
 /// Silently degrades (logs a warning) if durable storage is unavailable or the table is empty.
 #[instrument(skip_all, fields(tenant, otel.name = "authz.load_and_activate_tenant_policies"))]
 pub async fn load_and_activate_tenant_policies(state: &ServerState, tenant: &str) {
-    let Some(store) = state.event_store.as_ref() else {
+    let Some(store) = state.policy_store() else {
         return;
     };
 

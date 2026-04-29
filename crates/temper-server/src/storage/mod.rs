@@ -11,8 +11,10 @@ use std::pin::Pin;
 use std::sync::Arc;
 
 use temper_runtime::persistence::{EventStore, PersistenceEnvelope, PersistenceError};
-use temper_store_postgres::{PostgresEventStore, PostgresTrajectoryInsert};
-use temper_store_turso::{TenantStoreRouter, TursoEventStore, TursoTrajectoryInsert};
+use temper_store_postgres::{PostgresEventStore, PostgresPolicyRow, PostgresTrajectoryInsert};
+use temper_store_turso::{
+    PolicyRow as TursoPolicyRow, TenantStoreRouter, TursoEventStore, TursoTrajectoryInsert,
+};
 
 use crate::event_store::ServerEventStore;
 use crate::platform_store::{
@@ -247,6 +249,46 @@ pub struct QueryProjectionFieldsRow {
     pub fields: BTreeMap<String, Option<String>>,
 }
 
+/// Backend-neutral row for one granular Cedar policy entry.
+#[derive(Clone, Debug)]
+pub struct PolicyStoreRow {
+    pub tenant: String,
+    pub policy_id: String,
+    pub cedar_text: String,
+    pub policy_hash: String,
+    pub created_at: String,
+    pub created_by: String,
+    pub enabled: bool,
+}
+
+impl From<TursoPolicyRow> for PolicyStoreRow {
+    fn from(row: TursoPolicyRow) -> Self {
+        Self {
+            tenant: row.tenant,
+            policy_id: row.policy_id,
+            cedar_text: row.cedar_text,
+            policy_hash: row.policy_hash,
+            created_at: row.created_at,
+            created_by: row.created_by,
+            enabled: row.enabled,
+        }
+    }
+}
+
+impl From<PostgresPolicyRow> for PolicyStoreRow {
+    fn from(row: PostgresPolicyRow) -> Self {
+        Self {
+            tenant: row.tenant,
+            policy_id: row.policy_id,
+            cedar_text: row.cedar_text,
+            policy_hash: row.policy_hash,
+            created_at: row.created_at,
+            created_by: row.created_by,
+            enabled: row.enabled,
+        }
+    }
+}
+
 /// Durable query-plane capability.
 #[async_trait::async_trait]
 pub trait QueryPlaneStore: Send + Sync {
@@ -294,12 +336,46 @@ pub trait TrajectorySink: Send + Sync {
     async fn persist_trajectory_entry(&self, entry: &TrajectoryEntry) -> Result<(), String>;
 }
 
+/// Granular Cedar policy persistence capability.
+#[async_trait::async_trait]
+pub trait PolicyStore: Send + Sync {
+    async fn save_policy(
+        &self,
+        tenant: &str,
+        policy_id: &str,
+        cedar_text: &str,
+        created_by: &str,
+    ) -> Result<bool, String>;
+
+    async fn load_policies_for_tenant(&self, tenant: &str) -> Result<Vec<PolicyStoreRow>, String>;
+
+    async fn load_all_policies(&self) -> Result<Vec<PolicyStoreRow>, String>;
+
+    async fn toggle_policy_enabled(
+        &self,
+        tenant: &str,
+        policy_id: &str,
+        enabled: bool,
+    ) -> Result<bool, String>;
+
+    async fn update_policy_text(
+        &self,
+        tenant: &str,
+        policy_id: &str,
+        cedar_text: &str,
+        created_by: &str,
+    ) -> Result<bool, String>;
+
+    async fn delete_policy(&self, tenant: &str, policy_id: &str) -> Result<(), String>;
+}
+
 /// Composed storage capabilities selected at boot.
 #[derive(Clone)]
 pub struct StorageStack {
     pub backend: BackendLabel,
     pub events: BoxedEventStore,
     pub platform: Option<Arc<dyn PlatformStore>>,
+    pub policies: Option<Arc<dyn PolicyStore>>,
     pub query_plane: Option<Arc<dyn QueryPlaneStore>>,
     pub trajectory: Option<Arc<dyn TrajectorySink>>,
 }
@@ -309,6 +385,7 @@ impl StorageStack {
         backend: BackendLabel,
         events: BoxedEventStore,
         platform: Option<Arc<dyn PlatformStore>>,
+        policies: Option<Arc<dyn PolicyStore>>,
         query_plane: Option<Arc<dyn QueryPlaneStore>>,
         trajectory: Option<Arc<dyn TrajectorySink>>,
     ) -> Self {
@@ -316,6 +393,7 @@ impl StorageStack {
             backend,
             events,
             platform,
+            policies,
             query_plane,
             trajectory,
         }
@@ -329,6 +407,7 @@ impl StorageStack {
                     BackendLabel::Postgres,
                     BoxedEventStore::from_arc(store.clone()),
                     Some(store.clone() as Arc<dyn PlatformStore>),
+                    Some(store.clone() as Arc<dyn PolicyStore>),
                     Some(store.clone() as Arc<dyn QueryPlaneStore>),
                     Some(store.clone() as Arc<dyn TrajectorySink>),
                 )
@@ -339,6 +418,7 @@ impl StorageStack {
                     BackendLabel::Turso,
                     BoxedEventStore::from_arc(store.clone()),
                     Some(store.clone() as Arc<dyn PlatformStore>),
+                    Some(store.clone() as Arc<dyn PolicyStore>),
                     Some(store.clone() as Arc<dyn QueryPlaneStore>),
                     Some(store.clone() as Arc<dyn TrajectorySink>),
                 )
@@ -351,6 +431,7 @@ impl StorageStack {
                     BackendLabel::TursoRouted,
                     BoxedEventStore::from_arc(router.clone()),
                     Some(platform_store),
+                    Some(router.clone() as Arc<dyn PolicyStore>),
                     Some(router.clone() as Arc<dyn QueryPlaneStore>),
                     Some(router.clone() as Arc<dyn TrajectorySink>),
                 )
@@ -360,6 +441,7 @@ impl StorageStack {
                 Self::new(
                     BackendLabel::Redis,
                     BoxedEventStore::from_arc(store),
+                    None,
                     None,
                     None,
                     None,
@@ -375,9 +457,222 @@ impl StorageStack {
                     platform,
                     None,
                     None,
+                    None,
                 )
             }
         }
+    }
+}
+
+#[async_trait::async_trait]
+impl PolicyStore for PostgresEventStore {
+    async fn save_policy(
+        &self,
+        tenant: &str,
+        policy_id: &str,
+        cedar_text: &str,
+        created_by: &str,
+    ) -> Result<bool, String> {
+        self.save_policy(tenant, policy_id, cedar_text, created_by)
+            .await
+            .map_err(|e| e.to_string())
+    }
+
+    async fn load_policies_for_tenant(&self, tenant: &str) -> Result<Vec<PolicyStoreRow>, String> {
+        self.load_policies_for_tenant(tenant)
+            .await
+            .map(|rows| rows.into_iter().map(PolicyStoreRow::from).collect())
+            .map_err(|e| e.to_string())
+    }
+
+    async fn load_all_policies(&self) -> Result<Vec<PolicyStoreRow>, String> {
+        self.load_all_policies()
+            .await
+            .map(|rows| rows.into_iter().map(PolicyStoreRow::from).collect())
+            .map_err(|e| e.to_string())
+    }
+
+    async fn toggle_policy_enabled(
+        &self,
+        tenant: &str,
+        policy_id: &str,
+        enabled: bool,
+    ) -> Result<bool, String> {
+        self.toggle_policy_enabled(tenant, policy_id, enabled)
+            .await
+            .map_err(|e| e.to_string())
+    }
+
+    async fn update_policy_text(
+        &self,
+        tenant: &str,
+        policy_id: &str,
+        cedar_text: &str,
+        created_by: &str,
+    ) -> Result<bool, String> {
+        self.update_policy_text(tenant, policy_id, cedar_text, created_by)
+            .await
+            .map_err(|e| e.to_string())
+    }
+
+    async fn delete_policy(&self, tenant: &str, policy_id: &str) -> Result<(), String> {
+        self.delete_policy(tenant, policy_id)
+            .await
+            .map_err(|e| e.to_string())
+    }
+}
+
+#[async_trait::async_trait]
+impl PolicyStore for TursoEventStore {
+    async fn save_policy(
+        &self,
+        tenant: &str,
+        policy_id: &str,
+        cedar_text: &str,
+        created_by: &str,
+    ) -> Result<bool, String> {
+        self.save_policy(tenant, policy_id, cedar_text, created_by)
+            .await
+            .map_err(|e| e.to_string())
+    }
+
+    async fn load_policies_for_tenant(&self, tenant: &str) -> Result<Vec<PolicyStoreRow>, String> {
+        self.load_policies_for_tenant(tenant)
+            .await
+            .map(|rows| rows.into_iter().map(PolicyStoreRow::from).collect())
+            .map_err(|e| e.to_string())
+    }
+
+    async fn load_all_policies(&self) -> Result<Vec<PolicyStoreRow>, String> {
+        self.load_all_policies()
+            .await
+            .map(|rows| rows.into_iter().map(PolicyStoreRow::from).collect())
+            .map_err(|e| e.to_string())
+    }
+
+    async fn toggle_policy_enabled(
+        &self,
+        tenant: &str,
+        policy_id: &str,
+        enabled: bool,
+    ) -> Result<bool, String> {
+        self.toggle_policy_enabled(tenant, policy_id, enabled)
+            .await
+            .map_err(|e| e.to_string())
+    }
+
+    async fn update_policy_text(
+        &self,
+        tenant: &str,
+        policy_id: &str,
+        cedar_text: &str,
+        created_by: &str,
+    ) -> Result<bool, String> {
+        self.update_policy_text(tenant, policy_id, cedar_text, created_by)
+            .await
+            .map_err(|e| e.to_string())
+    }
+
+    async fn delete_policy(&self, tenant: &str, policy_id: &str) -> Result<(), String> {
+        self.delete_policy(tenant, policy_id)
+            .await
+            .map_err(|e| e.to_string())
+    }
+}
+
+#[async_trait::async_trait]
+impl PolicyStore for TenantStoreRouter {
+    async fn save_policy(
+        &self,
+        tenant: &str,
+        policy_id: &str,
+        cedar_text: &str,
+        created_by: &str,
+    ) -> Result<bool, String> {
+        let store = self
+            .store_for_tenant(tenant)
+            .await
+            .map_err(|e| e.to_string())?;
+        store
+            .save_policy(tenant, policy_id, cedar_text, created_by)
+            .await
+            .map_err(|e| e.to_string())
+    }
+
+    async fn load_policies_for_tenant(&self, tenant: &str) -> Result<Vec<PolicyStoreRow>, String> {
+        let store = self
+            .store_for_tenant(tenant)
+            .await
+            .map_err(|e| e.to_string())?;
+        store
+            .load_policies_for_tenant(tenant)
+            .await
+            .map(|rows| rows.into_iter().map(PolicyStoreRow::from).collect())
+            .map_err(|e| e.to_string())
+    }
+
+    async fn load_all_policies(&self) -> Result<Vec<PolicyStoreRow>, String> {
+        let mut rows: Vec<PolicyStoreRow> = self
+            .platform_store()
+            .load_all_policies()
+            .await
+            .map(|rows| rows.into_iter().map(PolicyStoreRow::from).collect())
+            .map_err(|e| e.to_string())?;
+        for tenant_id in self.connected_tenants().await {
+            if let Ok(store) = self.store_for_tenant(&tenant_id).await {
+                let mut tenant_rows: Vec<PolicyStoreRow> = store
+                    .load_all_policies()
+                    .await
+                    .map(|rows| rows.into_iter().map(PolicyStoreRow::from).collect())
+                    .map_err(|e| e.to_string())?;
+                rows.append(&mut tenant_rows);
+            }
+        }
+        Ok(rows)
+    }
+
+    async fn toggle_policy_enabled(
+        &self,
+        tenant: &str,
+        policy_id: &str,
+        enabled: bool,
+    ) -> Result<bool, String> {
+        let store = self
+            .store_for_tenant(tenant)
+            .await
+            .map_err(|e| e.to_string())?;
+        store
+            .toggle_policy_enabled(tenant, policy_id, enabled)
+            .await
+            .map_err(|e| e.to_string())
+    }
+
+    async fn update_policy_text(
+        &self,
+        tenant: &str,
+        policy_id: &str,
+        cedar_text: &str,
+        created_by: &str,
+    ) -> Result<bool, String> {
+        let store = self
+            .store_for_tenant(tenant)
+            .await
+            .map_err(|e| e.to_string())?;
+        store
+            .update_policy_text(tenant, policy_id, cedar_text, created_by)
+            .await
+            .map_err(|e| e.to_string())
+    }
+
+    async fn delete_policy(&self, tenant: &str, policy_id: &str) -> Result<(), String> {
+        let store = self
+            .store_for_tenant(tenant)
+            .await
+            .map_err(|e| e.to_string())?;
+        store
+            .delete_policy(tenant, policy_id)
+            .await
+            .map_err(|e| e.to_string())
     }
 }
 
