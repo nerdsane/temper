@@ -2,10 +2,10 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-MAX_VIOLATIONS="${MAX_STORAGE_BOUNDARY_VIOLATIONS:-130}"
+MAX_VIOLATIONS="${MAX_STORAGE_BOUNDARY_VIOLATIONS:-95}"
 STRICT="${TEMPER_STORAGE_DISPATCH_STRICT:-0}"
 
-PATTERN='ServerEventStore|\.event_store\b|event_store\.as_ref|metadata_store_for_tenant|platform_metadata_store|collect_all_metadata_stores|collect_all_turso_stores|persistent_store_for_tenant|platform_persistent_store|metadata_backend_for_tenant'
+PATTERN='ServerEventStore|\.event_store\b|event_store\.as_ref|collect_all_turso_stores|persistent_store_for_tenant|platform_persistent_store|metadata_backend_for_tenant'
 
 VIOLATIONS="$(
   cd "$ROOT"
