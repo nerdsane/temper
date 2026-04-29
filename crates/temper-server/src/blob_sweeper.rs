@@ -17,6 +17,7 @@ use std::time::Duration;
 use tracing::instrument;
 
 use crate::state::ServerState;
+use crate::storage::MetadataStore;
 
 /// Default sweep cadence — 6 hours.
 pub const DEFAULT_BLOB_SWEEP_INTERVAL: Duration = Duration::from_secs(6 * 60 * 60);
@@ -85,7 +86,7 @@ pub fn spawn_blob_sweeper(state: ServerState) -> tokio::task::JoinHandle<()> {
 async fn sweep_once(state: &ServerState, batch: u64) {
     let mut iterations = 0u64;
     let total_deleted = if let Some(store) = state.platform_metadata_store() {
-        drain(&store, batch, &mut iterations).await
+        drain(store.as_ref(), batch, &mut iterations).await
     } else {
         0
     };
@@ -95,11 +96,7 @@ async fn sweep_once(state: &ServerState, batch: u64) {
     }
 }
 
-async fn drain(
-    store: &crate::event_store::ServerEventStore,
-    batch: u64,
-    iterations: &mut u64,
-) -> u64 {
+async fn drain(store: &dyn MetadataStore, batch: u64, iterations: &mut u64) -> u64 {
     let mut total = 0u64;
     loop {
         match store.sweep_expired_blobs(batch).await {
