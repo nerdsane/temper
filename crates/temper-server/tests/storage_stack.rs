@@ -222,6 +222,7 @@ fn storage_stack_labels_backend_and_exposes_boxed_events() {
         None,
         None,
         None,
+        None,
     );
 
     assert_eq!(stack.backend, BackendLabel::Postgres);
@@ -230,6 +231,7 @@ fn storage_stack_labels_backend_and_exposes_boxed_events() {
     assert!(stack.policies.is_none());
     assert!(stack.query_plane.is_none());
     assert!(stack.trajectory.is_none());
+    assert!(stack.metadata.is_none());
 }
 
 #[tokio::test]
@@ -241,6 +243,7 @@ async fn storage_stack_exposes_query_plane_and_trajectory_capabilities() {
         None,
         Some(Arc::new(RecordingQueryPlane)),
         Some(Arc::new(RecordingTrajectorySink)),
+        None,
     );
 
     let query_plane = stack.query_plane.as_ref().expect("query plane");

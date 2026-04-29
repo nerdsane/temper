@@ -53,7 +53,7 @@ use crate::events::EntityStateChange;
 use crate::idempotency::IdempotencyCache;
 use crate::registry::SpecRegistry;
 use crate::secrets::vault::SecretsVault;
-use crate::storage::{PolicyStore, QueryPlaneStore, StorageStack, TrajectorySink};
+use crate::storage::{MetadataStore, PolicyStore, QueryPlaneStore, StorageStack, TrajectorySink};
 use crate::trigger::ReactionDispatcher;
 use crate::wasm_registry::WasmModuleRegistry;
 use crate::webhooks::WebhookDispatcher;
@@ -834,34 +834,33 @@ impl ServerState {
     /// Postgres is a shared platform store with tenant columns; Turso may be
     /// single-DB or tenant-routed. This helper lets read/write paths avoid
     /// branching on Turso-only accessors.
-    pub async fn metadata_store_for_tenant(
-        &self,
-        tenant: &str,
-    ) -> Option<crate::event_store::ServerEventStore> {
-        let store = self.event_store.as_ref()?;
-        match store.as_ref() {
-            crate::event_store::ServerEventStore::Postgres(_) => Some((**store).clone()),
-            crate::event_store::ServerEventStore::Turso(_) => Some((**store).clone()),
-            crate::event_store::ServerEventStore::TenantRouted(router) => router
-                .store_for_tenant(tenant)
-                .await
-                .ok()
-                .map(crate::event_store::ServerEventStore::Turso),
-            _ => None,
+    pub async fn metadata_store_for_tenant(&self, tenant: &str) -> Option<Arc<dyn MetadataStore>> {
+        if let Some(provider) = self
+            .storage_stack
+            .as_ref()
+            .and_then(|stack| stack.metadata.clone())
+        {
+            return provider.store_for_tenant(tenant).await;
         }
+
+        let stack =
+            StorageStack::from_server_event_store(self.event_store.as_ref()?.as_ref().clone());
+        stack.metadata?.store_for_tenant(tenant).await
     }
 
     /// Return the platform metadata store for system-wide tables.
-    pub fn platform_metadata_store(&self) -> Option<crate::event_store::ServerEventStore> {
-        let store = self.event_store.as_ref()?;
-        match store.as_ref() {
-            crate::event_store::ServerEventStore::Postgres(_) => Some((**store).clone()),
-            crate::event_store::ServerEventStore::Turso(_) => Some((**store).clone()),
-            crate::event_store::ServerEventStore::TenantRouted(router) => Some(
-                crate::event_store::ServerEventStore::Turso(router.platform_store().clone()),
-            ),
-            _ => None,
+    pub fn platform_metadata_store(&self) -> Option<Arc<dyn MetadataStore>> {
+        if let Some(provider) = self
+            .storage_stack
+            .as_ref()
+            .and_then(|stack| stack.metadata.clone())
+        {
+            return provider.platform_store();
         }
+
+        let stack =
+            StorageStack::from_server_event_store(self.event_store.as_ref()?.as_ref().clone());
+        stack.metadata?.platform_store()
     }
 
     /// Upload stream content for a TemperFS `File` entity using the standard
@@ -1232,26 +1231,22 @@ impl ServerState {
     }
 
     /// Collect backend-neutral platform/tenant stores for cross-tenant reads.
-    pub async fn collect_all_metadata_stores(&self) -> Vec<crate::event_store::ServerEventStore> {
+    pub async fn collect_all_metadata_stores(&self) -> Vec<Arc<dyn MetadataStore>> {
+        if let Some(provider) = self
+            .storage_stack
+            .as_ref()
+            .and_then(|stack| stack.metadata.clone())
+        {
+            return provider.all_stores().await;
+        }
+
         let Some(store) = self.event_store.as_ref() else {
             return Vec::new();
         };
-
-        match store.as_ref() {
-            crate::event_store::ServerEventStore::Postgres(_) => vec![(**store).clone()],
-            crate::event_store::ServerEventStore::Turso(_) => vec![(**store).clone()],
-            crate::event_store::ServerEventStore::TenantRouted(router) => {
-                let mut stores = vec![crate::event_store::ServerEventStore::Turso(
-                    router.platform_store().clone(),
-                )];
-                for tid in router.connected_tenants().await {
-                    if let Ok(s) = router.store_for_tenant(&tid).await {
-                        stores.push(crate::event_store::ServerEventStore::Turso(s));
-                    }
-                }
-                stores
-            }
-            _ => Vec::new(),
-        }
+        let stack = StorageStack::from_server_event_store(store.as_ref().clone());
+        let Some(provider) = stack.metadata else {
+            return Vec::new();
+        };
+        provider.all_stores().await
     }
 }
