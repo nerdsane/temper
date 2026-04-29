@@ -355,17 +355,11 @@ impl ServerState {
             return Some(query_plane);
         }
 
-        let store = self.event_store.as_ref()?.clone();
-        if matches!(
-            store.as_ref(),
-            ServerEventStore::Postgres(_)
-                | ServerEventStore::Turso(_)
-                | ServerEventStore::TenantRouted(_)
-        ) {
-            Some(store as Arc<dyn QueryPlaneStore>)
-        } else {
-            None
-        }
+        // Compatibility for older tests that still assign `event_store`
+        // directly instead of calling `set_event_store`. Rebuild a stack from
+        // the cloned backend so the returned capability is still concrete.
+        StorageStack::from_server_event_store(self.event_store.as_ref()?.as_ref().clone())
+            .query_plane
     }
 
     /// Return the observe trajectory sink plus backend label for metrics.
@@ -376,20 +370,12 @@ impl ServerState {
             return Some((stack.backend.as_str(), sink));
         }
 
-        let store = self.event_store.as_ref()?.clone();
-        if matches!(
-            store.as_ref(),
-            ServerEventStore::Postgres(_)
-                | ServerEventStore::Turso(_)
-                | ServerEventStore::TenantRouted(_)
-        ) {
-            Some((
-                crate::storage::BackendLabel::from(store.as_ref()).as_str(),
-                store as Arc<dyn TrajectorySink>,
-            ))
-        } else {
-            None
-        }
+        // Compatibility for older tests that still assign `event_store`
+        // directly instead of calling `set_event_store`. Rebuild a stack from
+        // the cloned backend so the returned capability is still concrete.
+        let stack =
+            StorageStack::from_server_event_store(self.event_store.as_ref()?.as_ref().clone());
+        stack.trajectory.map(|sink| (stack.backend.as_str(), sink))
     }
 
     /// Create ServerState from CSDL XML and optional specification sources.

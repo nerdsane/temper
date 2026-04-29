@@ -11,12 +11,14 @@ use std::pin::Pin;
 use std::sync::Arc;
 
 use temper_runtime::persistence::{EventStore, PersistenceEnvelope, PersistenceError};
+use temper_store_postgres::{PostgresEventStore, PostgresTrajectoryInsert};
+use temper_store_turso::{TenantStoreRouter, TursoEventStore, TursoTrajectoryInsert};
 
 use crate::event_store::ServerEventStore;
 use crate::platform_store::{
     InstalledAppRecord, PlatformStore, SpecRow, SpecVerificationUpdate, WasmModuleRow,
 };
-use crate::state::trajectory::TrajectoryEntry;
+use crate::state::trajectory::{TrajectoryEntry, TrajectorySource};
 
 pub type EventStoreFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
 
@@ -323,42 +325,293 @@ impl StorageStack {
     }
 
     pub fn from_server_event_store(store: ServerEventStore) -> Self {
-        let backend = BackendLabel::from(&store);
-        let store = Arc::new(store);
-        let events = BoxedEventStore::from_arc(store.clone());
-        let platform = if store.platform_store().is_some() {
-            Some(store.clone() as Arc<dyn PlatformStore>)
-        } else {
-            None
-        };
-        let query_plane = if matches!(
-            store.as_ref(),
-            ServerEventStore::Postgres(_)
-                | ServerEventStore::Turso(_)
-                | ServerEventStore::TenantRouted(_)
-        ) {
-            Some(store.clone() as Arc<dyn QueryPlaneStore>)
-        } else {
-            None
-        };
-        let trajectory = if matches!(
-            store.as_ref(),
-            ServerEventStore::Postgres(_)
-                | ServerEventStore::Turso(_)
-                | ServerEventStore::TenantRouted(_)
-        ) {
-            Some(store.clone() as Arc<dyn TrajectorySink>)
-        } else {
-            None
-        };
-        Self::new(
-            backend,
-            events,
-            platform,
-            query_plane,
-            trajectory,
-            Some(store),
-        )
+        match store {
+            ServerEventStore::Postgres(store) => {
+                let compatibility_store = Arc::new(ServerEventStore::Postgres(store.clone()));
+                let store = Arc::new(store);
+                Self::new(
+                    BackendLabel::Postgres,
+                    BoxedEventStore::from_arc(store.clone()),
+                    Some(store.clone() as Arc<dyn PlatformStore>),
+                    Some(store.clone() as Arc<dyn QueryPlaneStore>),
+                    Some(store.clone() as Arc<dyn TrajectorySink>),
+                    Some(compatibility_store),
+                )
+            }
+            ServerEventStore::Turso(store) => {
+                let compatibility_store = Arc::new(ServerEventStore::Turso(store.clone()));
+                let store = Arc::new(store);
+                Self::new(
+                    BackendLabel::Turso,
+                    BoxedEventStore::from_arc(store.clone()),
+                    Some(store.clone() as Arc<dyn PlatformStore>),
+                    Some(store.clone() as Arc<dyn QueryPlaneStore>),
+                    Some(store.clone() as Arc<dyn TrajectorySink>),
+                    Some(compatibility_store),
+                )
+            }
+            ServerEventStore::TenantRouted(router) => {
+                let compatibility_store = Arc::new(ServerEventStore::TenantRouted(router.clone()));
+                let platform_store =
+                    Arc::new(router.platform_store().clone()) as Arc<dyn PlatformStore>;
+                let router = Arc::new(router);
+                Self::new(
+                    BackendLabel::TursoRouted,
+                    BoxedEventStore::from_arc(router.clone()),
+                    Some(platform_store),
+                    Some(router.clone() as Arc<dyn QueryPlaneStore>),
+                    Some(router.clone() as Arc<dyn TrajectorySink>),
+                    Some(compatibility_store),
+                )
+            }
+            ServerEventStore::Redis(store) => {
+                let compatibility_store = Arc::new(ServerEventStore::Redis(store.clone()));
+                let store = Arc::new(store);
+                Self::new(
+                    BackendLabel::Redis,
+                    BoxedEventStore::from_arc(store),
+                    None,
+                    None,
+                    None,
+                    Some(compatibility_store),
+                )
+            }
+            #[cfg(feature = "sim")]
+            ServerEventStore::Sim(store, platform_store) => {
+                let compatibility_store =
+                    Arc::new(ServerEventStore::Sim(store.clone(), platform_store.clone()));
+                let store = Arc::new(store);
+                let platform = platform_store.map(|store| store as Arc<dyn PlatformStore>);
+                Self::new(
+                    BackendLabel::Sim,
+                    BoxedEventStore::from_arc(store),
+                    platform,
+                    None,
+                    None,
+                    Some(compatibility_store),
+                )
+            }
+        }
+    }
+}
+
+#[async_trait::async_trait]
+impl QueryPlaneStore for PostgresEventStore {
+    async fn upsert_projection(
+        &self,
+        tenant: &str,
+        entity_type: &str,
+        entity_id: &str,
+        status: &str,
+        fields: &serde_json::Value,
+        sequence_nr: u64,
+    ) -> Result<(), PersistenceError> {
+        self.upsert_query_projection(tenant, entity_type, entity_id, status, fields, sequence_nr)
+            .await
+    }
+
+    async fn remove_projection(
+        &self,
+        tenant: &str,
+        entity_type: &str,
+        entity_id: &str,
+    ) -> Result<(), PersistenceError> {
+        self.remove_query_projection(tenant, entity_type, entity_id)
+            .await
+    }
+
+    async fn query_field_index(
+        &self,
+        tenant: &str,
+        entity_type: &str,
+        where_clause: &str,
+        params: Vec<String>,
+    ) -> Result<Option<Vec<String>>, PersistenceError> {
+        PostgresEventStore::query_field_index(self, tenant, entity_type, where_clause, params)
+            .await
+            .map(Some)
+    }
+
+    async fn load_projection_fields_many(
+        &self,
+        tenant: &str,
+        entity_type: &str,
+        entity_ids: &[String],
+        field_names: &[&str],
+    ) -> Result<Option<Vec<QueryProjectionFieldsRow>>, PersistenceError> {
+        self.load_query_projection_fields_many(tenant, entity_type, entity_ids, field_names)
+            .await
+            .map(|rows| {
+                Some(
+                    rows.into_iter()
+                        .map(|row| QueryProjectionFieldsRow {
+                            entity_id: row.entity_id,
+                            status: row.status,
+                            fields: row.fields,
+                        })
+                        .collect(),
+                )
+            })
+    }
+
+    async fn projected_entity_counts_by_tenant(
+        &self,
+    ) -> Result<Option<Vec<(String, u64)>>, PersistenceError> {
+        PostgresEventStore::projected_entity_counts_by_tenant(self)
+            .await
+            .map(Some)
+    }
+}
+
+#[async_trait::async_trait]
+impl QueryPlaneStore for TursoEventStore {
+    async fn upsert_projection(
+        &self,
+        tenant: &str,
+        entity_type: &str,
+        entity_id: &str,
+        status: &str,
+        fields: &serde_json::Value,
+        sequence_nr: u64,
+    ) -> Result<(), PersistenceError> {
+        self.upsert_query_projection(tenant, entity_type, entity_id, status, fields, sequence_nr)
+            .await
+    }
+
+    async fn remove_projection(
+        &self,
+        tenant: &str,
+        entity_type: &str,
+        entity_id: &str,
+    ) -> Result<(), PersistenceError> {
+        self.remove_query_projection(tenant, entity_type, entity_id)
+            .await
+    }
+
+    async fn query_field_index(
+        &self,
+        tenant: &str,
+        entity_type: &str,
+        where_clause: &str,
+        params: Vec<String>,
+    ) -> Result<Option<Vec<String>>, PersistenceError> {
+        TursoEventStore::query_field_index(self, tenant, entity_type, where_clause, params)
+            .await
+            .map(Some)
+    }
+
+    async fn load_projection_fields_many(
+        &self,
+        tenant: &str,
+        entity_type: &str,
+        entity_ids: &[String],
+        field_names: &[&str],
+    ) -> Result<Option<Vec<QueryProjectionFieldsRow>>, PersistenceError> {
+        self.load_query_projection_fields_many(tenant, entity_type, entity_ids, field_names)
+            .await
+            .map(|rows| {
+                Some(
+                    rows.into_iter()
+                        .map(|row| QueryProjectionFieldsRow {
+                            entity_id: row.entity_id,
+                            status: row.status,
+                            fields: row.fields,
+                        })
+                        .collect(),
+                )
+            })
+    }
+
+    async fn projected_entity_counts_by_tenant(
+        &self,
+    ) -> Result<Option<Vec<(String, u64)>>, PersistenceError> {
+        TursoEventStore::projected_entity_counts_by_tenant(self)
+            .await
+            .map(Some)
+    }
+}
+
+#[async_trait::async_trait]
+impl QueryPlaneStore for TenantStoreRouter {
+    async fn upsert_projection(
+        &self,
+        tenant: &str,
+        entity_type: &str,
+        entity_id: &str,
+        status: &str,
+        fields: &serde_json::Value,
+        sequence_nr: u64,
+    ) -> Result<(), PersistenceError> {
+        let store = self.store_for_tenant(tenant).await?;
+        store
+            .upsert_query_projection(tenant, entity_type, entity_id, status, fields, sequence_nr)
+            .await
+    }
+
+    async fn remove_projection(
+        &self,
+        tenant: &str,
+        entity_type: &str,
+        entity_id: &str,
+    ) -> Result<(), PersistenceError> {
+        let store = self.store_for_tenant(tenant).await?;
+        store
+            .remove_query_projection(tenant, entity_type, entity_id)
+            .await
+    }
+
+    async fn query_field_index(
+        &self,
+        tenant: &str,
+        entity_type: &str,
+        where_clause: &str,
+        params: Vec<String>,
+    ) -> Result<Option<Vec<String>>, PersistenceError> {
+        let store = self.store_for_tenant(tenant).await?;
+        TursoEventStore::query_field_index(&store, tenant, entity_type, where_clause, params)
+            .await
+            .map(Some)
+    }
+
+    async fn load_projection_fields_many(
+        &self,
+        tenant: &str,
+        entity_type: &str,
+        entity_ids: &[String],
+        field_names: &[&str],
+    ) -> Result<Option<Vec<QueryProjectionFieldsRow>>, PersistenceError> {
+        let store = self.store_for_tenant(tenant).await?;
+        store
+            .load_query_projection_fields_many(tenant, entity_type, entity_ids, field_names)
+            .await
+            .map(|rows| {
+                Some(
+                    rows.into_iter()
+                        .map(|row| QueryProjectionFieldsRow {
+                            entity_id: row.entity_id,
+                            status: row.status,
+                            fields: row.fields,
+                        })
+                        .collect(),
+                )
+            })
+    }
+
+    async fn projected_entity_counts_by_tenant(
+        &self,
+    ) -> Result<Option<Vec<(String, u64)>>, PersistenceError> {
+        let mut counts = Vec::new();
+        for tenant_id in self.connected_tenants().await {
+            let store = self.store_for_tenant(&tenant_id).await?;
+            if let Some((_, count)) = TursoEventStore::projected_entity_counts_by_tenant(&store)
+                .await?
+                .into_iter()
+                .find(|(tenant, _)| tenant == &tenant_id)
+            {
+                counts.push((tenant_id, count));
+            }
+        }
+        Ok(Some(counts))
     }
 }
 
@@ -424,6 +677,157 @@ impl QueryPlaneStore for ServerEventStore {
         &self,
     ) -> Result<Option<Vec<(String, u64)>>, PersistenceError> {
         self.projected_entity_counts_by_tenant().await
+    }
+}
+
+fn trajectory_source_label(source: &TrajectorySource) -> &'static str {
+    match source {
+        TrajectorySource::Entity => "Entity",
+        TrajectorySource::Platform => "Platform",
+        TrajectorySource::Authz => "Authz",
+    }
+}
+
+fn trajectory_request_body_json(entry: &TrajectoryEntry) -> Option<String> {
+    entry.request_body.as_ref().and_then(|value| {
+        let serialized = serde_json::to_string(value).ok()?;
+        Some(if serialized.len() > 4096 {
+            let mut end = 4096;
+            while !serialized.is_char_boundary(end) {
+                end -= 1;
+            }
+            serialized[..end].to_string()
+        } else {
+            serialized
+        })
+    })
+}
+
+fn trajectory_matched_policy_ids_json(entry: &TrajectoryEntry) -> Option<String> {
+    entry
+        .matched_policy_ids
+        .as_ref()
+        .map(|ids| serde_json::to_string(ids).unwrap_or_default())
+}
+
+#[async_trait::async_trait]
+impl TrajectorySink for PostgresEventStore {
+    async fn persist_trajectory_entry(&self, entry: &TrajectoryEntry) -> Result<(), String> {
+        let matched_policy_ids_json = trajectory_matched_policy_ids_json(entry);
+        let request_body_json = trajectory_request_body_json(entry);
+        let source = entry.source.as_ref().map(trajectory_source_label);
+
+        self.persist_trajectory(PostgresTrajectoryInsert {
+            tenant: &entry.tenant,
+            entity_type: &entry.entity_type,
+            entity_id: &entry.entity_id,
+            action: &entry.action,
+            success: entry.success,
+            from_status: entry.from_status.as_deref(),
+            to_status: entry.to_status.as_deref(),
+            error: entry.error.as_deref(),
+            agent_id: entry.agent_id.as_deref(),
+            session_id: entry.session_id.as_deref(),
+            authz_denied: entry.authz_denied,
+            denied_resource: entry.denied_resource.as_deref(),
+            denied_module: entry.denied_module.as_deref(),
+            source,
+            spec_governed: entry.spec_governed,
+            created_at: &entry.timestamp,
+            request_body: request_body_json.as_deref(),
+            intent: entry.intent.as_deref(),
+            matched_policy_ids: matched_policy_ids_json.as_deref(),
+        })
+        .await
+        .map_err(|e| {
+            format!(
+                "failed to persist trajectory entry for {}/{}/{} action {} in postgres: {e}",
+                entry.tenant, entry.entity_type, entry.entity_id, entry.action
+            )
+        })
+    }
+}
+
+#[async_trait::async_trait]
+impl TrajectorySink for TursoEventStore {
+    async fn persist_trajectory_entry(&self, entry: &TrajectoryEntry) -> Result<(), String> {
+        let matched_policy_ids_json = trajectory_matched_policy_ids_json(entry);
+        let request_body_json = trajectory_request_body_json(entry);
+        let source = entry.source.as_ref().map(trajectory_source_label);
+
+        self.persist_trajectory(TursoTrajectoryInsert {
+            tenant: &entry.tenant,
+            entity_type: &entry.entity_type,
+            entity_id: &entry.entity_id,
+            action: &entry.action,
+            success: entry.success,
+            from_status: entry.from_status.as_deref(),
+            to_status: entry.to_status.as_deref(),
+            error: entry.error.as_deref(),
+            agent_id: entry.agent_id.as_deref(),
+            session_id: entry.session_id.as_deref(),
+            authz_denied: entry.authz_denied,
+            denied_resource: entry.denied_resource.as_deref(),
+            denied_module: entry.denied_module.as_deref(),
+            source,
+            spec_governed: entry.spec_governed,
+            created_at: &entry.timestamp,
+            request_body: request_body_json.as_deref(),
+            intent: entry.intent.as_deref(),
+            matched_policy_ids: matched_policy_ids_json.as_deref(),
+        })
+        .await
+        .map_err(|e| {
+            format!(
+                "failed to persist trajectory entry for {}/{}/{} action {} in turso: {e}",
+                entry.tenant, entry.entity_type, entry.entity_id, entry.action
+            )
+        })
+    }
+}
+
+#[async_trait::async_trait]
+impl TrajectorySink for TenantStoreRouter {
+    async fn persist_trajectory_entry(&self, entry: &TrajectoryEntry) -> Result<(), String> {
+        let store = self.store_for_tenant(&entry.tenant).await.map_err(|e| {
+            format!(
+                "failed to resolve tenant store for trajectory entry {}/{}/{} action {}: {e}",
+                entry.tenant, entry.entity_type, entry.entity_id, entry.action
+            )
+        })?;
+        let matched_policy_ids_json = trajectory_matched_policy_ids_json(entry);
+        let request_body_json = trajectory_request_body_json(entry);
+        let source = entry.source.as_ref().map(trajectory_source_label);
+
+        store
+            .persist_trajectory(TursoTrajectoryInsert {
+                tenant: &entry.tenant,
+                entity_type: &entry.entity_type,
+                entity_id: &entry.entity_id,
+                action: &entry.action,
+                success: entry.success,
+                from_status: entry.from_status.as_deref(),
+                to_status: entry.to_status.as_deref(),
+                error: entry.error.as_deref(),
+                agent_id: entry.agent_id.as_deref(),
+                session_id: entry.session_id.as_deref(),
+                authz_denied: entry.authz_denied,
+                denied_resource: entry.denied_resource.as_deref(),
+                denied_module: entry.denied_module.as_deref(),
+                source,
+                spec_governed: entry.spec_governed,
+                created_at: &entry.timestamp,
+                request_body: request_body_json.as_deref(),
+                intent: entry.intent.as_deref(),
+                matched_policy_ids: matched_policy_ids_json.as_deref(),
+            })
+            .await
+            .map_err(|e| {
+                format!(
+                    "failed to persist trajectory entry for {}/{}/{} action {} in turso-routed: {e}",
+                    entry.tenant, entry.entity_type, entry.entity_id, entry.action
+                )
+            })
     }
 }
 
