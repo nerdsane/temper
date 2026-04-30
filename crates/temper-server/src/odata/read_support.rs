@@ -1,5 +1,6 @@
 //! Shared helpers for OData read handlers.
 
+use std::collections::HashMap;
 use std::sync::OnceLock;
 
 use futures_util::stream::{self, StreamExt};
@@ -7,12 +8,24 @@ use temper_runtime::tenant::TenantId;
 
 use crate::blobs::hydrate_blob_refs_for_tenant;
 use crate::state::ServerState;
+use crate::storage::EntityCatalogRow;
 
 fn env_usize(name: &str, default: usize) -> usize {
     std::env::var(name) // determinism-ok: read once at startup
         .ok()
         .and_then(|v| v.trim().parse::<usize>().ok())
         .filter(|v| *v > 0)
+        .unwrap_or(default)
+}
+
+fn env_bool(name: &str, default: bool) -> bool {
+    std::env::var(name) // determinism-ok: read once at startup
+        .ok()
+        .and_then(|v| match v.trim().to_ascii_lowercase().as_str() {
+            "1" | "true" | "yes" | "on" => Some(true),
+            "0" | "false" | "no" | "off" => Some(false),
+            _ => None,
+        })
         .unwrap_or(default)
 }
 
@@ -32,6 +45,77 @@ fn entity_set_materialization_concurrency() -> usize {
         .get_or_init(|| env_usize("TEMPER_ODATA_ENTITY_SET_MATERIALIZATION_CONCURRENCY", 16))
 }
 
+/// When true, list materialization reads each row from the durable
+/// `entity_catalog` projection in a single batch query, avoiding the per-row
+/// actor hydration cost. IDs that are absent from the catalog still fall
+/// back to the actor path on a per-id basis.
+fn catalog_fast_read_enabled() -> bool {
+    static ENABLED: OnceLock<bool> = OnceLock::new();
+    *ENABLED.get_or_init(|| env_bool("TEMPER_ODATA_CATALOG_FAST_READ", false))
+}
+
+/// Build the OData JSON body for a single catalog row.
+///
+/// Mirrors the actor's serialized `EntityState` shape (`status`, `fields`,
+/// `entity_type`, `entity_id`, `sequence_nr`, `total_event_count`,
+/// `item_count`, `counters`, `booleans`, `lists`, `events`) so downstream
+/// `enrich_entity_response` and OData clients see the same payload as the
+/// actor path. Counters/booleans/lists are emitted as empty maps because the
+/// catalog only persists `status` + `fields`; entity types that depend on
+/// those collections in their OData response should leave the fast-read
+/// flag off until the projection is extended.
+fn catalog_row_to_entity_body(
+    entity_type: &str,
+    entity_set_name: &str,
+    row: EntityCatalogRow,
+) -> serde_json::Value {
+    let id = row.entity_id;
+    serde_json::json!({
+        "entity_type": entity_type,
+        "entity_id": id,
+        "status": row.status,
+        "item_count": 0,
+        "counters": {},
+        "booleans": {},
+        "lists": {},
+        "fields": row.fields,
+        "events": [],
+        "total_event_count": row.sequence_nr,
+        "sequence_nr": row.sequence_nr,
+        "@odata.id": format!("{entity_set_name}('{id}')"),
+    })
+}
+
+async fn try_load_catalog_rows(
+    state: &ServerState,
+    tenant: &TenantId,
+    entity_type: &str,
+    entity_ids: &[String],
+) -> HashMap<String, EntityCatalogRow> {
+    let Some(query_plane) = state.query_plane_store() else {
+        return HashMap::new();
+    };
+    match query_plane
+        .load_entity_catalog_rows(tenant.as_str(), entity_type, entity_ids)
+        .await
+    {
+        Ok(Some(rows)) => rows
+            .into_iter()
+            .map(|row| (row.entity_id.clone(), row))
+            .collect(),
+        Ok(None) => HashMap::new(),
+        Err(error) => {
+            tracing::warn!(
+                error = %error,
+                tenant = %tenant,
+                entity_type = %entity_type,
+                "catalog fast-read failed; falling back to actor materialization"
+            );
+            HashMap::new()
+        }
+    }
+}
+
 pub(super) async fn materialize_entity_set_entities(
     state: &ServerState,
     tenant: &TenantId,
@@ -39,14 +123,27 @@ pub(super) async fn materialize_entity_set_entities(
     entity_set_name: &str,
     entity_ids: &[String],
 ) -> Vec<serde_json::Value> {
+    let mut catalog_hits: HashMap<String, EntityCatalogRow> = if catalog_fast_read_enabled() {
+        try_load_catalog_rows(state, tenant, entity_type, entity_ids).await
+    } else {
+        HashMap::new()
+    };
+
     let concurrency = entity_set_materialization_concurrency();
     stream::iter(entity_ids.iter().cloned())
         .map(|id| {
+            let catalog_row = catalog_hits.remove(&id);
             let state = state.clone();
             let tenant = tenant.clone();
             let entity_type = entity_type.to_string();
             let entity_set_name = entity_set_name.to_string();
             async move {
+                if let Some(row) = catalog_row {
+                    let mut entity =
+                        catalog_row_to_entity_body(&entity_type, &entity_set_name, row);
+                    hydrate_blob_refs_for_tenant(&state, &tenant, &mut entity).await;
+                    return Some(entity);
+                }
                 match state
                     .get_tenant_entity_state(&tenant, &entity_type, &id)
                     .await
@@ -181,10 +278,39 @@ pub(super) async fn record_entity_set_not_found(state: &ServerState, tenant: &st
 
 #[cfg(test)]
 mod tests {
-    use super::select_entity_ids_for_materialization;
+    use super::{
+        EntityCatalogRow, catalog_row_to_entity_body, select_entity_ids_for_materialization,
+    };
     use temper_odata::query::types::{
         FilterExpr, ODataValue, OrderByClause, OrderDirection, QueryOptions,
     };
+
+    #[test]
+    fn catalog_row_serializes_to_entity_state_shape() {
+        let row = EntityCatalogRow {
+            entity_id: "en-123".to_string(),
+            status: "Published".to_string(),
+            fields: serde_json::json!({"Name": "Foo", "Score": 7}),
+            sequence_nr: 14,
+        };
+        let body = catalog_row_to_entity_body("DesignLanguage", "DesignLanguages", row);
+
+        // Mirrors EntityState serialization keys so enrich_entity_response and
+        // OData clients see no difference between catalog-served and actor-served bodies.
+        assert_eq!(body["entity_type"], "DesignLanguage");
+        assert_eq!(body["entity_id"], "en-123");
+        assert_eq!(body["status"], "Published");
+        assert_eq!(body["sequence_nr"], 14);
+        assert_eq!(body["total_event_count"], 14);
+        assert_eq!(body["item_count"], 0);
+        assert_eq!(body["counters"], serde_json::json!({}));
+        assert_eq!(body["booleans"], serde_json::json!({}));
+        assert_eq!(body["lists"], serde_json::json!({}));
+        assert_eq!(body["events"], serde_json::json!([]));
+        assert_eq!(body["fields"]["Name"], "Foo");
+        assert_eq!(body["fields"]["Score"], 7);
+        assert_eq!(body["@odata.id"], "DesignLanguages('en-123')");
+    }
 
     #[test]
     fn default_pagination_applies_when_top_missing_and_no_filter_orderby() {
