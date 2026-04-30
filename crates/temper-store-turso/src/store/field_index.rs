@@ -47,6 +47,15 @@ pub struct ProjectedEntityFieldsRow {
     pub fields: BTreeMap<String, Option<String>>,
 }
 
+/// One row from `entity_catalog`, with the full JSON fields blob preserved.
+#[derive(Debug, Clone, PartialEq)]
+pub struct EntityCatalogRow {
+    pub entity_id: String,
+    pub status: String,
+    pub fields: serde_json::Value,
+    pub sequence_nr: u64,
+}
+
 impl TursoEventStore {
     /// Upsert the durable query-plane projection for a single entity.
     ///
@@ -462,6 +471,60 @@ impl TursoEventStore {
             counts.push((tenant, count.max(0) as u64));
         }
         Ok(counts)
+    }
+
+    /// Batch-load full entity catalog rows for a list of entity IDs.
+    ///
+    /// Returns only rows that exist in the catalog; missing IDs are silently
+    /// omitted. Mirrors the Postgres impl so the OData read path can stay
+    /// backend-agnostic.
+    #[instrument(skip_all, fields(
+        otel.name = "turso.load_entity_catalog_rows",
+        tenant, entity_type,
+        entity_count = entity_ids.len(),
+    ))]
+    pub async fn load_entity_catalog_rows(
+        &self,
+        tenant: &str,
+        entity_type: &str,
+        entity_ids: &[String],
+    ) -> Result<Vec<EntityCatalogRow>, PersistenceError> {
+        if entity_ids.is_empty() {
+            return Ok(Vec::new());
+        }
+        let conn = self.configured_connection().await?;
+        let placeholders = std::iter::repeat_n("?", entity_ids.len())
+            .collect::<Vec<_>>()
+            .join(", ");
+        let sql = format!(
+            "SELECT entity_id, status, fields, sequence_nr \
+             FROM entity_catalog \
+             WHERE tenant = ? AND entity_type = ? AND entity_id IN ({placeholders}) \
+             ORDER BY entity_id"
+        );
+        let mut params: Vec<libsql::Value> = Vec::with_capacity(entity_ids.len() + 2);
+        params.push(libsql::Value::Text(tenant.to_string()));
+        params.push(libsql::Value::Text(entity_type.to_string()));
+        for id in entity_ids {
+            params.push(libsql::Value::Text(id.clone()));
+        }
+        let mut rows = conn.query(&sql, params).await.map_err(storage_error)?;
+        let mut out = Vec::new();
+        while let Some(row) = rows.next().await.map_err(storage_error)? {
+            let entity_id: String = row.get(0).map_err(storage_error)?;
+            let status: String = row.get(1).map_err(storage_error)?;
+            let fields_text: String = row.get(2).map_err(storage_error)?;
+            let sequence_nr: i64 = row.get(3).map_err(storage_error)?;
+            let fields: serde_json::Value = serde_json::from_str(&fields_text)
+                .map_err(|err| PersistenceError::Storage(err.to_string()))?;
+            out.push(EntityCatalogRow {
+                entity_id,
+                status,
+                fields,
+                sequence_nr: sequence_nr.max(0) as u64,
+            });
+        }
+        Ok(out)
     }
 }
 
