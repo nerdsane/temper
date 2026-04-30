@@ -1,11 +1,12 @@
 # ADR-0077: Catalog-first OData entity materialization
 
-- Status: Accepted
+- Status: Accepted (amended 2026-04-30 — extended to single-entity reads)
 - Date: 2026-04-30
 - Deciders: Temper core maintainers
 - Related:
   - ADR-0076: Eliminate `ServerEventStore` enum (the abstraction that lets us add catalog-first reads without branching on backend)
   - ADR-0074: Turso → Postgres ETL methodology (revealed the projection-not-populated gap)
+  - `crates/temper-server/src/odata/read.rs`
   - `crates/temper-server/src/odata/read_support.rs`
   - `crates/temper-server/src/storage/mod.rs`
 
@@ -33,6 +34,8 @@ Add a catalog-first batch read to `materialize_entity_set_entities` in `read_sup
    - For each ID with a catalog hit, build the response body from the row directly.
    - For misses (catalog stale, never written, or entity has non-empty `counters`/`booleans`/`lists` not yet projected), fall back to the existing `state.get_tenant_entity_state` path on a per-id basis.
 
+7. (Amendment, same flag) In `load_existing_entity_body` — the helper used by every single-entity OData read (`GET /tdata/EntitySet('key')`, navigation property parent loads, stream `$value` GETs) — try `try_load_entity_body_from_catalog` first. On hit, return the catalog-derived body directly. On miss, fall back to the existing `entity_exists` index check + actor hydration. This eliminates the cold-start 404 class: a process that has migrated entities on disk but hasn't yet run a list query for that entity_type can no longer reject a direct single-entity read.
+
 The body shape is identical to the actor's `EntityState` serialization (`status`, `fields`, `entity_type`, `entity_id`, `sequence_nr`, `total_event_count`, `item_count`, `counters`, `booleans`, `lists`, `events`) so `enrich_entity_response` and OData clients see no difference.
 
 ## Why opt-in
@@ -52,7 +55,7 @@ Projection upserts happen in the same write path that appends events (`storage/m
 **Positive**:
 - `GET /tdata/DesignLanguages` against the openpaw production fleet drops from 22s to one indexed Postgres query (~10–50 ms p99 expected).
 - The actor system stays cold for read-heavy workloads — fewer spawns, less mailbox pressure, less snapshot/event replay traffic.
-- Sets the precedent for moving more OData read paths (single-entity GET, navigation property expansion) to catalog reads in follow-ups.
+- Single-entity GETs (`/tdata/EntitySet('key')`), navigation parent loads, and stream `$value` reads no longer 404 on cold lookups for migrated entities. The OData read surface no longer depends on the in-memory `entity_index` for correctness.
 
 **Negative**:
 - Two divergent code paths (catalog vs actor) for materialization. Mitigated by the fallback being the *same* old code, only invoked on miss.

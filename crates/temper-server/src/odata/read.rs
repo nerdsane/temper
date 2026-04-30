@@ -19,6 +19,7 @@ use super::common::{
 use super::read_support::{
     materialize_entity_set_entities, odata_default_page_size, odata_max_entities,
     record_entity_set_not_found, resolve_entity_set_name, select_entity_ids_for_materialization,
+    try_load_entity_body_from_catalog,
 };
 use super::response::annotate_entity;
 use crate::blobs::hydrate_blob_refs_for_tenant;
@@ -180,21 +181,48 @@ fn resource_not_found_response(set_name: &str, key: &str) -> Response {
     .into_response()
 }
 
-async fn load_existing_entity_response(
+/// Load a single entity body for OData read handlers.
+///
+/// Tries the durable `entity_catalog` projection first (gated by the
+/// `TEMPER_ODATA_CATALOG_FAST_READ` flag). On a hit, returns a body whose
+/// shape matches the actor's serialized `EntityState` — blob refs already
+/// hydrated. On miss (flag off, no catalog row, or backend error), falls
+/// back to the actor path: validate the entity exists in the in-memory
+/// index, then load via `get_tenant_entity_state`.
+///
+/// The catalog-first path bypasses the in-memory index, so it survives
+/// cold starts and bulk-imported entities (data on disk but not yet
+/// indexed in the running process). See ADR-0077.
+async fn load_existing_entity_body(
     state: &ServerState,
     tenant: &TenantId,
     entity_type: &str,
     set_name: &str,
     key: &str,
-) -> Result<crate::EntityResponse, Response> {
+) -> Result<serde_json::Value, Response> {
+    if let Some(body) =
+        try_load_entity_body_from_catalog(state, tenant, entity_type, set_name, key).await
+    {
+        return Ok(body);
+    }
+
     if !state.entity_exists(tenant, entity_type, key) {
         return Err(resource_not_found_response(set_name, key));
     }
 
-    state
+    let response = state
         .get_tenant_entity_state(tenant, entity_type, key)
         .await
-        .map_err(|_| resource_not_found_response(set_name, key))
+        .map_err(|_| resource_not_found_response(set_name, key))?;
+    let mut body = serde_json::to_value(&response.state).unwrap_or_default();
+    hydrate_blob_refs_for_tenant(state, tenant, &mut body).await;
+    if let Some(obj) = body.as_object_mut() {
+        obj.insert(
+            "@odata.id".into(),
+            serde_json::json!(format!("{set_name}('{key}')")),
+        );
+    }
+    Ok(body)
 }
 
 async fn apply_entity_query_options(
@@ -237,9 +265,11 @@ async fn build_entity_body(
     key: &str,
     options: EntityBodyOptions<'_>,
 ) -> Result<serde_json::Value, Response> {
-    let response = load_existing_entity_response(state, tenant, entity_type, set_name, key).await?;
-    let mut state_json = serde_json::to_value(&response.state).unwrap_or_default();
-    hydrate_blob_refs_for_tenant(state, tenant, &mut state_json).await;
+    let mut state_json =
+        load_existing_entity_body(state, tenant, entity_type, set_name, key).await?;
+    if let Some(obj) = state_json.as_object_mut() {
+        obj.remove("@odata.id");
+    }
     let mut body = annotate_entity(state_json, options.context, options.odata_id);
 
     if options.enrich {
@@ -587,16 +617,20 @@ async fn handle_navigation_property(
             }
         };
 
-    let response =
-        match load_existing_entity_response(state, tenant, &parent_type, &parent_set, &parent_key)
-            .await
-        {
-            Ok(r) => r,
-            Err(resp) => return resp,
-        };
+    let parent_body = match load_existing_entity_body(
+        state,
+        tenant,
+        &parent_type,
+        &parent_set,
+        &parent_key,
+    )
+    .await
+    {
+        Ok(b) => b,
+        Err(resp) => return resp,
+    };
 
-    let mut parent_body = serde_json::to_value(&response.state).unwrap_or_default();
-    hydrate_blob_refs_for_tenant(state, tenant, &mut parent_body).await;
+    let mut parent_body = parent_body;
     let nav_opts = ExpandOptions {
         select: query_options.select.clone(),
         filter: query_options.filter.clone(),
@@ -866,10 +900,10 @@ async fn handle_stream_get(
         return resp;
     }
 
-    // 3. Get entity state
+    // 3. Get entity state (catalog-first; falls back to actor on miss).
     let entity_state =
-        match load_existing_entity_response(state, tenant, &entity_type, &set_name, &key).await {
-            Ok(resp) => serde_json::to_value(&resp.state).unwrap_or_default(),
+        match load_existing_entity_body(state, tenant, &entity_type, &set_name, &key).await {
+            Ok(body) => body,
             Err(resp) => return resp,
         };
 
