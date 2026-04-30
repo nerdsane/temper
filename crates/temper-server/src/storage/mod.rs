@@ -246,6 +246,19 @@ pub struct QueryProjectionFieldsRow {
     pub fields: BTreeMap<String, Option<String>>,
 }
 
+/// Full entity row materialized from the durable query-plane catalog.
+///
+/// Returned by [`QueryPlaneStore::load_entity_catalog_rows`] and used by the
+/// OData read path to skip actor hydration on collection materialization.
+#[derive(Clone, Debug, PartialEq)]
+pub struct EntityCatalogRow {
+    pub entity_id: String,
+    pub status: String,
+    /// Raw JSONB fields object as written by the projection upsert.
+    pub fields: serde_json::Value,
+    pub sequence_nr: u64,
+}
+
 /// Backend-neutral row for one granular Cedar policy entry.
 #[derive(Clone, Debug)]
 pub struct PolicyStoreRow {
@@ -321,6 +334,22 @@ pub trait QueryPlaneStore: Send + Sync {
         entity_ids: &[String],
         field_names: &[&str],
     ) -> Result<Option<Vec<QueryProjectionFieldsRow>>, PersistenceError>;
+
+    /// Batch-fetch full entity rows from the projection catalog.
+    ///
+    /// Returns a partial result — only rows present in the catalog. IDs not
+    /// in the catalog (yet to be projected, or never written) are simply
+    /// absent from the response. Returns `None` if the backend cannot
+    /// service catalog reads at all (used by routers that fan out per
+    /// tenant; default impl returns `Some(vec![])`).
+    async fn load_entity_catalog_rows(
+        &self,
+        _tenant: &str,
+        _entity_type: &str,
+        _entity_ids: &[String],
+    ) -> Result<Option<Vec<EntityCatalogRow>>, PersistenceError> {
+        Ok(None)
+    }
 
     async fn projected_entity_counts_by_tenant(
         &self,
@@ -2147,6 +2176,28 @@ impl QueryPlaneStore for PostgresEventStore {
             })
     }
 
+    async fn load_entity_catalog_rows(
+        &self,
+        tenant: &str,
+        entity_type: &str,
+        entity_ids: &[String],
+    ) -> Result<Option<Vec<EntityCatalogRow>>, PersistenceError> {
+        self.load_entity_catalog_rows_pg(tenant, entity_type, entity_ids)
+            .await
+            .map(|rows| {
+                Some(
+                    rows.into_iter()
+                        .map(|row| EntityCatalogRow {
+                            entity_id: row.entity_id,
+                            status: row.status,
+                            fields: row.fields,
+                            sequence_nr: row.sequence_nr,
+                        })
+                        .collect(),
+                )
+            })
+    }
+
     async fn projected_entity_counts_by_tenant(
         &self,
     ) -> Result<Option<Vec<(String, u64)>>, PersistenceError> {
@@ -2209,6 +2260,28 @@ impl QueryPlaneStore for TursoEventStore {
                             entity_id: row.entity_id,
                             status: row.status,
                             fields: row.fields,
+                        })
+                        .collect(),
+                )
+            })
+    }
+
+    async fn load_entity_catalog_rows(
+        &self,
+        tenant: &str,
+        entity_type: &str,
+        entity_ids: &[String],
+    ) -> Result<Option<Vec<EntityCatalogRow>>, PersistenceError> {
+        TursoEventStore::load_entity_catalog_rows(self, tenant, entity_type, entity_ids)
+            .await
+            .map(|rows| {
+                Some(
+                    rows.into_iter()
+                        .map(|row| EntityCatalogRow {
+                            entity_id: row.entity_id,
+                            status: row.status,
+                            fields: row.fields,
+                            sequence_nr: row.sequence_nr,
                         })
                         .collect(),
                 )
@@ -2284,6 +2357,29 @@ impl QueryPlaneStore for TenantStoreRouter {
                             entity_id: row.entity_id,
                             status: row.status,
                             fields: row.fields,
+                        })
+                        .collect(),
+                )
+            })
+    }
+
+    async fn load_entity_catalog_rows(
+        &self,
+        tenant: &str,
+        entity_type: &str,
+        entity_ids: &[String],
+    ) -> Result<Option<Vec<EntityCatalogRow>>, PersistenceError> {
+        let store = self.store_for_tenant(tenant).await?;
+        TursoEventStore::load_entity_catalog_rows(&store, tenant, entity_type, entity_ids)
+            .await
+            .map(|rows| {
+                Some(
+                    rows.into_iter()
+                        .map(|row| EntityCatalogRow {
+                            entity_id: row.entity_id,
+                            status: row.status,
+                            fields: row.fields,
+                            sequence_nr: row.sequence_nr,
                         })
                         .collect(),
                 )
