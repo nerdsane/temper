@@ -116,6 +116,34 @@ async fn try_load_catalog_rows(
     }
 }
 
+/// Try to load a single entity body from the durable `entity_catalog`.
+///
+/// Returns `Some(json)` when the catalog has a row for `(tenant, entity_type,
+/// key)` and the catalog fast-read feature flag is enabled. Returns `None`
+/// when the flag is off, the catalog has no row, or the read fails — caller
+/// is expected to fall back to actor hydration in that case.
+///
+/// The returned JSON has the same shape as the actor's serialized
+/// `EntityState` so downstream code (`enrich_entity_response`, OData
+/// clients, blob hydration) can't tell the difference.
+pub(super) async fn try_load_entity_body_from_catalog(
+    state: &ServerState,
+    tenant: &TenantId,
+    entity_type: &str,
+    entity_set_name: &str,
+    key: &str,
+) -> Option<serde_json::Value> {
+    if !catalog_fast_read_enabled() {
+        return None;
+    }
+    let ids = [key.to_string()];
+    let rows = try_load_catalog_rows(state, tenant, entity_type, &ids).await;
+    let row = rows.into_iter().next().map(|(_, r)| r)?;
+    let mut body = catalog_row_to_entity_body(entity_type, entity_set_name, row);
+    hydrate_blob_refs_for_tenant(state, tenant, &mut body).await;
+    Some(body)
+}
+
 pub(super) async fn materialize_entity_set_entities(
     state: &ServerState,
     tenant: &TenantId,
@@ -310,6 +338,54 @@ mod tests {
         assert_eq!(body["fields"]["Name"], "Foo");
         assert_eq!(body["fields"]["Score"], 7);
         assert_eq!(body["@odata.id"], "DesignLanguages('en-123')");
+    }
+
+    #[test]
+    fn catalog_row_body_matches_actor_serialization_for_single_key_path() {
+        // The single-entity read path (handle_entity → load_existing_entity_body)
+        // expects the catalog-derived body to be a drop-in replacement for the
+        // actor's serialized state. Verify the keyset matches what the actor
+        // emits so enrich_entity_response and downstream clients see no diff.
+        let row = EntityCatalogRow {
+            entity_id: "fl-019dde81".to_string(),
+            status: "Ready".to_string(),
+            fields: serde_json::json!({
+                "Id": "fl-019dde81",
+                "Status": "Ready",
+                "Name": "phosphor-command-grid.html",
+                "MimeType": "text/html",
+                "content_hash": "sha256:c74e77",
+                "size_bytes": 8427,
+            }),
+            sequence_nr: 3,
+        };
+        let body = catalog_row_to_entity_body("File", "Files", row);
+        let obj = body.as_object().expect("entity body is an object");
+        // Required EntityState top-level keys.
+        for required in [
+            "entity_type",
+            "entity_id",
+            "status",
+            "item_count",
+            "counters",
+            "booleans",
+            "lists",
+            "fields",
+            "events",
+            "total_event_count",
+            "sequence_nr",
+            "@odata.id",
+        ] {
+            assert!(
+                obj.contains_key(required),
+                "missing required key: {required}"
+            );
+        }
+        // Verify @odata.id format matches what handle_entity uses.
+        assert_eq!(body["@odata.id"], "Files('fl-019dde81')");
+        // Fields blob is preserved verbatim.
+        assert_eq!(body["fields"]["Name"], "phosphor-command-grid.html");
+        assert_eq!(body["fields"]["content_hash"], "sha256:c74e77");
     }
 
     #[test]
