@@ -3,7 +3,7 @@
 import { useState, useCallback, useMemo } from "react";
 import { useRouter } from "next/navigation";
 import { fetchAgents } from "@/lib/api";
-import { useSSERefresh, useRelativeTime } from "@/lib/hooks";
+import { useSSERefresh } from "@/lib/hooks";
 import type { AgentsResponse } from "@/lib/types";
 import ErrorDisplay from "@/components/ErrorDisplay";
 import StatCard from "@/components/StatCard";
@@ -36,8 +36,6 @@ export default function AgentsPage() {
   });
 
   const data = agentsPoll.data;
-  const lastUpdated = useRelativeTime(agentsPoll.lastUpdated);
-
   const totalDenials = useMemo(() => {
     if (!data) return 0;
     return data.agents.reduce((sum, a) => sum + a.denial_count, 0);
@@ -90,7 +88,6 @@ export default function AgentsPage() {
         <div className="flex items-center gap-3">
           {lastUpdated && (
             <span className="text-xs text-[var(--color-text-muted)]">
-              Updated {lastUpdated}
             </span>
           )}
         </div>

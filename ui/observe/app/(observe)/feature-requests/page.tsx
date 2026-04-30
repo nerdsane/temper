@@ -5,7 +5,7 @@ import {
   fetchFeatureRequests,
   updateFeatureRequest,
 } from "@/lib/api";
-import { useSSERefresh, useRelativeTime } from "@/lib/hooks";
+import { useSSERefresh } from "@/lib/hooks";
 import type {
   FeatureRequest,
   FeatureRequestDisposition,
@@ -182,9 +182,6 @@ export default function FeatureRequestsPage() {
     fetcher: fetchFeatureRequests,
     sseKinds: ["FeatureRequests"],
   });
-
-  const lastUpdated = useRelativeTime(featuresPoll.lastUpdated);
-
   const handleUpdate = useCallback(
     async (id: string, disposition: FeatureRequestDisposition, notes?: string) => {
       setActing(true);
@@ -275,9 +272,6 @@ export default function FeatureRequestsPage() {
                 {counts.open} open
               </span>
             </div>
-          )}
-          {lastUpdated && (
-            <span className="text-xs text-[var(--color-text-muted)]">Updated {lastUpdated}</span>
           )}
         </div>
       </div>

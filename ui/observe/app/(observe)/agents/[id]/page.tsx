@@ -4,7 +4,7 @@ import { useState, useMemo, useCallback, useEffect } from "react";
 import { useParams, useSearchParams } from "next/navigation";
 import Link from "next/link";
 import { fetchAgentHistory, fetchAllPolicies, fetchSpecs, createPolicy, togglePolicy, deletePolicy } from "@/lib/api";
-import { useSSERefresh, useRelativeTime } from "@/lib/hooks";
+import { useSSERefresh } from "@/lib/hooks";
 import type { AgentHistoryResponse, PolicyEntry, SpecSummary } from "@/lib/types";
 import ErrorDisplay from "@/components/ErrorDisplay";
 import StatCard from "@/components/StatCard";
@@ -48,8 +48,6 @@ export default function AgentDetailPage() {
   });
 
   const data = historyPoll.data;
-  const lastUpdated = useRelativeTime(historyPoll.lastUpdated);
-
   // Fetch policies relevant to this agent
   const policiesPoll = useSSERefresh<{ policies: PolicyEntry[] }>({
     fetcher: async () => {
@@ -194,7 +192,6 @@ export default function AgentDetailPage() {
           )}
           {lastUpdated && (
             <span className="text-xs text-[var(--color-text-muted)]">
-              Updated {lastUpdated}
             </span>
           )}
         </div>

@@ -664,7 +664,7 @@ async fn migrate_trajectories(
         let matched_policy_ids = row
             .matched_policy_ids
             .as_ref()
-            .map(|ids| serde_json::to_value(ids))
+            .map(serde_json::to_value)
             .transpose()?;
         sqlx::query(
             "INSERT INTO trajectories \

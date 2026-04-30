@@ -1,7 +1,5 @@
 //! Bounded background persistence for observe trajectory entries.
 
-#[cfg(test)]
-use std::sync::Mutex;
 use std::sync::{
     Arc, OnceLock,
     atomic::{AtomicU64, AtomicUsize, Ordering},
@@ -12,22 +10,18 @@ use opentelemetry::{
     KeyValue, global,
     metrics::{Counter, Gauge, Histogram},
 };
-use tokio::sync::mpsc;
-use tokio::sync::mpsc::error::TrySendError;
 use tracing::Instrument;
 
 use crate::state::trajectory::TrajectoryEntry;
 use crate::storage::TrajectorySink;
 
 const DEFAULT_CAPACITY: usize = 8_192;
-const DRAIN_BATCH_LIMIT: usize = 128;
 
 struct TrajectoryOutboxMetrics {
     outbox_depth: Gauge<u64>,
     outbox_capacity: Gauge<u64>,
     enqueued_total: Counter<u64>,
     dropped_total: Counter<u64>,
-    batch_flush_ms: Histogram<f64>,
     persist_latency_ms: Histogram<f64>,
 }
 
@@ -38,11 +32,11 @@ fn metrics() -> &'static TrajectoryOutboxMetrics {
         TrajectoryOutboxMetrics {
             outbox_depth: meter
                 .u64_gauge("temper_trajectory_outbox_depth")
-                .with_description("Current number of trajectory entries waiting in the outbox.")
+                .with_description("Current number of trajectory entries in flight in the outbox.")
                 .build(),
             outbox_capacity: meter
                 .u64_gauge("temper_trajectory_outbox_capacity")
-                .with_description("Configured capacity of the trajectory persistence outbox.")
+                .with_description("Configured maximum in-flight depth of the trajectory persistence outbox.")
                 .build(),
             enqueued_total: meter
                 .u64_counter("temper_trajectory_outbox_enqueued_total")
@@ -52,15 +46,10 @@ fn metrics() -> &'static TrajectoryOutboxMetrics {
                 .u64_counter("temper_trajectory_outbox_dropped_total")
                 .with_description("Trajectory entries dropped because the persistence outbox was unavailable or full.")
                 .build(),
-            batch_flush_ms: meter
-                .f64_histogram("temper_trajectory_outbox_batch_flush_ms")
-                .with_unit("ms")
-                .with_description("Wall time to drain and persist one trajectory outbox batch.")
-                .build(),
             persist_latency_ms: meter
                 .f64_histogram("temper_trajectory_outbox_persist_latency_ms")
                 .with_unit("ms")
-                .with_description("Wall time to persist a trajectory entry drained from the outbox.")
+                .with_description("Wall time to persist a single trajectory entry from the outbox.")
                 .build(),
         }
     })
@@ -111,13 +100,6 @@ fn record_dropped(entry: &TrajectoryEntry, backend: &str, reason: &str) {
     metrics().dropped_total.add(1, &attrs);
 }
 
-fn record_batch_flush(duration: Duration, batch_len: usize) {
-    let attrs = [KeyValue::new("batch_len", batch_len as i64)];
-    metrics()
-        .batch_flush_ms
-        .record(duration.as_secs_f64() * 1000.0, &attrs);
-}
-
 fn record_persist_latency(
     entry: &TrajectoryEntry,
     backend: &str,
@@ -143,26 +125,23 @@ struct QueuedTrajectory {
 }
 
 pub(crate) struct TrajectoryOutbox {
-    sender: mpsc::Sender<QueuedTrajectory>,
+    capacity: usize,
     depth: Arc<AtomicUsize>,
     dropped_total: Arc<AtomicU64>,
     #[cfg(test)]
-    receiver_guard: Option<Mutex<mpsc::Receiver<QueuedTrajectory>>>,
+    inflight: Option<Arc<tokio::sync::Notify>>,
 }
 
 impl TrajectoryOutbox {
     fn spawn(capacity: usize) -> Self {
-        let (sender, receiver) = mpsc::channel(capacity);
-        let depth = Arc::new(AtomicUsize::new(0));
         record_capacity(capacity);
         record_depth(0);
-        tokio::spawn(drain(receiver, Arc::clone(&depth)));
         Self {
-            sender,
-            depth,
+            capacity,
+            depth: Arc::new(AtomicUsize::new(0)),
             dropped_total: Arc::new(AtomicU64::new(0)),
             #[cfg(test)]
-            receiver_guard: None,
+            inflight: None,
         }
     }
 
@@ -182,64 +161,65 @@ impl TrajectoryOutbox {
         entry: TrajectoryEntry,
     ) -> bool {
         let metric_entry = entry.clone();
-        self.depth.fetch_add(1, Ordering::Relaxed);
-        match self.sender.try_send(QueuedTrajectory {
+        // Backpressure: cap the in-flight depth at `capacity`. Drop-newest on
+        // overflow so a slow tenant DB cannot consume unbounded memory.
+        let prev = self.depth.fetch_add(1, Ordering::Relaxed);
+        if prev >= self.capacity {
+            self.depth.fetch_sub(1, Ordering::Relaxed);
+            self.dropped_total.fetch_add(1, Ordering::Relaxed);
+            record_depth(self.depth.load(Ordering::Relaxed));
+            record_dropped(&metric_entry, backend, "outbox_full");
+            tracing::warn!(
+                tenant = %metric_entry.tenant,
+                entity_type = %metric_entry.entity_type,
+                entity_id = %metric_entry.entity_id,
+                action = %metric_entry.action,
+                "trajectory outbox full; dropping entry"
+            );
+            return false;
+        }
+        record_enqueued(&metric_entry, backend);
+        record_depth(self.depth.load(Ordering::Relaxed));
+
+        // Spawn the persist on the current runtime so it follows the calling
+        // task's lifecycle. This avoids the cross-runtime dead-drainer hazard
+        // a single global channel-and-task would have under per-test tokio
+        // runtimes.
+        let depth = Arc::clone(&self.depth);
+        let item = QueuedTrajectory {
             sink,
             backend,
             entry,
-        }) {
-            Ok(()) => {
-                record_enqueued(&metric_entry, backend);
-                record_depth(self.depth.load(Ordering::Relaxed));
-                true
-            }
-            Err(TrySendError::Full(item)) => {
-                self.depth.fetch_sub(1, Ordering::Relaxed);
-                self.dropped_total.fetch_add(1, Ordering::Relaxed);
-                record_depth(self.depth.load(Ordering::Relaxed));
-                record_dropped(&item.entry, backend, "outbox_full");
-                tracing::warn!(
-                    tenant = %item.entry.tenant,
-                    entity_type = %item.entry.entity_type,
-                    entity_id = %item.entry.entity_id,
-                    action = %item.entry.action,
-                    "trajectory outbox full; dropping entry"
-                );
-                false
-            }
-            Err(TrySendError::Closed(item)) => {
-                self.depth.fetch_sub(1, Ordering::Relaxed);
-                self.dropped_total.fetch_add(1, Ordering::Relaxed);
-                record_depth(self.depth.load(Ordering::Relaxed));
-                record_dropped(&item.entry, backend, "outbox_closed");
-                tracing::error!(
-                    tenant = %item.entry.tenant,
-                    entity_type = %item.entry.entity_type,
-                    entity_id = %item.entry.entity_id,
-                    action = %item.entry.action,
-                    "trajectory outbox closed; dropping entry"
-                );
-                false
-            }
+        };
+        // In unit tests built via `for_tests`, skip the spawn so the bounded
+        // depth/drop semantics can be exercised without a tokio runtime.
+        #[cfg(test)]
+        if self.inflight.is_some() {
+            return true;
         }
+        tokio::spawn(async move {
+            persist_drained(item).await;
+            depth.fetch_sub(1, Ordering::Relaxed);
+            record_depth(depth.load(Ordering::Relaxed));
+        });
+        true
     }
 
     #[cfg(test)]
     fn for_tests(capacity: usize) -> Self {
-        let (sender, receiver) = mpsc::channel(capacity);
         record_capacity(capacity);
         record_depth(0);
         Self {
-            sender,
+            capacity,
             depth: Arc::new(AtomicUsize::new(0)),
             dropped_total: Arc::new(AtomicU64::new(0)),
-            receiver_guard: Some(Mutex::new(receiver)),
+            inflight: Some(Arc::new(tokio::sync::Notify::new())),
         }
     }
 
     #[cfg(test)]
     fn try_record_for_test(&self, entry: TrajectoryEntry) -> bool {
-        debug_assert!(self.receiver_guard.is_some());
+        debug_assert!(self.inflight.is_some());
         self.try_enqueue(None, "test", entry)
     }
 
@@ -251,28 +231,6 @@ impl TrajectoryOutbox {
     #[cfg(test)]
     fn depth(&self) -> usize {
         self.depth.load(Ordering::Relaxed)
-    }
-}
-
-async fn drain(mut receiver: mpsc::Receiver<QueuedTrajectory>, depth: Arc<AtomicUsize>) {
-    while let Some(first) = receiver.recv().await {
-        let batch_started_at = Instant::now();
-        let mut batch = Vec::with_capacity(DRAIN_BATCH_LIMIT.min(depth.load(Ordering::Relaxed)));
-        batch.push(first);
-        while batch.len() < DRAIN_BATCH_LIMIT {
-            match receiver.try_recv() {
-                Ok(item) => batch.push(item),
-                Err(_) => break,
-            }
-        }
-
-        let batch_len = batch.len();
-        for item in batch {
-            depth.fetch_sub(1, Ordering::Relaxed);
-            record_depth(depth.load(Ordering::Relaxed));
-            persist_drained(item).await;
-        }
-        record_batch_flush(batch_started_at.elapsed(), batch_len);
     }
 }
 

@@ -5,6 +5,11 @@
 //! provides the boxed adapter used by the server-facing storage stack so
 //! backend selection is a composition step rather than business-code branching.
 
+// Object-safe trait return types unavoidably use Pin<Box<dyn Future<Output =
+// nested-result>>> shapes. The `EventStoreFuture` alias is the explicit
+// factoring of that pattern; clippy's type_complexity lint flags it anyway.
+#![allow(clippy::type_complexity)]
+
 use std::collections::BTreeMap;
 use std::future::Future;
 use std::pin::Pin;
@@ -408,6 +413,7 @@ pub trait ObserveReadStore: Send + Sync {
 /// Evolution engine durable metadata capability.
 #[async_trait::async_trait]
 pub trait EvolutionStore: Send + Sync {
+    #[allow(clippy::too_many_arguments)]
     async fn upsert_feature_request(
         &self,
         id: &str,
@@ -458,6 +464,7 @@ pub trait EvolutionStore: Send + Sync {
 /// Design-time verification event capability.
 #[async_trait::async_trait]
 pub trait DesignTimeEventStore: Send + Sync {
+    #[allow(clippy::too_many_arguments)]
     async fn insert_design_time_event(
         &self,
         kind: &str,
@@ -680,6 +687,7 @@ pub struct StorageStack {
 }
 
 impl StorageStack {
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         backend: BackendLabel,
         events: BoxedEventStore,

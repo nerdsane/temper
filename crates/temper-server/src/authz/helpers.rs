@@ -231,7 +231,14 @@ pub(crate) async fn record_authz_denial(
         tracing::warn!(error = %e, id = %pd.id, "failed to persist PD with governance_decision_id");
     }
 
-    // Record authorization denials as observability without back-pressuring the caller.
+    // Tell the Observe UI a new decision exists so the Decisions tab refreshes live.
+    let _ = state
+        .observe_refresh_tx
+        .send(crate::state::ObserveRefreshHint::Decisions);
+
+    // Record authorization denials as observability without back-pressuring the
+    // caller — the trajectory entry below is enqueued onto the bounded outbox
+    // and persisted by the drainer task (ADR-0067).
     let traj = TrajectoryEntry {
         timestamp: sim_now().to_rfc3339(),
         tenant: input.tenant.to_string(),
