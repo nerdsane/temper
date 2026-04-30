@@ -217,9 +217,6 @@ APP CATALOG:\n\
 \x20 await temper.list_apps() -> available pre-built apps (name, description, entity_types)\n\
 \x20 await temper.get_app(app_name) -> full app guide markdown (when to use, actions, examples)\n\
 \x20 await temper.install_app(app_name) -> install an app into the current tenant\n\
-\x20 await temper.list_skills() -> alias for list_apps (backward compatible)\n\
-\x20 await temper.get_skill(skill_name) -> alias for get_app (backward compatible)\n\
-\x20 await temper.install_skill(skill_name) -> alias for install_app (backward compatible)\n\
 \n\
 GOVERNANCE:\n\
 \x20 await temper.get_decisions(tenant, status?) -> list decisions\n\
@@ -232,8 +229,9 @@ OBSERVABILITY:\n\
 \x20 await temper.get_evolution_records(tenant, record_type?) -> O-P-A-D-I records\n\
 \x20 await temper.check_sentinel(tenant) -> trigger evolution engine\n\
 \n\
-INTEGRATION: specs declare [[integration]] sections for external APIs.\n\
-Use module = \"http_fetch\" with url and method config keys for HTTP integrations.\n\
+TRIGGERS (ADR-0046): actions declare [[action.triggers]] inline with kind = \"entity\" | \"wasm\" | \"webhook\".\n\
+For HTTP, use kind = \"wasm\" with module = \"http_fetch\", url, and method config keys.\n\
+The webhook kind is parse-only today; use wasm + http_fetch instead.\n\
 \n\
 COMPILE_WASM: Use compile_wasm(tenant, module_name, rust_source) to compile Rust into WASM.\n\
 Source should use `temper_wasm_sdk::prelude::*` and the `temper_module!` macro.\n\

@@ -1,6 +1,7 @@
 use super::*;
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
+use std::sync::Arc;
 use std::time::Duration;
 use temper_runtime::ActorSystem;
 use temper_runtime::scheduler::sim_now;
@@ -80,7 +81,10 @@ async fn observe_json(app: Router, uri: &str) -> serde_json::Value {
 }
 
 async fn wait_for_trajectory_total(app: Router, uri: &str, min_total: u64) -> serde_json::Value {
-    for _ in 0..50 {
+    // Trajectory persistence runs through the bounded outbox drainer
+    // (ADR-0067), which spawns each persist concurrently. Poll briefly to let
+    // the drainer flush this test's entries.
+    for _ in 0..100 {
         let json = observe_json(app.clone(), uri).await;
         if json["total"].as_u64().unwrap_or(0) >= min_total {
             return json;

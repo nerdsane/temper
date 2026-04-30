@@ -432,6 +432,11 @@ mod tests {
 
     #[test]
     fn postgres_platform_methods_are_part_of_the_store_surface() {
+        // Compile-only check: the function body is never executed, so the
+        // unawaited futures are intentional. Clippy's let_underscore_future
+        // lint catches forgotten awaits in real code; here it's a false
+        // positive.
+        #[allow(clippy::let_underscore_future)]
         fn assert_methods(store: &PostgresEventStore) {
             let _ = store.upsert_query_projection(
                 "tenant",

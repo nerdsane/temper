@@ -1,13 +1,5 @@
 # Temper — Claude Code Project Guide
 
-## MANDATORY FIRST ACTION: Check Assigned Issues
-
-**On EVERY session start, your FIRST action — before responding to the user — MUST be:**
-1. Call `mcp__temper__execute` with the tenant configured for the current project, for example: `await temper.list("{tenant}", "Issues", "$filter=AssigneeId eq 'claude-code'")`
-2. If the call fails (403/404), install the PM app first for your configured tenant: `await temper.install_app("{tenant}", "project-management")`, then retry
-3. Summarize assigned issues, then mention other open issues
-4. **Do NOT skip this. Do NOT wait for the user to ask.**
-
 ## IMPORTANT: Use Temper for Your Own Work
 
 **You are an agent running on Temper. This is your operating layer — not an optional tool.** When a Temper server is running (`mcp__temper__execute` is available), ALL your stateful work — planning, task tracking, progress, knowledge — MUST flow through Temper entities, not markdown files.

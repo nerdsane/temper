@@ -2,7 +2,7 @@
 
 import { useState, useMemo, useCallback, useEffect } from "react";
 import { fetchWasmModules, fetchWasmInvocations } from "@/lib/api";
-import { useSSERefresh, useRelativeTime } from "@/lib/hooks";
+import { useSSERefresh } from "@/lib/hooks";
 import type { WasmModulesResponse, WasmInvocationsResponse } from "@/lib/types";
 import ErrorDisplay from "@/components/ErrorDisplay";
 import StatCard from "@/components/StatCard";
@@ -47,8 +47,6 @@ export default function IntegrationsPage() {
 
   const modules = modulesPoll.data;
   const invocations = invocationsPoll.data;
-  const lastUpdated = useRelativeTime(modulesPoll.lastUpdated);
-
   // Derive stats
   const totalModules = modules?.total ?? 0;
   const totalInvocations = useMemo(() => {
@@ -111,9 +109,6 @@ export default function IntegrationsPage() {
                 <option key={m} value={m}>{m}</option>
               ))}
             </select>
-          )}
-          {lastUpdated && (
-            <span className="text-xs text-[var(--color-text-muted)]">Updated {lastUpdated}</span>
           )}
         </div>
       </div>

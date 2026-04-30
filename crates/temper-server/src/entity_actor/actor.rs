@@ -509,6 +509,7 @@ impl EntityActor {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(crate) async fn recover_entity_state_from_store(
     tenant: &str,
     entity_type: &str,
