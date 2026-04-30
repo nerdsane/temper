@@ -1,142 +1,54 @@
-//! Lightweight schema migration runner.
+//! Versioned schema migration runner.
 //!
-//! Executes the `CREATE TABLE IF NOT EXISTS` statements defined in
-//! [`crate::schema`] against the provided connection pool.  This is
-//! intentionally simple — for production systems consider a full migration
-//! framework such as `sqlx migrate` or `refinery`.
+//! Postgres is the canonical schema source. The migration files under
+//! `crates/temper-store-postgres/migrations/` are executed through
+//! `sqlx::migrate!()` so production cutovers can reason about schema version,
+//! not just a bag of startup-time `CREATE TABLE IF NOT EXISTS` statements.
 
 use sqlx::PgPool;
 use temper_runtime::persistence::PersistenceError;
 
-use crate::schema;
-
 /// Run all schema migrations.
 ///
-/// Creates all persistence tables used by Temper if they do not already exist.
-/// The statements are idempotent so this function is safe to call on every
-/// application start-up.
+/// Creates or upgrades all persistence tables used by Temper. The initial
+/// migration remains idempotent because existing local/dev databases may have
+/// been created by the pre-ADR-0065 bootstrap runner before `_sqlx_migrations`
+/// existed.
 pub async fn run_migrations(pool: &PgPool) -> Result<(), PersistenceError> {
-    sqlx::query(schema::CREATE_EVENTS_TABLE)
-        .execute(pool)
+    static MIGRATOR: sqlx::migrate::Migrator = sqlx::migrate!("./migrations");
+    MIGRATOR
+        .run(pool)
         .await
-        .map_err(|e| PersistenceError::Storage(format!("failed to create events table: {e}")))?;
-
-    sqlx::query(schema::CREATE_SNAPSHOTS_TABLE)
-        .execute(pool)
-        .await
-        .map_err(|e| PersistenceError::Storage(format!("failed to create snapshots table: {e}")))?;
-
-    sqlx::query(schema::CREATE_SPECS_TABLE)
-        .execute(pool)
-        .await
-        .map_err(|e| PersistenceError::Storage(format!("failed to create specs table: {e}")))?;
-
-    sqlx::query(schema::CREATE_TRAJECTORIES_TABLE)
-        .execute(pool)
-        .await
-        .map_err(|e| {
-            PersistenceError::Storage(format!("failed to create trajectories table: {e}"))
-        })?;
-
-    sqlx::query(schema::CREATE_TRAJECTORIES_SUCCESS_INDEX)
-        .execute(pool)
-        .await
-        .map_err(|e| {
-            PersistenceError::Storage(format!("failed to create trajectories success index: {e}"))
-        })?;
-
-    sqlx::query(schema::CREATE_TRAJECTORIES_ENTITY_INDEX)
-        .execute(pool)
-        .await
-        .map_err(|e| {
-            PersistenceError::Storage(format!("failed to create trajectories entity index: {e}"))
-        })?;
-
-    sqlx::query(schema::CREATE_DESIGN_TIME_EVENTS_TABLE)
-        .execute(pool)
-        .await
-        .map_err(|e| {
-            PersistenceError::Storage(format!("failed to create design_time_events table: {e}"))
-        })?;
-
-    sqlx::query(schema::CREATE_TENANT_CONSTRAINTS_TABLE)
-        .execute(pool)
-        .await
-        .map_err(|e| {
-            PersistenceError::Storage(format!("failed to create tenant_constraints table: {e}"))
-        })?;
-
-    sqlx::query(schema::CREATE_DESIGN_TIME_EVENTS_TENANT_INDEX)
-        .execute(pool)
-        .await
-        .map_err(|e| {
-            PersistenceError::Storage(format!(
-                "failed to create design_time_events tenant index: {e}"
-            ))
-        })?;
-
-    sqlx::query(schema::CREATE_ENTITY_LISTING_INDEX)
-        .execute(pool)
-        .await
-        .map_err(|e| {
-            PersistenceError::Storage(format!("failed to create entity listing index: {e}"))
-        })?;
-
-    sqlx::query(schema::CREATE_WASM_MODULES_TABLE)
-        .execute(pool)
-        .await
-        .map_err(|e| {
-            PersistenceError::Storage(format!("failed to create wasm_modules table: {e}"))
-        })?;
-
-    sqlx::query(schema::CREATE_WASM_INVOCATION_LOGS_TABLE)
-        .execute(pool)
-        .await
-        .map_err(|e| {
-            PersistenceError::Storage(format!("failed to create wasm_invocation_logs table: {e}"))
-        })?;
-
-    sqlx::query(schema::CREATE_WASM_INVOCATION_LOGS_TENANT_INDEX)
-        .execute(pool)
-        .await
-        .map_err(|e| {
-            PersistenceError::Storage(format!(
-                "failed to create wasm_invocation_logs tenant index: {e}"
-            ))
-        })?;
-
-    sqlx::query(schema::CREATE_WASM_INVOCATION_LOGS_MODULE_INDEX)
-        .execute(pool)
-        .await
-        .map_err(|e| {
-            PersistenceError::Storage(format!(
-                "failed to create wasm_invocation_logs module index: {e}"
-            ))
-        })?;
-
-    sqlx::query(schema::CREATE_WASM_INVOCATION_LOGS_CREATED_INDEX)
-        .execute(pool)
-        .await
-        .map_err(|e| {
-            PersistenceError::Storage(format!(
-                "failed to create wasm_invocation_logs created index: {e}"
-            ))
-        })?;
-
-    // Enable row-level security on all tenant-scoped tables.
-    for stmt in schema::ENABLE_TENANT_RLS {
-        sqlx::query(stmt)
-            .execute(pool)
-            .await
-            .map_err(|e| PersistenceError::Storage(format!("failed to enable tenant RLS: {e}")))?;
-    }
-
-    Ok(())
+        .map_err(|e| PersistenceError::Storage(format!("failed to run Postgres migrations: {e}")))
 }
 
 #[cfg(test)]
 mod tests {
     use crate::schema;
+
+    #[test]
+    fn versioned_migration_is_the_schema_source() {
+        let migration = include_str!("../migrations/0001_initial.sql").to_lowercase();
+        for table in [
+            "events",
+            "snapshots",
+            "specs",
+            "trajectories",
+            "entity_catalog",
+            "entity_field_index",
+            "tenant_secrets",
+            "blobs",
+        ] {
+            assert!(
+                migration.contains(&format!("create table if not exists {table}")),
+                "versioned migration missing table: {table}"
+            );
+        }
+        assert!(
+            migration.contains("enable row level security"),
+            "versioned migration must carry tenant RLS setup"
+        );
+    }
 
     #[test]
     fn migration_sql_is_idempotent() {
@@ -176,6 +88,14 @@ mod tests {
         assert!(
             schema::CREATE_WASM_INVOCATION_LOGS_TABLE.contains("IF NOT EXISTS"),
             "wasm_invocation_logs DDL must be idempotent"
+        );
+        assert!(
+            schema::CREATE_PENDING_DECISIONS_TABLE.contains("IF NOT EXISTS"),
+            "pending_decisions DDL must be idempotent"
+        );
+        assert!(
+            schema::CREATE_ENTITY_CATALOG_TABLE.contains("IF NOT EXISTS"),
+            "entity_catalog DDL must be idempotent"
         );
     }
 }

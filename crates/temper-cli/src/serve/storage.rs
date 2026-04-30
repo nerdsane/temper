@@ -3,7 +3,7 @@
 use anyhow::{Context, Result};
 
 use temper_evolution::PostgresRecordStore;
-use temper_server::event_store::ServerEventStore;
+use temper_server::storage::StorageStack;
 use temper_store_postgres::PostgresEventStore;
 use temper_store_turso::TursoEventStore;
 
@@ -11,7 +11,7 @@ use super::LoadedTenantSpecs;
 
 pub(super) async fn connect_postgres_store(
     database_url: &str,
-) -> Result<(ServerEventStore, sqlx::PgPool)> {
+) -> Result<(StorageStack, sqlx::PgPool)> {
     eprintln!("  Connecting to Postgres...");
     let pool = sqlx::PgPool::connect(database_url)
         .await
@@ -26,7 +26,7 @@ pub(super) async fn connect_postgres_store(
         .context("Failed to migrate evolution_records")?;
     eprintln!("  Postgres connected, migrations applied.");
     Ok((
-        ServerEventStore::Postgres(PostgresEventStore::new(pool.clone())),
+        StorageStack::from_postgres(PostgresEventStore::new(pool.clone())),
         pool,
     ))
 }

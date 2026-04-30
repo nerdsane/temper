@@ -51,7 +51,8 @@ impl crate::state::ServerState {
             trigger_action = %persist_entry.trigger_action,
             success = persist_entry.success,
         );
-        tokio::spawn( // determinism-ok: background persist of WASM invocation
+        tokio::spawn(
+            // determinism-ok: background persist of WASM invocation
             async move {
                 if let Err(e) = state.persist_wasm_invocation(&persist_entry).await {
                     tracing::error!(error = %e, "failed to persist WASM invocation");
@@ -216,7 +217,8 @@ impl crate::state::ServerState {
             .observe_refresh_tx
             .send(crate::state::ObserveRefreshHint::Decisions);
         let state_c = self.clone();
-        tokio::spawn(async move { // determinism-ok: background persist of pending decision
+        tokio::spawn(async move {
+            // determinism-ok: background persist of pending decision
             if let Err(e) = state_c.persist_pending_decision(&pd).await {
                 tracing::error!(error = %e, "failed to persist WASM authz decision");
             }
@@ -289,13 +291,7 @@ impl crate::state::ServerState {
                 "unmet_intent"
             );
         }
-        let state_c = self.clone();
-        #[rustfmt::skip]
-        tokio::spawn(async move { // determinism-ok: background persist
-            if let Err(e) = state_c.persist_trajectory_entry(&traj).await {
-                tracing::error!(error = %e, "failed to persist WASM authz trajectory");
-            }
-        });
+        self.enqueue_trajectory_entry(traj);
         Some(decision_id)
     }
 }

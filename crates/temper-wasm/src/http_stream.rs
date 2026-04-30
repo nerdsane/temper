@@ -69,7 +69,7 @@ pub struct HttpStreamHandles {
 }
 
 /// Full set of endpoints the kernel dispatcher + guest share for one
-/// inbound exchange (ADR-0056 dispatch + ADR-0057 Phase 2).
+/// inbound exchange (ADR-0069 dispatch + ADR-0057 Phase 2).
 ///
 /// Mirror of [`OutboundExchange`] with the directions inverted:
 ///   * Request body: KERNEL writes (axum body chunks), GUEST reads.
@@ -328,7 +328,7 @@ impl HttpStreamRegistry {
     }
 
     /// Open a full inbound exchange for a single HTTP request
-    /// dispatched via HttpEndpoint (ADR-0056). Kernel writes axum
+    /// dispatched via HttpEndpoint (ADR-0069). Kernel writes axum
     /// body chunks into `kernel_request_body`, guest reads them
     /// from `guest_request_body`. Guest writes its response body
     /// to `guest_response_body`; kernel streams chunks out via

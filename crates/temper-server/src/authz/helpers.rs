@@ -146,7 +146,7 @@ pub(crate) struct DenialInput<'a> {
 /// Record result of an authorization denial.
 ///
 /// Creates a `PendingDecision` for human review, broadcasts it via SSE, and
-/// persists both the decision and trajectory to Turso synchronously.
+/// persists both the decision and trajectory to the durable metadata backend.
 ///
 /// Returns the `PendingDecision` so callers can include the decision ID in
 /// their HTTP response.
@@ -190,7 +190,7 @@ pub(crate) async fn record_authz_denial(
     // Broadcast for SSE.
     let _ = state.pending_decision_tx.send(pd.clone());
 
-    // Persist decision to Turso synchronously.
+    // Persist decision synchronously.
     if let Err(e) = state.persist_pending_decision(&pd).await {
         tracing::warn!(error = %e, id = %pd.id, "failed to persist pending decision");
     }
@@ -236,7 +236,9 @@ pub(crate) async fn record_authz_denial(
         .observe_refresh_tx
         .send(crate::state::ObserveRefreshHint::Decisions);
 
-    // Record trajectory to Turso synchronously.
+    // Record authorization denials as observability without back-pressuring the
+    // caller — the trajectory entry below is enqueued onto the bounded outbox
+    // and persisted by the drainer task (ADR-0067).
     let traj = TrajectoryEntry {
         timestamp: sim_now().to_rfc3339(),
         tenant: input.tenant.to_string(),
@@ -259,8 +261,8 @@ pub(crate) async fn record_authz_denial(
         intent: None,
         matched_policy_ids: None,
     };
-    if let Err(e) = state.persist_trajectory_entry(&traj).await {
-        tracing::warn!(error = %e, "failed to persist authz trajectory");
+    if !state.enqueue_trajectory_entry(traj.clone()) {
+        tracing::warn!("failed to enqueue authz trajectory");
     }
 
     // Feed denial into suggestion engine for pattern detection.
@@ -273,8 +275,8 @@ pub(crate) async fn record_authz_denial(
             &traj.timestamp,
         );
     }
-    if let Some(turso) = state.persistent_store_for_tenant(input.tenant).await
-        && let Err(e) = turso
+    if let Some(store) = state.metadata_store_for_tenant(input.tenant).await
+        && let Err(e) = store
             .upsert_policy_denial_pattern(
                 input.tenant,
                 traj.agent_type.as_deref(),
@@ -285,7 +287,7 @@ pub(crate) async fn record_authz_denial(
             )
             .await
     {
-        tracing::warn!(error = %e, tenant = input.tenant, "failed to persist denial pattern");
+        tracing::warn!(error = %e, tenant = input.tenant, backend = store.backend_name(), "failed to persist denial pattern");
     }
 
     pd

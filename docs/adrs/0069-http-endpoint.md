@@ -1,4 +1,4 @@
-# ADR-0056: HttpEndpoint — inbound path-prefix routing to streaming WASM integrations
+# ADR-0069: HttpEndpoint — inbound path-prefix routing to streaming WASM integrations
 
 - Status: Proposed
 - Date: 2026-04-20

@@ -17,7 +17,8 @@ use std::time::Duration;
 use temper_jit::table::TransitionTable;
 use temper_runtime::ActorSystem;
 use temper_runtime::scheduler::install_deterministic_context;
-use temper_server::{EntityActor, EntityMsg, EntityResponse, ServerEventStore};
+use temper_server::storage::{BackendLabel, BoxedEventStore};
+use temper_server::{EntityActor, EntityMsg, EntityResponse};
 use temper_store_sim::SimEventStore;
 
 const ORDER_IOA: &str = include_str!("../../../test-fixtures/specs/order.ioa.toml");
@@ -26,9 +27,9 @@ fn order_table() -> Arc<RwLock<TransitionTable>> {
     Arc::new(RwLock::new(TransitionTable::from_ioa_source(ORDER_IOA)))
 }
 
-fn sim_store_with_handle(seed: u64) -> (Arc<ServerEventStore>, SimEventStore) {
+fn sim_store_with_handle(seed: u64) -> (BoxedEventStore, SimEventStore) {
     let inner = SimEventStore::no_faults(seed);
-    let store = Arc::new(ServerEventStore::Sim(inner.clone(), None));
+    let store = BoxedEventStore::new(inner.clone());
     (store, inner)
 }
 
@@ -65,17 +66,23 @@ async fn wait_ready(actor_ref: &temper_runtime::actor::ActorRef<EntityMsg>) {
 }
 
 /// Harness: spawn an `Order` actor bound to the given persistence id against a
-/// `SimEventStore`-backed `ServerEventStore`. Returns the actor ref plus the
+/// `SimEventStore`-backed StorageStack journal. Returns the actor ref plus the
 /// raw sim handle so tests can queue violations and inspect the journal.
 fn spawn_order(
     system: &ActorSystem,
     table: Arc<RwLock<TransitionTable>>,
-    store: Arc<ServerEventStore>,
+    store: BoxedEventStore,
     entity_id: &str,
 ) -> temper_runtime::actor::ActorRef<EntityMsg> {
-    let actor =
-        EntityActor::with_persistence("Order", entity_id, table, serde_json::json!({}), store)
-            .with_tenant("default");
+    let actor = EntityActor::with_persistence(
+        "Order",
+        entity_id,
+        table,
+        serde_json::json!({}),
+        store,
+        BackendLabel::Sim,
+    )
+    .with_tenant("default");
     system.spawn(actor, entity_id)
 }
 

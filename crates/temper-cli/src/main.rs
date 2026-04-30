@@ -13,10 +13,13 @@ mod decide;
 mod init;
 mod install;
 mod mcp;
+mod migrate_turso_to_postgres;
 mod serve;
 mod util;
 mod verify;
 mod verify_ioa;
+
+use std::path::PathBuf;
 
 use clap::{Parser, Subcommand, ValueEnum};
 
@@ -71,9 +74,8 @@ enum Commands {
         port: u16,
         /// Storage backend (`postgres`, `turso`, `redis`).
         ///
-        /// If omitted, startup preserves legacy behavior:
-        /// - use Postgres when `DATABASE_URL` is set
-        /// - otherwise run in-memory only
+        /// If omitted, `TEMPER_EVENT_STORE` can select the backend. When neither
+        /// is set, startup preserves today's default Turso/libSQL backend.
         #[arg(long, value_enum, default_value = "turso")]
         storage: StorageBackend,
         /// Install or load an app at startup. Repeatable. Two formats:
@@ -114,6 +116,33 @@ enum Commands {
     ///
     /// This subcommand is used internally by `temper serve --verify-subprocess`.
     VerifyIoa,
+    /// Copy Turso/libSQL data into a PostgreSQL store.
+    MigrateTursoToPostgres {
+        /// Tenant to migrate, or `all` to discover tenants from source data.
+        #[arg(long)]
+        tenant: String,
+        /// Read and verify the source without writing to Postgres.
+        #[arg(long)]
+        dry_run: bool,
+        /// Compare copied row counts and checksums after the migration.
+        #[arg(long)]
+        verify: bool,
+        /// Copy entity snapshots in addition to event journals.
+        #[arg(long)]
+        from_snapshot: bool,
+        /// Path where the migration manifest JSON will be written.
+        #[arg(long, default_value = "migration_manifest.json")]
+        manifest: PathBuf,
+        /// Source Turso/libSQL URL. Falls back to TURSO_URL.
+        #[arg(long)]
+        turso_url: Option<String>,
+        /// Source Turso Cloud auth token. Falls back to TURSO_AUTH_TOKEN.
+        #[arg(long)]
+        turso_auth_token: Option<String>,
+        /// Target PostgreSQL URL. Falls back to DATABASE_URL.
+        #[arg(long)]
+        database_url: Option<String>,
+    },
     /// Start the stdio MCP server for Code Mode
     Mcp {
         /// Port where Temper HTTP server is running.
@@ -128,6 +157,29 @@ enum Commands {
         #[arg(long, hide = true)]
         agent_id: Option<String>,
     },
+}
+
+fn resolve_storage_backend(
+    cli_storage: StorageBackend,
+    storage_explicit: bool,
+    env_storage: Option<&str>,
+) -> Result<StorageBackend, String> {
+    if storage_explicit {
+        return Ok(cli_storage);
+    }
+
+    let Some(value) = env_storage.map(str::trim).filter(|value| !value.is_empty()) else {
+        return Ok(cli_storage);
+    };
+
+    match value.to_ascii_lowercase().as_str() {
+        "postgres" | "pg" => Ok(StorageBackend::Postgres),
+        "turso" | "libsql" => Ok(StorageBackend::Turso),
+        "redis" => Ok(StorageBackend::Redis),
+        other => Err(format!(
+            "TEMPER_EVENT_STORE must be one of postgres, turso, redis; got {other:?}"
+        )),
+    }
 }
 
 #[tokio::main]
@@ -159,6 +211,14 @@ async fn main() -> anyhow::Result<()> {
         } => {
             let storage_explicit =
                 std::env::args().any(|arg| arg == "--storage" || arg.starts_with("--storage="));
+            let storage_env = std::env::var("TEMPER_EVENT_STORE").ok();
+            let storage_config_explicit = storage_explicit
+                || storage_env
+                    .as_deref()
+                    .is_some_and(|value| !value.trim().is_empty());
+            let storage =
+                resolve_storage_backend(storage, storage_explicit, storage_env.as_deref())
+                    .map_err(|err| anyhow::anyhow!(err))?;
             // Split --app entries by format:
             //   NAME=DIR  → load user app's specs from directory
             //   NAME      → install a built-in OS app from the embedded catalog
@@ -183,7 +243,7 @@ async fn main() -> anyhow::Result<()> {
                 apps,
                 os_app_installs,
                 storage,
-                storage_explicit,
+                storage_config_explicit,
                 !no_observe,
                 verify_subprocess,
                 discord_token,
@@ -196,6 +256,28 @@ async fn main() -> anyhow::Result<()> {
             url,
             agent_id,
         } => mcp::run(port, url, agent_id).await?,
+        Commands::MigrateTursoToPostgres {
+            tenant,
+            dry_run,
+            verify,
+            from_snapshot,
+            manifest,
+            turso_url,
+            turso_auth_token,
+            database_url,
+        } => {
+            migrate_turso_to_postgres::run(migrate_turso_to_postgres::MigrationOptions {
+                tenant,
+                dry_run,
+                verify,
+                from_snapshot,
+                manifest_path: manifest,
+                turso_url,
+                turso_auth_token,
+                database_url,
+            })
+            .await?
+        }
     }
 
     Ok(())
@@ -353,6 +435,84 @@ mod tests {
                 ..
             } => {}
             _ => panic!("expected Serve command with default turso storage"),
+        }
+    }
+
+    #[test]
+    fn storage_backend_env_is_used_when_cli_storage_is_not_explicit() {
+        assert_eq!(
+            resolve_storage_backend(StorageBackend::Turso, false, Some("postgres")).unwrap(),
+            StorageBackend::Postgres
+        );
+        assert_eq!(
+            resolve_storage_backend(StorageBackend::Turso, false, Some("redis")).unwrap(),
+            StorageBackend::Redis
+        );
+        assert_eq!(
+            resolve_storage_backend(StorageBackend::Turso, true, Some("postgres")).unwrap(),
+            StorageBackend::Turso
+        );
+    }
+
+    #[test]
+    fn storage_backend_env_rejects_unknown_values() {
+        let error = resolve_storage_backend(StorageBackend::Turso, false, Some("sqlite"))
+            .expect_err("unknown storage backend should fail");
+        assert!(error.contains("TEMPER_EVENT_STORE"));
+    }
+
+    #[test]
+    fn railway_start_command_does_not_pin_turso_storage() {
+        let railway_toml = include_str!("../../../railway.toml");
+        assert!(
+            !railway_toml.contains("--storage turso"),
+            "Railway must allow TEMPER_EVENT_STORE=postgres to select the backend"
+        );
+    }
+
+    #[test]
+    fn test_cli_parse_migrate_turso_to_postgres() {
+        let cli = Cli::parse_from([
+            "temper",
+            "migrate-turso-to-postgres",
+            "--tenant",
+            "all",
+            "--dry-run",
+            "--verify",
+            "--from-snapshot",
+            "--manifest",
+            "migration_manifest.json",
+            "--turso-url",
+            "file:temper.db",
+            "--database-url",
+            "postgres://temper:temper_dev@localhost:5432/temper",
+        ]);
+        match cli.command {
+            Commands::MigrateTursoToPostgres {
+                tenant,
+                dry_run,
+                verify,
+                from_snapshot,
+                manifest,
+                turso_url,
+                database_url,
+                ..
+            } => {
+                assert_eq!(tenant, "all");
+                assert!(dry_run);
+                assert!(verify);
+                assert!(from_snapshot);
+                assert_eq!(
+                    manifest,
+                    std::path::PathBuf::from("migration_manifest.json")
+                );
+                assert_eq!(turso_url, Some("file:temper.db".to_string()));
+                assert_eq!(
+                    database_url,
+                    Some("postgres://temper:temper_dev@localhost:5432/temper".to_string())
+                );
+            }
+            _ => panic!("expected MigrateTursoToPostgres command"),
         }
     }
 

@@ -155,6 +155,9 @@ jobs:
       - name: Readability ratchet
         run: bash scripts/readability-ratchet.sh check .ci/readability-baseline.env
 
+      - name: Storage dispatch boundary ratchet
+        run: bash scripts/check-storage-dispatch-boundary.sh
+
       # DST pattern scan DISABLED (2026-02-17)
       # Reason: Grep-based pattern matching is too brittle and caused 5+ consecutive
       # CI failures from false positives. The DST reviewer agent (.claude/agents/dst-reviewer.md)

@@ -1,7 +1,8 @@
 //! DST persistence tests: Real EntityActor + SimEventStore.
 //!
 //! These tests verify that the real persistence code path (EntityActor with
-//! ServerEventStore) works correctly with the in-memory SimEventStore backend.
+//! StorageStack event journal) works correctly with the in-memory
+//! SimEventStore backend.
 //! All tests run across multiple seeds to catch timing-dependent bugs.
 //!
 //! FoundationDB pattern: same code, simulated I/O.
@@ -13,7 +14,8 @@ use std::time::Duration;
 use temper_jit::table::TransitionTable;
 use temper_runtime::ActorSystem;
 use temper_runtime::scheduler::install_deterministic_context;
-use temper_server::{EntityActor, EntityMsg, EntityResponse, ServerEventStore};
+use temper_server::storage::{BackendLabel, BoxedEventStore};
+use temper_server::{EntityActor, EntityMsg, EntityResponse};
 use temper_store_sim::SimEventStore;
 
 const ORDER_IOA: &str = include_str!("../../../test-fixtures/specs/order.ioa.toml");
@@ -23,8 +25,8 @@ fn order_table() -> Arc<RwLock<TransitionTable>> {
     Arc::new(RwLock::new(TransitionTable::from_ioa_source(ORDER_IOA)))
 }
 
-fn sim_store(seed: u64) -> Arc<ServerEventStore> {
-    Arc::new(ServerEventStore::Sim(SimEventStore::no_faults(seed), None))
+fn sim_store(seed: u64) -> BoxedEventStore {
+    BoxedEventStore::new(SimEventStore::no_faults(seed))
 }
 
 async fn dispatch_action(
@@ -74,6 +76,7 @@ async fn dst_replay_fidelity() {
                 table.clone(),
                 serde_json::json!({}),
                 store.clone(),
+                BackendLabel::Sim,
             )
             .with_tenant("default");
             let actor_ref = system.spawn(actor, &entity_id);
@@ -101,6 +104,7 @@ async fn dst_replay_fidelity() {
             table.clone(),
             serde_json::json!({}),
             store.clone(),
+            BackendLabel::Sim,
         )
         .with_tenant("default");
         let actor_ref2 = system2.spawn(actor2, format!("{entity_id}-replay"));
@@ -127,7 +131,7 @@ async fn dst_sequence_monotonicity() {
     for seed in 0..NUM_SEEDS {
         let (_guard, _clock, _id_gen) = install_deterministic_context(seed);
         let store_inner = SimEventStore::no_faults(seed);
-        let store = Arc::new(ServerEventStore::Sim(store_inner.clone(), None));
+        let store = BoxedEventStore::new(store_inner.clone());
         let table = order_table();
         let system = ActorSystem::new("dst-seq");
 
@@ -138,6 +142,7 @@ async fn dst_sequence_monotonicity() {
             table.clone(),
             serde_json::json!({}),
             store.clone(),
+            BackendLabel::Sim,
         )
         .with_tenant("default");
         let actor_ref = system.spawn(actor, &entity_id);
@@ -185,6 +190,7 @@ async fn dst_crash_recovery() {
                 table.clone(),
                 serde_json::json!({}),
                 store.clone(),
+                BackendLabel::Sim,
             )
             .with_tenant("default");
             let actor_ref = system.spawn(actor, &entity_id);
@@ -206,6 +212,7 @@ async fn dst_crash_recovery() {
                 table.clone(),
                 serde_json::json!({}),
                 store.clone(),
+                BackendLabel::Sim,
             )
             .with_tenant("default");
             let actor_ref = system.spawn(actor, format!("{entity_id}-2"));
@@ -235,7 +242,7 @@ async fn dst_determinism_canary() {
         for run in 0..2 {
             let (_guard, _clock, _id_gen) = install_deterministic_context(seed);
             let store_inner = SimEventStore::no_faults(seed);
-            let store = Arc::new(ServerEventStore::Sim(store_inner.clone(), None));
+            let store = BoxedEventStore::new(store_inner.clone());
             let table = order_table();
             let system = ActorSystem::new(format!("dst-det-{run}"));
 
@@ -246,6 +253,7 @@ async fn dst_determinism_canary() {
                 table.clone(),
                 serde_json::json!({}),
                 store.clone(),
+                BackendLabel::Sim,
             )
             .with_tenant("default");
             let actor_ref = system.spawn(actor, &entity_id);
@@ -309,6 +317,7 @@ async fn dst_replay_preserves_data_fields() {
                 table.clone(),
                 initial,
                 store.clone(),
+                BackendLabel::Sim,
             )
             .with_tenant("default");
             let actor_ref = system.spawn(actor, &entity_id);
@@ -345,6 +354,7 @@ async fn dst_replay_preserves_data_fields() {
             table.clone(),
             serde_json::json!({}),
             store.clone(),
+            BackendLabel::Sim,
         )
         .with_tenant("default");
         let actor_ref2 = system2.spawn(actor2, format!("{entity_id}-replay"));

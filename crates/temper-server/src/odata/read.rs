@@ -443,8 +443,8 @@ async fn handle_entity_set(
     // ---- Filter push-down: try SQL-level filtering first ----
     let sql_pushdown_ids = if let Some(filter) = &query_options.filter {
         if let Some(translated) = super::filter_sql::try_translate_filter(filter) {
-            if let Some(store) = state.event_store.as_ref() {
-                match store
+            if let Some(query_plane) = state.query_plane_store() {
+                match query_plane
                     .query_field_index(
                         tenant.as_str(),
                         &entity_type,

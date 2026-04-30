@@ -1,4 +1,3 @@
-use temper_runtime::persistence::EventStore;
 use temper_runtime::tenant::TenantId;
 
 use crate::entity_actor::recover_entity_state_from_store;
@@ -7,7 +6,10 @@ use crate::runtime_metrics;
 use super::ServerState;
 
 pub(super) async fn populate_field_index_from_snapshots(state: &ServerState, tenant: &TenantId) {
-    let Some(store) = state.event_store.as_ref() else {
+    let Some((store, backend)) = state.event_journal() else {
+        return;
+    };
+    let Some(query_plane) = state.query_plane_store() else {
         return;
     };
 
@@ -37,8 +39,8 @@ pub(super) async fn populate_field_index_from_snapshots(state: &ServerState, ten
                 if let Ok(state_snapshot) =
                     serde_json::from_slice::<crate::entity_actor::EntityState>(&snapshot_bytes)
                 {
-                    if let Err(e) = store
-                        .upsert_query_projection(
+                    if let Err(e) = query_plane
+                        .upsert_projection(
                             tenant.as_str(),
                             entity_type,
                             entity_id,
@@ -123,7 +125,8 @@ pub(super) async fn populate_field_index_from_snapshots(state: &ServerState, ten
             entity_type,
             entity_id,
             &table,
-            store,
+            &store,
+            backend,
             &serde_json::json!({}),
             tenant_blob_store.as_ref(),
         )
@@ -137,8 +140,8 @@ pub(super) async fn populate_field_index_from_snapshots(state: &ServerState, ten
             );
             errors += 1;
         } else if replayed.status == "Deleted" {
-            if let Err(e) = store
-                .remove_query_projection(tenant.as_str(), entity_type, entity_id)
+            if let Err(e) = query_plane
+                .remove_projection(tenant.as_str(), entity_type, entity_id)
                 .await
             {
                 tracing::debug!(
@@ -150,8 +153,8 @@ pub(super) async fn populate_field_index_from_snapshots(state: &ServerState, ten
                 errors += 1;
             }
         } else {
-            match store
-                .upsert_query_projection(
+            match query_plane
+                .upsert_projection(
                     tenant.as_str(),
                     entity_type,
                     entity_id,

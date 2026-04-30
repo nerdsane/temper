@@ -225,9 +225,9 @@ async fn test_reconcile_os_app_skips_unchanged_bundle_digest() {
         .await
         .unwrap();
     let mut state = PlatformState::new(None);
-    state.server.event_store = Some(std::sync::Arc::new(
-        temper_server::event_store::ServerEventStore::Turso(turso),
-    ));
+    state
+        .server
+        .set_storage_stack(temper_server::StorageStack::from_turso(turso));
 
     install_skill(&state, "test-digest", "project-management")
         .await
@@ -292,9 +292,9 @@ async fn test_reconcile_os_app_delta_content_change_skips_specs() {
         .await
         .unwrap();
     let mut state = PlatformState::new(None);
-    state.server.event_store = Some(std::sync::Arc::new(
-        temper_server::event_store::ServerEventStore::Turso(turso),
-    ));
+    state
+        .server
+        .set_storage_stack(temper_server::StorageStack::from_turso(turso));
     let tenant = "test-delta-content";
 
     install_skill(&state, tenant, "project-management")
@@ -304,9 +304,9 @@ async fn test_reconcile_os_app_delta_content_change_skips_specs() {
     let current = os_app_bundle_digest("project-management").expect("project-management digest");
     let ps = state
         .server
-        .event_store
+        .storage_stack
         .as_ref()
-        .and_then(|store| store.platform_store())
+        .and_then(|stack| stack.platform.clone())
         .expect("platform store");
     ps.record_installed_app_metadata(&InstalledAppRecord {
         tenant: tenant.to_string(),
@@ -353,9 +353,9 @@ async fn test_reconcile_os_app_repairs_spec_content_drift_despite_matching_diges
         .await
         .unwrap();
     let mut state = PlatformState::new(None);
-    state.server.event_store = Some(std::sync::Arc::new(
-        temper_server::event_store::ServerEventStore::Turso(turso),
-    ));
+    state
+        .server
+        .set_storage_stack(temper_server::StorageStack::from_turso(turso));
     let tenant_name = "test-spec-drift";
     let tenant = TenantId::new(tenant_name);
 
@@ -450,9 +450,9 @@ async fn test_reconcile_os_app_repairs_entity_set_map_from_matching_digest() {
         .await
         .unwrap();
     let mut state = PlatformState::new(None);
-    state.server.event_store = Some(std::sync::Arc::new(
-        temper_server::event_store::ServerEventStore::Turso(turso),
-    ));
+    state
+        .server
+        .set_storage_stack(temper_server::StorageStack::from_turso(turso));
     let tenant_name = "test-reconcile-map";
     let tenant = TenantId::new(tenant_name);
 
@@ -1024,8 +1024,6 @@ async fn test_install_skill_activates_tenant_cedar_policies() {
 /// 5. Verify specs survived the "restart".
 #[tokio::test]
 async fn test_skill_install_survives_restart() {
-    use std::sync::Arc;
-    use temper_server::event_store::ServerEventStore;
     use temper_server::registry_bootstrap::restore_registry_from_turso;
     use temper_store_turso::TursoEventStore;
 
@@ -1034,7 +1032,9 @@ async fn test_skill_install_survives_restart() {
 
     let turso = TursoEventStore::new(&db_url, None).await.unwrap();
     let mut state = PlatformState::new(None);
-    state.server.event_store = Some(Arc::new(ServerEventStore::Turso(turso)));
+    state
+        .server
+        .set_storage_stack(temper_server::StorageStack::from_turso(turso));
     state.server.data_dir = std::path::PathBuf::from(format!(
         "/tmp/temper-adr-test-{}-data",
         uuid::Uuid::new_v4()
@@ -1053,13 +1053,7 @@ async fn test_skill_install_survives_restart() {
         assert!(registry.get_table(&tenant, "Project").is_some());
     }
 
-    let turso_ref = state
-        .server
-        .event_store
-        .as_ref()
-        .unwrap()
-        .platform_turso_store()
-        .unwrap();
+    let turso_ref = state.server.platform_turso_store().unwrap();
     let rows = turso_ref.load_specs().await.unwrap();
     assert!(
         rows.iter()
@@ -1138,21 +1132,15 @@ async fn test_restore_installed_app_heals_pending_specs_on_restart() {
         .await
         .unwrap();
     let mut state = PlatformState::new(None);
-    state.server.event_store = Some(std::sync::Arc::new(
-        temper_server::event_store::ServerEventStore::Turso(turso),
-    ));
+    state
+        .server
+        .set_storage_stack(temper_server::StorageStack::from_turso(turso));
 
     install_skill(&state, "test-heal", "project-management")
         .await
         .expect("install should succeed");
 
-    let turso_ref = state
-        .server
-        .event_store
-        .as_ref()
-        .unwrap()
-        .platform_turso_store()
-        .unwrap();
+    let turso_ref = state.server.platform_turso_store().unwrap();
 
     for entity_type in ["Issue", "Project", "Cycle", "Comment", "Label"] {
         turso_ref
@@ -1177,7 +1165,7 @@ async fn test_restore_installed_app_heals_pending_specs_on_restart() {
         );
     }
 
-    crate::recovery::restore_installed_apps(&state, turso_ref).await;
+    crate::recovery::restore_installed_apps(&state, &turso_ref).await;
 
     {
         let registry = state.registry.read().unwrap();
@@ -1220,21 +1208,15 @@ async fn test_runtime_recovery_heals_matching_digest_without_hot_reinstall() {
         .await
         .unwrap();
     let mut state = PlatformState::new(None);
-    state.server.event_store = Some(std::sync::Arc::new(
-        temper_server::event_store::ServerEventStore::Turso(turso),
-    ));
+    state
+        .server
+        .set_storage_stack(temper_server::StorageStack::from_turso(turso));
 
     install_skill(&state, "test-runtime-heal", "project-management")
         .await
         .expect("install should succeed");
 
-    let turso_ref = state
-        .server
-        .event_store
-        .as_ref()
-        .unwrap()
-        .platform_turso_store()
-        .unwrap();
+    let turso_ref = state.server.platform_turso_store().unwrap();
 
     for entity_type in ["Issue", "Project", "Cycle", "Comment", "Label"] {
         turso_ref
@@ -1261,7 +1243,7 @@ async fn test_runtime_recovery_heals_matching_digest_without_hot_reinstall() {
 
     let outcome = crate::recovery::recover_installed_app_runtime_state(
         &state,
-        turso_ref,
+        &turso_ref,
         "test-runtime-heal",
         "project-management",
     )
@@ -1313,9 +1295,9 @@ async fn test_runtime_recovery_heals_missing_entity_set_map_from_matching_digest
         .await
         .unwrap();
     let mut state = PlatformState::new(None);
-    state.server.event_store = Some(std::sync::Arc::new(
-        temper_server::event_store::ServerEventStore::Turso(turso),
-    ));
+    state
+        .server
+        .set_storage_stack(temper_server::StorageStack::from_turso(turso));
     let tenant_name = "test-runtime-map-heal";
     let tenant = TenantId::new(tenant_name);
 
@@ -1361,17 +1343,11 @@ async fn test_runtime_recovery_heals_missing_entity_set_map_from_matching_digest
             .expect("replace tenant config with a broken entity-set map");
     }
 
-    let turso_ref = state
-        .server
-        .event_store
-        .as_ref()
-        .unwrap()
-        .platform_turso_store()
-        .unwrap();
+    let turso_ref = state.server.platform_turso_store().unwrap();
 
     let outcome = crate::recovery::recover_installed_app_runtime_state(
         &state,
-        turso_ref,
+        &turso_ref,
         tenant_name,
         "project-management",
     )
@@ -1687,8 +1663,6 @@ fn test_state_field_str_accepts_lowercase_names() {
 
 #[tokio::test]
 async fn test_install_app_bootstraps_adrs_into_temper_fs() {
-    use std::sync::Arc;
-    use temper_server::event_store::ServerEventStore;
     use temper_store_turso::TursoEventStore;
 
     let app_root = std::env::temp_dir().join(format!("temper-os-apps-{}", uuid::Uuid::new_v4()));
@@ -1715,7 +1689,9 @@ async fn test_install_app_bootstraps_adrs_into_temper_fs() {
     let db_url = format!("file:{db_path}");
     let turso = TursoEventStore::new(&db_url, None).await.unwrap();
     let mut state = PlatformState::new(None);
-    state.server.event_store = Some(Arc::new(ServerEventStore::Turso(turso)));
+    state
+        .server
+        .set_storage_stack(temper_server::StorageStack::from_turso(turso));
     state.server.data_dir = std::path::PathBuf::from(format!(
         "/tmp/temper-adr-test-{}-data",
         uuid::Uuid::new_v4()
@@ -1955,8 +1931,6 @@ to = "Authorized"
 
 #[tokio::test]
 async fn test_local_stream_uploads_create_real_file_version_lineage() {
-    use std::sync::Arc;
-    use temper_server::event_store::ServerEventStore;
     use temper_server::state::DispatchCommand;
     use temper_store_turso::TursoEventStore;
 
@@ -1967,7 +1941,9 @@ async fn test_local_stream_uploads_create_real_file_version_lineage() {
     let db_url = format!("file:{db_path}");
     let turso = TursoEventStore::new(&db_url, None).await.unwrap();
     let mut state = PlatformState::new(None);
-    state.server.event_store = Some(Arc::new(ServerEventStore::Turso(turso)));
+    state
+        .server
+        .set_storage_stack(temper_server::StorageStack::from_turso(turso));
     state.server.data_dir = std::path::PathBuf::from(format!(
         "/tmp/temper-file-version-lineage-{}-data",
         uuid::Uuid::new_v4()

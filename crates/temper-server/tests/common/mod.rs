@@ -4,13 +4,11 @@
 //! duplicated scaffolding across DST test suites.
 #![allow(dead_code)]
 
-use std::sync::Arc;
-
 use temper_runtime::ActorSystem;
 use temper_runtime::tenant::TenantId;
 use temper_server::registry::SpecRegistry;
 use temper_server::request_context::AgentContext;
-use temper_server::{ServerEventStore, ServerState};
+use temper_server::{ServerState, StorageStack};
 use temper_spec::csdl::parse_csdl;
 use temper_store_sim::SimEventStore;
 
@@ -38,14 +36,13 @@ pub fn build_single_tenant_state_with_store(
     tenant: &str,
     entities: &[(&str, &str)],
 ) -> ServerState {
-    let store = ServerEventStore::Sim(sim_store, None);
     let mut registry = SpecRegistry::new();
     let csdl = parse_csdl(CSDL_XML).expect("CSDL parse");
     registry.register_tenant(tenant, csdl, CSDL_XML.to_string(), entities);
 
     let system = ActorSystem::new(system_name);
     let mut state = ServerState::from_registry(system, registry);
-    state.event_store = Some(Arc::new(store));
+    state.set_storage_stack(StorageStack::from_sim(sim_store, None));
     state
 }
 
@@ -62,7 +59,6 @@ pub fn build_single_tenant_state(
     entities: &[(&str, &str)],
 ) -> (ServerState, SimEventStore) {
     let sim_store = SimEventStore::no_faults(seed);
-    let store = ServerEventStore::Sim(sim_store.clone(), None);
 
     let mut registry = SpecRegistry::new();
     let csdl = parse_csdl(CSDL_XML).expect("CSDL parse");
@@ -70,7 +66,7 @@ pub fn build_single_tenant_state(
 
     let system = ActorSystem::new(system_name);
     let mut state = ServerState::from_registry(system, registry);
-    state.event_store = Some(Arc::new(store));
+    state.set_storage_stack(StorageStack::from_sim(sim_store.clone(), None));
     (state, sim_store)
 }
 
@@ -84,7 +80,6 @@ pub fn build_two_tenant_state(
     entities_b: &[(&str, &str)],
 ) -> ServerState {
     let sim_store = SimEventStore::no_faults(seed);
-    let store = ServerEventStore::Sim(sim_store, None);
 
     let mut registry = SpecRegistry::new();
     let csdl_a = parse_csdl(CSDL_XML).expect("CSDL parse");
@@ -95,7 +90,7 @@ pub fn build_two_tenant_state(
 
     let system = ActorSystem::new(system_name);
     let mut state = ServerState::from_registry(system, registry);
-    state.event_store = Some(Arc::new(store));
+    state.set_storage_stack(StorageStack::from_sim(sim_store, None));
     state
 }
 

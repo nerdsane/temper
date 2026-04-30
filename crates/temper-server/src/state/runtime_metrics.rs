@@ -71,10 +71,10 @@ impl RuntimeMetricInstruments {
         let indexed_total: u64 = indexed_by_tenant.values().copied().sum();
         self.indexed_entities.record(indexed_total, &[]);
 
-        if let Some(store) = state.event_store.as_ref()
+        if let Some(query_plane) = state.query_plane_store()
             && let Ok(Ok(Some(projected_by_tenant))) = tokio::time::timeout(
                 self.durable_store_timeout,
-                store.projected_entity_counts_by_tenant(),
+                query_plane.projected_entity_counts_by_tenant(),
             )
             .await
         {

@@ -1,14 +1,12 @@
-use std::sync::Arc;
-
 use temper_runtime::ActorSystem;
 use temper_runtime::persistence::{EventMetadata, EventStore, PersistenceEnvelope};
 use temper_runtime::scheduler::sim_now;
 use temper_runtime::tenant::TenantId;
 use temper_store_turso::TursoEventStore;
 
-use temper_server::event_store::ServerEventStore;
 use temper_server::registry::SpecRegistry;
 use temper_server::state::ServerState;
+use temper_server::storage::StorageStack;
 use temper_spec::csdl::parse_csdl;
 
 const CSDL_XML: &str = include_str!("../../../test-fixtures/specs/model.csdl.xml");
@@ -25,7 +23,7 @@ fn build_state_with_turso(system_name: &str, store: TursoEventStore) -> ServerSt
     );
 
     let mut state = ServerState::from_registry(ActorSystem::new(system_name), registry);
-    state.event_store = Some(Arc::new(ServerEventStore::Turso(store)));
+    state.set_storage_stack(StorageStack::from_turso(store));
     state
 }
 
@@ -58,7 +56,7 @@ async fn ensure_entity_loaded_returns_false_when_no_transition_table_exists() {
 
     let mut state =
         ServerState::from_registry(ActorSystem::new("test-ensure-loaded"), SpecRegistry::new());
-    state.event_store = Some(Arc::new(ServerEventStore::Turso(store)));
+    state.set_storage_stack(StorageStack::from_turso(store));
 
     let loaded = state
         .ensure_entity_loaded(&TenantId::new("tenant-a"), "Order", "ord-1")

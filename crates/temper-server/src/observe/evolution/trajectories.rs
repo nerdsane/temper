@@ -21,7 +21,7 @@ pub(crate) struct TrajectoryQueryParams {
     pub failed_limit: Option<usize>,
 }
 
-/// GET /observe/trajectories -- aggregated trajectory stats from Turso.
+/// GET /observe/trajectories -- aggregated trajectory stats.
 ///
 /// Returns:
 /// - `total`: total matching entries
@@ -39,14 +39,13 @@ pub(crate) async fn handle_trajectories(
     let failed_limit = params.failed_limit.unwrap_or(50).min(500);
     let success_filter: Option<bool> = params.success.as_deref().map(|s| s == "true");
 
-    // Determine which stores to query: tenant-scoped or fan-out.
     let stores = if let Some(ref scope) = tenant_scope {
-        match state.persistent_store_for_tenant(scope.as_str()).await {
-            Some(turso) => vec![turso],
+        match state.metadata_store_for_tenant(scope.as_str()).await {
+            Some(store) => vec![store],
             None => Vec::new(),
         }
     } else {
-        state.collect_all_turso_stores().await
+        state.collect_all_metadata_stores().await
     };
 
     if !stores.is_empty() {
@@ -58,8 +57,8 @@ pub(crate) async fn handle_trajectories(
             std::collections::BTreeMap::new();
         let mut failed_intents = Vec::new();
 
-        for turso in &stores {
-            match turso
+        for store in &stores {
+            match store
                 .query_trajectory_stats(
                     params.entity_type.as_deref(),
                     params.action.as_deref(),
@@ -88,7 +87,7 @@ pub(crate) async fn handle_trajectories(
                     failed_intents.extend(stats.failed_intents);
                 }
                 Err(e) => {
-                    tracing::warn!(error = %e, "failed to query trajectories from Turso");
+                    tracing::warn!(error = %e, backend = store.backend_name(), "failed to query trajectories");
                 }
             }
         }
@@ -112,7 +111,7 @@ pub(crate) async fn handle_trajectories(
         })));
     }
 
-    // Fallback: empty response when no Turso configured.
+    // Fallback: empty response when no durable metadata backend is configured.
     Ok(Json(serde_json::json!({
         "total": 0,
         "success_count": 0,
@@ -195,10 +194,9 @@ pub(crate) async fn handle_unmet_intent(
             .or_else(|| Some(intent.to_string())),
         matched_policy_ids: None,
     };
-    state
-        .persist_trajectory_entry(&entry)
-        .await
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
+    if !state.enqueue_trajectory_entry(entry) {
+        tracing::warn!("failed to enqueue unmet-intent trajectory");
+    }
 
     Ok(StatusCode::CREATED)
 }
@@ -266,8 +264,8 @@ pub(crate) async fn handle_post_ots_trajectory(
         .and_then(|v| v.to_str().ok())
         .unwrap_or("default");
 
-    if let Some(turso) = state.persistent_store_for_tenant(tenant).await {
-        turso
+    if let Some(store) = state.metadata_store_for_tenant(tenant).await {
+        store
             .persist_ots_trajectory(&temper_store_turso::OtsTrajectoryParams {
                 trajectory_id: &trajectory_id,
                 tenant,
@@ -315,14 +313,14 @@ pub(crate) async fn handle_get_ots_trajectories(
         .unwrap_or("default");
     let limit = params.limit.unwrap_or(50).min(500);
 
-    let Some(turso) = state.persistent_store_for_tenant(tenant).await else {
+    let Some(store) = state.metadata_store_for_tenant(tenant).await else {
         return Ok(Json(serde_json::json!({
             "trajectories": [],
             "total": 0,
         })));
     };
 
-    match turso
+    match store
         .list_ots_trajectories(
             tenant,
             params.agent_id.as_deref(),

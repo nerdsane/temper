@@ -152,8 +152,8 @@ pub(crate) async fn handle_audit(
         matched_policy_ids: None,
     };
 
-    if let Err(e) = state.persist_trajectory_entry(&entry).await {
-        tracing::error!(error = %e, "failed to persist audit trajectory entry");
+    if !state.enqueue_trajectory_entry(entry) {
+        tracing::warn!("failed to enqueue audit trajectory entry");
     }
 
     (

@@ -4,10 +4,12 @@
 //! This provides persistent local blob storage so the blob_adapter WASM module
 //! can upload/download via HTTP without requiring external S3/R2.
 
-use crate::TursoEventStore;
 use libsql::params;
 use std::time::Duration;
 
+use crate::TursoEventStore;
+
+use super::TursoBlobRow;
 use super::write_gate::WritePriority;
 
 const BLOB_STORE_ATTEMPTS: usize = 6;
@@ -197,5 +199,57 @@ impl TursoEventStore {
         }
 
         Err("blob get failed: exhausted retry budget".to_string())
+    }
+
+    /// List stored blobs for storage migration.
+    ///
+    /// Expired blobs are included deliberately: migration is a data-copy
+    /// operation, while `sweep_expired_blobs` remains responsible for retention.
+    pub async fn list_blobs(&self, limit: i64) -> Result<Vec<TursoBlobRow>, String> {
+        let conn = self
+            .configured_connection()
+            .await
+            .map_err(|e| e.to_string())?;
+        let mut rows = conn
+            .query(
+                "SELECT blob_key, data, size_bytes, created_at, expires_at \
+                 FROM blobs \
+                 ORDER BY blob_key \
+                 LIMIT ?1",
+                params![limit],
+            )
+            .await
+            .map_err(|e| format!("blob list failed: {e}"))?;
+
+        let mut out = Vec::new();
+        while let Some(row) = rows
+            .next()
+            .await
+            .map_err(|e| format!("blob row fetch failed: {e}"))?
+        {
+            let data = row
+                .get_value(1)
+                .map_err(|e| format!("blob data read failed: {e}"))
+                .and_then(|value| match value {
+                    libsql::Value::Blob(bytes) => Ok(bytes),
+                    _ => Err("blob data column is not BLOB type".to_string()),
+                })?;
+            out.push(TursoBlobRow {
+                blob_key: row
+                    .get::<String>(0)
+                    .map_err(|e| format!("blob key read failed: {e}"))?,
+                data,
+                size_bytes: row
+                    .get::<i64>(2)
+                    .map_err(|e| format!("blob size read failed: {e}"))?,
+                created_at: row
+                    .get::<String>(3)
+                    .map_err(|e| format!("blob created_at read failed: {e}"))?,
+                expires_at: row
+                    .get::<Option<String>>(4)
+                    .map_err(|e| format!("blob expires_at read failed: {e}"))?,
+            });
+        }
+        Ok(out)
     }
 }
