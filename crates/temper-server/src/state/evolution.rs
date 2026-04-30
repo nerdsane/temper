@@ -1,6 +1,6 @@
 //! Backend-neutral evolution record access.
 //!
-//! Dispatches to whichever backend is available (Turso → Postgres) so that
+//! Dispatches to whichever durable metadata backend is available so that
 //! observe endpoints work regardless of the configured event store.
 
 use temper_store_turso::EvolutionRecordRow;
@@ -16,14 +16,13 @@ impl ServerState {
         record_type: Option<&str>,
         status: Option<&str>,
     ) -> Result<Vec<EvolutionRecordRow>, String> {
-        // Prefer Turso when available.
-        if let Some(turso) = self.platform_persistent_store() {
-            let rows = turso
+        if let Some(store) = self.platform_metadata_store() {
+            let rows = store
                 .list_evolution_records(record_type, status)
                 .await
                 .map_err(|e| {
                     tracing::warn!(
-                        backend = "turso",
+                        backend = store.backend_name(),
                         record_type,
                         status,
                         error = %e,
@@ -32,7 +31,7 @@ impl ServerState {
                     e.to_string()
                 })?;
             tracing::info!(
-                backend = "turso",
+                backend = store.backend_name(),
                 record_type,
                 status,
                 count = rows.len(),
@@ -77,16 +76,16 @@ impl ServerState {
         &self,
         id: &str,
     ) -> Result<Option<EvolutionRecordRow>, String> {
-        if let Some(turso) = self.platform_persistent_store() {
-            let row = turso
+        if let Some(store) = self.platform_metadata_store() {
+            let row = store
                 .get_evolution_record(id)
                 .await
                 .map_err(|e| {
-                    tracing::warn!(backend = "turso", record_id = id, error = %e, "evolution.store.read");
+                    tracing::warn!(backend = store.backend_name(), record_id = id, error = %e, "evolution.store.read");
                     e.to_string()
                 })?;
             tracing::info!(
-                backend = "turso",
+                backend = store.backend_name(),
                 record_id = id,
                 found = row.is_some(),
                 "evolution.record.get"
@@ -116,12 +115,16 @@ impl ServerState {
     /// List ranked insights (I-Records) from the first available backend.
     #[instrument(skip_all, fields(otel.name = "evolution.list_ranked_insights"))]
     pub async fn list_ranked_insights(&self) -> Result<Vec<EvolutionRecordRow>, String> {
-        if let Some(turso) = self.platform_persistent_store() {
-            let rows = turso.list_ranked_insights().await.map_err(|e| {
-                tracing::warn!(backend = "turso", error = %e, "evolution.store.read");
+        if let Some(store) = self.platform_metadata_store() {
+            let rows = store.list_ranked_insights().await.map_err(|e| {
+                tracing::warn!(backend = store.backend_name(), error = %e, "evolution.store.read");
                 e.to_string()
             })?;
-            tracing::info!(backend = "turso", count = rows.len(), "evolution.insight");
+            tracing::info!(
+                backend = store.backend_name(),
+                count = rows.len(),
+                "evolution.insight"
+            );
             return Ok(rows);
         }
 
@@ -154,8 +157,8 @@ impl ServerState {
         derived_from: Option<&str>,
         data_json: &str,
     ) -> Result<(), String> {
-        if let Some(turso) = self.platform_persistent_store() {
-            turso
+        if let Some(store) = self.platform_metadata_store() {
+            store
                 .insert_evolution_record(
                     id,
                     record_type,
@@ -167,7 +170,7 @@ impl ServerState {
                 .await
                 .map_err(|e| {
                     tracing::warn!(
-                        backend = "turso",
+                        backend = store.backend_name(),
                         record_id = id,
                         record_type,
                         status,
@@ -177,7 +180,7 @@ impl ServerState {
                     e.to_string()
                 })?;
             tracing::info!(
-                backend = "turso",
+                backend = store.backend_name(),
                 record_id = id,
                 record_type,
                 status,

@@ -10,11 +10,11 @@ use temper_spec::csdl::parse_csdl;
 use temper_store_turso::TursoEventStore;
 use tower::ServiceExt;
 
-use crate::event_store::ServerEventStore;
 use crate::registry::SpecRegistry;
 use crate::request_context::AgentContext;
 use crate::secrets::vault::SecretsVault;
 use crate::state::TrajectoryEntry;
+use crate::storage::StorageStack;
 
 const CSDL_XML: &str = include_str!("../../../../test-fixtures/specs/model.csdl.xml");
 const ORDER_IOA: &str = include_str!("../../../../test-fixtures/specs/order.ioa.toml");
@@ -48,7 +48,7 @@ async fn test_state_with_turso() -> ServerState {
         .await
         .expect("create local turso db");
     let mut state = test_state_with_registry();
-    state.event_store = Some(Arc::new(ServerEventStore::Turso(turso)));
+    state.set_storage_stack(StorageStack::from_turso(turso));
     state
 }
 
@@ -81,7 +81,10 @@ async fn observe_json(app: Router, uri: &str) -> serde_json::Value {
 }
 
 async fn wait_for_trajectory_total(app: Router, uri: &str, min_total: u64) -> serde_json::Value {
-    for _ in 0..50 {
+    // Trajectory persistence runs through the bounded outbox drainer
+    // (ADR-0067), which spawns each persist concurrently. Poll briefly to let
+    // the drainer flush this test's entries.
+    for _ in 0..100 {
         let json = observe_json(app.clone(), uri).await;
         if json["total"].as_u64().unwrap_or(0) >= min_total {
             return json;
@@ -152,7 +155,7 @@ async fn batch_file_text_read_returns_projected_file_contents_in_request_order()
     let state = test_state_with_turso().await;
     let tenant = "default";
     let turso = state
-        .persistent_store_for_tenant(tenant)
+        .turso_store_for_tenant(tenant)
         .await
         .expect("tenant turso store");
 
@@ -228,7 +231,7 @@ async fn batch_file_version_text_read_returns_immutable_version_contents_in_requ
     let state = test_state_with_turso().await;
     let tenant = "default";
     let turso = state
-        .persistent_store_for_tenant(tenant)
+        .turso_store_for_tenant(tenant)
         .await
         .expect("tenant turso store");
 
@@ -302,7 +305,7 @@ async fn batch_file_version_text_read_uses_local_store_for_internal_blob_endpoin
     let mut state = test_state_with_turso().await;
     let tenant = "default";
     let turso = state
-        .persistent_store_for_tenant(tenant)
+        .turso_store_for_tenant(tenant)
         .await
         .expect("tenant turso store");
 
@@ -560,7 +563,7 @@ async fn test_approve_decision_reload_failure_keeps_pending_and_policies_unchang
     assert_eq!(response.status(), StatusCode::BAD_REQUEST);
 
     // Verify decision status unchanged in Turso.
-    let turso = state.platform_persistent_store().expect("turso configured");
+    let turso = state.platform_turso_store().expect("turso configured");
     let data_str = turso
         .get_pending_decision(&decision_id)
         .await
@@ -1235,7 +1238,7 @@ async fn test_evolution_decide_creates_d_record() {
     };
     let data_json = serde_json::to_string(&obs).unwrap();
     state
-        .platform_persistent_store()
+        .platform_turso_store()
         .expect("turso configured")
         .insert_evolution_record(
             &obs.header.id,
@@ -1521,7 +1524,7 @@ async fn test_load_dir_emits_design_time_events() {
     let system = ActorSystem::new("test-load-dir-events");
     let registry = SpecRegistry::new();
     let mut state = ServerState::from_registry(system, registry);
-    state.event_store = Some(Arc::new(ServerEventStore::Turso(turso)));
+    state.set_storage_stack(StorageStack::from_turso(turso));
 
     let app = Router::new()
         .nest("/observe", build_observe_router())
@@ -1554,7 +1557,7 @@ async fn test_load_dir_emits_design_time_events() {
         .unwrap();
 
     // Check that design-time events were persisted to Turso.
-    let turso = state.platform_persistent_store().expect("turso configured");
+    let turso = state.platform_turso_store().expect("turso configured");
     let events = turso
         .list_design_time_events(None, 1000)
         .await

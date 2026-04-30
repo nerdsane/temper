@@ -52,14 +52,14 @@ pub(crate) async fn handle_list_decisions(
     if let Some(resp) = require_policy_auth(&state, &headers, &tenant).await {
         return resp;
     }
-    if let Some(turso) = state.persistent_store_for_tenant(&tenant).await {
-        match turso
+    if let Some(store) = state.metadata_store_for_tenant(&tenant).await {
+        match store
             .query_decisions(&tenant, params.status.as_deref())
             .await
         {
             Ok(data_strings) => return format_decision_list(data_strings),
             Err(e) => {
-                tracing::warn!(error = %e, "failed to query decisions from Turso");
+                tracing::warn!(error = %e, backend = store.backend_name(), "failed to query decisions");
             }
         }
     }
@@ -87,17 +87,17 @@ pub(crate) async fn handle_approve_decision(
             .into_response();
     }
 
-    // Read decision from Turso (single source of truth).
+    // Read decision from the durable metadata backend.
     let mut decision: PendingDecision = {
-        let Some(turso) = state.persistent_store_for_tenant(&tenant).await else {
-            tracing::error!("Turso backend not configured for approve decision");
+        let Some(store) = state.metadata_store_for_tenant(&tenant).await else {
+            tracing::error!("durable metadata backend not configured for approve decision");
             return (
                 StatusCode::SERVICE_UNAVAILABLE,
-                "Turso backend not configured",
+                "durable metadata backend not configured",
             )
                 .into_response();
         };
-        match turso.get_pending_decision(&id).await {
+        match store.get_pending_decision(&id).await {
             Ok(Some(data_str)) => match serde_json::from_str::<PendingDecision>(&data_str) {
                 Ok(d) if d.tenant == tenant => d,
                 _ => {
@@ -110,7 +110,7 @@ pub(crate) async fn handle_approve_decision(
                 return (StatusCode::NOT_FOUND, "Decision not found").into_response();
             }
             Err(e) => {
-                tracing::error!(error = %e, "failed to load decision from Turso");
+                tracing::error!(error = %e, backend = store.backend_name(), "failed to load decision");
                 return (
                     StatusCode::INTERNAL_SERVER_ERROR,
                     format!("Failed to load decision: {e}"),
@@ -171,7 +171,7 @@ pub(crate) async fn handle_approve_decision(
     decision.decided_at = Some(sim_now().to_rfc3339());
     let approved_decision = decision.clone();
 
-    // Persist updated decision to Turso synchronously.
+    // Persist updated decision synchronously.
     if let Err(e) = state.persist_pending_decision(&approved_decision).await {
         tracing::warn!(id = %id, error = %e, "failed to persist approved decision");
     }
@@ -200,10 +200,10 @@ pub(crate) async fn handle_approve_decision(
         verification_results: None,
         implementation: None,
     };
-    // Persist D-Record to Turso (evolution records stay on platform DB).
-    if let Some(turso) = state.platform_persistent_store() {
+    // Persist D-Record to the platform metadata backend.
+    if let Some(store) = state.platform_metadata_store() {
         let data_json = serde_json::to_string(&d_record).unwrap_or_default();
-        if let Err(e) = turso
+        if let Err(e) = store
             .insert_evolution_record(
                 &d_record.header.id,
                 "Decision",
@@ -214,7 +214,7 @@ pub(crate) async fn handle_approve_decision(
             )
             .await
         {
-            tracing::warn!(error = %e, "failed to persist D-Record to Turso");
+            tracing::warn!(error = %e, backend = store.backend_name(), "failed to persist D-Record");
         }
     }
 
@@ -279,17 +279,17 @@ pub(crate) async fn handle_deny_decision(
         .and_then(|v| v.as_str())
         .map(String::from);
 
-    // Read decision from Turso (single source of truth).
+    // Read decision from the durable metadata backend.
     let mut decision: PendingDecision = {
-        let Some(turso) = state.persistent_store_for_tenant(&tenant).await else {
-            tracing::error!("Turso backend not configured for deny decision");
+        let Some(store) = state.metadata_store_for_tenant(&tenant).await else {
+            tracing::error!("durable metadata backend not configured for deny decision");
             return (
                 StatusCode::SERVICE_UNAVAILABLE,
-                "Turso backend not configured",
+                "durable metadata backend not configured",
             )
                 .into_response();
         };
-        match turso.get_pending_decision(&id).await {
+        match store.get_pending_decision(&id).await {
             Ok(Some(data_str)) => match serde_json::from_str::<PendingDecision>(&data_str) {
                 Ok(d) if d.tenant == tenant => d,
                 _ => {
@@ -302,7 +302,7 @@ pub(crate) async fn handle_deny_decision(
                 return (StatusCode::NOT_FOUND, "Decision not found").into_response();
             }
             Err(e) => {
-                tracing::error!(error = %e, "failed to load decision from Turso");
+                tracing::error!(error = %e, backend = store.backend_name(), "failed to load decision");
                 return (
                     StatusCode::INTERNAL_SERVER_ERROR,
                     format!("Failed to load decision: {e}"),
@@ -326,7 +326,7 @@ pub(crate) async fn handle_deny_decision(
     decision.decided_at = Some(sim_now().to_rfc3339());
     let denied_decision = decision.clone();
 
-    // Persist updated decision to Turso synchronously.
+    // Persist updated decision synchronously.
     if let Err(e) = state.persist_pending_decision(&denied_decision).await {
         tracing::warn!(error = %e, "failed to persist denied decision");
     }
@@ -420,14 +420,13 @@ pub(crate) async fn handle_list_all_decisions(
     if let Err(status) = require_observe_auth(&state, &headers, "manage_policies", "PolicySet") {
         return (status, "Authorization required for cross-tenant access").into_response();
     }
-    // Fan-out across all tenant stores to aggregate decisions.
-    let stores = state.collect_all_turso_stores().await;
+    let stores = state.collect_all_metadata_stores().await;
     let mut all_data = Vec::new();
-    for turso in &stores {
-        match turso.query_all_decisions(params.status.as_deref()).await {
+    for store in &stores {
+        match store.query_all_decisions(params.status.as_deref()).await {
             Ok(data_strings) => all_data.extend(data_strings),
             Err(e) => {
-                tracing::warn!(error = %e, "failed to query decisions from a Turso store");
+                tracing::warn!(error = %e, backend = store.backend_name(), "failed to query decisions from metadata store");
             }
         }
     }

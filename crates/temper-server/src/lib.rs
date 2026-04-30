@@ -14,7 +14,6 @@ pub mod blob_sweeper;
 pub mod blobs;
 pub mod channels;
 pub mod entity_actor;
-pub mod event_store;
 pub mod events;
 pub mod eventual_invariants;
 pub mod http_endpoint;
@@ -37,12 +36,14 @@ pub mod secrets;
 #[cfg(feature = "observe")]
 pub mod sentinel;
 pub mod state;
+pub mod storage;
+pub(crate) mod trajectory_outbox;
 pub mod trigger;
 pub mod wasm_registry;
 pub mod webhooks;
 
 pub use entity_actor::{EntityActor, EntityActorHandler, EntityMsg, EntityResponse, EntityState};
-pub use event_store::ServerEventStore;
 pub use registry::SpecRegistry;
 pub use router::build_router;
 pub use state::ServerState;
+pub use storage::StorageStack;

@@ -1,4 +1,4 @@
-//! In-memory routing table for ADR-0056 `HttpEndpoint` entities.
+//! In-memory routing table for ADR-0069 `HttpEndpoint` entities.
 //!
 //! The kernel's axum router consults this table as a fallback (after
 //! built-in routes). On each request, the table does longest-prefix
@@ -8,7 +8,7 @@
 //! inbound exchange (ADR-0057 Phase 2) and invokes the bound WASM
 //! integration.
 //!
-//! Discipline (per ADR-0056):
+//! Discipline (per ADR-0069):
 //!   * Longest-prefix match wins; ties on length are rejected at
 //!     `Create` time by a cross-field invariant.
 //!   * Built-in namespaces (`/tdata`, `/webhooks`, `/_admin`,
@@ -251,7 +251,7 @@ pub async fn rebuild_tenant_table(state: &crate::state::ServerState, tenant: &Te
 /// Rebuild semantics are eager: any HttpEndpoint-typed transition
 /// (Create, Pause, Resume, Delete) triggers a full re-enumeration.
 /// Cost is O(active_rows) per change, acceptable at our expected
-/// row count (O(hundreds) per tenant per ADR-0056).
+/// row count (O(hundreds) per tenant per ADR-0069).
 pub fn spawn_reconciler(state: crate::state::ServerState) {
     let mut rx = state.event_tx.subscribe();
     tokio::spawn(async move {

@@ -8,14 +8,13 @@ mod common;
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
 use common::{build_default_state, dispatch};
-use std::sync::Arc;
 use temper_runtime::ActorSystem;
 use temper_runtime::tenant::TenantId;
 use temper_server::build_router;
 use temper_server::registry::{
     EntityLevelSummary, EntityVerificationResult, SpecRegistry, VerificationStatus,
 };
-use temper_server::{ServerEventStore, ServerState};
+use temper_server::{ServerState, StorageStack};
 use temper_spec::csdl::parse_csdl;
 use temper_store_turso::TursoEventStore;
 use tower::ServiceExt;
@@ -109,7 +108,7 @@ fn build_turso_state(system_name: &str, store: TursoEventStore) -> ServerState {
     }
 
     let mut state = state;
-    state.event_store = Some(Arc::new(ServerEventStore::Turso(store)));
+    state.set_storage_stack(StorageStack::from_turso(store));
     state
 }
 

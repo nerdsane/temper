@@ -4,16 +4,15 @@
 //! action → custom_effects → dispatch_wasm_integrations → WasmEngine.invoke()
 //! → callback dispatched → entity state transitions.
 
-use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use temper_runtime::ActorSystem;
 use temper_runtime::tenant::TenantId;
-use temper_server::ServerEventStore;
 use temper_server::ServerState;
 use temper_server::registry::SpecRegistry;
 use temper_server::request_context::AgentContext;
 use temper_server::state::{DispatchExtOptions, PendingDecision};
+use temper_server::storage::StorageStack;
 use temper_spec::csdl::parse_csdl;
 use temper_store_turso::TursoEventStore;
 
@@ -117,7 +116,7 @@ async fn build_echo_test_state_with_turso() -> ServerState {
         .await
         .expect("create local turso db");
     let mut state = build_echo_test_state();
-    state.event_store = Some(Arc::new(ServerEventStore::Turso(turso)));
+    state.set_storage_stack(StorageStack::from_turso(turso));
     state.data_dir = data_dir;
     state
 }
@@ -167,7 +166,7 @@ fn install_non_wasm_policy(state: &ServerState) {
 /// 3. A WASM invocation entry recording the failed invocation
 async fn assert_wasm_authz_denial_artifacts(state: &ServerState, entity_id: &str) {
     let turso = state
-        .platform_persistent_store()
+        .platform_turso_store()
         .expect("Turso backend required for authz denial artifact verification");
 
     // 1. Verify PendingDecision was persisted.
@@ -370,7 +369,7 @@ async fn persisted_wasm_modules_with_legacy_db_blob_fallback_execute_after_start
     let state = build_echo_test_state_with_turso().await;
     let tenant = TenantId::default();
     let turso = state
-        .platform_persistent_store()
+        .platform_turso_store()
         .expect("turso backend required");
     let hash = temper_wasm::WasmEngine::hash_module(ECHO_WASM);
 

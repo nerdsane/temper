@@ -21,7 +21,7 @@ use temper_server::entity_actor::EntityResponse;
 use temper_server::platform_store::{SimPlatformFaultConfig, SimPlatformStore};
 use temper_server::registry_bootstrap::restore_registry_from_platform_store;
 use temper_server::request_context::AgentContext;
-use temper_server::{ServerEventStore, SpecRegistry};
+use temper_server::{SpecRegistry, StorageStack};
 use temper_store_sim::SimEventStore;
 use temper_store_sim::SimFaultConfig;
 
@@ -54,12 +54,12 @@ impl SimPlatformHarness {
         let sim_platform_store = Arc::new(SimPlatformStore::new(seed, platform_faults));
 
         let platform_state = PlatformState::new(None);
-        let store = ServerEventStore::Sim(
+        let stack = StorageStack::from_sim(
             sim_event_store.clone(),
             Some(Arc::clone(&sim_platform_store)),
         );
         let mut state = platform_state;
-        state.server.event_store = Some(Arc::new(store));
+        state.server.set_storage_stack(stack);
 
         Self {
             sim_event_store,
@@ -145,11 +145,11 @@ impl SimPlatformHarness {
         let mut new_state = PlatformState::new(None);
 
         // 2. Wire same durable stores.
-        let store = ServerEventStore::Sim(
+        let stack = StorageStack::from_sim(
             self.sim_event_store.clone(),
             Some(Arc::clone(&self.sim_platform_store)),
         );
-        new_state.server.event_store = Some(Arc::new(store));
+        new_state.server.set_storage_stack(stack);
 
         // 3. Restore specs from platform store — PRODUCTION code.
         {

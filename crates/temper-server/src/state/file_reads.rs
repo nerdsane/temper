@@ -3,10 +3,10 @@ use std::sync::Arc;
 
 use futures_util::stream::{self, StreamExt};
 use temper_runtime::tenant::TenantId;
-use temper_store_turso::store::field_index::ProjectedEntityFieldsRow;
 use tracing::instrument;
 
 use super::ServerState;
+use crate::storage::QueryProjectionFieldsRow;
 
 const FILE_BATCH_READ_CONCURRENCY: usize = 8;
 
@@ -136,16 +136,17 @@ impl ServerState {
     ) -> Result<BTreeMap<String, FileProjectionMeta>, String> {
         let mut by_id = BTreeMap::new();
 
-        if let Some(turso) = self.persistent_store_for_tenant(tenant.as_str()).await {
-            let rows = turso
-                .load_query_projection_fields_many(
+        if let Some(query_plane) = self.query_plane_store() {
+            let rows = query_plane
+                .load_projection_fields_many(
                     tenant.as_str(),
                     "File",
                     file_ids,
                     &["content_hash", "mime_type", "has_content"],
                 )
                 .await
-                .map_err(|e| format!("failed to load File projections: {e}"))?;
+                .map_err(|e| format!("failed to load File projections: {e}"))?
+                .unwrap_or_default();
             for row in rows {
                 by_id.insert(row.entity_id.clone(), file_projection_from_row(row));
             }
@@ -173,16 +174,17 @@ impl ServerState {
     ) -> Result<BTreeMap<String, FileProjectionMeta>, String> {
         let mut by_id = BTreeMap::new();
 
-        if let Some(turso) = self.persistent_store_for_tenant(tenant.as_str()).await {
-            let rows = turso
-                .load_query_projection_fields_many(
+        if let Some(query_plane) = self.query_plane_store() {
+            let rows = query_plane
+                .load_projection_fields_many(
                     tenant.as_str(),
                     "FileVersion",
                     file_version_ids,
                     &["content_hash", "mime_type"],
                 )
                 .await
-                .map_err(|e| format!("failed to load FileVersion projections: {e}"))?;
+                .map_err(|e| format!("failed to load FileVersion projections: {e}"))?
+                .unwrap_or_default();
             for row in rows {
                 by_id.insert(row.entity_id.clone(), file_version_projection_from_row(row));
             }
@@ -343,7 +345,7 @@ fn local_file_blob_key(content_hash: &str) -> String {
     )
 }
 
-fn file_projection_from_row(row: ProjectedEntityFieldsRow) -> FileProjectionMeta {
+fn file_projection_from_row(row: QueryProjectionFieldsRow) -> FileProjectionMeta {
     FileProjectionMeta {
         content_hash: row
             .fields
@@ -384,7 +386,7 @@ fn file_projection_from_state(fields: &serde_json::Value) -> FileProjectionMeta 
     }
 }
 
-fn file_version_projection_from_row(row: ProjectedEntityFieldsRow) -> FileProjectionMeta {
+fn file_version_projection_from_row(row: QueryProjectionFieldsRow) -> FileProjectionMeta {
     let content_hash = row
         .fields
         .get("content_hash")

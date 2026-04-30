@@ -11,6 +11,7 @@ use tracing::instrument;
 
 use crate::authz::{load_and_activate_tenant_policies, persist_and_activate_policy};
 use crate::state::ServerState;
+use crate::storage::PolicyStoreRow;
 
 /// Derive a human-readable source label from a `policy_id`.
 fn policy_source(policy_id: &str) -> &'static str {
@@ -26,7 +27,7 @@ fn policy_source(policy_id: &str) -> &'static str {
 }
 
 /// Serialize a [`PolicyRow`] to a JSON value for API responses.
-fn policy_row_to_json(row: &temper_store_turso::PolicyRow) -> serde_json::Value {
+fn policy_row_to_json(row: &PolicyStoreRow) -> serde_json::Value {
     serde_json::json!({
         "tenant": row.tenant,
         "policy_id": row.policy_id,
@@ -204,7 +205,7 @@ pub(crate) async fn handle_list_policies(
         return resp;
     }
 
-    let Some(turso) = state.persistent_store_for_tenant(&tenant).await else {
+    let Some(store) = state.policy_store() else {
         return (
             StatusCode::SERVICE_UNAVAILABLE,
             "Persistence backend not configured",
@@ -212,7 +213,7 @@ pub(crate) async fn handle_list_policies(
             .into_response();
     };
 
-    match turso.load_policies_for_tenant(&tenant).await {
+    match store.load_policies_for_tenant(&tenant).await {
         Ok(rows) => {
             let enabled_count = rows.iter().filter(|r| r.enabled).count();
             let disabled_count = rows.len() - enabled_count;
@@ -252,8 +253,7 @@ pub(crate) async fn handle_list_all_policies(
         return (status, "Authorization required for cross-tenant access").into_response();
     }
 
-    let stores = state.collect_all_turso_stores().await;
-    if stores.is_empty() {
+    let Some(store) = state.policy_store() else {
         return (
             StatusCode::SERVICE_UNAVAILABLE,
             "Persistence backend not configured",
@@ -261,13 +261,17 @@ pub(crate) async fn handle_list_all_policies(
             .into_response();
     };
 
-    let mut rows: Vec<temper_store_turso::PolicyRow> = Vec::new();
-    for turso in &stores {
-        match turso.load_all_policies().await {
-            Ok(mut loaded) => rows.append(&mut loaded),
-            Err(e) => tracing::warn!(error = %e, "failed to list policies from Turso store"),
+    let mut rows = match store.load_all_policies().await {
+        Ok(rows) => rows,
+        Err(e) => {
+            tracing::warn!(error = %e, "failed to list policies from durable store");
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("Failed to list policies: {e}"),
+            )
+                .into_response();
         }
-    }
+    };
 
     rows.sort_by(|a, b| {
         a.tenant
@@ -380,7 +384,7 @@ pub(crate) async fn handle_patch_policy(
         return resp;
     }
 
-    let Some(turso) = state.persistent_store_for_tenant(&tenant).await else {
+    let Some(store) = state.policy_store() else {
         return (
             StatusCode::SERVICE_UNAVAILABLE,
             "Persistence backend not configured",
@@ -418,7 +422,7 @@ pub(crate) async fn handle_patch_policy(
             .get("created_by")
             .and_then(|v| v.as_str())
             .unwrap_or("api");
-        if let Err(e) = turso
+        if let Err(e) = store
             .update_policy_text(&tenant, &policy_id, cedar_text, created_by)
             .await
         {
@@ -433,7 +437,7 @@ pub(crate) async fn handle_patch_policy(
 
     // If enabled is being changed, toggle it.
     if let Some(enabled) = new_enabled {
-        match turso
+        match store
             .toggle_policy_enabled(&tenant, &policy_id, enabled)
             .await
         {
@@ -452,8 +456,8 @@ pub(crate) async fn handle_patch_policy(
         }
     }
 
-    // Reload tenant policies from Turso to update in-memory state.
-    reload_tenant_from_turso(&state, &tenant).await;
+    // Reload tenant policies from durable storage to update in-memory state.
+    reload_tenant_from_store(&state, &tenant).await;
 
     let _ = state
         .observe_refresh_tx
@@ -483,7 +487,7 @@ pub(crate) async fn handle_delete_policy_entry(
         return resp;
     }
 
-    let Some(turso) = state.persistent_store_for_tenant(&tenant).await else {
+    let Some(store) = state.policy_store() else {
         return (
             StatusCode::SERVICE_UNAVAILABLE,
             "Persistence backend not configured",
@@ -491,7 +495,7 @@ pub(crate) async fn handle_delete_policy_entry(
             .into_response();
     };
 
-    if let Err(e) = turso.delete_policy(&tenant, &policy_id).await {
+    if let Err(e) = store.delete_policy(&tenant, &policy_id).await {
         tracing::warn!(error = %e, "failed to delete policy");
         return (
             StatusCode::INTERNAL_SERVER_ERROR,
@@ -500,8 +504,8 @@ pub(crate) async fn handle_delete_policy_entry(
             .into_response();
     }
 
-    // Reload tenant policies from Turso to update in-memory state.
-    reload_tenant_from_turso(&state, &tenant).await;
+    // Reload tenant policies from durable storage to update in-memory state.
+    reload_tenant_from_store(&state, &tenant).await;
 
     let _ = state
         .observe_refresh_tx
@@ -522,15 +526,12 @@ pub(crate) async fn handle_delete_policy_entry(
 // Helpers
 // ---------------------------------------------------------------------------
 
-/// Reload a tenant's in-memory policy state from Turso.
+/// Reload a tenant's in-memory policy state from durable storage.
 ///
 /// Reads all enabled policies, concatenates them, updates `tenant_policies`,
 /// and reloads the Cedar engine.
-async fn reload_tenant_from_turso(state: &ServerState, tenant: &str) {
-    let Some(turso) = state.persistent_store_for_tenant(tenant).await else {
-        return;
-    };
-    load_and_activate_tenant_policies(state, tenant, &turso).await;
+async fn reload_tenant_from_store(state: &ServerState, tenant: &str) {
+    load_and_activate_tenant_policies(state, tenant).await;
 }
 
 /// Build the prospective enabled policy text for a tenant, optionally including
@@ -562,9 +563,9 @@ async fn build_prospective_enabled_text_with_override(
     override_cedar_text: &str,
     override_enabled: Option<bool>,
 ) -> String {
-    // Load all current policies from Turso to get accurate per-entry data.
-    let rows = if let Some(turso) = state.persistent_store_for_tenant(tenant).await {
-        turso
+    // Load all current policies from durable storage to get accurate per-entry data.
+    let rows = if let Some(store) = state.policy_store() {
+        store
             .load_policies_for_tenant(tenant)
             .await
             .unwrap_or_default()

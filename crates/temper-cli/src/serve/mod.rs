@@ -71,11 +71,11 @@ pub async fn run(
     let api_key = std::env::var("ANTHROPIC_API_KEY").ok();
 
     // Phase 1: Storage backend
-    let (pg_pool, event_store) = bootstrap::init_storage(storage, storage_explicit).await?;
+    let (pg_pool, storage_stack) = bootstrap::init_storage(storage, storage_explicit).await?;
 
     // Phase 2: Registry (restore + disk apps)
     let (registry, mut tenant_policy_seed) =
-        bootstrap::build_registry(pg_pool.as_ref(), &event_store, &apps).await?;
+        bootstrap::build_registry(pg_pool.as_ref(), storage_stack.as_ref(), &apps).await?;
 
     // Assemble platform state
     let mut state = PlatformState::with_registry(registry, api_key);
@@ -110,11 +110,11 @@ pub async fn run(
     state.server.webhook_dispatcher = bootstrap::load_webhooks(&apps);
 
     // Phase 5: Persistence wiring
-    if let Some(store) = event_store {
-        if let Some(pool) = store.postgres_pool().cloned() {
+    if let Some(stack) = storage_stack {
+        if let Some(pool) = stack.postgres_pool.clone() {
             state.server.pg_record_store = Some(Arc::new(PostgresRecordStore::new(pool)));
         }
-        state.server.event_store = Some(Arc::new(store));
+        state.server.set_storage_stack(stack);
     }
 
     // Phase 5b: Secrets vault
@@ -605,7 +605,7 @@ async fn spawn_background_verification(state: &PlatformState, specs_dir: &str, t
     let registry = state.registry.clone();
     let server = state.server.clone();
     let tenant_str = tenant.to_string();
-    let verification_cache = match server.persistent_store_for_tenant(tenant).await {
+    let verification_cache = match server.turso_store_for_tenant(tenant).await {
         Some(store) => match store.load_verification_cache(tenant).await {
             Ok(cache) => cache,
             Err(e) => {

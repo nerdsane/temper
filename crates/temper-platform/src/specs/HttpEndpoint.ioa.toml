@@ -1,6 +1,6 @@
 # HttpEndpoint — platform-level inbound route registration.
 #
-# See ADR-0056. Registers a path prefix with a WASM integration. The
+# See ADR-0069. Registers a path prefix with a WASM integration. The
 # kernel's router fallback does longest-prefix match against Active
 # endpoints and dispatches with a streaming request/response channel.
 #

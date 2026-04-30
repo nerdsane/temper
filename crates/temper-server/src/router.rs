@@ -86,7 +86,7 @@ pub fn build_router(state: ServerState) -> Router {
             "/_internal/blobs/{*path}",
             put(blobs::put_blob).get(blobs::get_blob),
         )
-        // ADR-0056 Phase 2 dispatcher fallback. Matched paths that
+        // ADR-0069 Phase 2 dispatcher fallback. Matched paths that
         // aren't served by any built-in route above fall through to
         // this handler, which consults the per-tenant HttpEndpoint
         // table and dispatches to the bound WASM integration. Slice

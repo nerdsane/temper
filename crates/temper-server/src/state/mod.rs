@@ -48,11 +48,14 @@ use temper_store_postgres::PostgresEventStore;
 
 use crate::adapters::AdapterRegistry;
 use crate::entity_actor::EntityMsg;
-use crate::event_store::ServerEventStore;
 use crate::events::EntityStateChange;
 use crate::idempotency::IdempotencyCache;
 use crate::registry::SpecRegistry;
 use crate::secrets::vault::SecretsVault;
+use crate::storage::{
+    BackendLabel, BoxedEventStore, MetadataStore, PolicyStore, QueryPlaneStore, StorageStack,
+    TrajectorySink,
+};
 use crate::trigger::ReactionDispatcher;
 use crate::wasm_registry::WasmModuleRegistry;
 use crate::webhooks::WebhookDispatcher;
@@ -208,8 +211,8 @@ pub struct ServerState {
     pub actor_registry: Arc<RwLock<BTreeMap<String, ActorRef<EntityMsg>>>>,
     /// Last access time per actor key (used for idle passivation).
     pub last_accessed: Arc<RwLock<BTreeMap<String, chrono::DateTime<chrono::Utc>>>>,
-    /// Optional runtime event store backend for persistence.
-    pub event_store: Option<Arc<ServerEventStore>>,
+    /// First-class storage capabilities selected for this runtime.
+    pub storage_stack: Option<Arc<StorageStack>>,
     /// Runtime data directory for persisted local metadata (e.g. specs registry).
     pub data_dir: std::path::PathBuf,
     /// Agent hints learned from trajectory analysis, keyed by action name.
@@ -308,7 +311,7 @@ pub struct ServerState {
     /// point that `temper-platform` uses to wire `hooks.rs` into the
     /// dispatch pipeline.
     pub custom_effect_handler: Option<Arc<dyn custom_effects::CustomEffectHandler>>,
-    /// Per-tenant HttpEndpoint route tables (ADR-0056 Phase 2).
+    /// Per-tenant HttpEndpoint route tables (ADR-0069 Phase 2).
     /// Consulted by the router fallback to dispatch to WASM
     /// integrations registered via the HttpEndpoint entity.
     pub http_endpoint_tables: Arc<crate::http_endpoint::HttpEndpointTables>,
@@ -335,6 +338,43 @@ fn install_liveness_metrics_reporter_once() {
 
 #[allow(deprecated)] // ADR-0025 Phase 4: RecordStore used until chain validation replaced
 impl ServerState {
+    /// Attach the composed runtime storage stack.
+    pub fn set_storage_stack(&mut self, stack: StorageStack) {
+        self.storage_stack = Some(Arc::new(stack));
+    }
+
+    /// Return the durable query-plane capability for projection reads/writes.
+    pub(crate) fn query_plane_store(&self) -> Option<Arc<dyn QueryPlaneStore>> {
+        self.storage_stack
+            .as_ref()
+            .and_then(|stack| stack.query_plane.clone())
+    }
+
+    /// Return the runtime event journal capability plus backend label.
+    pub(crate) fn event_journal(&self) -> Option<(BoxedEventStore, BackendLabel)> {
+        self.storage_stack
+            .as_ref()
+            .map(|stack| (stack.events.clone(), stack.backend))
+    }
+
+    /// Return the granular Cedar policy persistence capability.
+    pub(crate) fn policy_store(&self) -> Option<Arc<dyn PolicyStore>> {
+        self.storage_stack
+            .as_ref()
+            .and_then(|stack| stack.policies.clone())
+    }
+
+    /// Return the observe trajectory sink plus backend label for metrics.
+    pub(crate) fn trajectory_sink(&self) -> Option<(&'static str, Arc<dyn TrajectorySink>)> {
+        if let Some(stack) = self.storage_stack.as_ref()
+            && let Some(sink) = stack.trajectory.clone()
+        {
+            return Some((stack.backend.as_str(), sink));
+        }
+
+        None
+    }
+
     /// Create ServerState from CSDL XML and optional specification sources.
     pub fn new(system: ActorSystem, csdl: CsdlDocument, csdl_xml: String) -> Self {
         install_liveness_metrics_reporter_once();
@@ -366,7 +406,7 @@ impl ServerState {
             transition_tables: Arc::new(BTreeMap::new()),
             actor_registry: Arc::new(RwLock::new(BTreeMap::new())),
             last_accessed: Arc::new(RwLock::new(BTreeMap::new())),
-            event_store: None,
+            storage_stack: None,
             data_dir: std::path::PathBuf::new(),
             agent_hints: Arc::new(RwLock::new(BTreeMap::new())),
             authz: Arc::new(AuthzEngine::permissive()),
@@ -548,22 +588,22 @@ impl ServerState {
         store: PostgresEventStore,
     ) -> Result<Self, String> {
         let mut state = Self::with_specs(system, csdl, csdl_xml, ioa_sources)?;
-        state.event_store = Some(Arc::new(ServerEventStore::Postgres(store)));
+        state.set_storage_stack(StorageStack::from_postgres(store));
         Ok(state)
     }
 
-    /// Create ServerState with specs and an explicit runtime event store.
+    /// Create ServerState with specs and an explicit storage stack.
     ///
     /// Returns an error if any IOA spec fails to parse.
-    pub fn with_event_store(
+    pub fn with_storage_stack(
         system: ActorSystem,
         csdl: CsdlDocument,
         csdl_xml: String,
         ioa_sources: BTreeMap<String, String>,
-        store: ServerEventStore,
+        stack: StorageStack,
     ) -> Result<Self, String> {
         let mut state = Self::with_specs(system, csdl, csdl_xml, ioa_sources)?;
-        state.event_store = Some(Arc::new(store));
+        state.set_storage_stack(stack);
         Ok(state)
     }
 
@@ -599,7 +639,7 @@ impl ServerState {
             transition_tables: Arc::new(BTreeMap::new()),
             actor_registry: Arc::new(RwLock::new(BTreeMap::new())),
             last_accessed: Arc::new(RwLock::new(BTreeMap::new())),
-            event_store: None,
+            storage_stack: None,
             data_dir: std::path::PathBuf::new(),
             agent_hints: Arc::new(RwLock::new(BTreeMap::new())),
             authz: Arc::new(AuthzEngine::permissive()),
@@ -735,8 +775,8 @@ impl ServerState {
     /// Get a reference to the platform Turso event store.
     ///
     /// Panics if the event store is not configured or is not a Turso backend.
-    pub fn turso(&self) -> &temper_store_turso::TursoEventStore {
-        self.platform_persistent_store()
+    pub fn turso(&self) -> temper_store_turso::TursoEventStore {
+        self.platform_turso_store()
             .expect("Turso event store is not configured")
     }
 
@@ -744,14 +784,15 @@ impl ServerState {
     ///
     /// Only use for system-wide data that stays in the platform DB
     /// (evolution records, feature requests, tenant registry).
-    /// For tenant-scoped data, use [`persistent_store_for_tenant`].
+    /// For tenant-scoped data, use [`turso_store_for_tenant`].
     ///
     /// Returns `None` when the server is running without Turso (e.g. in-memory
     /// mode or tests). Callers should degrade gracefully to empty results.
-    pub fn platform_persistent_store(&self) -> Option<&temper_store_turso::TursoEventStore> {
-        self.event_store
+    pub fn platform_turso_store(&self) -> Option<temper_store_turso::TursoEventStore> {
+        self.storage_stack
             .as_ref()
-            .and_then(|store| store.platform_turso_store())
+            .and_then(|stack| stack.turso.as_ref())
+            .and_then(|provider| provider.platform_store())
     }
 
     /// Get a Turso store for a specific tenant.
@@ -761,12 +802,42 @@ impl ServerState {
     /// `temper-system` and `default` tenants route to the platform store.
     ///
     /// Returns `None` when the server is running without Turso.
-    pub async fn persistent_store_for_tenant(
+    pub async fn turso_store_for_tenant(
         &self,
         tenant: &str,
     ) -> Option<temper_store_turso::TursoEventStore> {
-        let store = self.event_store.as_ref()?;
-        store.turso_for_tenant(tenant).await
+        let provider = self.storage_stack.as_ref()?.turso.as_ref()?.clone();
+        provider.store_for_tenant(tenant).await
+    }
+
+    /// Return a backend-neutral metadata store for one tenant.
+    ///
+    /// Postgres is a shared platform store with tenant columns; Turso may be
+    /// single-DB or tenant-routed. This helper lets read/write paths avoid
+    /// branching on Turso-only accessors.
+    pub async fn metadata_store_for_tenant(&self, tenant: &str) -> Option<Arc<dyn MetadataStore>> {
+        if let Some(provider) = self
+            .storage_stack
+            .as_ref()
+            .and_then(|stack| stack.metadata.clone())
+        {
+            return provider.store_for_tenant(tenant).await;
+        }
+
+        None
+    }
+
+    /// Return the platform metadata store for system-wide tables.
+    pub fn platform_metadata_store(&self) -> Option<Arc<dyn MetadataStore>> {
+        if let Some(provider) = self
+            .storage_stack
+            .as_ref()
+            .and_then(|stack| stack.metadata.clone())
+        {
+            return provider.platform_store();
+        }
+
+        None
     }
 
     /// Upload stream content for a TemperFS `File` entity using the standard
@@ -997,7 +1068,7 @@ impl ServerState {
         None
     }
 
-    /// Load aggregated unmet-intent failure groups from Turso.
+    /// Load aggregated unmet-intent failure groups from durable metadata stores.
     ///
     /// Uses fan-out across all tenant stores in TenantRouted mode.
     /// Returns an empty vec when Turso is not configured.
@@ -1007,7 +1078,7 @@ impl ServerState {
         Vec<temper_store_turso::UnmetIntentAggRow>,
         std::collections::BTreeMap<String, String>,
     ) {
-        let stores = self.collect_all_turso_stores().await;
+        let stores = self.collect_all_metadata_stores().await;
         if stores.is_empty() {
             return (Vec::new(), std::collections::BTreeMap::new());
         }
@@ -1015,60 +1086,60 @@ impl ServerState {
         let mut failures = Vec::new();
         let mut submitted_specs = std::collections::BTreeMap::new();
 
-        for turso in &stores {
-            match turso.load_unmet_intent_rows().await {
+        for store in &stores {
+            match store.load_unmet_intent_rows().await {
                 Ok(rows) => failures.extend(rows),
                 Err(e) => {
-                    tracing::warn!(error = %e, "failed to load unmet intent rows from Turso");
+                    tracing::warn!(error = %e, backend = store.backend_name(), "failed to load unmet intent rows");
                 }
             }
-            match turso.load_submit_spec_timestamps().await {
+            match store.load_submit_spec_timestamps().await {
                 Ok(map) => submitted_specs.extend(map),
                 Err(e) => {
-                    tracing::warn!(error = %e, "failed to load submit-spec timestamps from Turso");
+                    tracing::warn!(error = %e, backend = store.backend_name(), "failed to load submit-spec timestamps");
                 }
             }
         }
         (failures, submitted_specs)
     }
 
-    /// Count trajectory rows per tenant using fan-out across all stores.
+    /// Count trajectory rows per tenant using fan-out across all metadata stores.
     ///
     /// Returns an empty map when Turso is not configured.
     pub async fn count_trajectories_by_tenant(&self) -> std::collections::BTreeMap<String, u64> {
-        let stores = self.collect_all_turso_stores().await;
+        let stores = self.collect_all_metadata_stores().await;
         if stores.is_empty() {
             return std::collections::BTreeMap::new();
         }
 
         let mut counts = std::collections::BTreeMap::new();
-        for turso in &stores {
-            match turso.count_trajectories_by_tenant().await {
+        for store in &stores {
+            match store.count_trajectories_by_tenant().await {
                 Ok(c) => {
                     for (tenant, count) in c {
                         *counts.entry(tenant).or_insert(0) += count;
                     }
                 }
                 Err(e) => {
-                    tracing::warn!(error = %e, "failed to count trajectories by tenant from Turso");
+                    tracing::warn!(error = %e, backend = store.backend_name(), "failed to count trajectories by tenant");
                 }
             }
         }
         counts
     }
 
-    /// Load trajectory entries from Turso, converting to domain TrajectoryEntry.
+    /// Load trajectory entries from durable metadata stores.
     ///
     /// Uses fan-out across all tenant stores in TenantRouted mode.
     pub async fn load_trajectory_entries(&self, limit: i64) -> Vec<TrajectoryEntry> {
-        let stores = self.collect_all_turso_stores().await;
+        let stores = self.collect_all_metadata_stores().await;
         if stores.is_empty() {
             return Vec::new();
         }
 
         let mut all_entries = Vec::new();
-        for turso in &stores {
-            match turso.load_recent_trajectories(limit).await {
+        for store in &stores {
+            match store.load_recent_trajectories(limit).await {
                 Ok(rows) => {
                     all_entries.extend(rows.into_iter().map(|r| TrajectoryEntry {
                         timestamp: r.created_at,
@@ -1099,7 +1170,7 @@ impl ServerState {
                     }));
                 }
                 Err(e) => {
-                    tracing::warn!(error = %e, "failed to load trajectories from Turso");
+                    tracing::warn!(error = %e, backend = store.backend_name(), "failed to load trajectories");
                 }
             }
         }
@@ -1114,25 +1185,26 @@ impl ServerState {
     /// In single-DB mode, returns just the shared store.
     /// In TenantRouted mode, returns the platform store + all connected tenant stores.
     /// Returns an empty vec when Turso is not configured.
-    pub async fn collect_all_turso_stores(&self) -> Vec<temper_store_turso::TursoEventStore> {
-        let Some(store) = self.event_store.as_ref() else {
+    pub async fn all_turso_stores(&self) -> Vec<temper_store_turso::TursoEventStore> {
+        let Some(provider) = self
+            .storage_stack
+            .as_ref()
+            .and_then(|stack| stack.turso.clone())
+        else {
             return Vec::new();
         };
+        provider.all_stores().await
+    }
 
-        if let Some(turso) = store.turso_store() {
-            return vec![turso.clone()];
-        }
-
-        if let Some(router) = store.tenant_router() {
-            let mut stores = vec![router.platform_store().clone()];
-            for tid in router.connected_tenants().await {
-                if let Ok(s) = router.store_for_tenant(&tid).await {
-                    stores.push(s);
-                }
-            }
-            return stores;
-        }
-
-        Vec::new()
+    /// Collect backend-neutral platform/tenant stores for cross-tenant reads.
+    pub async fn collect_all_metadata_stores(&self) -> Vec<Arc<dyn MetadataStore>> {
+        let Some(provider) = self
+            .storage_stack
+            .as_ref()
+            .and_then(|stack| stack.metadata.clone())
+        else {
+            return Vec::new();
+        };
+        provider.all_stores().await
     }
 }

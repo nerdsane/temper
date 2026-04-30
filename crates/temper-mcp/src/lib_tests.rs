@@ -2,12 +2,11 @@ use super::*;
 use temper_sandbox::helpers::format_authz_denied;
 
 use std::collections::BTreeMap;
-use std::sync::Arc;
 
 use axum::Router;
 use serde_json::{Value, json};
 use temper_runtime::ActorSystem;
-use temper_server::{ServerEventStore, ServerState};
+use temper_server::{ServerState, StorageStack};
 use temper_spec::parse_csdl;
 use temper_store_turso::TursoEventStore;
 use tokio::net::TcpListener;
@@ -96,7 +95,7 @@ async fn start_test_temper_server() -> (u16, oneshot::Sender<()>) {
         ioa_sources,
     )
     .unwrap();
-    state.event_store = Some(Arc::new(ServerEventStore::Turso(turso)));
+    state.set_storage_stack(StorageStack::from_turso(turso));
 
     let router: Router = temper_server::build_router(state);
     let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");

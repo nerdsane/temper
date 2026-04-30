@@ -105,13 +105,12 @@ fn resolve_entity_type_or_record_404(
             intent,
             matched_policy_ids: None,
         };
-        {
-            let state_c = state.clone();
-            tokio::spawn(async move { // determinism-ok: background persist for sync 404 path
-                if let Err(e) = state_c.persist_trajectory_entry(&entry).await {
-                    tracing::error!(error = %e, "failed to persist entity-set-not-found trajectory");
-                }
-            });
+        if !state.enqueue_trajectory_entry(entry) {
+            tracing::warn!(
+                tenant = %tenant,
+                entity_set = %set_name,
+                "failed to enqueue entity-set-not-found trajectory"
+            );
         }
         Box::new(
             odata_error(

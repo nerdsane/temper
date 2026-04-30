@@ -39,7 +39,7 @@ pub struct WasmInvocationContext {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub workflow_run_id: Option<String>,
     /// When the invocation was triggered by an HttpEndpoint dispatch
-    /// (ADR-0056 Phase 2), carries the HTTP-specific context so the
+    /// (ADR-0069 Phase 2), carries the HTTP-specific context so the
     /// guest can unpack method, path params, headers, and the stream
     /// handle IDs needed to read the request body + write the
     /// response. `None` for entity-action-triggered invocations.

@@ -12,8 +12,8 @@ use temper_runtime::persistence::{PersistenceError, storage_error};
 use temper_runtime::scheduler::sim_now;
 use tracing::instrument;
 
-use super::TursoEventStore;
 use super::write_gate::WritePriority;
+use super::{TursoEventStore, TursoQueryProjectionRow};
 
 fn projection_hash(status: &str, fields: &serde_json::Value) -> String {
     let mut hasher = Sha256::new();
@@ -373,6 +373,69 @@ impl TursoEventStore {
             .iter()
             .filter_map(|entity_id| by_entity.remove(entity_id))
             .collect())
+    }
+
+    /// Export every durable query-plane projection, optionally scoped to one tenant.
+    ///
+    /// Turso keeps projected fields in `entity_field_index`, so this reconstructs
+    /// a JSON object from the EAV rows while preserving the catalog status and
+    /// sequence number. Scalar values remain strings because that is the durable
+    /// representation used for SQL filter push-down.
+    #[instrument(skip_all, fields(
+        otel.name = "turso.export_query_projections",
+        tenant = tenant.unwrap_or("*"),
+    ))]
+    pub async fn export_query_projections(
+        &self,
+        tenant: Option<&str>,
+    ) -> Result<Vec<TursoQueryProjectionRow>, PersistenceError> {
+        let conn = self.configured_connection().await?;
+        let mut rows = conn
+            .query(
+                "SELECT c.tenant, c.entity_type, c.entity_id, c.status, c.sequence_nr, \
+                        f.field_name, f.field_value \
+                 FROM entity_catalog c \
+                 LEFT JOIN entity_field_index f \
+                   ON c.tenant = f.tenant \
+                  AND c.entity_type = f.entity_type \
+                  AND c.entity_id = f.entity_id \
+                 WHERE (?1 IS NULL OR c.tenant = ?1) \
+                 ORDER BY c.tenant, c.entity_type, c.entity_id, f.field_name",
+                params![tenant],
+            )
+            .await
+            .map_err(storage_error)?;
+
+        let mut out = BTreeMap::<(String, String, String), TursoQueryProjectionRow>::new();
+        while let Some(row) = rows.next().await.map_err(storage_error)? {
+            let tenant: String = row.get(0).map_err(storage_error)?;
+            let entity_type: String = row.get(1).map_err(storage_error)?;
+            let entity_id: String = row.get(2).map_err(storage_error)?;
+            let status: String = row.get(3).map_err(storage_error)?;
+            let sequence_nr = row.get::<i64>(4).map_err(storage_error)?.max(0) as u64;
+            let field_name: Option<String> = row.get(5).map_err(storage_error)?;
+            let field_value: Option<String> = row.get(6).map_err(storage_error)?;
+            let key = (tenant.clone(), entity_type.clone(), entity_id.clone());
+            let entry = out.entry(key).or_insert_with(|| TursoQueryProjectionRow {
+                tenant,
+                entity_type,
+                entity_id,
+                status,
+                fields: serde_json::Value::Object(serde_json::Map::new()),
+                sequence_nr,
+            });
+
+            if let Some(field_name) = field_name
+                && let Some(object) = entry.fields.as_object_mut()
+            {
+                let value = field_value
+                    .map(serde_json::Value::String)
+                    .unwrap_or(serde_json::Value::Null);
+                object.insert(field_name, value);
+            }
+        }
+
+        Ok(out.into_values().collect())
     }
 
     /// Return projected entity counts grouped by tenant.
