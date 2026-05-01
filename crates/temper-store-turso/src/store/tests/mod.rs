@@ -785,11 +785,11 @@ async fn load_wasm_module_metadata_all_tenants_returns_metadata_without_bulk_byt
     let store = make_store("wasm-metadata").await;
 
     store
-        .upsert_wasm_module("tenant-a", "mod-a", b"hello-a", "hash-a")
+        .upsert_wasm_module("tenant-a", "mod-a", b"hello-a", "hash-a", "bundled")
         .await
         .expect("persist mod-a");
     store
-        .upsert_wasm_module("tenant-b", "mod-b", b"hello-b", "hash-b")
+        .upsert_wasm_module("tenant-b", "mod-b", b"hello-b", "hash-b", "bundled")
         .await
         .expect("persist mod-b");
 
@@ -1184,11 +1184,11 @@ async fn upsert_wasm_module_preserves_version_for_identical_hash() {
     let store = make_store("wasm-idempotent").await;
 
     store
-        .upsert_wasm_module("tenant-a", "mod-a", b"hello-a", "hash-a")
+        .upsert_wasm_module("tenant-a", "mod-a", b"hello-a", "hash-a", "bundled")
         .await
         .expect("initial wasm upsert");
     store
-        .upsert_wasm_module("tenant-a", "mod-a", b"hello-a", "hash-a")
+        .upsert_wasm_module("tenant-a", "mod-a", b"hello-a", "hash-a", "bundled")
         .await
         .expect("identical wasm upsert");
 
@@ -1215,7 +1215,7 @@ async fn upsert_wasm_module_stores_metadata_only_without_db_blob() {
     let store = make_store("wasm-artifact").await;
 
     store
-        .upsert_wasm_module("tenant-a", "mod-a", b"hello-a", "hash-a")
+        .upsert_wasm_module("tenant-a", "mod-a", b"hello-a", "hash-a", "bundled")
         .await
         .expect("persist wasm artifact");
 

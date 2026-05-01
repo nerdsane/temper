@@ -58,6 +58,8 @@ pub struct PostgresWasmModuleRow {
     pub module_name: String,
     pub wasm_bytes: Vec<u8>,
     pub sha256_hash: String,
+    /// Provenance: `"bundled"` (install pipeline) or `"upload"` (hot upload).
+    pub source: String,
 }
 
 #[derive(Debug, Clone)]
@@ -989,7 +991,7 @@ impl PostgresEventStore {
         tenant: &str,
     ) -> Result<Vec<PostgresWasmModuleRow>, PersistenceError> {
         let rows = sqlx::query(
-            "SELECT tenant, module_name, wasm_bytes, sha256_hash \
+            "SELECT tenant, module_name, wasm_bytes, sha256_hash, source \
              FROM wasm_modules WHERE tenant = $1 ORDER BY module_name",
         )
         .bind(tenant)
@@ -1003,7 +1005,7 @@ impl PostgresEventStore {
         &self,
     ) -> Result<Vec<PostgresWasmModuleRow>, PersistenceError> {
         let rows = sqlx::query(
-            "SELECT tenant, module_name, wasm_bytes, sha256_hash \
+            "SELECT tenant, module_name, wasm_bytes, sha256_hash, source \
              FROM wasm_modules ORDER BY tenant, module_name",
         )
         .fetch_all(self.pool())
@@ -1018,19 +1020,36 @@ impl PostgresEventStore {
         name: &str,
         bytes: &[u8],
         hash: &str,
+        source: &str,
     ) -> Result<(), PersistenceError> {
+        // Idempotent on hash + source-aware preservation:
+        //   - source='upload' callers (hot upload via the API) overwrite anything
+        //     so iterative testing works.
+        //   - source='bundled' callers (the os-apps install pipeline) only
+        //     overwrite existing 'bundled' rows. They never clobber an 'upload'
+        //     row even if the hash differs — that's how hot uploads survive
+        //     restarts. Bumping `version` only happens on actual hash changes,
+        //     so re-running the same image yields a no-op.
         sqlx::query(
-            "INSERT INTO wasm_modules (tenant, module_name, wasm_bytes, sha256_hash, version, size_bytes, updated_at) \
-             VALUES ($1, $2, $3, $4, 1, $5, now()) \
-             ON CONFLICT (tenant, module_name) DO UPDATE SET wasm_bytes = EXCLUDED.wasm_bytes, \
-                 sha256_hash = EXCLUDED.sha256_hash, version = wasm_modules.version + 1, \
-                 size_bytes = EXCLUDED.size_bytes, updated_at = now()",
+            "INSERT INTO wasm_modules \
+             (tenant, module_name, wasm_bytes, sha256_hash, version, size_bytes, updated_at, source) \
+             VALUES ($1, $2, $3, $4, 1, $5, now(), $6) \
+             ON CONFLICT (tenant, module_name) DO UPDATE SET \
+                 wasm_bytes = EXCLUDED.wasm_bytes, \
+                 sha256_hash = EXCLUDED.sha256_hash, \
+                 version = wasm_modules.version + 1, \
+                 size_bytes = EXCLUDED.size_bytes, \
+                 updated_at = now(), \
+                 source = EXCLUDED.source \
+             WHERE wasm_modules.sha256_hash IS DISTINCT FROM EXCLUDED.sha256_hash \
+                AND (EXCLUDED.source = 'upload' OR wasm_modules.source = 'bundled')",
         )
         .bind(tenant)
         .bind(name)
         .bind(bytes)
         .bind(hash)
         .bind(bytes.len() as i32)
+        .bind(source)
         .execute(self.pool())
         .await
         .map_err(storage_error)?;
@@ -1737,7 +1756,7 @@ impl PostgresEventStore {
         module_name: &str,
     ) -> Result<Option<PostgresWasmModuleRow>, PersistenceError> {
         let row = sqlx::query(
-            "SELECT tenant, module_name, wasm_bytes, sha256_hash \
+            "SELECT tenant, module_name, wasm_bytes, sha256_hash, source \
              FROM wasm_modules WHERE tenant = $1 AND module_name = $2",
         )
         .bind(tenant)
@@ -1912,11 +1931,13 @@ fn row_to_installed_app(row: sqlx::postgres::PgRow) -> PostgresInstalledAppRow {
 }
 
 fn row_to_wasm_module(row: sqlx::postgres::PgRow) -> PostgresWasmModuleRow {
+    let source: Option<String> = row.try_get("source").ok();
     PostgresWasmModuleRow {
         tenant: row.get("tenant"),
         module_name: row.get("module_name"),
         wasm_bytes: row.get("wasm_bytes"),
         sha256_hash: row.get("sha256_hash"),
+        source: source.unwrap_or_else(|| "bundled".to_string()),
     }
 }
 

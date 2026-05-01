@@ -148,6 +148,24 @@ impl TursoEventStore {
         conn.execute(schema::CREATE_WASM_MODULES_TABLE, ())
             .await
             .map_err(storage_error)?;
+        // Idempotent ALTER for pre-existing DBs created before the source
+        // column existed. Turso has no IF NOT EXISTS for ADD COLUMN, so we
+        // ignore "duplicate column" errors.
+        match conn
+            .execute(schema::ADD_WASM_MODULES_SOURCE_COLUMN, ())
+            .await
+        {
+            Ok(_) => {}
+            Err(e) => {
+                let msg = e.to_string();
+                if !msg.contains("duplicate column")
+                    && !msg.contains("already exists")
+                    && !msg.contains("already has")
+                {
+                    return Err(storage_error(e));
+                }
+            }
+        }
         conn.execute(schema::CREATE_WASM_INVOCATION_LOGS_TABLE, ())
             .await
             .map_err(storage_error)?;
@@ -629,6 +647,8 @@ pub struct TursoWasmModuleRow {
     pub size_bytes: i32,
     /// ISO-8601 updated_at timestamp.
     pub updated_at: String,
+    /// Provenance: `"bundled"` (install pipeline) or `"upload"` (hot upload).
+    pub source: String,
 }
 
 /// Metadata row returned by startup WASM registry restore queries.

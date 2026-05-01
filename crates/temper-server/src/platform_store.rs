@@ -55,6 +55,10 @@ pub struct WasmModuleRow {
     pub wasm_bytes: Vec<u8>,
     /// SHA-256 hash of the WASM binary.
     pub sha256_hash: String,
+    /// Provenance: `"bundled"` (os-apps install pipeline) or `"upload"` (hot
+    /// upload via `POST /api/wasm/modules/{name}`). The install pipeline must
+    /// not clobber rows whose source is `"upload"`.
+    pub source: String,
 }
 
 /// Durable metadata for an installed OS app bundle.
@@ -187,12 +191,18 @@ pub trait PlatformStore: Send + Sync {
     async fn load_wasm_modules_all_tenants(&self) -> Result<Vec<WasmModuleRow>, String>;
 
     /// Upsert a WASM module binary for a tenant.
+    ///
+    /// `source` distinguishes the os-apps install pipeline (`"bundled"`) from
+    /// the hot-upload API (`"upload"`). The store skips overwriting an existing
+    /// `'upload'` row with a `'bundled'` row whose hash differs, so iterative
+    /// hot-uploaded testing survives subsequent restarts.
     async fn upsert_wasm_module(
         &self,
         tenant: &str,
         name: &str,
         bytes: &[u8],
         hash: &str,
+        source: &str,
     ) -> Result<(), String>;
 }
 
@@ -394,6 +404,7 @@ impl PlatformStore for TursoEventStore {
                 module_name: r.module_name,
                 wasm_bytes: r.wasm_bytes,
                 sha256_hash: r.sha256_hash,
+                source: r.source,
             })
             .collect())
     }
@@ -410,6 +421,7 @@ impl PlatformStore for TursoEventStore {
                 module_name: r.module_name,
                 wasm_bytes: r.wasm_bytes,
                 sha256_hash: r.sha256_hash,
+                source: r.source,
             })
             .collect())
     }
@@ -420,8 +432,9 @@ impl PlatformStore for TursoEventStore {
         name: &str,
         bytes: &[u8],
         hash: &str,
+        source: &str,
     ) -> Result<(), String> {
-        self.upsert_wasm_module(tenant, name, bytes, hash)
+        self.upsert_wasm_module(tenant, name, bytes, hash, source)
             .await
             .map_err(|e| e.to_string())
     }
@@ -620,6 +633,7 @@ impl PlatformStore for PostgresEventStore {
                 module_name: r.module_name,
                 wasm_bytes: r.wasm_bytes,
                 sha256_hash: r.sha256_hash,
+                source: r.source,
             })
             .collect())
     }
@@ -636,6 +650,7 @@ impl PlatformStore for PostgresEventStore {
                 module_name: r.module_name,
                 wasm_bytes: r.wasm_bytes,
                 sha256_hash: r.sha256_hash,
+                source: r.source,
             })
             .collect())
     }
@@ -646,8 +661,9 @@ impl PlatformStore for PostgresEventStore {
         name: &str,
         bytes: &[u8],
         hash: &str,
+        source: &str,
     ) -> Result<(), String> {
-        self.upsert_wasm_module(tenant, name, bytes, hash)
+        self.upsert_wasm_module(tenant, name, bytes, hash, source)
             .await
             .map_err(|e| e.to_string())
     }
@@ -1136,6 +1152,7 @@ mod sim_platform_store {
             name: &str,
             bytes: &[u8],
             hash: &str,
+            source: &str,
         ) -> Result<(), String> {
             let mut inner = self.inner.lock().expect("SimPlatformStore lock poisoned"); // ci-ok: infallible lock
 
@@ -1152,6 +1169,7 @@ mod sim_platform_store {
                     module_name: name.to_string(),
                     wasm_bytes: bytes.to_vec(),
                     sha256_hash: hash.to_string(),
+                    source: source.to_string(),
                 },
             );
             Ok(())
