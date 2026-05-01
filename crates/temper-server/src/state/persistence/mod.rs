@@ -54,12 +54,18 @@ impl ServerState {
     }
 
     /// Upsert a WASM module in the persistence backend (Postgres or Turso).
+    ///
+    /// `source` is `"bundled"` for the os-apps install pipeline and `"upload"`
+    /// for the hot-upload API. The store is idempotent on hash and refuses to
+    /// overwrite an existing `'upload'` row with a `'bundled'` row whose hash
+    /// differs — that's how hot-uploaded modules survive subsequent restarts.
     pub async fn upsert_wasm_module(
         &self,
         tenant: &str,
         module_name: &str,
         wasm_bytes: &[u8],
         sha256_hash: &str,
+        source: &str,
     ) -> Result<(), String> {
         let Some(backend) = self.tenant_metadata_backend(tenant).await else {
             return Ok(());
@@ -83,32 +89,76 @@ impl ServerState {
         match backend {
             TenantMetadataBackend::Postgres(pool) => {
                 sqlx::query(
-                    "INSERT INTO wasm_modules (tenant, module_name, wasm_bytes, sha256_hash, version, size_bytes, updated_at) \
-                     VALUES ($1, $2, $3, $4, 1, $5, now()) \
+                    "INSERT INTO wasm_modules \
+                     (tenant, module_name, wasm_bytes, sha256_hash, version, size_bytes, updated_at, source) \
+                     VALUES ($1, $2, $3, $4, 1, $5, now(), $6) \
                      ON CONFLICT (tenant, module_name) DO UPDATE SET \
                          wasm_bytes = EXCLUDED.wasm_bytes, \
                          sha256_hash = EXCLUDED.sha256_hash, \
                          version = wasm_modules.version + 1, \
                          size_bytes = EXCLUDED.size_bytes, \
-                         updated_at = now()",
+                         updated_at = now(), \
+                         source = EXCLUDED.source \
+                     WHERE wasm_modules.sha256_hash IS DISTINCT FROM EXCLUDED.sha256_hash \
+                        AND (EXCLUDED.source = 'upload' OR wasm_modules.source = 'bundled')",
                 )
                 .bind(tenant)
                 .bind(module_name)
                 .bind(Vec::<u8>::new())
                 .bind(&effective_hash)
                 .bind(wasm_bytes.len() as i32)
+                .bind(source)
                 .execute(&pool)
                 .await
                 .map(|_| ())
                 .map_err(|e| format!("failed to upsert WASM module {tenant}/{module_name}: {e}"))
             }
             TenantMetadataBackend::Turso(turso) => turso
-                .upsert_wasm_module(tenant, module_name, wasm_bytes, &effective_hash)
+                .upsert_wasm_module(tenant, module_name, wasm_bytes, &effective_hash, source)
                 .await
                 .map_err(|e| {
                     format!("failed to upsert WASM module {tenant}/{module_name} in turso: {e}")
                 }),
             TenantMetadataBackend::Redis => Err(Self::redis_ephemeral_error("WASM module persistence")),
+        }
+    }
+
+    /// Return `(module_name -> (sha256_hash, source))` for every WASM module
+    /// currently persisted for `tenant`. Used by the os-apps install pipeline
+    /// to skip overwriting hot-uploaded modules at boot.
+    pub async fn load_wasm_module_sources(
+        &self,
+        tenant: &str,
+    ) -> Result<std::collections::BTreeMap<String, (String, String)>, String> {
+        let Some(backend) = self.tenant_metadata_backend(tenant).await else {
+            return Ok(std::collections::BTreeMap::new());
+        };
+
+        match backend {
+            TenantMetadataBackend::Postgres(pool) => {
+                let rows = sqlx::query_as::<_, (String, String, String)>(
+                    "SELECT module_name, sha256_hash, source FROM wasm_modules WHERE tenant = $1",
+                )
+                .bind(tenant)
+                .fetch_all(&pool)
+                .await
+                .map_err(|e| format!("failed to load WASM module sources for {tenant}: {e}"))?;
+                Ok(rows
+                    .into_iter()
+                    .map(|(name, hash, source)| (name, (hash, source)))
+                    .collect())
+            }
+            TenantMetadataBackend::Turso(turso) => {
+                let rows = turso
+                    .load_all_wasm_modules(tenant)
+                    .await
+                    .map_err(|e| format!("failed to load WASM module sources for {tenant}: {e}"))?;
+                Ok(rows
+                    .into_iter()
+                    .map(|r| (r.module_name, (r.sha256_hash, r.source)))
+                    .collect())
+            }
+            TenantMetadataBackend::Redis => Ok(std::collections::BTreeMap::new()),
         }
     }
 

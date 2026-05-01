@@ -96,8 +96,15 @@ CREATE TABLE IF NOT EXISTS wasm_modules (
     version INTEGER NOT NULL DEFAULT 1,
     size_bytes INTEGER NOT NULL,
     updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+    source TEXT NOT NULL DEFAULT 'bundled',
     UNIQUE(tenant, module_name)
 );";
+
+/// ALTER for existing Turso DBs: add the `source` column. Idempotent via the
+/// IF NOT EXISTS guard. See `0002_wasm_modules_source.sql` for the Postgres
+/// equivalent.
+pub const ADD_WASM_MODULES_SOURCE_COLUMN: &str = "\
+ALTER TABLE wasm_modules ADD COLUMN source TEXT NOT NULL DEFAULT 'bundled';";
 
 /// CREATE TABLE statement for WASM invocation logs.
 ///

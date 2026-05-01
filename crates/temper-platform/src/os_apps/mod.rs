@@ -1490,17 +1490,51 @@ pub(super) async fn install_os_app_with_plan(
     }
 
     // ── Step 4: Persist/register WASM modules, warming only eager modules. ──
+    //
+    // Source-aware preservation: if a (tenant, module) row in the durable store
+    // has source='upload' (i.e., a hot upload from `POST /api/wasm/modules/{name}`),
+    // skip every step for that module — upsert (preserved by the store anyway),
+    // registry overwrite (would clobber the upload hash loaded by boot recovery),
+    // and engine warm-up (would cache bundled bytes the registry shouldn't pick).
+    // Without this guard, hot uploads silently revert on every restart.
     let mut wasm_registered = Vec::new();
     let mut wasm_skipped = Vec::new();
     let mut wasm_failures = Vec::new();
     if plan.wasm {
+        let existing_sources = match state.server.load_wasm_module_sources(tenant).await {
+            Ok(map) => map,
+            Err(e) => {
+                tracing::warn!(
+                    tenant,
+                    error = %e,
+                    "Failed to load existing WASM modules; install pipeline will not honor hot-upload preservation this cycle"
+                );
+                std::collections::BTreeMap::new()
+            }
+        };
+
         for (module_name, wasm_bytes) in &bundle.wasm_modules {
             let module_config = bundle.wasm_module_configs.get(module_name);
             let hash = temper_wasm::WasmEngine::hash_module(wasm_bytes);
 
+            if let Some((existing_hash, existing_source)) = existing_sources.get(module_name)
+                && existing_source == "upload"
+                && existing_hash != &hash
+            {
+                tracing::info!(
+                    tenant,
+                    module = %module_name,
+                    bundled_hash = %hash,
+                    upload_hash = %existing_hash,
+                    "Skipping bundled install: hot-uploaded module preserved"
+                );
+                wasm_skipped.push(module_name.clone());
+                continue;
+            }
+
             if let Err(e) = state
                 .server
-                .upsert_wasm_module(tenant, module_name, wasm_bytes, &hash)
+                .upsert_wasm_module(tenant, module_name, wasm_bytes, &hash, "bundled")
                 .await
             {
                 tracing::warn!(

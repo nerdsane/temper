@@ -312,7 +312,7 @@ async fn persisted_wasm_modules_are_lazy_compiled_on_first_invoke() {
     let hash = temper_wasm::WasmEngine::hash_module(ECHO_WASM);
 
     state
-        .upsert_wasm_module("default", "echo_integration", ECHO_WASM, &hash)
+        .upsert_wasm_module("default", "echo_integration", ECHO_WASM, &hash, "bundled")
         .await
         .expect("persist echo module");
     state
@@ -374,7 +374,7 @@ async fn persisted_wasm_modules_with_legacy_db_blob_fallback_execute_after_start
     let hash = temper_wasm::WasmEngine::hash_module(ECHO_WASM);
 
     turso
-        .upsert_wasm_module("default", "echo_integration", ECHO_WASM, &hash)
+        .upsert_wasm_module("default", "echo_integration", ECHO_WASM, &hash, "bundled")
         .await
         .expect("persist metadata-only echo module");
     turso

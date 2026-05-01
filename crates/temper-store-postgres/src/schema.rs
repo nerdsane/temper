@@ -155,8 +155,19 @@ CREATE TABLE IF NOT EXISTS wasm_modules (
     version       INT          NOT NULL DEFAULT 1,
     size_bytes    INT          NOT NULL,
     updated_at    TIMESTAMPTZ  NOT NULL DEFAULT now(),
+    source        TEXT         NOT NULL DEFAULT 'bundled',
     UNIQUE (tenant, module_name)
 );";
+
+/// Idempotent migration to add the `source` column to existing
+/// deployments. `'bundled'` rows came from the os-apps install pipeline
+/// (on-disk bytes baked into the deploy image); `'upload'` rows came
+/// from a hot upload via `POST /api/wasm/modules/{name}` and must
+/// survive subsequent restarts (the boot install pipeline checks this
+/// flag before overwriting).
+pub const ADD_WASM_MODULES_SOURCE_COLUMN: &str = "\
+ALTER TABLE wasm_modules \
+    ADD COLUMN IF NOT EXISTS source TEXT NOT NULL DEFAULT 'bundled';";
 
 /// CREATE TABLE statement for WASM invocation logs.
 ///

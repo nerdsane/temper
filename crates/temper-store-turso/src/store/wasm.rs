@@ -23,12 +23,18 @@ impl TursoEventStore {
         module_name: &str,
         wasm_bytes: &[u8],
         sha256_hash: &str,
+        source: &str,
     ) -> Result<(), PersistenceError> {
         let _query_timer = TursoQueryTimer::start("turso.upsert_wasm_module");
         let conn = self.configured_connection().await?;
+        // Idempotent + source-aware preservation. See Postgres counterpart for
+        // the full reasoning. Hot uploads (source='upload') always win; the
+        // os-apps install pipeline (source='bundled') skips when an existing
+        // 'upload' row holds a different hash so iterative testing survives
+        // restarts.
         let mut existing_rows = conn
             .query(
-                "SELECT sha256_hash \
+                "SELECT sha256_hash, source \
                  FROM wasm_modules \
                  WHERE tenant = ?1 AND module_name = ?2",
                 params![tenant, module_name],
@@ -38,7 +44,20 @@ impl TursoEventStore {
 
         if let Some(row) = existing_rows.next().await.map_err(storage_error)? {
             let existing_hash: String = row.get(0).map_err(storage_error)?;
+            let existing_source: String = row
+                .get::<String>(1)
+                .unwrap_or_else(|_| "bundled".to_string());
             if existing_hash == sha256_hash {
+                return Ok(());
+            }
+            if existing_source == "upload" && source != "upload" {
+                tracing::info!(
+                    tenant,
+                    module_name,
+                    existing_hash = %existing_hash,
+                    incoming_hash = %sha256_hash,
+                    "skipping bundled wasm upsert: existing row is a hot upload"
+                );
                 return Ok(());
             }
         }
@@ -48,8 +67,8 @@ impl TursoEventStore {
             .acquire_write_permit("turso.upsert_wasm_module", WritePriority::High)
             .await?;
         conn.execute(
-            "INSERT INTO wasm_modules (tenant, module_name, wasm_bytes, sha256_hash, version, size_bytes, updated_at)
-             VALUES (?1, ?2, ?3, ?4, 1, ?5, datetime('now'))
+            "INSERT INTO wasm_modules (tenant, module_name, wasm_bytes, sha256_hash, version, size_bytes, updated_at, source)
+             VALUES (?1, ?2, ?3, ?4, 1, ?5, datetime('now'), ?6)
              ON CONFLICT (tenant, module_name) DO UPDATE SET
                  wasm_bytes = CASE
                      WHEN wasm_modules.sha256_hash IS NOT excluded.sha256_hash
@@ -65,8 +84,11 @@ impl TursoEventStore {
                      THEN excluded.size_bytes ELSE wasm_modules.size_bytes END,
                  updated_at = CASE
                      WHEN wasm_modules.sha256_hash IS NOT excluded.sha256_hash
-                     THEN datetime('now') ELSE wasm_modules.updated_at END",
-            params![tenant, module_name, Vec::<u8>::new(), sha256_hash, wasm_bytes.len() as i64],
+                     THEN datetime('now') ELSE wasm_modules.updated_at END,
+                 source = CASE
+                     WHEN wasm_modules.sha256_hash IS NOT excluded.sha256_hash
+                     THEN excluded.source ELSE wasm_modules.source END",
+            params![tenant, module_name, Vec::<u8>::new(), sha256_hash, wasm_bytes.len() as i64, source],
         )
         .await
         .map_err(storage_error)?;
@@ -84,7 +106,7 @@ impl TursoEventStore {
         let conn = self.configured_connection().await?;
         let mut rows = conn
             .query(
-                "SELECT tenant, module_name, wasm_bytes, sha256_hash, version, size_bytes, updated_at \
+                "SELECT tenant, module_name, wasm_bytes, sha256_hash, version, size_bytes, updated_at, source \
                  FROM wasm_modules \
                  WHERE tenant = ?1 AND module_name = ?2",
                 params![tenant, module_name],
@@ -109,7 +131,7 @@ impl TursoEventStore {
         let conn = self.configured_connection().await?;
         let mut rows = conn
             .query(
-                "SELECT tenant, module_name, wasm_bytes, sha256_hash, version, size_bytes, updated_at \
+                "SELECT tenant, module_name, wasm_bytes, sha256_hash, version, size_bytes, updated_at, source \
                  FROM wasm_modules \
                  WHERE tenant = ?1 \
                  ORDER BY module_name",
@@ -134,7 +156,7 @@ impl TursoEventStore {
         let conn = self.configured_connection().await?;
         let mut rows = conn
             .query(
-                "SELECT tenant, module_name, wasm_bytes, sha256_hash, version, size_bytes, updated_at \
+                "SELECT tenant, module_name, wasm_bytes, sha256_hash, version, size_bytes, updated_at, source \
                  FROM wasm_modules \
                  ORDER BY tenant, module_name",
                 (),
@@ -265,7 +287,7 @@ impl TursoEventStore {
         Ok(affected > 0)
     }
 
-    /// Parse a WASM module row from a libsql Row (7 columns).
+    /// Parse a WASM module row from a libsql Row (8 columns).
     fn row_to_wasm_module(row: &libsql::Row) -> Result<TursoWasmModuleRow, PersistenceError> {
         Ok(TursoWasmModuleRow {
             tenant: row.get::<String>(0).map_err(storage_error)?,
@@ -275,6 +297,9 @@ impl TursoEventStore {
             version: row.get::<i64>(4).map_err(storage_error)? as i32,
             size_bytes: row.get::<i64>(5).map_err(storage_error)? as i32,
             updated_at: row.get::<String>(6).map_err(storage_error)?,
+            source: row
+                .get::<String>(7)
+                .unwrap_or_else(|_| "bundled".to_string()),
         })
     }
 

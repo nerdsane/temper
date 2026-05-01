@@ -129,8 +129,10 @@ pub async fn handle_upload_wasm_module(
 
     // Persist to durable storage first — if durability fails, refuse the upload.
     // This ensures the module survives restarts before we expose it in memory.
+    // source="upload" so the os-apps install pipeline won't clobber this row at
+    // next boot.
     if let Err(e) = state
-        .upsert_wasm_module(tenant.as_str(), &module_name, &body, &hash)
+        .upsert_wasm_module(tenant.as_str(), &module_name, &body, &hash, "upload")
         .await
     {
         tracing::error!(error = %e, "failed to persist WASM module to durable store");
