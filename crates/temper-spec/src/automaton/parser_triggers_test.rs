@@ -190,6 +190,98 @@ to = "Failed"
 }
 
 #[test]
+fn test_action_triggers_adapter_kind_synthesizes_integration() {
+    let spec = r#"
+[automaton]
+name = "EvolutionRun"
+states = ["Proposing", "Verifying", "Failed"]
+initial = "Proposing"
+
+[[action]]
+name = "RecordDataset"
+from = ["Proposing"]
+to = "Proposing"
+
+[[action.triggers]]
+name = "propose_mutation"
+kind = "adapter"
+adapter = "claude_code"
+on_success = "RecordMutation"
+on_failure = "Fail"
+
+[action.triggers.config]
+command = "/tmp/mock-claude"
+
+[[action]]
+name = "RecordMutation"
+from = ["Proposing"]
+to = "Verifying"
+
+[[action]]
+name = "Fail"
+from = ["Proposing", "Verifying"]
+to = "Failed"
+"#;
+    let automaton = parse_automaton(spec).expect("adapter trigger should parse");
+    let trigger = &automaton.actions[0].triggers[0];
+    assert_eq!(trigger.kind, TriggerKind::Adapter);
+    assert_eq!(trigger.adapter.as_deref(), Some("claude_code"));
+
+    let integration = automaton
+        .integrations
+        .iter()
+        .find(|ig| ig.name == "__trigger__:RecordDataset:propose_mutation")
+        .expect("adapter trigger should synthesize integration");
+    assert_eq!(integration.integration_type, "adapter");
+    assert_eq!(integration.on_success.as_deref(), Some("RecordMutation"));
+    assert_eq!(integration.on_failure.as_deref(), Some("Fail"));
+    assert_eq!(
+        integration.config.get("adapter").map(String::as_str),
+        Some("claude_code")
+    );
+    assert_eq!(
+        integration.config.get("command").map(String::as_str),
+        Some("/tmp/mock-claude")
+    );
+
+    let has_effect = automaton.actions[0].effect.iter().any(|effect| {
+        matches!(effect, Effect::Trigger { name }
+            if name == "__trigger__:RecordDataset:propose_mutation")
+    });
+    assert!(has_effect, "source action should gain trigger effect");
+}
+
+#[test]
+fn test_action_triggers_adapter_kind_requires_adapter_key() {
+    let spec = r#"
+[automaton]
+name = "EvolutionRun"
+states = ["Proposing", "Failed"]
+initial = "Proposing"
+
+[[action]]
+name = "RecordDataset"
+from = ["Proposing"]
+to = "Proposing"
+
+[[action.triggers]]
+name = "propose_mutation"
+kind = "adapter"
+on_failure = "Fail"
+
+[[action]]
+name = "Fail"
+from = ["Proposing"]
+to = "Failed"
+"#;
+    let err = parse_automaton(spec).expect_err("adapter trigger without adapter must fail");
+    assert!(
+        err.to_string().contains("missing 'adapter'"),
+        "expected adapter validation error, got: {err}"
+    );
+}
+
+#[test]
 fn test_action_triggers_webhook_kind() {
     let spec = r#"
 [automaton]
