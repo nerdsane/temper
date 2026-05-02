@@ -11,6 +11,13 @@ use crate::PostgresEventStore;
 
 const DISTINCT_RESOURCE_IDS_BUDGET: usize = 100;
 
+/// Maximum bytes for a single value to be indexed into `entity_field_index`.
+/// Postgres btree (idx_efi_lookup) rejects keys that exceed roughly 2704 bytes
+/// (one third of an 8KB page). Anything larger can't be indexed at all, so we
+/// skip it from the per-field index — the full value remains in
+/// `entity_catalog.fields` (jsonb, no size cap) for direct reads.
+const MAX_INDEXABLE_FIELD_VALUE_BYTES: usize = 2000;
+
 #[derive(Clone, Copy, Debug)]
 pub struct PostgresSpecVerificationUpdate<'a> {
     pub status: &'a str,
@@ -365,6 +372,22 @@ impl PostgresEventStore {
         if let Some(object) = fields.as_object() {
             for (field_name, value) in object {
                 if let Some(field_value) = scalar_field_value(value) {
+                    // Postgres btree caps an indexed key at ~2704 bytes (compressed).
+                    // Inserting a longer value into entity_field_index errors out and
+                    // poisons the whole transaction, which then rolls back the
+                    // entity_catalog upsert above too — silently dropping the entire
+                    // row from both projections. Long fields can't be btree-indexed
+                    // by Postgres in any case, so they're meaningless to $filter
+                    // pushdown; the full value is still in entity_catalog.fields
+                    // (jsonb) for read-by-id and catalog-fast-read. Skipping them
+                    // here keeps the projection consistent.
+                    // Skip silently — this is normal for any field whose
+                    // serialized scalar exceeds Postgres' btree key cap.
+                    // The full value is preserved in entity_catalog.fields
+                    // jsonb, which is what reads return.
+                    if field_value.len() > MAX_INDEXABLE_FIELD_VALUE_BYTES {
+                        continue;
+                    }
                     sqlx::query(
                         "INSERT INTO entity_field_index \
                          (tenant, entity_type, entity_id, field_name, field_value, status) \
