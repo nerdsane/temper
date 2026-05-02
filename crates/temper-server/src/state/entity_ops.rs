@@ -658,13 +658,24 @@ impl ServerState {
                 )
                 .await
             {
-                tracing::warn!(
+                // Surface the projection failure instead of swallowing it.
+                // Previously this was a `warn` followed by `Ok(response)`,
+                // which produced HTTP 201 even when the entity wasn't
+                // discoverable via $filter — silently corrupting any caller
+                // that does write-then-read-back. Returning Err propagates
+                // up through the OData write handler to a 5xx so the client
+                // knows to retry. The event is already durable in the
+                // events table; on retry the actor's idempotent UPSERT into
+                // entity_catalog/entity_field_index will succeed (or fail
+                // again loudly).
+                tracing::error!(
                     error = %e,
                     tenant = %tenant,
                     entity_type = %entity_type,
                     entity_id = %entity_id,
                     "failed to update query projection during create"
                 );
+                return Err(format!("query projection write failed during create: {e}"));
             }
         }
 
@@ -718,13 +729,17 @@ impl ServerState {
                 )
                 .await
             {
-                tracing::warn!(
+                // Same reasoning as create: don't ack a write that won't be
+                // visible via $filter. Propagate so OData returns 5xx and
+                // clients can retry against the idempotent upsert.
+                tracing::error!(
                     error = %e,
                     tenant = %tenant,
                     entity_type = %entity_type,
                     entity_id = %entity_id,
                     "failed to update query projection during field update"
                 );
+                return Err(format!("query projection write failed during update: {e}"));
             }
         }
 
@@ -761,12 +776,17 @@ impl ServerState {
                     .remove_projection(tenant.as_str(), entity_type, entity_id)
                     .await
             {
-                tracing::warn!(
+                // Delete is idempotent against the projection: a stale row
+                // surviving in entity_field_index after the tombstone is a
+                // visibility leak, not data corruption. Log loudly so it's
+                // greppable but don't block the delete from completing —
+                // the actor and event journal already reflect the tombstone.
+                tracing::error!(
                     error = %e,
                     tenant = %tenant,
                     entity_type = %entity_type,
                     entity_id = %entity_id,
-                    "failed to remove query projection during delete"
+                    "failed to remove query projection during delete (stale projection row will linger until next successful upsert/delete)"
                 );
             }
 
