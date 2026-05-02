@@ -675,9 +675,7 @@ impl ServerState {
                     entity_id = %entity_id,
                     "failed to update query projection during create"
                 );
-                return Err(format!(
-                    "query projection write failed during create: {e}"
-                ));
+                return Err(format!("query projection write failed during create: {e}"));
             }
         }
 
@@ -741,9 +739,7 @@ impl ServerState {
                     entity_id = %entity_id,
                     "failed to update query projection during field update"
                 );
-                return Err(format!(
-                    "query projection write failed during update: {e}"
-                ));
+                return Err(format!("query projection write failed during update: {e}"));
             }
         }
 
