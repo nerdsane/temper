@@ -72,26 +72,26 @@ pub fn parse_automaton_with_liveness(
     // ADR-0049: wire each state_timeout's `state` into the target action's
     // `from` list so the action is actually enabled from that state.
     wire_state_timeout_from_states(&mut automaton);
-    // ADR-0046: expand `[[action.triggers]]` kind="wasm" / "webhook" blocks
+    // ADR-0046/0078: expand `[[action.triggers]]` external integration blocks
     // into synthesized `[[integration]]` entries + action effects so the
-    // existing WASM/webhook runtime picks them up without needing a parallel
+    // existing WASM/adapter/webhook runtime picks them up without needing a parallel
     // dispatch path. Entity-kind triggers are handled separately by the
     // reaction dispatcher.
-    expand_wasm_and_webhook_triggers(&mut automaton)?;
+    expand_external_action_triggers(&mut automaton)?;
     // ADR-0050: enforce (or warn on) liveness coverage.
     check_liveness_coverage(&automaton, mode)?;
     Ok(automaton)
 }
 
-/// ADR-0046: translate `[[action.triggers]]` kind="wasm" / "webhook"
-/// declarations into the existing `[[integration]]` + `Effect::Trigger`
-/// runtime. For each such trigger, synthesizes:
+/// ADR-0046/0078: translate external `[[action.triggers]]` declarations into
+/// the existing `[[integration]]` + `Effect::Trigger` runtime. For each such
+/// trigger, synthesizes:
 ///
 /// 1. A new `Integration` appended to `automaton.integrations` with
-///    fields copied from the trigger (module / url / method / config /
-///    on_success / on_failure).
+///    fields copied from the trigger (module / adapter / url / method /
+///    config / on_success / on_failure).
 /// 2. A `trigger` effect on the source action so the transition table
-///    emits a `custom_effect` that the runtime's wasm/webhook dispatcher
+///    emits a `custom_effect` that the runtime's integration dispatcher
 ///    picks up by name.
 ///
 /// Synthesized integrations are named
@@ -108,7 +108,7 @@ fn is_platform_custom_effect_name(effect_name: &str) -> bool {
     effect_name.chars().any(|ch| ch.is_ascii_uppercase())
 }
 
-fn expand_wasm_and_webhook_triggers(automaton: &mut Automaton) -> Result<(), AutomatonParseError> {
+fn expand_external_action_triggers(automaton: &mut Automaton) -> Result<(), AutomatonParseError> {
     use super::types::{Effect, Integration, TriggerKind};
 
     let legacy_trigger_names: std::collections::BTreeSet<String> = automaton
@@ -120,7 +120,10 @@ fn expand_wasm_and_webhook_triggers(automaton: &mut Automaton) -> Result<(), Aut
         std::collections::BTreeMap::new();
     for action in &automaton.actions {
         for trigger in &action.triggers {
-            if matches!(trigger.kind, TriggerKind::Wasm | TriggerKind::Webhook) {
+            if matches!(
+                trigger.kind,
+                TriggerKind::Wasm | TriggerKind::Adapter | TriggerKind::Webhook
+            ) {
                 inline_trigger_owners
                     .entry(trigger.name.clone())
                     .or_default()
@@ -133,7 +136,12 @@ fn expand_wasm_and_webhook_triggers(automaton: &mut Automaton) -> Result<(), Aut
         let local_inline_trigger_names: std::collections::BTreeSet<String> = action
             .triggers
             .iter()
-            .filter(|trigger| matches!(trigger.kind, TriggerKind::Wasm | TriggerKind::Webhook))
+            .filter(|trigger| {
+                matches!(
+                    trigger.kind,
+                    TriggerKind::Wasm | TriggerKind::Adapter | TriggerKind::Webhook
+                )
+            })
             .map(|trigger| trigger.name.clone())
             .collect();
 
@@ -176,7 +184,10 @@ fn expand_wasm_and_webhook_triggers(automaton: &mut Automaton) -> Result<(), Aut
             })
             .collect();
         for trigger in &action.triggers {
-            if !matches!(trigger.kind, TriggerKind::Wasm | TriggerKind::Webhook) {
+            if !matches!(
+                trigger.kind,
+                TriggerKind::Wasm | TriggerKind::Adapter | TriggerKind::Webhook
+            ) {
                 continue;
             }
             let synth_name = synthesized_trigger_name(&action.name, &trigger.name);
@@ -205,6 +216,25 @@ fn expand_wasm_and_webhook_triggers(automaton: &mut Automaton) -> Result<(), Aut
                         on_failure: trigger.on_failure.clone(),
                         llm: trigger.llm,
                         config: trigger.config.clone(),
+                    });
+                }
+                TriggerKind::Adapter => {
+                    let mut config = trigger.config.clone();
+                    if let Some(adapter) = &trigger.adapter {
+                        config.insert("adapter".to_string(), adapter.clone());
+                    }
+                    if let Some(adapter_type) = &trigger.adapter_type {
+                        config.insert("adapter_type".to_string(), adapter_type.clone());
+                    }
+                    synthesized.push(Integration {
+                        name: synth_name.clone(),
+                        trigger: synth_name.clone(),
+                        integration_type: "adapter".to_string(),
+                        module: None,
+                        on_success: trigger.on_success.clone(),
+                        on_failure: trigger.on_failure.clone(),
+                        llm: trigger.llm,
+                        config,
                     });
                 }
                 TriggerKind::Webhook => {
@@ -612,7 +642,7 @@ fn validate(automaton: &Automaton) -> Result<(), AutomatonParseError> {
 /// - `to_state` (if set) is a declared state.
 /// - Trigger guard nesting depth ≤ `MAX_TRIGGER_GUARD_DEPTH`.
 /// - `params` and `params_from` keys must not collide.
-/// - For `Wasm`/`Webhook` kinds: `on_success`/`on_failure` reference
+/// - For `Wasm`/`Adapter`/`Webhook` kinds: `on_success`/`on_failure` reference
 ///   actions declared on the same source entity.
 /// - Trigger names within a single action must be unique.
 fn validate_action_triggers(
@@ -661,6 +691,18 @@ fn validate_action_triggers(
                     if trigger.module.as_deref().is_none_or(str::is_empty) {
                         return Err(AutomatonParseError::Validation(format!(
                             "trigger '{}' on action '{}' is kind=\"wasm\" but missing 'module'",
+                            trigger.name, action.name
+                        )));
+                    }
+                }
+                TriggerKind::Adapter => {
+                    let has_adapter = [trigger.adapter.as_deref(), trigger.adapter_type.as_deref()]
+                        .into_iter()
+                        .flatten()
+                        .any(|adapter| !adapter.trim().is_empty());
+                    if !has_adapter {
+                        return Err(AutomatonParseError::Validation(format!(
+                            "trigger '{}' on action '{}' is kind=\"adapter\" but missing 'adapter'",
                             trigger.name, action.name
                         )));
                     }

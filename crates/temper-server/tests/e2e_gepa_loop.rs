@@ -1541,22 +1541,26 @@ MOCK_OUTPUT
 
     // --- Build EvolutionRun spec with propose_mutation test override ---
     let base_ioa = include_str!("../../../os-apps/evolution/evolution_run.ioa.toml");
-    // Replace proposer + verifier integrations with deterministic adapters for test-only execution.
+    // Replace proposer + verifier action triggers with deterministic adapters for test-only
+    // execution. Production keeps the WASM proposer/verifier modules.
     let mock_path = mock_script.to_str().expect("mock path to str");
     let verify_path = verify_script.to_str().expect("verify path to str");
     let mock_workdir = mock_workdir.to_str().expect("mock workdir to str");
     let modified_ioa = base_ioa
         .replace(
-        "type = \"wasm\"\nmodule = \"gepa-proposer-agent\"",
-        &format!("type = \"adapter\"\nadapter = \"claude_code\"\ncommand = \"{mock_path}\""),
+            "kind = \"wasm\"\nmodule = \"gepa-proposer-agent\"",
+            "kind = \"adapter\"\nadapter = \"claude_code\"",
         )
         .replace(
-            "type = \"wasm\"\nmodule = \"gepa-verify\"",
-            &format!(
-                "type = \"adapter\"\nadapter = \"claude_code\"\ncommand = \"{verify_path}\"\non_success = \"RecordVerificationPass\""
-            ),
+            "workdir = \"/workspace\"",
+            &format!("command = \"{mock_path}\"\nworkdir = \"{mock_workdir}\""),
         )
-        .replace("workdir = \"/workspace\"", &format!("workdir = \"{mock_workdir}\""));
+        .replace(
+            "kind = \"wasm\"\nmodule = \"gepa-verify\"\non_failure = \"Fail\"\n\n[action.triggers.config]\ntemper_api_url = \"http://127.0.0.1:4455\"",
+            &format!(
+                "kind = \"adapter\"\nadapter = \"claude_code\"\non_success = \"RecordVerificationPass\"\non_failure = \"Fail\"\n\n[action.triggers.config]\ncommand = \"{verify_path}\"\ntemper_api_url = \"http://127.0.0.1:4455\""
+            ),
+        );
 
     let csdl_xml = r#"<?xml version="1.0" encoding="utf-8"?>
 <edmx:Edmx Version="4.0" xmlns:edmx="http://docs.oasis-open.org/odata/ns/edmx">

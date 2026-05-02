@@ -465,6 +465,9 @@ pub enum TriggerKind {
     /// WASM module execution. Optionally dispatches `on_success` / `on_failure`
     /// actions on the source entity afterwards.
     Wasm,
+    /// Native platform adapter execution. Optionally dispatches `on_success`
+    /// / `on_failure` actions on the source entity afterwards.
+    Adapter,
     /// Outbound HTTP webhook. Optionally dispatches `on_success` / `on_failure`
     /// actions on the source entity afterwards.
     Webhook,
@@ -603,7 +606,8 @@ impl TriggerGuard {
 /// An outgoing trigger declared inline on an `Action` (ADR-0046).
 ///
 /// Unifies cross-entity dispatch (former `reactions.toml`), WASM execution
-/// (former `[[integration]] type = "wasm"`), and outbound webhooks (former
+/// (former `[[integration]] type = "wasm"`), native adapters (former
+/// `[[integration]] type = "adapter"`), and outbound webhooks (former
 /// `[[integration]] type = "webhook"`) under a single `kind`-discriminated
 /// schema.
 ///
@@ -611,6 +615,7 @@ impl TriggerGuard {
 /// presence per `kind`:
 /// - `Entity`: requires `target_entity` + `target_action`.
 /// - `Wasm`: requires `module`.
+/// - `Adapter`: requires `adapter` or `adapter_type`.
 /// - `Webhook`: requires `url` + `method`.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct ActionTrigger {
@@ -679,6 +684,15 @@ pub struct ActionTrigger {
     /// Common keys: `url`, `method`, `headers`, `api_key_ref`.
     #[serde(default)]
     pub config: BTreeMap<String, String>,
+
+    // ─── Adapter-kind fields ───────────────────────────────────────────
+    /// Native adapter key (required for `Adapter` kind unless
+    /// `adapter_type` is present).
+    #[serde(default)]
+    pub adapter: Option<String>,
+    /// Alternate native adapter key name accepted by the runtime dispatcher.
+    #[serde(default)]
+    pub adapter_type: Option<String>,
 
     // ─── Webhook-kind fields ────────────────────────────────────────────
     /// Outbound HTTP URL (required for `Webhook` kind).
