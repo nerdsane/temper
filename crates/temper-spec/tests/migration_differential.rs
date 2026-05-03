@@ -16,157 +16,192 @@
 //! (true for all commits in MIGRATIONS as of ship).
 
 use std::collections::BTreeMap;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use temper_spec::automaton::{Integration, parse_automaton};
 
-/// (repo_worktree, migration_commit_sha, spec_path_relative_to_repo_root)
-const MIGRATIONS: &[(&str, &str, &str)] = &[
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum RepoFixture {
+    Current,
+    External {
+        name: &'static str,
+        root_env: &'static str,
+    },
+}
+
+const TEMPER: RepoFixture = RepoFixture::Current;
+const OPENPAW: RepoFixture = RepoFixture::External {
+    name: "openpaw",
+    root_env: "TEMPER_MIGRATION_DIFF_OPENPAW_ROOT",
+};
+
+/// (repo_fixture, migration_commit_sha, spec_path_relative_to_repo_root)
+///
+/// External repositories are opt-in because Temper CI cannot assume sibling
+/// checkouts exist on the runner. Set the fixture's root_env to include them
+/// in the differential locally.
+const MIGRATIONS: &[(RepoFixture, &str, &str)] = &[
     // --- temper repo ---
     (
-        "/Users/seshendranalla/Development/temper-action-triggers",
+        TEMPER,
         "53e2304",
         "reference-apps/weather-tracker/specs/weather_report.ioa.toml",
     ),
     (
-        "/Users/seshendranalla/Development/temper-action-triggers",
+        TEMPER,
         "c7cf6a2",
         "os-apps/temper-agent/specs/cron_job.ioa.toml",
     ),
     (
-        "/Users/seshendranalla/Development/temper-action-triggers",
+        TEMPER,
         "c7cf6a2",
         "os-apps/temper-agent/specs/cron_scheduler.ioa.toml",
     ),
     (
-        "/Users/seshendranalla/Development/temper-action-triggers",
+        TEMPER,
         "c7cf6a2",
         "os-apps/temper-agent/specs/heartbeat_monitor.ioa.toml",
     ),
     (
-        "/Users/seshendranalla/Development/temper-action-triggers",
+        TEMPER,
         "c7cf6a2",
         "reference-apps/crucible/specs/crucible_scheduler.ioa.toml",
     ),
     (
-        "/Users/seshendranalla/Development/temper-action-triggers",
+        TEMPER,
         "c7cf6a2",
         "reference-apps/crucible/specs/session_schedule.ioa.toml",
     ),
     // ad06abd (not 15c8e87): get pre-migration content, not post-prompt-fix.
     (
-        "/Users/seshendranalla/Development/temper-action-triggers",
+        TEMPER,
         "ad06abd",
         "os-apps/evolution/evolution_run.ioa.toml",
     ),
     (
-        "/Users/seshendranalla/Development/temper-action-triggers",
+        TEMPER,
         "ad06abd",
         "os-apps/intent-discovery/specs/intent_discovery.ioa.toml",
     ),
     (
-        "/Users/seshendranalla/Development/temper-action-triggers",
+        TEMPER,
         "ad06abd",
         "os-apps/temper-agent/specs/temper_agent.ioa.toml",
     ),
     (
-        "/Users/seshendranalla/Development/temper-action-triggers",
+        TEMPER,
         "ad06abd",
         "os-apps/temper-channels/specs/channel.ioa.toml",
     ),
     // --- openpaw repo — 7a644954 bulk migration ---
     (
-        "/Users/seshendranalla/Development/openpaw-action-triggers",
+        OPENPAW,
         "7a644954",
         "os-apps/paw-agent/specs/capability_request.ioa.toml",
     ),
     (
-        "/Users/seshendranalla/Development/openpaw-action-triggers",
+        OPENPAW,
         "7a644954",
         "os-apps/paw-agent/specs/cron_job.ioa.toml",
     ),
     (
-        "/Users/seshendranalla/Development/openpaw-action-triggers",
+        OPENPAW,
         "7a644954",
         "os-apps/paw-agent/specs/plan_review.ioa.toml",
     ),
     (
-        "/Users/seshendranalla/Development/openpaw-action-triggers",
+        OPENPAW,
         "7a644954",
         "os-apps/paw-agent/specs/session.ioa.toml",
     ),
     (
-        "/Users/seshendranalla/Development/openpaw-action-triggers",
+        OPENPAW,
         "7a644954",
         "os-apps/paw-autoreason/specs/tournament.ioa.toml",
     ),
     (
-        "/Users/seshendranalla/Development/openpaw-action-triggers",
+        OPENPAW,
         "7a644954",
         "os-apps/paw-channels/specs/channel.ioa.toml",
     ),
     (
-        "/Users/seshendranalla/Development/openpaw-action-triggers",
+        OPENPAW,
         "7a644954",
         "os-apps/paw-consilium/specs/deliberation.ioa.toml",
     ),
     (
-        "/Users/seshendranalla/Development/openpaw-action-triggers",
+        OPENPAW,
         "7a644954",
         "os-apps/paw-foresight/specs/foresight_model.ioa.toml",
     ),
     (
-        "/Users/seshendranalla/Development/openpaw-action-triggers",
+        OPENPAW,
         "7a644954",
         "os-apps/paw-foresight/specs/projection.ioa.toml",
     ),
     (
-        "/Users/seshendranalla/Development/openpaw-action-triggers",
+        OPENPAW,
         "7a644954",
         "os-apps/paw-fs/specs/workspace.ioa.toml",
     ),
     (
-        "/Users/seshendranalla/Development/openpaw-action-triggers",
+        OPENPAW,
         "7a644954",
         "os-apps/paw-heal/specs/alert_cycle.ioa.toml",
     ),
     (
-        "/Users/seshendranalla/Development/openpaw-action-triggers",
+        OPENPAW,
         "7a644954",
         "os-apps/paw-ingest/specs/webhook_event.ioa.toml",
     ),
     (
-        "/Users/seshendranalla/Development/openpaw-action-triggers",
+        OPENPAW,
         "7a644954",
         "os-apps/paw-wiki/specs/wiki_job.ioa.toml",
     ),
     // --- openpaw batch 2 (trigger-keyed script fix) — commit 563c6048 ---
     (
-        "/Users/seshendranalla/Development/openpaw-action-triggers",
+        OPENPAW,
         "563c6048",
         "os-apps/paw-research/specs/web_query.ioa.toml",
     ),
     (
-        "/Users/seshendranalla/Development/openpaw-action-triggers",
+        OPENPAW,
         "563c6048",
         "os-apps/paw-managed-agents/specs/managed_session.ioa.toml",
     ),
     (
-        "/Users/seshendranalla/Development/openpaw-action-triggers",
+        OPENPAW,
         "563c6048",
         "os-apps/paw-managed-agents/specs/managed_agent.ioa.toml",
     ),
 ];
 
-fn git_show(repo_root: &str, sha: &str, path: &str) -> String {
+fn current_repo_root() -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .ancestors()
+        .nth(2)
+        .expect("crate lives under crates/temper-spec")
+        .to_path_buf()
+}
+
+fn resolve_repo_root(repo: RepoFixture) -> Option<PathBuf> {
+    match repo {
+        RepoFixture::Current => Some(current_repo_root()),
+        RepoFixture::External { root_env, .. } => std::env::var_os(root_env).map(PathBuf::from),
+    }
+}
+
+fn git_show(repo_root: &Path, sha: &str, path: &str) -> String {
     git_show_inner(repo_root, sha, path, None)
 }
 
 fn git_show_inner(
-    repo_root: &str,
+    repo_root: &Path,
     sha: &str,
     path: &str,
-    git_dir_override: Option<&str>,
+    git_dir_override: Option<&Path>,
 ) -> String {
     let mut cmd = Command::new("git");
     if let Some(git_dir) = git_dir_override {
@@ -174,13 +209,17 @@ fn git_show_inner(
     }
     sanitize_git_env(&mut cmd);
     let out = cmd
-        .args(["-C", repo_root, "show", &format!("{sha}^:{path}")])
+        .arg("-C")
+        .arg(repo_root)
+        .arg("show")
+        .arg(format!("{sha}^:{path}"))
         .output()
         .expect("git show");
     assert!(
         out.status.success(),
-        "git show {sha}^:{path} in {repo_root} failed: {}",
-        String::from_utf8_lossy(&out.stderr)
+        "git show {sha}^:{path} in {repo_root} failed: {stderr}",
+        repo_root = repo_root.display(),
+        stderr = String::from_utf8_lossy(&out.stderr)
     );
     String::from_utf8(out.stdout).expect("utf8")
 }
@@ -200,9 +239,10 @@ fn sanitize_git_env(cmd: &mut Command) {
     }
 }
 
-fn read_current(repo_root: &str, path: &str) -> String {
-    std::fs::read_to_string(format!("{repo_root}/{path}"))
-        .unwrap_or_else(|e| panic!("read {repo_root}/{path}: {e}"))
+fn read_current(repo_root: &Path, path: &str) -> String {
+    let full_path = repo_root.join(path);
+    std::fs::read_to_string(&full_path)
+        .unwrap_or_else(|e| panic!("read {}: {e}", full_path.display()))
 }
 
 /// Integrations intentionally dropped (not just migrated) after the initial
@@ -376,10 +416,22 @@ fn allowed_extra_config_keys(path: &str, trigger_name: &str) -> &'static [&'stat
 #[test]
 fn all_migrations_preserve_integrations() {
     let mut failures: Vec<String> = Vec::new();
+    let mut checked = 0usize;
 
     for (repo, sha, path) in MIGRATIONS {
-        let old_src = git_show(repo, sha, path);
-        let new_src = read_current(repo, path);
+        let Some(repo_root) = resolve_repo_root(*repo) else {
+            if let RepoFixture::External { name, root_env } = repo {
+                eprintln!(
+                    "  {path}: note — skipping external {name} fixture; set {root_env} to enable"
+                );
+                continue;
+            }
+            unreachable!("current repo root is always resolvable");
+        };
+        checked += 1;
+
+        let old_src = git_show(&repo_root, sha, path);
+        let new_src = read_current(&repo_root, path);
 
         let old = match parse_automaton(&old_src) {
             Ok(a) => a,
@@ -451,6 +503,8 @@ fn all_migrations_preserve_integrations() {
             failures.join("\n  - ")
         );
     }
+
+    assert!(checked > 0, "at least one migration fixture must run");
 }
 
 /// Guards the expander's naming scheme (parser.rs:109). If the
@@ -491,12 +545,12 @@ on_success = "Fire"
 
 #[test]
 fn git_show_ignores_inherited_git_dir_from_other_repo() {
-    let repo = "/Users/seshendranalla/Development/openpaw-action-triggers";
-    let wrong_git_dir = "/Users/seshendranalla/Development/temper-action-triggers/.git";
-    let path = "os-apps/paw-agent/specs/capability_request.ioa.toml";
+    let repo = current_repo_root();
+    let wrong_git_dir = repo.join("target/not-a-real-git-dir");
+    let path = "reference-apps/weather-tracker/specs/weather_report.ioa.toml";
 
-    let clean = git_show(repo, "7a644954", path);
-    let contaminated = git_show_inner(repo, "7a644954", path, Some(wrong_git_dir));
+    let clean = git_show(&repo, "53e2304", path);
+    let contaminated = git_show_inner(&repo, "53e2304", path, Some(&wrong_git_dir));
 
     assert_eq!(clean, contaminated);
 }
