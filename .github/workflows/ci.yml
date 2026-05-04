@@ -5,6 +5,13 @@ on:
     branches: [main, staging]
   push:
     branches: [main, staging]
+  schedule:
+    - cron: "17 8 * * *"
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
 
 env:
   CARGO_TERM_COLOR: always
@@ -58,6 +65,7 @@ jobs:
   check:
     name: Compile & Lint
     runs-on: ubuntu-latest
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@v4
 
@@ -88,6 +96,35 @@ jobs:
 
       - name: cargo clippy --workspace --all-targets
         run: cargo clippy --workspace --all-targets -- -D warnings
+
+  # ─────────────────────────────────────────────────────
+  # Gate 1b: Bench compile (non-PR events only)
+  # ─────────────────────────────────────────────────────
+  bench-build:
+    name: Bench Build
+    runs-on: ubuntu-latest
+    if: github.event_name != 'pull_request'
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install system dependencies
+        run: sudo apt-get update && sudo apt-get install -y libz3-dev
+
+      - name: Install pinned Rust toolchain
+        uses: dtolnay/rust-toolchain@nightly
+        with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
+
+      - name: Cache cargo registry
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target/
+          key: ${{ runner.os }}-cargo-bench-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-cargo-bench-
 
       - name: cargo bench --workspace --no-run
         run: cargo bench --workspace --no-run
@@ -188,8 +225,7 @@ jobs:
   test:
     name: Tests
     runs-on: ubuntu-latest
-    needs: check
-    timeout-minutes: 360
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@v4
         with:
@@ -222,8 +258,53 @@ jobs:
             (cd "wasm-modules/$module" && cargo build --target wasm32-unknown-unknown --release)
           done
 
-      - name: cargo test --workspace
-        run: cargo test --workspace
+      - name: cargo test --workspace -- --skip dst_
+        run: cargo test --workspace -- --skip dst_
+
+  # ─────────────────────────────────────────────────────
+  # Gate 3b: DST/platform coverage (matrixed)
+  # ─────────────────────────────────────────────────────
+  dst-platform-tests:
+    name: DST/Platform Tests (${{ matrix.suite }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - suite: core
+            command: cargo test -p temper-server --test dst_concurrency_retry --test dst_hotswap --test dst_lifecycle --test dst_multi_tenant --test dst_persistence
+          - suite: platform-boot
+            command: cargo test -p temper-server --test dst_platform_boot
+          - suite: platform-consistency
+            command: cargo test -p temper-server --test dst_platform_cedar --test dst_platform_index --test dst_platform_rollback
+          - suite: platform-random
+            command: cargo test -p temper-server --test dst_platform_random
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install system dependencies
+        run: sudo apt-get update && sudo apt-get install -y libz3-dev
+
+      - name: Install pinned Rust toolchain
+        uses: dtolnay/rust-toolchain@nightly
+        with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
+
+      - name: Cache cargo registry
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target/
+          key: ${{ runner.os }}-cargo-dst-${{ matrix.suite }}-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-cargo-dst-${{ matrix.suite }}-
+
+      - name: cargo test DST/platform suite
+        env:
+          TEMPER_DST_RANDOM_MODE: ${{ matrix.suite == 'platform-random' && github.event_name == 'pull_request' && 'smoke' || 'full' }}
+        run: ${{ matrix.command }}
 
   # ─────────────────────────────────────────────────────
   # Gate 4: Spec verification (minutes)
@@ -231,7 +312,7 @@ jobs:
   verify-specs:
     name: Spec Verification (L0-L3)
     runs-on: ubuntu-latest
-    needs: check
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
 
