@@ -1284,6 +1284,7 @@ impl WasmHost for ProductionWasmHost {
         request: crate::http_stream::HttpRequestHead,
     ) -> Result<crate::http_stream::HttpStreamHandles, String> {
         use futures_util::StreamExt;
+        use tracing::Instrument;
 
         let exchange = self.http_streams.open_outbound_exchange().await;
         let guest = exchange.guest_handles();
@@ -1292,6 +1293,18 @@ impl WasmHost for ProductionWasmHost {
         let head_tx = exchange.bridge_head_sender;
         let streams = self.http_streams.clone();
         let client = self.client.clone();
+        let (filtered_headers, span_hints) = split_span_hint_headers(&request.headers);
+        let span = tracing::info_span!(
+            "wasm.host.http_stream",
+            otel.name = "wasm.host.http_stream",
+            http.method = %request.method,
+            http.url = %telemetry_url(&request.url),
+            header_count = filtered_headers.len() as u64,
+            status_code = tracing::field::Empty,
+            response_bytes = tracing::field::Empty,
+            duration_ms = tracing::field::Empty,
+        );
+        apply_span_hints(&span, &span_hints);
 
         // Build the request head before moving into the task so we
         // can surface malformed-method errors synchronously.
@@ -1304,63 +1317,83 @@ impl WasmHost for ProductionWasmHost {
             other => return Err(format!("unsupported HTTP method: {other}")),
         };
         let mut builder = builder;
-        for (k, v) in &request.headers {
+        for (k, v) in &filtered_headers {
             builder = builder.header(k.as_str(), v.as_str());
         }
+        if !filtered_headers
+            .iter()
+            .any(|(k, _)| k.eq_ignore_ascii_case("traceparent"))
+            && let Some(traceparent) = current_traceparent_header(&span, self.trace_id.as_deref())
+        {
+            builder = builder.header("traceparent", traceparent);
+        }
 
-        tokio::spawn(async move {
-            // Pull request body chunks from the registry; wrap as a
-            // Stream<Item = Result<Bytes, _>> for reqwest.
-            let req_streams = streams.clone();
-            let body_stream = async_stream::stream! {
-                loop {
-                    match req_streams.read(bridge_req).await {
-                        Ok(chunk) if chunk.is_empty() => break, // EOF
-                        Ok(chunk) => yield Ok::<_, std::io::Error>(bytes::Bytes::from(chunk)),
+        tokio::spawn(
+            async move {
+                let started = Instant::now();
+                // Pull request body chunks from the registry; wrap as a
+                // Stream<Item = Result<Bytes, _>> for reqwest.
+                let req_streams = streams.clone();
+                let body_stream = async_stream::stream! {
+                    loop {
+                        match req_streams.read(bridge_req).await {
+                            Ok(chunk) if chunk.is_empty() => break, // EOF
+                            Ok(chunk) => yield Ok::<_, std::io::Error>(bytes::Bytes::from(chunk)),
+                            Err(_) => break,
+                        }
+                    }
+                };
+                let req_body = reqwest::Body::wrap_stream(body_stream);
+
+                let send_result = builder.body(req_body).send().await;
+                let resp = match send_result {
+                    Ok(r) => r,
+                    Err(e) => {
+                        tracing::Span::current().record("status_code", 0u64);
+                        tracing::Span::current()
+                            .record("duration_ms", started.elapsed().as_millis() as u64);
+                        let _ = head_tx.send(crate::http_stream::HttpResponseHead {
+                            status: 0,
+                            headers: vec![("x-temper-stream-error".into(), format!("{e}"))],
+                        });
+                        let _ = streams.close(bridge_resp).await;
+                        return;
+                    }
+                };
+
+                let status = resp.status().as_u16();
+                tracing::Span::current().record("status_code", status);
+                let headers: Vec<(String, String)> = resp
+                    .headers()
+                    .iter()
+                    .filter_map(|(k, v)| {
+                        v.to_str()
+                            .ok()
+                            .map(|s| (k.as_str().to_string(), s.to_string()))
+                    })
+                    .collect();
+                let _ = head_tx.send(crate::http_stream::HttpResponseHead { status, headers });
+
+                let mut body_stream = resp.bytes_stream();
+                let mut response_bytes = 0u64;
+                while let Some(chunk) = body_stream.next().await {
+                    match chunk {
+                        Ok(bytes) => {
+                            response_bytes += bytes.len() as u64;
+                            if streams.write(bridge_resp, bytes.to_vec()).await.is_err() {
+                                break; // guest hung up
+                            }
+                        }
                         Err(_) => break,
                     }
                 }
-            };
-            let req_body = reqwest::Body::wrap_stream(body_stream);
-
-            let send_result = builder.body(req_body).send().await;
-            let resp = match send_result {
-                Ok(r) => r,
-                Err(e) => {
-                    let _ = head_tx.send(crate::http_stream::HttpResponseHead {
-                        status: 0,
-                        headers: vec![("x-temper-stream-error".into(), format!("{e}"))],
-                    });
-                    let _ = streams.close(bridge_resp).await;
-                    return;
-                }
-            };
-
-            let status = resp.status().as_u16();
-            let headers: Vec<(String, String)> = resp
-                .headers()
-                .iter()
-                .filter_map(|(k, v)| {
-                    v.to_str()
-                        .ok()
-                        .map(|s| (k.as_str().to_string(), s.to_string()))
-                })
-                .collect();
-            let _ = head_tx.send(crate::http_stream::HttpResponseHead { status, headers });
-
-            let mut body_stream = resp.bytes_stream();
-            while let Some(chunk) = body_stream.next().await {
-                match chunk {
-                    Ok(bytes) => {
-                        if streams.write(bridge_resp, bytes.to_vec()).await.is_err() {
-                            break; // guest hung up
-                        }
-                    }
-                    Err(_) => break,
-                }
+                tracing::Span::current().record("response_bytes", response_bytes);
+                tracing::Span::current()
+                    .record("duration_ms", started.elapsed().as_millis() as u64);
+                let _ = streams.close(bridge_resp).await;
             }
-            let _ = streams.close(bridge_resp).await;
-        });
+            .instrument(span),
+        );
 
         Ok(guest)
     }

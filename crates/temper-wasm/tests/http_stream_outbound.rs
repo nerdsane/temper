@@ -28,9 +28,25 @@ async fn echo_handler(req: Request) -> impl IntoResponse {
     Body::from_stream(out_stream)
 }
 
+/// Axum handler that reports which headers arrived upstream.
+async fn header_echo_handler(req: Request) -> impl IntoResponse {
+    let span_hint_present = req.headers().contains_key("x-temper-span-name")
+        || req
+            .headers()
+            .contains_key("x-temper-span-attr-gen_ai.system");
+    let regular_header = req
+        .headers()
+        .get("x-regular")
+        .and_then(|value| value.to_str().ok())
+        .unwrap_or("");
+    format!("span_hint_present={span_hint_present};regular={regular_header}")
+}
+
 /// Bind axum on 127.0.0.1:0 (random port), return the bound addr.
 async fn spawn_echo_server() -> String {
-    let app = Router::new().route("/echo", post(echo_handler));
+    let app = Router::new()
+        .route("/echo", post(echo_handler))
+        .route("/headers", post(header_echo_handler));
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
     tokio::spawn(async move {
@@ -80,6 +96,47 @@ async fn outbound_streaming_echoes_request_body() {
 
     let expected: Vec<u8> = chunks.into_iter().flat_map(|c| c.to_vec()).collect();
     assert_eq!(echoed, expected, "echoed bytes must match sent");
+}
+
+#[tokio::test]
+async fn outbound_streaming_strips_temper_span_hint_headers() {
+    let base = spawn_echo_server().await;
+    let host = Arc::new(ProductionWasmHost::new(BTreeMap::new()));
+
+    let handles = host
+        .http_stream_begin_outbound(HttpRequestHead {
+            method: "POST".into(),
+            url: format!("{base}/headers"),
+            headers: vec![
+                ("x-regular".into(), "kept".into()),
+                ("X-Temper-Span-Name".into(), "tool.llm_call.test".into()),
+                (
+                    "X-Temper-Span-Attr-gen_ai.system".into(),
+                    "test-provider".into(),
+                ),
+            ],
+        })
+        .await
+        .unwrap();
+
+    host.http_stream_close(handles.request_body).await.unwrap();
+    let head = host
+        .http_stream_response_head(handles.response_body)
+        .await
+        .unwrap();
+    assert_eq!(head.status, 200);
+
+    let mut body = Vec::new();
+    loop {
+        let chunk = host.http_stream_read(handles.response_body).await.unwrap();
+        if chunk.is_empty() {
+            break;
+        }
+        body.extend_from_slice(&chunk);
+    }
+    let body = String::from_utf8(body).unwrap();
+
+    assert_eq!(body, "span_hint_present=false;regular=kept");
 }
 
 #[tokio::test]

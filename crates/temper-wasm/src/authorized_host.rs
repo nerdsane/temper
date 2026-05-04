@@ -192,6 +192,81 @@ impl WasmHost for AuthorizedWasmHost {
         }
     }
 
+    async fn http_stream_begin_outbound(
+        &self,
+        request: crate::http_stream::HttpRequestHead,
+    ) -> Result<crate::http_stream::HttpStreamHandles, String> {
+        let domain = extract_domain(&request.url);
+        match self
+            .gate
+            .authorize_http_call(domain, &request.method, &request.url, &self.ctx)
+        {
+            WasmAuthzDecision::Allow => self.inner.http_stream_begin_outbound(request).await,
+            WasmAuthzDecision::Deny(reason) => {
+                tracing::warn!(
+                    tenant = %self.ctx.tenant,
+                    module = %self.ctx.module_name,
+                    entity_type = %self.ctx.entity_type,
+                    trigger_action = %self.ctx.trigger_action,
+                    domain = %domain,
+                    http_method = %request.method,
+                    reason = %reason,
+                    "WASM host authorization denied outbound streaming HTTP call"
+                );
+                Err(format!(
+                    "authorization denied for http_stream_begin_outbound to {domain}: {reason}"
+                ))
+            }
+        }
+    }
+
+    async fn http_stream_read(
+        &self,
+        handle: crate::http_stream::StreamHandle,
+    ) -> Result<Vec<u8>, crate::http_stream::StreamError> {
+        self.inner.http_stream_read(handle).await
+    }
+
+    async fn http_stream_read_bounded(
+        &self,
+        handle: crate::http_stream::StreamHandle,
+        max_bytes: usize,
+    ) -> Result<Vec<u8>, crate::http_stream::StreamError> {
+        self.inner.http_stream_read_bounded(handle, max_bytes).await
+    }
+
+    async fn http_stream_try_write(
+        &self,
+        handle: crate::http_stream::StreamHandle,
+        chunk: Vec<u8>,
+    ) -> Result<usize, crate::http_stream::StreamError> {
+        self.inner.http_stream_try_write(handle, chunk).await
+    }
+
+    async fn http_stream_close(
+        &self,
+        handle: crate::http_stream::StreamHandle,
+    ) -> Result<(), crate::http_stream::StreamError> {
+        self.inner.http_stream_close(handle).await
+    }
+
+    async fn http_stream_response_head(
+        &self,
+        response_body: crate::http_stream::StreamHandle,
+    ) -> Result<crate::http_stream::HttpResponseHead, String> {
+        self.inner.http_stream_response_head(response_body).await
+    }
+
+    async fn http_stream_send_response_head(
+        &self,
+        response_body: crate::http_stream::StreamHandle,
+        head: crate::http_stream::HttpResponseHead,
+    ) -> Result<(), crate::http_stream::StreamError> {
+        self.inner
+            .http_stream_send_response_head(response_body, head)
+            .await
+    }
+
     fn get_secret(&self, key: &str) -> Result<String, String> {
         match self.gate.authorize_secret_access(key, &self.ctx) {
             WasmAuthzDecision::Allow => self.inner.get_secret(key),
