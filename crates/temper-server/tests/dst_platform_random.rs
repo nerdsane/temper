@@ -18,6 +18,41 @@ use common::workload_gen::{WorkloadGenerator, WorkloadOp};
 
 // ── Helpers ──────────────────────────────────────────────────────────────
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum RandomMode {
+    Full,
+    Smoke,
+}
+
+impl RandomMode {
+    fn current() -> Self {
+        // determinism-ok: CI mode selection happens before deterministic seeds are installed.
+        match std::env::var("TEMPER_DST_RANDOM_MODE") {
+            Ok(value) if value == "full" => Self::Full,
+            Ok(value) if value == "smoke" => Self::Smoke,
+            Ok(value) => {
+                panic!("TEMPER_DST_RANDOM_MODE must be 'full' or 'smoke', got {value:?}")
+            }
+            Err(std::env::VarError::NotPresent) => Self::Full,
+            Err(err) => panic!("TEMPER_DST_RANDOM_MODE is not valid UTF-8: {err}"),
+        }
+    }
+
+    fn seeds(self, full: u64, smoke: u64) -> u64 {
+        match self {
+            Self::Full => full,
+            Self::Smoke => smoke,
+        }
+    }
+
+    fn ops(self, full: usize, smoke: usize) -> usize {
+        match self {
+            Self::Full => full,
+            Self::Smoke => smoke,
+        }
+    }
+}
+
 /// Run a full workload: generate `num_ops` operations and execute them.
 ///
 /// When `check_invariants_inline` is true, `CheckInvariants` ops actually
@@ -114,11 +149,15 @@ async fn run_workload(
 
 #[tokio::test]
 async fn dst_random_workload_no_faults() {
-    for seed in 0..100 {
+    let mode = RandomMode::current();
+    let seeds = mode.seeds(100, 10);
+    let ops = mode.ops(50, 20);
+
+    for seed in 0..seeds {
         let (_guard, _clock, _id_gen) = install_deterministic_context(seed);
         let mut harness = SimPlatformHarness::no_faults(seed);
 
-        run_workload(&mut harness, seed, 50, true).await;
+        run_workload(&mut harness, seed, ops, true).await;
 
         // Final invariant check after all ops.
         assert_boot_invariants(&harness)
@@ -136,7 +175,11 @@ async fn dst_random_workload_no_faults() {
 
 #[tokio::test]
 async fn dst_random_workload_event_faults() {
-    for seed in 0..50 {
+    let mode = RandomMode::current();
+    let seeds = mode.seeds(50, 5);
+    let ops = mode.ops(30, 15);
+
+    for seed in 0..seeds {
         let (_guard, _clock, _id_gen) = install_deterministic_context(seed);
         let mut harness = SimPlatformHarness::new(
             seed,
@@ -144,7 +187,7 @@ async fn dst_random_workload_event_faults() {
             SimPlatformFaultConfig::none(),
         );
 
-        run_workload(&mut harness, seed, 30, true).await;
+        run_workload(&mut harness, seed, ops, true).await;
 
         // Disable faults before restart so restore succeeds cleanly.
         let prev_event = harness.sim_event_store.disable_faults();
@@ -166,7 +209,11 @@ async fn dst_random_workload_event_faults() {
 
 #[tokio::test]
 async fn dst_random_workload_platform_faults() {
-    for seed in 0..50 {
+    let mode = RandomMode::current();
+    let seeds = mode.seeds(50, 5);
+    let ops = mode.ops(30, 15);
+
+    for seed in 0..seeds {
         let (_guard, _clock, _id_gen) = install_deterministic_context(seed);
         let mut harness = SimPlatformHarness::new(
             seed,
@@ -174,7 +221,7 @@ async fn dst_random_workload_platform_faults() {
             SimPlatformFaultConfig::heavy(),
         );
 
-        run_workload(&mut harness, seed, 30, true).await;
+        run_workload(&mut harness, seed, ops, true).await;
 
         // Disable faults before restart so restore succeeds cleanly.
         let prev_plat = harness.sim_platform_store.disable_faults();
@@ -196,7 +243,11 @@ async fn dst_random_workload_platform_faults() {
 
 #[tokio::test]
 async fn dst_random_workload_combined_faults() {
-    for seed in 0..50 {
+    let mode = RandomMode::current();
+    let seeds = mode.seeds(50, 5);
+    let ops = mode.ops(30, 15);
+
+    for seed in 0..seeds {
         let (_guard, _clock, _id_gen) = install_deterministic_context(seed);
         let mut harness = SimPlatformHarness::new(
             seed,
@@ -204,7 +255,7 @@ async fn dst_random_workload_combined_faults() {
             SimPlatformFaultConfig::heavy(),
         );
 
-        run_workload(&mut harness, seed, 30, true).await;
+        run_workload(&mut harness, seed, ops, true).await;
 
         // Disable ALL faults before restart so restore succeeds cleanly.
         let prev_event = harness.sim_event_store.disable_faults();
@@ -228,14 +279,18 @@ async fn dst_random_workload_combined_faults() {
 
 #[tokio::test]
 async fn dst_random_workload_determinism() {
-    for seed in 0..10 {
+    let mode = RandomMode::current();
+    let seeds = mode.seeds(10, 3);
+    let ops = mode.ops(50, 20);
+
+    for seed in 0..seeds {
         let mut results = Vec::new();
 
         for _run in 0..2 {
             let (_guard, _clock, _id_gen) = install_deterministic_context(seed);
             let mut harness = SimPlatformHarness::no_faults(seed);
 
-            run_workload(&mut harness, seed, 50, false).await;
+            run_workload(&mut harness, seed, ops, false).await;
 
             // Restart so state is fully rebuilt from durable stores.
             harness.restart().await;
