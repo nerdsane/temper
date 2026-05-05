@@ -92,7 +92,7 @@ fn digest_named_parts(parts: &[(String, Vec<u8>)]) -> String {
     digest_bytes(&parts)
 }
 
-fn digest_app_bundle(app_name: &str, bundle: &AppBundle) -> OsAppBundleDigest {
+pub(super) fn digest_app_bundle(app_name: &str, bundle: &AppBundle) -> OsAppBundleDigest {
     let entry = app_entry(app_name);
     let app_version = entry
         .as_ref()
