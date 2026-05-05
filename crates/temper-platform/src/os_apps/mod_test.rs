@@ -1594,12 +1594,14 @@ startup_loading = "lazy"
     };
     assert_eq!(install.wasm_modules, vec!["echo".to_string()]);
 
-    let registry = state.server.wasm_module_registry.read().unwrap();
+    let registry_hash = {
+        let registry = state.server.wasm_module_registry.read().unwrap();
+        registry.get_hash(&tenant, "echo").map(ToOwned::to_owned)
+    };
     assert_eq!(
-        registry.get_hash(&tenant, "echo"),
+        registry_hash.as_deref(),
         Some(expected_bundled_hash.as_str())
     );
-    drop(registry);
 
     let module_sources = state
         .server
@@ -1707,12 +1709,11 @@ startup_loading = "lazy"
     assert!(install.wasm_modules.is_empty());
     assert_eq!(install.wasm_skipped, vec!["echo".to_string()]);
 
-    let registry = state.server.wasm_module_registry.read().unwrap();
-    assert_eq!(
-        registry.get_hash(&tenant, "echo"),
-        Some(uploaded_hash.as_str())
-    );
-    drop(registry);
+    let registry_hash = {
+        let registry = state.server.wasm_module_registry.read().unwrap();
+        registry.get_hash(&tenant, "echo").map(ToOwned::to_owned)
+    };
+    assert_eq!(registry_hash.as_deref(), Some(uploaded_hash.as_str()));
 
     let module_sources = state
         .server
