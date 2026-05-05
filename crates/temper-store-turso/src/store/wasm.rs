@@ -11,6 +11,8 @@ use super::{
 use crate::TursoWasmInvocationInsert;
 use crate::metrics::TursoQueryTimer;
 
+const BUNDLED_REPLACE_UPLOAD_SOURCE: &str = "bundled-replace-upload";
+
 impl TursoEventStore {
     /// Upsert a WASM module binary for a tenant.
     ///
@@ -28,10 +30,15 @@ impl TursoEventStore {
         let _query_timer = TursoQueryTimer::start("turso.upsert_wasm_module");
         let conn = self.configured_connection().await?;
         // Idempotent + source-aware preservation. See Postgres counterpart for
-        // the full reasoning. Hot uploads (source='upload') always win; the
-        // os-apps install pipeline (source='bundled') skips when an existing
-        // 'upload' row holds a different hash so iterative testing survives
-        // restarts.
+        // the full reasoning. Plain bundled installs preserve hot uploads, but
+        // OS-app reconcile can opt into replacing stale uploads when the
+        // bundled WASM digest changed.
+        let replace_uploaded_wasm = source == BUNDLED_REPLACE_UPLOAD_SOURCE;
+        let persisted_source = if replace_uploaded_wasm {
+            "bundled"
+        } else {
+            source
+        };
         let mut existing_rows = conn
             .query(
                 "SELECT sha256_hash, source \
@@ -50,7 +57,7 @@ impl TursoEventStore {
             if existing_hash == sha256_hash {
                 return Ok(());
             }
-            if existing_source == "upload" && source != "upload" {
+            if existing_source == "upload" && source != "upload" && !replace_uploaded_wasm {
                 tracing::info!(
                     tenant,
                     module_name,
@@ -88,7 +95,7 @@ impl TursoEventStore {
                  source = CASE
                      WHEN wasm_modules.sha256_hash IS NOT excluded.sha256_hash
                      THEN excluded.source ELSE wasm_modules.source END",
-            params![tenant, module_name, Vec::<u8>::new(), sha256_hash, wasm_bytes.len() as i64, source],
+            params![tenant, module_name, Vec::<u8>::new(), sha256_hash, wasm_bytes.len() as i64, persisted_source],
         )
         .await
         .map_err(storage_error)?;

@@ -10,6 +10,7 @@ use temper_runtime::persistence::PersistenceError;
 use crate::PostgresEventStore;
 
 const DISTINCT_RESOURCE_IDS_BUDGET: usize = 100;
+const BUNDLED_REPLACE_UPLOAD_SOURCE: &str = "bundled-replace-upload";
 
 /// Maximum bytes for a single value to be indexed into `entity_field_index`.
 /// Postgres btree (idx_efi_lookup) rejects keys that exceed roughly 2704 bytes
@@ -1049,10 +1050,17 @@ impl PostgresEventStore {
         //   - source='upload' callers (hot upload via the API) overwrite anything
         //     so iterative testing works.
         //   - source='bundled' callers (the os-apps install pipeline) only
-        //     overwrite existing 'bundled' rows. They never clobber an 'upload'
-        //     row even if the hash differs — that's how hot uploads survive
-        //     restarts. Bumping `version` only happens on actual hash changes,
-        //     so re-running the same image yields a no-op.
+        //     overwrite existing 'bundled' rows. They preserve hot uploads
+        //     across same-bundle restarts.
+        //   - source='bundled-replace-upload' is an internal reconcile mode:
+        //     persist the row back as 'bundled' while replacing stale uploads
+        //     after the installed app's bundled WASM digest changed.
+        let replace_uploaded_wasm = source == BUNDLED_REPLACE_UPLOAD_SOURCE;
+        let persisted_source = if replace_uploaded_wasm {
+            "bundled"
+        } else {
+            source
+        };
         sqlx::query(
             "INSERT INTO wasm_modules \
              (tenant, module_name, wasm_bytes, sha256_hash, version, size_bytes, updated_at, source) \
@@ -1065,14 +1073,15 @@ impl PostgresEventStore {
                  updated_at = now(), \
                  source = EXCLUDED.source \
              WHERE wasm_modules.sha256_hash IS DISTINCT FROM EXCLUDED.sha256_hash \
-                AND (EXCLUDED.source = 'upload' OR wasm_modules.source = 'bundled')",
+                AND ($7 OR EXCLUDED.source = 'upload' OR wasm_modules.source = 'bundled')",
         )
         .bind(tenant)
         .bind(name)
         .bind(bytes)
         .bind(hash)
         .bind(bytes.len() as i32)
-        .bind(source)
+        .bind(persisted_source)
+        .bind(replace_uploaded_wasm)
         .execute(self.pool())
         .await
         .map_err(storage_error)?;

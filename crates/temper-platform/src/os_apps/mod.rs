@@ -11,7 +11,6 @@
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
-use std::sync::{OnceLock, RwLock};
 
 use serde::Serialize;
 use sha2::{Digest, Sha256};
@@ -23,11 +22,17 @@ use crate::bootstrap;
 use crate::state::PlatformState;
 
 mod agent_bootstrap;
+mod app_catalog;
 pub mod git_sources;
 mod reconcile;
 mod runtime_heal;
 mod system_files;
 mod types;
+pub(super) use app_catalog::catalog;
+pub use app_catalog::{
+    add_os_apps_dir, list_startup_os_apps, reload_os_apps, reload_skills, set_os_apps_dir,
+    set_skills_dir,
+};
 pub use reconcile::{os_app_bundle_digest, reconcile_os_app, resolve_os_app_install_order};
 pub(crate) use runtime_heal::{
     restore_app_specs_from_matching_digest, tenant_has_ready_app_specs_for_bundle,
@@ -149,276 +154,6 @@ pub type SkillBundle = AppBundle;
 // Backward-compatible type aliases.
 pub type OsAppEntry = AppEntry;
 pub type OsAppBundle = AppBundle;
-
-// ── App Catalog (disk-loaded, cached) ───────────────────────────────
-
-/// In-memory cache of discovered apps.
-struct AppCatalog {
-    /// Directory containing app bundles.
-    apps_dir: PathBuf,
-    /// Catalog entries (lightweight metadata).
-    entries: Vec<AppEntry>,
-    /// Mapping from app name to its directory path on disk.
-    paths: BTreeMap<String, PathBuf>,
-}
-
-/// Global catalog, initialized on first access.
-static CATALOG: OnceLock<RwLock<AppCatalog>> = OnceLock::new();
-
-/// Get or initialize the global app catalog.
-fn catalog() -> &'static RwLock<AppCatalog> {
-    CATALOG.get_or_init(|| RwLock::new(AppCatalog::discover()))
-}
-
-/// Override the OS apps directory. Must be called before any catalog access.
-///
-/// If the catalog was already initialized, it is replaced.
-pub fn set_os_apps_dir(dir: PathBuf) {
-    let new_catalog = AppCatalog::from_dir(dir);
-    match CATALOG.get() {
-        Some(lock) => {
-            *lock.write().unwrap() = new_catalog; // ci-ok: infallible lock
-        }
-        None => {
-            let _ = CATALOG.set(RwLock::new(new_catalog));
-        }
-    }
-}
-
-/// Add an additional directory of apps to the catalog.
-///
-/// Scans the directory and merges discovered apps into the existing catalog.
-/// Apps in the new directory do NOT replace existing apps with the same name.
-/// Use this to register reference apps or project-specific apps alongside
-/// the main os-apps directory.
-pub fn add_os_apps_dir(dir: PathBuf) {
-    let additional = AppCatalog::from_dir(dir);
-    let cat = catalog();
-    let mut lock = cat.write().unwrap(); // ci-ok: infallible lock
-    for (name, path) in additional.paths {
-        lock.paths.entry(name.clone()).or_insert(path);
-    }
-    for entry in additional.entries {
-        if !lock.entries.iter().any(|e| e.name == entry.name) {
-            lock.entries.push(entry);
-        }
-    }
-}
-
-/// Re-scan the OS apps directory and refresh the catalog.
-///
-/// Call this after modifying app files on disk to pick up changes
-/// without restarting the server.
-pub fn reload_os_apps() {
-    let cat = catalog().read().unwrap(); // ci-ok: infallible lock
-    let dir = cat.apps_dir.clone();
-    drop(cat);
-    let new = AppCatalog::from_dir(dir);
-    *catalog().write().unwrap() = new; // ci-ok: infallible lock
-}
-
-/// Backward-compatible alias.
-pub fn set_skills_dir(dir: PathBuf) {
-    set_os_apps_dir(dir);
-}
-
-/// Backward-compatible alias.
-pub fn reload_skills() {
-    reload_os_apps();
-}
-
-/// List OS apps that belong to the default startup surface.
-pub fn list_startup_os_apps() -> Vec<String> {
-    let cat = match catalog().read() {
-        Ok(cat) => cat,
-        Err(poisoned) => poisoned.into_inner(),
-    };
-    let mut apps: Vec<String> = cat
-        .entries
-        .iter()
-        .filter(|entry| entry.startup_install == StartupInstallMode::Core)
-        .map(|entry| entry.name.clone())
-        .collect();
-    apps.sort();
-    apps
-}
-
-impl AppCatalog {
-    /// Discover the apps directory and scan it.
-    fn discover() -> Self {
-        // Priority 1: TEMPER_OS_APPS_DIR env var.
-        if let Ok(dir) = std::env::var("TEMPER_OS_APPS_DIR") {
-            // determinism-ok: env var read at startup for configuration
-            let path = PathBuf::from(dir);
-            if path.is_dir() {
-                tracing::info!(
-                    "Loading OS apps from TEMPER_OS_APPS_DIR: {}",
-                    path.display()
-                );
-                return Self::from_dir(path);
-            }
-        }
-
-        // Priority 1b: legacy TEMPER_SKILLS_DIR env var.
-        if let Ok(dir) = std::env::var("TEMPER_SKILLS_DIR") {
-            let path = PathBuf::from(dir);
-            if path.is_dir() {
-                tracing::info!(
-                    "Loading OS apps from legacy TEMPER_SKILLS_DIR: {}",
-                    path.display()
-                );
-                return Self::from_dir(path);
-            }
-        }
-
-        // Priority 2: Relative to this crate's source (works in dev and cargo test).
-        let compile_time_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .join("..")
-            .join("..")
-            .join("os-apps");
-        if compile_time_dir.is_dir() {
-            let canonical = compile_time_dir
-                .canonicalize()
-                .unwrap_or(compile_time_dir.clone());
-            tracing::info!("Loading OS apps from workspace: {}", canonical.display());
-            return Self::from_dir(canonical);
-        }
-
-        // Priority 3: ./os-apps/ relative to CWD.
-        let cwd_dir = PathBuf::from("os-apps");
-        if cwd_dir.is_dir() {
-            let canonical = cwd_dir.canonicalize().unwrap_or(cwd_dir.clone());
-            tracing::info!("Loading OS apps from CWD: {}", canonical.display());
-            return Self::from_dir(canonical);
-        }
-
-        // Priority 4: ./skills/ (legacy fallback).
-        let legacy_cwd_dir = PathBuf::from("skills");
-        if legacy_cwd_dir.is_dir() {
-            let canonical = legacy_cwd_dir
-                .canonicalize()
-                .unwrap_or(legacy_cwd_dir.clone());
-            tracing::info!(
-                "Loading OS apps from legacy CWD skills/: {}",
-                canonical.display()
-            );
-            return Self::from_dir(canonical);
-        }
-
-        tracing::warn!(
-            "No os-apps directory found. Set TEMPER_OS_APPS_DIR (or legacy TEMPER_SKILLS_DIR)."
-        );
-        Self {
-            apps_dir: PathBuf::new(),
-            entries: Vec::new(),
-            paths: BTreeMap::new(),
-        }
-    }
-
-    /// Build catalog from a specific directory.
-    fn from_dir(dir: PathBuf) -> Self {
-        let mut entries = Vec::new();
-        let mut paths = BTreeMap::new();
-
-        let read_dir = match std::fs::read_dir(&dir) {
-            Ok(rd) => rd,
-            Err(e) => {
-                tracing::warn!("Failed to read apps directory {}: {e}", dir.display());
-                return Self {
-                    apps_dir: dir,
-                    entries,
-                    paths,
-                };
-            }
-        };
-
-        let mut app_dirs: Vec<_> = read_dir
-            .filter_map(|e| e.ok())
-            .filter(|e| e.path().is_dir())
-            .collect();
-        // Deterministic ordering.
-        app_dirs.sort_by_key(|e| e.file_name());
-
-        for entry in app_dirs {
-            let app_dir = entry.path();
-            let dir_name = entry.file_name().to_string_lossy().to_string();
-
-            // app.toml is required — skip directories without it.
-            let manifest = match read_app_manifest(&app_dir) {
-                Some(m) => m,
-                None => {
-                    tracing::warn!(
-                        app = %dir_name,
-                        path = %app_dir.display(),
-                        "Skipping app directory — missing required app.toml"
-                    );
-                    continue;
-                }
-            };
-
-            // APP.md is required — skip directories without it.
-            let app_guide = match read_app_guide(&app_dir) {
-                Some(guide) => Some(guide),
-                None => {
-                    tracing::warn!(
-                        app = %manifest.name,
-                        path = %app_dir.display(),
-                        "Skipping app — missing required APP.md"
-                    );
-                    continue;
-                }
-            };
-
-            let app_name = manifest.name.clone();
-
-            // Scan for IOA specs to determine entity types.
-            let ioa_files = find_ioa_files(&app_dir);
-            let entity_types: Vec<String> = ioa_files
-                .iter()
-                .filter_map(|(_, ioa_path)| {
-                    let source = std::fs::read_to_string(ioa_path).ok()?;
-                    let parsed = automaton::parse_automaton(&source).ok()?;
-                    Some(parsed.automaton.name)
-                })
-                .collect();
-
-            // Description from manifest (required), fallback to APP.md extract.
-            let description = if !manifest.description.is_empty() {
-                manifest.description.clone()
-            } else {
-                app_guide
-                    .as_ref()
-                    .and_then(|guide| extract_description(guide))
-                    .unwrap_or_else(|| format!("App: {app_name}"))
-            };
-
-            let version = manifest.version.clone();
-            let startup_install = manifest.startup_install;
-            let dependencies = manifest.dependencies.clone();
-
-            let app_path = app_dir.clone();
-            paths.insert(app_name.clone(), app_path.clone());
-            if dir_name != app_name {
-                paths.entry(dir_name).or_insert(app_path);
-            }
-            entries.push(AppEntry {
-                name: app_name,
-                description,
-                entity_types,
-                version,
-                startup_install,
-                app_guide,
-                dependencies,
-            });
-        }
-
-        Self {
-            apps_dir: dir,
-            entries,
-            paths,
-        }
-    }
-}
 
 /// Find all IOA spec files in an app directory.
 ///
@@ -1227,6 +962,11 @@ pub(super) async fn install_os_app_with_plan(
         )
     })?;
     let tenant_id = TenantId::new(tenant);
+    let replace_uploaded_wasm = if plan.wasm && !bundle.wasm_modules.is_empty() {
+        should_replace_uploaded_wasm_for_bundle_reconcile(state, tenant, app_name, &bundle).await
+    } else {
+        false
+    };
 
     if bundle.adrs.is_empty() {
         tracing::warn!(
@@ -1493,10 +1233,9 @@ pub(super) async fn install_os_app_with_plan(
     //
     // Source-aware preservation: if a (tenant, module) row in the durable store
     // has source='upload' (i.e., a hot upload from `POST /api/wasm/modules/{name}`),
-    // skip every step for that module — upsert (preserved by the store anyway),
-    // registry overwrite (would clobber the upload hash loaded by boot recovery),
-    // and engine warm-up (would cache bundled bytes the registry shouldn't pick).
-    // Without this guard, hot uploads silently revert on every restart.
+    // preserve it across same-bundle restarts. When the installed app metadata
+    // says the bundled WASM digest changed, the bundle is a newer deployment and
+    // must replace stale uploads so production executes the shipped module.
     let mut wasm_registered = Vec::new();
     let mut wasm_skipped = Vec::new();
     let mut wasm_failures = Vec::new();
@@ -1521,22 +1260,44 @@ pub(super) async fn install_os_app_with_plan(
                 && existing_source == "upload"
                 && existing_hash != &hash
             {
-                tracing::info!(
-                    tenant,
-                    module = %module_name,
-                    bundled_hash = %hash,
-                    upload_hash = %existing_hash,
-                    "Skipping bundled install: hot-uploaded module preserved"
-                );
-                wasm_skipped.push(module_name.clone());
-                continue;
+                if replace_uploaded_wasm {
+                    tracing::info!(
+                        tenant,
+                        module = %module_name,
+                        bundled_hash = %hash,
+                        upload_hash = %existing_hash,
+                        "Replacing hot-uploaded WASM module: bundled app WASM digest changed"
+                    );
+                } else {
+                    tracing::info!(
+                        tenant,
+                        module = %module_name,
+                        bundled_hash = %hash,
+                        upload_hash = %existing_hash,
+                        "Skipping bundled install: hot-uploaded module preserved"
+                    );
+                    wasm_skipped.push(module_name.clone());
+                    continue;
+                }
             }
 
-            if let Err(e) = state
-                .server
-                .upsert_wasm_module(tenant, module_name, wasm_bytes, &hash, "bundled")
-                .await
-            {
+            let upsert_result = if replace_uploaded_wasm {
+                state
+                    .server
+                    .upsert_bundled_wasm_module_replacing_upload(
+                        tenant,
+                        module_name,
+                        wasm_bytes,
+                        &hash,
+                    )
+                    .await
+            } else {
+                state
+                    .server
+                    .upsert_wasm_module(tenant, module_name, wasm_bytes, &hash, "bundled")
+                    .await
+            };
+            if let Err(e) = upsert_result {
                 tracing::warn!(
                     tenant,
                     module = %module_name,
@@ -1662,6 +1423,36 @@ pub(super) async fn install_os_app_with_plan(
         adrs_bootstrapped,
         seed_instances: seed_created,
     })
+}
+
+async fn should_replace_uploaded_wasm_for_bundle_reconcile(
+    state: &PlatformState,
+    tenant: &str,
+    app_name: &str,
+    bundle: &AppBundle,
+) -> bool {
+    let Some(ps) = state
+        .server
+        .storage_stack
+        .as_ref()
+        .and_then(|stack| stack.platform.clone())
+    else {
+        return false;
+    };
+    let digest = reconcile::digest_app_bundle(app_name, bundle);
+    match ps.get_installed_app(tenant, app_name).await {
+        Ok(Some(record)) => record.wasm_digest != digest.wasm_digest,
+        Ok(None) => false,
+        Err(error) => {
+            tracing::warn!(
+                tenant,
+                app = %app_name,
+                error = %error,
+                "Failed to read OS app metadata while deciding WASM hot-upload replacement"
+            );
+            false
+        }
+    }
 }
 
 /// Backward-compatible alias.
