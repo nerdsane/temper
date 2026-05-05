@@ -1497,6 +1497,240 @@ version = "1.0.0"
     let _ = fs::remove_dir_all(&temp_dir);
 }
 
+#[tokio::test]
+async fn test_reconcile_os_app_replaces_hot_upload_when_bundled_wasm_digest_changes() {
+    use temper_store_turso::TursoEventStore;
+
+    let app_root = std::env::temp_dir().join(format!(
+        "temper-os-apps-wasm-digest-reconcile-{}",
+        uuid::Uuid::new_v4()
+    ));
+    let app_dir = app_root.join("wasm-digest-app");
+    let module_dir = app_dir
+        .join("wasm")
+        .join("echo")
+        .join("target")
+        .join("wasm32-unknown-unknown")
+        .join("release");
+    fs::create_dir_all(&module_dir).unwrap();
+    fs::write(
+        app_dir.join("app.toml"),
+        r#"name = "wasm-digest-app"
+description = "Temporary WASM reconcile test app"
+version = "0.1.0"
+
+[[wasm_modules]]
+name = "echo"
+criticality = "app-required"
+startup_loading = "lazy"
+"#,
+    )
+    .unwrap();
+    fs::write(
+        app_dir.join("APP.md"),
+        "# WASM Digest App\n\nTemporary WASM reconcile test app.\n",
+    )
+    .unwrap();
+
+    let echo_wasm = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../temper-wasm/tests/fixtures/echo_integration.wasm");
+    let reader_wasm = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../temper-wasm/tests/fixtures/sdk_context_reader.wasm");
+    fs::copy(&echo_wasm, module_dir.join("echo.wasm")).unwrap();
+    add_os_apps_dir(app_root.clone());
+
+    let db_path = format!(
+        "/tmp/temper-wasm-digest-reconcile-{}.db",
+        uuid::Uuid::new_v4()
+    );
+    let db_url = format!("file:{db_path}");
+    let turso = TursoEventStore::new(&db_url, None).await.unwrap();
+    let mut state = PlatformState::new(None);
+    state
+        .server
+        .set_storage_stack(temper_server::StorageStack::from_turso(turso));
+    state.server.data_dir = std::path::PathBuf::from(format!(
+        "/tmp/temper-wasm-digest-reconcile-{}-data",
+        uuid::Uuid::new_v4()
+    ));
+    std::fs::create_dir_all(&state.server.data_dir).unwrap();
+    let tenant_name = "test-wasm-digest-reconcile";
+    let tenant = TenantId::new(tenant_name);
+
+    install_os_app(&state, tenant_name, "wasm-digest-app")
+        .await
+        .expect("initial app install should succeed");
+
+    let uploaded_bytes = b"stale hot-uploaded module bytes".to_vec();
+    let uploaded_hash = temper_wasm::WasmEngine::hash_module(&uploaded_bytes);
+    state
+        .server
+        .upsert_wasm_module(
+            tenant_name,
+            "echo",
+            &uploaded_bytes,
+            &uploaded_hash,
+            "upload",
+        )
+        .await
+        .expect("hot upload should persist");
+    state
+        .server
+        .wasm_module_registry
+        .write()
+        .unwrap()
+        .register(&tenant, "echo", &uploaded_hash);
+
+    fs::copy(&reader_wasm, module_dir.join("echo.wasm")).unwrap();
+    add_os_apps_dir(app_root.clone());
+    let expected_bundled_bytes = fs::read(module_dir.join("echo.wasm")).unwrap();
+    let expected_bundled_hash = temper_wasm::WasmEngine::hash_module(&expected_bundled_bytes);
+
+    let result = reconcile_os_app(&state, tenant_name, "wasm-digest-app")
+        .await
+        .expect("reconcile should succeed");
+    let OsAppReconcileResult::Installed { install, .. } = result else {
+        panic!("changed WASM digest should reinstall the app bundle");
+    };
+    assert_eq!(install.wasm_modules, vec!["echo".to_string()]);
+
+    let registry = state.server.wasm_module_registry.read().unwrap();
+    assert_eq!(
+        registry.get_hash(&tenant, "echo"),
+        Some(expected_bundled_hash.as_str())
+    );
+    drop(registry);
+
+    let module_sources = state
+        .server
+        .load_wasm_module_sources(tenant_name)
+        .await
+        .expect("load wasm module sources");
+    assert_eq!(
+        module_sources.get("echo"),
+        Some(&(expected_bundled_hash, "bundled".to_string()))
+    );
+
+    let _ = fs::remove_dir_all(&app_root);
+    let _ = fs::remove_dir_all(&state.server.data_dir);
+    let _ = std::fs::remove_file(&db_path);
+    let _ = std::fs::remove_file(format!("{db_path}-wal"));
+    let _ = std::fs::remove_file(format!("{db_path}-shm"));
+}
+
+#[tokio::test]
+async fn test_reconcile_os_app_preserves_hot_upload_when_bundled_wasm_digest_unchanged() {
+    use temper_store_turso::TursoEventStore;
+
+    let app_root = std::env::temp_dir().join(format!(
+        "temper-os-apps-wasm-preserve-{}",
+        uuid::Uuid::new_v4()
+    ));
+    let app_dir = app_root.join("wasm-preserve-app");
+    let module_dir = app_dir
+        .join("wasm")
+        .join("echo")
+        .join("target")
+        .join("wasm32-unknown-unknown")
+        .join("release");
+    fs::create_dir_all(&module_dir).unwrap();
+    fs::write(
+        app_dir.join("app.toml"),
+        r#"name = "wasm-preserve-app"
+description = "Temporary WASM preserve test app"
+version = "0.1.0"
+
+[[wasm_modules]]
+name = "echo"
+criticality = "app-required"
+startup_loading = "lazy"
+"#,
+    )
+    .unwrap();
+    fs::write(
+        app_dir.join("APP.md"),
+        "# WASM Preserve App\n\nTemporary WASM preserve test app.\n",
+    )
+    .unwrap();
+
+    let echo_wasm = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../temper-wasm/tests/fixtures/echo_integration.wasm");
+    fs::copy(&echo_wasm, module_dir.join("echo.wasm")).unwrap();
+    add_os_apps_dir(app_root.clone());
+
+    let db_path = format!("/tmp/temper-wasm-preserve-{}.db", uuid::Uuid::new_v4());
+    let db_url = format!("file:{db_path}");
+    let turso = TursoEventStore::new(&db_url, None).await.unwrap();
+    let mut state = PlatformState::new(None);
+    state
+        .server
+        .set_storage_stack(temper_server::StorageStack::from_turso(turso));
+    state.server.data_dir = std::path::PathBuf::from(format!(
+        "/tmp/temper-wasm-preserve-{}-data",
+        uuid::Uuid::new_v4()
+    ));
+    std::fs::create_dir_all(&state.server.data_dir).unwrap();
+    let tenant_name = "test-wasm-preserve";
+    let tenant = TenantId::new(tenant_name);
+
+    install_os_app(&state, tenant_name, "wasm-preserve-app")
+        .await
+        .expect("initial app install should succeed");
+
+    let uploaded_bytes = b"same bundle hot upload should survive".to_vec();
+    let uploaded_hash = temper_wasm::WasmEngine::hash_module(&uploaded_bytes);
+    state
+        .server
+        .upsert_wasm_module(
+            tenant_name,
+            "echo",
+            &uploaded_bytes,
+            &uploaded_hash,
+            "upload",
+        )
+        .await
+        .expect("hot upload should persist");
+    state
+        .server
+        .wasm_module_registry
+        .write()
+        .unwrap()
+        .register(&tenant, "echo", &uploaded_hash);
+
+    add_os_apps_dir(app_root.clone());
+    let result = reconcile_os_app(&state, tenant_name, "wasm-preserve-app")
+        .await
+        .expect("reconcile should succeed");
+    let OsAppReconcileResult::Installed { install, .. } = result else {
+        panic!("registry drift should run delta install");
+    };
+    assert!(install.wasm_modules.is_empty());
+    assert_eq!(install.wasm_skipped, vec!["echo".to_string()]);
+
+    let registry = state.server.wasm_module_registry.read().unwrap();
+    assert_eq!(
+        registry.get_hash(&tenant, "echo"),
+        Some(uploaded_hash.as_str())
+    );
+    drop(registry);
+
+    let module_sources = state
+        .server
+        .load_wasm_module_sources(tenant_name)
+        .await
+        .expect("load wasm module sources");
+    assert_eq!(
+        module_sources.get("echo"),
+        Some(&(uploaded_hash, "upload".to_string()))
+    );
+
+    let _ = fs::remove_dir_all(&app_root);
+    let _ = fs::remove_dir_all(&state.server.data_dir);
+    let _ = std::fs::remove_file(&db_path);
+    let _ = std::fs::remove_file(format!("{db_path}-wal"));
+    let _ = std::fs::remove_file(format!("{db_path}-shm"));
+}
+
 #[test]
 fn test_load_app_bundle_rejects_legacy_reactions_file() {
     let temp_dir = std::env::temp_dir().join(format!(

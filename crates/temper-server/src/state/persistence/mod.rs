@@ -21,6 +21,8 @@ pub(crate) enum TenantMetadataBackend {
 mod logs_and_secrets;
 mod spec_metadata;
 
+const BUNDLED_REPLACE_UPLOAD_SOURCE: &str = "bundled-replace-upload";
+
 impl ServerState {
     fn redis_ephemeral_error(operation: &str) -> String {
         format!(
@@ -57,8 +59,9 @@ impl ServerState {
     ///
     /// `source` is `"bundled"` for the os-apps install pipeline and `"upload"`
     /// for the hot-upload API. The store is idempotent on hash and refuses to
-    /// overwrite an existing `'upload'` row with a `'bundled'` row whose hash
-    /// differs — that's how hot-uploaded modules survive subsequent restarts.
+    /// overwrite an existing `'upload'` row with a plain `'bundled'` row whose
+    /// hash differs — that's how hot-uploaded modules survive same-bundle
+    /// restarts.
     pub async fn upsert_wasm_module(
         &self,
         tenant: &str,
@@ -69,6 +72,12 @@ impl ServerState {
     ) -> Result<(), String> {
         let Some(backend) = self.tenant_metadata_backend(tenant).await else {
             return Ok(());
+        };
+        let replace_uploaded_wasm = source == BUNDLED_REPLACE_UPLOAD_SOURCE;
+        let persisted_source = if replace_uploaded_wasm {
+            "bundled"
+        } else {
+            source
         };
 
         let effective_hash = if sha256_hash.is_empty() {
@@ -100,14 +109,15 @@ impl ServerState {
                          updated_at = now(), \
                          source = EXCLUDED.source \
                      WHERE wasm_modules.sha256_hash IS DISTINCT FROM EXCLUDED.sha256_hash \
-                        AND (EXCLUDED.source = 'upload' OR wasm_modules.source = 'bundled')",
+                        AND ($7 OR EXCLUDED.source = 'upload' OR wasm_modules.source = 'bundled')",
                 )
                 .bind(tenant)
                 .bind(module_name)
                 .bind(Vec::<u8>::new())
                 .bind(&effective_hash)
                 .bind(wasm_bytes.len() as i32)
-                .bind(source)
+                .bind(persisted_source)
+                .bind(replace_uploaded_wasm)
                 .execute(&pool)
                 .await
                 .map(|_| ())
@@ -123,9 +133,30 @@ impl ServerState {
         }
     }
 
+    /// Persist a bundled OS-app module while explicitly replacing an existing
+    /// hot-upload row. Use this only when installed-app metadata proves the
+    /// bundled WASM digest changed; normal restart/install paths should preserve
+    /// hot uploads.
+    pub async fn upsert_bundled_wasm_module_replacing_upload(
+        &self,
+        tenant: &str,
+        module_name: &str,
+        wasm_bytes: &[u8],
+        sha256_hash: &str,
+    ) -> Result<(), String> {
+        self.upsert_wasm_module(
+            tenant,
+            module_name,
+            wasm_bytes,
+            sha256_hash,
+            BUNDLED_REPLACE_UPLOAD_SOURCE,
+        )
+        .await
+    }
+
     /// Return `(module_name -> (sha256_hash, source))` for every WASM module
     /// currently persisted for `tenant`. Used by the os-apps install pipeline
-    /// to skip overwriting hot-uploaded modules at boot.
+    /// to decide whether hot-uploaded modules should be preserved or replaced.
     pub async fn load_wasm_module_sources(
         &self,
         tenant: &str,

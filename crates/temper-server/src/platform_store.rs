@@ -193,9 +193,9 @@ pub trait PlatformStore: Send + Sync {
     /// Upsert a WASM module binary for a tenant.
     ///
     /// `source` distinguishes the os-apps install pipeline (`"bundled"`) from
-    /// the hot-upload API (`"upload"`). The store skips overwriting an existing
-    /// `'upload'` row with a `'bundled'` row whose hash differs, so iterative
-    /// hot-uploaded testing survives subsequent restarts.
+    /// the hot-upload API (`"upload"`). Plain bundled installs preserve existing
+    /// upload rows, while OS-app reconcile can explicitly replace stale uploads
+    /// when the installed app's bundled WASM digest changes.
     async fn upsert_wasm_module(
         &self,
         tenant: &str,
