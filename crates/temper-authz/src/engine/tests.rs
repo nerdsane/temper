@@ -370,6 +370,59 @@ fn test_principal_attribute_access_in_policy() {
 }
 
 #[test]
+fn test_resource_attribute_access_in_policy() {
+    // Temper app policies gate claimed work on entity state, e.g.
+    // `principal.id == resource.worker_id`.
+    let policy = r#"
+        permit(
+            principal is Agent,
+            action == Action::"StartLocal",
+            resource is WorkerRun
+        ) when {
+            principal.agent_type == "worker" &&
+            resource has worker_id &&
+            principal.id == resource.worker_id
+        };
+    "#;
+    let engine = AuthzEngine::new(policy).unwrap();
+
+    let worker_ctx = SecurityContext::from_headers(&[
+        (
+            "X-Temper-Principal-Id".to_string(),
+            "local-codex-worker".to_string(),
+        ),
+        ("X-Temper-Principal-Kind".to_string(), "agent".to_string()),
+        ("X-Temper-Agent-Type".to_string(), "worker".to_string()),
+    ]);
+    let mut attrs = HashMap::new();
+    attrs.insert("id".to_string(), serde_json::json!("wr-1"));
+    attrs.insert(
+        "worker_id".to_string(),
+        serde_json::json!("local-codex-worker"),
+    );
+
+    let decision = engine.authorize(&worker_ctx, "StartLocal", "WorkerRun", &attrs);
+    assert!(
+        decision.is_allowed(),
+        "claimed worker should be allowed through resource.worker_id: {decision:?}"
+    );
+
+    let other_ctx = SecurityContext::from_headers(&[
+        (
+            "X-Temper-Principal-Id".to_string(),
+            "other-worker".to_string(),
+        ),
+        ("X-Temper-Principal-Kind".to_string(), "agent".to_string()),
+        ("X-Temper-Agent-Type".to_string(), "worker".to_string()),
+    ]);
+    let decision = engine.authorize(&other_ctx, "StartLocal", "WorkerRun", &attrs);
+    assert!(
+        !decision.is_allowed(),
+        "different worker must not satisfy resource.worker_id"
+    );
+}
+
+#[test]
 fn test_principal_agent_type_set_membership_filtering() {
     let policy = r#"
         permit(

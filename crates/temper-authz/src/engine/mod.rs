@@ -446,23 +446,66 @@ impl AuthzEngine {
             insert_json_as_cedar(&mut principal_attrs, key.clone(), value);
         }
 
-        // Entity schema validation is intentionally None: principal attributes
-        // include tenant-defined custom attrs that can't be predicted by a
-        // static schema. Policy-level type checking suffices.
+        let mut resource_entity_attrs: HashMap<String, cedar_policy::RestrictedExpression> =
+            HashMap::new();
+        for (key, value) in resource_attrs {
+            insert_json_as_cedar(&mut resource_entity_attrs, key.clone(), value);
+        }
 
-        let entities = match Entity::new(principal_uid.clone(), principal_attrs, HashSet::new()) {
-            Ok(entity) => match Entities::from_entities([entity], None) {
+        // Entity schema validation is intentionally None: app specs define
+        // tenant-specific attributes that cannot be predicted by a static
+        // platform schema. Policy-level type checks still apply.
+        let principal_entity = match Entity::new(
+            principal_uid.clone(),
+            principal_attrs.clone(),
+            HashSet::new(),
+        ) {
+            Ok(entity) => entity,
+            Err(e) => {
+                return AuthzDecision::Deny(AuthzDenial::EngineError(format!(
+                    "failed to build principal entity: {e}"
+                )));
+            }
+        };
+        let resource_entity = if resource_uid == principal_uid {
+            let mut merged_attrs = principal_attrs;
+            merged_attrs.extend(resource_entity_attrs);
+            match Entity::new(resource_uid.clone(), merged_attrs, HashSet::new()) {
+                Ok(entity) => entity,
+                Err(e) => {
+                    return AuthzDecision::Deny(AuthzDenial::EngineError(format!(
+                        "failed to build merged principal/resource entity: {e}"
+                    )));
+                }
+            }
+        } else {
+            match Entity::new(resource_uid.clone(), resource_entity_attrs, HashSet::new()) {
+                Ok(entity) => entity,
+                Err(e) => {
+                    return AuthzDecision::Deny(AuthzDenial::EngineError(format!(
+                        "failed to build resource entity: {e}"
+                    )));
+                }
+            }
+        };
+
+        let entities = if resource_uid == principal_uid {
+            match Entities::from_entities([resource_entity], None) {
                 Ok(e) => e,
                 Err(e) => {
                     return AuthzDecision::Deny(AuthzDenial::EngineError(format!(
                         "failed to build entity store: {e}"
                     )));
                 }
-            },
-            Err(e) => {
-                return AuthzDecision::Deny(AuthzDenial::EngineError(format!(
-                    "failed to build principal entity: {e}"
-                )));
+            }
+        } else {
+            match Entities::from_entities([principal_entity, resource_entity], None) {
+                Ok(e) => e,
+                Err(e) => {
+                    return AuthzDecision::Deny(AuthzDenial::EngineError(format!(
+                        "failed to build entity store: {e}"
+                    )));
+                }
             }
         };
 
