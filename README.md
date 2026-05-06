@@ -13,6 +13,10 @@
   <a href="#status"><img src="https://img.shields.io/badge/version-0.1.0-yellow" alt="Pre-release"></a>
 </p>
 
+<p align="center">
+  <img src="assets/readme-hero.jpg" alt="Temper tempering plant" width="1000">
+</p>
+
 ---
 
 ## Why Temper
