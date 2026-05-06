@@ -1,0 +1,13 @@
+<svg viewBox="0 0 1200 12" xmlns="http://www.w3.org/2000/svg" preserveAspectRatio="none">
+  <defs>
+    <linearGradient id="temperBand" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0" stop-color="#F1D078"/>
+      <stop offset="0.18" stop-color="#E5A549"/>
+      <stop offset="0.36" stop-color="#A26B3A"/>
+      <stop offset="0.54" stop-color="#693560"/>
+      <stop offset="0.72" stop-color="#2D4280"/>
+      <stop offset="1" stop-color="#6E6E6E"/>
+    </linearGradient>
+  </defs>
+  <rect width="1200" height="12" fill="url(#temperBand)"/>
+</svg>

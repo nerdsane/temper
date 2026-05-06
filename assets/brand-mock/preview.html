@@ -1,0 +1,206 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>Temper README header — brand mock</title>
+<style>
+  body {
+    margin: 0;
+    padding: 56px 24px;
+    background: #f4f4f2;
+    color: #1c1c1c;
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif;
+    line-height: 1.6;
+  }
+  .page { max-width: 920px; margin: 0 auto; }
+  h1.page-title {
+    font-size: 14px;
+    text-transform: uppercase;
+    letter-spacing: 2px;
+    color: #888;
+    font-weight: 600;
+    margin: 0 0 8px;
+  }
+  p.page-sub {
+    color: #666;
+    font-size: 13px;
+    margin: 0 0 48px;
+  }
+  .mock {
+    margin-bottom: 64px;
+    border: 1px solid #e3e3e1;
+    background: #fff;
+    border-radius: 8px;
+    padding: 40px 36px;
+    box-shadow: 0 1px 0 rgba(0,0,0,0.02);
+  }
+  .label {
+    text-transform: uppercase;
+    font-size: 10px;
+    letter-spacing: 1.6px;
+    color: #999;
+    margin-bottom: 12px;
+    font-weight: 700;
+  }
+  .label .tag {
+    display: inline-block;
+    background: #1c1c1c;
+    color: #f4f4f2;
+    padding: 3px 8px;
+    border-radius: 3px;
+    margin-right: 8px;
+    letter-spacing: 1px;
+  }
+  .mock-banner {
+    width: 100%;
+    height: auto;
+    display: block;
+    border-radius: 4px;
+    margin-bottom: 28px;
+  }
+  .repo-h1 {
+    text-align: center;
+    font-size: 32px;
+    font-weight: 600;
+    margin: 0 0 6px;
+    letter-spacing: -0.4px;
+  }
+  .tagline {
+    text-align: center;
+    font-style: italic;
+    color: #555;
+    font-size: 15px;
+    margin: 0 0 22px;
+  }
+  .badges {
+    text-align: center;
+    margin-bottom: 28px;
+  }
+  .badge {
+    display: inline-block;
+    background: #555;
+    color: #fff;
+    padding: 3px 9px;
+    border-radius: 3px;
+    font-size: 11px;
+    margin: 0 3px;
+    font-family: monospace;
+  }
+  hr {
+    border: none;
+    height: 1px;
+    background: #e5e5e5;
+    margin: 24px 0;
+  }
+  .body-prose {
+    color: #333;
+    font-size: 14px;
+  }
+  .body-prose h2 {
+    font-size: 18px;
+    font-weight: 600;
+    margin: 28px 0 8px;
+  }
+  img.divider {
+    width: 100%;
+    height: 4px;
+    margin: 28px 0;
+    display: block;
+    border: none;
+  }
+  .note {
+    font-size: 12px;
+    color: #777;
+    margin-top: 8px;
+    font-style: italic;
+  }
+</style>
+</head>
+<body>
+<div class="page">
+
+<h1 class="page-title">Temper README header — direction mocks</h1>
+<p class="page-sub">Four arrangements. Tell me which lands.</p>
+
+<!-- Option A — wordmark neon banner only -->
+<div class="label"><span class="tag">A</span> Wordmark banner (sodium-amber neon) replacing the flame mascot</div>
+<div class="mock">
+  <img class="mock-banner" src="01-wordmark-neon.svg" alt="TEMPER wordmark">
+  <p class="tagline">A verified, policy-driven runtime for agents that build their own tools.</p>
+  <div class="badges">
+    <span class="badge">CI passing</span>
+    <span class="badge">MIT/Apache-2.0</span>
+    <span class="badge">rust 1.92+</span>
+    <span class="badge">v0.1.0</span>
+  </div>
+  <hr>
+  <div class="body-prose">
+    <h2>Why this exists</h2>
+    <p>Agents can produce code faster than any team can review by hand…</p>
+  </div>
+</div>
+
+<!-- Option B — color-band only as section dividers -->
+<div class="label"><span class="tag">B</span> Mascot kept; color-band only, used as section dividers</div>
+<div class="mock">
+  <p class="tagline" style="margin-top:12px">[ existing flame mascot stays here ]</p>
+  <h1 class="repo-h1">Temper</h1>
+  <p class="tagline">A verified, policy-driven runtime for agents that build their own tools.</p>
+  <div class="body-prose">
+    <h2>Why this exists</h2>
+    <p>Agents can produce code faster than any team can review by hand…</p>
+    <img class="divider" src="02-color-band.svg" alt="">
+    <h2>The specification model</h2>
+    <p>A capability in Temper is described by three artifacts…</p>
+    <img class="divider" src="02-color-band.svg" alt="">
+    <h2>The verification cascade</h2>
+    <p>Every spec passes four independent layers of analysis before the kernel will load it.</p>
+  </div>
+</div>
+
+<!-- Option C — combined header, both moves at once -->
+<div class="label"><span class="tag">C</span> Combined: wordmark banner with color band running underneath</div>
+<div class="mock">
+  <img class="mock-banner" src="03-header-combined.svg" alt="TEMPER">
+  <p class="tagline" style="margin-top:24px">A verified, policy-driven runtime for agents that build their own tools.</p>
+  <div class="badges">
+    <span class="badge">CI passing</span>
+    <span class="badge">MIT/Apache-2.0</span>
+    <span class="badge">rust 1.92+</span>
+    <span class="badge">v0.1.0</span>
+  </div>
+  <hr>
+  <div class="body-prose">
+    <h2>Why this exists</h2>
+    <p>Agents can produce code faster than any team can review by hand…</p>
+    <img class="divider" src="02-color-band.svg" alt="">
+    <h2>The specification model</h2>
+    <p>A capability in Temper is described by three artifacts…</p>
+  </div>
+</div>
+
+<!-- Option D — austere/plaque alternative, no neon -->
+<div class="label"><span class="tag">D</span> Austere plaque variant (no neon — engraved-stone register, more Mitutoyo than shop sign)</div>
+<div class="mock">
+  <img class="mock-banner" src="04-wordmark-flat.svg" alt="TEMPER">
+  <p class="tagline" style="margin-top:24px">A verified, policy-driven runtime for agents that build their own tools.</p>
+  <div class="badges">
+    <span class="badge">CI passing</span>
+    <span class="badge">MIT/Apache-2.0</span>
+    <span class="badge">rust 1.92+</span>
+    <span class="badge">v0.1.0</span>
+  </div>
+  <hr>
+  <div class="body-prose">
+    <h2>Why this exists</h2>
+    <p>Agents can produce code faster than any team can review by hand…</p>
+    <img class="divider" src="02-color-band.svg" alt="">
+    <h2>The specification model</h2>
+    <p>A capability in Temper is described by three artifacts…</p>
+  </div>
+  <p class="note">D is a sober counter to A's neon — same vocabulary (industrial, all-caps, wide-spaced) but no glow. Closer to a Mitutoyo product page than a shop sign. Pairs well if you want the text register quiet and the band carrying the only color.</p>
+</div>
+
+</div>
+</body>
+</html>

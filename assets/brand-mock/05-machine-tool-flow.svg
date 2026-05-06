@@ -1,0 +1,85 @@
+<svg viewBox="0 0 1400 360" xmlns="http://www.w3.org/2000/svg">
+  <style>
+    .label { font-family: 'IBM Plex Sans', 'Inter', Helvetica, Arial, sans-serif; font-size: 13px; font-weight: 500; letter-spacing: 2px; fill: #1c1c1c; }
+    .sub { font-family: 'IBM Plex Sans', 'Inter', Helvetica, Arial, sans-serif; font-size: 10px; letter-spacing: 0.6px; fill: #6a6a6a; font-weight: 400; }
+    .verb { font-family: 'IBM Plex Sans', 'Inter', Helvetica, Arial, sans-serif; font-size: 10px; letter-spacing: 1.6px; fill: #6a6a6a; font-weight: 500; }
+    .node { fill: #fbfbf9; stroke: #1c1c1c; stroke-width: 1.4; }
+    .node-accent { fill: #FFC270; stroke: #1c1c1c; stroke-width: 1.4; }
+    .arrow { stroke: #1c1c1c; stroke-width: 1.4; fill: none; }
+    .recur { stroke: #1c1c1c; stroke-width: 1.2; fill: none; stroke-dasharray: 3,4; }
+    .caption { font-family: 'IBM Plex Sans', 'Inter', Helvetica, Arial, sans-serif; font-size: 13px; fill: #2a2a2a; font-weight: 400; }
+    .caption-em { font-style: italic; fill: #5a5a5a; }
+    .stage-no { font-family: 'IBM Plex Sans', 'Inter', Helvetica, Arial, sans-serif; font-size: 9px; letter-spacing: 1px; fill: #999; font-weight: 600; }
+  </style>
+
+  <rect width="1400" height="360" fill="#f5f4f1"/>
+
+  <!-- Stage numbers -->
+  <text class="stage-no" x="135" y="105" text-anchor="middle">01</text>
+  <text class="stage-no" x="395" y="105" text-anchor="middle">02</text>
+  <text class="stage-no" x="660" y="105" text-anchor="middle">03</text>
+  <text class="stage-no" x="925" y="105" text-anchor="middle">04</text>
+  <text class="stage-no" x="1230" y="105" text-anchor="middle">05</text>
+
+  <!-- Node 1: AGENT -->
+  <rect class="node" x="65" y="115" width="140" height="92" rx="2"/>
+  <text class="label" x="135" y="155" text-anchor="middle">AGENT</text>
+  <text class="sub" x="135" y="180" text-anchor="middle">describes a need</text>
+
+  <!-- arrow 1 -->
+  <line class="arrow" x1="208" y1="161" x2="295" y2="161"/>
+  <polygon points="295,161 283,155 283,167" fill="#1c1c1c"/>
+  <text class="verb" x="251" y="148" text-anchor="middle">WRITES</text>
+
+  <!-- Node 2: SPEC -->
+  <rect class="node" x="305" y="115" width="180" height="92" rx="2"/>
+  <text class="label" x="395" y="148" text-anchor="middle">SPEC</text>
+  <text class="sub" x="395" y="170" text-anchor="middle">state machine</text>
+  <text class="sub" x="395" y="184" text-anchor="middle">WASM modules</text>
+  <text class="sub" x="395" y="198" text-anchor="middle">policies · data</text>
+
+  <!-- arrow 2 -->
+  <line class="arrow" x1="488" y1="161" x2="565" y2="161"/>
+  <polygon points="565,161 553,155 553,167" fill="#1c1c1c"/>
+  <text class="verb" x="526" y="148" text-anchor="middle">VERIFIES</text>
+
+  <!-- Node 3: KERNEL -->
+  <rect class="node" x="575" y="115" width="170" height="92" rx="2"/>
+  <text class="label" x="660" y="148" text-anchor="middle">KERNEL</text>
+  <text class="sub" x="660" y="170" text-anchor="middle">four-layer cascade</text>
+  <text class="sub" x="660" y="184" text-anchor="middle">SMT · model</text>
+  <text class="sub" x="660" y="198" text-anchor="middle">simulation · property</text>
+
+  <!-- arrow 3 -->
+  <line class="arrow" x1="748" y1="161" x2="835" y2="161"/>
+  <polygon points="835,161 823,155 823,167" fill="#1c1c1c"/>
+  <text class="verb" x="791" y="148" text-anchor="middle">DEPLOYS</text>
+
+  <!-- Node 4: RUNTIME (accent) -->
+  <rect class="node-accent" x="845" y="115" width="160" height="92" rx="2"/>
+  <text class="label" x="925" y="148" text-anchor="middle">RUNTIME</text>
+  <text class="sub" x="925" y="170" text-anchor="middle" fill="#3a2e10">live state machine</text>
+  <text class="sub" x="925" y="184" text-anchor="middle" fill="#3a2e10">typed API</text>
+  <text class="sub" x="925" y="198" text-anchor="middle" fill="#3a2e10">audit log</text>
+
+  <!-- arrow 4 -->
+  <line class="arrow" x1="1008" y1="161" x2="1095" y2="161"/>
+  <polygon points="1095,161 1083,155 1083,167" fill="#1c1c1c"/>
+  <text class="verb" x="1051" y="148" text-anchor="middle">USED BY</text>
+
+  <!-- Node 5: ANOTHER AGENT -->
+  <rect class="node" x="1105" y="115" width="250" height="92" rx="2"/>
+  <text class="label" x="1230" y="148" text-anchor="middle">ANOTHER AGENT</text>
+  <text class="sub" x="1230" y="170" text-anchor="middle">calls in</text>
+  <text class="sub" x="1230" y="184" text-anchor="middle">composes</text>
+  <text class="sub" x="1230" y="198" text-anchor="middle">writes the next spec</text>
+
+  <!-- Recursion arrow (dashed) -->
+  <path class="recur" d="M 1230 115 Q 1230 65 700 55 Q 170 65 135 105"/>
+  <polygon points="135,115 130,103 142,103" fill="#1c1c1c"/>
+  <text class="sub" x="700" y="48" text-anchor="middle" fill="#888" font-style="italic">tools build on tools</text>
+
+  <!-- Caption block -->
+  <text class="caption" x="700" y="270" text-anchor="middle">A spec becomes a tool. The tool becomes substrate the next agent builds on.</text>
+  <text class="caption caption-em" x="700" y="295" text-anchor="middle">A machine tool — a tool that makes tools.</text>
+</svg>

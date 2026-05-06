@@ -1,0 +1,39 @@
+<svg viewBox="0 0 1200 280" xmlns="http://www.w3.org/2000/svg">
+  <defs>
+    <filter id="neonGlow" x="-50%" y="-50%" width="200%" height="200%">
+      <feGaussianBlur in="SourceAlpha" stdDeviation="6" result="blur1"/>
+      <feFlood flood-color="#FFA94D" flood-opacity="0.7" result="color1"/>
+      <feComposite in="color1" in2="blur1" operator="in" result="glow1"/>
+      <feGaussianBlur in="SourceAlpha" stdDeviation="14" result="blur2"/>
+      <feFlood flood-color="#FF8A1F" flood-opacity="0.4" result="color2"/>
+      <feComposite in="color2" in2="blur2" operator="in" result="glow2"/>
+      <feMerge>
+        <feMergeNode in="glow2"/>
+        <feMergeNode in="glow1"/>
+        <feMergeNode in="SourceGraphic"/>
+      </feMerge>
+    </filter>
+    <radialGradient id="vignette" cx="0.5" cy="0.5" r="0.7">
+      <stop offset="0" stop-color="#15151a"/>
+      <stop offset="1" stop-color="#08080a"/>
+    </radialGradient>
+    <linearGradient id="temperBand" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0" stop-color="#F1D078"/>
+      <stop offset="0.18" stop-color="#E5A549"/>
+      <stop offset="0.36" stop-color="#A26B3A"/>
+      <stop offset="0.54" stop-color="#693560"/>
+      <stop offset="0.72" stop-color="#2D4280"/>
+      <stop offset="1" stop-color="#6E6E6E"/>
+    </linearGradient>
+  </defs>
+  <rect width="1200" height="280" fill="url(#vignette)"/>
+  <text x="600" y="155"
+        text-anchor="middle"
+        font-family="'IBM Plex Sans', 'Inter', 'Helvetica Neue', Helvetica, Arial, sans-serif"
+        font-weight="500"
+        font-size="124"
+        letter-spacing="42"
+        fill="#FFC270"
+        filter="url(#neonGlow)">TEMPER</text>
+  <rect x="0" y="266" width="1200" height="6" fill="url(#temperBand)"/>
+</svg>

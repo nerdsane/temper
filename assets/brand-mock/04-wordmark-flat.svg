@@ -1,0 +1,11 @@
+<svg viewBox="0 0 1200 240" xmlns="http://www.w3.org/2000/svg">
+  <rect width="1200" height="240" fill="#0c0c0e"/>
+  <text x="600" y="158"
+        text-anchor="middle"
+        font-family="'IBM Plex Sans', 'Inter', 'Helvetica Neue', Helvetica, Arial, sans-serif"
+        font-weight="500"
+        font-size="124"
+        letter-spacing="42"
+        fill="#E8E8E5">TEMPER</text>
+  <rect x="0" y="226" width="1200" height="3" fill="#3a3a3e"/>
+</svg>
