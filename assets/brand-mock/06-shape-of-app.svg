@@ -1,0 +1,56 @@
+<svg viewBox="0 0 1200 480" xmlns="http://www.w3.org/2000/svg">
+  <style>
+    .label { font-family: 'IBM Plex Sans', 'Inter', Helvetica, Arial, sans-serif; font-size: 13px; font-weight: 500; letter-spacing: 2px; fill: #1c1c1c; }
+    .sub { font-family: 'IBM Plex Sans', 'Inter', Helvetica, Arial, sans-serif; font-size: 10px; letter-spacing: 0.6px; fill: #6a6a6a; font-weight: 400; }
+    .group-title { font-family: 'IBM Plex Sans', 'Inter', Helvetica, Arial, sans-serif; font-size: 10px; font-weight: 600; letter-spacing: 2.2px; fill: #999; }
+    .verb { font-family: 'IBM Plex Sans', 'Inter', Helvetica, Arial, sans-serif; font-size: 10px; letter-spacing: 1.6px; fill: #6a6a6a; font-weight: 500; }
+    .node { fill: #fbfbf9; stroke: #1c1c1c; stroke-width: 1.4; }
+    .container { fill: none; stroke: #1c1c1c; stroke-width: 1.4; stroke-dasharray: 4,4; }
+    .runtime { fill: #FFC270; stroke: #1c1c1c; stroke-width: 1.4; }
+    .arrow { stroke: #1c1c1c; stroke-width: 1.4; fill: none; }
+  </style>
+
+  <rect width="1200" height="480" fill="#f5f4f1"/>
+
+  <!-- Left side: A DESCRIPTION (dashed container with four parts inside) -->
+  <text class="group-title" x="80" y="65">A DESCRIPTION</text>
+  <rect class="container" x="70" y="80" width="540" height="340" rx="2"/>
+
+  <!-- Behavior -->
+  <rect class="node" x="90" y="100" width="500" height="70" rx="2"/>
+  <text class="label" x="110" y="130">BEHAVIOR</text>
+  <text class="sub" x="110" y="150">states · transitions · invariants</text>
+
+  <!-- Data contract -->
+  <rect class="node" x="90" y="180" width="500" height="70" rx="2"/>
+  <text class="label" x="110" y="210">DATA CONTRACT</text>
+  <text class="sub" x="110" y="230">entity types · properties · published as a typed API</text>
+
+  <!-- Authorization -->
+  <rect class="node" x="90" y="260" width="500" height="70" rx="2"/>
+  <text class="label" x="110" y="290">AUTHORIZATION</text>
+  <text class="sub" x="110" y="310">default-deny · scope-based human approval</text>
+
+  <!-- Application logic -->
+  <rect class="node" x="90" y="340" width="500" height="70" rx="2"/>
+  <text class="label" x="110" y="370">APPLICATION LOGIC</text>
+  <text class="sub" x="110" y="390">sandboxed modules · triggered inline by transitions</text>
+
+  <!-- Arrow with verb -->
+  <line class="arrow" x1="615" y1="250" x2="755" y2="250"/>
+  <polygon points="755,250 743,244 743,256" fill="#1c1c1c"/>
+  <text class="verb" x="685" y="237" text-anchor="middle">VERIFIED · DEPLOYED</text>
+
+  <!-- Right side: RUNTIME -->
+  <text class="group-title" x="775" y="65">RUNTIME</text>
+  <rect class="runtime" x="765" y="80" width="370" height="340" rx="2"/>
+
+  <text class="label" x="950" y="180" text-anchor="middle">TYPED API</text>
+  <text class="sub" x="950" y="200" text-anchor="middle" fill="#3a2e10">callers read and write</text>
+
+  <text class="label" x="950" y="250" text-anchor="middle">STATE MACHINE</text>
+  <text class="sub" x="950" y="270" text-anchor="middle" fill="#3a2e10">enforced at every transition</text>
+
+  <text class="label" x="950" y="320" text-anchor="middle">AUDIT LOG</text>
+  <text class="sub" x="950" y="340" text-anchor="middle" fill="#3a2e10">every action recorded</text>
+</svg>

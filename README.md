@@ -72,6 +72,10 @@ A description in Temper has four parts.
 
 Each part is small enough for an agent to author and a human to read. The state machine is the contract; the application logic is what runs inside it.
 
+<p align="center">
+  <img src="assets/brand-mock/06-shape-of-app.svg" alt="A description (behavior, data contract, authorization, application logic) is verified and deployed into a runtime exposing a typed API, an enforced state machine, and an audit log" width="900">
+</p>
+
 A heartbeat scheduler with one inline-triggered module — taken from `reference-apps/crucible`:
 
 ```toml
