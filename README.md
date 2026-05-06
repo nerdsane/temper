@@ -251,7 +251,6 @@ Version 0.1.0. The architecture is stabilizing; the API surface is not frozen. D
 | **temper-wasm-sdk** | SDK for writing WASM integration modules |
 | **temper-macros** | Proc macros: `#[derive(Message)]`, `#[derive(DomainEvent)]` |
 | **temper-ots** | Open Trajectory Specification — DST-compatible trajectory capture for agent decisions |
-| **temper-transport** | Platform-agnostic channel transports (e.g., Discord) that bridge external messaging to Temper's Channel entities |
 
 </details>
 
