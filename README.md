@@ -1,4 +1,6 @@
-<!-- VISUAL: TEMPER wordmark banner + temper-color band underneath -->
+<p align="center">
+  <img src="assets/brand-mock/03-header-combined.svg" alt="TEMPER" width="800">
+</p>
 
 <p align="center">
   <em>A verified, policy-driven runtime for agents that build their own tools.</em>
@@ -21,7 +23,9 @@ Agents are fast at writing code, but the code drifts — invariants get missed, 
 
 The description hot-reloads. What an agent shipped keeps running while the agent revises it.
 
-<!-- VISUAL: machine-tool flow diagram (AGENT → SPEC → KERNEL → RUNTIME → ANOTHER AGENT, recursion arc) -->
+<p align="center">
+  <img src="assets/brand-mock/05-machine-tool-flow.svg" alt="Agent describes a spec; the kernel verifies and deploys it; another agent calls into the runtime — tools build on tools" width="900">
+</p>
 
 ---
 
@@ -93,8 +97,6 @@ on_failure = "CheckFailed"
 
 `Start` moves the entity from `Idle` to `Checking` and dispatches the WASM module. On success the runtime fires `CheckComplete`; on failure, `CheckFailed`. Either path is a verified transition.
 
-<!-- VISUAL: shape-of-an-app diagram -->
-
 ---
 
 ## Hot reload
@@ -130,10 +132,6 @@ L3 Property:    PASSED  randomized cases
 
 ---
 
-<!-- VISUAL: mid-README captioned image (industrial / spec-sheet inspired) -->
-
----
-
 ## Built on Temper
 
 - **[Katagami](https://github.com/arni-labs/katagami)** by [@arni0x9053](https://x.com/arni0x9053) — a library of agent-researched design languages. Each language ships as a verified spec plus a rendered embodiment of canonical UI elements. [Writeup](https://x.com/arni0x9053/status/2045594733654020449).
@@ -144,8 +142,6 @@ L3 Property:    PASSED  randomized cases
 ## Compatible agents
 
 Temper exposes an HTTP API and a stdio MCP bridge. Anything that speaks HTTP or MCP can drive it.
-
-<!-- VISUAL: compatible-agents grid -->
 
 Claude Code · OpenClaw · Pydantic AI · LangChain · custom HTTP / MCP clients
 
