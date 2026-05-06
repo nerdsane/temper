@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="assets/brand-mock/03-header-combined.svg" alt="TEMPER" width="800">
+  <img src="assets/readme-hero.jpg" alt="Temper tempering plant" width="1000">
 </p>
 
 <p align="center">
@@ -11,10 +11,6 @@
   <a href="LICENSE-MIT"><img src="https://img.shields.io/badge/license-MIT%2FApache--2.0-blue" alt="License"></a>
   <a href="https://www.rust-lang.org"><img src="https://img.shields.io/badge/rust-1.92%2B-orange" alt="Rust"></a>
   <a href="#status"><img src="https://img.shields.io/badge/version-0.1.0-yellow" alt="Pre-release"></a>
-</p>
-
-<p align="center">
-  <img src="assets/readme-hero.jpg" alt="Temper tempering plant" width="1000">
 </p>
 
 ---
