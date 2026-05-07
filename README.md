@@ -7,10 +7,10 @@
 </p>
 
 <p align="center">
-  <a href="https://github.com/nerdsane/temper/actions/workflows/ci.yml"><img src="https://github.com/nerdsane/temper/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
-  <a href="LICENSE-MIT"><img src="https://img.shields.io/badge/license-MIT%2FApache--2.0-blue" alt="License"></a>
-  <a href="https://www.rust-lang.org"><img src="https://img.shields.io/badge/rust-1.92%2B-orange" alt="Rust"></a>
-  <a href="#status"><img src="https://img.shields.io/badge/version-0.1.0-yellow" alt="Pre-release"></a>
+  <a href="https://github.com/nerdsane/temper/actions/workflows/ci.yml"><img src="https://img.shields.io/github/actions/workflow/status/nerdsane/temper/ci.yml?style=for-the-badge&label=CI" alt="CI"></a>
+  <a href="LICENSE-MIT"><img src="https://img.shields.io/badge/License-MIT%2FApache--2.0-blue?style=for-the-badge" alt="License"></a>
+  <a href="https://www.rust-lang.org"><img src="https://img.shields.io/badge/Rust-1.92%2B-orange?style=for-the-badge" alt="Rust"></a>
+  <a href="#status"><img src="https://img.shields.io/badge/Version-0.1.0-yellow?style=for-the-badge" alt="Pre-release"></a>
 </p>
 
 ---
