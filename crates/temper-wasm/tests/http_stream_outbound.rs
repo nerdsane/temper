@@ -10,15 +10,17 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use axum::Router;
-use axum::body::Body;
+use axum::body::{Body, to_bytes};
 use axum::extract::Request;
 use axum::response::IntoResponse;
-use axum::routing::post;
+use axum::routing::{post, put};
 use futures_util::StreamExt;
+use serde_json::Value;
 
 use temper_wasm::WasmHost;
 use temper_wasm::host_trait::ProductionWasmHost;
-use temper_wasm::http_stream::HttpRequestHead;
+use temper_wasm::http_stream::{HttpRequestHead, StreamError};
+use temper_wasm::types::WasmInvocationContext;
 
 /// Axum handler that streams request body bytes back verbatim.
 async fn echo_handler(req: Request) -> impl IntoResponse {
@@ -42,17 +44,113 @@ async fn header_echo_handler(req: Request) -> impl IntoResponse {
     format!("span_hint_present={span_hint_present};regular={regular_header}")
 }
 
+/// Axum handler that reports auth/context headers plus streamed body bytes.
+async fn internal_header_echo_handler(req: Request) -> impl IntoResponse {
+    let (parts, body) = req.into_parts();
+    let body = to_bytes(body, 1024 * 1024).await.unwrap();
+    let header = |name: &str| {
+        parts
+            .headers
+            .get(name)
+            .and_then(|value| value.to_str().ok())
+            .unwrap_or("")
+            .to_string()
+    };
+    format!(
+        "authorization={};tenant={};principal_kind={};principal_id={};workflow_type={};body={}",
+        header("authorization"),
+        header("x-tenant-id"),
+        header("x-temper-principal-kind"),
+        header("x-temper-principal-id"),
+        header("x-temper-workflow-root-entity-type"),
+        String::from_utf8_lossy(&body)
+    )
+}
+
 /// Bind axum on 127.0.0.1:0 (random port), return the bound addr.
 async fn spawn_echo_server() -> String {
     let app = Router::new()
         .route("/echo", post(echo_handler))
-        .route("/headers", post(header_echo_handler));
+        .route("/headers", post(header_echo_handler))
+        .route("/internal", put(internal_header_echo_handler));
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
     tokio::spawn(async move {
         axum::serve(listener, app).await.unwrap();
     });
     format!("http://{addr}")
+}
+
+#[tokio::test]
+async fn outbound_streaming_injects_internal_auth_headers() {
+    let base = spawn_echo_server().await;
+
+    let mut secrets = BTreeMap::new();
+    secrets.insert("temper_api_url".to_string(), base.clone());
+    secrets.insert("temper_api_key".to_string(), "secret123".to_string());
+
+    let host = Arc::new(ProductionWasmHost::new(secrets).with_invocation_context(
+        WasmInvocationContext {
+            tenant: "default".to_string(),
+            entity_type: "Workspace".to_string(),
+            entity_id: "ws-1".to_string(),
+            trigger_action: "CreateFile".to_string(),
+            trigger_params: Value::Null,
+            entity_state: Value::Null,
+            agent_id: Some("operator".to_string()),
+            session_id: None,
+            integration_config: BTreeMap::new(),
+            trace_id: String::new(),
+            workflow_root_entity_type: Some("CurationQuery".to_string()),
+            workflow_root_entity_id: Some("cq-1".to_string()),
+            workflow_run_id: Some("CurationQuery:cq-1".to_string()),
+            http_request: None,
+        },
+    ));
+
+    let handles = host
+        .http_stream_begin_outbound(HttpRequestHead {
+            method: "PUT".into(),
+            url: format!("{base}/internal"),
+            headers: vec![("content-type".into(), "image/png".into())],
+        })
+        .await
+        .unwrap();
+
+    loop {
+        match host
+            .http_stream_try_write(handles.request_body, b"raw-image-bytes".to_vec())
+            .await
+        {
+            Ok(_) => break,
+            Err(StreamError::WouldBlock) => tokio::task::yield_now().await,
+            Err(error) => panic!("unexpected write error: {error:?}"),
+        }
+    }
+    host.http_stream_close(handles.request_body).await.unwrap();
+
+    let head = host
+        .http_stream_response_head(handles.response_body)
+        .await
+        .unwrap();
+    assert_eq!(head.status, 200);
+
+    let mut body = Vec::new();
+    loop {
+        let chunk = host.http_stream_read(handles.response_body).await.unwrap();
+        if chunk.is_empty() {
+            break;
+        }
+        body.extend_from_slice(&chunk);
+    }
+    let body = String::from_utf8(body).unwrap();
+
+    assert!(body.contains("authorization=Bearer secret123"));
+    assert!(body.contains("tenant=default"));
+    assert!(body.contains("principal_kind=agent"));
+    assert!(body.contains("principal_id=operator"));
+    assert!(body.contains("workflow_type=CurationQuery"));
+    assert!(body.contains("body=raw-image-bytes"));
 }
 
 #[tokio::test]

@@ -541,6 +541,77 @@ impl ProductionWasmHost {
         self
     }
 
+    fn is_internal_temper_url(&self, url: &str) -> bool {
+        self.internal_api_base_url
+            .as_ref()
+            .is_some_and(|api_url| url.starts_with(api_url.trim_end_matches('/')))
+            || self
+                .secrets
+                .get("temper_api_url")
+                .is_some_and(|api_url| url.starts_with(api_url.trim_end_matches('/')))
+    }
+
+    fn add_internal_temper_headers(
+        &self,
+        mut builder: reqwest::RequestBuilder,
+        url: &str,
+        headers: &[(String, String)],
+    ) -> reqwest::RequestBuilder {
+        if !self.is_internal_temper_url(url) {
+            return builder;
+        }
+
+        let Some(ref inv_ctx) = self.invocation_context else {
+            return builder;
+        };
+
+        let has_tenant = headers
+            .iter()
+            .any(|(k, _)| k.eq_ignore_ascii_case("x-tenant-id"));
+        let has_principal = headers
+            .iter()
+            .any(|(k, _)| k.eq_ignore_ascii_case("x-temper-principal-kind"));
+        let has_authorization = headers
+            .iter()
+            .any(|(k, _)| k.eq_ignore_ascii_case("authorization"));
+
+        if !has_tenant {
+            builder = builder.header("x-tenant-id", inv_ctx.tenant.as_str());
+        }
+
+        if !has_principal {
+            let agent_type = if inv_ctx.entity_type.eq_ignore_ascii_case("Session") {
+                "agent"
+            } else {
+                "system"
+            };
+            let principal_id = inv_ctx
+                .agent_id
+                .as_deref()
+                .filter(|s| !s.is_empty())
+                .unwrap_or(inv_ctx.entity_id.as_str());
+            builder = builder
+                .header("x-temper-principal-kind", "agent")
+                .header("x-temper-principal-id", principal_id)
+                .header("x-temper-agent-type", agent_type);
+            if let Some(ref sid) = inv_ctx.session_id {
+                builder = builder.header("x-temper-ctx-sessionid", sid.as_str());
+            }
+        }
+
+        if !has_authorization
+            && let Some(key) = self
+                .internal_api_key
+                .as_ref()
+                .or_else(|| self.secrets.get("temper_api_key"))
+                .filter(|k| !k.is_empty())
+        {
+            builder = builder.header("authorization", format!("Bearer {key}"));
+        }
+
+        add_workflow_observability_headers(builder, headers, inv_ctx)
+    }
+
     fn build_guest_wide_event(&self, event_json: &str) -> Result<WideEvent, String> {
         let payload: GuestWideEventInput = serde_json::from_str(event_json)
             .map_err(|e| format!("invalid guest wide event payload: {e}"))?;
@@ -684,67 +755,8 @@ impl WasmHost for ProductionWasmHost {
             builder = builder.header(k.as_str(), v.as_str());
         }
 
-        // Auto-inject Temper auth headers for internal API calls (ADR-0043).
-        // Internal = URL starts with temper_api_url from secrets.
-        //
-        // Principal headers and bearer auth are handled independently:
-        // guests may deliberately set a service principal, but still need the
-        // local API key so bearer auth accepts the request.
-        let is_internal = self
-            .internal_api_base_url
-            .as_ref()
-            .is_some_and(|api_url| url.starts_with(api_url))
-            || self
-                .secrets
-                .get("temper_api_url")
-                .is_some_and(|api_url| url.starts_with(api_url.trim_end_matches('/')));
-        if is_internal && let Some(ref inv_ctx) = self.invocation_context {
-            let has_tenant = filtered_headers
-                .iter()
-                .any(|(k, _)| k.eq_ignore_ascii_case("x-tenant-id"));
-            let has_principal = filtered_headers
-                .iter()
-                .any(|(k, _)| k.eq_ignore_ascii_case("x-temper-principal-kind"));
-            let has_authorization = filtered_headers
-                .iter()
-                .any(|(k, _)| k.eq_ignore_ascii_case("authorization"));
-
-            if !has_tenant {
-                builder = builder.header("x-tenant-id", inv_ctx.tenant.as_str());
-            }
-
-            if !has_principal {
-                let agent_type = if inv_ctx.entity_type.eq_ignore_ascii_case("Session") {
-                    "agent"
-                } else {
-                    "system"
-                };
-                let principal_id = inv_ctx
-                    .agent_id
-                    .as_deref()
-                    .filter(|s| !s.is_empty())
-                    .unwrap_or(inv_ctx.entity_id.as_str());
-                builder = builder
-                    .header("x-temper-principal-kind", "agent")
-                    .header("x-temper-principal-id", principal_id)
-                    .header("x-temper-agent-type", agent_type);
-                if let Some(ref sid) = inv_ctx.session_id {
-                    builder = builder.header("x-temper-ctx-sessionid", sid.as_str());
-                }
-            }
-
-            if !has_authorization
-                && let Some(key) = self
-                    .internal_api_key
-                    .as_ref()
-                    .or_else(|| self.secrets.get("temper_api_key"))
-                    .filter(|k| !k.is_empty())
-            {
-                builder = builder.header("authorization", format!("Bearer {key}"));
-            }
-
-            builder = add_workflow_observability_headers(builder, &filtered_headers, inv_ctx);
-        }
+        let is_internal = self.is_internal_temper_url(url);
+        builder = self.add_internal_temper_headers(builder, url, &filtered_headers);
         // determinism-ok: is_internal check uses non-deterministic URL comparison,
         // but this runs in WasmHost (not simulation), so wall-clock/network access is fine.
 
@@ -1320,6 +1332,7 @@ impl WasmHost for ProductionWasmHost {
         for (k, v) in &filtered_headers {
             builder = builder.header(k.as_str(), v.as_str());
         }
+        builder = self.add_internal_temper_headers(builder, &request.url, &filtered_headers);
         if !filtered_headers
             .iter()
             .any(|(k, _)| k.eq_ignore_ascii_case("traceparent"))
