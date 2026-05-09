@@ -9,6 +9,7 @@ use axum::body::Body;
 use axum::http::{Request, StatusCode};
 use common::{build_default_state, dispatch};
 use std::sync::Arc;
+use std::time::Duration;
 use temper_runtime::ActorSystem;
 use temper_runtime::tenant::TenantId;
 use temper_server::build_router;
@@ -77,6 +78,28 @@ async fn patch_json(
         .unwrap();
     let body = serde_json::from_slice(&bytes).unwrap_or(serde_json::Value::Null);
     (status, body)
+}
+
+async fn wait_for_value_array<F>(
+    state: &ServerState,
+    path: &str,
+    predicate: F,
+) -> (StatusCode, serde_json::Value)
+where
+    F: Fn(&[serde_json::Value]) -> bool,
+{
+    for _ in 0..50 {
+        let (status, body) = get_json(state, path).await;
+        if status == StatusCode::OK
+            && body["value"]
+                .as_array()
+                .is_some_and(|values| predicate(values))
+        {
+            return (status, body);
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    get_json(state, path).await
 }
 
 fn build_turso_state(system_name: &str, store: TursoEventStore) -> ServerState {
@@ -243,7 +266,12 @@ async fn filtered_entity_set_returns_entities_created_via_odata_post() {
     .await;
     assert_eq!(status, StatusCode::CREATED, "seed create failed: {body:?}");
 
-    let (status, body) = get_json(&state, "/tdata/Orders?$filter=Currency%20eq%20'USD'").await;
+    let (status, body) = wait_for_value_array(
+        &state,
+        "/tdata/Orders?$filter=Currency%20eq%20'USD'",
+        |values| values.len() == 1,
+    )
+    .await;
     assert_eq!(status, StatusCode::OK);
     let values = body["value"].as_array().expect("value array");
     assert_eq!(
@@ -290,7 +318,16 @@ async fn filtered_entity_set_reflects_odata_patch_updates() {
     .await;
     assert_eq!(status, StatusCode::OK, "patch failed: {body:?}");
 
-    let (status, body) = get_json(&state, "/tdata/Orders?$filter=Currency%20eq%20'USD'").await;
+    let (status, body) = wait_for_value_array(
+        &state,
+        "/tdata/Orders?$filter=Currency%20eq%20'USD'",
+        |values| {
+            values
+                .iter()
+                .any(|value| value["entity_id"].as_str() == Some("ord-patched-filter"))
+        },
+    )
+    .await;
     assert_eq!(status, StatusCode::OK);
     let values = body["value"].as_array().expect("value array");
     assert!(
