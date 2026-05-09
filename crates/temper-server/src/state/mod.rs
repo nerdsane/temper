@@ -5,12 +5,14 @@ pub mod custom_effects;
 mod dispatch;
 mod entity_ops;
 mod evolution;
+mod file_read_projection;
 mod file_reads;
 pub mod metrics;
 pub mod pending_decisions;
 mod persistence;
 pub mod policy_suggestions;
 mod projection_backfill;
+mod published_assets;
 mod runtime_metrics;
 pub mod trajectory;
 pub mod wasm_invocation_log;
@@ -18,13 +20,14 @@ pub mod wasm_invocation_log;
 pub use admission::{AdmissionController, AdmissionOutcome, AdmissionPermit};
 pub use dispatch::{DispatchCommand, DispatchError, DispatchExtOptions, StateTimeoutTracker};
 pub use entity_ops::{FailedLevelInfo, VerificationGateError};
-pub use file_reads::{TextFileReadResult, TextFileVersionReadResult};
+pub use file_reads::{IndexedFileStreamRead, TextFileReadResult, TextFileVersionReadResult};
 pub use metrics::MetricsCollector;
 pub use pending_decisions::{
     ActionScope, DecisionStatus, DurationScope, PendingDecision, PolicyScopeMatrix, PrincipalScope,
     ResourceScope,
 };
 pub use policy_suggestions::PolicySuggestionEngine;
+pub use published_assets::PublishFileAssetRequest;
 pub use trajectory::{TrajectoryEntry, TrajectorySource};
 pub use wasm_invocation_log::WasmInvocationEntry;
 
@@ -984,6 +987,26 @@ impl ServerState {
         file_id: &str,
         agent_ctx: &crate::request_context::AgentContext,
     ) -> Result<(u16, Vec<u8>), String> {
+        match self.read_file_stream_indexed(tenant, file_id).await? {
+            IndexedFileStreamRead::Content { bytes, .. } => return Ok((200, bytes)),
+            IndexedFileStreamRead::NoContent { .. } => return Ok((404, Vec::new())),
+            IndexedFileStreamRead::MissingIndex => {
+                tracing::warn!(
+                    tenant = %tenant,
+                    file_id,
+                    "file stream projection missing; falling back to actor/WASM materialization"
+                );
+            }
+            IndexedFileStreamRead::StaleIndex { content_hash, .. } => {
+                tracing::warn!(
+                    tenant = %tenant,
+                    file_id,
+                    content_hash = %content_hash,
+                    "file stream projection blob missing; falling back to actor/WASM materialization"
+                );
+            }
+        }
+
         let entity_state = serde_json::to_value(
             &self
                 .get_tenant_entity_state(tenant, "File", file_id)

@@ -1557,6 +1557,7 @@ startup_loading = "lazy"
     let tenant_name = "test-wasm-digest-reconcile";
     let tenant = TenantId::new(tenant_name);
 
+    add_os_apps_dir(app_root.clone());
     install_os_app(&state, tenant_name, "wasm-digest-app")
         .await
         .expect("initial app install should succeed");
@@ -1674,6 +1675,7 @@ startup_loading = "lazy"
     let tenant_name = "test-wasm-preserve";
     let tenant = TenantId::new(tenant_name);
 
+    add_os_apps_dir(app_root.clone());
     install_os_app(&state, tenant_name, "wasm-preserve-app")
         .await
         .expect("initial app install should succeed");
