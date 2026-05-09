@@ -71,6 +71,26 @@ fn system_get(uri: &str) -> Request<Body> {
         .unwrap()
 }
 
+async fn observe_json(app: &Router, uri: &str) -> serde_json::Value {
+    let response = app.clone().oneshot(system_get(uri)).await.unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(response.into_body(), 1024 * 1024)
+        .await
+        .unwrap();
+    serde_json::from_slice(&body).unwrap()
+}
+
+async fn wait_for_trajectory_total(app: &Router, uri: &str, min_total: u64) -> serde_json::Value {
+    for _ in 0..50 {
+        let json = observe_json(app, uri).await;
+        if json["total"].as_u64().unwrap_or(0) >= min_total {
+            return json;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    observe_json(app, uri).await
+}
+
 /// Build a POST request with admin auth headers for observe endpoints.
 fn system_post(uri: &str, body: &str) -> Request<Body> {
     Request::post(uri)
@@ -891,16 +911,7 @@ async fn test_trajectories_records_success_and_failure() {
         .nest("/api", crate::api::build_api_router())
         .with_state(state);
 
-    let response = app
-        .oneshot(system_get("/observe/trajectories"))
-        .await
-        .unwrap();
-
-    assert_eq!(response.status(), StatusCode::OK);
-    let body = axum::body::to_bytes(response.into_body(), 1024 * 1024)
-        .await
-        .unwrap();
-    let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    let json = wait_for_trajectory_total(&app, "/observe/trajectories", 2).await;
 
     assert!(json["total"].as_u64().unwrap() >= 2);
     assert!(json["success_count"].as_u64().unwrap() >= 1);
@@ -939,26 +950,11 @@ async fn test_trajectories_filters_by_entity_type() {
         .with_state(state);
 
     // Filter for entity_type=Order should find our entry.
-    let response = app
-        .clone()
-        .oneshot(system_get("/observe/trajectories?entity_type=Order"))
-        .await
-        .unwrap();
-    let body = axum::body::to_bytes(response.into_body(), 1024 * 1024)
-        .await
-        .unwrap();
-    let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    let json = wait_for_trajectory_total(&app, "/observe/trajectories?entity_type=Order", 1).await;
     assert!(json["total"].as_u64().unwrap() >= 1);
 
     // Filter for non-existent entity_type should return 0.
-    let response = app
-        .oneshot(system_get("/observe/trajectories?entity_type=Nonexistent"))
-        .await
-        .unwrap();
-    let body = axum::body::to_bytes(response.into_body(), 1024 * 1024)
-        .await
-        .unwrap();
-    let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    let json = observe_json(&app, "/observe/trajectories?entity_type=Nonexistent").await;
     assert_eq!(json["total"], 0);
 }
 
