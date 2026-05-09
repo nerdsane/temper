@@ -167,6 +167,10 @@ fn run_git(args: &[&str], working_dir: &Path) -> Result<(), String> {
     let output = Command::new("git")
         .args(args)
         .current_dir(working_dir)
+        .env_remove("GIT_DIR")
+        .env_remove("GIT_WORK_TREE")
+        .env_remove("GIT_INDEX_FILE")
+        .env_remove("GIT_PREFIX")
         .output()
         .map_err(|e| format!("failed to run git {}: {e}", args.first().unwrap_or(&"")))?;
 
@@ -362,6 +366,7 @@ mod tests {
                 "-c",
                 "user.email=temper@example.test",
                 "commit",
+                "--no-verify",
                 "-m",
                 "initial app",
             ],
