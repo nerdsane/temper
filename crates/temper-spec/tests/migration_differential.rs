@@ -200,6 +200,31 @@ fn sanitize_git_env(cmd: &mut Command) {
     }
 }
 
+fn git_repo_available(repo_root: &str) -> bool {
+    let mut cmd = Command::new("git");
+    sanitize_git_env(&mut cmd);
+    cmd.args(["-C", repo_root, "rev-parse", "--show-toplevel"])
+        .output()
+        .is_ok_and(|out| out.status.success())
+}
+
+fn require_git_repos(repos: &[&str]) -> bool {
+    let missing: Vec<&str> = repos
+        .iter()
+        .copied()
+        .filter(|repo| !git_repo_available(repo))
+        .collect();
+    if missing.is_empty() {
+        return true;
+    }
+
+    eprintln!(
+        "skipping migration differential; required git worktree(s) unavailable: {}",
+        missing.join(", ")
+    );
+    false
+}
+
 fn read_current(repo_root: &str, path: &str) -> String {
     std::fs::read_to_string(format!("{repo_root}/{path}"))
         .unwrap_or_else(|e| panic!("read {repo_root}/{path}: {e}"))
@@ -375,6 +400,13 @@ fn allowed_extra_config_keys(path: &str, trigger_name: &str) -> &'static [&'stat
 
 #[test]
 fn all_migrations_preserve_integrations() {
+    if !require_git_repos(&[
+        "/Users/seshendranalla/Development/temper-action-triggers",
+        "/Users/seshendranalla/Development/openpaw-action-triggers",
+    ]) {
+        return;
+    }
+
     let mut failures: Vec<String> = Vec::new();
 
     for (repo, sha, path) in MIGRATIONS {
@@ -494,6 +526,12 @@ fn git_show_ignores_inherited_git_dir_from_other_repo() {
     let repo = "/Users/seshendranalla/Development/openpaw-action-triggers";
     let wrong_git_dir = "/Users/seshendranalla/Development/temper-action-triggers/.git";
     let path = "os-apps/paw-agent/specs/capability_request.ioa.toml";
+    if !require_git_repos(&[
+        "/Users/seshendranalla/Development/temper-action-triggers",
+        repo,
+    ]) {
+        return;
+    }
 
     let clean = git_show(repo, "7a644954", path);
     let contaminated = git_show_inner(repo, "7a644954", path, Some(wrong_git_dir));
