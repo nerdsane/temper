@@ -111,34 +111,62 @@ impl ServerState {
             &request.kind,
             &content_hash,
         );
-        let Some(store) = self.turso_store_for_tenant(tenant.as_str()).await else {
-            return Err("published assets require a Turso tenant store".to_string());
+        let asset = PublishedAssetUpsert {
+            id: asset_id,
+            tenant: tenant.to_string(),
+            source_file_id: request.file_id,
+            source_file_version_id: request.source_file_version_id,
+            content_hash,
+            kind: request.kind,
+            mime_type,
+            byte_length: bytes.len() as i64,
+            public_storage_key: storage_key,
+            public_url,
+            owner_entity_type: request.owner_entity_type,
+            owner_entity_id: request.owner_entity_id,
+            status: "published".to_string(),
         };
 
-        store
-            .upsert_published_asset(&PublishedAssetUpsert {
-                id: asset_id,
-                tenant: tenant.to_string(),
-                source_file_id: request.file_id,
-                source_file_version_id: request.source_file_version_id,
-                content_hash,
-                kind: request.kind,
-                mime_type,
-                byte_length: bytes.len() as i64,
-                public_storage_key: storage_key,
-                public_url,
-                owner_entity_type: request.owner_entity_type,
-                owner_entity_id: request.owner_entity_id,
-                status: "published".to_string(),
-            })
-            .await
-            .map_err(|e| format!("failed to persist published asset: {e}"))
+        if let Some(store) = self.turso_store_for_tenant(tenant.as_str()).await {
+            return store
+                .upsert_published_asset(&asset)
+                .await
+                .map_err(|e| format!("failed to persist published asset: {e}"));
+        }
+
+        tracing::warn!(
+            tenant = %tenant,
+            asset_id = %asset.id,
+            owner_entity_type = %asset.owner_entity_type,
+            owner_entity_id = %asset.owner_entity_id,
+            kind = %asset.kind,
+            "published asset metadata store unavailable; returning derived asset row"
+        );
+        Ok(published_asset_row_from_upsert(asset))
     }
 
     fn secret(&self, tenant: &TenantId, key: &str) -> Option<String> {
         self.secrets_vault
             .as_ref()
             .and_then(|vault| vault.get_secret(tenant.as_str(), key))
+    }
+}
+
+fn published_asset_row_from_upsert(asset: PublishedAssetUpsert) -> PublishedAssetRow {
+    PublishedAssetRow {
+        id: asset.id,
+        tenant: asset.tenant,
+        source_file_id: asset.source_file_id,
+        source_file_version_id: asset.source_file_version_id,
+        content_hash: asset.content_hash,
+        kind: asset.kind,
+        mime_type: asset.mime_type,
+        byte_length: asset.byte_length,
+        public_storage_key: asset.public_storage_key,
+        public_url: asset.public_url,
+        owner_entity_type: asset.owner_entity_type,
+        owner_entity_id: asset.owner_entity_id,
+        status: asset.status,
     }
 }
 
