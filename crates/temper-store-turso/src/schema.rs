@@ -209,6 +209,38 @@ pub const CREATE_POLICY_DENIAL_PATTERNS_TENANT_INDEX: &str = "\
 CREATE INDEX IF NOT EXISTS idx_policy_denial_patterns_tenant
     ON policy_denial_patterns(tenant, last_seen DESC);";
 
+/// Immutable public asset records derived from governed TemperFS files.
+///
+/// The source File/FileVersion and event log remain the authority; this table is
+/// a rebuildable read model for public delivery URLs.
+pub const CREATE_PUBLISHED_ASSETS_TABLE: &str = "\
+CREATE TABLE IF NOT EXISTS published_assets (
+    id TEXT PRIMARY KEY,
+    tenant TEXT NOT NULL,
+    source_file_id TEXT NOT NULL,
+    source_file_version_id TEXT NOT NULL DEFAULT '',
+    content_hash TEXT NOT NULL,
+    kind TEXT NOT NULL,
+    mime_type TEXT NOT NULL,
+    byte_length INTEGER NOT NULL,
+    public_storage_key TEXT NOT NULL,
+    public_url TEXT NOT NULL,
+    owner_entity_type TEXT NOT NULL DEFAULT '',
+    owner_entity_id TEXT NOT NULL DEFAULT '',
+    status TEXT NOT NULL DEFAULT 'published',
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+    UNIQUE(tenant, kind, owner_entity_type, owner_entity_id, content_hash)
+);";
+
+pub const CREATE_PUBLISHED_ASSETS_OWNER_INDEX: &str = "\
+CREATE INDEX IF NOT EXISTS idx_published_assets_owner
+    ON published_assets(tenant, owner_entity_type, owner_entity_id, kind, status);";
+
+pub const CREATE_PUBLISHED_ASSETS_SOURCE_INDEX: &str = "\
+CREATE INDEX IF NOT EXISTS idx_published_assets_source
+    ON published_assets(tenant, source_file_id, status);";
+
 mod installed_apps;
 pub use installed_apps::*;
 

@@ -7,6 +7,7 @@ mod filter_sql;
 mod read;
 mod read_support;
 mod response;
+mod stream_fast_path;
 mod write;
 
 #[cfg(feature = "observe")]

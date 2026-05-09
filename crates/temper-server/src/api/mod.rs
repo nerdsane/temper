@@ -35,6 +35,7 @@ use crate::state::ServerState;
 /// - POST   /api/evolution/materialize                  -> persist O/P/A/I + PM issues
 /// - POST   /api/files/read-text-batch                  -> batch current-file text reads via projections + blobs
 /// - POST   /api/files/read-version-text-batch          -> batch immutable file-version text reads
+/// - POST   /api/files/publish-asset                    -> promote a governed file to a public immutable asset
 pub fn build_api_router() -> Router<ServerState> {
     Router::new()
         .route(
@@ -78,6 +79,7 @@ pub fn build_api_router() -> Router<ServerState> {
             "/files/read-version-text-batch",
             post(files::handle_read_version_text_batch),
         )
+        .route("/files/publish-asset", post(files::handle_publish_asset))
         // OTS trajectory endpoints (full agent execution traces for GEPA)
         .route(
             "/ots/trajectories",
