@@ -6,20 +6,11 @@
 use std::sync::Arc;
 
 use temper_actor_runtime::spec_actor::SpecActorState;
-use temper_actor_runtime::test_utils::setup_shared_pg;
+use temper_actor_runtime::test_utils::setup_test_pg;
 use temper_actor_runtime::{ActorSystem, SchedulerConfig, SpecMessage};
 use temper_agents::{
     AGENT_ACTOR_TYPES, MockLlmIntegration, MockToolExecutor, register_agent_actors,
 };
-use tokio::sync::OnceCell;
-
-static POOL: OnceCell<deadpool_postgres::Pool> = OnceCell::const_new();
-
-async fn test_pool() -> deadpool_postgres::Pool {
-    POOL.get_or_init(|| async { setup_shared_pg().await })
-        .await
-        .clone()
-}
 
 async fn load_actor_state(
     pool: &deadpool_postgres::Pool,
@@ -53,7 +44,7 @@ async fn run_until_quiescent(system: &ActorSystem, max_polls: usize) {
 
 #[tokio::test]
 async fn test_agent_initialize() {
-    let pool = test_pool().await;
+    let (pool, _postgres) = setup_test_pg().await;
     let system = Arc::new(ActorSystem::new(pool.clone(), SchedulerConfig::default()));
     register_agent_actors(&system).await.unwrap();
     system.register(Arc::new(MockLlmIntegration)).await.unwrap();
@@ -75,7 +66,7 @@ async fn test_agent_initialize() {
 
 #[tokio::test]
 async fn test_simple_inference_chain() {
-    let pool = test_pool().await;
+    let (pool, _postgres) = setup_test_pg().await;
     let system = Arc::new(ActorSystem::new(pool.clone(), SchedulerConfig::default()));
     register_agent_actors(&system).await.unwrap();
     system.register(Arc::new(MockLlmIntegration)).await.unwrap();
@@ -122,7 +113,7 @@ async fn test_simple_inference_chain() {
 
 #[tokio::test]
 async fn test_context_manager_transitions() {
-    let pool = test_pool().await;
+    let (pool, _postgres) = setup_test_pg().await;
     let system = Arc::new(ActorSystem::new(pool.clone(), SchedulerConfig::default()));
     register_agent_actors(&system).await.unwrap();
     system.register(Arc::new(MockLlmIntegration)).await.unwrap();

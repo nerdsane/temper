@@ -25,7 +25,10 @@ pub async fn setup_test_pg() -> (Pool, ContainerAsync<Postgres>) {
     cfg.dbname = Some("postgres".to_string());
 
     let pool = cfg
-        .create_pool(None, tokio_postgres::NoTls)
+        .create_pool(
+            Some(deadpool_postgres::Runtime::Tokio1),
+            tokio_postgres::NoTls,
+        )
         .expect("create pool");
 
     let client = pool.get().await.expect("get client");
@@ -64,7 +67,10 @@ pub async fn setup_shared_pg() -> Pool {
     cfg.dbname = Some("postgres".to_string());
 
     let pool = cfg
-        .create_pool(None, tokio_postgres::NoTls)
+        .create_pool(
+            Some(deadpool_postgres::Runtime::Tokio1),
+            tokio_postgres::NoTls,
+        )
         .expect("create pool");
 
     let client = pool.get().await.expect("get client");
