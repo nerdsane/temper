@@ -14,7 +14,7 @@ use effects::parse_effect_value;
 #[cfg(test)]
 use guards::parse_guard_clause;
 use guards::parse_guard_value;
-use inline::{join_multiline_arrays, parse_kv, parse_string_array};
+use inline::{join_multiline_arrays, parse_action_params, parse_kv, parse_string_array};
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 enum Section {
@@ -191,7 +191,7 @@ impl ParseState {
             "kind" => action.kind = value.to_string(),
             "from" => action.from = parse_string_array(value),
             "to" => action.to = Some(value.to_string()),
-            "params" => action.params = parse_string_array(value),
+            "params" => action.params = parse_action_params(value),
             "hint" => action.hint = Some(value.to_string()),
             "guard" => parse_guard_value(value, &mut action.guard)?,
             "effect" => parse_effect_value(value, &mut action.effect)?,

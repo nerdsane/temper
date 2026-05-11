@@ -1,0 +1,46 @@
+# Process entity -- API-only lifecycle state machine for testing.
+# Simplified version of the full agentic process spec.
+
+[automaton]
+name = "Process"
+states = ["Created", "Running", "Suspended", "Terminated", "Failed"]
+initial = "Created"
+
+[[action]]
+name = "Initialize"
+kind = "input"
+from = ["Created"]
+to = "Running"
+
+[[action]]
+name = "StartProcess"
+kind = "input"
+from = ["Created", "Running"]
+to = "Running"
+params = [{ name = "user_prompt", type = "string" }]
+
+[[action]]
+name = "SendInput"
+kind = "input"
+from = ["Running", "Suspended"]
+to = "Running"
+params = [{ name = "user_prompt", type = "string" }]
+
+[[action]]
+name = "SuspendProcess"
+kind = "input"
+from = ["Running"]
+to = "Suspended"
+
+[[action]]
+name = "ResumeProcess"
+kind = "input"
+from = ["Suspended"]
+to = "Running"
+
+[[action]]
+name = "TerminateProcess"
+kind = "input"
+from = ["Running", "Suspended", "Created"]
+to = "Terminated"
+params = [{ name = "reason", type = "string" }]

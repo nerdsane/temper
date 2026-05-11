@@ -40,6 +40,8 @@ members = [
     "crates/temper-sandbox",
     "crates/temper-ots",
     "crates/temper-transport",
+    "crates/temper-actor-runtime",
+    "crates/temper-agents",
     "reference-apps/crucible",
     "reference-apps/ecommerce",
     "reference-apps/oncall",
@@ -77,6 +79,8 @@ tower-http = { version = "0.6", features = ["cors", "trace"] }
 
 # Database
 sqlx = { version = "0.8", features = ["runtime-tokio", "postgres", "json", "chrono", "uuid", "migrate"] }
+tokio-postgres = { version = "0.7", features = ["with-serde_json-1", "with-chrono-0_4", "with-uuid-1"] }
+deadpool-postgres = "0.14"
 fred = { version = "10", features = ["subscriber-client", "i-scripts", "sha-1"] }
 
 # Auth
@@ -120,6 +124,12 @@ reqwest = { version = "0.12", features = ["json", "stream", "multipart"] }
 tokio-test = "0.4"
 criterion = { version = "0.5", features = ["html_reports"] }
 wiremock = "0.6"
+testcontainers = "0.23"
+testcontainers-modules = { version = "0.11", features = ["postgres"] }
+serial_test = "3"
+prost = "0.14"
+prost-types = "0.14"
+futures = "0.3"
 
 # Internal crates
 temper-macros = { path = "crates/temper-macros" }
@@ -147,6 +157,8 @@ temper-sdk = { path = "crates/temper-sdk" }
 temper-sandbox = { path = "crates/temper-sandbox" }
 temper-ots = { path = "crates/temper-ots" }
 temper-transport = { path = "crates/temper-transport" }
+temper-actor-runtime = { path = "crates/temper-actor-runtime" }
+temper-agents = { path = "crates/temper-agents" }
 
 # WASM runtime
 wasmtime = { version = "29", features = ["component-model", "profiling"] }

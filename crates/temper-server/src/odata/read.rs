@@ -575,6 +575,46 @@ async fn handle_entity(
     };
     let key_str = extract_key(key);
 
+    if state.actor_backed_types.contains(&entity_type)
+        && let Some(actor_sys) = &state.pg_actor_system
+    {
+        let namespace = format!("{tenant}/{key_str}");
+        return match actor_sys.load_state(&namespace, &entity_type).await {
+            Ok(Some(state_bytes)) => {
+                let actor_state: temper_actor_runtime::spec_actor::SpecActorState =
+                    serde_json::from_slice(&state_bytes).unwrap_or_default();
+                let body = serde_json::json!({
+                    "entity_type": entity_type,
+                    "entity_id": key_str,
+                    "status": actor_state.status,
+                    "counters": actor_state.counters,
+                    "booleans": actor_state.booleans,
+                    "lists": actor_state.lists,
+                    "fields": actor_state.fields,
+                    "@odata.context": format!("$metadata#{set_name}/$entity"),
+                    "@odata.id": format!("{set_name}('{key_str}')"),
+                });
+                ODataResponse {
+                    status: StatusCode::OK,
+                    body,
+                }
+                .into_response()
+            }
+            Ok(None) => odata_error(
+                StatusCode::NOT_FOUND,
+                "ResourceNotFound",
+                &format!("Entity '{set_name}' with key '{key_str}' not found"),
+            )
+            .into_response(),
+            Err(e) => odata_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "ActorReadError",
+                &e.to_string(),
+            )
+            .into_response(),
+        };
+    }
+
     match build_entity_body(
         state,
         tenant,
