@@ -313,7 +313,7 @@ pub async fn handle_odata_post(
             }
 
             // PG-backed entity creation.
-            if state.actor_backed_types.contains(&entity_type)
+            if state.is_pg_actor_backed(&tenant, &entity_type)
                 && let Some(actor_sys) = &state.pg_actor_system
             {
                 let namespace = format!("{tenant}/{entity_id}");
@@ -411,7 +411,7 @@ pub async fn handle_odata_post(
                 return *resp;
             }
 
-            if state.actor_backed_types.contains(&entity_type)
+            if state.is_pg_actor_backed(&tenant, &entity_type)
                 && let Some(actor_sys) = &state.pg_actor_system
             {
                 let namespace = format!("{tenant}/{key_str}");

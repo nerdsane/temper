@@ -30,6 +30,12 @@ pub(crate) enum StorageBackend {
     Redis,
 }
 
+#[derive(Clone, Debug, ValueEnum, PartialEq, Eq)]
+pub(crate) enum ActorRuntimeBackend {
+    Legacy,
+    Postgres,
+}
+
 #[derive(Parser)]
 #[command(name = "temper", about = "Temper framework CLI")]
 struct Cli {
@@ -78,6 +84,20 @@ enum Commands {
         /// is set, startup preserves today's default Turso/libSQL backend.
         #[arg(long, value_enum, default_value = "turso")]
         storage: StorageBackend,
+        /// Actor runtime (`legacy`, `postgres`).
+        ///
+        /// If omitted, `TEMPER_ACTOR_RUNTIME` can select the runtime. The
+        /// Postgres runtime requires Postgres storage and DATABASE_URL.
+        #[arg(long, value_enum, default_value = "legacy")]
+        actor_runtime: ActorRuntimeBackend,
+        /// Entity type to route through the selected actor runtime.
+        ///
+        /// Repeatable. Comma-separated values are accepted. Use `tenant:Type`
+        /// to canary a type for one tenant. If omitted while
+        /// `--actor-runtime postgres` is selected, all registered entity types
+        /// must pass the actor-runtime compatibility gate.
+        #[arg(long)]
+        actor_backed_type: Vec<String>,
         /// Install or load an app at startup. Repeatable. Two formats:
         ///   --app NAME           install a built-in OS app from the embedded catalog
         ///                        (e.g. --app project-management)
@@ -182,6 +202,28 @@ fn resolve_storage_backend(
     }
 }
 
+fn resolve_actor_runtime_backend(
+    cli_runtime: ActorRuntimeBackend,
+    runtime_explicit: bool,
+    env_runtime: Option<&str>,
+) -> Result<ActorRuntimeBackend, String> {
+    if runtime_explicit {
+        return Ok(cli_runtime);
+    }
+
+    let Some(value) = env_runtime.map(str::trim).filter(|value| !value.is_empty()) else {
+        return Ok(cli_runtime);
+    };
+
+    match value.to_ascii_lowercase().as_str() {
+        "legacy" | "in-memory" | "memory" => Ok(ActorRuntimeBackend::Legacy),
+        "postgres" | "pg" => Ok(ActorRuntimeBackend::Postgres),
+        other => Err(format!(
+            "TEMPER_ACTOR_RUNTIME must be one of legacy, postgres; got {other:?}"
+        )),
+    }
+}
+
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     // Load .env file from project root (silently ignored if missing).
@@ -202,6 +244,8 @@ async fn main() -> anyhow::Result<()> {
         Commands::Serve {
             port,
             storage,
+            actor_runtime,
+            actor_backed_type,
             app,
             no_observe,
             specs_dir,
@@ -219,6 +263,24 @@ async fn main() -> anyhow::Result<()> {
             let storage =
                 resolve_storage_backend(storage, storage_explicit, storage_env.as_deref())
                     .map_err(|err| anyhow::anyhow!(err))?;
+            let actor_runtime_explicit = std::env::args()
+                .any(|arg| arg == "--actor-runtime" || arg.starts_with("--actor-runtime="));
+            let actor_runtime_env = std::env::var("TEMPER_ACTOR_RUNTIME").ok();
+            let actor_runtime = resolve_actor_runtime_backend(
+                actor_runtime,
+                actor_runtime_explicit,
+                actor_runtime_env.as_deref(),
+            )
+            .map_err(|err| anyhow::anyhow!(err))?;
+            let actor_backed_type = if actor_backed_type.is_empty() {
+                std::env::var("TEMPER_ACTOR_BACKED_TYPES")
+                    .ok()
+                    .filter(|value| !value.trim().is_empty())
+                    .into_iter()
+                    .collect()
+            } else {
+                actor_backed_type
+            };
             // Split --app entries by format:
             //   NAME=DIR  → load user app's specs from directory
             //   NAME      → install a built-in OS app from the embedded catalog
@@ -244,6 +306,8 @@ async fn main() -> anyhow::Result<()> {
                 os_app_installs,
                 storage,
                 storage_config_explicit,
+                actor_runtime,
+                actor_backed_type,
                 !no_observe,
                 verify_subprocess,
                 discord_token,
@@ -427,6 +491,30 @@ mod tests {
     }
 
     #[test]
+    fn test_cli_parse_serve_with_postgres_actor_runtime() {
+        let cli = Cli::parse_from([
+            "temper",
+            "serve",
+            "--actor-runtime",
+            "postgres",
+            "--actor-backed-type",
+            "Order",
+            "--actor-backed-type",
+            "Invoice,Customer",
+        ]);
+        match cli.command {
+            Commands::Serve {
+                actor_runtime: ActorRuntimeBackend::Postgres,
+                actor_backed_type,
+                ..
+            } => {
+                assert_eq!(actor_backed_type, vec!["Order", "Invoice,Customer"]);
+            }
+            _ => panic!("expected Serve command with postgres actor runtime"),
+        }
+    }
+
+    #[test]
     fn test_cli_parse_serve_default_storage() {
         let cli = Cli::parse_from(["temper", "serve"]);
         match cli.command {
@@ -441,15 +529,18 @@ mod tests {
     #[test]
     fn storage_backend_env_is_used_when_cli_storage_is_not_explicit() {
         assert_eq!(
-            resolve_storage_backend(StorageBackend::Turso, false, Some("postgres")).unwrap(),
+            resolve_storage_backend(StorageBackend::Turso, false, Some("postgres"))
+                .expect("postgres storage env should parse"),
             StorageBackend::Postgres
         );
         assert_eq!(
-            resolve_storage_backend(StorageBackend::Turso, false, Some("redis")).unwrap(),
+            resolve_storage_backend(StorageBackend::Turso, false, Some("redis"))
+                .expect("redis storage env should parse"),
             StorageBackend::Redis
         );
         assert_eq!(
-            resolve_storage_backend(StorageBackend::Turso, true, Some("postgres")).unwrap(),
+            resolve_storage_backend(StorageBackend::Turso, true, Some("postgres"))
+                .expect("explicit CLI storage should win"),
             StorageBackend::Turso
         );
     }
@@ -459,6 +550,28 @@ mod tests {
         let error = resolve_storage_backend(StorageBackend::Turso, false, Some("sqlite"))
             .expect_err("unknown storage backend should fail");
         assert!(error.contains("TEMPER_EVENT_STORE"));
+    }
+
+    #[test]
+    fn actor_runtime_env_is_used_when_cli_runtime_is_not_explicit() {
+        assert_eq!(
+            resolve_actor_runtime_backend(ActorRuntimeBackend::Legacy, false, Some("postgres"))
+                .expect("postgres actor runtime env should parse"),
+            ActorRuntimeBackend::Postgres
+        );
+        assert_eq!(
+            resolve_actor_runtime_backend(ActorRuntimeBackend::Postgres, true, Some("legacy"))
+                .expect("explicit CLI actor runtime should win"),
+            ActorRuntimeBackend::Postgres
+        );
+    }
+
+    #[test]
+    fn actor_runtime_env_rejects_unknown_values() {
+        let error =
+            resolve_actor_runtime_backend(ActorRuntimeBackend::Legacy, false, Some("sqlite"))
+                .expect_err("unknown actor runtime should fail");
+        assert!(error.contains("TEMPER_ACTOR_RUNTIME"));
     }
 
     #[test]

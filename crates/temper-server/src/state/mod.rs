@@ -204,6 +204,10 @@ pub struct ServerState {
     /// actor_backed_types, OData reads/writes dispatch through this runtime.
     pub pg_actor_system: Option<Arc<PgActorSystem>>,
     /// Entity types backed by pg_actor_system.
+    ///
+    /// Entries may be global entity type names (for example, `Order`) or
+    /// tenant-scoped keys (`tenant:Order`) for canarying one tenant without
+    /// changing same-named entity types in other tenants.
     pub actor_backed_types: std::collections::HashSet<String>,
     /// Parsed CSDL document describing the entity model (legacy single-tenant).
     pub csdl: Arc<CsdlDocument>,
@@ -772,6 +776,15 @@ impl ServerState {
         let mut state = Self::from_registry(legacy, registry);
         state.pg_actor_system = Some(system);
         state
+    }
+
+    /// Return true when OData for this tenant/entity should dispatch through
+    /// the Postgres actor runtime.
+    pub fn is_pg_actor_backed(&self, tenant: &TenantId, entity_type: &str) -> bool {
+        self.actor_backed_types.contains(entity_type)
+            || self
+                .actor_backed_types
+                .contains(&format!("{}:{entity_type}", tenant.as_str()))
     }
 
     /// Attach an encrypted secrets vault.
