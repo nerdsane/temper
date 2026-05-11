@@ -132,6 +132,17 @@ fn agent_post(uri: &str, body: impl Into<Body>) -> Request<Body> {
         .unwrap()
 }
 
+fn agent_get(uri: &str) -> Request<Body> {
+    Request::get(uri)
+        .header("X-Tenant-Id", "default")
+        .header("X-Temper-Principal-Id", "agent-1")
+        .header("X-Temper-Principal-Kind", "agent")
+        .header("X-Temper-Agent-Type", "swe")
+        .header("X-Temper-Ctx-SessionId", "session-1")
+        .body(Body::empty())
+        .unwrap()
+}
+
 const ADMIN_MANAGE_POLICIES_POLICY: &str = r#"
 permit(
   principal is Admin,
@@ -373,6 +384,61 @@ async fn tenant_decision_lookup_returns_known_decision_by_id() {
     assert_eq!(json["id"], decision_id);
     assert_eq!(json["resource_type"], "WasmModule");
     assert_eq!(json["resource_id"], "git_upload_pack");
+}
+
+#[tokio::test]
+async fn tenant_decision_list_allows_agent_to_read_owned_pending_decisions() {
+    let state = test_state_with_turso().await;
+    install_admin_policy(&state);
+
+    let mut owned = crate::state::PendingDecision::from_denial(
+        "default",
+        "agent-1",
+        "manage_wasm",
+        "WasmModule",
+        "git_upload_pack",
+        serde_json::json!({"id":"git_upload_pack"}),
+        "test denial",
+        Some("git_upload_pack".to_string()),
+    );
+    owned.session_id = Some("session-1".to_string());
+    let mut other = crate::state::PendingDecision::from_denial(
+        "default",
+        "agent-2",
+        "manage_wasm",
+        "WasmModule",
+        "git_receive_pack",
+        serde_json::json!({"id":"git_receive_pack"}),
+        "test denial",
+        Some("git_receive_pack".to_string()),
+    );
+    other.session_id = Some("session-2".to_string());
+    let owned_id = owned.id.clone();
+    state
+        .persist_pending_decision(&owned)
+        .await
+        .expect("persist owned pending decision");
+    state
+        .persist_pending_decision(&other)
+        .await
+        .expect("persist other pending decision");
+    let app = build_app_with_state(state);
+
+    let response = app
+        .oneshot(agent_get("/api/tenants/default/decisions?status=pending"))
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(response.into_body(), 1024 * 1024)
+        .await
+        .unwrap();
+    let json: serde_json::Value = serde_json::from_slice(&body).expect("decision list JSON");
+    assert_eq!(json["total"], 1);
+    assert_eq!(json["pending_count"], 1);
+    assert_eq!(json["decisions"][0]["id"], owned_id);
+    assert_eq!(json["decisions"][0]["agent_id"], "agent-1");
+    assert_eq!(json["decisions"][0]["session_id"], "session-1");
 }
 
 #[tokio::test]

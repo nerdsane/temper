@@ -6,6 +6,7 @@
 
 mod authorize;
 mod decisions;
+mod decisions_access;
 mod decisions_get;
 mod files;
 mod policies;
