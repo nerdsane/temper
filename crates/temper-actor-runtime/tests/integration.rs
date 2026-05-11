@@ -2,13 +2,14 @@
 
 use std::sync::Arc;
 
-use dd_testcontainers::postgres::PostgresContainer;
 use temper_actor_runtime::*;
+use testcontainers::{ContainerAsync, runners::AsyncRunner};
+use testcontainers_modules::postgres::Postgres;
 use tokio::sync::OnceCell;
 use tokio_postgres::NoTls;
 use uuid::Uuid;
 
-static POSTGRES: OnceCell<PostgresContainer> = OnceCell::const_new();
+static POSTGRES: OnceCell<ContainerAsync<Postgres>> = OnceCell::const_new();
 
 // ─── Proto messages (prost derive) ───────────────────────────────────────────
 
@@ -38,18 +39,15 @@ pub struct GenericMessage {
 async fn test_pool() -> deadpool_postgres::Pool {
     let pg = POSTGRES
         .get_or_init(|| async {
-            let container = PostgresContainer::builder()
-                .db("odp_temper")
-                .start_async()
+            let container = Postgres::default()
+                .start()
                 .await
                 .expect("failed to start postgres");
+            let host = container.get_host().await.expect("get host");
+            let port = container.get_host_port_ipv4(5432).await.expect("get port");
             let connstr = format!(
                 "host={} port={} user={} password={} dbname={}",
-                container.host(),
-                container.port(),
-                container.user(),
-                container.password(),
-                container.db()
+                host, port, "postgres", "postgres", "postgres"
             );
             let (client, conn) = tokio_postgres::connect(&connstr, NoTls)
                 .await
@@ -63,11 +61,11 @@ async fn test_pool() -> deadpool_postgres::Pool {
         .await;
 
     let mut cfg = deadpool_postgres::Config::new();
-    cfg.host = Some(pg.host().to_string());
-    cfg.port = Some(pg.port());
-    cfg.user = Some(pg.user().to_string());
-    cfg.password = Some(pg.password().to_string());
-    cfg.dbname = Some(pg.db().to_string());
+    cfg.host = Some(pg.get_host().await.expect("get host").to_string());
+    cfg.port = Some(pg.get_host_port_ipv4(5432).await.expect("get port"));
+    cfg.user = Some("postgres".to_string());
+    cfg.password = Some("postgres".to_string());
+    cfg.dbname = Some("postgres".to_string());
     cfg.create_pool(Some(deadpool_postgres::Runtime::Tokio1), NoTls)
         .expect("pool failed")
 }
