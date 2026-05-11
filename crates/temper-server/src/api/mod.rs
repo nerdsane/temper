@@ -6,6 +6,7 @@
 
 mod authorize;
 mod decisions;
+mod decisions_get;
 mod files;
 mod policies;
 mod repl;
@@ -127,6 +128,10 @@ pub fn build_api_router() -> Router<ServerState> {
         .route(
             "/tenants/{tenant}/decisions/stream",
             get(decisions::handle_decision_stream),
+        )
+        .route(
+            "/tenants/{tenant}/decisions/{id}",
+            get(decisions_get::handle_get_decision),
         )
         .route(
             "/tenants/{tenant}/decisions/{id}/approve",

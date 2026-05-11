@@ -18,6 +18,7 @@ use crate::storage::StorageStack;
 
 const CSDL_XML: &str = include_str!("../../../../test-fixtures/specs/model.csdl.xml");
 const ORDER_IOA: &str = include_str!("../../../../test-fixtures/specs/order.ioa.toml");
+const VALID_EMPTY_WASM: &[u8] = b"\0asm\x01\0\0\0";
 
 fn test_state_with_registry() -> ServerState {
     let csdl = parse_csdl(CSDL_XML).expect("CSDL should parse");
@@ -42,12 +43,19 @@ async fn test_state_with_turso() -> ServerState {
         std::process::id(),
         id,
     );
+    let data_dir = std::path::PathBuf::from(format!(
+        "/tmp/temper-observe-test-{}-{}-data",
+        std::process::id(),
+        id,
+    ));
     // Clean up leftover DB from a previous run.
     let _ = std::fs::remove_file(db_url.strip_prefix("file:").unwrap_or(&db_url));
+    let _ = std::fs::remove_dir_all(&data_dir);
     let turso = TursoEventStore::new(&db_url, None)
         .await
         .expect("create local turso db");
     let mut state = test_state_with_registry();
+    state.data_dir = data_dir;
     state.set_storage_stack(StorageStack::from_turso(turso));
     state
 }
@@ -113,6 +121,17 @@ fn admin_post(uri: &str, body: &str) -> Request<Body> {
         .unwrap()
 }
 
+fn agent_post(uri: &str, body: impl Into<Body>) -> Request<Body> {
+    Request::post(uri)
+        .header("X-Tenant-Id", "default")
+        .header("X-Temper-Principal-Id", "agent-1")
+        .header("X-Temper-Principal-Kind", "agent")
+        .header("X-Temper-Agent-Type", "swe")
+        .header("X-Temper-Ctx-SessionId", "session-1")
+        .body(body.into())
+        .unwrap()
+}
+
 const ADMIN_MANAGE_POLICIES_POLICY: &str = r#"
 permit(
   principal is Admin,
@@ -148,6 +167,212 @@ fn build_app_with_state(state: ServerState) -> Router {
         .nest("/observe", build_observe_router())
         .nest("/api", crate::api::build_api_router())
         .with_state(state)
+}
+
+#[tokio::test]
+async fn wasm_upload_denial_creates_pending_decision_for_module_resource() {
+    let state = test_state_with_turso().await;
+    install_admin_policy(&state);
+    let app = build_app_with_state(state.clone());
+
+    let response = app
+        .oneshot(agent_post(
+            "/api/wasm/modules/git_upload_pack",
+            Body::from(VALID_EMPTY_WASM.to_vec()),
+        ))
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::FORBIDDEN);
+    let body = axum::body::to_bytes(response.into_body(), 1024 * 1024)
+        .await
+        .unwrap();
+    let json: serde_json::Value = serde_json::from_slice(&body).expect("denial response JSON");
+    let decision_id = json["decision_id"].as_str().expect("top-level decision_id");
+
+    let turso = state.platform_turso_store().expect("turso configured");
+    let data_str = turso
+        .get_pending_decision(decision_id)
+        .await
+        .expect("query decision")
+        .expect("decision should be persisted");
+    let decision: crate::state::PendingDecision =
+        serde_json::from_str(&data_str).expect("deserialize pending decision");
+
+    assert_eq!(decision.tenant, "default");
+    assert_eq!(decision.agent_id, "agent-1");
+    assert_eq!(decision.action, "manage_wasm");
+    assert_eq!(decision.resource_type, "WasmModule");
+    assert_eq!(decision.resource_id, "git_upload_pack");
+    assert_eq!(decision.resource_attrs["id"], "git_upload_pack");
+    assert_eq!(decision.module_name.as_deref(), Some("git_upload_pack"));
+    assert_eq!(decision.session_id.as_deref(), Some("session-1"));
+    assert_eq!(decision.status, crate::state::DecisionStatus::Pending);
+}
+
+#[tokio::test]
+async fn wasm_delete_denial_creates_pending_decision_for_module_resource() {
+    let state = test_state_with_turso().await;
+    install_admin_policy(&state);
+    let app = build_app_with_state(state.clone());
+
+    let response = app
+        .oneshot(
+            Request::delete("/api/wasm/modules/git_receive_pack")
+                .header("X-Tenant-Id", "default")
+                .header("X-Temper-Principal-Id", "agent-1")
+                .header("X-Temper-Principal-Kind", "agent")
+                .header("X-Temper-Agent-Type", "swe")
+                .header("X-Temper-Ctx-SessionId", "session-1")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::FORBIDDEN);
+    let body = axum::body::to_bytes(response.into_body(), 1024 * 1024)
+        .await
+        .unwrap();
+    let json: serde_json::Value = serde_json::from_slice(&body).expect("denial response JSON");
+    let decision_id = json["decision_id"].as_str().expect("top-level decision_id");
+
+    let turso = state.platform_turso_store().expect("turso configured");
+    let data_str = turso
+        .get_pending_decision(decision_id)
+        .await
+        .expect("query decision")
+        .expect("decision should be persisted");
+    let decision: crate::state::PendingDecision =
+        serde_json::from_str(&data_str).expect("deserialize pending decision");
+    assert_eq!(decision.action, "manage_wasm");
+    assert_eq!(decision.resource_type, "WasmModule");
+    assert_eq!(decision.resource_id, "git_receive_pack");
+    assert_eq!(decision.module_name.as_deref(), Some("git_receive_pack"));
+}
+
+#[tokio::test]
+async fn wasm_upload_accepts_json_base64_body() {
+    use base64::Engine;
+
+    let state = test_state_with_turso().await;
+    let app = build_app_with_state(state);
+    let payload = serde_json::json!({
+        "wasm_base64": base64::engine::general_purpose::STANDARD.encode(VALID_EMPTY_WASM),
+    });
+
+    let response = app
+        .oneshot(admin_post(
+            "/api/wasm/modules/base64_module",
+            &payload.to_string(),
+        ))
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(response.into_body(), 1024 * 1024)
+        .await
+        .unwrap();
+    let json: serde_json::Value = serde_json::from_slice(&body).expect("upload response JSON");
+    assert_eq!(json["module_name"], "base64_module");
+    assert_eq!(json["size_bytes"], VALID_EMPTY_WASM.len());
+}
+
+#[tokio::test]
+async fn approved_wasm_upload_decision_allows_agent_retry() {
+    let state = test_state_with_turso().await;
+    install_admin_policy(&state);
+    let app = build_app_with_state(state);
+
+    let denied = app
+        .clone()
+        .oneshot(agent_post(
+            "/api/wasm/modules/git_upload_pack",
+            Body::from(VALID_EMPTY_WASM.to_vec()),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(denied.status(), StatusCode::FORBIDDEN);
+    let denied_body = axum::body::to_bytes(denied.into_body(), 1024 * 1024)
+        .await
+        .unwrap();
+    let denied_json: serde_json::Value =
+        serde_json::from_slice(&denied_body).expect("denial response JSON");
+    let decision_id = denied_json["decision_id"]
+        .as_str()
+        .expect("top-level decision_id");
+
+    let approved = app
+        .clone()
+        .oneshot(
+            Request::post(format!(
+                "/api/tenants/default/decisions/{decision_id}/approve"
+            ))
+            .header("content-type", "application/json")
+            .header("x-temper-principal-id", "admin-1")
+            .header("x-temper-principal-kind", "admin")
+            .body(Body::from(r#"{"scope":{"principal":"this_agent","action":"this_action","resource":"this_resource","duration":"always"},"decided_by":"admin-1"}"#))
+            .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(approved.status(), StatusCode::OK);
+
+    let retried = app
+        .oneshot(agent_post(
+            "/api/wasm/modules/git_upload_pack",
+            Body::from(VALID_EMPTY_WASM.to_vec()),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(retried.status(), StatusCode::OK);
+    let retried_body = axum::body::to_bytes(retried.into_body(), 1024 * 1024)
+        .await
+        .unwrap();
+    let retried_json: serde_json::Value =
+        serde_json::from_slice(&retried_body).expect("retry response JSON");
+    assert_eq!(retried_json["module_name"], "git_upload_pack");
+}
+
+#[tokio::test]
+async fn tenant_decision_lookup_returns_known_decision_by_id() {
+    let state = test_state_with_turso().await;
+    install_admin_policy(&state);
+    let pending = crate::state::PendingDecision::from_denial(
+        "default",
+        "agent-1",
+        "manage_wasm",
+        "WasmModule",
+        "git_upload_pack",
+        serde_json::json!({"id":"git_upload_pack"}),
+        "test denial",
+        Some("git_upload_pack".to_string()),
+    );
+    let decision_id = pending.id.clone();
+    state
+        .persist_pending_decision(&pending)
+        .await
+        .expect("persist pending decision");
+    let app = build_app_with_state(state);
+
+    let response = app
+        .oneshot(
+            Request::get(format!("/api/tenants/default/decisions/{decision_id}"))
+                .header("X-Temper-Principal-Kind", "admin")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(response.into_body(), 1024 * 1024)
+        .await
+        .unwrap();
+    let json: serde_json::Value = serde_json::from_slice(&body).expect("decision JSON");
+    assert_eq!(json["id"], decision_id);
+    assert_eq!(json["resource_type"], "WasmModule");
+    assert_eq!(json["resource_id"], "git_upload_pack");
 }
 
 #[tokio::test]

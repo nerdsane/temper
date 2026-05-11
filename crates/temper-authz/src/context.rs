@@ -96,7 +96,14 @@ impl SecurityContext {
                     );
                 }
                 k if k.starts_with("x-temper-ctx-") => {
-                    let ctx_name = k.strip_prefix("x-temper-ctx-").unwrap(); // ci-ok: guarded by starts_with
+                    let raw_ctx_name = k.strip_prefix("x-temper-ctx-").unwrap(); // ci-ok: guarded by starts_with
+                    let ctx_name = match raw_ctx_name {
+                        "agentid" => "agentId",
+                        "agenttype" => "agentType",
+                        "agenttypeverified" => "agentTypeVerified",
+                        "sessionid" => "sessionId",
+                        other => other,
+                    };
                     context_attrs.insert(
                         ctx_name.to_string(),
                         serde_json::Value::String(value.clone()),
@@ -295,6 +302,24 @@ mod tests {
         assert_eq!(ctx.principal.kind, PrincipalKind::Admin);
         assert!(ctx.principal.attributes.contains_key("approvallimit"));
         assert!(ctx.context_attrs.contains_key("ratelimitexceeded"));
+    }
+
+    #[test]
+    fn test_context_from_headers_normalizes_session_id() {
+        let headers = vec![
+            ("X-Temper-Principal-Id".to_string(), "agent-1".to_string()),
+            ("X-Temper-Principal-Kind".to_string(), "agent".to_string()),
+            (
+                "x-temper-ctx-sessionid".to_string(),
+                "session-1".to_string(),
+            ),
+        ];
+
+        let ctx = SecurityContext::from_headers(&headers);
+        assert_eq!(
+            ctx.context_attrs.get("sessionId"),
+            Some(&serde_json::Value::String("session-1".to_string()))
+        );
     }
 
     #[test]

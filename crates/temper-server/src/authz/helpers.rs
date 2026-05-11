@@ -4,7 +4,9 @@
 //! used across OData bindings, policy management, spec submission, and WASM
 //! authz gates.
 
-use axum::http::HeaderMap;
+use std::collections::BTreeMap;
+
+use axum::http::{HeaderMap, StatusCode};
 use temper_authz::SecurityContext;
 use temper_runtime::scheduler::{sim_now, sim_uuid};
 use temper_runtime::tenant::TenantId;
@@ -141,6 +143,103 @@ pub(crate) struct DenialInput<'a> {
     pub module_name: Option<String>,
     /// Entity status at the time of denial.
     pub from_status: Option<String>,
+}
+
+/// Input for a resumable management mutation authorization check.
+pub(crate) struct GovernedMutationAuth<'a> {
+    pub tenant: &'a str,
+    pub action: &'a str,
+    pub resource_type: &'a str,
+    pub resource_id: &'a str,
+    pub resource_attrs: BTreeMap<String, serde_json::Value>,
+    pub module_name: Option<&'a str>,
+    pub from_status: Option<&'a str>,
+}
+
+/// Authorize a resumable management mutation and record agent denials.
+///
+/// This helper is for mutating HTTP endpoints whose denied operation can be
+/// retried after a human approval. Agent requests with session context become
+/// `PendingDecision` records. Non-agent or sessionless denials stay ordinary
+/// `403 Forbidden` responses so passive/admin surfaces do not generate noisy
+/// approval work.
+pub(crate) async fn require_governed_mutation_auth(
+    state: &crate::state::ServerState,
+    headers: &HeaderMap,
+    mut input: GovernedMutationAuth<'_>,
+) -> Option<(StatusCode, String)> {
+    let security_ctx = security_context_from_headers(headers, None, None, None);
+    if matches!(
+        security_ctx.principal.kind,
+        temper_authz::PrincipalKind::Admin
+    ) {
+        return None;
+    }
+
+    input
+        .resource_attrs
+        .entry("id".to_string())
+        .or_insert_with(|| serde_json::Value::String(input.resource_id.to_string()));
+
+    let Err(denial) = state.authorize_with_context(
+        &security_ctx,
+        input.action,
+        input.resource_type,
+        &input.resource_attrs,
+        input.tenant,
+    ) else {
+        return None;
+    };
+
+    let reason = denial.to_string();
+    let session_id = security_ctx
+        .context_attrs
+        .get("sessionId")
+        .and_then(|v| v.as_str());
+    if matches!(
+        security_ctx.principal.kind,
+        temper_authz::PrincipalKind::Agent
+    ) && session_id.is_some()
+    {
+        let resource_attrs_json =
+            serde_json::to_value(&input.resource_attrs).unwrap_or_else(|_| serde_json::json!({}));
+        let pd = record_authz_denial(
+            state,
+            DenialInput {
+                tenant: input.tenant,
+                security_ctx: &security_ctx,
+                agent_id_override: None,
+                action: input.action,
+                resource_type: input.resource_type,
+                resource_id: input.resource_id,
+                resource_attrs: resource_attrs_json,
+                reason: &reason,
+                module_name: input.module_name.map(str::to_string),
+                from_status: input.from_status.map(str::to_string),
+            },
+        )
+        .await;
+        return Some((
+            StatusCode::FORBIDDEN,
+            serde_json::json!({
+                "decision_id": pd.id,
+                "error": {
+                    "code": "AuthorizationDenied",
+                    "message": format!("{reason} Decision {}", pd.id),
+                }
+            })
+            .to_string(),
+        ));
+    }
+
+    tracing::warn!(
+        reason = %reason,
+        action = input.action,
+        resource_type = input.resource_type,
+        resource_id = input.resource_id,
+        "unauthorized non-resumable governed mutation"
+    );
+    Some((StatusCode::FORBIDDEN, reason))
 }
 
 /// Record result of an authorization denial.
