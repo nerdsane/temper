@@ -1,0 +1,283 @@
+# ReadersWriters Entity - I/O Automaton Specification
+#
+# Faithful Temper port of the Quint ReadersWriters example:
+#   readers: Set[int]
+#   writers: Set[int]
+#   waiting: List[(str, int)]
+#
+# The detailed set/list transition relation is computed by the
+# readers_writers_step WASM module. Temper commits only narrow validated
+# callbacks whose guards/effects preserve the safety-critical projection.
+
+[automaton]
+name = "ReadersWriters"
+states = ["Idle", "Reading", "Writing"]
+initial = "Idle"
+
+# --- Projected state variables verified by Temper ---
+
+[[state]]
+name = "reader_count"
+type = "counter"
+initial = "0"
+
+[[state]]
+name = "writer_count"
+type = "counter"
+initial = "0"
+
+[[state]]
+name = "waiting_count"
+type = "counter"
+initial = "0"
+
+[[state]]
+name = "wasm_in_flight"
+type = "bool"
+initial = "false"
+
+# --- Public protocol actions ---
+
+[[action]]
+name = "TryRead"
+kind = "input"
+from = ["Idle", "Reading", "Writing"]
+guard = "is_false wasm_in_flight"
+effect = "set wasm_in_flight true"
+params = ["actor"]
+hint = "Append ('read', actor) to the FIFO waiting queue if the actor is not already waiting to read."
+
+[[action.triggers]]
+name = "step"
+kind = "wasm"
+module = "readers_writers_step"
+on_success = "ValidateProposal"
+on_failure = "StepFailed"
+
+[[action]]
+name = "TryWrite"
+kind = "input"
+from = ["Idle", "Reading", "Writing"]
+guard = "is_false wasm_in_flight"
+effect = "set wasm_in_flight true"
+params = ["actor"]
+hint = "Append ('write', actor) to the FIFO waiting queue if the actor is not already waiting to write."
+
+[[action.triggers]]
+name = "step"
+kind = "wasm"
+module = "readers_writers_step"
+on_success = "ValidateProposal"
+on_failure = "StepFailed"
+
+[[action]]
+name = "ReadOrWrite"
+kind = "input"
+from = ["Idle", "Reading", "Writing"]
+guard = "is_false wasm_in_flight"
+effect = "set wasm_in_flight true"
+hint = "Serve the head of the FIFO waiting queue if the head request is enabled."
+
+[[action.triggers]]
+name = "step"
+kind = "wasm"
+module = "readers_writers_step"
+on_success = "ValidateProposal"
+on_failure = "StepFailed"
+
+[[action]]
+name = "Stop"
+kind = "input"
+from = ["Reading", "Writing"]
+guard = "is_false wasm_in_flight"
+effect = "set wasm_in_flight true"
+params = ["actor"]
+hint = "Stop one active reader or writer."
+
+[[action.triggers]]
+name = "step"
+kind = "wasm"
+module = "readers_writers_step"
+on_success = "ValidateProposal"
+on_failure = "StepFailed"
+
+# --- Proposal validation action ---
+
+[[action]]
+name = "ValidateProposal"
+kind = "input"
+from = ["Idle", "Reading", "Writing"]
+guard = "is_true wasm_in_flight"
+params = ["proposed_readers", "proposed_writers", "proposed_waiting", "last_step", "actor"]
+hint = "Validate a WASM proposal against the current detailed fields, then dispatch a narrow commit callback."
+
+[[action.triggers]]
+name = "validate"
+kind = "wasm"
+module = "readers_writers_step"
+on_failure = "StepFailed"
+
+# --- Narrow commit callbacks ---
+
+[[action]]
+name = "Enqueued"
+kind = "input"
+from = ["Idle", "Reading", "Writing"]
+guard = "is_true wasm_in_flight"
+params = ["readers", "writers", "waiting", "last_step", "actor"]
+effect = [
+    { type = "increment", var = "waiting_count" },
+    { type = "set_bool", var = "wasm_in_flight", value = false },
+]
+hint = "A request was appended to the waiting queue. Active readers/writers are unchanged."
+
+[[action]]
+name = "Unchanged"
+kind = "input"
+from = ["Idle", "Reading", "Writing"]
+guard = "is_true wasm_in_flight"
+params = ["readers", "writers", "waiting", "last_step", "actor"]
+effect = "set wasm_in_flight false"
+hint = "The Quint transition was a no-op, for example a duplicate TryRead/TryWrite."
+
+[[action]]
+name = "ReaderStartedFromIdle"
+kind = "input"
+from = ["Idle"]
+to = "Reading"
+guard = [
+    { type = "is_true", var = "wasm_in_flight" },
+    { type = "min_count", var = "waiting_count", min = 1 },
+]
+params = ["readers", "writers", "waiting", "last_step", "actor"]
+effect = [
+    { type = "increment", var = "reader_count" },
+    { type = "decrement", var = "waiting_count" },
+    { type = "set_bool", var = "wasm_in_flight", value = false },
+]
+hint = "The FIFO queue head was a read request and the resource had no active users."
+
+[[action]]
+name = "ReaderStartedFromReading"
+kind = "input"
+from = ["Reading"]
+to = "Reading"
+guard = [
+    { type = "is_true", var = "wasm_in_flight" },
+    { type = "min_count", var = "waiting_count", min = 1 },
+]
+params = ["readers", "writers", "waiting", "last_step", "actor"]
+effect = [
+    { type = "increment", var = "reader_count" },
+    { type = "decrement", var = "waiting_count" },
+    { type = "set_bool", var = "wasm_in_flight", value = false },
+]
+hint = "The FIFO queue head was a read request and readers were already active."
+
+[[action]]
+name = "WriterStarted"
+kind = "input"
+from = ["Idle"]
+to = "Writing"
+guard = [
+    { type = "is_true", var = "wasm_in_flight" },
+    { type = "min_count", var = "waiting_count", min = 1 },
+]
+params = ["readers", "writers", "waiting", "last_step", "actor"]
+effect = [
+    { type = "increment", var = "writer_count" },
+    { type = "decrement", var = "waiting_count" },
+    { type = "set_bool", var = "wasm_in_flight", value = false },
+]
+hint = "The FIFO queue head was a write request and the resource was idle."
+
+[[action]]
+name = "ReaderStoppedMoreRemain"
+kind = "input"
+from = ["Reading"]
+guard = [
+    { type = "is_true", var = "wasm_in_flight" },
+    { type = "min_count", var = "reader_count", min = 2 },
+]
+params = ["readers", "writers", "waiting", "last_step", "actor"]
+effect = [
+    { type = "decrement", var = "reader_count" },
+    { type = "set_bool", var = "wasm_in_flight", value = false },
+]
+hint = "One reader stopped and at least one reader remains active."
+
+[[action]]
+name = "ReaderStoppedLast"
+kind = "input"
+from = ["Reading"]
+to = "Idle"
+guard = [
+    { type = "is_true", var = "wasm_in_flight" },
+    { type = "min_count", var = "reader_count", min = 1 },
+    { type = "max_count", var = "reader_count", max = 2 },
+]
+params = ["readers", "writers", "waiting", "last_step", "actor"]
+effect = [
+    { type = "decrement", var = "reader_count" },
+    { type = "set_bool", var = "wasm_in_flight", value = false },
+]
+hint = "The final active reader stopped."
+
+[[action]]
+name = "WriterStopped"
+kind = "input"
+from = ["Writing"]
+to = "Idle"
+guard = [
+    { type = "is_true", var = "wasm_in_flight" },
+    { type = "min_count", var = "writer_count", min = 1 },
+]
+params = ["readers", "writers", "waiting", "last_step", "actor"]
+effect = [
+    { type = "decrement", var = "writer_count" },
+    { type = "set_bool", var = "wasm_in_flight", value = false },
+]
+hint = "The active writer stopped."
+
+[[action]]
+name = "Rejected"
+kind = "input"
+from = ["Idle", "Reading", "Writing"]
+guard = "is_true wasm_in_flight"
+params = ["error", "last_step", "actor"]
+effect = "set wasm_in_flight false"
+hint = "The requested step was disabled or failed proposal validation. No protocol state is committed."
+
+[[action]]
+name = "StepFailed"
+kind = "input"
+from = ["Idle", "Reading", "Writing"]
+guard = "is_true wasm_in_flight"
+params = ["error", "integration"]
+effect = "set wasm_in_flight false"
+hint = "The readers_writers_step WASM module failed before producing a proposal or validation result."
+
+# --- Safety invariants ---
+
+[[invariant]]
+name = "NoReaderWriterOverlap"
+assert = "reader_count == 0 || writer_count == 0"
+
+[[invariant]]
+name = "AtMostOneWriter"
+assert = "writer_count <= 1"
+
+[[invariant]]
+name = "IdleMeansNoActiveActors"
+when = ["Idle"]
+assert = "reader_count == 0 && writer_count == 0"
+
+[[invariant]]
+name = "ReadingMeansReadersOnly"
+when = ["Reading"]
+assert = "reader_count > 0 && writer_count == 0"
+
+[[invariant]]
+name = "WritingHasWriter"
+when = ["Writing"]
+assert = "reader_count == 0 && writer_count > 0"

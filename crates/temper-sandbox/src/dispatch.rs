@@ -26,6 +26,12 @@ pub struct DispatchContext<'a> {
     pub agent_type: Option<&'a str>,
     /// Session ID for grouping actions within a conversation.
     pub session_id: Option<&'a str>,
+    /// Optional passthrough principal id for server-hosted REPL loopback calls.
+    pub principal_id: Option<&'a str>,
+    /// Optional passthrough principal kind for server-hosted REPL loopback calls.
+    pub principal_kind: Option<&'a str>,
+    /// Optional passthrough agent role for server-hosted REPL loopback calls.
+    pub agent_role: Option<&'a str>,
     /// Optional closure to resolve entity type to entity set name.
     pub entity_set_resolver: Option<&'a (dyn Fn(&str) -> String + Send + Sync)>,
     /// Optional path to temper binary (for `compile_wasm` SDK resolution).
@@ -39,6 +45,10 @@ impl<'a> DispatchContext<'a> {
     fn identity(&self) -> AgentIdentity<'a> {
         AgentIdentity {
             session_id: self.session_id,
+            principal_id: self.principal_id,
+            principal_kind: self.principal_kind,
+            agent_role: self.agent_role,
+            agent_type: self.agent_type,
         }
     }
 
@@ -407,6 +417,10 @@ async fn dispatch_governance(
                     async move {
                         let identity = AgentIdentity {
                             session_id: session_id_owned.as_deref(),
+                            principal_id: None,
+                            principal_kind: None,
+                            agent_role: None,
+                            agent_type: None,
                         };
                         temper_governance_request(
                             &http,

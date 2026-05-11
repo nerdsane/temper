@@ -1,0 +1,153 @@
+<?xml version="1.0" encoding="utf-8"?>
+<edmx:Edmx Version="4.0" xmlns:edmx="http://docs.oasis-open.org/odata/ns/edmx">
+  <edmx:DataServices>
+    <Schema Namespace="Temper.Vocab" xmlns="http://docs.oasis-open.org/odata/ns/edm">
+      <Term Name="StateMachine.States" Type="Collection(Edm.String)" AppliesTo="EntityType"/>
+      <Term Name="StateMachine.InitialState" Type="Edm.String" AppliesTo="EntityType"/>
+      <Term Name="StateMachine.ValidFromStates" Type="Collection(Edm.String)" AppliesTo="Action"/>
+      <Term Name="StateMachine.TargetState" Type="Edm.String" AppliesTo="Action"/>
+      <Term Name="Agent.Hint" Type="Edm.String" AppliesTo="Action EntityType"/>
+      <Term Name="ShardKey" Type="Edm.String" AppliesTo="EntityType"/>
+      <Term Name="AuthZ.CedarPolicy" Type="Edm.String" AppliesTo="EntityType Action"/>
+    </Schema>
+
+    <Schema Namespace="Temper.ReadersWriters" xmlns="http://docs.oasis-open.org/odata/ns/edm">
+      <EnumType Name="ReadersWritersStatus">
+        <Member Name="Idle" Value="0"/>
+        <Member Name="Reading" Value="1"/>
+        <Member Name="Writing" Value="2"/>
+      </EnumType>
+
+      <ComplexType Name="WaitRequest">
+        <Property Name="kind" Type="Edm.String" Nullable="false"/>
+        <Property Name="actor" Type="Edm.Int32" Nullable="false"/>
+      </ComplexType>
+
+      <EntityType Name="ReadersWriters">
+        <Key>
+          <PropertyRef Name="Id"/>
+        </Key>
+        <Property Name="Id" Type="Edm.Guid" Nullable="false"/>
+        <Property Name="Name" Type="Edm.String"/>
+        <Property Name="Status" Type="Temper.ReadersWriters.ReadersWritersStatus" Nullable="false"/>
+        <Property Name="readers" Type="Collection(Edm.Int32)"/>
+        <Property Name="writers" Type="Collection(Edm.Int32)"/>
+        <Property Name="waiting" Type="Collection(Temper.ReadersWriters.WaitRequest)"/>
+        <Property Name="reader_count" Type="Edm.Int32" DefaultValue="0"/>
+        <Property Name="writer_count" Type="Edm.Int32" DefaultValue="0"/>
+        <Property Name="waiting_count" Type="Edm.Int32" DefaultValue="0"/>
+        <Property Name="wasm_in_flight" Type="Edm.Boolean" DefaultValue="false"/>
+        <Property Name="last_step" Type="Edm.String"/>
+        <Property Name="actor" Type="Edm.Int32"/>
+        <Property Name="error" Type="Edm.String"/>
+        <Property Name="proposed_readers" Type="Collection(Edm.Int32)"/>
+        <Property Name="proposed_writers" Type="Collection(Edm.Int32)"/>
+        <Property Name="proposed_waiting" Type="Collection(Temper.ReadersWriters.WaitRequest)"/>
+
+        <Annotation Term="Temper.Vocab.StateMachine.States">
+          <Collection>
+            <String>Idle</String>
+            <String>Reading</String>
+            <String>Writing</String>
+          </Collection>
+        </Annotation>
+        <Annotation Term="Temper.Vocab.StateMachine.InitialState" String="Idle"/>
+        <Annotation Term="Temper.Vocab.ShardKey" String="Id"/>
+        <Annotation Term="Temper.Vocab.AuthZ.CedarPolicy" String="policies/readers_writers.cedar"/>
+      </EntityType>
+
+      <Action Name="TryRead" IsBound="true">
+        <Parameter Name="bindingParameter" Type="Temper.ReadersWriters.ReadersWriters"/>
+        <Parameter Name="actor" Type="Edm.Int32" Nullable="false"/>
+        <ReturnType Type="Temper.ReadersWriters.ReadersWriters"/>
+        <Annotation Term="Temper.Vocab.StateMachine.ValidFromStates">
+          <Collection><String>Idle</String><String>Reading</String><String>Writing</String></Collection>
+        </Annotation>
+      </Action>
+
+      <Action Name="TryWrite" IsBound="true">
+        <Parameter Name="bindingParameter" Type="Temper.ReadersWriters.ReadersWriters"/>
+        <Parameter Name="actor" Type="Edm.Int32" Nullable="false"/>
+        <ReturnType Type="Temper.ReadersWriters.ReadersWriters"/>
+        <Annotation Term="Temper.Vocab.StateMachine.ValidFromStates">
+          <Collection><String>Idle</String><String>Reading</String><String>Writing</String></Collection>
+        </Annotation>
+      </Action>
+
+      <Action Name="ReadOrWrite" IsBound="true">
+        <Parameter Name="bindingParameter" Type="Temper.ReadersWriters.ReadersWriters"/>
+        <ReturnType Type="Temper.ReadersWriters.ReadersWriters"/>
+        <Annotation Term="Temper.Vocab.StateMachine.ValidFromStates">
+          <Collection><String>Idle</String><String>Reading</String><String>Writing</String></Collection>
+        </Annotation>
+      </Action>
+
+      <Action Name="Stop" IsBound="true">
+        <Parameter Name="bindingParameter" Type="Temper.ReadersWriters.ReadersWriters"/>
+        <Parameter Name="actor" Type="Edm.Int32" Nullable="false"/>
+        <ReturnType Type="Temper.ReadersWriters.ReadersWriters"/>
+        <Annotation Term="Temper.Vocab.StateMachine.ValidFromStates">
+          <Collection><String>Reading</String><String>Writing</String></Collection>
+        </Annotation>
+      </Action>
+
+      <Action Name="ValidateProposal" IsBound="true">
+        <Parameter Name="bindingParameter" Type="Temper.ReadersWriters.ReadersWriters"/>
+        <Parameter Name="proposed_readers" Type="Collection(Edm.Int32)"/>
+        <Parameter Name="proposed_writers" Type="Collection(Edm.Int32)"/>
+        <Parameter Name="proposed_waiting" Type="Collection(Temper.ReadersWriters.WaitRequest)"/>
+        <Parameter Name="last_step" Type="Edm.String"/>
+        <Parameter Name="actor" Type="Edm.Int32"/>
+        <ReturnType Type="Temper.ReadersWriters.ReadersWriters"/>
+      </Action>
+
+      <Action Name="Enqueued" IsBound="true">
+        <Parameter Name="bindingParameter" Type="Temper.ReadersWriters.ReadersWriters"/>
+        <ReturnType Type="Temper.ReadersWriters.ReadersWriters"/>
+      </Action>
+      <Action Name="Unchanged" IsBound="true">
+        <Parameter Name="bindingParameter" Type="Temper.ReadersWriters.ReadersWriters"/>
+        <ReturnType Type="Temper.ReadersWriters.ReadersWriters"/>
+      </Action>
+      <Action Name="ReaderStartedFromIdle" IsBound="true">
+        <Parameter Name="bindingParameter" Type="Temper.ReadersWriters.ReadersWriters"/>
+        <ReturnType Type="Temper.ReadersWriters.ReadersWriters"/>
+      </Action>
+      <Action Name="ReaderStartedFromReading" IsBound="true">
+        <Parameter Name="bindingParameter" Type="Temper.ReadersWriters.ReadersWriters"/>
+        <ReturnType Type="Temper.ReadersWriters.ReadersWriters"/>
+      </Action>
+      <Action Name="WriterStarted" IsBound="true">
+        <Parameter Name="bindingParameter" Type="Temper.ReadersWriters.ReadersWriters"/>
+        <ReturnType Type="Temper.ReadersWriters.ReadersWriters"/>
+      </Action>
+      <Action Name="ReaderStoppedMoreRemain" IsBound="true">
+        <Parameter Name="bindingParameter" Type="Temper.ReadersWriters.ReadersWriters"/>
+        <ReturnType Type="Temper.ReadersWriters.ReadersWriters"/>
+      </Action>
+      <Action Name="ReaderStoppedLast" IsBound="true">
+        <Parameter Name="bindingParameter" Type="Temper.ReadersWriters.ReadersWriters"/>
+        <ReturnType Type="Temper.ReadersWriters.ReadersWriters"/>
+      </Action>
+      <Action Name="WriterStopped" IsBound="true">
+        <Parameter Name="bindingParameter" Type="Temper.ReadersWriters.ReadersWriters"/>
+        <ReturnType Type="Temper.ReadersWriters.ReadersWriters"/>
+      </Action>
+      <Action Name="Rejected" IsBound="true">
+        <Parameter Name="bindingParameter" Type="Temper.ReadersWriters.ReadersWriters"/>
+        <Parameter Name="error" Type="Edm.String"/>
+        <ReturnType Type="Temper.ReadersWriters.ReadersWriters"/>
+      </Action>
+      <Action Name="StepFailed" IsBound="true">
+        <Parameter Name="bindingParameter" Type="Temper.ReadersWriters.ReadersWriters"/>
+        <Parameter Name="error" Type="Edm.String"/>
+        <Parameter Name="integration" Type="Edm.String"/>
+        <ReturnType Type="Temper.ReadersWriters.ReadersWriters"/>
+      </Action>
+
+      <EntityContainer Name="ReadersWritersService">
+        <EntitySet Name="ReadersWriters" EntityType="Temper.ReadersWriters.ReadersWriters"/>
+      </EntityContainer>
+    </Schema>
+  </edmx:DataServices>
+</edmx:Edmx>

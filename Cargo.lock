@@ -4668,6 +4668,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "readers-writers-reference"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "temper-jit",
+ "temper-spec",
+ "temper-verify",
+]
+
+[[package]]
 name = "redis-protocol"
 version = "6.0.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"

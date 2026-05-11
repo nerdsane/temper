@@ -43,6 +43,7 @@ members = [
     "reference-apps/crucible",
     "reference-apps/ecommerce",
     "reference-apps/oncall",
+    "reference-apps/readers-writers",
 ]
 
 [workspace.package]
