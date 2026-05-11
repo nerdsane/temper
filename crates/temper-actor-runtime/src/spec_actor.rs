@@ -264,17 +264,18 @@ impl Actor for SpecDrivenActor {
         // Merge non-empty params into fields to preserve context from prior steps
         // (e.g. child Process keeps parent_pid while later messages add user_prompt/response).
         // For a new user turn, clear transient scratchpad fields from prior turns.
-        if self.name == "Process" && matches!(action.as_str(), "StartProcess" | "SendInput") {
-            if let Some(obj) = actor_state.fields.as_object_mut() {
-                for key in [
-                    "tool_calls",
-                    "tool_results",
-                    "child_result",
-                    "response",
-                    "error",
-                ] {
-                    obj.remove(key);
-                }
+        if self.name == "Process"
+            && matches!(action.as_str(), "StartProcess" | "SendInput")
+            && let Some(obj) = actor_state.fields.as_object_mut()
+        {
+            for key in [
+                "tool_calls",
+                "tool_results",
+                "child_result",
+                "response",
+                "error",
+            ] {
+                obj.remove(key);
             }
         }
 

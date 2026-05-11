@@ -220,19 +220,17 @@ async fn dispatch_builtin(
                 .await
                 .ok()
                 .flatten()
-            {
-                if let Ok(mut state) = serde_json::from_slice::<
+                && let Ok(mut state) = serde_json::from_slice::<
                     temper_actor_runtime::spec_actor::SpecActorState,
                 >(&bytes)
-                {
-                    if let Some(obj) = state.fields.as_object_mut() {
-                        obj.remove("child_result");
-                    }
-                    if let Ok(new_bytes) = serde_json::to_vec(&state) {
-                        let _ = ctx
-                            .upsert_actor_state(&ctx.self_handle().namespace, "Process", new_bytes)
-                            .await;
-                    }
+            {
+                if let Some(obj) = state.fields.as_object_mut() {
+                    obj.remove("child_result");
+                }
+                if let Ok(new_bytes) = serde_json::to_vec(&state) {
+                    let _ = ctx
+                        .upsert_actor_state(&ctx.self_handle().namespace, "Process", new_bytes)
+                        .await;
                 }
             }
             ctx.tell(
@@ -272,18 +270,17 @@ async fn dispatch_builtin(
                         )
                         .ok()
                     })
-                {
-                    if matches!(
+                    && matches!(
                         child_state.status.as_str(),
                         "Ready" | "Failed" | "Terminated"
-                    ) {
-                        return serde_json::json!({
-                            "child_process_id": child_id,
-                            "status": child_state.status,
-                            "result": child_state.fields,
-                        })
-                        .to_string();
-                    }
+                    )
+                {
+                    return serde_json::json!({
+                        "child_process_id": child_id,
+                        "status": child_state.status,
+                        "result": child_state.fields,
+                    })
+                    .to_string();
                 }
             }
 
@@ -414,7 +411,7 @@ async fn dispatch_via_bus(
         "tool": tool_name,
         "args": input,
     }))
-    .unwrap();
+    .map_err(|e| ActorError::HandlerFailed(format!("serialize bus call payload: {e}")))?;
 
     let timeout_secs: u64 = std::env::var("CLIENT_TOOL_TIMEOUT_SECS")
         .ok()

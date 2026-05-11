@@ -27,6 +27,11 @@ name = "tool_call_rounds"
 type = "counter"
 initial = "0"
 
+[[state]]
+name = "child_count"
+type = "counter"
+initial = "0"
+
 # ─── Lifecycle ────────────────────────────────────────────────────────────────
 
 [[action]]
