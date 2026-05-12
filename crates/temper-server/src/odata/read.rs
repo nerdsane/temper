@@ -22,6 +22,7 @@ use super::read_support::{
     try_load_entity_body_from_catalog,
 };
 use super::response::annotate_entity;
+use super::stream_fast_path::try_file_stream_fast_path;
 use crate::blobs::hydrate_blob_refs_for_tenant;
 use crate::query_eval::{apply_query_options, expand_entity, select_fields};
 use crate::response::{ODataResponse, ODataStreamResponse, ODataXmlResponse, odata_error};
@@ -909,15 +910,15 @@ pub async fn handle_hints(State(state): State<ServerState>) -> impl IntoResponse
     }
 }
 
-/// Handle GET on `$value` — download binary content via WASM blob_adapter.
+/// Handle GET on `$value` — return binary content for stream-backed entities.
 ///
 /// Flow:
 /// 1. Resolve parent entity from ODataPath
 /// 2. Verify entity type has `HasStream=true` in CSDL
-/// 3. Get entity state (content_hash, mime_type, etc.)
-/// 4. Invoke WASM blob_adapter (handles auth, caching, download)
-/// 5. Read downloaded bytes from StreamRegistry
-/// 6. Return binary response
+/// 3. For TemperFS File/FileVersion, read the projection-backed blob pointer and
+///    fetch bytes directly from blob storage.
+/// 4. Fall back to actor materialization + WASM blob_adapter only when the
+///    projection is missing, so older in-memory/test paths still work.
 #[instrument(skip_all, fields(otel.name = "GET $value"))]
 async fn handle_stream_get(
     state: &ServerState,
@@ -938,6 +939,12 @@ async fn handle_stream_get(
     // 2. Check HasStream=true
     if let Err(resp) = check_has_stream_or_400(state, tenant, &entity_type) {
         return resp;
+    }
+
+    if let Some(response) =
+        try_file_stream_fast_path(state, tenant, &set_name, &entity_type, &key).await
+    {
+        return response;
     }
 
     // 3. Get entity state (catalog-first; falls back to actor on miss).

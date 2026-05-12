@@ -5,7 +5,7 @@ use temper_runtime::persistence::{
     EventMetadata, EventStore, PersistenceEnvelope, PersistenceError,
 };
 
-use super::TursoEventStore;
+use super::{PublishedArtifactUpsert, TursoEventStore};
 use crate::TursoSpecVerificationUpdate;
 
 fn test_envelope(event_type: &str, payload: serde_json::Value) -> PersistenceEnvelope {
@@ -713,6 +713,59 @@ async fn load_query_projection_fields_many_returns_requested_fields_by_entity() 
         rows.iter().all(|row| row.entity_id != "missing"),
         "missing entity ids should be omitted"
     );
+}
+
+#[tokio::test]
+async fn published_artifact_upsert_round_trips_and_updates_by_id() {
+    let store = make_store("published-artifacts").await;
+    let tenant = format!("tenant-{}", uuid::Uuid::new_v4());
+
+    let artifact = PublishedArtifactUpsert {
+        id: "part-test".to_string(),
+        tenant: tenant.clone(),
+        source_file_id: "fl-source".to_string(),
+        source_file_version_id: "fv-source-v1".to_string(),
+        content_hash: "sha256:first".to_string(),
+        label: "preview".to_string(),
+        mime_type: "image/png".to_string(),
+        byte_length: 42,
+        public_storage_key: "demo/documents/doc-1/preview-sha256:first.png".to_string(),
+        public_url: "https://artifacts.example.com/demo/documents/doc-1/preview-sha256:first.png"
+            .to_string(),
+        owner_ref_type: "Document".to_string(),
+        owner_ref_id: "doc-1".to_string(),
+        status: "published".to_string(),
+    };
+
+    let inserted = store
+        .upsert_published_artifact(&artifact)
+        .await
+        .expect("insert published artifact");
+    assert_eq!(inserted.id, artifact.id);
+    assert_eq!(inserted.public_url, artifact.public_url);
+
+    let mut updated = artifact;
+    updated.source_file_version_id = "fv-source-v2".to_string();
+    updated.content_hash = "sha256:second".to_string();
+    updated.byte_length = 84;
+    updated.public_storage_key = "demo/documents/doc-1/preview-sha256:second.png".to_string();
+    updated.public_url =
+        "https://artifacts.example.com/demo/documents/doc-1/preview-sha256:second.png".to_string();
+
+    store
+        .upsert_published_artifact(&updated)
+        .await
+        .expect("update published artifact");
+    let loaded = store
+        .load_published_artifact(&tenant, "part-test")
+        .await
+        .expect("load published artifact")
+        .expect("published artifact exists");
+
+    assert_eq!(loaded.source_file_version_id, "fv-source-v2");
+    assert_eq!(loaded.content_hash, "sha256:second");
+    assert_eq!(loaded.byte_length, 84);
+    assert_eq!(loaded.public_url, updated.public_url);
 }
 
 #[tokio::test]
