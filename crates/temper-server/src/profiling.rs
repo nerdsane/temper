@@ -24,11 +24,13 @@ use std::time::Duration;
 use axum::extract::Query;
 use axum::http::{StatusCode, header};
 use axum::response::{IntoResponse, Response};
+use chrono::{DateTime, SecondsFormat, Utc};
 use opentelemetry::KeyValue;
 use opentelemetry::global;
 use opentelemetry::metrics::Counter;
 use pprof::protos::Message;
 use serde::Deserialize;
+use serde_json::json;
 
 /// Resolve `TEMPER_PROFILING_ENABLED` at call time. Startup-read semantics
 /// are unnecessary — the toggle is intentionally dynamic so ops can flip
@@ -88,7 +90,82 @@ fn profiling_metrics() -> &'static ProfilingMetrics {
     })
 }
 
-async fn upload_to_agent(pprof_bytes: Vec<u8>, profile_type: &str) {
+fn non_empty_env(var_name: &str) -> Option<String> {
+    std::env::var(var_name)
+        .ok()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+}
+
+fn service_name() -> String {
+    non_empty_env("DD_SERVICE").unwrap_or_else(|| "temper".to_string())
+}
+
+fn deployment_environment() -> String {
+    non_empty_env("DD_ENV").unwrap_or_else(|| "prod".to_string())
+}
+
+fn service_version() -> String {
+    non_empty_env("BUILD_VERSION")
+        .or_else(|| non_empty_env("DD_VERSION"))
+        .unwrap_or_else(|| "dev".to_string())
+}
+
+fn profile_filename(profile_type: &str) -> String {
+    format!("{profile_type}.pprof")
+}
+
+fn profile_tags(profile_type: &str) -> Vec<String> {
+    vec![
+        format!("service:{}", service_name()),
+        format!("env:{}", deployment_environment()),
+        format!("version:{}", service_version()),
+        format!("runtime-id:{}", temper_observe::otel::runtime_id()),
+        "runtime:rust".to_string(),
+        format!("profile.component:{profile_type}"),
+    ]
+}
+
+fn profile_upload_event_json(
+    profile_type: &str,
+    filename: &str,
+    started_at: DateTime<Utc>,
+    ended_at: DateTime<Utc>,
+) -> serde_json::Value {
+    let activation = if non_empty_env("DD_PROFILING_ENABLED").as_deref() == Some("auto") {
+        "auto"
+    } else {
+        "manual"
+    };
+
+    json!({
+        "version": "4",
+        "family": "rust",
+        "start": started_at.to_rfc3339_opts(SecondsFormat::AutoSi, true),
+        "end": ended_at.to_rfc3339_opts(SecondsFormat::AutoSi, true),
+        "attachments": [filename],
+        "tags_profiler": profile_tags(profile_type).join(","),
+        "info": {
+            "profiler": {
+                "activation": activation,
+                "ssi": {
+                    "mechanism": "none"
+                },
+                "settings": {
+                    "profile_type": profile_type,
+                    "profile_source": "pprof-rs"
+                }
+            }
+        }
+    })
+}
+
+async fn upload_to_agent(
+    pprof_bytes: Vec<u8>,
+    profile_type: &str,
+    started_at: DateTime<Utc>,
+    ended_at: DateTime<Utc>,
+) {
     let url = agent_intake_url();
     let client = reqwest::Client::builder()
         .timeout(Duration::from_secs(5))
@@ -104,29 +181,35 @@ async fn upload_to_agent(pprof_bytes: Vec<u8>, profile_type: &str) {
         }
     };
 
-    // The Datadog profiling intake expects a multipart form with:
-    //   - `tags[]`: service, env, version, host, runtime-id, etc.
-    //   - `data[profile.pprof]`: the gzipped pprof blob.
-    //
-    // The pprof crate's `.pprof()` method already returns a pprof.proto
-    // body; Datadog accepts raw pprof.
-    let service = std::env::var("DD_SERVICE").unwrap_or_else(|_| "temper".to_string());
-    let env = std::env::var("DD_ENV").unwrap_or_else(|_| "prod".to_string());
-    let version = std::env::var("BUILD_VERSION")
-        .or_else(|_| std::env::var("DD_VERSION"))
-        .unwrap_or_else(|_| "dev".to_string());
-
+    // The Datadog profiling intake expects the same multipart envelope used by
+    // first-party profilers: an `event.json` part plus profile attachments
+    // named exactly as listed in the event's `attachments` array.
+    let filename = profile_filename(profile_type);
+    let event = profile_upload_event_json(profile_type, &filename, started_at, ended_at);
+    let event_json = match serde_json::to_vec(&event) {
+        Ok(bytes) => bytes,
+        Err(e) => {
+            tracing::warn!(error = %e, "profile uploader: failed to encode event.json");
+            profiling_metrics()
+                .upload_errors
+                .add(1, &[KeyValue::new("stage", "event_encode")]);
+            return;
+        }
+    };
     let form = reqwest::multipart::Form::new()
-        .text("tags[]", format!("service:{service}"))
-        .text("tags[]", format!("env:{env}"))
-        .text("tags[]", format!("version:{version}"))
-        .text("tags[]", format!("profile.component:{profile_type}"))
         .part(
-            "data[profile.pprof]",
+            filename.clone(),
             reqwest::multipart::Part::bytes(pprof_bytes)
-                .file_name("profile.pprof")
+                .file_name(filename.clone())
                 .mime_str("application/octet-stream")
-                .unwrap_or_else(|_| reqwest::multipart::Part::text("")),
+                .expect("static profile upload MIME type is valid"),
+        )
+        .part(
+            "event",
+            reqwest::multipart::Part::bytes(event_json)
+                .file_name("event.json")
+                .mime_str("application/json")
+                .expect("static profile event MIME type is valid"),
         );
 
     match client.post(&url).multipart(form).send().await {
@@ -211,10 +294,12 @@ pub async fn cpu_profile_handler(Query(q): Query<CpuProfileQuery>) -> Response {
                 .into_response();
         }
     };
+    let started_at = Utc::now();
 
     // determinism-ok: observability-only sleep. Profiler samples in the
     // background while the task yields back to the runtime.
     tokio::time::sleep(Duration::from_secs(seconds)).await;
+    let ended_at = Utc::now();
 
     let report = match guard.report().build() {
         Ok(r) => r,
@@ -263,7 +348,7 @@ pub async fn cpu_profile_handler(Query(q): Query<CpuProfileQuery>) -> Response {
     if auto_upload_enabled() {
         let body_for_upload = body.clone();
         tokio::spawn(async move {
-            upload_to_agent(body_for_upload, "cpu").await;
+            upload_to_agent(body_for_upload, "cpu", started_at, ended_at).await;
         });
     }
 
@@ -330,8 +415,10 @@ pub async fn wall_profile_handler(Query(q): Query<CpuProfileQuery>) -> Response 
                 .into_response();
         }
     };
+    let started_at = Utc::now();
 
     tokio::time::sleep(Duration::from_secs(seconds)).await;
+    let ended_at = Utc::now();
 
     let profile = match guard.report().build().and_then(|r| r.pprof()) {
         Ok(p) => p,
@@ -357,7 +444,7 @@ pub async fn wall_profile_handler(Query(q): Query<CpuProfileQuery>) -> Response 
     if auto_upload_enabled() {
         let body_for_upload = body.clone();
         tokio::spawn(async move {
-            upload_to_agent(body_for_upload, "wall").await;
+            upload_to_agent(body_for_upload, "wall", started_at, ended_at).await;
         });
     }
 
@@ -379,64 +466,4 @@ pub async fn wall_profile_handler(Query(q): Query<CpuProfileQuery>) -> Response 
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn default_values_applied() {
-        let q = CpuProfileQuery {
-            seconds: default_seconds(),
-            frequency: default_frequency(),
-        };
-        assert_eq!(q.seconds, 30);
-        assert_eq!(q.frequency, 100);
-    }
-
-    use std::sync::Mutex;
-
-    // Cargo runs tests in parallel; env-var mutation races otherwise.
-    static ENV_LOCK: Mutex<()> = Mutex::new(());
-
-    #[test]
-    fn profiling_toggle_states() {
-        let _g = ENV_LOCK.lock().unwrap();
-        unsafe {
-            std::env::remove_var("TEMPER_PROFILING_ENABLED");
-        }
-        assert!(!profiling_enabled(), "default should be off");
-
-        for truthy in ["1", "true", "yes", "on"] {
-            unsafe {
-                std::env::set_var("TEMPER_PROFILING_ENABLED", truthy);
-            }
-            assert!(profiling_enabled(), "{truthy} should enable");
-        }
-
-        for falsy in ["0", "false", "no", "off", ""] {
-            unsafe {
-                std::env::set_var("TEMPER_PROFILING_ENABLED", falsy);
-            }
-            assert!(!profiling_enabled(), "{falsy:?} should disable");
-        }
-
-        unsafe {
-            std::env::remove_var("TEMPER_PROFILING_ENABLED");
-        }
-    }
-
-    #[test]
-    fn max_window_clamps() {
-        let _g = ENV_LOCK.lock().unwrap();
-        unsafe {
-            std::env::set_var("TEMPER_PROFILING_MAX_SECONDS", "99999");
-        }
-        assert_eq!(max_window_seconds(), 600);
-        unsafe {
-            std::env::set_var("TEMPER_PROFILING_MAX_SECONDS", "2");
-        }
-        assert_eq!(max_window_seconds(), 5);
-        unsafe {
-            std::env::remove_var("TEMPER_PROFILING_MAX_SECONDS");
-        }
-    }
-}
+mod tests;
