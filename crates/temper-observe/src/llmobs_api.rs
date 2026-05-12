@@ -1,10 +1,15 @@
-use std::collections::BTreeMap;
 use std::sync::OnceLock;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use reqwest::Client;
 use serde_json::{Map, Value, json};
 use sha2::{Digest, Sha256};
+
+#[path = "llmobs_format.rs"]
+mod llmobs_format;
+
+use llmobs_format::convert_otel_messages_to_llmobs;
+pub use llmobs_format::parse_tool_span_inputs;
 
 #[derive(Clone, Debug)]
 struct LlmObsConfig {
@@ -19,6 +24,10 @@ pub struct LlmSpanInput<'a> {
     pub trace_id: &'a str,
     pub span_id: &'a str,
     pub parent_span_id: Option<&'a str>,
+    pub agent_span_id: Option<&'a str>,
+    pub workflow_span_id: Option<&'a str>,
+    pub agent_name: Option<&'a str>,
+    pub workflow_name: Option<&'a str>,
     pub span_name: &'a str,
     pub provider: &'a str,
     pub model: &'a str,
@@ -84,12 +93,26 @@ fn build_llm_span_payload(input: &LlmSpanInput<'_>) -> Result<Value, String> {
     let duration_ns = (input.duration_ms as f64) * 1_000_000.0;
     let trace_id = normalize_trace_id(input.trace_id);
     let span_id = normalize_span_id(input.span_id);
-    let parent_span_id = input
+    let apm_parent_span_id = input
         .parent_span_id
         .map(str::trim)
         .filter(|value| !value.is_empty())
-        .map(normalize_span_id)
-        .unwrap_or_else(|| "undefined".to_string());
+        .map(normalize_span_id);
+    let agent_span_id = input
+        .agent_span_id
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(normalize_span_id);
+    let workflow_span_id = input
+        .workflow_span_id
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(normalize_span_id);
+    let llm_parent_span_id = workflow_span_id
+        .as_deref()
+        .or(apm_parent_span_id.as_deref())
+        .unwrap_or("undefined")
+        .to_string();
     let provider = normalize_model_provider(input.provider);
     let mut metadata = Map::from_iter([
         ("model_name".to_string(), json!(input.model)),
@@ -148,28 +171,87 @@ fn build_llm_span_payload(input: &LlmSpanInput<'_>) -> Result<Value, String> {
         format!("model_provider:{provider}"),
     ];
 
+    let status = if input.error_type.is_some() {
+        "error"
+    } else {
+        "ok"
+    };
+    let mut spans = Vec::new();
+
+    if let Some(agent_span_id) = agent_span_id.as_deref() {
+        let agent_start_ns = start_ns.saturating_sub(100_000_000);
+        spans.push(json!({
+            "parent_id": "undefined",
+            "trace_id": trace_id,
+            "span_id": agent_span_id,
+            "name": input.agent_name.unwrap_or("temperpaw.agent_session"),
+            "service": input.service_name,
+            "ml_app": input.service_name,
+            "session_id": input.session_id,
+            "tags": span_tags.clone(),
+            "status": status,
+            "start_ns": agent_start_ns,
+            "duration": duration_ns + 200_000_000.0,
+            "meta": {
+                "kind": "agent",
+                "metadata": {
+                    "session_id": input.session_id,
+                },
+            },
+        }));
+    }
+
+    if let Some(workflow_span_id) = workflow_span_id.as_deref() {
+        let workflow_start_ns = start_ns.saturating_sub(50_000_000);
+        let workflow_parent_id = agent_span_id
+            .as_deref()
+            .or(apm_parent_span_id.as_deref())
+            .unwrap_or("undefined");
+        spans.push(json!({
+            "parent_id": workflow_parent_id,
+            "trace_id": trace_id,
+            "span_id": workflow_span_id,
+            "name": input.workflow_name.unwrap_or("temperpaw.agent_turn"),
+            "service": input.service_name,
+            "ml_app": input.service_name,
+            "session_id": input.session_id,
+            "tags": span_tags.clone(),
+            "status": status,
+            "start_ns": workflow_start_ns,
+            "duration": duration_ns + 100_000_000.0,
+            "meta": {
+                "kind": "workflow",
+                "metadata": {
+                    "session_id": input.session_id,
+                },
+            },
+        }));
+    }
+
+    spans.push(json!({
+        "parent_id": llm_parent_span_id,
+        "trace_id": trace_id,
+        "span_id": span_id,
+        "name": input.span_name,
+        "service": input.service_name,
+        "ml_app": input.service_name,
+        "session_id": input.session_id,
+        "tags": span_tags,
+        "status": status,
+        "start_ns": start_ns,
+        "duration": duration_ns,
+        "meta": Value::Object(meta),
+        "metrics": Value::Object(metrics),
+    }));
+
     Ok(json!({
         "data": {
             "type": "span",
             "attributes": {
                 "ml_app": input.service_name,
                 "session_id": input.session_id,
-                "tags": span_tags.clone(),
-                "spans": [{
-                    "parent_id": parent_span_id,
-                    "trace_id": trace_id,
-                    "span_id": span_id,
-                    "name": input.span_name,
-                    "service": input.service_name,
-                    "ml_app": input.service_name,
-                    "session_id": input.session_id,
-                    "tags": span_tags,
-                    "status": if input.error_type.is_some() { "error" } else { "ok" },
-                    "start_ns": start_ns,
-                    "duration": duration_ns,
-                    "meta": Value::Object(meta),
-                    "metrics": Value::Object(metrics),
-                }],
+                "tags": [format!("service:{}", input.service_name), format!("session_id:{}", input.session_id)],
+                "spans": spans,
             },
         },
     }))
@@ -374,92 +456,8 @@ fn hash_to_decimal_id(seed: &str) -> String {
     u64::from_be_bytes(buffer).to_string()
 }
 
-fn convert_otel_messages_to_llmobs(raw: &str) -> Result<Vec<Value>, serde_json::Error> {
-    let parsed: Vec<Value> = serde_json::from_str(raw)?;
-    Ok(parsed
-        .into_iter()
-        .filter_map(convert_otel_message)
-        .collect())
-}
-
-fn convert_otel_message(message: Value) -> Option<Value> {
-    let role = message
-        .get("role")
-        .and_then(Value::as_str)
-        .unwrap_or("assistant");
-    let parts = message.get("parts").and_then(Value::as_array)?;
-
-    let mut content_chunks = Vec::new();
-    let mut tool_calls = Vec::new();
-    let mut tool_results = Vec::new();
-
-    for part in parts {
-        match part.get("type").and_then(Value::as_str).unwrap_or("") {
-            "text" => {
-                if let Some(content) = part.get("content").and_then(Value::as_str) {
-                    content_chunks.push(content.to_string());
-                }
-            }
-            "tool_call" => {
-                let arguments = match part.get("arguments") {
-                    Some(Value::Object(map)) => Value::Object(map.clone()),
-                    Some(Value::String(raw)) => serde_json::from_str::<Value>(raw)
-                        .ok()
-                        .filter(Value::is_object)
-                        .unwrap_or_else(|| json!({ "raw": raw })),
-                    Some(other) => json!({ "raw": other.to_string() }),
-                    None => json!({}),
-                };
-                tool_calls.push(json!({
-                    "name": part.get("name").and_then(Value::as_str).unwrap_or("unknown"),
-                    "arguments": arguments,
-                    "tool_id": part.get("id").and_then(Value::as_str).unwrap_or_default(),
-                    "type": "tool_call",
-                }));
-            }
-            "tool_call_response" => {
-                let result = match part.get("result") {
-                    Some(Value::String(raw)) => raw.clone(),
-                    Some(other) => other.to_string(),
-                    None => String::new(),
-                };
-                tool_results.push(json!({
-                    "name": part.get("name").and_then(Value::as_str).unwrap_or("tool_result"),
-                    "result": result,
-                    "tool_id": part.get("id").and_then(Value::as_str).unwrap_or_default(),
-                    "type": "tool_result",
-                }));
-            }
-            _ => {}
-        }
-    }
-
-    let mut rendered = Map::from_iter([
-        ("role".to_string(), json!(role)),
-        ("content".to_string(), json!(content_chunks.join("\n"))),
-    ]);
-    if !tool_calls.is_empty() {
-        rendered.insert("tool_calls".to_string(), Value::Array(tool_calls));
-    }
-    if !tool_results.is_empty() {
-        rendered.insert("tool_results".to_string(), Value::Array(tool_results));
-    }
-    Some(Value::Object(rendered))
-}
-
-pub fn parse_tool_span_inputs(
-    raw_events: &[Value],
-) -> Result<Vec<BTreeMap<String, Value>>, serde_json::Error> {
-    raw_events
-        .iter()
-        .map(|value| match value {
-            Value::Object(map) => Ok(map
-                .iter()
-                .map(|(key, value)| (key.clone(), value.clone()))
-                .collect()),
-            other => serde_json::from_value::<BTreeMap<String, Value>>(other.clone()),
-        })
-        .collect()
+pub fn derive_span_id(seed: &str) -> String {
+    hash_to_decimal_id(seed)
 }
 
 #[cfg(test)]

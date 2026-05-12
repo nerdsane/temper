@@ -1193,6 +1193,14 @@ async fn submit_llmobs_llm_span(
         .as_deref()
         .unwrap_or(ctx.entity_ref.entity_id);
     let span_name = format!("wasm:{module_name}");
+    let workflow_name = format!("{}.{}", ctx.entity_ref.entity_type, ctx.action);
+    let agent_span_id = callback_params
+        .get("_gen_ai_llmobs_agent_span_id")
+        .and_then(Value::as_str)
+        .or(parent_span_id);
+    let workflow_span_id = callback_params
+        .get("_gen_ai_llmobs_workflow_span_id")
+        .and_then(Value::as_str);
 
     let input_tokens = callback_params
         .get("input_tokens")
@@ -1211,6 +1219,10 @@ async fn submit_llmobs_llm_span(
             trace_id,
             span_id,
             parent_span_id,
+            agent_span_id,
+            workflow_span_id,
+            agent_name: Some("temperpaw.agent_session"),
+            workflow_name: Some(&workflow_name),
             span_name: &span_name,
             provider: &provider,
             model: &model,
@@ -1255,27 +1267,9 @@ async fn submit_llmobs_tool_spans(
         return;
     };
 
-    let trace_id = entity_state
-        .fields
-        .get("gen_ai_parent_trace_id")
-        .and_then(Value::as_str)
-        .or_else(|| {
-            entity_state
-                .fields
-                .get("_gen_ai_parent_trace_id")
-                .and_then(Value::as_str)
-        });
-    let parent_span_id = entity_state
-        .fields
-        .get("gen_ai_parent_span_id")
-        .and_then(Value::as_str)
-        .or_else(|| {
-            entity_state
-                .fields
-                .get("_gen_ai_parent_span_id")
-                .and_then(Value::as_str)
-        });
-    let (Some(trace_id), Some(parent_span_id)) = (trace_id, parent_span_id) else {
+    let Some((trace_id, parent_span_id)) =
+        llmobs_tool_trace_and_parent(entity_state, callback_params)
+    else {
         tracing::warn!(
             tenant = %ctx.entity_ref.tenant,
             entity_id = ctx.entity_ref.entity_id,
@@ -1312,8 +1306,8 @@ async fn submit_llmobs_tool_spans(
             Some(temper_observe::llmobs_api::ToolSpanInput {
                 service_name: &service_name,
                 session_id,
-                trace_id,
-                parent_span_id,
+                trace_id: &trace_id,
+                parent_span_id: &parent_span_id,
                 tool_name,
                 tool_call_id,
                 arguments_json: arguments,
@@ -1331,8 +1325,8 @@ async fn submit_llmobs_tool_spans(
     if let Err(error) = temper_observe::llmobs_api::submit_tool_spans(
         &service_name,
         session_id,
-        trace_id,
-        parent_span_id,
+        &trace_id,
+        &parent_span_id,
         &spans,
     )
     .await
@@ -1345,6 +1339,56 @@ async fn submit_llmobs_tool_spans(
             "failed to submit tool spans to Datadog LLM Observability API"
         );
     }
+}
+
+fn llmobs_tool_trace_and_parent(
+    entity_state: &EntityState,
+    callback_params: &Value,
+) -> Option<(String, String)> {
+    let trace_id = entity_state
+        .fields
+        .get("gen_ai_parent_trace_id")
+        .and_then(Value::as_str)
+        .or_else(|| {
+            entity_state
+                .fields
+                .get("_gen_ai_parent_trace_id")
+                .and_then(Value::as_str)
+        })
+        .or_else(|| {
+            callback_params
+                .get("_gen_ai_parent_trace_id")
+                .and_then(Value::as_str)
+        })?;
+    let parent_span_id = entity_state
+        .fields
+        .get("llmobs_workflow_span_id")
+        .and_then(Value::as_str)
+        .or_else(|| {
+            entity_state
+                .fields
+                .get("_gen_ai_llmobs_workflow_span_id")
+                .and_then(Value::as_str)
+        })
+        .or_else(|| {
+            callback_params
+                .get("_gen_ai_llmobs_workflow_span_id")
+                .and_then(Value::as_str)
+        })
+        .or_else(|| {
+            entity_state
+                .fields
+                .get("gen_ai_parent_span_id")
+                .and_then(Value::as_str)
+        })
+        .or_else(|| {
+            entity_state
+                .fields
+                .get("_gen_ai_parent_span_id")
+                .and_then(Value::as_str)
+        })?;
+
+    Some((trace_id.to_string(), parent_span_id.to_string()))
 }
 
 fn current_otel_trace_id(span: &Span) -> Option<String> {
@@ -1466,7 +1510,37 @@ fn attach_llm_parent_context(
             "gen_ai_llm_parent_span_id".into(),
             json!(parent_span_id.to_string()),
         );
+        object.insert(
+            "_gen_ai_llmobs_agent_span_id".into(),
+            json!(parent_span_id.to_string()),
+        );
+        object.insert(
+            "llmobs_agent_span_id".into(),
+            json!(parent_span_id.to_string()),
+        );
+    } else {
+        let agent_span_id = temper_observe::llmobs_api::derive_span_id(&format!(
+            "{}:{}:agent",
+            span_context.trace_id(),
+            span_context.span_id()
+        ));
+        object.insert(
+            "_gen_ai_llmobs_agent_span_id".into(),
+            json!(agent_span_id.clone()),
+        );
+        object.insert("llmobs_agent_span_id".into(), json!(agent_span_id));
     }
+
+    let workflow_span_id = temper_observe::llmobs_api::derive_span_id(&format!(
+        "{}:{}:workflow",
+        span_context.trace_id(),
+        span_context.span_id()
+    ));
+    object.insert(
+        "_gen_ai_llmobs_workflow_span_id".into(),
+        json!(workflow_span_id.clone()),
+    );
+    object.insert("llmobs_workflow_span_id".into(), json!(workflow_span_id));
 }
 
 fn strip_private_observability_params(mut params: Value) -> Value {
@@ -1823,6 +1897,51 @@ mod tests {
         assert_eq!(
             callback_params["gen_ai_llm_parent_span_id"],
             expected_parent_span_id
+        );
+        assert_eq!(
+            callback_params["_gen_ai_llmobs_agent_span_id"],
+            expected_parent_span_id
+        );
+        assert_eq!(
+            callback_params["llmobs_agent_span_id"],
+            expected_parent_span_id
+        );
+        assert!(
+            callback_params["_gen_ai_llmobs_workflow_span_id"]
+                .as_str()
+                .is_some_and(|workflow_span_id| !workflow_span_id.is_empty()
+                    && workflow_span_id != expected_parent_span_id
+                    && workflow_span_id != llm_span_id)
+        );
+        assert_eq!(
+            callback_params["llmobs_workflow_span_id"],
+            callback_params["_gen_ai_llmobs_workflow_span_id"]
+        );
+    }
+
+    #[test]
+    fn llmobs_tool_parent_prefers_workflow_span_id() {
+        let entity_state = EntityState {
+            entity_type: "Session".to_string(),
+            entity_id: "ss-1".to_string(),
+            status: "CallingTools".to_string(),
+            item_count: 0,
+            counters: std::collections::BTreeMap::new(),
+            booleans: std::collections::BTreeMap::new(),
+            lists: std::collections::BTreeMap::new(),
+            fields: json!({
+                "gen_ai_parent_trace_id": "trace-1",
+                "gen_ai_parent_span_id": "legacy-llm-parent",
+                "llmobs_workflow_span_id": "workflow-parent",
+            }),
+            events: std::collections::VecDeque::new(),
+            total_event_count: 0,
+            sequence_nr: 0,
+        };
+
+        assert_eq!(
+            llmobs_tool_trace_and_parent(&entity_state, &json!({})),
+            Some(("trace-1".to_string(), "workflow-parent".to_string()))
         );
     }
 }
