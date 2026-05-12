@@ -575,7 +575,7 @@ async fn handle_entity(
     };
     let key_str = extract_key(key);
 
-    if state.actor_backed_types.contains(&entity_type)
+    if state.is_pg_actor_backed(tenant, &entity_type)
         && let Some(actor_sys) = &state.pg_actor_system
     {
         let namespace = format!("{tenant}/{key_str}");
