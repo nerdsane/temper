@@ -328,6 +328,8 @@ pub struct ServerState {
     /// receive a clone of this Arc via `with_shared_streams` so
     /// FFI calls from the guest resolve to the same handle IDs.
     pub http_stream_registry: Arc<temper_wasm::http_stream::HttpStreamRegistry>,
+    /// Long-lived workflow root spans keyed by workflow.run_id.
+    pub(crate) workflow_spans: Arc<crate::workflow_tracing::WorkflowSpanRegistry>,
 }
 
 /// Install a one-time hook so liveness violations surfaced by temper-spec
@@ -458,6 +460,7 @@ impl ServerState {
             custom_effect_handler: None,
             http_endpoint_tables: Arc::new(crate::http_endpoint::HttpEndpointTables::new()),
             http_stream_registry: Arc::new(temper_wasm::http_stream::HttpStreamRegistry::new()),
+            workflow_spans: Arc::new(crate::workflow_tracing::WorkflowSpanRegistry::default()),
         };
 
         // Pre-register built-in WASM modules (http_fetch for generic HTTP integrations).
@@ -693,6 +696,7 @@ impl ServerState {
             custom_effect_handler: None,
             http_endpoint_tables: Arc::new(crate::http_endpoint::HttpEndpointTables::new()),
             http_stream_registry: Arc::new(temper_wasm::http_stream::HttpStreamRegistry::new()),
+            workflow_spans: Arc::new(crate::workflow_tracing::WorkflowSpanRegistry::default()),
         };
         state.register_builtin_wasm_modules();
         state
