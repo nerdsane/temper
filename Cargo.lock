@@ -6725,12 +6725,15 @@ name = "temper-store-postgres"
 version = "0.1.0"
 dependencies = [
  "chrono",
+ "opentelemetry",
  "serde",
  "serde_json",
  "sha2 0.10.9",
  "sqlx",
  "temper-runtime",
  "thiserror 2.0.18",
+ "tracing",
+ "tracing-opentelemetry",
  "uuid",
 ]
 

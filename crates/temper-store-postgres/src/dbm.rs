@@ -1,25 +1,25 @@
 use std::borrow::Cow;
-use std::collections::HashMap;
-use std::sync::{LazyLock, Mutex};
 
-static TAGGED_STATIC_SQL: LazyLock<Mutex<HashMap<String, &'static str>>> =
-    LazyLock::new(|| Mutex::new(HashMap::new()));
+mod query;
+#[cfg(test)]
+pub(crate) use query::query_span_metadata;
+pub(crate) use query::{PostgresQuery, PostgresQueryAs, PostgresQueryScalar};
 
 macro_rules! postgres_query {
     ($sql:expr $(,)?) => {
-        sqlx::query($crate::dbm::tag_static_sql($sql))
+        $crate::dbm::PostgresQuery::new($sql)
     };
 }
 
 macro_rules! postgres_query_as {
     ($sql:expr $(,)?) => {
-        sqlx::query_as($crate::dbm::tag_static_sql($sql))
+        $crate::dbm::PostgresQueryAs::new($sql)
     };
 }
 
 macro_rules! postgres_query_scalar {
     ($sql:expr $(,)?) => {
-        sqlx::query_scalar($crate::dbm::tag_static_sql($sql))
+        $crate::dbm::PostgresQueryScalar::new($sql)
     };
 }
 
@@ -29,17 +29,24 @@ pub(crate) use postgres_query_scalar;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct DbmSqlCommentConfig {
-    enabled: bool,
+    mode: DbmPropagationMode,
     database_service: String,
     parent_service: String,
     env: Option<String>,
     version: Option<String>,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum DbmPropagationMode {
+    Disabled,
+    Service,
+    Full,
+}
+
 impl DbmSqlCommentConfig {
     pub(crate) fn disabled() -> Self {
         Self {
-            enabled: false,
+            mode: DbmPropagationMode::Disabled,
             database_service: String::new(),
             parent_service: String::new(),
             env: None,
@@ -54,12 +61,35 @@ impl DbmSqlCommentConfig {
         version: Option<impl Into<String>>,
     ) -> Self {
         Self {
-            enabled: true,
+            mode: DbmPropagationMode::Service,
             database_service: database_service.into(),
             parent_service: parent_service.into(),
             env: env.map(Into::into),
             version: version.map(Into::into),
         }
+    }
+
+    pub(crate) fn full(
+        database_service: impl Into<String>,
+        parent_service: impl Into<String>,
+        env: Option<impl Into<String>>,
+        version: Option<impl Into<String>>,
+    ) -> Self {
+        Self {
+            mode: DbmPropagationMode::Full,
+            database_service: database_service.into(),
+            parent_service: parent_service.into(),
+            env: env.map(Into::into),
+            version: version.map(Into::into),
+        }
+    }
+
+    fn enabled(&self) -> bool {
+        !matches!(self.mode, DbmPropagationMode::Disabled)
+    }
+
+    fn trace_correlation_enabled(&self) -> bool {
+        matches!(self.mode, DbmPropagationMode::Full)
     }
 
     fn from_env() -> Self {
@@ -75,44 +105,58 @@ impl DbmSqlCommentConfig {
             .or_else(|| non_empty_env("DD_DB_SERVICE"))
             .unwrap_or_else(|| format!("{parent_service}-postgres"));
 
-        Self::service(
-            database_service,
-            parent_service,
-            non_empty_env("DD_ENV"),
-            non_empty_env("DD_VERSION"),
-        )
+        let env = non_empty_env("DD_ENV");
+        let version = non_empty_env("DD_VERSION");
+        if mode == "full" {
+            Self::full(database_service, parent_service, env, version)
+        } else {
+            Self::service(database_service, parent_service, env, version)
+        }
     }
 }
 
 pub(crate) fn tag_sql(sql: &str) -> Cow<'_, str> {
     let config = DbmSqlCommentConfig::from_env();
-    if !config.enabled {
+    if !config.enabled() {
         return Cow::Borrowed(sql);
     }
-    Cow::Owned(tag_sql_with_config(sql, &config))
+    Cow::Owned(tag_sql_with_config_and_traceparent(
+        sql,
+        &config,
+        current_traceparent_header().as_deref(),
+    ))
 }
 
-pub(crate) fn tag_static_sql(sql: &'static str) -> &'static str {
+fn tag_static_sql(sql: &'static str) -> query::TaggedSql {
     let config = DbmSqlCommentConfig::from_env();
-    if !config.enabled {
-        return sql;
+    if !config.enabled() {
+        return query::TaggedSql {
+            text: Cow::Borrowed(sql),
+            persistent: true,
+        };
     }
 
-    let tagged = tag_sql_with_config(sql, &config);
-    let mut cache = TAGGED_STATIC_SQL
-        .lock()
-        .expect("tagged static SQL cache lock poisoned");
-    if let Some(cached) = cache.get(&tagged) {
-        return cached;
+    query::TaggedSql {
+        text: Cow::Owned(tag_sql_with_config_and_traceparent(
+            sql,
+            &config,
+            current_traceparent_header().as_deref(),
+        )),
+        persistent: !config.trace_correlation_enabled(),
     }
-
-    let leaked: &'static str = Box::leak(tagged.clone().into_boxed_str());
-    cache.insert(tagged, leaked);
-    leaked
 }
 
+#[cfg(test)]
 pub(crate) fn tag_sql_with_config(sql: &str, config: &DbmSqlCommentConfig) -> String {
-    if !config.enabled {
+    tag_sql_with_config_and_traceparent(sql, config, None)
+}
+
+pub(crate) fn tag_sql_with_config_and_traceparent(
+    sql: &str,
+    config: &DbmSqlCommentConfig,
+    traceparent: Option<&str>,
+) -> String {
+    if !config.enabled() {
         return sql.to_string();
     }
 
@@ -126,6 +170,11 @@ pub(crate) fn tag_sql_with_config(sql: &str, config: &DbmSqlCommentConfig) -> St
     if let Some(version) = config.version.as_deref().filter(|value| !value.is_empty()) {
         tags.push(("ddpv", version));
     }
+    if config.trace_correlation_enabled()
+        && let Some(traceparent) = traceparent.filter(|value| !value.is_empty())
+    {
+        tags.push(("traceparent", traceparent));
+    }
 
     let rendered_tags = tags
         .into_iter()
@@ -133,6 +182,31 @@ pub(crate) fn tag_sql_with_config(sql: &str, config: &DbmSqlCommentConfig) -> St
         .collect::<Vec<_>>()
         .join(",");
     format!("/*{rendered_tags}*/ {sql}")
+}
+
+fn current_traceparent_header() -> Option<String> {
+    use opentelemetry::trace::TraceContextExt as _;
+    use tracing_opentelemetry::OpenTelemetrySpanExt as _;
+
+    let span_context = tracing::Span::current()
+        .context()
+        .span()
+        .span_context()
+        .clone();
+    if !span_context.is_valid() {
+        return None;
+    }
+    let flags = if span_context.trace_flags().is_sampled() {
+        "01"
+    } else {
+        "00"
+    };
+    Some(format!(
+        "00-{}-{}-{}",
+        span_context.trace_id(),
+        span_context.span_id(),
+        flags
+    ))
 }
 
 fn non_empty_env(name: &str) -> Option<String> {
@@ -192,6 +266,40 @@ mod tests {
         assert!(tagged.contains("dde='prod'"));
         assert!(tagged.contains("ddpv='abc123'"));
         assert!(tagged.ends_with(sql));
+    }
+
+    #[test]
+    fn full_mode_adds_traceparent_for_datadog_dbm_trace_correlation() {
+        let sql = "SELECT sequence_nr FROM snapshots WHERE tenant = $1";
+        let config = super::DbmSqlCommentConfig::full(
+            "temperpaw-postgres",
+            "temperpaw",
+            Some("prod"),
+            Some("abc123"),
+        );
+
+        let tagged = super::tag_sql_with_config_and_traceparent(
+            sql,
+            &config,
+            Some("00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01"),
+        );
+
+        assert!(
+            tagged
+                .contains("traceparent='00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01'")
+        );
+        assert!(tagged.ends_with(sql));
+    }
+
+    #[test]
+    fn postgres_span_resource_is_stable_and_table_oriented() {
+        let metadata = super::query_span_metadata(
+            "/*ddps='temperpaw'*/ INSERT INTO snapshots (tenant, entity_type) VALUES ($1, $2)",
+        );
+
+        assert_eq!(metadata.operation, "INSERT");
+        assert_eq!(metadata.relation.as_deref(), Some("snapshots"));
+        assert_eq!(metadata.resource, "postgres INSERT snapshots");
     }
 
     #[test]

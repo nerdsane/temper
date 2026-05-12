@@ -16,24 +16,25 @@ TemperPaw needs humans and agents to answer "which service is creating this data
 
 `temper-store-postgres` owns a small SQLCommenter tagging layer for Postgres statements.
 
-When `DD_DBM_PROPAGATION_MODE` is `service` or `full`, static Postgres statements are routed through DBM helper macros that prepend SQLCommenter tags before handing the SQL to `sqlx`. Dynamic SQL uses an owned tagged string for the lifetime of the query. The propagated tags are:
+When `DD_DBM_PROPAGATION_MODE` is `service` or `full`, Postgres statements are routed through DBM helper macros that prepend SQLCommenter tags before handing the SQL to `sqlx`. Dynamic SQL uses an owned tagged string for the lifetime of the query. The propagated tags are:
 
 - `dddbs`: database service name, from `DD_DBM_DATABASE_SERVICE`, `DD_DB_SERVICE`, or `<DD_SERVICE>-postgres`.
 - `ddps`: parent application service, from `DD_SERVICE`.
 - `dde`: Datadog environment, from `DD_ENV` when set.
 - `ddpv`: Datadog version, from `DD_VERSION` when set.
+- `traceparent`: W3C trace context from the active OpenTelemetry span when `DD_DBM_PROPAGATION_MODE=full`.
 
 `DD_DBM_PROPAGATION_MODE=disabled` or an unset value leaves SQL untouched.
 
-For now, both `service` and `full` enable the same service-level SQLCommenter attribution. We deliberately do not inject per-trace `traceparent` into every prepared statement yet because doing so would create a distinct prepared statement for every trace/span and can churn Postgres and `sqlx` statement caches. A future change may add bounded full-mode propagation if it can preserve prepared-statement behavior and avoid cardinality explosions.
+The store owns query execution wrappers instead of returning borrowed `sqlx::Query` values directly. The wrapper keeps SQL text alive across the awaited call, records a stable `postgres <OPERATION> <relation>` client span around each query, and lets `full` mode use an owned SQL string without leaking per-trace statements. `service` mode keeps prepared statement caching enabled. `full` mode disables per-query persistence so trace-specific SQLCommenter text does not churn `sqlx` or Postgres statement caches.
 
 ## Consequences
 
 - Datadog DBM query samples can attribute Postgres load to Temper/TemperPaw service identity.
+- APM traces now contain first-class Postgres client spans with `db.system`, `db.operation`, `db.collection.name`, `db.statement`, and `peer.service`.
+- Full DBM mode can join sampled Postgres work to the active APM trace through `traceparent` while avoiding cached prepared statements for trace-specific SQL text.
 - The implementation is centralized in `temper-store-postgres` instead of scattered through business logic.
-- Static SQL comments are cached per rendered statement to avoid repeated allocation.
 - Query signatures may include the comment prefix before Datadog normalization; DBM query monitors should use normalized signatures or propagated tags rather than raw SQL text.
-- Individual APM trace-to-DBM sample joins remain a follow-up until safe full propagation exists for Rust `sqlx`.
 
 ## Rollback
 
