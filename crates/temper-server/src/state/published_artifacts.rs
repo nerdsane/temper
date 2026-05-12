@@ -220,6 +220,16 @@ fn build_public_blob_put_headers(
 ) -> Result<HeaderMap, String> {
     let mut headers = HeaderMap::new();
     if crate::blob_store::is_local_internal_blob_endpoint(url) {
+        if let Some(api_key) = std::env::var("TEMPER_API_KEY")
+            .ok()
+            .filter(|value| !value.trim().is_empty())
+        {
+            headers.insert(
+                AUTHORIZATION,
+                HeaderValue::from_str(&format!("Bearer {api_key}"))
+                    .map_err(|e| format!("invalid internal blob authorization header: {e}"))?,
+            );
+        }
         return Ok(headers);
     }
 
