@@ -61,7 +61,7 @@ impl EventStore for PostgresEventStore {
             .await
             .map_err(|e| PersistenceError::Storage(e.to_string()))?;
 
-        let row: Option<(i64,)> = sqlx::query_as(
+        let row: Option<(i64,)> = crate::dbm::postgres_query_as!(
             "SELECT COALESCE(MAX(sequence_nr), 0) FROM events \
              WHERE tenant = $1 AND entity_type = $2 AND entity_id = $3",
         )
@@ -86,7 +86,7 @@ impl EventStore for PostgresEventStore {
             let metadata_json = serde_json::to_value(&event.metadata)
                 .map_err(|e| PersistenceError::Serialization(e.to_string()))?;
 
-            sqlx::query(
+            crate::dbm::postgres_query!(
                 "INSERT INTO events (tenant, entity_type, entity_id, sequence_nr, event_type, payload, metadata) \
                  VALUES ($1, $2, $3, $4, $5, $6, $7)",
             )
@@ -130,19 +130,20 @@ impl EventStore for PostgresEventStore {
         let (tenant, entity_type, entity_id) =
             parse_persistence_id_parts(persistence_id).map_err(PersistenceError::Storage)?;
 
-        let rows: Vec<(i64, String, serde_json::Value, serde_json::Value)> = sqlx::query_as(
-            "SELECT sequence_nr, event_type, payload, metadata \
+        let rows: Vec<(i64, String, serde_json::Value, serde_json::Value)> =
+            crate::dbm::postgres_query_as!(
+                "SELECT sequence_nr, event_type, payload, metadata \
              FROM events \
              WHERE tenant = $1 AND entity_type = $2 AND entity_id = $3 AND sequence_nr > $4 \
              ORDER BY sequence_nr ASC",
-        )
-        .bind(tenant)
-        .bind(entity_type)
-        .bind(entity_id)
-        .bind(from_sequence as i64)
-        .fetch_all(&self.pool)
-        .await
-        .map_err(|e| PersistenceError::Storage(e.to_string()))?;
+            )
+            .bind(tenant)
+            .bind(entity_type)
+            .bind(entity_id)
+            .bind(from_sequence as i64)
+            .fetch_all(&self.pool)
+            .await
+            .map_err(|e| PersistenceError::Storage(e.to_string()))?;
 
         rows.into_iter()
             .map(|(seq, event_type, payload, meta_json)| {
@@ -171,7 +172,7 @@ impl EventStore for PostgresEventStore {
         let (tenant, entity_type, entity_id) =
             parse_persistence_id_parts(persistence_id).map_err(PersistenceError::Storage)?;
 
-        sqlx::query(
+        crate::dbm::postgres_query!(
             "INSERT INTO snapshots (tenant, entity_type, entity_id, sequence_nr, state) \
              VALUES ($1, $2, $3, $4, $5) \
              ON CONFLICT (tenant, entity_type, entity_id) \
@@ -199,7 +200,7 @@ impl EventStore for PostgresEventStore {
         let (tenant, entity_type, entity_id) =
             parse_persistence_id_parts(persistence_id).map_err(PersistenceError::Storage)?;
 
-        let row: Option<(i64, Vec<u8>)> = sqlx::query_as(
+        let row: Option<(i64, Vec<u8>)> = crate::dbm::postgres_query_as!(
             "SELECT sequence_nr, state FROM snapshots \
              WHERE tenant = $1 AND entity_type = $2 AND entity_id = $3",
         )
@@ -219,7 +220,7 @@ impl EventStore for PostgresEventStore {
         &self,
         tenant: &str,
     ) -> Result<Vec<(String, String)>, PersistenceError> {
-        let rows: Vec<(String, String)> = sqlx::query_as(
+        let rows: Vec<(String, String)> = crate::dbm::postgres_query_as!(
             "SELECT DISTINCT entity_type, entity_id \
              FROM events \
              WHERE tenant = $1",
@@ -238,7 +239,7 @@ impl EventStore for PostgresEventStore {
         tenant: &str,
         entity_type: &str,
     ) -> Result<Vec<String>, PersistenceError> {
-        let rows: Vec<String> = sqlx::query_scalar(
+        let rows: Vec<String> = crate::dbm::postgres_query_scalar!(
             "SELECT DISTINCT e.entity_id \
              FROM events e \
              WHERE e.tenant = $1 \
@@ -607,12 +608,12 @@ mod tests {
                 Some("true")
             );
 
-            sqlx::query("DELETE FROM entity_field_index WHERE tenant = $1")
+            crate::dbm::postgres_query!("DELETE FROM entity_field_index WHERE tenant = $1")
                 .bind(&tenant)
                 .execute(&pool)
                 .await
                 .unwrap();
-            sqlx::query("DELETE FROM entity_catalog WHERE tenant = $1")
+            crate::dbm::postgres_query!("DELETE FROM entity_catalog WHERE tenant = $1")
                 .bind(&tenant)
                 .execute(&pool)
                 .await

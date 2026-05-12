@@ -12,6 +12,7 @@
 //! - **Schema migration** — a simple, idempotent migration runner that
 //!   creates the required tables on startup.
 
+pub mod dbm;
 pub mod migration;
 pub mod platform;
 pub mod schema;
