@@ -25,10 +25,11 @@ fn normalizes_hex_trace_and_span_ids() {
 #[test]
 fn llm_span_payload_uses_span_name_and_supported_model_metadata() {
     let payload = build_llm_span_payload(&LlmSpanInput {
-        service_name: "openpaw",
+        service_name: "temperpaw",
         session_id: "session-1",
         trace_id: "0000000000000000000000000000000f",
         span_id: "000000000000000a",
+        parent_span_id: None,
         span_name: "wasm:provider_caller",
         provider: "openai_codex",
         model: "gpt-5.4",
@@ -53,4 +54,30 @@ fn llm_span_payload_uses_span_name_and_supported_model_metadata() {
     let tags = span["tags"].as_array().unwrap();
     assert!(tags.iter().any(|tag| tag == "model_name:gpt-5.4"));
     assert!(tags.iter().any(|tag| tag == "model_provider:openai"));
+}
+
+#[test]
+fn llm_span_payload_uses_parent_span_id_when_available() {
+    let payload = build_llm_span_payload(&LlmSpanInput {
+        service_name: "temperpaw",
+        session_id: "session-1",
+        trace_id: "0000000000000000000000000000000f",
+        span_id: "000000000000000a",
+        parent_span_id: Some("000000000000000b"),
+        span_name: "wasm:provider_caller",
+        provider: "openai_codex",
+        model: "gpt-5.4",
+        system_instructions: None,
+        input_messages_json: None,
+        output_messages_json: None,
+        input_tokens: 10,
+        output_tokens: 20,
+        finish_reason: Some("stop"),
+        duration_ms: 1234,
+        error_type: None,
+    })
+    .unwrap();
+    let span = &payload["data"]["attributes"]["spans"][0];
+
+    assert_eq!(span["parent_id"], "11");
 }

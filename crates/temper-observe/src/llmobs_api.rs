@@ -18,6 +18,7 @@ pub struct LlmSpanInput<'a> {
     pub session_id: &'a str,
     pub trace_id: &'a str,
     pub span_id: &'a str,
+    pub parent_span_id: Option<&'a str>,
     pub span_name: &'a str,
     pub provider: &'a str,
     pub model: &'a str,
@@ -83,6 +84,12 @@ fn build_llm_span_payload(input: &LlmSpanInput<'_>) -> Result<Value, String> {
     let duration_ns = (input.duration_ms as f64) * 1_000_000.0;
     let trace_id = normalize_trace_id(input.trace_id);
     let span_id = normalize_span_id(input.span_id);
+    let parent_span_id = input
+        .parent_span_id
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(normalize_span_id)
+        .unwrap_or_else(|| "undefined".to_string());
     let provider = normalize_model_provider(input.provider);
     let mut metadata = Map::from_iter([
         ("model_name".to_string(), json!(input.model)),
@@ -149,7 +156,7 @@ fn build_llm_span_payload(input: &LlmSpanInput<'_>) -> Result<Value, String> {
                 "session_id": input.session_id,
                 "tags": span_tags.clone(),
                 "spans": [{
-                    "parent_id": "undefined",
+                    "parent_id": parent_span_id,
                     "trace_id": trace_id,
                     "span_id": span_id,
                     "name": input.span_name,

@@ -317,6 +317,13 @@ impl crate::state::ServerState {
             return Ok(None);
         };
 
+        let current_span = Span::current();
+        let llm_parent_span_id = if integration.llm {
+            current_otel_span_id(&current_span).or_else(|| ctx.agent_ctx.parent_span_id.clone())
+        } else {
+            None
+        };
+
         // LLM integrations get a dedicated child span with the `gen_ai.*`
         // attributes so LLM Observability lands on the content-bearing model
         // call while the dispatch trace stays continuous. Integrations opt in
@@ -331,7 +338,6 @@ impl crate::state::ServerState {
         } else {
             None
         };
-        let current_span = Span::current();
         let active_span = llm_root_span.as_ref().unwrap_or(&current_span);
         active_span.record("otel.name", format!("wasm:{module_name}").as_str());
         active_span.record("wasm.module", module_name.as_str());
@@ -550,6 +556,7 @@ impl crate::state::ServerState {
             &limits,
             &denial_tracker,
             blob_cache,
+            llm_parent_span_id.as_deref(),
         );
 
         if let Some(span) = llm_root_span {
@@ -737,6 +744,7 @@ impl crate::state::ServerState {
         limits: &WasmResourceLimits,
         denial_tracker: &HttpCallAuthzDenialTracker,
         blob_cache: std::collections::BTreeMap<String, Vec<u8>>,
+        llm_parent_span_id: Option<&str>,
     ) -> Result<Option<EntityResponse>, String> {
         // Existing action-triggered invocations don't use streams — pass empty registry.
         let streams = Arc::new(std::sync::RwLock::new(StreamRegistry::default()));
@@ -747,7 +755,11 @@ impl crate::state::ServerState {
         {
             Ok(mut result) if result.success => {
                 if integration.llm {
-                    attach_llm_parent_context(&Span::current(), &mut result.callback_params);
+                    attach_llm_parent_context(
+                        &Span::current(),
+                        llm_parent_span_id,
+                        &mut result.callback_params,
+                    );
                 }
 
                 let callback_params = &result.callback_params;
@@ -1165,6 +1177,10 @@ async fn submit_llmobs_llm_span(
     let span_id = callback_params
         .get("_gen_ai_parent_span_id")
         .and_then(Value::as_str);
+    let parent_span_id = callback_params
+        .get("_gen_ai_llm_parent_span_id")
+        .and_then(Value::as_str)
+        .or(ctx.agent_ctx.parent_span_id.as_deref());
     let (Some(trace_id), Some(span_id)) = (trace_id, span_id) else {
         return;
     };
@@ -1194,6 +1210,7 @@ async fn submit_llmobs_llm_span(
             session_id,
             trace_id,
             span_id,
+            parent_span_id,
             span_name: &span_name,
             provider: &provider,
             model: &model,
@@ -1339,6 +1356,15 @@ fn current_otel_trace_id(span: &Span) -> Option<String> {
     }
 }
 
+fn current_otel_span_id(span: &Span) -> Option<String> {
+    let span_context = span.context().span().span_context().clone();
+    if span_context.is_valid() {
+        Some(span_context.span_id().to_string())
+    } else {
+        None
+    }
+}
+
 pub(super) fn record_wasm_error_on_current_span(error: &str) {
     let span = Span::current();
     record_wasm_error_on_span(&span, error);
@@ -1398,7 +1424,11 @@ fn build_llm_root_span(
     span
 }
 
-fn attach_llm_parent_context(span: &Span, callback_params: &mut Value) {
+fn attach_llm_parent_context(
+    span: &Span,
+    llm_parent_span_id: Option<&str>,
+    callback_params: &mut Value,
+) {
     let span_context = span.context().span().span_context().clone();
     if !span_context.is_valid() {
         return;
@@ -1424,6 +1454,19 @@ fn attach_llm_parent_context(span: &Span, callback_params: &mut Value) {
         "gen_ai_parent_span_id".into(),
         json!(span_context.span_id().to_string()),
     );
+    if let Some(parent_span_id) = llm_parent_span_id
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        object.insert(
+            "_gen_ai_llm_parent_span_id".into(),
+            json!(parent_span_id.to_string()),
+        );
+        object.insert(
+            "gen_ai_llm_parent_span_id".into(),
+            json!(parent_span_id.to_string()),
+        );
+    }
 }
 
 fn strip_private_observability_params(mut params: Value) -> Value {
@@ -1554,8 +1597,10 @@ mod tests {
             "_gen_ai_provider": "anthropic",
             "_gen_ai_model": "claude-sonnet-4-6",
             "_gen_ai_finish_reason": "end_turn",
+            "_gen_ai_llm_parent_span_id": "parent-span-private",
             "_dd_llmobs_tool_spans": "[]",
             "gen_ai_parent_trace_id": "trace-public",
+            "gen_ai_llm_parent_span_id": "parent-span-public",
         });
 
         let stripped = strip_private_observability_params(params);
@@ -1563,12 +1608,14 @@ mod tests {
         assert_eq!(stripped["provider_response_file_id"], "file-123");
         assert_eq!(stripped["input_tokens"], 10);
         assert_eq!(stripped["gen_ai_parent_trace_id"], "trace-public");
+        assert_eq!(stripped["gen_ai_llm_parent_span_id"], "parent-span-public");
         assert!(stripped.get("_gen_ai_input_messages").is_none());
         assert!(stripped.get("_gen_ai_output_messages").is_none());
         assert!(stripped.get("_gen_ai_system_instructions").is_none());
         assert!(stripped.get("_gen_ai_provider").is_none());
         assert!(stripped.get("_gen_ai_model").is_none());
         assert!(stripped.get("_gen_ai_finish_reason").is_none());
+        assert!(stripped.get("_gen_ai_llm_parent_span_id").is_none());
         assert!(stripped.get("_dd_llmobs_tool_spans").is_none());
     }
 
@@ -1719,5 +1766,63 @@ mod tests {
         });
 
         assert_eq!(llm_trace_id, expected_trace_id);
+    }
+
+    #[test]
+    fn llm_parent_context_records_llm_span_and_dispatch_parent_ids() {
+        use opentelemetry::trace::{TraceContextExt, TracerProvider as _};
+        use opentelemetry_sdk::trace::SdkTracerProvider;
+        use tracing_subscriber::prelude::*;
+
+        let tracer_provider = SdkTracerProvider::builder().build();
+        let subscriber = tracing_subscriber::registry().with(
+            tracing_opentelemetry::layer()
+                .with_tracer(tracer_provider.tracer("temper-server-llm-parent-test")),
+        );
+        let _subscriber_guard = tracing::subscriber::set_default(subscriber);
+
+        let dispatch_parent = tracing::info_span!("dispatch.dispatch_tenant_action_core");
+        let (expected_trace_id, expected_parent_span_id) = dispatch_parent.in_scope(|| {
+            let span_context = tracing::Span::current()
+                .context()
+                .span()
+                .span_context()
+                .clone();
+            (
+                span_context.trace_id().to_string(),
+                span_context.span_id().to_string(),
+            )
+        });
+
+        let mut callback_params = json!({});
+        let (llm_trace_id, llm_span_id) = dispatch_parent.in_scope(|| {
+            let llm_span = tracing::info_span!("llm_caller.trace");
+            let span_context = llm_span.context().span().span_context().clone();
+            attach_llm_parent_context(
+                &llm_span,
+                Some(&expected_parent_span_id),
+                &mut callback_params,
+            );
+            (
+                span_context.trace_id().to_string(),
+                span_context.span_id().to_string(),
+            )
+        });
+
+        assert_eq!(llm_trace_id, expected_trace_id);
+        assert_ne!(llm_span_id, expected_parent_span_id);
+        assert_eq!(
+            callback_params["_gen_ai_parent_trace_id"],
+            expected_trace_id
+        );
+        assert_eq!(callback_params["_gen_ai_parent_span_id"], llm_span_id);
+        assert_eq!(
+            callback_params["_gen_ai_llm_parent_span_id"],
+            expected_parent_span_id
+        );
+        assert_eq!(
+            callback_params["gen_ai_llm_parent_span_id"],
+            expected_parent_span_id
+        );
     }
 }
