@@ -219,6 +219,10 @@ fn build_public_blob_put_headers(
     bytes: &[u8],
 ) -> Result<HeaderMap, String> {
     let mut headers = HeaderMap::new();
+    if crate::blob_store::is_local_internal_blob_endpoint(url) {
+        return Ok(headers);
+    }
+
     let access_key = state
         .secret(tenant, "published_blob_access_key")
         .or_else(|| state.secret(tenant, "blob_access_key"));
