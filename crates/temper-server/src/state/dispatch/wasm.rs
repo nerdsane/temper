@@ -38,7 +38,6 @@ struct WasmDispatchCtx<'a> {
 
 const HTTP_CALL_AUTHZ_DENIED_PREFIX: &str = "authorization denied for http_call";
 const MONTY_REPL_MODULE: &str = "monty_repl";
-const OPENPAW_SERVICE_NAME: &str = "openpaw";
 
 fn http_call_authz_denied_error(reason: &str) -> String {
     format!("{HTTP_CALL_AUTHZ_DENIED_PREFIX}: {reason}")
@@ -46,6 +45,20 @@ fn http_call_authz_denied_error(reason: &str) -> String {
 
 fn is_http_call_authz_denial(error: &str) -> bool {
     error.contains(HTTP_CALL_AUTHZ_DENIED_PREFIX)
+}
+
+fn llmobs_service_name() -> String {
+    for var in ["DD_SERVICE", "OTEL_SERVICE_NAME"] {
+        let Some(value) = std::env::var(var) // determinism-ok: observability-only process config
+            .ok()
+            .map(|value| value.trim().to_string())
+            .filter(|value| !value.is_empty())
+        else {
+            continue;
+        };
+        return value;
+    }
+    "temper-platform".to_string()
 }
 
 fn local_blob_binary_interceptor(
@@ -1173,10 +1186,11 @@ async fn submit_llmobs_llm_span(
         .get("output_tokens")
         .and_then(Value::as_i64)
         .unwrap_or_default();
+    let service_name = llmobs_service_name();
 
     if let Err(error) =
         temper_observe::llmobs_api::submit_llm_span(temper_observe::llmobs_api::LlmSpanInput {
-            service_name: OPENPAW_SERVICE_NAME,
+            service_name: &service_name,
             session_id,
             trace_id,
             span_id,
@@ -1258,6 +1272,7 @@ async fn submit_llmobs_tool_spans(
         .session_id
         .as_deref()
         .unwrap_or(ctx.entity_ref.entity_id);
+    let service_name = llmobs_service_name();
 
     let spans: Vec<_> = raw_events
         .iter()
@@ -1278,7 +1293,7 @@ async fn submit_llmobs_tool_spans(
                 .and_then(Value::as_bool)
                 .unwrap_or(false);
             Some(temper_observe::llmobs_api::ToolSpanInput {
-                service_name: OPENPAW_SERVICE_NAME,
+                service_name: &service_name,
                 session_id,
                 trace_id,
                 parent_span_id,
@@ -1297,7 +1312,7 @@ async fn submit_llmobs_tool_spans(
     }
 
     if let Err(error) = temper_observe::llmobs_api::submit_tool_spans(
-        OPENPAW_SERVICE_NAME,
+        &service_name,
         session_id,
         trace_id,
         parent_span_id,
@@ -1570,6 +1585,27 @@ mod tests {
 
         assert!(should_record_gen_ai_span_attrs(true, &params));
         assert!(!should_record_gen_ai_span_attrs(false, &params));
+    }
+
+    #[test]
+    fn llmobs_service_name_prefers_runtime_service_identity() {
+        unsafe {
+            std::env::set_var("DD_SERVICE", "temperpaw");
+            std::env::remove_var("OTEL_SERVICE_NAME");
+        }
+        assert_eq!(llmobs_service_name(), "temperpaw");
+
+        unsafe {
+            std::env::remove_var("DD_SERVICE");
+            std::env::set_var("OTEL_SERVICE_NAME", "temper-agent");
+        }
+        assert_eq!(llmobs_service_name(), "temper-agent");
+
+        unsafe {
+            std::env::remove_var("DD_SERVICE");
+            std::env::remove_var("OTEL_SERVICE_NAME");
+        }
+        assert_eq!(llmobs_service_name(), "temper-platform");
     }
 
     #[test]
