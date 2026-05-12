@@ -3,6 +3,7 @@
 //! Production uses real HTTP + secret store. Simulation uses canned
 //! responses for deterministic testing.
 
+use std::borrow::Cow;
 use std::collections::BTreeMap;
 use std::future::Future;
 use std::pin::Pin;
@@ -730,7 +731,7 @@ impl WasmHost for ProductionWasmHost {
         let (filtered_headers, span_hints) = split_span_hint_headers(headers);
         let span = tracing::info_span!(
             "wasm.host.http_call",
-            otel.name = "wasm.host.http_call",
+            otel.name = %span_hint_otel_name(&span_hints, "wasm.host.http_call"),
             http.method = %method,
             http.url = %telemetry_url(url),
             request_bytes = body.len() as u64,
@@ -738,9 +739,25 @@ impl WasmHost for ProductionWasmHost {
             status_code = tracing::field::Empty,
             response_bytes = tracing::field::Empty,
             duration_ms = tracing::field::Empty,
+            observability_event = tracing::field::Empty,
+            session_id = tracing::field::Empty,
+            managed_session_id = tracing::field::Empty,
+            inner_session_id = tracing::field::Empty,
+            parent_session_id = tracing::field::Empty,
+            agent_id = tracing::field::Empty,
+            environment_id = tracing::field::Empty,
+            entity_type = tracing::field::Empty,
+            entity_id = tracing::field::Empty,
+            action_name = tracing::field::Empty,
+            workflow_step = tracing::field::Empty,
+            tool.name = tracing::field::Empty,
+            tool.call_id = tracing::field::Empty,
+            gen_ai.operation.name = tracing::field::Empty,
+            gen_ai.provider.name = tracing::field::Empty,
+            gen_ai.request.model = tracing::field::Empty,
         );
+        apply_span_hints(&span, &span_hints);
         let _guard = span.enter();
-        apply_span_hints(&tracing::Span::current(), &span_hints);
 
         let mut builder = match method.to_uppercase().as_str() {
             "GET" => self.client.get(url),
@@ -918,7 +935,7 @@ impl WasmHost for ProductionWasmHost {
         let (filtered_headers, span_hints) = split_span_hint_headers(headers);
         let span = tracing::info_span!(
             "wasm.host.http_call_binary",
-            otel.name = "wasm.host.http_call_binary",
+            otel.name = %span_hint_otel_name(&span_hints, "wasm.host.http_call_binary"),
             http.method = %method,
             http.url = %telemetry_url(url),
             request_bytes = body.len() as u64,
@@ -926,9 +943,25 @@ impl WasmHost for ProductionWasmHost {
             status_code = tracing::field::Empty,
             response_bytes = tracing::field::Empty,
             duration_ms = tracing::field::Empty,
+            observability_event = tracing::field::Empty,
+            session_id = tracing::field::Empty,
+            managed_session_id = tracing::field::Empty,
+            inner_session_id = tracing::field::Empty,
+            parent_session_id = tracing::field::Empty,
+            agent_id = tracing::field::Empty,
+            environment_id = tracing::field::Empty,
+            entity_type = tracing::field::Empty,
+            entity_id = tracing::field::Empty,
+            action_name = tracing::field::Empty,
+            workflow_step = tracing::field::Empty,
+            tool.name = tracing::field::Empty,
+            tool.call_id = tracing::field::Empty,
+            gen_ai.operation.name = tracing::field::Empty,
+            gen_ai.provider.name = tracing::field::Empty,
+            gen_ai.request.model = tracing::field::Empty,
         );
+        apply_span_hints(&span, &span_hints);
         let _guard = span.enter();
-        apply_span_hints(&tracing::Span::current(), &span_hints);
 
         if let Some(ref interceptor) = self.binary_http_interceptor
             && let Some(result) = interceptor(
@@ -1308,13 +1341,29 @@ impl WasmHost for ProductionWasmHost {
         let (filtered_headers, span_hints) = split_span_hint_headers(&request.headers);
         let span = tracing::info_span!(
             "wasm.host.http_stream",
-            otel.name = "wasm.host.http_stream",
+            otel.name = %span_hint_otel_name(&span_hints, "wasm.host.http_stream"),
             http.method = %request.method,
             http.url = %telemetry_url(&request.url),
             header_count = filtered_headers.len() as u64,
             status_code = tracing::field::Empty,
             response_bytes = tracing::field::Empty,
             duration_ms = tracing::field::Empty,
+            observability_event = tracing::field::Empty,
+            session_id = tracing::field::Empty,
+            managed_session_id = tracing::field::Empty,
+            inner_session_id = tracing::field::Empty,
+            parent_session_id = tracing::field::Empty,
+            agent_id = tracing::field::Empty,
+            environment_id = tracing::field::Empty,
+            entity_type = tracing::field::Empty,
+            entity_id = tracing::field::Empty,
+            action_name = tracing::field::Empty,
+            workflow_step = tracing::field::Empty,
+            tool.name = tracing::field::Empty,
+            tool.call_id = tracing::field::Empty,
+            gen_ai.operation.name = tracing::field::Empty,
+            gen_ai.provider.name = tracing::field::Empty,
+            gen_ai.request.model = tracing::field::Empty,
         );
         apply_span_hints(&span, &span_hints);
 
@@ -1763,6 +1812,39 @@ pub(crate) fn split_span_hint_headers(
     (kept, hints)
 }
 
+pub(crate) fn span_hint_otel_name<'a>(
+    hints: &'a SpanHints,
+    default_name: &'static str,
+) -> Cow<'a, str> {
+    hints
+        .span_name
+        .as_deref()
+        .map(Cow::Borrowed)
+        .unwrap_or(Cow::Borrowed(default_name))
+}
+
+pub(crate) fn datadog_visible_span_hint_field(attr_key: &str) -> Option<&'static str> {
+    match attr_key {
+        "observability_event" => Some("observability_event"),
+        "session_id" => Some("session_id"),
+        "managed_session_id" => Some("managed_session_id"),
+        "inner_session_id" => Some("inner_session_id"),
+        "parent_session_id" => Some("parent_session_id"),
+        "agent_id" => Some("agent_id"),
+        "environment_id" => Some("environment_id"),
+        "entity_type" => Some("entity_type"),
+        "entity_id" => Some("entity_id"),
+        "action_name" => Some("action_name"),
+        "workflow_step" => Some("workflow_step"),
+        "tool.name" => Some("tool.name"),
+        "tool.call_id" => Some("tool.call_id"),
+        "gen_ai.operation.name" => Some("gen_ai.operation.name"),
+        "gen_ai.provider.name" => Some("gen_ai.provider.name"),
+        "gen_ai.request.model" => Some("gen_ai.request.model"),
+        _ => None,
+    }
+}
+
 /// Apply span hints to the currently-active tracing span's underlying OTel
 /// span. `update_name` overrides the span display name; `set_attribute`
 /// calls attach the key/value pairs. If no tracer subscriber is installed
@@ -1775,9 +1857,13 @@ pub(crate) fn apply_span_hints(span: &tracing::Span, hints: &SpanHints) {
     let cx = span.context();
     let otel_span = cx.span();
     if let Some(ref name) = hints.span_name {
+        span.record("otel.name", name.as_str());
         otel_span.update_name(name.clone());
     }
     for (k, v) in &hints.attributes {
+        if let Some(field_name) = datadog_visible_span_hint_field(k) {
+            span.record(field_name, v.as_str());
+        }
         otel_span.set_attribute(KeyValue::new(k.clone(), v.clone()));
     }
 }

@@ -32,6 +32,23 @@ fn split_span_hint_headers_extracts_span_name_case_insensitive() {
 }
 
 #[test]
+fn span_hint_otel_name_prefers_semantic_name_for_datadog_resource() {
+    let hints = SpanHints {
+        span_name: Some("temperpaw.agent.session".to_string()),
+        ..SpanHints::default()
+    };
+
+    assert_eq!(
+        span_hint_otel_name(&hints, "wasm.host.http_stream"),
+        "temperpaw.agent.session"
+    );
+    assert_eq!(
+        span_hint_otel_name(&SpanHints::default(), "wasm.host.http_stream"),
+        "wasm.host.http_stream"
+    );
+}
+
+#[test]
 fn split_span_hint_headers_extracts_generic_attributes() {
     let headers = vec![
         (
@@ -59,6 +76,36 @@ fn split_span_hint_headers_extracts_generic_attributes() {
             .iter()
             .any(|(k, v)| k == "tool.name" && v == "temper_write")
     );
+}
+
+#[test]
+fn common_session_tool_and_llm_span_hints_are_datadog_visible_fields() {
+    for attr_key in [
+        "observability_event",
+        "session_id",
+        "managed_session_id",
+        "inner_session_id",
+        "parent_session_id",
+        "agent_id",
+        "environment_id",
+        "entity_type",
+        "entity_id",
+        "action_name",
+        "workflow_step",
+        "tool.name",
+        "tool.call_id",
+        "gen_ai.operation.name",
+        "gen_ai.provider.name",
+        "gen_ai.request.model",
+    ] {
+        assert_eq!(
+            datadog_visible_span_hint_field(attr_key),
+            Some(attr_key),
+            "{attr_key} must be recorded as a static tracing field so Datadog can facet/search it"
+        );
+    }
+
+    assert_eq!(datadog_visible_span_hint_field("x_custom.future"), None);
 }
 
 #[test]
