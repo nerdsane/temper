@@ -30,6 +30,11 @@ The WASM host now treats span hints as first-class Datadog-facing fields:
 3. The host still writes all hint attributes to the underlying OpenTelemetry span
    so future/custom attributes are not discarded.
 4. Hint headers continue to be stripped before outbound requests leave the host.
+5. Guest log span events include the active OpenTelemetry trace/span ids and
+   Datadog decimal `dd.trace_id` / `dd.span_id` fields. If a WASM invocation is
+   acting on a `Session` entity and no explicit `session_id` exists, the host
+   derives `session_id` from the entity id so logs remain joinable to the
+   session trace.
 
 The Datadog-visible static fields currently include:
 
@@ -57,6 +62,10 @@ vocabulary used in TemperPaw logs, OData state, LLM Observability, and monitors.
 This makes WASM host calls less opaque without introducing a guest-managed span
 ABI yet.
 
+Guest logs emitted through the host are also joinable to the same trace by both
+OpenTelemetry hex ids and Datadog decimal ids. This is intentionally host-side:
+guests do not need direct access to tracing internals to produce correlated logs.
+
 This ADR does not claim true inside-WASM APM. Guest code still cannot create
 arbitrary child spans directly. If future debugging requires that, Temper should
 add an explicit guest-to-host observability API such as `host_start_span`,
@@ -65,4 +74,3 @@ add an explicit guest-to-host observability API such as `host_start_span`,
 The field allowlist must remain intentionally small. High-cardinality or
 payload-sized values should stay in logs, span events, OData rows, or LLMObs
 content fields instead of becoming universal trace facets.
-

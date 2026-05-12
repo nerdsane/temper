@@ -1213,7 +1213,7 @@ impl WasmHost for ProductionWasmHost {
         let session_id = self
             .invocation_context
             .as_ref()
-            .and_then(|ctx| ctx.session_id.as_deref())
+            .and_then(context_session_id)
             .unwrap_or("");
         let trace_id = self.trace_id.as_deref().unwrap_or("");
 
@@ -1547,11 +1547,8 @@ fn guest_log_span_attrs(
         {
             attrs.insert("agent_id".to_string(), agent_id.to_string());
         }
-        if let Some(session_id) = context
-            .session_id
-            .as_deref()
-            .filter(|value| !value.is_empty())
-        {
+        if let Some(session_id) = context_session_id(context) {
+            attrs.insert("session_id".to_string(), session_id.to_string());
             attrs.insert("gen_ai.conversation.id".to_string(), session_id.to_string());
         }
         if !context.trace_id.is_empty() {
@@ -1600,10 +1597,13 @@ fn emit_named_guest_log_span_event(
     let agent_id = context
         .and_then(|ctx| ctx.agent_id.as_deref())
         .unwrap_or("");
-    let session_id = context
-        .and_then(|ctx| ctx.session_id.as_deref())
-        .unwrap_or("");
-    let trace_id = context.map(|ctx| ctx.trace_id.as_str()).unwrap_or("");
+    let session_id = context.and_then(context_session_id).unwrap_or("");
+    let fallback_trace_id = context.map(|ctx| ctx.trace_id.as_str());
+    let correlation = current_log_correlation(fallback_trace_id);
+    let trace_id = correlation.trace_id.as_str();
+    let span_id = correlation.span_id.as_str();
+    let dd_trace_id = correlation.dd_trace_id.as_str();
+    let dd_span_id = correlation.dd_span_id.as_str();
     let fields_json = fields_json.unwrap_or("");
 
     match level.to_ascii_lowercase().as_str() {
@@ -1619,9 +1619,17 @@ fn emit_named_guest_log_span_event(
             entity_id = %entity_id,
             trigger_action = %trigger_action,
             agent_id = %agent_id,
+            session_id = %session_id,
             gen_ai.conversation.id = %session_id,
             trace_id = %trace_id,
+            span_id = %span_id,
+            otel.trace_id = %trace_id,
+            otel.span_id = %span_id,
+            dd.trace_id = %dd_trace_id,
+            dd.span_id = %dd_span_id,
             fields_json = %fields_json,
+            "{}",
+            message,
         ),
         "warn" => tracing::event!(
             name: "wasm_guest.log",
@@ -1635,9 +1643,17 @@ fn emit_named_guest_log_span_event(
             entity_id = %entity_id,
             trigger_action = %trigger_action,
             agent_id = %agent_id,
+            session_id = %session_id,
             gen_ai.conversation.id = %session_id,
             trace_id = %trace_id,
+            span_id = %span_id,
+            otel.trace_id = %trace_id,
+            otel.span_id = %span_id,
+            dd.trace_id = %dd_trace_id,
+            dd.span_id = %dd_span_id,
             fields_json = %fields_json,
+            "{}",
+            message,
         ),
         "info" => tracing::event!(
             name: "wasm_guest.log",
@@ -1651,9 +1667,17 @@ fn emit_named_guest_log_span_event(
             entity_id = %entity_id,
             trigger_action = %trigger_action,
             agent_id = %agent_id,
+            session_id = %session_id,
             gen_ai.conversation.id = %session_id,
             trace_id = %trace_id,
+            span_id = %span_id,
+            otel.trace_id = %trace_id,
+            otel.span_id = %span_id,
+            dd.trace_id = %dd_trace_id,
+            dd.span_id = %dd_span_id,
             fields_json = %fields_json,
+            "{}",
+            message,
         ),
         _ => tracing::event!(
             name: "wasm_guest.log",
@@ -1667,11 +1691,91 @@ fn emit_named_guest_log_span_event(
             entity_id = %entity_id,
             trigger_action = %trigger_action,
             agent_id = %agent_id,
+            session_id = %session_id,
             gen_ai.conversation.id = %session_id,
             trace_id = %trace_id,
+            span_id = %span_id,
+            otel.trace_id = %trace_id,
+            otel.span_id = %span_id,
+            dd.trace_id = %dd_trace_id,
+            dd.span_id = %dd_span_id,
             fields_json = %fields_json,
+            "{}",
+            message,
         ),
     }
+}
+
+fn context_session_id(context: &WasmInvocationContext) -> Option<&str> {
+    context
+        .session_id
+        .as_deref()
+        .filter(|value| !value.is_empty())
+        .or_else(|| {
+            (context.entity_type == "Session" && !context.entity_id.is_empty())
+                .then_some(context.entity_id.as_str())
+        })
+}
+
+#[derive(Default)]
+struct LogCorrelation {
+    trace_id: String,
+    span_id: String,
+    dd_trace_id: String,
+    dd_span_id: String,
+}
+
+fn current_log_correlation(fallback_trace_id: Option<&str>) -> LogCorrelation {
+    use opentelemetry::trace::TraceContextExt as _;
+    use tracing_opentelemetry::OpenTelemetrySpanExt as _;
+
+    let span = tracing::Span::current();
+    let cx = span.context();
+    let span_context = cx.span().span_context().clone();
+    let (trace_id, span_id) = if span_context.is_valid() {
+        (
+            span_context.trace_id().to_string(),
+            span_context.span_id().to_string(),
+        )
+    } else {
+        (
+            fallback_trace_id.map(str::to_string).unwrap_or_default(),
+            String::new(),
+        )
+    };
+    let dd_trace_id = datadog_trace_id_decimal(&trace_id).unwrap_or_default();
+    let dd_span_id = datadog_span_id_decimal(&span_id).unwrap_or_default();
+    LogCorrelation {
+        trace_id,
+        span_id,
+        dd_trace_id,
+        dd_span_id,
+    }
+}
+
+fn datadog_trace_id_decimal(trace_id: &str) -> Option<String> {
+    let trace_id = trace_id.trim();
+    if trace_id.is_empty() {
+        return None;
+    }
+    let low_bits = if trace_id.len() > 16 {
+        trace_id.get(trace_id.len() - 16..)?
+    } else {
+        trace_id
+    };
+    u64::from_str_radix(low_bits, 16)
+        .ok()
+        .map(|value| value.to_string())
+}
+
+fn datadog_span_id_decimal(span_id: &str) -> Option<String> {
+    let span_id = span_id.trim();
+    if span_id.is_empty() {
+        return None;
+    }
+    u64::from_str_radix(span_id, 16)
+        .ok()
+        .map(|value| value.to_string())
 }
 
 fn telemetry_url(url: &str) -> String {

@@ -438,4 +438,5 @@ fn guest_log_span_event_is_named_for_trace_export() {
     assert!(names.iter().any(|name| name == "wasm_guest.log"));
 }
 
+mod log_correlation;
 mod span_hint_tests;
