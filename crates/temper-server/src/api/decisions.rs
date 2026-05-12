@@ -18,7 +18,7 @@ use tracing::instrument;
 
 use temper_runtime::tenant::TenantId;
 
-use super::{empty_decision_list, format_decision_list, require_policy_auth};
+use super::{decisions_access, empty_decision_list, format_decision_list, require_policy_auth};
 use crate::authz::{persist_and_activate_policy, require_observe_auth};
 use crate::request_context::AgentContext;
 use crate::state::{DecisionStatus, PendingDecision, ServerState};
@@ -49,15 +49,16 @@ pub(crate) async fn handle_list_decisions(
     headers: HeaderMap,
     Query(params): Query<DecisionListParams>,
 ) -> impl IntoResponse {
-    if let Some(resp) = require_policy_auth(&state, &headers, &tenant).await {
-        return resp;
-    }
+    let access = match decisions_access::decision_list_access(&state, &headers, &tenant).await {
+        Ok(access) => access,
+        Err(resp) => return resp,
+    };
     if let Some(store) = state.metadata_store_for_tenant(&tenant).await {
         match store
             .query_decisions(&tenant, params.status.as_deref())
             .await
         {
-            Ok(data_strings) => return format_decision_list(data_strings),
+            Ok(data_strings) => return format_decision_list(access.filter(data_strings)),
             Err(e) => {
                 tracing::warn!(error = %e, backend = store.backend_name(), "failed to query decisions");
             }

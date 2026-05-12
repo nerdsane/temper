@@ -6,6 +6,7 @@
 - Related:
   - `crates/temper-server/src/authz/helpers.rs`
   - `crates/temper-server/src/observe/wasm.rs`
+  - `crates/temper-server/src/api/decisions_access.rs`
   - `crates/temper-server/src/api/decisions.rs`
 
 ## Context
@@ -18,17 +19,17 @@ Agent/session-scoped mutating requests that can be retried must convert Cedar de
 
 WASM module upload and delete use this governed mutation path. The resource is `WasmModule::{module_name}` and the action remains `manage_wasm`.
 
-Requests without resumable agent context, cross-tenant observe/admin reads, streams, and passive list/detail endpoints continue to return ordinary 403 responses. They are not converted into decisions because there is no safe session to pause and retry.
+Requests without resumable agent context, cross-tenant observe/admin reads, and streams continue to return ordinary 403 responses. They are not converted into decisions because there is no safe session to pause and retry.
 
 The WASM upload API continues to accept raw WASM bytes. It also accepts JSON `{ "wasm_base64": "..." }` for WASM-host clients that cannot submit binary request bodies.
 
-Tenant-scoped decision lookup is part of the public governance API so agents do not need cross-tenant `/api/decisions` access to poll a decision they already know about.
+Tenant-scoped decision lookup is part of the public governance API so agents do not need cross-tenant `/api/decisions` access to poll a decision they already know about. Tenant-scoped decision lists are owner-filtered for agent principals: an agent may read decisions for its own agent id or current session id, while admins and policy managers retain full list access.
 
 ## Rollout Plan
 
 1. Add tests that show WASM upload/delete denials create pending decisions with `WasmModule::{module_name}`.
 2. Move WASM upload/delete onto the governed mutation helper.
-3. Add JSON base64 upload compatibility and tenant-scoped decision lookup.
+3. Add JSON base64 upload compatibility and tenant-scoped decision lookup/list access.
 4. Update TemperPaw to use tenant-scoped decision routes and pin the merged Temper commit.
 
 ## Consequences
