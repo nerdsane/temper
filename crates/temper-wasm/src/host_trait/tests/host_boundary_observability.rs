@@ -21,6 +21,10 @@ struct CapturedEvent {
     fields: BTreeMap<String, String>,
 }
 
+type CapturedSpans = Arc<Mutex<Vec<CapturedSpan>>>;
+type CapturedEvents = Arc<Mutex<Vec<CapturedEvent>>>;
+type CaptureGuard = tracing::dispatcher::DefaultGuard;
+
 #[derive(Default)]
 struct CaptureVisitor {
     fields: BTreeMap<String, String>,
@@ -128,11 +132,7 @@ where
     }
 }
 
-fn capture_spans_and_events() -> (
-    Arc<Mutex<Vec<CapturedSpan>>>,
-    Arc<Mutex<Vec<CapturedEvent>>>,
-    tracing::dispatcher::DefaultGuard,
-) {
+fn capture_spans_and_events() -> (CapturedSpans, CapturedEvents, CaptureGuard) {
     let spans = Arc::new(Mutex::new(Vec::new()));
     let events = Arc::new(Mutex::new(Vec::new()));
     let layer = SpanEventCapture {
