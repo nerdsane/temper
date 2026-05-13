@@ -5,6 +5,7 @@ pub mod custom_effects;
 mod dispatch;
 mod entity_ops;
 mod evolution;
+mod file_read_blobs;
 mod file_read_projection;
 mod file_reads;
 pub mod metrics;
