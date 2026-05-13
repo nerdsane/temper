@@ -20,6 +20,7 @@ fn build_context() -> WasmInvocationContext {
         entity_type: "EchoTest".to_string(),
         entity_id: "e1".to_string(),
         trigger_action: "TriggerEcho".to_string(),
+        wasm_module: Some("echo_integration".to_string()),
         trigger_params: serde_json::json!({}),
         entity_state: serde_json::json!({"status": "Pending"}),
         agent_id: None,

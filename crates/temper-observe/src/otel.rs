@@ -20,6 +20,7 @@
 //! | `TEMPER_LOG_QUEUE_SIZE` | Max buffered log records before drop (default: 2048, range: 128–32768) |
 
 use std::collections::HashMap;
+use std::sync::OnceLock;
 use std::time::Duration;
 
 use opentelemetry::KeyValue;
@@ -162,6 +163,19 @@ fn read_non_empty_env(var_name: &str) -> Option<String> {
         .ok()
         .map(|value| value.trim().to_string())
         .filter(|value| !value.is_empty())
+}
+
+/// Process-lifetime runtime id shared by traces and profiler uploads.
+///
+/// Datadog uses this resource/tag value to stitch profiles back to the APM
+/// traces captured by the same process.
+pub fn runtime_id() -> &'static str {
+    static RUNTIME_ID: OnceLock<String> = OnceLock::new();
+    RUNTIME_ID
+        .get_or_init(|| {
+            read_non_empty_env("DD_RUNTIME_ID").unwrap_or_else(|| uuid::Uuid::new_v4().to_string())
+        })
+        .as_str()
 }
 
 fn parse_otlp_headers(raw: &str) -> HashMap<String, String> {
@@ -418,10 +432,7 @@ pub fn init_tracing(
     // ADR-0055: runtime-id enables Datadog Profiler ↔ APM trace stitching.
     // Generated once at process start; regenerates only on restart.
     // determinism-ok: observability-only identifier, not a simulation variable.
-    resource_attrs.push(KeyValue::new(
-        "runtime-id",
-        uuid::Uuid::new_v4().to_string(),
-    ));
+    resource_attrs.push(KeyValue::new("runtime-id", runtime_id().to_string()));
     let resource = Resource::builder_empty()
         .with_attributes(resource_attrs)
         .build();

@@ -64,9 +64,29 @@ impl ServerState {
             .load_file_projection_metadata_from_index(tenant, &[file_id.to_string()])
             .await?;
         let Some(meta) = meta_by_id.get(file_id).cloned() else {
-            return Ok(IndexedFileStreamRead::MissingIndex);
+            return self
+                .read_file_stream_from_state_fallback(tenant, file_id)
+                .await;
         };
-        self.read_indexed_stream_from_meta(tenant, meta).await
+        match self.read_indexed_stream_from_meta(tenant, meta).await? {
+            IndexedFileStreamRead::StaleIndex {
+                content_hash,
+                mime_type,
+            } => {
+                let fallback = self
+                    .read_file_stream_from_state_fallback(tenant, file_id)
+                    .await?;
+                if stream_read_content_hash(&fallback).is_some_and(|hash| hash != content_hash) {
+                    Ok(fallback)
+                } else {
+                    Ok(IndexedFileStreamRead::StaleIndex {
+                        content_hash,
+                        mime_type,
+                    })
+                }
+            }
+            read => Ok(read),
+        }
     }
 
     #[instrument(skip_all, fields(
@@ -86,9 +106,29 @@ impl ServerState {
             )
             .await?;
         let Some(meta) = meta_by_id.get(file_version_id).cloned() else {
-            return Ok(IndexedFileStreamRead::MissingIndex);
+            return self
+                .read_file_version_stream_from_state_fallback(tenant, file_version_id)
+                .await;
         };
-        self.read_indexed_stream_from_meta(tenant, meta).await
+        match self.read_indexed_stream_from_meta(tenant, meta).await? {
+            IndexedFileStreamRead::StaleIndex {
+                content_hash,
+                mime_type,
+            } => {
+                let fallback = self
+                    .read_file_version_stream_from_state_fallback(tenant, file_version_id)
+                    .await?;
+                if stream_read_content_hash(&fallback).is_some_and(|hash| hash != content_hash) {
+                    Ok(fallback)
+                } else {
+                    Ok(IndexedFileStreamRead::StaleIndex {
+                        content_hash,
+                        mime_type,
+                    })
+                }
+            }
+            read => Ok(read),
+        }
     }
 
     #[instrument(skip_all, fields(
@@ -319,6 +359,36 @@ impl ServerState {
         })
     }
 
+    async fn read_file_stream_from_state_fallback(
+        &self,
+        tenant: &TenantId,
+        file_id: &str,
+    ) -> Result<IndexedFileStreamRead, String> {
+        let Ok(resp) = self.get_tenant_entity_state(tenant, "File", file_id).await else {
+            return Ok(IndexedFileStreamRead::MissingIndex);
+        };
+        self.read_indexed_stream_from_meta(tenant, file_projection_from_state(&resp.state.fields))
+            .await
+    }
+
+    async fn read_file_version_stream_from_state_fallback(
+        &self,
+        tenant: &TenantId,
+        file_version_id: &str,
+    ) -> Result<IndexedFileStreamRead, String> {
+        let Ok(resp) = self
+            .get_tenant_entity_state(tenant, "FileVersion", file_version_id)
+            .await
+        else {
+            return Ok(IndexedFileStreamRead::MissingIndex);
+        };
+        self.read_indexed_stream_from_meta(
+            tenant,
+            file_version_projection_from_state(&resp.state.fields),
+        )
+        .await
+    }
+
     async fn read_single_file_text(
         &self,
         tenant: &TenantId,
@@ -398,91 +468,13 @@ impl ServerState {
             text,
         })
     }
-
-    async fn fetch_blob_text_for_hash(
-        &self,
-        tenant: &TenantId,
-        content_hash: &str,
-    ) -> Result<Option<String>, String> {
-        let blob_bytes = self.fetch_blob_bytes_for_hash(tenant, content_hash).await?;
-        Ok(blob_bytes.map(|bytes| String::from_utf8_lossy(&bytes).to_string()))
-    }
-
-    async fn fetch_blob_bytes_for_hash(
-        &self,
-        tenant: &TenantId,
-        content_hash: &str,
-    ) -> Result<Option<Vec<u8>>, String> {
-        let blob_endpoint = self
-            .secrets_vault
-            .as_ref()
-            .and_then(|vault| vault.get_secret(tenant.as_str(), "blob_endpoint"));
-        let blob_key = file_blob_key(blob_endpoint.as_deref(), content_hash);
-        let mut blob_bytes = self
-            .get_blob_with_legacy_fallback(tenant, &blob_key)
-            .await
-            .map_err(|e| format!("failed to read blob '{content_hash}': {e}"))?;
-        if blob_bytes.is_none()
-            && blob_endpoint.as_deref().is_some_and(|endpoint| {
-                !crate::blob_store::is_local_internal_blob_endpoint(endpoint)
-            })
-        {
-            let legacy_local_key = local_file_blob_key(content_hash);
-            if legacy_local_key != blob_key {
-                blob_bytes = self
-                    .get_blob_with_legacy_fallback(tenant, &legacy_local_key)
-                    .await
-                    .map_err(|e| {
-                        format!("failed to read legacy local blob '{content_hash}': {e}")
-                    })?;
-            }
-        }
-        Ok(blob_bytes)
-    }
 }
 
-fn file_blob_key(blob_endpoint: Option<&str>, content_hash: &str) -> String {
-    match blob_endpoint {
-        Some(endpoint) if !crate::blob_store::is_local_internal_blob_endpoint(endpoint) => {
-            // The blob_adapter WASM writes external R2/S3 objects at
-            // `{bucket}/{content_hash}`. Local/internal storage includes the
-            // bucket name in the key because the internal route has no
-            // separate bucket namespace.
-            content_hash.to_string()
-        }
-        _ => local_file_blob_key(content_hash),
-    }
-}
-
-fn local_file_blob_key(content_hash: &str) -> String {
-    format!(
-        "{}/{}",
-        crate::blob_store::DEFAULT_BLOB_BUCKET,
-        content_hash
-    )
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn file_blob_key_matches_blob_adapter_external_contract() {
-        assert_eq!(
-            file_blob_key(
-                Some("https://example.r2.cloudflarestorage.com"),
-                "sha256:abc"
-            ),
-            "sha256:abc"
-        );
-    }
-
-    #[test]
-    fn file_blob_key_keeps_bucket_prefix_for_internal_store() {
-        assert_eq!(
-            file_blob_key(Some("http://127.0.0.1:4491/_internal/blobs"), "sha256:abc"),
-            "temper-fs/sha256:abc"
-        );
-        assert_eq!(file_blob_key(None, "sha256:abc"), "temper-fs/sha256:abc");
+fn stream_read_content_hash(read: &IndexedFileStreamRead) -> Option<&str> {
+    match read {
+        IndexedFileStreamRead::Content { content_hash, .. }
+        | IndexedFileStreamRead::NoContent { content_hash, .. }
+        | IndexedFileStreamRead::StaleIndex { content_hash, .. } => Some(content_hash.as_str()),
+        IndexedFileStreamRead::MissingIndex => None,
     }
 }

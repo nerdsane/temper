@@ -209,10 +209,42 @@ impl crate::state::ServerState {
         agent_ctx: &AgentContext,
         await_integration: bool,
     ) -> Result<EntityResponse, DispatchError> {
-        if let Some(parent) = remote_parent_context(agent_ctx) {
+        let explicit_workflow_context = agent_ctx.workflow_run_id.is_some()
+            || agent_ctx.workflow_root_entity_type.is_some()
+            || agent_ctx.workflow_root_entity_id.is_some();
+        let use_workflow_root = crate::workflow_tracing::should_use_workflow_root_span(
+            explicit_workflow_context,
+            entity_type,
+        );
+        let mut enriched_agent_ctx = agent_ctx.for_dispatch_root(entity_type, entity_id);
+        let mut workflow_root_active = false;
+        if use_workflow_root {
+            let root_entity_type = enriched_agent_ctx
+                .workflow_root_entity_type
+                .as_deref()
+                .unwrap_or(entity_type);
+            let root_entity_id = enriched_agent_ctx
+                .workflow_root_entity_id
+                .as_deref()
+                .unwrap_or(entity_id);
+            let workflow_run_id = enriched_agent_ctx
+                .workflow_run_id
+                .as_deref()
+                .unwrap_or(root_entity_id);
+            if let Some(parent) = self.workflow_spans.parent_context(
+                tenant.as_str(),
+                root_entity_type,
+                root_entity_id,
+                workflow_run_id,
+                enriched_agent_ctx.session_id.as_deref(),
+            ) {
+                workflow_root_active = true;
+                tracing::Span::current().set_parent(parent);
+            }
+        } else if let Some(parent) = remote_parent_context(agent_ctx) {
             tracing::Span::current().set_parent(parent);
         }
-        let enriched_agent_ctx = agent_ctx.for_dispatch_root(entity_type, entity_id);
+        enriched_agent_ctx = enriched_agent_ctx.with_current_span_trace_context();
         let agent_ctx = &enriched_agent_ctx;
         record_workflow_span_attrs(agent_ctx, entity_type, entity_id, Some(action));
 
@@ -528,6 +560,14 @@ impl crate::state::ServerState {
         tracing::Span::current().record("success", response.success);
         if let Some(ref err) = response.error {
             tracing::Span::current().record("error_msg", err.as_str());
+        }
+        if workflow_root_active && let Some(workflow_run_id) = agent_ctx.workflow_run_id.clone() {
+            self.workflow_spans.finish_if_terminal_after_drain(
+                workflow_run_id,
+                entity_type.to_string(),
+                entity_id.to_string(),
+                response.state.status.clone(),
+            );
         }
 
         Ok(response)

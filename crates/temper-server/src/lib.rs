@@ -41,6 +41,7 @@ pub(crate) mod trajectory_outbox;
 pub mod trigger;
 pub mod wasm_registry;
 pub mod webhooks;
+pub(crate) mod workflow_tracing;
 
 pub use entity_actor::{EntityActor, EntityActorHandler, EntityMsg, EntityResponse, EntityState};
 pub use registry::SpecRegistry;

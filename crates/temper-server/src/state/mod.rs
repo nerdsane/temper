@@ -5,6 +5,7 @@ pub mod custom_effects;
 mod dispatch;
 mod entity_ops;
 mod evolution;
+mod file_read_blobs;
 mod file_read_projection;
 mod file_reads;
 pub mod metrics;
@@ -335,6 +336,8 @@ pub struct ServerState {
     /// receive a clone of this Arc via `with_shared_streams` so
     /// FFI calls from the guest resolve to the same handle IDs.
     pub http_stream_registry: Arc<temper_wasm::http_stream::HttpStreamRegistry>,
+    /// Long-lived workflow root spans keyed by workflow.run_id.
+    pub(crate) workflow_spans: Arc<crate::workflow_tracing::WorkflowSpanRegistry>,
 }
 
 /// Install a one-time hook so liveness violations surfaced by temper-spec
@@ -465,6 +468,7 @@ impl ServerState {
             custom_effect_handler: None,
             http_endpoint_tables: Arc::new(crate::http_endpoint::HttpEndpointTables::new()),
             http_stream_registry: Arc::new(temper_wasm::http_stream::HttpStreamRegistry::new()),
+            workflow_spans: Arc::new(crate::workflow_tracing::WorkflowSpanRegistry::default()),
         };
 
         // Pre-register built-in WASM modules (http_fetch for generic HTTP integrations).
@@ -700,6 +704,7 @@ impl ServerState {
             custom_effect_handler: None,
             http_endpoint_tables: Arc::new(crate::http_endpoint::HttpEndpointTables::new()),
             http_stream_registry: Arc::new(temper_wasm::http_stream::HttpStreamRegistry::new()),
+            workflow_spans: Arc::new(crate::workflow_tracing::WorkflowSpanRegistry::default()),
         };
         state.register_builtin_wasm_modules();
         state
@@ -964,6 +969,7 @@ impl ServerState {
             entity_type: "File".to_string(),
             entity_id: file_id.to_string(),
             trigger_action: "StreamUpload".to_string(),
+            wasm_module: Some("blob_adapter".to_string()),
             trigger_params: serde_json::json!({
                 "stream_id": stream_id,
                 "size_bytes": body.len() as i64,
@@ -1071,6 +1077,7 @@ impl ServerState {
             entity_type: "File".to_string(),
             entity_id: file_id.to_string(),
             trigger_action: "StreamDownload".to_string(),
+            wasm_module: Some("blob_adapter".to_string()),
             trigger_params: serde_json::json!({
                 "stream_id": response_stream_id,
                 "operation": "get",

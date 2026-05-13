@@ -95,6 +95,7 @@ async fn outbound_streaming_injects_internal_auth_headers() {
             entity_type: "Workspace".to_string(),
             entity_id: "ws-1".to_string(),
             trigger_action: "CreateFile".to_string(),
+            wasm_module: Some("blob_adapter".to_string()),
             trigger_params: Value::Null,
             entity_state: Value::Null,
             agent_id: Some("operator".to_string()),

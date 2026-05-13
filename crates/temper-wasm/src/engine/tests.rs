@@ -120,6 +120,7 @@ fn make_context() -> WasmInvocationContext {
         entity_type: "Order".into(),
         entity_id: "1".into(),
         trigger_action: "Submit".into(),
+        wasm_module: Some("test_module".into()),
         trigger_params: serde_json::Value::Null,
         entity_state: serde_json::Value::Null,
         agent_id: None,

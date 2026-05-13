@@ -3,10 +3,14 @@ use reqwest::header::{AUTHORIZATION, CONTENT_TYPE, HOST, HeaderMap, HeaderValue}
 use sha2::{Digest, Sha256};
 use std::sync::OnceLock;
 use temper_runtime::tenant::TenantId;
-use temper_store_turso::{PublishedArtifactRow, PublishedArtifactUpsert};
-use tracing::instrument;
+use tracing::{Span, instrument};
+
+use crate::storage::{PublishedArtifactStoreRow, PublishedArtifactStoreUpsert};
 
 use super::{IndexedFileStreamRead, ServerState};
+use telemetry::{PublishedArtifactTelemetry, emit_published_artifact_persisted_log};
+
+mod telemetry;
 
 const DEFAULT_PUBLIC_ARTIFACT_NAMESPACE: &str = "published-artifacts";
 
@@ -27,15 +31,28 @@ impl ServerState {
         otel.name = "state.publish_file_artifact",
         tenant = %tenant,
         file_id = %request.file_id,
+        source_file_id = %request.file_id,
+        source_file_version_id = %request.source_file_version_id,
         artifact_label = %request.label,
         owner_ref_type = %request.owner_ref_type,
         owner_ref_id = %request.owner_ref_id,
+        artifact_id = tracing::field::Empty,
+        content_hash = tracing::field::Empty,
+        mime_type = tracing::field::Empty,
+        byte_length = tracing::field::Empty,
+        public_storage_key = tracing::field::Empty,
+        public_url = tracing::field::Empty,
+        artifact_status = tracing::field::Empty,
+        metadata_backend = tracing::field::Empty,
+        artifact_namespace = tracing::field::Empty,
+        public_blob_bucket = tracing::field::Empty,
+        public_blob_endpoint_host = tracing::field::Empty,
     ))]
     pub async fn publish_file_artifact(
         &self,
         tenant: &TenantId,
         request: PublishFileArtifactRequest,
-    ) -> Result<PublishedArtifactRow, String> {
+    ) -> Result<PublishedArtifactStoreRow, String> {
         let source_display = if request.source_file_version_id.trim().is_empty() {
             format!("File('{}')", request.file_id)
         } else {
@@ -83,6 +100,11 @@ impl ServerState {
             .as_deref()
             .filter(|namespace| !namespace.trim().is_empty())
             .unwrap_or(DEFAULT_PUBLIC_ARTIFACT_NAMESPACE);
+        let (endpoint_host, _) = parse_url_host_path(endpoint.as_str());
+        let span = Span::current();
+        span.record("artifact_namespace", namespace);
+        span.record("public_blob_bucket", bucket.as_str());
+        span.record("public_blob_endpoint_host", endpoint_host);
 
         let storage_key = public_storage_key(
             namespace,
@@ -115,7 +137,7 @@ impl ServerState {
             &request.label,
             &content_hash,
         );
-        let artifact = PublishedArtifactUpsert {
+        let artifact = PublishedArtifactStoreUpsert {
             id: artifact_id,
             tenant: tenant.to_string(),
             source_file_id: request.file_id,
@@ -131,22 +153,24 @@ impl ServerState {
             status: "published".to_string(),
         };
 
-        if let Some(store) = self.turso_store_for_tenant(tenant.as_str()).await {
-            return store
-                .upsert_published_artifact(&artifact)
-                .await
-                .map_err(|e| format!("failed to persist published artifact: {e}"));
-        }
-
-        tracing::warn!(
-            tenant = %tenant,
-            artifact_id = %artifact.id,
-            owner_ref_type = %artifact.owner_ref_type,
-            owner_ref_id = %artifact.owner_ref_id,
-            artifact_label = %artifact.label,
-            "published artifact metadata store unavailable; returning derived artifact row"
+        let store = self
+            .metadata_store_for_tenant(tenant.as_str())
+            .await
+            .ok_or_else(|| "published artifact metadata store unavailable".to_string())?;
+        let persisted = store
+            .upsert_published_artifact(&artifact)
+            .await
+            .map_err(|e| format!("failed to persist published artifact: {e}"))?;
+        let telemetry = PublishedArtifactTelemetry::from_row(
+            &persisted,
+            store.backend_name(),
+            namespace,
+            bucket.as_str(),
+            endpoint_host,
         );
-        Ok(published_artifact_row_from_upsert(artifact))
+        telemetry.record_on_current_span();
+        emit_published_artifact_persisted_log(&telemetry);
+        Ok(persisted)
     }
 
     fn secret(&self, tenant: &TenantId, key: &str) -> Option<String> {
@@ -156,24 +180,16 @@ impl ServerState {
     }
 }
 
-fn published_artifact_row_from_upsert(artifact: PublishedArtifactUpsert) -> PublishedArtifactRow {
-    PublishedArtifactRow {
-        id: artifact.id,
-        tenant: artifact.tenant,
-        source_file_id: artifact.source_file_id,
-        source_file_version_id: artifact.source_file_version_id,
-        content_hash: artifact.content_hash,
-        label: artifact.label,
-        mime_type: artifact.mime_type,
-        byte_length: artifact.byte_length,
-        public_storage_key: artifact.public_storage_key,
-        public_url: artifact.public_url,
-        owner_ref_type: artifact.owner_ref_type,
-        owner_ref_id: artifact.owner_ref_id,
-        status: artifact.status,
-    }
-}
-
+#[instrument(skip_all, fields(
+    otel.name = "state.put_public_blob",
+    tenant = %tenant,
+    bucket = %bucket,
+    storage_key = %storage_key,
+    endpoint_host = tracing::field::Empty,
+    mime_type = %stream_content_type(mime_type),
+    byte_length = bytes.len(),
+    http.status_code = tracing::field::Empty,
+))]
 async fn put_public_blob(
     state: &ServerState,
     tenant: &TenantId,
@@ -189,6 +205,8 @@ async fn put_public_blob(
         bucket.trim_matches('/'),
         storage_key.trim_start_matches('/')
     );
+    let (endpoint_host, _) = parse_url_host_path(&url);
+    tracing::Span::current().record("endpoint_host", endpoint_host);
     let mut request = public_blob_http_client()
         .put(&url)
         .body(bytes.to_vec())
@@ -201,14 +219,58 @@ async fn put_public_blob(
     let response = request
         .send()
         .await
-        .map_err(|e| format!("public blob PUT request failed for '{storage_key}': {e}"))?;
-    if !response.status().is_success() {
-        return Err(format!(
-            "public blob PUT failed for '{storage_key}' with HTTP {}",
-            response.status()
-        ));
+        .map_err(|e| public_blob_put_request_error(endpoint, bucket, storage_key, &e))?;
+    let status = response.status();
+    tracing::Span::current().record("http.status_code", status.as_u16());
+    if !status.is_success() {
+        let error = public_blob_put_status_error(bucket, endpoint, storage_key, status);
+        let mime_type = stream_content_type(mime_type);
+        tracing::warn!(
+            http.status_code = %status,
+            endpoint_host,
+            bucket,
+            storage_key,
+            mime_type,
+            byte_length = bytes.len(),
+            "public blob PUT failed"
+        );
+        return Err(error);
     }
+    let mime_type = stream_content_type(mime_type);
+    tracing::info!(
+        http.status_code = %status,
+        endpoint_host,
+        bucket,
+        storage_key,
+        mime_type,
+        byte_length = bytes.len(),
+        "public blob PUT succeeded"
+    );
     Ok(())
+}
+
+fn public_blob_put_request_error(
+    endpoint: &str,
+    bucket: &str,
+    storage_key: &str,
+    error: &reqwest::Error,
+) -> String {
+    let (endpoint_host, _) = parse_url_host_path(endpoint);
+    format!(
+        "public blob PUT request failed for bucket '{bucket}' key '{storage_key}' via endpoint host '{endpoint_host}': {error}"
+    )
+}
+
+fn public_blob_put_status_error(
+    bucket: &str,
+    endpoint: &str,
+    storage_key: &str,
+    status: reqwest::StatusCode,
+) -> String {
+    let (endpoint_host, _) = parse_url_host_path(endpoint);
+    format!(
+        "public blob PUT failed for bucket '{bucket}' key '{storage_key}' via endpoint host '{endpoint_host}' with HTTP {status}"
+    )
 }
 
 fn build_public_blob_put_headers(
@@ -420,45 +482,4 @@ fn uri_encode_path(path: &str) -> String {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::{public_storage_key, published_artifact_id};
-
-    #[test]
-    fn public_storage_key_is_generic_and_content_addressed() {
-        let key = public_storage_key(
-            "public/demo artifacts",
-            "Report",
-            "quarterly-2026",
-            "preview image",
-            "sha256:abc123",
-            "image/png",
-        );
-
-        assert_eq!(
-            key,
-            "public/demo-artifacts/Report/quarterly-2026/preview-image-abc123.png"
-        );
-    }
-
-    #[test]
-    fn published_artifact_id_uses_generic_owner_ref_label_and_hash() {
-        let first = published_artifact_id(
-            "tenant-a",
-            "Report",
-            "quarterly-2026",
-            "preview",
-            "sha256:abc123",
-        );
-        let second = published_artifact_id(
-            "tenant-a",
-            "Report",
-            "quarterly-2026",
-            "download",
-            "sha256:abc123",
-        );
-
-        assert!(first.starts_with("part-"));
-        assert_eq!(first.len(), "part-".len() + 32);
-        assert_ne!(first, second);
-    }
-}
+mod tests;

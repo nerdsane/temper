@@ -49,6 +49,8 @@ pub struct Context {
     pub entity_id: String,
     /// The action that triggered this integration.
     pub trigger_action: String,
+    /// WASM module name being invoked, when the host provides it.
+    pub wasm_module: String,
     /// HTTP dispatch context (present only when this invocation was
     /// routed via an ADR-0069 HttpEndpoint). Guests serving HTTP
     /// unwrap this then drive the inbound exchange via
@@ -139,6 +141,11 @@ impl Context {
             .and_then(Value::as_str)
             .unwrap_or("")
             .to_string();
+        let wasm_module = parsed
+            .get("wasm_module")
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .to_string();
 
         let http_request = parsed.get("http_request").cloned();
 
@@ -150,6 +157,7 @@ impl Context {
             entity_type,
             entity_id,
             trigger_action,
+            wasm_module,
             http_request,
         })
     }

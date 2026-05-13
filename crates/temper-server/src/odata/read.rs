@@ -984,6 +984,7 @@ async fn handle_stream_get(
         entity_type: entity_type.clone(),
         entity_id: key.clone(),
         trigger_action: "StreamDownload".to_string(),
+        wasm_module: Some("blob_adapter".to_string()),
         trigger_params: serde_json::json!({
             "stream_id": response_stream_id,
             "operation": "get",
