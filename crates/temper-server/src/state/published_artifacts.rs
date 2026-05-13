@@ -3,11 +3,14 @@ use reqwest::header::{AUTHORIZATION, CONTENT_TYPE, HOST, HeaderMap, HeaderValue}
 use sha2::{Digest, Sha256};
 use std::sync::OnceLock;
 use temper_runtime::tenant::TenantId;
-use tracing::instrument;
+use tracing::{Span, instrument};
 
 use crate::storage::{PublishedArtifactStoreRow, PublishedArtifactStoreUpsert};
 
 use super::{IndexedFileStreamRead, ServerState};
+use telemetry::{PublishedArtifactTelemetry, emit_published_artifact_persisted_log};
+
+mod telemetry;
 
 const DEFAULT_PUBLIC_ARTIFACT_NAMESPACE: &str = "published-artifacts";
 
@@ -28,9 +31,22 @@ impl ServerState {
         otel.name = "state.publish_file_artifact",
         tenant = %tenant,
         file_id = %request.file_id,
+        source_file_id = %request.file_id,
+        source_file_version_id = %request.source_file_version_id,
         artifact_label = %request.label,
         owner_ref_type = %request.owner_ref_type,
         owner_ref_id = %request.owner_ref_id,
+        artifact_id = tracing::field::Empty,
+        content_hash = tracing::field::Empty,
+        mime_type = tracing::field::Empty,
+        byte_length = tracing::field::Empty,
+        public_storage_key = tracing::field::Empty,
+        public_url = tracing::field::Empty,
+        artifact_status = tracing::field::Empty,
+        metadata_backend = tracing::field::Empty,
+        artifact_namespace = tracing::field::Empty,
+        public_blob_bucket = tracing::field::Empty,
+        public_blob_endpoint_host = tracing::field::Empty,
     ))]
     pub async fn publish_file_artifact(
         &self,
@@ -84,6 +100,11 @@ impl ServerState {
             .as_deref()
             .filter(|namespace| !namespace.trim().is_empty())
             .unwrap_or(DEFAULT_PUBLIC_ARTIFACT_NAMESPACE);
+        let (endpoint_host, _) = parse_url_host_path(endpoint.as_str());
+        let span = Span::current();
+        span.record("artifact_namespace", namespace);
+        span.record("public_blob_bucket", bucket.as_str());
+        span.record("public_blob_endpoint_host", endpoint_host);
 
         let storage_key = public_storage_key(
             namespace,
@@ -140,15 +161,15 @@ impl ServerState {
             .upsert_published_artifact(&artifact)
             .await
             .map_err(|e| format!("failed to persist published artifact: {e}"))?;
-        tracing::info!(
-            tenant = %tenant,
-            artifact_id = %persisted.id,
-            owner_ref_type = %persisted.owner_ref_type,
-            owner_ref_id = %persisted.owner_ref_id,
-            artifact_label = %persisted.label,
-            metadata_backend = store.backend_name(),
-            "published artifact metadata persisted"
+        let telemetry = PublishedArtifactTelemetry::from_row(
+            &persisted,
+            store.backend_name(),
+            namespace,
+            bucket.as_str(),
+            endpoint_host,
         );
+        telemetry.record_on_current_span();
+        emit_published_artifact_persisted_log(&telemetry);
         Ok(persisted)
     }
 
@@ -203,20 +224,26 @@ async fn put_public_blob(
     tracing::Span::current().record("http.status_code", status.as_u16());
     if !status.is_success() {
         let error = public_blob_put_status_error(bucket, endpoint, storage_key, status);
+        let mime_type = stream_content_type(mime_type);
         tracing::warn!(
             http.status_code = %status,
             endpoint_host,
             bucket,
             storage_key,
+            mime_type,
+            byte_length = bytes.len(),
             "public blob PUT failed"
         );
         return Err(error);
     }
+    let mime_type = stream_content_type(mime_type);
     tracing::info!(
         http.status_code = %status,
         endpoint_host,
         bucket,
         storage_key,
+        mime_type,
+        byte_length = bytes.len(),
         "public blob PUT succeeded"
     );
     Ok(())
