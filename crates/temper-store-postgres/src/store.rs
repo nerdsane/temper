@@ -541,6 +541,9 @@ mod tests {
         let _ = PostgresEventStore::persist_wasm_invocation;
         let _ = PostgresEventStore::load_recent_wasm_invocations;
         let _ = PostgresEventStore::delete_wasm_module;
+
+        let _ = PostgresEventStore::upsert_published_artifact;
+        let _ = PostgresEventStore::load_published_artifact;
     }
 
     #[test]
@@ -614,6 +617,69 @@ mod tests {
                 .await
                 .unwrap();
             crate::dbm::postgres_query!("DELETE FROM entity_catalog WHERE tenant = $1")
+                .bind(&tenant)
+                .execute(&pool)
+                .await
+                .unwrap();
+        });
+    }
+
+    #[test]
+    fn published_artifact_upsert_round_trips_and_updates_by_id() {
+        let database_url = match std::env::var("DATABASE_URL") {
+            Ok(url) => url,
+            Err(_) => return,
+        };
+
+        sqlx::test_block_on(async {
+            let pool = PgPool::connect(&database_url).await.unwrap();
+            run_migrations(&pool).await.unwrap();
+            let store = PostgresEventStore::new(pool.clone());
+            let tenant = format!("tenant-published-artifact-{}", uuid::Uuid::new_v4());
+
+            let artifact = crate::PostgresPublishedArtifactUpsert {
+                id: "part-test",
+                tenant: &tenant,
+                source_file_id: "file-a",
+                source_file_version_id: "",
+                content_hash: "sha256:abc",
+                label: "latest",
+                mime_type: "text/markdown",
+                byte_length: 42,
+                public_storage_key: "published/file-a.md",
+                public_url: "https://assets.example/published/file-a.md",
+                owner_ref_type: "Doc",
+                owner_ref_id: "doc-a",
+                status: "published",
+            };
+
+            let row = store.upsert_published_artifact(&artifact).await.unwrap();
+            assert_eq!(row.tenant, tenant);
+            assert_eq!(row.id, "part-test");
+            assert_eq!(row.public_url, "https://assets.example/published/file-a.md");
+
+            let updated = crate::PostgresPublishedArtifactUpsert {
+                public_url: "https://assets.example/published/file-a-v2.md",
+                public_storage_key: "published/file-a-v2.md",
+                byte_length: 43,
+                ..artifact
+            };
+            store.upsert_published_artifact(&updated).await.unwrap();
+
+            let loaded = store
+                .load_published_artifact(&tenant, "part-test")
+                .await
+                .unwrap()
+                .expect("artifact should load after upsert");
+
+            assert_eq!(
+                loaded.public_url,
+                "https://assets.example/published/file-a-v2.md"
+            );
+            assert_eq!(loaded.public_storage_key, "published/file-a-v2.md");
+            assert_eq!(loaded.byte_length, 43);
+
+            crate::dbm::postgres_query!("DELETE FROM published_artifacts WHERE tenant = $1")
                 .bind(&tenant)
                 .execute(&pool)
                 .await

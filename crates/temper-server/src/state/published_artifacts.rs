@@ -3,8 +3,9 @@ use reqwest::header::{AUTHORIZATION, CONTENT_TYPE, HOST, HeaderMap, HeaderValue}
 use sha2::{Digest, Sha256};
 use std::sync::OnceLock;
 use temper_runtime::tenant::TenantId;
-use temper_store_turso::{PublishedArtifactRow, PublishedArtifactUpsert};
 use tracing::instrument;
+
+use crate::storage::{PublishedArtifactStoreRow, PublishedArtifactStoreUpsert};
 
 use super::{IndexedFileStreamRead, ServerState};
 
@@ -35,7 +36,7 @@ impl ServerState {
         &self,
         tenant: &TenantId,
         request: PublishFileArtifactRequest,
-    ) -> Result<PublishedArtifactRow, String> {
+    ) -> Result<PublishedArtifactStoreRow, String> {
         let source_display = if request.source_file_version_id.trim().is_empty() {
             format!("File('{}')", request.file_id)
         } else {
@@ -115,7 +116,7 @@ impl ServerState {
             &request.label,
             &content_hash,
         );
-        let artifact = PublishedArtifactUpsert {
+        let artifact = PublishedArtifactStoreUpsert {
             id: artifact_id,
             tenant: tenant.to_string(),
             source_file_id: request.file_id,
@@ -131,46 +132,30 @@ impl ServerState {
             status: "published".to_string(),
         };
 
-        if let Some(store) = self.turso_store_for_tenant(tenant.as_str()).await {
-            return store
-                .upsert_published_artifact(&artifact)
-                .await
-                .map_err(|e| format!("failed to persist published artifact: {e}"));
-        }
-
-        tracing::warn!(
+        let store = self
+            .metadata_store_for_tenant(tenant.as_str())
+            .await
+            .ok_or_else(|| "published artifact metadata store unavailable".to_string())?;
+        let persisted = store
+            .upsert_published_artifact(&artifact)
+            .await
+            .map_err(|e| format!("failed to persist published artifact: {e}"))?;
+        tracing::info!(
             tenant = %tenant,
-            artifact_id = %artifact.id,
-            owner_ref_type = %artifact.owner_ref_type,
-            owner_ref_id = %artifact.owner_ref_id,
-            artifact_label = %artifact.label,
-            "published artifact metadata store unavailable; returning derived artifact row"
+            artifact_id = %persisted.id,
+            owner_ref_type = %persisted.owner_ref_type,
+            owner_ref_id = %persisted.owner_ref_id,
+            artifact_label = %persisted.label,
+            metadata_backend = store.backend_name(),
+            "published artifact metadata persisted"
         );
-        Ok(published_artifact_row_from_upsert(artifact))
+        Ok(persisted)
     }
 
     fn secret(&self, tenant: &TenantId, key: &str) -> Option<String> {
         self.secrets_vault
             .as_ref()
             .and_then(|vault| vault.get_secret(tenant.as_str(), key))
-    }
-}
-
-fn published_artifact_row_from_upsert(artifact: PublishedArtifactUpsert) -> PublishedArtifactRow {
-    PublishedArtifactRow {
-        id: artifact.id,
-        tenant: artifact.tenant,
-        source_file_id: artifact.source_file_id,
-        source_file_version_id: artifact.source_file_version_id,
-        content_hash: artifact.content_hash,
-        label: artifact.label,
-        mime_type: artifact.mime_type,
-        byte_length: artifact.byte_length,
-        public_storage_key: artifact.public_storage_key,
-        public_url: artifact.public_url,
-        owner_ref_type: artifact.owner_ref_type,
-        owner_ref_id: artifact.owner_ref_id,
-        status: artifact.status,
     }
 }
 

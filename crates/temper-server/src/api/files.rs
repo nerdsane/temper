@@ -44,7 +44,7 @@ pub(crate) struct PublishArtifactRequest {
 
 #[derive(Debug, serde::Serialize)]
 pub(crate) struct PublishArtifactResponse {
-    artifact: temper_store_turso::PublishedArtifactRow,
+    artifact: crate::storage::PublishedArtifactStoreRow,
 }
 
 /// POST /api/files/read-text-batch — read many text file bodies via the
