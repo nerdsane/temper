@@ -66,6 +66,7 @@ fn guest_log_named_event_carries_datadog_trace_and_span_correlation() {
         entity_type: "Session".to_string(),
         entity_id: "ss-1".to_string(),
         trigger_action: "ContextReady".to_string(),
+        wasm_module: Some("provider_caller".to_string()),
         trigger_params: serde_json::Value::Null,
         entity_state: serde_json::Value::Null,
         agent_id: Some("agent-1".to_string()),

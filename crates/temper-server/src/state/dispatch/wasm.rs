@@ -376,6 +376,7 @@ impl crate::state::ServerState {
             entity_type: ctx.entity_ref.entity_type.to_string(),
             entity_id: ctx.entity_ref.entity_id.to_string(),
             trigger_action: ctx.action.to_string(),
+            wasm_module: Some(module_name.clone()),
             trigger_params,
             entity_state: serde_json::to_value(entity_state).unwrap_or_default(),
             agent_id: ctx.agent_ctx.agent_id.clone(),
@@ -995,9 +996,12 @@ impl crate::state::ServerState {
         &self,
         tenant: &TenantId,
         module_name: &str,
-        context: WasmInvocationContext,
+        mut context: WasmInvocationContext,
         streams: Arc<std::sync::RwLock<StreamRegistry>>,
     ) -> Result<temper_wasm::WasmInvocationResult, String> {
+        if context.wasm_module.is_none() {
+            context.wasm_module = Some(module_name.to_string());
+        }
         // Resolve module hash
         let module_hash = {
             let wasm_reg = self.wasm_module_registry.read().unwrap(); // ci-ok: infallible lock

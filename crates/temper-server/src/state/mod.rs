@@ -969,6 +969,7 @@ impl ServerState {
             entity_type: "File".to_string(),
             entity_id: file_id.to_string(),
             trigger_action: "StreamUpload".to_string(),
+            wasm_module: Some("blob_adapter".to_string()),
             trigger_params: serde_json::json!({
                 "stream_id": stream_id,
                 "size_bytes": body.len() as i64,
@@ -1076,6 +1077,7 @@ impl ServerState {
             entity_type: "File".to_string(),
             entity_id: file_id.to_string(),
             trigger_action: "StreamDownload".to_string(),
+            wasm_module: Some("blob_adapter".to_string()),
             trigger_params: serde_json::json!({
                 "stream_id": response_stream_id,
                 "operation": "get",

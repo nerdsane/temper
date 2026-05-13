@@ -296,6 +296,7 @@ async fn dispatch_matched_route(
         entity_type: "HttpEndpoint".to_string(),
         entity_id: route.route.id.clone(),
         trigger_action: "HandleHttp".to_string(),
+        wasm_module: Some(route.route.integration_module.clone()),
         trigger_params: serde_json::Value::Null,
         entity_state: serde_json::Value::Null,
         agent_id: None,
@@ -328,7 +329,8 @@ async fn dispatch_matched_route(
         .map(|v| v.get_tenant_secrets(tenant_id.as_str()))
         .unwrap_or_default();
     let host: std::sync::Arc<dyn temper_wasm::WasmHost> = std::sync::Arc::new(
-        temper_wasm::ProductionWasmHost::with_shared_streams(secrets, streams.clone()),
+        temper_wasm::ProductionWasmHost::with_shared_streams(secrets, streams.clone())
+            .with_invocation_context(ctx.clone()),
     );
 
     // Spawn task B: invoke the WASM module. Runs to completion

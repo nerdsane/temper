@@ -82,6 +82,8 @@ fn split_span_hint_headers_extracts_generic_attributes() {
 fn common_session_tool_and_llm_span_hints_are_datadog_visible_fields() {
     for attr_key in [
         "observability_event",
+        "tenant",
+        "wasm_module",
         "session_id",
         "managed_session_id",
         "inner_session_id",
@@ -90,8 +92,12 @@ fn common_session_tool_and_llm_span_hints_are_datadog_visible_fields() {
         "environment_id",
         "entity_type",
         "entity_id",
+        "trigger_action",
         "action_name",
         "workflow_step",
+        "workflow_root_entity_type",
+        "workflow_root_entity_id",
+        "workflow_run_id",
         "tool.name",
         "tool.call_id",
         "gen_ai.operation.name",

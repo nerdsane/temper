@@ -6,7 +6,7 @@
 
 use std::collections::BTreeMap;
 use std::future::Future;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use sha2::{Digest, Sha256};
 use wasmtime::{Caller, Linker};
@@ -145,6 +145,65 @@ pub(crate) fn resolve_field_bytes(
         },
     };
     FieldResolution::Bytes(bytes)
+}
+
+fn record_context_json_on_span(span: &tracing::Span, context_json: &str, workflow_step: &str) {
+    span.record("workflow_step", workflow_step);
+    let Ok(ctx) = serde_json::from_str::<serde_json::Value>(context_json) else {
+        return;
+    };
+    if let Some(value) = ctx.get("tenant").and_then(serde_json::Value::as_str) {
+        span.record("tenant", value);
+    }
+    if let Some(value) = ctx.get("entity_type").and_then(serde_json::Value::as_str) {
+        span.record("entity_type", value);
+    }
+    if let Some(value) = ctx.get("entity_id").and_then(serde_json::Value::as_str) {
+        span.record("entity_id", value);
+    }
+    if let Some(value) = ctx
+        .get("trigger_action")
+        .and_then(serde_json::Value::as_str)
+    {
+        span.record("trigger_action", value);
+        span.record("action_name", value);
+    }
+    if let Some(value) = ctx.get("wasm_module").and_then(serde_json::Value::as_str) {
+        span.record("wasm_module", value);
+    }
+    if let Some(value) = ctx.get("agent_id").and_then(serde_json::Value::as_str) {
+        span.record("agent_id", value);
+    }
+    if let Some(value) = ctx
+        .get("session_id")
+        .and_then(serde_json::Value::as_str)
+        .or_else(|| {
+            let entity_type = ctx.get("entity_type").and_then(serde_json::Value::as_str)?;
+            (entity_type == "Session")
+                .then(|| ctx.get("entity_id").and_then(serde_json::Value::as_str))
+                .flatten()
+        })
+    {
+        span.record("session_id", value);
+    }
+    if let Some(value) = ctx
+        .get("workflow_root_entity_type")
+        .and_then(serde_json::Value::as_str)
+    {
+        span.record("workflow_root_entity_type", value);
+    }
+    if let Some(value) = ctx
+        .get("workflow_root_entity_id")
+        .and_then(serde_json::Value::as_str)
+    {
+        span.record("workflow_root_entity_id", value);
+    }
+    if let Some(value) = ctx
+        .get("workflow_run_id")
+        .and_then(serde_json::Value::as_str)
+    {
+        span.record("workflow_run_id", value);
+    }
 }
 
 /// Link all host functions into the WASM linker.
@@ -687,9 +746,35 @@ pub(super) fn link_host_functions(linker: &mut Linker<HostState>) -> Result<(), 
                 let mut key_buf = vec![0u8; key_len as usize];
                 let _ = memory.read(&caller, key_ptr as usize, &mut key_buf);
                 let key = String::from_utf8_lossy(&key_buf);
+                let started = Instant::now();
+                let span = tracing::info_span!(
+                    "wasm.host.cache_contains",
+                    otel.name = "wasm.host.cache_contains",
+                    cache.key = %key,
+                    cache.hit = tracing::field::Empty,
+                    duration_ms = tracing::field::Empty,
+                    tenant = tracing::field::Empty,
+                    wasm_module = tracing::field::Empty,
+                    session_id = tracing::field::Empty,
+                    agent_id = tracing::field::Empty,
+                    entity_type = tracing::field::Empty,
+                    entity_id = tracing::field::Empty,
+                    trigger_action = tracing::field::Empty,
+                    action_name = tracing::field::Empty,
+                    workflow_step = tracing::field::Empty,
+                    workflow_root_entity_type = tracing::field::Empty,
+                    workflow_root_entity_id = tracing::field::Empty,
+                    workflow_run_id = tracing::field::Empty,
+                );
+                record_context_json_on_span(&span, &caller.data().context_json, "cache_contains");
+                let _guard = span.enter();
 
                 let streams = caller.data().streams.read().expect("streams lock poisoned"); // ci-ok: infallible lock
-                if streams.cache_contains(&key) { 1 } else { 0 }
+                let hit = streams.cache_contains(&key);
+                tracing::Span::current().record("cache.hit", hit);
+                tracing::Span::current()
+                    .record("duration_ms", started.elapsed().as_millis() as u64);
+                if hit { 1 } else { 0 }
             },
         )
         .map_err(|e| WasmError::Compilation(format!("failed to link host_cache_contains: {e}")))?;
@@ -718,6 +803,30 @@ pub(super) fn link_host_functions(linker: &mut Linker<HostState>) -> Result<(), 
                 let mut id_buf = vec![0u8; stream_id_len as usize];
                 let _ = memory.read(&caller, stream_id_ptr as usize, &mut id_buf);
                 let stream_id = String::from_utf8_lossy(&id_buf).to_string();
+                let started = Instant::now();
+                let span = tracing::info_span!(
+                    "wasm.host.cache_to_stream",
+                    otel.name = "wasm.host.cache_to_stream",
+                    cache.key = %key,
+                    stream.id = %stream_id,
+                    cache.hit = tracing::field::Empty,
+                    bytes = tracing::field::Empty,
+                    duration_ms = tracing::field::Empty,
+                    tenant = tracing::field::Empty,
+                    wasm_module = tracing::field::Empty,
+                    session_id = tracing::field::Empty,
+                    agent_id = tracing::field::Empty,
+                    entity_type = tracing::field::Empty,
+                    entity_id = tracing::field::Empty,
+                    trigger_action = tracing::field::Empty,
+                    action_name = tracing::field::Empty,
+                    workflow_step = tracing::field::Empty,
+                    workflow_root_entity_type = tracing::field::Empty,
+                    workflow_root_entity_id = tracing::field::Empty,
+                    workflow_run_id = tracing::field::Empty,
+                );
+                record_context_json_on_span(&span, &caller.data().context_json, "cache_to_stream");
+                let _guard = span.enter();
 
                 let mut streams = caller
                     .data()
@@ -725,8 +834,19 @@ pub(super) fn link_host_functions(linker: &mut Linker<HostState>) -> Result<(), 
                     .write()
                     .expect("streams lock poisoned"); // ci-ok: infallible lock
                 match streams.cache_to_stream(&key, &stream_id) {
-                    Some(byte_count) => byte_count as i32,
-                    None => -1,
+                    Some(byte_count) => {
+                        tracing::Span::current().record("cache.hit", true);
+                        tracing::Span::current().record("bytes", byte_count as u64);
+                        tracing::Span::current()
+                            .record("duration_ms", started.elapsed().as_millis() as u64);
+                        byte_count as i32
+                    }
+                    None => {
+                        tracing::Span::current().record("cache.hit", false);
+                        tracing::Span::current()
+                            .record("duration_ms", started.elapsed().as_millis() as u64);
+                        -1
+                    }
                 }
             },
         )
@@ -772,6 +892,29 @@ pub(super) fn link_host_functions(linker: &mut Linker<HostState>) -> Result<(), 
                     return -3;
                 }
                 let field_name = String::from_utf8_lossy(&name_buf).to_string();
+                let started = Instant::now();
+                let span = tracing::info_span!(
+                    "wasm.host.read_field",
+                    otel.name = "wasm.host.read_field",
+                    field.name = %field_name,
+                    result = tracing::field::Empty,
+                    bytes = tracing::field::Empty,
+                    duration_ms = tracing::field::Empty,
+                    tenant = tracing::field::Empty,
+                    wasm_module = tracing::field::Empty,
+                    session_id = tracing::field::Empty,
+                    agent_id = tracing::field::Empty,
+                    entity_type = tracing::field::Empty,
+                    entity_id = tracing::field::Empty,
+                    trigger_action = tracing::field::Empty,
+                    action_name = tracing::field::Empty,
+                    workflow_step = tracing::field::Empty,
+                    workflow_root_entity_type = tracing::field::Empty,
+                    workflow_root_entity_id = tracing::field::Empty,
+                    workflow_run_id = tracing::field::Empty,
+                );
+                record_context_json_on_span(&span, &caller.data().context_json, "read_field");
+                let _guard = span.enter();
 
                 let bytes = match resolve_field_bytes(
                     &caller.data().context_json,
@@ -779,26 +922,50 @@ pub(super) fn link_host_functions(linker: &mut Linker<HostState>) -> Result<(), 
                     &field_name,
                 ) {
                     FieldResolution::Bytes(b) => b,
-                    FieldResolution::NotFound => return -1,
+                    FieldResolution::NotFound => {
+                        tracing::Span::current().record("result", "not_found");
+                        tracing::Span::current()
+                            .record("duration_ms", started.elapsed().as_millis() as u64);
+                        return -1;
+                    }
                     FieldResolution::BlobRefMissing { key } => {
                         tracing::warn!(
                             field = %field_name,
                             blob_key = %key,
                             "host_read_field: blob ref not in prefetch cache"
                         );
+                        tracing::Span::current().record("result", "blob_ref_missing");
+                        tracing::Span::current()
+                            .record("duration_ms", started.elapsed().as_millis() as u64);
                         return -2;
                     }
-                    FieldResolution::HostError => return -3,
+                    FieldResolution::HostError => {
+                        tracing::Span::current().record("result", "host_error");
+                        tracing::Span::current()
+                            .record("duration_ms", started.elapsed().as_millis() as u64);
+                        return -3;
+                    }
                 };
 
                 let needed = bytes.len() as i32;
                 if needed > buf_len {
                     // Buffer too small — signal needed size; caller retries with larger buf.
+                    tracing::Span::current().record("result", "buffer_too_small");
+                    tracing::Span::current().record("bytes", needed as u64);
+                    tracing::Span::current()
+                        .record("duration_ms", started.elapsed().as_millis() as u64);
                     return needed;
                 }
                 if memory.write(&mut caller, buf_ptr as usize, &bytes).is_err() {
+                    tracing::Span::current().record("result", "memory_write_error");
+                    tracing::Span::current()
+                        .record("duration_ms", started.elapsed().as_millis() as u64);
                     return -3;
                 }
+                tracing::Span::current().record("result", "ok");
+                tracing::Span::current().record("bytes", needed as u64);
+                tracing::Span::current()
+                    .record("duration_ms", started.elapsed().as_millis() as u64);
                 needed
             },
         )
@@ -828,6 +995,34 @@ pub(super) fn link_host_functions(linker: &mut Linker<HostState>) -> Result<(), 
                 let mut id_buf = vec![0u8; stream_id_len as usize];
                 let _ = memory.read(&caller, stream_id_ptr as usize, &mut id_buf);
                 let stream_id = String::from_utf8_lossy(&id_buf).to_string();
+                let started = Instant::now();
+                let span = tracing::info_span!(
+                    "wasm.host.cache_from_stream",
+                    otel.name = "wasm.host.cache_from_stream",
+                    cache.key = %key,
+                    stream.id = %stream_id,
+                    success = tracing::field::Empty,
+                    bytes = tracing::field::Empty,
+                    duration_ms = tracing::field::Empty,
+                    tenant = tracing::field::Empty,
+                    wasm_module = tracing::field::Empty,
+                    session_id = tracing::field::Empty,
+                    agent_id = tracing::field::Empty,
+                    entity_type = tracing::field::Empty,
+                    entity_id = tracing::field::Empty,
+                    trigger_action = tracing::field::Empty,
+                    action_name = tracing::field::Empty,
+                    workflow_step = tracing::field::Empty,
+                    workflow_root_entity_type = tracing::field::Empty,
+                    workflow_root_entity_id = tracing::field::Empty,
+                    workflow_run_id = tracing::field::Empty,
+                );
+                record_context_json_on_span(
+                    &span,
+                    &caller.data().context_json,
+                    "cache_from_stream",
+                );
+                let _guard = span.enter();
 
                 let mut streams = caller
                     .data()
@@ -837,9 +1032,19 @@ pub(super) fn link_host_functions(linker: &mut Linker<HostState>) -> Result<(), 
                 // Read bytes from stream without consuming it
                 let bytes = match streams.get_stream(&stream_id) {
                     Some(b) => b.to_vec(),
-                    None => return -1,
+                    None => {
+                        tracing::Span::current().record("success", false);
+                        tracing::Span::current()
+                            .record("duration_ms", started.elapsed().as_millis() as u64);
+                        return -1;
+                    }
                 };
+                let bytes_len = bytes.len() as u64;
                 streams.cache_put(&key, bytes);
+                tracing::Span::current().record("success", true);
+                tracing::Span::current().record("bytes", bytes_len);
+                tracing::Span::current()
+                    .record("duration_ms", started.elapsed().as_millis() as u64);
                 0
             },
         )
@@ -878,12 +1083,40 @@ pub(super) fn link_host_functions(linker: &mut Linker<HostState>) -> Result<(), 
                 let mut algo_buf = vec![0u8; algorithm_len as usize];
                 let _ = memory.read(&caller, algorithm_ptr as usize, &mut algo_buf);
                 let algorithm = String::from_utf8_lossy(&algo_buf).to_string();
+                let started = Instant::now();
+                let span = tracing::info_span!(
+                    "wasm.host.hash_stream",
+                    otel.name = "wasm.host.hash_stream",
+                    stream.id = %stream_id,
+                    hash.algorithm = %algorithm,
+                    success = tracing::field::Empty,
+                    bytes = tracing::field::Empty,
+                    duration_ms = tracing::field::Empty,
+                    tenant = tracing::field::Empty,
+                    wasm_module = tracing::field::Empty,
+                    session_id = tracing::field::Empty,
+                    agent_id = tracing::field::Empty,
+                    entity_type = tracing::field::Empty,
+                    entity_id = tracing::field::Empty,
+                    trigger_action = tracing::field::Empty,
+                    action_name = tracing::field::Empty,
+                    workflow_step = tracing::field::Empty,
+                    workflow_root_entity_type = tracing::field::Empty,
+                    workflow_root_entity_id = tracing::field::Empty,
+                    workflow_run_id = tracing::field::Empty,
+                );
+                record_context_json_on_span(&span, &caller.data().context_json, "hash_stream");
+                let _guard = span.enter();
 
                 // Hash stream bytes in-place (no clone)
                 let streams = caller.data().streams.read().expect("streams lock poisoned"); // ci-ok: infallible lock
                 let Some(bytes) = streams.get_stream(&stream_id) else {
+                    tracing::Span::current().record("success", false);
+                    tracing::Span::current()
+                        .record("duration_ms", started.elapsed().as_millis() as u64);
                     return -1;
                 };
+                tracing::Span::current().record("bytes", bytes.len() as u64);
 
                 let hex_hash = match algorithm.as_str() {
                     "sha256" => {
@@ -891,16 +1124,27 @@ pub(super) fn link_host_functions(linker: &mut Linker<HostState>) -> Result<(), 
                         hasher.update(bytes);
                         format!("sha256:{:x}", hasher.finalize())
                     }
-                    _ => return -1,
+                    _ => {
+                        tracing::Span::current().record("success", false);
+                        tracing::Span::current()
+                            .record("duration_ms", started.elapsed().as_millis() as u64);
+                        return -1;
+                    }
                 };
                 drop(streams);
 
                 // Write hex hash to result buffer
                 let hash_bytes = hex_hash.as_bytes();
                 if hash_bytes.len() > result_buf_len as usize {
+                    tracing::Span::current().record("success", false);
+                    tracing::Span::current()
+                        .record("duration_ms", started.elapsed().as_millis() as u64);
                     return -1; // buffer too small
                 }
                 let _ = memory.write(&mut caller, result_buf_ptr as usize, hash_bytes);
+                tracing::Span::current().record("success", true);
+                tracing::Span::current()
+                    .record("duration_ms", started.elapsed().as_millis() as u64);
                 hash_bytes.len() as i32
             },
         )
