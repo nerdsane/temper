@@ -29,6 +29,7 @@ pub mod field_index;
 mod instrumentation;
 pub mod ots;
 mod policy;
+mod published_artifacts;
 mod secrets;
 mod specs;
 #[cfg(test)]
@@ -38,6 +39,7 @@ mod wasm;
 mod write_gate;
 
 use instrumentation::InstrumentedConnection;
+pub use published_artifacts::{PublishedArtifactRow, PublishedArtifactUpsert};
 
 #[derive(Clone, Debug)]
 pub struct TursoEventStore {
@@ -199,6 +201,15 @@ impl TursoEventStore {
             .await
             .map_err(storage_error)?;
         conn.execute(schema::CREATE_POLICY_DENIAL_PATTERNS_TENANT_INDEX, ())
+            .await
+            .map_err(storage_error)?;
+        conn.execute(schema::CREATE_PUBLISHED_ARTIFACTS_TABLE, ())
+            .await
+            .map_err(storage_error)?;
+        conn.execute(schema::CREATE_PUBLISHED_ARTIFACTS_OWNER_INDEX, ())
+            .await
+            .map_err(storage_error)?;
+        conn.execute(schema::CREATE_PUBLISHED_ARTIFACTS_SOURCE_INDEX, ())
             .await
             .map_err(storage_error)?;
         // Migration: add `enabled` column to existing `policies` tables.
