@@ -1,4 +1,5 @@
 use std::sync::Arc;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use opentelemetry::trace::{Status, TraceContextExt};
 use serde_json::{Value, json};
@@ -756,9 +757,17 @@ impl crate::state::ServerState {
         {
             Ok(mut result) if result.success => {
                 if integration.llm {
+                    let session_id = ctx
+                        .agent_ctx
+                        .session_id
+                        .as_deref()
+                        .unwrap_or(ctx.entity_ref.entity_id);
                     attach_llm_parent_context(
                         &Span::current(),
                         llm_parent_span_id,
+                        entity_state,
+                        session_id,
+                        result.duration_ms,
                         &mut result.callback_params,
                     );
                 }
@@ -1224,6 +1233,7 @@ async fn submit_llmobs_llm_span(
             span_id,
             parent_span_id,
             agent_span_id,
+            agent_start_ns: llmobs_agent_start_ns(entity_state, callback_params),
             workflow_span_id,
             agent_name: Some("temperpaw.agent.session"),
             workflow_name: Some(&workflow_name),
@@ -1475,6 +1485,9 @@ fn build_llm_root_span(
 fn attach_llm_parent_context(
     span: &Span,
     llm_parent_span_id: Option<&str>,
+    entity_state: &EntityState,
+    session_id: &str,
+    duration_ms: u64,
     callback_params: &mut Value,
 ) {
     let span_context = span.context().span().span_context().clone();
@@ -1514,26 +1527,35 @@ fn attach_llm_parent_context(
             "gen_ai_llm_parent_span_id".into(),
             json!(parent_span_id.to_string()),
         );
-        object.insert(
-            "_gen_ai_llmobs_agent_span_id".into(),
-            json!(parent_span_id.to_string()),
-        );
-        object.insert(
-            "llmobs_agent_span_id".into(),
-            json!(parent_span_id.to_string()),
-        );
-    } else {
-        let agent_span_id = temper_observe::llmobs_api::derive_span_id(&format!(
-            "{}:{}:agent",
-            span_context.trace_id(),
-            span_context.span_id()
-        ));
-        object.insert(
-            "_gen_ai_llmobs_agent_span_id".into(),
-            json!(agent_span_id.clone()),
-        );
-        object.insert("llmobs_agent_span_id".into(), json!(agent_span_id));
     }
+
+    let trace_id = span_context.trace_id().to_string();
+    let agent_span_id = entity_state
+        .fields
+        .get("llmobs_agent_span_id")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(ToOwned::to_owned)
+        .unwrap_or_else(|| {
+            temper_observe::llmobs_api::derive_span_id(&format!("{trace_id}:{session_id}:agent"))
+        });
+    object.insert(
+        "_gen_ai_llmobs_agent_span_id".into(),
+        json!(agent_span_id.clone()),
+    );
+    object.insert("llmobs_agent_span_id".into(), json!(agent_span_id));
+
+    let agent_start_ns = entity_state
+        .fields
+        .get("llmobs_agent_start_ns")
+        .and_then(value_as_u64)
+        .unwrap_or_else(|| llmobs_agent_start_ns_for_duration(duration_ms));
+    object.insert(
+        "_gen_ai_llmobs_agent_start_ns".into(),
+        json!(agent_start_ns),
+    );
+    object.insert("llmobs_agent_start_ns".into(), json!(agent_start_ns));
 
     let workflow_span_id = temper_observe::llmobs_api::derive_span_id(&format!(
         "{}:{}:workflow",
@@ -1545,6 +1567,40 @@ fn attach_llm_parent_context(
         json!(workflow_span_id.clone()),
     );
     object.insert("llmobs_workflow_span_id".into(), json!(workflow_span_id));
+}
+
+fn llmobs_agent_start_ns(entity_state: &EntityState, callback_params: &Value) -> Option<u64> {
+    callback_params
+        .get("_gen_ai_llmobs_agent_start_ns")
+        .and_then(value_as_u64)
+        .or_else(|| {
+            callback_params
+                .get("llmobs_agent_start_ns")
+                .and_then(value_as_u64)
+        })
+        .or_else(|| {
+            entity_state
+                .fields
+                .get("llmobs_agent_start_ns")
+                .and_then(value_as_u64)
+        })
+}
+
+fn llmobs_agent_start_ns_for_duration(duration_ms: u64) -> u64 {
+    current_unix_ns().saturating_sub(duration_ms.saturating_add(100).saturating_mul(1_000_000))
+}
+
+fn current_unix_ns() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos() as u64
+}
+
+fn value_as_u64(value: &Value) -> Option<u64> {
+    value
+        .as_u64()
+        .or_else(|| value.as_str()?.trim().parse::<u64>().ok())
 }
 
 fn strip_private_observability_params(mut params: Value) -> Value {
@@ -1779,7 +1835,7 @@ mod tests {
 
     #[test]
     fn llm_root_span_stays_on_active_trace() {
-        use opentelemetry::trace::{TraceContextExt, TracerProvider as _};
+        use opentelemetry::trace::TracerProvider as _;
         use opentelemetry_sdk::trace::SdkTracerProvider;
         use tracing_subscriber::prelude::*;
 
@@ -1848,7 +1904,7 @@ mod tests {
 
     #[test]
     fn llm_parent_context_records_llm_span_and_dispatch_parent_ids() {
-        use opentelemetry::trace::{TraceContextExt, TracerProvider as _};
+        use opentelemetry::trace::TracerProvider as _;
         use opentelemetry_sdk::trace::SdkTracerProvider;
         use tracing_subscriber::prelude::*;
 
@@ -1873,12 +1929,28 @@ mod tests {
         });
 
         let mut callback_params = json!({});
+        let entity_state = EntityState {
+            entity_type: "Session".to_string(),
+            entity_id: "session-1".to_string(),
+            status: "CallingProvider".to_string(),
+            item_count: 0,
+            counters: std::collections::BTreeMap::new(),
+            booleans: std::collections::BTreeMap::new(),
+            lists: std::collections::BTreeMap::new(),
+            fields: json!({}),
+            events: std::collections::VecDeque::new(),
+            total_event_count: 0,
+            sequence_nr: 0,
+        };
         let (llm_trace_id, llm_span_id) = dispatch_parent.in_scope(|| {
             let llm_span = tracing::info_span!("llm_caller.trace");
             let span_context = llm_span.context().span().span_context().clone();
             attach_llm_parent_context(
                 &llm_span,
                 Some(&expected_parent_span_id),
+                &entity_state,
+                "session-1",
+                1_234,
                 &mut callback_params,
             );
             (
@@ -1902,12 +1974,19 @@ mod tests {
             callback_params["gen_ai_llm_parent_span_id"],
             expected_parent_span_id
         );
+        let expected_agent_span_id = temper_observe::llmobs_api::derive_span_id(&format!(
+            "{expected_trace_id}:session-1:agent"
+        ));
         assert_eq!(
             callback_params["_gen_ai_llmobs_agent_span_id"],
-            expected_parent_span_id
+            expected_agent_span_id
         );
         assert_eq!(
             callback_params["llmobs_agent_span_id"],
+            expected_agent_span_id
+        );
+        assert_ne!(
+            callback_params["_gen_ai_llmobs_agent_span_id"],
             expected_parent_span_id
         );
         assert!(
@@ -1921,6 +2000,61 @@ mod tests {
             callback_params["llmobs_workflow_span_id"],
             callback_params["_gen_ai_llmobs_workflow_span_id"]
         );
+        assert!(
+            callback_params["llmobs_agent_start_ns"]
+                .as_u64()
+                .is_some_and(|start_ns| start_ns > 0)
+        );
+    }
+
+    #[test]
+    fn llm_parent_context_reuses_existing_llmobs_agent_root() {
+        use opentelemetry::trace::TracerProvider as _;
+        use opentelemetry_sdk::trace::SdkTracerProvider;
+        use tracing_subscriber::prelude::*;
+
+        let tracer_provider = SdkTracerProvider::builder().build();
+        let subscriber = tracing_subscriber::registry().with(
+            tracing_opentelemetry::layer()
+                .with_tracer(tracer_provider.tracer("temper-server-llm-parent-reuse-test")),
+        );
+        let _subscriber_guard = tracing::subscriber::set_default(subscriber);
+
+        let entity_state = EntityState {
+            entity_type: "Session".to_string(),
+            entity_id: "session-1".to_string(),
+            status: "CallingProvider".to_string(),
+            item_count: 0,
+            counters: std::collections::BTreeMap::new(),
+            booleans: std::collections::BTreeMap::new(),
+            lists: std::collections::BTreeMap::new(),
+            fields: json!({
+                "llmobs_agent_span_id": "stable-agent-root",
+                "llmobs_agent_start_ns": 12345_u64,
+            }),
+            events: std::collections::VecDeque::new(),
+            total_event_count: 0,
+            sequence_nr: 0,
+        };
+
+        let mut callback_params = json!({});
+        let llm_span = tracing::info_span!("llm_caller.trace");
+        attach_llm_parent_context(
+            &llm_span,
+            Some("turn-parent-span"),
+            &entity_state,
+            "session-1",
+            99,
+            &mut callback_params,
+        );
+
+        assert_eq!(
+            callback_params["_gen_ai_llmobs_agent_span_id"],
+            "stable-agent-root"
+        );
+        assert_eq!(callback_params["llmobs_agent_span_id"], "stable-agent-root");
+        assert_eq!(callback_params["_gen_ai_llmobs_agent_start_ns"], 12345_u64);
+        assert_eq!(callback_params["llmobs_agent_start_ns"], 12345_u64);
     }
 
     #[test]

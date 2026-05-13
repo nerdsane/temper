@@ -4,10 +4,8 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use reqwest::Client;
 use serde_json::{Map, Value, json};
 use sha2::{Digest, Sha256};
-
 #[path = "llmobs_format.rs"]
 mod llmobs_format;
-
 pub use llmobs_format::parse_tool_span_inputs;
 use llmobs_format::{convert_otel_messages_to_llmobs, parent_io_value_from_messages};
 
@@ -25,6 +23,7 @@ pub struct LlmSpanInput<'a> {
     pub span_id: &'a str,
     pub parent_span_id: Option<&'a str>,
     pub agent_span_id: Option<&'a str>,
+    pub agent_start_ns: Option<u64>,
     pub workflow_span_id: Option<&'a str>,
     pub agent_name: Option<&'a str>,
     pub workflow_name: Option<&'a str>,
@@ -57,7 +56,6 @@ pub struct ToolSpanInput<'a> {
 
 static LLMOBS_CONFIG: OnceLock<Option<LlmObsConfig>> = OnceLock::new();
 static LLMOBS_CLIENT: OnceLock<Client> = OnceLock::new();
-
 pub async fn submit_llm_span(input: LlmSpanInput<'_>) -> Result<(), String> {
     let Some(config) = llmobs_config().as_ref().cloned() else {
         return Ok(());
@@ -66,7 +64,6 @@ pub async fn submit_llm_span(input: LlmSpanInput<'_>) -> Result<(), String> {
     let payload = build_llm_span_payload(&input)?;
     post_payload(&config, payload).await
 }
-
 fn build_llm_span_payload(input: &LlmSpanInput<'_>) -> Result<Value, String> {
     let mut input_messages = input
         .input_messages_json
@@ -92,7 +89,9 @@ fn build_llm_span_payload(input: &LlmSpanInput<'_>) -> Result<Value, String> {
     let parent_output_value = parent_io_value_from_messages(&output_messages, "assistant");
 
     let start_ns = approximate_start_ns(input.duration_ms);
-    let duration_ns = (input.duration_ms as f64) * 1_000_000.0;
+    let duration_ns_u64 = input.duration_ms.saturating_mul(1_000_000);
+    let duration_ns = duration_ns_u64 as f64;
+    let end_ns = start_ns.saturating_add(duration_ns_u64);
     let trace_id = normalize_trace_id(input.trace_id);
     let span_id = normalize_span_id(input.span_id);
     let apm_parent_span_id = input
@@ -181,7 +180,14 @@ fn build_llm_span_payload(input: &LlmSpanInput<'_>) -> Result<Value, String> {
     let mut spans = Vec::new();
 
     if let Some(agent_span_id) = agent_span_id.as_deref() {
-        let agent_start_ns = start_ns.saturating_sub(100_000_000);
+        let agent_start_ns = input
+            .agent_start_ns
+            .unwrap_or_else(|| start_ns.saturating_sub(100_000_000))
+            .min(start_ns.saturating_sub(100_000_000));
+        let agent_duration_ns = end_ns
+            .saturating_add(100_000_000)
+            .saturating_sub(agent_start_ns)
+            .max(duration_ns_u64.saturating_add(200_000_000));
         let agent_meta = parent_agent_or_workflow_meta(
             "agent",
             input.session_id,
@@ -199,7 +205,7 @@ fn build_llm_span_payload(input: &LlmSpanInput<'_>) -> Result<Value, String> {
             "tags": span_tags.clone(),
             "status": status,
             "start_ns": agent_start_ns,
-            "duration": duration_ns + 200_000_000.0,
+            "duration": agent_duration_ns as f64,
             "meta": agent_meta,
         }));
     }

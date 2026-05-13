@@ -22,7 +22,15 @@ Temper's direct LLMObs payloads emit a compact hierarchy for every LLM integrati
 2. A `workflow` child span named from the Temper entity action, such as `Session.ContextReady`.
 3. The existing content-bearing `llm` span, nested under the workflow span.
 
-The agent root uses the active APM parent span id when one exists, so the LLMObs tree and APM trace remain joinable without inventing a second correlation model. The workflow span id is deterministically derived from the trace id and LLM span id. LLM messages, token metrics, model provider, and model name stay on the LLM span to avoid repeating large prompt/response payloads on parent spans.
+The agent root span id is stable for the logical TemperPaw session. Temper
+derives it from the active trace id and session id on the first LLM turn, then
+persists `llmobs_agent_span_id` and `llmobs_agent_start_ns` through callback
+state so later LLM turns and tool turns attach to the same root instead of
+creating one root per provider call. The workflow span id remains
+deterministically derived from the trace id and LLM span id, giving each model
+turn its own workflow child under the session root. LLM messages, token metrics,
+model provider, and model name stay on the LLM span to avoid repeating large
+prompt/response payloads on parent spans.
 
 The agent and workflow spans carry only compact `input.value` / `output.value` summaries derived from the LLM call. This keeps Datadog's agent-loop and Trace Explorer views useful for humans and agents while avoiding duplicated chat `messages` arrays on every parent span.
 
@@ -39,11 +47,20 @@ APM remains the authoritative low-level trace for detailed dispatch, database, O
 - Agent-loop tooling can narrate the root and workflow spans because those spans have compact IO values.
 - Agents can query by `session_id`, `ml_app`, model, provider, and span kind to reconstruct the model/tool flow.
 - APM trace correlation is preserved for deeper runtime debugging.
+- Multi-turn sessions with tools remain one LLMObs session tree instead of a
+  forest of repeated agent roots; Datadog's trace tree can show the first LLM
+  call, tool execution, and final LLM call chronologically under the same agent
+  span.
 
 ### Negative
 
-- The agent root duration is an envelope around the observed LLM call, not the complete wall-clock lifetime of a long-lived session.
-- Multiple LLM turns in one session produce separate workflow spans and may repeat the agent root if Datadog receives them in separate payloads.
+- The agent root duration is still an observability envelope based on observed
+  LLM turns, not a perfect wall-clock measurement of all possible non-LLM
+  session work.
+- Re-submitting the same agent span id on later turns relies on Datadog trace
+  assembly de-duplicating by trace id/span id. Live TemperPaw verification must
+  continue checking multi-turn tool sessions because this behavior is part of
+  the Datadog intake contract we depend on.
 - Parent agent/workflow IO values intentionally duplicate a short summary of the LLM child input/output; full message arrays remain only on the LLM span.
 
 ## Non-Goals
