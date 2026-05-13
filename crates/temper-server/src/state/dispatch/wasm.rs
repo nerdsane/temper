@@ -1225,7 +1225,7 @@ async fn submit_llmobs_llm_span(
             parent_span_id,
             agent_span_id,
             workflow_span_id,
-            agent_name: Some("temperpaw.agent_session"),
+            agent_name: Some("temperpaw.agent.session"),
             workflow_name: Some(&workflow_name),
             span_name: &span_name,
             provider: &provider,

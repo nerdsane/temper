@@ -8,8 +8,8 @@ use sha2::{Digest, Sha256};
 #[path = "llmobs_format.rs"]
 mod llmobs_format;
 
-use llmobs_format::convert_otel_messages_to_llmobs;
 pub use llmobs_format::parse_tool_span_inputs;
+use llmobs_format::{convert_otel_messages_to_llmobs, parent_io_value_from_messages};
 
 #[derive(Clone, Debug)]
 struct LlmObsConfig {
@@ -88,6 +88,8 @@ fn build_llm_span_payload(input: &LlmSpanInput<'_>) -> Result<Value, String> {
         .transpose()
         .map_err(|error| format!("failed to convert output messages: {error}"))?
         .unwrap_or_default();
+    let parent_input_value = parent_io_value_from_messages(&input_messages, "user");
+    let parent_output_value = parent_io_value_from_messages(&output_messages, "assistant");
 
     let start_ns = approximate_start_ns(input.duration_ms);
     let duration_ns = (input.duration_ms as f64) * 1_000_000.0;
@@ -180,11 +182,17 @@ fn build_llm_span_payload(input: &LlmSpanInput<'_>) -> Result<Value, String> {
 
     if let Some(agent_span_id) = agent_span_id.as_deref() {
         let agent_start_ns = start_ns.saturating_sub(100_000_000);
+        let agent_meta = parent_agent_or_workflow_meta(
+            "agent",
+            input.session_id,
+            parent_input_value.as_deref(),
+            parent_output_value.as_deref(),
+        );
         spans.push(json!({
             "parent_id": "undefined",
             "trace_id": trace_id,
             "span_id": agent_span_id,
-            "name": input.agent_name.unwrap_or("temperpaw.agent_session"),
+            "name": input.agent_name.unwrap_or("temperpaw.agent.session"),
             "service": input.service_name,
             "ml_app": input.service_name,
             "session_id": input.session_id,
@@ -192,12 +200,7 @@ fn build_llm_span_payload(input: &LlmSpanInput<'_>) -> Result<Value, String> {
             "status": status,
             "start_ns": agent_start_ns,
             "duration": duration_ns + 200_000_000.0,
-            "meta": {
-                "kind": "agent",
-                "metadata": {
-                    "session_id": input.session_id,
-                },
-            },
+            "meta": agent_meta,
         }));
     }
 
@@ -207,6 +210,12 @@ fn build_llm_span_payload(input: &LlmSpanInput<'_>) -> Result<Value, String> {
             .as_deref()
             .or(apm_parent_span_id.as_deref())
             .unwrap_or("undefined");
+        let workflow_meta = parent_agent_or_workflow_meta(
+            "workflow",
+            input.session_id,
+            parent_input_value.as_deref(),
+            parent_output_value.as_deref(),
+        );
         spans.push(json!({
             "parent_id": workflow_parent_id,
             "trace_id": trace_id,
@@ -219,12 +228,7 @@ fn build_llm_span_payload(input: &LlmSpanInput<'_>) -> Result<Value, String> {
             "status": status,
             "start_ns": workflow_start_ns,
             "duration": duration_ns + 100_000_000.0,
-            "meta": {
-                "kind": "workflow",
-                "metadata": {
-                    "session_id": input.session_id,
-                },
-            },
+            "meta": workflow_meta,
         }));
     }
 
@@ -255,6 +259,30 @@ fn build_llm_span_payload(input: &LlmSpanInput<'_>) -> Result<Value, String> {
             },
         },
     }))
+}
+
+fn parent_agent_or_workflow_meta(
+    kind: &str,
+    session_id: &str,
+    input_value: Option<&str>,
+    output_value: Option<&str>,
+) -> Value {
+    let mut meta = Map::from_iter([
+        ("kind".to_string(), json!(kind)),
+        (
+            "metadata".to_string(),
+            json!({
+                "session_id": session_id,
+            }),
+        ),
+    ]);
+    if let Some(value) = input_value {
+        meta.insert("input".to_string(), json!({ "value": value }));
+    }
+    if let Some(value) = output_value {
+        meta.insert("output".to_string(), json!({ "value": value }));
+    }
+    Value::Object(meta)
 }
 
 pub async fn submit_tool_spans(

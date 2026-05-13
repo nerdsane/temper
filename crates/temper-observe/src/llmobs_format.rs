@@ -2,6 +2,8 @@ use std::collections::BTreeMap;
 
 use serde_json::{Map, Value, json};
 
+const PARENT_IO_VALUE_MAX_CHARS: usize = 4096;
+
 pub(super) fn convert_otel_messages_to_llmobs(raw: &str) -> Result<Vec<Value>, serde_json::Error> {
     let parsed: Vec<Value> = serde_json::from_str(raw)?;
     Ok(parsed
@@ -73,6 +75,44 @@ fn convert_otel_message(message: Value) -> Option<Value> {
         rendered.insert("tool_results".to_string(), Value::Array(tool_results));
     }
     Some(Value::Object(rendered))
+}
+
+pub(super) fn parent_io_value_from_messages(
+    messages: &[Value],
+    preferred_role: &str,
+) -> Option<String> {
+    messages
+        .iter()
+        .rev()
+        .find_map(|message| {
+            (message.get("role").and_then(Value::as_str) == Some(preferred_role))
+                .then(|| message_content_value(message))
+                .flatten()
+        })
+        .or_else(|| messages.iter().rev().find_map(message_content_value))
+        .map(compact_parent_io_value)
+}
+
+fn message_content_value(message: &Value) -> Option<&str> {
+    message
+        .get("content")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+}
+
+fn compact_parent_io_value(value: &str) -> String {
+    let trimmed = value.trim();
+    if trimmed.chars().count() <= PARENT_IO_VALUE_MAX_CHARS {
+        return trimmed.to_string();
+    }
+
+    let mut compacted = trimmed
+        .chars()
+        .take(PARENT_IO_VALUE_MAX_CHARS)
+        .collect::<String>();
+    compacted.push_str("...");
+    compacted
 }
 
 pub fn parse_tool_span_inputs(

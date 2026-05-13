@@ -91,6 +91,36 @@ fn llm_span_payload_uses_parent_span_id_when_available() {
 }
 
 #[test]
+fn llm_span_payload_defaults_agent_root_to_temperpaw_session_name() {
+    let payload = build_llm_span_payload(&LlmSpanInput {
+        service_name: "temperpaw",
+        session_id: "session-1",
+        trace_id: "0000000000000000000000000000000f",
+        span_id: "000000000000000a",
+        parent_span_id: None,
+        agent_span_id: Some("000000000000000b"),
+        workflow_span_id: None,
+        agent_name: None,
+        workflow_name: None,
+        span_name: "wasm:provider_caller",
+        provider: "openai_codex",
+        model: "gpt-5.4",
+        system_instructions: None,
+        input_messages_json: None,
+        output_messages_json: None,
+        input_tokens: 10,
+        output_tokens: 20,
+        finish_reason: Some("stop"),
+        duration_ms: 1234,
+        error_type: None,
+    })
+    .unwrap();
+    let spans = payload["data"]["attributes"]["spans"].as_array().unwrap();
+
+    assert_eq!(spans[0]["name"], "temperpaw.agent.session");
+}
+
+#[test]
 fn llm_span_payload_can_emit_agent_workflow_tree() {
     let payload = build_llm_span_payload(&LlmSpanInput {
         service_name: "temperpaw",
@@ -100,7 +130,7 @@ fn llm_span_payload_can_emit_agent_workflow_tree() {
         parent_span_id: Some("000000000000000b"),
         agent_span_id: Some("000000000000000b"),
         workflow_span_id: Some("000000000000000c"),
-        agent_name: Some("temperpaw.agent_session"),
+        agent_name: Some("temperpaw.agent.session"),
         workflow_name: Some("Session.ContextReady"),
         span_name: "wasm:provider_caller",
         provider: "openai_codex",
@@ -122,16 +152,22 @@ fn llm_span_payload_can_emit_agent_workflow_tree() {
     let spans = payload["data"]["attributes"]["spans"].as_array().unwrap();
 
     assert_eq!(spans.len(), 3);
-    assert_eq!(spans[0]["name"], "temperpaw.agent_session");
+    assert_eq!(spans[0]["name"], "temperpaw.agent.session");
     assert_eq!(spans[0]["parent_id"], "undefined");
     assert_eq!(spans[0]["span_id"], "11");
     assert_eq!(spans[0]["meta"]["kind"], "agent");
     assert_eq!(spans[0]["meta"]["metadata"]["session_id"], "session-1");
+    assert_eq!(spans[0]["meta"]["input"]["value"], "Debug this session");
+    assert_eq!(spans[0]["meta"]["output"]["value"], "Done");
 
     assert_eq!(spans[1]["name"], "Session.ContextReady");
     assert_eq!(spans[1]["parent_id"], "11");
     assert_eq!(spans[1]["span_id"], "12");
     assert_eq!(spans[1]["meta"]["kind"], "workflow");
+    assert_eq!(spans[1]["meta"]["input"]["value"], "Debug this session");
+    assert_eq!(spans[1]["meta"]["output"]["value"], "Done");
+    assert!(spans[0]["meta"]["input"].get("messages").is_none());
+    assert!(spans[1]["meta"]["input"].get("messages").is_none());
 
     assert_eq!(spans[2]["name"], "wasm:provider_caller");
     assert_eq!(spans[2]["parent_id"], "12");
