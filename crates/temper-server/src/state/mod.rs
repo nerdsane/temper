@@ -5,12 +5,14 @@ pub mod custom_effects;
 mod dispatch;
 mod entity_ops;
 mod evolution;
+mod file_read_projection;
 mod file_reads;
 pub mod metrics;
 pub mod pending_decisions;
 mod persistence;
 pub mod policy_suggestions;
 mod projection_backfill;
+mod published_artifacts;
 mod runtime_metrics;
 pub mod trajectory;
 pub mod wasm_invocation_log;
@@ -18,13 +20,14 @@ pub mod wasm_invocation_log;
 pub use admission::{AdmissionController, AdmissionOutcome, AdmissionPermit};
 pub use dispatch::{DispatchCommand, DispatchError, DispatchExtOptions, StateTimeoutTracker};
 pub use entity_ops::{FailedLevelInfo, VerificationGateError};
-pub use file_reads::{TextFileReadResult, TextFileVersionReadResult};
+pub use file_reads::{IndexedFileStreamRead, TextFileReadResult, TextFileVersionReadResult};
 pub use metrics::MetricsCollector;
 pub use pending_decisions::{
     ActionScope, DecisionStatus, DurationScope, PendingDecision, PolicyScopeMatrix, PrincipalScope,
     ResourceScope,
 };
 pub use policy_suggestions::PolicySuggestionEngine;
+pub use published_artifacts::PublishFileArtifactRequest;
 pub use trajectory::{TrajectoryEntry, TrajectorySource};
 pub use wasm_invocation_log::WasmInvocationEntry;
 
@@ -204,6 +207,10 @@ pub struct ServerState {
     /// actor_backed_types, OData reads/writes dispatch through this runtime.
     pub pg_actor_system: Option<Arc<PgActorSystem>>,
     /// Entity types backed by pg_actor_system.
+    ///
+    /// Entries may be global entity type names (for example, `Order`) or
+    /// tenant-scoped keys (`tenant:Order`) for canarying one tenant without
+    /// changing same-named entity types in other tenants.
     pub actor_backed_types: std::collections::HashSet<String>,
     /// Parsed CSDL document describing the entity model (legacy single-tenant).
     pub csdl: Arc<CsdlDocument>,
@@ -778,6 +785,15 @@ impl ServerState {
         state
     }
 
+    /// Return true when OData for this tenant/entity should dispatch through
+    /// the Postgres actor runtime.
+    pub fn is_pg_actor_backed(&self, tenant: &TenantId, entity_type: &str) -> bool {
+        self.actor_backed_types.contains(entity_type)
+            || self
+                .actor_backed_types
+                .contains(&format!("{}:{entity_type}", tenant.as_str()))
+    }
+
     /// Attach an encrypted secrets vault.
     pub fn with_secrets_vault(mut self, vault: SecretsVault) -> Self {
         self.secrets_vault = Some(Arc::new(vault));
@@ -1007,6 +1023,26 @@ impl ServerState {
         file_id: &str,
         agent_ctx: &crate::request_context::AgentContext,
     ) -> Result<(u16, Vec<u8>), String> {
+        match self.read_file_stream_indexed(tenant, file_id).await? {
+            IndexedFileStreamRead::Content { bytes, .. } => return Ok((200, bytes)),
+            IndexedFileStreamRead::NoContent { .. } => return Ok((404, Vec::new())),
+            IndexedFileStreamRead::MissingIndex => {
+                tracing::warn!(
+                    tenant = %tenant,
+                    file_id,
+                    "file stream projection missing; falling back to actor/WASM materialization"
+                );
+            }
+            IndexedFileStreamRead::StaleIndex { content_hash, .. } => {
+                tracing::warn!(
+                    tenant = %tenant,
+                    file_id,
+                    content_hash = %content_hash,
+                    "file stream projection blob missing; falling back to actor/WASM materialization"
+                );
+            }
+        }
+
         let entity_state = serde_json::to_value(
             &self
                 .get_tenant_entity_state(tenant, "File", file_id)

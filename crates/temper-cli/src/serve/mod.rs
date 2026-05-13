@@ -7,6 +7,7 @@
 //! Specs are loaded immediately (design-time observation) and verification
 //! runs in the background so the observe UI can stream progress.
 
+mod actor_runtime;
 mod bootstrap;
 mod loader;
 mod storage;
@@ -29,6 +30,7 @@ use temper_server::registry::{EntityLevelSummary, EntityVerificationResult, Veri
 use temper_server::state::DesignTimeEvent;
 use temper_verify::cascade::VerificationCascade;
 
+use crate::ActorRuntimeBackend;
 use crate::StorageBackend;
 
 use loader::read_ioa_sources;
@@ -60,6 +62,8 @@ pub async fn run(
     skills: Vec<String>,
     storage: StorageBackend,
     storage_explicit: bool,
+    actor_runtime: ActorRuntimeBackend,
+    actor_backed_type: Vec<String>,
     observe: bool,
     verify_subprocess: bool,
     discord_bot_token: Option<String>,
@@ -71,7 +75,8 @@ pub async fn run(
     let api_key = std::env::var("ANTHROPIC_API_KEY").ok();
 
     // Phase 1: Storage backend
-    let (pg_pool, storage_stack) = bootstrap::init_storage(storage, storage_explicit).await?;
+    let (pg_pool, storage_stack) =
+        bootstrap::init_storage(storage.clone(), storage_explicit).await?;
 
     // Phase 2: Registry (restore + disk apps)
     let (registry, mut tenant_policy_seed) =
@@ -79,6 +84,7 @@ pub async fn run(
 
     // Assemble platform state
     let mut state = PlatformState::with_registry(registry, api_key);
+    let mut pg_actor_runtime_cancel = None;
     state.api_token = std::env::var("TEMPER_API_KEY").ok();
     if state.api_token.is_some() {
         println!("  API key: configured (Bearer token required)");
@@ -243,9 +249,19 @@ pub async fn run(
 
     // Phase 8: Bootstrap system + agent tenants
     bootstrap::bootstrap_tenants(&state, &apps).await;
-
     // Phase 8b: Restore persisted skills + apply CLI `--skill` requests.
     bootstrap::bootstrap_installed_apps(&state, &skills).await;
+    if actor_runtime == ActorRuntimeBackend::Postgres {
+        pg_actor_runtime_cancel = Some(
+            actor_runtime::install_postgres_actor_runtime(
+                storage,
+                pg_pool.is_some(),
+                &actor_backed_type,
+                &mut state.server,
+            )
+            .await?,
+        );
+    }
 
     // Phase 9: Bind, start background tasks, serve
     let router = build_platform_router(state.clone());
@@ -267,6 +283,7 @@ pub async fn run(
     spawn_optimization_loop(&state);
     spawn_actor_passivation_loop(&state);
     state.server.spawn_runtime_metrics_loop();
+    let _pg_actor_runtime_cancel = pg_actor_runtime_cancel;
 
     // Channel transports: spawn persistent connections to external messaging platforms.
     // Resolve Discord bot token: CLI/env → vault fallback.
