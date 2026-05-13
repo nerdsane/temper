@@ -174,6 +174,16 @@ fn published_artifact_row_from_upsert(artifact: PublishedArtifactUpsert) -> Publ
     }
 }
 
+#[instrument(skip_all, fields(
+    otel.name = "state.put_public_blob",
+    tenant = %tenant,
+    bucket = %bucket,
+    storage_key = %storage_key,
+    endpoint_host = tracing::field::Empty,
+    mime_type = %stream_content_type(mime_type),
+    byte_length = bytes.len(),
+    http.status_code = tracing::field::Empty,
+))]
 async fn put_public_blob(
     state: &ServerState,
     tenant: &TenantId,
@@ -189,6 +199,8 @@ async fn put_public_blob(
         bucket.trim_matches('/'),
         storage_key.trim_start_matches('/')
     );
+    let (endpoint_host, _) = parse_url_host_path(&url);
+    tracing::Span::current().record("endpoint_host", endpoint_host);
     let mut request = public_blob_http_client()
         .put(&url)
         .body(bytes.to_vec())
@@ -201,14 +213,52 @@ async fn put_public_blob(
     let response = request
         .send()
         .await
-        .map_err(|e| format!("public blob PUT request failed for '{storage_key}': {e}"))?;
-    if !response.status().is_success() {
-        return Err(format!(
-            "public blob PUT failed for '{storage_key}' with HTTP {}",
-            response.status()
-        ));
+        .map_err(|e| public_blob_put_request_error(endpoint, bucket, storage_key, &e))?;
+    let status = response.status();
+    tracing::Span::current().record("http.status_code", status.as_u16());
+    if !status.is_success() {
+        let error = public_blob_put_status_error(bucket, endpoint, storage_key, status);
+        tracing::warn!(
+            http.status_code = %status,
+            endpoint_host,
+            bucket,
+            storage_key,
+            "public blob PUT failed"
+        );
+        return Err(error);
     }
+    tracing::info!(
+        http.status_code = %status,
+        endpoint_host,
+        bucket,
+        storage_key,
+        "public blob PUT succeeded"
+    );
     Ok(())
+}
+
+fn public_blob_put_request_error(
+    endpoint: &str,
+    bucket: &str,
+    storage_key: &str,
+    error: &reqwest::Error,
+) -> String {
+    let (endpoint_host, _) = parse_url_host_path(endpoint);
+    format!(
+        "public blob PUT request failed for bucket '{bucket}' key '{storage_key}' via endpoint host '{endpoint_host}': {error}"
+    )
+}
+
+fn public_blob_put_status_error(
+    bucket: &str,
+    endpoint: &str,
+    storage_key: &str,
+    status: reqwest::StatusCode,
+) -> String {
+    let (endpoint_host, _) = parse_url_host_path(endpoint);
+    format!(
+        "public blob PUT failed for bucket '{bucket}' key '{storage_key}' via endpoint host '{endpoint_host}' with HTTP {status}"
+    )
 }
 
 fn build_public_blob_put_headers(
@@ -420,45 +470,4 @@ fn uri_encode_path(path: &str) -> String {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::{public_storage_key, published_artifact_id};
-
-    #[test]
-    fn public_storage_key_is_generic_and_content_addressed() {
-        let key = public_storage_key(
-            "public/demo artifacts",
-            "Report",
-            "quarterly-2026",
-            "preview image",
-            "sha256:abc123",
-            "image/png",
-        );
-
-        assert_eq!(
-            key,
-            "public/demo-artifacts/Report/quarterly-2026/preview-image-abc123.png"
-        );
-    }
-
-    #[test]
-    fn published_artifact_id_uses_generic_owner_ref_label_and_hash() {
-        let first = published_artifact_id(
-            "tenant-a",
-            "Report",
-            "quarterly-2026",
-            "preview",
-            "sha256:abc123",
-        );
-        let second = published_artifact_id(
-            "tenant-a",
-            "Report",
-            "quarterly-2026",
-            "download",
-            "sha256:abc123",
-        );
-
-        assert!(first.starts_with("part-"));
-        assert_eq!(first.len(), "part-".len() + 32);
-        assert_ne!(first, second);
-    }
-}
+mod tests;
