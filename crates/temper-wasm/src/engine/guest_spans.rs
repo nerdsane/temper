@@ -1,3 +1,4 @@
+use std::cell::RefCell;
 use std::collections::BTreeMap;
 use std::time::SystemTime;
 
@@ -46,6 +47,14 @@ struct GuestSpanEndPayload {
     attributes: BTreeMap<String, Value>,
 }
 
+thread_local! {
+    // `EnteredSpan` is intentionally !Send, while Wasmtime host state must be
+    // Send. Guest WASM execution is synchronous on one blocking thread, so keep
+    // the active enter guards thread-local and the registry itself portable.
+    static ENTERED_GUEST_SPANS: RefCell<Vec<tracing::span::EnteredSpan>> =
+        const { RefCell::new(Vec::new()) };
+}
+
 struct GuestSpanEntry {
     span: tracing::Span,
 }
@@ -61,6 +70,7 @@ pub(crate) struct GuestSpanRegistry {
 
 impl GuestSpanRegistry {
     pub(crate) fn new(context: WasmInvocationContext) -> Self {
+        clear_thread_local_guest_spans();
         Self {
             context,
             next_id: 1,
@@ -97,7 +107,6 @@ impl GuestSpanRegistry {
         self.next_id = self.next_id.saturating_add(1);
         self.total_started += 1;
         let kind = payload.kind.as_deref().unwrap_or("internal");
-        let parent_guard = self.enter_active();
         let span = tracing::info_span!(
             "wasm.guest",
             otel.name = %name,
@@ -129,9 +138,9 @@ impl GuestSpanRegistry {
             error.message = tracing::field::Empty,
             exception.message = tracing::field::Empty,
         );
-        drop(parent_guard);
         update_span_name(&span, name);
         apply_attributes(&span, &payload.attributes);
+        enter_thread_local_guest_span(&span);
 
         self.spans.insert(id, GuestSpanEntry { span });
         self.stack.push(id);
@@ -196,6 +205,7 @@ impl GuestSpanRegistry {
         self.stack.pop();
         apply_attributes(&entry.span, &payload.attributes);
         apply_end_status(&entry.span, &payload);
+        exit_thread_local_guest_span();
         end_otel_span(&entry.span);
         drop(entry);
         Ok(())
@@ -221,11 +231,13 @@ impl GuestSpanRegistry {
                     .context()
                     .span()
                     .set_status(Status::error("guest span left open"));
+                exit_thread_local_guest_span();
                 end_otel_span(&entry.span);
                 drop(entry);
             }
         }
         self.spans.clear();
+        clear_thread_local_guest_spans();
     }
 
     fn span(&self, span_id: i64) -> Result<&tracing::Span, String> {
@@ -260,6 +272,22 @@ pub(crate) fn guest_span_attribute_allowed(key: &str) -> bool {
 fn update_span_name(span: &tracing::Span, name: &str) {
     span.record("otel.name", name);
     span.context().span().update_name(name.to_string());
+}
+
+fn enter_thread_local_guest_span(span: &tracing::Span) {
+    ENTERED_GUEST_SPANS.with(|guards| {
+        guards.borrow_mut().push(span.clone().entered());
+    });
+}
+
+fn exit_thread_local_guest_span() {
+    ENTERED_GUEST_SPANS.with(|guards| {
+        let _ = guards.borrow_mut().pop();
+    });
+}
+
+fn clear_thread_local_guest_spans() {
+    ENTERED_GUEST_SPANS.with(|guards| guards.borrow_mut().clear());
 }
 
 fn apply_attributes(span: &tracing::Span, attributes: &BTreeMap<String, Value>) {

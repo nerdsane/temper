@@ -26,9 +26,11 @@ Temper exposes a structured guest observability ABI:
 
 Payloads are JSON. `host_start_span` requires `name` and accepts optional
 `kind` and `attributes`. Span ids are opaque positive integers scoped to one
-WASM invocation. Guest spans nest by start/end order; the active guest span is
-entered around existing telemetry host functions so logs, metrics, progress,
-wide events, and host-boundary spans remain correlated.
+WASM invocation. Guest spans nest by start/end order. Temper keeps the guest
+span stack entered on the synchronous WASM execution thread, and also enters
+the active guest span around existing telemetry host functions, so pure guest
+work, logs, metrics, progress, wide events, and host-boundary spans remain
+correlated.
 
 Guest metrics remain low-cardinality OTEL metrics. The host also emits a
 `wasm_guest.metric` event on the active guest span so operators can pivot from
