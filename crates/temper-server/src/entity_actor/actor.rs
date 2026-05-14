@@ -39,6 +39,25 @@ use super::types::{
     MAX_ITEMS_PER_ENTITY,
 };
 
+fn event_budget_workspace_id(state: &EntityState) -> String {
+    if state.entity_type == "Workspace" {
+        return state.entity_id.clone();
+    }
+
+    for key in ["WorkspaceId", "workspace_id"] {
+        if let Some(value) = state
+            .fields
+            .get(key)
+            .and_then(serde_json::Value::as_str)
+            .filter(|value| !value.is_empty())
+        {
+            return value.to_string();
+        }
+    }
+
+    String::new()
+}
+
 /// The entity actor -- processes actions through a TransitionTable.
 /// Optionally persists events to the configured backend. Wide events are emitted
 /// via the OTEL SDK (no-op when OTEL is not initialised).
@@ -660,6 +679,24 @@ impl Actor for EntityActor {
 
                 // TigerStyle: Budget enforcement (not just assertions -- hard limits)
                 if state.total_event_count >= MAX_EVENTS_PER_ENTITY {
+                    let workspace_id = event_budget_workspace_id(state);
+                    crate::event_budget_metrics::record_exhausted(
+                        &self.tenant,
+                        &state.entity_type,
+                        &state.entity_id,
+                        &workspace_id,
+                    );
+                    tracing::warn!(
+                        tenant = %self.tenant,
+                        entity_type = %state.entity_type,
+                        entity_id = %state.entity_id,
+                        workspace_id = %workspace_id,
+                        status = %state.status,
+                        action = %name,
+                        events_total = state.total_event_count,
+                        max_events = MAX_EVENTS_PER_ENTITY,
+                        "Event budget exhausted (10000 max)"
+                    );
                     ctx.reply(EntityResponse {
                         success: false,
                         state: state.clone(),

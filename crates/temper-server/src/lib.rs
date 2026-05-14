@@ -14,6 +14,7 @@ pub mod blob_sweeper;
 pub mod blobs;
 pub mod channels;
 pub mod entity_actor;
+pub mod event_budget_metrics;
 pub mod events;
 pub mod eventual_invariants;
 pub mod http_endpoint;

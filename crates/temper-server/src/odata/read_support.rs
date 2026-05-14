@@ -54,6 +54,10 @@ fn catalog_fast_read_enabled() -> bool {
     *ENABLED.get_or_init(|| env_bool("TEMPER_ODATA_CATALOG_FAST_READ", false))
 }
 
+fn should_read_catalog_for_materialization(prefer_catalog: bool) -> bool {
+    prefer_catalog || catalog_fast_read_enabled()
+}
+
 /// Build the OData JSON body for a single catalog row.
 ///
 /// Mirrors the actor's serialized `EntityState` shape (`status`, `fields`,
@@ -150,12 +154,14 @@ pub(super) async fn materialize_entity_set_entities(
     entity_type: &str,
     entity_set_name: &str,
     entity_ids: &[String],
+    prefer_catalog: bool,
 ) -> Vec<serde_json::Value> {
-    let mut catalog_hits: HashMap<String, EntityCatalogRow> = if catalog_fast_read_enabled() {
-        try_load_catalog_rows(state, tenant, entity_type, entity_ids).await
-    } else {
-        HashMap::new()
-    };
+    let mut catalog_hits: HashMap<String, EntityCatalogRow> =
+        if should_read_catalog_for_materialization(prefer_catalog) {
+            try_load_catalog_rows(state, tenant, entity_type, entity_ids).await
+        } else {
+            HashMap::new()
+        };
 
     let concurrency = entity_set_materialization_concurrency();
     stream::iter(entity_ids.iter().cloned())
@@ -308,6 +314,7 @@ pub(super) async fn record_entity_set_not_found(state: &ServerState, tenant: &st
 mod tests {
     use super::{
         EntityCatalogRow, catalog_row_to_entity_body, select_entity_ids_for_materialization,
+        should_read_catalog_for_materialization,
     };
     use temper_odata::query::types::{
         FilterExpr, ODataValue, OrderByClause, OrderDirection, QueryOptions,
@@ -386,6 +393,11 @@ mod tests {
         // Fields blob is preserved verbatim.
         assert_eq!(body["fields"]["Name"], "phosphor-command-grid.html");
         assert_eq!(body["fields"]["content_hash"], "sha256:c74e77");
+    }
+
+    #[test]
+    fn pushed_down_filters_prefer_catalog_materialization() {
+        assert!(should_read_catalog_for_materialization(true));
     }
 
     #[test]
