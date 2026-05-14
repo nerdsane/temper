@@ -52,7 +52,11 @@ const DROPPED_SPAN_NAMES: &[&str] = &["turso.configured_connection", "clock_time
 /// debug value but produce enough volume to crowd out the dispatch-critical
 /// spans at 100%. Keep p99+ via `--log_with_p99` in the guest sampler; the
 /// host-level sampler drops 95% of them uniformly at random.
-const REDUCED_SAMPLE_PREFIXES: &[&str] = &["wasm:workspace_fs", "wasm:monty_repl"];
+///
+/// Do not include tool/provider guest module boundaries here. Guest spans
+/// inherit the parent sampling decision, so reducing those boundaries severs
+/// the very traces operators need when following work through WASM.
+const REDUCED_SAMPLE_PREFIXES: &[&str] = &["wasm:workspace_fs"];
 
 /// Trace-id-based deterministic sampling: keep if `(trace_id_low_u64 % 100) < rate_pct`.
 /// Using trace_id instead of random keeps the decision consistent across
@@ -746,6 +750,28 @@ mod tests {
         assert!(
             (3.0..=7.0).contains(&kept_pct),
             "reduced sample should keep ~5%, got {kept_pct:.1}%"
+        );
+    }
+
+    #[test]
+    fn monty_repl_boundary_is_not_reduced_sampled() {
+        use opentelemetry::trace::TraceId;
+        let sampler = NameBasedSampler {
+            inner: Sampler::AlwaysOn,
+        };
+        let trace_id = TraceId::from_bytes([0u8; 16]);
+        let result = sampler.should_sample(
+            None,
+            trace_id,
+            "wasm:monty_repl",
+            &SpanKind::Internal,
+            &[],
+            &[],
+        );
+
+        assert!(
+            matches!(result.decision, SamplingDecision::RecordAndSample),
+            "monty_repl must keep full sampling so guest tool spans stay stitched"
         );
     }
 

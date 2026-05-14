@@ -48,6 +48,11 @@ host calls; the direct export uses those same ids and the captured parent
 context so Datadog receives the guest span even when the tracing subscriber's
 entered-guard path is not sufficient to emit it from WASI execution.
 
+Temper must not reduce-sample key guest execution boundaries such as
+`wasm:monty_repl`. Guest spans inherit parent sampling decisions; dropping the
+module boundary also drops the nested `tool.*` spans that make the WASM work
+observable.
+
 ## Consequences
 
 - WASM modules can create Datadog-visible child spans for useful pure guest
