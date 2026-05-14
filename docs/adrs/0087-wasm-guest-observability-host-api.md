@@ -41,6 +41,13 @@ guest ends or when invocation cleanup closes an unended span. That keeps the
 same span id usable for APM and log correlation even for WASI guests that do
 most work between host function calls.
 
+For WASI guest invocations, Temper also keeps a minimal host-owned lifecycle
+snapshot and exports the guest span directly with the OpenTelemetry tracer on
+close. The tracing span still provides the trace/span ids used by logs and
+host calls; the direct export uses those same ids and the captured parent
+context so Datadog receives the guest span even when the tracing subscriber's
+entered-guard path is not sufficient to emit it from WASI execution.
+
 ## Consequences
 
 - WASM modules can create Datadog-visible child spans for useful pure guest

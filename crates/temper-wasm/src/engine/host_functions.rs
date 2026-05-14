@@ -419,7 +419,11 @@ pub(super) fn link_host_functions(linker: &mut Linker<HostState>) -> Result<(), 
                 let Ok(payload) = read_guest_string(&mut caller, ptr, len) else {
                     return -1;
                 };
-                match caller.data().guest_spans.add_span_event(span_id, &payload) {
+                match caller
+                    .data_mut()
+                    .guest_spans
+                    .add_span_event(span_id, &payload)
+                {
                     Ok(()) => 0,
                     Err(error) => {
                         tracing::warn!(span_id, error = %error, "host_add_span_event failed");
@@ -440,7 +444,7 @@ pub(super) fn link_host_functions(linker: &mut Linker<HostState>) -> Result<(), 
                     return -1;
                 };
                 match caller
-                    .data()
+                    .data_mut()
                     .guest_spans
                     .set_span_attributes(span_id, &payload)
                 {

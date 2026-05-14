@@ -3,7 +3,9 @@ use std::collections::BTreeMap;
 use std::time::SystemTime;
 
 use opentelemetry::KeyValue;
-use opentelemetry::trace::{Status, TraceContextExt as _};
+use opentelemetry::trace::{
+    Event, Span as OtelSpan, SpanId, SpanKind, Status, TraceContextExt as _, TraceId, Tracer,
+};
 use serde::Deserialize;
 use serde_json::Value;
 use tracing_opentelemetry::OpenTelemetrySpanExt as _;
@@ -57,10 +59,25 @@ thread_local! {
 
 struct GuestSpanEntry {
     span: tracing::Span,
+    name: String,
+    kind: String,
+    start_time: SystemTime,
+    parent_context: Option<opentelemetry::Context>,
+    trace_id: Option<TraceId>,
+    span_id: Option<SpanId>,
+    attributes: BTreeMap<String, Value>,
+    events: Vec<GuestSpanManualEvent>,
+}
+
+struct GuestSpanManualEvent {
+    name: String,
+    timestamp: SystemTime,
+    attributes: BTreeMap<String, Value>,
 }
 
 pub(crate) struct GuestSpanRegistry {
     context: WasmInvocationContext,
+    manual_export: bool,
     next_id: i64,
     total_started: usize,
     max_spans: usize,
@@ -69,10 +86,20 @@ pub(crate) struct GuestSpanRegistry {
 }
 
 impl GuestSpanRegistry {
+    #[cfg(test)]
     pub(crate) fn new(context: WasmInvocationContext) -> Self {
+        Self::with_manual_export(context, false)
+    }
+
+    pub(crate) fn for_invocation(context: WasmInvocationContext, needs_wasi: bool) -> Self {
+        Self::with_manual_export(context, needs_wasi)
+    }
+
+    fn with_manual_export(context: WasmInvocationContext, manual_export: bool) -> Self {
         clear_thread_local_guest_spans();
         Self {
             context,
+            manual_export,
             next_id: 1,
             total_started: 0,
             max_spans: DEFAULT_MAX_GUEST_SPANS,
@@ -107,6 +134,7 @@ impl GuestSpanRegistry {
         self.next_id = self.next_id.saturating_add(1);
         self.total_started += 1;
         let kind = payload.kind.as_deref().unwrap_or("internal");
+        let parent_context = manual_parent_context();
         let span = tracing::info_span!(
             "wasm.guest",
             otel.name = %name,
@@ -140,39 +168,67 @@ impl GuestSpanRegistry {
         );
         update_span_name(&span, name);
         apply_attributes(&span, &payload.attributes);
+        let (trace_id, span_id) = tracing_span_ids(&span);
         enter_thread_local_guest_span(&span);
 
-        self.spans.insert(id, GuestSpanEntry { span });
+        self.spans.insert(
+            id,
+            GuestSpanEntry {
+                span,
+                name: name.to_string(),
+                kind: kind.to_string(),
+                start_time: SystemTime::now(),
+                parent_context,
+                trace_id,
+                span_id,
+                attributes: allowed_attributes(&payload.attributes),
+                events: Vec::new(),
+            },
+        );
         self.stack.push(id);
         Ok(id)
     }
 
-    pub(crate) fn add_span_event(&self, span_id: i64, payload_json: &str) -> Result<(), String> {
+    pub(crate) fn add_span_event(
+        &mut self,
+        span_id: i64,
+        payload_json: &str,
+    ) -> Result<(), String> {
         let payload: GuestSpanEventPayload = serde_json::from_str(payload_json)
             .map_err(|e| format!("invalid guest span event payload: {e}"))?;
         let name = payload.name.trim();
         if name.is_empty() {
             return Err("guest span event name must not be empty".to_string());
         }
-        let span = self.span(span_id)?;
+        let entry = self.span_mut(span_id)?;
         let attrs = payload
             .attributes
             .iter()
             .filter_map(|(key, value)| key_value_from_json(key, value))
             .collect::<Vec<_>>();
-        span.context().span().add_event(name.to_string(), attrs);
+        entry
+            .span
+            .context()
+            .span()
+            .add_event(name.to_string(), attrs);
+        entry.events.push(GuestSpanManualEvent {
+            name: name.to_string(),
+            timestamp: SystemTime::now(),
+            attributes: allowed_attributes(&payload.attributes),
+        });
         Ok(())
     }
 
     pub(crate) fn set_span_attributes(
-        &self,
+        &mut self,
         span_id: i64,
         payload_json: &str,
     ) -> Result<(), String> {
         let payload: GuestSpanAttributesPayload = serde_json::from_str(payload_json)
             .map_err(|e| format!("invalid guest span attributes payload: {e}"))?;
-        let span = self.span(span_id)?;
-        apply_attributes(span, &payload.attributes);
+        let entry = self.span_mut(span_id)?;
+        apply_attributes(&entry.span, &payload.attributes);
+        merge_allowed_attributes(&mut entry.attributes, &payload.attributes);
         Ok(())
     }
 
@@ -203,10 +259,16 @@ impl GuestSpanRegistry {
             .remove(&span_id)
             .ok_or_else(|| format!("unknown guest span id: {span_id}"))?;
         self.stack.pop();
+        let mut entry = entry;
+        merge_allowed_attributes(&mut entry.attributes, &payload.attributes);
+        merge_end_status_attributes(&mut entry.attributes, &payload);
         apply_attributes(&entry.span, &payload.attributes);
         apply_end_status(&entry.span, &payload);
         exit_thread_local_guest_span();
         end_otel_span(&entry.span);
+        if self.manual_export {
+            export_manual_span(&entry, status_from_end_payload(&payload), SystemTime::now());
+        }
         drop(entry);
         Ok(())
     }
@@ -233,6 +295,13 @@ impl GuestSpanRegistry {
                     .set_status(Status::error("guest span left open"));
                 exit_thread_local_guest_span();
                 end_otel_span(&entry.span);
+                if self.manual_export {
+                    export_manual_span(
+                        &entry,
+                        Status::error("guest span left open"),
+                        SystemTime::now(),
+                    );
+                }
                 drop(entry);
             }
         }
@@ -240,10 +309,9 @@ impl GuestSpanRegistry {
         clear_thread_local_guest_spans();
     }
 
-    fn span(&self, span_id: i64) -> Result<&tracing::Span, String> {
+    fn span_mut(&mut self, span_id: i64) -> Result<&mut GuestSpanEntry, String> {
         self.spans
-            .get(&span_id)
-            .map(|entry| &entry.span)
+            .get_mut(&span_id)
             .ok_or_else(|| format!("unknown guest span id: {span_id}"))
     }
 }
@@ -288,6 +356,140 @@ fn exit_thread_local_guest_span() {
 
 fn clear_thread_local_guest_spans() {
     ENTERED_GUEST_SPANS.with(|guards| guards.borrow_mut().clear());
+}
+
+fn manual_parent_context() -> Option<opentelemetry::Context> {
+    let context = tracing::Span::current().context();
+    let span_context = context.span().span_context().clone();
+    span_context
+        .is_valid()
+        .then(|| opentelemetry::Context::new().with_remote_span_context(span_context))
+}
+
+fn tracing_span_ids(span: &tracing::Span) -> (Option<TraceId>, Option<SpanId>) {
+    let context = span.context();
+    let span_context = context.span().span_context().clone();
+    if span_context.is_valid() {
+        (Some(span_context.trace_id()), Some(span_context.span_id()))
+    } else {
+        (None, None)
+    }
+}
+
+fn allowed_attributes(attributes: &BTreeMap<String, Value>) -> BTreeMap<String, Value> {
+    attributes
+        .iter()
+        .filter(|(key, _)| guest_span_attribute_allowed(key))
+        .map(|(key, value)| (key.clone(), value.clone()))
+        .collect()
+}
+
+fn merge_allowed_attributes(
+    target: &mut BTreeMap<String, Value>,
+    attributes: &BTreeMap<String, Value>,
+) {
+    for (key, value) in attributes {
+        if guest_span_attribute_allowed(key) {
+            target.insert(key.clone(), value.clone());
+        }
+    }
+}
+
+fn merge_end_status_attributes(
+    target: &mut BTreeMap<String, Value>,
+    payload: &GuestSpanEndPayload,
+) {
+    let status = payload.status.as_deref().unwrap_or("ok");
+    if !status.eq_ignore_ascii_case("error") {
+        return;
+    }
+    let error_message = payload
+        .error_message
+        .as_deref()
+        .filter(|value| !value.is_empty())
+        .unwrap_or("guest span failed");
+    let error_type = payload
+        .error_type
+        .as_deref()
+        .filter(|value| !value.is_empty())
+        .unwrap_or("guest_span_error");
+    target.insert(
+        "error.type".to_string(),
+        Value::String(error_type.to_string()),
+    );
+    target.insert(
+        "error.message".to_string(),
+        Value::String(error_message.to_string()),
+    );
+    target.insert(
+        "exception.message".to_string(),
+        Value::String(error_message.to_string()),
+    );
+}
+
+fn status_from_end_payload(payload: &GuestSpanEndPayload) -> Status {
+    let status = payload.status.as_deref().unwrap_or("ok");
+    if status.eq_ignore_ascii_case("error") {
+        let error_message = payload
+            .error_message
+            .as_deref()
+            .filter(|value| !value.is_empty())
+            .unwrap_or("guest span failed");
+        Status::error(error_message.to_string())
+    } else {
+        Status::Ok
+    }
+}
+
+fn export_manual_span(entry: &GuestSpanEntry, status: Status, end_time: SystemTime) {
+    let (Some(trace_id), Some(span_id), Some(parent_context)) =
+        (entry.trace_id, entry.span_id, entry.parent_context.clone())
+    else {
+        return;
+    };
+
+    let tracer = opentelemetry::global::tracer("temper-wasm-guest");
+    let attrs = entry
+        .attributes
+        .iter()
+        .filter_map(|(key, value)| key_value_from_json(key, value))
+        .collect::<Vec<_>>();
+    let events = entry
+        .events
+        .iter()
+        .map(|event| {
+            let attrs = event
+                .attributes
+                .iter()
+                .filter_map(|(key, value)| key_value_from_json(key, value))
+                .collect::<Vec<_>>();
+            Event::new(event.name.clone(), event.timestamp, attrs, 0)
+        })
+        .collect::<Vec<_>>();
+    let mut span = tracer.build_with_context(
+        tracer
+            .span_builder(entry.name.clone())
+            .with_trace_id(trace_id)
+            .with_span_id(span_id)
+            .with_kind(span_kind(&entry.kind))
+            .with_start_time(entry.start_time)
+            .with_end_time(end_time)
+            .with_status(status)
+            .with_attributes(attrs)
+            .with_events(events),
+        &parent_context,
+    );
+    span.end_with_timestamp(end_time);
+}
+
+fn span_kind(kind: &str) -> SpanKind {
+    match kind.to_ascii_lowercase().as_str() {
+        "server" => SpanKind::Server,
+        "client" => SpanKind::Client,
+        "producer" => SpanKind::Producer,
+        "consumer" => SpanKind::Consumer,
+        _ => SpanKind::Internal,
+    }
 }
 
 fn apply_attributes(span: &tracing::Span, attributes: &BTreeMap<String, Value>) {

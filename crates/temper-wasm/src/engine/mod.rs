@@ -438,7 +438,7 @@ impl WasmEngine {
             streams,
             wasi_ctx,
             blob_cache,
-            guest_spans: GuestSpanRegistry::new(context.clone()),
+            guest_spans: GuestSpanRegistry::for_invocation(context.clone(), needs_wasi),
         };
         let mut store = Store::new(&engine, host_state);
         store
