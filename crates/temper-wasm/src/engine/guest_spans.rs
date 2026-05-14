@@ -168,8 +168,9 @@ impl GuestSpanRegistry {
         );
         update_span_name(&span, name);
         apply_attributes(&span, &payload.attributes);
-        let (trace_id, span_id) = tracing_span_ids(&span);
         enter_thread_local_guest_span(&span);
+        let (trace_id, span_id) = tracing_span_ids(&span);
+        let attributes = manual_span_attributes(&self.context, id, &payload.attributes);
 
         self.spans.insert(
             id,
@@ -181,7 +182,7 @@ impl GuestSpanRegistry {
                 parent_context,
                 trace_id,
                 span_id,
-                attributes: allowed_attributes(&payload.attributes),
+                attributes,
                 events: Vec::new(),
             },
         );
@@ -382,6 +383,62 @@ fn allowed_attributes(attributes: &BTreeMap<String, Value>) -> BTreeMap<String, 
         .filter(|(key, _)| guest_span_attribute_allowed(key))
         .map(|(key, value)| (key.clone(), value.clone()))
         .collect()
+}
+
+fn manual_span_attributes(
+    context: &WasmInvocationContext,
+    span_id: i64,
+    attributes: &BTreeMap<String, Value>,
+) -> BTreeMap<String, Value> {
+    let mut manual = allowed_attributes(attributes);
+    manual.insert("tenant".to_string(), Value::String(context.tenant.clone()));
+    manual.insert(
+        "entity_type".to_string(),
+        Value::String(context.entity_type.clone()),
+    );
+    manual.insert(
+        "entity_id".to_string(),
+        Value::String(context.entity_id.clone()),
+    );
+    manual.insert(
+        "trigger_action".to_string(),
+        Value::String(context.trigger_action.clone()),
+    );
+    manual.insert(
+        "wasm_module".to_string(),
+        Value::String(context.wasm_module.clone().unwrap_or_default()),
+    );
+    manual.insert(
+        "agent_id".to_string(),
+        Value::String(context.agent_id.clone().unwrap_or_default()),
+    );
+    manual.insert(
+        "session_id".to_string(),
+        Value::String(context.session_id.clone().unwrap_or_default()),
+    );
+    manual.insert(
+        "workflow_root_entity_type".to_string(),
+        Value::String(
+            context
+                .workflow_root_entity_type
+                .clone()
+                .unwrap_or_default(),
+        ),
+    );
+    manual.insert(
+        "workflow_root_entity_id".to_string(),
+        Value::String(context.workflow_root_entity_id.clone().unwrap_or_default()),
+    );
+    manual.insert(
+        "workflow_run_id".to_string(),
+        Value::String(context.workflow_run_id.clone().unwrap_or_default()),
+    );
+    manual.insert(
+        "observability_event".to_string(),
+        Value::String("wasm_guest.span".to_string()),
+    );
+    manual.insert("wasm_guest_span_id".to_string(), Value::from(span_id));
+    manual
 }
 
 fn merge_allowed_attributes(
@@ -649,6 +706,39 @@ mod tests {
         assert!(!guest_span_attribute_allowed("_otel.parent_trace_id"));
         assert!(guest_span_attribute_allowed("tool.name"));
         assert!(guest_span_attribute_allowed("gen_ai.operation.name"));
+    }
+
+    #[test]
+    fn manual_span_snapshot_includes_invocation_correlation_attributes() {
+        let mut attributes = BTreeMap::new();
+        attributes.insert("tool.name".to_string(), Value::String("python".to_string()));
+        let snapshot = manual_span_attributes(&context(), 7, &attributes);
+
+        assert_eq!(
+            snapshot.get("tenant"),
+            Some(&Value::String("test".to_string()))
+        );
+        assert_eq!(
+            snapshot.get("entity_id"),
+            Some(&Value::String("s-1".to_string()))
+        );
+        assert_eq!(
+            snapshot.get("wasm_module"),
+            Some(&Value::String("test_guest".to_string()))
+        );
+        assert_eq!(
+            snapshot.get("workflow_run_id"),
+            Some(&Value::String("Session:s-1".to_string()))
+        );
+        assert_eq!(
+            snapshot.get("observability_event"),
+            Some(&Value::String("wasm_guest.span".to_string()))
+        );
+        assert_eq!(snapshot.get("wasm_guest_span_id"), Some(&Value::from(7)));
+        assert_eq!(
+            snapshot.get("tool.name"),
+            Some(&Value::String("python".to_string()))
+        );
     }
 
     #[test]
