@@ -55,3 +55,12 @@ fn wasm_modules_table_has_required_columns() {
         );
     }
 }
+
+#[test]
+fn entity_catalog_stores_full_fields_json() {
+    let sql = CREATE_ENTITY_CATALOG_TABLE.to_uppercase();
+    assert!(
+        sql.contains("FIELDS"),
+        "entity_catalog schema must preserve full projected fields for catalog reads"
+    );
+}

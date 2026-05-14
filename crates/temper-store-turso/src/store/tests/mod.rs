@@ -716,6 +716,47 @@ async fn load_query_projection_fields_many_returns_requested_fields_by_entity() 
 }
 
 #[tokio::test]
+async fn load_entity_catalog_rows_returns_full_projected_fields() {
+    let store = make_store("entity-catalog-rows-full-fields").await;
+    let tenant = format!("tenant-{}", uuid::Uuid::new_v4());
+
+    store
+        .upsert_query_projection(
+            &tenant,
+            "File",
+            "file-a",
+            "Ready",
+            &serde_json::json!({
+                "Path": "/notes/readme.md",
+                "WorkspaceId": "ws-a",
+                "MimeType": "text/markdown",
+                "HasContent": true,
+            }),
+            7,
+        )
+        .await
+        .expect("upsert file projection");
+
+    let rows = store
+        .load_entity_catalog_rows(
+            &tenant,
+            "File",
+            &["file-a".to_string(), "missing".to_string()],
+        )
+        .await
+        .expect("load catalog rows");
+
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].entity_id, "file-a");
+    assert_eq!(rows[0].status, "Ready");
+    assert_eq!(rows[0].sequence_nr, 7);
+    assert_eq!(rows[0].fields["Path"], "/notes/readme.md");
+    assert_eq!(rows[0].fields["WorkspaceId"], "ws-a");
+    assert_eq!(rows[0].fields["MimeType"], "text/markdown");
+    assert_eq!(rows[0].fields["HasContent"], true);
+}
+
+#[tokio::test]
 async fn published_artifact_upsert_round_trips_and_updates_by_id() {
     let store = make_store("published-artifacts").await;
     let tenant = format!("tenant-{}", uuid::Uuid::new_v4());

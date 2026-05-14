@@ -511,6 +511,7 @@ async fn handle_entity_set(
         None // no filter
     };
 
+    let prefer_catalog_materialization = sql_pushdown_ids.is_some();
     let (entity_ids, apply_options, precomputed_count) = if let Some(pushed_ids) = sql_pushdown_ids
     {
         // SQL push-down already filtered — apply pagination only.
@@ -534,8 +535,15 @@ async fn handle_entity_set(
         )
     };
 
-    let entities =
-        materialize_entity_set_entities(state, tenant, &entity_type, name, &entity_ids).await;
+    let entities = materialize_entity_set_entities(
+        state,
+        tenant,
+        &entity_type,
+        name,
+        &entity_ids,
+        prefer_catalog_materialization,
+    )
+    .await;
 
     let (mut result, mut count) = apply_query_options(entities, &apply_options);
     if count.is_none() {

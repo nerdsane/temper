@@ -80,13 +80,14 @@ impl TursoEventStore {
             .await?;
         let conn = self.configured_connection().await?;
         let new_projection_hash = projection_hash(status, fields);
+        let fields_json = serde_json::to_string(fields).map_err(storage_error)?;
         let updated_at = sim_now().to_rfc3339();
         let sequence_nr = i64::try_from(sequence_nr).unwrap_or(i64::MAX);
 
         let unchanged_rows = conn
             .execute(
                 "UPDATE entity_catalog \
-                 SET status = ?4, updated_at = ?5, sequence_nr = ?6, projection_version = 2 \
+                 SET status = ?4, updated_at = ?5, sequence_nr = ?6, projection_version = 2, fields = ?8 \
                  WHERE tenant = ?1 AND entity_type = ?2 AND entity_id = ?3 AND projection_hash = ?7",
                 params![
                     tenant,
@@ -96,6 +97,7 @@ impl TursoEventStore {
                     updated_at.as_str(),
                     sequence_nr,
                     new_projection_hash.as_str(),
+                    fields_json.as_str(),
                 ],
             )
             .await
@@ -112,10 +114,11 @@ impl TursoEventStore {
 
         tx.execute(
             "INSERT INTO entity_catalog \
-             (tenant, entity_type, entity_id, status, updated_at, sequence_nr, projection_version, projection_hash) \
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, 2, ?7) \
+             (tenant, entity_type, entity_id, status, fields, updated_at, sequence_nr, projection_version, projection_hash) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, 2, ?8) \
              ON CONFLICT(tenant, entity_type, entity_id) DO UPDATE SET \
                  status = excluded.status, \
+                 fields = excluded.fields, \
                  updated_at = excluded.updated_at, \
                  sequence_nr = excluded.sequence_nr, \
                  projection_version = excluded.projection_version, \
@@ -125,6 +128,7 @@ impl TursoEventStore {
                 entity_type,
                 entity_id,
                 status,
+                fields_json.as_str(),
                 updated_at,
                 sequence_nr,
                 new_projection_hash.as_str(),
