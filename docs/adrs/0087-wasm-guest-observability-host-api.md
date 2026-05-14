@@ -34,6 +34,11 @@ Guest metrics remain low-cardinality OTEL metrics. The host also emits a
 `wasm_guest.metric` event on the active guest span so operators can pivot from
 the trace to the metric without adding trace ids as metric tags.
 
+Temper closes the OpenTelemetry span attached to the tracing span when the
+guest ends or when invocation cleanup closes an unended span. That keeps the
+same span id usable for APM and log correlation even for WASI guests that do
+most work between host function calls.
+
 ## Consequences
 
 - WASM modules can create Datadog-visible child spans for useful pure guest

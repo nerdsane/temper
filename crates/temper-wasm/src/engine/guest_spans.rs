@@ -1,4 +1,5 @@
 use std::collections::BTreeMap;
+use std::time::SystemTime;
 
 use opentelemetry::KeyValue;
 use opentelemetry::trace::{Status, TraceContextExt as _};
@@ -195,6 +196,7 @@ impl GuestSpanRegistry {
         self.stack.pop();
         apply_attributes(&entry.span, &payload.attributes);
         apply_end_status(&entry.span, &payload);
+        end_otel_span(&entry.span);
         drop(entry);
         Ok(())
     }
@@ -219,6 +221,7 @@ impl GuestSpanRegistry {
                     .context()
                     .span()
                     .set_status(Status::error("guest span left open"));
+                end_otel_span(&entry.span);
                 drop(entry);
             }
         }
@@ -293,6 +296,14 @@ fn apply_end_status(span: &tracing::Span, payload: &GuestSpanEndPayload) {
             .set_status(Status::error(error_message.to_string()));
     } else {
         span.context().span().set_status(Status::Ok);
+    }
+}
+
+fn end_otel_span(span: &tracing::Span) {
+    let context = span.context();
+    let otel_span = context.span();
+    if otel_span.span_context().is_valid() {
+        otel_span.end_with_timestamp(SystemTime::now());
     }
 }
 
