@@ -3,6 +3,7 @@
 //! Modules are compiled once and cached by SHA-256 hash. Each invocation
 //! gets a fresh `Store` with fuel + memory limits (TigerStyle budgets).
 
+mod guest_spans;
 mod host_functions;
 mod telemetry;
 #[cfg(test)]
@@ -24,6 +25,8 @@ use crate::stream::StreamRegistry;
 use crate::types::{
     MAX_MODULE_SIZE, WasmInvocationContext, WasmInvocationResult, WasmResourceLimits,
 };
+
+pub(crate) use guest_spans::GuestSpanRegistry;
 
 const WASM_EPOCH_TICK_INTERVAL: Duration = Duration::from_millis(10);
 
@@ -183,6 +186,8 @@ pub(crate) struct HostState {
     /// blob refs synchronously. Keyed by blob key (e.g.
     /// `field-overflow/sha256/<hex>.json`). See ADR-0046.
     pub(crate) blob_cache: BTreeMap<String, Vec<u8>>,
+    /// Guest-created observability spans scoped to this invocation.
+    pub(crate) guest_spans: GuestSpanRegistry,
 }
 
 /// WASM engine: compile, cache, invoke modules.
@@ -433,6 +438,7 @@ impl WasmEngine {
             streams,
             wasi_ctx,
             blob_cache,
+            guest_spans: GuestSpanRegistry::new(context.clone()),
         };
         let mut store = Store::new(&engine, host_state);
         store
@@ -481,11 +487,20 @@ impl WasmEngine {
             WasmError::Invocation(format!("failed to write context to memory: {e}"))
         })?;
 
-        let result_ptr = run_fn
-            .call(&mut store, (ctx_ptr as i32, ctx_bytes.len() as i32))
-            .map_err(|e| {
-                telemetry::map_invoke_error(e, &context, needs_wasi, limits.max_duration, start)
-            })?;
+        let result_ptr = match run_fn.call(&mut store, (ctx_ptr as i32, ctx_bytes.len() as i32)) {
+            Ok(result_ptr) => result_ptr,
+            Err(e) => {
+                let err = telemetry::map_invoke_error(
+                    e,
+                    &context,
+                    needs_wasi,
+                    limits.max_duration,
+                    start,
+                );
+                store.data_mut().guest_spans.cleanup_unclosed();
+                return Err(err);
+            }
+        };
 
         let duration_ms = start.elapsed().as_millis() as u64;
         tracing::Span::current().record("duration_ms", duration_ms);
@@ -494,18 +509,29 @@ impl WasmEngine {
             host_result.clone()
         } else if result_ptr > 0 {
             let mut len_bytes = [0u8; 4];
-            memory
-                .read(&store, (result_ptr - 4) as usize, &mut len_bytes)
-                .map_err(|e| WasmError::Invocation(format!("failed to read result length: {e}")))?;
+            if let Err(e) = memory.read(&store, (result_ptr - 4) as usize, &mut len_bytes) {
+                store.data_mut().guest_spans.cleanup_unclosed();
+                return Err(WasmError::Invocation(format!(
+                    "failed to read result length: {e}"
+                )));
+            }
             let result_len = u32::from_le_bytes(len_bytes) as usize;
 
             let mut result_bytes = vec![0u8; result_len];
-            memory
-                .read(&store, result_ptr as usize, &mut result_bytes)
-                .map_err(|e| WasmError::Invocation(format!("failed to read result: {e}")))?;
+            if let Err(e) = memory.read(&store, result_ptr as usize, &mut result_bytes) {
+                store.data_mut().guest_spans.cleanup_unclosed();
+                return Err(WasmError::Invocation(format!("failed to read result: {e}")));
+            }
 
-            String::from_utf8(result_bytes)
-                .map_err(|e| WasmError::Invocation(format!("result is not valid UTF-8: {e}")))?
+            match String::from_utf8(result_bytes) {
+                Ok(result) => result,
+                Err(e) => {
+                    store.data_mut().guest_spans.cleanup_unclosed();
+                    return Err(WasmError::Invocation(format!(
+                        "result is not valid UTF-8: {e}"
+                    )));
+                }
+            }
         } else {
             String::new()
         };
@@ -524,18 +550,23 @@ impl WasmEngine {
                     );
                 }
             }
-            return Ok(telemetry::empty_result(&context, needs_wasi, duration_ms));
+            let result = telemetry::empty_result(&context, needs_wasi, duration_ms);
+            store.data_mut().guest_spans.cleanup_unclosed();
+            return Ok(result);
         }
 
-        let parsed = telemetry::parse_result_json(&result_json, &context, needs_wasi, duration_ms)?;
+        let parsed =
+            match telemetry::parse_result_json(&result_json, &context, needs_wasi, duration_ms) {
+                Ok(parsed) => parsed,
+                Err(err) => {
+                    store.data_mut().guest_spans.cleanup_unclosed();
+                    return Err(err);
+                }
+            };
 
-        Ok(telemetry::finalize_result(
-            &store,
-            parsed,
-            &context,
-            needs_wasi,
-            duration_ms,
-        ))
+        let result = telemetry::finalize_result(&store, parsed, &context, needs_wasi, duration_ms);
+        store.data_mut().guest_spans.cleanup_unclosed();
+        Ok(result)
     }
 
     /// Remove a module from the cache.

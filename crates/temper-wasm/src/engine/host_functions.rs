@@ -88,6 +88,21 @@ pub(crate) enum FieldResolution {
     HostError,
 }
 
+fn read_guest_string(caller: &mut Caller<'_, HostState>, ptr: i32, len: i32) -> Result<String, ()> {
+    if ptr < 0 || len < 0 {
+        return Err(());
+    }
+    let memory = caller.get_export("memory").and_then(|e| e.into_memory());
+    let Some(memory) = memory else {
+        return Err(());
+    };
+    let mut buf = vec![0u8; len as usize];
+    memory
+        .read(caller, ptr as usize, &mut buf)
+        .map_err(|_| ())?;
+    String::from_utf8(buf).map_err(|_| ())
+}
+
 #[derive(Debug, serde::Deserialize)]
 struct HostHttpBatchRequest {
     method: String,
@@ -226,6 +241,7 @@ pub(super) fn link_host_functions(linker: &mut Linker<HostState>) -> Result<(), 
                     let _ = memory.read(&caller, msg_ptr as usize, &mut msg_buf);
                     let level = String::from_utf8_lossy(&level_buf);
                     let msg = String::from_utf8_lossy(&msg_buf);
+                    let _guest_span = caller.data().guest_spans.enter_active();
                     caller.data().host.log(&level, &msg);
                 }
             },
@@ -287,6 +303,7 @@ pub(super) fn link_host_functions(linker: &mut Linker<HostState>) -> Result<(), 
                 let Ok(payload) = String::from_utf8(buf) else {
                     return -1;
                 };
+                let _guest_span = caller.data().guest_spans.enter_active();
                 match caller.data().host.emit_progress(&payload) {
                     Ok(()) => 0,
                     Err(_) => -1,
@@ -312,6 +329,7 @@ pub(super) fn link_host_functions(linker: &mut Linker<HostState>) -> Result<(), 
                 let Ok(payload) = String::from_utf8(buf) else {
                     return -1;
                 };
+                let _guest_span = caller.data().guest_spans.enter_active();
                 match caller.data().host.emit_wide_event(&payload) {
                     Ok(()) => 0,
                     Err(_) => -1,
@@ -337,6 +355,7 @@ pub(super) fn link_host_functions(linker: &mut Linker<HostState>) -> Result<(), 
                 let Ok(payload) = String::from_utf8(buf) else {
                     return -1;
                 };
+                let _guest_span = caller.data().guest_spans.enter_active();
                 match caller.data().host.log_structured(&payload) {
                     Ok(()) => 0,
                     Err(_) => -1,
@@ -362,6 +381,7 @@ pub(super) fn link_host_functions(linker: &mut Linker<HostState>) -> Result<(), 
                 let Ok(payload) = String::from_utf8(buf) else {
                     return -1;
                 };
+                let _guest_span = caller.data().guest_spans.enter_active();
                 match caller.data().host.emit_metric(&payload) {
                     Ok(()) => 0,
                     Err(_) => -1,
@@ -369,6 +389,96 @@ pub(super) fn link_host_functions(linker: &mut Linker<HostState>) -> Result<(), 
             },
         )
         .map_err(|e| WasmError::Compilation(format!("failed to link host_emit_metric: {e}")))?;
+
+    // host_start_span(ptr, len) -> i64
+    linker
+        .func_wrap(
+            "env",
+            "host_start_span",
+            |mut caller: Caller<'_, HostState>, ptr: i32, len: i32| -> i64 {
+                let Ok(payload) = read_guest_string(&mut caller, ptr, len) else {
+                    return -1;
+                };
+                match caller.data_mut().guest_spans.start_span(&payload) {
+                    Ok(span_id) => span_id,
+                    Err(error) => {
+                        tracing::warn!(error = %error, "host_start_span failed");
+                        -1
+                    }
+                }
+            },
+        )
+        .map_err(|e| WasmError::Compilation(format!("failed to link host_start_span: {e}")))?;
+
+    // host_add_span_event(span_id, ptr, len) -> i32
+    linker
+        .func_wrap(
+            "env",
+            "host_add_span_event",
+            |mut caller: Caller<'_, HostState>, span_id: i64, ptr: i32, len: i32| -> i32 {
+                let Ok(payload) = read_guest_string(&mut caller, ptr, len) else {
+                    return -1;
+                };
+                match caller.data().guest_spans.add_span_event(span_id, &payload) {
+                    Ok(()) => 0,
+                    Err(error) => {
+                        tracing::warn!(span_id, error = %error, "host_add_span_event failed");
+                        -1
+                    }
+                }
+            },
+        )
+        .map_err(|e| WasmError::Compilation(format!("failed to link host_add_span_event: {e}")))?;
+
+    // host_set_span_attributes(span_id, ptr, len) -> i32
+    linker
+        .func_wrap(
+            "env",
+            "host_set_span_attributes",
+            |mut caller: Caller<'_, HostState>, span_id: i64, ptr: i32, len: i32| -> i32 {
+                let Ok(payload) = read_guest_string(&mut caller, ptr, len) else {
+                    return -1;
+                };
+                match caller
+                    .data()
+                    .guest_spans
+                    .set_span_attributes(span_id, &payload)
+                {
+                    Ok(()) => 0,
+                    Err(error) => {
+                        tracing::warn!(
+                            span_id,
+                            error = %error,
+                            "host_set_span_attributes failed"
+                        );
+                        -1
+                    }
+                }
+            },
+        )
+        .map_err(|e| {
+            WasmError::Compilation(format!("failed to link host_set_span_attributes: {e}"))
+        })?;
+
+    // host_end_span(span_id, ptr, len) -> i32
+    linker
+        .func_wrap(
+            "env",
+            "host_end_span",
+            |mut caller: Caller<'_, HostState>, span_id: i64, ptr: i32, len: i32| -> i32 {
+                let Ok(payload) = read_guest_string(&mut caller, ptr, len) else {
+                    return -1;
+                };
+                match caller.data_mut().guest_spans.end_span(span_id, &payload) {
+                    Ok(()) => 0,
+                    Err(error) => {
+                        tracing::warn!(span_id, error = %error, "host_end_span failed");
+                        -1
+                    }
+                }
+            },
+        )
+        .map_err(|e| WasmError::Compilation(format!("failed to link host_end_span: {e}")))?;
 
     // host_get_secret(key_ptr, key_len, buf_ptr, buf_len) -> actual_len (-1 on error)
     linker
@@ -388,6 +498,7 @@ pub(super) fn link_host_functions(linker: &mut Linker<HostState>) -> Result<(), 
                 let _ = memory.read(&caller, key_ptr as usize, &mut key_buf);
                 let key = String::from_utf8_lossy(&key_buf);
 
+                let _guest_span = caller.data().guest_spans.enter_active();
                 match caller.data().host.get_secret(&key) {
                     Ok(secret) => {
                         let secret_bytes = secret.as_bytes();
@@ -458,6 +569,7 @@ pub(super) fn link_host_functions(linker: &mut Linker<HostState>) -> Result<(), 
 
                 // Bridge async -> sync with an outer deadline so a hanging
                 // host call can never pin the actor indefinitely.
+                let _guest_span = caller.data().guest_spans.enter_active();
                 let host = caller.data().host.clone();
                 let Ok(result) = run_host_call_with_timeout("host_http_call", async move {
                     host.http_call(&method, &url, &headers, &body).await
@@ -510,6 +622,7 @@ pub(super) fn link_host_functions(linker: &mut Linker<HostState>) -> Result<(), 
                     Vec::new()
                 };
 
+                let _guest_span = caller.data().guest_spans.enter_active();
                 let host = caller.data().host.clone();
                 let result = tokio::task::block_in_place(|| {
                     tokio::runtime::Handle::current().block_on(
@@ -601,6 +714,7 @@ pub(super) fn link_host_functions(linker: &mut Linker<HostState>) -> Result<(), 
 
                 // Bridge async -> sync with an outer deadline so a hanging
                 // host call can never pin the actor indefinitely.
+                let _guest_span = caller.data().guest_spans.enter_active();
                 let host = caller.data().host.clone();
                 let Ok(result) = run_host_call_with_timeout("host_connect_call", async move {
                     host.connect_call(&url, &headers, &body).await
@@ -702,6 +816,7 @@ pub(super) fn link_host_functions(linker: &mut Linker<HostState>) -> Result<(), 
 
                 // Bridge async -> sync with an outer deadline so a hanging
                 // host call can never pin the actor indefinitely.
+                let _guest_span = caller.data().guest_spans.enter_active();
                 let host = caller.data().host.clone();
                 let Ok(result) = run_host_call_with_timeout("host_http_call_stream", async move {
                     host.http_call_binary(&method, &url, &headers, &body_bytes)
@@ -747,6 +862,7 @@ pub(super) fn link_host_functions(linker: &mut Linker<HostState>) -> Result<(), 
                 let _ = memory.read(&caller, key_ptr as usize, &mut key_buf);
                 let key = String::from_utf8_lossy(&key_buf);
                 let started = Instant::now();
+                let _guest_span = caller.data().guest_spans.enter_active();
                 let span = tracing::info_span!(
                     "wasm.host.cache_contains",
                     otel.name = "wasm.host.cache_contains",
@@ -804,6 +920,7 @@ pub(super) fn link_host_functions(linker: &mut Linker<HostState>) -> Result<(), 
                 let _ = memory.read(&caller, stream_id_ptr as usize, &mut id_buf);
                 let stream_id = String::from_utf8_lossy(&id_buf).to_string();
                 let started = Instant::now();
+                let _guest_span = caller.data().guest_spans.enter_active();
                 let span = tracing::info_span!(
                     "wasm.host.cache_to_stream",
                     otel.name = "wasm.host.cache_to_stream",
@@ -893,6 +1010,7 @@ pub(super) fn link_host_functions(linker: &mut Linker<HostState>) -> Result<(), 
                 }
                 let field_name = String::from_utf8_lossy(&name_buf).to_string();
                 let started = Instant::now();
+                let _guest_span = caller.data().guest_spans.enter_active();
                 let span = tracing::info_span!(
                     "wasm.host.read_field",
                     otel.name = "wasm.host.read_field",
@@ -996,6 +1114,7 @@ pub(super) fn link_host_functions(linker: &mut Linker<HostState>) -> Result<(), 
                 let _ = memory.read(&caller, stream_id_ptr as usize, &mut id_buf);
                 let stream_id = String::from_utf8_lossy(&id_buf).to_string();
                 let started = Instant::now();
+                let _guest_span = caller.data().guest_spans.enter_active();
                 let span = tracing::info_span!(
                     "wasm.host.cache_from_stream",
                     otel.name = "wasm.host.cache_from_stream",
@@ -1084,6 +1203,7 @@ pub(super) fn link_host_functions(linker: &mut Linker<HostState>) -> Result<(), 
                 let _ = memory.read(&caller, algorithm_ptr as usize, &mut algo_buf);
                 let algorithm = String::from_utf8_lossy(&algo_buf).to_string();
                 let started = Instant::now();
+                let _guest_span = caller.data().guest_spans.enter_active();
                 let span = tracing::info_span!(
                     "wasm.host.hash_stream",
                     otel.name = "wasm.host.hash_stream",
@@ -1258,6 +1378,7 @@ pub(super) fn link_host_functions(linker: &mut Linker<HostState>) -> Result<(), 
                 };
 
                 // Call host evaluate_spec (synchronous — no async bridge needed)
+                let _guest_span = caller.data().guest_spans.enter_active();
                 let result_json = match caller.data().host.evaluate_spec(
                     &ioa_source,
                     &current_state,
@@ -1339,6 +1460,7 @@ pub(super) fn link_host_functions(linker: &mut Linker<HostState>) -> Result<(), 
                     Vec::new()
                 };
 
+                let _guest_span = caller.data().guest_spans.enter_active();
                 let host = caller.data().host.clone();
                 let head = crate::http_stream::HttpRequestHead {
                     method,
@@ -1391,6 +1513,7 @@ pub(super) fn link_host_functions(linker: &mut Linker<HostState>) -> Result<(), 
                     return -4;
                 }
 
+                let _guest_span = caller.data().guest_spans.enter_active();
                 let host = caller.data().host.clone();
                 let sh = crate::http_stream::StreamHandle(handle as u32);
                 let result = tokio::task::block_in_place(|| {
@@ -1431,6 +1554,7 @@ pub(super) fn link_host_functions(linker: &mut Linker<HostState>) -> Result<(), 
                 let mut buf = vec![0u8; data_len as usize];
                 let _ = memory.read(&caller, data_ptr as usize, &mut buf);
 
+                let _guest_span = caller.data().guest_spans.enter_active();
                 let host = caller.data().host.clone();
                 let sh = crate::http_stream::StreamHandle(handle as u32);
                 let result = tokio::task::block_in_place(|| {
@@ -1455,6 +1579,7 @@ pub(super) fn link_host_functions(linker: &mut Linker<HostState>) -> Result<(), 
             "env",
             "host_http_stream_close",
             |caller: Caller<'_, HostState>, handle: i32| -> i32 {
+                let _guest_span = caller.data().guest_spans.enter_active();
                 let host = caller.data().host.clone();
                 let sh = crate::http_stream::StreamHandle(handle as u32);
                 let result = tokio::task::block_in_place(|| {
@@ -1488,6 +1613,7 @@ pub(super) fn link_host_functions(linker: &mut Linker<HostState>) -> Result<(), 
                 let memory = caller.get_export("memory").and_then(|e| e.into_memory());
                 let Some(memory) = memory else { return -4 };
 
+                let _guest_span = caller.data().guest_spans.enter_active();
                 let host = caller.data().host.clone();
                 let sh = crate::http_stream::StreamHandle(resp_handle as u32);
                 let result = tokio::task::block_in_place(|| {
@@ -1555,6 +1681,7 @@ pub(super) fn link_host_functions(linker: &mut Linker<HostState>) -> Result<(), 
                     status: raw.status,
                     headers: raw.headers,
                 };
+                let _guest_span = caller.data().guest_spans.enter_active();
                 let host = caller.data().host.clone();
                 let sh = crate::http_stream::StreamHandle(resp_handle as u32);
                 let result = tokio::task::block_in_place(|| {

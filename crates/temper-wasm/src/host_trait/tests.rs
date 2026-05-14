@@ -15,6 +15,17 @@ fn guest_metric_count_kind_is_counter() {
     assert!(!guest_metric_is_counter_kind(None));
 }
 
+#[test]
+fn guest_metric_tags_reject_high_cardinality_correlation_ids() {
+    assert!(guest_metric_tag_allowed("provider"));
+    assert!(guest_metric_tag_allowed("model"));
+    assert!(!guest_metric_tag_allowed("trace_id"));
+    assert!(!guest_metric_tag_allowed("dd.span_id"));
+    assert!(!guest_metric_tag_allowed("session_id"));
+    assert!(!guest_metric_tag_allowed("workflow_run_id"));
+    assert!(!guest_metric_tag_allowed("tool.call_id"));
+}
+
 /// Build a Connect frame: [flags(1)][length(4 big-endian)][payload].
 fn make_frame(flags: u8, payload: &[u8]) -> Vec<u8> {
     let mut frame = Vec::with_capacity(5 + payload.len());
