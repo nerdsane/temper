@@ -123,9 +123,12 @@ fn guest_log_named_event_carries_datadog_trace_and_span_correlation() {
 
 #[test]
 fn production_guest_log_does_not_emit_duplicate_uncorrelated_wasm_event() {
+    type CapturedEvent = (String, BTreeMap<String, String>);
+    type CapturedEvents = Arc<Mutex<Vec<CapturedEvent>>>;
+
     #[derive(Clone)]
     struct EventCapture {
-        events: Arc<Mutex<Vec<(String, BTreeMap<String, String>)>>>,
+        events: CapturedEvents,
     }
 
     #[derive(Default)]
