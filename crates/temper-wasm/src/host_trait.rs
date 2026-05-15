@@ -381,6 +381,27 @@ fn guest_metric_is_counter_kind(kind: Option<&str>) -> bool {
     matches!(kind, Some("count" | "counter"))
 }
 
+fn guest_metric_tag_allowed(key: &str) -> bool {
+    let key = key.trim();
+    if key.is_empty() {
+        return false;
+    }
+    !matches!(
+        key,
+        "trace_id"
+            | "span_id"
+            | "dd.trace_id"
+            | "dd.span_id"
+            | "otel.trace_id"
+            | "otel.span_id"
+            | "session_id"
+            | "entity_id"
+            | "workflow_run_id"
+            | "tool.call_id"
+            | "request.id"
+    ) && !key.ends_with("_id")
+}
+
 const DEFAULT_BLOB_TRANSPORT_MAX_CONCURRENCY: usize = 32;
 
 fn blob_transport_max_concurrency() -> usize {
@@ -1457,11 +1478,13 @@ impl WasmHost for ProductionWasmHost {
     fn emit_metric(&self, metric_json: &str) -> Result<(), String> {
         let payload: GuestMetricInput = serde_json::from_str(metric_json)
             .map_err(|e| format!("invalid guest metric payload: {e}"))?;
+        record_guest_metric_span_event(&payload, self.invocation_context.as_ref());
         let meter = opentelemetry::global::meter("temper");
         let mut attrs: Vec<opentelemetry::KeyValue> = payload
             .tags
-            .into_iter()
-            .map(|(key, value)| opentelemetry::KeyValue::new(key, value))
+            .iter()
+            .filter(|(key, _)| guest_metric_tag_allowed(key))
+            .map(|(key, value)| opentelemetry::KeyValue::new(key.clone(), value.clone()))
             .collect();
         if let Some(ctx) = &self.invocation_context {
             attrs.push(opentelemetry::KeyValue::new("tenant", ctx.tenant.clone()));
@@ -1469,14 +1492,12 @@ impl WasmHost for ProductionWasmHost {
                 "entity_type",
                 ctx.entity_type.clone(),
             ));
+            attrs.push(opentelemetry::KeyValue::new(
+                "trigger_action",
+                ctx.trigger_action.clone(),
+            ));
             if let Some(module) = &ctx.wasm_module {
                 attrs.push(opentelemetry::KeyValue::new("wasm_module", module.clone()));
-            }
-            if let Some(session_id) = context_session_id(ctx) {
-                attrs.push(opentelemetry::KeyValue::new(
-                    "session_id",
-                    session_id.to_string(),
-                ));
             }
         }
 
@@ -1806,6 +1827,62 @@ fn record_guest_log_span_event(
     let otel_span = cx.span();
     if otel_span.span_context().is_valid() {
         otel_span.add_event("wasm_guest.log", attrs);
+    }
+}
+
+fn record_guest_metric_span_event(
+    payload: &GuestMetricInput,
+    context: Option<&WasmInvocationContext>,
+) {
+    use opentelemetry::KeyValue;
+    use opentelemetry::trace::TraceContextExt as _;
+    use tracing_opentelemetry::OpenTelemetrySpanExt as _;
+
+    let mut attrs = vec![
+        KeyValue::new("metric.name", truncate_for_span_attr(&payload.name)),
+        KeyValue::new("metric.value", payload.value),
+    ];
+    if let Some(kind) = payload.kind.as_deref().filter(|value| !value.is_empty()) {
+        attrs.push(KeyValue::new("metric.kind", truncate_for_span_attr(kind)));
+    }
+    if let Some(context) = context {
+        attrs.push(KeyValue::new("tenant", context.tenant.clone()));
+        attrs.push(KeyValue::new("entity_type", context.entity_type.clone()));
+        attrs.push(KeyValue::new("entity_id", context.entity_id.clone()));
+        attrs.push(KeyValue::new(
+            "trigger_action",
+            context.trigger_action.clone(),
+        ));
+        if let Some(module) = context
+            .wasm_module
+            .as_deref()
+            .filter(|value| !value.is_empty())
+        {
+            attrs.push(KeyValue::new("wasm_module", module.to_string()));
+        }
+        if let Some(session_id) = context_session_id(context) {
+            attrs.push(KeyValue::new("session_id", session_id.to_string()));
+        }
+        if let Some(run_id) = context
+            .workflow_run_id
+            .as_deref()
+            .filter(|value| !value.is_empty())
+        {
+            attrs.push(KeyValue::new("workflow_run_id", run_id.to_string()));
+        }
+    }
+    for (key, value) in &payload.tags {
+        attrs.push(KeyValue::new(
+            format!("metric.tag.{key}"),
+            truncate_for_span_attr(value),
+        ));
+    }
+
+    let span = tracing::Span::current();
+    let cx = span.context();
+    let otel_span = cx.span();
+    if otel_span.span_context().is_valid() {
+        otel_span.add_event("wasm_guest.metric", attrs);
     }
 }
 

@@ -61,6 +61,22 @@ unsafe extern "C" {
     /// Returns 0 on success, -1 on error.
     pub fn host_emit_metric(ptr: i32, len: i32) -> i32;
 
+    /// Start a structured guest observability span.
+    /// Returns an opaque positive span id, or -1 on error.
+    pub fn host_start_span(payload_ptr: i32, payload_len: i32) -> i64;
+
+    /// Add an event to a structured guest observability span.
+    /// Returns 0 on success, -1 on error.
+    pub fn host_add_span_event(span_id: i64, payload_ptr: i32, payload_len: i32) -> i32;
+
+    /// Set attributes on a structured guest observability span.
+    /// Returns 0 on success, -1 on error.
+    pub fn host_set_span_attributes(span_id: i64, payload_ptr: i32, payload_len: i32) -> i32;
+
+    /// End a structured guest observability span.
+    /// Returns 0 on success, -1 on error.
+    pub fn host_end_span(span_id: i64, payload_ptr: i32, payload_len: i32) -> i32;
+
     /// Read a secret value by key.
     /// Returns bytes written, needed size if too small, or -1 on error.
     pub fn host_get_secret(key_ptr: i32, key_len: i32, buf_ptr: i32, buf_len: i32) -> i32;
