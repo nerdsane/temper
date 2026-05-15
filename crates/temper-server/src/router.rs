@@ -104,6 +104,7 @@ pub fn build_router(state: ServerState) -> Router {
             Method::GET,
             Method::POST,
             Method::PATCH,
+            Method::PUT,
             Method::DELETE,
             Method::OPTIONS,
         ])

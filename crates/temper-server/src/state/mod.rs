@@ -8,6 +8,7 @@ mod evolution;
 mod file_read_blobs;
 mod file_read_projection;
 mod file_reads;
+mod file_writes;
 pub mod metrics;
 pub mod pending_decisions;
 mod persistence;
@@ -22,6 +23,7 @@ pub use admission::{AdmissionController, AdmissionOutcome, AdmissionPermit};
 pub use dispatch::{DispatchCommand, DispatchError, DispatchExtOptions, StateTimeoutTracker};
 pub use entity_ops::{FailedLevelInfo, VerificationGateError};
 pub use file_reads::{IndexedFileStreamRead, TextFileReadResult, TextFileVersionReadResult};
+pub(crate) use file_writes::FileStreamContentError;
 pub use metrics::MetricsCollector;
 pub use pending_decisions::{
     ActionScope, DecisionStatus, DurationScope, PendingDecision, PolicyScopeMatrix, PrincipalScope,
@@ -32,7 +34,6 @@ pub use published_artifacts::PublishFileArtifactRequest;
 pub use trajectory::{TrajectoryEntry, TrajectorySource};
 pub use wasm_invocation_log::WasmInvocationEntry;
 
-use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet};
 use std::num::NonZeroUsize;
 use std::sync::{Arc, Mutex, OnceLock, RwLock};
@@ -925,139 +926,6 @@ impl ServerState {
         }
 
         None
-    }
-
-    /// Upload stream content for a TemperFS `File` entity using the standard
-    /// `blob_adapter` path, then dispatch the callback action it returns.
-    ///
-    /// This is the programmatic equivalent of `PUT /tdata/Files('{id}')/$value`
-    /// and keeps platform-side bootstrapping aligned with normal stream writes.
-    pub async fn put_file_stream_content(
-        &self,
-        tenant: &temper_runtime::tenant::TenantId,
-        file_id: &str,
-        body: &[u8],
-        mime_type: &str,
-        agent_ctx: &crate::request_context::AgentContext,
-    ) -> Result<crate::entity_actor::EntityResponse, String> {
-        let blob_endpoint = self
-            .secrets_vault
-            .as_ref()
-            .and_then(|vault| vault.get_secret(&tenant.to_string(), "blob_endpoint"));
-
-        if blob_endpoint
-            .as_deref()
-            .is_none_or(crate::blob_store::is_local_internal_blob_endpoint)
-        {
-            let file_state = self
-                .get_tenant_entity_state(tenant, "File", file_id)
-                .await
-                .map_err(|e| format!("failed to load File('{file_id}') state: {e}"))?;
-            let mut hasher = Sha256::new();
-            hasher.update(body);
-            let content_hash = format!("sha256:{:x}", hasher.finalize());
-            let blob_key = format!("temper-fs/{content_hash}");
-            self.put_blob_object(tenant, &blob_key, body, None)
-                .await
-                .map_err(|e| format!("failed to persist local blob '{blob_key}': {e}"))?;
-
-            let version_number = file_state
-                .state
-                .counters
-                .get("version_count")
-                .copied()
-                .unwrap_or(0)
-                + 1;
-            let previous_version_id = file_state
-                .state
-                .fields
-                .get("last_version_id")
-                .and_then(|value| value.as_str())
-                .unwrap_or_default();
-            let created_by = agent_ctx.agent_id.clone().unwrap_or_default();
-            return self
-                .dispatch_tenant_action(
-                    tenant,
-                    "File",
-                    file_id,
-                    "StreamUpdated",
-                    serde_json::json!({
-                        "content_hash": content_hash,
-                        "size_bytes": body.len() as i64,
-                        "mime_type": mime_type,
-                        "version_number": version_number,
-                        "previous_version_id": previous_version_id,
-                        "created_by": created_by,
-                    }),
-                    agent_ctx,
-                )
-                .await;
-        }
-
-        let mut entity_state = serde_json::to_value(
-            &self
-                .get_tenant_entity_state(tenant, "File", file_id)
-                .await
-                .map_err(|e| format!("failed to load File('{file_id}') state: {e}"))?
-                .state,
-        )
-        .map_err(|e| format!("failed to serialize File('{file_id}') state: {e}"))?;
-        crate::blobs::hydrate_blob_refs_for_tenant(self, tenant, &mut entity_state).await;
-
-        let stream_id = format!("upload-{}", temper_runtime::scheduler::sim_uuid());
-        let streams = Arc::new(RwLock::new(StreamRegistry::default()));
-        {
-            let mut registry = streams.write().unwrap(); // ci-ok: infallible lock
-            registry.register_stream(&stream_id, body.to_vec());
-        }
-
-        let inv_ctx = WasmInvocationContext {
-            tenant: tenant.to_string(),
-            entity_type: "File".to_string(),
-            entity_id: file_id.to_string(),
-            trigger_action: "StreamUpload".to_string(),
-            wasm_module: Some("blob_adapter".to_string()),
-            trigger_params: serde_json::json!({
-                "stream_id": stream_id,
-                "size_bytes": body.len() as i64,
-                "content_type": mime_type,
-                "operation": "put",
-            }),
-            entity_state,
-            agent_id: agent_ctx.agent_id.clone(),
-            session_id: agent_ctx.session_id.clone(),
-            integration_config: std::collections::BTreeMap::new(),
-            trace_id: agent_ctx.trace_id.clone().unwrap_or_default(),
-            workflow_root_entity_type: agent_ctx.workflow_root_entity_type.clone(),
-            workflow_root_entity_id: agent_ctx.workflow_root_entity_id.clone(),
-            workflow_run_id: agent_ctx.workflow_run_id.clone(),
-            http_request: None,
-        };
-
-        let wasm_result = self
-            .invoke_wasm_direct(tenant, "blob_adapter", inv_ctx, streams)
-            .await
-            .map_err(|e| format!("blob_adapter invocation failed: {e}"))?;
-
-        if !wasm_result.success {
-            return Err(wasm_result
-                .error
-                .unwrap_or_else(|| "blob_adapter returned an unknown error".to_string()));
-        }
-
-        if wasm_result.callback_action.is_empty() {
-            return self.get_tenant_entity_state(tenant, "File", file_id).await;
-        }
-
-        self.dispatch_tenant_action(
-            tenant,
-            "File",
-            file_id,
-            &wasm_result.callback_action,
-            wasm_result.callback_params,
-            agent_ctx,
-        )
-        .await
     }
 
     /// Download stream content for a TemperFS `File` entity without going
