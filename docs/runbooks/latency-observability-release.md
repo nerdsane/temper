@@ -197,9 +197,11 @@ railway run --service openpaw --environment production -- python3 scripts/deploy
 
 May 14, 2026 dry-run result: the Railway-injected Datadog credentials worked
 and the script would create all 62 source-of-truth monitors under the
-`team:openpaw` monitor tag scope. Before non-dry-run deployment, confirm that
-this is expected and that there is not an older dashboard/monitor source using
-different tags or names.
+`team:openpaw` monitor tag scope. On May 15, 2026, the live source set was
+expanded to 65 monitors with three standard APM coverage monitors, and the
+Datadog deploy created or updated the full set. Before running future
+`--reconcile` deployments, confirm that older dashboards or monitors are not
+still intentionally managed under different tags or names.
 
 Deploy dashboard:
 
@@ -272,6 +274,19 @@ This is a required Datadog configuration step. The local code can emit
 histograms, but Datadog must be configured to expose p95/p99 aggregations. If a
 percentile widget or monitor is No Data while avg/max is live, treat it as a
 measurement gap, not a product latency conclusion.
+
+The TemperPaw Datadog config repository keeps this step repeatable:
+
+```sh
+railway run --service openpaw --environment production -- python3 scripts/configure_metric_percentiles.py
+railway run --service openpaw --environment production -- python3 scripts/configure_metric_percentiles.py --apply
+```
+
+The script manages a bounded list of latency distribution metrics and excludes
+known high-cardinality tags such as `session_id` from the queryable tag list.
+Datadog cannot configure metrics that have never emitted, so missing future
+runtime metrics are skipped and must be re-run after the Temper runtime PR is
+deployed.
 
 ## Live Verification
 

@@ -60,7 +60,7 @@ require_pattern "$ROOT/docs/temper-latency-observability-report.html" "Program P
 require_pattern "$ROOT/docs/temper-latency-observability-report.html" "OBS-005" "OBS-005 dashboard task"
 require_pattern "$ROOT/docs/temper-latency-observability-report.html" "0083-trace-budget-and-fanout-summarization" "ADR-0083 dashboard link"
 require_pattern "$ROOT/docs/temper-latency-observability-report.html" "0084-authz-latency-phase-instrumentation" "ADR-0084 dashboard link"
-require_pattern "$ROOT/docs/temper-latency-observability-report.html" "live deployment" "live deployment blocker recorded"
+require_pattern "$ROOT/docs/temper-latency-observability-report.html" "Runtime deployment pending" "runtime deployment blocker recorded"
 
 require_pattern "$ROOT/crates/temper-server/src/profiling.rs" "TEMPER_PROFILING_CONTINUOUS" "profiler continuous gate"
 require_pattern "$ROOT/crates/temper-server/src/profiling/metrics.rs" "datadog.profiling.rust.profiles_uploaded" "profiler upload metric"
@@ -89,11 +89,14 @@ fi
 
 require_file "$TEMPERPAW_WORKTREE/dd-dashboards/temperpaw-overview.json"
 require_file "$TEMPERPAW_WORKTREE/dd-monitors/temperpaw-monitors.json"
+require_file "$TEMPERPAW_WORKTREE/scripts/configure_metric_percentiles.py"
 require_file "$TEMPERPAW_WORKTREE/scripts/read_datadog_snapshot.py"
 python3 -m json.tool "$TEMPERPAW_WORKTREE/dd-dashboards/temperpaw-overview.json" >/dev/null
 pass "TemperPaw dashboard JSON parses"
 python3 -m json.tool "$TEMPERPAW_WORKTREE/dd-monitors/temperpaw-monitors.json" >/dev/null
 pass "TemperPaw monitor JSON parses"
+python3 -m py_compile "$TEMPERPAW_WORKTREE/scripts/configure_metric_percentiles.py" "$TEMPERPAW_WORKTREE/scripts/deploy_monitors.py"
+pass "TemperPaw Datadog deploy helpers compile"
 python3 -m py_compile "$TEMPERPAW_WORKTREE/scripts/read_datadog_snapshot.py"
 pass "TemperPaw Datadog snapshot helper compiles"
 require_pattern "$TEMPERPAW_WORKTREE/dd-dashboards/temperpaw-overview.json" "Trace Budget (ADR-0083)" "Trace Budget dashboard group"
@@ -110,6 +113,10 @@ require_pattern "$TEMPERPAW_WORKTREE/dd-monitors/temperpaw-monitors.json" "[Temp
 require_pattern "$TEMPERPAW_WORKTREE/dd-monitors/temperpaw-monitors.json" "[Temper] Dispatch Background Trace Budget Disabled" "trace budget disabled monitor"
 require_pattern "$TEMPERPAW_WORKTREE/dd-monitors/temperpaw-monitors.json" "[Temper] Cedar Evaluation Duration Max Regression" "Cedar max fallback monitor"
 require_pattern "$TEMPERPAW_WORKTREE/dd-monitors/temperpaw-monitors.json" "[Temper] Cedar AuthZ Phase Error" "Cedar phase error monitor"
+require_pattern "$TEMPERPAW_WORKTREE/dd-monitors/temperpaw-monitors.json" "[TemperPaw] APM Request Rate Missing" "APM request rate monitor"
+require_pattern "$TEMPERPAW_WORKTREE/dd-monitors/temperpaw-monitors.json" "[TemperPaw] APM HTTP 5xx Spike" "APM error monitor"
+require_pattern "$TEMPERPAW_WORKTREE/dd-monitors/temperpaw-monitors.json" "[TemperPaw] APM HTTP Duration p95 Regression" "APM duration monitor"
+require_pattern "$TEMPERPAW_WORKTREE/scripts/configure_metric_percentiles.py" "include_percentiles" "Datadog percentile configuration helper"
 
 if [[ "$MODE" == "full" ]]; then
   echo
