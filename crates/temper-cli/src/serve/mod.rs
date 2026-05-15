@@ -67,6 +67,7 @@ pub async fn run(
 ) -> Result<()> {
     let _otel_guard = init_observability("temper-platform");
     temper_authz::init_metrics();
+    temper_store_postgres::init_metrics();
     temper_store_turso::init_metrics();
     let api_key = std::env::var("ANTHROPIC_API_KEY").ok();
 
@@ -267,6 +268,7 @@ pub async fn run(
     spawn_optimization_loop(&state);
     spawn_actor_passivation_loop(&state);
     state.server.spawn_runtime_metrics_loop();
+    temper_server::profiling::spawn_continuous_profiler();
 
     // Channel transports: spawn persistent connections to external messaging platforms.
     // Resolve Discord bot token: CLI/env → vault fallback.

@@ -194,6 +194,53 @@ fn state_cache_budget() -> usize {
     *STATE_CACHE_BUDGET.get_or_init(|| env_usize("TEMPER_STATE_CACHE_BUDGET", 10_000))
 }
 
+/// Summary of a query-projection replay parity verification run.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct QueryProjectionReplayParityReport {
+    /// Tenant whose persisted journals and projection rows were compared.
+    pub tenant: String,
+    /// Number of persisted entities considered by the verifier.
+    pub checked: u64,
+    /// Number of non-deleted entities whose projection row matched replayed state.
+    pub matched: u64,
+    /// Number of entities whose projection row diverged from replayed state.
+    pub drifted: u64,
+    /// Number of active entities missing from the projection catalog.
+    pub missing: u64,
+    /// Number of replayed deleted entities correctly absent from the catalog.
+    pub deleted_absent: u64,
+    /// Number of entities the verifier could not compare because of a store or spec error.
+    pub errors: u64,
+    /// Bounded sample of drift/error examples for operator diagnosis.
+    pub drift_examples: Vec<QueryProjectionReplayParityDrift>,
+}
+
+impl QueryProjectionReplayParityReport {
+    /// Returns true when every checked entity matched the projection contract.
+    pub fn is_clean(&self) -> bool {
+        self.drifted == 0 && self.missing == 0 && self.errors == 0
+    }
+}
+
+/// One bounded replay parity drift or error example.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct QueryProjectionReplayParityDrift {
+    /// Entity type whose projection diverged from replayed state.
+    pub entity_type: String,
+    /// Entity identifier for targeted repair. This is intentionally not emitted as a metric tag.
+    pub entity_id: String,
+    /// Drift class, such as `fields`, `sequence`, `missing_catalog`, or `deleted_present`.
+    pub drift_kind: String,
+    /// Sequence relationship between catalog and replayed state.
+    pub sequence_direction: String,
+    /// Absolute sequence gap when both sides have sequence numbers.
+    pub sequence_gap: u64,
+    /// Sequence number currently stored in the projection catalog, when a row exists.
+    pub catalog_sequence: Option<u64>,
+    /// Sequence number recovered from authoritative event replay.
+    pub authoritative_sequence: u64,
+}
+
 /// Shared state for the Temper HTTP server.
 #[derive(Clone)]
 // ADR-0025 Phase 4: remove record_store field after IOA entity migration complete
@@ -204,7 +251,7 @@ pub struct ServerState {
     /// actor_backed_types, OData reads/writes dispatch through this runtime.
     pub pg_actor_system: Option<Arc<PgActorSystem>>,
     /// Entity types backed by pg_actor_system.
-    pub actor_backed_types: std::collections::HashSet<String>,
+    pub actor_backed_types: BTreeSet<String>,
     /// Parsed CSDL document describing the entity model (legacy single-tenant).
     pub csdl: Arc<CsdlDocument>,
     /// Raw CSDL XML string for serving via `$metadata` (legacy single-tenant).
@@ -407,7 +454,7 @@ impl ServerState {
         let state = Self {
             actor_system: Arc::new(system),
             pg_actor_system: None,
-            actor_backed_types: std::collections::HashSet::new(),
+            actor_backed_types: BTreeSet::new(),
             csdl: Arc::new(csdl),
             csdl_xml: Arc::new(csdl_xml),
             entity_set_map: Arc::new(entity_set_map),
@@ -639,7 +686,7 @@ impl ServerState {
         let state = Self {
             actor_system: Arc::new(system),
             pg_actor_system: None,
-            actor_backed_types: std::collections::HashSet::new(),
+            actor_backed_types: BTreeSet::new(),
             csdl: Arc::new(CsdlDocument {
                 version: "4.0".into(),
                 schemas: vec![],

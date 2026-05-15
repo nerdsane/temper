@@ -8,6 +8,7 @@ description = "PostgreSQL storage backend for Temper entity services"
 
 [dependencies]
 temper-runtime = { workspace = true }
+opentelemetry = { workspace = true }
 sqlx = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }

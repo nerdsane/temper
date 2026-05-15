@@ -316,6 +316,9 @@ impl TursoEventStore {
         let _ = conn
             .execute(schema::ALTER_ENTITY_CATALOG_ADD_PROJECTION_HASH, ())
             .await;
+        let _ = conn
+            .execute(schema::ALTER_ENTITY_CATALOG_ADD_FIELDS, ())
+            .await;
 
         // Entity field index — EAV table for OData filter push-down.
         conn.execute(schema::CREATE_ENTITY_FIELD_INDEX_TABLE, ())
@@ -386,7 +389,7 @@ pub struct TursoQueryProjectionRow {
     pub entity_id: String,
     /// Current entity status.
     pub status: String,
-    /// Top-level scalar fields reconstructed from the durable EAV index.
+    /// Full projected fields JSON preserved in the durable catalog.
     pub fields: serde_json::Value,
     /// Latest sequence number represented by this projection.
     pub sequence_nr: u64,

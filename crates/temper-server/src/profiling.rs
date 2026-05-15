@@ -1,15 +1,15 @@
 //! CPU profile capture for the Temper runtime (ADR-0055).
 //!
-//! Exposes on-demand CPU profiling via an admin HTTP endpoint. An operator
-//! curls `/admin/profile/cpu?seconds=30` during a burst; the server runs a
-//! pprof-rs profiler for the requested window and returns a pprof-format
-//! protobuf blob. The blob can be uploaded to Datadog's profile intake
-//! endpoint or inspected locally with `go tool pprof` / `pprof -http`.
+//! Exposes on-demand CPU profiling via an admin HTTP endpoint and an optional
+//! continuous capture loop. An operator can curl
+//! `/_admin/profile/cpu?seconds=30` during a burst; production can also set
+//! `TEMPER_PROFILING_CONTINUOUS=true` plus auto-upload so profiles stay fresh
+//! without a human catching the hot window.
 //!
 //! This is the primary W8 capability per the Datadog-instrumentation plan.
-//! Continuous always-on profiling will arrive when Datadog ships a
-//! production-ready Rust SDK; until then, on-demand capture is enough for
-//! temper#146-style investigations.
+//! The continuous loop here is deliberately small and opt-in; if Datadog ships
+//! a production-ready Rust SDK, this module can hand off capture/upload while
+//! keeping the same freshness metrics.
 //!
 //! # Env gates
 //!
@@ -17,18 +17,32 @@
 //!   master switch. When false, the admin endpoint returns 503.
 //! - `TEMPER_PROFILING_MAX_SECONDS` (default `120`): hard cap on window
 //!   length so a caller cannot tie up a runtime thread for 10 minutes.
+//! - `TEMPER_PROFILING_AUTO_UPLOAD` (default `false`): push captured profiles
+//!   to the local Datadog Agent profile intake.
+//! - `TEMPER_PROFILING_CONTINUOUS` (default `false`): start a bounded periodic
+//!   CPU capture loop. Requires auto-upload so samples are not discarded.
+//! - `TEMPER_PROFILING_CONTINUOUS_INTERVAL_SECONDS` (default `300`): interval
+//!   between periodic captures.
+//! - `TEMPER_PROFILING_CONTINUOUS_SECONDS` (default `30`): capture window.
 
-use std::sync::OnceLock;
-use std::time::Duration;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::{Duration, Instant};
 
 use axum::extract::Query;
 use axum::http::{StatusCode, header};
 use axum::response::{IntoResponse, Response};
-use opentelemetry::KeyValue;
-use opentelemetry::global;
-use opentelemetry::metrics::Counter;
 use pprof::protos::Message;
 use serde::Deserialize;
+use tokio::spawn as spawn_observability_task; // determinism-ok: production-only profiler tasks
+use tokio::time::sleep as sleep_for_profile_capture; // determinism-ok: bounded profiler capture window
+
+mod metrics;
+
+pub use metrics::record_profiling_config;
+use metrics::{
+    current_unix_seconds, profile_attrs, profile_stage_attrs, profiling_metrics,
+    record_capture_error,
+};
 
 /// Resolve `TEMPER_PROFILING_ENABLED` at call time. Startup-read semantics
 /// are unnecessary — the toggle is intentionally dynamic so ops can flip
@@ -52,43 +66,112 @@ fn max_window_seconds() -> u64 {
 /// manually and uploads separately. When on, the profile is both
 /// returned in the HTTP response AND pushed to the Agent.
 fn auto_upload_enabled() -> bool {
-    std::env::var("TEMPER_PROFILING_AUTO_UPLOAD")
+    std::env::var("TEMPER_PROFILING_AUTO_UPLOAD") // determinism-ok: observability toggle
         .map(|v| matches!(v.as_str(), "1" | "true" | "yes" | "on"))
         .unwrap_or(false)
 }
 
+fn continuous_enabled() -> bool {
+    std::env::var("TEMPER_PROFILING_CONTINUOUS") // determinism-ok: observability toggle
+        .map(|v| matches!(v.as_str(), "1" | "true" | "yes" | "on"))
+        .unwrap_or(false)
+}
+
+fn continuous_interval_seconds() -> u64 {
+    std::env::var("TEMPER_PROFILING_CONTINUOUS_INTERVAL_SECONDS") // determinism-ok: observability tuning
+        .ok()
+        .and_then(|v| v.parse::<u64>().ok())
+        .unwrap_or(300)
+        .clamp(60, 3_600)
+}
+
+fn continuous_window_seconds() -> u64 {
+    std::env::var("TEMPER_PROFILING_CONTINUOUS_SECONDS") // determinism-ok: observability tuning
+        .ok()
+        .and_then(|v| v.parse::<u64>().ok())
+        .unwrap_or(30)
+        .clamp(5, max_window_seconds())
+}
+
+fn continuous_frequency() -> i32 {
+    std::env::var("TEMPER_PROFILING_CONTINUOUS_FREQUENCY") // determinism-ok: observability tuning
+        .ok()
+        .and_then(|v| v.parse::<i32>().ok())
+        .unwrap_or(100)
+        .clamp(10, 500)
+}
+
 /// Datadog Agent profiling intake URL. Defaults to the local Agent.
 fn agent_intake_url() -> String {
-    let host = std::env::var("DD_AGENT_HOST").unwrap_or_else(|_| "127.0.0.1".to_string());
-    let port = std::env::var("DD_TRACE_AGENT_PORT").unwrap_or_else(|_| "8126".to_string());
+    let host = std::env::var("DD_AGENT_HOST") // determinism-ok: production Datadog Agent endpoint
+        .unwrap_or_else(|_| "127.0.0.1".to_string());
+    let port = std::env::var("DD_TRACE_AGENT_PORT") // determinism-ok: production Datadog Agent endpoint
+        .unwrap_or_else(|_| "8126".to_string());
     format!("http://{host}:{port}/profiling/v1/input")
 }
 
-struct ProfilingMetrics {
-    profiles_uploaded: Counter<u64>,
-    upload_errors: Counter<u64>,
-}
+async fn capture_profile_body(
+    seconds: u64,
+    frequency: i32,
+    profile_type: &str,
+    mode: &str,
+) -> Result<Vec<u8>, String> {
+    let capture_started = Instant::now(); // determinism-ok: observability duration only
+    profiling_metrics()
+        .captures_started
+        .add(1, &profile_attrs(profile_type, mode));
 
-fn profiling_metrics() -> &'static ProfilingMetrics {
-    static M: OnceLock<ProfilingMetrics> = OnceLock::new();
-    M.get_or_init(|| {
-        let meter = global::meter("temper.profiling");
-        ProfilingMetrics {
-            profiles_uploaded: meter
-                .u64_counter("datadog.profiling.rust.profiles_uploaded")
-                .with_description(
-                    "Profiles successfully pushed to the Datadog Agent intake endpoint.",
-                )
-                .build(),
-            upload_errors: meter
-                .u64_counter("datadog.profiling.rust.upload_errors")
-                .with_description("Profile upload attempts that failed to reach the Datadog Agent.")
-                .build(),
+    let guard = match pprof::ProfilerGuardBuilder::default()
+        .frequency(frequency)
+        .blocklist(&["libc", "libgcc", "pthread", "vdso"])
+        .build()
+    {
+        Ok(g) => g,
+        Err(e) => {
+            record_capture_error(profile_type, mode, "profiler_start");
+            return Err(format!("profiler start failed: {e}"));
         }
-    })
+    };
+
+    // determinism-ok: observability-only sleep. Profiler samples in the
+    // background while the task yields back to the runtime.
+    sleep_for_profile_capture(Duration::from_secs(seconds)).await;
+
+    let report = match guard.report().build() {
+        Ok(r) => r,
+        Err(e) => {
+            record_capture_error(profile_type, mode, "report_build");
+            return Err(format!("report build failed: {e}"));
+        }
+    };
+
+    let profile = match report.pprof() {
+        Ok(p) => p,
+        Err(e) => {
+            record_capture_error(profile_type, mode, "pprof_conversion");
+            return Err(format!("pprof conversion failed: {e}"));
+        }
+    };
+
+    let mut body = Vec::new();
+    if let Err(e) = profile.write_to_vec(&mut body) {
+        record_capture_error(profile_type, mode, "pprof_serialize");
+        return Err(format!("pprof serialize failed: {e}"));
+    }
+
+    let attrs = profile_attrs(profile_type, mode);
+    let elapsed_ms = capture_started.elapsed().as_secs_f64() * 1_000.0;
+    let metrics = profiling_metrics();
+    metrics.captures_completed.add(1, &attrs);
+    metrics.capture_duration_ms.record(elapsed_ms, &attrs);
+    metrics
+        .last_capture_unix_seconds
+        .record(current_unix_seconds(), &attrs);
+
+    Ok(body)
 }
 
-async fn upload_to_agent(pprof_bytes: Vec<u8>, profile_type: &str) {
+async fn upload_to_agent(pprof_bytes: Vec<u8>, profile_type: &str, mode: &str) {
     let url = agent_intake_url();
     let client = reqwest::Client::builder()
         .timeout(Duration::from_secs(5))
@@ -99,7 +182,7 @@ async fn upload_to_agent(pprof_bytes: Vec<u8>, profile_type: &str) {
             tracing::warn!(error = %e, "profile uploader: failed to build HTTP client");
             profiling_metrics()
                 .upload_errors
-                .add(1, &[KeyValue::new("stage", "client_build")]);
+                .add(1, &profile_stage_attrs(profile_type, mode, "client_build"));
             return;
         }
     };
@@ -110,10 +193,12 @@ async fn upload_to_agent(pprof_bytes: Vec<u8>, profile_type: &str) {
     //
     // The pprof crate's `.pprof()` method already returns a pprof.proto
     // body; Datadog accepts raw pprof.
-    let service = std::env::var("DD_SERVICE").unwrap_or_else(|_| "temper".to_string());
-    let env = std::env::var("DD_ENV").unwrap_or_else(|_| "prod".to_string());
-    let version = std::env::var("BUILD_VERSION")
-        .or_else(|_| std::env::var("DD_VERSION"))
+    let service = std::env::var("DD_SERVICE") // determinism-ok: production profile metadata tag
+        .unwrap_or_else(|_| "temper".to_string());
+    let env = std::env::var("DD_ENV") // determinism-ok: production profile metadata tag
+        .unwrap_or_else(|_| "prod".to_string());
+    let version = std::env::var("BUILD_VERSION") // determinism-ok: production profile metadata tag
+        .or_else(|_| std::env::var("DD_VERSION")) // determinism-ok: production profile metadata tag
         .unwrap_or_else(|_| "dev".to_string());
 
     let form = reqwest::multipart::Form::new()
@@ -121,6 +206,7 @@ async fn upload_to_agent(pprof_bytes: Vec<u8>, profile_type: &str) {
         .text("tags[]", format!("env:{env}"))
         .text("tags[]", format!("version:{version}"))
         .text("tags[]", format!("profile.component:{profile_type}"))
+        .text("tags[]", format!("profile.mode:{mode}"))
         .part(
             "data[profile.pprof]",
             reqwest::multipart::Part::bytes(pprof_bytes)
@@ -132,10 +218,9 @@ async fn upload_to_agent(pprof_bytes: Vec<u8>, profile_type: &str) {
     match client.post(&url).multipart(form).send().await {
         Ok(resp) if resp.status().is_success() => {
             tracing::info!(url = %url, "profile uploaded to Datadog Agent intake");
-            profiling_metrics().profiles_uploaded.add(
-                1,
-                &[KeyValue::new("profile_type", profile_type.to_string())],
-            );
+            profiling_metrics()
+                .profiles_uploaded
+                .add(1, &profile_attrs(profile_type, mode));
         }
         Ok(resp) => {
             tracing::warn!(
@@ -143,15 +228,16 @@ async fn upload_to_agent(pprof_bytes: Vec<u8>, profile_type: &str) {
                 status = %resp.status(),
                 "profile upload non-2xx",
             );
-            profiling_metrics()
-                .upload_errors
-                .add(1, &[KeyValue::new("stage", "non_success_status")]);
+            profiling_metrics().upload_errors.add(
+                1,
+                &profile_stage_attrs(profile_type, mode, "non_success_status"),
+            );
         }
         Err(e) => {
             tracing::warn!(error = %e, url = %url, "profile upload failed");
             profiling_metrics()
                 .upload_errors
-                .add(1, &[KeyValue::new("stage", "request_error")]);
+                .add(1, &profile_stage_attrs(profile_type, mode, "request_error"));
         }
     }
 }
@@ -195,63 +281,18 @@ pub async fn cpu_profile_handler(Query(q): Query<CpuProfileQuery>) -> Response {
 
     tracing::info!(seconds, frequency, "ADR-0055: starting CPU profile capture");
 
-    let guard = match pprof::ProfilerGuardBuilder::default()
-        .frequency(frequency)
-        .blocklist(&["libc", "libgcc", "pthread", "vdso"])
-        .build()
-    {
-        Ok(g) => g,
+    let body = match capture_profile_body(seconds, frequency, "cpu", "on_demand").await {
+        Ok(body) => body,
         Err(e) => {
-            tracing::warn!(error = %e, "failed to start profiler");
+            tracing::warn!(error = %e, "CPU profile capture failed");
             return (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 [(header::CONTENT_TYPE, "text/plain")],
-                format!("profiler start failed: {e}"),
+                e,
             )
                 .into_response();
         }
     };
-
-    // determinism-ok: observability-only sleep. Profiler samples in the
-    // background while the task yields back to the runtime.
-    tokio::time::sleep(Duration::from_secs(seconds)).await;
-
-    let report = match guard.report().build() {
-        Ok(r) => r,
-        Err(e) => {
-            tracing::warn!(error = %e, "profiler report build failed");
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                [(header::CONTENT_TYPE, "text/plain")],
-                format!("report build failed: {e}"),
-            )
-                .into_response();
-        }
-    };
-
-    let profile = match report.pprof() {
-        Ok(p) => p,
-        Err(e) => {
-            tracing::warn!(error = %e, "pprof conversion failed");
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                [(header::CONTENT_TYPE, "text/plain")],
-                format!("pprof conversion failed: {e}"),
-            )
-                .into_response();
-        }
-    };
-
-    let mut body = Vec::new();
-    if let Err(e) = profile.write_to_vec(&mut body) {
-        tracing::warn!(error = %e, "pprof serialization failed");
-        return (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            [(header::CONTENT_TYPE, "text/plain")],
-            format!("pprof serialize failed: {e}"),
-        )
-            .into_response();
-    }
 
     tracing::info!(
         bytes = body.len(),
@@ -262,8 +303,9 @@ pub async fn cpu_profile_handler(Query(q): Query<CpuProfileQuery>) -> Response {
 
     if auto_upload_enabled() {
         let body_for_upload = body.clone();
-        tokio::spawn(async move {
-            upload_to_agent(body_for_upload, "cpu").await;
+        spawn_observability_task(async move {
+            // determinism-ok: observability-only upload task
+            upload_to_agent(body_for_upload, "cpu", "on_demand").await;
         });
     }
 
@@ -282,6 +324,69 @@ pub async fn cpu_profile_handler(Query(q): Query<CpuProfileQuery>) -> Response {
         body,
     )
         .into_response()
+}
+
+/// Start opt-in continuous CPU profiling.
+///
+/// The loop is intentionally disabled unless profiling, continuous mode, and
+/// auto-upload are all enabled. This avoids quietly burning CPU or collecting
+/// profiles that never reach Datadog.
+pub fn spawn_continuous_profiler() {
+    record_profiling_config();
+
+    if !profiling_enabled() || !continuous_enabled() {
+        return;
+    }
+
+    if !auto_upload_enabled() {
+        tracing::warn!(
+            "TEMPER_PROFILING_CONTINUOUS=true but TEMPER_PROFILING_AUTO_UPLOAD is not enabled; continuous profiling not started"
+        );
+        return;
+    }
+
+    static STARTED: AtomicBool = AtomicBool::new(false);
+    if STARTED.swap(true, Ordering::AcqRel) {
+        tracing::debug!("continuous profiling loop already started");
+        return;
+    }
+
+    let interval_secs = continuous_interval_seconds();
+    let seconds = continuous_window_seconds();
+    let frequency = continuous_frequency();
+    tracing::info!(
+        interval_secs,
+        seconds,
+        frequency,
+        "starting continuous CPU profiler"
+    );
+
+    spawn_observability_task(async move {
+        // determinism-ok: observability-only periodic profiler loop
+        let mut ticker = tokio::time::interval(Duration::from_secs(interval_secs));
+        ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+
+        loop {
+            ticker.tick().await;
+            record_profiling_config();
+
+            if !profiling_enabled() || !auto_upload_enabled() {
+                tracing::warn!(
+                    "continuous profiler skipped because profiling or auto-upload is disabled"
+                );
+                continue;
+            }
+
+            match capture_profile_body(seconds, frequency, "cpu", "continuous").await {
+                Ok(body) => {
+                    upload_to_agent(body, "cpu", "continuous").await;
+                }
+                Err(e) => {
+                    tracing::warn!(error = %e, "continuous CPU profile capture failed");
+                }
+            }
+        }
+    });
 }
 
 /// `GET /admin/profile/wall?seconds=30&frequency=100`
@@ -315,49 +420,24 @@ pub async fn wall_profile_handler(Query(q): Query<CpuProfileQuery>) -> Response 
         "ADR-0055: starting wall-clock profile capture"
     );
 
-    let guard = match pprof::ProfilerGuardBuilder::default()
-        .frequency(frequency)
-        .blocklist(&["libc", "libgcc", "pthread", "vdso"])
-        .build()
-    {
-        Ok(g) => g,
+    let body = match capture_profile_body(seconds, frequency, "wall", "on_demand").await {
+        Ok(body) => body,
         Err(e) => {
+            tracing::warn!(error = %e, "wall-clock profile capture failed");
             return (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 [(header::CONTENT_TYPE, "text/plain")],
-                format!("profiler start failed: {e}"),
+                e,
             )
                 .into_response();
         }
     };
-
-    tokio::time::sleep(Duration::from_secs(seconds)).await;
-
-    let profile = match guard.report().build().and_then(|r| r.pprof()) {
-        Ok(p) => p,
-        Err(e) => {
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                [(header::CONTENT_TYPE, "text/plain")],
-                format!("pprof build failed: {e}"),
-            )
-                .into_response();
-        }
-    };
-    let mut body = Vec::new();
-    if let Err(e) = profile.write_to_vec(&mut body) {
-        return (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            [(header::CONTENT_TYPE, "text/plain")],
-            format!("pprof serialize failed: {e}"),
-        )
-            .into_response();
-    }
 
     if auto_upload_enabled() {
         let body_for_upload = body.clone();
-        tokio::spawn(async move {
-            upload_to_agent(body_for_upload, "wall").await;
+        spawn_observability_task(async move {
+            // determinism-ok: observability-only upload task
+            upload_to_agent(body_for_upload, "wall", "on_demand").await;
         });
     }
 
@@ -379,64 +459,4 @@ pub async fn wall_profile_handler(Query(q): Query<CpuProfileQuery>) -> Response 
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn default_values_applied() {
-        let q = CpuProfileQuery {
-            seconds: default_seconds(),
-            frequency: default_frequency(),
-        };
-        assert_eq!(q.seconds, 30);
-        assert_eq!(q.frequency, 100);
-    }
-
-    use std::sync::Mutex;
-
-    // Cargo runs tests in parallel; env-var mutation races otherwise.
-    static ENV_LOCK: Mutex<()> = Mutex::new(());
-
-    #[test]
-    fn profiling_toggle_states() {
-        let _g = ENV_LOCK.lock().unwrap();
-        unsafe {
-            std::env::remove_var("TEMPER_PROFILING_ENABLED");
-        }
-        assert!(!profiling_enabled(), "default should be off");
-
-        for truthy in ["1", "true", "yes", "on"] {
-            unsafe {
-                std::env::set_var("TEMPER_PROFILING_ENABLED", truthy);
-            }
-            assert!(profiling_enabled(), "{truthy} should enable");
-        }
-
-        for falsy in ["0", "false", "no", "off", ""] {
-            unsafe {
-                std::env::set_var("TEMPER_PROFILING_ENABLED", falsy);
-            }
-            assert!(!profiling_enabled(), "{falsy:?} should disable");
-        }
-
-        unsafe {
-            std::env::remove_var("TEMPER_PROFILING_ENABLED");
-        }
-    }
-
-    #[test]
-    fn max_window_clamps() {
-        let _g = ENV_LOCK.lock().unwrap();
-        unsafe {
-            std::env::set_var("TEMPER_PROFILING_MAX_SECONDS", "99999");
-        }
-        assert_eq!(max_window_seconds(), 600);
-        unsafe {
-            std::env::set_var("TEMPER_PROFILING_MAX_SECONDS", "2");
-        }
-        assert_eq!(max_window_seconds(), 5);
-        unsafe {
-            std::env::remove_var("TEMPER_PROFILING_MAX_SECONDS");
-        }
-    }
-}
+mod tests;

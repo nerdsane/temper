@@ -4,11 +4,20 @@
 //! `UNIQUE (entity_type, entity_id, sequence_nr)` constraint to enforce
 //! optimistic concurrency on appends.
 
-use sqlx::PgPool;
+use std::time::Instant;
+
+use sqlx::{Acquire, PgPool};
 use temper_runtime::persistence::{
     EventMetadata, EventStore, PersistenceEnvelope, PersistenceError,
 };
 use temper_runtime::tenant::parse_persistence_id_parts;
+
+use crate::metrics::{
+    PostgresTransactionTimer, record_postgres_pool_acquire_duration,
+    record_postgres_transaction_begin_duration, record_postgres_transaction_commit_duration,
+};
+
+const EVENT_APPEND_OPERATION: &str = "event_append";
 
 /// A PostgreSQL-backed event store.
 ///
@@ -55,11 +64,45 @@ impl EventStore for PostgresEventStore {
         let (tenant, entity_type, entity_id) =
             parse_persistence_id_parts(persistence_id).map_err(PersistenceError::Storage)?;
 
-        let mut tx = self
-            .pool
-            .begin()
-            .await
-            .map_err(|e| PersistenceError::Storage(e.to_string()))?;
+        let mut transaction_timer = PostgresTransactionTimer::start(EVENT_APPEND_OPERATION);
+        let acquire_started = Instant::now();
+        let mut conn = match self.pool.acquire().await {
+            Ok(conn) => {
+                record_postgres_pool_acquire_duration(
+                    acquire_started.elapsed(),
+                    EVENT_APPEND_OPERATION,
+                    "ok",
+                );
+                conn
+            }
+            Err(e) => {
+                record_postgres_pool_acquire_duration(
+                    acquire_started.elapsed(),
+                    EVENT_APPEND_OPERATION,
+                    "error",
+                );
+                return Err(PersistenceError::Storage(e.to_string()));
+            }
+        };
+        let begin_started = Instant::now();
+        let mut tx = match conn.begin().await {
+            Ok(tx) => {
+                record_postgres_transaction_begin_duration(
+                    begin_started.elapsed(),
+                    EVENT_APPEND_OPERATION,
+                    "ok",
+                );
+                tx
+            }
+            Err(e) => {
+                record_postgres_transaction_begin_duration(
+                    begin_started.elapsed(),
+                    EVENT_APPEND_OPERATION,
+                    "error",
+                );
+                return Err(PersistenceError::Storage(e.to_string()));
+            }
+        };
 
         let row: Option<(i64,)> = sqlx::query_as(
             "SELECT COALESCE(MAX(sequence_nr), 0) FROM events \
@@ -74,6 +117,7 @@ impl EventStore for PostgresEventStore {
 
         let current_seq = row.map(|r| r.0 as u64).unwrap_or(0);
         if current_seq != expected_sequence {
+            transaction_timer.set_outcome("concurrency_violation");
             return Err(PersistenceError::ConcurrencyViolation {
                 expected: expected_sequence,
                 actual: current_seq,
@@ -86,7 +130,7 @@ impl EventStore for PostgresEventStore {
             let metadata_json = serde_json::to_value(&event.metadata)
                 .map_err(|e| PersistenceError::Serialization(e.to_string()))?;
 
-            sqlx::query(
+            if let Err(e) = sqlx::query(
                 "INSERT INTO events (tenant, entity_type, entity_id, sequence_nr, event_type, payload, metadata) \
                  VALUES ($1, $2, $3, $4, $5, $6, $7)",
             )
@@ -99,22 +143,35 @@ impl EventStore for PostgresEventStore {
             .bind(metadata_json)
             .execute(&mut *tx)
             .await
-            .map_err(|e| {
+            {
                 let msg = e.to_string();
                 if msg.contains("unique") || msg.contains("duplicate key") {
-                    PersistenceError::ConcurrencyViolation {
+                    transaction_timer.set_outcome("concurrency_violation");
+                    return Err(PersistenceError::ConcurrencyViolation {
                         expected: expected_sequence,
                         actual: new_seq,
-                    }
+                    });
                 } else {
-                    PersistenceError::Storage(msg)
+                    return Err(PersistenceError::Storage(msg));
                 }
-            })?;
+            }
         }
 
-        tx.commit()
-            .await
-            .map_err(|e| PersistenceError::Storage(e.to_string()))?;
+        let commit_started = Instant::now();
+        tx.commit().await.map_err(|e| {
+            record_postgres_transaction_commit_duration(
+                commit_started.elapsed(),
+                EVENT_APPEND_OPERATION,
+                "error",
+            );
+            PersistenceError::Storage(e.to_string())
+        })?;
+        record_postgres_transaction_commit_duration(
+            commit_started.elapsed(),
+            EVENT_APPEND_OPERATION,
+            "ok",
+        );
+        transaction_timer.set_outcome("ok");
 
         Ok(new_seq)
     }

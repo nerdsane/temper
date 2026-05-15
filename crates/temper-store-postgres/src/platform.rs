@@ -1,13 +1,18 @@
 //! PostgreSQL platform-store methods.
 
 use std::collections::{BTreeMap, BTreeSet};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use sha2::{Digest, Sha256};
-use sqlx::Row;
+use sqlx::{Acquire, Row};
 use temper_runtime::persistence::PersistenceError;
 
 use crate::PostgresEventStore;
+use crate::metrics::{
+    PostgresTransactionTimer, record_postgres_pool_acquire_duration,
+    record_postgres_projection_index_fields, record_postgres_transaction_begin_duration,
+    record_postgres_transaction_commit_duration,
+};
 
 const DISTINCT_RESOURCE_IDS_BUDGET: usize = 100;
 const BUNDLED_REPLACE_UPLOAD_SOURCE: &str = "bundled-replace-upload";
@@ -18,6 +23,8 @@ const BUNDLED_REPLACE_UPLOAD_SOURCE: &str = "bundled-replace-upload";
 /// skip it from the per-field index — the full value remains in
 /// `entity_catalog.fields` (jsonb, no size cap) for direct reads.
 const MAX_INDEXABLE_FIELD_VALUE_BYTES: usize = 2000;
+const QUERY_PROJECTION_UPSERT_OPERATION: &str = "query_projection_upsert";
+const QUERY_PROJECTION_REMOVE_OPERATION: &str = "query_projection_remove";
 
 #[derive(Clone, Copy, Debug)]
 pub struct PostgresSpecVerificationUpdate<'a> {
@@ -342,7 +349,46 @@ impl PostgresEventStore {
         sequence_nr: u64,
     ) -> Result<(), PersistenceError> {
         let projection_hash = json_hash(fields);
-        let mut tx = self.pool().begin().await.map_err(storage_error)?;
+        let mut transaction_timer =
+            PostgresTransactionTimer::start(QUERY_PROJECTION_UPSERT_OPERATION);
+        let acquire_started = Instant::now();
+        let mut conn = match self.pool().acquire().await {
+            Ok(conn) => {
+                record_postgres_pool_acquire_duration(
+                    acquire_started.elapsed(),
+                    QUERY_PROJECTION_UPSERT_OPERATION,
+                    "ok",
+                );
+                conn
+            }
+            Err(e) => {
+                record_postgres_pool_acquire_duration(
+                    acquire_started.elapsed(),
+                    QUERY_PROJECTION_UPSERT_OPERATION,
+                    "error",
+                );
+                return Err(storage_error(e));
+            }
+        };
+        let begin_started = Instant::now();
+        let mut tx = match conn.begin().await {
+            Ok(tx) => {
+                record_postgres_transaction_begin_duration(
+                    begin_started.elapsed(),
+                    QUERY_PROJECTION_UPSERT_OPERATION,
+                    "ok",
+                );
+                tx
+            }
+            Err(e) => {
+                record_postgres_transaction_begin_duration(
+                    begin_started.elapsed(),
+                    QUERY_PROJECTION_UPSERT_OPERATION,
+                    "error",
+                );
+                return Err(storage_error(e));
+            }
+        };
         sqlx::query(
             "INSERT INTO entity_catalog \
              (tenant, entity_type, entity_id, status, fields, sequence_nr, projection_version, projection_hash, updated_at) \
@@ -370,6 +416,8 @@ impl PostgresEventStore {
             .await
             .map_err(storage_error)?;
 
+        let mut indexed_fields = 0_u64;
+        let mut skipped_fields = 0_u64;
         if let Some(object) = fields.as_object() {
             for (field_name, value) in object {
                 if let Some(field_value) = scalar_field_value(value) {
@@ -387,8 +435,10 @@ impl PostgresEventStore {
                     // The full value is preserved in entity_catalog.fields
                     // jsonb, which is what reads return.
                     if field_value.len() > MAX_INDEXABLE_FIELD_VALUE_BYTES {
+                        skipped_fields += 1;
                         continue;
                     }
+                    indexed_fields += 1;
                     sqlx::query(
                         "INSERT INTO entity_field_index \
                          (tenant, entity_type, entity_id, field_name, field_value, status) \
@@ -409,7 +459,22 @@ impl PostgresEventStore {
             }
         }
 
-        tx.commit().await.map_err(storage_error)?;
+        let commit_started = Instant::now();
+        tx.commit().await.map_err(|e| {
+            record_postgres_transaction_commit_duration(
+                commit_started.elapsed(),
+                QUERY_PROJECTION_UPSERT_OPERATION,
+                "error",
+            );
+            storage_error(e)
+        })?;
+        record_postgres_transaction_commit_duration(
+            commit_started.elapsed(),
+            QUERY_PROJECTION_UPSERT_OPERATION,
+            "ok",
+        );
+        record_postgres_projection_index_fields(indexed_fields, skipped_fields);
+        transaction_timer.set_outcome("ok");
         Ok(())
     }
 
@@ -419,7 +484,46 @@ impl PostgresEventStore {
         entity_type: &str,
         entity_id: &str,
     ) -> Result<(), PersistenceError> {
-        let mut tx = self.pool().begin().await.map_err(storage_error)?;
+        let mut transaction_timer =
+            PostgresTransactionTimer::start(QUERY_PROJECTION_REMOVE_OPERATION);
+        let acquire_started = Instant::now();
+        let mut conn = match self.pool().acquire().await {
+            Ok(conn) => {
+                record_postgres_pool_acquire_duration(
+                    acquire_started.elapsed(),
+                    QUERY_PROJECTION_REMOVE_OPERATION,
+                    "ok",
+                );
+                conn
+            }
+            Err(e) => {
+                record_postgres_pool_acquire_duration(
+                    acquire_started.elapsed(),
+                    QUERY_PROJECTION_REMOVE_OPERATION,
+                    "error",
+                );
+                return Err(storage_error(e));
+            }
+        };
+        let begin_started = Instant::now();
+        let mut tx = match conn.begin().await {
+            Ok(tx) => {
+                record_postgres_transaction_begin_duration(
+                    begin_started.elapsed(),
+                    QUERY_PROJECTION_REMOVE_OPERATION,
+                    "ok",
+                );
+                tx
+            }
+            Err(e) => {
+                record_postgres_transaction_begin_duration(
+                    begin_started.elapsed(),
+                    QUERY_PROJECTION_REMOVE_OPERATION,
+                    "error",
+                );
+                return Err(storage_error(e));
+            }
+        };
         sqlx::query(
             "DELETE FROM entity_catalog WHERE tenant = $1 AND entity_type = $2 AND entity_id = $3",
         )
@@ -436,7 +540,21 @@ impl PostgresEventStore {
             .execute(&mut *tx)
             .await
             .map_err(storage_error)?;
-        tx.commit().await.map_err(storage_error)?;
+        let commit_started = Instant::now();
+        tx.commit().await.map_err(|e| {
+            record_postgres_transaction_commit_duration(
+                commit_started.elapsed(),
+                QUERY_PROJECTION_REMOVE_OPERATION,
+                "error",
+            );
+            storage_error(e)
+        })?;
+        record_postgres_transaction_commit_duration(
+            commit_started.elapsed(),
+            QUERY_PROJECTION_REMOVE_OPERATION,
+            "ok",
+        );
+        transaction_timer.set_outcome("ok");
         Ok(())
     }
 

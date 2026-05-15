@@ -1,6 +1,6 @@
 //! Shared helpers for OData read handlers.
 
-use std::collections::HashMap;
+use std::collections::BTreeMap;
 use std::sync::OnceLock;
 
 use futures_util::stream::{self, StreamExt};
@@ -9,6 +9,10 @@ use temper_runtime::tenant::TenantId;
 use crate::blobs::hydrate_blob_refs_for_tenant;
 use crate::state::ServerState;
 use crate::storage::EntityCatalogRow;
+
+mod shadow;
+
+use shadow::maybe_spawn_catalog_shadow_check;
 
 fn env_usize(name: &str, default: usize) -> usize {
     std::env::var(name) // determinism-ok: read once at startup
@@ -91,9 +95,9 @@ async fn try_load_catalog_rows(
     tenant: &TenantId,
     entity_type: &str,
     entity_ids: &[String],
-) -> HashMap<String, EntityCatalogRow> {
+) -> BTreeMap<String, EntityCatalogRow> {
     let Some(query_plane) = state.query_plane_store() else {
-        return HashMap::new();
+        return BTreeMap::new();
     };
     match query_plane
         .load_entity_catalog_rows(tenant.as_str(), entity_type, entity_ids)
@@ -103,7 +107,7 @@ async fn try_load_catalog_rows(
             .into_iter()
             .map(|row| (row.entity_id.clone(), row))
             .collect(),
-        Ok(None) => HashMap::new(),
+        Ok(None) => BTreeMap::new(),
         Err(error) => {
             tracing::warn!(
                 error = %error,
@@ -111,7 +115,7 @@ async fn try_load_catalog_rows(
                 entity_type = %entity_type,
                 "catalog fast-read failed; falling back to actor materialization"
             );
-            HashMap::new()
+            BTreeMap::new()
         }
     }
 }
@@ -139,6 +143,7 @@ pub(super) async fn try_load_entity_body_from_catalog(
     let ids = [key.to_string()];
     let rows = try_load_catalog_rows(state, tenant, entity_type, &ids).await;
     let row = rows.into_iter().next().map(|(_, r)| r)?;
+    maybe_spawn_catalog_shadow_check(state, tenant, entity_type, &row);
     let mut body = catalog_row_to_entity_body(entity_type, entity_set_name, row);
     hydrate_blob_refs_for_tenant(state, tenant, &mut body).await;
     Some(body)
@@ -151,10 +156,10 @@ pub(super) async fn materialize_entity_set_entities(
     entity_set_name: &str,
     entity_ids: &[String],
 ) -> Vec<serde_json::Value> {
-    let mut catalog_hits: HashMap<String, EntityCatalogRow> = if catalog_fast_read_enabled() {
+    let mut catalog_hits: BTreeMap<String, EntityCatalogRow> = if catalog_fast_read_enabled() {
         try_load_catalog_rows(state, tenant, entity_type, entity_ids).await
     } else {
-        HashMap::new()
+        BTreeMap::new()
     };
 
     let concurrency = entity_set_materialization_concurrency();
@@ -167,6 +172,7 @@ pub(super) async fn materialize_entity_set_entities(
             let entity_set_name = entity_set_name.to_string();
             async move {
                 if let Some(row) = catalog_row {
+                    maybe_spawn_catalog_shadow_check(&state, &tenant, &entity_type, &row);
                     let mut entity =
                         catalog_row_to_entity_body(&entity_type, &entity_set_name, row);
                     hydrate_blob_refs_for_tenant(&state, &tenant, &mut entity).await;

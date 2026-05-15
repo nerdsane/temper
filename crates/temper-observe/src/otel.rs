@@ -20,9 +20,11 @@
 //! | `TEMPER_LOG_QUEUE_SIZE` | Max buffered log records before drop (default: 2048, range: 128–32768) |
 
 use std::collections::HashMap;
+use std::sync::OnceLock;
 use std::time::Duration;
 
 use opentelemetry::KeyValue;
+use opentelemetry::metrics::{Counter, Gauge};
 use opentelemetry::trace::{
     Link, SamplingDecision, SamplingResult, SpanKind, TraceId, TraceState, TracerProvider as _,
 };
@@ -47,11 +49,168 @@ use tracing_subscriber::prelude::*;
 /// - `clock_time_get`: WASI guest syscall; fires per-LLM-token in high volume.
 const DROPPED_SPAN_NAMES: &[&str] = &["turso.configured_connection", "clock_time_get"];
 
-/// Span name *prefixes* that are sampled at a reduced rate — they carry some
-/// debug value but produce enough volume to crowd out the dispatch-critical
-/// spans at 100%. Keep p99+ via `--log_with_p99` in the guest sampler; the
-/// host-level sampler drops 95% of them uniformly at random.
-const REDUCED_SAMPLE_PREFIXES: &[&str] = &["wasm:workspace_fs", "wasm:monty_repl"];
+const WASM_AUXILIARY_SAMPLE_RATE_ENV: &str = "TEMPER_TRACE_WASM_AUX_SAMPLE_PCT";
+const DISPATCH_BACKGROUND_SAMPLE_RATE_ENV: &str = "TEMPER_TRACE_DISPATCH_BACKGROUND_SAMPLE_PCT";
+const WASM_AUXILIARY_SAMPLE_RATE_DEFAULT: u8 = 5;
+const DISPATCH_BACKGROUND_SAMPLE_RATE_DEFAULT: u8 = 25;
+const WASM_AUXILIARY_PREFIXES: &[&str] = &["wasm:workspace_fs", "wasm:monty_repl"];
+const DISPATCH_BACKGROUND_PREFIXES: &[&str] = &[
+    "dispatch.phase.query_projection",
+    "dispatch.background_wasm_integrations",
+    "dispatch.scheduled_actions",
+];
+
+#[derive(Clone, Debug)]
+struct ReducedSampleRule {
+    name: &'static str,
+    prefixes: &'static [&'static str],
+    sample_rate_pct: u8,
+}
+
+impl ReducedSampleRule {
+    fn matches(&self, span_name: &str) -> bool {
+        self.prefixes
+            .iter()
+            .any(|prefix| span_name.starts_with(prefix))
+    }
+}
+
+#[derive(Clone, Debug)]
+struct TraceSamplerConfig {
+    reduced_rules: Vec<ReducedSampleRule>,
+}
+
+impl Default for TraceSamplerConfig {
+    fn default() -> Self {
+        Self::with_rates(
+            WASM_AUXILIARY_SAMPLE_RATE_DEFAULT,
+            DISPATCH_BACKGROUND_SAMPLE_RATE_DEFAULT,
+        )
+    }
+}
+
+impl TraceSamplerConfig {
+    fn from_env() -> Self {
+        Self::with_rates(
+            sample_rate_from_env(
+                WASM_AUXILIARY_SAMPLE_RATE_ENV,
+                WASM_AUXILIARY_SAMPLE_RATE_DEFAULT,
+            ),
+            sample_rate_from_env(
+                DISPATCH_BACKGROUND_SAMPLE_RATE_ENV,
+                DISPATCH_BACKGROUND_SAMPLE_RATE_DEFAULT,
+            ),
+        )
+    }
+
+    fn with_rates(
+        wasm_auxiliary_sample_rate_pct: u8,
+        dispatch_background_sample_rate_pct: u8,
+    ) -> Self {
+        Self {
+            reduced_rules: vec![
+                ReducedSampleRule {
+                    name: "wasm_auxiliary",
+                    prefixes: WASM_AUXILIARY_PREFIXES,
+                    sample_rate_pct: wasm_auxiliary_sample_rate_pct,
+                },
+                ReducedSampleRule {
+                    name: "dispatch_background",
+                    prefixes: DISPATCH_BACKGROUND_PREFIXES,
+                    sample_rate_pct: dispatch_background_sample_rate_pct,
+                },
+            ],
+        }
+    }
+
+    fn reduced_rule_rate(&self, rule_name: &str) -> Option<u8> {
+        self.reduced_rules
+            .iter()
+            .find(|rule| rule.name == rule_name)
+            .map(|rule| rule.sample_rate_pct)
+    }
+
+    fn reduced_prefix_count(&self) -> usize {
+        self.reduced_rules
+            .iter()
+            .map(|rule| rule.prefixes.len())
+            .sum()
+    }
+}
+
+struct TraceSamplerMetrics {
+    decisions_total: Counter<u64>,
+    configured_rules: Gauge<u64>,
+    reduced_sample_rate_pct: Gauge<u64>,
+}
+
+fn trace_sampler_metrics() -> &'static TraceSamplerMetrics {
+    static METRICS: OnceLock<TraceSamplerMetrics> = OnceLock::new();
+    METRICS.get_or_init(|| {
+        let meter = opentelemetry::global::meter("temper.observe");
+        TraceSamplerMetrics {
+            decisions_total: meter
+                .u64_counter("temper_trace_sampler_decisions_total")
+                .with_description(
+                    "Trace sampler decisions by bounded rule name and final sampling decision.",
+                )
+                .build(),
+            configured_rules: meter
+                .u64_gauge("temper_trace_sampler_configured_rules")
+                .with_description(
+                    "Configured trace sampler rules by rule kind. Values are counts, not rates.",
+                )
+                .build(),
+            reduced_sample_rate_pct: meter
+                .u64_gauge("temper_trace_sampler_reduced_sample_rate_pct")
+                .with_unit("%")
+                .with_description("Effective trace sampler keep rate for reduced-prefix rules.")
+                .build(),
+        }
+    })
+}
+
+fn sample_rate_from_env(var: &str, default: u8) -> u8 {
+    read_non_empty_env(var)
+        .and_then(|value| value.parse::<u16>().ok())
+        .map(|value| value.min(100) as u8)
+        .unwrap_or(default)
+}
+
+fn sampling_decision_label(decision: &SamplingDecision) -> &'static str {
+    match decision {
+        SamplingDecision::Drop => "drop",
+        SamplingDecision::RecordOnly => "record_only",
+        SamplingDecision::RecordAndSample => "record_and_sample",
+    }
+}
+
+fn record_trace_sampler_decision(rule: &'static str, decision: &'static str) {
+    trace_sampler_metrics().decisions_total.add(
+        1,
+        &[
+            KeyValue::new("rule", rule),
+            KeyValue::new("decision", decision),
+        ],
+    );
+}
+
+fn record_trace_sampler_config(config: &TraceSamplerConfig) {
+    trace_sampler_metrics().configured_rules.record(
+        DROPPED_SPAN_NAMES.len() as u64,
+        &[KeyValue::new("rule_kind", "drop_exact")],
+    );
+    trace_sampler_metrics().configured_rules.record(
+        config.reduced_prefix_count() as u64,
+        &[KeyValue::new("rule_kind", "reduced_prefix")],
+    );
+    for rule in &config.reduced_rules {
+        trace_sampler_metrics().reduced_sample_rate_pct.record(
+            rule.sample_rate_pct as u64,
+            &[KeyValue::new("rule", rule.name)],
+        );
+    }
+}
 
 /// Trace-id-based deterministic sampling: keep if `(trace_id_low_u64 % 100) < rate_pct`.
 /// Using trace_id instead of random keeps the decision consistent across
@@ -76,6 +235,7 @@ fn trace_id_sample_at(trace_id: TraceId, rate_pct: u8) -> bool {
 #[derive(Debug, Clone)]
 struct NameBasedSampler {
     inner: Sampler,
+    config: TraceSamplerConfig,
 }
 
 impl ShouldSample for NameBasedSampler {
@@ -89,25 +249,44 @@ impl ShouldSample for NameBasedSampler {
         links: &[Link],
     ) -> SamplingResult {
         if DROPPED_SPAN_NAMES.contains(&name) {
+            record_trace_sampler_decision("drop_exact", "drop");
             return SamplingResult {
                 decision: SamplingDecision::Drop,
                 attributes: Vec::new(),
                 trace_state: TraceState::default(),
             };
         }
-        if REDUCED_SAMPLE_PREFIXES
+        if let Some(rule) = self
+            .config
+            .reduced_rules
             .iter()
-            .any(|prefix| name.starts_with(prefix))
-            && !trace_id_sample_at(trace_id, 5)
+            .find(|rule| rule.matches(name))
         {
-            return SamplingResult {
-                decision: SamplingDecision::Drop,
-                attributes: Vec::new(),
-                trace_state: TraceState::default(),
-            };
+            if !trace_id_sample_at(trace_id, rule.sample_rate_pct) {
+                record_trace_sampler_decision(rule.name, "reduced_drop");
+                return SamplingResult {
+                    decision: SamplingDecision::Drop,
+                    attributes: Vec::new(),
+                    trace_state: TraceState::default(),
+                };
+            }
+            let result = self.inner.should_sample(
+                parent_context,
+                trace_id,
+                name,
+                span_kind,
+                attributes,
+                links,
+            );
+            record_trace_sampler_decision(rule.name, sampling_decision_label(&result.decision));
+            return result;
         }
-        self.inner
-            .should_sample(parent_context, trace_id, name, span_kind, attributes, links)
+
+        let result =
+            self.inner
+                .should_sample(parent_context, trace_id, name, span_kind, attributes, links);
+        record_trace_sampler_decision("delegate", sampling_decision_label(&result.decision));
+        result
     }
 }
 
@@ -446,8 +625,10 @@ pub fn init_tracing(
         .build();
 
     // ADR-0052 hygiene: drop known-noisy span names at ingestion.
+    let trace_sampler_config = TraceSamplerConfig::from_env();
     let sampler = NameBasedSampler {
         inner: Sampler::ParentBased(Box::new(Sampler::AlwaysOn)),
+        config: trace_sampler_config.clone(),
     };
 
     let tracer_provider = SdkTracerProvider::builder()
@@ -477,6 +658,7 @@ pub fn init_tracing(
         .build();
 
     opentelemetry::global::set_meter_provider(meter_provider.clone());
+    record_trace_sampler_config(&trace_sampler_config);
 
     // --- Logs ---
     let log_exporter = build_with_retry("log exporter", || {
@@ -555,6 +737,12 @@ pub fn init_tracing(
         service_name,
         trace_queue,
         trace_batch = TRACE_BATCH_MAX_EXPORT_BATCH_SIZE,
+        trace_wasm_auxiliary_sample_pct = trace_sampler_config
+            .reduced_rule_rate("wasm_auxiliary")
+            .unwrap_or(WASM_AUXILIARY_SAMPLE_RATE_DEFAULT),
+        trace_dispatch_background_sample_pct = trace_sampler_config
+            .reduced_rule_rate("dispatch_background")
+            .unwrap_or(DISPATCH_BACKGROUND_SAMPLE_RATE_DEFAULT),
         log_queue,
         log_batch = LOG_BATCH_MAX_EXPORT_BATCH_SIZE,
         "OTEL initialised (traces + metrics + logs)"
@@ -606,10 +794,12 @@ mod tests {
     use std::sync::Mutex;
 
     static ENV_LOCK: Mutex<()> = Mutex::new(());
-    const TEST_ENV_VARS: [&str; 3] = [
+    const TEST_ENV_VARS: [&str; 5] = [
         "OTLP_ENDPOINT",
         "OTEL_EXPORTER_OTLP_ENDPOINT",
         "LOGFIRE_TOKEN",
+        "TEMPER_TRACE_WASM_AUX_SAMPLE_PCT",
+        "TEMPER_TRACE_DISPATCH_BACKGROUND_SAMPLE_PCT",
     ];
 
     fn with_test_env(values: &[(&str, Option<&str>)], f: impl FnOnce()) {
@@ -695,6 +885,7 @@ mod tests {
         use opentelemetry::trace::TraceId;
         let sampler = NameBasedSampler {
             inner: Sampler::AlwaysOn,
+            config: TraceSamplerConfig::default(),
         };
         let trace_id = TraceId::from_bytes([0u8; 16]);
 
@@ -712,6 +903,7 @@ mod tests {
     fn reduced_sample_prefixes_keep_roughly_5_percent() {
         let sampler = NameBasedSampler {
             inner: Sampler::AlwaysOn,
+            config: TraceSamplerConfig::default(),
         };
         let mut kept = 0usize;
         let total = 10_000usize;
@@ -743,6 +935,7 @@ mod tests {
         use opentelemetry::trace::TraceId;
         let sampler = NameBasedSampler {
             inner: Sampler::AlwaysOn,
+            config: TraceSamplerConfig::default(),
         };
         let trace_id = TraceId::from_bytes([0u8; 16]);
         let result = sampler.should_sample(
@@ -770,6 +963,25 @@ mod tests {
             || {
                 let config = resolve_otel_config();
                 assert!(config.is_none(), "all-empty env vars should disable OTEL");
+            },
+        );
+    }
+
+    #[test]
+    fn trace_sampler_config_reads_and_clamps_sample_rate_overrides() {
+        with_test_env(
+            &[
+                ("TEMPER_TRACE_WASM_AUX_SAMPLE_PCT", Some("17")),
+                ("TEMPER_TRACE_DISPATCH_BACKGROUND_SAMPLE_PCT", Some("250")),
+            ],
+            || {
+                let config = TraceSamplerConfig::from_env();
+                assert_eq!(config.reduced_rule_rate("wasm_auxiliary"), Some(17));
+                assert_eq!(config.reduced_rule_rate("dispatch_background"), Some(100));
+                assert_eq!(
+                    config.reduced_prefix_count(),
+                    WASM_AUXILIARY_PREFIXES.len() + DISPATCH_BACKGROUND_PREFIXES.len()
+                );
             },
         );
     }

@@ -716,6 +716,42 @@ async fn load_query_projection_fields_many_returns_requested_fields_by_entity() 
 }
 
 #[tokio::test]
+async fn load_entity_catalog_rows_preserves_projected_fields_json() {
+    let store = make_store("query-projection-catalog-fields").await;
+    let tenant = format!("tenant-{}", uuid::Uuid::new_v4());
+
+    store
+        .upsert_query_projection(
+            &tenant,
+            "File",
+            "file-a",
+            "Ready",
+            &serde_json::json!({
+                "content_hash": "sha256:file-a",
+                "has_content": true,
+                "size_bytes": 12,
+                "nested": { "kept": true },
+            }),
+            7,
+        )
+        .await
+        .expect("upsert file-a projection");
+
+    let rows = store
+        .load_entity_catalog_rows(&tenant, "File", &["file-a".to_string()])
+        .await
+        .expect("load catalog row");
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].entity_id, "file-a");
+    assert_eq!(rows[0].status, "Ready");
+    assert_eq!(rows[0].sequence_nr, 7);
+    assert_eq!(rows[0].fields["content_hash"], "sha256:file-a");
+    assert_eq!(rows[0].fields["has_content"], true);
+    assert_eq!(rows[0].fields["size_bytes"], 12);
+    assert_eq!(rows[0].fields["nested"]["kept"], true);
+}
+
+#[tokio::test]
 async fn export_query_projections_returns_all_fields_for_migration() {
     let store = make_store("query-projection-export").await;
     let tenant = format!("tenant-{}", uuid::Uuid::new_v4());
@@ -753,12 +789,14 @@ async fn export_query_projections_returns_all_fields_for_migration() {
     );
     assert_eq!(
         rows[0].fields.get("has_content").and_then(|v| v.as_str()),
-        Some("true")
+        None
     );
+    assert_eq!(rows[0].fields["has_content"], true);
     assert_eq!(
         rows[0].fields.get("size_bytes").and_then(|v| v.as_str()),
-        Some("12")
+        None
     );
+    assert_eq!(rows[0].fields["size_bytes"], 12);
 }
 
 #[tokio::test]

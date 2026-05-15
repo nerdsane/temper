@@ -6,17 +6,17 @@
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::str::FromStr;
-use std::sync::{OnceLock, RwLock};
+use std::sync::RwLock;
+use std::time::Instant;
 
 use cedar_policy::{
     Authorizer, Context, Decision, Entities, Entity, EntityUid, Policy, PolicyId, PolicySet,
     Request, Response as CedarResponse,
 };
-use opentelemetry::global;
-use opentelemetry::metrics::Counter;
 
 use crate::context::{PrincipalKind, SecurityContext};
 use crate::error::{AuthzDenial, AuthzError};
+use crate::metrics::{CedarDecisionMetric, CedarPhaseOutcome};
 
 #[cfg(test)]
 mod tests;
@@ -340,8 +340,7 @@ impl AuthzEngine {
         resource_attrs: &HashMap<String, serde_json::Value>,
         policy_set: &PolicySet,
     ) -> AuthzDecision {
-        cedar_evaluations_counter().add(1, &[]);
-        let eval_start = std::time::Instant::now();
+        let mut recorder = CedarEvaluationRecorder::start();
 
         // Build Cedar principal
         let principal_type = match security_ctx.principal.kind {
@@ -357,17 +356,22 @@ impl AuthzEngine {
         )) {
             Ok(uid) => uid,
             Err(e) => {
-                return AuthzDecision::Deny(AuthzDenial::InvalidPrincipal(e.to_string()));
+                return recorder.fail(
+                    "principal_uid",
+                    AuthzDenial::InvalidPrincipal(e.to_string()),
+                );
             }
         };
+        recorder.finish_phase("principal_uid");
 
         // Build Cedar action
         let action_uid = match EntityUid::from_str(&format!("Action::\"{}\"", action)) {
             Ok(uid) => uid,
             Err(e) => {
-                return AuthzDecision::Deny(AuthzDenial::InvalidAction(e.to_string()));
+                return recorder.fail("action_uid", AuthzDenial::InvalidAction(e.to_string()));
             }
         };
+        recorder.finish_phase("action_uid");
 
         // Build Cedar resource
         let resource_uid = match EntityUid::from_str(&format!(
@@ -377,9 +381,10 @@ impl AuthzEngine {
         )) {
             Ok(uid) => uid,
             Err(e) => {
-                return AuthzDecision::Deny(AuthzDenial::InvalidResource(e.to_string()));
+                return recorder.fail("resource_uid", AuthzDenial::InvalidResource(e.to_string()));
             }
         };
+        recorder.finish_phase("resource_uid");
 
         // Build Cedar context from security context attrs + resource attrs
         let mut ctx_map: HashMap<String, cedar_policy::RestrictedExpression> = HashMap::new();
@@ -408,14 +413,16 @@ impl AuthzEngine {
         for (key, value) in resource_attrs {
             insert_json_as_cedar(&mut ctx_map, key.clone(), value);
         }
+        crate::metrics::record_cedar_request_attribute_count("context", ctx_map.len());
 
         // Build context and request
         let context = match Context::from_pairs(ctx_map) {
             Ok(c) => c,
             Err(e) => {
-                return AuthzDecision::Deny(AuthzDenial::InvalidContext(e.to_string()));
+                return recorder.fail("context_attrs", AuthzDenial::InvalidContext(e.to_string()));
             }
         };
+        recorder.finish_phase("context_attrs");
 
         // Build principal entity with attributes so Cedar can resolve both
         // exact UID matches (`principal == Agent::"bot-1"`) and attribute
@@ -445,12 +452,19 @@ impl AuthzEngine {
         for (key, value) in &security_ctx.principal.attributes {
             insert_json_as_cedar(&mut principal_attrs, key.clone(), value);
         }
+        crate::metrics::record_cedar_request_attribute_count("principal", principal_attrs.len());
+        recorder.finish_phase("principal_attrs");
 
         let mut resource_entity_attrs: HashMap<String, cedar_policy::RestrictedExpression> =
             HashMap::new();
         for (key, value) in resource_attrs {
             insert_json_as_cedar(&mut resource_entity_attrs, key.clone(), value);
         }
+        crate::metrics::record_cedar_request_attribute_count(
+            "resource",
+            resource_entity_attrs.len(),
+        );
+        recorder.finish_phase("resource_attrs");
 
         // Entity schema validation is intentionally None: app specs define
         // tenant-specific attributes that cannot be predicted by a static
@@ -462,9 +476,10 @@ impl AuthzEngine {
         ) {
             Ok(entity) => entity,
             Err(e) => {
-                return AuthzDecision::Deny(AuthzDenial::EngineError(format!(
-                    "failed to build principal entity: {e}"
-                )));
+                return recorder.fail(
+                    "entities",
+                    AuthzDenial::EngineError(format!("failed to build principal entity: {e}")),
+                );
             }
         };
         let resource_entity = if resource_uid == principal_uid {
@@ -473,18 +488,22 @@ impl AuthzEngine {
             match Entity::new(resource_uid.clone(), merged_attrs, HashSet::new()) {
                 Ok(entity) => entity,
                 Err(e) => {
-                    return AuthzDecision::Deny(AuthzDenial::EngineError(format!(
-                        "failed to build merged principal/resource entity: {e}"
-                    )));
+                    return recorder.fail(
+                        "entities",
+                        AuthzDenial::EngineError(format!(
+                            "failed to build merged principal/resource entity: {e}"
+                        )),
+                    );
                 }
             }
         } else {
             match Entity::new(resource_uid.clone(), resource_entity_attrs, HashSet::new()) {
                 Ok(entity) => entity,
                 Err(e) => {
-                    return AuthzDecision::Deny(AuthzDenial::EngineError(format!(
-                        "failed to build resource entity: {e}"
-                    )));
+                    return recorder.fail(
+                        "entities",
+                        AuthzDenial::EngineError(format!("failed to build resource entity: {e}")),
+                    );
                 }
             }
         };
@@ -493,21 +512,24 @@ impl AuthzEngine {
             match Entities::from_entities([resource_entity], None) {
                 Ok(e) => e,
                 Err(e) => {
-                    return AuthzDecision::Deny(AuthzDenial::EngineError(format!(
-                        "failed to build entity store: {e}"
-                    )));
+                    return recorder.fail(
+                        "entities",
+                        AuthzDenial::EngineError(format!("failed to build entity store: {e}")),
+                    );
                 }
             }
         } else {
             match Entities::from_entities([principal_entity, resource_entity], None) {
                 Ok(e) => e,
                 Err(e) => {
-                    return AuthzDecision::Deny(AuthzDenial::EngineError(format!(
-                        "failed to build entity store: {e}"
-                    )));
+                    return recorder.fail(
+                        "entities",
+                        AuthzDenial::EngineError(format!("failed to build entity store: {e}")),
+                    );
                 }
             }
         };
+        recorder.finish_phase("entities");
 
         let request = match Request::new(
             principal_uid,
@@ -518,24 +540,24 @@ impl AuthzEngine {
         ) {
             Ok(r) => r,
             Err(e) => {
-                return AuthzDecision::Deny(AuthzDenial::EngineError(format!(
-                    "invalid request: {e}"
-                )));
+                return recorder.fail(
+                    "request",
+                    AuthzDenial::EngineError(format!("invalid request: {e}")),
+                );
             }
         };
+        recorder.finish_phase("request");
 
         let response: CedarResponse = self
             .authorizer
             .is_authorized(&request, policy_set, &entities);
+        recorder.finish_phase("authorizer");
 
         let decision = response.decision();
-        crate::metrics::record_cedar_evaluation(
-            eval_start.elapsed(),
-            match decision {
-                Decision::Allow => "allow",
-                Decision::Deny => "deny",
-            },
-        );
+        recorder.finish(match decision {
+            Decision::Allow => CedarDecisionMetric::Allow,
+            Decision::Deny => CedarDecisionMetric::Deny,
+        });
 
         match decision {
             Decision::Allow => {
@@ -660,14 +682,45 @@ fn count_user_policies(ps: &PolicySet) -> usize {
         .count()
 }
 
-fn cedar_evaluations_counter() -> &'static Counter<u64> {
-    static COUNTER: OnceLock<Counter<u64>> = OnceLock::new();
-    COUNTER.get_or_init(|| {
-        global::meter("temper-authz")
-            .u64_counter("temper_cedar_evaluations_total")
-            .with_description("Total number of Cedar authorization evaluations.")
-            .build()
-    })
+struct CedarEvaluationRecorder {
+    started_at: Instant,
+    phase_started_at: Instant,
+}
+
+impl CedarEvaluationRecorder {
+    fn start() -> Self {
+        let now = Instant::now();
+        Self {
+            started_at: now,
+            phase_started_at: now,
+        }
+    }
+
+    fn finish_phase(&mut self, phase: &'static str) {
+        crate::metrics::record_cedar_phase_duration(
+            phase,
+            self.phase_started_at.elapsed(),
+            CedarPhaseOutcome::Ok,
+        );
+        self.phase_started_at = Instant::now();
+    }
+
+    fn fail(&mut self, phase: &'static str, denial: AuthzDenial) -> AuthzDecision {
+        crate::metrics::record_cedar_phase_duration(
+            phase,
+            self.phase_started_at.elapsed(),
+            CedarPhaseOutcome::Error,
+        );
+        crate::metrics::record_cedar_evaluation(
+            self.started_at.elapsed(),
+            CedarDecisionMetric::Error,
+        );
+        AuthzDecision::Deny(denial)
+    }
+
+    fn finish(&self, decision: CedarDecisionMetric) {
+        crate::metrics::record_cedar_evaluation(self.started_at.elapsed(), decision);
+    }
 }
 
 /// Insert a `serde_json::Value` into a Cedar context map, converting to the
