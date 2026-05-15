@@ -1063,21 +1063,21 @@
             live runs pass, and deployment completes.
           </p>
           <div class="progress-track" aria-label="Program progress">
-            <div class="progress-fill" style="width: 84%">84%</div>
+            <div class="progress-fill" style="width: 88%">88%</div>
           </div>
           <div class="program-facts">
-            <div class="program-fact"><strong>Phase</strong><span>Measurement package is implemented, quality-gated locally, pushed, split into two draft PRs, refreshed with live Railway/Datadog evidence, deployed into Datadog with service-level APM coverage recognized for rate/duration/error, DBM explain-plan repair applied to production Postgres, and production on-demand CPU profiling proven under live read load. The Temper runtime PR has been refreshed onto current <code>main</code> locally; merge conflicts are resolved, the full latency-observability preflight is green, readability ratchet is back at baseline without loosening the baseline, and the branch is ready for push. Runtime PR review/merge, production runtime deployment, continuous profiling, skipped future metric percentile configs, DBM schema collection, and live e2e evidence remain pending.</span></div>
+            <div class="program-fact"><strong>Phase</strong><span>Measurement package is implemented, quality-gated locally, pushed, split into two draft PRs, refreshed with live Railway/Datadog evidence, deployed into Datadog with service-level APM coverage recognized for rate/duration/error, DBM explain-plan repair applied to production Postgres, and production on-demand CPU profiling proven under live read load. Temper PR <a href="https://github.com/nerdsane/temper/pull/229">#229</a> is refreshed onto current <code>main</code>, mergeable at head <code>50fe9664</code>, and has only the GitHub <code>Tests</code> check still running. TemperPaw PR <a href="https://github.com/nerdsane/temperpaw/pull/266">#266</a> is refreshed onto current <code>main</code>, mergeable at head <code>aa38b944</code>, and has GitHub CI running. Runtime PR CI completion/review/merge, production runtime deployment, Datadog config redeploy from the refreshed TemperPaw source, continuous profiling, skipped future metric percentile configs, DBM schema collection, and live e2e evidence remain pending.</span></div>
             <div class="program-fact"><strong>Branches</strong><span>Temper <code>codex/latency-observability-program</code>; TemperPaw <code>codex/latency-observability-program</code></span></div>
             <div class="program-fact"><strong>Worktrees</strong><span>Temper <code>/Users/seshendranalla/Development/temper-worktrees/latency-observability-program</code>; TemperPaw <code>/Users/seshendranalla/Development/temperpaw-worktrees/latency-observability-program</code></span></div>
             <div class="program-fact"><strong>PRs</strong><span>Temper draft PR <a href="https://github.com/nerdsane/temper/pull/229">nerdsane/temper#229</a>; TemperPaw draft PR <a href="https://github.com/nerdsane/temperpaw/pull/266">nerdsane/temperpaw#266</a>.</span></div>
-            <div class="program-fact"><strong>Railway</strong><span>Project <code>openpaw-seshendranalla</code>, environment <code>production</code>, service <code>openpaw</code>, domains <code>openpaw-production.up.railway.app</code> and <code>temperpaw.katagami.ai</code>.</span></div>
+            <div class="program-fact"><strong>Railway</strong><span>CLI authentication is confirmed for the correct account. Project <code>openpaw-seshendranalla</code>, environment <code>production</code>, service <code>openpaw</code>, domains <code>openpaw-production.up.railway.app</code> and <code>temperpaw.katagami.ai</code>.</span></div>
             <div class="program-fact"><strong>Datadog tag</strong><span>Production exports <code>DD_SERVICE=temperpaw</code>; dashboards and monitors must query <code>service:temperpaw</code>, not the Railway service name.</span></div>
-            <div class="program-fact"><strong>Production checks</strong><span>Railway-backed Datadog deployment updated dashboard <code>mn4-k3k-i66</code>, created or updated 66 source monitors, enabled percentile aggregations for 18 live Temper latency distributions, and applied DBM helper schema/functions; Railway domain <code>/readyz</code> is ready and <code>/healthz</code> returns 200; Datadog reports <code>temper_up=1</code>, Cedar traffic, APM HTTP traffic, fresh DBM explain plans without <code>invalid_schema</code>, fresh CPU profiler upload counters, and service coverage for APM rate, duration, and error on <code>service:temperpaw</code>.</span></div>
+            <div class="program-fact"><strong>Production checks</strong><span>Railway-backed Datadog deployment updated dashboard <code>mn4-k3k-i66</code>, created or updated 66 live monitors, enabled percentile aggregations for 18 live Temper latency distributions, and applied DBM helper schema/functions; Railway domain <code>/readyz</code> is ready and <code>/healthz</code> returns 200; Datadog reports <code>temper_up=1</code>, Cedar traffic, APM HTTP traffic, fresh DBM explain plans without <code>invalid_schema</code>, fresh CPU profiler upload counters, and service coverage for APM rate, duration, and error on <code>service:temperpaw</code>. After the TemperPaw main refresh, the source monitor catalog is 76 monitors and must be redeployed through Railway.</span></div>
             <div class="program-fact"><strong>Review gates</strong><span>DST compliance review PASS; code-quality review PASS; changed sim-visible files pass the determinism hook loop; readability ratchet is green at baseline after module splits.</span></div>
             <div class="program-fact"><strong>Dashboard</strong><span><code>docs/temper-latency-observability-report.html</code></span></div>
             <div class="program-fact"><strong>ADRs</strong><span><code>docs/adrs/0081-latency-observability-acceleration-program.md</code>; <code>docs/adrs/0082-projection-correctness-observability.md</code>; <code>docs/adrs/0083-trace-budget-and-fanout-summarization.md</code>; <code>docs/adrs/0084-authz-latency-phase-instrumentation.md</code></span></div>
             <div class="program-fact"><strong>Runbooks</strong><span><code>docs/runbooks/datadog-postgres-dbm.md</code>; <code>docs/runbooks/latency-observability-release.md</code>; <code>scripts/datadog-postgres-dbm-setup.sql</code></span></div>
-            <div class="program-fact"><strong>Local checks</strong><span><code>scripts/verify-latency-observability-package.sh full</code> passed after Railway access and again after the readability-safe module split. The Temper pre-push gate also passed rustfmt, clippy, readability ratchet, and full <code>cargo test --workspace</code>; the slowest DST random workload took about 17.5 minutes and passed.</span></div>
+            <div class="program-fact"><strong>Local checks</strong><span><code>scripts/verify-latency-observability-package.sh full</code> passed after Railway access and again after the readability-safe module split. The Temper pre-push gate also passed rustfmt, clippy, readability ratchet, and full <code>cargo test --workspace</code>; the slowest DST random workload took 457.87 seconds and passed. TemperPaw <code>cargo test -p temperpaw --tests -- --nocapture</code> passed 187 tests after the observability restructure merge.</span></div>
             <div class="program-fact"><strong>Tracking</strong><span>Thread goal active; Temper MCP issue tracking unavailable in this session.</span></div>
             <div class="program-fact"><strong>Finish line</strong><span>ADRs written, changes implemented, local tests and live e2e tests pass, PRs merged, deployed, evidence recorded here.</span></div>
           </div>
@@ -1361,6 +1361,16 @@
               <time datetime="2026-05-15">2026-05-15</time>
               <p>The first post-merge push attempt was blocked by the readability ratchet because merged mainline files raised <code>PROD_FILES_GT500</code> and <code>PROD_FILES_GT1000</code>. Fixed the regression without updating the baseline: moved OTEL environment resolution, trace sampler rules, and OTEL tests into <code>crates/temper-observe/src/otel/config.rs</code>, <code>otel/sampler.rs</code>, and <code>otel/tests.rs</code>; trimmed <code>crates/temper-cli/src/serve/mod.rs</code> to the 1000-line threshold; and updated the package verifier to follow the new sampler module. Verification now passes: <code>cargo fmt --check</code>, <code>cargo test -p temper-observe otel --lib -- --nocapture</code>, <code>scripts/verify-latency-observability-package.sh full</code>, <code>bash scripts/readability-ratchet.sh check .ci/readability-baseline.env</code>, and <code>git diff --check</code>.</p>
             </div>
+            <div class="log-entry">
+              <time datetime="2026-05-15">2026-05-15</time>
+              <p>Pushed the refreshed Temper branch at <code>50fe9664</code>. The repository pre-push hook passed rustfmt, clippy, readability ratchet, and the full workspace test suite; the slowest <code>dst_platform_random</code> workload finished in 457.87 seconds. GitHub now reports Temper PR <a href="https://github.com/nerdsane/temper/pull/229">#229</a> as <code>MERGEABLE</code> with CI running. TemperPaw PR <a href="https://github.com/nerdsane/temperpaw/pull/266">#266</a> remains <code>CONFLICTING</code> and is the next refresh target.</p>
+            </div>
+            <div class="log-entry">
+              <time datetime="2026-05-15T03:13:00-04:00">2026-05-15 03:13 EDT</time>
+              <p>Railway CLI authentication is confirmed for the correct account, so the live deployment and Datadog redeploy lane is open again.</p>
+              <p>Resolved the TemperPaw observability restructure merge in the worktree <code>/Users/seshendranalla/Development/temperpaw-worktrees/latency-observability-program</code>. The merged Datadog source keeps the new TemperPaw identity cleanup, LLMObs/session/DBM/log surfaces, legacy monitor reconciliation, Datadog retry/backoff, validate-before-deploy, 76 source monitors, and the latency-program percentile coverage backed by <code>scripts/configure_metric_percentiles.py</code>.</p>
+              <p>Verified TemperPaw locally with <code>python3 -m json.tool</code> for dashboard and monitors, <code>python3 -m py_compile</code> for Datadog scripts, <code>git diff --check</code>, focused Datadog contracts, identity/session contracts, and full <code>cargo test -p temperpaw --tests -- --nocapture</code> with 187 passing tests. Pushed merge commit <code>aa38b944</code>; GitHub now reports TemperPaw PR <a href="https://github.com/nerdsane/temperpaw/pull/266">#266</a> as <code>MERGEABLE</code> with CI running.</p>
+            </div>
           </div>
         </div>
       </div>
@@ -1456,15 +1466,15 @@
             </tr>
             <tr>
               <td>Review gates</td>
-              <td>DST review PASS, code-quality review PASS, changed sim-visible files pass the determinism guard loop, and full focused preflight passed after the cleanup.</td>
-              <td>The package is locally review-gated for commit/PR, with residual risk now concentrated in source updates for the live Datadog deploy fixes, PR merge, runtime deployment, DBM/profiler proof, and live e2e evidence.</td>
-              <td>Commit/push the latest report and TemperPaw Datadog deployment fixes, then run the release checklist through merge/deploy/live e2e proof.</td>
+              <td>DST review PASS, code-quality review PASS, changed sim-visible files pass the determinism guard loop, full focused Temper preflight passed after cleanup, and TemperPaw <code>cargo test -p temperpaw --tests</code> passed after the observability restructure merge.</td>
+              <td>The package is locally review-gated for commit/PR, with residual risk now concentrated in GitHub CI completion, PR review/merge, runtime deployment, Datadog redeploy from refreshed source, DBM/profiler proof, and live e2e evidence.</td>
+              <td>Commit/push this report update, wait for both PR CI lanes, then run the release checklist through merge/deploy/live e2e proof.</td>
             </tr>
             <tr>
               <td>OBS-004 Datadog dashboard and monitors</td>
-              <td>Updated and deployed TemperPaw <code>dd-dashboards/temperpaw-overview.json</code> and <code>dd-monitors/temperpaw-monitors.json</code> with projection correctness, replay parity, Postgres timing, dispatch p95/p99, APM coverage, WASM p95/p99, blob p95/p99, Monty wait p95/p99, session context p95/p99, and session phase p95/p99 surfaces. Queries are scoped to production's <code>service:temperpaw</code> tag.</td>
-              <td>The live Datadog account now has the dashboard, monitors, and percentile config needed for current-tail diagnosis. Some monitors correctly remain No Data until the Temper runtime PR emits new Postgres/projection/AuthZ phase metrics.</td>
-              <td>Commit/push the updated TemperPaw source, rerun after runtime deployment for skipped metrics, and capture widget screenshots/links once the new runtime surfaces have data.</td>
+              <td>Live Datadog was previously deployed with 66 monitors and dashboard <code>mn4-k3k-i66</code>. The refreshed TemperPaw source now has a merged 76-monitor catalog and 24-widget dashboard combining main's session/LLMObs/DBM/log restructuring with latency-program projection, Postgres, dispatch, WASM, blob, Monty, AuthZ, and trace-budget coverage. Queries are scoped to production's <code>service:temperpaw</code> tag.</td>
+              <td>The live Datadog account has a working baseline, and the source now has the merged target config. Some monitors correctly remain No Data until the Temper runtime PR emits new Postgres/projection/AuthZ phase metrics.</td>
+              <td>Redeploy the refreshed TemperPaw Datadog source through Railway, rerun percentile config after runtime deployment for newly emitted metrics, and capture widget screenshots/links once the new runtime surfaces have data.</td>
             </tr>
             <tr>
               <td>OBS-005 trace budget</td>
@@ -1613,9 +1623,9 @@
             <tr>
               <td>OBS-004</td>
               <td>Convert key metrics to distributions/percentiles and fix misleading or No Data monitors.</td>
-              <td><span class="status watch">Live Datadog config deployed</span></td>
+              <td><span class="status watch">Source refreshed; live redeploy next</span></td>
               <td><a href="https://github.com/nerdsane/temperpaw/pull/266">TemperPaw PR #266</a></td>
-              <td>Dashboard and 66 monitors are deployed; 18 live distributions have percentiles enabled; Datadog service coverage now recognizes APM rate, duration, and error. Done still requires runtime deployment for skipped new metrics and widget data for the new surfaces.</td>
+              <td>Dashboard and 66 monitors were deployed live before the main refresh; the merged source now contains a validated 76-monitor catalog and 24-widget dashboard. 18 live distributions have percentiles enabled; Datadog service coverage recognizes APM rate, duration, and error. Done still requires redeploying the refreshed source, runtime deployment for skipped new metrics, and widget data for the new surfaces.</td>
             </tr>
             <tr>
               <td>OBS-005</td>
@@ -2200,10 +2210,11 @@ flowchart LR
               <li>Local: added monitors for projection drift, replay parity drift/errors, shadow check errors, projection queue/e2e regressions, backfill failures, and Postgres pool/transaction regressions.</li>
               <li>Local: repaired the request latency monitor to use <code>p95:temper_dispatch_ask_latency_ms</code> instead of an average, and added p95 monitors for WASM, blob, Monty, and session phases.</li>
               <li>Local: corrected Datadog query scopes from the Railway service name to the runtime tag <code>service:temperpaw</code> and added a preflight regression guard.</li>
-              <li>Live: deployed dashboard <code>mn4-k3k-i66</code>, created or updated 66 source monitors, and added four standard APM coverage monitors.</li>
+              <li>Live: deployed dashboard <code>mn4-k3k-i66</code>, created or updated 66 source monitors, and added four standard APM coverage monitors before the main refresh.</li>
               <li>Live: enabled percentiles for 18 currently emitted Temper latency distributions; skipped six future runtime metrics that Datadog cannot preconfigure before first emission.</li>
               <li>Live: Datadog service coverage now recognizes APM rate, duration, and error for <code>service:temperpaw</code>.</li>
-              <li>Next: commit/push the TemperPaw deployment fixes, rerun percentile config after runtime deploy, and verify live widget data for the new runtime metrics.</li>
+              <li>Local: merged the latest TemperPaw observability restructure into the latency branch; source now has 76 monitors and a 24-widget dashboard with no unsupported percentile queries.</li>
+              <li>Next: redeploy the refreshed TemperPaw Datadog source through Railway, rerun percentile config after runtime deploy, and verify live widget data for the new runtime metrics.</li>
             </ul>
             <p class="small">Acceptance: SLO dashboards use percentiles, not misleading averages.</p>
           </div>
