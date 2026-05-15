@@ -1286,12 +1286,6 @@ impl WasmHost for ProductionWasmHost {
 
     fn log(&self, level: &str, message: &str) {
         record_guest_log_span_event(level, message, self.invocation_context.as_ref(), None);
-        match level {
-            "error" => tracing::error!(target: "wasm_guest", "{}", message),
-            "warn" => tracing::warn!(target: "wasm_guest", "{}", message),
-            "info" => tracing::info!(target: "wasm_guest", "{}", message),
-            _ => tracing::debug!(target: "wasm_guest", "{}", message),
-        }
     }
 
     fn evaluate_spec(
