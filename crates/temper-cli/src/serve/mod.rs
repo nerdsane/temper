@@ -13,8 +13,7 @@ mod loader;
 mod storage;
 
 use std::collections::{BTreeMap, HashMap};
-use std::path::Path;
-use std::sync::Arc;
+use std::{path::Path, sync::Arc};
 
 use anyhow::{Context, Result};
 use tokio::io::AsyncBufReadExt;
@@ -30,8 +29,7 @@ use temper_server::registry::{EntityLevelSummary, EntityVerificationResult, Veri
 use temper_server::state::DesignTimeEvent;
 use temper_verify::cascade::VerificationCascade;
 
-use crate::ActorRuntimeBackend;
-use crate::StorageBackend;
+use crate::{ActorRuntimeBackend, StorageBackend};
 
 use loader::read_ioa_sources;
 

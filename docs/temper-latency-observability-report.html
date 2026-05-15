@@ -1063,10 +1063,10 @@
             live runs pass, and deployment completes.
           </p>
           <div class="progress-track" aria-label="Program progress">
-            <div class="progress-fill" style="width: 83%">83%</div>
+            <div class="progress-fill" style="width: 84%">84%</div>
           </div>
           <div class="program-facts">
-            <div class="program-fact"><strong>Phase</strong><span>Measurement package is implemented, quality-gated locally, pushed, split into two draft PRs, refreshed with live Railway/Datadog evidence, deployed into Datadog with service-level APM coverage recognized for rate/duration/error, DBM explain-plan repair applied to production Postgres, and production on-demand CPU profiling proven under live read load. The Temper runtime PR has been refreshed onto current <code>main</code> locally; merge conflicts are resolved, the full latency-observability preflight is green, and the branch is ready for merge-commit/push. Runtime PR review/merge, production runtime deployment, continuous profiling, skipped future metric percentile configs, DBM schema collection, and live e2e evidence remain pending.</span></div>
+            <div class="program-fact"><strong>Phase</strong><span>Measurement package is implemented, quality-gated locally, pushed, split into two draft PRs, refreshed with live Railway/Datadog evidence, deployed into Datadog with service-level APM coverage recognized for rate/duration/error, DBM explain-plan repair applied to production Postgres, and production on-demand CPU profiling proven under live read load. The Temper runtime PR has been refreshed onto current <code>main</code> locally; merge conflicts are resolved, the full latency-observability preflight is green, readability ratchet is back at baseline without loosening the baseline, and the branch is ready for push. Runtime PR review/merge, production runtime deployment, continuous profiling, skipped future metric percentile configs, DBM schema collection, and live e2e evidence remain pending.</span></div>
             <div class="program-fact"><strong>Branches</strong><span>Temper <code>codex/latency-observability-program</code>; TemperPaw <code>codex/latency-observability-program</code></span></div>
             <div class="program-fact"><strong>Worktrees</strong><span>Temper <code>/Users/seshendranalla/Development/temper-worktrees/latency-observability-program</code>; TemperPaw <code>/Users/seshendranalla/Development/temperpaw-worktrees/latency-observability-program</code></span></div>
             <div class="program-fact"><strong>PRs</strong><span>Temper draft PR <a href="https://github.com/nerdsane/temper/pull/229">nerdsane/temper#229</a>; TemperPaw draft PR <a href="https://github.com/nerdsane/temperpaw/pull/266">nerdsane/temperpaw#266</a>.</span></div>
@@ -1356,6 +1356,10 @@
             <div class="log-entry">
               <time datetime="2026-05-15">2026-05-15</time>
               <p>Reran the full latency-observability package preflight after the mainline refresh. It initially exposed a verifier test filter that matched zero Turso tests after the merged mainline rename; fixed <code>scripts/verify-latency-observability-package.sh</code> to call <code>load_entity_catalog_rows_returns_full_projected_fields</code>. The corrected <code>scripts/verify-latency-observability-package.sh full</code> pass now covers package consistency, cargo formatting/checks, all <code>temper-authz</code> tests, profiling tests, OTEL sampler tests, Postgres metrics tests, projection metrics, OData shadow tests, replay parity integration tests, and the focused Turso full-fields/export tests.</p>
+            </div>
+            <div class="log-entry">
+              <time datetime="2026-05-15">2026-05-15</time>
+              <p>The first post-merge push attempt was blocked by the readability ratchet because merged mainline files raised <code>PROD_FILES_GT500</code> and <code>PROD_FILES_GT1000</code>. Fixed the regression without updating the baseline: moved OTEL environment resolution, trace sampler rules, and OTEL tests into <code>crates/temper-observe/src/otel/config.rs</code>, <code>otel/sampler.rs</code>, and <code>otel/tests.rs</code>; trimmed <code>crates/temper-cli/src/serve/mod.rs</code> to the 1000-line threshold; and updated the package verifier to follow the new sampler module. Verification now passes: <code>cargo fmt --check</code>, <code>cargo test -p temper-observe otel --lib -- --nocapture</code>, <code>scripts/verify-latency-observability-package.sh full</code>, <code>bash scripts/readability-ratchet.sh check .ci/readability-baseline.env</code>, and <code>git diff --check</code>.</p>
             </div>
           </div>
         </div>
