@@ -1063,12 +1063,13 @@
             live runs pass, and deployment completes.
           </p>
           <div class="progress-track" aria-label="Program progress">
-            <div class="progress-fill" style="width: 60%">60%</div>
+            <div class="progress-fill" style="width: 66%">66%</div>
           </div>
           <div class="program-facts">
-            <div class="program-fact"><strong>Phase</strong><span>Measurement package is implemented and quality-gated locally. TemperPaw config branch is pushed; Temper branch is being amended/pushed after readability-safe module splits. PRs, live Datadog deployment, Datadog percentile config, and e2e evidence remain pending.</span></div>
+            <div class="program-fact"><strong>Phase</strong><span>Measurement package is implemented, quality-gated locally, pushed, and split into two draft PRs. Live Datadog deployment, Datadog percentile config, PR review/merge, runtime deployment, and live e2e evidence remain pending.</span></div>
             <div class="program-fact"><strong>Branches</strong><span>Temper <code>codex/latency-observability-program</code>; TemperPaw <code>codex/latency-observability-program</code></span></div>
             <div class="program-fact"><strong>Worktrees</strong><span>Temper <code>/Users/seshendranalla/Development/temper-worktrees/latency-observability-program</code>; TemperPaw <code>/Users/seshendranalla/Development/temperpaw-worktrees/latency-observability-program</code></span></div>
+            <div class="program-fact"><strong>PRs</strong><span>Temper draft PR <a href="https://github.com/nerdsane/temper/pull/229">nerdsane/temper#229</a>; TemperPaw draft PR <a href="https://github.com/nerdsane/temperpaw/pull/266">nerdsane/temperpaw#266</a>.</span></div>
             <div class="program-fact"><strong>Railway</strong><span>Project <code>openpaw-seshendranalla</code>, environment <code>production</code>, service <code>openpaw</code>, domains <code>openpaw-production.up.railway.app</code> and <code>temperpaw.katagami.ai</code>.</span></div>
             <div class="program-fact"><strong>Datadog tag</strong><span>Production exports <code>DD_SERVICE=temperpaw</code>; dashboards and monitors must query <code>service:temperpaw</code>, not the Railway service name.</span></div>
             <div class="program-fact"><strong>Production checks</strong><span>Railway-backed Datadog monitor dry-run reached the API and would create 62 monitors; Railway domain <code>/readyz</code> is ready and <code>/healthz</code> returns 200; Datadog reports <code>temper_up=1</code> and Cedar traffic for <code>service:temperpaw</code>.</span></div>
@@ -1076,7 +1077,7 @@
             <div class="program-fact"><strong>Dashboard</strong><span><code>docs/temper-latency-observability-report.html</code></span></div>
             <div class="program-fact"><strong>ADRs</strong><span><code>docs/adrs/0081-latency-observability-acceleration-program.md</code>; <code>docs/adrs/0082-projection-correctness-observability.md</code>; <code>docs/adrs/0083-trace-budget-and-fanout-summarization.md</code>; <code>docs/adrs/0084-authz-latency-phase-instrumentation.md</code></span></div>
             <div class="program-fact"><strong>Runbooks</strong><span><code>docs/runbooks/datadog-postgres-dbm.md</code>; <code>docs/runbooks/latency-observability-release.md</code>; <code>scripts/datadog-postgres-dbm-setup.sql</code></span></div>
-            <div class="program-fact"><strong>Local checks</strong><span><code>scripts/verify-latency-observability-package.sh full</code> passed after Railway access and again after the readability-safe module split. After cleaning the staged authz helper lint, <code>cargo check -p temper-server</code>, <code>cargo clippy -p temper-server --all-targets -- -D warnings</code>, the readability ratchet, the sim-visible determinism hook loop, and <code>scripts/verify-latency-observability-package.sh quick</code> pass.</span></div>
+            <div class="program-fact"><strong>Local checks</strong><span><code>scripts/verify-latency-observability-package.sh full</code> passed after Railway access and again after the readability-safe module split. The Temper pre-push gate also passed rustfmt, clippy, readability ratchet, and full <code>cargo test --workspace</code>; the slowest DST random workload took about 17.5 minutes and passed.</span></div>
             <div class="program-fact"><strong>Tracking</strong><span>Thread goal active; Temper MCP issue tracking unavailable in this session.</span></div>
             <div class="program-fact"><strong>Finish line</strong><span>ADRs written, changes implemented, local tests and live e2e tests pass, PRs merged, deployed, evidence recorded here.</span></div>
           </div>
@@ -1284,6 +1285,10 @@
               <time datetime="2026-05-15">2026-05-15</time>
               <p>Re-ran local quality gates after the module split. <code>scripts/verify-latency-observability-package.sh full</code>, <code>cargo check -p temper-server</code>, <code>cargo clippy -p temper-server --all-targets -- -D warnings</code>, <code>bash scripts/readability-ratchet.sh check .ci/readability-baseline.env</code>, the changed/new sim-visible determinism hook loop, and <code>scripts/verify-latency-observability-package.sh quick</code> all pass. The verifier was updated so profiler upload and projection shadow-read checks follow the new module paths.</p>
             </div>
+            <div class="log-entry">
+              <time datetime="2026-05-15">2026-05-15</time>
+              <p>Pushed the Temper branch after the repository pre-push hook passed all four gates: rustfmt, clippy, readability ratchet, and full <code>cargo test --workspace</code>. Created draft PRs: <a href="https://github.com/nerdsane/temper/pull/229">nerdsane/temper#229</a> for the runtime/report/ADR package and <a href="https://github.com/nerdsane/temperpaw/pull/266">nerdsane/temperpaw#266</a> for Datadog dashboards, monitors, and snapshot tooling.</p>
+            </div>
           </div>
         </div>
       </div>
@@ -1436,7 +1441,7 @@
             </tr>
             <tr>
               <td>Observability repair</td>
-              <td><span class="status watch">PR prep</span></td>
+              <td><span class="status watch">Draft PRs open</span></td>
               <td>Profiler freshness, DBM plan health, percentile metrics, trace budget, projection drift/lag/replay metrics.</td>
               <td>Dashboards/monitors show trustworthy current data, not stale or average-only proxies.</td>
             </tr>
@@ -1460,7 +1465,7 @@
             </tr>
             <tr>
               <td>Final verification</td>
-              <td><span class="status watch">Focused local gates green</span></td>
+              <td><span class="status watch">Pre-push full suite passed</span></td>
               <td>Local tests, live runs, live e2e tests, PR links, merge proof, deployment proof.</td>
               <td>All PRs merged and deployed; this dashboard contains the evidence trail.</td>
             </tr>
@@ -1498,7 +1503,7 @@
               <td>OBS-001</td>
               <td>Restore useful Datadog profiling: freshness, upload rate, upload errors, CPU/allocation/lock profiles.</td>
               <td><span class="status watch">Local patch verified</span></td>
-              <td><code>codex/latency-observability-program</code>; PR pending</td>
+              <td><a href="https://github.com/nerdsane/temper/pull/229">Temper PR #229</a></td>
               <td>Local check/test passed. Done still requires PR, deploy, <code>ddprof</code> evaluation, fresh live profile uploads within 10 minutes, and flamegraph links or screenshots recorded here.</td>
             </tr>
             <tr>
@@ -1512,28 +1517,28 @@
               <td>OBS-003</td>
               <td>Add projection correctness observability: lag, sequence, version/hash, drift samples, shadow reads, replay parity.</td>
               <td><span class="status watch">Replay parity verified locally</span></td>
-              <td><code>codex/latency-observability-program</code>; PR pending</td>
+              <td><a href="https://github.com/nerdsane/temper/pull/229">Temper PR #229</a></td>
               <td>Source-tagged queue/update/backfill/applied-sequence metrics, opt-in sampled shadow checks, replay parity metrics, replay parity test coverage, and Turso catalog field preservation exist. Done still requires live Datadog proof and scheduled/live parity execution against deployed data.</td>
             </tr>
             <tr>
               <td>OBS-004</td>
               <td>Convert key metrics to distributions/percentiles and fix misleading or No Data monitors.</td>
               <td><span class="status watch">Tail + trace config expanded</span></td>
-              <td><code>/Users/seshendranalla/Development/temperpaw-worktrees/latency-observability-program</code>; deploy pending</td>
+              <td><a href="https://github.com/nerdsane/temperpaw/pull/266">TemperPaw PR #266</a></td>
               <td>Projection, replay parity, Postgres, dispatch, WASM, blob, Monty, session p95/p99, and trace-budget widgets plus drift/latency/cardinality monitors exist in config and pass JSON validation. Done requires Datadog deploy, widget data, and monitor IDs.</td>
             </tr>
             <tr>
               <td>OBS-005</td>
               <td>Add trace budgets and high-fanout summary spans with exemplars.</td>
               <td><span class="status watch">Local patch/config verified</span></td>
-              <td><code>codex/latency-observability-program</code>; TemperPaw config worktree; PR pending</td>
+              <td><a href="https://github.com/nerdsane/temper/pull/229">Temper PR #229</a>; <a href="https://github.com/nerdsane/temperpaw/pull/266">TemperPaw PR #266</a></td>
               <td>ADR-0083, sampler metrics, configurable reduced-prefix rules, reaction fanout span summaries, dashboard widgets, and monitors exist. Done requires deployed high-fanout smoke evidence: no routine 100k-span traces; slow/error traces retain root and summary detail.</td>
             </tr>
             <tr>
               <td>PERF-001</td>
               <td>Measure then optimize Cedar/AuthZ CPU path without weakening governance.</td>
               <td><span class="status watch">ADR-0084 local instrumentation added</span></td>
-              <td><code>codex/latency-observability-program</code>; TemperPaw config worktree; PR pending</td>
+              <td><a href="https://github.com/nerdsane/temper/pull/229">Temper PR #229</a>; <a href="https://github.com/nerdsane/temperpaw/pull/266">TemperPaw PR #266</a></td>
               <td>ADR-0084, canonical counter cleanup, ms duration metric, phase metrics, request-shape histograms, AuthZ dashboard group, focused AuthZ test, full AuthZ suite, and package preflight pass locally. Done still requires PR, deploy, Datadog percentile config, live phase metric proof, profiler evidence, and no policy bypass.</td>
             </tr>
             <tr>
@@ -1568,8 +1573,8 @@
               <td>VERIFY-001</td>
               <td>Build repeatable load/replay/e2e verification and deployment evidence trail.</td>
               <td><span class="status watch">Full focused preflight + quality gates passed</span></td>
-              <td>Pending PRs</td>
-              <td><code>scripts/verify-latency-observability-package.sh full</code> passed after the module split; cargo check, clippy, readability ratchet, determinism hook loop, and quick preflight are also clean. Done still requires live runs, live e2e tests, PR merge links, deployment proof, and final Datadog evidence recorded here.</td>
+              <td><a href="https://github.com/nerdsane/temper/pull/229">Temper PR #229</a>; <a href="https://github.com/nerdsane/temperpaw/pull/266">TemperPaw PR #266</a></td>
+              <td><code>scripts/verify-latency-observability-package.sh full</code> passed after the module split; the Temper pre-push hook passed full <code>cargo test --workspace</code>. Done still requires live runs, live e2e tests, PR merge links, deployment proof, and final Datadog evidence recorded here.</td>
             </tr>
           </tbody>
         </table>
