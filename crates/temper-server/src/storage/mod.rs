@@ -32,6 +32,11 @@ use crate::platform_store::PlatformStore;
 use crate::platform_store::SimPlatformStore;
 use crate::state::trajectory::{TrajectoryEntry, TrajectorySource};
 
+mod published_artifacts;
+pub use published_artifacts::{
+    PublishedArtifactStore, PublishedArtifactStoreRow, PublishedArtifactStoreUpsert,
+};
+
 pub type EventStoreFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
 
 /// Object-safe adapter for the runtime event journal.
@@ -630,6 +635,7 @@ pub trait MetadataStore:
     + DecisionStore
     + WasmMetadataStore
     + WasmInvocationStore
+    + PublishedArtifactStore
 {
 }
 
@@ -645,6 +651,7 @@ impl<T> MetadataStore for T where
         + DecisionStore
         + WasmMetadataStore
         + WasmInvocationStore
+        + PublishedArtifactStore
 {
 }
 

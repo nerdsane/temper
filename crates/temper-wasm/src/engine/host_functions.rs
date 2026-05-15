@@ -6,7 +6,7 @@
 
 use std::collections::BTreeMap;
 use std::future::Future;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use sha2::{Digest, Sha256};
 use wasmtime::{Caller, Linker};
@@ -88,6 +88,21 @@ pub(crate) enum FieldResolution {
     HostError,
 }
 
+fn read_guest_string(caller: &mut Caller<'_, HostState>, ptr: i32, len: i32) -> Result<String, ()> {
+    if ptr < 0 || len < 0 {
+        return Err(());
+    }
+    let memory = caller.get_export("memory").and_then(|e| e.into_memory());
+    let Some(memory) = memory else {
+        return Err(());
+    };
+    let mut buf = vec![0u8; len as usize];
+    memory
+        .read(caller, ptr as usize, &mut buf)
+        .map_err(|_| ())?;
+    String::from_utf8(buf).map_err(|_| ())
+}
+
 #[derive(Debug, serde::Deserialize)]
 struct HostHttpBatchRequest {
     method: String,
@@ -147,6 +162,65 @@ pub(crate) fn resolve_field_bytes(
     FieldResolution::Bytes(bytes)
 }
 
+fn record_context_json_on_span(span: &tracing::Span, context_json: &str, workflow_step: &str) {
+    span.record("workflow_step", workflow_step);
+    let Ok(ctx) = serde_json::from_str::<serde_json::Value>(context_json) else {
+        return;
+    };
+    if let Some(value) = ctx.get("tenant").and_then(serde_json::Value::as_str) {
+        span.record("tenant", value);
+    }
+    if let Some(value) = ctx.get("entity_type").and_then(serde_json::Value::as_str) {
+        span.record("entity_type", value);
+    }
+    if let Some(value) = ctx.get("entity_id").and_then(serde_json::Value::as_str) {
+        span.record("entity_id", value);
+    }
+    if let Some(value) = ctx
+        .get("trigger_action")
+        .and_then(serde_json::Value::as_str)
+    {
+        span.record("trigger_action", value);
+        span.record("action_name", value);
+    }
+    if let Some(value) = ctx.get("wasm_module").and_then(serde_json::Value::as_str) {
+        span.record("wasm_module", value);
+    }
+    if let Some(value) = ctx.get("agent_id").and_then(serde_json::Value::as_str) {
+        span.record("agent_id", value);
+    }
+    if let Some(value) = ctx
+        .get("session_id")
+        .and_then(serde_json::Value::as_str)
+        .or_else(|| {
+            let entity_type = ctx.get("entity_type").and_then(serde_json::Value::as_str)?;
+            (entity_type == "Session")
+                .then(|| ctx.get("entity_id").and_then(serde_json::Value::as_str))
+                .flatten()
+        })
+    {
+        span.record("session_id", value);
+    }
+    if let Some(value) = ctx
+        .get("workflow_root_entity_type")
+        .and_then(serde_json::Value::as_str)
+    {
+        span.record("workflow_root_entity_type", value);
+    }
+    if let Some(value) = ctx
+        .get("workflow_root_entity_id")
+        .and_then(serde_json::Value::as_str)
+    {
+        span.record("workflow_root_entity_id", value);
+    }
+    if let Some(value) = ctx
+        .get("workflow_run_id")
+        .and_then(serde_json::Value::as_str)
+    {
+        span.record("workflow_run_id", value);
+    }
+}
+
 /// Link all host functions into the WASM linker.
 pub(super) fn link_host_functions(linker: &mut Linker<HostState>) -> Result<(), WasmError> {
     // host_log(level_ptr, level_len, msg_ptr, msg_len)
@@ -167,6 +241,7 @@ pub(super) fn link_host_functions(linker: &mut Linker<HostState>) -> Result<(), 
                     let _ = memory.read(&caller, msg_ptr as usize, &mut msg_buf);
                     let level = String::from_utf8_lossy(&level_buf);
                     let msg = String::from_utf8_lossy(&msg_buf);
+                    let _guest_span = caller.data().guest_spans.enter_active();
                     caller.data().host.log(&level, &msg);
                 }
             },
@@ -228,6 +303,7 @@ pub(super) fn link_host_functions(linker: &mut Linker<HostState>) -> Result<(), 
                 let Ok(payload) = String::from_utf8(buf) else {
                     return -1;
                 };
+                let _guest_span = caller.data().guest_spans.enter_active();
                 match caller.data().host.emit_progress(&payload) {
                     Ok(()) => 0,
                     Err(_) => -1,
@@ -253,6 +329,7 @@ pub(super) fn link_host_functions(linker: &mut Linker<HostState>) -> Result<(), 
                 let Ok(payload) = String::from_utf8(buf) else {
                     return -1;
                 };
+                let _guest_span = caller.data().guest_spans.enter_active();
                 match caller.data().host.emit_wide_event(&payload) {
                     Ok(()) => 0,
                     Err(_) => -1,
@@ -278,6 +355,7 @@ pub(super) fn link_host_functions(linker: &mut Linker<HostState>) -> Result<(), 
                 let Ok(payload) = String::from_utf8(buf) else {
                     return -1;
                 };
+                let _guest_span = caller.data().guest_spans.enter_active();
                 match caller.data().host.log_structured(&payload) {
                     Ok(()) => 0,
                     Err(_) => -1,
@@ -303,6 +381,7 @@ pub(super) fn link_host_functions(linker: &mut Linker<HostState>) -> Result<(), 
                 let Ok(payload) = String::from_utf8(buf) else {
                     return -1;
                 };
+                let _guest_span = caller.data().guest_spans.enter_active();
                 match caller.data().host.emit_metric(&payload) {
                     Ok(()) => 0,
                     Err(_) => -1,
@@ -310,6 +389,100 @@ pub(super) fn link_host_functions(linker: &mut Linker<HostState>) -> Result<(), 
             },
         )
         .map_err(|e| WasmError::Compilation(format!("failed to link host_emit_metric: {e}")))?;
+
+    // host_start_span(ptr, len) -> i64
+    linker
+        .func_wrap(
+            "env",
+            "host_start_span",
+            |mut caller: Caller<'_, HostState>, ptr: i32, len: i32| -> i64 {
+                let Ok(payload) = read_guest_string(&mut caller, ptr, len) else {
+                    return -1;
+                };
+                match caller.data_mut().guest_spans.start_span(&payload) {
+                    Ok(span_id) => span_id,
+                    Err(error) => {
+                        tracing::warn!(error = %error, "host_start_span failed");
+                        -1
+                    }
+                }
+            },
+        )
+        .map_err(|e| WasmError::Compilation(format!("failed to link host_start_span: {e}")))?;
+
+    // host_add_span_event(span_id, ptr, len) -> i32
+    linker
+        .func_wrap(
+            "env",
+            "host_add_span_event",
+            |mut caller: Caller<'_, HostState>, span_id: i64, ptr: i32, len: i32| -> i32 {
+                let Ok(payload) = read_guest_string(&mut caller, ptr, len) else {
+                    return -1;
+                };
+                match caller
+                    .data_mut()
+                    .guest_spans
+                    .add_span_event(span_id, &payload)
+                {
+                    Ok(()) => 0,
+                    Err(error) => {
+                        tracing::warn!(span_id, error = %error, "host_add_span_event failed");
+                        -1
+                    }
+                }
+            },
+        )
+        .map_err(|e| WasmError::Compilation(format!("failed to link host_add_span_event: {e}")))?;
+
+    // host_set_span_attributes(span_id, ptr, len) -> i32
+    linker
+        .func_wrap(
+            "env",
+            "host_set_span_attributes",
+            |mut caller: Caller<'_, HostState>, span_id: i64, ptr: i32, len: i32| -> i32 {
+                let Ok(payload) = read_guest_string(&mut caller, ptr, len) else {
+                    return -1;
+                };
+                match caller
+                    .data_mut()
+                    .guest_spans
+                    .set_span_attributes(span_id, &payload)
+                {
+                    Ok(()) => 0,
+                    Err(error) => {
+                        tracing::warn!(
+                            span_id,
+                            error = %error,
+                            "host_set_span_attributes failed"
+                        );
+                        -1
+                    }
+                }
+            },
+        )
+        .map_err(|e| {
+            WasmError::Compilation(format!("failed to link host_set_span_attributes: {e}"))
+        })?;
+
+    // host_end_span(span_id, ptr, len) -> i32
+    linker
+        .func_wrap(
+            "env",
+            "host_end_span",
+            |mut caller: Caller<'_, HostState>, span_id: i64, ptr: i32, len: i32| -> i32 {
+                let Ok(payload) = read_guest_string(&mut caller, ptr, len) else {
+                    return -1;
+                };
+                match caller.data_mut().guest_spans.end_span(span_id, &payload) {
+                    Ok(()) => 0,
+                    Err(error) => {
+                        tracing::warn!(span_id, error = %error, "host_end_span failed");
+                        -1
+                    }
+                }
+            },
+        )
+        .map_err(|e| WasmError::Compilation(format!("failed to link host_end_span: {e}")))?;
 
     // host_get_secret(key_ptr, key_len, buf_ptr, buf_len) -> actual_len (-1 on error)
     linker
@@ -329,6 +502,7 @@ pub(super) fn link_host_functions(linker: &mut Linker<HostState>) -> Result<(), 
                 let _ = memory.read(&caller, key_ptr as usize, &mut key_buf);
                 let key = String::from_utf8_lossy(&key_buf);
 
+                let _guest_span = caller.data().guest_spans.enter_active();
                 match caller.data().host.get_secret(&key) {
                     Ok(secret) => {
                         let secret_bytes = secret.as_bytes();
@@ -399,6 +573,7 @@ pub(super) fn link_host_functions(linker: &mut Linker<HostState>) -> Result<(), 
 
                 // Bridge async -> sync with an outer deadline so a hanging
                 // host call can never pin the actor indefinitely.
+                let _guest_span = caller.data().guest_spans.enter_active();
                 let host = caller.data().host.clone();
                 let Ok(result) = run_host_call_with_timeout("host_http_call", async move {
                     host.http_call(&method, &url, &headers, &body).await
@@ -451,6 +626,7 @@ pub(super) fn link_host_functions(linker: &mut Linker<HostState>) -> Result<(), 
                     Vec::new()
                 };
 
+                let _guest_span = caller.data().guest_spans.enter_active();
                 let host = caller.data().host.clone();
                 let result = tokio::task::block_in_place(|| {
                     tokio::runtime::Handle::current().block_on(
@@ -542,6 +718,7 @@ pub(super) fn link_host_functions(linker: &mut Linker<HostState>) -> Result<(), 
 
                 // Bridge async -> sync with an outer deadline so a hanging
                 // host call can never pin the actor indefinitely.
+                let _guest_span = caller.data().guest_spans.enter_active();
                 let host = caller.data().host.clone();
                 let Ok(result) = run_host_call_with_timeout("host_connect_call", async move {
                     host.connect_call(&url, &headers, &body).await
@@ -643,6 +820,7 @@ pub(super) fn link_host_functions(linker: &mut Linker<HostState>) -> Result<(), 
 
                 // Bridge async -> sync with an outer deadline so a hanging
                 // host call can never pin the actor indefinitely.
+                let _guest_span = caller.data().guest_spans.enter_active();
                 let host = caller.data().host.clone();
                 let Ok(result) = run_host_call_with_timeout("host_http_call_stream", async move {
                     host.http_call_binary(&method, &url, &headers, &body_bytes)
@@ -687,9 +865,36 @@ pub(super) fn link_host_functions(linker: &mut Linker<HostState>) -> Result<(), 
                 let mut key_buf = vec![0u8; key_len as usize];
                 let _ = memory.read(&caller, key_ptr as usize, &mut key_buf);
                 let key = String::from_utf8_lossy(&key_buf);
+                let started = Instant::now();
+                let _guest_span = caller.data().guest_spans.enter_active();
+                let span = tracing::info_span!(
+                    "wasm.host.cache_contains",
+                    otel.name = "wasm.host.cache_contains",
+                    cache.key = %key,
+                    cache.hit = tracing::field::Empty,
+                    duration_ms = tracing::field::Empty,
+                    tenant = tracing::field::Empty,
+                    wasm_module = tracing::field::Empty,
+                    session_id = tracing::field::Empty,
+                    agent_id = tracing::field::Empty,
+                    entity_type = tracing::field::Empty,
+                    entity_id = tracing::field::Empty,
+                    trigger_action = tracing::field::Empty,
+                    action_name = tracing::field::Empty,
+                    workflow_step = tracing::field::Empty,
+                    workflow_root_entity_type = tracing::field::Empty,
+                    workflow_root_entity_id = tracing::field::Empty,
+                    workflow_run_id = tracing::field::Empty,
+                );
+                record_context_json_on_span(&span, &caller.data().context_json, "cache_contains");
+                let _guard = span.enter();
 
                 let streams = caller.data().streams.read().expect("streams lock poisoned"); // ci-ok: infallible lock
-                if streams.cache_contains(&key) { 1 } else { 0 }
+                let hit = streams.cache_contains(&key);
+                tracing::Span::current().record("cache.hit", hit);
+                tracing::Span::current()
+                    .record("duration_ms", started.elapsed().as_millis() as u64);
+                if hit { 1 } else { 0 }
             },
         )
         .map_err(|e| WasmError::Compilation(format!("failed to link host_cache_contains: {e}")))?;
@@ -718,6 +923,31 @@ pub(super) fn link_host_functions(linker: &mut Linker<HostState>) -> Result<(), 
                 let mut id_buf = vec![0u8; stream_id_len as usize];
                 let _ = memory.read(&caller, stream_id_ptr as usize, &mut id_buf);
                 let stream_id = String::from_utf8_lossy(&id_buf).to_string();
+                let started = Instant::now();
+                let _guest_span = caller.data().guest_spans.enter_active();
+                let span = tracing::info_span!(
+                    "wasm.host.cache_to_stream",
+                    otel.name = "wasm.host.cache_to_stream",
+                    cache.key = %key,
+                    stream.id = %stream_id,
+                    cache.hit = tracing::field::Empty,
+                    bytes = tracing::field::Empty,
+                    duration_ms = tracing::field::Empty,
+                    tenant = tracing::field::Empty,
+                    wasm_module = tracing::field::Empty,
+                    session_id = tracing::field::Empty,
+                    agent_id = tracing::field::Empty,
+                    entity_type = tracing::field::Empty,
+                    entity_id = tracing::field::Empty,
+                    trigger_action = tracing::field::Empty,
+                    action_name = tracing::field::Empty,
+                    workflow_step = tracing::field::Empty,
+                    workflow_root_entity_type = tracing::field::Empty,
+                    workflow_root_entity_id = tracing::field::Empty,
+                    workflow_run_id = tracing::field::Empty,
+                );
+                record_context_json_on_span(&span, &caller.data().context_json, "cache_to_stream");
+                let _guard = span.enter();
 
                 let mut streams = caller
                     .data()
@@ -725,8 +955,19 @@ pub(super) fn link_host_functions(linker: &mut Linker<HostState>) -> Result<(), 
                     .write()
                     .expect("streams lock poisoned"); // ci-ok: infallible lock
                 match streams.cache_to_stream(&key, &stream_id) {
-                    Some(byte_count) => byte_count as i32,
-                    None => -1,
+                    Some(byte_count) => {
+                        tracing::Span::current().record("cache.hit", true);
+                        tracing::Span::current().record("bytes", byte_count as u64);
+                        tracing::Span::current()
+                            .record("duration_ms", started.elapsed().as_millis() as u64);
+                        byte_count as i32
+                    }
+                    None => {
+                        tracing::Span::current().record("cache.hit", false);
+                        tracing::Span::current()
+                            .record("duration_ms", started.elapsed().as_millis() as u64);
+                        -1
+                    }
                 }
             },
         )
@@ -772,6 +1013,30 @@ pub(super) fn link_host_functions(linker: &mut Linker<HostState>) -> Result<(), 
                     return -3;
                 }
                 let field_name = String::from_utf8_lossy(&name_buf).to_string();
+                let started = Instant::now();
+                let _guest_span = caller.data().guest_spans.enter_active();
+                let span = tracing::info_span!(
+                    "wasm.host.read_field",
+                    otel.name = "wasm.host.read_field",
+                    field.name = %field_name,
+                    result = tracing::field::Empty,
+                    bytes = tracing::field::Empty,
+                    duration_ms = tracing::field::Empty,
+                    tenant = tracing::field::Empty,
+                    wasm_module = tracing::field::Empty,
+                    session_id = tracing::field::Empty,
+                    agent_id = tracing::field::Empty,
+                    entity_type = tracing::field::Empty,
+                    entity_id = tracing::field::Empty,
+                    trigger_action = tracing::field::Empty,
+                    action_name = tracing::field::Empty,
+                    workflow_step = tracing::field::Empty,
+                    workflow_root_entity_type = tracing::field::Empty,
+                    workflow_root_entity_id = tracing::field::Empty,
+                    workflow_run_id = tracing::field::Empty,
+                );
+                record_context_json_on_span(&span, &caller.data().context_json, "read_field");
+                let _guard = span.enter();
 
                 let bytes = match resolve_field_bytes(
                     &caller.data().context_json,
@@ -779,26 +1044,50 @@ pub(super) fn link_host_functions(linker: &mut Linker<HostState>) -> Result<(), 
                     &field_name,
                 ) {
                     FieldResolution::Bytes(b) => b,
-                    FieldResolution::NotFound => return -1,
+                    FieldResolution::NotFound => {
+                        tracing::Span::current().record("result", "not_found");
+                        tracing::Span::current()
+                            .record("duration_ms", started.elapsed().as_millis() as u64);
+                        return -1;
+                    }
                     FieldResolution::BlobRefMissing { key } => {
                         tracing::warn!(
                             field = %field_name,
                             blob_key = %key,
                             "host_read_field: blob ref not in prefetch cache"
                         );
+                        tracing::Span::current().record("result", "blob_ref_missing");
+                        tracing::Span::current()
+                            .record("duration_ms", started.elapsed().as_millis() as u64);
                         return -2;
                     }
-                    FieldResolution::HostError => return -3,
+                    FieldResolution::HostError => {
+                        tracing::Span::current().record("result", "host_error");
+                        tracing::Span::current()
+                            .record("duration_ms", started.elapsed().as_millis() as u64);
+                        return -3;
+                    }
                 };
 
                 let needed = bytes.len() as i32;
                 if needed > buf_len {
                     // Buffer too small — signal needed size; caller retries with larger buf.
+                    tracing::Span::current().record("result", "buffer_too_small");
+                    tracing::Span::current().record("bytes", needed as u64);
+                    tracing::Span::current()
+                        .record("duration_ms", started.elapsed().as_millis() as u64);
                     return needed;
                 }
                 if memory.write(&mut caller, buf_ptr as usize, &bytes).is_err() {
+                    tracing::Span::current().record("result", "memory_write_error");
+                    tracing::Span::current()
+                        .record("duration_ms", started.elapsed().as_millis() as u64);
                     return -3;
                 }
+                tracing::Span::current().record("result", "ok");
+                tracing::Span::current().record("bytes", needed as u64);
+                tracing::Span::current()
+                    .record("duration_ms", started.elapsed().as_millis() as u64);
                 needed
             },
         )
@@ -828,6 +1117,35 @@ pub(super) fn link_host_functions(linker: &mut Linker<HostState>) -> Result<(), 
                 let mut id_buf = vec![0u8; stream_id_len as usize];
                 let _ = memory.read(&caller, stream_id_ptr as usize, &mut id_buf);
                 let stream_id = String::from_utf8_lossy(&id_buf).to_string();
+                let started = Instant::now();
+                let _guest_span = caller.data().guest_spans.enter_active();
+                let span = tracing::info_span!(
+                    "wasm.host.cache_from_stream",
+                    otel.name = "wasm.host.cache_from_stream",
+                    cache.key = %key,
+                    stream.id = %stream_id,
+                    success = tracing::field::Empty,
+                    bytes = tracing::field::Empty,
+                    duration_ms = tracing::field::Empty,
+                    tenant = tracing::field::Empty,
+                    wasm_module = tracing::field::Empty,
+                    session_id = tracing::field::Empty,
+                    agent_id = tracing::field::Empty,
+                    entity_type = tracing::field::Empty,
+                    entity_id = tracing::field::Empty,
+                    trigger_action = tracing::field::Empty,
+                    action_name = tracing::field::Empty,
+                    workflow_step = tracing::field::Empty,
+                    workflow_root_entity_type = tracing::field::Empty,
+                    workflow_root_entity_id = tracing::field::Empty,
+                    workflow_run_id = tracing::field::Empty,
+                );
+                record_context_json_on_span(
+                    &span,
+                    &caller.data().context_json,
+                    "cache_from_stream",
+                );
+                let _guard = span.enter();
 
                 let mut streams = caller
                     .data()
@@ -837,9 +1155,19 @@ pub(super) fn link_host_functions(linker: &mut Linker<HostState>) -> Result<(), 
                 // Read bytes from stream without consuming it
                 let bytes = match streams.get_stream(&stream_id) {
                     Some(b) => b.to_vec(),
-                    None => return -1,
+                    None => {
+                        tracing::Span::current().record("success", false);
+                        tracing::Span::current()
+                            .record("duration_ms", started.elapsed().as_millis() as u64);
+                        return -1;
+                    }
                 };
+                let bytes_len = bytes.len() as u64;
                 streams.cache_put(&key, bytes);
+                tracing::Span::current().record("success", true);
+                tracing::Span::current().record("bytes", bytes_len);
+                tracing::Span::current()
+                    .record("duration_ms", started.elapsed().as_millis() as u64);
                 0
             },
         )
@@ -878,12 +1206,41 @@ pub(super) fn link_host_functions(linker: &mut Linker<HostState>) -> Result<(), 
                 let mut algo_buf = vec![0u8; algorithm_len as usize];
                 let _ = memory.read(&caller, algorithm_ptr as usize, &mut algo_buf);
                 let algorithm = String::from_utf8_lossy(&algo_buf).to_string();
+                let started = Instant::now();
+                let _guest_span = caller.data().guest_spans.enter_active();
+                let span = tracing::info_span!(
+                    "wasm.host.hash_stream",
+                    otel.name = "wasm.host.hash_stream",
+                    stream.id = %stream_id,
+                    hash.algorithm = %algorithm,
+                    success = tracing::field::Empty,
+                    bytes = tracing::field::Empty,
+                    duration_ms = tracing::field::Empty,
+                    tenant = tracing::field::Empty,
+                    wasm_module = tracing::field::Empty,
+                    session_id = tracing::field::Empty,
+                    agent_id = tracing::field::Empty,
+                    entity_type = tracing::field::Empty,
+                    entity_id = tracing::field::Empty,
+                    trigger_action = tracing::field::Empty,
+                    action_name = tracing::field::Empty,
+                    workflow_step = tracing::field::Empty,
+                    workflow_root_entity_type = tracing::field::Empty,
+                    workflow_root_entity_id = tracing::field::Empty,
+                    workflow_run_id = tracing::field::Empty,
+                );
+                record_context_json_on_span(&span, &caller.data().context_json, "hash_stream");
+                let _guard = span.enter();
 
                 // Hash stream bytes in-place (no clone)
                 let streams = caller.data().streams.read().expect("streams lock poisoned"); // ci-ok: infallible lock
                 let Some(bytes) = streams.get_stream(&stream_id) else {
+                    tracing::Span::current().record("success", false);
+                    tracing::Span::current()
+                        .record("duration_ms", started.elapsed().as_millis() as u64);
                     return -1;
                 };
+                tracing::Span::current().record("bytes", bytes.len() as u64);
 
                 let hex_hash = match algorithm.as_str() {
                     "sha256" => {
@@ -891,16 +1248,27 @@ pub(super) fn link_host_functions(linker: &mut Linker<HostState>) -> Result<(), 
                         hasher.update(bytes);
                         format!("sha256:{:x}", hasher.finalize())
                     }
-                    _ => return -1,
+                    _ => {
+                        tracing::Span::current().record("success", false);
+                        tracing::Span::current()
+                            .record("duration_ms", started.elapsed().as_millis() as u64);
+                        return -1;
+                    }
                 };
                 drop(streams);
 
                 // Write hex hash to result buffer
                 let hash_bytes = hex_hash.as_bytes();
                 if hash_bytes.len() > result_buf_len as usize {
+                    tracing::Span::current().record("success", false);
+                    tracing::Span::current()
+                        .record("duration_ms", started.elapsed().as_millis() as u64);
                     return -1; // buffer too small
                 }
                 let _ = memory.write(&mut caller, result_buf_ptr as usize, hash_bytes);
+                tracing::Span::current().record("success", true);
+                tracing::Span::current()
+                    .record("duration_ms", started.elapsed().as_millis() as u64);
                 hash_bytes.len() as i32
             },
         )
@@ -1014,6 +1382,7 @@ pub(super) fn link_host_functions(linker: &mut Linker<HostState>) -> Result<(), 
                 };
 
                 // Call host evaluate_spec (synchronous — no async bridge needed)
+                let _guest_span = caller.data().guest_spans.enter_active();
                 let result_json = match caller.data().host.evaluate_spec(
                     &ioa_source,
                     &current_state,
@@ -1095,6 +1464,7 @@ pub(super) fn link_host_functions(linker: &mut Linker<HostState>) -> Result<(), 
                     Vec::new()
                 };
 
+                let _guest_span = caller.data().guest_spans.enter_active();
                 let host = caller.data().host.clone();
                 let head = crate::http_stream::HttpRequestHead {
                     method,
@@ -1147,6 +1517,7 @@ pub(super) fn link_host_functions(linker: &mut Linker<HostState>) -> Result<(), 
                     return -4;
                 }
 
+                let _guest_span = caller.data().guest_spans.enter_active();
                 let host = caller.data().host.clone();
                 let sh = crate::http_stream::StreamHandle(handle as u32);
                 let result = tokio::task::block_in_place(|| {
@@ -1187,6 +1558,7 @@ pub(super) fn link_host_functions(linker: &mut Linker<HostState>) -> Result<(), 
                 let mut buf = vec![0u8; data_len as usize];
                 let _ = memory.read(&caller, data_ptr as usize, &mut buf);
 
+                let _guest_span = caller.data().guest_spans.enter_active();
                 let host = caller.data().host.clone();
                 let sh = crate::http_stream::StreamHandle(handle as u32);
                 let result = tokio::task::block_in_place(|| {
@@ -1211,6 +1583,7 @@ pub(super) fn link_host_functions(linker: &mut Linker<HostState>) -> Result<(), 
             "env",
             "host_http_stream_close",
             |caller: Caller<'_, HostState>, handle: i32| -> i32 {
+                let _guest_span = caller.data().guest_spans.enter_active();
                 let host = caller.data().host.clone();
                 let sh = crate::http_stream::StreamHandle(handle as u32);
                 let result = tokio::task::block_in_place(|| {
@@ -1244,6 +1617,7 @@ pub(super) fn link_host_functions(linker: &mut Linker<HostState>) -> Result<(), 
                 let memory = caller.get_export("memory").and_then(|e| e.into_memory());
                 let Some(memory) = memory else { return -4 };
 
+                let _guest_span = caller.data().guest_spans.enter_active();
                 let host = caller.data().host.clone();
                 let sh = crate::http_stream::StreamHandle(resp_handle as u32);
                 let result = tokio::task::block_in_place(|| {
@@ -1311,6 +1685,7 @@ pub(super) fn link_host_functions(linker: &mut Linker<HostState>) -> Result<(), 
                     status: raw.status,
                     headers: raw.headers,
                 };
+                let _guest_span = caller.data().guest_spans.enter_active();
                 let host = caller.data().host.clone();
                 let sh = crate::http_stream::StreamHandle(resp_handle as u32);
                 let result = tokio::task::block_in_place(|| {

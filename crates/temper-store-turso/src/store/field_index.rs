@@ -115,24 +115,24 @@ impl TursoEventStore {
 
         tx.execute(
             "INSERT INTO entity_catalog \
-             (tenant, entity_type, entity_id, status, updated_at, sequence_nr, projection_version, projection_hash, fields) \
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, 2, ?7, ?8) \
+             (tenant, entity_type, entity_id, status, fields, updated_at, sequence_nr, projection_version, projection_hash) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, 2, ?8) \
              ON CONFLICT(tenant, entity_type, entity_id) DO UPDATE SET \
                  status = excluded.status, \
+                 fields = excluded.fields, \
                  updated_at = excluded.updated_at, \
                  sequence_nr = excluded.sequence_nr, \
                  projection_version = excluded.projection_version, \
-                 projection_hash = excluded.projection_hash, \
-                 fields = excluded.fields",
+                 projection_hash = excluded.projection_hash",
             params![
                 tenant,
                 entity_type,
                 entity_id,
                 status,
-                updated_at,
+                fields_json.as_str(),
+                updated_at.as_str(),
                 sequence_nr,
                 new_projection_hash.as_str(),
-                fields_json.as_str(),
             ],
         )
         .await

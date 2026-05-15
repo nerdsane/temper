@@ -134,7 +134,7 @@ if [[ "$MODE" == "full" ]]; then
     cargo test -p temper-server query_projection_metrics --lib -- --nocapture
     cargo test -p temper-server odata::read_support --lib -- --nocapture
     cargo test -p temper-server --test query_projection_backfill -- --nocapture
-    cargo test -p temper-store-turso load_entity_catalog_rows_preserves_projected_fields_json --lib -- --nocapture
+    cargo test -p temper-store-turso load_entity_catalog_rows_returns_full_projected_fields --lib -- --nocapture
     cargo test -p temper-store-turso export_query_projections_returns_all_fields_for_migration --lib -- --nocapture
     git diff --check
   )

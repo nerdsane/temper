@@ -197,7 +197,7 @@ pub const ALTER_POLICIES_ADD_ENABLED: &str =
 pub const ALTER_ENTITY_CATALOG_ADD_PROJECTION_HASH: &str =
     "ALTER TABLE entity_catalog ADD COLUMN projection_hash TEXT NOT NULL DEFAULT ''";
 
-/// Migration: add full projected fields to the durable query-plane catalog.
+/// Migration: add full projected fields JSON to the durable query-plane catalog.
 pub const ALTER_ENTITY_CATALOG_ADD_FIELDS: &str =
     "ALTER TABLE entity_catalog ADD COLUMN fields TEXT NOT NULL DEFAULT '{}'";
 
@@ -219,6 +219,38 @@ CREATE TABLE IF NOT EXISTS policy_denial_patterns (
 pub const CREATE_POLICY_DENIAL_PATTERNS_TENANT_INDEX: &str = "\
 CREATE INDEX IF NOT EXISTS idx_policy_denial_patterns_tenant
     ON policy_denial_patterns(tenant, last_seen DESC);";
+
+/// Immutable public artifact records derived from governed TemperFS files.
+///
+/// The source File/FileVersion and event log remain the authority; this table is
+/// a rebuildable read model for public delivery URLs.
+pub const CREATE_PUBLISHED_ARTIFACTS_TABLE: &str = "\
+CREATE TABLE IF NOT EXISTS published_artifacts (
+    id TEXT PRIMARY KEY,
+    tenant TEXT NOT NULL,
+    source_file_id TEXT NOT NULL,
+    source_file_version_id TEXT NOT NULL DEFAULT '',
+    content_hash TEXT NOT NULL,
+    label TEXT NOT NULL,
+    mime_type TEXT NOT NULL,
+    byte_length INTEGER NOT NULL,
+    public_storage_key TEXT NOT NULL,
+    public_url TEXT NOT NULL,
+    owner_ref_type TEXT NOT NULL DEFAULT '',
+    owner_ref_id TEXT NOT NULL DEFAULT '',
+    status TEXT NOT NULL DEFAULT 'published',
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+    UNIQUE(tenant, label, owner_ref_type, owner_ref_id, content_hash)
+);";
+
+pub const CREATE_PUBLISHED_ARTIFACTS_OWNER_INDEX: &str = "\
+CREATE INDEX IF NOT EXISTS idx_published_artifacts_owner
+    ON published_artifacts(tenant, owner_ref_type, owner_ref_id, label, status);";
+
+pub const CREATE_PUBLISHED_ARTIFACTS_SOURCE_INDEX: &str = "\
+CREATE INDEX IF NOT EXISTS idx_published_artifacts_source
+    ON published_artifacts(tenant, source_file_id, status);";
 
 mod installed_apps;
 pub use installed_apps::*;
@@ -431,62 +463,5 @@ CREATE INDEX IF NOT EXISTS idx_ots_trajectories_outcome
     ON ots_trajectories(outcome);";
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn schemas_are_idempotent() {
-        assert!(CREATE_EVENTS_TABLE.contains("IF NOT EXISTS"));
-        assert!(CREATE_EVENTS_ENTITY_INDEX.contains("IF NOT EXISTS"));
-        assert!(CREATE_SNAPSHOTS_TABLE.contains("IF NOT EXISTS"));
-        assert!(CREATE_SPECS_TABLE.contains("IF NOT EXISTS"));
-        assert!(CREATE_TRAJECTORIES_TABLE.contains("IF NOT EXISTS"));
-        assert!(CREATE_TRAJECTORIES_SUCCESS_INDEX.contains("IF NOT EXISTS"));
-        assert!(CREATE_TRAJECTORIES_ENTITY_ACTION_INDEX.contains("IF NOT EXISTS"));
-        assert!(CREATE_TENANT_CONSTRAINTS_TABLE.contains("IF NOT EXISTS"));
-        assert!(CREATE_WASM_MODULES_TABLE.contains("IF NOT EXISTS"));
-        assert!(CREATE_WASM_INVOCATION_LOGS_TABLE.contains("IF NOT EXISTS"));
-        assert!(CREATE_WASM_INVOCATION_LOGS_TENANT_INDEX.contains("IF NOT EXISTS"));
-        assert!(CREATE_WASM_INVOCATION_LOGS_MODULE_INDEX.contains("IF NOT EXISTS"));
-        assert!(CREATE_WASM_INVOCATION_LOGS_CREATED_INDEX.contains("IF NOT EXISTS"));
-        assert!(CREATE_PENDING_DECISIONS_TABLE.contains("IF NOT EXISTS"));
-        assert!(CREATE_PENDING_DECISIONS_TENANT_INDEX.contains("IF NOT EXISTS"));
-        assert!(CREATE_PENDING_DECISIONS_STATUS_INDEX.contains("IF NOT EXISTS"));
-        assert!(CREATE_TRAJECTORIES_AGENT_INDEX.contains("IF NOT EXISTS"));
-        assert!(CREATE_FEATURE_REQUESTS_TABLE.contains("IF NOT EXISTS"));
-        assert!(CREATE_EVOLUTION_RECORDS_TABLE.contains("IF NOT EXISTS"));
-        assert!(CREATE_EVOLUTION_RECORDS_TYPE_INDEX.contains("IF NOT EXISTS"));
-        assert!(CREATE_EVOLUTION_RECORDS_STATUS_INDEX.contains("IF NOT EXISTS"));
-        assert!(CREATE_DESIGN_TIME_EVENTS_TABLE.contains("IF NOT EXISTS"));
-        assert!(CREATE_DESIGN_TIME_EVENTS_TENANT_INDEX.contains("IF NOT EXISTS"));
-        assert!(CREATE_TENANT_SECRETS_TABLE.contains("IF NOT EXISTS"));
-        assert!(CREATE_OTS_TRAJECTORIES_TABLE.contains("IF NOT EXISTS"));
-        assert!(CREATE_OTS_TRAJECTORIES_AGENT_INDEX.contains("IF NOT EXISTS"));
-        assert!(CREATE_OTS_TRAJECTORIES_TENANT_INDEX.contains("IF NOT EXISTS"));
-        assert!(CREATE_OTS_TRAJECTORIES_OUTCOME_INDEX.contains("IF NOT EXISTS"));
-        assert!(CREATE_ENTITY_CATALOG_TABLE.contains("IF NOT EXISTS"));
-        assert!(CREATE_ENTITY_CATALOG_TYPE_INDEX.contains("IF NOT EXISTS"));
-        assert!(CREATE_ENTITY_CATALOG_STATUS_INDEX.contains("IF NOT EXISTS"));
-        assert!(CREATE_ENTITY_FIELD_INDEX_TABLE.contains("IF NOT EXISTS"));
-        assert!(CREATE_ENTITY_FIELD_INDEX_LOOKUP.contains("IF NOT EXISTS"));
-        assert!(CREATE_ENTITY_FIELD_INDEX_STATUS.contains("IF NOT EXISTS"));
-    }
-
-    #[test]
-    fn wasm_modules_table_has_required_columns() {
-        let sql = CREATE_WASM_MODULES_TABLE.to_uppercase();
-        for col in &[
-            "TENANT",
-            "MODULE_NAME",
-            "WASM_BYTES",
-            "SHA256_HASH",
-            "VERSION",
-            "SIZE_BYTES",
-        ] {
-            assert!(
-                sql.contains(col),
-                "wasm_modules schema missing column: {col}"
-            );
-        }
-    }
-}
+#[path = "schema_test.rs"]
+mod schema_test;

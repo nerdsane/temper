@@ -40,7 +40,7 @@ Enable Datadog Continuous Profiler on every Temper deployment, gated by an env f
 
 **Primary**: `pprof-rs` (`pprof = "0.14"`) for CPU + wall-clock sampling. Produces pprof-format profiles.
 
-**Uploader**: a small in-repo component (~100 lines) that POSTs the pprof blob to the Datadog Agent profile intake endpoint (`/profiling/v1/input`) with the required multipart envelope (`service`, `env`, `version`, `runtime-id`, `profile.component`, `embodiment` tags).
+**Uploader**: a small in-repo component that POSTs the pprof blob to the Datadog Agent profile intake endpoint (`/profiling/v1/input`) with Datadog's first-party multipart shape: a profile attachment such as `cpu.pprof` plus an `event` part named `event.json`. The event carries `service`, `env`, `version`, `runtime-id`, `runtime`, and `profile.component` tags in `tags_profiler`.
 
 **Why this path**: pprof-rs is mature (used by tikv and much of the tokio-console ecosystem). The Datadog intake endpoint format is documented and stable. Building the uploader is lower total maintenance than waiting for the Datadog Rust SDK to ship.
 
@@ -61,13 +61,12 @@ Configurable via env:
 
 Profiler emissions carry, at minimum:
 
-- `service` — per ADR-0053 (`temper` for platform profiles; `openpaw` for embodiment-side profiles when they exist).
+- `service` — per ADR-0053 (`temper` for platform profiles; `temperpaw` for TemperPaw deployments when they embed the platform).
 - `env` — `prod`, `staging`, `dev`.
 - `version` — the binary's `BUILD_VERSION` env (already set in the Dockerfile).
 - `host` — auto.
 - `runtime-id` — UUID generated at process start, persisted for process lifetime. Matches the `@runtime-id` on spans so Datadog can stitch profiles to traces.
-- `embodiment` — `openpaw` | `tamago` | ... (per ADR-0053).
-- `profile.component` — `temper-platform` | `openpaw-trigger`. Lets the UI filter profiles to the logical component within the process.
+- `profile.component` — `cpu` | `wall` | future profile families. Lets the UI filter profiles to the captured runtime component without creating a second service identity.
 
 ### Sub-Decision 4: `@runtime-id` on spans
 

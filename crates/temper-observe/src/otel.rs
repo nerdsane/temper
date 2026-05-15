@@ -53,6 +53,10 @@ const WASM_AUXILIARY_SAMPLE_RATE_ENV: &str = "TEMPER_TRACE_WASM_AUX_SAMPLE_PCT";
 const DISPATCH_BACKGROUND_SAMPLE_RATE_ENV: &str = "TEMPER_TRACE_DISPATCH_BACKGROUND_SAMPLE_PCT";
 const WASM_AUXILIARY_SAMPLE_RATE_DEFAULT: u8 = 5;
 const DISPATCH_BACKGROUND_SAMPLE_RATE_DEFAULT: u8 = 25;
+/// Span name prefixes that are sampled at a reduced rate. Do not include
+/// tool/provider guest module boundaries here: guest spans inherit parent
+/// sampling, so reducing those boundaries can sever traces operators need when
+/// following work through WASM.
 const WASM_AUXILIARY_PREFIXES: &[&str] = &["wasm:workspace_fs", "wasm:monty_repl"];
 const DISPATCH_BACKGROUND_PREFIXES: &[&str] = &[
     "dispatch.phase.query_projection",
@@ -343,6 +347,19 @@ fn read_non_empty_env(var_name: &str) -> Option<String> {
         .filter(|value| !value.is_empty())
 }
 
+/// Process-lifetime runtime id shared by traces and profiler uploads.
+///
+/// Datadog uses this resource/tag value to stitch profiles back to the APM
+/// traces captured by the same process.
+pub fn runtime_id() -> &'static str {
+    static RUNTIME_ID: OnceLock<String> = OnceLock::new();
+    RUNTIME_ID
+        .get_or_init(|| {
+            read_non_empty_env("DD_RUNTIME_ID").unwrap_or_else(|| uuid::Uuid::new_v4().to_string())
+        })
+        .as_str()
+}
+
 fn parse_otlp_headers(raw: &str) -> HashMap<String, String> {
     raw.split(',')
         .filter_map(|pair| pair.split_once('='))
@@ -597,10 +614,7 @@ pub fn init_tracing(
     // ADR-0055: runtime-id enables Datadog Profiler ↔ APM trace stitching.
     // Generated once at process start; regenerates only on restart.
     // determinism-ok: observability-only identifier, not a simulation variable.
-    resource_attrs.push(KeyValue::new(
-        "runtime-id",
-        uuid::Uuid::new_v4().to_string(),
-    ));
+    resource_attrs.push(KeyValue::new("runtime-id", runtime_id().to_string()));
     let resource = Resource::builder_empty()
         .with_attributes(resource_attrs)
         .build();
@@ -927,6 +941,29 @@ mod tests {
         assert!(
             (3.0..=7.0).contains(&kept_pct),
             "reduced sample should keep ~5%, got {kept_pct:.1}%"
+        );
+    }
+
+    #[test]
+    fn monty_repl_boundary_is_not_reduced_sampled() {
+        use opentelemetry::trace::TraceId;
+        let sampler = NameBasedSampler {
+            inner: Sampler::AlwaysOn,
+            config: TraceSamplerConfig::default(),
+        };
+        let trace_id = TraceId::from_bytes([0u8; 16]);
+        let result = sampler.should_sample(
+            None,
+            trace_id,
+            "wasm:monty_repl",
+            &SpanKind::Internal,
+            &[],
+            &[],
+        );
+
+        assert!(
+            matches!(result.decision, SamplingDecision::RecordAndSample),
+            "monty_repl must keep full sampling so guest tool spans stay stitched"
         );
     }
 

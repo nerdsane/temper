@@ -1,4 +1,5 @@
 use super::*;
+use std::collections::BTreeMap;
 use std::time::Duration;
 use temper_jit::table::TransitionTable;
 use temper_runtime::ActorSystem;
@@ -7,6 +8,39 @@ const ORDER_IOA: &str = include_str!("../../../../test-fixtures/specs/order.ioa.
 
 fn order_table() -> Arc<RwLock<TransitionTable>> {
     Arc::new(RwLock::new(TransitionTable::from_ioa_source(ORDER_IOA)))
+}
+
+#[test]
+fn event_budget_workspace_id_uses_workspace_entity_id_or_field() {
+    let workspace_state = EntityState {
+        entity_type: "Workspace".to_string(),
+        entity_id: "ws-1".to_string(),
+        status: "Active".to_string(),
+        item_count: 0,
+        counters: BTreeMap::new(),
+        booleans: BTreeMap::new(),
+        lists: BTreeMap::new(),
+        fields: serde_json::json!({"WorkspaceId": "ignored"}),
+        events: std::collections::VecDeque::new(),
+        total_event_count: 0,
+        sequence_nr: 0,
+    };
+    assert_eq!(event_budget_workspace_id(&workspace_state), "ws-1");
+
+    let file_state = EntityState {
+        entity_type: "File".to_string(),
+        entity_id: "fl-1".to_string(),
+        status: "Ready".to_string(),
+        item_count: 0,
+        counters: BTreeMap::new(),
+        booleans: BTreeMap::new(),
+        lists: BTreeMap::new(),
+        fields: serde_json::json!({"workspace_id": "ws-2"}),
+        events: std::collections::VecDeque::new(),
+        total_event_count: 0,
+        sequence_nr: 0,
+    };
+    assert_eq!(event_budget_workspace_id(&file_state), "ws-2");
 }
 
 // =============================================

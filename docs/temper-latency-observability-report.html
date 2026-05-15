@@ -1063,10 +1063,10 @@
             live runs pass, and deployment completes.
           </p>
           <div class="progress-track" aria-label="Program progress">
-            <div class="progress-fill" style="width: 81%">81%</div>
+            <div class="progress-fill" style="width: 83%">83%</div>
           </div>
           <div class="program-facts">
-            <div class="program-fact"><strong>Phase</strong><span>Measurement package is implemented, quality-gated locally, pushed, split into two draft PRs, refreshed with live Railway/Datadog evidence, deployed into Datadog with service-level APM coverage recognized for rate/duration/error, DBM explain-plan repair applied to production Postgres, and production on-demand CPU profiling proven under live read load. Runtime PR review/merge, production runtime deployment, continuous profiling, skipped future metric percentile configs, DBM schema collection, and live e2e evidence remain pending.</span></div>
+            <div class="program-fact"><strong>Phase</strong><span>Measurement package is implemented, quality-gated locally, pushed, split into two draft PRs, refreshed with live Railway/Datadog evidence, deployed into Datadog with service-level APM coverage recognized for rate/duration/error, DBM explain-plan repair applied to production Postgres, and production on-demand CPU profiling proven under live read load. The Temper runtime PR has been refreshed onto current <code>main</code> locally; merge conflicts are resolved, the full latency-observability preflight is green, and the branch is ready for merge-commit/push. Runtime PR review/merge, production runtime deployment, continuous profiling, skipped future metric percentile configs, DBM schema collection, and live e2e evidence remain pending.</span></div>
             <div class="program-fact"><strong>Branches</strong><span>Temper <code>codex/latency-observability-program</code>; TemperPaw <code>codex/latency-observability-program</code></span></div>
             <div class="program-fact"><strong>Worktrees</strong><span>Temper <code>/Users/seshendranalla/Development/temper-worktrees/latency-observability-program</code>; TemperPaw <code>/Users/seshendranalla/Development/temperpaw-worktrees/latency-observability-program</code></span></div>
             <div class="program-fact"><strong>PRs</strong><span>Temper draft PR <a href="https://github.com/nerdsane/temper/pull/229">nerdsane/temper#229</a>; TemperPaw draft PR <a href="https://github.com/nerdsane/temperpaw/pull/266">nerdsane/temperpaw#266</a>.</span></div>
@@ -1348,6 +1348,14 @@
             <div class="log-entry">
               <time datetime="2026-05-15">2026-05-15</time>
               <p>Verified production on-demand profiling through Railway. Current production has <code>TEMPER_PROFILING_ENABLED=true</code>, <code>TEMPER_PROFILING_AUTO_UPLOAD=true</code>, <code>TEMPER_PROFILING_CONTINUOUS</code> unset, and <code>DD_PROFILING_ENABLED=false</code>. Idle CPU and wall captures returned HTTP 200 with 83-byte payloads; an 8-second CPU capture at 199 Hz while issuing 140 authenticated <code>/readyz</code>, <code>/tdata/Channels</code>, and <code>/tdata/WorkerRuns</code> reads returned HTTP 200 for all probes and produced a 26.4 KB pprof payload. Railway logs show uploads to the Datadog Agent intake, Datadog now has fresh <code>profile_type:cpu</code> upload buckets and no upload-error series, and <code>go tool pprof</code> parsed 70.35 ms of samples showing Axum middleware, OData read, Postgres catalog loading, SQLx receive, and tracing/OTel span work.</p>
+            </div>
+            <div class="log-entry">
+              <time datetime="2026-05-15">2026-05-15</time>
+              <p>Started refreshing Temper PR <a href="https://github.com/nerdsane/temper/pull/229">#229</a> onto latest <code>origin/main</code>. Resolved conflicts across serve startup, OTEL trace sampling, OData catalog reads, profiling upload/tests, Postgres DBM-attributed projection writes, and Turso catalog/projection tests while preserving both mainline features and the latency-observability instrumentation. Current local checks pass: <code>cargo fmt --check</code>, <code>git diff --check</code>, <code>cargo check -p temper-cli</code>, <code>cargo test -p temper-server profiling::tests --lib -- --nocapture</code>, <code>cargo test -p temper-store-postgres metrics --lib -- --nocapture</code>, and focused <code>temper-store-turso</code> catalog/export/published-artifact tests.</p>
+            </div>
+            <div class="log-entry">
+              <time datetime="2026-05-15">2026-05-15</time>
+              <p>Reran the full latency-observability package preflight after the mainline refresh. It initially exposed a verifier test filter that matched zero Turso tests after the merged mainline rename; fixed <code>scripts/verify-latency-observability-package.sh</code> to call <code>load_entity_catalog_rows_returns_full_projected_fields</code>. The corrected <code>scripts/verify-latency-observability-package.sh full</code> pass now covers package consistency, cargo formatting/checks, all <code>temper-authz</code> tests, profiling tests, OTEL sampler tests, Postgres metrics tests, projection metrics, OData shadow tests, replay parity integration tests, and the focused Turso full-fields/export tests.</p>
             </div>
           </div>
         </div>

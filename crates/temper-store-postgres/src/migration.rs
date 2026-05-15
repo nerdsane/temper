@@ -28,7 +28,13 @@ mod tests {
 
     #[test]
     fn versioned_migration_is_the_schema_source() {
-        let migration = include_str!("../migrations/0001_initial.sql").to_lowercase();
+        let migration = [
+            include_str!("../migrations/0001_initial.sql"),
+            include_str!("../migrations/0002_wasm_modules_source.sql"),
+            include_str!("../migrations/0003_published_artifacts.sql"),
+        ]
+        .join("\n")
+        .to_lowercase();
         for table in [
             "events",
             "snapshots",
@@ -38,6 +44,7 @@ mod tests {
             "entity_field_index",
             "tenant_secrets",
             "blobs",
+            "published_artifacts",
         ] {
             assert!(
                 migration.contains(&format!("create table if not exists {table}")),
@@ -96,6 +103,10 @@ mod tests {
         assert!(
             schema::CREATE_ENTITY_CATALOG_TABLE.contains("IF NOT EXISTS"),
             "entity_catalog DDL must be idempotent"
+        );
+        assert!(
+            schema::CREATE_PUBLISHED_ARTIFACTS_TABLE.contains("IF NOT EXISTS"),
+            "published_artifacts DDL must be idempotent"
         );
     }
 }
