@@ -1063,16 +1063,16 @@
             live runs pass, and deployment completes.
           </p>
           <div class="progress-track" aria-label="Program progress">
-            <div class="progress-fill" style="width: 66%">66%</div>
+            <div class="progress-fill" style="width: 68%">68%</div>
           </div>
           <div class="program-facts">
-            <div class="program-fact"><strong>Phase</strong><span>Measurement package is implemented, quality-gated locally, pushed, and split into two draft PRs. Live Datadog deployment, Datadog percentile config, PR review/merge, runtime deployment, and live e2e evidence remain pending.</span></div>
+            <div class="program-fact"><strong>Phase</strong><span>Measurement package is implemented, quality-gated locally, pushed, split into two draft PRs, and refreshed with live Railway/Datadog evidence. Live Datadog config deployment, Datadog percentile config, PR review/merge, runtime deployment, and live e2e evidence remain pending.</span></div>
             <div class="program-fact"><strong>Branches</strong><span>Temper <code>codex/latency-observability-program</code>; TemperPaw <code>codex/latency-observability-program</code></span></div>
             <div class="program-fact"><strong>Worktrees</strong><span>Temper <code>/Users/seshendranalla/Development/temper-worktrees/latency-observability-program</code>; TemperPaw <code>/Users/seshendranalla/Development/temperpaw-worktrees/latency-observability-program</code></span></div>
             <div class="program-fact"><strong>PRs</strong><span>Temper draft PR <a href="https://github.com/nerdsane/temper/pull/229">nerdsane/temper#229</a>; TemperPaw draft PR <a href="https://github.com/nerdsane/temperpaw/pull/266">nerdsane/temperpaw#266</a>.</span></div>
             <div class="program-fact"><strong>Railway</strong><span>Project <code>openpaw-seshendranalla</code>, environment <code>production</code>, service <code>openpaw</code>, domains <code>openpaw-production.up.railway.app</code> and <code>temperpaw.katagami.ai</code>.</span></div>
             <div class="program-fact"><strong>Datadog tag</strong><span>Production exports <code>DD_SERVICE=temperpaw</code>; dashboards and monitors must query <code>service:temperpaw</code>, not the Railway service name.</span></div>
-            <div class="program-fact"><strong>Production checks</strong><span>Railway-backed Datadog monitor dry-run reached the API and would create 62 monitors; Railway domain <code>/readyz</code> is ready and <code>/healthz</code> returns 200; Datadog reports <code>temper_up=1</code> and Cedar traffic for <code>service:temperpaw</code>.</span></div>
+            <div class="program-fact"><strong>Production checks</strong><span>Railway-backed Datadog monitor dry-run reached the API and would create 62 monitors; Railway domain <code>/readyz</code> is ready and <code>/healthz</code> returns 200; Datadog reports <code>temper_up=1</code>, Cedar traffic, APM HTTP traffic, and DBM samples/plans for <code>service:temperpaw</code>.</span></div>
             <div class="program-fact"><strong>Review gates</strong><span>DST compliance review PASS; code-quality review PASS; changed sim-visible files pass the determinism hook loop; readability ratchet is green at baseline after module splits.</span></div>
             <div class="program-fact"><strong>Dashboard</strong><span><code>docs/temper-latency-observability-report.html</code></span></div>
             <div class="program-fact"><strong>ADRs</strong><span><code>docs/adrs/0081-latency-observability-acceleration-program.md</code>; <code>docs/adrs/0082-projection-correctness-observability.md</code>; <code>docs/adrs/0083-trace-budget-and-fanout-summarization.md</code>; <code>docs/adrs/0084-authz-latency-phase-instrumentation.md</code></span></div>
@@ -1289,6 +1289,34 @@
               <time datetime="2026-05-15">2026-05-15</time>
               <p>Pushed the Temper branch after the repository pre-push hook passed all four gates: rustfmt, clippy, readability ratchet, and full <code>cargo test --workspace</code>. Created draft PRs: <a href="https://github.com/nerdsane/temper/pull/229">nerdsane/temper#229</a> for the runtime/report/ADR package and <a href="https://github.com/nerdsane/temperpaw/pull/266">nerdsane/temperpaw#266</a> for Datadog dashboards, monitors, and snapshot tooling.</p>
             </div>
+            <div class="log-entry">
+              <time datetime="2026-05-15">2026-05-15</time>
+              <p>Confirmed both draft PRs point at the pushed worktree heads: Temper <code>1ae2c3fe</code> and TemperPaw <code>ea86a6d5</code>. Both worktrees are clean and tracking their pushed branches.</p>
+            </div>
+            <div class="log-entry">
+              <time datetime="2026-05-15">2026-05-15</time>
+              <p>Used live Datadog MCP with the correct Railway/Datadog account. Datadog services now visible for this program are <code>openpaw</code>, <code>temperpaw</code>, and <code>temperpaw-postgres</code>. Dashboard <code>TemperPaw - Platform Overview</code> exists and already contains profiler upload/error widgets.</p>
+            </div>
+            <div class="log-entry">
+              <time datetime="2026-05-15">2026-05-15</time>
+              <p>Datadog monitor coverage still reports missing service-level APM error, duration, and rate coverage for <code>service:temperpaw</code>, even though many domain-specific Temper/TemperPaw monitors exist. This confirms OBS-004 still needs Datadog config deployment plus coverage reconciliation, not just local JSON changes.</p>
+            </div>
+            <div class="log-entry">
+              <time datetime="2026-05-15">2026-05-15</time>
+              <p>Live APM over the latest two-hour window showed sustained HTTP traffic under <code>service:temperpaw env:prod</code>. Longest raw traces were mostly long-lived event streams with almost all time in <code>idle_ns</code>, so they are not server slowness. Excluding <code>GET /observe/events/stream</code> and <code>GET /tdata/$events</code>, the slowest observed paths were file <code>$value</code> writes at about 2.1-2.4 s, a WASM observability probe at about 1.3 s, policy creation around 0.4 s, and regular OData/list reads mostly in the single-digit to low-tens of milliseconds.</p>
+            </div>
+            <div class="log-entry">
+              <time datetime="2026-05-15">2026-05-15</time>
+              <p>Live custom metric check showed <code>temper_dispatch_ask_latency_ms</code> averaging about 15-21 ms with max buckets around 25-28 ms, and <code>temper_cedar_evaluation_duration</code> averaging about 35-59 ms with max buckets around 64 ms in the sampled window. Both are Datadog distribution metrics with <code>is_percentiles_enabled:false</code>; no <code>temper*</code> metric under <code>service:temperpaw</code> currently has percentile aggregation enabled.</p>
+            </div>
+            <div class="log-entry">
+              <time datetime="2026-05-15">2026-05-15</time>
+              <p>Live DBM is present but incomplete: activity rows and APM correlation are visible for <code>temperpaw-postgres</code>, and DBM found the instance suspicious only for transient latency spikes rather than sustained contention. Plan search returned 191 recent plan records, but plan payloads still contain <code>invalid_schema</code> collection errors, so explain-plan usefulness remains blocked until the DBM SQL/runbook repair is applied.</p>
+            </div>
+            <div class="log-entry">
+              <time datetime="2026-05-15">2026-05-15</time>
+              <p>DBM query-performance refresh separated database costs from application costs: <code>entity_catalog</code> batch lookup is high volume but usually sub-millisecond database latency, tenant-count scans average around 8.9 ms and touch about 3,846 shared blocks, field-index filtered reads are around tens of microseconds, and sampled <code>entity_field_index</code> upserts are also tens of microseconds with a single observed transaction-duration sample around 15.8 ms. The live slow file writes are therefore unlikely to be explained by database saturation alone.</p>
+            </div>
           </div>
         </div>
       </div>
@@ -1298,7 +1326,7 @@
           <thead>
             <tr>
               <th>Evidence check</th>
-              <th>Live result on May 14, 2026</th>
+              <th>Latest live result</th>
               <th>Meaning</th>
               <th>Next action</th>
             </tr>
@@ -1306,21 +1334,39 @@
           <tbody>
             <tr>
               <td>Datadog profiling metrics</td>
-              <td><code>datadog.profiling.rust.profiles_uploaded</code> and <code>datadog.profiling.rust.upload_errors</code> exist; <code>service:temperpaw</code> returned only CPU upload points with value 0 over the latest 24-hour check.</td>
+              <td><code>datadog.profiling.rust.profiles_uploaded</code> and <code>datadog.profiling.rust.upload_errors</code> exist and are used by the live dashboard. The latest live checks still returned no useful fresh profiler series for <code>service:temperpaw</code>.</td>
               <td>Profiling is instrumented in name, but it is not currently useful enough to guide CPU optimization.</td>
               <td>Inspect runtime profiler code, add freshness/config/upload evidence, and verify live profiles become fresh.</td>
             </tr>
             <tr>
               <td>Datadog DBM instance health</td>
-              <td><code>temperpaw-postgres</code> is healthy with stable QPS and mostly sub-millisecond reported query latency.</td>
-              <td>The database is not broadly saturated in the sampled window, so we need plan-level evidence before changing query shapes.</td>
+              <td><code>temperpaw-postgres</code> is visible in DBM. Datadog ranked it suspicious for transient latency spikes around 2026-05-15 02:23-02:34 UTC, but baseline behavior stabilized afterward; wait events were minimal.</td>
+              <td>The database is not broadly saturated in the sampled window. The transient spikes are real enough to keep watching, but they do not justify speculative query-shape changes without plan and app-side timing evidence.</td>
               <td>Keep DBM health in the dashboard and separate global DB health from hot query design.</td>
             </tr>
             <tr>
               <td>Datadog DBM query plans</td>
-              <td>Plan search returned 2,408 samples, but sampled plans consistently include <code>plan.collection_errors</code> with <code>invalid_schema</code>.</td>
+              <td>Plan search returned recent records with APM trace correlation, including <code>entity_catalog</code>, <code>entity_field_index</code>, and <code>events</code> signatures, but sampled plans still include <code>plan.collection_errors</code> with <code>invalid_schema</code>.</td>
               <td>DBM can see workload signatures but cannot yet explain plans reliably.</td>
               <td>Repair DBM plan collection or document the exact production config change required, then re-run top query analysis.</td>
+            </tr>
+            <tr>
+              <td>APM endpoint latency refresh</td>
+              <td>Over the latest live two-hour window, long-lived event stream spans were 45-60 s but almost entirely <code>idle_ns</code>. Excluding those streams, file <code>$value</code> writes were about 2.1-2.4 s, one WASM probe was about 1.3 s, policy creation was about 0.4 s, and regular OData/list reads were mostly 6-20 ms.</td>
+              <td>The prior diagnosis still applies: ordinary reads are already fast on the projection plane, while blob/file writes, integration/WASM work, and selected control-plane work need separate optimization lanes. Raw APM averages must exclude long-lived streams or they overstate server work.</td>
+              <td>Add dashboard filters/notes that separate streaming spans from request/response spans; keep slow-file and WASM paths in the next optimization queue after measurement deploy.</td>
+            </tr>
+            <tr>
+              <td>Datadog percentile configuration</td>
+              <td><code>temper_dispatch_ask_latency_ms</code> and <code>temper_cedar_evaluation_duration</code> are Datadog distribution metrics with <code>is_percentiles_enabled:false</code>. A search for percentile-enabled <code>temper*</code> metrics under <code>service:temperpaw</code> returned no data.</td>
+              <td>This explains current p95/p99 monitor failures or No Data behavior for custom Temper metrics. Local code and dashboard config alone are not enough; Datadog metric configuration must be updated.</td>
+              <td>Enable percentile aggregations for the selected bounded set of Temper latency distributions, then rerun the dashboard/monitor proof and record the resulting metric-context evidence here.</td>
+            </tr>
+            <tr>
+              <td>DBM query cost refresh</td>
+              <td>Live DBM query-performance analysis showed <code>entity_catalog</code> batch lookups are high volume but usually sub-millisecond database latency; tenant-count scans average around 8.9 ms and touch about 3,846 shared blocks; field-index filtered reads are tens of microseconds; sampled <code>entity_field_index</code> upserts are tens of microseconds with one transaction-duration sample around 15.8 ms.</td>
+              <td>Database-side cost is measurable and currently not the whole explanation for the slowest file writes. The likely next wins are app-side transaction shape, write amplification/coalescing, blob path timing, and stream-aware latency accounting.</td>
+              <td>Deploy app-side Postgres timing metrics, then correlate slow APM traces against DBM signatures before rewriting storage paths.</td>
             </tr>
             <tr>
               <td>OBS-002 repair package</td>
@@ -1704,10 +1750,10 @@ sequenceDiagram
       <div class="callout">
         <div>
           <strong>Scope.</strong>
-          Datadog was queried for <code>temperpaw</code> over the last 24 hours on May 14, 2026, with DB health
-          comparisons across May 13 to May 14. Traces reported production version
-          <code>86bd073dc89efc6e559cbdf9787ce9e0b92228fe</code>. Production observability includes projection
-          symbols missing from this local checkout.
+          Datadog was queried for <code>temperpaw</code> on May 14-15, 2026. The first pass used 24-hour
+          APM/DBM evidence; the latest refresh used a live two-hour APM, metric, monitor-coverage,
+          and DBM query-performance window. Production observability includes projection symbols
+          missing from this local checkout, and production currently emits <code>DD_SERVICE=temperpaw</code>.
         </div>
       </div>
 
@@ -1720,6 +1766,10 @@ sequenceDiagram
         <div class="metric"><div class="label">Field index upsert</div><strong>3.4 / 8.1 / 23 ms</strong><p>Small per-row SQL, huge volume.</p></div>
         <div class="metric"><div class="label">Catalog upsert</div><strong>3.8 / 48 / 220 ms</strong><p>Tail latency plus workload anomaly.</p></div>
         <div class="metric"><div class="label">Profiler</div><strong>0 uploads</strong><p>Rust profiling metrics exist; latest 24-hour check returned CPU upload points with value 0.</p></div>
+        <div class="metric"><div class="label">Dispatch live avg</div><strong>15-21 ms</strong><p>Latest two-hour <code>temper_dispatch_ask_latency_ms</code> buckets; percentile aggregation is disabled.</p></div>
+        <div class="metric"><div class="label">Cedar live avg</div><strong>35-59 ms</strong><p>Latest two-hour <code>temper_cedar_evaluation_duration</code> buckets, max around 64 ms.</p></div>
+        <div class="metric"><div class="label">Slow non-stream path</div><strong>2.4 s</strong><p>File <code>$value</code> write; event streams are longer but mostly idle by design.</p></div>
+        <div class="metric"><div class="label">DBM plan health</div><strong>blocked</strong><p>Samples and trace correlation exist; plan payloads still report <code>invalid_schema</code>.</p></div>
       </div>
 
       <div class="diagram diagram-wide" style="margin-top: 15px;">
@@ -1928,17 +1978,17 @@ flowchart LR
           <tbody>
             <tr>
               <td>Is Datadog profiling instrumented?</td>
-              <td>Yes in principle. Upload/error metrics and dashboard widgets exist.</td>
+              <td>Yes in principle. Upload/error metrics and dashboard widgets exist, and Datadog can find those metric names.</td>
               <td>Freshness monitor, upload rate by profile type, upload failure reason, flamegraph runbook, verified CPU/alloc/lock profiles.</td>
             </tr>
             <tr>
               <td>Is profiling useful right now?</td>
-              <td>Not enough. Recent data appeared stale/sparse.</td>
+              <td>Not enough. The latest live refresh still did not return useful fresh profiler series for <code>service:temperpaw</code>.</td>
               <td>Fix ingestion before CPU work; then profile Cedar, JSON, projection diffing, and WASM host overhead.</td>
             </tr>
             <tr>
               <td>Is DB monitoring useful?</td>
-              <td>Partially. DBM found idle-in-transaction, transaction waits, and query identities.</td>
+              <td>Partially. DBM now shows activity rows, query samples, APM trace correlation, query performance, and transient-latency health signals; explain-plan payloads still fail with <code>invalid_schema</code>.</td>
               <td>Fix plan schema, CPU/vacuum metrics, and DBM activity monitor false alerts. Local app-side pool acquire, transaction begin/commit, transaction duration, operation outcome, and projection field-count metrics are now implemented but still need live Datadog proof.</td>
             </tr>
             <tr>
