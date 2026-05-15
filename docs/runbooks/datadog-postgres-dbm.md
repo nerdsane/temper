@@ -28,20 +28,26 @@ planning deterministic and explicit.
 
 ## Repair Steps
 
-1. Confirm the Datadog Agent Postgres instance has `dbm: true` and tags that
-   include the production service and environment, for example:
+1. Confirm the Datadog Agent Postgres instance has `dbm: true`, a known
+   database role, and tags that include the production service and environment,
+   for example:
 
    ```yaml
    instances:
      - dbm: true
        host: <postgres-host>
        port: 5432
-       username: datadog
-       password: ENC[datadog_user_database_password]
+       username: <dbm-agent-role>
+       password: ENC[dbm_agent_role_database_password]
        tags:
          - service:temperpaw
          - env:prod
    ```
+
+   A dedicated `datadog` role is preferred. Railway production on May 15, 2026
+   had a separate `datadog-postgres-agent` service configured with
+   `PGUSER=postgres` and no `datadog` database role, so the setup command used
+   `-v dbm_agent_role=postgres`.
 
 2. Run the setup SQL in every logical database the Agent monitors:
 
@@ -49,19 +55,25 @@ planning deterministic and explicit.
    psql "$DATABASE_URL" -f scripts/datadog-postgres-dbm-setup.sql
    ```
 
-3. Verify as the Datadog role:
+   If the Agent role is not `datadog`, pass it explicitly:
 
    ```sh
-   psql "$DATABASE_URL" -U datadog -A \
+   psql "$DATABASE_URL" -v dbm_agent_role=postgres -f scripts/datadog-postgres-dbm-setup.sql
+   ```
+
+3. Verify as the DBM Agent role:
+
+   ```sh
+   psql "$DATABASE_URL" -U <dbm-agent-role> -A \
      -c "select count(*) from datadog.pg_stat_activity();"
 
-   psql "$DATABASE_URL" -U datadog -A \
+   psql "$DATABASE_URL" -U <dbm-agent-role> -A \
      -c "select count(*) from datadog.pg_stat_statements();"
 
-   psql "$DATABASE_URL" -U datadog -A \
+   psql "$DATABASE_URL" -U <dbm-agent-role> -A \
      -c "select * from datadog.explain_statement('SELECT tenant, COUNT(*) FROM entity_catalog GROUP BY tenant ORDER BY tenant') limit 1;"
 
-   psql "$DATABASE_URL" -U datadog -A \
+   psql "$DATABASE_URL" -U <dbm-agent-role> -A \
      -c "select * from datadog.explain_statement('SELECT entity_id FROM entity_catalog WHERE tenant = ''__datadog_probe__'' AND entity_type = ''Session'' LIMIT 1') limit 1;"
    ```
 
@@ -98,5 +110,5 @@ planning deterministic and explicit.
   logs.
 - The synthetic RLS tenant in `datadog.explain_statement` is for planning only.
   It is not a correctness proof for projected reads.
-- If production tables move out of `public`, update the `datadog` role
+- If production tables move out of `public`, update the DBM Agent role
   `search_path` and this runbook before expecting DBM plans to recover.

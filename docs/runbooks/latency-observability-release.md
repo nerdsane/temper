@@ -161,6 +161,14 @@ Run the DBM setup SQL in each monitored Postgres database:
 psql "$DATABASE_URL" -f scripts/datadog-postgres-dbm-setup.sql
 ```
 
+If the DBM Agent uses a role other than the default `datadog`, pass it
+explicitly. Railway production on May 15, 2026 used the
+`datadog-postgres-agent` service with `PGUSER=postgres`:
+
+```sh
+psql "$DATABASE_URL" -v dbm_agent_role=postgres -f scripts/datadog-postgres-dbm-setup.sql
+```
+
 Then follow `docs/runbooks/datadog-postgres-dbm.md` to validate:
 
 - `datadog.pg_stat_activity()`,

@@ -5,30 +5,40 @@
 -- role with enough privileges to create schemas, extensions, functions, and
 -- grants.
 --
--- This script intentionally does not create or rotate the datadog role
+-- This script intentionally does not create or rotate the DBM Agent role
 -- password. Manage the role credential through the database provider and
 -- Datadog Agent secret backend.
+--
+-- The Agent role defaults to "datadog", but production Railway DBM currently
+-- runs the Datadog Postgres Agent as "postgres". Override when needed:
+--
+--   psql "$DATABASE_URL" -v dbm_agent_role=postgres -f scripts/datadog-postgres-dbm-setup.sql
 
 \set ON_ERROR_STOP on
 
-DO $$
-BEGIN
-    IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'datadog') THEN
-        RAISE EXCEPTION 'role "datadog" does not exist; create it with a managed password before running DBM setup';
-    END IF;
-END
-$$;
+\if :{?dbm_agent_role}
+\else
+\set dbm_agent_role datadog
+\endif
+
+SELECT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = :'dbm_agent_role') AS dbm_agent_role_exists \gset
+
+\if :dbm_agent_role_exists
+\else
+\echo 'role "' :dbm_agent_role '" does not exist; create it with a managed password or pass -v dbm_agent_role=<existing-role>'
+\quit 1
+\endif
 
 CREATE SCHEMA IF NOT EXISTS datadog;
 
-GRANT USAGE ON SCHEMA datadog TO datadog;
-GRANT USAGE ON SCHEMA public TO datadog;
-GRANT pg_monitor TO datadog;
+GRANT USAGE ON SCHEMA datadog TO :"dbm_agent_role";
+GRANT USAGE ON SCHEMA public TO :"dbm_agent_role";
+GRANT pg_monitor TO :"dbm_agent_role";
 
 -- Temper application SQL uses unqualified table names in the public schema.
 -- Datadog explains sampled statements from a separate Agent session, so its
 -- role must have the same schema lookup context the application has.
-ALTER ROLE datadog SET search_path = "$user", public, datadog, pg_catalog;
+ALTER ROLE :"dbm_agent_role" SET search_path = "$user", public, datadog, pg_catalog;
 
 CREATE EXTENSION IF NOT EXISTS pg_stat_statements;
 
@@ -74,14 +84,14 @@ LANGUAGE 'plpgsql'
 RETURNS NULL ON NULL INPUT
 SECURITY DEFINER;
 
-GRANT EXECUTE ON FUNCTION datadog.pg_stat_activity() TO datadog;
-GRANT EXECUTE ON FUNCTION datadog.pg_stat_statements() TO datadog;
-GRANT EXECUTE ON FUNCTION datadog.explain_statement(TEXT) TO datadog;
+GRANT EXECUTE ON FUNCTION datadog.pg_stat_activity() TO :"dbm_agent_role";
+GRANT EXECUTE ON FUNCTION datadog.pg_stat_statements() TO :"dbm_agent_role";
+GRANT EXECUTE ON FUNCTION datadog.explain_statement(TEXT) TO :"dbm_agent_role";
 
 -- Optional direct SELECT grants for operator-run validation queries. The DBM
 -- explain function is SECURITY DEFINER, but these grants make psql smoke tests
 -- less surprising and support future custom DBM metrics.
-GRANT SELECT ON TABLE entity_catalog TO datadog;
-GRANT SELECT ON TABLE entity_field_index TO datadog;
-GRANT SELECT ON TABLE events TO datadog;
-GRANT SELECT ON TABLE snapshots TO datadog;
+GRANT SELECT ON TABLE entity_catalog TO :"dbm_agent_role";
+GRANT SELECT ON TABLE entity_field_index TO :"dbm_agent_role";
+GRANT SELECT ON TABLE events TO :"dbm_agent_role";
+GRANT SELECT ON TABLE snapshots TO :"dbm_agent_role";

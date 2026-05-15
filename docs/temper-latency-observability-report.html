@@ -1063,16 +1063,16 @@
             live runs pass, and deployment completes.
           </p>
           <div class="progress-track" aria-label="Program progress">
-            <div class="progress-fill" style="width: 75%">75%</div>
+            <div class="progress-fill" style="width: 78%">78%</div>
           </div>
           <div class="program-facts">
-            <div class="program-fact"><strong>Phase</strong><span>Measurement package is implemented, quality-gated locally, pushed, split into two draft PRs, refreshed with live Railway/Datadog evidence, and deployed into Datadog with service-level APM coverage recognized for rate, duration, and error. Runtime PR review/merge, production runtime deployment, DBM SQL repair, profiler proof, skipped future metric percentile configs, and live e2e evidence remain pending.</span></div>
+            <div class="program-fact"><strong>Phase</strong><span>Measurement package is implemented, quality-gated locally, pushed, split into two draft PRs, refreshed with live Railway/Datadog evidence, deployed into Datadog with service-level APM coverage recognized for rate/duration/error, and DBM explain-plan repair applied to production Postgres. Runtime PR review/merge, production runtime deployment, profiler proof, skipped future metric percentile configs, DBM schema collection, and live e2e evidence remain pending.</span></div>
             <div class="program-fact"><strong>Branches</strong><span>Temper <code>codex/latency-observability-program</code>; TemperPaw <code>codex/latency-observability-program</code></span></div>
             <div class="program-fact"><strong>Worktrees</strong><span>Temper <code>/Users/seshendranalla/Development/temper-worktrees/latency-observability-program</code>; TemperPaw <code>/Users/seshendranalla/Development/temperpaw-worktrees/latency-observability-program</code></span></div>
             <div class="program-fact"><strong>PRs</strong><span>Temper draft PR <a href="https://github.com/nerdsane/temper/pull/229">nerdsane/temper#229</a>; TemperPaw draft PR <a href="https://github.com/nerdsane/temperpaw/pull/266">nerdsane/temperpaw#266</a>.</span></div>
             <div class="program-fact"><strong>Railway</strong><span>Project <code>openpaw-seshendranalla</code>, environment <code>production</code>, service <code>openpaw</code>, domains <code>openpaw-production.up.railway.app</code> and <code>temperpaw.katagami.ai</code>.</span></div>
             <div class="program-fact"><strong>Datadog tag</strong><span>Production exports <code>DD_SERVICE=temperpaw</code>; dashboards and monitors must query <code>service:temperpaw</code>, not the Railway service name.</span></div>
-            <div class="program-fact"><strong>Production checks</strong><span>Railway-backed Datadog deployment updated dashboard <code>mn4-k3k-i66</code>, created or updated 66 source monitors, and enabled percentile aggregations for 18 live Temper latency distributions; Railway domain <code>/readyz</code> is ready and <code>/healthz</code> returns 200; Datadog reports <code>temper_up=1</code>, Cedar traffic, APM HTTP traffic, DBM samples/plans, and service coverage for APM rate, duration, and error on <code>service:temperpaw</code>.</span></div>
+            <div class="program-fact"><strong>Production checks</strong><span>Railway-backed Datadog deployment updated dashboard <code>mn4-k3k-i66</code>, created or updated 66 source monitors, enabled percentile aggregations for 18 live Temper latency distributions, and applied DBM helper schema/functions; Railway domain <code>/readyz</code> is ready and <code>/healthz</code> returns 200; Datadog reports <code>temper_up=1</code>, Cedar traffic, APM HTTP traffic, fresh DBM explain plans without <code>invalid_schema</code>, and service coverage for APM rate, duration, and error on <code>service:temperpaw</code>.</span></div>
             <div class="program-fact"><strong>Review gates</strong><span>DST compliance review PASS; code-quality review PASS; changed sim-visible files pass the determinism hook loop; readability ratchet is green at baseline after module splits.</span></div>
             <div class="program-fact"><strong>Dashboard</strong><span><code>docs/temper-latency-observability-report.html</code></span></div>
             <div class="program-fact"><strong>ADRs</strong><span><code>docs/adrs/0081-latency-observability-acceleration-program.md</code>; <code>docs/adrs/0082-projection-correctness-observability.md</code>; <code>docs/adrs/0083-trace-budget-and-fanout-summarization.md</code>; <code>docs/adrs/0084-authz-latency-phase-instrumentation.md</code></span></div>
@@ -1341,6 +1341,10 @@
               <time datetime="2026-05-15">2026-05-15</time>
               <p>Verified percentile configuration live: <code>search_datadog_metrics(percentiles_enabled=true)</code> now returns 18 <code>temper*</code> metrics for <code>service:temperpaw</code>, and metric context confirms <code>temper_dispatch_ask_latency_ms</code>, <code>temper_cedar_evaluation_duration</code>, and <code>temper_session_phase_duration_ms</code> have <code>is_percentiles_enabled:true</code>. After Datadog indexing caught up, the service coverage analyzer recognized all three standard APM signals for <code>service:temperpaw</code>: rate via monitors <code>283342070</code>/<code>283342074</code>, duration via <code>283342076</code>, and error via <code>283345345</code>.</p>
             </div>
+            <div class="log-entry">
+              <time datetime="2026-05-15">2026-05-15</time>
+              <p>Applied the DBM repair to production Postgres using Railway's Postgres public URL without printing secrets. Production's <code>datadog-postgres-agent</code> uses <code>PGUSER=postgres</code>, so <code>scripts/datadog-postgres-dbm-setup.sql</code> now accepts <code>-v dbm_agent_role=postgres</code>. SQL probes returned JSON explain plans, the Datadog Postgres agent was restarted, and fresh DBM plans after a live read smoke showed real index plans with zero fresh <code>invalid_schema</code> matches. DBM schema collection is still absent and remains a separate gap.</p>
+            </div>
           </div>
         </div>
       </div>
@@ -1370,9 +1374,9 @@
             </tr>
             <tr>
               <td>Datadog DBM query plans</td>
-              <td>Plan search returned recent records with APM trace correlation, including <code>entity_catalog</code>, <code>entity_field_index</code>, and <code>events</code> signatures, but sampled plans still include <code>plan.collection_errors</code> with <code>invalid_schema</code>.</td>
-              <td>DBM can see workload signatures but cannot yet explain plans reliably.</td>
-              <td>Repair DBM plan collection or document the exact production config change required, then re-run top query analysis.</td>
+              <td>DBM explain-plan repair was applied on 2026-05-15. Fresh plans now include real plan payloads for <code>entity_catalog</code>, <code>entity_field_index</code>, and <code>events</code>; examples include <code>idx_entity_catalog_type</code>, <code>idx_efi_lookup</code>, <code>entity_catalog_pkey</code>, <code>idx_events_tenant_entity</code>, and <code>events_tenant_entity_type_entity_id_sequence_nr_key</code>. Fresh <code>invalid_schema</code> search returned zero matches after the live read smoke.</td>
+              <td>Explain plans are now usable for hot-query design. Remaining DBM gaps are schema collection, occasional prepared-statement notices, and one long Datadog-agent query truncated by <code>track_activity_query_size=1024</code>.</td>
+              <td>Keep watching fresh plan samples for <code>invalid_schema</code>, enable schema collection if supported by the Railway agent config, and decide whether <code>track_activity_query_size</code> should be raised.</td>
             </tr>
             <tr>
               <td>APM endpoint latency refresh</td>
@@ -1579,9 +1583,9 @@
             <tr>
               <td>OBS-002</td>
               <td>Repair DBM usefulness: query plans, DB CPU/vacuum coverage, lock/wait/pool/transaction visibility.</td>
-              <td><span class="status watch">Local metrics + repair package verified</span></td>
-              <td><code>codex/latency-observability-program</code>; config execution pending</td>
-              <td>Runbook, setup SQL, and app-side Postgres metrics exist. Done requires staging/live execution, Datadog Agent reload, metric visibility, top query plans visible, DB CPU/vacuum/wait coverage recorded, and no routine <code>invalid_schema</code> samples.</td>
+              <td><span class="status watch">Live explain-plan repair applied</span></td>
+              <td><code>codex/latency-observability-program</code>; PR/deploy still pending for app-side metrics</td>
+              <td>Runbook and setup SQL exist and were applied to production Postgres with the live DBM agent role. SQL probes and fresh DBM plan searches now return real explain plans with zero fresh <code>invalid_schema</code> matches. Done still requires runtime PR deploy for app-side Postgres metrics, DB CPU/vacuum/wait coverage recorded, DBM schema collection decision, and continued clean plan samples.</td>
             </tr>
             <tr>
               <td>OBS-003</td>
@@ -2014,8 +2018,8 @@ flowchart LR
             </tr>
             <tr>
               <td>Is DB monitoring useful?</td>
-              <td>Partially. DBM now shows activity rows, query samples, APM trace correlation, query performance, and transient-latency health signals; explain-plan payloads still fail with <code>invalid_schema</code>.</td>
-              <td>Fix plan schema, CPU/vacuum metrics, and DBM activity monitor false alerts. Local app-side pool acquire, transaction begin/commit, transaction duration, operation outcome, and projection field-count metrics are now implemented but still need live Datadog proof.</td>
+              <td>Much more useful after the live DBM helper repair. DBM now shows activity rows, APM trace correlation, query performance, transient-latency health signals, and fresh explain plans for hot <code>entity_catalog</code>, <code>entity_field_index</code>, and <code>events</code> signatures. Schema definitions still do not show up through DBM schema collection.</td>
+              <td>Use the new plan data for measured query-shape work, but still fix/decide schema collection, CPU/vacuum metrics, and DBM activity monitor false alerts. Local app-side pool acquire, transaction begin/commit, transaction duration, operation outcome, and projection field-count metrics are implemented but still need live Datadog proof after runtime deploy.</td>
             </tr>
             <tr>
               <td>Can we prove projections are correct?</td>
@@ -2137,15 +2141,17 @@ flowchart LR
         <article class="task">
           <header>OBS-002 / DBM repair</header>
           <div class="body">
-            <p>Make database monitoring reliable enough for query design. The setup/runbook repair package and app-side Postgres metrics are implemented locally; live execution is still pending.</p>
+            <p>Make database monitoring reliable enough for query design. The setup/runbook repair package was applied live to production Postgres, and app-side Postgres metrics are implemented locally but still need runtime deployment.</p>
             <ul>
-              <li>Local: added Datadog Postgres DBM setup SQL for schema, helper functions, grants, search path, and RLS planning context.</li>
+              <li>Local: added Datadog Postgres DBM setup SQL for schema, helper functions, grants, search path, RLS planning context, and configurable DBM Agent role.</li>
               <li>Local: added operator runbook with psql validation and Datadog plan-search criteria.</li>
               <li>Local: added Postgres pool acquire, transaction begin, transaction commit, transaction duration, operation outcome, and projection field-count metrics.</li>
-              <li>Live: run setup in staging/production databases and reload the Datadog Agent.</li>
-              <li>Live: confirm explain plans for hot projection/event queries and verify DB CPU, vacuum, wait, transaction, and pool coverage in Datadog.</li>
+              <li>Live: production DBM Agent role was <code>postgres</code>, not <code>datadog</code>; applied setup with <code>-v dbm_agent_role=postgres</code>.</li>
+              <li>Live: SQL probes returned JSON explain plans for <code>entity_catalog</code> queries, the Datadog Postgres agent was restarted, and a Railway-domain read smoke returned 200 for <code>/readyz</code>, <code>/tdata/Channels?$top=1</code>, and <code>/tdata/WorkerRuns?$top=1</code>.</li>
+              <li>Live: fresh DBM plan search after the smoke returned plans for <code>events</code> using <code>idx_events_tenant_entity</code> and <code>events_tenant_entity_type_entity_id_sequence_nr_key</code>, and fresh <code>invalid_schema</code> search returned zero matches.</li>
+              <li>Next: verify DB CPU/vacuum/wait coverage, decide schema collection support, decide whether to raise <code>track_activity_query_size</code>, and verify app-side pool/transaction metrics after runtime deploy.</li>
             </ul>
-            <p class="small">Acceptance: plans visible for top projection/event queries, app-side DB p50/p95/p99 visible by operation, and DB health warnings cleared.</p>
+            <p class="small">Acceptance: plans visible for top projection/event queries, app-side DB p50/p95/p99 visible by operation, schema/CPU/vacuum/wait gaps classified, and DB health warnings cleared.</p>
           </div>
         </article>
         <article class="task">
