@@ -4,10 +4,10 @@
 //! methods on a context struct. This allows both MCP and agent-runtime
 //! to use them with different context shapes.
 //!
-//! Identity is conveyed exclusively via `Authorization: Bearer` token.
+//! Identity is normally conveyed via `Authorization: Bearer` token.
 //! The platform resolves the token to a verified agent identity (ADR-0033).
-//! Self-declared identity headers (`X-Temper-Agent-Type`,
-//! `X-Temper-Principal-Id`) are not sent.
+//! The server-hosted REPL can also pass through an already-received
+//! `X-Temper-*` identity for local/dev operator workflows.
 
 use reqwest::Method;
 use serde_json::Value;
@@ -23,6 +23,15 @@ use crate::helpers::{format_authz_denied, format_http_error};
 pub struct AgentIdentity<'a> {
     /// Session ID (becomes `X-Session-Id`).
     pub session_id: Option<&'a str>,
+    /// Caller principal id to pass through when the server-hosted REPL invokes
+    /// the local HTTP API on behalf of a request.
+    pub principal_id: Option<&'a str>,
+    /// Caller principal kind (`admin`, `agent`, `customer`).
+    pub principal_kind: Option<&'a str>,
+    /// Agent role used by Cedar policies (`lock_client`, `wasm_module`, ...).
+    pub agent_role: Option<&'a str>,
+    /// Agent software type / classification.
+    pub agent_type: Option<&'a str>,
 }
 
 /// Process a Temper HTTP response into a `Result<Value, String>`.
@@ -112,6 +121,18 @@ async fn send_json(
     if let Some(sid) = identity.session_id {
         request = request.header("X-Session-Id", sid);
     }
+    if let Some(principal_id) = identity.principal_id {
+        request = request.header("X-Temper-Principal-Id", principal_id);
+    }
+    if let Some(principal_kind) = identity.principal_kind {
+        request = request.header("X-Temper-Principal-Kind", principal_kind);
+    }
+    if let Some(agent_role) = identity.agent_role {
+        request = request.header("X-Temper-Agent-Role", agent_role);
+    }
+    if let Some(agent_type) = identity.agent_type {
+        request = request.header("X-Temper-Agent-Type", agent_type);
+    }
 
     if let Some(key) = api_key {
         request = request.header("Authorization", format!("Bearer {key}"));
@@ -152,6 +173,18 @@ pub async fn temper_request_bytes(
 
     if let Some(sid) = identity.session_id {
         request = request.header("X-Session-Id", sid);
+    }
+    if let Some(principal_id) = identity.principal_id {
+        request = request.header("X-Temper-Principal-Id", principal_id);
+    }
+    if let Some(principal_kind) = identity.principal_kind {
+        request = request.header("X-Temper-Principal-Kind", principal_kind);
+    }
+    if let Some(agent_role) = identity.agent_role {
+        request = request.header("X-Temper-Agent-Role", agent_role);
+    }
+    if let Some(agent_type) = identity.agent_type {
+        request = request.header("X-Temper-Agent-Type", agent_type);
     }
 
     request = request.body(body);

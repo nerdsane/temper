@@ -1,0 +1,16 @@
+[package]
+name = "readers-writers-reference"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.92"
+publish = false
+description = "Reference Readers/Writers application for Temper"
+
+[dependencies]
+serde = { workspace = true, features = ["derive"] }
+serde_json = { workspace = true }
+
+[dev-dependencies]
+temper-jit = { path = "../../crates/temper-jit" }
+temper-spec = { path = "../../crates/temper-spec" }
+temper-verify = { path = "../../crates/temper-verify" }

@@ -1,0 +1,14 @@
+[package]
+name = "readers_writers_step"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[workspace]
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+readers-writers-reference = { path = "../.." }
+temper-wasm-sdk = { path = "../../../../crates/temper-wasm-sdk" }

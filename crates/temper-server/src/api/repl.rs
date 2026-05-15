@@ -37,6 +37,22 @@ pub(crate) async fn handle_repl(
         .get("x-temper-principal-id")
         .and_then(|v| v.to_str().ok())
         .map(String::from);
+    let principal_kind = headers
+        .get("x-temper-principal-kind")
+        .and_then(|v| v.to_str().ok())
+        .map(String::from);
+    let agent_role = headers
+        .get("x-temper-agent-role")
+        .and_then(|v| v.to_str().ok())
+        .map(String::from);
+    let agent_type = headers
+        .get("x-temper-agent-type")
+        .and_then(|v| v.to_str().ok())
+        .map(String::from);
+    let session_id = headers
+        .get("x-session-id")
+        .and_then(|v| v.to_str().ok())
+        .map(String::from);
 
     let tenant = match extract_tenant(&headers, &state) {
         Ok(t) => t.as_str().to_string(),
@@ -46,6 +62,7 @@ pub(crate) async fn handle_repl(
     let agent_id = principal_id.clone();
     let port = state.listen_port.get().copied().unwrap_or(4200);
     let code = body.code;
+    let tenant_for_repl = tenant.clone();
 
     // The Monty sandbox types are !Send, so we run in a dedicated
     // single-threaded runtime via spawn_blocking.
@@ -57,7 +74,13 @@ pub(crate) async fn handle_repl(
         rt.block_on(async move {
             let config = temper_sandbox::repl::ReplConfig {
                 server_port: port,
-                agent_id: principal_id,
+                tenant: tenant_for_repl,
+                agent_id: principal_id.clone(),
+                principal_id,
+                principal_kind,
+                agent_role,
+                agent_type,
+                session_id,
             };
             temper_sandbox::repl::run_repl(&config, &code).await
         })

@@ -149,6 +149,11 @@ impl crate::state::ServerState {
     ) -> Result<Option<EntityResponse>, String> {
         match mode {
             WasmDispatchMode::Inline => {
+                // Preserve inline semantics through nested WASM callbacks.
+                // A public action may dispatch a validation callback that has
+                // its own WASM trigger; returning before that nested trigger
+                // commits lets concurrent requests observe stale detailed
+                // fields while counters advance.
                 let resp = self
                     .dispatch_tenant_action_core(
                         entity_ref.tenant,
@@ -157,7 +162,7 @@ impl crate::state::ServerState {
                         callback_action,
                         callback_params,
                         agent_ctx,
-                        false,
+                        true,
                     )
                     .await
                     .map_err(|e| e.to_string())?;
