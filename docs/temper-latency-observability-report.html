@@ -1006,7 +1006,7 @@
 
     <header class="hero">
       <div class="hero-main">
-        <div class="eyebrow">Vapor Terminal OVA Console / May 14, 2026</div>
+        <div class="eyebrow">Vapor Terminal OVA Console / May 15, 2026</div>
         <h1>Temper Latency and Observability Acceleration Report</h1>
         <p class="lede">
           This report combines a whole-repository architecture pass with live Datadog APM, DBM, metrics,
@@ -1027,8 +1027,8 @@
           <div class="strip-title"><span>Observability Read</span><span>Datadog</span></div>
           <div class="meter-body">
             <div class="meter-row"><span>APM</span><div class="bar"><i style="width: 82%"></i></div><span>rich</span></div>
-            <div class="meter-row"><span>DBM</span><div class="bar warn"><i style="width: 55%"></i></div><span>partial</span></div>
-            <div class="meter-row"><span>profiler</span><div class="bar warn"><i style="width: 30%"></i></div><span>stale</span></div>
+            <div class="meter-row"><span>DBM</span><div class="bar"><i style="width: 74%"></i></div><span>plans</span></div>
+            <div class="meter-row"><span>profiler</span><div class="bar warn"><i style="width: 62%"></i></div><span>on-demand</span></div>
           </div>
         </div>
         <div class="meter">
@@ -1037,7 +1037,7 @@
             <p class="small">
               The older diagnosis still applies in shape, but production now has a projection/index read plane.
               Reads are mostly fast; the new battlefront is projection writes, Cedar CPU, WASM latency,
-              blob uploads, and observability gaps around profiling and drift.
+              blob uploads, continuous profiling, and projection drift proof.
             </p>
           </div>
         </div>
@@ -1063,16 +1063,16 @@
             live runs pass, and deployment completes.
           </p>
           <div class="progress-track" aria-label="Program progress">
-            <div class="progress-fill" style="width: 78%">78%</div>
+            <div class="progress-fill" style="width: 81%">81%</div>
           </div>
           <div class="program-facts">
-            <div class="program-fact"><strong>Phase</strong><span>Measurement package is implemented, quality-gated locally, pushed, split into two draft PRs, refreshed with live Railway/Datadog evidence, deployed into Datadog with service-level APM coverage recognized for rate/duration/error, and DBM explain-plan repair applied to production Postgres. Runtime PR review/merge, production runtime deployment, profiler proof, skipped future metric percentile configs, DBM schema collection, and live e2e evidence remain pending.</span></div>
+            <div class="program-fact"><strong>Phase</strong><span>Measurement package is implemented, quality-gated locally, pushed, split into two draft PRs, refreshed with live Railway/Datadog evidence, deployed into Datadog with service-level APM coverage recognized for rate/duration/error, DBM explain-plan repair applied to production Postgres, and production on-demand CPU profiling proven under live read load. Runtime PR review/merge, production runtime deployment, continuous profiling, skipped future metric percentile configs, DBM schema collection, and live e2e evidence remain pending.</span></div>
             <div class="program-fact"><strong>Branches</strong><span>Temper <code>codex/latency-observability-program</code>; TemperPaw <code>codex/latency-observability-program</code></span></div>
             <div class="program-fact"><strong>Worktrees</strong><span>Temper <code>/Users/seshendranalla/Development/temper-worktrees/latency-observability-program</code>; TemperPaw <code>/Users/seshendranalla/Development/temperpaw-worktrees/latency-observability-program</code></span></div>
             <div class="program-fact"><strong>PRs</strong><span>Temper draft PR <a href="https://github.com/nerdsane/temper/pull/229">nerdsane/temper#229</a>; TemperPaw draft PR <a href="https://github.com/nerdsane/temperpaw/pull/266">nerdsane/temperpaw#266</a>.</span></div>
             <div class="program-fact"><strong>Railway</strong><span>Project <code>openpaw-seshendranalla</code>, environment <code>production</code>, service <code>openpaw</code>, domains <code>openpaw-production.up.railway.app</code> and <code>temperpaw.katagami.ai</code>.</span></div>
             <div class="program-fact"><strong>Datadog tag</strong><span>Production exports <code>DD_SERVICE=temperpaw</code>; dashboards and monitors must query <code>service:temperpaw</code>, not the Railway service name.</span></div>
-            <div class="program-fact"><strong>Production checks</strong><span>Railway-backed Datadog deployment updated dashboard <code>mn4-k3k-i66</code>, created or updated 66 source monitors, enabled percentile aggregations for 18 live Temper latency distributions, and applied DBM helper schema/functions; Railway domain <code>/readyz</code> is ready and <code>/healthz</code> returns 200; Datadog reports <code>temper_up=1</code>, Cedar traffic, APM HTTP traffic, fresh DBM explain plans without <code>invalid_schema</code>, and service coverage for APM rate, duration, and error on <code>service:temperpaw</code>.</span></div>
+            <div class="program-fact"><strong>Production checks</strong><span>Railway-backed Datadog deployment updated dashboard <code>mn4-k3k-i66</code>, created or updated 66 source monitors, enabled percentile aggregations for 18 live Temper latency distributions, and applied DBM helper schema/functions; Railway domain <code>/readyz</code> is ready and <code>/healthz</code> returns 200; Datadog reports <code>temper_up=1</code>, Cedar traffic, APM HTTP traffic, fresh DBM explain plans without <code>invalid_schema</code>, fresh CPU profiler upload counters, and service coverage for APM rate, duration, and error on <code>service:temperpaw</code>.</span></div>
             <div class="program-fact"><strong>Review gates</strong><span>DST compliance review PASS; code-quality review PASS; changed sim-visible files pass the determinism hook loop; readability ratchet is green at baseline after module splits.</span></div>
             <div class="program-fact"><strong>Dashboard</strong><span><code>docs/temper-latency-observability-report.html</code></span></div>
             <div class="program-fact"><strong>ADRs</strong><span><code>docs/adrs/0081-latency-observability-acceleration-program.md</code>; <code>docs/adrs/0082-projection-correctness-observability.md</code>; <code>docs/adrs/0083-trace-budget-and-fanout-summarization.md</code>; <code>docs/adrs/0084-authz-latency-phase-instrumentation.md</code></span></div>
@@ -1345,6 +1345,10 @@
               <time datetime="2026-05-15">2026-05-15</time>
               <p>Applied the DBM repair to production Postgres using Railway's Postgres public URL without printing secrets. Production's <code>datadog-postgres-agent</code> uses <code>PGUSER=postgres</code>, so <code>scripts/datadog-postgres-dbm-setup.sql</code> now accepts <code>-v dbm_agent_role=postgres</code>. SQL probes returned JSON explain plans, the Datadog Postgres agent was restarted, and fresh DBM plans after a live read smoke showed real index plans with zero fresh <code>invalid_schema</code> matches. DBM schema collection is still absent and remains a separate gap.</p>
             </div>
+            <div class="log-entry">
+              <time datetime="2026-05-15">2026-05-15</time>
+              <p>Verified production on-demand profiling through Railway. Current production has <code>TEMPER_PROFILING_ENABLED=true</code>, <code>TEMPER_PROFILING_AUTO_UPLOAD=true</code>, <code>TEMPER_PROFILING_CONTINUOUS</code> unset, and <code>DD_PROFILING_ENABLED=false</code>. Idle CPU and wall captures returned HTTP 200 with 83-byte payloads; an 8-second CPU capture at 199 Hz while issuing 140 authenticated <code>/readyz</code>, <code>/tdata/Channels</code>, and <code>/tdata/WorkerRuns</code> reads returned HTTP 200 for all probes and produced a 26.4 KB pprof payload. Railway logs show uploads to the Datadog Agent intake, Datadog now has fresh <code>profile_type:cpu</code> upload buckets and no upload-error series, and <code>go tool pprof</code> parsed 70.35 ms of samples showing Axum middleware, OData read, Postgres catalog loading, SQLx receive, and tracing/OTel span work.</p>
+            </div>
           </div>
         </div>
       </div>
@@ -1362,9 +1366,9 @@
           <tbody>
             <tr>
               <td>Datadog profiling metrics</td>
-              <td><code>datadog.profiling.rust.profiles_uploaded</code> and <code>datadog.profiling.rust.upload_errors</code> exist and are used by the live dashboard. The latest live checks still returned no useful fresh profiler series for <code>service:temperpaw</code>.</td>
-              <td>Profiling is instrumented in name, but it is not currently useful enough to guide CPU optimization.</td>
-              <td>Inspect runtime profiler code, add freshness/config/upload evidence, and verify live profiles become fresh.</td>
+              <td>Production on-demand profiler routes are live. Idle CPU/wall captures returned HTTP 200 but only 83-byte profiles; an 8-second CPU capture at 199 Hz during 140 authenticated read probes produced a 26.4 KB pprof file, uploaded to the Datadog Agent intake, and yielded fresh <code>profile_type:cpu</code> upload buckets with no upload-error series.</td>
+              <td>Profiling is now useful for targeted CPU investigations when captured under live load. It is still not a continuous always-on surface: <code>TEMPER_PROFILING_CONTINUOUS</code> is unset, native <code>ddprof</code> is disabled, wall counters are not yet trustworthy, and allocation/lock profiles are not proven.</td>
+              <td>Enable continuous profiling or <code>ddprof</code> after PR deploy, add/verify freshness monitors, capture flamegraph links/screenshots, and use loaded CPU captures for Cedar/AuthZ and projection hot-path work.</td>
             </tr>
             <tr>
               <td>Datadog DBM instance health</td>
@@ -1434,9 +1438,9 @@
             </tr>
             <tr>
               <td>Datadog metric snapshot</td>
-              <td>Read-only Datadog query via <code>scripts/read_datadog_snapshot.py</code> and Railway found <code>temper_up=1</code> over 1h/24h, 17,005 counted Cedar evaluations over 24h, and live <code>temper_cedar_evaluation_duration</code> averages with 24h max around 122 ms. After percentile configuration, live metrics now expose p95/p99 for currently emitted distributions, but profiler upload evidence still remains absent.</td>
-              <td>The core service and Cedar metrics are live under <code>service:temperpaw</code>; tail metrics are usable for existing distributions; profiler and future runtime metrics remain measurement gaps.</td>
-              <td>Rerun the snapshot after runtime deployment and require nonempty profiler/correctness/Postgres/projection surfaces before choosing speed optimizations.</td>
+              <td>Read-only Datadog query via <code>scripts/read_datadog_snapshot.py</code> and Railway found <code>temper_up=1</code> over 1h/24h, 17,005 counted Cedar evaluations over 24h, and live <code>temper_cedar_evaluation_duration</code> averages with 24h max around 122 ms. After percentile configuration, live metrics expose p95/p99 for currently emitted distributions; after the production load capture, profiler upload metrics show fresh <code>profile_type:cpu</code> buckets.</td>
+              <td>The core service, Cedar metrics, current-tail distributions, and targeted CPU profiler path are live under <code>service:temperpaw</code>; future runtime metrics, continuous profiles, and projection/Postgres correctness surfaces remain measurement gaps until runtime deployment.</td>
+              <td>Rerun the snapshot after runtime deployment and require nonempty profiler/correctness/Postgres/projection surfaces before choosing broad speed optimizations.</td>
             </tr>
             <tr>
               <td>Review gates</td>
@@ -1476,21 +1480,21 @@
             </tr>
             <tr>
               <td>OBS-001 local implementation</td>
-              <td>Added profiler config/freshness/capture metrics, opt-in continuous CPU profile capture, and startup wiring from the CLI serve path.</td>
-              <td>Production can now keep in-process pprof CPU profiles fresh when the Datadog Agent is reachable and the three profiler gates are enabled.</td>
-              <td>Open PR, deploy with profiler env gates enabled, and re-query Datadog for fresh profile uploads and flamegraph availability.</td>
+              <td>Added profiler config/freshness/capture metrics, opt-in continuous CPU profile capture, and startup wiring from the CLI serve path. Production currently runs an older on-demand profiler with <code>TEMPER_PROFILING_ENABLED=true</code> and auto-upload enabled.</td>
+              <td>On-demand in-process pprof is proven live and useful under load. The current deployment can upload targeted CPU profiles, but the branch's continuous profiler loop is not deployed and production has <code>TEMPER_PROFILING_CONTINUOUS</code> unset.</td>
+              <td>Merge/deploy the runtime PR, enable continuous capture intentionally, compare against native <code>ddprof</code>, and record flamegraph links/screenshots.</td>
             </tr>
             <tr>
               <td>Datadog native profiler path</td>
-              <td>Current Datadog docs recommend <code>ddprof</code> for compiled languages including Rust, C, and C++; profiles should appear in the Profiler page a couple of minutes after startup when runtime, symbols, OS permissions, service/env/version, and Agent/export settings are correct.</td>
-              <td>The repaired in-process profiler is a useful fallback/control, but the production target should evaluate <code>ddprof</code> as the first-class continuous profiler for Temper's Rust processes.</td>
-              <td>Add a deployment task to wrap or link the production service with <code>ddprof</code>, verify <code>perf_event_paranoid</code>/capabilities and symbols, then compare live Datadog profile freshness with the in-process fallback.</td>
+              <td>Production currently has <code>DD_PROFILING_ENABLED=false</code>, so <code>scripts/temperpaw-entrypoint.sh</code> does not wrap the process in <code>ddprof</code>. Current Datadog docs recommend <code>ddprof</code> for compiled languages including Rust, C, and C++ when runtime, symbols, OS permissions, service/env/version, and Agent/export settings are correct.</td>
+              <td>The in-process profiler is a proven fallback/control for targeted captures, but <code>ddprof</code> remains the likely first-class continuous profiler for Temper's Rust process if Railway permissions and image contents support it.</td>
+              <td>Add a deployment task to install/wrap with <code>ddprof</code>, verify <code>perf_event_paranoid</code>/capabilities and symbols, then compare native continuous profiles with the in-process fallback.</td>
             </tr>
             <tr>
               <td>OBS-001 local verification</td>
               <td><code>cargo check -p temper-cli</code>, <code>cargo test -p temper-server profiling::tests --lib</code>, <code>cargo test -p temper-server query_projection_metrics --lib</code>, <code>cargo test -p temper-server odata::read_support --lib</code>, <code>cargo test -p temper-store-postgres metrics --lib</code>, <code>cargo fmt --check</code>, <code>git diff --check</code>, JS syntax check, and Playwright screenshot smoke check passed.</td>
-              <td>The local code path compiles and profiler tuning behavior is covered by unit tests.</td>
-              <td>Live Datadog verification remains required before OBS-001 is done.</td>
+              <td>The local code path compiles and profiler tuning behavior is covered by unit tests; production on-demand CPU profile capture and Datadog Agent upload are now live-proven.</td>
+              <td>OBS-001 is not done until continuous or native profiling is deployed, flamegraph evidence is recorded, and stale-profiler monitoring stays clean.</td>
             </tr>
           </tbody>
         </table>
@@ -1576,9 +1580,9 @@
             <tr>
               <td>OBS-001</td>
               <td>Restore useful Datadog profiling: freshness, upload rate, upload errors, CPU/allocation/lock profiles.</td>
-              <td><span class="status watch">Local patch verified</span></td>
+              <td><span class="status watch">On-demand live proof</span></td>
               <td><a href="https://github.com/nerdsane/temper/pull/229">Temper PR #229</a></td>
-              <td>Local check/test passed. Done still requires PR, deploy, <code>ddprof</code> evaluation, fresh live profile uploads within 10 minutes, and flamegraph links or screenshots recorded here.</td>
+              <td>Local check/test passed, and production on-demand CPU capture under read load produced a valid 26.4 KB pprof profile plus fresh Datadog upload counters. Done still requires PR merge/deploy, continuous or native <code>ddprof</code> evaluation, allocation/lock or documented Rust limitation, and flamegraph links/screenshots recorded here.</td>
             </tr>
             <tr>
               <td>OBS-002</td>
@@ -1689,7 +1693,7 @@
             <span class="chip good">keep event audit</span>
             <span class="chip warn">bound projection lag</span>
             <span class="chip warn">control trace cardinality</span>
-            <span class="chip bad">fix stale profiler</span>
+            <span class="chip warn">make profiling continuous</span>
           </div>
         </div>
       </div>
@@ -1794,12 +1798,12 @@ sequenceDiagram
         <div class="metric"><div class="label">Fan-out trace</div><strong>166k spans</strong><p>One trace had 104k field-index inserts.</p></div>
         <div class="metric"><div class="label">Field index upsert</div><strong>3.4 / 8.1 / 23 ms</strong><p>Small per-row SQL, huge volume.</p></div>
         <div class="metric"><div class="label">Catalog upsert</div><strong>3.8 / 48 / 220 ms</strong><p>Tail latency plus workload anomaly.</p></div>
-        <div class="metric"><div class="label">Profiler</div><strong>0 uploads</strong><p>Rust profiling metrics exist; latest 24-hour check returned CPU upload points with value 0.</p></div>
+        <div class="metric"><div class="label">Profiler</div><strong>26.4 KB</strong><p>Loaded production CPU capture parsed by <code>go tool pprof</code>; Datadog saw fresh <code>profile_type:cpu</code> uploads.</p></div>
         <div class="metric"><div class="label">Percentile config</div><strong>18 live</strong><p>Temper distributions now have Datadog percentiles enabled; six future runtime metrics were skipped until first emission.</p></div>
         <div class="metric"><div class="label">Dispatch live avg</div><strong>15-21 ms</strong><p>Latest two-hour <code>temper_dispatch_ask_latency_ms</code> buckets; p95/p99 aggregation is now enabled.</p></div>
         <div class="metric"><div class="label">Cedar live avg</div><strong>35-59 ms</strong><p><code>temper_cedar_evaluation_duration</code> buckets, max around 64 ms; p95/p99 aggregation is now enabled.</p></div>
         <div class="metric"><div class="label">Slow non-stream path</div><strong>2.4 s</strong><p>File <code>$value</code> write; event streams are longer but mostly idle by design.</p></div>
-        <div class="metric"><div class="label">DBM plan health</div><strong>blocked</strong><p>Samples and trace correlation exist; plan payloads still report <code>invalid_schema</code>.</p></div>
+        <div class="metric"><div class="label">DBM plan health</div><strong>usable</strong><p>Fresh plans now include real index payloads; schema collection remains a separate gap.</p></div>
       </div>
 
       <div class="diagram diagram-wide" style="margin-top: 15px;">
@@ -1862,14 +1866,14 @@ flowchart TB
             </tr>
             <tr>
               <td>Postgres DBM</td>
-              <td>DBM sees <code>temperpaw-postgres</code> as healthy, but sampled plans consistently include <code>invalid_schema</code> collection errors.</td>
-              <td>Instance health is useful; plan-level diagnosis is blocked until DBM plan collection is repaired or explained.</td>
+              <td>DBM sees <code>temperpaw-postgres</code> as healthy and fresh post-repair plans include real payloads for <code>entity_catalog</code>, <code>entity_field_index</code>, and <code>events</code>.</td>
+              <td>Instance health and plan-level diagnosis are now usable; schema collection and <code>track_activity_query_size</code> remain follow-up gaps.</td>
               <td><span class="status watch">Medium</span></td>
             </tr>
             <tr>
               <td>Profiling</td>
-              <td>Profiler upload/error metrics exist, but <code>profiles_uploaded{service:temperpaw,profile_type:cpu}</code> returned zero uploads in the latest live check.</td>
-              <td>Profiling is instrumented in principle, but freshness and automatic capture/upload are not yet proven.</td>
+              <td>Production on-demand CPU profile under read load produced a valid 26.4 KB pprof payload, uploaded to the Datadog Agent, and exposed fresh <code>profile_type:cpu</code> upload buckets.</td>
+              <td>Targeted CPU profiling is useful now; continuous profiling, native <code>ddprof</code>, wall/allocation/lock coverage, and freshness monitors still need completion.</td>
               <td><span class="status watch">Medium</span></td>
             </tr>
           </tbody>
@@ -2008,13 +2012,13 @@ flowchart LR
           <tbody>
             <tr>
               <td>Is Datadog profiling instrumented?</td>
-              <td>Yes in principle. Upload/error metrics and dashboard widgets exist, and Datadog can find those metric names.</td>
-              <td>Freshness monitor, upload rate by profile type, upload failure reason, flamegraph runbook, verified CPU/alloc/lock profiles.</td>
+              <td>Yes for targeted in-process CPU profiling. Production routes, Agent upload, upload counters, and dashboard widgets exist; loaded captures produce parseable pprof payloads.</td>
+              <td>Continuous capture, native <code>ddprof</code>, freshness monitor, trustworthy wall counters, allocation/lock profile proof or documented limits, and flamegraph runbook evidence.</td>
             </tr>
             <tr>
               <td>Is profiling useful right now?</td>
-              <td>Not enough. The latest live refresh still did not return useful fresh profiler series for <code>service:temperpaw</code>.</td>
-              <td>Fix ingestion before CPU work; then profile Cedar, JSON, projection diffing, and WASM host overhead.</td>
+              <td>Useful for targeted CPU captures under real load. Not enough yet for always-on diagnosis because continuous profiling is unset and native <code>ddprof</code> is disabled.</td>
+              <td>Use loaded CPU captures for Cedar, JSON, projection diffing, and WASM host overhead while completing continuous/native profiling.</td>
             </tr>
             <tr>
               <td>Is DB monitoring useful?</td>
@@ -2127,12 +2131,13 @@ flowchart LR
         <article class="task">
           <header>OBS-001 / profiler restoration</header>
           <div class="body">
-            <p>Make Datadog profiling continuously useful. Local code repair is implemented and verified; live rollout is still pending.</p>
+            <p>Make Datadog profiling continuously useful. Targeted production CPU profiling is live-proven under load; continuous and native profiling are still pending.</p>
             <ul>
               <li>Local: added profiler config, capture, freshness, upload, and continuous-mode metrics.</li>
               <li>Local: added opt-in continuous CPU capture with Datadog Agent auto-upload requirement.</li>
+              <li>Live: verified <code>/_admin/profile/cpu</code> under authenticated read load; Datadog received fresh CPU upload counters and the pprof file parses locally.</li>
               <li>Live: evaluate Datadog <code>ddprof</code> for the production Rust process and compare it with the in-process fallback.</li>
-              <li>Live: enable profiler gates and confirm fresh CPU profiles in Datadog.</li>
+              <li>Live: enable continuous profiler gates after runtime deploy and confirm fresh profiles without manual load generation.</li>
               <li>Next: confirm allocation/lock profile path or document Rust profiler limitations.</li>
             </ul>
             <p class="small">Acceptance: fresh profiles within 10 minutes and no stale profiler monitor for 24 hours.</p>
