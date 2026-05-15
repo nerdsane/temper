@@ -198,7 +198,7 @@ railway run --service openpaw --environment production -- python3 scripts/deploy
 May 14, 2026 dry-run result: the Railway-injected Datadog credentials worked
 and the script would create all 62 source-of-truth monitors under the
 `team:openpaw` monitor tag scope. On May 15, 2026, the live source set was
-expanded to 65 monitors with three standard APM coverage monitors, and the
+expanded to 66 monitors with four standard APM coverage monitors, and the
 Datadog deploy created or updated the full set. Before running future
 `--reconcile` deployments, confirm that older dashboards or monitors are not
 still intentionally managed under different tags or names.

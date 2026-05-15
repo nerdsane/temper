@@ -115,6 +115,7 @@ require_pattern "$TEMPERPAW_WORKTREE/dd-monitors/temperpaw-monitors.json" "[Temp
 require_pattern "$TEMPERPAW_WORKTREE/dd-monitors/temperpaw-monitors.json" "[Temper] Cedar AuthZ Phase Error" "Cedar phase error monitor"
 require_pattern "$TEMPERPAW_WORKTREE/dd-monitors/temperpaw-monitors.json" "[TemperPaw] APM Request Rate Missing" "APM request rate monitor"
 require_pattern "$TEMPERPAW_WORKTREE/dd-monitors/temperpaw-monitors.json" "[TemperPaw] APM HTTP 5xx Spike" "APM error monitor"
+require_pattern "$TEMPERPAW_WORKTREE/dd-monitors/temperpaw-monitors.json" "[TemperPaw] APM Error Rate Spike" "APM error rate monitor"
 require_pattern "$TEMPERPAW_WORKTREE/dd-monitors/temperpaw-monitors.json" "[TemperPaw] APM HTTP Duration p95 Regression" "APM duration monitor"
 require_pattern "$TEMPERPAW_WORKTREE/scripts/configure_metric_percentiles.py" "include_percentiles" "Datadog percentile configuration helper"
 

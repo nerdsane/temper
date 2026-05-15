@@ -1063,16 +1063,16 @@
             live runs pass, and deployment completes.
           </p>
           <div class="progress-track" aria-label="Program progress">
-            <div class="progress-fill" style="width: 73%">73%</div>
+            <div class="progress-fill" style="width: 75%">75%</div>
           </div>
           <div class="program-facts">
-            <div class="program-fact"><strong>Phase</strong><span>Measurement package is implemented, quality-gated locally, pushed, split into two draft PRs, refreshed with live Railway/Datadog evidence, and partially deployed into Datadog. Runtime PR review/merge, production runtime deployment, DBM SQL repair, profiler proof, skipped future metric percentile configs, and live e2e evidence remain pending.</span></div>
+            <div class="program-fact"><strong>Phase</strong><span>Measurement package is implemented, quality-gated locally, pushed, split into two draft PRs, refreshed with live Railway/Datadog evidence, and deployed into Datadog with service-level APM coverage recognized for rate, duration, and error. Runtime PR review/merge, production runtime deployment, DBM SQL repair, profiler proof, skipped future metric percentile configs, and live e2e evidence remain pending.</span></div>
             <div class="program-fact"><strong>Branches</strong><span>Temper <code>codex/latency-observability-program</code>; TemperPaw <code>codex/latency-observability-program</code></span></div>
             <div class="program-fact"><strong>Worktrees</strong><span>Temper <code>/Users/seshendranalla/Development/temper-worktrees/latency-observability-program</code>; TemperPaw <code>/Users/seshendranalla/Development/temperpaw-worktrees/latency-observability-program</code></span></div>
             <div class="program-fact"><strong>PRs</strong><span>Temper draft PR <a href="https://github.com/nerdsane/temper/pull/229">nerdsane/temper#229</a>; TemperPaw draft PR <a href="https://github.com/nerdsane/temperpaw/pull/266">nerdsane/temperpaw#266</a>.</span></div>
             <div class="program-fact"><strong>Railway</strong><span>Project <code>openpaw-seshendranalla</code>, environment <code>production</code>, service <code>openpaw</code>, domains <code>openpaw-production.up.railway.app</code> and <code>temperpaw.katagami.ai</code>.</span></div>
             <div class="program-fact"><strong>Datadog tag</strong><span>Production exports <code>DD_SERVICE=temperpaw</code>; dashboards and monitors must query <code>service:temperpaw</code>, not the Railway service name.</span></div>
-            <div class="program-fact"><strong>Production checks</strong><span>Railway-backed Datadog deployment updated dashboard <code>mn4-k3k-i66</code>, created or updated 65 source monitors, and enabled percentile aggregations for 18 live Temper latency distributions; Railway domain <code>/readyz</code> is ready and <code>/healthz</code> returns 200; Datadog reports <code>temper_up=1</code>, Cedar traffic, APM HTTP traffic, and DBM samples/plans for <code>service:temperpaw</code>.</span></div>
+            <div class="program-fact"><strong>Production checks</strong><span>Railway-backed Datadog deployment updated dashboard <code>mn4-k3k-i66</code>, created or updated 66 source monitors, and enabled percentile aggregations for 18 live Temper latency distributions; Railway domain <code>/readyz</code> is ready and <code>/healthz</code> returns 200; Datadog reports <code>temper_up=1</code>, Cedar traffic, APM HTTP traffic, DBM samples/plans, and service coverage for APM rate, duration, and error on <code>service:temperpaw</code>.</span></div>
             <div class="program-fact"><strong>Review gates</strong><span>DST compliance review PASS; code-quality review PASS; changed sim-visible files pass the determinism hook loop; readability ratchet is green at baseline after module splits.</span></div>
             <div class="program-fact"><strong>Dashboard</strong><span><code>docs/temper-latency-observability-report.html</code></span></div>
             <div class="program-fact"><strong>ADRs</strong><span><code>docs/adrs/0081-latency-observability-acceleration-program.md</code>; <code>docs/adrs/0082-projection-correctness-observability.md</code>; <code>docs/adrs/0083-trace-budget-and-fanout-summarization.md</code>; <code>docs/adrs/0084-authz-latency-phase-instrumentation.md</code></span></div>
@@ -1327,7 +1327,7 @@
             </div>
             <div class="log-entry">
               <time datetime="2026-05-15">2026-05-15</time>
-              <p>Deployed the source monitor set through Railway. The first live deploy created 62 monitors; a follow-up coverage pass added three standard APM monitors (<code>APM Request Rate Missing</code> id <code>283342070</code>, <code>APM HTTP 5xx Spike</code> id <code>283342074</code>, <code>APM HTTP Duration p95 Regression</code> id <code>283342076</code>) and updated the set to 65 monitors.</p>
+              <p>Deployed the source monitor set through Railway. The first live deploy created 62 monitors; follow-up coverage passes added four standard APM monitors (<code>APM Request Rate Missing</code> id <code>283342070</code>, <code>APM HTTP 5xx Spike</code> id <code>283342074</code>, <code>APM HTTP Duration p95 Regression</code> id <code>283342076</code>, and <code>APM Error Rate Spike</code> id <code>283345345</code>) and updated the set to 66 monitors.</p>
             </div>
             <div class="log-entry">
               <time datetime="2026-05-15">2026-05-15</time>
@@ -1339,7 +1339,7 @@
             </div>
             <div class="log-entry">
               <time datetime="2026-05-15">2026-05-15</time>
-              <p>Verified percentile configuration live: <code>search_datadog_metrics(percentiles_enabled=true)</code> now returns 18 <code>temper*</code> metrics for <code>service:temperpaw</code>, and metric context confirms <code>temper_dispatch_ask_latency_ms</code>, <code>temper_cedar_evaluation_duration</code>, and <code>temper_session_phase_duration_ms</code> have <code>is_percentiles_enabled:true</code>. The Datadog service coverage analyzer still reports APM rate/error/duration gaps immediately after monitor creation, so that analyzer likely needs indexing time or a different coverage-recognition pattern; the three APM monitors themselves are present and OK.</p>
+              <p>Verified percentile configuration live: <code>search_datadog_metrics(percentiles_enabled=true)</code> now returns 18 <code>temper*</code> metrics for <code>service:temperpaw</code>, and metric context confirms <code>temper_dispatch_ask_latency_ms</code>, <code>temper_cedar_evaluation_duration</code>, and <code>temper_session_phase_duration_ms</code> have <code>is_percentiles_enabled:true</code>. After Datadog indexing caught up, the service coverage analyzer recognized all three standard APM signals for <code>service:temperpaw</code>: rate via monitors <code>283342070</code>/<code>283342074</code>, duration via <code>283342076</code>, and error via <code>283345345</code>.</p>
             </div>
           </div>
         </div>
@@ -1418,9 +1418,9 @@
             </tr>
             <tr>
               <td>Datadog monitor deployment</td>
-              <td>Dashboard <a href="https://app.datadoghq.com/dashboard/mn4-k3k-i66">mn4-k3k-i66</a> was updated. Monitor deploy created or updated 65 source monitors. The three standard APM coverage monitors are present and OK: ids <code>283342070</code>, <code>283342074</code>, and <code>283342076</code>.</td>
-              <td>The Datadog dashboard/monitor source now exists in production Datadog. Service coverage analyzer still reports missing APM rate/error/duration immediately after creation, so coverage recognition is either delayed or needs a Datadog-recognized monitor pattern.</td>
-              <td>Poll monitor coverage again after indexing; if still missing, create the exact Datadog-recognized APM monitor type/pattern and record the delta.</td>
+              <td>Dashboard <a href="https://app.datadoghq.com/dashboard/mn4-k3k-i66">mn4-k3k-i66</a> was updated. Monitor deploy created or updated 66 source monitors. Standard APM monitors are present: request-rate id <code>283342070</code>, 5xx id <code>283342074</code>, duration id <code>283342076</code>, and error-rate id <code>283345345</code>.</td>
+              <td>The Datadog dashboard/monitor source now exists in production Datadog. Service coverage analyzer recognizes rate, duration, and error coverage for <code>service:temperpaw</code>.</td>
+              <td>Keep the four standard APM coverage monitors in source and rerun the deployment/verifier after runtime metrics begin emitting from the Temper PR.</td>
             </tr>
             <tr>
               <td>Production health probe</td>
@@ -1595,7 +1595,7 @@
               <td>Convert key metrics to distributions/percentiles and fix misleading or No Data monitors.</td>
               <td><span class="status watch">Live Datadog config deployed</span></td>
               <td><a href="https://github.com/nerdsane/temperpaw/pull/266">TemperPaw PR #266</a></td>
-              <td>Dashboard and 65 monitors are deployed; 18 live distributions have percentiles enabled. Done still requires runtime deployment for skipped new metrics, widget data for the new surfaces, and monitor coverage reconciliation.</td>
+              <td>Dashboard and 66 monitors are deployed; 18 live distributions have percentiles enabled; Datadog service coverage now recognizes APM rate, duration, and error. Done still requires runtime deployment for skipped new metrics and widget data for the new surfaces.</td>
             </tr>
             <tr>
               <td>OBS-005</td>
@@ -2177,9 +2177,10 @@ flowchart LR
               <li>Local: added monitors for projection drift, replay parity drift/errors, shadow check errors, projection queue/e2e regressions, backfill failures, and Postgres pool/transaction regressions.</li>
               <li>Local: repaired the request latency monitor to use <code>p95:temper_dispatch_ask_latency_ms</code> instead of an average, and added p95 monitors for WASM, blob, Monty, and session phases.</li>
               <li>Local: corrected Datadog query scopes from the Railway service name to the runtime tag <code>service:temperpaw</code> and added a preflight regression guard.</li>
-              <li>Live: deployed dashboard <code>mn4-k3k-i66</code>, created or updated 65 source monitors, and added three standard APM coverage monitors.</li>
+              <li>Live: deployed dashboard <code>mn4-k3k-i66</code>, created or updated 66 source monitors, and added four standard APM coverage monitors.</li>
               <li>Live: enabled percentiles for 18 currently emitted Temper latency distributions; skipped six future runtime metrics that Datadog cannot preconfigure before first emission.</li>
-              <li>Next: commit/push the TemperPaw deployment fixes, rerun percentile config after runtime deploy, verify live widget data, and reconcile Datadog service coverage if it still reports APM gaps after indexing.</li>
+              <li>Live: Datadog service coverage now recognizes APM rate, duration, and error for <code>service:temperpaw</code>.</li>
+              <li>Next: commit/push the TemperPaw deployment fixes, rerun percentile config after runtime deploy, and verify live widget data for the new runtime metrics.</li>
             </ul>
             <p class="small">Acceptance: SLO dashboards use percentiles, not misleading averages.</p>
           </div>
