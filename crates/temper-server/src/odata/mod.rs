@@ -9,6 +9,7 @@ mod read;
 mod read_support;
 mod response;
 mod stream_fast_path;
+mod stream_put;
 mod write;
 
 #[cfg(feature = "observe")]

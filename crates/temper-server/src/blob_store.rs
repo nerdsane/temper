@@ -88,7 +88,7 @@ impl BlobStore {
         body: &[u8],
         ttl: Option<Duration>,
     ) -> Result<(), String> {
-        let queued_at = Instant::now();
+        let queued_at = Instant::now(); // determinism-ok: production blob I/O queue metric only
         let _permit = blob_io_semaphore()
             .acquire()
             .await
@@ -112,8 +112,43 @@ impl BlobStore {
         }
     }
 
+    /// Write bytes to a content-addressed key.
+    ///
+    /// Remote object stores use a direct `PUT` because the key is already
+    /// derived from the payload hash; avoiding a preflight existence check
+    /// saves a round trip on the File `$value` write path.
+    pub(crate) async fn put_content_addressed(
+        &self,
+        key: &str,
+        body: &[u8],
+        ttl: Option<Duration>,
+    ) -> Result<(), String> {
+        let queued_at = Instant::now(); // determinism-ok: production blob I/O queue metric only
+        let _permit = blob_io_semaphore()
+            .acquire()
+            .await
+            .expect("blob semaphore closed"); // ci-ok: process-global and never closed
+        let wait_duration = queued_at.elapsed();
+        crate::runtime_metrics::record_blob_io_wait_duration(wait_duration, "put_content");
+        if wait_duration.as_millis() > 0 {
+            tracing::info!(path = %key, wait_ms = wait_duration.as_millis() as u64, "content-addressed blob put queued");
+        }
+        if ttl.is_some() {
+            tracing::debug!(
+                path = %key,
+                ttl_seconds = ttl.map(|duration| duration.as_secs()),
+                "content-addressed blob write received TTL; retention is delegated to the object store"
+            );
+        }
+
+        match &self.backend {
+            BlobStoreBackend::LocalFs { root } => put_local_blob(root, key, body).await,
+            BlobStoreBackend::S3(store) => store.put(key, body).await,
+        }
+    }
+
     pub(crate) async fn get(&self, key: &str) -> Result<Option<Vec<u8>>, String> {
-        let queued_at = Instant::now();
+        let queued_at = Instant::now(); // determinism-ok: production blob I/O queue metric only
         let _permit = blob_io_semaphore()
             .acquire()
             .await
@@ -169,6 +204,18 @@ impl ServerState {
         store.put_if_absent(key, body, ttl).await
     }
 
+    /// Write bytes to a tenant-scoped content-addressed blob key.
+    pub(crate) async fn put_content_addressed_blob(
+        &self,
+        tenant: &TenantId,
+        key: &str,
+        body: &[u8],
+        ttl: Option<Duration>,
+    ) -> Result<(), String> {
+        let store = self.blob_store_for_tenant(tenant)?;
+        store.put_content_addressed(key, body, ttl).await
+    }
+
     pub(crate) async fn get_blob_with_legacy_fallback(
         &self,
         tenant: &TenantId,
@@ -215,6 +262,10 @@ impl S3BlobStore {
             return Ok(());
         }
 
+        self.put(key, body).await
+    }
+
+    async fn put(&self, key: &str, body: &[u8]) -> Result<(), String> {
         let url = self.object_url(key);
         let mut request = self.client.put(&url).body(body.to_vec());
         let headers = self.signed_headers(Method::PUT, &url)?;
