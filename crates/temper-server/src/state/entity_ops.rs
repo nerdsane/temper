@@ -2,6 +2,7 @@
 
 use std::collections::BTreeMap;
 use std::sync::{Arc, OnceLock, RwLock};
+use std::time::Instant;
 
 use tracing::instrument;
 
@@ -37,6 +38,86 @@ fn is_deleted_envelope(event: &PersistenceEnvelope) -> bool {
         .get("action")
         .and_then(serde_json::Value::as_str)
         == Some("Deleted")
+}
+
+fn record_projection_update_started(
+    tenant: &TenantId,
+    entity_type: &str,
+    operation: &str,
+    source: &str,
+) {
+    crate::query_projection_metrics::record_update_started(
+        tenant.as_str(),
+        entity_type,
+        operation,
+        source,
+    );
+}
+
+fn record_projection_update_success(
+    tenant: &TenantId,
+    entity_type: &str,
+    operation: &str,
+    source: &str,
+    sequence_nr: u64,
+    started_at: Instant,
+) {
+    let duration = started_at.elapsed();
+    crate::query_projection_metrics::record_update_duration(
+        tenant.as_str(),
+        entity_type,
+        operation,
+        source,
+        "ok",
+        duration,
+    );
+    crate::query_projection_metrics::record_update_end_to_end_duration(
+        tenant.as_str(),
+        entity_type,
+        operation,
+        source,
+        "ok",
+        duration,
+    );
+    crate::query_projection_metrics::record_update_applied_sequence(
+        tenant.as_str(),
+        entity_type,
+        operation,
+        source,
+        sequence_nr,
+    );
+}
+
+fn record_projection_update_error(
+    tenant: &TenantId,
+    entity_type: &str,
+    operation: &str,
+    source: &str,
+    started_at: Instant,
+) {
+    let duration = started_at.elapsed();
+    crate::query_projection_metrics::record_update_duration(
+        tenant.as_str(),
+        entity_type,
+        operation,
+        source,
+        "error",
+        duration,
+    );
+    crate::query_projection_metrics::record_update_end_to_end_duration(
+        tenant.as_str(),
+        entity_type,
+        operation,
+        source,
+        "error",
+        duration,
+    );
+    crate::query_projection_metrics::record_update_error(
+        tenant.as_str(),
+        entity_type,
+        operation,
+        source,
+    );
 }
 
 /// Error returned when the verification gate blocks an operation.
@@ -306,6 +387,14 @@ impl ServerState {
     #[instrument(skip_all, fields(otel.name = "entity.populate_field_index", tenant = %tenant))]
     pub async fn populate_field_index_from_snapshots(&self, tenant: &TenantId) {
         projection_backfill::populate_field_index_from_snapshots(self, tenant).await;
+    }
+
+    /// Compare durable projection rows with authoritative state rebuilt by event replay.
+    pub async fn verify_query_projection_replay_parity(
+        &self,
+        tenant: &TenantId,
+    ) -> Result<super::QueryProjectionReplayParityReport, String> {
+        projection_backfill::verify_query_projection_replay_parity(self, tenant).await
     }
 
     /// Hydrate actor state from the event store by spawning actors for all
@@ -647,6 +736,10 @@ impl ServerState {
             let status = response.state.status.clone();
             let fields = self.query_projection_fields(tenant, entity_type, &response.state.fields);
             let sequence_nr = response.state.sequence_nr;
+            let operation = "upsert";
+            let source = "create";
+            record_projection_update_started(tenant, entity_type, operation, source);
+            let projection_started_at = Instant::now(); // determinism-ok: production-only projection duration metric
             if let Err(e) = query_plane
                 .upsert_projection(
                     tenant.as_str(),
@@ -658,6 +751,13 @@ impl ServerState {
                 )
                 .await
             {
+                record_projection_update_error(
+                    tenant,
+                    entity_type,
+                    operation,
+                    source,
+                    projection_started_at,
+                );
                 // Surface the projection failure instead of swallowing it.
                 // Previously this was a `warn` followed by `Ok(response)`,
                 // which produced HTTP 201 even when the entity wasn't
@@ -677,6 +777,14 @@ impl ServerState {
                 );
                 return Err(format!("query projection write failed during create: {e}"));
             }
+            record_projection_update_success(
+                tenant,
+                entity_type,
+                operation,
+                source,
+                sequence_nr,
+                projection_started_at,
+            );
         }
 
         Ok(response)
@@ -718,6 +826,10 @@ impl ServerState {
             let status = response.state.status.clone();
             let fields = self.query_projection_fields(tenant, entity_type, &response.state.fields);
             let sequence_nr = response.state.sequence_nr;
+            let operation = "upsert";
+            let source = "field_update";
+            record_projection_update_started(tenant, entity_type, operation, source);
+            let projection_started_at = Instant::now(); // determinism-ok: production-only projection duration metric
             if let Err(e) = query_plane
                 .upsert_projection(
                     tenant.as_str(),
@@ -729,6 +841,13 @@ impl ServerState {
                 )
                 .await
             {
+                record_projection_update_error(
+                    tenant,
+                    entity_type,
+                    operation,
+                    source,
+                    projection_started_at,
+                );
                 // Same reasoning as create: don't ack a write that won't be
                 // visible via $filter. Propagate so OData returns 5xx and
                 // clients can retry against the idempotent upsert.
@@ -741,6 +860,14 @@ impl ServerState {
                 );
                 return Err(format!("query projection write failed during update: {e}"));
             }
+            record_projection_update_success(
+                tenant,
+                entity_type,
+                operation,
+                source,
+                sequence_nr,
+                projection_started_at,
+            );
         }
 
         Ok(response)
@@ -771,23 +898,44 @@ impl ServerState {
         .map_err(|e| format!("Actor delete failed: {e}"))?;
 
         if response.success {
-            if let Some(query_plane) = self.query_plane_store()
-                && let Err(e) = query_plane
+            if let Some(query_plane) = self.query_plane_store() {
+                let operation = "remove";
+                let source = "delete";
+                record_projection_update_started(tenant, entity_type, operation, source);
+                let projection_started_at = Instant::now(); // determinism-ok: production-only projection duration metric
+                if let Err(e) = query_plane
                     .remove_projection(tenant.as_str(), entity_type, entity_id)
                     .await
-            {
-                // Delete is idempotent against the projection: a stale row
-                // surviving in entity_field_index after the tombstone is a
-                // visibility leak, not data corruption. Log loudly so it's
-                // greppable but don't block the delete from completing —
-                // the actor and event journal already reflect the tombstone.
-                tracing::error!(
-                    error = %e,
-                    tenant = %tenant,
-                    entity_type = %entity_type,
-                    entity_id = %entity_id,
-                    "failed to remove query projection during delete (stale projection row will linger until next successful upsert/delete)"
-                );
+                {
+                    record_projection_update_error(
+                        tenant,
+                        entity_type,
+                        operation,
+                        source,
+                        projection_started_at,
+                    );
+                    // Delete is idempotent against the projection: a stale row
+                    // surviving in entity_field_index after the tombstone is a
+                    // visibility leak, not data corruption. Log loudly so it's
+                    // greppable but don't block the delete from completing —
+                    // the actor and event journal already reflect the tombstone.
+                    tracing::error!(
+                        error = %e,
+                        tenant = %tenant,
+                        entity_type = %entity_type,
+                        entity_id = %entity_id,
+                        "failed to remove query projection during delete (stale projection row will linger until next successful upsert/delete)"
+                    );
+                } else {
+                    record_projection_update_success(
+                        tenant,
+                        entity_type,
+                        operation,
+                        source,
+                        response.state.sequence_nr,
+                        projection_started_at,
+                    );
+                }
             }
 
             // Tombstone persisted successfully; now it is safe to remove actor

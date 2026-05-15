@@ -1,6 +1,6 @@
 //! Actor runtime startup wiring for `temper serve`.
 
-use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::sync::{Arc, RwLock};
 
 use anyhow::{Context, Result, anyhow, bail};
@@ -18,7 +18,7 @@ use crate::StorageBackend;
 
 pub(super) struct ConfiguredPostgresActorRuntime {
     pub system: Arc<PgActorSystem>,
-    pub actor_backed_types: HashSet<String>,
+    pub actor_backed_types: BTreeSet<String>,
     pub cancel: watch::Sender<bool>,
 }
 
@@ -49,7 +49,7 @@ struct ActorRuntimeDefinition {
 #[derive(Debug)]
 struct ActorRuntimeDefinitions {
     definitions: Vec<ActorRuntimeDefinition>,
-    actor_backed_keys: HashSet<String>,
+    actor_backed_keys: BTreeSet<String>,
 }
 
 #[derive(Debug, Default)]
@@ -159,7 +159,7 @@ fn collect_actor_runtime_definitions(
     }
 
     let mut definitions = BTreeMap::<String, ActorRuntimeDefinition>::new();
-    let mut actor_backed_keys = HashSet::new();
+    let mut actor_backed_keys = BTreeSet::new();
     for tenant in registry.tenant_ids() {
         for entity_type in registry.entity_types(tenant) {
             if !selected.matches(tenant.as_str(), entity_type) {

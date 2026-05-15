@@ -36,7 +36,22 @@ impl ReactionDispatcher {
     /// broadcast sent. Reactions are fire-and-forget: failures are logged but
     /// do not roll back the source transition.
     #[allow(clippy::too_many_arguments)]
-    #[instrument(skip_all, fields(otel.name = "reaction.dispatch", tenant = %tenant, entity_type, entity_id, action_name = action, depth))]
+    #[instrument(skip_all, fields(
+        otel.name = "reaction.dispatch",
+        tenant = %tenant,
+        entity_type,
+        entity_id,
+        action_name = action,
+        depth,
+        reaction.rule_count = tracing::field::Empty,
+        reaction.fired_count = tracing::field::Empty,
+        reaction.guard_skipped_count = tracing::field::Empty,
+        reaction.target_resolve_error_count = tracing::field::Empty,
+        reaction.authz_denied_count = tracing::field::Empty,
+        reaction.dispatch_error_count = tracing::field::Empty,
+        reaction.success_count = tracing::field::Empty,
+        reaction.result_count = tracing::field::Empty,
+    ))]
     pub async fn dispatch_reactions(
         &self,
         state: &crate::ServerState,
@@ -50,6 +65,7 @@ impl ReactionDispatcher {
         invoking_ctx: &AgentContext,
     ) -> Vec<ReactionResult> {
         if depth >= MAX_REACTION_DEPTH {
+            record_reaction_fanout_span(ReactionFanoutCounts::default());
             tracing::warn!(
                 tenant = %tenant,
                 entity_type,
@@ -68,9 +84,17 @@ impl ReactionDispatcher {
             .collect();
 
         if rules.is_empty() {
+            record_reaction_fanout_span(ReactionFanoutCounts::default());
             return Vec::new();
         }
 
+        let rule_count = rules.len();
+        let mut fired_count = 0usize;
+        let mut guard_skipped_count = 0usize;
+        let mut target_resolve_error_count = 0usize;
+        let mut authz_denied_count = 0usize;
+        let mut dispatch_error_count = 0usize;
+        let mut success_count = 0usize;
         let mut results = Vec::new();
 
         for rule in rules {
@@ -92,6 +116,7 @@ impl ReactionDispatcher {
                     guard, fields, to_state, &resolved, &rule.name,
                 );
                 if !passed {
+                    guard_skipped_count += 1;
                     tracing::debug!(
                         rule = rule.name,
                         cross_entity_queries = queries.len(),
@@ -105,6 +130,7 @@ impl ReactionDispatcher {
                 match super::resolver::resolve_target_id(&rule.resolve_target, entity_id, fields) {
                     Some(id) => id,
                     None => {
+                        target_resolve_error_count += 1;
                         tracing::warn!(
                             rule = rule.name,
                             "Could not resolve target entity ID for reaction"
@@ -180,6 +206,7 @@ impl ReactionDispatcher {
                 tenant.as_str(),
             ) {
                 let reason = denial.to_string();
+                authz_denied_count += 1;
                 tracing::warn!(
                     rule = rule.name,
                     target_entity = %rule.then.entity_type,
@@ -201,6 +228,7 @@ impl ReactionDispatcher {
 
             // Fire the target action via the core dispatch (no reaction cascade
             // to avoid infinite async recursion — we handle cascading ourselves).
+            fired_count += 1;
             let dispatch_result = state
                 .dispatch_tenant_action_core(
                     tenant,
@@ -216,6 +244,9 @@ impl ReactionDispatcher {
             match dispatch_result {
                 Ok(response) => {
                     let target_status = response.state.status.clone();
+                    if response.success {
+                        success_count += 1;
+                    }
                     results.push(ReactionResult {
                         rule_name: rule.name.clone(),
                         success: response.success,
@@ -248,6 +279,7 @@ impl ReactionDispatcher {
                     }
                 }
                 Err(e) => {
+                    dispatch_error_count += 1;
                     tracing::warn!(
                         rule = rule.name,
                         error = %e,
@@ -264,8 +296,46 @@ impl ReactionDispatcher {
             }
         }
 
+        record_reaction_fanout_span(ReactionFanoutCounts {
+            rule_count,
+            fired_count,
+            guard_skipped_count,
+            target_resolve_error_count,
+            authz_denied_count,
+            dispatch_error_count,
+            success_count,
+            result_count: results.len(),
+        });
+
         results
     }
+}
+
+#[derive(Default)]
+struct ReactionFanoutCounts {
+    rule_count: usize,
+    fired_count: usize,
+    guard_skipped_count: usize,
+    target_resolve_error_count: usize,
+    authz_denied_count: usize,
+    dispatch_error_count: usize,
+    success_count: usize,
+    result_count: usize,
+}
+
+fn record_reaction_fanout_span(counts: ReactionFanoutCounts) {
+    let span = tracing::Span::current();
+    span.record("reaction.rule_count", counts.rule_count);
+    span.record("reaction.fired_count", counts.fired_count);
+    span.record("reaction.guard_skipped_count", counts.guard_skipped_count);
+    span.record(
+        "reaction.target_resolve_error_count",
+        counts.target_resolve_error_count,
+    );
+    span.record("reaction.authz_denied_count", counts.authz_denied_count);
+    span.record("reaction.dispatch_error_count", counts.dispatch_error_count);
+    span.record("reaction.success_count", counts.success_count);
+    span.record("reaction.result_count", counts.result_count);
 }
 
 // Target resolver logic consolidated in super::resolver::resolve_target_id.

@@ -400,7 +400,7 @@ pub struct TursoQueryProjectionRow {
     pub entity_id: String,
     /// Current entity status.
     pub status: String,
-    /// Top-level scalar fields reconstructed from the durable EAV index.
+    /// Full projected fields JSON preserved in the durable catalog.
     pub fields: serde_json::Value,
     /// Latest sequence number represented by this projection.
     pub sequence_nr: u64,

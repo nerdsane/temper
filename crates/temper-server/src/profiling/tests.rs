@@ -1,4 +1,5 @@
 use super::*;
+
 use std::sync::Mutex;
 
 // Cargo runs tests in parallel; env-var mutation races otherwise.
@@ -58,6 +59,46 @@ fn max_window_clamps() {
 }
 
 #[test]
+fn continuous_tuning_clamps() {
+    let _g = ENV_LOCK.lock().unwrap();
+    unsafe {
+        std::env::remove_var("TEMPER_PROFILING_MAX_SECONDS");
+        std::env::remove_var("TEMPER_PROFILING_CONTINUOUS_INTERVAL_SECONDS");
+        std::env::remove_var("TEMPER_PROFILING_CONTINUOUS_SECONDS");
+        std::env::remove_var("TEMPER_PROFILING_CONTINUOUS_FREQUENCY");
+    }
+    assert_eq!(continuous_interval_seconds(), 300);
+    assert_eq!(continuous_window_seconds(), 30);
+    assert_eq!(continuous_frequency(), 100);
+
+    unsafe {
+        std::env::set_var("TEMPER_PROFILING_CONTINUOUS_INTERVAL_SECONDS", "5");
+        std::env::set_var("TEMPER_PROFILING_CONTINUOUS_SECONDS", "1");
+        std::env::set_var("TEMPER_PROFILING_CONTINUOUS_FREQUENCY", "1");
+    }
+    assert_eq!(continuous_interval_seconds(), 60);
+    assert_eq!(continuous_window_seconds(), 5);
+    assert_eq!(continuous_frequency(), 10);
+
+    unsafe {
+        std::env::set_var("TEMPER_PROFILING_MAX_SECONDS", "60");
+        std::env::set_var("TEMPER_PROFILING_CONTINUOUS_INTERVAL_SECONDS", "999999");
+        std::env::set_var("TEMPER_PROFILING_CONTINUOUS_SECONDS", "999");
+        std::env::set_var("TEMPER_PROFILING_CONTINUOUS_FREQUENCY", "999");
+    }
+    assert_eq!(continuous_interval_seconds(), 3_600);
+    assert_eq!(continuous_window_seconds(), 60);
+    assert_eq!(continuous_frequency(), 500);
+
+    unsafe {
+        std::env::remove_var("TEMPER_PROFILING_MAX_SECONDS");
+        std::env::remove_var("TEMPER_PROFILING_CONTINUOUS_INTERVAL_SECONDS");
+        std::env::remove_var("TEMPER_PROFILING_CONTINUOUS_SECONDS");
+        std::env::remove_var("TEMPER_PROFILING_CONTINUOUS_FREQUENCY");
+    }
+}
+
+#[test]
 fn datadog_profile_event_uses_agent_intake_envelope() {
     let _g = ENV_LOCK.lock().unwrap();
     unsafe {
@@ -74,7 +115,7 @@ fn datadog_profile_event_uses_agent_intake_envelope() {
         .unwrap()
         .with_timezone(&chrono::Utc);
     let filename = profile_filename("cpu");
-    let event = profile_upload_event_json("cpu", &filename, started_at, ended_at);
+    let event = profile_upload_event_json("cpu", "on_demand", &filename, started_at, ended_at);
 
     assert_eq!(event["version"], "4");
     assert_eq!(event["family"], "rust");
@@ -92,6 +133,7 @@ fn datadog_profile_event_uses_agent_intake_envelope() {
         "version:30feec4",
         "runtime:rust",
         "profile.component:cpu",
+        "profile.mode:on_demand",
     ] {
         assert!(tags.contains(expected), "missing tag {expected} in {tags}");
     }
@@ -104,5 +146,6 @@ fn datadog_profile_event_uses_agent_intake_envelope() {
         std::env::remove_var("DD_SERVICE");
         std::env::remove_var("DD_ENV");
         std::env::remove_var("DD_VERSION");
+        std::env::remove_var("DD_PROFILING_ENABLED");
     }
 }

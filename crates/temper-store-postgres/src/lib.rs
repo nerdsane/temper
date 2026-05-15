@@ -13,11 +13,13 @@
 //!   creates the required tables on startup.
 
 pub mod dbm;
+mod metrics;
 pub mod migration;
 pub mod platform;
 pub mod schema;
 pub mod store;
 
+pub use metrics::init_metrics;
 pub use platform::{
     PostgresActionStats, PostgresAgentSummary, PostgresDesignTimeEventRow,
     PostgresEvolutionRecordRow, PostgresFeatureRequestRow, PostgresInstalledAppRow,

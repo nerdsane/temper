@@ -146,6 +146,7 @@ pub(crate) struct DenialInput<'a> {
 }
 
 /// Input for a resumable management mutation authorization check.
+#[allow(unused)] // Staged for governed management endpoints after the latency package lands.
 pub(crate) struct GovernedMutationAuth<'a> {
     pub tenant: &'a str,
     pub action: &'a str,
@@ -163,6 +164,7 @@ pub(crate) struct GovernedMutationAuth<'a> {
 /// `PendingDecision` records. Non-agent or sessionless denials stay ordinary
 /// `403 Forbidden` responses so passive/admin surfaces do not generate noisy
 /// approval work.
+#[allow(unused)] // Staged for governed management endpoints after the latency package lands.
 pub(crate) async fn require_governed_mutation_auth(
     state: &crate::state::ServerState,
     headers: &HeaderMap,

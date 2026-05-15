@@ -731,6 +731,10 @@ async fn load_entity_catalog_rows_returns_full_projected_fields() {
                 "WorkspaceId": "ws-a",
                 "MimeType": "text/markdown",
                 "HasContent": true,
+                "content_hash": "sha256:file-a",
+                "has_content": true,
+                "size_bytes": 12,
+                "nested": { "kept": true },
             }),
             7,
         )
@@ -754,6 +758,10 @@ async fn load_entity_catalog_rows_returns_full_projected_fields() {
     assert_eq!(rows[0].fields["WorkspaceId"], "ws-a");
     assert_eq!(rows[0].fields["MimeType"], "text/markdown");
     assert_eq!(rows[0].fields["HasContent"], true);
+    assert_eq!(rows[0].fields["content_hash"], "sha256:file-a");
+    assert_eq!(rows[0].fields["has_content"], true);
+    assert_eq!(rows[0].fields["size_bytes"], 12);
+    assert_eq!(rows[0].fields["nested"]["kept"], true);
 }
 
 #[tokio::test]
@@ -847,12 +855,14 @@ async fn export_query_projections_returns_all_fields_for_migration() {
     );
     assert_eq!(
         rows[0].fields.get("has_content").and_then(|v| v.as_str()),
-        Some("true")
+        None
     );
+    assert_eq!(rows[0].fields["has_content"], true);
     assert_eq!(
         rows[0].fields.get("size_bytes").and_then(|v| v.as_str()),
-        Some("12")
+        None
     );
+    assert_eq!(rows[0].fields["size_bytes"], 12);
 }
 
 #[tokio::test]

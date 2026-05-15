@@ -1,3 +1,6 @@
+use std::collections::BTreeMap;
+use std::time::Instant;
+
 use temper_runtime::tenant::TenantId;
 
 use crate::entity_actor::recover_entity_state_from_store;
@@ -5,7 +8,31 @@ use crate::runtime_metrics;
 
 use super::ServerState;
 
+mod replay_parity;
+
+pub(super) use replay_parity::verify_query_projection_replay_parity;
+
+fn transition_table_for(
+    state: &ServerState,
+    tenant: &TenantId,
+    entity_type: &str,
+) -> Option<temper_jit::TransitionTable> {
+    {
+        let registry = state.registry.read().unwrap();
+        registry
+            .get_table_live(tenant, entity_type)
+            .map(|table| table.read().expect("table lock poisoned").clone())
+    }
+    .or_else(|| {
+        state
+            .transition_tables
+            .get(entity_type)
+            .map(|table| (**table).clone())
+    })
+}
+
 pub(super) async fn populate_field_index_from_snapshots(state: &ServerState, tenant: &TenantId) {
+    let overall_started_at = Instant::now(); // determinism-ok: production-only backfill duration metric
     let Some((store, backend)) = state.event_journal() else {
         return;
     };
@@ -28,6 +55,20 @@ pub(super) async fn populate_field_index_from_snapshots(state: &ServerState, ten
     };
 
     let total = entities.len();
+    let mut considered_by_type = BTreeMap::<String, u64>::new();
+    for (entity_type, _) in &entities {
+        *considered_by_type.entry(entity_type.clone()).or_default() += 1;
+    }
+    for (entity_type, count) in considered_by_type {
+        crate::query_projection_metrics::record_backfill_entities(
+            tenant.as_str(),
+            &entity_type,
+            "backfill",
+            "considered",
+            count,
+        );
+    }
+
     let mut indexed = 0usize;
     let mut errors = 0usize;
     let mut needs_replay = Vec::new();
@@ -61,13 +102,41 @@ pub(super) async fn populate_field_index_from_snapshots(state: &ServerState, ten
                             "field index backfill: upsert failed"
                         );
                         errors += 1;
+                        crate::query_projection_metrics::record_backfill_entities(
+                            tenant.as_str(),
+                            entity_type,
+                            "backfill_snapshot",
+                            "error",
+                            1,
+                        );
                     } else {
                         indexed += 1;
+                        crate::query_projection_metrics::record_backfill_entities(
+                            tenant.as_str(),
+                            entity_type,
+                            "backfill_snapshot",
+                            "ok",
+                            1,
+                        );
+                        crate::query_projection_metrics::record_update_applied_sequence(
+                            tenant.as_str(),
+                            entity_type,
+                            "upsert",
+                            "backfill_snapshot",
+                            state_snapshot.sequence_nr,
+                        );
                     }
                 }
             }
             Ok(None) => {
                 needs_replay.push((entity_type.clone(), entity_id.clone()));
+                crate::query_projection_metrics::record_backfill_entities(
+                    tenant.as_str(),
+                    entity_type,
+                    "backfill_snapshot",
+                    "missing_snapshot",
+                    1,
+                );
             }
             Err(e) => {
                 tracing::debug!(
@@ -77,6 +146,13 @@ pub(super) async fn populate_field_index_from_snapshots(state: &ServerState, ten
                     "field index backfill: snapshot load failed"
                 );
                 errors += 1;
+                crate::query_projection_metrics::record_backfill_entities(
+                    tenant.as_str(),
+                    entity_type,
+                    "backfill_snapshot",
+                    "error",
+                    1,
+                );
             }
         }
     }
@@ -96,26 +172,20 @@ pub(super) async fn populate_field_index_from_snapshots(state: &ServerState, ten
     }
 
     for (entity_type, entity_id) in &needs_replay {
-        let table = {
-            let registry = state.registry.read().unwrap();
-            registry
-                .get_table_live(tenant, entity_type)
-                .map(|table| table.read().expect("table lock poisoned").clone())
-        }
-        .or_else(|| {
-            state
-                .transition_tables
-                .get(entity_type)
-                .map(|table| (**table).clone())
-        });
-
-        let Some(table) = table else {
+        let Some(table) = transition_table_for(state, tenant, entity_type) else {
             tracing::debug!(
                 entity_type = %entity_type,
                 entity_id = %entity_id,
                 "field index backfill: no transition table available for replay"
             );
             errors += 1;
+            crate::query_projection_metrics::record_backfill_entities(
+                tenant.as_str(),
+                entity_type,
+                "backfill_replay",
+                "missing_table",
+                1,
+            );
             continue;
         };
 
@@ -133,6 +203,19 @@ pub(super) async fn populate_field_index_from_snapshots(state: &ServerState, ten
         .await;
 
         if replayed.total_event_count == 0 {
+            crate::query_projection_metrics::record_backfill_replay_events(
+                tenant.as_str(),
+                entity_type,
+                "empty",
+                replayed.total_event_count as u64,
+            );
+            crate::query_projection_metrics::record_backfill_entities(
+                tenant.as_str(),
+                entity_type,
+                "backfill_replay",
+                "empty",
+                1,
+            );
             tracing::debug!(
                 entity_type = %entity_type,
                 entity_id = %entity_id,
@@ -151,6 +234,40 @@ pub(super) async fn populate_field_index_from_snapshots(state: &ServerState, ten
                     "field index backfill: failed to clear deleted projection"
                 );
                 errors += 1;
+                crate::query_projection_metrics::record_backfill_replay_events(
+                    tenant.as_str(),
+                    entity_type,
+                    "error",
+                    replayed.total_event_count as u64,
+                );
+                crate::query_projection_metrics::record_backfill_entities(
+                    tenant.as_str(),
+                    entity_type,
+                    "backfill_replay",
+                    "error",
+                    1,
+                );
+            } else {
+                crate::query_projection_metrics::record_backfill_replay_events(
+                    tenant.as_str(),
+                    entity_type,
+                    "deleted",
+                    replayed.total_event_count as u64,
+                );
+                crate::query_projection_metrics::record_backfill_entities(
+                    tenant.as_str(),
+                    entity_type,
+                    "backfill_replay",
+                    "deleted_removed",
+                    1,
+                );
+                crate::query_projection_metrics::record_update_applied_sequence(
+                    tenant.as_str(),
+                    entity_type,
+                    "remove",
+                    "backfill_replay",
+                    replayed.sequence_nr,
+                );
             }
         } else {
             match query_plane
@@ -166,6 +283,26 @@ pub(super) async fn populate_field_index_from_snapshots(state: &ServerState, ten
             {
                 Ok(()) => {
                     indexed += 1;
+                    crate::query_projection_metrics::record_backfill_replay_events(
+                        tenant.as_str(),
+                        entity_type,
+                        "ok",
+                        replayed.total_event_count as u64,
+                    );
+                    crate::query_projection_metrics::record_backfill_entities(
+                        tenant.as_str(),
+                        entity_type,
+                        "backfill_replay",
+                        "ok",
+                        1,
+                    );
+                    crate::query_projection_metrics::record_update_applied_sequence(
+                        tenant.as_str(),
+                        entity_type,
+                        "upsert",
+                        "backfill_replay",
+                        replayed.sequence_nr,
+                    );
                 }
                 Err(e) => {
                     tracing::debug!(
@@ -175,6 +312,19 @@ pub(super) async fn populate_field_index_from_snapshots(state: &ServerState, ten
                         "field index backfill: replay upsert failed"
                     );
                     errors += 1;
+                    crate::query_projection_metrics::record_backfill_replay_events(
+                        tenant.as_str(),
+                        entity_type,
+                        "error",
+                        replayed.total_event_count as u64,
+                    );
+                    crate::query_projection_metrics::record_backfill_entities(
+                        tenant.as_str(),
+                        entity_type,
+                        "backfill_replay",
+                        "error",
+                        1,
+                    );
                 }
             }
         }
@@ -188,5 +338,10 @@ pub(super) async fn populate_field_index_from_snapshots(state: &ServerState, ten
         indexed,
         errors,
         "populated query projections (snapshots + persistence replay)"
+    );
+    crate::query_projection_metrics::record_backfill_duration(
+        tenant.as_str(),
+        "overall",
+        overall_started_at.elapsed(),
     );
 }
