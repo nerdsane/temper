@@ -80,13 +80,15 @@ impl TursoEventStore {
             .await?;
         let conn = self.configured_connection().await?;
         let new_projection_hash = projection_hash(status, fields);
+        let fields_json = serde_json::to_string(fields)
+            .map_err(|error| PersistenceError::Serialization(error.to_string()))?;
         let updated_at = sim_now().to_rfc3339();
         let sequence_nr = i64::try_from(sequence_nr).unwrap_or(i64::MAX);
 
         let unchanged_rows = conn
             .execute(
                 "UPDATE entity_catalog \
-                 SET status = ?4, updated_at = ?5, sequence_nr = ?6, projection_version = 2 \
+                 SET status = ?4, updated_at = ?5, sequence_nr = ?6, projection_version = 2, fields = ?8 \
                  WHERE tenant = ?1 AND entity_type = ?2 AND entity_id = ?3 AND projection_hash = ?7",
                 params![
                     tenant,
@@ -96,6 +98,7 @@ impl TursoEventStore {
                     updated_at.as_str(),
                     sequence_nr,
                     new_projection_hash.as_str(),
+                    fields_json.as_str(),
                 ],
             )
             .await
@@ -112,10 +115,11 @@ impl TursoEventStore {
 
         tx.execute(
             "INSERT INTO entity_catalog \
-             (tenant, entity_type, entity_id, status, updated_at, sequence_nr, projection_version, projection_hash) \
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, 2, ?7) \
+             (tenant, entity_type, entity_id, status, fields, updated_at, sequence_nr, projection_version, projection_hash) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, 2, ?8) \
              ON CONFLICT(tenant, entity_type, entity_id) DO UPDATE SET \
                  status = excluded.status, \
+                 fields = excluded.fields, \
                  updated_at = excluded.updated_at, \
                  sequence_nr = excluded.sequence_nr, \
                  projection_version = excluded.projection_version, \
@@ -125,7 +129,8 @@ impl TursoEventStore {
                 entity_type,
                 entity_id,
                 status,
-                updated_at,
+                fields_json.as_str(),
+                updated_at.as_str(),
                 sequence_nr,
                 new_projection_hash.as_str(),
             ],
@@ -387,9 +392,7 @@ impl TursoEventStore {
     /// Export every durable query-plane projection, optionally scoped to one tenant.
     ///
     /// Turso keeps projected fields in `entity_field_index`, so this reconstructs
-    /// a JSON object from the EAV rows while preserving the catalog status and
-    /// sequence number. Scalar values remain strings because that is the durable
-    /// representation used for SQL filter push-down.
+    /// the full projected fields JSON preserved in the catalog.
     #[instrument(skip_all, fields(
         otel.name = "turso.export_query_projections",
         tenant = tenant.unwrap_or("*"),
@@ -401,50 +404,36 @@ impl TursoEventStore {
         let conn = self.configured_connection().await?;
         let mut rows = conn
             .query(
-                "SELECT c.tenant, c.entity_type, c.entity_id, c.status, c.sequence_nr, \
-                        f.field_name, f.field_value \
-                 FROM entity_catalog c \
-                 LEFT JOIN entity_field_index f \
-                   ON c.tenant = f.tenant \
-                  AND c.entity_type = f.entity_type \
-                  AND c.entity_id = f.entity_id \
-                 WHERE (?1 IS NULL OR c.tenant = ?1) \
-                 ORDER BY c.tenant, c.entity_type, c.entity_id, f.field_name",
+                "SELECT tenant, entity_type, entity_id, status, fields, sequence_nr \
+                 FROM entity_catalog \
+                 WHERE (?1 IS NULL OR tenant = ?1) \
+                 ORDER BY tenant, entity_type, entity_id",
                 params![tenant],
             )
             .await
             .map_err(storage_error)?;
 
-        let mut out = BTreeMap::<(String, String, String), TursoQueryProjectionRow>::new();
+        let mut out = Vec::new();
         while let Some(row) = rows.next().await.map_err(storage_error)? {
             let tenant: String = row.get(0).map_err(storage_error)?;
             let entity_type: String = row.get(1).map_err(storage_error)?;
             let entity_id: String = row.get(2).map_err(storage_error)?;
             let status: String = row.get(3).map_err(storage_error)?;
-            let sequence_nr = row.get::<i64>(4).map_err(storage_error)?.max(0) as u64;
-            let field_name: Option<String> = row.get(5).map_err(storage_error)?;
-            let field_value: Option<String> = row.get(6).map_err(storage_error)?;
-            let key = (tenant.clone(), entity_type.clone(), entity_id.clone());
-            let entry = out.entry(key).or_insert_with(|| TursoQueryProjectionRow {
+            let fields_text: String = row.get(4).map_err(storage_error)?;
+            let sequence_nr = row.get::<i64>(5).map_err(storage_error)?.max(0) as u64;
+            let fields = serde_json::from_str(&fields_text)
+                .map_err(|error| PersistenceError::Serialization(error.to_string()))?;
+            out.push(TursoQueryProjectionRow {
                 tenant,
                 entity_type,
                 entity_id,
                 status,
-                fields: serde_json::Value::Object(serde_json::Map::new()),
+                fields,
                 sequence_nr,
             });
-
-            if let Some(field_name) = field_name
-                && let Some(object) = entry.fields.as_object_mut()
-            {
-                let value = field_value
-                    .map(serde_json::Value::String)
-                    .unwrap_or(serde_json::Value::Null);
-                object.insert(field_name, value);
-            }
         }
 
-        Ok(out.into_values().collect())
+        Ok(out)
     }
 
     /// Return projected entity counts grouped by tenant.
@@ -516,7 +505,7 @@ impl TursoEventStore {
             let fields_text: String = row.get(2).map_err(storage_error)?;
             let sequence_nr: i64 = row.get(3).map_err(storage_error)?;
             let fields: serde_json::Value = serde_json::from_str(&fields_text)
-                .map_err(|err| PersistenceError::Storage(err.to_string()))?;
+                .map_err(|error| PersistenceError::Serialization(error.to_string()))?;
             out.push(EntityCatalogRow {
                 entity_id,
                 status,

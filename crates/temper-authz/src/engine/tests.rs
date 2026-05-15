@@ -166,6 +166,19 @@ fn test_invalid_policy_returns_error() {
 }
 
 #[test]
+fn invalid_action_denies_through_instrumented_error_path() {
+    let engine = AuthzEngine::permissive();
+    let ctx = customer_context("cust-1");
+    let attrs = HashMap::new();
+
+    let decision = engine.authorize(&ctx, "bad\"action", "Order", &attrs);
+    assert!(
+        matches!(decision, AuthzDecision::Deny(AuthzDenial::InvalidAction(_))),
+        "invalid action should deny with typed reason, got: {decision:?}"
+    );
+}
+
+#[test]
 fn test_decision_is_allowed() {
     assert!((AuthzDecision::Allow { policy_ids: vec![] }).is_allowed());
     assert!(!AuthzDecision::Deny(AuthzDenial::NoMatchingPermit).is_allowed());

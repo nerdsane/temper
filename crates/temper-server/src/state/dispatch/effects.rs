@@ -7,6 +7,7 @@
 use std::sync::Arc;
 use std::time::Instant;
 
+use tokio::spawn as spawn_post_dispatch_effect; // determinism-ok: post-dispatch side effects are outside transition semantics
 use tracing::Instrument;
 
 use crate::entity_actor::{EntityResponse, effects::ScheduledAction};
@@ -80,8 +81,15 @@ impl crate::state::ServerState {
             "upsert"
         }
         .to_string();
+        let source = "background_dispatch".to_string();
+        let enqueued_at = Instant::now(); // determinism-ok: production-only projection queue metric
 
-        crate::query_projection_metrics::record_update_enqueued(&tenant, &entity_type, &operation);
+        crate::query_projection_metrics::record_update_enqueued(
+            &tenant,
+            &entity_type,
+            &operation,
+            &source,
+        );
 
         let span = tracing::info_span!(
             "dispatch.phase.query_projection",
@@ -92,9 +100,22 @@ impl crate::state::ServerState {
             operation = %operation,
         );
 
-        tokio::spawn(
+        spawn_post_dispatch_effect(
             async move {
-                let started_at = Instant::now();
+                let started_at = Instant::now(); // determinism-ok: production-only projection duration metric
+                crate::query_projection_metrics::record_update_started(
+                    &tenant,
+                    &entity_type,
+                    &operation,
+                    &source,
+                );
+                crate::query_projection_metrics::record_update_queue_wait(
+                    &tenant,
+                    &entity_type,
+                    &operation,
+                    &source,
+                    started_at.duration_since(enqueued_at),
+                );
                 let result = if status == "Deleted" {
                     query_plane
                         .remove_projection(&tenant, &entity_type, &entity_id)
@@ -116,8 +137,17 @@ impl crate::state::ServerState {
                     &tenant,
                     &entity_type,
                     &operation,
+                    &source,
                     result_label,
                     started_at.elapsed(),
+                );
+                crate::query_projection_metrics::record_update_end_to_end_duration(
+                    &tenant,
+                    &entity_type,
+                    &operation,
+                    &source,
+                    result_label,
+                    enqueued_at.elapsed(),
                 );
 
                 if let Err(e) = result {
@@ -125,6 +155,7 @@ impl crate::state::ServerState {
                         &tenant,
                         &entity_type,
                         &operation,
+                        &source,
                     );
                     tracing::warn!(
                         error = %e,
@@ -133,6 +164,14 @@ impl crate::state::ServerState {
                         entity_id = %entity_id,
                         operation = %operation,
                         "failed to update query projection"
+                    );
+                } else {
+                    crate::query_projection_metrics::record_update_applied_sequence(
+                        &tenant,
+                        &entity_type,
+                        &operation,
+                        &source,
+                        sequence_nr,
                     );
                 }
             }
@@ -343,7 +382,7 @@ impl crate::state::ServerState {
                     "unmet_intent"
                 );
             }
-            tokio::spawn(async move {
+            spawn_post_dispatch_effect(async move {
                 // determinism-ok: external side-effect, no simulation-visible state
                 dispatcher.dispatch(&entry);
             });
@@ -391,7 +430,7 @@ impl crate::state::ServerState {
                 entity_type = %et,
                 entity_id = %eid,
             );
-            tokio::spawn(
+            spawn_post_dispatch_effect(
                 // determinism-ok: timer delivery is a background side-effect
                 async move {
                     tokio::time::sleep(delay).await; // determinism-ok: scheduled delay

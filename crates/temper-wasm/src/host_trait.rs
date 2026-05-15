@@ -3,6 +3,7 @@
 //! Production uses real HTTP + secret store. Simulation uses canned
 //! responses for deterministic testing.
 
+use std::borrow::Cow;
 use std::collections::BTreeMap;
 use std::future::Future;
 use std::pin::Pin;
@@ -19,6 +20,8 @@ use crate::metrics;
 use crate::types::WasmInvocationContext;
 use crate::workflow_headers::add_workflow_observability_headers;
 use temper_observe::wide_event::{self, EventKind, WideEvent};
+
+mod guest_progress;
 
 /// Host capabilities provided to WASM modules.
 ///
@@ -378,6 +381,27 @@ fn guest_metric_is_counter_kind(kind: Option<&str>) -> bool {
     matches!(kind, Some("count" | "counter"))
 }
 
+fn guest_metric_tag_allowed(key: &str) -> bool {
+    let key = key.trim();
+    if key.is_empty() {
+        return false;
+    }
+    !matches!(
+        key,
+        "trace_id"
+            | "span_id"
+            | "dd.trace_id"
+            | "dd.span_id"
+            | "otel.trace_id"
+            | "otel.span_id"
+            | "session_id"
+            | "entity_id"
+            | "workflow_run_id"
+            | "tool.call_id"
+            | "request.id"
+    ) && !key.ends_with("_id")
+}
+
 const DEFAULT_BLOB_TRANSPORT_MAX_CONCURRENCY: usize = 32;
 
 fn blob_transport_max_concurrency() -> usize {
@@ -671,10 +695,20 @@ impl ProductionWasmHost {
                     .entry("agent_id".into())
                     .or_insert_with(|| json!(agent_id));
             }
+            if let Some(module) = &ctx.wasm_module {
+                attributes
+                    .entry("wasm_module".into())
+                    .or_insert_with(|| json!(module));
+            }
             if let Some(session_id) = &ctx.session_id {
                 attributes
                     .entry("gen_ai.conversation.id".into())
                     .or_insert_with(|| json!(session_id));
+            }
+            if let Some(run_id) = &ctx.workflow_run_id {
+                attributes
+                    .entry("workflow_run_id".into())
+                    .or_insert_with(|| json!(run_id));
             }
         }
         attributes
@@ -730,7 +764,7 @@ impl WasmHost for ProductionWasmHost {
         let (filtered_headers, span_hints) = split_span_hint_headers(headers);
         let span = tracing::info_span!(
             "wasm.host.http_call",
-            otel.name = "wasm.host.http_call",
+            otel.name = %span_hint_otel_name(&span_hints, "wasm.host.http_call"),
             http.method = %method,
             http.url = %telemetry_url(url),
             request_bytes = body.len() as u64,
@@ -738,9 +772,32 @@ impl WasmHost for ProductionWasmHost {
             status_code = tracing::field::Empty,
             response_bytes = tracing::field::Empty,
             duration_ms = tracing::field::Empty,
+            tenant = tracing::field::Empty,
+            wasm_module = tracing::field::Empty,
+            observability_event = tracing::field::Empty,
+            session_id = tracing::field::Empty,
+            managed_session_id = tracing::field::Empty,
+            inner_session_id = tracing::field::Empty,
+            parent_session_id = tracing::field::Empty,
+            agent_id = tracing::field::Empty,
+            environment_id = tracing::field::Empty,
+            entity_type = tracing::field::Empty,
+            entity_id = tracing::field::Empty,
+            trigger_action = tracing::field::Empty,
+            action_name = tracing::field::Empty,
+            workflow_step = tracing::field::Empty,
+            workflow_root_entity_type = tracing::field::Empty,
+            workflow_root_entity_id = tracing::field::Empty,
+            workflow_run_id = tracing::field::Empty,
+            tool.name = tracing::field::Empty,
+            tool.call_id = tracing::field::Empty,
+            gen_ai.operation.name = tracing::field::Empty,
+            gen_ai.provider.name = tracing::field::Empty,
+            gen_ai.request.model = tracing::field::Empty,
         );
+        record_invocation_context_on_span(&span, self.invocation_context.as_ref(), "http_call");
+        apply_span_hints(&span, &span_hints);
         let _guard = span.enter();
-        apply_span_hints(&tracing::Span::current(), &span_hints);
 
         let mut builder = match method.to_uppercase().as_str() {
             "GET" => self.client.get(url),
@@ -918,7 +975,7 @@ impl WasmHost for ProductionWasmHost {
         let (filtered_headers, span_hints) = split_span_hint_headers(headers);
         let span = tracing::info_span!(
             "wasm.host.http_call_binary",
-            otel.name = "wasm.host.http_call_binary",
+            otel.name = %span_hint_otel_name(&span_hints, "wasm.host.http_call_binary"),
             http.method = %method,
             http.url = %telemetry_url(url),
             request_bytes = body.len() as u64,
@@ -926,9 +983,36 @@ impl WasmHost for ProductionWasmHost {
             status_code = tracing::field::Empty,
             response_bytes = tracing::field::Empty,
             duration_ms = tracing::field::Empty,
+            tenant = tracing::field::Empty,
+            wasm_module = tracing::field::Empty,
+            observability_event = tracing::field::Empty,
+            session_id = tracing::field::Empty,
+            managed_session_id = tracing::field::Empty,
+            inner_session_id = tracing::field::Empty,
+            parent_session_id = tracing::field::Empty,
+            agent_id = tracing::field::Empty,
+            environment_id = tracing::field::Empty,
+            entity_type = tracing::field::Empty,
+            entity_id = tracing::field::Empty,
+            trigger_action = tracing::field::Empty,
+            action_name = tracing::field::Empty,
+            workflow_step = tracing::field::Empty,
+            workflow_root_entity_type = tracing::field::Empty,
+            workflow_root_entity_id = tracing::field::Empty,
+            workflow_run_id = tracing::field::Empty,
+            tool.name = tracing::field::Empty,
+            tool.call_id = tracing::field::Empty,
+            gen_ai.operation.name = tracing::field::Empty,
+            gen_ai.provider.name = tracing::field::Empty,
+            gen_ai.request.model = tracing::field::Empty,
         );
+        record_invocation_context_on_span(
+            &span,
+            self.invocation_context.as_ref(),
+            "http_call_binary",
+        );
+        apply_span_hints(&span, &span_hints);
         let _guard = span.enter();
-        apply_span_hints(&tracing::Span::current(), &span_hints);
 
         if let Some(ref interceptor) = self.binary_http_interceptor
             && let Some(result) = interceptor(
@@ -1073,6 +1157,36 @@ impl WasmHost for ProductionWasmHost {
         headers: &[(String, String)],
         body: &str,
     ) -> Result<Vec<String>, String> {
+        let started = Instant::now();
+        let (filtered_headers, span_hints) = split_span_hint_headers(headers);
+        let span = tracing::info_span!(
+            "wasm.host.connect_call",
+            otel.name = %span_hint_otel_name(&span_hints, "wasm.host.connect_call"),
+            http.method = "POST",
+            http.url = %telemetry_url(url),
+            request_bytes = body.len() as u64,
+            header_count = filtered_headers.len() as u64,
+            status_code = tracing::field::Empty,
+            response_frames = tracing::field::Empty,
+            response_bytes = tracing::field::Empty,
+            duration_ms = tracing::field::Empty,
+            tenant = tracing::field::Empty,
+            wasm_module = tracing::field::Empty,
+            session_id = tracing::field::Empty,
+            agent_id = tracing::field::Empty,
+            entity_type = tracing::field::Empty,
+            entity_id = tracing::field::Empty,
+            trigger_action = tracing::field::Empty,
+            action_name = tracing::field::Empty,
+            workflow_step = tracing::field::Empty,
+            workflow_root_entity_type = tracing::field::Empty,
+            workflow_root_entity_id = tracing::field::Empty,
+            workflow_run_id = tracing::field::Empty,
+        );
+        record_invocation_context_on_span(&span, self.invocation_context.as_ref(), "connect_call");
+        apply_span_hints(&span, &span_hints);
+        let _guard = span.enter();
+
         let mut builder = self.client.post(url);
 
         // Set Connect protocol headers.
@@ -1081,22 +1195,33 @@ impl WasmHost for ProductionWasmHost {
             .header("content-type", "application/connect+json")
             .header("connect-protocol-version", "1");
 
-        for (k, v) in headers {
+        for (k, v) in &filtered_headers {
             builder = builder.header(k.as_str(), v.as_str());
+        }
+        if !filtered_headers
+            .iter()
+            .any(|(k, _)| k.eq_ignore_ascii_case("traceparent"))
+            && let Some(traceparent) =
+                current_traceparent_header(&tracing::Span::current(), self.trace_id.as_deref())
+        {
+            builder = builder.header("traceparent", traceparent);
         }
 
         if !body.is_empty() {
             builder = builder.body(encode_connect_json_frame(body));
         }
 
-        let resp = builder
-            .send()
-            .await
-            .map_err(|e| format!("Connect call failed: {e}"))?;
+        let resp = builder.send().await.map_err(|e| {
+            tracing::Span::current().record("duration_ms", started.elapsed().as_millis() as u64);
+            format!("Connect call failed: {e}")
+        })?;
 
         let status = resp.status().as_u16();
+        tracing::Span::current().record("status_code", status);
         if !(200..300).contains(&status) {
             let err_body = resp.text().await.unwrap_or_default();
+            tracing::Span::current().record("duration_ms", started.elapsed().as_millis() as u64);
+            tracing::Span::current().record("response_bytes", err_body.len() as u64);
             return Err(format!("Connect call failed (HTTP {status}): {err_body}"));
         }
 
@@ -1105,24 +1230,62 @@ impl WasmHost for ProductionWasmHost {
             .await
             .map_err(|e| format!("failed to read Connect response body: {e}"))?;
 
-        parse_connect_frames(&resp_bytes)
+        let frames = parse_connect_frames(&resp_bytes)?;
+        tracing::Span::current().record("response_frames", frames.len() as u64);
+        tracing::Span::current().record("response_bytes", resp_bytes.len() as u64);
+        tracing::Span::current().record("duration_ms", started.elapsed().as_millis() as u64);
+        metrics::record_host_http_call(
+            "POST",
+            "connect",
+            status,
+            body.len() as u64,
+            resp_bytes.len() as u64,
+            started.elapsed().as_secs_f64() * 1000.0,
+        );
+        Ok(frames)
     }
 
     fn get_secret(&self, key: &str) -> Result<String, String> {
-        self.secrets
+        let started = Instant::now();
+        let span = tracing::info_span!(
+            "wasm.host.get_secret",
+            otel.name = "wasm.host.get_secret",
+            secret.key = %key,
+            success = tracing::field::Empty,
+            duration_ms = tracing::field::Empty,
+            tenant = tracing::field::Empty,
+            wasm_module = tracing::field::Empty,
+            session_id = tracing::field::Empty,
+            agent_id = tracing::field::Empty,
+            entity_type = tracing::field::Empty,
+            entity_id = tracing::field::Empty,
+            trigger_action = tracing::field::Empty,
+            action_name = tracing::field::Empty,
+            workflow_step = tracing::field::Empty,
+            workflow_root_entity_type = tracing::field::Empty,
+            workflow_root_entity_id = tracing::field::Empty,
+            workflow_run_id = tracing::field::Empty,
+            error.type = tracing::field::Empty,
+            error.message = tracing::field::Empty,
+        );
+        record_invocation_context_on_span(&span, self.invocation_context.as_ref(), "secret_lookup");
+        let _guard = span.enter();
+        let result = self
+            .secrets
             .get(key)
             .cloned()
-            .ok_or_else(|| format!("secret not found: {key}"))
+            .ok_or_else(|| format!("secret not found: {key}"));
+        tracing::Span::current().record("success", result.is_ok());
+        tracing::Span::current().record("duration_ms", started.elapsed().as_millis() as u64);
+        if let Err(error) = &result {
+            tracing::Span::current().record("error.type", "secret_not_found");
+            tracing::Span::current().record("error.message", error.as_str());
+        }
+        result
     }
 
     fn log(&self, level: &str, message: &str) {
         record_guest_log_span_event(level, message, self.invocation_context.as_ref(), None);
-        match level {
-            "error" => tracing::error!(target: "wasm_guest", "{}", message),
-            "warn" => tracing::warn!(target: "wasm_guest", "{}", message),
-            "info" => tracing::info!(target: "wasm_guest", "{}", message),
-            _ => tracing::debug!(target: "wasm_guest", "{}", message),
-        }
     }
 
     fn evaluate_spec(
@@ -1132,17 +1295,57 @@ impl WasmHost for ProductionWasmHost {
         action: &str,
         params_json: &str,
     ) -> Result<String, String> {
-        match &self.spec_evaluator {
+        let started = Instant::now();
+        let span = tracing::info_span!(
+            "wasm.host.evaluate_spec",
+            otel.name = "wasm.host.evaluate_spec",
+            spec.bytes = ioa_source.len() as u64,
+            spec.current_state = %current_state,
+            spec.action = %action,
+            params_bytes = params_json.len() as u64,
+            success = tracing::field::Empty,
+            duration_ms = tracing::field::Empty,
+            tenant = tracing::field::Empty,
+            wasm_module = tracing::field::Empty,
+            session_id = tracing::field::Empty,
+            agent_id = tracing::field::Empty,
+            entity_type = tracing::field::Empty,
+            entity_id = tracing::field::Empty,
+            trigger_action = tracing::field::Empty,
+            action_name = tracing::field::Empty,
+            workflow_step = tracing::field::Empty,
+            workflow_root_entity_type = tracing::field::Empty,
+            workflow_root_entity_id = tracing::field::Empty,
+            workflow_run_id = tracing::field::Empty,
+            error.type = tracing::field::Empty,
+            error.message = tracing::field::Empty,
+        );
+        record_invocation_context_on_span(&span, self.invocation_context.as_ref(), "evaluate_spec");
+        let _guard = span.enter();
+        let result = match &self.spec_evaluator {
             Some(evaluator) => evaluator(ioa_source, current_state, action, params_json),
             None => Err("evaluate_spec not supported by this host".to_string()),
+        };
+        tracing::Span::current().record("success", result.is_ok());
+        tracing::Span::current().record("duration_ms", started.elapsed().as_millis() as u64);
+        if let Err(error) = &result {
+            tracing::Span::current().record("error.type", "spec_evaluation_error");
+            tracing::Span::current().record("error.message", error.as_str());
         }
+        result
     }
 
     fn emit_progress(&self, event_json: &str) -> Result<(), String> {
-        match &self.progress_emitter {
+        let result = match &self.progress_emitter {
             Some(emitter) => emitter(event_json),
             None => Ok(()),
-        }
+        };
+        guest_progress::record_guest_progress_event(
+            event_json,
+            self.invocation_context.as_ref(),
+            result.as_ref().err().map(String::as_str),
+        );
+        result
     }
 
     fn emit_wide_event(&self, event_json: &str) -> Result<(), String> {
@@ -1180,7 +1383,17 @@ impl WasmHost for ProductionWasmHost {
         let session_id = self
             .invocation_context
             .as_ref()
-            .and_then(|ctx| ctx.session_id.as_deref())
+            .and_then(context_session_id)
+            .unwrap_or("");
+        let wasm_module = self
+            .invocation_context
+            .as_ref()
+            .and_then(|ctx| ctx.wasm_module.as_deref())
+            .unwrap_or("");
+        let workflow_run_id = self
+            .invocation_context
+            .as_ref()
+            .and_then(|ctx| ctx.workflow_run_id.as_deref())
             .unwrap_or("");
         let trace_id = self.trace_id.as_deref().unwrap_or("");
 
@@ -1198,7 +1411,10 @@ impl WasmHost for ProductionWasmHost {
                 entity_type,
                 entity_id,
                 trigger_action,
+                action_name = trigger_action,
                 session_id,
+                wasm_module,
+                workflow_run_id,
                 trace_id,
                 fields_json = %fields_json,
                 "{}",
@@ -1210,7 +1426,10 @@ impl WasmHost for ProductionWasmHost {
                 entity_type,
                 entity_id,
                 trigger_action,
+                action_name = trigger_action,
                 session_id,
+                wasm_module,
+                workflow_run_id,
                 trace_id,
                 fields_json = %fields_json,
                 "{}",
@@ -1222,7 +1441,10 @@ impl WasmHost for ProductionWasmHost {
                 entity_type,
                 entity_id,
                 trigger_action,
+                action_name = trigger_action,
                 session_id,
+                wasm_module,
+                workflow_run_id,
                 trace_id,
                 fields_json = %fields_json,
                 "{}",
@@ -1234,7 +1456,10 @@ impl WasmHost for ProductionWasmHost {
                 entity_type,
                 entity_id,
                 trigger_action,
+                action_name = trigger_action,
                 session_id,
+                wasm_module,
+                workflow_run_id,
                 trace_id,
                 fields_json = %fields_json,
                 "{}",
@@ -1247,17 +1472,27 @@ impl WasmHost for ProductionWasmHost {
     fn emit_metric(&self, metric_json: &str) -> Result<(), String> {
         let payload: GuestMetricInput = serde_json::from_str(metric_json)
             .map_err(|e| format!("invalid guest metric payload: {e}"))?;
+        record_guest_metric_span_event(&payload, self.invocation_context.as_ref());
         let meter = opentelemetry::global::meter("temper");
         let mut attrs: Vec<opentelemetry::KeyValue> = payload
             .tags
-            .into_iter()
-            .map(|(key, value)| opentelemetry::KeyValue::new(key, value))
+            .iter()
+            .filter(|(key, _)| guest_metric_tag_allowed(key))
+            .map(|(key, value)| opentelemetry::KeyValue::new(key.clone(), value.clone()))
             .collect();
         if let Some(ctx) = &self.invocation_context {
+            attrs.push(opentelemetry::KeyValue::new("tenant", ctx.tenant.clone()));
             attrs.push(opentelemetry::KeyValue::new(
                 "entity_type",
                 ctx.entity_type.clone(),
             ));
+            attrs.push(opentelemetry::KeyValue::new(
+                "trigger_action",
+                ctx.trigger_action.clone(),
+            ));
+            if let Some(module) = &ctx.wasm_module {
+                attrs.push(opentelemetry::KeyValue::new("wasm_module", module.clone()));
+            }
         }
 
         if guest_metric_is_counter_kind(payload.kind.as_deref()) {
@@ -1308,14 +1543,37 @@ impl WasmHost for ProductionWasmHost {
         let (filtered_headers, span_hints) = split_span_hint_headers(&request.headers);
         let span = tracing::info_span!(
             "wasm.host.http_stream",
-            otel.name = "wasm.host.http_stream",
+            otel.name = %span_hint_otel_name(&span_hints, "wasm.host.http_stream"),
             http.method = %request.method,
             http.url = %telemetry_url(&request.url),
             header_count = filtered_headers.len() as u64,
             status_code = tracing::field::Empty,
             response_bytes = tracing::field::Empty,
             duration_ms = tracing::field::Empty,
+            tenant = tracing::field::Empty,
+            wasm_module = tracing::field::Empty,
+            observability_event = tracing::field::Empty,
+            session_id = tracing::field::Empty,
+            managed_session_id = tracing::field::Empty,
+            inner_session_id = tracing::field::Empty,
+            parent_session_id = tracing::field::Empty,
+            agent_id = tracing::field::Empty,
+            environment_id = tracing::field::Empty,
+            entity_type = tracing::field::Empty,
+            entity_id = tracing::field::Empty,
+            trigger_action = tracing::field::Empty,
+            action_name = tracing::field::Empty,
+            workflow_step = tracing::field::Empty,
+            workflow_root_entity_type = tracing::field::Empty,
+            workflow_root_entity_id = tracing::field::Empty,
+            workflow_run_id = tracing::field::Empty,
+            tool.name = tracing::field::Empty,
+            tool.call_id = tracing::field::Empty,
+            gen_ai.operation.name = tracing::field::Empty,
+            gen_ai.provider.name = tracing::field::Empty,
+            gen_ai.request.model = tracing::field::Empty,
         );
+        record_invocation_context_on_span(&span, self.invocation_context.as_ref(), "http_stream");
         apply_span_hints(&span, &span_hints);
 
         // Build the request head before moving into the task so we
@@ -1498,12 +1756,40 @@ fn guest_log_span_attrs(
         {
             attrs.insert("agent_id".to_string(), agent_id.to_string());
         }
-        if let Some(session_id) = context
-            .session_id
+        if let Some(module) = context
+            .wasm_module
             .as_deref()
             .filter(|value| !value.is_empty())
         {
+            attrs.insert("wasm_module".to_string(), module.to_string());
+        }
+        if let Some(session_id) = context_session_id(context) {
+            attrs.insert("session_id".to_string(), session_id.to_string());
             attrs.insert("gen_ai.conversation.id".to_string(), session_id.to_string());
+        }
+        if let Some(root_type) = context
+            .workflow_root_entity_type
+            .as_deref()
+            .filter(|value| !value.is_empty())
+        {
+            attrs.insert(
+                "workflow_root_entity_type".to_string(),
+                root_type.to_string(),
+            );
+        }
+        if let Some(root_id) = context
+            .workflow_root_entity_id
+            .as_deref()
+            .filter(|value| !value.is_empty())
+        {
+            attrs.insert("workflow_root_entity_id".to_string(), root_id.to_string());
+        }
+        if let Some(run_id) = context
+            .workflow_run_id
+            .as_deref()
+            .filter(|value| !value.is_empty())
+        {
+            attrs.insert("workflow_run_id".to_string(), run_id.to_string());
         }
         if !context.trace_id.is_empty() {
             attrs.insert("trace_id".to_string(), context.trace_id.clone());
@@ -1538,6 +1824,62 @@ fn record_guest_log_span_event(
     }
 }
 
+fn record_guest_metric_span_event(
+    payload: &GuestMetricInput,
+    context: Option<&WasmInvocationContext>,
+) {
+    use opentelemetry::KeyValue;
+    use opentelemetry::trace::TraceContextExt as _;
+    use tracing_opentelemetry::OpenTelemetrySpanExt as _;
+
+    let mut attrs = vec![
+        KeyValue::new("metric.name", truncate_for_span_attr(&payload.name)),
+        KeyValue::new("metric.value", payload.value),
+    ];
+    if let Some(kind) = payload.kind.as_deref().filter(|value| !value.is_empty()) {
+        attrs.push(KeyValue::new("metric.kind", truncate_for_span_attr(kind)));
+    }
+    if let Some(context) = context {
+        attrs.push(KeyValue::new("tenant", context.tenant.clone()));
+        attrs.push(KeyValue::new("entity_type", context.entity_type.clone()));
+        attrs.push(KeyValue::new("entity_id", context.entity_id.clone()));
+        attrs.push(KeyValue::new(
+            "trigger_action",
+            context.trigger_action.clone(),
+        ));
+        if let Some(module) = context
+            .wasm_module
+            .as_deref()
+            .filter(|value| !value.is_empty())
+        {
+            attrs.push(KeyValue::new("wasm_module", module.to_string()));
+        }
+        if let Some(session_id) = context_session_id(context) {
+            attrs.push(KeyValue::new("session_id", session_id.to_string()));
+        }
+        if let Some(run_id) = context
+            .workflow_run_id
+            .as_deref()
+            .filter(|value| !value.is_empty())
+        {
+            attrs.push(KeyValue::new("workflow_run_id", run_id.to_string()));
+        }
+    }
+    for (key, value) in &payload.tags {
+        attrs.push(KeyValue::new(
+            format!("metric.tag.{key}"),
+            truncate_for_span_attr(value),
+        ));
+    }
+
+    let span = tracing::Span::current();
+    let cx = span.context();
+    let otel_span = cx.span();
+    if otel_span.span_context().is_valid() {
+        otel_span.add_event("wasm_guest.metric", attrs);
+    }
+}
+
 fn emit_named_guest_log_span_event(
     level: &str,
     message: &str,
@@ -1551,10 +1893,25 @@ fn emit_named_guest_log_span_event(
     let agent_id = context
         .and_then(|ctx| ctx.agent_id.as_deref())
         .unwrap_or("");
-    let session_id = context
-        .and_then(|ctx| ctx.session_id.as_deref())
+    let wasm_module = context
+        .and_then(|ctx| ctx.wasm_module.as_deref())
         .unwrap_or("");
-    let trace_id = context.map(|ctx| ctx.trace_id.as_str()).unwrap_or("");
+    let session_id = context.and_then(context_session_id).unwrap_or("");
+    let workflow_root_entity_type = context
+        .and_then(|ctx| ctx.workflow_root_entity_type.as_deref())
+        .unwrap_or("");
+    let workflow_root_entity_id = context
+        .and_then(|ctx| ctx.workflow_root_entity_id.as_deref())
+        .unwrap_or("");
+    let workflow_run_id = context
+        .and_then(|ctx| ctx.workflow_run_id.as_deref())
+        .unwrap_or("");
+    let fallback_trace_id = context.map(|ctx| ctx.trace_id.as_str());
+    let correlation = current_log_correlation(fallback_trace_id);
+    let trace_id = correlation.trace_id.as_str();
+    let span_id = correlation.span_id.as_str();
+    let dd_trace_id = correlation.dd_trace_id.as_str();
+    let dd_span_id = correlation.dd_span_id.as_str();
     let fields_json = fields_json.unwrap_or("");
 
     match level.to_ascii_lowercase().as_str() {
@@ -1570,9 +1927,21 @@ fn emit_named_guest_log_span_event(
             entity_id = %entity_id,
             trigger_action = %trigger_action,
             agent_id = %agent_id,
+            wasm_module = %wasm_module,
+            session_id = %session_id,
             gen_ai.conversation.id = %session_id,
+            workflow_root_entity_type = %workflow_root_entity_type,
+            workflow_root_entity_id = %workflow_root_entity_id,
+            workflow_run_id = %workflow_run_id,
             trace_id = %trace_id,
+            span_id = %span_id,
+            otel.trace_id = %trace_id,
+            otel.span_id = %span_id,
+            dd.trace_id = %dd_trace_id,
+            dd.span_id = %dd_span_id,
             fields_json = %fields_json,
+            "{}",
+            message,
         ),
         "warn" => tracing::event!(
             name: "wasm_guest.log",
@@ -1586,9 +1955,21 @@ fn emit_named_guest_log_span_event(
             entity_id = %entity_id,
             trigger_action = %trigger_action,
             agent_id = %agent_id,
+            wasm_module = %wasm_module,
+            session_id = %session_id,
             gen_ai.conversation.id = %session_id,
+            workflow_root_entity_type = %workflow_root_entity_type,
+            workflow_root_entity_id = %workflow_root_entity_id,
+            workflow_run_id = %workflow_run_id,
             trace_id = %trace_id,
+            span_id = %span_id,
+            otel.trace_id = %trace_id,
+            otel.span_id = %span_id,
+            dd.trace_id = %dd_trace_id,
+            dd.span_id = %dd_span_id,
             fields_json = %fields_json,
+            "{}",
+            message,
         ),
         "info" => tracing::event!(
             name: "wasm_guest.log",
@@ -1602,9 +1983,21 @@ fn emit_named_guest_log_span_event(
             entity_id = %entity_id,
             trigger_action = %trigger_action,
             agent_id = %agent_id,
+            wasm_module = %wasm_module,
+            session_id = %session_id,
             gen_ai.conversation.id = %session_id,
+            workflow_root_entity_type = %workflow_root_entity_type,
+            workflow_root_entity_id = %workflow_root_entity_id,
+            workflow_run_id = %workflow_run_id,
             trace_id = %trace_id,
+            span_id = %span_id,
+            otel.trace_id = %trace_id,
+            otel.span_id = %span_id,
+            dd.trace_id = %dd_trace_id,
+            dd.span_id = %dd_span_id,
             fields_json = %fields_json,
+            "{}",
+            message,
         ),
         _ => tracing::event!(
             name: "wasm_guest.log",
@@ -1618,11 +2011,149 @@ fn emit_named_guest_log_span_event(
             entity_id = %entity_id,
             trigger_action = %trigger_action,
             agent_id = %agent_id,
+            wasm_module = %wasm_module,
+            session_id = %session_id,
             gen_ai.conversation.id = %session_id,
+            workflow_root_entity_type = %workflow_root_entity_type,
+            workflow_root_entity_id = %workflow_root_entity_id,
+            workflow_run_id = %workflow_run_id,
             trace_id = %trace_id,
+            span_id = %span_id,
+            otel.trace_id = %trace_id,
+            otel.span_id = %span_id,
+            dd.trace_id = %dd_trace_id,
+            dd.span_id = %dd_span_id,
             fields_json = %fields_json,
+            "{}",
+            message,
         ),
     }
+}
+
+fn context_session_id(context: &WasmInvocationContext) -> Option<&str> {
+    context
+        .session_id
+        .as_deref()
+        .filter(|value| !value.is_empty())
+        .or_else(|| {
+            (context.entity_type == "Session" && !context.entity_id.is_empty())
+                .then_some(context.entity_id.as_str())
+        })
+}
+
+fn record_invocation_context_on_span(
+    span: &tracing::Span,
+    context: Option<&WasmInvocationContext>,
+    workflow_step: &str,
+) {
+    span.record("workflow_step", workflow_step);
+    let Some(context) = context else {
+        return;
+    };
+    span.record("tenant", context.tenant.as_str());
+    span.record("entity_type", context.entity_type.as_str());
+    span.record("entity_id", context.entity_id.as_str());
+    span.record("trigger_action", context.trigger_action.as_str());
+    span.record("action_name", context.trigger_action.as_str());
+    if let Some(module) = context
+        .wasm_module
+        .as_deref()
+        .filter(|value| !value.is_empty())
+    {
+        span.record("wasm_module", module);
+    }
+    if let Some(agent_id) = context
+        .agent_id
+        .as_deref()
+        .filter(|value| !value.is_empty())
+    {
+        span.record("agent_id", agent_id);
+    }
+    if let Some(session_id) = context_session_id(context) {
+        span.record("session_id", session_id);
+    }
+    if let Some(root_type) = context
+        .workflow_root_entity_type
+        .as_deref()
+        .filter(|value| !value.is_empty())
+    {
+        span.record("workflow_root_entity_type", root_type);
+    }
+    if let Some(root_id) = context
+        .workflow_root_entity_id
+        .as_deref()
+        .filter(|value| !value.is_empty())
+    {
+        span.record("workflow_root_entity_id", root_id);
+    }
+    if let Some(run_id) = context
+        .workflow_run_id
+        .as_deref()
+        .filter(|value| !value.is_empty())
+    {
+        span.record("workflow_run_id", run_id);
+    }
+}
+
+#[derive(Default)]
+struct LogCorrelation {
+    trace_id: String,
+    span_id: String,
+    dd_trace_id: String,
+    dd_span_id: String,
+}
+
+fn current_log_correlation(fallback_trace_id: Option<&str>) -> LogCorrelation {
+    use opentelemetry::trace::TraceContextExt as _;
+    use tracing_opentelemetry::OpenTelemetrySpanExt as _;
+
+    let span = tracing::Span::current();
+    let cx = span.context();
+    let span_context = cx.span().span_context().clone();
+    let (trace_id, span_id) = if span_context.is_valid() {
+        (
+            span_context.trace_id().to_string(),
+            span_context.span_id().to_string(),
+        )
+    } else {
+        (
+            fallback_trace_id.map(str::to_string).unwrap_or_default(),
+            String::new(),
+        )
+    };
+    let dd_trace_id = datadog_trace_id_decimal(&trace_id).unwrap_or_default();
+    let dd_span_id = datadog_span_id_decimal(&span_id).unwrap_or_default();
+    LogCorrelation {
+        trace_id,
+        span_id,
+        dd_trace_id,
+        dd_span_id,
+    }
+}
+
+fn datadog_trace_id_decimal(trace_id: &str) -> Option<String> {
+    let trace_id = trace_id.trim();
+    if trace_id.is_empty() {
+        return None;
+    }
+    let low_bits = if trace_id.len() > 16 {
+        trace_id.get(trace_id.len() - 16..)?
+    } else {
+        trace_id
+    };
+    u64::from_str_radix(low_bits, 16)
+        .ok()
+        .map(|value| value.to_string())
+}
+
+fn datadog_span_id_decimal(span_id: &str) -> Option<String> {
+    let span_id = span_id.trim();
+    if span_id.is_empty() {
+        return None;
+    }
+    u64::from_str_radix(span_id, 16)
+        .ok()
+        .map(|value| value.to_string())
 }
 
 fn telemetry_url(url: &str) -> String {
@@ -1763,6 +2294,45 @@ pub(crate) fn split_span_hint_headers(
     (kept, hints)
 }
 
+pub(crate) fn span_hint_otel_name<'a>(
+    hints: &'a SpanHints,
+    default_name: &'static str,
+) -> Cow<'a, str> {
+    hints
+        .span_name
+        .as_deref()
+        .map(Cow::Borrowed)
+        .unwrap_or(Cow::Borrowed(default_name))
+}
+
+pub(crate) fn datadog_visible_span_hint_field(attr_key: &str) -> Option<&'static str> {
+    match attr_key {
+        "tenant" => Some("tenant"),
+        "wasm_module" => Some("wasm_module"),
+        "observability_event" => Some("observability_event"),
+        "session_id" => Some("session_id"),
+        "managed_session_id" => Some("managed_session_id"),
+        "inner_session_id" => Some("inner_session_id"),
+        "parent_session_id" => Some("parent_session_id"),
+        "agent_id" => Some("agent_id"),
+        "environment_id" => Some("environment_id"),
+        "entity_type" => Some("entity_type"),
+        "entity_id" => Some("entity_id"),
+        "trigger_action" => Some("trigger_action"),
+        "action_name" => Some("action_name"),
+        "workflow_step" => Some("workflow_step"),
+        "workflow_root_entity_type" => Some("workflow_root_entity_type"),
+        "workflow_root_entity_id" => Some("workflow_root_entity_id"),
+        "workflow_run_id" => Some("workflow_run_id"),
+        "tool.name" => Some("tool.name"),
+        "tool.call_id" => Some("tool.call_id"),
+        "gen_ai.operation.name" => Some("gen_ai.operation.name"),
+        "gen_ai.provider.name" => Some("gen_ai.provider.name"),
+        "gen_ai.request.model" => Some("gen_ai.request.model"),
+        _ => None,
+    }
+}
+
 /// Apply span hints to the currently-active tracing span's underlying OTel
 /// span. `update_name` overrides the span display name; `set_attribute`
 /// calls attach the key/value pairs. If no tracer subscriber is installed
@@ -1775,9 +2345,13 @@ pub(crate) fn apply_span_hints(span: &tracing::Span, hints: &SpanHints) {
     let cx = span.context();
     let otel_span = cx.span();
     if let Some(ref name) = hints.span_name {
+        span.record("otel.name", name.as_str());
         otel_span.update_name(name.clone());
     }
     for (k, v) in &hints.attributes {
+        if let Some(field_name) = datadog_visible_span_hint_field(k) {
+            span.record(field_name, v.as_str());
+        }
         otel_span.set_attribute(KeyValue::new(k.clone(), v.clone()));
     }
 }
@@ -2084,6 +2658,5 @@ impl WasmHost for SimWasmHost {
     }
 }
 
-#[cfg(test)]
 #[cfg(test)]
 mod tests;

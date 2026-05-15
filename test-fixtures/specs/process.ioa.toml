@@ -1,0 +1,271 @@
+# Agent (Process) — the orchestrator state machine.
+# Pure state machine: receives messages, transitions states, emits coordination events.
+# Routing is handled by reaction rules (agent.reactions.toml), not by this spec.
+
+[automaton]
+name = "Process"
+states = [
+    "Created", "Ready", "PreparingContext", "BlockedInference",
+    "BlockedToolCall", "BlockedApproval", "BlockedCompaction",
+    "BlockedChild", "Suspended", "Terminated", "Failed",
+]
+initial = "Created"
+
+[automaton.timeouts]
+BlockedInference = "120s"
+BlockedToolCall = "60s"
+BlockedCompaction = "30s"
+BlockedApproval = "3600s"
+
+[[state]]
+name = "turns"
+type = "counter"
+initial = "0"
+
+[[state]]
+name = "tool_call_rounds"
+type = "counter"
+initial = "0"
+
+[[state]]
+name = "child_count"
+type = "counter"
+initial = "0"
+
+# ─── Lifecycle ────────────────────────────────────────────────────────────────
+
+[[action]]
+name = "Initialize"
+kind = "input"
+from = ["Created"]
+to = "Ready"
+
+# ─── Start / User Input ──────────────────────────────────────────────────────
+
+[[action]]
+name = "StartProcess"
+kind = "input"
+from = ["Ready"]
+to = "PreparingContext"
+params = [{ name = "user_prompt", type = "string" }]
+effect = [{ type = "emit", event = "PrepareContext" }]
+
+[[action]]
+name = "SendInput"
+kind = "input"
+from = ["Ready", "Failed"]
+to = "PreparingContext"
+params = [{ name = "user_prompt", type = "string" }]
+effect = [{ type = "emit", event = "PrepareContext" }]
+
+# ─── Context Preparation Results ─────────────────────────────────────────────
+
+[[action]]
+name = "ContextReady"
+kind = "input"
+from = ["PreparingContext"]
+to = "BlockedInference"
+effect = [{ type = "trigger", name = "invoke_llm" }]
+
+[[action]]
+name = "ContextOverflow"
+kind = "input"
+from = ["PreparingContext"]
+to = "BlockedCompaction"
+effect = [{ type = "emit", event = "CompactionNeeded" }]
+
+# ─── Inference Results ────────────────────────────────────────────────────────
+
+[[action]]
+name = "InferenceCompleteEndTurn"
+kind = "input"
+from = ["BlockedInference"]
+to = "Ready"
+effect = [
+    { type = "increment", var = "turns" },
+    { type = "trigger", name = "notify_parent" },
+]
+
+[[action]]
+name = "InferenceCompleteToolCalls"
+kind = "input"
+from = ["BlockedInference"]
+to = "BlockedToolCall"
+effect = [
+    { type = "increment", var = "turns" },
+    { type = "emit", event = "ToolCallBatchRequested" },
+]
+
+[[action]]
+name = "InferenceContextOverflow"
+kind = "input"
+from = ["BlockedInference"]
+to = "BlockedCompaction"
+effect = [{ type = "emit", event = "CompactionNeeded" }]
+
+[[action]]
+name = "InferenceFailed"
+kind = "input"
+from = ["BlockedInference"]
+to = "Failed"
+
+# ─── Tool Call Results ────────────────────────────────────────────────────────
+
+[[action]]
+name = "ToolCallBatchComplete"
+kind = "input"
+from = ["BlockedToolCall"]
+to = "BlockedInference"
+effect = [
+    { type = "increment", var = "tool_call_rounds" },
+    { type = "trigger", name = "invoke_llm" },
+]
+
+[[action]]
+name = "ToolCallBatchFailed"
+kind = "input"
+from = ["BlockedToolCall"]
+to = "Failed"
+effect = [{ type = "trigger", name = "notify_parent" }]
+
+[[action]]
+name = "ApprovalRequired"
+kind = "input"
+from = ["BlockedToolCall"]
+to = "BlockedApproval"
+
+[[action]]
+name = "ApproveToolCall"
+kind = "input"
+from = ["BlockedApproval"]
+to = "BlockedToolCall"
+effect = [{ type = "emit", event = "ToolCallBatchRequested" }]
+
+[[action]]
+name = "DenyToolCall"
+kind = "input"
+from = ["BlockedApproval"]
+to = "BlockedInference"
+effect = [{ type = "trigger", name = "invoke_llm" }]
+
+# ─── Compaction Results ───────────────────────────────────────────────────────
+
+[[action]]
+name = "CompactionComplete"
+kind = "input"
+from = ["BlockedCompaction"]
+to = "PreparingContext"
+effect = [{ type = "emit", event = "PrepareContext" }]
+
+[[action]]
+name = "CompactionFailed"
+kind = "input"
+from = ["BlockedCompaction"]
+to = "Failed"
+effect = [{ type = "trigger", name = "notify_parent" }]
+
+# ─── Control ──────────────────────────────────────────────────────────────────
+
+[[action]]
+name = "SuspendProcess"
+kind = "input"
+from = ["Ready", "PreparingContext", "BlockedInference", "BlockedToolCall", "BlockedApproval", "BlockedCompaction"]
+to = "Suspended"
+
+[[action]]
+name = "ResumeProcess"
+kind = "input"
+from = ["Suspended"]
+to = "Ready"
+
+[[action]]
+name = "TerminateProcess"
+kind = "input"
+from = ["Created", "Ready", "PreparingContext", "BlockedInference", "BlockedToolCall", "BlockedApproval", "BlockedCompaction", "Suspended", "Failed"]
+to = "Terminated"
+params = [{ name = "reason", type = "string" }]
+
+[[action]]
+name = "TimeoutExpired"
+kind = "input"
+from = ["BlockedInference", "BlockedToolCall", "BlockedApproval", "BlockedCompaction"]
+to = "Failed"
+effect = [{ type = "trigger", name = "notify_parent" }]
+
+# ─── Integrations ─────────────────────────────────────────────────────────────
+
+[[integration]]
+name = "invoke_llm"
+trigger = "invoke_llm"
+type = "llm"
+emits = ["InferenceCompleteEndTurn", "InferenceCompleteToolCalls", "InferenceContextOverflow", "InferenceFailed"]
+
+# ─── Child process primitives ─────────────────────────────────────────────────
+
+[[action]]
+name = "SpawnChild"
+kind = "input"
+from = ["Ready", "BlockedInference", "BlockedToolCall"]
+params = [
+    { name = "child_definition_id", type = "string" },
+    { name = "child_user_prompt",   type = "string" },
+]
+effect = [
+    { type = "increment", var = "child_count" },
+    { type = "trigger",   name = "spawn_child" },
+]
+hint = "Spawn a child Process. The child runs independently; parent can wait via BlockOnChild."
+
+[[action]]
+name = "BlockOnChild"
+kind = "input"
+from = ["Ready"]
+to = "BlockedChild"
+hint = "Block until a child Process completes."
+
+[[action]]
+name = "UnblockFromChild"
+kind = "input"
+from = ["BlockedChild"]
+to = "BlockedInference"
+params = [{ name = "child_result", type = "string" }]
+effect = [{ type = "trigger", name = "invoke_llm" }]
+hint = "Unblock parent when a child Process completes and resume inference with the child result."
+
+# ─── Sleep primitive ──────────────────────────────────────────────────────────
+
+[[action]]
+name = "SleepProcess"
+kind = "input"
+from = ["Ready"]
+to = "Ready"
+params = [{ name = "sleep_seconds", type = "uint64" }]
+effect = [{ type = "trigger", name = "schedule_wakeup" }]
+hint = "Suspend execution for N seconds, then resume."
+
+# ─── Completion with parent notification ─────────────────────────────────────
+
+[[action]]
+name = "CompleteProcess"
+kind = "input"
+from = ["Ready"]
+to = "Terminated"
+params = [{ name = "final_answer", type = "string" }]
+effect = [{ type = "trigger", name = "notify_parent" }]
+
+# ─── Integrations for new primitives ─────────────────────────────────────────
+
+[[integration]]
+name = "spawn_child"
+trigger = "spawn_child"
+type = "child_spawner"
+
+[[integration]]
+name = "schedule_wakeup"
+trigger = "schedule_wakeup"
+type = "wakeup_scheduler"
+
+[[integration]]
+name = "notify_parent"
+trigger = "notify_parent"
+type = "child_completion"

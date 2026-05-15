@@ -13,6 +13,9 @@ pub struct WasmInvocationContext {
     pub entity_id: String,
     /// The action that triggered this integration.
     pub trigger_action: String,
+    /// WASM module name being invoked, when known by the host.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub wasm_module: Option<String>,
     /// Parameters from the triggering action.
     pub trigger_params: serde_json::Value,
     /// Current entity state snapshot (fields JSON).
@@ -178,6 +181,7 @@ mod tests {
             entity_type: "Order".into(),
             entity_id: "ORD-1".into(),
             trigger_action: "Submit".into(),
+            wasm_module: Some("order_submitter".into()),
             trigger_params: serde_json::json!({"amount": 100}),
             entity_state: serde_json::json!({"status": "Draft"}),
             agent_id: Some("agent-1".into()),
@@ -193,6 +197,7 @@ mod tests {
         let back: WasmInvocationContext = serde_json::from_str(&json).unwrap();
         assert_eq!(back.tenant, "t1");
         assert_eq!(back.entity_type, "Order");
+        assert_eq!(back.wasm_module, Some("order_submitter".into()));
         assert_eq!(back.agent_id, Some("agent-1".into()));
         assert!(back.session_id.is_none());
     }
@@ -204,6 +209,7 @@ mod tests {
             entity_type: "E".into(),
             entity_id: "1".into(),
             trigger_action: "A".into(),
+            wasm_module: None,
             trigger_params: serde_json::Value::Null,
             entity_state: serde_json::Value::Null,
             agent_id: None,
@@ -218,6 +224,7 @@ mod tests {
         let json = serde_json::to_string(&ctx).unwrap();
         assert!(!json.contains("agent_id"));
         assert!(!json.contains("session_id"));
+        assert!(!json.contains("wasm_module"));
         assert!(!json.contains("integration_config"));
         assert!(!json.contains("workflow_root_entity_type"));
         assert!(!json.contains("workflow_root_entity_id"));
@@ -257,6 +264,7 @@ mod tests {
             entity_type: "HttpEndpoint".into(),
             entity_id: "he-1".into(),
             trigger_action: "HandleHttp".into(),
+            wasm_module: Some("git_http_endpoint".into()),
             trigger_params: serde_json::Value::Null,
             entity_state: serde_json::Value::Null,
             agent_id: None,

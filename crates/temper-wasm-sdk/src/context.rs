@@ -49,6 +49,8 @@ pub struct Context {
     pub entity_id: String,
     /// The action that triggered this integration.
     pub trigger_action: String,
+    /// WASM module name being invoked, when the host provides it.
+    pub wasm_module: String,
     /// HTTP dispatch context (present only when this invocation was
     /// routed via an ADR-0069 HttpEndpoint). Guests serving HTTP
     /// unwrap this then drive the inbound exchange via
@@ -64,6 +66,84 @@ pub struct WideEventInput<'a> {
     pub tags: &'a Value,
     pub attributes: &'a Value,
     pub measurements: &'a Value,
+}
+
+/// A structured guest observability span owned by the WASM module.
+pub struct WasmSpan {
+    id: i64,
+    ended: bool,
+}
+
+impl WasmSpan {
+    /// Return the opaque host span id.
+    pub fn id(&self) -> i64 {
+        self.id
+    }
+
+    /// Add a span event with structured attributes.
+    pub fn add_event(&self, name: &str, attributes: &Value) -> Result<(), String> {
+        let payload = build_guest_span_event_payload(name, attributes)?;
+        call_host_span_event(self.id, &payload)
+    }
+
+    /// Add or update span attributes.
+    pub fn set_attributes(&self, attributes: &Value) -> Result<(), String> {
+        let payload = build_guest_span_attributes_payload(attributes)?;
+        call_host_span_attributes(self.id, &payload)
+    }
+
+    /// End the span with an OK status.
+    pub fn end_ok(mut self, attributes: &Value) -> Result<(), String> {
+        self.end_ok_ref(attributes)
+    }
+
+    /// End the span with an error status and optional final attributes.
+    pub fn end_error(
+        mut self,
+        error_type: &str,
+        error_message: &str,
+        attributes: &Value,
+    ) -> Result<(), String> {
+        self.end_error_ref(error_type, error_message, attributes)
+    }
+
+    fn end_ok_ref(&mut self, attributes: &Value) -> Result<(), String> {
+        if self.ended {
+            return Ok(());
+        }
+        let payload = build_guest_span_end_ok_payload(attributes)?;
+        call_host_span_end(self.id, &payload)?;
+        self.ended = true;
+        Ok(())
+    }
+
+    fn end_error_ref(
+        &mut self,
+        error_type: &str,
+        error_message: &str,
+        attributes: &Value,
+    ) -> Result<(), String> {
+        if self.ended {
+            return Ok(());
+        }
+        let payload = build_guest_span_end_error_payload(error_type, error_message, attributes)?;
+        call_host_span_end(self.id, &payload)?;
+        self.ended = true;
+        Ok(())
+    }
+}
+
+impl Drop for WasmSpan {
+    fn drop(&mut self) {
+        if !self.ended {
+            let payload = build_guest_span_end_ok_payload(&serde_json::json!({
+                "wasm_guest.drop_end": true,
+            }))
+            .unwrap_or_else(|_| "{\"status\":\"ok\"}".to_string());
+            let _ = call_host_span_end(self.id, &payload);
+            self.ended = true;
+        }
+    }
 }
 
 impl Context {
@@ -139,6 +219,11 @@ impl Context {
             .and_then(Value::as_str)
             .unwrap_or("")
             .to_string();
+        let wasm_module = parsed
+            .get("wasm_module")
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .to_string();
 
         let http_request = parsed.get("http_request").cloned();
 
@@ -150,6 +235,7 @@ impl Context {
             entity_type,
             entity_id,
             trigger_action,
+            wasm_module,
             http_request,
         })
     }
@@ -399,6 +485,30 @@ impl Context {
         }
     }
 
+    /// Start a structured guest observability span.
+    pub fn start_span(&self, name: &str, attributes: &Value) -> Result<WasmSpan, String> {
+        self.start_span_with_kind(name, None, attributes)
+    }
+
+    /// Start a structured guest observability span with an explicit span kind.
+    pub fn start_span_with_kind(
+        &self,
+        name: &str,
+        kind: Option<&str>,
+        attributes: &Value,
+    ) -> Result<WasmSpan, String> {
+        let payload = build_guest_span_start_payload(name, kind, attributes)?;
+        let span_id =
+            unsafe { host::host_start_span(payload.as_ptr() as i32, payload.len() as i32) };
+        if span_id <= 0 {
+            return Err(format!("host_start_span failed for '{name}'"));
+        }
+        Ok(WasmSpan {
+            id: span_id,
+            ended: false,
+        })
+    }
+
     /// Evaluate a single transition against an IOA spec via the host.
     ///
     /// The host builds a `TransitionTable` from the IOA source and evaluates
@@ -506,5 +616,151 @@ impl Context {
         let bytes = self.read_field_bytes(field_name)?;
         String::from_utf8(bytes)
             .map_err(|e| format!("field '{field_name}' is not valid UTF-8: {e}"))
+    }
+}
+
+fn object_attributes(attributes: &Value) -> Value {
+    match attributes {
+        Value::Object(_) => attributes.clone(),
+        _ => serde_json::json!({}),
+    }
+}
+
+fn build_guest_span_start_payload(
+    name: &str,
+    kind: Option<&str>,
+    attributes: &Value,
+) -> Result<String, String> {
+    let mut payload = serde_json::json!({
+        "name": name,
+        "attributes": object_attributes(attributes),
+    });
+    if let Some(kind) = kind.filter(|value| !value.is_empty()) {
+        payload["kind"] = Value::String(kind.to_string());
+    }
+    serde_json::to_string(&payload).map_err(|e| format!("span start JSON serialize: {e}"))
+}
+
+fn build_guest_span_event_payload(name: &str, attributes: &Value) -> Result<String, String> {
+    let payload = serde_json::json!({
+        "name": name,
+        "attributes": object_attributes(attributes),
+    });
+    serde_json::to_string(&payload).map_err(|e| format!("span event JSON serialize: {e}"))
+}
+
+fn build_guest_span_attributes_payload(attributes: &Value) -> Result<String, String> {
+    let payload = serde_json::json!({
+        "attributes": object_attributes(attributes),
+    });
+    serde_json::to_string(&payload).map_err(|e| format!("span attributes JSON serialize: {e}"))
+}
+
+fn build_guest_span_end_ok_payload(attributes: &Value) -> Result<String, String> {
+    let payload = serde_json::json!({
+        "status": "ok",
+        "attributes": object_attributes(attributes),
+    });
+    serde_json::to_string(&payload).map_err(|e| format!("span end JSON serialize: {e}"))
+}
+
+fn build_guest_span_end_error_payload(
+    error_type: &str,
+    error_message: &str,
+    attributes: &Value,
+) -> Result<String, String> {
+    let payload = serde_json::json!({
+        "status": "error",
+        "error.type": error_type,
+        "error.message": error_message,
+        "attributes": object_attributes(attributes),
+    });
+    serde_json::to_string(&payload).map_err(|e| format!("span error JSON serialize: {e}"))
+}
+
+fn call_host_span_event(span_id: i64, payload: &str) -> Result<(), String> {
+    let rc = unsafe {
+        host::host_add_span_event(span_id, payload.as_ptr() as i32, payload.len() as i32)
+    };
+    if rc == 0 {
+        Ok(())
+    } else {
+        Err(format!("host_add_span_event failed for span {span_id}"))
+    }
+}
+
+fn call_host_span_attributes(span_id: i64, payload: &str) -> Result<(), String> {
+    let rc = unsafe {
+        host::host_set_span_attributes(span_id, payload.as_ptr() as i32, payload.len() as i32)
+    };
+    if rc == 0 {
+        Ok(())
+    } else {
+        Err(format!(
+            "host_set_span_attributes failed for span {span_id}"
+        ))
+    }
+}
+
+fn call_host_span_end(span_id: i64, payload: &str) -> Result<(), String> {
+    let rc = unsafe { host::host_end_span(span_id, payload.as_ptr() as i32, payload.len() as i32) };
+    if rc == 0 {
+        Ok(())
+    } else {
+        Err(format!("host_end_span failed for span {span_id}"))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn builds_guest_span_lifecycle_payloads() {
+        let start = build_guest_span_start_payload(
+            "tool.llm_call",
+            Some("client"),
+            &serde_json::json!({
+                "tool.name": "provider_caller",
+                "gen_ai.request.model": "claude",
+            }),
+        )
+        .expect("start payload");
+        let start: Value = serde_json::from_str(&start).expect("valid start JSON");
+        assert_eq!(start["name"], "tool.llm_call");
+        assert_eq!(start["kind"], "client");
+        assert_eq!(start["attributes"]["tool.name"], "provider_caller");
+
+        let event =
+            build_guest_span_event_payload("llm.response", &serde_json::json!({"tokens": 42}))
+                .expect("event payload");
+        let event: Value = serde_json::from_str(&event).expect("valid event JSON");
+        assert_eq!(event["name"], "llm.response");
+        assert_eq!(event["attributes"]["tokens"], 42);
+
+        let attrs = build_guest_span_attributes_payload(&serde_json::json!({"completion": "stop"}))
+            .expect("attrs payload");
+        let attrs: Value = serde_json::from_str(&attrs).expect("valid attrs JSON");
+        assert_eq!(attrs["attributes"]["completion"], "stop");
+
+        let end = build_guest_span_end_error_payload(
+            "llm_error",
+            "provider failed",
+            &serde_json::json!({"http.status_code": 500}),
+        )
+        .expect("end payload");
+        let end: Value = serde_json::from_str(&end).expect("valid end JSON");
+        assert_eq!(end["status"], "error");
+        assert_eq!(end["error.type"], "llm_error");
+        assert_eq!(end["error.message"], "provider failed");
+    }
+
+    #[test]
+    fn non_object_span_attributes_become_empty_objects() {
+        let payload =
+            build_guest_span_start_payload("guest", None, &Value::String("ignored".to_string()))
+                .expect("payload");
+        let payload: Value = serde_json::from_str(&payload).expect("valid JSON");
+        assert_eq!(payload["attributes"], serde_json::json!({}));
     }
 }

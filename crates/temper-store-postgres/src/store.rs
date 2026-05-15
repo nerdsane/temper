@@ -4,11 +4,20 @@
 //! `UNIQUE (entity_type, entity_id, sequence_nr)` constraint to enforce
 //! optimistic concurrency on appends.
 
-use sqlx::PgPool;
+use std::time::Instant;
+
+use sqlx::{Acquire, PgPool};
 use temper_runtime::persistence::{
     EventMetadata, EventStore, PersistenceEnvelope, PersistenceError,
 };
 use temper_runtime::tenant::parse_persistence_id_parts;
+
+use crate::metrics::{
+    PostgresTransactionTimer, record_postgres_pool_acquire_duration,
+    record_postgres_transaction_begin_duration, record_postgres_transaction_commit_duration,
+};
+
+const EVENT_APPEND_OPERATION: &str = "event_append";
 
 /// A PostgreSQL-backed event store.
 ///
@@ -55,13 +64,47 @@ impl EventStore for PostgresEventStore {
         let (tenant, entity_type, entity_id) =
             parse_persistence_id_parts(persistence_id).map_err(PersistenceError::Storage)?;
 
-        let mut tx = self
-            .pool
-            .begin()
-            .await
-            .map_err(|e| PersistenceError::Storage(e.to_string()))?;
+        let mut transaction_timer = PostgresTransactionTimer::start(EVENT_APPEND_OPERATION);
+        let acquire_started = Instant::now();
+        let mut conn = match self.pool.acquire().await {
+            Ok(conn) => {
+                record_postgres_pool_acquire_duration(
+                    acquire_started.elapsed(),
+                    EVENT_APPEND_OPERATION,
+                    "ok",
+                );
+                conn
+            }
+            Err(e) => {
+                record_postgres_pool_acquire_duration(
+                    acquire_started.elapsed(),
+                    EVENT_APPEND_OPERATION,
+                    "error",
+                );
+                return Err(PersistenceError::Storage(e.to_string()));
+            }
+        };
+        let begin_started = Instant::now();
+        let mut tx = match conn.begin().await {
+            Ok(tx) => {
+                record_postgres_transaction_begin_duration(
+                    begin_started.elapsed(),
+                    EVENT_APPEND_OPERATION,
+                    "ok",
+                );
+                tx
+            }
+            Err(e) => {
+                record_postgres_transaction_begin_duration(
+                    begin_started.elapsed(),
+                    EVENT_APPEND_OPERATION,
+                    "error",
+                );
+                return Err(PersistenceError::Storage(e.to_string()));
+            }
+        };
 
-        let row: Option<(i64,)> = sqlx::query_as(
+        let row: Option<(i64,)> = crate::dbm::postgres_query_as!(
             "SELECT COALESCE(MAX(sequence_nr), 0) FROM events \
              WHERE tenant = $1 AND entity_type = $2 AND entity_id = $3",
         )
@@ -74,6 +117,7 @@ impl EventStore for PostgresEventStore {
 
         let current_seq = row.map(|r| r.0 as u64).unwrap_or(0);
         if current_seq != expected_sequence {
+            transaction_timer.set_outcome("concurrency_violation");
             return Err(PersistenceError::ConcurrencyViolation {
                 expected: expected_sequence,
                 actual: current_seq,
@@ -86,7 +130,7 @@ impl EventStore for PostgresEventStore {
             let metadata_json = serde_json::to_value(&event.metadata)
                 .map_err(|e| PersistenceError::Serialization(e.to_string()))?;
 
-            sqlx::query(
+            if let Err(e) = crate::dbm::postgres_query!(
                 "INSERT INTO events (tenant, entity_type, entity_id, sequence_nr, event_type, payload, metadata) \
                  VALUES ($1, $2, $3, $4, $5, $6, $7)",
             )
@@ -99,22 +143,35 @@ impl EventStore for PostgresEventStore {
             .bind(metadata_json)
             .execute(&mut *tx)
             .await
-            .map_err(|e| {
+            {
                 let msg = e.to_string();
                 if msg.contains("unique") || msg.contains("duplicate key") {
-                    PersistenceError::ConcurrencyViolation {
+                    transaction_timer.set_outcome("concurrency_violation");
+                    return Err(PersistenceError::ConcurrencyViolation {
                         expected: expected_sequence,
                         actual: new_seq,
-                    }
+                    });
                 } else {
-                    PersistenceError::Storage(msg)
+                    return Err(PersistenceError::Storage(msg));
                 }
-            })?;
+            }
         }
 
-        tx.commit()
-            .await
-            .map_err(|e| PersistenceError::Storage(e.to_string()))?;
+        let commit_started = Instant::now();
+        tx.commit().await.map_err(|e| {
+            record_postgres_transaction_commit_duration(
+                commit_started.elapsed(),
+                EVENT_APPEND_OPERATION,
+                "error",
+            );
+            PersistenceError::Storage(e.to_string())
+        })?;
+        record_postgres_transaction_commit_duration(
+            commit_started.elapsed(),
+            EVENT_APPEND_OPERATION,
+            "ok",
+        );
+        transaction_timer.set_outcome("ok");
 
         Ok(new_seq)
     }
@@ -130,19 +187,20 @@ impl EventStore for PostgresEventStore {
         let (tenant, entity_type, entity_id) =
             parse_persistence_id_parts(persistence_id).map_err(PersistenceError::Storage)?;
 
-        let rows: Vec<(i64, String, serde_json::Value, serde_json::Value)> = sqlx::query_as(
-            "SELECT sequence_nr, event_type, payload, metadata \
+        let rows: Vec<(i64, String, serde_json::Value, serde_json::Value)> =
+            crate::dbm::postgres_query_as!(
+                "SELECT sequence_nr, event_type, payload, metadata \
              FROM events \
              WHERE tenant = $1 AND entity_type = $2 AND entity_id = $3 AND sequence_nr > $4 \
              ORDER BY sequence_nr ASC",
-        )
-        .bind(tenant)
-        .bind(entity_type)
-        .bind(entity_id)
-        .bind(from_sequence as i64)
-        .fetch_all(&self.pool)
-        .await
-        .map_err(|e| PersistenceError::Storage(e.to_string()))?;
+            )
+            .bind(tenant)
+            .bind(entity_type)
+            .bind(entity_id)
+            .bind(from_sequence as i64)
+            .fetch_all(&self.pool)
+            .await
+            .map_err(|e| PersistenceError::Storage(e.to_string()))?;
 
         rows.into_iter()
             .map(|(seq, event_type, payload, meta_json)| {
@@ -171,7 +229,7 @@ impl EventStore for PostgresEventStore {
         let (tenant, entity_type, entity_id) =
             parse_persistence_id_parts(persistence_id).map_err(PersistenceError::Storage)?;
 
-        sqlx::query(
+        crate::dbm::postgres_query!(
             "INSERT INTO snapshots (tenant, entity_type, entity_id, sequence_nr, state) \
              VALUES ($1, $2, $3, $4, $5) \
              ON CONFLICT (tenant, entity_type, entity_id) \
@@ -199,7 +257,7 @@ impl EventStore for PostgresEventStore {
         let (tenant, entity_type, entity_id) =
             parse_persistence_id_parts(persistence_id).map_err(PersistenceError::Storage)?;
 
-        let row: Option<(i64, Vec<u8>)> = sqlx::query_as(
+        let row: Option<(i64, Vec<u8>)> = crate::dbm::postgres_query_as!(
             "SELECT sequence_nr, state FROM snapshots \
              WHERE tenant = $1 AND entity_type = $2 AND entity_id = $3",
         )
@@ -219,7 +277,7 @@ impl EventStore for PostgresEventStore {
         &self,
         tenant: &str,
     ) -> Result<Vec<(String, String)>, PersistenceError> {
-        let rows: Vec<(String, String)> = sqlx::query_as(
+        let rows: Vec<(String, String)> = crate::dbm::postgres_query_as!(
             "SELECT DISTINCT entity_type, entity_id \
              FROM events \
              WHERE tenant = $1",
@@ -238,7 +296,7 @@ impl EventStore for PostgresEventStore {
         tenant: &str,
         entity_type: &str,
     ) -> Result<Vec<String>, PersistenceError> {
-        let rows: Vec<String> = sqlx::query_scalar(
+        let rows: Vec<String> = crate::dbm::postgres_query_scalar!(
             "SELECT DISTINCT e.entity_id \
              FROM events e \
              WHERE e.tenant = $1 \
@@ -540,6 +598,9 @@ mod tests {
         let _ = PostgresEventStore::persist_wasm_invocation;
         let _ = PostgresEventStore::load_recent_wasm_invocations;
         let _ = PostgresEventStore::delete_wasm_module;
+
+        let _ = PostgresEventStore::upsert_published_artifact;
+        let _ = PostgresEventStore::load_published_artifact;
     }
 
     #[test]
@@ -607,12 +668,75 @@ mod tests {
                 Some("true")
             );
 
-            sqlx::query("DELETE FROM entity_field_index WHERE tenant = $1")
+            crate::dbm::postgres_query!("DELETE FROM entity_field_index WHERE tenant = $1")
                 .bind(&tenant)
                 .execute(&pool)
                 .await
                 .unwrap();
-            sqlx::query("DELETE FROM entity_catalog WHERE tenant = $1")
+            crate::dbm::postgres_query!("DELETE FROM entity_catalog WHERE tenant = $1")
+                .bind(&tenant)
+                .execute(&pool)
+                .await
+                .unwrap();
+        });
+    }
+
+    #[test]
+    fn published_artifact_upsert_round_trips_and_updates_by_id() {
+        let database_url = match std::env::var("DATABASE_URL") {
+            Ok(url) => url,
+            Err(_) => return,
+        };
+
+        sqlx::test_block_on(async {
+            let pool = PgPool::connect(&database_url).await.unwrap();
+            run_migrations(&pool).await.unwrap();
+            let store = PostgresEventStore::new(pool.clone());
+            let tenant = format!("tenant-published-artifact-{}", uuid::Uuid::new_v4());
+
+            let artifact = crate::PostgresPublishedArtifactUpsert {
+                id: "part-test",
+                tenant: &tenant,
+                source_file_id: "file-a",
+                source_file_version_id: "",
+                content_hash: "sha256:abc",
+                label: "latest",
+                mime_type: "text/markdown",
+                byte_length: 42,
+                public_storage_key: "published/file-a.md",
+                public_url: "https://assets.example/published/file-a.md",
+                owner_ref_type: "Doc",
+                owner_ref_id: "doc-a",
+                status: "published",
+            };
+
+            let row = store.upsert_published_artifact(&artifact).await.unwrap();
+            assert_eq!(row.tenant, tenant);
+            assert_eq!(row.id, "part-test");
+            assert_eq!(row.public_url, "https://assets.example/published/file-a.md");
+
+            let updated = crate::PostgresPublishedArtifactUpsert {
+                public_url: "https://assets.example/published/file-a-v2.md",
+                public_storage_key: "published/file-a-v2.md",
+                byte_length: 43,
+                ..artifact
+            };
+            store.upsert_published_artifact(&updated).await.unwrap();
+
+            let loaded = store
+                .load_published_artifact(&tenant, "part-test")
+                .await
+                .unwrap()
+                .expect("artifact should load after upsert");
+
+            assert_eq!(
+                loaded.public_url,
+                "https://assets.example/published/file-a-v2.md"
+            );
+            assert_eq!(loaded.public_storage_key, "published/file-a-v2.md");
+            assert_eq!(loaded.byte_length, 43);
+
+            crate::dbm::postgres_query!("DELETE FROM published_artifacts WHERE tenant = $1")
                 .bind(&tenant)
                 .execute(&pool)
                 .await

@@ -12,16 +12,20 @@
 //! - **Schema migration** — a simple, idempotent migration runner that
 //!   creates the required tables on startup.
 
+pub mod dbm;
+mod metrics;
 pub mod migration;
 pub mod platform;
 pub mod schema;
 pub mod store;
 
+pub use metrics::init_metrics;
 pub use platform::{
     PostgresActionStats, PostgresAgentSummary, PostgresDesignTimeEventRow,
     PostgresEvolutionRecordRow, PostgresFeatureRequestRow, PostgresInstalledAppRow,
     PostgresOtsTrajectoryParams, PostgresOtsTrajectoryRow, PostgresPolicyDenialPatternRow,
-    PostgresPolicyRow, PostgresProjectedEntityFieldsRow, PostgresSecretRow, PostgresSpecRow,
+    PostgresPolicyRow, PostgresProjectedEntityFieldsRow, PostgresPublishedArtifactRow,
+    PostgresPublishedArtifactUpsert, PostgresSecretRow, PostgresSpecRow,
     PostgresSpecVerificationUpdate, PostgresTrajectoryInsert, PostgresTrajectoryRow,
     PostgresTrajectoryStats, PostgresUnmetIntentAggRow, PostgresWasmInvocationInsert,
     PostgresWasmInvocationRow, PostgresWasmModuleMetadataRow, PostgresWasmModuleRow,

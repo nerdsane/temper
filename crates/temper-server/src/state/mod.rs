@@ -5,12 +5,15 @@ pub mod custom_effects;
 mod dispatch;
 mod entity_ops;
 mod evolution;
+mod file_read_blobs;
+mod file_read_projection;
 mod file_reads;
 pub mod metrics;
 pub mod pending_decisions;
 mod persistence;
 pub mod policy_suggestions;
 mod projection_backfill;
+mod published_artifacts;
 mod runtime_metrics;
 pub mod trajectory;
 pub mod wasm_invocation_log;
@@ -18,13 +21,14 @@ pub mod wasm_invocation_log;
 pub use admission::{AdmissionController, AdmissionOutcome, AdmissionPermit};
 pub use dispatch::{DispatchCommand, DispatchError, DispatchExtOptions, StateTimeoutTracker};
 pub use entity_ops::{FailedLevelInfo, VerificationGateError};
-pub use file_reads::{TextFileReadResult, TextFileVersionReadResult};
+pub use file_reads::{IndexedFileStreamRead, TextFileReadResult, TextFileVersionReadResult};
 pub use metrics::MetricsCollector;
 pub use pending_decisions::{
     ActionScope, DecisionStatus, DurationScope, PendingDecision, PolicyScopeMatrix, PrincipalScope,
     ResourceScope,
 };
 pub use policy_suggestions::PolicySuggestionEngine;
+pub use published_artifacts::PublishFileArtifactRequest;
 pub use trajectory::{TrajectoryEntry, TrajectorySource};
 pub use wasm_invocation_log::WasmInvocationEntry;
 
@@ -33,6 +37,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::num::NonZeroUsize;
 use std::sync::{Arc, Mutex, OnceLock, RwLock};
 use std::time::Duration;
+use temper_actor_runtime::ActorSystem as PgActorSystem;
 use temper_authz::AuthzEngine;
 use temper_evolution::PostgresRecordStore;
 #[allow(deprecated)]
@@ -193,12 +198,68 @@ fn state_cache_budget() -> usize {
     *STATE_CACHE_BUDGET.get_or_init(|| env_usize("TEMPER_STATE_CACHE_BUDGET", 10_000))
 }
 
+/// Summary of a query-projection replay parity verification run.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct QueryProjectionReplayParityReport {
+    /// Tenant whose persisted journals and projection rows were compared.
+    pub tenant: String,
+    /// Number of persisted entities considered by the verifier.
+    pub checked: u64,
+    /// Number of non-deleted entities whose projection row matched replayed state.
+    pub matched: u64,
+    /// Number of entities whose projection row diverged from replayed state.
+    pub drifted: u64,
+    /// Number of active entities missing from the projection catalog.
+    pub missing: u64,
+    /// Number of replayed deleted entities correctly absent from the catalog.
+    pub deleted_absent: u64,
+    /// Number of entities the verifier could not compare because of a store or spec error.
+    pub errors: u64,
+    /// Bounded sample of drift/error examples for operator diagnosis.
+    pub drift_examples: Vec<QueryProjectionReplayParityDrift>,
+}
+
+impl QueryProjectionReplayParityReport {
+    /// Returns true when every checked entity matched the projection contract.
+    pub fn is_clean(&self) -> bool {
+        self.drifted == 0 && self.missing == 0 && self.errors == 0
+    }
+}
+
+/// One bounded replay parity drift or error example.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct QueryProjectionReplayParityDrift {
+    /// Entity type whose projection diverged from replayed state.
+    pub entity_type: String,
+    /// Entity identifier for targeted repair. This is intentionally not emitted as a metric tag.
+    pub entity_id: String,
+    /// Drift class, such as `fields`, `sequence`, `missing_catalog`, or `deleted_present`.
+    pub drift_kind: String,
+    /// Sequence relationship between catalog and replayed state.
+    pub sequence_direction: String,
+    /// Absolute sequence gap when both sides have sequence numbers.
+    pub sequence_gap: u64,
+    /// Sequence number currently stored in the projection catalog, when a row exists.
+    pub catalog_sequence: Option<u64>,
+    /// Sequence number recovered from authoritative event replay.
+    pub authoritative_sequence: u64,
+}
+
 /// Shared state for the Temper HTTP server.
 #[derive(Clone)]
 // ADR-0025 Phase 4: remove record_store field after IOA entity migration complete
 pub struct ServerState {
-    /// The actor system for spawning and managing entity actors.
+    /// The actor system for spawning and managing legacy in-memory entity actors.
     pub actor_system: Arc<ActorSystem>,
+    /// Optional PG-backed actor system. When configured and an entity type is in
+    /// actor_backed_types, OData reads/writes dispatch through this runtime.
+    pub pg_actor_system: Option<Arc<PgActorSystem>>,
+    /// Entity types backed by pg_actor_system.
+    ///
+    /// Entries may be global entity type names (for example, `Order`) or
+    /// tenant-scoped keys (`tenant:Order`) for canarying one tenant without
+    /// changing same-named entity types in other tenants.
+    pub actor_backed_types: BTreeSet<String>,
     /// Parsed CSDL document describing the entity model (legacy single-tenant).
     pub csdl: Arc<CsdlDocument>,
     /// Raw CSDL XML string for serving via `$metadata` (legacy single-tenant).
@@ -322,6 +383,8 @@ pub struct ServerState {
     /// receive a clone of this Arc via `with_shared_streams` so
     /// FFI calls from the guest resolve to the same handle IDs.
     pub http_stream_registry: Arc<temper_wasm::http_stream::HttpStreamRegistry>,
+    /// Long-lived workflow root spans keyed by workflow.run_id.
+    pub(crate) workflow_spans: Arc<crate::workflow_tracing::WorkflowSpanRegistry>,
 }
 
 /// Install a one-time hook so liveness violations surfaced by temper-spec
@@ -400,6 +463,8 @@ impl ServerState {
         let (observe_refresh_tx, _) = tokio::sync::broadcast::channel(64); // determinism-ok: broadcast for external observation
         let state = Self {
             actor_system: Arc::new(system),
+            pg_actor_system: None,
+            actor_backed_types: BTreeSet::new(),
             csdl: Arc::new(csdl),
             csdl_xml: Arc::new(csdl_xml),
             entity_set_map: Arc::new(entity_set_map),
@@ -450,6 +515,7 @@ impl ServerState {
             custom_effect_handler: None,
             http_endpoint_tables: Arc::new(crate::http_endpoint::HttpEndpointTables::new()),
             http_stream_registry: Arc::new(temper_wasm::http_stream::HttpStreamRegistry::new()),
+            workflow_spans: Arc::new(crate::workflow_tracing::WorkflowSpanRegistry::default()),
         };
 
         // Pre-register built-in WASM modules (http_fetch for generic HTTP integrations).
@@ -630,6 +696,8 @@ impl ServerState {
         let (observe_refresh_tx, _) = tokio::sync::broadcast::channel(64); // determinism-ok: broadcast for external observation
         let state = Self {
             actor_system: Arc::new(system),
+            pg_actor_system: None,
+            actor_backed_types: BTreeSet::new(),
             csdl: Arc::new(CsdlDocument {
                 version: "4.0".into(),
                 schemas: vec![],
@@ -683,6 +751,7 @@ impl ServerState {
             custom_effect_handler: None,
             http_endpoint_tables: Arc::new(crate::http_endpoint::HttpEndpointTables::new()),
             http_stream_registry: Arc::new(temper_wasm::http_stream::HttpStreamRegistry::new()),
+            workflow_spans: Arc::new(crate::workflow_tracing::WorkflowSpanRegistry::default()),
         };
         state.register_builtin_wasm_modules();
         state
@@ -753,6 +822,24 @@ impl ServerState {
     pub fn with_pg_record_store(mut self, store: PostgresRecordStore) -> Self {
         self.pg_record_store = Some(Arc::new(store));
         self
+    }
+
+    /// Create ServerState from SpecRegistry using the PG-backed actor system.
+    /// This is the actorized runtime path: actor_instances + actor_messages are source of truth.
+    pub fn from_pg_registry(system: Arc<PgActorSystem>, registry: SpecRegistry) -> Self {
+        let legacy = ActorSystem::new("pg-actor-compat");
+        let mut state = Self::from_registry(legacy, registry);
+        state.pg_actor_system = Some(system);
+        state
+    }
+
+    /// Return true when OData for this tenant/entity should dispatch through
+    /// the Postgres actor runtime.
+    pub fn is_pg_actor_backed(&self, tenant: &TenantId, entity_type: &str) -> bool {
+        self.actor_backed_types.contains(entity_type)
+            || self
+                .actor_backed_types
+                .contains(&format!("{}:{entity_type}", tenant.as_str()))
     }
 
     /// Attach an encrypted secrets vault.
@@ -929,6 +1016,7 @@ impl ServerState {
             entity_type: "File".to_string(),
             entity_id: file_id.to_string(),
             trigger_action: "StreamUpload".to_string(),
+            wasm_module: Some("blob_adapter".to_string()),
             trigger_params: serde_json::json!({
                 "stream_id": stream_id,
                 "size_bytes": body.len() as i64,
@@ -984,6 +1072,26 @@ impl ServerState {
         file_id: &str,
         agent_ctx: &crate::request_context::AgentContext,
     ) -> Result<(u16, Vec<u8>), String> {
+        match self.read_file_stream_indexed(tenant, file_id).await? {
+            IndexedFileStreamRead::Content { bytes, .. } => return Ok((200, bytes)),
+            IndexedFileStreamRead::NoContent { .. } => return Ok((404, Vec::new())),
+            IndexedFileStreamRead::MissingIndex => {
+                tracing::warn!(
+                    tenant = %tenant,
+                    file_id,
+                    "file stream projection missing; falling back to actor/WASM materialization"
+                );
+            }
+            IndexedFileStreamRead::StaleIndex { content_hash, .. } => {
+                tracing::warn!(
+                    tenant = %tenant,
+                    file_id,
+                    content_hash = %content_hash,
+                    "file stream projection blob missing; falling back to actor/WASM materialization"
+                );
+            }
+        }
+
         let entity_state = serde_json::to_value(
             &self
                 .get_tenant_entity_state(tenant, "File", file_id)
@@ -1016,6 +1124,7 @@ impl ServerState {
             entity_type: "File".to_string(),
             entity_id: file_id.to_string(),
             trigger_action: "StreamDownload".to_string(),
+            wasm_module: Some("blob_adapter".to_string()),
             trigger_params: serde_json::json!({
                 "stream_id": response_stream_id,
                 "operation": "get",

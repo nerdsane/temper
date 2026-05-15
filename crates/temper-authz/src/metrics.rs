@@ -7,6 +7,9 @@ use opentelemetry::{KeyValue, global};
 struct CedarMetrics {
     evaluations_total: Counter<u64>,
     evaluation_duration: Histogram<f64>,
+    evaluation_duration_ms: Histogram<f64>,
+    evaluation_phase_duration_ms: Histogram<f64>,
+    request_attribute_count: Histogram<u64>,
 }
 
 fn metrics() -> &'static CedarMetrics {
@@ -22,6 +25,22 @@ fn metrics() -> &'static CedarMetrics {
                 .f64_histogram("temper_cedar_evaluation_duration")
                 .with_description("Latency of Cedar authorization evaluation.")
                 .build(),
+            evaluation_duration_ms: meter
+                .f64_histogram("temper_cedar_evaluation_duration_ms")
+                .with_description("Latency of Cedar authorization evaluation in milliseconds.")
+                .with_unit("ms")
+                .build(),
+            evaluation_phase_duration_ms: meter
+                .f64_histogram("temper_cedar_evaluation_phase_duration_ms")
+                .with_description(
+                    "Latency of bounded phases inside Cedar authorization evaluation.",
+                )
+                .with_unit("ms")
+                .build(),
+            request_attribute_count: meter
+                .u64_histogram("temper_cedar_request_attribute_count")
+                .with_description("Attribute counts in Cedar authorization request inputs.")
+                .build(),
         }
     })
 }
@@ -30,10 +49,66 @@ pub fn init_metrics() {
     let _ = metrics();
 }
 
-pub(crate) fn record_cedar_evaluation(duration: Duration, decision: &str) {
-    let attrs = [KeyValue::new("decision", decision.to_string())];
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum CedarDecisionMetric {
+    Allow,
+    Deny,
+    Error,
+}
+
+impl CedarDecisionMetric {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Allow => "allow",
+            Self::Deny => "deny",
+            Self::Error => "error",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum CedarPhaseOutcome {
+    Ok,
+    Error,
+}
+
+impl CedarPhaseOutcome {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Ok => "ok",
+            Self::Error => "error",
+        }
+    }
+}
+
+pub(crate) fn record_cedar_evaluation(duration: Duration, decision: CedarDecisionMetric) {
+    let attrs = [KeyValue::new("decision", decision.as_str().to_string())];
     metrics().evaluations_total.add(1, &attrs);
     metrics()
         .evaluation_duration
         .record(duration.as_secs_f64(), &attrs);
+    metrics()
+        .evaluation_duration_ms
+        .record(duration.as_secs_f64() * 1000.0, &attrs);
+}
+
+pub(crate) fn record_cedar_phase_duration(
+    phase: &'static str,
+    duration: Duration,
+    outcome: CedarPhaseOutcome,
+) {
+    let attrs = [
+        KeyValue::new("phase", phase.to_string()),
+        KeyValue::new("outcome", outcome.as_str().to_string()),
+    ];
+    metrics()
+        .evaluation_phase_duration_ms
+        .record(duration.as_secs_f64() * 1000.0, &attrs);
+}
+
+pub(crate) fn record_cedar_request_attribute_count(source: &'static str, count: usize) {
+    let attrs = [KeyValue::new("source", source.to_string())];
+    metrics()
+        .request_attribute_count
+        .record(count as u64, &attrs);
 }

@@ -358,3 +358,119 @@ async fn query_projection_excludes_fields_marked_not_query_indexed() {
 
     let _ = std::fs::remove_file(db_path);
 }
+
+#[tokio::test]
+async fn replay_parity_verifier_detects_projection_drift() {
+    let db_path = std::env::temp_dir().join(format!(
+        "temper-query-projection-parity-{}.db",
+        uuid::Uuid::new_v4()
+    ));
+    let db_url = format!("file:{}", db_path.display());
+    let store = TursoEventStore::new(&db_url, None)
+        .await
+        .expect("create local turso db");
+
+    let tenant = TenantId::new("tenant-a");
+    let entity_type = "Order";
+    let active_id = "ord-parity-active";
+    let deleted_id = "ord-parity-deleted";
+
+    let state = build_state_with_turso("test-query-projection-parity", store.clone());
+    state
+        .get_or_create_tenant_entity(
+            &tenant,
+            entity_type,
+            active_id,
+            serde_json::json!({"Title": "Parity Good"}),
+        )
+        .await
+        .expect("create active entity");
+    let response = state
+        .dispatch_tenant_action(
+            &tenant,
+            entity_type,
+            active_id,
+            "AddItem",
+            serde_json::json!({"ProductId": "sku-3", "Quantity": 1}),
+            &AgentContext::default(),
+        )
+        .await
+        .expect("dispatch AddItem");
+    assert!(
+        response.success,
+        "AddItem should succeed for parity verifier test"
+    );
+
+    state
+        .get_or_create_tenant_entity(
+            &tenant,
+            entity_type,
+            deleted_id,
+            serde_json::json!({"Title": "Parity Deleted"}),
+        )
+        .await
+        .expect("create entity that will be deleted");
+    state
+        .delete_tenant_entity(&tenant, entity_type, deleted_id)
+        .await
+        .expect("delete parity entity");
+
+    let active_ids = wait_for_query_projection_ids(
+        &store,
+        tenant.as_str(),
+        entity_type,
+        "Title",
+        "Parity Good",
+        &[active_id.to_string()],
+    )
+    .await;
+    assert_eq!(active_ids, vec![active_id.to_string()]);
+    let counts = wait_for_projected_counts(&store, &[("tenant-a".to_string(), 1)]).await;
+    assert_eq!(counts, vec![("tenant-a".to_string(), 1)]);
+
+    let clean = state
+        .verify_query_projection_replay_parity(&tenant)
+        .await
+        .expect("clean replay parity report");
+    assert!(clean.is_clean(), "expected clean parity report: {clean:?}");
+    assert_eq!(clean.checked, 1);
+    assert_eq!(clean.matched, 1);
+    assert_eq!(clean.deleted_absent, 0);
+
+    let actor_state = state
+        .get_tenant_entity_state(&tenant, entity_type, active_id)
+        .await
+        .expect("load active state");
+    store
+        .upsert_query_projection(
+            tenant.as_str(),
+            entity_type,
+            active_id,
+            &actor_state.state.status,
+            &serde_json::json!({"Title": "Parity Drift"}),
+            actor_state.state.sequence_nr,
+        )
+        .await
+        .expect("inject projection drift");
+
+    let drift = state
+        .verify_query_projection_replay_parity(&tenant)
+        .await
+        .expect("drift replay parity report");
+    assert!(!drift.is_clean(), "expected drift report: {drift:?}");
+    assert_eq!(drift.checked, 1);
+    assert_eq!(drift.drifted, 1);
+    assert_eq!(drift.missing, 0);
+    assert_eq!(drift.errors, 0);
+    assert!(
+        drift.drift_examples.iter().any(|example| {
+            example.entity_type == entity_type
+                && example.entity_id == active_id
+                && example.drift_kind == "fields"
+                && example.sequence_direction == "equal"
+        }),
+        "expected fields drift example for active entity: {drift:?}"
+    );
+
+    let _ = std::fs::remove_file(db_path);
+}

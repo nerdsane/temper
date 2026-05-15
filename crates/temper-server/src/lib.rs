@@ -14,6 +14,7 @@ pub mod blob_sweeper;
 pub mod blobs;
 pub mod channels;
 pub mod entity_actor;
+pub mod event_budget_metrics;
 pub mod events;
 pub mod eventual_invariants;
 pub mod http_endpoint;
@@ -41,6 +42,7 @@ pub(crate) mod trajectory_outbox;
 pub mod trigger;
 pub mod wasm_registry;
 pub mod webhooks;
+pub(crate) mod workflow_tracing;
 
 pub use entity_actor::{EntityActor, EntityActorHandler, EntityMsg, EntityResponse, EntityState};
 pub use registry::SpecRegistry;

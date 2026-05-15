@@ -1,0 +1,26 @@
+# Message — a single conversation message within a Process.
+# Written by Process/LLM actors as side effects during conversation.
+# Mirrors the Message entity from model.csdl.xml.
+#
+# Roles: user | assistant | tool
+# Created by:
+#   Process actor    — user messages (StartProcess/SendInput params)
+#   LlmIntegration   — assistant messages (inference results, tool calls)
+#   ToolExecutor     — tool result messages
+
+[automaton]
+name = "Message"
+states = ["Written"]
+initial = "Written"
+
+[[action]]
+name = "Write"
+kind = "input"
+from = ["Written"]
+params = [
+    { name = "process_id", type = "string" },
+    { name = "role",       type = "string" },
+    { name = "content",    type = "string" },
+    { name = "sequence",   type = "uint64" },
+]
+hint = "Append a message to the conversation."

@@ -2,18 +2,28 @@
 //!
 //! Upload, download, delete, and list WASM integration modules.
 
+use std::collections::BTreeMap;
+
 use axum::extract::Path;
 use axum::extract::{Query, State};
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::Json;
+use base64::Engine;
 use serde::{Deserialize, Serialize};
-use temper_authz::PrincipalKind;
 
 use tracing::instrument;
 
-use crate::authz::{observe_tenant_scope, require_observe_auth, security_context_from_headers};
+use crate::authz::{
+    GovernedMutationAuth, observe_tenant_scope, require_governed_mutation_auth,
+    require_observe_auth,
+};
 use crate::odata::extract_tenant;
 use crate::state::ServerState;
+
+#[derive(Deserialize)]
+struct WasmModuleUploadJson {
+    wasm_base64: String,
+}
 
 /// Response for WASM module upload.
 #[derive(Serialize)]
@@ -89,50 +99,72 @@ pub async fn handle_upload_wasm_module(
     body: axum::body::Bytes,
 ) -> Result<Json<WasmModuleUploadResponse>, (StatusCode, String)> {
     let tenant = extract_tenant(&headers, &state)?;
-    // Cedar authorization: admin bypass, others need manage_wasm.
-    let security_ctx = security_context_from_headers(&headers, None, None, None);
-    if !matches!(security_ctx.principal.kind, PrincipalKind::Admin)
-        && let Err(denial) = state.authorize_with_context(
-            &security_ctx,
-            "manage_wasm",
-            "WasmModule",
-            &std::collections::BTreeMap::new(),
-            tenant.as_str(),
-        )
+    let mut resource_attrs = BTreeMap::new();
+    resource_attrs.insert(
+        "id".to_string(),
+        serde_json::Value::String(module_name.clone()),
+    );
+    resource_attrs.insert(
+        "module_name".to_string(),
+        serde_json::Value::String(module_name.clone()),
+    );
+    if let Some(resp) = require_governed_mutation_auth(
+        &state,
+        &headers,
+        GovernedMutationAuth {
+            tenant: tenant.as_str(),
+            action: "manage_wasm",
+            resource_type: "WasmModule",
+            resource_id: &module_name,
+            resource_attrs,
+            module_name: Some(&module_name),
+            from_status: None,
+        },
+    )
+    .await
     {
-        let reason = denial.to_string();
-        tracing::warn!(reason = %reason, "unauthorized WASM upload attempt");
-        return Err((StatusCode::FORBIDDEN, reason));
+        return Err(resp);
     }
 
+    let module_bytes = decode_wasm_upload_body(&headers, body)?;
+
     // TigerStyle: pre-assertion on module size (10 MB budget)
-    if body.len() > temper_wasm::types::MAX_MODULE_SIZE {
-        tracing::warn!(size = body.len(), "WASM module too large");
+    if module_bytes.len() > temper_wasm::types::MAX_MODULE_SIZE {
+        tracing::warn!(size = module_bytes.len(), "WASM module too large");
         return Err((
             StatusCode::PAYLOAD_TOO_LARGE,
             format!(
                 "WASM module too large: {} bytes (max {})",
-                body.len(),
+                module_bytes.len(),
                 temper_wasm::types::MAX_MODULE_SIZE
             ),
         ));
     }
 
     // Compile and cache (must succeed before persisting)
-    let hash = state.wasm_engine.compile_and_cache(&body).map_err(|e| {
-        tracing::warn!(error = %e, "WASM compilation failed");
-        (
-            StatusCode::BAD_REQUEST,
-            format!("WASM compilation failed: {e}"),
-        )
-    })?;
+    let hash = state
+        .wasm_engine
+        .compile_and_cache(&module_bytes)
+        .map_err(|e| {
+            tracing::warn!(error = %e, "WASM compilation failed");
+            (
+                StatusCode::BAD_REQUEST,
+                format!("WASM compilation failed: {e}"),
+            )
+        })?;
 
     // Persist to durable storage first — if durability fails, refuse the upload.
     // This ensures the module survives restarts before we expose it in memory.
     // source="upload" so the os-apps install pipeline won't clobber this row at
     // next boot.
     if let Err(e) = state
-        .upsert_wasm_module(tenant.as_str(), &module_name, &body, &hash, "upload")
+        .upsert_wasm_module(
+            tenant.as_str(),
+            &module_name,
+            &module_bytes,
+            &hash,
+            "upload",
+        )
         .await
     {
         tracing::error!(error = %e, "failed to persist WASM module to durable store");
@@ -149,7 +181,7 @@ pub async fn handle_upload_wasm_module(
         wasm_reg.register(&tenant, &module_name, &hash);
     }
 
-    let size_bytes = body.len();
+    let size_bytes = module_bytes.len();
     tracing::info!(
         tenant = %tenant,
         module = %module_name,
@@ -163,6 +195,38 @@ pub async fn handle_upload_wasm_module(
         sha256_hash: hash,
         size_bytes,
     }))
+}
+
+fn decode_wasm_upload_body(
+    headers: &HeaderMap,
+    body: axum::body::Bytes,
+) -> Result<axum::body::Bytes, (StatusCode, String)> {
+    let content_type = headers
+        .get(axum::http::header::CONTENT_TYPE)
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("");
+    if !content_type
+        .split(';')
+        .any(|part| part.trim().eq_ignore_ascii_case("application/json"))
+    {
+        return Ok(body);
+    }
+
+    let payload: WasmModuleUploadJson = serde_json::from_slice(&body).map_err(|e| {
+        (
+            StatusCode::BAD_REQUEST,
+            format!("invalid WASM upload JSON body: {e}"),
+        )
+    })?;
+    let decoded = base64::engine::general_purpose::STANDARD
+        .decode(payload.wasm_base64)
+        .map_err(|e| {
+            (
+                StatusCode::BAD_REQUEST,
+                format!("invalid wasm_base64 payload: {e}"),
+            )
+        })?;
+    Ok(axum::body::Bytes::from(decoded))
 }
 
 /// GET /observe/wasm/modules/{module_name} — module info.
@@ -205,20 +269,31 @@ pub async fn handle_delete_wasm_module(
     Path(module_name): Path<String>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
     let tenant = extract_tenant(&headers, &state)?;
-    // Cedar authorization: admin bypass, others need manage_wasm.
-    let security_ctx = security_context_from_headers(&headers, None, None, None);
-    if !matches!(security_ctx.principal.kind, PrincipalKind::Admin)
-        && let Err(denial) = state.authorize_with_context(
-            &security_ctx,
-            "manage_wasm",
-            "WasmModule",
-            &std::collections::BTreeMap::new(),
-            tenant.as_str(),
-        )
+    let mut resource_attrs = BTreeMap::new();
+    resource_attrs.insert(
+        "id".to_string(),
+        serde_json::Value::String(module_name.clone()),
+    );
+    resource_attrs.insert(
+        "module_name".to_string(),
+        serde_json::Value::String(module_name.clone()),
+    );
+    if let Some(resp) = require_governed_mutation_auth(
+        &state,
+        &headers,
+        GovernedMutationAuth {
+            tenant: tenant.as_str(),
+            action: "manage_wasm",
+            resource_type: "WasmModule",
+            resource_id: &module_name,
+            resource_attrs,
+            module_name: Some(&module_name),
+            from_status: None,
+        },
+    )
+    .await
     {
-        let reason = denial.to_string();
-        tracing::warn!(reason = %reason, "unauthorized WASM delete attempt");
-        return Err((StatusCode::FORBIDDEN, reason));
+        return Err(resp);
     }
 
     // Get hash before removing from registry (for cache eviction)

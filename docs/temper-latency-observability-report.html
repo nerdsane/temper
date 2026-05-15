@@ -1,0 +1,2657 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Temper Latency and Observability Acceleration Report</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Archivo+Narrow:wght@500;600;700&amp;family=Noto+Sans:wght@400;500;650;800&amp;family=Share+Tech+Mono&amp;display=swap" rel="stylesheet">
+  <style>
+    :root {
+      --bg: #fcfcfa;
+      --surface: #f7f8ff;
+      --surface-2: #eef3ff;
+      --ink: #0b0d12;
+      --muted: #6e7480;
+      --line: #111318;
+      --lavender: #dcd6ff;
+      --cyan: #bff6ff;
+      --info: #7abfe8;
+      --success: #31d48a;
+      --warn: #c7a64b;
+      --error: #c2556b;
+      --shadow: 7px 7px 0 rgba(17, 19, 24, 0.11);
+      --mono: "Share Tech Mono", ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+      --body: "Noto Sans", system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      --heading: "Archivo Narrow", Impact, Haettenschweiler, "Arial Narrow Bold", sans-serif;
+    }
+
+    * {
+      box-sizing: border-box;
+    }
+
+    html {
+      scroll-behavior: smooth;
+    }
+
+    body {
+      margin: 0;
+      color: var(--ink);
+      background:
+        linear-gradient(90deg, rgba(11, 13, 18, 0.035) 1px, transparent 1px) 0 0 / 24px 24px,
+        linear-gradient(0deg, rgba(11, 13, 18, 0.03) 1px, transparent 1px) 0 0 / 24px 24px,
+        radial-gradient(circle at 8% 8%, rgba(191, 246, 255, 0.45), transparent 360px),
+        radial-gradient(circle at 92% 0%, rgba(220, 214, 255, 0.55), transparent 380px),
+        var(--bg);
+      font-family: var(--body);
+      font-size: 16px;
+      line-height: 1.58;
+      letter-spacing: 0;
+    }
+
+    a {
+      color: var(--ink);
+      text-decoration-thickness: 2px;
+      text-underline-offset: 3px;
+    }
+
+    button {
+      font: inherit;
+    }
+
+    .shell {
+      width: min(1440px, calc(100% - 32px));
+      margin: 0 auto;
+      padding: 20px 0 56px;
+    }
+
+    .topbar {
+      position: sticky;
+      top: 0;
+      z-index: 50;
+      display: grid;
+      grid-template-columns: minmax(250px, 0.75fr) minmax(0, 1.4fr);
+      gap: 12px;
+      padding: 10px 0;
+      background: linear-gradient(180deg, rgba(252, 252, 250, 0.98), rgba(252, 252, 250, 0.78));
+      backdrop-filter: blur(14px);
+      border-bottom: 2px solid rgba(17, 19, 24, 0.18);
+    }
+
+    .brand-strip,
+    .nav-strip,
+    .panel,
+    .metric,
+    .diagram,
+    .callout,
+    .task,
+    .source-box,
+    table {
+      border: 2px solid var(--line);
+      background: rgba(247, 248, 255, 0.88);
+      box-shadow: var(--shadow);
+    }
+
+    .brand-strip {
+      display: grid;
+      grid-template-columns: 52px 1fr;
+      min-height: 54px;
+    }
+
+    .brand-mark {
+      display: grid;
+      place-items: center;
+      border-right: 2px solid var(--line);
+      background: var(--cyan);
+      font-family: var(--mono);
+      font-size: 22px;
+    }
+
+    .brand-text {
+      padding: 7px 12px;
+      font-family: var(--mono);
+      line-height: 1.2;
+      text-transform: uppercase;
+    }
+
+    .brand-text strong {
+      display: block;
+      font-family: var(--heading);
+      font-size: 22px;
+    }
+
+    .nav-strip {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      min-height: 54px;
+      padding: 8px;
+      overflow-x: auto;
+    }
+
+    .nav-strip a,
+    .nav-action,
+    .diagram-toolbar button,
+    .inline-action {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      min-height: 32px;
+      padding: 5px 10px;
+      border: 1px solid var(--line);
+      background: #fff;
+      color: var(--ink);
+      font-family: var(--mono);
+      font-size: 12px;
+      text-decoration: none;
+      white-space: nowrap;
+      cursor: pointer;
+    }
+
+    .nav-action,
+    .inline-action.primary {
+      background: var(--cyan);
+    }
+
+    .nav-strip a:hover,
+    .nav-action:hover,
+    .diagram-toolbar button:hover,
+    .inline-action:hover {
+      background: var(--lavender);
+    }
+
+    .hero {
+      position: relative;
+      display: grid;
+      grid-template-columns: minmax(0, 1.15fr) minmax(320px, 0.85fr);
+      gap: 18px;
+      margin-top: 18px;
+      border: 2px solid var(--line);
+      background:
+        linear-gradient(135deg, rgba(255, 255, 255, 0.88), rgba(247, 248, 255, 0.78)),
+        repeating-linear-gradient(0deg, rgba(11, 13, 18, 0.04), rgba(11, 13, 18, 0.04) 1px, transparent 1px, transparent 8px);
+      box-shadow: 10px 10px 0 rgba(17, 19, 24, 0.12);
+      overflow: hidden;
+    }
+
+    .hero::before,
+    .hero::after {
+      content: "";
+      position: absolute;
+      pointer-events: none;
+      border: 2px solid rgba(17, 19, 24, 0.22);
+      transform: skewX(-18deg);
+    }
+
+    .hero::before {
+      right: -60px;
+      top: 38px;
+      width: 290px;
+      height: 84px;
+      background: rgba(191, 246, 255, 0.48);
+    }
+
+    .hero::after {
+      right: 116px;
+      bottom: 38px;
+      width: 230px;
+      height: 62px;
+      background: rgba(220, 214, 255, 0.5);
+    }
+
+    .hero-main,
+    .hero-side {
+      position: relative;
+      z-index: 2;
+      padding: 26px;
+    }
+
+    .hero-side {
+      border-left: 2px solid var(--line);
+      background: rgba(11, 13, 18, 0.04);
+    }
+
+    .eyebrow {
+      display: inline-flex;
+      align-items: center;
+      min-height: 30px;
+      margin-bottom: 14px;
+      padding: 4px 9px;
+      border: 2px solid var(--line);
+      background: var(--cyan);
+      font-family: var(--mono);
+      font-size: 12px;
+      text-transform: uppercase;
+    }
+
+    h1,
+    h2,
+    h3,
+    h4 {
+      margin: 0;
+      font-family: var(--heading);
+      line-height: 1;
+      letter-spacing: 0;
+      text-transform: uppercase;
+    }
+
+    h1 {
+      max-width: 940px;
+      font-size: 76px;
+    }
+
+    h2 {
+      padding-bottom: 8px;
+      border-bottom: 4px double var(--line);
+      font-size: 46px;
+    }
+
+    h3 {
+      margin-bottom: 9px;
+      font-size: 26px;
+    }
+
+    h4 {
+      font-size: 20px;
+    }
+
+    p {
+      margin: 0 0 12px;
+    }
+
+    .lede {
+      max-width: 88ch;
+      margin-top: 18px;
+      font-size: 18px;
+    }
+
+    .meter {
+      margin-bottom: 12px;
+      border: 2px solid var(--line);
+      background: rgba(255, 255, 255, 0.72);
+    }
+
+    .strip-title,
+    .panel-title {
+      display: flex;
+      justify-content: space-between;
+      gap: 12px;
+      align-items: center;
+      min-height: 34px;
+      padding: 7px 10px;
+      color: #fff;
+      background: var(--ink);
+      font-family: var(--mono);
+      font-size: 12px;
+      text-transform: uppercase;
+    }
+
+    .strip-title span:last-child,
+    .panel-title span:last-child {
+      color: var(--cyan);
+    }
+
+    .meter-body {
+      padding: 10px 12px;
+    }
+
+    .meter-row {
+      display: grid;
+      grid-template-columns: 100px 1fr 62px;
+      gap: 10px;
+      align-items: center;
+      margin: 8px 0;
+      font-family: var(--mono);
+      font-size: 12px;
+    }
+
+    .bar {
+      height: 12px;
+      border: 1px solid var(--line);
+      background: #fff;
+    }
+
+    .bar i {
+      display: block;
+      height: 100%;
+      background: linear-gradient(90deg, var(--success), var(--cyan));
+    }
+
+    .bar.warn i {
+      background: linear-gradient(90deg, var(--warn), var(--error));
+    }
+
+    .interaction-strip {
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) auto;
+      gap: 12px;
+      align-items: center;
+      margin-top: 16px;
+      padding: 10px 12px;
+      border: 2px solid var(--line);
+      background: rgba(191, 246, 255, 0.36);
+      box-shadow: var(--shadow);
+      font-family: var(--mono);
+      font-size: 13px;
+    }
+
+    .section {
+      margin-top: 34px;
+      scroll-margin-top: 96px;
+    }
+
+    .section-header {
+      display: grid;
+      grid-template-columns: 210px 1fr;
+      gap: 16px;
+      align-items: end;
+      margin-bottom: 15px;
+    }
+
+    .section-label {
+      padding: 8px 10px;
+      border: 2px solid var(--line);
+      background: var(--ink);
+      color: #fff;
+      font-family: var(--mono);
+      font-size: 12px;
+      text-transform: uppercase;
+    }
+
+    .grid-2,
+    .grid-3,
+    .metrics,
+    .task-board {
+      display: grid;
+      gap: 15px;
+    }
+
+    .grid-2 {
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+    }
+
+    .grid-3 {
+      grid-template-columns: repeat(3, minmax(0, 1fr));
+    }
+
+    .metrics {
+      grid-template-columns: repeat(4, minmax(0, 1fr));
+    }
+
+    .task-board {
+      grid-template-columns: repeat(4, minmax(0, 1fr));
+    }
+
+    .progress-console {
+      display: grid;
+      grid-template-columns: minmax(0, 1.15fr) minmax(280px, 0.85fr);
+      gap: 15px;
+      align-items: stretch;
+    }
+
+    .progress-track {
+      height: 28px;
+      border: 2px solid var(--line);
+      background: #fff;
+      overflow: hidden;
+    }
+
+    .progress-fill {
+      display: flex;
+      align-items: center;
+      justify-content: flex-end;
+      width: 5%;
+      min-width: 54px;
+      height: 100%;
+      padding-right: 8px;
+      background: linear-gradient(90deg, var(--success), var(--cyan));
+      border-right: 2px solid var(--line);
+      font-family: var(--mono);
+      font-size: 12px;
+      color: var(--ink);
+    }
+
+    .program-facts {
+      display: grid;
+      gap: 8px;
+      margin-top: 12px;
+    }
+
+    .program-fact {
+      display: grid;
+      grid-template-columns: minmax(82px, 120px) minmax(0, 1fr);
+      gap: 10px;
+      padding: 7px 9px;
+      border: 1px solid rgba(17, 19, 24, 0.28);
+      background: rgba(255, 255, 255, 0.66);
+      font-family: var(--mono);
+      font-size: 12px;
+    }
+
+    .program-fact strong,
+    .program-fact span {
+      min-width: 0;
+    }
+
+    .program-fact span {
+      overflow-wrap: anywhere;
+    }
+
+    .status-log {
+      display: grid;
+      gap: 10px;
+    }
+
+    .log-entry {
+      padding: 10px;
+      border: 1px solid rgba(17, 19, 24, 0.34);
+      background: rgba(255, 255, 255, 0.72);
+    }
+
+    .log-entry time {
+      display: block;
+      margin-bottom: 4px;
+      color: var(--muted);
+      font-family: var(--mono);
+      font-size: 12px;
+    }
+
+    .panel,
+    .callout,
+    .source-box {
+      padding: 16px;
+    }
+
+    .panel p,
+    .callout p,
+    .source-box p {
+      max-width: 78ch;
+      overflow-wrap: break-word;
+    }
+
+    .callout {
+      display: grid;
+      grid-template-columns: 12px minmax(0, 1fr);
+      gap: 12px;
+      background: rgba(191, 246, 255, 0.38);
+    }
+
+    .callout::before {
+      content: "";
+      display: block;
+      background: var(--ink);
+    }
+
+    .callout.warning {
+      background: rgba(199, 166, 75, 0.2);
+    }
+
+    .callout.critical {
+      background: rgba(194, 85, 107, 0.16);
+    }
+
+    .chips {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+      margin-top: 12px;
+    }
+
+    .chip {
+      display: inline-flex;
+      align-items: center;
+      min-height: 28px;
+      padding: 4px 8px;
+      border: 1px solid var(--line);
+      background: #fff;
+      font-family: var(--mono);
+      font-size: 12px;
+    }
+
+    .chip.good {
+      background: rgba(49, 212, 138, 0.2);
+    }
+
+    .chip.warn {
+      background: rgba(199, 166, 75, 0.22);
+    }
+
+    .chip.bad {
+      background: rgba(194, 85, 107, 0.18);
+    }
+
+    .metric {
+      min-height: 150px;
+      display: grid;
+      grid-template-rows: auto 1fr auto;
+      background: rgba(255, 255, 255, 0.78);
+    }
+
+    .metric .label {
+      padding: 8px 10px;
+      border-bottom: 2px solid var(--line);
+      background: rgba(220, 214, 255, 0.54);
+      font-family: var(--mono);
+      font-size: 12px;
+      text-transform: uppercase;
+    }
+
+    .metric strong {
+      display: block;
+      padding: 12px 10px 4px;
+      font-family: var(--heading);
+      font-size: 30px;
+      line-height: 1;
+    }
+
+    .metric p {
+      margin: 0;
+      padding: 0 10px 12px;
+      color: var(--muted);
+      font-size: 13px;
+    }
+
+    table {
+      width: 100%;
+      border-collapse: collapse;
+      background: rgba(255, 255, 255, 0.8);
+    }
+
+    th,
+    td {
+      vertical-align: top;
+      padding: 10px;
+      border: 1px solid rgba(17, 19, 24, 0.26);
+      text-align: left;
+    }
+
+    th {
+      background: var(--ink);
+      color: #fff;
+      font-family: var(--mono);
+      font-size: 12px;
+      text-transform: uppercase;
+    }
+
+    tbody tr:nth-child(even) td {
+      background: rgba(247, 248, 255, 0.72);
+    }
+
+    .table-wrap {
+      overflow-x: auto;
+      padding-bottom: 8px;
+    }
+
+    .status {
+      display: inline-flex;
+      min-height: 24px;
+      padding: 2px 8px;
+      border: 1px solid var(--line);
+      font-family: var(--mono);
+      font-size: 12px;
+      white-space: nowrap;
+    }
+
+    .status.ok {
+      background: rgba(49, 212, 138, 0.22);
+    }
+
+    .status.watch {
+      background: rgba(199, 166, 75, 0.22);
+    }
+
+    .status.fail {
+      background: rgba(194, 85, 107, 0.2);
+    }
+
+    .diagram {
+      position: relative;
+      min-height: 330px;
+      padding: 12px;
+      overflow: auto;
+      background:
+        linear-gradient(180deg, rgba(247, 248, 255, 0.94), rgba(255, 255, 255, 0.84)),
+        repeating-linear-gradient(90deg, rgba(11, 13, 18, 0.035), rgba(11, 13, 18, 0.035) 1px, transparent 1px, transparent 10px);
+    }
+
+    .diagram .panel-title {
+      margin: -12px -12px 12px;
+    }
+
+    .mermaid {
+      min-width: 900px;
+      margin: 0;
+      font-family: var(--mono);
+      font-size: 15px;
+    }
+
+    .diagram-wide .mermaid {
+      min-width: 1120px;
+    }
+
+    .diagram-toolbar {
+      position: sticky;
+      top: 0;
+      left: 0;
+      z-index: 5;
+      display: flex;
+      justify-content: flex-end;
+      gap: 8px;
+      margin-bottom: 10px;
+      pointer-events: none;
+    }
+
+    .diagram-toolbar button {
+      pointer-events: auto;
+    }
+
+    .diagram.is-focused {
+      position: fixed;
+      inset: 22px;
+      z-index: 90;
+      min-height: auto;
+      background: var(--bg);
+      box-shadow: 12px 12px 0 rgba(17, 19, 24, 0.22);
+    }
+
+    .diagram.is-focused .mermaid {
+      min-width: 1280px;
+      font-size: 17px;
+    }
+
+    body.has-focused-diagram {
+      overflow: hidden;
+    }
+
+    .task {
+      background: rgba(255, 255, 255, 0.78);
+      min-height: 230px;
+    }
+
+    .task header {
+      padding: 9px 10px;
+      border-bottom: 2px solid var(--line);
+      background: var(--ink);
+      color: #fff;
+      font-family: var(--mono);
+      font-size: 12px;
+      text-transform: uppercase;
+    }
+
+    .task .body {
+      padding: 12px;
+    }
+
+    .task ul,
+    .panel ul,
+    .callout ul,
+    .source-box ul {
+      margin: 8px 0 0 18px;
+      padding: 0;
+    }
+
+    .task li,
+    .panel li,
+    .callout li,
+    .source-box li {
+      margin: 6px 0;
+    }
+
+    .small {
+      color: var(--muted);
+      font-size: 13px;
+    }
+
+    code {
+      padding: 1px 4px;
+      border: 1px solid rgba(17, 19, 24, 0.2);
+      background: rgba(220, 214, 255, 0.48);
+      font-family: var(--mono);
+      overflow-wrap: anywhere;
+      word-break: break-word;
+    }
+
+    .drillable {
+      cursor: pointer;
+      transition: background-color 150ms ease, box-shadow 150ms ease, transform 150ms ease;
+    }
+
+    .drillable:hover,
+    .drillable:focus-visible {
+      outline: 3px solid var(--cyan);
+      outline-offset: 2px;
+      background-color: rgba(191, 246, 255, 0.18);
+    }
+
+    .drillable:active {
+      transform: translate(1px, 1px);
+    }
+
+    .detail-drawer {
+      position: fixed;
+      top: 0;
+      right: 0;
+      z-index: 100;
+      display: grid;
+      grid-template-rows: auto 1fr auto;
+      width: min(500px, 100%);
+      height: 100dvh;
+      border-left: 3px solid var(--line);
+      background:
+        linear-gradient(180deg, rgba(252, 252, 250, 0.99), rgba(247, 248, 255, 0.99)),
+        repeating-linear-gradient(0deg, rgba(11, 13, 18, 0.04), rgba(11, 13, 18, 0.04) 1px, transparent 1px, transparent 9px);
+      box-shadow: -10px 0 0 rgba(17, 19, 24, 0.12);
+      transform: translateX(105%);
+      transition: transform 180ms ease;
+    }
+
+    .detail-drawer.is-open {
+      transform: translateX(0);
+    }
+
+    .drawer-head {
+      display: grid;
+      grid-template-columns: 1fr auto;
+      gap: 10px;
+      padding: 14px;
+      color: #fff;
+      background: var(--ink);
+      border-bottom: 2px solid var(--line);
+    }
+
+    .drawer-kicker {
+      display: block;
+      margin-bottom: 5px;
+      color: var(--cyan);
+      font-family: var(--mono);
+      font-size: 12px;
+      text-transform: uppercase;
+    }
+
+    .drawer-title {
+      font-family: var(--heading);
+      font-size: 32px;
+      line-height: 1;
+      text-transform: uppercase;
+    }
+
+    .drawer-close {
+      min-width: 36px;
+      min-height: 34px;
+      border: 1px solid #fff;
+      background: transparent;
+      color: #fff;
+      font-family: var(--mono);
+      cursor: pointer;
+    }
+
+    .drawer-body {
+      overflow: auto;
+      padding: 16px;
+    }
+
+    .drawer-body dl {
+      display: grid;
+      grid-template-columns: 130px 1fr;
+      gap: 8px 10px;
+      margin: 0;
+    }
+
+    .drawer-body dt {
+      color: var(--muted);
+      font-family: var(--mono);
+      text-transform: uppercase;
+    }
+
+    .drawer-foot {
+      padding: 12px 14px;
+      border-top: 2px solid var(--line);
+      background: rgba(220, 214, 255, 0.44);
+      font-family: var(--mono);
+      font-size: 12px;
+    }
+
+    .drawer-scrim {
+      position: fixed;
+      inset: 0;
+      z-index: 95;
+      background: rgba(11, 13, 18, 0.22);
+      opacity: 0;
+      pointer-events: none;
+      transition: opacity 180ms ease;
+    }
+
+    .drawer-scrim.is-open {
+      opacity: 1;
+      pointer-events: auto;
+    }
+
+    body.reader-mode {
+      background: var(--bg);
+    }
+
+    body.reader-mode .hero::before,
+    body.reader-mode .hero::after {
+      display: none;
+    }
+
+    body.reader-mode .shell {
+      width: min(1180px, calc(100% - 32px));
+    }
+
+    body.reader-mode .grid-3,
+    body.reader-mode .metrics,
+    body.reader-mode .task-board {
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+    }
+
+    @media (max-width: 1180px) {
+      .topbar,
+      .hero,
+      .section-header,
+      .grid-2,
+      .grid-3 {
+        grid-template-columns: 1fr;
+      }
+
+      .hero-side {
+        border-left: 0;
+        border-top: 2px solid var(--line);
+      }
+
+      h1 {
+        font-size: 58px;
+      }
+
+      h2 {
+        font-size: 40px;
+      }
+
+      .metrics,
+      .progress-console,
+      .task-board {
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+      }
+    }
+
+    @media (max-width: 700px) {
+      .shell {
+        width: min(100% - 18px, 1440px);
+        padding-top: 8px;
+      }
+
+      .topbar {
+        position: static;
+      }
+
+      .hero-main,
+      .hero-side {
+        padding: 16px;
+      }
+
+      h1 {
+        font-size: 42px;
+      }
+
+      h2 {
+        font-size: 32px;
+      }
+
+      .metrics,
+      .progress-console,
+      .task-board {
+        grid-template-columns: 1fr;
+      }
+
+      .program-fact {
+        grid-template-columns: 1fr;
+        gap: 4px;
+      }
+
+      .section {
+        scroll-margin-top: 32px;
+      }
+
+      .interaction-strip {
+        grid-template-columns: 1fr;
+      }
+
+      .diagram {
+        min-height: 260px;
+      }
+
+      .mermaid,
+      .diagram-wide .mermaid {
+        min-width: 780px;
+        font-size: 14px;
+      }
+
+      .detail-drawer {
+        top: auto;
+        bottom: 0;
+        width: 100%;
+        height: min(78dvh, 720px);
+        border-left: 0;
+        border-top: 3px solid var(--line);
+        transform: translateY(105%);
+      }
+
+      .detail-drawer.is-open {
+        transform: translateY(0);
+      }
+
+      .drawer-body dl {
+        grid-template-columns: 1fr;
+      }
+
+      table {
+        min-width: 760px;
+      }
+    }
+
+    @media print {
+      .topbar,
+      .interaction-strip,
+      #progress,
+      .detail-drawer,
+      .drawer-scrim,
+      .diagram-toolbar {
+        display: none;
+      }
+
+      body {
+        background: #fff;
+      }
+
+      .shell {
+        width: 100%;
+      }
+
+      .panel,
+      .diagram,
+      .task,
+      .metric,
+      table,
+      .callout {
+        box-shadow: none;
+      }
+    }
+  </style>
+</head>
+<body>
+  <div class="shell">
+    <nav class="topbar" aria-label="Report navigation">
+      <div class="brand-strip">
+        <div class="brand-mark">T</div>
+        <div class="brand-text">
+          <strong>Temper Speed Report</strong>
+          <span>Latency / Observability / Correctness</span>
+        </div>
+      </div>
+      <div class="nav-strip">
+        <a href="#answer">Answer</a>
+        <a href="#architecture">Architecture</a>
+        <a href="#evidence">Evidence</a>
+        <a href="#progress">Progress</a>
+        <a href="#diagnosis">Diagnosis</a>
+        <a href="#observability">Observability</a>
+        <a href="#target">Target</a>
+        <a href="#tasks">Tasks</a>
+        <a href="#sources">Sources</a>
+        <button class="nav-action" id="toggleReading" type="button">Focus Read</button>
+        <button class="nav-action" id="openGuide" type="button">How To Use</button>
+      </div>
+    </nav>
+
+    <header class="hero">
+      <div class="hero-main">
+        <div class="eyebrow">Vapor Terminal OVA Console / May 15, 2026</div>
+        <h1>Temper Latency and Observability Acceleration Report</h1>
+        <p class="lede">
+          This report combines a whole-repository architecture pass with live Datadog APM, DBM, metrics,
+          monitors, dashboards, and profiling signals. It is built as an interactive console: click any card,
+          table row, chip, task, or diagram for a detail drawer.
+        </p>
+      </div>
+      <aside class="hero-side">
+        <div class="meter">
+          <div class="strip-title"><span>Architecture Read</span><span>repo + prod</span></div>
+          <div class="meter-body">
+            <div class="meter-row"><span>core actor</span><div class="bar"><i style="width: 88%"></i></div><span>fast</span></div>
+            <div class="meter-row"><span>read plane</span><div class="bar"><i style="width: 78%"></i></div><span>good</span></div>
+            <div class="meter-row"><span>write plane</span><div class="bar warn"><i style="width: 62%"></i></div><span>hot</span></div>
+          </div>
+        </div>
+        <div class="meter">
+          <div class="strip-title"><span>Observability Read</span><span>Datadog</span></div>
+          <div class="meter-body">
+            <div class="meter-row"><span>APM</span><div class="bar"><i style="width: 82%"></i></div><span>rich</span></div>
+            <div class="meter-row"><span>DBM</span><div class="bar"><i style="width: 78%"></i></div><span>plans + metrics</span></div>
+            <div class="meter-row"><span>profiler</span><div class="bar warn"><i style="width: 62%"></i></div><span>on-demand</span></div>
+          </div>
+        </div>
+        <div class="meter">
+          <div class="strip-title"><span>Primary Thesis</span><span>updated</span></div>
+          <div class="meter-body">
+            <p class="small">
+              The older diagnosis still applies in shape, but production now has a projection/index read plane.
+              Reads are mostly fast; the new battlefront is projection writes, Cedar CPU, WASM latency,
+              blob uploads, continuous profiling, and projection drift proof.
+            </p>
+          </div>
+        </div>
+      </aside>
+    </header>
+
+    <div class="interaction-strip">
+      <span>Click almost anywhere for more detail. Diagram toolbars can focus large diagrams for easier reading.</span>
+      <button class="inline-action primary" type="button" id="openFirstDetail">Open Guide</button>
+    </div>
+
+    <section class="section" id="progress">
+      <div class="section-header">
+        <div class="section-label">live / program control</div>
+        <h2>Program Progress</h2>
+      </div>
+      <div class="progress-console">
+        <div class="panel">
+          <h3>Current status</h3>
+          <p>
+            This HTML file is now the living dashboard for the Temper latency and observability acceleration goal.
+            It must be updated as milestones move, evidence arrives, tasks split, ADRs land, PRs open, PRs merge,
+            live runs pass, and deployment completes.
+          </p>
+          <div class="progress-track" aria-label="Program progress">
+            <div class="progress-fill" style="width: 97%">97%</div>
+          </div>
+          <div class="program-facts">
+            <div class="program-fact"><strong>Phase</strong><span>The core latency-observability package is merged, deployed, and producing post-deploy Datadog evidence. Temper PR <a href="https://github.com/nerdsane/temper/pull/229">#229</a> merged into <code>main</code> at <code>eafba6ab</code>; TemperPaw PR <a href="https://github.com/nerdsane/temperpaw/pull/266">#266</a> merged into <code>main</code> at <code>2b0ec6e9</code>. Railway production now runs image <code>ghcr.io/nerdsane/temperpaw:sha-2b0ec6e</code> with the merged Temper dependency pinned to <code>eafba6ab</code>. Deployment, health, APM, DBM, metrics, monitors, and runtime percentile checks are green. The remaining blocker is the higher-order Paw Patrol production worker e2e: the Mac mini worker path is a genuine production dependency because WorkerRuns are assigned to <code>mac-mini-codex-prod</code> with worktrees under <code>/Users/openclaw/Development/temperpaw-worktrees</code>, and repo sweep/DailyBrief agents invoke local Codex even when <code>PAW_CODEX_ENABLE_EXECUTION=0</code>. The malformed local Temper skill file was repaired on the Mac mini at <code>2026-05-15 06:17 EDT</code>; Codex auth is still missing on that host.</span></div>
+            <div class="program-fact"><strong>Branches</strong><span>Merged: Temper <code>codex/latency-observability-program</code>; TemperPaw <code>codex/latency-observability-program</code>; final dashboard evidence <code>codex/latency-observability-final-report</code>; Mac mini auth checkpoint <code>codex/latency-observability-worker-auth-report</code>; auth retry checkpoint <code>codex/latency-observability-auth-retry-report</code>; auth-path checkpoint <code>codex/latency-observability-auth-path-report</code>; local-proof blocker <code>codex/latency-observability-local-proof-blocker</code>; current-report checkpoint <code>codex/latency-observability-current-report</code>. Current local dashboard branch: <code>codex/latency-observability-auth-expiry-20260515</code>.</span></div>
+            <div class="program-fact"><strong>Worktrees</strong><span>Current browser-safe report worktree <code>/Users/seshendranalla/Development/temper-worktrees/latency-observability-auth-expiry-20260515</code>; production proof worktree <code>/Users/seshendranalla/Development/temperpaw-worktrees/production-observe-main-proof</code> is on TemperPaw <code>origin/main</code> at <code>2b0ec6e9</code>. Merged program worktrees remain at <code>/Users/seshendranalla/Development/temper-worktrees/latency-observability-program</code> and <code>/Users/seshendranalla/Development/temperpaw-worktrees/latency-observability-program</code>.</span></div>
+            <div class="program-fact"><strong>PRs</strong><span>Temper PR <a href="https://github.com/nerdsane/temper/pull/229">nerdsane/temper#229</a> merged after green CI; TemperPaw PR <a href="https://github.com/nerdsane/temperpaw/pull/266">nerdsane/temperpaw#266</a> merged after green CI and Docker; final evidence PR <a href="https://github.com/nerdsane/temper/pull/230">nerdsane/temper#230</a> merged after green CI as <code>0be1b768</code>; Mac mini auth checkpoint PR <a href="https://github.com/nerdsane/temper/pull/231">nerdsane/temper#231</a> merged after green CI as <code>6650ac85</code>; auth retry PR <a href="https://github.com/nerdsane/temper/pull/232">nerdsane/temper#232</a> merged after green CI as <code>36917639</code>; auth-path PR <a href="https://github.com/nerdsane/temper/pull/233">nerdsane/temper#233</a> merged after green CI as <code>b47a7c7a</code>; local-proof blocker PR <a href="https://github.com/nerdsane/temper/pull/234">nerdsane/temper#234</a> merged after green CI as <code>d3ca7b98</code>; current blocker report PR <a href="https://github.com/nerdsane/temper/pull/235">nerdsane/temper#235</a> merged after green CI as <code>b466a584</code>.</span></div>
+            <div class="program-fact"><strong>Railway</strong><span>CLI authentication is confirmed for the correct account as of <code>2026-05-15 09:17 EDT</code>. Project <code>openpaw-seshendranalla</code>, environment <code>production</code>, service <code>openpaw</code>, deployment <code>a3564c57-a16f-49e9-ac5a-355dd0013f88</code>, domains <code>openpaw-production.up.railway.app</code> and <code>temperpaw.katagami.ai</code>. <code>/paw/version</code> reports <code>sha-2b0ec6e9</code> / <code>2b0ec6e9849d5eabacb480678a9bfc92fff6f1c4</code>. Current proof worktree status now resolves <code>Service: openpaw</code>; production commands still pass <code>--service openpaw</code> explicitly to avoid stale-worktree ambiguity.</span></div>
+            <div class="program-fact"><strong>Datadog tag</strong><span>Production exports <code>DD_SERVICE=temperpaw</code>; dashboards and monitors must query <code>service:temperpaw</code>, not the Railway service name.</span></div>
+            <div class="program-fact"><strong>Production checks</strong><span>Railway domain <code>/readyz</code> is ready and <code>/healthz</code> returns 200. Datadog reports <code>temper_up=1</code>, 14k+ APM spans in the latest hour for <code>service:temperpaw env:prod</code>, no matching active alert groups, APM rate/error/duration monitor coverage, fresh DBM plans tagged with version <code>2b0ec6e9849d5eabacb480678a9bfc92fff6f1c4</code>, and newly emitted runtime percentiles for Cedar phase duration, Postgres pool/transaction timing, projection queue wait, and projection end-to-end update duration. The deployment initially exposed stale Railway service-level <code>BUILD_VERSION</code>/<code>BUILD_SHA</code>/<code>DD_VERSION</code> overrides; those were corrected and redeployed.</span></div>
+            <div class="program-fact"><strong>Review gates</strong><span>DST compliance review PASS; code-quality review PASS; changed sim-visible files pass the determinism hook loop; readability ratchet is green at baseline after module splits.</span></div>
+            <div class="program-fact"><strong>Dashboard</strong><span><code>docs/temper-latency-observability-report.html</code></span></div>
+            <div class="program-fact"><strong>ADRs</strong><span><code>docs/adrs/0081-latency-observability-acceleration-program.md</code>; <code>docs/adrs/0082-projection-correctness-observability.md</code>; <code>docs/adrs/0083-trace-budget-and-fanout-summarization.md</code>; <code>docs/adrs/0084-authz-latency-phase-instrumentation.md</code></span></div>
+            <div class="program-fact"><strong>Runbooks</strong><span><code>docs/runbooks/datadog-postgres-dbm.md</code>; <code>docs/runbooks/latency-observability-release.md</code>; <code>scripts/datadog-postgres-dbm-setup.sql</code></span></div>
+            <div class="program-fact"><strong>Local checks</strong><span><code>scripts/verify-latency-observability-package.sh full</code> passed after Railway access and again after the readability-safe module split. The Temper pre-push gate also passed rustfmt, clippy, readability ratchet, and full <code>cargo test --workspace</code>; the slowest DST random workload took 457.87 seconds and passed. TemperPaw <code>cargo test -p temperpaw --tests -- --nocapture</code> passed 187 tests after the observability restructure merge; the later DBM monitor correction passed <code>datadog_monitor_config</code> and <code>datadog_observability_contract</code>.</span></div>
+            <div class="program-fact"><strong>Tracking</strong><span>Thread goal active; Temper MCP issue tracking unavailable in this session.</span></div>
+            <div class="program-fact"><strong>Finish line</strong><span>ADRs written, changes implemented, local tests pass, PRs merged, runtime deployed, Datadog evidence recorded here, and the Mac mini skill-loader issue is repaired. Remaining to close the overall goal: approve a fresh Mac mini Codex device-auth login while the 15-minute session is active, or explicitly approve transferring local Codex auth material to the Mac mini; then rerun the worker doctor until <code>codex_exec_smoke</code> passes, rerun the production observe-only e2e proof to completion on the Mac mini worker path, and attach the proof bundle. A temporary authenticated local-worker attempt proved the control-plane dispatch path but could not complete because production assigned a Mac-mini-local worktree root. Fresh Mac mini device-auth attempts after Railway was confirmed correct expired at <code>2026-05-15 10:37 EDT</code> and <code>2026-05-15 11:49 EDT</code> without completing.</span></div>
+          </div>
+        </div>
+        <div class="panel">
+          <h3>Status log</h3>
+          <div class="status-log">
+            <div class="log-entry">
+              <time datetime="2026-05-14">2026-05-14</time>
+              <p>Created main-based worktree <code>codex/latency-observability-program</code> for all tracked program setup edits.</p>
+            </div>
+            <div class="log-entry">
+              <time datetime="2026-05-14">2026-05-14</time>
+              <p>Promoted this report from a static diagnosis into the living program dashboard with a progress bar, milestone tracker, task board, and evidence target.</p>
+            </div>
+            <div class="log-entry">
+              <time datetime="2026-05-14">2026-05-14</time>
+              <p>Created ADR-0081 to define the measurement-first program, worktree discipline, correctness gates, PR/merge/deploy finish line, and dashboard-as-source-of-status requirement.</p>
+            </div>
+            <div class="log-entry">
+              <time datetime="2026-05-14">2026-05-14</time>
+              <p>Ran live Datadog profiling metric check. Metrics exist for <code>datadog.profiling.rust.profiles_uploaded</code> and <code>datadog.profiling.rust.upload_errors</code>, but the last 24 hours for <code>service:temperpaw</code> only returned stale-looking CPU upload points with value 0 and no useful nonzero production profile series.</p>
+            </div>
+            <div class="log-entry">
+              <time datetime="2026-05-14">2026-05-14</time>
+              <p>Ran live Datadog DBM check. <code>temperpaw-postgres</code> is healthy and low-latency overall, but plan search returned 2,408 plan samples with <code>plan.collection_errors</code> / <code>invalid_schema</code>, so query plan evidence is present but not usable yet.</p>
+            </div>
+            <div class="log-entry">
+              <time datetime="2026-05-14">2026-05-14</time>
+              <p>Implemented OBS-001 local repair in <code>crates/temper-server/src/profiling.rs</code> and <code>crates/temper-cli/src/serve/mod.rs</code>: explicit profiler config/freshness/capture metrics plus opt-in continuous CPU profile capture gated by <code>TEMPER_PROFILING_ENABLED</code>, <code>TEMPER_PROFILING_CONTINUOUS</code>, and <code>TEMPER_PROFILING_AUTO_UPLOAD</code>.</p>
+            </div>
+            <div class="log-entry">
+              <time datetime="2026-05-14">2026-05-14</time>
+              <p>Verified the local profiler repair: <code>cargo check -p temper-cli</code> passed; <code>cargo test -p temper-server profiling::tests --lib -- --nocapture</code> passed 4 profiler tests; <code>cargo fmt --check</code> and <code>git diff --check</code> passed. Remaining warnings are pre-existing dead-code warnings in <code>crates/temper-server/src/authz/helpers.rs</code>.</p>
+            </div>
+            <div class="log-entry">
+              <time datetime="2026-05-14">2026-05-14</time>
+              <p>Rendered this report with Playwright at <code>#progress</code>, confirmed the progress surface loads, and fixed section anchor spacing so sticky navigation no longer covers headings on direct links.</p>
+            </div>
+            <div class="log-entry">
+              <time datetime="2026-05-14">2026-05-14</time>
+              <p>Drafted OBS-002 DBM repair package: <code>scripts/datadog-postgres-dbm-setup.sql</code> creates the required Datadog schema/functions/grants/search path, and <code>docs/runbooks/datadog-postgres-dbm.md</code> gives operator validation steps for the current <code>invalid_schema</code> failure.</p>
+            </div>
+            <div class="log-entry">
+              <time datetime="2026-05-14">2026-05-14</time>
+              <p>Added OBS-002 app-side PostgreSQL timing metrics in <code>crates/temper-store-postgres</code>: pool acquire, transaction begin, transaction commit, end-to-end transaction duration, operation outcomes, projection indexed field count, and oversized-field skips for event append and projection write transactions.</p>
+            </div>
+            <div class="log-entry">
+              <time datetime="2026-05-14">2026-05-14</time>
+              <p>Verified the Postgres metrics slice: <code>cargo test -p temper-store-postgres metrics --lib -- --nocapture</code>, <code>cargo check -p temper-cli</code>, <code>cargo fmt --check</code>, and <code>git diff --check</code> passed.</p>
+            </div>
+            <div class="log-entry">
+              <time datetime="2026-05-14">2026-05-14</time>
+              <p>Created ADR-0082 for projection correctness observability: projection source tagging, applied sequence visibility, background queue delay, backfill coverage, and a follow-up drift/parity gate before projection write optimization.</p>
+            </div>
+            <div class="log-entry">
+              <time datetime="2026-05-14">2026-05-14</time>
+              <p>Implemented OBS-003 first metrics slice in <code>crates/temper-server/src/query_projection_metrics.rs</code>, <code>state/dispatch/effects.rs</code>, <code>state/entity_ops.rs</code>, and <code>state/projection_backfill.rs</code>. It adds source-tagged projection update metrics, queue wait, end-to-end duration, applied sequence gauges, and backfill coverage/replay-event metrics.</p>
+            </div>
+            <div class="log-entry">
+              <time datetime="2026-05-14">2026-05-14</time>
+              <p>Verified OBS-003 locally: <code>cargo test -p temper-server query_projection_metrics --lib -- --nocapture</code>, <code>cargo check -p temper-cli</code>, <code>cargo fmt --check</code>, and <code>git diff --check</code> passed. Remaining warnings are the same pre-existing authz helper dead-code warnings.</p>
+            </div>
+            <div class="log-entry">
+              <time datetime="2026-05-14">2026-05-14</time>
+              <p>Implemented the OBS-003 sampled projection drift hook in <code>crates/temper-server/src/odata/read_support.rs</code>. When <code>TEMPER_ODATA_CATALOG_SHADOW_READ_EVERY</code> is set above 0, catalog-fast OData hits deterministically sample background actor shadow reads and compare projected status, fields, and sequence against authoritative actor state.</p>
+            </div>
+            <div class="log-entry">
+              <time datetime="2026-05-14">2026-05-14</time>
+              <p>Verified the sampled drift hook locally: <code>cargo test -p temper-server odata::read_support --lib -- --nocapture</code> passed 9 tests, including stable sampling, drift classification, and sequence-gap direction tests. <code>cargo check -p temper-cli</code>, <code>cargo fmt --check</code>, and <code>git diff --check</code> passed.</p>
+            </div>
+            <div class="log-entry">
+              <time datetime="2026-05-14">2026-05-14</time>
+              <p>Created the TemperPaw main-based worktree at <code>/Users/seshendranalla/Development/temperpaw-worktrees/latency-observability-program</code> on branch <code>codex/latency-observability-program</code> for Datadog dashboard and monitor configuration.</p>
+            </div>
+            <div class="log-entry">
+              <time datetime="2026-05-14">2026-05-14</time>
+              <p>Added OBS-004 Datadog config coverage in TemperPaw: projection queue wait p95/p99, projection end-to-end p95/p99, applied sequence, backfill coverage/replay events, shadow check totals/sequence gap, Postgres pool acquire p95/p99, Postgres transaction p95/p99, and monitors for projection drift, shadow errors, projection queue/e2e regressions, backfill failures, and Postgres pool/transaction regressions.</p>
+            </div>
+            <div class="log-entry">
+              <time datetime="2026-05-14">2026-05-14</time>
+              <p>Verified TemperPaw Datadog config locally: <code>python3 -m json.tool dd-dashboards/temperpaw-overview.json</code>, <code>python3 -m json.tool dd-monitors/temperpaw-monitors.json</code>, and <code>git diff --check</code> passed in the TemperPaw worktree.</p>
+            </div>
+            <div class="log-entry">
+              <time datetime="2026-05-14">2026-05-14</time>
+              <p>Implemented the OBS-003 replay parity verifier in <code>state/projection_backfill.rs</code> and exposed it through <code>ServerState::verify_query_projection_replay_parity</code>. It rebuilds active entity state from the event journal, compares durable catalog rows, emits <code>temper_query_projection_replay_parity_*</code> metrics, and returns bounded drift examples without using entity IDs as metric tags.</p>
+            </div>
+            <div class="log-entry">
+              <time datetime="2026-05-14">2026-05-14</time>
+              <p>The parity test exposed a real Turso correctness issue: <code>entity_catalog</code> did not preserve the full projected fields JSON. Fixed Turso schema/migration/upsert/load/export paths so the catalog stores <code>fields</code> as a JSON text blob while <code>entity_field_index</code> remains the scalar filter index.</p>
+            </div>
+            <div class="log-entry">
+              <time datetime="2026-05-14">2026-05-14</time>
+              <p>Verified replay parity and Turso field preservation locally: <code>cargo test -p temper-server --test query_projection_backfill -- --nocapture</code> passed 4 tests, and focused <code>temper-store-turso</code> tests for catalog fields, schema migration, and projection export passed.</p>
+            </div>
+            <div class="log-entry">
+              <time datetime="2026-05-14">2026-05-14</time>
+              <p>Extended TemperPaw Datadog config with replay parity widgets and monitors for parity drift/errors. JSON validation and <code>git diff --check</code> pass locally; deployment was blocked on Datadog API keys at this point in the run.</p>
+            </div>
+            <div class="log-entry">
+              <time datetime="2026-05-14">2026-05-14</time>
+              <p>Expanded OBS-004 tail-latency coverage in TemperPaw Datadog config: dispatch p95/p99, WASM invocation p95/p99, WASM host HTTP p95/p99, blob I/O and remote transport p95/p99, Monty REPL wait p95/p99, context-prepare p95/p99, and session-phase p95/p99 widgets.</p>
+            </div>
+            <div class="log-entry">
+              <time datetime="2026-05-14">2026-05-14</time>
+              <p>Added or repaired percentile monitors for request latency, WASM invocation, WASM host HTTP, blob I/O, blob transport, Monty REPL wait, session context prepare, and session phase duration. TemperPaw dashboard/monitor JSON validation and <code>git diff --check</code> passed locally.</p>
+            </div>
+            <div class="log-entry">
+              <time datetime="2026-05-14">2026-05-14</time>
+              <p>Added <code>docs/runbooks/latency-observability-release.md</code> to define the two-PR release split, local verification commands, runtime flags, DBM repair, Datadog deployment commands, live proof matrix, e2e run requirements, rollback, and done criteria.</p>
+            </div>
+            <div class="log-entry">
+              <time datetime="2026-05-14">2026-05-14</time>
+              <p>Created ADR-0083 for trace budget and fanout summarization. The decision keeps canonical request roots, makes sampler decisions measurable, adds startup-tunable reduced-prefix sampling, and records bounded reaction fanout summaries on parent spans.</p>
+            </div>
+            <div class="log-entry">
+              <time datetime="2026-05-14">2026-05-14</time>
+              <p>Implemented OBS-005 local code in <code>crates/temper-observe/src/otel.rs</code> and <code>crates/temper-server/src/trigger/dispatcher.rs</code>: <code>temper_trace_sampler_decisions_total</code>, <code>temper_trace_sampler_configured_rules</code>, <code>temper_trace_sampler_reduced_sample_rate_pct</code>, <code>TEMPER_TRACE_WASM_AUX_SAMPLE_PCT</code>, <code>TEMPER_TRACE_DISPATCH_BACKGROUND_SAMPLE_PCT</code>, and reaction fanout fields.</p>
+            </div>
+            <div class="log-entry">
+              <time datetime="2026-05-14">2026-05-14</time>
+              <p>Verified OBS-005 locally: <code>cargo test -p temper-observe otel --lib -- --nocapture</code> passed 9 tests, and <code>cargo check -p temper-server</code> passed with only the known pre-existing authz helper dead-code warnings.</p>
+            </div>
+            <div class="log-entry">
+              <time datetime="2026-05-14">2026-05-14</time>
+              <p>Added OBS-005 Datadog config in TemperPaw: a Trace Budget dashboard group and monitors for missing sampler metrics, delegated span-volume spikes, and disabled dispatch-background trace budgeting. Dashboard JSON, monitor JSON, and <code>git diff --check</code> passed locally.</p>
+            </div>
+            <div class="log-entry">
+              <time datetime="2026-05-14">2026-05-14</time>
+              <p>Added <code>scripts/verify-latency-observability-package.sh</code> as the package preflight for OBS-001 through OBS-005. The quick mode verifies the living dashboard, ADRs, runbooks, DBM SQL, required metric/source strings, TemperPaw JSON, dashboard widgets, and monitors. Its first run exposed a missing e2e proof command in the release runbook; the runbook now names <code>python3 scripts/temper_agent_e2e_proof.py</code>.</p>
+            </div>
+            <div class="log-entry">
+              <time datetime="2026-05-14">2026-05-14</time>
+              <p>Verified the new preflight quick mode: <code>scripts/verify-latency-observability-package.sh quick</code> passed.</p>
+            </div>
+            <div class="log-entry">
+              <time datetime="2026-05-14">2026-05-14</time>
+              <p>Verified the full focused preflight: <code>scripts/verify-latency-observability-package.sh full</code> passed. It ran the static cross-repo package checks, <code>cargo fmt --check</code>, <code>cargo check -p temper-cli</code>, <code>cargo check -p temper-server</code>, profiler tests, OTEL sampler tests, Postgres metrics tests, projection metrics tests, OData shadow tests, replay parity integration tests, focused Turso projection tests, and TemperPaw <code>git diff --check</code>. The only warnings were the known pre-existing authz helper dead-code warnings.</p>
+            </div>
+            <div class="log-entry">
+              <time datetime="2026-05-14">2026-05-14</time>
+              <p>Used current Datadog context to check Cedar/AuthZ signals. <code>temper_cedar_evaluations_total</code> and <code>temper_cedar_evaluation_duration</code> are live, but <code>temper_cedar_evaluation_duration</code> has percentile aggregations disabled and <code>temper_cedar_evaluations_total</code> is emitted from both <code>temper-authz</code> and <code>temper.authz</code> instrumentation scopes.</p>
+            </div>
+            <div class="log-entry">
+              <time datetime="2026-05-14">2026-05-14</time>
+              <p>Created ADR-0084 for AuthZ latency phase instrumentation. The decision records one canonical Cedar counter scope, keeps the existing seconds metric, adds <code>temper_cedar_evaluation_duration_ms</code>, adds <code>temper_cedar_evaluation_phase_duration_ms</code>, and records bounded request-shape histograms with <code>temper_cedar_request_attribute_count</code>.</p>
+            </div>
+            <div class="log-entry">
+              <time datetime="2026-05-14">2026-05-14</time>
+              <p>Implemented the ADR-0084 local AuthZ metrics slice in <code>crates/temper-authz</code>: canonical allow/deny/error counter path, millisecond duration metric, bounded phase timers, request attribute-count histograms, and a focused invalid-action error-path test. <code>cargo check -p temper-authz</code> and <code>cargo test -p temper-authz invalid_action_denies_through_instrumented_error_path -- --nocapture</code> passed.</p>
+            </div>
+            <div class="log-entry">
+              <time datetime="2026-05-14">2026-05-14</time>
+              <p>Extended TemperPaw Datadog config with an <code>AuthZ Phase Breakdown (ADR-0084)</code> dashboard group, ms duration p95/p99 and avg/max fallback panels, phase duration panels, request-shape panels, a Cedar max-duration fallback monitor, and a phase-error monitor. Dashboard and monitor JSON parse locally.</p>
+            </div>
+            <div class="log-entry">
+              <time datetime="2026-05-14">2026-05-14</time>
+              <p>Verified the updated ADR-0084 package with <code>scripts/verify-latency-observability-package.sh full</code>. It passed package consistency checks, <code>cargo fmt --check</code>, <code>cargo check -p temper-cli</code>, <code>cargo check -p temper-server</code>, all 56 <code>temper-authz</code> tests, profiler tests, OTEL sampler tests, Postgres metrics tests, projection metrics tests, OData shadow tests, replay parity integration tests, focused Turso projection tests, and both worktree diff checks. The only warnings remain the known pre-existing authz helper dead-code warnings.</p>
+            </div>
+            <div class="log-entry">
+              <time datetime="2026-05-14">2026-05-14</time>
+              <p>Checked this report after the progress update: inline module JavaScript parses, the document contains the 49% progress marker, ADR-0084 link, and AuthZ phase metric strings, and both Temper/TemperPaw <code>git diff --check</code> commands pass. The in-app browser connection detected the open file tab, but its URL policy blocked a reload of the local <code>file://</code> report, so latest visual refresh remained pending instead of bypassed.</p>
+            </div>
+            <div class="log-entry">
+              <time datetime="2026-05-14">2026-05-14</time>
+              <p>Next action at that point: prepare the PR split and deployment checklist. Live Datadog deployment was still blocked until API credentials and environment deployment access became available.</p>
+            </div>
+            <div class="log-entry">
+              <time datetime="2026-05-14">2026-05-14</time>
+              <p>Railway access is now available for the correct account. Production inspection found project <code>openpaw-seshendranalla</code>, environment <code>production</code>, Railway service <code>openpaw</code>, domains <code>openpaw-production.up.railway.app</code> and <code>temperpaw.katagami.ai</code>, Datadog API/app key variables present, and runtime tag <code>DD_SERVICE=temperpaw</code>.</p>
+            </div>
+            <div class="log-entry">
+              <time datetime="2026-05-14">2026-05-14</time>
+              <p>Retargeted TemperPaw dashboard and monitor queries from <code>service:openpaw</code> to <code>service:temperpaw</code> and added a package preflight guard so config cannot regress to the wrong service tag. Runtime deployment is still gated by PR/merge and by updating TemperPaw's pinned Temper revision after the Temper PR lands.</p>
+            </div>
+            <div class="log-entry">
+              <time datetime="2026-05-14">2026-05-14</time>
+              <p>Ran <code>railway run --service openpaw --environment production -- python3 scripts/deploy_monitors.py --dry-run</code>. The Datadog API call succeeded without exposing secrets and reported that all 62 source-of-truth monitors would be created under the <code>team:openpaw</code> tag scope.</p>
+            </div>
+            <div class="log-entry">
+              <time datetime="2026-05-14">2026-05-14</time>
+              <p>Probed production health through the Railway domain. <code>https://openpaw-production.up.railway.app/readyz</code> returned <code>status:"ready"</code> with Discord connected/configured, and <code>/healthz</code> returned HTTP 200. The custom domain <code>temperpaw.katagami.ai</code> did not resolve from this local environment during the check.</p>
+            </div>
+            <div class="log-entry">
+              <time datetime="2026-05-14">2026-05-14</time>
+              <p>Verified the in-app browser is on this report file and the title resolves to <code>Temper Latency and Observability Acceleration Report</code>. A reload of the local <code>file://</code> URL was blocked by the browser security policy again, so latest visual refresh remains pending; static HTML JavaScript parsing, package preflight, JSON parsing, and diff checks passed instead.</p>
+            </div>
+            <div class="log-entry">
+              <time datetime="2026-05-14">2026-05-14</time>
+              <p>Added and verified <code>scripts/read_datadog_snapshot.py</code> in TemperPaw. Running it through Railway-injected credentials for <code>service:temperpaw</code> showed <code>temper_up</code> stayed at 1 over 24h, <code>temper_cedar_evaluations_total</code> returned 17,005 counted evaluations, and <code>temper_cedar_evaluation_duration</code> returned live averages with max around 122 ms. Dispatch p95, projection-update error, new Postgres p95, and profiler upload/error queries returned no series.</p>
+            </div>
+            <div class="log-entry">
+              <time datetime="2026-05-14">2026-05-14</time>
+              <p>Re-ran <code>scripts/verify-latency-observability-package.sh full</code> after the Railway/service-tag/snapshot-helper updates. It passed package consistency, Rust formatting/check/tests, focused projection/AuthZ/profiler/OTEL/Postgres/Turso tests, TemperPaw JSON validation, snapshot helper compilation, and both worktree <code>git diff --check</code> passes. The only warnings are the known pre-existing unused authz helper warnings.</p>
+            </div>
+            <div class="log-entry">
+              <time datetime="2026-05-14">2026-05-14</time>
+              <p>Ran the changed-file determinism hook loop after cleanup; sim-visible Rust files now pass. Independent DST review returned PASS for <code>read_support.rs</code>, <code>profiling.rs</code>, <code>query_projection_metrics.rs</code>, dispatch effects, entity ops, state, projection backfill, reaction dispatcher, and the query projection backfill test. Independent code-quality review returned PASS with no blocker findings.</p>
+            </div>
+            <div class="log-entry">
+              <time datetime="2026-05-15">2026-05-15</time>
+              <p>Temper pre-push exposed a maintainability regression rather than a runtime bug: four production files crossed the 500-line readability threshold and two temporary dead-code allowances increased the baseline. Fixed this by splitting catalog shadow checks, profiler metrics/tests, and projection replay parity into child modules; changed the staged governed mutation helper to a precise lint expectation; and removed redundant Turso schema test coverage.</p>
+            </div>
+            <div class="log-entry">
+              <time datetime="2026-05-15">2026-05-15</time>
+              <p>Re-ran local quality gates after the module split. <code>scripts/verify-latency-observability-package.sh full</code>, <code>cargo check -p temper-server</code>, <code>cargo clippy -p temper-server --all-targets -- -D warnings</code>, <code>bash scripts/readability-ratchet.sh check .ci/readability-baseline.env</code>, the changed/new sim-visible determinism hook loop, and <code>scripts/verify-latency-observability-package.sh quick</code> all pass. The verifier was updated so profiler upload and projection shadow-read checks follow the new module paths.</p>
+            </div>
+            <div class="log-entry">
+              <time datetime="2026-05-15">2026-05-15</time>
+              <p>Pushed the Temper branch after the repository pre-push hook passed all four gates: rustfmt, clippy, readability ratchet, and full <code>cargo test --workspace</code>. Created draft PRs: <a href="https://github.com/nerdsane/temper/pull/229">nerdsane/temper#229</a> for the runtime/report/ADR package and <a href="https://github.com/nerdsane/temperpaw/pull/266">nerdsane/temperpaw#266</a> for Datadog dashboards, monitors, and snapshot tooling.</p>
+            </div>
+            <div class="log-entry">
+              <time datetime="2026-05-15">2026-05-15</time>
+              <p>Confirmed both draft PRs point at the pushed worktree heads: Temper <code>1ae2c3fe</code> and TemperPaw <code>ea86a6d5</code>. Both worktrees are clean and tracking their pushed branches.</p>
+            </div>
+            <div class="log-entry">
+              <time datetime="2026-05-15">2026-05-15</time>
+              <p>Used live Datadog MCP with the correct Railway/Datadog account. Datadog services now visible for this program are <code>openpaw</code>, <code>temperpaw</code>, and <code>temperpaw-postgres</code>. Dashboard <code>TemperPaw - Platform Overview</code> exists and already contains profiler upload/error widgets.</p>
+            </div>
+            <div class="log-entry">
+              <time datetime="2026-05-15">2026-05-15</time>
+              <p>Datadog monitor coverage still reports missing service-level APM error, duration, and rate coverage for <code>service:temperpaw</code>, even though many domain-specific Temper/TemperPaw monitors exist. This confirms OBS-004 still needs Datadog config deployment plus coverage reconciliation, not just local JSON changes.</p>
+            </div>
+            <div class="log-entry">
+              <time datetime="2026-05-15">2026-05-15</time>
+              <p>Live APM over the latest two-hour window showed sustained HTTP traffic under <code>service:temperpaw env:prod</code>. Longest raw traces were mostly long-lived event streams with almost all time in <code>idle_ns</code>, so they are not server slowness. Excluding <code>GET /observe/events/stream</code> and <code>GET /tdata/$events</code>, the slowest observed paths were file <code>$value</code> writes at about 2.1-2.4 s, a WASM observability probe at about 1.3 s, policy creation around 0.4 s, and regular OData/list reads mostly in the single-digit to low-tens of milliseconds.</p>
+            </div>
+            <div class="log-entry">
+              <time datetime="2026-05-15">2026-05-15</time>
+              <p>Live custom metric check showed <code>temper_dispatch_ask_latency_ms</code> averaging about 15-21 ms with max buckets around 25-28 ms, and <code>temper_cedar_evaluation_duration</code> averaging about 35-59 ms with max buckets around 64 ms in the sampled window. Both are Datadog distribution metrics with <code>is_percentiles_enabled:false</code>; no <code>temper*</code> metric under <code>service:temperpaw</code> currently has percentile aggregation enabled.</p>
+            </div>
+            <div class="log-entry">
+              <time datetime="2026-05-15">2026-05-15</time>
+              <p>Live DBM is present but incomplete: activity rows and APM correlation are visible for <code>temperpaw-postgres</code>, and DBM found the instance suspicious only for transient latency spikes rather than sustained contention. Plan search returned 191 recent plan records, but plan payloads still contain <code>invalid_schema</code> collection errors, so explain-plan usefulness remains blocked until the DBM SQL/runbook repair is applied.</p>
+            </div>
+            <div class="log-entry">
+              <time datetime="2026-05-15">2026-05-15</time>
+              <p>DBM query-performance refresh separated database costs from application costs: <code>entity_catalog</code> batch lookup is high volume but usually sub-millisecond database latency, tenant-count scans average around 8.9 ms and touch about 3,846 shared blocks, field-index filtered reads are around tens of microseconds, and sampled <code>entity_field_index</code> upserts are also tens of microseconds with a single observed transaction-duration sample around 15.8 ms. The live slow file writes are therefore unlikely to be explained by database saturation alone.</p>
+            </div>
+            <div class="log-entry">
+              <time datetime="2026-05-15">2026-05-15</time>
+              <p>Deployed the TemperPaw Datadog dashboard through Railway. <code>railway run --service openpaw --environment production -- python3 scripts/deploy_dashboard.py dd-dashboards/temperpaw-overview.json</code> updated dashboard <a href="https://app.datadoghq.com/dashboard/mn4-k3k-i66">mn4-k3k-i66</a>.</p>
+            </div>
+            <div class="log-entry">
+              <time datetime="2026-05-15">2026-05-15</time>
+              <p>Datadog rejected one monitor before deployment because <code>default_zero(...)</code> is incompatible with <code>on_missing_data: resolve</code>. Fixed <code>[OpenPaw] Error Rate Spike</code> to use <code>on_missing_data: default</code> and added validation plus 429 retry/backoff to <code>scripts/deploy_monitors.py</code> before retrying.</p>
+            </div>
+            <div class="log-entry">
+              <time datetime="2026-05-15">2026-05-15</time>
+              <p>Deployed the source monitor set through Railway. The first live deploy created 62 monitors; follow-up coverage passes added four standard APM monitors (<code>APM Request Rate Missing</code> id <code>283342070</code>, <code>APM HTTP 5xx Spike</code> id <code>283342074</code>, <code>APM HTTP Duration p95 Regression</code> id <code>283342076</code>, and <code>APM Error Rate Spike</code> id <code>283345345</code>) and updated the set to 66 monitors.</p>
+            </div>
+            <div class="log-entry">
+              <time datetime="2026-05-15">2026-05-15</time>
+              <p>Added repeatable Datadog percentile configuration in TemperPaw with <code>scripts/configure_metric_percentiles.py</code>. Applying it through Railway enabled percentiles for 18 currently live latency distributions including <code>temper_dispatch_ask_latency_ms</code>, <code>temper_cedar_evaluation_duration</code>, <code>temper_session_phase_duration_ms</code>, <code>temper_wasm_invocation_duration_ms</code>, <code>temper_wasm_host_http_duration_ms</code>, blob, actor, admission, event-store, projection update, session-context, and trajectory outbox metrics.</p>
+            </div>
+            <div class="log-entry">
+              <time datetime="2026-05-15">2026-05-15</time>
+              <p>Datadog could not preconfigure metrics that have never emitted. The percentile script skipped <code>temper_cedar_evaluation_duration_ms</code>, <code>temper_cedar_evaluation_phase_duration_ms</code>, <code>temper_postgres_pool_acquire_duration_ms</code>, <code>temper_postgres_transaction_duration_ms</code>, <code>temper_query_projection_update_end_to_end_duration_ms</code>, and <code>temper_query_projection_update_queue_wait_ms</code>; these must be rerun after the Temper runtime PR is deployed and emits them.</p>
+            </div>
+            <div class="log-entry">
+              <time datetime="2026-05-15">2026-05-15</time>
+              <p>Verified percentile configuration live: <code>search_datadog_metrics(percentiles_enabled=true)</code> now returns 18 <code>temper*</code> metrics for <code>service:temperpaw</code>, and metric context confirms <code>temper_dispatch_ask_latency_ms</code>, <code>temper_cedar_evaluation_duration</code>, and <code>temper_session_phase_duration_ms</code> have <code>is_percentiles_enabled:true</code>. After Datadog indexing caught up, the service coverage analyzer recognized all three standard APM signals for <code>service:temperpaw</code>: rate via monitors <code>283342070</code>/<code>283342074</code>, duration via <code>283342076</code>, and error via <code>283345345</code>.</p>
+            </div>
+            <div class="log-entry">
+              <time datetime="2026-05-15">2026-05-15</time>
+              <p>Applied the DBM repair to production Postgres using Railway's Postgres public URL without printing secrets. Production's <code>datadog-postgres-agent</code> uses <code>PGUSER=postgres</code>, so <code>scripts/datadog-postgres-dbm-setup.sql</code> now accepts <code>-v dbm_agent_role=postgres</code>. SQL probes returned JSON explain plans, the Datadog Postgres agent was restarted, and fresh DBM plans after a live read smoke showed real index plans with zero fresh <code>invalid_schema</code> matches. DBM schema collection is still absent and remains a separate gap.</p>
+            </div>
+            <div class="log-entry">
+              <time datetime="2026-05-15">2026-05-15</time>
+              <p>Verified production on-demand profiling through Railway. Current production has <code>TEMPER_PROFILING_ENABLED=true</code>, <code>TEMPER_PROFILING_AUTO_UPLOAD=true</code>, <code>TEMPER_PROFILING_CONTINUOUS</code> unset, and <code>DD_PROFILING_ENABLED=false</code>. Idle CPU and wall captures returned HTTP 200 with 83-byte payloads; an 8-second CPU capture at 199 Hz while issuing 140 authenticated <code>/readyz</code>, <code>/tdata/Channels</code>, and <code>/tdata/WorkerRuns</code> reads returned HTTP 200 for all probes and produced a 26.4 KB pprof payload. Railway logs show uploads to the Datadog Agent intake, Datadog now has fresh <code>profile_type:cpu</code> upload buckets and no upload-error series, and <code>go tool pprof</code> parsed 70.35 ms of samples showing Axum middleware, OData read, Postgres catalog loading, SQLx receive, and tracing/OTel span work.</p>
+            </div>
+            <div class="log-entry">
+              <time datetime="2026-05-15">2026-05-15</time>
+              <p>Started refreshing Temper PR <a href="https://github.com/nerdsane/temper/pull/229">#229</a> onto latest <code>origin/main</code>. Resolved conflicts across serve startup, OTEL trace sampling, OData catalog reads, profiling upload/tests, Postgres DBM-attributed projection writes, and Turso catalog/projection tests while preserving both mainline features and the latency-observability instrumentation. Current local checks pass: <code>cargo fmt --check</code>, <code>git diff --check</code>, <code>cargo check -p temper-cli</code>, <code>cargo test -p temper-server profiling::tests --lib -- --nocapture</code>, <code>cargo test -p temper-store-postgres metrics --lib -- --nocapture</code>, and focused <code>temper-store-turso</code> catalog/export/published-artifact tests.</p>
+            </div>
+            <div class="log-entry">
+              <time datetime="2026-05-15">2026-05-15</time>
+              <p>Reran the full latency-observability package preflight after the mainline refresh. It initially exposed a verifier test filter that matched zero Turso tests after the merged mainline rename; fixed <code>scripts/verify-latency-observability-package.sh</code> to call <code>load_entity_catalog_rows_returns_full_projected_fields</code>. The corrected <code>scripts/verify-latency-observability-package.sh full</code> pass now covers package consistency, cargo formatting/checks, all <code>temper-authz</code> tests, profiling tests, OTEL sampler tests, Postgres metrics tests, projection metrics, OData shadow tests, replay parity integration tests, and the focused Turso full-fields/export tests.</p>
+            </div>
+            <div class="log-entry">
+              <time datetime="2026-05-15">2026-05-15</time>
+              <p>The first post-merge push attempt was blocked by the readability ratchet because merged mainline files raised <code>PROD_FILES_GT500</code> and <code>PROD_FILES_GT1000</code>. Fixed the regression without updating the baseline: moved OTEL environment resolution, trace sampler rules, and OTEL tests into <code>crates/temper-observe/src/otel/config.rs</code>, <code>otel/sampler.rs</code>, and <code>otel/tests.rs</code>; trimmed <code>crates/temper-cli/src/serve/mod.rs</code> to the 1000-line threshold; and updated the package verifier to follow the new sampler module. Verification now passes: <code>cargo fmt --check</code>, <code>cargo test -p temper-observe otel --lib -- --nocapture</code>, <code>scripts/verify-latency-observability-package.sh full</code>, <code>bash scripts/readability-ratchet.sh check .ci/readability-baseline.env</code>, and <code>git diff --check</code>.</p>
+            </div>
+            <div class="log-entry">
+              <time datetime="2026-05-15">2026-05-15</time>
+              <p>Pushed the refreshed Temper branch at <code>50fe9664</code>. The repository pre-push hook passed rustfmt, clippy, readability ratchet, and the full workspace test suite; the slowest <code>dst_platform_random</code> workload finished in 457.87 seconds. GitHub now reports Temper PR <a href="https://github.com/nerdsane/temper/pull/229">#229</a> as <code>MERGEABLE</code> with CI running. TemperPaw PR <a href="https://github.com/nerdsane/temperpaw/pull/266">#266</a> remains <code>CONFLICTING</code> and is the next refresh target.</p>
+            </div>
+            <div class="log-entry">
+              <time datetime="2026-05-15T03:13:00-04:00">2026-05-15 03:13 EDT</time>
+              <p>Railway CLI authentication is confirmed for the correct account, so the live deployment and Datadog redeploy lane is open again.</p>
+              <p>Resolved the TemperPaw observability restructure merge in the worktree <code>/Users/seshendranalla/Development/temperpaw-worktrees/latency-observability-program</code>. The merged Datadog source keeps the new TemperPaw identity cleanup, LLMObs/session/DBM/log surfaces, legacy monitor reconciliation, Datadog retry/backoff, validate-before-deploy, 76 source monitors, and the latency-program percentile coverage backed by <code>scripts/configure_metric_percentiles.py</code>.</p>
+              <p>Verified TemperPaw locally with <code>python3 -m json.tool</code> for dashboard and monitors, <code>python3 -m py_compile</code> for Datadog scripts, <code>git diff --check</code>, focused Datadog contracts, identity/session contracts, and full <code>cargo test -p temperpaw --tests -- --nocapture</code> with 187 passing tests. Pushed merge commit <code>aa38b944</code>; GitHub now reports TemperPaw PR <a href="https://github.com/nerdsane/temperpaw/pull/266">#266</a> as <code>MERGEABLE</code> with CI running.</p>
+            </div>
+            <div class="log-entry">
+              <time datetime="2026-05-15T03:32:00-04:00">2026-05-15 03:32 EDT</time>
+              <p>Redeployed the refreshed TemperPaw Datadog source through Railway. The dashboard update completed for <a href="https://app.datadoghq.com/dashboard/mn4-k3k-i66">mn4-k3k-i66</a>.</p>
+              <p>The first monitor deploy exposed a real live-state problem: Datadog had same-name legacy OpenPaw monitor copies, and updating one into the current query would duplicate an existing TemperPaw monitor. Hardened <code>scripts/deploy_monitors.py</code> to prefer current <code>team:temperpaw</code> monitors over legacy duplicates, validated it with the Datadog observability contract, deployed all 76 source monitors, then ran <code>--reconcile</code> to delete 41 legacy/orphan monitors.</p>
+              <p>Re-applied Datadog percentile configuration. Datadog reported 30 configured source metrics: 19 already enabled live and 11 skipped as missing until the Temper runtime PR emits them. Pushed the deployer fix to TemperPaw at <code>0a18dbd8</code>; PR <a href="https://github.com/nerdsane/temperpaw/pull/266">#266</a> remains <code>MERGEABLE</code> with CI queued.</p>
+            </div>
+            <div class="log-entry">
+              <time datetime="2026-05-15T03:52:00-04:00">2026-05-15 03:52 EDT</time>
+              <p>Used Datadog MCP against the live deployment after the Railway deploy. Datadog confirms dashboard <a href="https://app.datadoghq.com/dashboard/mn4-k3k-i66">mn4-k3k-i66</a>, APM service coverage for rate/error/duration on <code>service:temperpaw</code>, live <code>temper_dispatch_ask_latency_ms</code> percentiles, and current DBM explain plans. It also showed that <code>datadog.dbm.activity_rows</code> is too sparse to be the primary DBM availability gate even while <code>postgresql.queries.count</code> and plans are live.</p>
+              <p>Replaced the live <code>[TemperPaw] Postgres DBM Activity Missing</code> monitor with <code>[TemperPaw] Postgres DBM Query Metrics Missing</code>, backed by <code>postgresql.queries.count</code>. The deploy created monitor <code>283379354</code>, deleted the old activity-row monitor <code>282522099</code>, and left the new monitor <code>OK</code>. The only remaining active Datadog alert is <code>[Temper] Trace Sampler Metrics Missing</code>, which is expected until the Temper runtime PR is deployed through TemperPaw.</p>
+              <p>Committed and pushed the source-of-truth correction to TemperPaw at <code>05f73f00</code> after JSON validation plus <code>datadog_monitor_config</code> and <code>datadog_observability_contract</code> passed.</p>
+            </div>
+            <div class="log-entry">
+              <time datetime="2026-05-15T05:30:00-04:00">2026-05-15 05:30 EDT</time>
+              <p>Completed the merge/deploy lane. Temper PR <a href="https://github.com/nerdsane/temper/pull/229">#229</a> merged into <code>main</code> as <code>eafba6ab</code> after green CI. TemperPaw PR <a href="https://github.com/nerdsane/temperpaw/pull/266">#266</a> bumped all Temper git rev pins to <code>eafba6ab</code>, passed <code>cargo check -p temperpaw</code>, focused Datadog tests, full <code>cargo test -p temperpaw --tests -- --nocapture</code> with 187 passing tests, GitHub CI, and Docker, then merged as <code>2b0ec6e9</code>.</p>
+              <p>Deployed production Railway service <code>openpaw</code> from image digest <code>sha256:4a84ec3a62b45d9ee67f897c5ca4b17ab9acdd3277fa0b37a64c49c69e7d4b78</code>. The first redeploy showed the new image but stale service-level version variables; corrected <code>BUILD_VERSION</code>, <code>BUILD_SHA</code>, and <code>DD_VERSION</code>, then redeployed as <code>a3564c57-a16f-49e9-ac5a-355dd0013f88</code>. Authenticated <code>/paw/version</code> now returns <code>sha-2b0ec6e9</code> and <code>2b0ec6e9849d5eabacb480678a9bfc92fff6f1c4</code>; public <code>/readyz</code> and <code>/healthz</code> are green.</p>
+              <p>Re-ran Datadog percentile configuration after runtime deployment. The new runtime metrics now emit and have p95/p99 enabled: <code>temper_cedar_evaluation_duration_ms</code>, <code>temper_cedar_evaluation_phase_duration_ms</code>, <code>temper_postgres_pool_acquire_duration_ms</code>, <code>temper_postgres_transaction_duration_ms</code>, <code>temper_query_projection_update_queue_wait_ms</code>, and <code>temper_query_projection_update_end_to_end_duration_ms</code>. Latest p95 samples show dispatch around 20.5 ms, Cedar total around 50 ms, Cedar <code>phase:authorizer</code> around 50 ms with request/context/resource phases in microseconds, Postgres pool acquire around 2.4 ms, Postgres transaction around 75 ms for projection upsert and around 19-25 ms for event append, projection queue wait under 0.04 ms, and projection update end-to-end around 75-102 ms.</p>
+              <p>Datadog MCP post-deploy verification found 14,133 APM spans in the latest hour for <code>service:temperpaw env:prod</code>, no matching active alert groups, no matching error spans for the deployed version, APM rate/error/duration monitor coverage, live trace sampler metrics, and 111 fresh DBM plan records in the latest hour. Sample DBM plans are tagged with version <code>2b0ec6e9849d5eabacb480678a9bfc92fff6f1c4</code> and include <code>entity_catalog_pkey</code>, <code>idx_entity_catalog_type</code>, and <code>idx_efi_lookup</code>.</p>
+              <p>Attempted the production observe-only Paw Patrol e2e proof. The control plane accepted the run and created RepoGraphSnapshot <code>en-019e2af1-84dd-7b62-abb1-f2d28216efac</code>, WorkCycle <code>wc-019e2af1-8e84-77f3-9dab-956bcc17d59b</code>, and WorkerRun <code>en-019e2af1-8f3a-70b0-928c-6963fbc38fa7</code>. The worker was correctly claimed by <code>mac-mini-codex-prod</code> but failed before scan execution because the worker host's local Codex auth refresh token is invalid/reused and its local Temper skill file is missing current YAML frontmatter. This is now the only hard e2e blocker before the whole goal can be called complete.</p>
+            </div>
+            <div class="log-entry">
+              <time datetime="2026-05-15T06:33:00-04:00">2026-05-15 06:33 EDT</time>
+              <p>Merged the final deployment evidence report PR <a href="https://github.com/nerdsane/temper/pull/230">#230</a> after green CI as <code>0be1b768</code>. CI included verification contract, integrity/DST patterns, compile/lint, spec verification, instrumentation hygiene, full workspace tests, and DST/platform shards.</p>
+              <p>Confirmed SSH access to the Mac mini worker host as <code>openclaw</code>. The worker doctor reproduced the failed e2e cause: control-plane OData and event-stream checks passed, but <code>codex_exec_smoke</code> failed because the local Temper skill lacked YAML frontmatter and the Codex ChatGPT refresh token was invalid/reused.</p>
+              <p>Repaired <code>/Users/openclaw/.agents/skills/temper/SKILL.md</code> by adding current Codex skill YAML frontmatter and preserved a timestamped backup at <code>/Users/openclaw/.agents/skills/temper/SKILL.md.bak-20260515T101729Z</code>. A second doctor run no longer reported the skill-loader error; the remaining failure is only Codex auth refresh.</p>
+              <p>Started <code>codex login --device-auth</code> on the Mac mini after clearing the unusable login, but the device-code flow timed out without browser approval. The next required human action is to approve a fresh Mac mini Codex device-auth code, then rerun <code>PAW_CODEX_WORKER_ENV_FILE=$HOME/.config/temperpaw/paw-codex-worker.env target/release/paw-codex-worker doctor</code> and the production observe-only proof.</p>
+            </div>
+            <div class="log-entry">
+              <time datetime="2026-05-15T07:37:00-04:00">2026-05-15 07:37 EDT</time>
+              <p>Merged Mac mini worker auth checkpoint PR <a href="https://github.com/nerdsane/temper/pull/231">#231</a> after green CI as <code>6650ac85</code>. CI covered verification contract, compile/lint, integrity/DST patterns, spec verification, instrumentation hygiene, full workspace tests, and all DST/platform shards.</p>
+              <p>Re-checked the deployment lane after the account fix: Railway CLI authentication is valid for the correct account and the worktree is linked to project <code>openpaw-seshendranalla</code> in environment <code>production</code>. Because the local Railway link has no default service selected, production commands must continue passing <code>--service openpaw</code> explicitly.</p>
+              <p>Re-checked Mac mini Codex auth and it still reported <code>Not logged in</code>. Started a fresh <code>codex login --device-auth</code> session on the Mac mini, held it open for the full 15-minute approval window, and it timed out without browser approval. No production observe-only e2e rerun was attempted because the worker doctor cannot pass <code>codex_exec_smoke</code> until that login is approved.</p>
+            </div>
+            <div class="log-entry">
+              <time datetime="2026-05-15T08:28:00-04:00">2026-05-15 08:28 EDT</time>
+              <p>Merged auth retry report PR <a href="https://github.com/nerdsane/temper/pull/232">#232</a> after green CI as <code>36917639</code>. CI included verification contract, compile/lint, integrity/DST patterns, spec verification, instrumentation hygiene, full workspace tests, and all DST/platform shards.</p>
+              <p>Inspected the Codex CLI auth surface on the Mac mini. <code>codex login --with-api-key</code> and <code>codex login --with-agent-identity</code> are available, but no <code>OPENAI_API_KEY</code> or <code>CODEX_AGENT_IDENTITY</code> is present locally, remotely, or in the worker environment file. The remote Mac mini has Codex config but no auth file; this local machine has a working ChatGPT Codex session and an auth file.</p>
+              <p>The only non-browser path currently discovered is transferring existing local Codex auth material to the Mac mini over SSH and then setting restrictive file permissions. That would move credential material, so it requires explicit human approval before execution. Without that approval, the supported path remains approving a fresh Mac mini <code>codex login --device-auth</code> session, then running the worker doctor and the production observe-only proof.</p>
+            </div>
+            <div class="log-entry">
+              <time datetime="2026-05-15T09:26:00-04:00">2026-05-15 09:26 EDT</time>
+              <p>Merged auth-path report PR <a href="https://github.com/nerdsane/temper/pull/233">#233</a> after green CI as <code>b47a7c7a</code>. CI covered verification contract, compile/lint, integrity/DST patterns, spec verification, instrumentation hygiene, full workspace tests, and all DST/platform shards.</p>
+              <p>Confirmed Railway is logged in to the correct account and linked to project <code>openpaw-seshendranalla</code>, environment <code>production</code>. Some worktrees still report <code>Service: None</code>, so commands continue to pass <code>--service openpaw</code> explicitly.</p>
+              <p>Created a fresh main-based TemperPaw proof worktree at <code>/Users/seshendranalla/Development/temperpaw-worktrees/production-observe-main-proof</code> on <code>origin/main</code> commit <code>2b0ec6e9</code>, built <code>paw-codex-worker</code>, and ran the production worker doctor through Railway-injected credentials. The doctor passed repo path, workspace path, worker token, capabilities, execution-off safety, Codex binary presence, OData, and event-stream checks; <code>PAW_CODEX_DOCTOR_EXEC_SMOKE=0</code> intentionally skipped Codex auth execution.</p>
+              <p>Started a temporary authenticated local worker with <code>WORKER_ID=mac-mini-codex-prod</code> and <code>PAW_CODEX_ENABLE_EXECUTION=0</code>, then reran the guarded production observe-only proof. The live control plane created RepoGraphSnapshot <code>en-019e2bcb-8cea-7463-b044-7475c5733934</code>, WorkCycle <code>wc-019e2bcb-970c-7200-88e3-6f1cf996e862</code>, and WorkerRun <code>en-019e2bcb-97df-75e0-bb2d-8109fea0ca05</code>; the WorkerRun was claimable and claimed by <code>mac-mini-codex-prod</code>, then failed with <code>create /Users/openclaw/Development/temperpaw-worktrees</code>.</p>
+              <p>This proves the deployed control plane can still dispatch the production proof and the worker protocol can claim it, but it does not satisfy the final e2e gate: production assigns worktrees under the Mac mini's host path and repo sweep/DailyBrief agents invoke local Codex even in observe-only mode. A passing proof therefore still requires Mac mini Codex auth repair, not a local fallback.</p>
+            </div>
+            <div class="log-entry">
+              <time datetime="2026-05-15T10:37:00-04:00">2026-05-15 10:37 EDT</time>
+              <p>Merged local-proof blocker PR <a href="https://github.com/nerdsane/temper/pull/234">#234</a> after green CI as <code>d3ca7b98</code>. CI included verification contract, compile/lint, integrity/DST patterns, spec verification, instrumentation hygiene, full workspace tests, and all DST/platform shards.</p>
+              <p>Re-verified Railway after the account correction: <code>railway whoami</code> reports the intended account, and <code>railway status</code> now resolves project <code>openpaw-seshendranalla</code>, environment <code>production</code>, service <code>openpaw</code> from the production proof worktree.</p>
+              <p>Re-checked the Mac mini host. The production worktree root exists and launchd reports <code>com.temperpaw.paw-codex-worker</code> running with <code>PAW_CODEX_ENABLE_EXECUTION=1</code>, <code>WORKER_ID=mac-mini-codex-prod</code>, and <code>WORKSPACE_ROOT=/Users/openclaw/Development/temperpaw-worktrees</code>. <code>codex login status</code> still reports <code>Not logged in</code>.</p>
+              <p>Started a fresh Mac mini <code>codex login --device-auth</code> session and held it open for the full approval window, but it timed out without completion. No new production observe-only e2e write was attempted because the worker's local Codex auth remains the final hard blocker.</p>
+            </div>
+            <div class="log-entry">
+              <time datetime="2026-05-15T11:49:00-04:00">2026-05-15 11:49 EDT</time>
+              <p>Merged current blocker report PR <a href="https://github.com/nerdsane/temper/pull/235">#235</a> after green CI as <code>b466a584</code>. The rerun passed verification contract, compile/lint, integrity/DST patterns, spec verification, instrumentation hygiene, full workspace tests, and all DST/platform shards.</p>
+              <p>Reconfirmed the post-Railway-fix deployment lane from the production proof worktree: Railway resolves project <code>openpaw-seshendranalla</code>, environment <code>production</code>, and service <code>openpaw</code>. The Mac mini worker launch agent is still running and the expected worktree root exists.</p>
+              <p>Started another fresh Mac mini <code>codex login --device-auth</code> session, kept it open for the full approval window, and it timed out without completion. This leaves the overall goal intentionally open: worker doctor and the production observe-only proof must wait for successful Mac mini Codex auth or explicit approval to transfer existing local Codex auth material.</p>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <div class="table-wrap" style="margin-top: 15px;">
+        <table>
+          <thead>
+            <tr>
+              <th>Evidence check</th>
+              <th>Latest live result</th>
+              <th>Meaning</th>
+              <th>Next action</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td>Datadog profiling metrics</td>
+              <td>Production on-demand profiler routes are live. Idle CPU/wall captures returned HTTP 200 but only 83-byte profiles; an 8-second CPU capture at 199 Hz during 140 authenticated read probes produced a 26.4 KB pprof file, uploaded to the Datadog Agent intake, and yielded fresh <code>profile_type:cpu</code> upload buckets with no upload-error series.</td>
+              <td>Profiling is now useful for targeted CPU investigations when captured under live load. It is still not a continuous always-on surface: <code>TEMPER_PROFILING_CONTINUOUS</code> is unset, native <code>ddprof</code> is disabled, wall counters are not yet trustworthy, and allocation/lock profiles are not proven.</td>
+              <td>Enable continuous profiling or <code>ddprof</code> deliberately, add/verify freshness monitors, capture flamegraph links/screenshots, and use loaded CPU captures for Cedar/AuthZ and projection hot-path work.</td>
+            </tr>
+            <tr>
+              <td>Datadog DBM instance health</td>
+              <td><code>temperpaw-postgres</code> is visible in DBM. Datadog ranked it suspicious for transient latency spikes around 2026-05-15 02:23-02:34 UTC, but baseline behavior stabilized afterward; wait events were minimal.</td>
+              <td>The database is not broadly saturated in the sampled window. The transient spikes are real enough to keep watching, but they do not justify speculative query-shape changes without plan and app-side timing evidence.</td>
+              <td>Keep DBM health in the dashboard and separate global DB health from hot query design.</td>
+            </tr>
+            <tr>
+              <td>Datadog DBM query plans</td>
+              <td>DBM explain-plan repair was applied on 2026-05-15. Post-deploy Datadog returned 111 fresh plan records in the latest hour for <code>temperpaw-postgres</code>, including app plans tagged with <code>version:2b0ec6e9849d5eabacb480678a9bfc92fff6f1c4</code>. Fresh plans include real payloads for <code>entity_catalog</code>, <code>entity_field_index</code>, and <code>events</code>; examples include <code>idx_entity_catalog_type</code>, <code>idx_efi_lookup</code>, <code>entity_catalog_pkey</code>, <code>idx_events_tenant_entity</code>, and <code>events_tenant_entity_type_entity_id_sequence_nr_key</code>.</td>
+              <td>Explain plans are now usable for hot-query design. Remaining DBM gaps are schema collection, occasional prepared-statement notices, and one long Datadog-agent query truncated by <code>track_activity_query_size=1024</code>.</td>
+              <td>Keep watching fresh plan samples for <code>invalid_schema</code>, enable schema collection if supported by the Railway agent config, and decide whether <code>track_activity_query_size</code> should be raised.</td>
+            </tr>
+            <tr>
+              <td>Datadog DBM availability monitor</td>
+              <td>Live Datadog showed <code>postgresql.queries.count</code> and plan samples current while <code>datadog.dbm.activity_rows</code> had no samples in the last hour. Replaced the activity-row availability monitor with <code>[TemperPaw] Postgres DBM Query Metrics Missing</code> using <code>postgresql.queries.count</code>; the new monitor is <code>OK</code>.</td>
+              <td>The old monitor was an observability false positive: it treated sparse DBM activity sampling as an integration outage. DBM activity rows remain useful for sampled correlation, but query-count and plan telemetry are better liveness signals.</td>
+              <td>Keep the new monitor live, use samples/plans for diagnosis, and keep schema collection as the remaining DBM instrumentation gap.</td>
+            </tr>
+            <tr>
+              <td>APM endpoint latency refresh</td>
+              <td>Over the latest live two-hour window, long-lived event stream spans were 45-60 s but almost entirely <code>idle_ns</code>. Excluding those streams, file <code>$value</code> writes were about 2.1-2.4 s, one WASM probe was about 1.3 s, policy creation was about 0.4 s, and regular OData/list reads were mostly 6-20 ms.</td>
+              <td>The prior diagnosis still applies: ordinary reads are already fast on the projection plane, while blob/file writes, integration/WASM work, and selected control-plane work need separate optimization lanes. Raw APM averages must exclude long-lived streams or they overstate server work.</td>
+              <td>Add dashboard filters/notes that separate streaming spans from request/response spans; keep slow-file and WASM paths in the next optimization queue after measurement deploy.</td>
+            </tr>
+            <tr>
+              <td>Datadog percentile configuration</td>
+              <td>Applied <code>scripts/configure_metric_percentiles.py --apply</code> through Railway before and after runtime deployment. Datadog now returns percentile-enabled post-deploy series for <code>temper_cedar_evaluation_duration_ms</code>, <code>temper_cedar_evaluation_phase_duration_ms</code>, <code>temper_postgres_pool_acquire_duration_ms</code>, <code>temper_postgres_transaction_duration_ms</code>, <code>temper_query_projection_update_queue_wait_ms</code>, and <code>temper_query_projection_update_end_to_end_duration_ms</code>.</td>
+              <td>The p95/p99 path is now usable for the newly deployed runtime metrics, not just the pre-existing averages. Remaining skipped metrics are workflow-dependent surfaces that need traffic or scheduled parity/backfill execution.</td>
+              <td>Keep the percentile script in the release checklist and rerun it after projection parity/backfill workflows emit their first samples.</td>
+            </tr>
+            <tr>
+              <td>DBM query cost refresh</td>
+              <td>Live DBM query-performance analysis showed <code>entity_catalog</code> batch lookups are high volume but usually sub-millisecond database latency; tenant-count scans average around 8.9 ms and touch about 3,846 shared blocks; field-index filtered reads are tens of microseconds; sampled <code>entity_field_index</code> upserts are tens of microseconds with one transaction-duration sample around 15.8 ms.</td>
+              <td>Database-side cost is measurable and currently not the whole explanation for the slowest file writes. The likely next wins are app-side transaction shape, write amplification/coalescing, blob path timing, and stream-aware latency accounting.</td>
+              <td>Deploy app-side Postgres timing metrics, then correlate slow APM traces against DBM signatures before rewriting storage paths.</td>
+            </tr>
+            <tr>
+              <td>OBS-002 repair package</td>
+              <td>Added <code>scripts/datadog-postgres-dbm-setup.sql</code> and <code>docs/runbooks/datadog-postgres-dbm.md</code> based on Datadog's Postgres DBM requirements for <code>datadog.explain_statement</code>, role grants, <code>pg_stat_statements</code>, and search path.</td>
+              <td>The most likely <code>invalid_schema</code> cause now has an explicit operator fix path and validation query set.</td>
+              <td>Run against staging/live Postgres and verify Datadog explains hot query signatures without <code>plan.collection_errors</code>.</td>
+            </tr>
+            <tr>
+              <td>OBS-002 app-side Postgres metrics</td>
+              <td>Added and deployed <code>temper_postgres_pool_acquire_duration_ms</code>, <code>temper_postgres_transaction_begin_duration_ms</code>, <code>temper_postgres_transaction_commit_duration_ms</code>, <code>temper_postgres_transaction_duration_ms</code>, <code>temper_postgres_operation_outcomes_total</code>, <code>temper_postgres_projection_index_fields</code>, and <code>temper_postgres_projection_skipped_index_fields_total</code>. Latest p95 pool acquire is about 2.4 ms; p95 transaction duration is about 75 ms for <code>query_projection_upsert</code> and about 19-25 ms for <code>event_append</code>.</td>
+              <td>DBM can show database-side behavior, while Temper can now separate pool waiting, transaction overhead, write amplification, and failed/concurrent operation outcomes. Current evidence points away from pool starvation and toward projection transaction/update work.</td>
+              <td>Correlate the next slow projection/write traces against these app-side operation metrics before changing storage shape.</td>
+            </tr>
+            <tr>
+              <td>OBS-003 projection correctness metrics</td>
+              <td>Added and deployed source-tagged projection metrics. Datadog now returns <code>source:background_dispatch</code> p95 queue wait under 0.04 ms and p95 end-to-end update around 75-102 ms. The broader set includes applied sequence, backfill, shadow-check, replay parity, and sequence-gap metrics.</td>
+              <td>Projection writes are now observable by source, catalog-fast reads can opt into deterministic sampled shadow checks via <code>TEMPER_ODATA_CATALOG_SHADOW_READ_EVERY</code>, and active projection rows can be compared against event-replayed authoritative state. The current live bottleneck is update work, not queueing.</td>
+              <td>Run scheduled/live parity and shadow-read checks against deployed data before making projection write-amp changes.</td>
+            </tr>
+            <tr>
+              <td>Railway production access</td>
+              <td>Railway CLI is logged in and linked to production. The service is <code>openpaw</code>, but production exports <code>DD_SERVICE=temperpaw</code>. Datadog key variables are present in the service environment without exposing secret values.</td>
+              <td>Datadog deploys now use <code>railway run</code>, but query scopes must follow the runtime service tag, not the Railway service name.</td>
+              <td>Use Railway for the remaining DBM SQL/runbook validation, runtime deployment checks, and live e2e proof on the Railway domain.</td>
+            </tr>
+            <tr>
+              <td>Datadog monitor deployment</td>
+              <td>Dashboard <a href="https://app.datadoghq.com/dashboard/mn4-k3k-i66">mn4-k3k-i66</a> was updated. The refreshed 76-monitor catalog is deployed and 41 legacy/orphan monitors were reconciled away. Standard APM monitors are present: request-rate id <code>283342070</code>, 5xx id <code>283342074</code>, duration id <code>283342076</code>, and error-rate id <code>283345345</code>. Latest Datadog MCP check found no matching active alert groups.</td>
+              <td>The Datadog dashboard/monitor source now exists in production Datadog. Service coverage analyzer recognizes rate, duration, and error coverage for <code>service:temperpaw</code>.</td>
+              <td>Keep source-of-truth monitor deployment in the release checklist and add SLO objects after latency targets are finalized.</td>
+            </tr>
+            <tr>
+              <td>Production health probe</td>
+              <td><code>https://openpaw-production.up.railway.app/readyz</code> returned ready JSON and <code>/healthz</code> returned HTTP 200 after deployment <code>a3564c57-a16f-49e9-ac5a-355dd0013f88</code>. Authenticated <code>/paw/version</code> returns <code>sha-2b0ec6e9</code> and <code>2b0ec6e9849d5eabacb480678a9bfc92fff6f1c4</code>.</td>
+              <td>The Railway app is alive on the Railway domain and version-correct. The deploy also exposed and fixed stale Railway service-level version variables that overrode image environment.</td>
+              <td>Keep the Railway domain as the canonical smoke target until custom-domain DNS is separately verified.</td>
+            </tr>
+            <tr>
+              <td>Datadog metric snapshot</td>
+              <td>Read-only Datadog query via <code>scripts/read_datadog_snapshot.py</code> and Railway found <code>temper_up=1</code> over 1h/24h, 23,481 counted Cedar evaluations over 24h, dispatch p95 around 20.5 ms in the latest bucket, and Postgres pool p95 around 2.36 ms. Datadog MCP found new p95 series for Cedar ms/phase, Postgres, projection queue, and projection e2e metrics.</td>
+              <td>The core service, current-tail distributions, Postgres app timing, projection timing, trace sampler metrics, DBM plans, and targeted CPU profiler path are live under <code>service:temperpaw</code>. Continuous/native profiling and scheduled projection parity remain the main observability gaps.</td>
+              <td>Use this evidence to pick the next optimization slice; do not broadly rewrite storage or authorization until profiler/parity evidence supports it.</td>
+            </tr>
+            <tr>
+              <td>Production observe-only e2e</td>
+              <td>First guarded production proof: RepoGraphSnapshot <code>en-019e2af1-84dd-7b62-abb1-f2d28216efac</code>, WorkCycle <code>wc-019e2af1-8e84-77f3-9dab-956bcc17d59b</code>, WorkerRun <code>en-019e2af1-8f3a-70b0-928c-6963fbc38fa7</code>; the Mac mini worker claimed it but failed before scan execution due stale Codex auth plus the now-repaired skill frontmatter issue. Second guarded proof with a temporary authenticated local worker: RepoGraphSnapshot <code>en-019e2bcb-8cea-7463-b044-7475c5733934</code>, WorkCycle <code>wc-019e2bcb-970c-7200-88e3-6f1cf996e862</code>, WorkerRun <code>en-019e2bcb-97df-75e0-bb2d-8109fea0ca05</code>; it claimed correctly but failed at <code>create /Users/openclaw/Development/temperpaw-worktrees</code>.</td>
+              <td>The deployed runtime/Datadog path works, and production dispatch/claim is live. The full Paw Patrol worker loop is still not healthy because production is intentionally bound to the Mac mini worker host: assigned worktree paths live under <code>/Users/openclaw/Development/temperpaw-worktrees</code>, and the repo sweep/DailyBrief agents invoke local Codex even with execution disabled.</td>
+              <td>Approve a fresh Mac mini Codex device-auth login while the code window is active, or explicitly approve transfer of local Codex auth material; then rerun worker doctor until <code>codex_exec_smoke</code> passes, restart/kick the Mac mini worker, rerun <code>crates/paw-codex-worker/scripts/production-observe-only.sh</code>, and attach the generated proof bundle.</td>
+            </tr>
+            <tr>
+              <td>Review gates</td>
+              <td>DST review PASS, code-quality review PASS, changed sim-visible files passed the determinism guard loop, Temper pre-push passed rustfmt/clippy/readability/full workspace tests, TemperPaw passed focused Datadog tests and full <code>cargo test -p temperpaw --tests</code>, GitHub CI passed for both PRs, and Docker main build pushed the deployed image digest.</td>
+              <td>The code package is merged, CI-proven, and deployed. Residual risk is no longer PR quality; it is the failed production worker e2e caused by the worker host's missing Codex auth.</td>
+              <td>Refresh Mac mini Codex auth, rerun the observe-only proof, then record the passing proof bundle here.</td>
+            </tr>
+            <tr>
+              <td>OBS-004 Datadog dashboard and monitors</td>
+              <td>The refreshed TemperPaw source has a deployed 76-monitor catalog and 24-widget dashboard combining main's session/LLMObs/DBM/log restructuring with latency-program projection, Postgres, dispatch, WASM, blob, Monty, AuthZ, and trace-budget coverage. Queries are scoped to production's <code>service:temperpaw</code> tag, and the runtime-only metric widgets now have first live samples.</td>
+              <td>The live Datadog account has the merged target config plus post-deploy runtime data. Some workflow-specific panels can remain sparse until parity/backfill/profiler schedules run.</td>
+              <td>Capture screenshots/links for the next review packet and add formal SLO objects after targets are approved.</td>
+            </tr>
+            <tr>
+              <td>OBS-005 trace budget</td>
+              <td>Added and deployed ADR-0083, sampler decision/config/rate metrics, startup-tunable reduced sampling for WASM auxiliary and background dispatch helper spans, reaction fanout summary span fields, and a TemperPaw Trace Budget dashboard/monitor group. Datadog now finds <code>temper_trace_sampler_decisions_total</code>, <code>temper_trace_sampler_configured_rules</code>, and <code>temper_trace_sampler_reduced_sample_rate_pct</code>.</td>
+              <td>Trace volume now has an explicit, observable budget instead of relying on ad hoc trace-agent behavior; high-fanout traces should retain root and summary context without routine 100k-child-span payloads.</td>
+              <td>Run a high-fanout smoke path and record representative trace span counts plus slow/error trace links here.</td>
+            </tr>
+            <tr>
+              <td>PERF-001 measurement prep</td>
+              <td>Datadog now shows live p95 for <code>temper_cedar_evaluation_duration_ms</code> and <code>temper_cedar_evaluation_phase_duration_ms</code>. Latest p95 is about 50 ms overall and about 50 ms in <code>phase:authorizer</code>; <code>action_uid</code>, <code>entities</code>, <code>request</code>, <code>resource_attrs</code>, <code>context_attrs</code>, <code>resource_uid</code>, and <code>principal_attrs</code> are all tiny by comparison.</td>
+              <td>We can now separate Cedar authorizer cost from Temper request-construction cost before optimizing or proposing a deny-safe cache. The first evidence says policy/entity evaluation dominates.</td>
+              <td>Use targeted profiling around Cedar authorizer execution, then decide between policy/entity reuse, compiled-entity strategy, or a separate deny-safe cache ADR.</td>
+            </tr>
+            <tr>
+              <td>Release verification package</td>
+              <td>Added <code>docs/runbooks/latency-observability-release.md</code> with the two-PR split, exact local checks, runtime flags, DBM setup, Datadog deploy commands, live proof matrix, e2e smoke requirements, rollback plan, and done criteria. Quick/full preflight passed; the two PRs merged; production deploy and Datadog proof are recorded here.</td>
+              <td>The work has a concrete path from local patches to deployed evidence. The one failed exit criterion is the production observe-only worker proof, and the failure is outside the merged runtime path.</td>
+              <td>Repair the Mac mini worker's local Codex setup, rerun <code>production-observe-only.sh</code>, and attach the generated proof bundle path/IDs here.</td>
+            </tr>
+            <tr>
+              <td>OBS-003 Turso projection catalog correctness</td>
+              <td>Fixed Turso <code>entity_catalog</code> to preserve full projected <code>fields</code> JSON, added an idempotent migration for existing catalogs, and updated catalog load/export paths. Focused Turso tests and the server replay parity integration test pass.</td>
+              <td>The catalog-fast read contract now matches the Postgres path: the catalog owns the full projected row, while the field index remains a scalar filter index.</td>
+              <td>Deploy, backfill/rewrite existing Turso projection rows, then verify replay parity is clean before increasing fast-read traffic.</td>
+            </tr>
+            <tr>
+              <td>OBS-001 local implementation</td>
+              <td>Added and deployed profiler config/freshness/capture metrics, opt-in continuous CPU profile capture, and startup wiring from the CLI serve path. Production still has <code>TEMPER_PROFILING_CONTINUOUS</code> unset and <code>DD_PROFILING_ENABLED=false</code>.</td>
+              <td>On-demand in-process pprof is proven live and useful under load, and the deployed runtime can now support a controlled continuous-capture experiment. It is not yet an always-on profiling posture.</td>
+              <td>Enable continuous capture intentionally or compare against native <code>ddprof</code>, then record flamegraph links/screenshots.</td>
+            </tr>
+            <tr>
+              <td>Datadog native profiler path</td>
+              <td>Production currently has <code>DD_PROFILING_ENABLED=false</code>, so <code>scripts/temperpaw-entrypoint.sh</code> does not wrap the process in <code>ddprof</code>. Current Datadog docs recommend <code>ddprof</code> for compiled languages including Rust, C, and C++ when runtime, symbols, OS permissions, service/env/version, and Agent/export settings are correct.</td>
+              <td>The in-process profiler is a proven fallback/control for targeted captures, but <code>ddprof</code> remains the likely first-class continuous profiler for Temper's Rust process if Railway permissions and image contents support it.</td>
+              <td>Add a deployment task to install/wrap with <code>ddprof</code>, verify <code>perf_event_paranoid</code>/capabilities and symbols, then compare native continuous profiles with the in-process fallback.</td>
+            </tr>
+            <tr>
+              <td>OBS-001 local verification</td>
+              <td><code>cargo check -p temper-cli</code>, <code>cargo test -p temper-server profiling::tests --lib</code>, <code>cargo test -p temper-server query_projection_metrics --lib</code>, <code>cargo test -p temper-server odata::read_support --lib</code>, <code>cargo test -p temper-store-postgres metrics --lib</code>, <code>cargo fmt --check</code>, <code>git diff --check</code>, JS syntax check, and Playwright screenshot smoke check passed.</td>
+              <td>The local code path compiles and profiler tuning behavior is covered by unit tests; production on-demand CPU profile capture and Datadog Agent upload are now live-proven.</td>
+              <td>OBS-001 is not done until continuous or native profiling is deployed, flamegraph evidence is recorded, and stale-profiler monitoring stays clean.</td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+
+      <div class="table-wrap" style="margin-top: 15px;">
+        <table>
+          <thead>
+            <tr>
+              <th>Milestone</th>
+              <th>Status</th>
+              <th>Evidence required in this dashboard</th>
+              <th>Exit criteria</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td>Program setup</td>
+              <td><span class="status ok">Baseline complete</span></td>
+              <td>Thread goal, worktree, branch, ADR link, progress dashboard.</td>
+              <td>ADR-0081 exists and this page records the plan/status baseline.</td>
+            </tr>
+            <tr>
+              <td>Observability repair</td>
+              <td><span class="status ok">Runtime metrics live</span></td>
+              <td>Profiler freshness, DBM plan health, percentile metrics, trace budget, projection drift/lag/replay metrics.</td>
+              <td>Dashboards/monitors show trustworthy current data, not stale or average-only proxies. Remaining nuance: continuous/native profiling and scheduled projection parity still need a follow-up pass.</td>
+            </tr>
+            <tr>
+              <td>Performance slice 1</td>
+              <td><span class="status ok">Measurement live</span></td>
+              <td>Cedar/AuthZ phase metrics, request-shape metrics, percentile config proof, profiler before/after, tests, and live latency evidence.</td>
+              <td>AuthZ p95/p99 evidence is now live: the authorizer phase dominates while request-shape phases are tiny, so the next optimization can be narrow and governance-preserving.</td>
+            </tr>
+            <tr>
+              <td>Performance slice 2</td>
+              <td><span class="status watch">Planned</span></td>
+              <td>Projection write amplification before/after, drift proof, and replay parity.</td>
+              <td>Projection update tail reduced without data drift.</td>
+            </tr>
+            <tr>
+              <td>Structural slices</td>
+              <td><span class="status watch">Planned</span></td>
+              <td>Workflow executor/blob data-plane ADRs, implementation PRs, live run evidence.</td>
+              <td>Slow external/data-plane work no longer defines control-plane latency.</td>
+            </tr>
+            <tr>
+              <td>Final verification</td>
+              <td><span class="status fail">Worker e2e blocked</span></td>
+              <td>Local tests, live runs, live e2e tests, PR links, merge proof, deployment proof.</td>
+              <td>All code PRs are merged and deployed; this dashboard contains the evidence trail. The Mac mini skill repair is complete. Final completion requires fresh Mac mini Codex auth and a passing production observe-only proof.</td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+
+      <div class="table-wrap" style="margin-top: 15px;">
+        <table>
+          <thead>
+            <tr>
+              <th>Task ID</th>
+              <th>Task</th>
+              <th>Status</th>
+              <th>Worktree / PR</th>
+              <th>Evidence required before done</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td>PLAN-001</td>
+              <td>Create living dashboard and program tracking baseline.</td>
+              <td><span class="status ok">Done</span></td>
+              <td><code>codex/latency-observability-program</code></td>
+              <td>This progress section, progress bar, status log, and milestone table exist.</td>
+            </tr>
+            <tr>
+              <td>ADR-0081</td>
+              <td>Define latency/observability acceleration program, gates, order, and finish line.</td>
+              <td><span class="status ok">Done</span></td>
+              <td><code>codex/latency-observability-program</code></td>
+              <td><code>docs/adrs/0081-latency-observability-acceleration-program.md</code> exists.</td>
+            </tr>
+            <tr>
+              <td>OBS-001</td>
+              <td>Restore useful Datadog profiling: freshness, upload rate, upload errors, CPU/allocation/lock profiles.</td>
+              <td><span class="status watch">Runtime deployed; continuous pending</span></td>
+              <td><a href="https://github.com/nerdsane/temper/pull/229">Temper PR #229</a> merged; deployed via TemperPaw <a href="https://github.com/nerdsane/temperpaw/pull/266">#266</a></td>
+              <td>Local check/test passed, production on-demand CPU capture under read load produced a valid 26.4 KB pprof profile plus fresh Datadog upload counters, and runtime deploy is live. Remaining profiler work is continuous or native <code>ddprof</code> evaluation, allocation/lock or documented Rust limitation, and durable flamegraph links/screenshots.</td>
+            </tr>
+            <tr>
+              <td>OBS-002</td>
+              <td>Repair DBM usefulness: query plans, DB CPU/vacuum coverage, lock/wait/pool/transaction visibility.</td>
+              <td><span class="status ok">DBM and app metrics live</span></td>
+              <td><a href="https://github.com/nerdsane/temper/pull/229">Temper PR #229</a> merged; deployed via TemperPaw <a href="https://github.com/nerdsane/temperpaw/pull/266">#266</a></td>
+              <td>Runbook/setup SQL were applied to production Postgres, DBM plans are live, and app-side Postgres metrics now emit. Latest p95: pool acquire about 2.4 ms, projection transaction about 75 ms, event append about 19-25 ms. Remaining work: DBM schema collection decision, DB CPU/vacuum/wait coverage classification, and continued clean plan samples.</td>
+            </tr>
+            <tr>
+              <td>OBS-003</td>
+              <td>Add projection correctness observability: lag, sequence, version/hash, drift samples, shadow reads, replay parity.</td>
+              <td><span class="status watch">Runtime metrics live; parity run pending</span></td>
+              <td><a href="https://github.com/nerdsane/temper/pull/229">Temper PR #229</a> merged; deployed via TemperPaw <a href="https://github.com/nerdsane/temperpaw/pull/266">#266</a></td>
+              <td>Source-tagged queue/update metrics emit in production. Latest p95: projection queue wait under 0.04 ms and projection end-to-end update about 75-102 ms. Opt-in shadow checks, replay parity metrics/tests, and Turso catalog field preservation exist; scheduled/live replay parity execution against deployed data remains pending.</td>
+            </tr>
+            <tr>
+              <td>OBS-004</td>
+              <td>Convert key metrics to distributions/percentiles and fix misleading or No Data monitors.</td>
+              <td><span class="status ok">Runtime percentiles live</span></td>
+              <td><a href="https://github.com/nerdsane/temperpaw/pull/266">TemperPaw PR #266</a> merged</td>
+              <td>Dashboard <code>mn4-k3k-i66</code> and the refreshed 76-monitor catalog are deployed live; 41 legacy/orphan monitors were reconciled away. Datadog service coverage recognizes APM rate, duration, and error. The post-deploy percentile pass enabled the new runtime metrics that were previously skipped: Cedar ms/phase, Postgres pool/transaction, and projection queue/e2e timings.</td>
+            </tr>
+            <tr>
+              <td>OBS-005</td>
+              <td>Add trace budgets and high-fanout summary spans with exemplars.</td>
+              <td><span class="status watch">Sampler metrics live</span></td>
+              <td><a href="https://github.com/nerdsane/temper/pull/229">Temper PR #229</a> merged; <a href="https://github.com/nerdsane/temperpaw/pull/266">TemperPaw PR #266</a> merged</td>
+              <td>ADR-0083, sampler metrics, configurable reduced-prefix rules, reaction fanout span summaries, dashboard widgets, and monitors are deployed. Datadog now finds <code>temper_trace_sampler_decisions_total</code>, <code>temper_trace_sampler_configured_rules</code>, and <code>temper_trace_sampler_reduced_sample_rate_pct</code>. Done requires high-fanout smoke evidence that routine traces no longer create 100k-span payloads while slow/error traces retain root and summary detail.</td>
+            </tr>
+            <tr>
+              <td>PERF-001</td>
+              <td>Measure then optimize Cedar/AuthZ CPU path without weakening governance.</td>
+              <td><span class="status ok">Phase evidence live</span></td>
+              <td><a href="https://github.com/nerdsane/temper/pull/229">Temper PR #229</a> merged; <a href="https://github.com/nerdsane/temperpaw/pull/266">TemperPaw PR #266</a> merged</td>
+              <td>ADR-0084, canonical counter cleanup, ms duration metric, phase metrics, request-shape histograms, AuthZ dashboard group, focused AuthZ test, full AuthZ suite, and package preflight passed locally and are deployed. Live p95 shows Cedar total around 50 ms, with <code>phase:authorizer</code> around 50 ms and request/context/resource construction phases in microseconds. Next optimization should target Cedar policy/entity evaluation itself, not broad request-construction surgery.</td>
+            </tr>
+            <tr>
+              <td>PERF-002</td>
+              <td>Reduce projection write amplification with diffing, batching, coalescing, and selective indexing.</td>
+              <td><span class="status watch">Planned</span></td>
+              <td>Pending PR</td>
+              <td>Before/after projection latency and write count; replay/shadow-read drift proof.</td>
+            </tr>
+            <tr>
+              <td>PERF-003</td>
+              <td>Improve DB transaction shape and event append path where evidence justifies it.</td>
+              <td><span class="status watch">Planned</span></td>
+              <td>Pending PR</td>
+              <td>No recurring idle-in-transaction samples; concurrency/event replay tests pass.</td>
+            </tr>
+            <tr>
+              <td>PERF-004</td>
+              <td>Move long integration workflows to durable, observable execution with idempotent callbacks.</td>
+              <td><span class="status watch">Planned</span></td>
+              <td>Pending ADR/PR</td>
+              <td>Control-plane response latency improves; live workflow e2e passes; duplicate side effects prevented.</td>
+            </tr>
+            <tr>
+              <td>PERF-005</td>
+              <td>Split blob/data plane with streaming or direct upload while preserving Temper metadata and verification.</td>
+              <td><span class="status watch">Planned</span></td>
+              <td>Pending ADR/PR</td>
+              <td>Large upload live run passes; hash/content verification and lifecycle callbacks proven.</td>
+            </tr>
+            <tr>
+              <td>VERIFY-001</td>
+              <td>Build repeatable load/replay/e2e verification and deployment evidence trail.</td>
+              <td><span class="status fail">Worker e2e blocked</span></td>
+              <td><a href="https://github.com/nerdsane/temper/pull/229">Temper PR #229</a> merged; <a href="https://github.com/nerdsane/temperpaw/pull/266">TemperPaw PR #266</a> merged; final evidence report <a href="https://github.com/nerdsane/temper/pull/230">Temper PR #230</a> merged; auth checkpoint <a href="https://github.com/nerdsane/temper/pull/231">Temper PR #231</a> merged; auth retry <a href="https://github.com/nerdsane/temper/pull/232">Temper PR #232</a> merged; auth-path <a href="https://github.com/nerdsane/temper/pull/233">Temper PR #233</a> merged; local-proof blocker <a href="https://github.com/nerdsane/temper/pull/234">Temper PR #234</a> merged; current blocker report <a href="https://github.com/nerdsane/temper/pull/235">Temper PR #235</a> merged</td>
+              <td>Local tests, GitHub CI, Docker image push, Railway deployment, health probes, version proof, Datadog monitor coverage, APM spans, DBM plans, and runtime metrics are recorded. The production observe-only proof is blocked by Mac mini Codex auth after the skill-loader repair. A local authenticated fallback proved production dispatch/claim but failed on the Mac-mini-specific worktree root, confirming that a passing final proof must repair the Mac mini worker rather than bypass it. API-key and Agent Identity login are supported by the CLI but no token is present; transferring existing local Codex auth material is possible only with explicit human approval. Fresh device-auth attempts expired at <code>2026-05-15 10:37 EDT</code> and <code>2026-05-15 11:49 EDT</code> without completion.</td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+    </section>
+
+    <section class="section" id="answer">
+      <div class="section-header">
+        <div class="section-label">00 / direct answer</div>
+        <h2>Does The Previous Diagnosis Still Apply?</h2>
+      </div>
+      <div class="grid-2">
+        <div class="panel">
+          <h3>Yes, with a production update</h3>
+          <p>
+            The central conclusion still holds: Temper's verified transition table and actor admission path are not
+            the main latency limit in the observed production system. The slow areas are around the mission-preserving
+            core: authorization, projection/index maintenance, event persistence shape, WASM integrations, blob
+            transfer, and observability cardinality.
+          </p>
+          <p>
+            The important update is that production Datadog traces show a newer projection read plane:
+            <code>entity_catalog</code>, <code>entity_field_index</code>, and
+            <code>dispatch.phase.query_projection</code>. Those symbols are not present in this local checkout,
+            so Datadog is the fresher source for production behavior.
+          </p>
+        </div>
+        <div class="panel">
+          <h3>Measured approach</h3>
+          <p>
+            We should treat speed as a correctness program. First repair measurement: profiling, DBM, percentile
+            metrics, trace budgets, and projection drift observability. Then optimize the CPU and write-amplified
+            paths with repeatable load tests and replay parity.
+          </p>
+          <div class="chips">
+            <span class="chip good">keep verified specs</span>
+            <span class="chip good">keep Cedar default-deny</span>
+            <span class="chip good">keep event audit</span>
+            <span class="chip warn">bound projection lag</span>
+            <span class="chip warn">control trace cardinality</span>
+            <span class="chip warn">make profiling continuous</span>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <section class="section" id="architecture">
+      <div class="section-header">
+        <div class="section-label">01 / current system</div>
+        <h2>Current Architecture</h2>
+      </div>
+      <div class="diagram diagram-wide">
+        <div class="panel-title"><span>Current platform architecture</span><span>repo + prod delta</span></div>
+        <pre class="mermaid">
+flowchart LR
+  Dev["Developer Chat"] --> SpecGen["Interview -> IOA / CSDL / Cedar / WASM"]
+  SpecGen --> Verify["Verification Cascade<br/>L0 symbolic<br/>L1 model check<br/>L2 deterministic simulation<br/>L3 property"]
+  Verify --> Registry["SpecRegistry<br/>(TenantId, EntityType) -> spec + TransitionTable"]
+  User["Production Chat / Agents / SDKs"] --> Server["Temper Server<br/>HTTP + OData + MCP"]
+  Registry --> Server
+  Server --> Authz["Cedar AuthZ<br/>principal + action + resource + context"]
+  Server --> Actors["Entity Actors<br/>verified transitions<br/>bounded mailboxes"]
+  Actors --> Events["Event Store<br/>tenant-scoped Postgres"]
+  Actors --> Wasm["WASM Integrations<br/>sandbox + host calls"]
+  Wasm --> External["External APIs<br/>blob store<br/>LLM/tool providers"]
+  Events --> Projection["Production projection plane<br/>entity_catalog + entity_field_index"]
+  Projection --> Reads["OData read/query path"]
+  Server --> Observe["temper-observe<br/>WideEvents + spans + metrics + trajectories"]
+  Observe --> Evolution["Evolution Engine<br/>O / P / A / D / I records"]
+  Observe --> Datadog["Datadog<br/>APM + DBM + metrics + monitors + profiler"]
+        </pre>
+      </div>
+
+      <div class="grid-2" style="margin-top: 15px;">
+        <div class="diagram">
+          <div class="panel-title"><span>Read path</span><span>projection first</span></div>
+          <pre class="mermaid">
+sequenceDiagram
+  participant C as Client
+  participant O as OData route
+  participant A as Cedar/Auth
+  participant P as Projection DB
+  participant E as Entity actor
+  C->>O: GET /odata/{path}
+  O->>A: authorize request
+  alt projection hit
+    O->>P: SELECT entity_catalog / entity_field_index
+    P-->>O: projected entity or query result
+  else fallback / hydration
+    O->>E: get_or_spawn + GetState
+    E-->>O: entity state
+  end
+  O-->>C: OData response
+          </pre>
+        </div>
+        <div class="diagram">
+          <div class="panel-title"><span>Action/write path</span><span>governed transition</span></div>
+          <pre class="mermaid">
+sequenceDiagram
+  participant C as Client
+  participant D as Dispatch
+  participant Z as Cedar
+  participant E as Entity actor
+  participant J as Event journal
+  participant Q as Projection updater
+  participant W as WASM integration
+  C->>D: POST action / PUT stream
+  D->>Z: authorize_with_context
+  Z-->>D: allow or deny
+  D->>E: ask/action
+  E->>J: append events
+  E-->>D: new state + effects
+  D->>Q: update projection
+  D->>W: inline or background integration
+  W-->>D: callback action
+  D-->>C: response
+          </pre>
+        </div>
+      </div>
+    </section>
+
+    <section class="section" id="evidence">
+      <div class="section-header">
+        <div class="section-label">02 / production signals</div>
+        <h2>Datadog Evidence Snapshot</h2>
+      </div>
+      <div class="callout">
+        <div>
+          <strong>Scope.</strong>
+          Datadog was queried for <code>temperpaw</code> on May 14-15, 2026. The first pass used 24-hour
+          APM/DBM evidence; the latest refresh used a live two-hour APM, metric, monitor-coverage,
+          DBM query-performance, Datadog monitor deployment, percentile-configuration, and post-runtime-deploy window.
+          Production observability includes projection symbols missing from this local checkout,
+          and production currently emits <code>DD_SERVICE=temperpaw</code> with version
+          <code>2b0ec6e9849d5eabacb480678a9bfc92fff6f1c4</code>.
+        </div>
+      </div>
+
+      <div class="metrics" style="margin-top: 15px;">
+        <div class="metric"><div class="label">OData reads</div><strong>7 / 17 / 30 ms</strong><p><code>GET /odata/{path}</code> p50 / p95 / p99.</p></div>
+        <div class="metric"><div class="label">Projection phase</div><strong>88 ms / 1.25 s</strong><p><code>query_projection</code> p50 / p95 overall.</p></div>
+        <div class="metric"><div class="label">AuthZ CPU</div><strong>81 / 203 / 253 ms</strong><p><code>authorize_with_context</code> p50 / p95 / p99.</p></div>
+        <div class="metric"><div class="label">WASM integrations</div><strong>4.4 / 19 / 50 s</strong><p><code>background_wasm_integrations</code> p50 / p95 / p99.</p></div>
+        <div class="metric"><div class="label">Fan-out trace</div><strong>166k spans</strong><p>One trace had 104k field-index inserts.</p></div>
+        <div class="metric"><div class="label">Field index upsert</div><strong>3.4 / 8.1 / 23 ms</strong><p>Small per-row SQL, huge volume.</p></div>
+        <div class="metric"><div class="label">Catalog upsert</div><strong>3.8 / 48 / 220 ms</strong><p>Tail latency plus workload anomaly.</p></div>
+        <div class="metric"><div class="label">Profiler</div><strong>26.4 KB</strong><p>Loaded production CPU capture parsed by <code>go tool pprof</code>; Datadog saw fresh <code>profile_type:cpu</code> uploads.</p></div>
+        <div class="metric"><div class="label">Runtime deploy</div><strong>2b0ec6e9</strong><p>Railway <code>/paw/version</code>, APM spans, DBM plans, and metrics all show the merged deployment SHA.</p></div>
+        <div class="metric"><div class="label">Monitor coverage</div><strong>3 / 3</strong><p>Datadog recognizes request rate, error, and duration monitors for <code>service:temperpaw</code>.</p></div>
+        <div class="metric"><div class="label">APM traffic</div><strong>14,133 spans</strong><p>Latest one-hour <code>service:temperpaw env:prod</code> query; no matching error spans for deployed version.</p></div>
+        <div class="metric"><div class="label">Dispatch p95</div><strong>20.5 ms</strong><p>Latest post-deploy <code>p95:temper_dispatch_ask_latency_ms</code> bucket.</p></div>
+        <div class="metric"><div class="label">Cedar p95</div><strong>50 ms</strong><p><code>temper_cedar_evaluation_duration_ms</code> is now live and percentile-enabled.</p></div>
+        <div class="metric"><div class="label">AuthZ phase p95</div><strong>50 ms</strong><p><code>phase:authorizer</code> dominates; request/context/resource phase p95s are microseconds.</p></div>
+        <div class="metric"><div class="label">Postgres pool p95</div><strong>2.4 ms</strong><p>App-side pool-acquire metric is live for projection upsert and event append.</p></div>
+        <div class="metric"><div class="label">Projection e2e p95</div><strong>75-102 ms</strong><p>Background projection queue wait is below 0.04 ms; update work itself is the measured cost.</p></div>
+        <div class="metric"><div class="label">Slow non-stream path</div><strong>2.4 s</strong><p>File <code>$value</code> write; event streams are longer but mostly idle by design.</p></div>
+        <div class="metric"><div class="label">DBM plan health</div><strong>usable</strong><p>Fresh plans now include real index payloads; schema collection remains a separate gap.</p></div>
+        <div class="metric"><div class="label">E2E proof</div><strong>blocked</strong><p>Dispatch and claim are live; a local fallback failed on the Mac mini worktree root, so fresh Mac mini Codex auth is still needed.</p></div>
+      </div>
+
+      <div class="diagram diagram-wide" style="margin-top: 15px;">
+        <div class="panel-title"><span>Latency anatomy</span><span>where the heat is</span></div>
+        <pre class="mermaid">
+flowchart TB
+  Request["User-visible request"] --> Core["Verified actor core<br/>fast: microseconds to sub-ms phases"]
+  Request --> Auth["Cedar authorization<br/>hot: CPU-bound p95 around 200 ms"]
+  Request --> Read["Projected reads<br/>healthy: GET p95 around 17 ms"]
+  Request --> Projection["Projection writes<br/>hot tail: fan-out + per-field upserts"]
+  Request --> Event["Event journal<br/>moderate tail: SELECT MAX + INSERT"]
+  Request --> Wasm["WASM/external workflows<br/>seconds to tens of seconds"]
+  Request --> Blob["Blob upload path<br/>seconds during bursts"]
+  Projection --> Trace["Trace cardinality<br/>100k+ spans on fan-out traces"]
+  Auth --> Profile["Need fresh CPU/alloc profiles"]
+  Projection --> Drift["Need drift + lag proof"]
+        </pre>
+      </div>
+
+      <div class="table-wrap" style="margin-top: 15px;">
+        <table>
+          <thead>
+            <tr>
+              <th>Layer</th>
+              <th>What Datadog showed</th>
+              <th>Interpretation</th>
+              <th>Confidence</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td>Transition table / actor admission</td>
+              <td>Actor spawn and admission p95 were sub-millisecond. Local JIT transition evaluation is microseconds.</td>
+              <td>The mission core is not the current latency limit.</td>
+              <td><span class="status ok">High</span></td>
+            </tr>
+            <tr>
+              <td>Read/query plane</td>
+              <td>OData GET p95 was around 17 ms using projection tables.</td>
+              <td>The new projection plane largely fixed regular read latency.</td>
+              <td><span class="status ok">High</span></td>
+            </tr>
+            <tr>
+              <td>Projection writes</td>
+              <td>Query projection tails into seconds during fan-out; one trace emitted 104k field-index insert spans.</td>
+              <td>Write amplification and trace fan-out are primary architecture issues.</td>
+              <td><span class="status ok">High</span></td>
+            </tr>
+            <tr>
+              <td>Cedar authorization</td>
+              <td>AuthZ p95 around 200 ms; sampled trace was almost entirely busy CPU time.</td>
+              <td>Needs profiling, context dimensions, cache/precompile strategy.</td>
+              <td><span class="status ok">High</span></td>
+            </tr>
+            <tr>
+              <td>WASM/external integrations</td>
+              <td>Session integration actions had p50s of seconds and p95s of tens of seconds.</td>
+              <td>External workflow work needs queueing, budgets, and async progress semantics.</td>
+              <td><span class="status ok">High</span></td>
+            </tr>
+            <tr>
+              <td>Postgres DBM</td>
+              <td>DBM sees <code>temperpaw-postgres</code> as healthy and fresh post-repair plans include real payloads for <code>entity_catalog</code>, <code>entity_field_index</code>, and <code>events</code>.</td>
+              <td>Instance health and plan-level diagnosis are now usable; schema collection and <code>track_activity_query_size</code> remain follow-up gaps.</td>
+              <td><span class="status watch">Medium</span></td>
+            </tr>
+            <tr>
+              <td>Profiling</td>
+              <td>Production on-demand CPU profile under read load produced a valid 26.4 KB pprof payload, uploaded to the Datadog Agent, and exposed fresh <code>profile_type:cpu</code> upload buckets.</td>
+              <td>Targeted CPU profiling is useful now; continuous profiling, native <code>ddprof</code>, wall/allocation/lock coverage, and freshness monitors still need completion.</td>
+              <td><span class="status watch">Medium</span></td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+    </section>
+
+    <section class="section" id="diagnosis">
+      <div class="section-header">
+        <div class="section-label">03 / diagnosis</div>
+        <h2>Architecture Versus Overlooked Costs</h2>
+      </div>
+      <div class="grid-2">
+        <div class="panel">
+          <h3>Architecture constraints to preserve</h3>
+          <ul>
+            <li>Specs are generated from conversation and verified before deployment.</li>
+            <li>Cedar remains default-deny and auditable.</li>
+            <li>Events remain durable enough for replay, audit, evolution, and proof.</li>
+            <li>Tenant isolation remains a first-class key in stores, caches, and metrics.</li>
+            <li>The deterministic simulation boundary remains clean.</li>
+          </ul>
+        </div>
+        <div class="panel">
+          <h3>Likely overlooked costs</h3>
+          <ul>
+            <li>Per-field projection writes and row-by-row index maintenance.</li>
+            <li>Per-call AuthZ context cloning and Cedar evaluation CPU.</li>
+            <li>Event append shape with <code>SELECT MAX(sequence_nr)</code>.</li>
+            <li>Blob upload path copying bytes before <code>blob_adapter</code>.</li>
+            <li>Observability cardinality: huge traces and average-only metrics.</li>
+          </ul>
+        </div>
+      </div>
+
+      <div class="diagram diagram-wide" style="margin-top: 15px;">
+        <div class="panel-title"><span>Cause and remedy map</span><span>mission-safe speed</span></div>
+        <pre class="mermaid">
+flowchart LR
+  Slow["Latency pressure"] --> Auth["AuthZ CPU"]
+  Slow --> Proj["Projection write amp"]
+  Slow --> Integrations["External/WASM workflows"]
+  Slow --> Blob["Blob data plane"]
+  Slow --> DB["DB transaction shape"]
+  Slow --> Obs["Observability overhead/gaps"]
+  Auth --> AuthFix["profile -> compile/cache -> avoid clones"]
+  Proj --> ProjFix["diff -> batch -> selective index -> drift monitor"]
+  Integrations --> IntFix["durable executor -> idempotent callbacks"]
+  Blob --> BlobFix["direct upload or true streaming"]
+  DB --> DBFix["pool wait + tx duration + CAS append"]
+  Obs --> ObsFix["distributions + exemplars + trace budgets"]
+  AuthFix --> Mission["Verified + governed + fast"]
+  ProjFix --> Mission
+  IntFix --> Mission
+  BlobFix --> Mission
+  DBFix --> Mission
+  ObsFix --> Mission
+        </pre>
+      </div>
+    </section>
+
+    <section class="section" id="observability">
+      <div class="section-header">
+        <div class="section-label">04 / observability</div>
+        <h2>Coverage And Gaps</h2>
+      </div>
+      <div class="grid-2">
+        <div class="panel">
+          <h3>What is good today</h3>
+          <ul>
+            <li>APM has meaningful phase spans for dispatch, projection, Cedar, WASM, and SQL.</li>
+            <li>SQL spans include busy/idle clues that distinguish actual query time from waiting.</li>
+            <li>DBM can see projection/event/trajectory query samples and post-repair explain plans.</li>
+            <li>Custom metrics exist for Cedar phase timing, Postgres pool/transaction timing, projection queue/e2e timing, dispatch, WASM, trace sampling, and profiling uploads.</li>
+            <li>Dashboard and monitor coverage exists, including DBM, Cedar, WASM, actor, mailbox, trace-budget, and standard APM rate/error/duration signals.</li>
+          </ul>
+        </div>
+        <div class="panel">
+          <h3>What is not good enough</h3>
+          <ul>
+            <li>Targeted CPU profiling works, but continuous/native profiling is still not proven as an always-on surface.</li>
+            <li>DBM plan collection is repaired, but schema collection, CPU/vacuum coverage, and <code>track_activity_query_size</code> tuning remain open.</li>
+            <li>Formal SLO objects are not yet defined, even though p95/p99 metrics and monitors now exist.</li>
+            <li>WASM metrics have <code>module:N/A</code>, hiding the key latency dimension.</li>
+            <li>Projection correctness instrumentation exists, but scheduled/live drift, replay parity, and version/hash checks need production execution.</li>
+            <li>Service dependency graph did not cleanly show <code>temperpaw -> temperpaw-postgres</code>.</li>
+          </ul>
+        </div>
+      </div>
+
+      <div class="diagram diagram-wide" style="margin-top: 15px;">
+        <div class="panel-title"><span>Current observability flow</span><span>what exists</span></div>
+        <pre class="mermaid">
+flowchart TB
+  App["temperpaw Rust service"] --> Tracing["tracing + OpenTelemetry spans"]
+  App --> Metrics["custom OTEL metrics<br/>dispatch + projection + Cedar + WASM"]
+  App --> Logs["structured logs"]
+  PG["Postgres / Railway"] --> DBM["Datadog DBM samples"]
+  App --> Prof["Datadog Rust profiler uploads"]
+  Tracing --> APM["Datadog APM"]
+  Metrics --> DDM["Datadog Metrics + Monitors"]
+  Logs --> DDL["Datadog Logs"]
+  DBM --> DDDB["DBM query analysis"]
+  Prof --> DDProf["Profiler UI"]
+  APM --> Dash["TemperPaw Platform Overview"]
+  DDM --> Dash
+  DDDB --> Dash
+  DDProf --> Dash
+        </pre>
+      </div>
+
+      <div class="diagram diagram-wide" style="margin-top: 15px;">
+        <div class="panel-title"><span>Observability repair loop</span><span>make speed measurable</span></div>
+        <pre class="mermaid">
+flowchart LR
+  Baseline["Baseline SLOs<br/>workflow p50/p95/p99"] --> Profiles["Fresh profiles<br/>CPU + alloc + lock"]
+  Profiles --> DBM2["Reliable DBM<br/>plans + waits + CPU + vacuum"]
+  DBM2 --> Distributions["Distribution metrics<br/>not averages"]
+  Distributions --> Correct["Correctness metrics<br/>lag + drift + replay parity"]
+  Correct --> TraceBudget["Trace budgets<br/>summaries + exemplars"]
+  TraceBudget --> Decide["Optimization decisions"]
+  Decide --> LoadLab["Replay + synthetic load lab"]
+  LoadLab --> Baseline
+        </pre>
+      </div>
+
+      <div class="table-wrap" style="margin-top: 15px;">
+        <table>
+          <thead>
+            <tr>
+              <th>Question</th>
+              <th>Current answer</th>
+              <th>Needed instrumentation</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td>Is Datadog profiling instrumented?</td>
+              <td>Yes for targeted in-process CPU profiling. Production routes, Agent upload, upload counters, and dashboard widgets exist; loaded captures produce parseable pprof payloads.</td>
+              <td>Continuous capture, native <code>ddprof</code>, freshness monitor, trustworthy wall counters, allocation/lock profile proof or documented limits, and flamegraph runbook evidence.</td>
+            </tr>
+            <tr>
+              <td>Is profiling useful right now?</td>
+              <td>Useful for targeted CPU captures under real load. Not enough yet for always-on diagnosis because continuous profiling is unset and native <code>ddprof</code> is disabled.</td>
+              <td>Use loaded CPU captures for Cedar, JSON, projection diffing, and WASM host overhead while completing continuous/native profiling.</td>
+            </tr>
+            <tr>
+              <td>Is DB monitoring useful?</td>
+              <td>Much more useful after the live DBM helper repair. DBM now shows activity rows, APM trace correlation, query performance, transient-latency health signals, and fresh explain plans for hot <code>entity_catalog</code>, <code>entity_field_index</code>, and <code>events</code> signatures. Schema definitions still do not show up through DBM schema collection.</td>
+              <td>Use the new plan data and live app-side pool/transaction metrics for measured query-shape work, but still fix/decide schema collection, CPU/vacuum metrics, and <code>track_activity_query_size</code>.</td>
+            </tr>
+            <tr>
+              <td>Can we prove projections are correct?</td>
+              <td>Partially, and now with a stronger local proof. We can emit source-tagged projection queue/update/backfill/applied-sequence metrics, opt into sampled catalog shadow reads, and run a replay parity verifier that compares active catalog rows with state rebuilt from the event journal.</td>
+              <td>Scheduled/live parity execution, row-count parity, hash/version parity, deployed dashboard proof, and clean drift/error monitors.</td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+    </section>
+
+    <section class="section" id="target">
+      <div class="section-header">
+        <div class="section-label">05 / target state</div>
+        <h2>Proposed Fast Architecture</h2>
+      </div>
+      <div class="diagram diagram-wide">
+        <div class="panel-title"><span>Target architecture</span><span>fast without losing Temper</span></div>
+        <pre class="mermaid">
+flowchart LR
+  Client["Clients / agents"] --> Edge["OData + MCP edge<br/>workflow SLO tags"]
+  Edge --> AuthCache["AuthZ decision layer<br/>compiled policy sets + deny-safe cache"]
+  AuthCache --> Actor["Verified entity actor<br/>TransitionTable + event append"]
+  Actor --> Journal["Event journal<br/>single-statement CAS + snapshots"]
+  Actor --> Outbox["Projection outbox<br/>tenant/entity/version sequenced"]
+  Outbox --> Coalescer["Projection coalescer<br/>diff fields + batch SQL + selective index"]
+  Coalescer --> Catalog["entity_catalog"]
+  Coalescer --> FieldIndex["entity_field_index"]
+  Catalog --> Reads["low-latency read plane"]
+  FieldIndex --> Reads
+  Actor --> Workflow["Durable integration executor<br/>queue + idempotency + budgets"]
+  Workflow --> External["External APIs / providers"]
+  Client --> BlobPlane["Direct blob data plane<br/>presigned or streamed upload"]
+  BlobPlane --> BlobStore["Object storage"]
+  BlobPlane --> Actor
+  Actor --> Correctness["Correctness plane<br/>replay + shadow reads + drift gauges"]
+  Edge --> Obs["Observability plane<br/>spans + distributions + profiles + DBM + exemplars"]
+  Coalescer --> Obs
+  Workflow --> Obs
+  Correctness --> Obs
+        </pre>
+      </div>
+
+      <div class="grid-3" style="margin-top: 15px;">
+        <div class="panel">
+          <h3>Keep the verified core</h3>
+          <p>Do not replace the actor/state-machine model. Optimize persistence, authorization, projections, and external work around it.</p>
+        </div>
+        <div class="panel">
+          <h3>Move derived work out</h3>
+          <p>Projection and integration work should be bounded, coalesced, and observable. Synchronous semantics should be explicit.</p>
+        </div>
+        <div class="panel">
+          <h3>Instrument correctness</h3>
+          <p>If reads depend on projections, drift detection, replay parity, and read-your-write guarantees belong in dashboards.</p>
+        </div>
+      </div>
+
+      <div class="diagram diagram-wide" style="margin-top: 15px;">
+        <div class="panel-title"><span>Projection correctness loop</span><span>speed plus proof</span></div>
+        <pre class="mermaid">
+sequenceDiagram
+  participant A as Actor/Event source
+  participant O as Projection outbox
+  participant C as Coalescer
+  participant P as Projection tables
+  participant S as Shadow reader
+  participant M as Monitors
+  A->>O: committed event sequence
+  O->>C: ordered projection work
+  C->>P: diff + batch update
+  P-->>C: version + row counts
+  S->>A: authoritative sample
+  S->>P: projected sample
+  S->>M: drift hash / lag / parity
+  M-->>C: alert or allow rollout
+        </pre>
+      </div>
+    </section>
+
+    <section class="section" id="tasks">
+      <div class="section-header">
+        <div class="section-label">06 / work plan</div>
+        <h2>Task Strategy</h2>
+      </div>
+      <div class="diagram diagram-wide">
+        <div class="panel-title"><span>Task dependency map</span><span>measured order</span></div>
+        <pre class="mermaid">
+flowchart LR
+  OBS1["OBS-001<br/>Profiler restoration"] --> PERF1["PERF-001<br/>Cedar CPU path"]
+  OBS2["OBS-002<br/>DBM repair"] --> PERF3["PERF-003<br/>DB transaction shape"]
+  OBS3["OBS-003<br/>Projection correctness"] --> PERF2["PERF-002<br/>Projection write amp"]
+  OBS4["OBS-004<br/>Metric percentiles"] --> SLO["SLO gates"]
+  OBS5["OBS-005<br/>Trace budgets"] --> PERF2
+  PERF2 --> VERIFY["VERIFY-001<br/>Replay load lab"]
+  PERF1 --> VERIFY
+  PERF3 --> VERIFY
+  PERF4["PERF-004<br/>Workflow executor"] --> VERIFY
+  PERF5["PERF-005<br/>Blob data plane"] --> VERIFY
+  VERIFY --> Fast["Fast + governed + correct"]
+        </pre>
+      </div>
+
+      <div class="task-board" style="margin-top: 15px;">
+        <article class="task">
+          <header>OBS-001 / profiler restoration</header>
+          <div class="body">
+            <p>Make Datadog profiling continuously useful. Targeted production CPU profiling is live-proven under load; continuous and native profiling are still pending.</p>
+            <ul>
+              <li>Local: added profiler config, capture, freshness, upload, and continuous-mode metrics.</li>
+              <li>Local: added opt-in continuous CPU capture with Datadog Agent auto-upload requirement.</li>
+              <li>Live: verified <code>/_admin/profile/cpu</code> under authenticated read load; Datadog received fresh CPU upload counters and the pprof file parses locally.</li>
+              <li>Live: evaluate Datadog <code>ddprof</code> for the production Rust process and compare it with the in-process fallback.</li>
+              <li>Live: enable continuous profiler gates after runtime deploy and confirm fresh profiles without manual load generation.</li>
+              <li>Next: confirm allocation/lock profile path or document Rust profiler limitations.</li>
+            </ul>
+            <p class="small">Acceptance: fresh profiles within 10 minutes and no stale profiler monitor for 24 hours.</p>
+          </div>
+        </article>
+        <article class="task">
+          <header>OBS-002 / DBM repair</header>
+          <div class="body">
+            <p>Make database monitoring reliable enough for query design. The setup/runbook repair package was applied live to production Postgres, and app-side Postgres metrics are implemented locally but still need runtime deployment.</p>
+            <ul>
+              <li>Local: added Datadog Postgres DBM setup SQL for schema, helper functions, grants, search path, RLS planning context, and configurable DBM Agent role.</li>
+              <li>Local: added operator runbook with psql validation and Datadog plan-search criteria.</li>
+              <li>Local: added Postgres pool acquire, transaction begin, transaction commit, transaction duration, operation outcome, and projection field-count metrics.</li>
+              <li>Live: production DBM Agent role was <code>postgres</code>, not <code>datadog</code>; applied setup with <code>-v dbm_agent_role=postgres</code>.</li>
+              <li>Live: SQL probes returned JSON explain plans for <code>entity_catalog</code> queries, the Datadog Postgres agent was restarted, and a Railway-domain read smoke returned 200 for <code>/readyz</code>, <code>/tdata/Channels?$top=1</code>, and <code>/tdata/WorkerRuns?$top=1</code>.</li>
+              <li>Live: fresh DBM plan search after the smoke returned plans for <code>events</code> using <code>idx_events_tenant_entity</code> and <code>events_tenant_entity_type_entity_id_sequence_nr_key</code>, and fresh <code>invalid_schema</code> search returned zero matches.</li>
+              <li>Next: verify DB CPU/vacuum/wait coverage, decide schema collection support, decide whether to raise <code>track_activity_query_size</code>, and verify app-side pool/transaction metrics after runtime deploy.</li>
+            </ul>
+            <p class="small">Acceptance: plans visible for top projection/event queries, app-side DB p50/p95/p99 visible by operation, schema/CPU/vacuum/wait gaps classified, and DB health warnings cleared.</p>
+          </div>
+        </article>
+        <article class="task">
+          <header>OBS-003 / projection correctness</header>
+          <div class="body">
+            <p>Treat projection correctness as first-class observability. Metrics, sampled shadow checks, replay parity, and the Turso catalog field-preservation repair are implemented and verified locally; live scheduled execution is next.</p>
+            <ul>
+              <li>Local: added ADR-0082 for projection correctness observability.</li>
+              <li>Local: added source-tagged update started/error/duration, queue wait, end-to-end duration, and applied sequence metrics.</li>
+              <li>Local: added backfill coverage, backfill duration, and replay event-count metrics.</li>
+              <li>Local: added opt-in deterministic sampled shadow checks for catalog-fast reads via <code>TEMPER_ODATA_CATALOG_SHADOW_READ_EVERY</code>.</li>
+              <li>Local: added replay parity verifier metrics/tests against authoritative event replay.</li>
+              <li>Local: fixed Turso <code>entity_catalog</code> so full projected fields JSON is preserved separately from the scalar field index.</li>
+              <li>Live: deployed projection queue and end-to-end update metrics; Datadog now shows p95 queue wait under 0.04 ms and update end-to-end around 75-102 ms for <code>source:background_dispatch</code>.</li>
+              <li>Next: schedule/live-run parity verification and shadow-read sampling against deployed data.</li>
+            </ul>
+            <p class="small">Acceptance: dashboard shows latency, lag, backlog, and drift together.</p>
+          </div>
+        </article>
+        <article class="task">
+          <header>OBS-004 / metric percentiles</header>
+          <div class="body">
+            <p>Convert key averages into useful distributions and make correctness and tail-latency signals visible in Datadog config. The TemperPaw dashboard/monitor slices are implemented, retargeted to production's <code>service:temperpaw</code> tag, deployed live, and now receiving post-runtime-deploy metric data.</p>
+            <ul>
+              <li>Local: added projection queue wait and end-to-end p95/p99 dashboard widgets.</li>
+              <li>Local: added projection applied-sequence, backfill, shadow-check, and shadow sequence-gap widgets.</li>
+              <li>Local: added replay parity check, duration, and sequence-gap widgets.</li>
+              <li>Local: added Postgres pool acquire and transaction p95/p99 widgets.</li>
+              <li>Local: added dispatch, WASM invocation, WASM host HTTP, blob I/O, blob transport, Monty wait, context-prepare, and session-phase p95/p99 widgets.</li>
+              <li>Local: added monitors for projection drift, replay parity drift/errors, shadow check errors, projection queue/e2e regressions, backfill failures, and Postgres pool/transaction regressions.</li>
+              <li>Local: repaired the request latency monitor to use <code>p95:temper_dispatch_ask_latency_ms</code> instead of an average, and added p95 monitors for WASM, blob, Monty, and session phases.</li>
+              <li>Local: corrected Datadog query scopes from the Railway service name to the runtime tag <code>service:temperpaw</code> and added a preflight regression guard.</li>
+              <li>Live: deployed dashboard <code>mn4-k3k-i66</code>, created or updated 66 source monitors, and added four standard APM coverage monitors before the main refresh.</li>
+              <li>Live: redeployed the refreshed 76-monitor source catalog after the TemperPaw main refresh.</li>
+              <li>Live: reconciled 41 legacy/orphan monitors, including stale OpenPaw monitor copies and the obsolete continuous profiler upload-stalled monitor.</li>
+              <li>Live: enabled percentiles for existing Temper latency distributions, then reran after runtime deployment so Cedar ms/phase, Postgres pool/transaction, and projection queue/e2e metrics now have p95/p99.</li>
+              <li>Live: Datadog service coverage now recognizes APM rate, duration, and error for <code>service:temperpaw</code>.</li>
+              <li>Local: merged the latest TemperPaw observability restructure into the latency branch; source now has 76 monitors and a 24-widget dashboard with no unsupported percentile queries.</li>
+              <li>Next: rerun percentile config after parity/backfill workflows emit and capture dashboard screenshots/links for review.</li>
+            </ul>
+            <p class="small">Acceptance: SLO dashboards use percentiles, not misleading averages.</p>
+          </div>
+        </article>
+        <article class="task">
+          <header>PERF-001 / Cedar CPU path</header>
+          <div class="body">
+            <p>Reduce authorization latency without weakening governance. The first move is measurement, not caching: ADR-0084 and the local phase metrics are now in place.</p>
+            <ul>
+              <li>Local: added ADR-0084 for AuthZ phase instrumentation and Datadog percentile gates.</li>
+              <li>Local: canonicalized <code>temper_cedar_evaluations_total</code> to the decision-tagged <code>temper.authz</code> scope and added an <code>error</code> decision label.</li>
+              <li>Local: added <code>temper_cedar_evaluation_duration_ms</code>, <code>temper_cedar_evaluation_phase_duration_ms</code>, and <code>temper_cedar_request_attribute_count</code>.</li>
+              <li>Local: added TemperPaw AuthZ phase dashboard widgets plus max-duration and phase-error monitors.</li>
+              <li>Live: enabled percentiles for the new Cedar ms/phase metrics after runtime deployment. Latest p95 is about 50 ms overall and about 50 ms in <code>phase:authorizer</code>; request-shape phases are microseconds.</li>
+              <li>Next: profile Cedar authorizer execution, then choose policy/entity reuse, conversion cleanup, or a separate deny-safe cache ADR based on evidence.</li>
+            </ul>
+            <p class="small">Target: p95 under 20 ms initially, p99 under 50 ms, with no Cedar bypass and no cache until invalidation is proven.</p>
+          </div>
+        </article>
+        <article class="task">
+          <header>PERF-002 / projection write amp</header>
+          <div class="body">
+            <p>Make projection updates fast and bounded.</p>
+            <ul>
+              <li>Diff previous/new state and update changed indexed fields only.</li>
+              <li>Batch field-index upserts and deletes.</li>
+              <li>Make indexing schema/query-driven rather than every-field by default.</li>
+            </ul>
+            <p class="small">Target: normal <code>query_projection</code> p95 under 50 ms and zero unexplained drift.</p>
+          </div>
+        </article>
+        <article class="task">
+          <header>PERF-003 / DB transaction shape</header>
+          <div class="body">
+            <p>Remove avoidable database tail latency.</p>
+            <ul>
+              <li>Eliminate idle-in-transaction on projection upserts.</li>
+              <li>Measure pool acquire time separately from SQL execution.</li>
+              <li>Replace event append <code>SELECT MAX</code> shape with optimistic insert or sequence metadata.</li>
+            </ul>
+            <p class="small">Target: no recurring idle-in-transaction samples for hot writes.</p>
+          </div>
+        </article>
+        <article class="task">
+          <header>PERF-004 / workflow executor</header>
+          <div class="body">
+            <p>Keep slow integrations from defining the whole platform latency.</p>
+            <ul>
+              <li>Move long-running WASM/external calls to a durable executor.</li>
+              <li>Use idempotency keys and verified callback transitions.</li>
+              <li>Emit progress state and queue wait metrics.</li>
+            </ul>
+            <p class="small">Target: control-plane responses are fast while integration progress remains visible.</p>
+          </div>
+        </article>
+        <article class="task">
+          <header>PERF-005 / blob data plane</header>
+          <div class="body">
+            <p>Stop routing large bytes through the hottest control path.</p>
+            <ul>
+              <li>Measure payload size, copy bytes, hash time, upload time, and registry pressure.</li>
+              <li>Support true streaming or presigned/direct object-store upload.</li>
+              <li>Keep Temper in charge of metadata, lifecycle, policy, and callbacks.</li>
+            </ul>
+            <p class="small">Target: large upload latency scales with storage path, not actor/control-plane CPU.</p>
+          </div>
+        </article>
+        <article class="task">
+          <header>OBS-005 / trace budgets</header>
+          <div class="body">
+            <p>Keep traces useful without making them the bottleneck.</p>
+            <ul>
+              <li>ADR-0083 defines sampler policy and rollback.</li>
+              <li>Sampler decision/config/rate metrics are implemented.</li>
+              <li>Reaction fanout summary span fields are implemented.</li>
+              <li>Datadog widgets and monitors are ready to deploy.</li>
+            </ul>
+            <p class="small">Target: no routine 100k-span traces while slow/error trace roots and fanout summaries remain available.</p>
+          </div>
+        </article>
+        <article class="task">
+          <header>VERIFY-001 / replay load lab</header>
+          <div class="body">
+            <p>Make performance regressions reproducible.</p>
+            <ul>
+              <li><code>scripts/verify-latency-observability-package.sh full</code> passed locally.</li>
+              <li>Run <code>python3 scripts/temper_agent_e2e_proof.py</code> during staging/live proof.</li>
+              <li>Generate synthetic tenants with large entities and many fields.</li>
+              <li>Compare projected reads to event/actor state during load.</li>
+            </ul>
+            <p class="small">Target: every speed claim has a repeatable benchmark and correctness check.</p>
+          </div>
+        </article>
+        <article class="task">
+          <header>DECIDE / explicit architecture calls</header>
+          <div class="body">
+            <p>These should become ADR-backed decisions.</p>
+            <ul>
+              <li>What read-your-write guarantee does projection promise?</li>
+              <li>Which fields are query-indexed by default?</li>
+              <li>Which integrations must remain inline?</li>
+              <li>What data sizes use direct blob upload?</li>
+            </ul>
+            <p class="small">Target: performance choices are contracts, not accidental behavior.</p>
+          </div>
+        </article>
+      </div>
+    </section>
+
+    <section class="section" id="slo">
+      <div class="section-header">
+        <div class="section-label">07 / targets</div>
+        <h2>Candidate SLOs</h2>
+      </div>
+      <div class="table-wrap">
+        <table>
+          <thead>
+            <tr>
+              <th>Workflow</th>
+              <th>Initial target</th>
+              <th>Stretch target</th>
+              <th>Correctness guardrail</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr><td>OData projected read</td><td>p95 under 20 ms</td><td>p95 under 10 ms</td><td>Projection drift zero for verified sample set.</td></tr>
+            <tr><td>Entity action, no integration</td><td>p95 under 75 ms</td><td>p95 under 35 ms</td><td>Durable event append before success unless spec says otherwise.</td></tr>
+            <tr><td>Cedar authorization</td><td>p95 under 20 ms</td><td>p95 under 5 ms for cache hits</td><td>Cache invalidates on policy hash and principal/context changes.</td></tr>
+            <tr><td>Projection update</td><td>p95 under 50 ms normal path</td><td>p99 under 100 ms normal path</td><td>Lag and drift alerts plus shadow reads during rollout.</td></tr>
+            <tr><td>Integration action</td><td>control response under 250 ms when async</td><td>progress event under 100 ms</td><td>Verified callback transition and idempotency key.</td></tr>
+            <tr><td>Blob metadata transition</td><td>p95 under 150 ms excluding object-store upload</td><td>p95 under 75 ms</td><td>Hash/content verification after durable object commit.</td></tr>
+          </tbody>
+        </table>
+      </div>
+    </section>
+
+    <section class="section" id="sources">
+      <div class="section-header">
+        <div class="section-label">08 / sources</div>
+        <h2>Sources And Anchors</h2>
+      </div>
+      <div class="grid-2">
+        <div class="source-box">
+          <h3>Repository anchors</h3>
+          <ul>
+            <li><code>README.md</code>: verified, policy-driven runtime and high-level architecture.</li>
+            <li><code>crates/temper-server/src/state/entity_ops.rs</code>: <code>authorize_with_context</code>.</li>
+            <li><code>crates/temper-server/src/state/dispatch/mod.rs</code> and <code>dispatch/wasm.rs</code>: WASM dispatch.</li>
+            <li><code>crates/temper-server/src/odata/write.rs</code>: stream <code>PUT $value</code> and <code>blob_adapter</code>.</li>
+            <li><code>crates/temper-store-postgres/src/store.rs</code>: event append transaction shape.</li>
+            <li><code>crates/temper-observe/src/wide_event.rs</code>: WideEvent span/metric emission.</li>
+            <li><code>crates/temper-authz/src/metrics.rs</code> and <code>crates/temper-authz/src/engine/mod.rs</code>: Cedar evaluation and ADR-0084 phase metrics.</li>
+          </ul>
+        </div>
+        <div class="source-box">
+          <h3>Live observability sources</h3>
+          <ul>
+            <li>Datadog APM spans for <code>temperpaw</code>: OData, dispatch phases, Cedar, projection, WASM, and SQL.</li>
+            <li>Datadog DBM for <code>temperpaw-postgres</code>: query samples, health signals, lock/wait evidence, plan gaps.</li>
+            <li>Datadog metrics: Cedar, AuthZ phase, projection, dispatch, WASM, and profiler upload/error metrics.</li>
+            <li>Datadog monitors and dashboard: <code>TemperPaw - Platform Overview</code>.</li>
+            <li><a href="https://katagami.ai/language/vapor-terminal-ova-console/DESIGN.md">Vapor Terminal OVA Console design language</a>.</li>
+          </ul>
+          <p class="small">
+            Caveat: production traces include projection symbols absent from this local checkout, so Datadog is treated
+            as the fresher source for production performance.
+          </p>
+        </div>
+      </div>
+    </section>
+  </div>
+
+  <div class="drawer-scrim" id="drawerScrim"></div>
+  <aside class="detail-drawer" id="detailDrawer" aria-live="polite" aria-hidden="true">
+    <div class="drawer-head">
+      <div>
+        <span class="drawer-kicker" id="drawerKicker">detail</span>
+        <div class="drawer-title" id="drawerTitle">Detail</div>
+      </div>
+      <button class="drawer-close" id="drawerClose" type="button" aria-label="Close detail drawer">X</button>
+    </div>
+    <div class="drawer-body" id="drawerBody"></div>
+    <div class="drawer-foot" id="drawerFoot">Click another item to replace this detail. Press Escape to close.</div>
+  </aside>
+
+  <script type="module">
+    import mermaid from "https://cdn.jsdelivr.net/npm/mermaid@10/dist/mermaid.esm.min.mjs";
+
+    mermaid.initialize({
+      startOnLoad: true,
+      theme: "base",
+      themeVariables: {
+        background: "#FCFCFA",
+        primaryColor: "#F7F8FF",
+        primaryTextColor: "#0B0D12",
+        primaryBorderColor: "#111318",
+        lineColor: "#111318",
+        secondaryColor: "#DCD6FF",
+        tertiaryColor: "#BFF6FF",
+        fontFamily: "Noto Sans, sans-serif"
+      }
+    });
+
+    const drawer = document.getElementById("detailDrawer");
+    const scrim = document.getElementById("drawerScrim");
+    const drawerTitle = document.getElementById("drawerTitle");
+    const drawerKicker = document.getElementById("drawerKicker");
+    const drawerBody = document.getElementById("drawerBody");
+    const drawerClose = document.getElementById("drawerClose");
+    const toggleReading = document.getElementById("toggleReading");
+
+    function escapeHtml(text) {
+      return String(text)
+        .replaceAll("&", "&amp;")
+        .replaceAll("<", "&lt;")
+        .replaceAll(">", "&gt;")
+        .replaceAll('"', "&quot;");
+    }
+
+    function cleanText(el) {
+      const clone = el.cloneNode(true);
+      clone.querySelectorAll("script, style, .diagram-toolbar").forEach((node) => node.remove());
+      return clone.textContent.replace(/\s+/g, " ").trim();
+    }
+
+    function sectionName(el) {
+      const section = el.closest("section");
+      if (!section) return "Report";
+      const heading = section.querySelector("h2");
+      return heading ? heading.textContent.trim() : "Report";
+    }
+
+    function titleFor(el) {
+      const direct = el.getAttribute("data-detail-title");
+      if (direct) return direct;
+      const header = el.querySelector("header, h3, .label, .panel-title");
+      if (header) return header.textContent.replace(/\s+/g, " ").trim();
+      if (el.matches("tr")) {
+        const first = el.querySelector("td, th");
+        return first ? first.textContent.trim() : "Table row";
+      }
+      return sectionName(el);
+    }
+
+    function detailFor(el) {
+      if (el.matches("tr")) {
+        const table = el.closest("table");
+        const headers = Array.from(table.querySelectorAll("thead th")).map((th) => th.textContent.trim());
+        const cells = Array.from(el.children).map((cell) => cell.textContent.replace(/\s+/g, " ").trim());
+        return "<dl>" + cells.map((value, index) => {
+          const label = headers[index] || "Field";
+          return `<dt>${escapeHtml(label)}</dt><dd>${escapeHtml(value)}</dd>`;
+        }).join("") + "</dl>";
+      }
+      const custom = el.getAttribute("data-detail");
+      const text = custom || cleanText(el);
+      const max = el.classList.contains("diagram") ? 1800 : 1200;
+      const trimmed = text.length > max ? text.slice(0, max) + "..." : text;
+      return `<p>${escapeHtml(trimmed)}</p>`;
+    }
+
+    function openDetail(el, overrideTitle, overrideBody) {
+      drawerTitle.textContent = overrideTitle || titleFor(el);
+      drawerKicker.textContent = sectionName(el);
+      drawerBody.innerHTML = overrideBody || detailFor(el);
+      drawer.classList.add("is-open");
+      scrim.classList.add("is-open");
+      drawer.setAttribute("aria-hidden", "false");
+    }
+
+    function closeDetail() {
+      drawer.classList.remove("is-open");
+      scrim.classList.remove("is-open");
+      drawer.setAttribute("aria-hidden", "true");
+    }
+
+    function isInteractiveTarget(target) {
+      return Boolean(target.closest("a, button, input, select, textarea, summary"));
+    }
+
+    const drillables = document.querySelectorAll(
+      ".panel, .callout, .metric, .task, .source-box, tbody tr, .chip, .meter, .diagram"
+    );
+
+    drillables.forEach((el) => {
+      el.classList.add("drillable");
+      if (!el.hasAttribute("tabindex")) el.setAttribute("tabindex", "0");
+      el.setAttribute("role", "button");
+      el.setAttribute("aria-label", `Open detail for ${titleFor(el)}`);
+      el.addEventListener("click", (event) => {
+        if (isInteractiveTarget(event.target) && !event.target.closest(".chip")) return;
+        openDetail(el);
+      });
+      el.addEventListener("keydown", (event) => {
+        if (event.key === "Enter" || event.key === " ") {
+          event.preventDefault();
+          openDetail(el);
+        }
+      });
+    });
+
+    document.querySelectorAll(".diagram").forEach((diagram, index) => {
+      const toolbar = document.createElement("div");
+      toolbar.className = "diagram-toolbar";
+      toolbar.innerHTML = `
+        <button type="button" data-action="detail">Explain</button>
+        <button type="button" data-action="focus">Focus</button>
+      `;
+      const title = diagram.querySelector(".panel-title");
+      if (title) title.insertAdjacentElement("afterend", toolbar);
+      else diagram.prepend(toolbar);
+
+      toolbar.addEventListener("click", (event) => {
+        event.stopPropagation();
+        const button = event.target.closest("button");
+        if (!button) return;
+        if (button.dataset.action === "detail") {
+          openDetail(diagram);
+        }
+        if (button.dataset.action === "focus") {
+          const focused = diagram.classList.toggle("is-focused");
+          document.body.classList.toggle("has-focused-diagram", focused);
+          button.textContent = focused ? "Close Focus" : "Focus";
+        }
+      });
+
+      diagram.setAttribute("data-detail-title", diagram.querySelector(".panel-title")?.textContent || `Diagram ${index + 1}`);
+    });
+
+    function openGuide() {
+      openDetail(document.body, "How To Use This Report", `
+        <p>This report is now interactive. Click any metric card, panel, task, chip, table row, or diagram to open a drawer with a focused explanation. Use diagram Focus to enlarge complex Mermaid diagrams. Use Focus Read to reduce visual density when you want a quieter reading mode.</p>
+        <dl>
+          <dt>Best first click</dt><dd>Start with the Latency Anatomy diagram in Evidence.</dd>
+          <dt>Speed plan</dt><dd>Open the Task Dependency Map, then click each OBS/PERF/VERIFY task card.</dd>
+          <dt>Correctness</dt><dd>Open Projection Correctness Loop and Candidate SLOs.</dd>
+        </dl>
+      `);
+    }
+
+    document.getElementById("openGuide").addEventListener("click", openGuide);
+    document.getElementById("openFirstDetail").addEventListener("click", openGuide);
+    drawerClose.addEventListener("click", closeDetail);
+    scrim.addEventListener("click", closeDetail);
+    toggleReading.addEventListener("click", () => {
+      document.body.classList.toggle("reader-mode");
+      toggleReading.textContent = document.body.classList.contains("reader-mode") ? "Full Console" : "Focus Read";
+    });
+    document.addEventListener("keydown", (event) => {
+      if (event.key === "Escape") {
+        document.querySelectorAll(".diagram.is-focused").forEach((diagram) => diagram.classList.remove("is-focused"));
+        document.body.classList.remove("has-focused-diagram");
+        closeDetail();
+      }
+    });
+  </script>
+</body>
+</html>

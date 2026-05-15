@@ -435,6 +435,35 @@ pub const CREATE_BLOBS_EXPIRES_AT_INDEX: &str = "\
 CREATE INDEX IF NOT EXISTS idx_blobs_expires_at
     ON blobs (expires_at) WHERE expires_at IS NOT NULL;";
 
+/// Rebuildable public artifact metadata produced by `publish-artifact`.
+pub const CREATE_PUBLISHED_ARTIFACTS_TABLE: &str = "\
+CREATE TABLE IF NOT EXISTS published_artifacts (
+    id                     TEXT         PRIMARY KEY,
+    tenant                 TEXT         NOT NULL,
+    source_file_id         TEXT         NOT NULL,
+    source_file_version_id TEXT         NOT NULL DEFAULT '',
+    content_hash           TEXT         NOT NULL,
+    label                  TEXT         NOT NULL,
+    mime_type              TEXT         NOT NULL,
+    byte_length            BIGINT       NOT NULL,
+    public_storage_key     TEXT         NOT NULL,
+    public_url             TEXT         NOT NULL,
+    owner_ref_type         TEXT         NOT NULL,
+    owner_ref_id           TEXT         NOT NULL,
+    status                 TEXT         NOT NULL,
+    updated_at             TIMESTAMPTZ  NOT NULL DEFAULT now()
+);";
+
+/// Fast lookup for app-owned published artifacts.
+pub const CREATE_PUBLISHED_ARTIFACTS_OWNER_INDEX: &str = "\
+CREATE INDEX IF NOT EXISTS idx_published_artifacts_owner
+    ON published_artifacts(tenant, owner_ref_type, owner_ref_id, label, status);";
+
+/// Fast lookup for artifacts derived from a source File.
+pub const CREATE_PUBLISHED_ARTIFACTS_SOURCE_INDEX: &str = "\
+CREATE INDEX IF NOT EXISTS idx_published_artifacts_source
+    ON published_artifacts(tenant, source_file_id, status);";
+
 // ---------------------------------------------------------------------------
 // Row-Level Security (RLS) — tenant isolation
 // ---------------------------------------------------------------------------
@@ -590,6 +619,13 @@ pub const ENABLE_TENANT_RLS: &[&str] = &[
     "DO $$ BEGIN \
        IF NOT EXISTS (SELECT 1 FROM pg_policies WHERE tablename = 'ots_trajectories' AND policyname = 'tenant_isolation') THEN \
          EXECUTE 'CREATE POLICY tenant_isolation ON ots_trajectories USING (tenant = current_setting(''app.current_tenant'', true))'; \
+       END IF; \
+     END $$",
+    // -- published_artifacts --
+    "ALTER TABLE published_artifacts ENABLE ROW LEVEL SECURITY",
+    "DO $$ BEGIN \
+       IF NOT EXISTS (SELECT 1 FROM pg_policies WHERE tablename = 'published_artifacts' AND policyname = 'tenant_isolation') THEN \
+         EXECUTE 'CREATE POLICY tenant_isolation ON published_artifacts USING (tenant = current_setting(''app.current_tenant'', true))'; \
        END IF; \
      END $$",
 ];
@@ -776,6 +812,36 @@ mod tests {
             CREATE_BLOBS_TABLE.contains("IF NOT EXISTS"),
             "blobs schema should use IF NOT EXISTS"
         );
+        assert!(
+            CREATE_PUBLISHED_ARTIFACTS_TABLE.contains("IF NOT EXISTS"),
+            "published_artifacts schema should use IF NOT EXISTS"
+        );
+    }
+
+    #[test]
+    fn published_artifacts_table_has_required_columns() {
+        let sql = CREATE_PUBLISHED_ARTIFACTS_TABLE.to_uppercase();
+        for col in &[
+            "ID",
+            "TENANT",
+            "SOURCE_FILE_ID",
+            "SOURCE_FILE_VERSION_ID",
+            "CONTENT_HASH",
+            "LABEL",
+            "MIME_TYPE",
+            "BYTE_LENGTH",
+            "PUBLIC_STORAGE_KEY",
+            "PUBLIC_URL",
+            "OWNER_REF_TYPE",
+            "OWNER_REF_ID",
+            "STATUS",
+            "UPDATED_AT",
+        ] {
+            assert!(
+                sql.contains(col),
+                "published_artifacts schema missing column: {col}"
+            );
+        }
     }
 
     #[test]
@@ -849,6 +915,7 @@ mod tests {
             "feature_requests",
             "evolution_records",
             "ots_trajectories",
+            "published_artifacts",
         ];
         let all_sql: String = ENABLE_TENANT_RLS.iter().map(|s| s.to_lowercase()).collect();
         for table in &expected_tables {

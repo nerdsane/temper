@@ -22,6 +22,7 @@ use super::read_support::{
     try_load_entity_body_from_catalog,
 };
 use super::response::annotate_entity;
+use super::stream_fast_path::try_file_stream_fast_path;
 use crate::blobs::hydrate_blob_refs_for_tenant;
 use crate::query_eval::{apply_query_options, expand_entity, select_fields};
 use crate::response::{ODataResponse, ODataStreamResponse, ODataXmlResponse, odata_error};
@@ -510,6 +511,7 @@ async fn handle_entity_set(
         None // no filter
     };
 
+    let prefer_catalog_materialization = sql_pushdown_ids.is_some();
     let (entity_ids, apply_options, precomputed_count) = if let Some(pushed_ids) = sql_pushdown_ids
     {
         // SQL push-down already filtered — apply pagination only.
@@ -533,8 +535,15 @@ async fn handle_entity_set(
         )
     };
 
-    let entities =
-        materialize_entity_set_entities(state, tenant, &entity_type, name, &entity_ids).await;
+    let entities = materialize_entity_set_entities(
+        state,
+        tenant,
+        &entity_type,
+        name,
+        &entity_ids,
+        prefer_catalog_materialization,
+    )
+    .await;
 
     let (mut result, mut count) = apply_query_options(entities, &apply_options);
     if count.is_none() {
@@ -574,6 +583,46 @@ async fn handle_entity(
         None => return entity_set_not_found_response(state, tenant, set_name).await,
     };
     let key_str = extract_key(key);
+
+    if state.is_pg_actor_backed(tenant, &entity_type)
+        && let Some(actor_sys) = &state.pg_actor_system
+    {
+        let namespace = format!("{tenant}/{key_str}");
+        return match actor_sys.load_state(&namespace, &entity_type).await {
+            Ok(Some(state_bytes)) => {
+                let actor_state: temper_actor_runtime::spec_actor::SpecActorState =
+                    serde_json::from_slice(&state_bytes).unwrap_or_default();
+                let body = serde_json::json!({
+                    "entity_type": entity_type,
+                    "entity_id": key_str,
+                    "status": actor_state.status,
+                    "counters": actor_state.counters,
+                    "booleans": actor_state.booleans,
+                    "lists": actor_state.lists,
+                    "fields": actor_state.fields,
+                    "@odata.context": format!("$metadata#{set_name}/$entity"),
+                    "@odata.id": format!("{set_name}('{key_str}')"),
+                });
+                ODataResponse {
+                    status: StatusCode::OK,
+                    body,
+                }
+                .into_response()
+            }
+            Ok(None) => odata_error(
+                StatusCode::NOT_FOUND,
+                "ResourceNotFound",
+                &format!("Entity '{set_name}' with key '{key_str}' not found"),
+            )
+            .into_response(),
+            Err(e) => odata_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "ActorReadError",
+                &e.to_string(),
+            )
+            .into_response(),
+        };
+    }
 
     match build_entity_body(
         state,
@@ -869,15 +918,15 @@ pub async fn handle_hints(State(state): State<ServerState>) -> impl IntoResponse
     }
 }
 
-/// Handle GET on `$value` — download binary content via WASM blob_adapter.
+/// Handle GET on `$value` — return binary content for stream-backed entities.
 ///
 /// Flow:
 /// 1. Resolve parent entity from ODataPath
 /// 2. Verify entity type has `HasStream=true` in CSDL
-/// 3. Get entity state (content_hash, mime_type, etc.)
-/// 4. Invoke WASM blob_adapter (handles auth, caching, download)
-/// 5. Read downloaded bytes from StreamRegistry
-/// 6. Return binary response
+/// 3. For TemperFS File/FileVersion, read the projection-backed blob pointer and
+///    fetch bytes directly from blob storage.
+/// 4. Fall back to actor materialization + WASM blob_adapter only when the
+///    projection is missing, so older in-memory/test paths still work.
 #[instrument(skip_all, fields(otel.name = "GET $value"))]
 async fn handle_stream_get(
     state: &ServerState,
@@ -898,6 +947,12 @@ async fn handle_stream_get(
     // 2. Check HasStream=true
     if let Err(resp) = check_has_stream_or_400(state, tenant, &entity_type) {
         return resp;
+    }
+
+    if let Some(response) =
+        try_file_stream_fast_path(state, tenant, &set_name, &entity_type, &key).await
+    {
+        return response;
     }
 
     // 3. Get entity state (catalog-first; falls back to actor on miss).
@@ -937,6 +992,7 @@ async fn handle_stream_get(
         entity_type: entity_type.clone(),
         entity_id: key.clone(),
         trigger_action: "StreamDownload".to_string(),
+        wasm_module: Some("blob_adapter".to_string()),
         trigger_params: serde_json::json!({
             "stream_id": response_stream_id,
             "operation": "get",

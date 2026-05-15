@@ -80,6 +80,64 @@ const WAT_HOST_CALL_THEN_RETURN: &str = r#"
     )
 "#;
 
+const WAT_GUEST_SPAN_LIFECYCLE: &str = r#"
+    (module
+      (import "env" "host_start_span" (func $host_start_span
+        (param i32 i32) (result i64)))
+      (import "env" "host_add_span_event" (func $host_add_span_event
+        (param i64 i32 i32) (result i32)))
+      (import "env" "host_set_span_attributes" (func $host_set_span_attributes
+        (param i64 i32 i32) (result i32)))
+      (import "env" "host_end_span" (func $host_end_span
+        (param i64 i32 i32) (result i32)))
+      (memory (export "memory") 1)
+      (data (i32.const 2048) "{\"name\":\"guest.root\",\"attributes\":{\"tool.name\":\"proof\",\"custom\":\"value\"}}")
+      (data (i32.const 2176) "{\"name\":\"guest.event\",\"attributes\":{\"phase\":\"inside\"}}")
+      (data (i32.const 2304) "{\"attributes\":{\"gen_ai.operation.name\":\"execute_tool\",\"tool.call_id\":\"call-1\"}}")
+      (data (i32.const 2432) "{\"status\":\"ok\",\"attributes\":{\"result\":\"done\"}}")
+      (func (export "run") (param i32 i32) (result i32)
+        (local $span i64)
+        i32.const 2048
+        i32.const 73
+        call $host_start_span
+        local.set $span
+
+        local.get $span
+        i64.const 0
+        i64.le_s
+        if
+          unreachable
+        end
+
+        local.get $span
+        i32.const 2176
+        i32.const 54
+        call $host_add_span_event
+        if
+          unreachable
+        end
+
+        local.get $span
+        i32.const 2304
+        i32.const 79
+        call $host_set_span_attributes
+        if
+          unreachable
+        end
+
+        local.get $span
+        i32.const 2432
+        i32.const 46
+        call $host_end_span
+        if
+          unreachable
+        end
+
+        i32.const 0
+      )
+    )
+"#;
+
 struct SlowHttpHost {
     delay: Duration,
 }
@@ -120,6 +178,7 @@ fn make_context() -> WasmInvocationContext {
         entity_type: "Order".into(),
         entity_id: "1".into(),
         trigger_action: "Submit".into(),
+        wasm_module: Some("test_module".into()),
         trigger_params: serde_json::Value::Null,
         entity_state: serde_json::Value::Null,
         agent_id: None,
@@ -172,6 +231,29 @@ fn resource_limits_default() {
     // ADR-0045: raised from 30s to cover HTTP-fronted integrations under load.
     assert_eq!(limits.max_duration, std::time::Duration::from_secs(120));
     assert_eq!(limits.max_response_bytes, 1024 * 1024);
+}
+
+#[tokio::test]
+async fn wasm_guest_can_drive_structured_observability_span_lifecycle() {
+    let engine = WasmEngine::new().unwrap();
+    let hash = engine
+        .compile_and_cache(WAT_GUEST_SPAN_LIFECYCLE.as_bytes())
+        .unwrap();
+
+    let result = engine
+        .invoke(
+            &hash,
+            &make_context(),
+            make_host(),
+            &WasmResourceLimits::default(),
+            make_streams(),
+        )
+        .await;
+
+    assert!(
+        result.is_ok(),
+        "guest span host functions should link and complete: {result:?}"
+    );
 }
 
 #[test]

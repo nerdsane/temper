@@ -15,6 +15,17 @@ fn guest_metric_count_kind_is_counter() {
     assert!(!guest_metric_is_counter_kind(None));
 }
 
+#[test]
+fn guest_metric_tags_reject_high_cardinality_correlation_ids() {
+    assert!(guest_metric_tag_allowed("provider"));
+    assert!(guest_metric_tag_allowed("model"));
+    assert!(!guest_metric_tag_allowed("trace_id"));
+    assert!(!guest_metric_tag_allowed("dd.span_id"));
+    assert!(!guest_metric_tag_allowed("session_id"));
+    assert!(!guest_metric_tag_allowed("workflow_run_id"));
+    assert!(!guest_metric_tag_allowed("tool.call_id"));
+}
+
 /// Build a Connect frame: [flags(1)][length(4 big-endian)][payload].
 fn make_frame(flags: u8, payload: &[u8]) -> Vec<u8> {
     let mut frame = Vec::with_capacity(5 + payload.len());
@@ -160,6 +171,7 @@ fn internal_http_call_injects_bearer_even_with_explicit_principal_headers() {
         entity_type: "Workspace".to_string(),
         entity_id: "ws-1".to_string(),
         trigger_action: "CreateFile".to_string(),
+        wasm_module: Some("workspace_fs".to_string()),
         trigger_params: Value::Null,
         entity_state: Value::Null,
         agent_id: Some("operator".to_string()),
@@ -246,6 +258,7 @@ fn internal_http_call_injects_bearer_from_internal_api_key_context() {
             entity_type: "Workspace".to_string(),
             entity_id: "ws-1".to_string(),
             trigger_action: "CreateFile".to_string(),
+            wasm_module: Some("workspace_fs".to_string()),
             trigger_params: Value::Null,
             entity_state: Value::Null,
             agent_id: Some("operator".to_string()),
@@ -310,6 +323,7 @@ fn internal_http_call_uses_configured_internal_api_base_url_without_secret() {
             entity_type: "Session".to_string(),
             entity_id: "ss-1".to_string(),
             trigger_action: "WorkspaceReady".to_string(),
+            wasm_module: Some("monty_repl".to_string()),
             trigger_params: Value::Null,
             entity_state: Value::Null,
             agent_id: Some("ss-1".to_string()),
@@ -347,6 +361,7 @@ fn guest_log_span_attrs_include_message_and_invocation_context() {
         entity_type: "Session".to_string(),
         entity_id: "ss-1".to_string(),
         trigger_action: "ContextReady".to_string(),
+        wasm_module: Some("provider_caller".to_string()),
         trigger_params: serde_json::Value::Null,
         entity_state: serde_json::Value::Null,
         agent_id: Some("agent-1".to_string()),
@@ -373,6 +388,7 @@ fn guest_log_span_attrs_include_message_and_invocation_context() {
     assert_eq!(attrs["entity_id"], "ss-1");
     assert_eq!(attrs["trigger_action"], "ContextReady");
     assert_eq!(attrs["agent_id"], "agent-1");
+    assert_eq!(attrs["wasm_module"], "provider_caller");
     assert_eq!(attrs["gen_ai.conversation.id"], "ss-1");
     assert_eq!(attrs["trace_id"], "0123456789abcdef0123456789abcdef");
     assert_eq!(attrs["fields_json"], r#"{"status":500}"#);
@@ -411,6 +427,7 @@ fn guest_log_span_event_is_named_for_trace_export() {
         entity_type: "Session".to_string(),
         entity_id: "ss-1".to_string(),
         trigger_action: "ContextReady".to_string(),
+        wasm_module: Some("provider_caller".to_string()),
         trigger_params: serde_json::Value::Null,
         entity_state: serde_json::Value::Null,
         agent_id: Some("agent-1".to_string()),
@@ -438,4 +455,6 @@ fn guest_log_span_event_is_named_for_trace_export() {
     assert!(names.iter().any(|name| name == "wasm_guest.log"));
 }
 
+mod host_boundary_observability;
+mod log_correlation;
 mod span_hint_tests;

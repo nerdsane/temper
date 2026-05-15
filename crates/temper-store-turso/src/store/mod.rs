@@ -29,6 +29,7 @@ pub mod field_index;
 mod instrumentation;
 pub mod ots;
 mod policy;
+mod published_artifacts;
 mod secrets;
 mod specs;
 #[cfg(test)]
@@ -38,6 +39,7 @@ mod wasm;
 mod write_gate;
 
 use instrumentation::InstrumentedConnection;
+pub use published_artifacts::{PublishedArtifactRow, PublishedArtifactUpsert};
 
 #[derive(Clone, Debug)]
 pub struct TursoEventStore {
@@ -201,6 +203,15 @@ impl TursoEventStore {
         conn.execute(schema::CREATE_POLICY_DENIAL_PATTERNS_TENANT_INDEX, ())
             .await
             .map_err(storage_error)?;
+        conn.execute(schema::CREATE_PUBLISHED_ARTIFACTS_TABLE, ())
+            .await
+            .map_err(storage_error)?;
+        conn.execute(schema::CREATE_PUBLISHED_ARTIFACTS_OWNER_INDEX, ())
+            .await
+            .map_err(storage_error)?;
+        conn.execute(schema::CREATE_PUBLISHED_ARTIFACTS_SOURCE_INDEX, ())
+            .await
+            .map_err(storage_error)?;
         // Migration: add `enabled` column to existing `policies` tables.
         let _ = conn.execute(schema::ALTER_POLICIES_ADD_ENABLED, ()).await;
         conn.execute(schema::CREATE_TENANT_INSTALLED_APPS_TABLE, ())
@@ -316,6 +327,9 @@ impl TursoEventStore {
         let _ = conn
             .execute(schema::ALTER_ENTITY_CATALOG_ADD_PROJECTION_HASH, ())
             .await;
+        let _ = conn
+            .execute(schema::ALTER_ENTITY_CATALOG_ADD_FIELDS, ())
+            .await;
 
         // Entity field index — EAV table for OData filter push-down.
         conn.execute(schema::CREATE_ENTITY_FIELD_INDEX_TABLE, ())
@@ -386,7 +400,7 @@ pub struct TursoQueryProjectionRow {
     pub entity_id: String,
     /// Current entity status.
     pub status: String,
-    /// Top-level scalar fields reconstructed from the durable EAV index.
+    /// Full projected fields JSON preserved in the durable catalog.
     pub fields: serde_json::Value,
     /// Latest sequence number represented by this projection.
     pub sequence_nr: u64,
