@@ -663,3 +663,52 @@ fn test_named_policies_produce_meaningful_ids() {
     }
     // NoMatchingPermit is also acceptable since user-1 != bot-1
 }
+
+#[test]
+fn candidate_filter_preserves_named_forbid_policy_ids() {
+    let engine = AuthzEngine::empty();
+
+    engine
+        .reload_tenant_policies_named(
+            "default",
+            &[
+                (
+                    "os-app:issue-read".to_string(),
+                    r#"permit(principal is Customer, action == Action::"read", resource is Issue);"#
+                        .to_string(),
+                ),
+                (
+                    "decision:block-issue-1".to_string(),
+                    r#"forbid(principal is Customer, action == Action::"read", resource == Issue::"issue-1");"#
+                        .to_string(),
+                ),
+                (
+                    "irrelevant:issue-write".to_string(),
+                    r#"permit(principal is Customer, action == Action::"write", resource is Issue);"#
+                        .to_string(),
+                ),
+                (
+                    "irrelevant:doc-read".to_string(),
+                    r#"permit(principal is Customer, action == Action::"read", resource is Doc);"#
+                        .to_string(),
+                ),
+            ],
+        )
+        .unwrap();
+
+    let ctx = customer_context("user-1");
+    let mut attrs = HashMap::new();
+    attrs.insert("id".to_string(), serde_json::json!("issue-1"));
+
+    let decision = engine.authorize_for_tenant("default", &ctx, "read", "Issue", &attrs);
+    let AuthzDecision::Deny(AuthzDenial::PolicyDenied { policy_ids }) = decision else {
+        panic!("expected named forbid policy denial");
+    };
+
+    assert!(
+        policy_ids
+            .iter()
+            .any(|id| id == "default:decision:block-issue-1"),
+        "candidate filtering must preserve named policy diagnostics, got: {policy_ids:?}"
+    );
+}

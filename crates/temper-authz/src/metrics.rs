@@ -9,6 +9,7 @@ struct CedarMetrics {
     evaluation_duration: Histogram<f64>,
     evaluation_duration_ms: Histogram<f64>,
     evaluation_phase_duration_ms: Histogram<f64>,
+    policy_candidate_count: Histogram<u64>,
     request_attribute_count: Histogram<u64>,
 }
 
@@ -36,6 +37,12 @@ fn metrics() -> &'static CedarMetrics {
                     "Latency of bounded phases inside Cedar authorization evaluation.",
                 )
                 .with_unit("ms")
+                .build(),
+            policy_candidate_count: meter
+                .u64_histogram("temper_cedar_policy_candidate_count")
+                .with_description(
+                    "Full and candidate Cedar policy counts considered for authorization.",
+                )
                 .build(),
             request_attribute_count: meter
                 .u64_histogram("temper_cedar_request_attribute_count")
@@ -111,4 +118,26 @@ pub(crate) fn record_cedar_request_attribute_count(source: &'static str, count: 
     metrics()
         .request_attribute_count
         .record(count as u64, &attrs);
+}
+
+pub(crate) fn record_cedar_policy_candidate_counts(
+    full_count: usize,
+    candidate_count: usize,
+    outcome: &'static str,
+) {
+    let full_attrs = [
+        KeyValue::new("source", "full".to_string()),
+        KeyValue::new("outcome", outcome.to_string()),
+    ];
+    metrics()
+        .policy_candidate_count
+        .record(full_count as u64, &full_attrs);
+
+    let candidate_attrs = [
+        KeyValue::new("source", "candidate".to_string()),
+        KeyValue::new("outcome", outcome.to_string()),
+    ];
+    metrics()
+        .policy_candidate_count
+        .record(candidate_count as u64, &candidate_attrs);
 }
