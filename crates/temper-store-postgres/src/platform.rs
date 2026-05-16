@@ -26,6 +26,9 @@ const MAX_INDEXABLE_FIELD_VALUE_BYTES: usize = 2000;
 const QUERY_PROJECTION_UPSERT_OPERATION: &str = "query_projection_upsert";
 const QUERY_PROJECTION_REMOVE_OPERATION: &str = "query_projection_remove";
 
+type ScalarFieldIndex = BTreeMap<String, String>;
+type ExistingFieldIndex = BTreeMap<String, (Option<String>, Option<String>)>;
+
 #[derive(Clone, Copy, Debug)]
 pub struct PostgresSpecVerificationUpdate<'a> {
     pub status: &'a str,
@@ -423,6 +426,9 @@ impl PostgresEventStore {
                 return Err(storage_error(e));
             }
         };
+        // The catalog row is the per-entity projection serialization point. Doing
+        // this before diffing field-index rows also serializes first writers when
+        // no catalog row existed at transaction start.
         crate::dbm::postgres_query!(
             "INSERT INTO entity_catalog \
              (tenant, entity_type, entity_id, status, fields, sequence_nr, projection_version, projection_hash, updated_at) \
@@ -442,54 +448,71 @@ impl PostgresEventStore {
         .await
         .map_err(storage_error)?;
 
-        crate::dbm::postgres_query!("DELETE FROM entity_field_index WHERE tenant = $1 AND entity_type = $2 AND entity_id = $3")
+        let existing_index_rows: Vec<(String, Option<String>, Option<String>)> =
+            crate::dbm::postgres_query_as!(
+                "SELECT field_name, field_value, status \
+                 FROM entity_field_index \
+                 WHERE tenant = $1 AND entity_type = $2 AND entity_id = $3 \
+                 FOR UPDATE",
+            )
             .bind(tenant)
             .bind(entity_type)
             .bind(entity_id)
-            .execute(&mut *tx)
+            .fetch_all(&mut *tx)
             .await
             .map_err(storage_error)?;
+        let existing_index = existing_index_rows
+            .into_iter()
+            .map(|(field_name, field_value, field_status)| {
+                (field_name, (field_value, field_status))
+            })
+            .collect::<ExistingFieldIndex>();
 
-        let mut indexed_fields = 0_u64;
-        let mut skipped_fields = 0_u64;
-        if let Some(object) = fields.as_object() {
-            for (field_name, value) in object {
-                if let Some(field_value) = scalar_field_value(value) {
-                    // Postgres btree caps an indexed key at ~2704 bytes (compressed).
-                    // Inserting a longer value into entity_field_index errors out and
-                    // poisons the whole transaction, which then rolls back the
-                    // entity_catalog upsert above too — silently dropping the entire
-                    // row from both projections. Long fields can't be btree-indexed
-                    // by Postgres in any case, so they're meaningless to $filter
-                    // pushdown; the full value is still in entity_catalog.fields
-                    // (jsonb) for read-by-id and catalog-fast-read. Skipping them
-                    // here keeps the projection consistent.
-                    // Skip silently — this is normal for any field whose
-                    // serialized scalar exceeds Postgres' btree key cap.
-                    // The full value is preserved in entity_catalog.fields
-                    // jsonb, which is what reads return.
-                    if field_value.len() > MAX_INDEXABLE_FIELD_VALUE_BYTES {
-                        skipped_fields += 1;
-                        continue;
-                    }
-                    indexed_fields += 1;
-                    crate::dbm::postgres_query!(
-                        "INSERT INTO entity_field_index \
-                         (tenant, entity_type, entity_id, field_name, field_value, status) \
-                         VALUES ($1, $2, $3, $4, $5, $6) \
-                         ON CONFLICT (tenant, entity_type, entity_id, field_name) DO UPDATE SET \
-                             field_value = EXCLUDED.field_value, status = EXCLUDED.status",
-                    )
-                    .bind(tenant)
-                    .bind(entity_type)
-                    .bind(entity_id)
-                    .bind(field_name)
-                    .bind(field_value)
-                    .bind(status)
-                    .execute(&mut *tx)
-                    .await
-                    .map_err(storage_error)?;
-                }
+        let (new_index, indexed_fields, skipped_fields) = scalar_index_fields(fields);
+
+        for (field_name, (old_value, _old_status)) in &existing_index {
+            let should_delete = match (old_value.as_ref(), new_index.get(field_name)) {
+                (Some(old), Some(new)) => old != new,
+                _ => true,
+            };
+            if should_delete {
+                crate::dbm::postgres_query!(
+                    "DELETE FROM entity_field_index \
+                     WHERE tenant = $1 AND entity_type = $2 AND entity_id = $3 AND field_name = $4",
+                )
+                .bind(tenant)
+                .bind(entity_type)
+                .bind(entity_id)
+                .bind(field_name)
+                .execute(&mut *tx)
+                .await
+                .map_err(storage_error)?;
+            }
+        }
+
+        for (field_name, field_value) in &new_index {
+            let should_upsert = !matches!(
+                existing_index.get(field_name),
+                Some((Some(old_value), Some(old_status)))
+                    if old_value == field_value && old_status.as_str() == status
+            );
+            if should_upsert {
+                crate::dbm::postgres_query!(
+                    "INSERT INTO entity_field_index \
+                     (tenant, entity_type, entity_id, field_name, field_value, status) \
+                     VALUES ($1, $2, $3, $4, $5, $6) \
+                     ON CONFLICT (tenant, entity_type, entity_id, field_name) DO UPDATE SET \
+                         field_value = EXCLUDED.field_value, status = EXCLUDED.status",
+                )
+                .bind(tenant)
+                .bind(entity_type)
+                .bind(entity_id)
+                .bind(field_name)
+                .bind(field_value)
+                .bind(status)
+                .execute(&mut *tx)
+                .await
+                .map_err(storage_error)?;
             }
         }
 
@@ -2163,6 +2186,29 @@ fn scalar_field_value(value: &serde_json::Value) -> Option<String> {
         serde_json::Value::String(v) => Some(v.clone()),
         serde_json::Value::Array(_) | serde_json::Value::Object(_) => None,
     }
+}
+
+fn scalar_index_fields(fields: &serde_json::Value) -> (ScalarFieldIndex, u64, u64) {
+    let mut indexed = ScalarFieldIndex::new();
+    let mut skipped_fields = 0_u64;
+
+    if let Some(object) = fields.as_object() {
+        for (field_name, value) in object {
+            let Some(field_value) = scalar_field_value(value) else {
+                continue;
+            };
+            // Postgres btree caps an indexed key at roughly one third of an
+            // 8KB page. Long fields remain fully preserved in entity_catalog.
+            if field_value.len() > MAX_INDEXABLE_FIELD_VALUE_BYTES {
+                skipped_fields += 1;
+                continue;
+            }
+            indexed.insert(field_name.clone(), field_value);
+        }
+    }
+
+    let indexed_fields = indexed.len() as u64;
+    (indexed, indexed_fields, skipped_fields)
 }
 
 fn postgres_placeholders(sql: &str, max_index: usize) -> String {
