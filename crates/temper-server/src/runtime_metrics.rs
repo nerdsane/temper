@@ -13,6 +13,8 @@ use opentelemetry::{KeyValue, global};
 
 use crate::state::ServerState;
 
+pub(crate) mod blob_transport;
+
 struct RuntimeMetrics {
     process_resident_memory_bytes: Gauge<u64>,
     active_actors: Gauge<u64>,

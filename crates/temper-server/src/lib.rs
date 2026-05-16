@@ -11,6 +11,7 @@ mod api;
 pub mod authz;
 pub mod blob_store;
 pub mod blob_sweeper;
+mod blob_transport_observability;
 pub mod blobs;
 pub mod channels;
 pub mod entity_actor;

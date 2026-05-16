@@ -13,7 +13,11 @@ use reqwest::{Method, StatusCode};
 use sha2::{Digest, Sha256};
 use temper_runtime::tenant::TenantId;
 use tokio::sync::Semaphore;
+use tracing::Instrument;
 
+use crate::blob_transport_observability::{
+    BlobTransportError, BlobTransportFinish, blob_transport_span, finish_blob_transport,
+};
 use crate::state::ServerState;
 
 type HmacSha256 = Hmac<Sha256>;
@@ -107,7 +111,9 @@ impl BlobStore {
         }
 
         match &self.backend {
-            BlobStoreBackend::LocalFs { root } => put_local_blob(root, key, body).await,
+            BlobStoreBackend::LocalFs { root } => {
+                put_local_blob_observed(root, key, body, "put").await
+            }
             BlobStoreBackend::S3(store) => store.put_if_absent(key, body).await,
         }
     }
@@ -142,8 +148,10 @@ impl BlobStore {
         }
 
         match &self.backend {
-            BlobStoreBackend::LocalFs { root } => put_local_blob(root, key, body).await,
-            BlobStoreBackend::S3(store) => store.put(key, body).await,
+            BlobStoreBackend::LocalFs { root } => {
+                put_local_blob_observed(root, key, body, "put_content").await
+            }
+            BlobStoreBackend::S3(store) => store.put_with_operation("put_content", key, body).await,
         }
     }
 
@@ -160,7 +168,7 @@ impl BlobStore {
         }
 
         match &self.backend {
-            BlobStoreBackend::LocalFs { root } => get_local_blob(root, key).await,
+            BlobStoreBackend::LocalFs { root } => get_local_blob_observed(root, key).await,
             BlobStoreBackend::S3(store) => store.get(key).await,
         }
     }
@@ -262,76 +270,198 @@ impl S3BlobStore {
             return Ok(());
         }
 
-        self.put(key, body).await
+        self.put_with_operation("put", key, body).await
     }
 
-    async fn put(&self, key: &str, body: &[u8]) -> Result<(), String> {
-        let url = self.object_url(key);
-        let mut request = self.client.put(&url).body(body.to_vec());
-        let headers = self.signed_headers(Method::PUT, &url)?;
-        for (header_name, header_value) in &headers {
-            request = request.header(header_name, header_value);
-        }
+    async fn put_with_operation(
+        &self,
+        operation: &'static str,
+        key: &str,
+        body: &[u8],
+    ) -> Result<(), String> {
+        let request_bytes = body.len() as u64;
+        let started_at = Instant::now(); // determinism-ok: production blob transport metric only
+        let span = blob_transport_span(operation, "s3", request_bytes);
+        let result = async {
+            let url = self.object_url(key);
+            let mut request = self.client.put(&url).body(body.to_vec());
+            let headers = self
+                .signed_headers(Method::PUT, &url)
+                .map_err(BlobTransportError::message)?;
+            for (header_name, header_value) in &headers {
+                request = request.header(header_name, header_value);
+            }
 
-        let response = request
-            .send()
-            .await
-            .map_err(|e| format!("blob PUT request failed for '{key}': {e}"))?;
-        if response.status().is_success() {
-            return Ok(());
+            let response = request.send().await.map_err(|e| {
+                BlobTransportError::message(format!("blob PUT request failed for '{key}': {e}"))
+            })?;
+            let status = response.status();
+            if status.is_success() {
+                return Ok(status);
+            }
+            Err(BlobTransportError::status(
+                format!("blob PUT failed for '{key}' with HTTP {status}"),
+                status,
+            ))
         }
-        Err(format!(
-            "blob PUT failed for '{key}' with HTTP {}",
-            response.status()
-        ))
+        .instrument(span.clone())
+        .await;
+
+        match result {
+            Ok(status) => {
+                finish_blob_transport(BlobTransportFinish {
+                    started_at,
+                    span: &span,
+                    operation,
+                    backend: "s3",
+                    outcome: "ok",
+                    status: Some(status),
+                    request_bytes,
+                    response_bytes: 0,
+                });
+                Ok(())
+            }
+            Err(error) => {
+                finish_blob_transport(BlobTransportFinish {
+                    started_at,
+                    span: &span,
+                    operation,
+                    backend: "s3",
+                    outcome: "error",
+                    status: error.status,
+                    request_bytes,
+                    response_bytes: 0,
+                });
+                Err(error.message)
+            }
+        }
     }
 
     async fn get(&self, key: &str) -> Result<Option<Vec<u8>>, String> {
-        let url = self.object_url(key);
-        let mut request = self.client.get(&url);
-        let headers = self.signed_headers(Method::GET, &url)?;
-        for (header_name, header_value) in &headers {
-            request = request.header(header_name, header_value);
-        }
+        let started_at = Instant::now(); // determinism-ok: production blob transport metric only
+        let span = blob_transport_span("get", "s3", 0);
+        let result = async {
+            let url = self.object_url(key);
+            let mut request = self.client.get(&url);
+            let headers = self
+                .signed_headers(Method::GET, &url)
+                .map_err(BlobTransportError::message)?;
+            for (header_name, header_value) in &headers {
+                request = request.header(header_name, header_value);
+            }
 
-        let response = request
-            .send()
-            .await
-            .map_err(|e| format!("blob GET request failed for '{key}': {e}"))?;
-        if response.status() == StatusCode::NOT_FOUND {
-            return Ok(None);
-        }
-        if !response.status().is_success() {
-            return Err(format!(
-                "blob GET failed for '{key}' with HTTP {}",
-                response.status()
-            ));
-        }
+            let response = request.send().await.map_err(|e| {
+                BlobTransportError::message(format!("blob GET request failed for '{key}': {e}"))
+            })?;
+            let status = response.status();
+            if status == StatusCode::NOT_FOUND {
+                return Ok((status, None));
+            }
+            if !status.is_success() {
+                return Err(BlobTransportError::status(
+                    format!("blob GET failed for '{key}' with HTTP {status}"),
+                    status,
+                ));
+            }
 
-        let bytes = response
-            .bytes()
-            .await
-            .map_err(|e| format!("blob GET body read failed for '{key}': {e}"))?;
-        Ok(Some(bytes.to_vec()))
+            let bytes = response.bytes().await.map_err(|e| {
+                BlobTransportError::message(format!("blob GET body read failed for '{key}': {e}"))
+            })?;
+            Ok((status, Some(bytes.to_vec())))
+        }
+        .instrument(span.clone())
+        .await;
+
+        match result {
+            Ok((status, bytes)) => {
+                let response_bytes = bytes.as_ref().map_or(0, |bytes| bytes.len() as u64);
+                let outcome = if bytes.is_some() { "ok" } else { "not_found" };
+                finish_blob_transport(BlobTransportFinish {
+                    started_at,
+                    span: &span,
+                    operation: "get",
+                    backend: "s3",
+                    outcome,
+                    status: Some(status),
+                    request_bytes: 0,
+                    response_bytes,
+                });
+                Ok(bytes)
+            }
+            Err(error) => {
+                finish_blob_transport(BlobTransportFinish {
+                    started_at,
+                    span: &span,
+                    operation: "get",
+                    backend: "s3",
+                    outcome: "error",
+                    status: error.status,
+                    request_bytes: 0,
+                    response_bytes: 0,
+                });
+                Err(error.message)
+            }
+        }
     }
 
     async fn exists(&self, key: &str) -> Result<bool, String> {
-        let url = self.object_url(key);
-        let mut request = self.client.head(&url);
-        let headers = self.signed_headers(Method::HEAD, &url)?;
-        for (header_name, header_value) in &headers {
-            request = request.header(header_name, header_value);
-        }
+        let started_at = Instant::now(); // determinism-ok: production blob transport metric only
+        let span = blob_transport_span("head", "s3", 0);
+        let result = async {
+            let url = self.object_url(key);
+            let mut request = self.client.head(&url);
+            let headers = self
+                .signed_headers(Method::HEAD, &url)
+                .map_err(BlobTransportError::message)?;
+            for (header_name, header_value) in &headers {
+                request = request.header(header_name, header_value);
+            }
 
-        let response = request
-            .send()
-            .await
-            .map_err(|e| format!("blob HEAD request failed for '{key}': {e}"))?;
-        match response.status() {
-            StatusCode::OK | StatusCode::NO_CONTENT => Ok(true),
-            StatusCode::NOT_FOUND => Ok(false),
-            status if status.is_success() => Ok(true),
-            status => Err(format!("blob HEAD failed for '{key}' with HTTP {status}")),
+            let response = request.send().await.map_err(|e| {
+                BlobTransportError::message(format!("blob HEAD request failed for '{key}': {e}"))
+            })?;
+            let status = response.status();
+            match status {
+                StatusCode::OK | StatusCode::NO_CONTENT => Ok((status, true)),
+                StatusCode::NOT_FOUND => Ok((status, false)),
+                status if status.is_success() => Ok((status, true)),
+                status => Err(BlobTransportError::status(
+                    format!("blob HEAD failed for '{key}' with HTTP {status}"),
+                    status,
+                )),
+            }
+        }
+        .instrument(span.clone())
+        .await;
+
+        match result {
+            Ok((status, exists)) => {
+                let outcome = if exists { "ok" } else { "not_found" };
+                finish_blob_transport(BlobTransportFinish {
+                    started_at,
+                    span: &span,
+                    operation: "head",
+                    backend: "s3",
+                    outcome,
+                    status: Some(status),
+                    request_bytes: 0,
+                    response_bytes: 0,
+                });
+                Ok(exists)
+            }
+            Err(error) => {
+                finish_blob_transport(BlobTransportFinish {
+                    started_at,
+                    span: &span,
+                    operation: "head",
+                    backend: "s3",
+                    outcome: "error",
+                    status: error.status,
+                    request_bytes: 0,
+                    response_bytes: 0,
+                });
+                Err(error.message)
+            }
         }
     }
 
@@ -420,6 +550,32 @@ async fn put_local_blob(root: &Path, key: &str, body: &[u8]) -> Result<(), Strin
         .map_err(|e| format!("failed to write local blob '{}': {e}", path.display()))
 }
 
+async fn put_local_blob_observed(
+    root: &Path,
+    key: &str,
+    body: &[u8],
+    operation: &'static str,
+) -> Result<(), String> {
+    let request_bytes = body.len() as u64;
+    let started_at = Instant::now(); // determinism-ok: production blob transport metric only
+    let span = blob_transport_span(operation, "local_fs", request_bytes);
+    let result = put_local_blob(root, key, body)
+        .instrument(span.clone())
+        .await;
+    let outcome = if result.is_ok() { "ok" } else { "error" };
+    finish_blob_transport(BlobTransportFinish {
+        started_at,
+        span: &span,
+        operation,
+        backend: "local_fs",
+        outcome,
+        status: None,
+        request_bytes,
+        response_bytes: 0,
+    });
+    result
+}
+
 async fn get_local_blob(root: &Path, key: &str) -> Result<Option<Vec<u8>>, String> {
     let path = local_blob_path(root, key)?;
     if !tokio::fs::try_exists(&path)
@@ -432,6 +588,28 @@ async fn get_local_blob(root: &Path, key: &str) -> Result<Option<Vec<u8>>, Strin
         .await
         .map(Some)
         .map_err(|e| format!("failed to read local blob '{}': {e}", path.display()))
+}
+
+async fn get_local_blob_observed(root: &Path, key: &str) -> Result<Option<Vec<u8>>, String> {
+    let started_at = Instant::now(); // determinism-ok: production blob transport metric only
+    let span = blob_transport_span("get", "local_fs", 0);
+    let result = get_local_blob(root, key).instrument(span.clone()).await;
+    let (outcome, response_bytes) = match &result {
+        Ok(Some(bytes)) => ("ok", bytes.len() as u64),
+        Ok(None) => ("not_found", 0),
+        Err(_) => ("error", 0),
+    };
+    finish_blob_transport(BlobTransportFinish {
+        started_at,
+        span: &span,
+        operation: "get",
+        backend: "local_fs",
+        outcome,
+        status: None,
+        request_bytes: 0,
+        response_bytes,
+    });
+    result
 }
 
 fn local_blob_path(root: &Path, key: &str) -> Result<PathBuf, String> {
