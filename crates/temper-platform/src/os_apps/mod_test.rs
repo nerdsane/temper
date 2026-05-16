@@ -2215,6 +2215,7 @@ async fn test_local_stream_uploads_create_real_file_version_lineage() {
             }),
             agent_ctx: &agent_ctx,
             await_integration: false,
+            await_reactions: true,
         })
         .await
         .expect("initialize file");

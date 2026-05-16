@@ -1,4 +1,7 @@
-use tracing::instrument;
+use std::sync::{Arc, OnceLock};
+
+use tokio::sync::Semaphore;
+use tracing::{Instrument, instrument};
 use tracing_opentelemetry::OpenTelemetrySpanExt;
 
 use crate::entity_actor::{EntityMsg, EntityResponse};
@@ -11,6 +14,27 @@ use super::effects::PostDispatchContext;
 use super::retry;
 use super::{DispatchCommand, DispatchError, DispatchExtOptions, record_workflow_span_attrs};
 use crate::state::admission::AdmissionOutcome;
+
+const DEFAULT_BACKGROUND_REACTION_MAX_CONCURRENCY: usize = 64;
+
+struct BackgroundReactionDispatch {
+    dispatcher: Arc<crate::trigger::ReactionDispatcher>,
+    tenant: TenantId,
+    entity_type: String,
+    entity_id: String,
+    action: String,
+    to_state: String,
+    fields: serde_json::Value,
+    agent_ctx: AgentContext,
+}
+
+fn background_reaction_semaphore() -> Arc<Semaphore> {
+    static SEMAPHORE: OnceLock<Arc<Semaphore>> = OnceLock::new();
+    Arc::clone(
+        SEMAPHORE
+            .get_or_init(|| Arc::new(Semaphore::new(DEFAULT_BACKGROUND_REACTION_MAX_CONCURRENCY))),
+    )
+}
 
 impl crate::state::ServerState {
     /// Dispatch an action using the unified command object.
@@ -72,6 +96,7 @@ impl crate::state::ServerState {
             params,
             agent_ctx,
             await_integration: false,
+            await_reactions: true,
         })
         .await
     }
@@ -118,6 +143,7 @@ impl crate::state::ServerState {
             params,
             agent_ctx: options.agent_ctx,
             await_integration: options.await_integration,
+            await_reactions: options.await_reactions,
         })
         .await
     }
@@ -134,6 +160,7 @@ impl crate::state::ServerState {
             params,
             agent_ctx,
             await_integration,
+            await_reactions,
         } = cmd;
 
         let response = self
@@ -156,30 +183,123 @@ impl crate::state::ServerState {
                 .ok()
                 .and_then(|slot| slot.clone());
             if let Some(dispatcher) = dispatcher {
+                let to_state = response.state.status.clone();
                 let fields = serde_json::to_value(&response.state.fields).unwrap_or_default();
-                dispatcher
-                    .dispatch_reactions(
-                        self,
-                        tenant,
+                if await_reactions {
+                    dispatcher
+                        .dispatch_reactions(
+                            self,
+                            tenant,
+                            entity_type,
+                            entity_id,
+                            action,
+                            &to_state,
+                            &fields,
+                            0,
+                            // ADR-0046: thread the invoking context through so
+                            // reactions without an explicit principal inherit
+                            // the invoking authority, and declared principals
+                            // can elevate deterministically.
+                            agent_ctx,
+                        )
+                        .await;
+                } else if let Some(background) =
+                    self.try_spawn_background_reactions(BackgroundReactionDispatch {
+                        dispatcher: Arc::clone(&dispatcher),
+                        tenant: tenant.clone(),
+                        entity_type: entity_type.to_string(),
+                        entity_id: entity_id.to_string(),
+                        action: action.to_string(),
+                        to_state,
+                        fields,
+                        agent_ctx: agent_ctx.clone(),
+                    })
+                {
+                    tracing::warn!(
+                        tenant = %tenant,
                         entity_type,
                         entity_id,
-                        action,
-                        &response.state.status,
-                        &fields,
-                        0,
-                        // ADR-0046: thread the invoking context through so
-                        // reactions without an explicit principal inherit
-                        // the invoking authority, and declared principals
-                        // can elevate deterministically.
-                        agent_ctx,
-                    )
-                    .await;
+                        action_name = action,
+                        "background reaction budget exhausted; awaiting reactions inline"
+                    );
+                    dispatcher
+                        .dispatch_reactions(
+                            self,
+                            tenant,
+                            entity_type,
+                            entity_id,
+                            action,
+                            &background.to_state,
+                            &background.fields,
+                            0,
+                            agent_ctx,
+                        )
+                        .await;
+                }
             }
         }
 
         // Scheduled actions are handled inside run_post_dispatch_effects
         // (called from dispatch_tenant_action_core).
         Ok(response)
+    }
+
+    fn try_spawn_background_reactions(
+        &self,
+        dispatch: BackgroundReactionDispatch,
+    ) -> Option<BackgroundReactionDispatch> {
+        let Ok(permit) = background_reaction_semaphore().try_acquire_owned() else {
+            return Some(dispatch);
+        };
+
+        let state = self.clone();
+        let BackgroundReactionDispatch {
+            dispatcher,
+            tenant,
+            entity_type,
+            entity_id,
+            action,
+            to_state,
+            fields,
+            agent_ctx,
+        } = dispatch;
+        let span = tracing::info_span!(
+            "reaction.dispatch.background",
+            tenant = %tenant,
+            entity_type = %entity_type,
+            entity_id = %entity_id,
+            action_name = %action,
+        );
+
+        tokio::spawn(
+            async move {
+                // determinism-ok: production-only post-commit reaction side effects
+                let _permit = permit;
+                let results = dispatcher
+                    .dispatch_reactions(
+                        &state,
+                        &tenant,
+                        &entity_type,
+                        &entity_id,
+                        &action,
+                        &to_state,
+                        &fields,
+                        0,
+                        &agent_ctx,
+                    )
+                    .await;
+                tracing::info!(
+                    tenant = %tenant,
+                    entity_type = %entity_type,
+                    entity_id = %entity_id,
+                    action_name = %action,
+                    reaction.result_count = results.len(),
+                    "background reactions completed"
+                );
+            }
+            .instrument(span),
+        );
+        None
     }
 
     /// Core dispatch without reaction cascade (used by ReactionDispatcher to

@@ -12,6 +12,7 @@ use temper_runtime::tenant::TenantId;
 use temper_server::ServerState;
 use temper_server::registry::SpecRegistry;
 use temper_server::request_context::AgentContext;
+use temper_server::state::DispatchExtOptions;
 use temper_spec::csdl::parse_csdl;
 
 const CSDL_XML: &str = r#"<?xml version="1.0" encoding="utf-8"?>
@@ -432,5 +433,77 @@ permit(
         workspace_after.state.fields["used_bytes"],
         serde_json::json!(42),
         "inline trigger should resolve workspace_id and increment workspace usage",
+    );
+}
+
+#[tokio::test]
+async fn inline_action_triggers_can_run_in_background_when_requested() {
+    let tenant = TenantId::new("trigger-e2e-bg");
+    let state = build_file_workspace_state(
+        "trigger-e2e-bg",
+        r#"
+permit(
+    principal is Agent,
+    action == Action::"IncrementUsage",
+    resource is Workspace
+) when {
+    principal.agent_type == "file-service"
+};
+"#,
+    );
+
+    let workspace_id = "ws-bg";
+    let file_id = "file-bg";
+    state
+        .get_or_create_tenant_entity(&tenant, "Workspace", workspace_id, serde_json::json!({}))
+        .await
+        .expect("workspace seed should succeed");
+    state
+        .get_or_create_tenant_entity(
+            &tenant,
+            "File",
+            file_id,
+            serde_json::json!({ "workspace_id": workspace_id }),
+        )
+        .await
+        .expect("file seed should succeed");
+
+    let agent_ctx = AgentContext::system();
+    let resp = state
+        .dispatch_tenant_action_ext_typed(
+            &tenant,
+            "File",
+            file_id,
+            "StreamUpdated",
+            serde_json::json!({ "size_bytes": 42 }),
+            DispatchExtOptions {
+                agent_ctx: &agent_ctx,
+                await_integration: false,
+                await_reactions: false,
+            },
+        )
+        .await
+        .expect("File.StreamUpdated should dispatch");
+
+    assert!(resp.success, "source File transition should commit");
+    assert_eq!(resp.state.status, "Ready");
+
+    let mut observed_usage = None;
+    for _ in 0..50 {
+        let workspace_after = state
+            .get_tenant_entity_state(&tenant, "Workspace", workspace_id)
+            .await
+            .expect("workspace should exist after trigger fired");
+        if workspace_after.state.fields["used_bytes"] == serde_json::json!(42) {
+            observed_usage = Some(workspace_after.state.fields["used_bytes"].clone());
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+
+    assert_eq!(
+        observed_usage,
+        Some(serde_json::json!(42)),
+        "background inline trigger should eventually increment workspace usage",
     );
 }

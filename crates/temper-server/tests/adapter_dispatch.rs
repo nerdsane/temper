@@ -108,6 +108,7 @@ method = "POST"
             DispatchExtOptions {
                 agent_ctx: &agent_ctx,
                 await_integration: true,
+                await_reactions: true,
             },
         )
         .await
@@ -181,6 +182,7 @@ method = "POST"
             DispatchExtOptions {
                 agent_ctx: &agent_ctx,
                 await_integration: true,
+                await_reactions: true,
             },
         )
         .await
@@ -269,6 +271,7 @@ method = "POST"
             DispatchExtOptions {
                 agent_ctx: &agent_ctx,
                 await_integration: true,
+                await_reactions: true,
             },
         )
         .await
@@ -285,6 +288,7 @@ method = "POST"
             DispatchExtOptions {
                 agent_ctx: &agent_ctx,
                 await_integration: true,
+                await_reactions: true,
             },
         )
         .await

@@ -231,6 +231,7 @@ pub(super) async fn dispatch_bound_action(
             DispatchExtOptions {
                 agent_ctx: &dispatch_agent_ctx,
                 await_integration,
+                await_reactions: true,
             },
         )
         .await;

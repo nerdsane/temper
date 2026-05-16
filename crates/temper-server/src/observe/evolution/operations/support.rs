@@ -267,6 +267,7 @@ pub(super) async fn spawn_intent_discovery(
             DispatchExtOptions {
                 agent_ctx,
                 await_integration,
+                await_reactions: true,
             },
         )
         .await?;

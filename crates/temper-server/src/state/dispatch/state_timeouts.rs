@@ -722,6 +722,7 @@ queue_timeout_seconds = 10
                         crate::state::dispatch::DispatchExtOptions {
                             agent_ctx: &agent_ctx,
                             await_integration: false,
+                            await_reactions: true,
                         },
                     )
                     .await;
@@ -899,6 +900,7 @@ queue_timeout_seconds = 0
                         crate::state::dispatch::DispatchExtOptions {
                             agent_ctx: &agent_ctx,
                             await_integration: false,
+                            await_reactions: true,
                         },
                     )
                     .await;
@@ -1064,6 +1066,7 @@ queue_timeout_seconds = 30
                         crate::state::dispatch::DispatchExtOptions {
                             agent_ctx: &agent_ctx,
                             await_integration: false,
+                            await_reactions: true,
                         },
                     )
                     .await;
@@ -1182,6 +1185,7 @@ queue_timeout_seconds = 30
                 params: serde_json::json!({}),
                 agent_ctx: &agent_ctx,
                 await_integration: false,
+                await_reactions: true,
             })
             .await;
         if let Ok(r) = retry {
