@@ -18,6 +18,8 @@ use crate::context::{PrincipalKind, SecurityContext};
 use crate::error::{AuthzDenial, AuthzError};
 use crate::metrics::{CedarDecisionMetric, CedarPhaseOutcome};
 
+mod candidates;
+
 #[cfg(test)]
 mod tests;
 
@@ -532,9 +534,9 @@ impl AuthzEngine {
         recorder.finish_phase("entities");
 
         let request = match Request::new(
-            principal_uid,
-            action_uid,
-            resource_uid,
+            principal_uid.clone(),
+            action_uid.clone(),
+            resource_uid.clone(),
             context,
             None, // schema-less: actions/resources are tenant-defined
         ) {
@@ -548,9 +550,26 @@ impl AuthzEngine {
         };
         recorder.finish_phase("request");
 
-        let response: CedarResponse = self
-            .authorizer
-            .is_authorized(&request, policy_set, &entities);
+        let candidate_selection = candidates::select_candidate_policy_set(
+            policy_set,
+            &principal_uid,
+            &action_uid,
+            &resource_uid,
+        );
+        crate::metrics::record_cedar_policy_candidate_counts(
+            candidate_selection.counts.full,
+            candidate_selection.counts.candidate,
+            candidate_selection.counts.outcome.as_str(),
+        );
+        recorder.finish_phase("policy_candidates");
+
+        let effective_policy_set = candidate_selection
+            .policy_set
+            .as_ref()
+            .unwrap_or(policy_set);
+        let response: CedarResponse =
+            self.authorizer
+                .is_authorized(&request, effective_policy_set, &entities);
         recorder.finish_phase("authorizer");
 
         let decision = response.decision();
