@@ -193,6 +193,7 @@ impl From<String> for DispatchError {
 pub struct DispatchExtOptions<'a> {
     pub agent_ctx: &'a AgentContext,
     pub await_integration: bool,
+    pub await_reactions: bool,
 }
 
 /// Unified command object for entity action dispatch.
@@ -216,6 +217,8 @@ pub struct DispatchCommand<'a> {
     pub agent_ctx: &'a AgentContext,
     /// Whether to await WASM integration callbacks before returning.
     pub await_integration: bool,
+    /// Whether to await cross-entity reaction cascades before returning.
+    pub await_reactions: bool,
 }
 
 pub(super) fn record_workflow_span_attrs(

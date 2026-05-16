@@ -3,7 +3,7 @@ use std::sync::{Arc, RwLock};
 use sha2::{Digest, Sha256};
 use temper_wasm::{StreamRegistry, WasmInvocationContext};
 
-use super::ServerState;
+use super::{DispatchExtOptions, ServerState};
 
 /// Error returned by the native/File `$value` content upload path.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -143,7 +143,7 @@ impl ServerState {
             .and_then(|value| value.as_str())
             .unwrap_or_default();
         let created_by = agent_ctx.agent_id.clone().unwrap_or_default();
-        self.dispatch_tenant_action(
+        self.dispatch_tenant_action_ext_typed(
             tenant,
             "File",
             file_id,
@@ -156,10 +156,14 @@ impl ServerState {
                 "previous_version_id": previous_version_id,
                 "created_by": created_by,
             }),
-            agent_ctx,
+            DispatchExtOptions {
+                agent_ctx,
+                await_integration: false,
+                await_reactions: false,
+            },
         )
         .await
-        .map_err(FileStreamContentError::ActionRejected)
+        .map_err(|error| FileStreamContentError::ActionRejected(error.to_string()))
     }
 
     #[tracing::instrument(skip_all, fields(

@@ -261,6 +261,7 @@ pub(super) async fn bootstrap_agents(
                         }),
                         agent_ctx: &agent_ctx,
                         await_integration: false,
+                        await_reactions: true,
                     })
                     .await
                 {
@@ -282,6 +283,7 @@ pub(super) async fn bootstrap_agents(
                         params: json!({}),
                         agent_ctx: &agent_ctx,
                         await_integration: false,
+                        await_reactions: true,
                     })
                     .await;
 
@@ -347,6 +349,7 @@ async fn set_agent_source_app(
                     }),
                     agent_ctx,
                     await_integration: false,
+                    await_reactions: true,
                 })
                 .await
             {
@@ -396,6 +399,7 @@ async fn ensure_inline_file_uploaded(
                 }),
                 agent_ctx,
                 await_integration: false,
+                await_reactions: true,
             })
             .await
             .map_err(|e| format!("failed to initialize File('{file_id}'): {e}"))?;

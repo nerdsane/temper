@@ -1599,6 +1599,7 @@ async fn bootstrap_app_entity(
                 }),
                 agent_ctx: &agent_ctx,
                 await_integration: false,
+                await_reactions: true,
             })
             .await;
         tracing::info!(tenant, app = %app_name, id = %id, "App entity updated");
@@ -1630,6 +1631,7 @@ async fn bootstrap_app_entity(
                     }),
                     agent_ctx: &agent_ctx,
                     await_integration: false,
+                    await_reactions: true,
                 })
                 .await
             {
@@ -2101,6 +2103,7 @@ pub(super) async fn ensure_app_docs_workspace(
                 }),
                 agent_ctx,
                 await_integration: false,
+                await_reactions: true,
             })
             .await
             .map_err(|e| format!("failed to initialize app docs workspace: {e}"))?;
@@ -2173,6 +2176,7 @@ pub(super) async fn ensure_directory(
             }),
             agent_ctx,
             await_integration: false,
+            await_reactions: true,
         })
         .await
         .map_err(|e| {
@@ -2193,6 +2197,7 @@ pub(super) async fn ensure_directory(
                 params: serde_json::json!({}),
                 agent_ctx,
                 await_integration: false,
+                await_reactions: true,
             })
             .await
             .map_err(|e| {
@@ -2247,6 +2252,7 @@ pub(super) async fn ensure_markdown_file(
                 }),
                 agent_ctx,
                 await_integration: false,
+                await_reactions: true,
             })
             .await
             .map_err(|e| format!("failed to initialize File('{}'): {e}", target.file_id))?;
@@ -2260,6 +2266,7 @@ pub(super) async fn ensure_markdown_file(
                 params: serde_json::json!({}),
                 agent_ctx,
                 await_integration: false,
+                await_reactions: true,
             })
             .await
             .map_err(|e| {
@@ -2278,6 +2285,7 @@ pub(super) async fn ensure_markdown_file(
                 params: serde_json::json!({}),
                 agent_ctx,
                 await_integration: false,
+                await_reactions: true,
             })
             .await
             .map_err(|e| {
@@ -2454,6 +2462,7 @@ async fn bootstrap_seed_data(
                             params,
                             agent_ctx: &agent_ctx,
                             await_integration: false,
+                            await_reactions: true,
                         })
                         .await
                     {

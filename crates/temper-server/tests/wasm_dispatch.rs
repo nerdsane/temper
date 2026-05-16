@@ -546,6 +546,7 @@ async fn wasm_authz_denial_records_governance_artifacts_blocking_mode() {
             DispatchExtOptions {
                 agent_ctx: &agent_ctx,
                 await_integration: true,
+                await_reactions: true,
             },
         )
         .await
