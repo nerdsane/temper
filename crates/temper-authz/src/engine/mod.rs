@@ -55,9 +55,25 @@ impl AuthzDecision {
     }
 }
 
-/// Per-tenant policy data: the compiled `PolicySet` and the source text.
-struct TenantPolicies {
+/// Compiled policy data used by Cedar and the request-time candidate selector.
+struct CompiledPolicies {
     policy_set: PolicySet,
+    candidate_index: candidates::CandidatePolicyIndex,
+}
+
+impl CompiledPolicies {
+    fn new(policy_set: PolicySet) -> Self {
+        let candidate_index = candidates::CandidatePolicyIndex::new(&policy_set);
+        Self {
+            policy_set,
+            candidate_index,
+        }
+    }
+}
+
+/// Per-tenant policy data: the compiled policies and the source text.
+struct TenantPolicies {
+    policies: CompiledPolicies,
     source_text: String,
 }
 
@@ -71,7 +87,7 @@ pub struct AuthzEngine {
     tenant_policies: RwLock<BTreeMap<String, TenantPolicies>>,
     /// Fallback global policy set for callers that don't specify a tenant.
     /// Deprecated: callers should migrate to `authorize_for_tenant`.
-    fallback_policy_set: RwLock<PolicySet>,
+    fallback_policy_set: RwLock<CompiledPolicies>,
     authorizer: Authorizer,
 }
 
@@ -89,7 +105,7 @@ impl AuthzEngine {
 
         Ok(Self {
             tenant_policies: RwLock::new(BTreeMap::new()),
-            fallback_policy_set: RwLock::new(policy_set),
+            fallback_policy_set: RwLock::new(CompiledPolicies::new(policy_set)),
             authorizer: Authorizer::new(),
         })
     }
@@ -106,7 +122,7 @@ impl AuthzEngine {
         merge_system_platform_policy(&mut policy_set);
         Self {
             tenant_policies: RwLock::new(BTreeMap::new()),
-            fallback_policy_set: RwLock::new(policy_set),
+            fallback_policy_set: RwLock::new(CompiledPolicies::new(policy_set)),
             authorizer: Authorizer::new(),
         }
     }
@@ -121,7 +137,7 @@ impl AuthzEngine {
             PolicySet::from_str("permit(principal, action, resource);").unwrap_or_default();
         Self {
             tenant_policies: RwLock::new(BTreeMap::new()),
-            fallback_policy_set: RwLock::new(policy_set),
+            fallback_policy_set: RwLock::new(CompiledPolicies::new(policy_set)),
             authorizer: Authorizer::new(),
         }
     }
@@ -146,7 +162,7 @@ impl AuthzEngine {
         tenants.insert(
             tenant.to_string(),
             TenantPolicies {
-                policy_set: new_policy_set,
+                policies: CompiledPolicies::new(new_policy_set),
                 source_text: policy_text.to_string(),
             },
         );
@@ -210,7 +226,7 @@ impl AuthzEngine {
         tenants.insert(
             tenant.to_string(),
             TenantPolicies {
-                policy_set: combined_set,
+                policies: CompiledPolicies::new(combined_set),
                 source_text: combined_text,
             },
         );
@@ -246,7 +262,7 @@ impl AuthzEngine {
             .fallback_policy_set
             .write()
             .map_err(|e| AuthzError::Engine(format!("policy lock poisoned: {e}")))?;
-        *current = new_policy_set;
+        *current = CompiledPolicies::new(new_policy_set);
         Ok(())
     }
 
@@ -257,14 +273,14 @@ impl AuthzEngine {
             .read()
             .map(|t| {
                 t.values()
-                    .map(|tp| count_user_policies(&tp.policy_set))
+                    .map(|tp| count_user_policies(&tp.policies.policy_set))
                     .sum()
             })
             .unwrap_or(0);
         let fallback_count = self
             .fallback_policy_set
             .read()
-            .map_or(0, |ps| count_user_policies(&ps));
+            .map_or(0, |ps| count_user_policies(&ps.policy_set));
         tenant_count + fallback_count
     }
 
@@ -323,7 +339,7 @@ impl AuthzEngine {
                 action,
                 resource_type,
                 resource_attrs,
-                &tp.policy_set,
+                &tp.policies,
             )
         } else {
             // No per-tenant policies loaded — fall back to global.
@@ -340,7 +356,7 @@ impl AuthzEngine {
         action: &str,
         resource_type: &str,
         resource_attrs: &HashMap<String, serde_json::Value>,
-        policy_set: &PolicySet,
+        policies: &CompiledPolicies,
     ) -> AuthzDecision {
         let mut recorder = CedarEvaluationRecorder::start();
 
@@ -550,12 +566,10 @@ impl AuthzEngine {
         };
         recorder.finish_phase("request");
 
-        let candidate_selection = candidates::select_candidate_policy_set(
-            policy_set,
-            &principal_uid,
-            &action_uid,
-            &resource_uid,
-        );
+        let candidate_selection =
+            policies
+                .candidate_index
+                .select(&principal_uid, &action_uid, &resource_uid);
         crate::metrics::record_cedar_policy_candidate_counts(
             candidate_selection.counts.full,
             candidate_selection.counts.candidate,
@@ -566,7 +580,7 @@ impl AuthzEngine {
         let effective_policy_set = candidate_selection
             .policy_set
             .as_ref()
-            .unwrap_or(policy_set);
+            .unwrap_or(&policies.policy_set);
         let response: CedarResponse =
             self.authorizer
                 .is_authorized(&request, effective_policy_set, &entities);

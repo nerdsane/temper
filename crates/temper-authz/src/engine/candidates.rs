@@ -1,3 +1,5 @@
+use std::collections::BTreeMap;
+
 use cedar_policy::{
     ActionConstraint, EntityTypeName, EntityUid, Policy, PolicySet, PrincipalConstraint,
     ResourceConstraint,
@@ -33,6 +35,127 @@ pub(super) struct CandidatePolicySelection {
     pub(super) counts: CandidatePolicyCounts,
 }
 
+#[derive(Debug, Clone)]
+pub(super) struct CandidatePolicyIndex {
+    full_count: usize,
+    policies: Vec<Policy>,
+    state: CandidatePolicyIndexState,
+}
+
+#[derive(Debug, Clone)]
+enum CandidatePolicyIndexState {
+    Indexed(CandidatePolicyBuckets),
+    Fallback,
+}
+
+#[derive(Debug, Clone, Default)]
+struct CandidatePolicyBuckets {
+    principal_any: Vec<usize>,
+    principal_by_type: BTreeMap<String, Vec<usize>>,
+    principal_by_uid: BTreeMap<String, Vec<usize>>,
+    action_any: Vec<usize>,
+    action_by_uid: BTreeMap<String, Vec<usize>>,
+    resource_any: Vec<usize>,
+    resource_by_type: BTreeMap<String, Vec<usize>>,
+    resource_by_uid: BTreeMap<String, Vec<usize>>,
+}
+
+impl CandidatePolicyIndex {
+    pub(super) fn new(policy_set: &PolicySet) -> Self {
+        let mut policies = Vec::new();
+        let mut buckets = CandidatePolicyBuckets::default();
+        let mut fallback = false;
+
+        for (idx, policy) in policy_set.policies().enumerate() {
+            policies.push(policy.clone());
+
+            if !policy.is_static() {
+                fallback = true;
+                continue;
+            }
+
+            index_principal_constraint(&mut buckets, idx, policy.principal_constraint());
+            index_action_constraint(&mut buckets, idx, policy.action_constraint());
+            index_resource_constraint(&mut buckets, idx, policy.resource_constraint());
+        }
+
+        let state = if fallback {
+            CandidatePolicyIndexState::Fallback
+        } else {
+            CandidatePolicyIndexState::Indexed(buckets)
+        };
+        Self {
+            full_count: policies.len(),
+            policies,
+            state,
+        }
+    }
+
+    pub(super) fn select(
+        &self,
+        principal_uid: &EntityUid,
+        action_uid: &EntityUid,
+        resource_uid: &EntityUid,
+    ) -> CandidatePolicySelection {
+        if self.full_count == 0 {
+            return use_full_policy_set(self.full_count);
+        }
+
+        let CandidatePolicyIndexState::Indexed(buckets) = &self.state else {
+            return fallback_policy_set(self.full_count, self.full_count);
+        };
+
+        let principal_candidates = union_sorted_buckets([
+            Some(&buckets.principal_any),
+            buckets
+                .principal_by_type
+                .get(&entity_type_key(principal_uid.type_name())),
+            buckets.principal_by_uid.get(&entity_uid_key(principal_uid)),
+        ]);
+        let action_candidates = union_sorted_buckets([
+            Some(&buckets.action_any),
+            buckets.action_by_uid.get(&entity_uid_key(action_uid)),
+            None,
+        ]);
+        let resource_candidates = union_sorted_buckets([
+            Some(&buckets.resource_any),
+            buckets
+                .resource_by_type
+                .get(&entity_type_key(resource_uid.type_name())),
+            buckets.resource_by_uid.get(&entity_uid_key(resource_uid)),
+        ]);
+
+        let candidate_indices = intersect_dimensions(vec![
+            principal_candidates,
+            action_candidates,
+            resource_candidates,
+        ]);
+        let candidate_count = candidate_indices.len();
+
+        if candidate_count == self.full_count {
+            return use_full_policy_set(self.full_count);
+        }
+
+        let candidates: Vec<Policy> = candidate_indices
+            .iter()
+            .map(|idx| self.policies[*idx].clone())
+            .collect();
+
+        match PolicySet::from_policies(candidates) {
+            Ok(filtered) => CandidatePolicySelection {
+                policy_set: Some(filtered),
+                counts: CandidatePolicyCounts {
+                    full: self.full_count,
+                    candidate: candidate_count,
+                    outcome: CandidateSelectionOutcome::Filtered,
+                },
+            },
+            Err(_) => fallback_policy_set(self.full_count, candidate_count),
+        }
+    }
+}
+
+#[cfg(test)]
 pub(super) fn select_candidate_policy_set(
     policy_set: &PolicySet,
     principal_uid: &EntityUid,
@@ -97,6 +220,7 @@ fn fallback_policy_set(full_count: usize, candidate_count: usize) -> CandidatePo
     }
 }
 
+#[cfg(test)]
 fn policy_may_match_request(
     policy: &Policy,
     principal_uid: &EntityUid,
@@ -108,6 +232,7 @@ fn policy_may_match_request(
         && resource_constraint_may_match(policy.resource_constraint(), resource_uid)
 }
 
+#[cfg(test)]
 fn principal_constraint_may_match(
     constraint: PrincipalConstraint,
     principal_uid: &EntityUid,
@@ -125,6 +250,7 @@ fn principal_constraint_may_match(
     }
 }
 
+#[cfg(test)]
 fn action_constraint_may_match(constraint: ActionConstraint, action_uid: &EntityUid) -> bool {
     match constraint {
         ActionConstraint::Any => true,
@@ -133,6 +259,7 @@ fn action_constraint_may_match(constraint: ActionConstraint, action_uid: &Entity
     }
 }
 
+#[cfg(test)]
 fn resource_constraint_may_match(constraint: ResourceConstraint, resource_uid: &EntityUid) -> bool {
     match constraint {
         ResourceConstraint::Any => true,
@@ -145,216 +272,161 @@ fn resource_constraint_may_match(constraint: ResourceConstraint, resource_uid: &
     }
 }
 
+#[cfg(test)]
 fn entity_type_matches(expected_type: &EntityTypeName, uid: &EntityUid) -> bool {
     uid.type_name() == expected_type
 }
 
-#[cfg(test)]
-mod tests {
-    use std::collections::{HashMap, HashSet};
-    use std::str::FromStr;
-
-    use cedar_policy::{Authorizer, Context, Decision, Entities, Entity, Request};
-
-    use super::*;
-
-    fn uid(value: &str) -> EntityUid {
-        EntityUid::from_str(value).expect("test UID should parse")
-    }
-
-    fn policy_set(source: &str) -> PolicySet {
-        PolicySet::from_str(source).expect("test policy should parse")
-    }
-
-    fn decision_and_reasons(
-        policy_set: &PolicySet,
-        principal_uid: &EntityUid,
-        action_uid: &EntityUid,
-        resource_uid: &EntityUid,
-    ) -> (Decision, Vec<String>) {
-        let principal = Entity::new(principal_uid.clone(), HashMap::new(), HashSet::new())
-            .expect("principal entity should build");
-        let resource = Entity::new(resource_uid.clone(), HashMap::new(), HashSet::new())
-            .expect("resource entity should build");
-        let entities =
-            Entities::from_entities([principal, resource], None).expect("entities should build");
-        let request = Request::new(
-            principal_uid.clone(),
-            action_uid.clone(),
-            resource_uid.clone(),
-            Context::empty(),
-            None,
-        )
-        .expect("request should build");
-        let response = Authorizer::new().is_authorized(&request, policy_set, &entities);
-        let reasons = response
-            .diagnostics()
-            .reason()
-            .map(|id| id.to_string())
-            .collect();
-        (response.decision(), reasons)
-    }
-
-    fn filtered_policy_set(
-        policy_set: &PolicySet,
-        principal_uid: &EntityUid,
-        action_uid: &EntityUid,
-        resource_uid: &EntityUid,
-    ) -> (PolicySet, CandidatePolicyCounts) {
-        let selection =
-            select_candidate_policy_set(policy_set, principal_uid, action_uid, resource_uid);
-        (
-            selection.policy_set.unwrap_or_else(|| policy_set.clone()),
-            selection.counts,
-        )
-    }
-
-    #[test]
-    fn filters_impossible_scopes_without_changing_allow_diagnostics() {
-        let policies = policy_set(
-            r#"
-            @id("permit-doc-read")
-            permit(principal is Customer, action == Action::"read", resource is Doc);
-
-            @id("irrelevant-action")
-            permit(principal is Customer, action == Action::"write", resource is Doc);
-
-            @id("irrelevant-principal")
-            permit(principal is Agent, action == Action::"read", resource is Doc);
-
-            @id("irrelevant-resource")
-            permit(principal is Customer, action == Action::"read", resource is Issue);
-
-            @id("irrelevant-resource-id")
-            forbid(principal is Customer, action == Action::"read", resource == Doc::"blocked");
-            "#,
-        );
-        let principal = uid(r#"Customer::"alice""#);
-        let action = uid(r#"Action::"read""#);
-        let resource = uid(r#"Doc::"doc-1""#);
-
-        let (filtered, counts) = filtered_policy_set(&policies, &principal, &action, &resource);
-
-        assert_eq!(counts.full, 5);
-        assert_eq!(counts.candidate, 1);
-        assert_eq!(counts.outcome, CandidateSelectionOutcome::Filtered);
-        assert_eq!(
-            decision_and_reasons(&policies, &principal, &action, &resource),
-            decision_and_reasons(&filtered, &principal, &action, &resource)
-        );
-    }
-
-    #[test]
-    fn preserves_matching_forbid_deny_override() {
-        let policies = policy_set(
-            r#"
-            @id("permit-doc-read")
-            permit(principal is Customer, action == Action::"read", resource is Doc);
-
-            @id("forbid-blocked-doc")
-            forbid(principal is Customer, action == Action::"read", resource == Doc::"blocked");
-
-            @id("irrelevant-resource")
-            permit(principal is Customer, action == Action::"read", resource is Issue);
-            "#,
-        );
-        let principal = uid(r#"Customer::"alice""#);
-        let action = uid(r#"Action::"read""#);
-        let resource = uid(r#"Doc::"blocked""#);
-
-        let (filtered, counts) = filtered_policy_set(&policies, &principal, &action, &resource);
-        let full_result = decision_and_reasons(&policies, &principal, &action, &resource);
-        let filtered_result = decision_and_reasons(&filtered, &principal, &action, &resource);
-
-        assert_eq!(counts.full, 3);
-        assert_eq!(counts.candidate, 2);
-        assert_eq!(full_result, filtered_result);
-        assert_eq!(filtered_result.0, Decision::Deny);
-        assert!(!filtered_result.1.is_empty());
-    }
-
-    #[test]
-    fn empty_candidate_set_still_denies_without_reasons() {
-        let policies = policy_set(
-            r#"
-            @id("irrelevant-action")
-            permit(principal is Customer, action == Action::"write", resource is Doc);
-
-            @id("irrelevant-resource")
-            permit(principal is Customer, action == Action::"read", resource is Issue);
-            "#,
-        );
-        let principal = uid(r#"Customer::"alice""#);
-        let action = uid(r#"Action::"read""#);
-        let resource = uid(r#"Doc::"doc-1""#);
-
-        let (filtered, counts) = filtered_policy_set(&policies, &principal, &action, &resource);
-
-        assert_eq!(counts.full, 2);
-        assert_eq!(counts.candidate, 0);
-        assert_eq!(
-            decision_and_reasons(&policies, &principal, &action, &resource),
-            decision_and_reasons(&filtered, &principal, &action, &resource)
-        );
-        assert_eq!(
-            decision_and_reasons(&filtered, &principal, &action, &resource),
-            (Decision::Deny, Vec::new())
-        );
-    }
-
-    #[test]
-    fn broad_forbids_remain_candidates() {
-        let policies = policy_set(
-            r#"
-            @id("permit-doc-read")
-            permit(principal is Customer, action == Action::"read", resource is Doc);
-
-            @id("broad-forbid")
-            forbid(principal, action, resource);
-
-            @id("irrelevant-action")
-            permit(principal is Customer, action == Action::"write", resource is Doc);
-            "#,
-        );
-        let principal = uid(r#"Customer::"alice""#);
-        let action = uid(r#"Action::"read""#);
-        let resource = uid(r#"Doc::"doc-1""#);
-
-        let (filtered, counts) = filtered_policy_set(&policies, &principal, &action, &resource);
-        let filtered_result = decision_and_reasons(&filtered, &principal, &action, &resource);
-
-        assert_eq!(counts.full, 3);
-        assert_eq!(counts.candidate, 2);
-        assert_eq!(
-            decision_and_reasons(&policies, &principal, &action, &resource),
-            filtered_result
-        );
-        assert_eq!(filtered_result.0, Decision::Deny);
-        assert!(!filtered_result.1.is_empty());
-    }
-
-    #[test]
-    fn hierarchy_constraints_are_included_conservatively() {
-        let policies = policy_set(
-            r#"
-            @id("principal-hierarchy")
-            permit(principal in Group::"operators", action == Action::"read", resource is Doc);
-
-            @id("resource-hierarchy")
-            permit(principal is Customer, action == Action::"read", resource in Folder::"root");
-
-            @id("irrelevant-resource")
-            permit(principal is Customer, action == Action::"read", resource is Issue);
-            "#,
-        );
-        let principal = uid(r#"Customer::"alice""#);
-        let action = uid(r#"Action::"read""#);
-        let resource = uid(r#"Doc::"doc-1""#);
-
-        let (_, counts) = filtered_policy_set(&policies, &principal, &action, &resource);
-
-        assert_eq!(counts.full, 3);
-        assert_eq!(counts.candidate, 2);
-        assert_eq!(counts.outcome, CandidateSelectionOutcome::Filtered);
+fn index_principal_constraint(
+    buckets: &mut CandidatePolicyBuckets,
+    idx: usize,
+    constraint: PrincipalConstraint,
+) {
+    match constraint {
+        PrincipalConstraint::Any | PrincipalConstraint::In(_) => {
+            push_index(&mut buckets.principal_any, idx);
+        }
+        PrincipalConstraint::Eq(expected) => {
+            push_index(
+                buckets
+                    .principal_by_uid
+                    .entry(entity_uid_key(&expected))
+                    .or_default(),
+                idx,
+            );
+        }
+        PrincipalConstraint::Is(expected_type) | PrincipalConstraint::IsIn(expected_type, _) => {
+            push_index(
+                buckets
+                    .principal_by_type
+                    .entry(entity_type_key(&expected_type))
+                    .or_default(),
+                idx,
+            );
+        }
     }
 }
+
+fn index_action_constraint(
+    buckets: &mut CandidatePolicyBuckets,
+    idx: usize,
+    constraint: ActionConstraint,
+) {
+    match constraint {
+        ActionConstraint::Any => push_index(&mut buckets.action_any, idx),
+        ActionConstraint::Eq(expected) => {
+            push_index(
+                buckets
+                    .action_by_uid
+                    .entry(entity_uid_key(&expected))
+                    .or_default(),
+                idx,
+            );
+        }
+        ActionConstraint::In(expected) => {
+            for action_uid in expected {
+                push_index(
+                    buckets
+                        .action_by_uid
+                        .entry(entity_uid_key(&action_uid))
+                        .or_default(),
+                    idx,
+                );
+            }
+        }
+    }
+}
+
+fn index_resource_constraint(
+    buckets: &mut CandidatePolicyBuckets,
+    idx: usize,
+    constraint: ResourceConstraint,
+) {
+    match constraint {
+        ResourceConstraint::Any | ResourceConstraint::In(_) => {
+            push_index(&mut buckets.resource_any, idx);
+        }
+        ResourceConstraint::Eq(expected) => {
+            push_index(
+                buckets
+                    .resource_by_uid
+                    .entry(entity_uid_key(&expected))
+                    .or_default(),
+                idx,
+            );
+        }
+        ResourceConstraint::Is(expected_type) | ResourceConstraint::IsIn(expected_type, _) => {
+            push_index(
+                buckets
+                    .resource_by_type
+                    .entry(entity_type_key(&expected_type))
+                    .or_default(),
+                idx,
+            );
+        }
+    }
+}
+
+fn push_index(bucket: &mut Vec<usize>, idx: usize) {
+    if bucket.last().copied() != Some(idx) {
+        bucket.push(idx);
+    }
+}
+
+fn entity_uid_key(uid: &EntityUid) -> String {
+    uid.to_string()
+}
+
+fn entity_type_key(entity_type: &EntityTypeName) -> String {
+    entity_type.to_string()
+}
+
+fn union_sorted_buckets<const N: usize>(buckets: [Option<&Vec<usize>>; N]) -> Vec<usize> {
+    let mut result = Vec::new();
+    for bucket in buckets.into_iter().flatten() {
+        result.extend_from_slice(bucket);
+    }
+    result.sort_unstable();
+    result.dedup();
+    result
+}
+
+fn intersect_dimensions(mut dimensions: Vec<Vec<usize>>) -> Vec<usize> {
+    if dimensions.iter().any(Vec::is_empty) {
+        return Vec::new();
+    }
+
+    dimensions.sort_by_key(Vec::len);
+    let mut result = dimensions.remove(0);
+    for dimension in dimensions {
+        result = intersect_sorted(&result, &dimension);
+        if result.is_empty() {
+            break;
+        }
+    }
+    result
+}
+
+fn intersect_sorted(left: &[usize], right: &[usize]) -> Vec<usize> {
+    let mut result = Vec::new();
+    let mut left_idx = 0usize;
+    let mut right_idx = 0usize;
+
+    while left_idx < left.len() && right_idx < right.len() {
+        match left[left_idx].cmp(&right[right_idx]) {
+            std::cmp::Ordering::Less => left_idx += 1,
+            std::cmp::Ordering::Greater => right_idx += 1,
+            std::cmp::Ordering::Equal => {
+                result.push(left[left_idx]);
+                left_idx += 1;
+                right_idx += 1;
+            }
+        }
+    }
+
+    result
+}
+
+#[cfg(test)]
+#[path = "candidates_tests.rs"]
+mod tests;
