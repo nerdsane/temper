@@ -11,6 +11,7 @@ struct PostgresMetrics {
     transaction_duration_ms: Histogram<f64>,
     operation_outcomes_total: Counter<u64>,
     projection_index_fields: Histogram<u64>,
+    projection_index_reconciliations_total: Counter<u64>,
     projection_skipped_index_fields_total: Counter<u64>,
 }
 
@@ -51,6 +52,12 @@ fn metrics() -> &'static PostgresMetrics {
                 .u64_histogram("temper_postgres_projection_index_fields")
                 .with_description(
                     "Number of scalar fields indexed into entity_field_index per projection upsert.",
+                )
+                .build(),
+            projection_index_reconciliations_total: meter
+                .u64_counter("temper_postgres_projection_index_reconciliations_total")
+                .with_description(
+                    "Projection field-index reconciliation decisions by low-cardinality path.",
                 )
                 .build(),
             projection_skipped_index_fields_total: meter
@@ -123,6 +130,16 @@ pub(crate) fn record_postgres_projection_index_fields(indexed_fields: u64, skipp
     }
 }
 
+pub(crate) fn record_postgres_projection_index_reconciliation(path: &'static str) {
+    metrics().projection_index_reconciliations_total.add(
+        1,
+        &[
+            KeyValue::new("operation", "query_projection_upsert"),
+            KeyValue::new("path", path),
+        ],
+    );
+}
+
 pub(crate) struct PostgresTransactionTimer {
     operation: &'static str,
     started: Instant,
@@ -167,6 +184,7 @@ mod tests {
         record_postgres_transaction_begin_duration(Duration::from_millis(1), "event_append", "ok");
         record_postgres_transaction_commit_duration(Duration::from_millis(3), "event_append", "ok");
         record_postgres_projection_index_fields(4, 1);
+        record_postgres_projection_index_reconciliation("skipped_unchanged");
 
         let mut timer = PostgresTransactionTimer::start("event_append");
         timer.set_outcome("ok");

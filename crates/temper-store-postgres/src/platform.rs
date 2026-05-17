@@ -4,14 +4,14 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::time::{Duration, Instant};
 
 use sha2::{Digest, Sha256};
-use sqlx::{Acquire, Row};
+use sqlx::{Acquire, Postgres, Row, Transaction};
 use temper_runtime::persistence::PersistenceError;
 
 use crate::PostgresEventStore;
 use crate::metrics::{
     PostgresTransactionTimer, record_postgres_pool_acquire_duration,
-    record_postgres_projection_index_fields, record_postgres_transaction_begin_duration,
-    record_postgres_transaction_commit_duration,
+    record_postgres_projection_index_fields, record_postgres_projection_index_reconciliation,
+    record_postgres_transaction_begin_duration, record_postgres_transaction_commit_duration,
 };
 
 const DISTINCT_RESOURCE_IDS_BUDGET: usize = 100;
@@ -28,6 +28,44 @@ const QUERY_PROJECTION_REMOVE_OPERATION: &str = "query_projection_remove";
 
 type ScalarFieldIndex = BTreeMap<String, String>;
 type ExistingFieldIndex = BTreeMap<String, (Option<String>, Option<String>)>;
+type CatalogProjectionFingerprint = (String, String);
+
+struct QueryProjectionCatalogUpdate<'a> {
+    tenant: &'a str,
+    entity_type: &'a str,
+    entity_id: &'a str,
+    status: &'a str,
+    fields: &'a serde_json::Value,
+    sequence_nr: u64,
+    projection_hash: &'a str,
+}
+
+async fn update_query_projection_catalog_row(
+    tx: &mut Transaction<'_, Postgres>,
+    update: QueryProjectionCatalogUpdate<'_>,
+) -> Result<(), PersistenceError> {
+    crate::dbm::postgres_query!(
+        "UPDATE entity_catalog \
+         SET status = $4, \
+             fields = CASE WHEN projection_hash IS DISTINCT FROM $7 THEN $5 ELSE fields END, \
+             sequence_nr = $6, \
+             projection_version = 2, \
+             projection_hash = $7, \
+             updated_at = now() \
+         WHERE tenant = $1 AND entity_type = $2 AND entity_id = $3",
+    )
+    .bind(update.tenant)
+    .bind(update.entity_type)
+    .bind(update.entity_id)
+    .bind(update.status)
+    .bind(update.fields)
+    .bind(update.sequence_nr as i64)
+    .bind(update.projection_hash)
+    .execute(&mut **tx)
+    .await
+    .map_err(storage_error)?;
+    Ok(())
+}
 
 #[derive(Clone, Copy, Debug)]
 pub struct PostgresSpecVerificationUpdate<'a> {
@@ -386,6 +424,7 @@ impl PostgresEventStore {
         sequence_nr: u64,
     ) -> Result<(), PersistenceError> {
         let projection_hash = json_hash(fields);
+        let (new_index, indexed_fields, skipped_fields) = scalar_index_fields(fields);
         let mut transaction_timer =
             PostgresTransactionTimer::start(QUERY_PROJECTION_UPSERT_OPERATION);
         let acquire_started = Instant::now();
@@ -426,93 +465,183 @@ impl PostgresEventStore {
                 return Err(storage_error(e));
             }
         };
-        // The catalog row is the per-entity projection serialization point. Doing
-        // this before diffing field-index rows also serializes first writers when
-        // no catalog row existed at transaction start.
-        crate::dbm::postgres_query!(
-            "INSERT INTO entity_catalog \
-             (tenant, entity_type, entity_id, status, fields, sequence_nr, projection_version, projection_hash, updated_at) \
-             VALUES ($1, $2, $3, $4, $5, $6, 2, $7, now()) \
-             ON CONFLICT (tenant, entity_type, entity_id) DO UPDATE SET \
-                 status = EXCLUDED.status, fields = EXCLUDED.fields, sequence_nr = EXCLUDED.sequence_nr, \
-                 projection_version = EXCLUDED.projection_version, projection_hash = EXCLUDED.projection_hash, updated_at = now()",
-        )
-        .bind(tenant)
-        .bind(entity_type)
-        .bind(entity_id)
-        .bind(status)
-        .bind(fields)
-        .bind(sequence_nr as i64)
-        .bind(projection_hash)
-        .execute(&mut *tx)
-        .await
-        .map_err(storage_error)?;
 
-        let existing_index_rows: Vec<(String, Option<String>, Option<String>)> =
+        let previous_catalog: Option<CatalogProjectionFingerprint> =
             crate::dbm::postgres_query_as!(
-                "SELECT field_name, field_value, status \
-                 FROM entity_field_index \
+                "SELECT status, projection_hash \
+                 FROM entity_catalog \
                  WHERE tenant = $1 AND entity_type = $2 AND entity_id = $3 \
                  FOR UPDATE",
             )
             .bind(tenant)
             .bind(entity_type)
             .bind(entity_id)
-            .fetch_all(&mut *tx)
+            .fetch_optional(&mut *tx)
             .await
             .map_err(storage_error)?;
-        let existing_index = existing_index_rows
-            .into_iter()
-            .map(|(field_name, field_value, field_status)| {
-                (field_name, (field_value, field_status))
-            })
-            .collect::<ExistingFieldIndex>();
 
-        let (new_index, indexed_fields, skipped_fields) = scalar_index_fields(fields);
+        let previous_catalog = if previous_catalog.is_some() {
+            update_query_projection_catalog_row(
+                &mut tx,
+                QueryProjectionCatalogUpdate {
+                    tenant,
+                    entity_type,
+                    entity_id,
+                    status,
+                    fields,
+                    sequence_nr,
+                    projection_hash: projection_hash.as_str(),
+                },
+            )
+            .await?;
+            previous_catalog
+        } else {
+            let inserted: Option<i32> = crate::dbm::postgres_query_scalar!(
+                "INSERT INTO entity_catalog \
+                 (tenant, entity_type, entity_id, status, fields, sequence_nr, projection_version, projection_hash, updated_at) \
+                 VALUES ($1, $2, $3, $4, $5, $6, 2, $7, now()) \
+                 ON CONFLICT (tenant, entity_type, entity_id) DO NOTHING \
+                 RETURNING 1",
+            )
+            .bind(tenant)
+            .bind(entity_type)
+            .bind(entity_id)
+            .bind(status)
+            .bind(fields)
+            .bind(sequence_nr as i64)
+            .bind(projection_hash.as_str())
+            .fetch_optional(&mut *tx)
+            .await
+            .map_err(storage_error)?;
 
-        for (field_name, (old_value, _old_status)) in &existing_index {
-            let should_delete = match (old_value.as_ref(), new_index.get(field_name)) {
-                (Some(old), Some(new)) => old != new,
-                _ => true,
-            };
-            if should_delete {
+            if inserted.is_some() {
+                None
+            } else {
+                let raced_catalog: Option<CatalogProjectionFingerprint> =
+                    crate::dbm::postgres_query_as!(
+                        "SELECT status, projection_hash \
+                         FROM entity_catalog \
+                         WHERE tenant = $1 AND entity_type = $2 AND entity_id = $3 \
+                         FOR UPDATE",
+                    )
+                    .bind(tenant)
+                    .bind(entity_type)
+                    .bind(entity_id)
+                    .fetch_optional(&mut *tx)
+                    .await
+                    .map_err(storage_error)?;
+                update_query_projection_catalog_row(
+                    &mut tx,
+                    QueryProjectionCatalogUpdate {
+                        tenant,
+                        entity_type,
+                        entity_id,
+                        status,
+                        fields,
+                        sequence_nr,
+                        projection_hash: projection_hash.as_str(),
+                    },
+                )
+                .await?;
+                raced_catalog
+            }
+        };
+
+        let should_reconcile_index =
+            previous_catalog
+                .as_ref()
+                .is_none_or(|(old_status, old_hash)| {
+                    old_status.as_str() != status || old_hash.as_str() != projection_hash.as_str()
+                });
+        let reconciliation_path = if should_reconcile_index {
+            if previous_catalog.is_some() {
+                "diff"
+            } else {
+                "insert"
+            }
+        } else {
+            "skipped_unchanged"
+        };
+
+        if should_reconcile_index {
+            let existing_index = if previous_catalog.is_some() {
+                let existing_index_rows: Vec<(String, Option<String>, Option<String>)> =
+                    crate::dbm::postgres_query_as!(
+                        "SELECT field_name, field_value, status \
+                         FROM entity_field_index \
+                         WHERE tenant = $1 AND entity_type = $2 AND entity_id = $3 \
+                         FOR UPDATE",
+                    )
+                    .bind(tenant)
+                    .bind(entity_type)
+                    .bind(entity_id)
+                    .fetch_all(&mut *tx)
+                    .await
+                    .map_err(storage_error)?;
+                existing_index_rows
+                    .into_iter()
+                    .map(|(field_name, field_value, field_status)| {
+                        (field_name, (field_value, field_status))
+                    })
+                    .collect::<ExistingFieldIndex>()
+            } else {
                 crate::dbm::postgres_query!(
                     "DELETE FROM entity_field_index \
-                     WHERE tenant = $1 AND entity_type = $2 AND entity_id = $3 AND field_name = $4",
+                     WHERE tenant = $1 AND entity_type = $2 AND entity_id = $3",
                 )
                 .bind(tenant)
                 .bind(entity_type)
                 .bind(entity_id)
-                .bind(field_name)
                 .execute(&mut *tx)
                 .await
                 .map_err(storage_error)?;
-            }
-        }
+                ExistingFieldIndex::new()
+            };
 
-        for (field_name, field_value) in &new_index {
-            let should_upsert = !matches!(
-                existing_index.get(field_name),
-                Some((Some(old_value), Some(old_status)))
-                    if old_value == field_value && old_status.as_str() == status
-            );
-            if should_upsert {
-                crate::dbm::postgres_query!(
-                    "INSERT INTO entity_field_index \
-                     (tenant, entity_type, entity_id, field_name, field_value, status) \
-                     VALUES ($1, $2, $3, $4, $5, $6) \
-                     ON CONFLICT (tenant, entity_type, entity_id, field_name) DO UPDATE SET \
-                         field_value = EXCLUDED.field_value, status = EXCLUDED.status",
-                )
-                .bind(tenant)
-                .bind(entity_type)
-                .bind(entity_id)
-                .bind(field_name)
-                .bind(field_value)
-                .bind(status)
-                .execute(&mut *tx)
-                .await
-                .map_err(storage_error)?;
+            for (field_name, (old_value, _old_status)) in &existing_index {
+                let should_delete = match (old_value.as_ref(), new_index.get(field_name)) {
+                    (Some(old), Some(new)) => old != new,
+                    _ => true,
+                };
+                if should_delete {
+                    crate::dbm::postgres_query!(
+                        "DELETE FROM entity_field_index \
+                         WHERE tenant = $1 AND entity_type = $2 AND entity_id = $3 AND field_name = $4",
+                    )
+                    .bind(tenant)
+                    .bind(entity_type)
+                    .bind(entity_id)
+                    .bind(field_name)
+                    .execute(&mut *tx)
+                    .await
+                    .map_err(storage_error)?;
+                }
+            }
+
+            for (field_name, field_value) in &new_index {
+                let should_upsert = !matches!(
+                    existing_index.get(field_name),
+                    Some((Some(old_value), Some(old_status)))
+                        if old_value == field_value && old_status.as_str() == status
+                );
+                if should_upsert {
+                    crate::dbm::postgres_query!(
+                        "INSERT INTO entity_field_index \
+                         (tenant, entity_type, entity_id, field_name, field_value, status) \
+                         VALUES ($1, $2, $3, $4, $5, $6) \
+                         ON CONFLICT (tenant, entity_type, entity_id, field_name) DO UPDATE SET \
+                             field_value = EXCLUDED.field_value, status = EXCLUDED.status",
+                    )
+                    .bind(tenant)
+                    .bind(entity_type)
+                    .bind(entity_id)
+                    .bind(field_name)
+                    .bind(field_value)
+                    .bind(status)
+                    .execute(&mut *tx)
+                    .await
+                    .map_err(storage_error)?;
+                }
             }
         }
 
@@ -531,6 +660,7 @@ impl PostgresEventStore {
             "ok",
         );
         record_postgres_projection_index_fields(indexed_fields, skipped_fields);
+        record_postgres_projection_index_reconciliation(reconciliation_path);
         transaction_timer.set_outcome("ok");
         Ok(())
     }
