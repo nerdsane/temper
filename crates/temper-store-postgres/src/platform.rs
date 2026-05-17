@@ -27,7 +27,6 @@ const QUERY_PROJECTION_UPSERT_OPERATION: &str = "query_projection_upsert";
 const QUERY_PROJECTION_REMOVE_OPERATION: &str = "query_projection_remove";
 
 type ScalarFieldIndex = BTreeMap<String, String>;
-type ExistingFieldIndex = BTreeMap<String, (Option<String>, Option<String>)>;
 type CatalogProjectionFingerprint = (String, String);
 
 struct QueryProjectionCatalogUpdate<'a> {
@@ -64,6 +63,70 @@ async fn update_query_projection_catalog_row(
     .execute(&mut **tx)
     .await
     .map_err(storage_error)?;
+    Ok(())
+}
+
+async fn reconcile_query_projection_field_index(
+    tx: &mut Transaction<'_, Postgres>,
+    tenant: &str,
+    entity_type: &str,
+    entity_id: &str,
+    status: &str,
+    new_index: &ScalarFieldIndex,
+) -> Result<(), PersistenceError> {
+    let mut field_names = Vec::with_capacity(new_index.len());
+    let mut field_values = Vec::with_capacity(new_index.len());
+    for (field_name, field_value) in new_index {
+        field_names.push(field_name.clone());
+        field_values.push(field_value.clone());
+    }
+
+    crate::dbm::postgres_query!(
+        "DELETE FROM entity_field_index e \
+         WHERE e.tenant = $1 \
+           AND e.entity_type = $2 \
+           AND e.entity_id = $3 \
+           AND NOT EXISTS ( \
+               SELECT 1 \
+               FROM unnest($4::text[], $5::text[]) AS incoming(field_name, field_value) \
+               WHERE incoming.field_name = e.field_name \
+                 AND incoming.field_value IS NOT DISTINCT FROM e.field_value \
+                 AND $6 IS NOT DISTINCT FROM e.status \
+           )",
+    )
+    .bind(tenant)
+    .bind(entity_type)
+    .bind(entity_id)
+    .bind(&field_names)
+    .bind(&field_values)
+    .bind(status)
+    .execute(&mut **tx)
+    .await
+    .map_err(storage_error)?;
+
+    if !field_names.is_empty() {
+        crate::dbm::postgres_query!(
+            "INSERT INTO entity_field_index \
+             (tenant, entity_type, entity_id, field_name, field_value, status) \
+             SELECT $1, $2, $3, incoming.field_name, incoming.field_value, $6 \
+             FROM unnest($4::text[], $5::text[]) AS incoming(field_name, field_value) \
+             ON CONFLICT (tenant, entity_type, entity_id, field_name) DO UPDATE SET \
+                 field_value = EXCLUDED.field_value, \
+                 status = EXCLUDED.status \
+             WHERE entity_field_index.field_value IS DISTINCT FROM EXCLUDED.field_value \
+                OR entity_field_index.status IS DISTINCT FROM EXCLUDED.status",
+        )
+        .bind(tenant)
+        .bind(entity_type)
+        .bind(entity_id)
+        .bind(&field_names)
+        .bind(&field_values)
+        .bind(status)
+        .execute(&mut **tx)
+        .await
+        .map_err(storage_error)?;
+    }
+
     Ok(())
 }
 
@@ -564,85 +627,15 @@ impl PostgresEventStore {
         };
 
         if should_reconcile_index {
-            let existing_index = if previous_catalog.is_some() {
-                let existing_index_rows: Vec<(String, Option<String>, Option<String>)> =
-                    crate::dbm::postgres_query_as!(
-                        "SELECT field_name, field_value, status \
-                         FROM entity_field_index \
-                         WHERE tenant = $1 AND entity_type = $2 AND entity_id = $3 \
-                         FOR UPDATE",
-                    )
-                    .bind(tenant)
-                    .bind(entity_type)
-                    .bind(entity_id)
-                    .fetch_all(&mut *tx)
-                    .await
-                    .map_err(storage_error)?;
-                existing_index_rows
-                    .into_iter()
-                    .map(|(field_name, field_value, field_status)| {
-                        (field_name, (field_value, field_status))
-                    })
-                    .collect::<ExistingFieldIndex>()
-            } else {
-                crate::dbm::postgres_query!(
-                    "DELETE FROM entity_field_index \
-                     WHERE tenant = $1 AND entity_type = $2 AND entity_id = $3",
-                )
-                .bind(tenant)
-                .bind(entity_type)
-                .bind(entity_id)
-                .execute(&mut *tx)
-                .await
-                .map_err(storage_error)?;
-                ExistingFieldIndex::new()
-            };
-
-            for (field_name, (old_value, _old_status)) in &existing_index {
-                let should_delete = match (old_value.as_ref(), new_index.get(field_name)) {
-                    (Some(old), Some(new)) => old != new,
-                    _ => true,
-                };
-                if should_delete {
-                    crate::dbm::postgres_query!(
-                        "DELETE FROM entity_field_index \
-                         WHERE tenant = $1 AND entity_type = $2 AND entity_id = $3 AND field_name = $4",
-                    )
-                    .bind(tenant)
-                    .bind(entity_type)
-                    .bind(entity_id)
-                    .bind(field_name)
-                    .execute(&mut *tx)
-                    .await
-                    .map_err(storage_error)?;
-                }
-            }
-
-            for (field_name, field_value) in &new_index {
-                let should_upsert = !matches!(
-                    existing_index.get(field_name),
-                    Some((Some(old_value), Some(old_status)))
-                        if old_value == field_value && old_status.as_str() == status
-                );
-                if should_upsert {
-                    crate::dbm::postgres_query!(
-                        "INSERT INTO entity_field_index \
-                         (tenant, entity_type, entity_id, field_name, field_value, status) \
-                         VALUES ($1, $2, $3, $4, $5, $6) \
-                         ON CONFLICT (tenant, entity_type, entity_id, field_name) DO UPDATE SET \
-                             field_value = EXCLUDED.field_value, status = EXCLUDED.status",
-                    )
-                    .bind(tenant)
-                    .bind(entity_type)
-                    .bind(entity_id)
-                    .bind(field_name)
-                    .bind(field_value)
-                    .bind(status)
-                    .execute(&mut *tx)
-                    .await
-                    .map_err(storage_error)?;
-                }
-            }
+            reconcile_query_projection_field_index(
+                &mut tx,
+                tenant,
+                entity_type,
+                entity_id,
+                status,
+                &new_index,
+            )
+            .await?;
         }
 
         let commit_started = Instant::now();
