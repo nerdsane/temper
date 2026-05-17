@@ -24,7 +24,10 @@ use super::{
 use replay_inputs::{extract_trajectory_actions_from_ots, has_replay_trajectory_input};
 
 mod invocation_artifacts;
+mod local_tdata_host;
 mod replay_inputs;
+
+use local_tdata_host::LocalTDataWasmHost;
 
 /// Shared context threaded through the WASM dispatch call chain.
 ///
@@ -476,7 +479,7 @@ impl crate::state::ServerState {
         let host_invocation_context = inv_ctx.clone();
         let internal_api_key = std::env::var("TEMPER_API_KEY").ok();
         let internal_api_url = internal_api_base_url(self);
-        let inner: Arc<dyn WasmHost> = Arc::new(
+        let production_host: Arc<dyn WasmHost> = Arc::new(
             ProductionWasmHost::with_timeout(tenant_secrets, http_timeout)
                 .with_binary_http_interceptor(
                     local_blob_interceptor
@@ -495,6 +498,8 @@ impl crate::state::ServerState {
                     current_otel_trace_id(active_span).or_else(|| ctx.agent_ctx.trace_id.clone()),
                 ),
         );
+        let inner: Arc<dyn WasmHost> =
+            Arc::new(LocalTDataWasmHost::new(self.clone(), production_host));
         let host: Arc<dyn WasmHost> = Arc::new(AuthorizedWasmHost::new(inner, gate, authz_ctx));
         let max_response_bytes = integration
             .config
@@ -1056,7 +1061,9 @@ impl crate::state::ServerState {
         if let Some(interceptor) = local_blob_interceptor {
             base_host = base_host.with_binary_http_interceptor(interceptor);
         }
-        let inner: Arc<dyn WasmHost> = Arc::new(base_host);
+        let production_host: Arc<dyn WasmHost> = Arc::new(base_host);
+        let inner: Arc<dyn WasmHost> =
+            Arc::new(LocalTDataWasmHost::new(self.clone(), production_host));
         let host: Arc<dyn WasmHost> =
             Arc::new(AuthorizedWasmHost::new(inner, base_gate, authz_ctx));
         let limits = WasmResourceLimits::default();
