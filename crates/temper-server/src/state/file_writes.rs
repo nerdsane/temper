@@ -109,25 +109,21 @@ impl ServerState {
         mime_type: &str,
         agent_ctx: &crate::request_context::AgentContext,
     ) -> Result<crate::entity_actor::EntityResponse, FileStreamContentError> {
-        let file_state = self
-            .get_tenant_entity_state(tenant, "File", file_id)
-            .await
-            .map_err(|e| {
-                FileStreamContentError::State(format!(
-                    "failed to load File('{file_id}') state: {e}"
-                ))
-            })?;
         let mut hasher = Sha256::new();
         hasher.update(body);
         let content_hash = format!("sha256:{:x}", hasher.finalize());
         let blob_key = format!("temper-fs/{content_hash}");
-        self.put_content_addressed_blob(tenant, &blob_key, body, None)
-            .await
-            .map_err(|e| {
-                FileStreamContentError::BlobStore(format!(
-                    "failed to persist blob '{blob_key}': {e}"
-                ))
-            })?;
+
+        let state_read = self.get_tenant_entity_state(tenant, "File", file_id);
+        let blob_write = self.put_content_addressed_blob(tenant, &blob_key, body, None);
+        let (file_state, blob_result) = tokio::join!(state_read, blob_write);
+
+        let file_state = file_state.map_err(|e| {
+            FileStreamContentError::State(format!("failed to load File('{file_id}') state: {e}"))
+        })?;
+        blob_result.map_err(|e| {
+            FileStreamContentError::BlobStore(format!("failed to persist blob '{blob_key}': {e}"))
+        })?;
 
         let version_number = file_state
             .state
