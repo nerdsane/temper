@@ -142,12 +142,39 @@ fn reduced_sample_prefixes_keep_roughly_5_percent() {
 }
 
 #[test]
+fn background_wasm_dispatch_is_not_reduced_sampled() {
+    let sampler = NameBasedSampler {
+        inner: Sampler::AlwaysOn,
+        config: TraceSamplerConfig::default(),
+    };
+    let mut bytes = [0u8; 16];
+    bytes[8..].copy_from_slice(&99u64.to_be_bytes());
+    let trace_id = TraceId::from_bytes(bytes);
+
+    let result = sampler.should_sample(
+        None,
+        trace_id,
+        "dispatch.background_wasm_integrations",
+        &SpanKind::Internal,
+        &[],
+        &[],
+    );
+
+    assert!(
+        matches!(result.decision, SamplingDecision::RecordAndSample),
+        "background WASM dispatch must retain child module/callback spans"
+    );
+}
+
+#[test]
 fn monty_repl_boundary_is_not_reduced_sampled() {
     let sampler = NameBasedSampler {
         inner: Sampler::AlwaysOn,
         config: TraceSamplerConfig::default(),
     };
-    let trace_id = TraceId::from_bytes([0u8; 16]);
+    let mut bytes = [0u8; 16];
+    bytes[8..].copy_from_slice(&99u64.to_be_bytes());
+    let trace_id = TraceId::from_bytes(bytes);
     let result = sampler.should_sample(
         None,
         trace_id,

@@ -21,13 +21,12 @@ const DISPATCH_BACKGROUND_SAMPLE_RATE_ENV: &str = "TEMPER_TRACE_DISPATCH_BACKGRO
 pub(super) const WASM_AUXILIARY_SAMPLE_RATE_DEFAULT: u8 = 5;
 pub(super) const DISPATCH_BACKGROUND_SAMPLE_RATE_DEFAULT: u8 = 25;
 /// Span name prefixes that are sampled at a reduced rate. Do not include
-/// tool/provider guest module boundaries here: guest spans inherit parent
-/// sampling, so reducing those boundaries can sever traces operators need when
-/// following work through WASM.
-pub(super) const WASM_AUXILIARY_PREFIXES: &[&str] = &["wasm:workspace_fs", "wasm:monty_repl"];
+/// tool/provider guest module boundaries or their background dispatch parents
+/// here: guest spans inherit parent sampling, so reducing those boundaries can
+/// sever traces operators need when following work through WASM.
+pub(super) const WASM_AUXILIARY_PREFIXES: &[&str] = &["wasm:workspace_fs"];
 pub(super) const DISPATCH_BACKGROUND_PREFIXES: &[&str] = &[
     "dispatch.phase.query_projection",
-    "dispatch.background_wasm_integrations",
     "dispatch.scheduled_actions",
 ];
 
