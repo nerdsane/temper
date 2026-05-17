@@ -33,10 +33,14 @@
 
     html {
       scroll-behavior: smooth;
+      max-width: 100%;
+      overflow-x: hidden;
     }
 
     body {
       margin: 0;
+      max-width: 100%;
+      overflow-x: hidden;
       color: var(--ink);
       background:
         linear-gradient(90deg, rgba(11, 13, 18, 0.035) 1px, transparent 1px) 0 0 / 24px 24px,
@@ -441,12 +445,15 @@
     .status-log {
       display: grid;
       gap: 10px;
+      min-width: 0;
     }
 
     .log-entry {
+      min-width: 0;
       padding: 10px;
       border: 1px solid rgba(17, 19, 24, 0.34);
       background: rgba(255, 255, 255, 0.72);
+      overflow-wrap: anywhere;
     }
 
     .log-entry time {
@@ -460,7 +467,20 @@
     .panel,
     .callout,
     .source-box {
+      min-width: 0;
       padding: 16px;
+    }
+
+    .metric,
+    .diagram,
+    .task,
+    .table-wrap,
+    .grid-2 > *,
+    .grid-3 > *,
+    .metrics > *,
+    .task-board > *,
+    .progress-console > * {
+      min-width: 0;
     }
 
     .panel p,
@@ -579,7 +599,9 @@
     }
 
     .table-wrap {
+      max-width: 100%;
       overflow-x: auto;
+      contain: content;
       padding-bottom: 8px;
     }
 
@@ -610,6 +632,7 @@
       min-height: 330px;
       padding: 12px;
       overflow: auto;
+      contain: content;
       background:
         linear-gradient(180deg, rgba(247, 248, 255, 0.94), rgba(255, 255, 255, 0.84)),
         repeating-linear-gradient(90deg, rgba(11, 13, 18, 0.035), rgba(11, 13, 18, 0.035) 1px, transparent 1px, transparent 10px);
@@ -1063,24 +1086,27 @@
             live runs pass, and deployment completes.
           </p>
           <div class="progress-track" aria-label="Program progress">
-            <div class="progress-fill" style="width: 63%">63%</div>
+            <div class="progress-fill" style="width: 98%">98%</div>
           </div>
           <div class="program-facts">
-            <div class="program-fact"><strong>Phase</strong><span>The measurement and observability foundation is largely in place, merged, deployed, and producing post-deploy Datadog evidence. Temper PR <a href="https://github.com/nerdsane/temper/pull/229">#229</a> merged into <code>main</code> at <code>eafba6ab</code>; TemperPaw PR <a href="https://github.com/nerdsane/temperpaw/pull/266">#266</a> merged into <code>main</code> at <code>2b0ec6e9</code>. Railway production now runs image <code>ghcr.io/nerdsane/temperpaw:sha-2b0ec6e</code> with the merged Temper dependency pinned to <code>eafba6ab</code>. Deployment, health, APM, DBM, metrics, monitors, runtime percentile checks, and the representative production file e2e proof are green. Correction recorded on <code>2026-05-15 16:02 EDT</code>: actual latency improvement remains part of the goal and is mostly still ahead. The next phase is to use the evidence to implement and prove before/after improvements, starting with the measured file <code>$value</code> write path, Cedar/AuthZ authorizer cost, and projection write amplification.</span></div>
-            <div class="program-fact"><strong>Branches</strong><span>Merged: Temper <code>codex/latency-observability-program</code>; TemperPaw <code>codex/latency-observability-program</code>; final dashboard evidence <code>codex/latency-observability-final-report</code>; Mac mini auth checkpoint <code>codex/latency-observability-worker-auth-report</code>; auth retry checkpoint <code>codex/latency-observability-auth-retry-report</code>; auth-path checkpoint <code>codex/latency-observability-auth-path-report</code>; local-proof blocker <code>codex/latency-observability-local-proof-blocker</code>; current-report checkpoint <code>codex/latency-observability-current-report</code>; auth-expiry checkpoint <code>codex/latency-observability-auth-expiry-20260515</code>. Current local dashboard branch: <code>codex/latency-observability-auth-timeout-20260515-1324</code>.</span></div>
-            <div class="program-fact"><strong>Worktrees</strong><span>Current browser-safe report worktree <code>/Users/seshendranalla/Development/temper-worktrees/latency-observability-auth-timeout-20260515-1324</code>; production proof worktree <code>/Users/seshendranalla/Development/temperpaw-worktrees/production-observe-main-proof</code> is on TemperPaw <code>origin/main</code> at <code>2b0ec6e9</code>. Merged program worktrees remain at <code>/Users/seshendranalla/Development/temper-worktrees/latency-observability-program</code> and <code>/Users/seshendranalla/Development/temperpaw-worktrees/latency-observability-program</code>.</span></div>
-            <div class="program-fact"><strong>PRs</strong><span>Temper PR <a href="https://github.com/nerdsane/temper/pull/229">nerdsane/temper#229</a> merged after green CI; TemperPaw PR <a href="https://github.com/nerdsane/temperpaw/pull/266">nerdsane/temperpaw#266</a> merged after green CI and Docker; final evidence PR <a href="https://github.com/nerdsane/temper/pull/230">nerdsane/temper#230</a> merged after green CI as <code>0be1b768</code>; Mac mini auth checkpoint PR <a href="https://github.com/nerdsane/temper/pull/231">nerdsane/temper#231</a> merged after green CI as <code>6650ac85</code>; auth retry PR <a href="https://github.com/nerdsane/temper/pull/232">nerdsane/temper#232</a> merged after green CI as <code>36917639</code>; auth-path PR <a href="https://github.com/nerdsane/temper/pull/233">nerdsane/temper#233</a> merged after green CI as <code>b47a7c7a</code>; local-proof blocker PR <a href="https://github.com/nerdsane/temper/pull/234">nerdsane/temper#234</a> merged after green CI as <code>d3ca7b98</code>; current blocker report PR <a href="https://github.com/nerdsane/temper/pull/235">nerdsane/temper#235</a> merged after green CI as <code>b466a584</code>; second auth-timeout report PR <a href="https://github.com/nerdsane/temper/pull/236">nerdsane/temper#236</a> merged after green CI as <code>5e4652d4</code>. Report correction PR <a href="https://github.com/nerdsane/temper/pull/237">nerdsane/temper#237</a> is open with green GitHub CI and is being amended to remove the false Mac-mini-specific finish line.</span></div>
-            <div class="program-fact"><strong>Railway</strong><span>CLI authentication is confirmed for the correct account as of <code>2026-05-15 09:17 EDT</code>. Project <code>openpaw-seshendranalla</code>, environment <code>production</code>, service <code>openpaw</code>, deployment <code>a3564c57-a16f-49e9-ac5a-355dd0013f88</code>, domains <code>openpaw-production.up.railway.app</code> and <code>temperpaw.katagami.ai</code>. <code>/paw/version</code> reports <code>sha-2b0ec6e9</code> / <code>2b0ec6e9849d5eabacb480678a9bfc92fff6f1c4</code>. Current proof worktree status now resolves <code>Service: openpaw</code>; production commands still pass <code>--service openpaw</code> explicitly to avoid stale-worktree ambiguity.</span></div>
-            <div class="program-fact"><strong>Datadog tag</strong><span>Production exports <code>DD_SERVICE=temperpaw</code>; dashboards and monitors must query <code>service:temperpaw</code>, not the Railway service name.</span></div>
-            <div class="program-fact"><strong>Production checks</strong><span>Railway domain <code>/readyz</code> is ready and <code>/healthz</code> returns 200. Datadog reports <code>temper_up=1</code>, 14k+ APM spans in the latest hour for <code>service:temperpaw env:prod</code>, no matching active alert groups, APM rate/error/duration monitor coverage, fresh DBM plans tagged with version <code>2b0ec6e9849d5eabacb480678a9bfc92fff6f1c4</code>, and newly emitted runtime percentiles for Cedar phase duration, Postgres pool/transaction timing, projection queue wait, and projection end-to-end update duration. The deployment initially exposed stale Railway service-level <code>BUILD_VERSION</code>/<code>BUILD_SHA</code>/<code>DD_VERSION</code> overrides; those were corrected and redeployed.</span></div>
-            <div class="program-fact"><strong>Review gates</strong><span>DST compliance review PASS; code-quality review PASS; changed sim-visible files pass the determinism hook loop; readability ratchet is green at baseline after module splits.</span></div>
+            <div class="program-fact"><strong>Phase</strong><span>The measurement and observability foundation is live, and eight shipped slices have moved through the full lane: ADR-0088/File <code>$value</code> fast path, ADR-0089/AuthZ candidate filtering, PERF-001B/ADR-0090 AuthZ candidate indexing, PERF-002/ADR-0091 projection diff-index upserts, PERF-005B/ADR-0092 bounded background File reactions, PERF-005C/ADR-0093 native blob/object-store observability, PERF-005D/ADR-0094 native-first File blob reads, and PERF-003/ADR-0095 projection transaction fast path. PERF-003 is no longer waiting on PR, CI, Docker, Railway, or live proof; it is deployed and measured. The goal remains open because we still need a longer post-deploy window and the next actual latency slice from the residuals.</span></div>
+            <div class="program-fact"><strong>Branches</strong><span>Merged: Temper <code>codex/latency-observability-program</code>; TemperPaw <code>codex/latency-observability-program</code>; final dashboard evidence <code>codex/latency-observability-final-report</code>; Mac mini/auth checkpoint branches; corrected production e2e report <code>codex/latency-observability-auth-timeout-20260515-1324</code>; File fast-path branches; AuthZ candidate-filter branches; PERF-001B branches; PERF-002 branches; PERF-005B branches; PERF-005C branches; PERF-005D Temper/TemperPaw branches; PERF-003 Temper branch <code>codex/latency-db-transaction-shape-20260517</code>; and PERF-003 TemperPaw rollout branch <code>codex/bump-temper-db-transaction-shape-20260517</code>.</span></div>
+            <div class="program-fact"><strong>Worktrees</strong><span>Current report worktree <code>/Users/seshendranalla/Development/temper-worktrees/latency-observability-auth-timeout-20260515-1324</code>. PERF-003 implementation worktree <code>/Users/seshendranalla/Development/temper-worktrees/latency-db-transaction-shape-20260517</code> produced merged Temper commit <code>6439a8a0be134ffa37933701fb8fca140121d44d</code>. PERF-003 rollout worktree <code>/Users/seshendranalla/Development/temperpaw-worktrees/bump-temper-db-transaction-shape-20260517</code> produced merged TemperPaw commit <code>c16e0201c1490e0496f4964f5c72b704bb8cd216</code>. Deployment proof worktree <code>/Users/seshendranalla/Development/temperpaw-worktrees/deploy-db-transaction-shape-20260517</code> is detached at the merged production commit.</span></div>
+            <div class="program-fact"><strong>PRs</strong><span>All PERF-003 PR gates are complete. Temper PR <a href="https://github.com/nerdsane/temper/pull/245">nerdsane/temper#245</a> passed CI run <a href="https://github.com/nerdsane/temper/actions/runs/25979739482">25979739482</a> and merged as <code>6439a8a0</code>. TemperPaw rollout PR <a href="https://github.com/nerdsane/temperpaw/pull/276">nerdsane/temperpaw#276</a> passed PR CI run <a href="https://github.com/nerdsane/temperpaw/actions/runs/25980160694">25980160694</a> and merged as <code>c16e0201</code>. TemperPaw main CI <a href="https://github.com/nerdsane/temperpaw/actions/runs/25980450147">25980450147</a> and Docker run <a href="https://github.com/nerdsane/temperpaw/actions/runs/25980450153">25980450153</a> passed for <code>c16e0201</code>.</span></div>
+            <div class="program-fact"><strong>Railway</strong><span>CLI authentication is confirmed for the correct account. Project <code>openpaw-seshendranalla</code>, environment <code>production</code>, service <code>openpaw</code>. Current deployment <code>6e42424f-7ad4-4577-b127-9e3a0a36abeb</code> succeeded from <code>Dockerfile.deploy</code> with image tag <code>ghcr.io/nerdsane/temperpaw:sha-c16e020</code> and image digest <code>sha256:9c8a844fdfe52a201adea5755a3d5d61c498d8ba6cdc84c2f64a151d3bf27c89</code>. Authenticated <code>/paw/version</code> reports <code>sha-c16e020</code> / <code>c16e0201c1490e0496f4964f5c72b704bb8cd216</code>; <code>/readyz</code> is ready and Discord is connected. A transient version-variable mismatch and accidental config/source deploy were corrected before final proof traffic.</span></div>
+            <div class="program-fact"><strong>Datadog tag</strong><span>Production exports <code>DD_SERVICE=temperpaw</code> and current version tag <code>DD_VERSION=c16e0201c1490e0496f4964f5c72b704bb8cd216</code>. PERF-003 metrics are live: <code>temper_postgres_projection_index_reconciliations_total</code> emits <code>path:insert</code>, <code>path:diff</code>, and <code>path:skipped_unchanged</code>; post-deploy sample counts included <code>233</code> diff, <code>25</code> insert, and <code>17</code> skipped-unchanged events. The small post-deploy <code>query_projection_upsert</code> transaction sample has p95 buckets from <code>12.9 ms</code> to <code>385.6 ms</code>; this proves attribution and fast-path usage, but it is not yet enough sample volume to declare the tail healed.</span></div>
+            <div class="program-fact"><strong>Production checks</strong><span>Latest live proof <code>perf-003-projection-fast-path-proof-20260517041730.md</code> ran against <code>https://openpaw-production.up.railway.app</code> on deployment <code>6e42424f</code>. It created File <code>fl-019e3427-4b90-7801-be94-d4af896aa315</code>, wrote three versions through <code>$value</code> with client wall clocks <code>349.2 ms</code>, <code>366.5 ms</code>, and <code>344.8 ms</code>, verified exact readback after each write, verified <code>VersionCount=3</code>, verified FileVersions transitioned <code>Superseded</code>, <code>Superseded</code>, <code>Current</code>, and confirmed indexed DB rows directly in production Postgres.</span></div>
+            <div class="program-fact"><strong>Current slice</strong><span>PERF-003/ADR-0095 is shipped. The production path now computes scalar projection indexes before connection acquisition/transaction start, locks the existing catalog fingerprint first, updates only catalog sequence/metadata when projected fields and status are unchanged, and reconciles <code>entity_field_index</code> only when projection hash or status changed. DBM confirms current-version query samples with APM trace correlation and one visible bounded catalog-lock wait around <code>56 ms</code> under concurrent proof traffic.</span></div>
+            <div class="program-fact"><strong>Current rollout</strong><span>Rollout complete, proof complete, but measurement continues. Post-deploy projection update metrics show File and FileVersion <code>background_dispatch</code> p95 buckets around <code>50-73 ms</code>, while <code>Session/background_dispatch</code> remains the notable residual at about <code>245-386 ms</code> in the proof window. Profiling is packaged but not continuously useful yet: <code>TEMPER_DDPROF_ENABLED=false</code>, <code>ddprof</code> is present, Railway exposes <code>perf_event_paranoid=3</code>, and <code>CAP_PERFMON=false</code>.</span></div>
+            <div class="program-fact"><strong>Next task order</strong><span>First collect a longer post-deploy c16 window so we do not overfit six proof writes. Then pick the next latency slice from measured residuals: <code>Session/background_dispatch</code> projection/update path, continuous replay parity plus sampled shadow-read activation, profiler canary/on-demand capture for CPU suspicion, startup/cutover readiness cost, and only then deeper File data-plane or event-append sequence-shape work if those tails remain material.</span></div>
+            <div class="program-fact"><strong>Review gates</strong><span>PERF-003 code-quality review marker passed with no findings. DST review marker was not required for this slice because the changed code is in <code>temper-store-postgres</code>, not the simulation-visible <code>temper-runtime</code>, <code>temper-jit</code>, or <code>temper-server</code> crates. The pre-push readability ratchet remains green at baseline.</span></div>
             <div class="program-fact"><strong>Dashboard</strong><span><code>docs/temper-latency-observability-report.html</code></span></div>
-            <div class="program-fact"><strong>ADRs</strong><span><code>docs/adrs/0081-latency-observability-acceleration-program.md</code>; <code>docs/adrs/0082-projection-correctness-observability.md</code>; <code>docs/adrs/0083-trace-budget-and-fanout-summarization.md</code>; <code>docs/adrs/0084-authz-latency-phase-instrumentation.md</code></span></div>
+            <div class="program-fact"><strong>ADRs</strong><span><code>docs/adrs/0081-latency-observability-acceleration-program.md</code>; <code>docs/adrs/0082-projection-correctness-observability.md</code>; <code>docs/adrs/0083-trace-budget-and-fanout-summarization.md</code>; <code>docs/adrs/0084-authz-latency-phase-instrumentation.md</code>; <code>docs/adrs/0088-native-file-value-write-fast-path.md</code>; <code>docs/adrs/0089-authz-policy-candidate-index.md</code>; PERF-001B ADR <code>/Users/seshendranalla/Development/temper-worktrees/latency-authz-candidate-index-20260516/docs/adrs/0090-authz-candidate-selection-index.md</code>; PERF-002 ADR <code>/Users/seshendranalla/Development/temper-worktrees/latency-projection-diff-index-20260516/docs/adrs/0091-query-projection-diff-index-upserts.md</code>; PERF-005B ADR <code>/Users/seshendranalla/Development/temper-worktrees/latency-file-value-residual-20260516/docs/adrs/0092-bounded-background-file-reactions.md</code>; PERF-005C ADR <code>/Users/seshendranalla/Development/temper-worktrees/latency-blob-transport-observability-20260516/docs/adrs/0093-native-blob-transport-observability.md</code>; PERF-005D ADR <code>/Users/seshendranalla/Development/temper-worktrees/latency-file-blob-read-key-order-20260517/docs/adrs/0094-native-file-blob-read-key-order.md</code>; active PERF-003 ADR <code>/Users/seshendranalla/Development/temper-worktrees/latency-db-transaction-shape-20260517/docs/adrs/0095-projection-transaction-fast-path.md</code></span></div>
             <div class="program-fact"><strong>Runbooks</strong><span><code>docs/runbooks/datadog-postgres-dbm.md</code>; <code>docs/runbooks/latency-observability-release.md</code>; <code>scripts/datadog-postgres-dbm-setup.sql</code></span></div>
-            <div class="program-fact"><strong>Local checks</strong><span><code>scripts/verify-latency-observability-package.sh full</code> passed after Railway access and again after the readability-safe module split. The Temper pre-push gate also passed rustfmt, clippy, readability ratchet, and full <code>cargo test --workspace</code>; the slowest DST random workload took 457.87 seconds and passed. TemperPaw <code>cargo test -p temperpaw --tests -- --nocapture</code> passed 187 tests after the observability restructure merge; the later DBM monitor correction passed <code>datadog_monitor_config</code> and <code>datadog_observability_contract</code>.</span></div>
-            <div class="program-fact"><strong>Tracking</strong><span>Thread goal active; Temper MCP issue tracking unavailable in this session.</span></div>
-            <div class="program-fact"><strong>Program split</strong><span>Done or mostly done: architecture study, ADRs, living dashboard, Datadog dashboards/monitors, profiling path, DBM repair, runtime percentile metrics, AuthZ phase measurement, projection correctness metrics, trace budget instrumentation, deploy proof, and representative production e2e proof. Still to go: actual latency PRs with before/after evidence for file/blob writes, Cedar/AuthZ, projection writes, DB transaction shape, workflow executor behavior, and data-plane shape.</span></div>
-            <div class="program-fact"><strong>Finish line</strong><span>ADRs written, changes implemented, local tests pass, PRs merged, runtime deployed, Datadog evidence recorded here, and the live production service is healthy. The corrected representative e2e proof passed on <code>2026-05-15 16:41 EDT</code>: production OData created File <code>latency-proof-20260515204138</code>, uploaded bytes through <code>$value</code>, reached projection status <code>Ready</code>, and read back the same SHA-256 <code>e49fc50a33d635d264263ba3f6a5e4dddb179b2710cfbc5b346e5cba14996a28</code>. Remaining to close the overall goal: ship actual latency-improvement PRs with before/after live evidence and correctness gates. The Mac mini attempts are historical evidence from an over-specific proof route, not a current blocker.</span></div>
+            <div class="program-fact"><strong>Local checks</strong><span><code>scripts/verify-latency-observability-package.sh full</code> passed after Railway access and again after the readability-safe module split. File fast-path, AuthZ, PERF-001B, PERF-002, PERF-005B, PERF-005C, PERF-005D, and PERF-003 have all passed the relevant local checks, GitHub CI, TemperPaw rollout checks, main CI, Docker, Railway deployment, live proof, and Datadog proof for their targeted behavior. PERF-003 specifically passed focused store tests, full <code>temper-store-postgres</code> tests, clippy, store/server checks, rustfmt, diff check, code-quality review, full Temper pre-push tests/doctests, Temper CI <a href="https://github.com/nerdsane/temper/actions/runs/25979739482">25979739482</a>, TemperPaw PR CI <a href="https://github.com/nerdsane/temperpaw/actions/runs/25980160694">25980160694</a>, main CI <a href="https://github.com/nerdsane/temperpaw/actions/runs/25980450147">25980450147</a>, Docker <a href="https://github.com/nerdsane/temperpaw/actions/runs/25980450153">25980450153</a>, Railway deployment, live OData/File proof, direct production DB proof, and DBM/APM correlation.</span></div>
+            <div class="program-fact"><strong>Tracking</strong><span>Thread goal was resumed by the user's <code>go on</code> instruction; Temper MCP issue tracking is unavailable in this session.</span></div>
+            <div class="program-fact"><strong>Program split</strong><span>Done or mostly done: architecture study, ADRs, living dashboard, Datadog dashboards/monitors, targeted profiling path, DBM repair, runtime percentile metrics, AuthZ phase measurement, projection correctness metrics, trace budget instrumentation, deploy proof, representative production e2e proof, File <code>$value</code> fast path, first AuthZ candidate-filter deployment, PERF-001B candidate-index deployment/proof, PERF-002 projection diff-index deployment/proof, PERF-005B code/PR/merge/CI/Docker/Railway/live-proof/Datadog/DB-proof, PERF-005C code/PR/merge/CI/Docker/Railway/live-proof/Datadog/DB-proof, PERF-005D code/PR/merge/CI/Docker/Railway/live-proof/Datadog/DBM-proof, and PERF-003 code/PR/merge/CI/Docker/Railway/live-proof/Datadog/DB-proof. Remaining work is deliberately narrower and evidence-driven, not a mystery bucket.</span></div>
+            <div class="program-fact"><strong>Finish line</strong><span>The goal remains open because the whole-system latency program is broader than one shipped projection transaction slice. The next phase should not start with another blind optimization; it should gather the longer c16 window, turn replay/shadow correctness checks into continuous production evidence, make profiler activation useful on Railway or document the platform limit, and then implement the highest residual latency item with the same ADR, worktree, tests, PR, merge, deploy, live e2e, Datadog proof, and correctness proof discipline.</span></div>
           </div>
         </div>
         <div class="panel">
@@ -1453,6 +1479,417 @@
               <p>Ran the corrected production end-to-end proof through the deployed TemperPaw OData/file path, without using a Codex worker. Production created File <code>latency-proof-20260515204138</code>, uploaded <code>36</code> bytes through <code>$value</code>, projected the entity to <code>Ready</code>, and read back content whose SHA-256 matched <code>e49fc50a33d635d264263ba3f6a5e4dddb179b2710cfbc5b346e5cba14996a28</code>.</p>
               <p>Queried Datadog for <code>service:temperpaw env:prod</code> over <code>2026-05-15T20:40:00Z</code> to <code>2026-05-15T20:46:00Z</code>. The proof trace shows <code>POST /tdata/Files</code> at about <code>189 ms</code>, <code>PUT /tdata/Files('latency-proof-{num}')/$value</code> at about <code>3.16 s</code>, <code>File.StreamUpdated</code> at about <code>355 ms</code>, and read-back <code>GET /tdata/Files('latency-proof-{num}')/$value</code> at about <code>175 ms</code>. That moves the dashboard to <code>63%</code> and makes file/blob write latency an immediate optimization candidate alongside Cedar/AuthZ and projection write amplification.</p>
             </div>
+            <div class="log-entry">
+              <time datetime="2026-05-15T17:42:00-04:00">2026-05-15 17:42 EDT</time>
+              <p>Merged corrected report/e2e PR <a href="https://github.com/nerdsane/temper/pull/237">#237</a> into <code>main</code> at <code>f2ec2a59</code>, then rebased the first actual latency branch onto the updated mainline.</p>
+              <p>Created ADR-0088 and implemented the first File <code>$value</code> latency slice in <code>codex/latency-file-value-fast-path-20260515</code>: built-in File uploads now use native content-addressed blob storage and dispatch the verified <code>StreamUpdated</code> action, avoiding the WASM blob adapter on the hot path and avoiding a remote HEAD before PUT for content-addressed writes. Local checks passed: <code>cargo check -p temper-server</code>, <code>cargo test -p temper-server --test file_value_fast_path</code>, <code>cargo fmt --check</code>, HTML module syntax check, and <code>git diff --check</code>. Browser reload of the local <code>file://</code> report remains blocked by the in-app browser URL policy. Remaining for this slice: DST/code review gates, PR, CI, merge, deploy, and production before/after Datadog proof.</p>
+            </div>
+            <div class="log-entry">
+              <time datetime="2026-05-15T17:58:00-04:00">2026-05-15 17:58 EDT</time>
+              <p>Unblocked the first latency-improvement PR after the repository readability ratchet caught an oversized-file regression. The File write helper moved to <code>crates/temper-server/src/state/file_writes.rs</code>, and OData <code>$value</code> PUT moved to <code>crates/temper-server/src/odata/stream_put.rs</code>; <code>crates/temper-server/src/odata/write.rs</code> is back below the 1000-line threshold without changing the readability baseline.</p>
+              <p>Re-ran validation after the split: <code>cargo check -p temper-server</code>, <code>cargo test -p temper-server --test file_value_fast_path</code> (7 tests), <code>cargo fmt --check</code>, <code>bash scripts/readability-ratchet.sh check .ci/readability-baseline.env</code>, <code>git diff --check</code>, and HTML module syntax check all pass. The broad determinism script still reports 26 pre-existing repository patterns and exits 0. DST/code review markers were refreshed for the updated file set. Remaining for this slice: amend, push, PR, CI, merge, deploy, and production before/after Datadog proof.</p>
+            </div>
+            <div class="log-entry">
+              <time datetime="2026-05-15T18:21:00-04:00">2026-05-15 18:21 EDT</time>
+              <p>Amended and pushed <code>codex/latency-file-value-fast-path-20260515</code> at <code>241c1829</code>. The repository pre-push hook passed all four gates: rustfmt, clippy, readability ratchet, and full <code>cargo test --workspace</code>. The slowest leg was <code>dst_platform_random</code> at 464.28 seconds, and the new <code>file_value_fast_path</code> suite passed again inside the full run.</p>
+              <p>Opened draft PR <a href="https://github.com/nerdsane/temper/pull/238">nerdsane/temper#238</a>. Remaining for this slice: GitHub CI, merge, deploy, production before/after Datadog proof, then either mark the PR ready/merge or address review feedback.</p>
+            </div>
+            <div class="log-entry">
+              <time datetime="2026-05-15T19:07:00-04:00">2026-05-15 19:07 EDT</time>
+              <p>Completed the first actual latency-improvement code slice in Temper. PR <a href="https://github.com/nerdsane/temper/pull/238">nerdsane/temper#238</a> passed GitHub CI, was marked ready, and merged into <code>main</code> as <code>98b497b2</code>. Its local and CI evidence covered the native built-in File <code>$value</code> fast path, readability split, full workspace tests, DST/platform suites, instrumentation hygiene, verification contract, and spec verification.</p>
+              <p>Created the TemperPaw rollout worktree <code>/Users/seshendranalla/Development/temperpaw-worktrees/bump-temper-file-fast-path-20260515</code> from <code>origin/main</code>, bumped all Temper runtime and <code>temper-wasm-sdk</code> pins from <code>eafba6ab</code> to <code>98b497b2</code>, and opened <a href="https://github.com/nerdsane/temperpaw/pull/269">nerdsane/temperpaw#269</a>. Local validation passed: <code>cargo check --locked -p temperpaw</code>, <code>cargo test --locked -p temperpaw --quiet</code>, <code>cargo test --locked -p paw-codex-worker --quiet</code>, <code>cargo fmt --all -- --check</code>, <code>git diff --check</code>, <code>cargo test --manifest-path os-apps/paw-patrol/wasm/review_gate_lifecycle/Cargo.toml --quiet</code>, and CI clippy. Remaining for this slice: TemperPaw CI, merge, Docker image build, Railway redeploy, production File <code>$value</code> e2e proof, and Datadog before/after trace evidence.</p>
+            </div>
+            <div class="log-entry">
+              <time datetime="2026-05-15T19:24:00-04:00">2026-05-15 19:24 EDT</time>
+              <p>Completed the TemperPaw rollout PR. <a href="https://github.com/nerdsane/temperpaw/pull/269">nerdsane/temperpaw#269</a> passed GitHub CI and merged into <code>main</code> as <code>fd83c31b00bff57ed39419824efbb99c56ee2854</code>. This makes production eligible for the Temper fast-path commit <code>98b497b2</code>.</p>
+            </div>
+            <div class="log-entry">
+              <time datetime="2026-05-15T19:51:00-04:00">2026-05-15 19:51 EDT</time>
+              <p>Verified the post-merge delivery lane. TemperPaw main CI run <code>25946125710</code> succeeded, Docker run <code>25946125708</code> succeeded, and GHCR edge image digest <code>sha256:b45f94c648fa634a0bd8448ddef51db3cc164e5fff8790f08b2ed3e53f0daaa4</code> was deployed to Railway as deployment <code>d950fb9e-feb7-498f-b794-665fce9913bc</code>.</p>
+              <p>Railway production health is green on <code>https://openpaw-production.up.railway.app</code>: <code>/readyz</code> returns ready JSON, <code>/healthz</code> returns 200, and authenticated <code>/paw/version</code> returns <code>sha-fd83c31</code> / <code>fd83c31b00bff57ed39419824efbb99c56ee2854</code>. The custom domain <code>temperpaw.katagami.ai</code> still failed DNS resolution from this local environment, so the Railway domain remains the proof target.</p>
+            </div>
+            <div class="log-entry">
+              <time datetime="2026-05-15T19:56:00-04:00">2026-05-15 19:56 EDT</time>
+              <p>Ran the live production File <code>$value</code> proof against the Railway domain. File <code>latency-fastpath-20260515235557</code> was created, uploaded through <code>$value</code>, reached <code>Status: Ready</code>, and read back the same SHA-256 <code>a1aa969a1dde6e33a628a3da2db19588b90785c53c006999b17434f741f41705</code>. Measured wall times: create 159.8 ms, upload 412.4 ms, entity read 64.2 ms, byte read 295.3 ms.</p>
+            </div>
+            <div class="log-entry">
+              <time datetime="2026-05-15T20:00:00-04:00">2026-05-15 20:00 EDT</time>
+              <p>Queried Datadog MCP for the deployed proof. The new upload trace is <code>f3723cc99d48e9a65d5cc7ac4b61fc23</code>: HTTP <code>PUT /tdata/Files('latency-fastpath-{num}')/$value</code> lasted 353.3 ms, includes native <code>state.put_file_stream_content.native</code>, has no matching <code>wasm.invoke</code> or <code>blob_adapter</code> spans, and carries version <code>fd83c31b00bff57ed39419824efbb99c56ee2854</code> plus code paths under Temper <code>98b497b</code>. Baseline trace <code>20be98473ad99f787fa0d007f36b9b7b</code> lasted 3,159.5 ms and included <code>wasm.invoke</code> plus R2 host HTTP work. This is a roughly 8.9x server-span improvement and a roughly 7.7x direct curl upload improvement for the representative proof.</p>
+            </div>
+            <div class="log-entry">
+              <time datetime="2026-05-15T20:21:00-04:00">2026-05-15 20:21 EDT</time>
+              <p>Started the second actual latency-improvement slice in fresh Temper worktree <code>/Users/seshendranalla/Development/temper-worktrees/latency-authz-fast-path-20260515</code> on branch <code>codex/latency-authz-fast-path-20260515</code>. ADR-0089 now records the Cedar/AuthZ candidate-policy decision: reduce the per-request Cedar policy set using only public scope constraints that cannot match the current principal/action/resource; keep forbids, diagnostics, default-deny, and Cedar expression evaluation intact; do not cache allow/deny decisions.</p>
+              <p>Implemented the local AuthZ candidate filter in <code>crates/temper-authz/src/engine/candidates.rs</code>, wired it into <code>evaluate_request</code>, and added <code>temper_cedar_policy_candidate_count</code> with low-cardinality <code>source</code> and <code>outcome</code> labels. Initial local verification is green: <code>cargo test -p temper-authz</code> passes 62 tests and <code>cargo check -p temper-server</code> passes. Remaining for this slice: wider checks, PR, TemperPaw pin, Railway deploy, live e2e, and Datadog proof that candidate count falls and <code>phase:authorizer</code> improves.</p>
+            </div>
+            <div class="log-entry">
+              <time datetime="2026-05-15T20:24:00-04:00">2026-05-15 20:24 EDT</time>
+              <p>Widened local verification for the AuthZ candidate slice. <code>cargo fmt --all -- --check</code> passed, <code>cargo clippy -p temper-authz -p temper-server --all-targets -- -D warnings</code> passed, the report inline module parses under <code>node --check --input-type=module</code>, and <code>git diff --check</code> passes for the touched Rust, ADR, and HTML files.</p>
+            </div>
+            <div class="log-entry">
+              <time datetime="2026-05-15T21:29:00-04:00">2026-05-15 21:29 EDT</time>
+              <p>Ran the full local pre-push verification pipeline for the AuthZ candidate slice. All four gates passed: rustfmt, workspace clippy, readability ratchet, and full <code>cargo test --workspace</code>. The slowest DST workload was <code>dst_platform_random</code> at 526.04 seconds and passed. The branch is ready for commit/PR packaging from a local verification standpoint.</p>
+            </div>
+            <div class="log-entry">
+              <time datetime="2026-05-15T21:33:00-04:00">2026-05-15 21:33 EDT</time>
+              <p>Committed the AuthZ candidate-filter slice as <code>eb02561f</code>, pushed branch <code>codex/latency-authz-fast-path-20260515</code>, and opened draft PR <a href="https://github.com/nerdsane/temper/pull/239">nerdsane/temper#239</a>. Next gates are GitHub CI, ready/merge, TemperPaw pin, Railway deployment, live e2e, and Datadog proof for <code>temper_cedar_policy_candidate_count</code> plus reduced <code>phase:authorizer</code> duration.</p>
+            </div>
+            <div class="log-entry">
+              <time datetime="2026-05-15T21:52:00-04:00">2026-05-15 21:52 EDT</time>
+              <p>GitHub CI passed for AuthZ candidate-filter PR <a href="https://github.com/nerdsane/temper/pull/239">nerdsane/temper#239</a>: spec verification, instrumentation hygiene, compile/lint, verification contract, integrity/DST patterns, workspace tests, and all DST platform shards were green in run <a href="https://github.com/nerdsane/temper/actions/runs/25949367580">25949367580</a>. The PR is merged into Temper <code>main</code> as <code>b0b898a2d71192e9534ec3b3d0529c6e54c3d3c5</code>.</p>
+              <p>Current gate for the second latency slice is now rollout, not implementation: create a TemperPaw worktree from <code>main</code>, pin Temper to <code>b0b898a2</code>, pass local/CI checks, merge/deploy, then prove live candidate counts and <code>phase:authorizer</code> latency in Datadog.</p>
+            </div>
+            <div class="log-entry">
+              <time datetime="2026-05-15T22:01:00-04:00">2026-05-15 22:01 EDT</time>
+              <p>Created TemperPaw rollout worktree <code>/Users/seshendranalla/Development/temperpaw-worktrees/bump-temper-authz-candidates-20260515</code> from <code>origin/main</code> on branch <code>codex/bump-temper-authz-candidates-20260515</code>. Bumped all Temper crate, WASM SDK, Docker, and observability-contract pins from <code>98b497b2</code> to <code>b0b898a2</code>.</p>
+              <p>Local rollout verification is green: <code>cargo check -p temperpaw --locked</code>, all 31 <code>datadog_observability_contract</code> tests, <code>cargo fmt --all -- --check</code>, and <code>git diff --check</code> passed. Next gates are commit, TemperPaw PR, CI, Railway deployment, and live Datadog proof.</p>
+            </div>
+            <div class="log-entry">
+              <time datetime="2026-05-15T22:03:00-04:00">2026-05-15 22:03 EDT</time>
+              <p>Committed TemperPaw rollout as <code>f8d4b477</code>, pushed branch <code>codex/bump-temper-authz-candidates-20260515</code>, and opened PR <a href="https://github.com/nerdsane/temperpaw/pull/270">nerdsane/temperpaw#270</a>. GitHub CI run <a href="https://github.com/nerdsane/temperpaw/actions/runs/25949959572">25949959572</a> is running.</p>
+            </div>
+            <div class="log-entry">
+              <time datetime="2026-05-15T22:17:00-04:00">2026-05-15 22:17 EDT</time>
+              <p>GitHub PR CI passed for <a href="https://github.com/nerdsane/temperpaw/pull/270">nerdsane/temperpaw#270</a>: format, clippy, check, tests, WASM build, and dashboard build were green in run <a href="https://github.com/nerdsane/temperpaw/actions/runs/25949959572">25949959572</a>. The PR merged into TemperPaw <code>main</code> as <code>7726e4dfba5453c337dafb7411f88c239f3d5bd5</code>.</p>
+              <p>Current gate is production rollout: main CI run <a href="https://github.com/nerdsane/temperpaw/actions/runs/25950252249">25950252249</a> and Docker run <a href="https://github.com/nerdsane/temperpaw/actions/runs/25950252254">25950252254</a> are running, then Railway must deploy the new image before live AuthZ evidence can be collected.</p>
+            </div>
+            <div class="log-entry">
+              <time datetime="2026-05-16T10:10:00-04:00">2026-05-16 10:10 EDT</time>
+              <p>Completed the AuthZ rollout delivery lane. TemperPaw main CI run <a href="https://github.com/nerdsane/temperpaw/actions/runs/25950252249">25950252249</a> passed, Docker run <a href="https://github.com/nerdsane/temperpaw/actions/runs/25950252254">25950252254</a> passed, and GHCR published <code>ghcr.io/nerdsane/temperpaw:sha-7726e4d</code> with manifest digest <code>sha256:960781072bd76d96af79148eb02033a478085aa4ee5ca27aee9ee449d2c61e46</code>.</p>
+              <p>Railway initially deployed the new digest while service-level version variables still pointed at <code>fd83c31b</code>. Corrected <code>BUILD_VERSION</code>, <code>BUILD_SHA</code>, <code>IMAGE_TAG</code>, and then <code>DD_VERSION</code>; deployment <code>8ad1c472-1c63-4473-a9ed-10f7458df253</code> is now successful on <code>sha-7726e4d</code>. Live <code>/readyz</code> is ready, Discord is connected/configured, and authenticated <code>/paw/version</code>, <code>BUILD_SHA</code>, and <code>DD_VERSION</code> all agree on <code>7726e4dfba5453c337dafb7411f88c239f3d5bd5</code>.</p>
+            </div>
+            <div class="log-entry">
+              <time datetime="2026-05-16T10:12:00-04:00">2026-05-16 10:12 EDT</time>
+              <p>Ran the corrected production File/OData proof <code>authz-candidates-ddversion-20260516141213</code>. Production created File <code>fl-019e3121-6a28-7a90-b5ea-6d1931e03e47</code>, uploaded 72 bytes, reached <code>Ready</code> in one poll, and read back matching SHA-256 <code>07b8ecbc0eb538ec7ff67b492f42644152ad0c74c42163f2c5b74b14f3b6641f</code>. Direct wall timings were metadata <code>89.8-120.7 ms</code>, list <code>60.5 ms</code>, create <code>274.5 ms</code>, upload <code>677.7 ms</code>, entity read <code>57.2 ms</code>, byte read <code>554.3 ms</code>, and version check <code>43.4 ms</code>.</p>
+              <p>Datadog retained exact-file sampled spans for the same proof under <code>version:7726e4dfba5453c337dafb7411f88c239f3d5bd5</code>: POST trace <code>9a3f6fc470e35fa071fc78054333f6e6</code> at <code>222 ms</code>, PUT <code>$value</code> trace <code>0878a09bf0de8803b19bac5b6764744f</code> at <code>625 ms</code>, entity GET trace <code>0748a07428770bc177b21ee73207cc01</code> at <code>9.8 ms</code>, and byte GET trace <code>214be076717c233a8f127977ba161300</code> at <code>501 ms</code>.</p>
+            </div>
+            <div class="log-entry">
+              <time datetime="2026-05-16T10:14:00-04:00">2026-05-16 10:14 EDT</time>
+              <p>Queried Datadog metrics for the corrected version. <code>temper_cedar_policy_candidate_count</code> now emits with <code>source:full</code> and <code>source:candidate</code> plus the correct version tag, but percentile aggregation is still disabled for this new distribution. In the latest proof bucket, full policy count averaged <code>16,497</code> per evaluation and candidate count averaged <code>48</code>, a roughly <code>344x</code> reduction in policies sent to Cedar.</p>
+              <p>The latency lesson is more measured than "done": <code>temper_cedar_evaluation_phase_duration_ms</code> has percentiles enabled and showed <code>phase:authorizer</code> p95 around <code>0.23 ms</code>, but <code>phase:policy_candidates</code> p95 around <code>13.4 ms</code>. The full PUT trace still shows <code>authz.Create</code> at <code>19.6 ms</code> and <code>authz.RecordVersion</code> at <code>26.1 ms</code>. So ADR-0089 successfully reduced Cedar evaluator work, while the next AuthZ slice should remove per-request candidate scanning/rebuilding with a correctness-preserving index or reusable candidate policy-set cache.</p>
+            </div>
+            <div class="log-entry">
+              <time datetime="2026-05-16T10:43:00-04:00">2026-05-16 10:43 EDT</time>
+              <p>Started PERF-001B in a fresh main-based Temper worktree <code>/Users/seshendranalla/Development/temper-worktrees/latency-authz-candidate-index-20260516</code> on branch <code>codex/latency-authz-candidate-index-20260516</code>. Added ADR-0090 for a precomputed static Cedar candidate-selection index: no decision cache, no Cedar bypass, fallback to full policy set on unsafe/non-static policies, and atomic index rebuild on policy reload.</p>
+              <p>Implemented the local slice in <code>crates/temper-authz/src/engine/candidates.rs</code>, <code>crates/temper-authz/src/engine/candidates_tests.rs</code>, and <code>crates/temper-authz/src/engine/mod.rs</code>. The engine now stores a compiled bundle of the Cedar <code>PolicySet</code> plus a candidate index keyed by principal, action, and resource constraints. Tests now include a <code>1,002</code>-policy equivalence case that proves indexed selection matches the ADR-0089 scan semantics for a production-shaped large policy set.</p>
+              <p>Local checks passed: focused large-policy test, full <code>cargo test -p temper-authz</code> with <code>64</code> tests, <code>cargo check -p temper-server</code>, <code>cargo clippy -p temper-authz -p temper-server --all-targets -- -D warnings</code>, <code>cargo fmt --all -- --check</code>, and <code>git diff --check</code>. Remaining gates are commit, PR, GitHub CI, TemperPaw dependency bump, Docker/Railway deploy, live e2e proof, and Datadog confirmation that <code>phase:policy_candidates</code> drops below <code>2 ms</code>.</p>
+            </div>
+            <div class="log-entry">
+              <time datetime="2026-05-16T11:36:00-04:00">2026-05-16 11:36 EDT</time>
+              <p>Committed PERF-001B as <code>247c7d6b5f7765894284ba3ab688cc2cfba99da8</code>, pushed branch <code>codex/latency-authz-candidate-index-20260516</code>, and opened ready PR <a href="https://github.com/nerdsane/temper/pull/240">nerdsane/temper#240</a>. GitHub CI run <a href="https://github.com/nerdsane/temper/actions/runs/25965850115">25965850115</a> is now the active gate.</p>
+              <p>Local pre-push evidence is strong. The first full run was blocked by one unrelated <code>temper-store-turso</code> concurrency assertion; the exact test passed immediately on rerun. The second normal <code>git push</code> kept hooks enabled and passed rustfmt, workspace clippy, readability ratchet, full workspace tests, and doctests before pushing.</p>
+            </div>
+            <div class="log-entry">
+              <time datetime="2026-05-16T11:49:00-04:00">2026-05-16 11:49 EDT</time>
+              <p>GitHub CI for <a href="https://github.com/nerdsane/temper/pull/240">nerdsane/temper#240</a> passed: compile/lint, tests, spec verification, instrumentation hygiene, verification contract, integrity/DST patterns, and all DST platform shards were green in run <a href="https://github.com/nerdsane/temper/actions/runs/25965850115">25965850115</a>. Merged into Temper <code>main</code> as <code>84e95c6677f4a03364dea796cc67237bbc8275ce</code>.</p>
+              <p>Current gate is now rollout, not Temper implementation: create a fresh TemperPaw worktree from <code>main</code>, bump every Temper pin to <code>84e95c66</code>, pass local/CI checks, merge, build Docker, deploy Railway, run the live File/OData proof, and confirm <code>phase:policy_candidates</code> latency in Datadog.</p>
+            </div>
+            <div class="log-entry">
+              <time datetime="2026-05-16T11:55:00-04:00">2026-05-16 11:55 EDT</time>
+              <p>Created the fresh TemperPaw rollout worktree <code>/Users/seshendranalla/Development/temperpaw-worktrees/bump-temper-authz-index-20260516</code> on branch <code>codex/bump-temper-authz-index-20260516</code> from <code>origin/main</code>. Bumped the Temper server, Docker observability clone, Datadog contract expectations, WASM SDK manifests, and the WASM lockfiles to <code>84e95c6677f4a03364dea796cc67237bbc8275ce</code>.</p>
+              <p>Local rollout validation is green: <code>cargo check -p temperpaw --locked</code>, all 31 <code>datadog_observability_contract</code> tests, <code>cargo fmt --all -- --check</code>, and <code>git diff --check</code>. The first contract run correctly caught stale WASM lockfile sources; that is now fixed and included in the rollout diff.</p>
+            </div>
+            <div class="log-entry">
+              <time datetime="2026-05-16T11:59:00-04:00">2026-05-16 11:59 EDT</time>
+              <p>Committed the TemperPaw rollout as <code>a5fb5e04f4c6a017d0bc3175bd3d07b0a85e9faa</code>, pushed <code>codex/bump-temper-authz-index-20260516</code>, and opened draft PR <a href="https://github.com/nerdsane/temperpaw/pull/271">nerdsane/temperpaw#271</a>. GitHub CI run <a href="https://github.com/nerdsane/temperpaw/actions/runs/25966397547">25966397547</a> is in progress.</p>
+            </div>
+            <div class="log-entry">
+              <time datetime="2026-05-16T12:14:00-04:00">2026-05-16 12:14 EDT</time>
+              <p>TemperPaw rollout PR <a href="https://github.com/nerdsane/temperpaw/pull/271">#271</a> passed CI run <a href="https://github.com/nerdsane/temperpaw/actions/runs/25966397547">25966397547</a>: fmt, clippy, check, worker smoke syntax, os-apps WASM build, Cargo tests, and dashboard build. Marked it ready and merged into <code>main</code> as <code>1118183f47239401f216a771d6cd6fa6c1376a07</code>.</p>
+              <p>Post-merge gates are now active: main CI run <a href="https://github.com/nerdsane/temperpaw/actions/runs/25966733023">25966733023</a> and Docker run <a href="https://github.com/nerdsane/temperpaw/actions/runs/25966733035">25966733035</a>.</p>
+            </div>
+            <div class="log-entry">
+              <time datetime="2026-05-16T12:39:00-04:00">2026-05-16 12:39 EDT</time>
+              <p>Post-merge gates passed. TemperPaw main CI <a href="https://github.com/nerdsane/temperpaw/actions/runs/25966733023">25966733023</a> was green, and Docker <a href="https://github.com/nerdsane/temperpaw/actions/runs/25966733035">25966733035</a> pushed <code>ghcr.io/nerdsane/temperpaw:sha-1118183</code> with digest <code>sha256:7843528813075858ba12403af1fc326e314425d00b44643da987e982687e78b9</code>.</p>
+            </div>
+            <div class="log-entry">
+              <time datetime="2026-05-16T12:47:00-04:00">2026-05-16 12:47 EDT</time>
+              <p>Railway deployment <code>ee997c77-7abb-4682-aa76-4a5155f05c1f</code> succeeded for the PERF-001B TemperPaw rollout. The production service is reachable on <code>https://openpaw-production.up.railway.app</code>; <code>/readyz</code> returns ready JSON in about <code>77 ms</code>, <code>/healthz</code> returns HTTP 200 in about <code>59 ms</code>, and authenticated <code>/paw/version</code> returns <code>sha-1118183f</code> plus SHA <code>1118183f47239401f216a771d6cd6fa6c1376a07</code> in about <code>52 ms</code>.</p>
+              <p>The first deploy command attempted a plain Railway redeploy and reused the old <code>sha-7726e4d</code> image; the successful deploy used the checked-in <code>Dockerfile.deploy</code> wrapper with <code>IMAGE_TAG=sha-1118183</code> and <code>railway up</code>.</p>
+            </div>
+            <div class="log-entry">
+              <time datetime="2026-05-16T12:56:00-04:00">2026-05-16 12:56 EDT</time>
+              <p>Live production proof <code>authz-index-live-proof-20260516164954</code> passed on deployed version <code>1118183f47239401f216a771d6cd6fa6c1376a07</code>. It created six Files, uploaded bytes through <code>$value</code>, observed <code>Ready</code> in one poll for every File, and read back matching SHA-256 values. The proof trace is <a href="https://app.datadoghq.com/apm/trace/ba53ebea1c7c4952ac11400d6b8e90a8">ba53ebea1c7c4952ac11400d6b8e90a8</a>.</p>
+              <p>Datadog confirms the candidate-index win and the remaining nuance: <code>phase:policy_candidates</code> p95 was <code>13.77 ms</code> in the first post-deploy/cold bucket, then <code>0.335 ms</code>, <code>0.262 ms</code>, <code>0.262 ms</code>, and <code>2.685 ms</code> in the live File proof bucket. Candidate volume remains <code>16,497</code> full policies versus <code>48</code> candidates on the heavy File path. Exact proof trace aggregation shows File create route p50/p95 at about <code>62.5/65.0 ms</code>, <code>dispatch.phase.query_projection</code> p50/p95 at about <code>20.8/25.4 ms</code>, and <code>entity.get_or_spawn_tenant_actor_with_fields</code> p95 around <code>41.9 ms</code>.</p>
+            </div>
+            <div class="log-entry">
+              <time datetime="2026-05-16T12:59:00-04:00">2026-05-16 12:59 EDT</time>
+              <p>Dashboard validation passed after the progress update: inline module JavaScript parses, <code>git diff --check</code> is clean for the report, desktop and mobile Playwright renders show the <code>92%</code> progress marker, and mobile no longer has page-level horizontal overflow while wide evidence tables remain scrollable inside their own containers.</p>
+            </div>
+            <div class="log-entry">
+              <time datetime="2026-05-16T13:32:00-04:00">2026-05-16 13:32 EDT</time>
+              <p>Started PERF-002 in a fresh main-based Temper worktree <code>/Users/seshendranalla/Development/temper-worktrees/latency-projection-diff-index-20260516</code> on branch <code>codex/latency-projection-diff-index-20260516</code>. Added ADR-0091 for Postgres query-projection diff-index upserts: keep <code>entity_catalog</code> authoritative, serialize concurrent projection writers through the catalog upsert, lock actual field-index rows in the same transaction, delete stale or changed index rows, upsert only missing/changed/status-changed rows, and avoid projection caches or Turso rewrites in the first PR.</p>
+              <p>Implemented the local PERF-002 slice in <code>crates/temper-store-postgres/src/platform.rs</code>. Projection upserts now compute the scalar index once, compare it with locked <code>entity_field_index</code> rows, preserve unchanged rows, remove fields that disappeared or became too large for the btree lookup index, and keep the full JSON fields in <code>entity_catalog</code>.</p>
+              <p>Added focused Postgres storage tests in <code>crates/temper-store-postgres/src/store_projection_test.rs</code>. They prove unchanged field-index rows are not rewritten, changed rows are rewritten, removed fields disappear, oversized values are no longer indexed, and the catalog row still carries the full projected fields and sequence. Local checks are green: <code>cargo fmt --all -- --check</code>, <code>cargo check -p temper-store-postgres</code>, <code>cargo clippy -p temper-store-postgres --all-targets -- -D warnings</code>, full <code>cargo test -p temper-store-postgres -- --nocapture</code>, and <code>git diff --check</code>. The integration tests compiled and passed in skip mode because local <code>DATABASE_URL</code> is not exported; live DB proof remains a deployment-gate item.</p>
+            </div>
+            <div class="log-entry">
+              <time datetime="2026-05-16T13:36:00-04:00">2026-05-16 13:36 EDT</time>
+              <p>Dashboard validation passed after the PERF-002 update: inline module JavaScript parses, <code>git diff --check</code> is clean for the report, and Playwright renders at desktop and mobile show the <code>93%</code> progress marker with no page-level horizontal overflow. Screenshots were saved to <code>/tmp/temper-report-progress-desktop-perf002.png</code> and <code>/tmp/temper-report-progress-mobile-perf002.png</code>.</p>
+            </div>
+            <div class="log-entry">
+              <time datetime="2026-05-16T13:43:00-04:00">2026-05-16 13:43 EDT</time>
+              <p>Packaging review found and fixed a concurrency edge in the first PERF-002 implementation. A missing catalog row cannot be locked with <code>FOR UPDATE</code>, so concurrent first-writer projection transactions could have diffed against an empty field index and left stale rows. The patch now upserts <code>entity_catalog</code> first so the catalog primary key serializes both new and existing entity updates before the transaction locks and diffs <code>entity_field_index</code>.</p>
+              <p>Re-verified after the transaction-order fix: <code>cargo fmt --all -- --check</code>, <code>cargo check -p temper-store-postgres</code>, <code>cargo clippy -p temper-store-postgres --all-targets -- -D warnings</code>, full <code>cargo test -p temper-store-postgres -- --nocapture</code>, projection worktree <code>git diff --check</code>, report inline JavaScript syntax check, and report <code>git diff --check</code> all pass.</p>
+            </div>
+            <div class="log-entry">
+              <time datetime="2026-05-16T13:54:00-04:00">2026-05-16 13:54 EDT</time>
+              <p>Pushed PERF-002 branch <code>codex/latency-projection-diff-index-20260516</code> after the full pre-push gate passed: rustfmt, clippy, readability ratchet, and full <code>cargo test --workspace</code>. The long randomized DST/platform test completed green instead of blocking the work.</p>
+              <p>Opened draft Temper PR <a href="https://github.com/nerdsane/temper/pull/241">nerdsane/temper#241</a> for commit <code>bd2cab1a</code>. GitHub CI run <a href="https://github.com/nerdsane/temper/actions/runs/25968899080">25968899080</a> is in progress; initial status shows the verification contract passed, bench build skipped, and compile/lint, integrity/DST, tests, platform DST shards, spec verification, and instrumentation hygiene still running.</p>
+            </div>
+            <div class="log-entry">
+              <time datetime="2026-05-16T13:57:00-04:00">2026-05-16 13:57 EDT</time>
+              <p>Validated the updated living dashboard: inline module JavaScript parses, report <code>git diff --check</code> is clean, desktop and mobile Playwright renders show the <code>94%</code> marker, PR/CI links are present, and mobile has no page-level horizontal overflow. Screenshots were saved to <code>/tmp/temper-report-progress-desktop-pr241.png</code> and <code>/tmp/temper-report-progress-mobile-pr241.png</code>.</p>
+            </div>
+            <div class="log-entry">
+              <time datetime="2026-05-16T14:25:00-04:00">2026-05-16 14:25 EDT</time>
+              <p>Temper PR <a href="https://github.com/nerdsane/temper/pull/241">#241</a> passed GitHub CI run <a href="https://github.com/nerdsane/temper/actions/runs/25968899080">25968899080</a>, was marked ready, and merged as <code>ed68e78539f5511b453e34e554bc95b0afb91a0d</code>. The local <code>gh</code> cleanup reported a harmless worktree checkout error because another worktree already owns <code>main</code>; the PR state is merged.</p>
+              <p>Created fresh main-based TemperPaw rollout worktree <code>/Users/seshendranalla/Development/temperpaw-worktrees/bump-temper-projection-diff-index-20260516</code> on branch <code>codex/bump-temper-projection-diff-index-20260516</code>. It pins root Temper crates, packaged <code>temper-wasm-sdk</code> manifests/locks, Docker <code>TEMPER_OBSERVABILITY_REV</code>, and the Datadog observability contract test to <code>ed68e785</code>. Local rollout verification is green: locked check, fmt, diff check, CI shell script checks, clippy, TemperPaw/worker/review-gate tests, all packaged WASM build scripts, and dashboard build.</p>
+            </div>
+            <div class="log-entry">
+              <time datetime="2026-05-16T14:32:00-04:00">2026-05-16 14:32 EDT</time>
+              <p>Opened draft TemperPaw rollout PR <a href="https://github.com/nerdsane/temperpaw/pull/272">nerdsane/temperpaw#272</a> for commit <code>65da324e</code>. The PR carries only the dependency and deployment pin handoff for PERF-002: root Temper crates, packaged <code>temper-wasm-sdk</code> manifests and locks, Docker <code>TEMPER_OBSERVABILITY_REV</code>, and Datadog observability contract expectations now point at merged Temper commit <code>ed68e78539f5511b453e34e554bc95b0afb91a0d</code>.</p>
+              <p>PR CI run <a href="https://github.com/nerdsane/temperpaw/actions/runs/25969575912">25969575912</a> is in progress. If it passes, the next gate is to mark the PR ready, merge it, verify main CI and Docker, deploy with the checked-in <code>Dockerfile.deploy</code> wrapper through <code>railway up</code>, then run the live projection proof and Datadog/replay/shadow drift checks.</p>
+            </div>
+            <div class="log-entry">
+              <time datetime="2026-05-16T14:33:00-04:00">2026-05-16 14:33 EDT</time>
+              <p>Validated this dashboard update: inline module JavaScript parses, report <code>git diff --check</code> is clean, and desktop/mobile Playwright renders show the <code>96%</code> progress marker, the PR <a href="https://github.com/nerdsane/temperpaw/pull/272">#272</a> link, and CI run <a href="https://github.com/nerdsane/temperpaw/actions/runs/25969575912">25969575912</a> with no page-level horizontal overflow. Screenshots were saved to <code>/tmp/temper-report-progress-desktop-pr272.png</code> and <code>/tmp/temper-report-progress-mobile-pr272.png</code>.</p>
+            </div>
+            <div class="log-entry">
+              <time datetime="2026-05-16T14:44:00-04:00">2026-05-16 14:44 EDT</time>
+              <p>TemperPaw rollout PR <a href="https://github.com/nerdsane/temperpaw/pull/272">#272</a> passed PR CI run <a href="https://github.com/nerdsane/temperpaw/actions/runs/25969575912">25969575912</a>, was marked ready, and merged as <code>73e756a0bdb5f9a3084c5dd33c424154871fb873</code>. The local merge cleanup again reported a harmless worktree checkout error because another worktree owns <code>main</code>; GitHub confirms the PR state is merged.</p>
+              <p>Next gate is post-merge verification on <code>main</code>: wait for main CI and Docker, then deploy the merged commit to Railway and prove the projection diff-index path live with request evidence, Datadog before/after metrics, and replay/shadow drift checks.</p>
+            </div>
+            <div class="log-entry">
+              <time datetime="2026-05-16T15:08:00-04:00">2026-05-16 15:08 EDT</time>
+              <p>Post-merge TemperPaw main gates are green for commit <code>73e756a0bdb5f9a3084c5dd33c424154871fb873</code>: CI run <a href="https://github.com/nerdsane/temperpaw/actions/runs/25969887628">25969887628</a> passed in <code>14m10s</code> and Docker run <a href="https://github.com/nerdsane/temperpaw/actions/runs/25969887617">25969887617</a> passed in <code>23m19s</code>. Docker emitted a pre-existing GitHub Actions Node.js 20 deprecation annotation for <code>docker/build-push-action@v6</code>, <code>docker/login-action@v3</code>, and <code>docker/metadata-action@v5</code>; it did not fail the build.</p>
+              <p>Deployment will use a fresh main-based TemperPaw worktree at the merged commit, not the PR branch or the dirty base checkout.</p>
+            </div>
+            <div class="log-entry">
+              <time datetime="2026-05-16T15:15:00-04:00">2026-05-16 15:15 EDT</time>
+              <p>Deployed PERF-002 to Railway production from detached main worktree <code>/Users/seshendranalla/Development/temperpaw-worktrees/deploy-projection-diff-index-20260516</code>. Deployment <code>72635a45-5744-4c72-82e0-7b7143e9a548</code> succeeded for service <code>openpaw</code> using <code>Dockerfile.deploy</code>, <code>IMAGE_TAG=sha-73e756a</code>, and wrapper digest <code>sha256:e89ad62667469b67eda4a67fdbeb618ac847757ede66ca5fe19a375ed50b9fed</code>.</p>
+              <p>Production probes passed: <code>/readyz</code> returned ready JSON, <code>/healthz</code> returned HTTP 200, and authenticated <code>/paw/version</code> returned <code>sha-73e756a</code> with SHA <code>73e756a0bdb5f9a3084c5dd33c424154871fb873</code>. The non-secret Railway release metadata and Datadog version tags were updated to the same SHA before deployment.</p>
+            </div>
+            <div class="log-entry">
+              <time datetime="2026-05-16T15:16:00-04:00">2026-05-16 15:16 EDT</time>
+              <p>Live projection proof <code>projection-diff-live-proof-20260516191623</code> passed against <code>https://openpaw-production.up.railway.app</code>. It created four Files, double-uploaded bytes through <code>$value</code>, reached <code>Ready</code> in one poll after each upload, read matching bytes back, and listed each File by <code>Name</code> through the projection path.</p>
+              <p>Direct wall timings from the successful run: creates <code>171.9-189.2 ms</code>, uploads <code>412.2-540.6 ms</code>, byte reads <code>328.4-385.3 ms</code>, and projection list-by-name reads <code>67.5-76.7 ms</code>. The proof exercised production auth, OData dispatch, event append, projection update, blob/object storage, read-after-write, and Datadog APM under version <code>73e756a0bdb5f9a3084c5dd33c424154871fb873</code>.</p>
+            </div>
+            <div class="log-entry">
+              <time datetime="2026-05-16T15:21:00-04:00">2026-05-16 15:21 EDT</time>
+              <p>Datadog confirms current-version projection metrics are active. <code>temper_query_projection_update_duration_ms</code>, <code>temper_query_projection_update_end_to_end_duration_ms</code>, <code>temper_query_projection_update_started_total</code>, <code>temper_query_projection_update_enqueued_total</code>, <code>temper_query_projection_update_queue_wait_ms</code>, and <code>temper_query_projection_applied_sequence_nr</code> are visible under <code>service:temperpaw</code> and version <code>73e756a0bdb5f9a3084c5dd33c424154871fb873</code>.</p>
+              <p>In the proof bucket, File projection upsert p95 was <code>42.6 ms</code> for <code>source:create</code> and <code>91.1 ms</code> for <code>source:background_dispatch</code>. APM sampled the successful proof window: <code>PUT $value</code> averaged about <code>420.1 ms</code>, byte GETs about <code>306.3 ms</code>, File creates about <code>132.7 ms</code>, list reads about <code>17.5 ms</code>, and entity reads about <code>8.3 ms</code>. Shadow and replay parity metric searches returned no recent data, so that remains an instrumentation/scheduling gap rather than a closed proof.</p>
+            </div>
+            <div class="log-entry">
+              <time datetime="2026-05-16T15:28:00-04:00">2026-05-16 15:28 EDT</time>
+              <p>Direct database correctness proof passed for the four successful proof Files. <code>entity_catalog</code> has all four rows at tenant <code>default</code>, entity type <code>File</code>, <code>Status=Ready</code>, and <code>sequence_nr=5</code>; <code>entity_field_index</code> has <code>14</code> indexed fields per File.</p>
+              <p>The indexed <code>Name</code> and <code>MimeType</code> values match the catalog fields, and each indexed <code>content_hash</code> matches the SHA-256 bytes read back by the live proof. This closes the production correctness slice for PERF-002 while keeping continuous replay/shadow execution as the next observability hardening item.</p>
+            </div>
+            <div class="log-entry">
+              <time datetime="2026-05-16T15:47:00-04:00">2026-05-16 15:47 EDT</time>
+              <p>Selected the next measured latency slice from current Datadog evidence: residual File <code>$value</code> latency still includes post-commit reaction work. Current-version APM/metrics show <code>PUT $value</code> around <code>490-611 ms</code> p95 depending on span scope, <code>File.StreamUpdated</code> around <code>248 ms</code> p95, and <code>reaction.dispatch</code> around <code>220 ms</code> p95. Long-lived event streams and idle actor passivation are excluded from the user-visible target.</p>
+              <p>Created fresh main-based Temper worktree <code>/Users/seshendranalla/Development/temper-worktrees/latency-file-value-residual-20260516</code> on branch <code>codex/latency-file-value-residual-20260516</code>, then wrote ADR-0092 <code>docs/adrs/0092-bounded-background-file-reactions.md</code>. The decision keeps File byte/blob/verified <code>StreamUpdated</code> commit synchronous, moves the FileVersion/RecordVersion reaction chain into a bounded background lane only for native File <code>$value</code> writes, and falls back to inline reactions when the background budget is exhausted.</p>
+            </div>
+            <div class="log-entry">
+              <time datetime="2026-05-16T15:48:00-04:00">2026-05-16 15:48 EDT</time>
+              <p>Implemented PERF-005B locally. The dispatch API now has an explicit <code>await_reactions</code> option; all default/OData/platform call sites preserve existing inline behavior, while <code>put_file_stream_content_native</code> opts into bounded background File reactions after the blob write and File transition commit. The background path emits <code>reaction.dispatch.background</code> and keeps overload behavior conservative by awaiting inline when no semaphore permit is available.</p>
+              <p>Local validation is green: <code>cargo test -p temper-server --test trigger_e2e_prod inline_action_triggers_can_run_in_background_when_requested -- --nocapture</code>, <code>cargo test -p temper-server --test file_value_fast_path -- --nocapture</code>, <code>cargo check -p temper-server -p temper-platform</code>, and <code>cargo clippy -p temper-server -p temper-platform --all-targets -- -D warnings</code>. Remaining gates are DST/code-review markers, pre-push/full CI, PR, TemperPaw rollout, Railway deployment, live File proof, Datadog before/after, and direct correctness proof.</p>
+            </div>
+            <div class="log-entry">
+              <time datetime="2026-05-16T15:53:00-04:00">2026-05-16 15:53 EDT</time>
+              <p>Expanded local validation for PERF-005B. The focused suite <code>cargo test -p temper-server --test trigger_e2e_prod --test reaction_e2e_prod --test adapter_dispatch --test wasm_dispatch -- --nocapture</code> passed, confirming default inline reaction behavior remains intact for existing reactions, adapter callbacks, triggers, and WASM callbacks. <code>cargo fmt --all -- --check</code> and <code>git diff --check</code> also pass.</p>
+              <p>Manual DST and code-quality review markers were written for this worktree because separate reviewer agents are not available under the current session tool rules. The determinism audit exits 0 with the known 26 pre-existing repository patterns and did not identify a new unsuppressed pattern from PERF-005B. Static dashboard validation passed; the in-app browser refused a local <code>file://</code> reload under its URL policy, so responsive visual refresh remains unverified in-browser for this edit rather than silently bypassed.</p>
+            </div>
+            <div class="log-entry">
+              <time datetime="2026-05-16T16:18:00-04:00">2026-05-16 16:18 EDT</time>
+              <p>Packaged PERF-005B for GitHub. Commit <code>77e97f92d855d612d9aa5d4f925ed3eb6f0f3109</code> is pushed on branch <code>codex/latency-file-value-residual-20260516</code>, and draft Temper PR <a href="https://github.com/nerdsane/temper/pull/242">nerdsane/temper#242</a> is open.</p>
+              <p>The full local pre-push gate passed before push: rustfmt, workspace clippy, readability ratchet, full workspace tests, and doctests. GitHub CI run <a href="https://github.com/nerdsane/temper/actions/runs/25971893778">25971893778</a> is running; early completed jobs include verification contract, Integrity &amp; DST Patterns, platform random DST shard, and instrumentation hygiene.</p>
+            </div>
+            <div class="log-entry">
+              <time datetime="2026-05-16T16:36:00-04:00">2026-05-16 16:36 EDT</time>
+              <p>Temper PR <a href="https://github.com/nerdsane/temper/pull/242">#242</a> passed CI run <a href="https://github.com/nerdsane/temper/actions/runs/25971893778">25971893778</a>, including verification contract, compile/lint, integrity/DST patterns, tests, DST/platform shards, spec verification, and instrumentation hygiene. Only pre-existing GitHub Actions Node.js 20 deprecation annotations remained.</p>
+              <p>Marked the PR ready and merged it as <code>1796c4f0f5cc9b81557107bae19795db5b578d0c</code>. This closes the Temper half of PERF-005B; the remaining work is the TemperPaw rollout, Railway deployment, live File proof, Datadog proof, and correctness proof.</p>
+            </div>
+            <div class="log-entry">
+              <time datetime="2026-05-16T16:48:00-04:00">2026-05-16 16:48 EDT</time>
+              <p>Created a fresh main-based TemperPaw worktree <code>/Users/seshendranalla/Development/temperpaw-worktrees/bump-temper-file-value-residual-20260516</code> on branch <code>codex/bump-temper-file-value-residual-20260516</code> from <code>origin/main</code> commit <code>73e756a0</code>. Updated the pinned Temper revision across root manifests, Docker observability source, Datadog observability contracts, packaged WASM manifests, and packaged WASM lockfiles to <code>1796c4f0f5cc9b81557107bae19795db5b578d0c</code>.</p>
+              <p>The rollout needed one compatibility patch: <code>crates/temperpaw/src/setup_api.rs</code> now sets <code>await_reactions: true</code> when constructing <code>DispatchExtOptions</code>, preserving the old synchronous setup behavior for TemperPaw while the native File <code>$value</code> path uses the new background-reaction option inside Temper.</p>
+              <p>Local rollout validation is green: locked <code>cargo check -p temperpaw</code>, 31 Datadog observability contract tests, stale-revision scan, rustfmt, diff check, clippy/check for <code>temperpaw</code> and <code>paw-codex-worker</code>, CI script syntax/smokes, full <code>temperpaw</code> tests, <code>paw-codex-worker</code> tests, review-gate lifecycle tests, every packaged WASM build script, and the dashboard production build after <code>npm ci</code>.</p>
+            </div>
+            <div class="log-entry">
+              <time datetime="2026-05-16T16:51:00-04:00">2026-05-16 16:51 EDT</time>
+              <p>Committed the TemperPaw rollout as <code>af3546778cb9c8d5c6150f11a5e27f5849a13639</code>, pushed branch <code>codex/bump-temper-file-value-residual-20260516</code>, and opened draft PR <a href="https://github.com/nerdsane/temperpaw/pull/273">nerdsane/temperpaw#273</a>.</p>
+              <p>GitHub queued PR CI run <a href="https://github.com/nerdsane/temperpaw/actions/runs/25972634147">25972634147</a>. The next decision point is remote CI: if green, mark the PR ready and merge; if red, fix the rollout before deployment.</p>
+            </div>
+            <div class="log-entry">
+              <time datetime="2026-05-16T17:06:00-04:00">2026-05-16 17:06 EDT</time>
+              <p>TemperPaw PR <a href="https://github.com/nerdsane/temperpaw/pull/273">#273</a> passed PR CI run <a href="https://github.com/nerdsane/temperpaw/actions/runs/25972634147">25972634147</a> in 14m44s: fmt, clippy, check, worker smoke, packaged WASM build, tests, and dashboard build all succeeded.</p>
+              <p>Marked the PR ready and squash-merged it as <code>e8457ca4a4891b05710980c7aebe1ed822d55f87</code>. TemperPaw main CI run <a href="https://github.com/nerdsane/temperpaw/actions/runs/25972955841">25972955841</a> and Docker run <a href="https://github.com/nerdsane/temperpaw/actions/runs/25972955833">25972955833</a> are now running against the merge commit.</p>
+            </div>
+            <div class="log-entry">
+              <time datetime="2026-05-16T17:31:00-04:00">2026-05-16 17:31 EDT</time>
+              <p>TemperPaw main CI <a href="https://github.com/nerdsane/temperpaw/actions/runs/25972955841">25972955841</a> passed in 14m55s, repeating the full mainline gate: fmt, clippy, check, worker smoke, packaged WASM build, tests, and dashboard build.</p>
+              <p>TemperPaw Docker <a href="https://github.com/nerdsane/temperpaw/actions/runs/25972955833">25972955833</a> passed in 24m49s. It pushed <code>ghcr.io/nerdsane/temperpaw:sha-e8457ca</code> with image digest <code>sha256:4956e8d7ed26af68168b64643b6aefc0e03e5cc114cbb8377382649c3a9eadfa</code>. The only annotation is the pre-existing Node.js 20 deprecation warning from Docker GitHub Actions.</p>
+            </div>
+            <div class="log-entry">
+              <time datetime="2026-05-16T17:39:00-04:00">2026-05-16 17:39 EDT</time>
+              <p>Deployed PERF-005B to Railway production from the merged TemperPaw commit <code>e8457ca4a4891b05710980c7aebe1ed822d55f87</code>. Railway deployment <code>5778571f-b325-4237-a792-cb13342963a4</code> succeeded with wrapper image digest <code>sha256:3280c36ae065391ecc7741abd9051faae0a983150db312c4e920a5eb977f1125</code> and runtime image tag <code>sha-e8457ca</code>.</p>
+              <p>Post-deploy probes are version-correct: <code>/readyz</code> returned ready JSON in about <code>75.7 ms</code>, <code>/healthz</code> returned HTTP 200 in about <code>40.3 ms</code>, production variables now expose <code>DD_VERSION=e8457ca4a4891b05710980c7aebe1ed822d55f87</code>, and authenticated <code>/paw/version</code> returns <code>sha-e8457ca4</code> with SHA <code>e8457ca4a4891b05710980c7aebe1ed822d55f87</code>.</p>
+            </div>
+            <div class="log-entry">
+              <time datetime="2026-05-16T17:52:00-04:00">2026-05-16 17:52 EDT</time>
+              <p>Ran live proof <code>file-reaction-background-live-proof-20260516215205</code> against Railway production on <code>e8457ca4</code>. It created six fresh Files and performed twelve native File <code>$value</code> writes. Every write reached <code>Status=Ready</code> in one poll, every byte readback matched the final SHA-256, and every File was findable by <code>Name</code> through the projection path.</p>
+              <p>Measured request wall times from the proof client: first-write average <code>288.5 ms</code> and max <code>317.0 ms</code>; final-write average <code>281.6 ms</code> and max <code>294.2 ms</code>; final byte reads averaged in the low-to-mid <code>300 ms</code> range. Each File produced the expected Superseded + Current FileVersion chain.</p>
+            </div>
+            <div class="log-entry">
+              <time datetime="2026-05-16T17:54:00-04:00">2026-05-16 17:54 EDT</time>
+              <p>Ran a direct production Postgres proof for the same six File IDs using Railway's Postgres public URL without printing secrets. It found all six File catalog rows at <code>Status=Ready</code>, <code>sequence_nr=5</code>, <code>version_count=2</code>, matching <code>content_hash</code>, and <code>last_version_id</code> equal to the Current FileVersion ID.</p>
+              <p>The DB proof also found <code>ok_index_files=6</code>: each File had <code>13</code> projection index rows, each File had <code>5</code> File events, and each FileVersion pair had <code>5</code> combined FileVersion events. Current FileVersion rows held the final content hash and size; Superseded rows remained linked as the predecessor.</p>
+            </div>
+            <div class="log-entry">
+              <time datetime="2026-05-16T17:56:00-04:00">2026-05-16 17:56 EDT</time>
+              <p>Queried Datadog APM for the proof window. Sampled <code>PUT /tdata/Files('fl-{guid}')/$value</code> spans under <code>version:e8457ca4a4891b05710980c7aebe1ed822d55f87</code> had p95 <code>238.7 ms</code>, average <code>238.6 ms</code>, and max <code>271.6 ms</code>. The previous projection-diff proof window had sampled <code>PUT $value</code> p95 <code>490.3 ms</code>, average <code>594.8 ms</code>, and max <code>1440.5 ms</code>.</p>
+              <p>Datadog also shows <code>File.StreamUpdated</code> p95 improving from <code>223.1 ms</code> in the previous proof window to <code>13.7 ms</code> now. New <code>reaction.dispatch.background</code> spans are present with p95 <code>89.6 ms</code>; trace <a href="https://app.datadoghq.com/apm/trace/fdd583aecbc17ec4b089b0e0dabb3580">fdd583aecbc17ec4b089b0e0dabb3580</a> shows the HTTP response ending at <code>21:52:12.908Z</code> and the background reaction span starting at <code>21:52:12.909Z</code>.</p>
+            </div>
+            <div class="log-entry">
+              <time datetime="2026-05-16T18:04:00-04:00">2026-05-16 18:04 EDT</time>
+              <p>Selected PERF-005C from the post-PERF-005B evidence. The residual upload p95 is now inside <code>state.put_file_stream_content.native</code>, while <code>temper_blob_io_wait_duration_ms</code> only measures semaphore queue wait and returned no useful production samples. The missing surface is actual native blob transport duration for local filesystem and S3/R2 operations.</p>
+              <p>Created fresh main-based Temper worktree <code>/Users/seshendranalla/Development/temper-worktrees/latency-blob-transport-observability-20260516</code> on branch <code>codex/latency-blob-transport-observability-20260516</code>, then wrote ADR-0093 <code>docs/adrs/0093-native-blob-transport-observability.md</code>.</p>
+            </div>
+            <div class="log-entry">
+              <time datetime="2026-05-16T18:18:00-04:00">2026-05-16 18:18 EDT</time>
+              <p>Implemented PERF-005C locally in Temper. Native <code>BlobStore</code> operations now emit bounded <code>blob.transport.put</code>, <code>blob.transport.put_content</code>, <code>blob.transport.get</code>, and <code>blob.transport.head</code> spans plus <code>temper_blob_native_transport_duration_ms</code>, <code>temper_blob_native_transport_requests_total</code>, <code>temper_blob_native_transport_request_bytes</code>, and <code>temper_blob_native_transport_response_bytes</code>. Labels are bounded to operation, backend, outcome, and status class, with no tenant, key, hash, URL, or auth material.</p>
+              <p>Validation passed: <code>cargo check -p temper-server</code>, <code>cargo clippy -p temper-server --all-targets -- -D warnings</code>, <code>cargo test -p temper-server blob</code>, <code>cargo test -p temper-server --test file_value_fast_path</code>, <code>cargo fmt --all -- --check</code>, and <code>git diff --check</code>. One malformed local Cargo command was corrected and rerun with proper filters.</p>
+            </div>
+            <div class="log-entry">
+              <time datetime="2026-05-16T18:45:00-04:00">2026-05-16 18:45 EDT</time>
+              <p>Committed PERF-005C as <code>8fc79f3c50eb05e3fdf419749b444ef6b45bbfae</code>, pushed branch <code>codex/latency-blob-transport-observability-20260516</code>, and opened draft Temper PR <a href="https://github.com/nerdsane/temper/pull/243">nerdsane/temper#243</a>.</p>
+              <p>The repository pre-push gate passed rustfmt, workspace clippy, readability ratchet, and full <code>cargo test --workspace</code>. GitHub CI run <a href="https://github.com/nerdsane/temper/actions/runs/25974966315">25974966315</a> is now running and the next decision point is green CI, then ready/merge, then the TemperPaw rollout.</p>
+            </div>
+            <div class="log-entry">
+              <time datetime="2026-05-16T19:02:00-04:00">2026-05-16 19:02 EDT</time>
+              <p>Temper PR <a href="https://github.com/nerdsane/temper/pull/243">nerdsane/temper#243</a> passed CI run <a href="https://github.com/nerdsane/temper/actions/runs/25974966315">25974966315</a>: verification contract, compile/lint, integrity/DST patterns, full non-DST workspace tests, all DST/platform shards, spec verification, and instrumentation hygiene are green.</p>
+              <p>Marked the PR ready and squash-merged it into Temper <code>main</code> as <code>88c9d797b398df04d845ff202738b09542817415</code>. The active PERF-005C gate is now a fresh main-based TemperPaw rollout worktree, dependency pin bump, dashboard/monitor contract update for <code>temper_blob_native_transport_*</code>, PR, Docker, Railway deploy, live File proof, and Datadog proof.</p>
+            </div>
+            <div class="log-entry">
+              <time datetime="2026-05-16T19:14:00-04:00">2026-05-16 19:14 EDT</time>
+              <p>Created and validated the PERF-005C TemperPaw rollout in <code>/Users/seshendranalla/Development/temperpaw-worktrees/bump-temper-blob-transport-observability-20260516</code> on branch <code>codex/bump-temper-blob-transport-observability-20260516</code>. The rollout pins Temper to merged commit <code>88c9d797b398df04d845ff202738b09542817415</code> and extends Datadog dashboard, monitor, percentile configuration, docs, and contract tests for <code>temper_blob_native_transport_*</code>.</p>
+              <p>Local rollout validation passed: dashboard and monitor JSON parse, percentile Python script compiles, <code>git diff --check</code> is clean, <code>cargo fmt --all -- --check</code> passes, <code>cargo check --locked -p temperpaw</code> passes, Datadog observability contract tests pass, Datadog monitor config tests pass, full <code>cargo test --locked -p temperpaw --tests -- --nocapture</code> passes with 187 tests, and the focused <code>workspace_fs</code> WASM SDK test passes.</p>
+            </div>
+            <div class="log-entry">
+              <time datetime="2026-05-16T19:16:00-04:00">2026-05-16 19:16 EDT</time>
+              <p>Committed the TemperPaw PERF-005C rollout as <code>04c6d3bf7c0b0e237675e4dba7f1beb7471ce220</code>, pushed branch <code>codex/bump-temper-blob-transport-observability-20260516</code>, and opened draft PR <a href="https://github.com/nerdsane/temperpaw/pull/274">nerdsane/temperpaw#274</a>.</p>
+              <p>GitHub PR CI run <a href="https://github.com/nerdsane/temperpaw/actions/runs/25975556316">25975556316</a> is in progress. The next gate is green CI, then mark ready, merge, wait for main CI and Docker, deploy the new image to Railway, and run live File/Datadog/DB proof for native blob transport.</p>
+            </div>
+            <div class="log-entry">
+              <time datetime="2026-05-16T19:31:00-04:00">2026-05-16 19:31 EDT</time>
+              <p>TemperPaw PR <a href="https://github.com/nerdsane/temperpaw/pull/274">#274</a> passed PR CI run <a href="https://github.com/nerdsane/temperpaw/actions/runs/25975556316">25975556316</a>: fmt, clippy, check, worker smoke syntax, os-app WASM build, tests, and dashboard build are green.</p>
+              <p>Marked the PR ready and squash-merged it into TemperPaw <code>main</code> as <code>9fcd4b2b1f6c651d8c12c954f836d250efb443be</code>. Mainline CI run <a href="https://github.com/nerdsane/temperpaw/actions/runs/25975834289">25975834289</a> and Docker run <a href="https://github.com/nerdsane/temperpaw/actions/runs/25975834282">25975834282</a> are now running for that merge commit.</p>
+            </div>
+            <div class="log-entry">
+              <time datetime="2026-05-16T19:54:00-04:00">2026-05-16 19:54 EDT</time>
+              <p>TemperPaw main CI run <a href="https://github.com/nerdsane/temperpaw/actions/runs/25975834289">25975834289</a> and Docker run <a href="https://github.com/nerdsane/temperpaw/actions/runs/25975834282">25975834282</a> passed for merge commit <code>9fcd4b2b1f6c651d8c12c954f836d250efb443be</code>.</p>
+              <p>Docker published <code>ghcr.io/nerdsane/temperpaw:sha-9fcd4b2</code> with digest <code>sha256:74d398d56362de4b31cf09334e975952ec8f455a29e92a80fee99a6d5edf65bb</code>. Next gate is a fresh main-based deployment worktree, Railway variable update/deploy, health/version probes, live File proof, Datadog native blob proof, and direct DB correctness proof.</p>
+            </div>
+            <div class="log-entry">
+              <time datetime="2026-05-16T20:00:00-04:00">2026-05-16 20:00 EDT</time>
+              <p>Deployed PERF-005C to Railway production from merged TemperPaw commit <code>9fcd4b2b1f6c651d8c12c954f836d250efb443be</code>. Railway deployment <code>37edf6ad-5f71-4865-85e3-46a05dd7cc78</code> succeeded; wrapper digest is <code>sha256:4f3da001ee59f15b87833713d6fa65a84c0cbffe5a5711a0fdf48cbc2b9c6f20</code>.</p>
+              <p>Post-deploy probes are version-correct: <code>/readyz</code> HTTP 200 in <code>96.5 ms</code>, <code>/healthz</code> HTTP 200 in <code>63.6 ms</code>, authenticated <code>/paw/version</code> HTTP 200 in <code>55.9 ms</code>, and Railway env reports <code>DD_VERSION=9fcd4b2b1f6c651d8c12c954f836d250efb443be</code>.</p>
+            </div>
+            <div class="log-entry">
+              <time datetime="2026-05-16T20:11:00-04:00">2026-05-16 20:11 EDT</time>
+              <p>Applied the native blob transport observability objects to live Datadog. Percentile configs were created for <code>temper_blob_native_transport_duration_ms</code>, <code>temper_blob_native_transport_request_bytes</code>, and <code>temper_blob_native_transport_response_bytes</code>. Dashboard <a href="https://app.datadoghq.com/dashboard/mn4-k3k-i66">mn4-k3k-i66</a> was updated, and monitors <code>[Temper] Native Blob Transport Duration Spike</code> id <code>283877764</code> plus <code>[Temper] Native Blob Transport p95 Regression</code> id <code>283877770</code> were created.</p>
+              <p>Ran fresh live proof <code>blob-transport-live-proof-20260517001121</code> after percentile config so Datadog p95/p99 has post-configuration samples. It created six Files, ran twelve <code>$value</code> writes, read final bytes back, listed by <code>Name</code>, and verified Superseded + Current FileVersion chains. Final-write average was <code>347.25 ms</code>, max <code>393.24 ms</code>.</p>
+            </div>
+            <div class="log-entry">
+              <time datetime="2026-05-16T20:15:00-04:00">2026-05-16 20:15 EDT</time>
+              <p>Ran direct production Postgres proof for the same six File IDs using Railway's Postgres public URL without printing secrets. It found <code>ok_file_catalog_rows=6</code>, <code>ok_current_file_versions=6</code>, <code>ok_superseded_file_versions=6</code>, <code>ok_file_event_chains=6</code>, and <code>ok_fileversion_event_chains=12</code>.</p>
+              <p>The DB proof also found <code>file_event_rows_total=30</code>, <code>fileversion_event_rows_total=30</code>, <code>ok_file_index_rows_14=6</code>, and <code>ok_fileversion_index_rows_9=12</code>; no bad File catalog rows or bad FileVersion event rows were returned.</p>
+            </div>
+            <div class="log-entry">
+              <time datetime="2026-05-16T20:18:00-04:00">2026-05-16 20:18 EDT</time>
+              <p>Queried Datadog for the post-configuration proof window. Metrics show <code>put_content</code> count <code>12</code>, average <code>195.2 ms</code>, p95/p99 <code>223.8 ms</code>; successful <code>get</code> count <code>12</code>, average <code>106.8 ms</code>, p95/p99 <code>177.4 ms</code>; 404 read-probe <code>get</code> count <code>12</code>, average <code>73.3 ms</code>, p95/p99 <code>88.3 ms</code>. Request and response byte metrics both averaged <code>98,304</code> bytes for the expected 64 KiB / 128 KiB mix.</p>
+              <p>Expanded trace <a href="https://app.datadoghq.com/apm/trace/a29ccff5afb451042e8bcd8ec1247b88">a29ccff5afb451042e8bcd8ec1247b88</a> proves the new span placement: <code>PUT $value</code> 264.4 ms, <code>state.put_file_stream_content.native</code> 235.7 ms, child <code>blob.transport.put_content</code> 186.5 ms, followed by <code>File.StreamUpdated</code> and bounded background reactions.</p>
+            </div>
+            <div class="log-entry">
+              <time datetime="2026-05-16T20:35:00-04:00">2026-05-16 20:35 EDT</time>
+              <p>Started PERF-005D from the PERF-005C Datadog evidence. Fresh native File reads were paying one failed legacy external-key <code>blob.transport.get</code> before the successful native <code>temper-fs/{content_hash}</code> get. Created fresh main-based Temper worktree <code>/Users/seshendranalla/Development/temper-worktrees/latency-file-blob-read-key-order-20260517</code> on branch <code>codex/latency-file-blob-read-key-order-20260517</code> and added ADR-0094 for native-first File blob read-key ordering with legacy fallback.</p>
+              <p>Implemented the local slice in <code>crates/temper-server/src/state/file_read_blobs.rs</code>. The read helper now tries <code>temper-fs/{content_hash}</code> first for every File read, then falls back to the legacy external <code>{content_hash}</code> key only when the tenant blob endpoint is external. File state, IOA specs, projections, OData, and acknowledgement semantics are unchanged.</p>
+            </div>
+            <div class="log-entry">
+              <time datetime="2026-05-16T20:36:00-04:00">2026-05-16 20:36 EDT</time>
+              <p>PERF-005D focused local checks are green: <code>cargo test -p temper-server file_blob_read_keys</code> passed the native-first and internal-only helper tests; <code>cargo test -p temper-server --test file_value_fast_path</code> passed all seven File value fast-path tests; <code>cargo check -p temper-server</code>, <code>cargo fmt --all -- --check</code>, and <code>git diff --check</code> passed.</p>
+              <p>Next gates are the required DST/code-quality review markers for the sim-visible <code>temper-server</code> change, commit, Temper PR, GitHub CI, TemperPaw pin bump, Railway deploy, live File proof, and Datadog confirmation that fresh native reads no longer emit the legacy-key 404 while legacy fallback remains available.</p>
+            </div>
+            <div class="log-entry">
+              <time datetime="2026-05-16T20:56:00-04:00">2026-05-16 20:56 EDT</time>
+              <p>Packaged PERF-005D for GitHub. DST and code-review markers were written for the touched sim-visible server file and ADR; the broad determinism audit still reports the known 26 pre-existing repository patterns, and the PERF-005D diff adds none.</p>
+              <p>Committed <code>a7e942cf</code> with message <code>Prefer native File blob read key</code>, pushed branch <code>codex/latency-file-blob-read-key-order-20260517</code>, and opened draft Temper PR <a href="https://github.com/nerdsane/temper/pull/244">nerdsane/temper#244</a>. The local pre-push gate passed all four gates: rustfmt, workspace clippy, readability ratchet, full <code>cargo test --workspace</code>, and doctests. GitHub CI run <a href="https://github.com/nerdsane/temper/actions/runs/25977404056">25977404056</a> is in progress.</p>
+            </div>
+            <div class="log-entry">
+              <time datetime="2026-05-16T21:10:00-04:00">2026-05-16 21:10 EDT</time>
+              <p>Checked the active Temper PR gate while resuming the thread. PR <a href="https://github.com/nerdsane/temper/pull/244">#244</a> is still draft and mergeable. All checks except the broad <code>cargo test --workspace -- --skip dst_</code> job are green; that final job has been running since <code>2026-05-17T00:56:44Z</code>.</p>
+              <p>While waiting, inspected the TemperPaw rollout surface. TemperPaw pins all Temper crates and all packaged WASM SDK manifests to one Temper revision, with <code>crates/temperpaw/tests/datadog_observability_contract.rs</code> enforcing the pin so the rollout remains a coordinated runtime/SDK bump.</p>
+              <p>Created fresh TemperPaw worktree <code>/Users/seshendranalla/Development/temperpaw-worktrees/bump-temper-file-blob-read-key-order-20260517</code> on branch <code>codex/bump-temper-file-blob-read-key-order-20260517</code> from <code>origin/main</code> commit <code>9fcd4b2b</code>. No pin edit has been made yet; that waits for the Temper merge SHA.</p>
+            </div>
+            <div class="log-entry">
+              <time datetime="2026-05-16T21:18:00-04:00">2026-05-16 21:18 EDT</time>
+              <p>PERF-005D Temper PR <a href="https://github.com/nerdsane/temper/pull/244">#244</a> passed CI run <a href="https://github.com/nerdsane/temper/actions/runs/25977404056">25977404056</a>, was marked ready, and merged as <code>ff79974d88a5b1a67e1fa9c4a746b422e12b29c3</code>. The merge command reported the known local checkout issue because another worktree owns <code>main</code>, but GitHub confirms the PR state is merged.</p>
+              <p>Applied the TemperPaw coordinated pin bump to commit <code>709876f3</code>, pushed <code>codex/bump-temper-file-blob-read-key-order-20260517</code>, and opened draft rollout PR <a href="https://github.com/nerdsane/temperpaw/pull/275">nerdsane/temperpaw#275</a>. Local rollout checks are green: <code>cargo check --locked -p temperpaw -p paw-codex-worker</code>, <code>cargo test -p temperpaw --test datadog_observability_contract</code> with 31 passing tests, <code>cargo fmt --all -- --check</code>, and <code>git diff --check</code>. GitHub CI run <a href="https://github.com/nerdsane/temperpaw/actions/runs/25977831129">25977831129</a> is in progress.</p>
+            </div>
+            <div class="log-entry">
+              <time datetime="2026-05-16T21:43:00-04:00">2026-05-16 21:43 EDT</time>
+              <p>TemperPaw rollout PR <a href="https://github.com/nerdsane/temperpaw/pull/275">#275</a> passed PR CI run <a href="https://github.com/nerdsane/temperpaw/actions/runs/25977831129">25977831129</a>, was marked ready, and merged as <code>821d6c6ee28845e6b1365d78f3b85c3b5cc1ad15</code>. GitHub queued main CI run <a href="https://github.com/nerdsane/temperpaw/actions/runs/25978275903">25978275903</a> and Docker run <a href="https://github.com/nerdsane/temperpaw/actions/runs/25978275890">25978275890</a>.</p>
+            </div>
+            <div class="log-entry">
+              <time datetime="2026-05-16T22:20:00-04:00">2026-05-16 22:20 EDT</time>
+              <p>TemperPaw main CI run <a href="https://github.com/nerdsane/temperpaw/actions/runs/25978275903">25978275903</a> and Docker run <a href="https://github.com/nerdsane/temperpaw/actions/runs/25978275890">25978275890</a> passed for <code>821d6c6ee28845e6b1365d78f3b85c3b5cc1ad15</code>. Docker published <code>ghcr.io/nerdsane/temperpaw:sha-821d6c6</code> with base image digest <code>sha256:c8e6ac6ff9df7a47ceec29fa80ebc4228d3cb99fdf3f285ac27189714e341aff</code>.</p>
+              <p>Railway deployment <code>b628e727-b013-4c89-9eaa-f65f4f7e7433</code> succeeded from the deployment worktree. The first deploy correctly used the image but still reported old runtime version variables; the second deploy fixed <code>BUILD_VERSION</code>, <code>BUILD_SHA</code>, <code>DD_VERSION</code>, <code>DD_GIT_COMMIT_SHA</code>, and OTEL <code>service.version</code>. Authenticated <code>/paw/version</code> now reports <code>sha-821d6c6</code> and full SHA <code>821d6c6ee28845e6b1365d78f3b85c3b5cc1ad15</code>.</p>
+            </div>
+            <div class="log-entry">
+              <time datetime="2026-05-16T22:24:00-04:00">2026-05-16 22:24 EDT</time>
+              <p>Ran production proof <code>blob-read-key-order-live-proof-20260517022158</code>: <code>12</code> fresh Files, <code>1,802</code> bytes written through <code>$value</code>, exact byte readback, matching SHA-256 <code>ContentHash</code>, matching <code>SizeBytes</code>, <code>Ready</code> status, <code>VersionCount=1</code>, and non-empty <code>LastVersionId</code> for every File. Client read wall clock: min <code>221.9 ms</code>, p50 <code>247.7 ms</code>, max <code>287.7 ms</code>.</p>
+              <p>Datadog before/after confirms the fix: previous version <code>9fcd4b2b</code> proof window had <code>12</code> successful fresh-read gets and <code>12</code> legacy-key <code>not_found</code> gets; current version <code>821d6c6e</code> proof window has successful get and put_content activity with no <code>get/outcome:not_found</code> series. DBM also captured proof-window PostgreSQL samples with propagated service/version tags.</p>
+            </div>
+            <div class="log-entry">
+              <time datetime="2026-05-16T22:42:00-04:00">2026-05-16 22:42 EDT</time>
+              <p>Selected PERF-003 from a fresh Datadog residual pass. Current deployed version <code>821d6c6e</code> shows <code>query_projection_upsert</code> transaction p95 around <code>429-443 ms</code> while pool acquire stays around <code>4.8-5.0 ms</code>; projection end-to-end p95 reaches <code>471-478 ms</code> for <code>Session/background_dispatch</code>. That points at transaction work/shape rather than connection starvation.</p>
+              <p>Created fresh main-based Temper worktree <code>/Users/seshendranalla/Development/temper-worktrees/latency-db-transaction-shape-20260517</code> on branch <code>codex/latency-db-transaction-shape-20260517</code>, added ADR-0095, and implemented the first local fast path: scalar index extraction moves before <code>BEGIN</code>, unchanged projection hash/status updates only catalog sequence/metadata, and changed projections still use the ADR-0091 diff reconciliation. Added <code>temper_postgres_projection_index_reconciliations_total</code> to distinguish <code>insert</code>, <code>diff</code>, and <code>skipped_unchanged</code> paths in Datadog.</p>
+              <p>Local verification is green: <code>cargo test -p temper-store-postgres upsert_query_projection -- --nocapture</code>, full <code>cargo test -p temper-store-postgres -- --nocapture</code>, <code>cargo clippy -p temper-store-postgres --all-targets -- -D warnings</code>, <code>cargo check -p temper-store-postgres</code>, <code>cargo check -p temper-server</code>, <code>cargo fmt --all -- --check</code>, and <code>git diff --check</code>. The Postgres integration portions still skip without <code>DATABASE_URL</code>; production DB proof remains a rollout gate.</p>
+            </div>
+            <div class="log-entry">
+              <time datetime="2026-05-16T23:02:00-04:00">2026-05-16 23:02 EDT</time>
+              <p>Completed the PERF-003 local-to-PR gate. Code-quality review marker passed with no findings, commit <code>f0e3a18c</code> was created with message <code>Shorten projection transaction fast path</code>, and branch <code>codex/latency-db-transaction-shape-20260517</code> pushed after the full Temper pre-push gate passed rustfmt, workspace clippy, readability ratchet, full <code>cargo test --workspace</code>, and doctests.</p>
+              <p>Opened draft Temper PR <a href="https://github.com/nerdsane/temper/pull/245">nerdsane/temper#245</a>. Remaining gates for this slice are GitHub CI, mark-ready/merge, TemperPaw pin bump and rollout PR, Railway deployment, live OData/File proof, Datadog before/after <code>query_projection_upsert</code> transaction p95, <code>temper_postgres_projection_index_reconciliations_total</code> path mix, and direct projection correctness proof against production data.</p>
+            </div>
+            <div class="log-entry">
+              <time datetime="2026-05-16T23:24:00-04:00">2026-05-16 23:24 EDT</time>
+              <p>Finished the Temper half of PERF-003: PR <a href="https://github.com/nerdsane/temper/pull/245">nerdsane/temper#245</a> passed GitHub CI run <a href="https://github.com/nerdsane/temper/actions/runs/25979739482">25979739482</a>, was marked ready, and merged as <code>6439a8a0be134ffa37933701fb8fca140121d44d</code>. CI passed verification contract, compile/lint, integrity/DST, non-DST workspace tests, all DST/platform shards, spec verification, and instrumentation hygiene.</p>
+              <p>Created fresh main-based TemperPaw worktree <code>/Users/seshendranalla/Development/temperpaw-worktrees/bump-temper-db-transaction-shape-20260517</code>, bumped all Temper runtime/server/store/SDK pins and checked-in WASM lockfiles to <code>6439a8a0</code>, and committed rollout commit <code>beaaf466</code>. Local rollout checks passed: <code>cargo check --locked -p temperpaw -p paw-codex-worker</code>, <code>cargo test -p temperpaw --test datadog_observability_contract -- --nocapture</code> with 31 passing tests, <code>cargo fmt --all -- --check</code>, <code>git diff --check</code>, and <code>rg --no-ignore</code> proof that the old Temper rev is gone.</p>
+              <p>Opened draft TemperPaw rollout PR <a href="https://github.com/nerdsane/temperpaw/pull/276">nerdsane/temperpaw#276</a>. PR CI run <a href="https://github.com/nerdsane/temperpaw/actions/runs/25980160694">25980160694</a> is in progress; after that the remaining gates are mark-ready/merge, main CI, Docker, Railway deploy, live OData/File proof, Datadog transaction p95 and reconciliation-path proof, and direct projection correctness proof.</p>
+            </div>
+            <div class="log-entry">
+              <time datetime="2026-05-17T00:02:00-04:00">2026-05-17 00:02 EDT</time>
+              <p>Completed the TemperPaw rollout gate for PERF-003. PR <a href="https://github.com/nerdsane/temperpaw/pull/276">nerdsane/temperpaw#276</a> passed PR CI run <a href="https://github.com/nerdsane/temperpaw/actions/runs/25980160694">25980160694</a>, was marked ready, and merged as <code>c16e0201c1490e0496f4964f5c72b704bb8cd216</code>. TemperPaw main CI run <a href="https://github.com/nerdsane/temperpaw/actions/runs/25980450147">25980450147</a> and Docker run <a href="https://github.com/nerdsane/temperpaw/actions/runs/25980450153">25980450153</a> passed.</p>
+            </div>
+            <div class="log-entry">
+              <time datetime="2026-05-17T00:12:00-04:00">2026-05-17 00:12 EDT</time>
+              <p>Deployed PERF-003 to Railway production from detached deployment worktree <code>/Users/seshendranalla/Development/temperpaw-worktrees/deploy-db-transaction-shape-20260517</code>. Final successful deployment is <code>6e42424f-7ad4-4577-b127-9e3a0a36abeb</code>, using <code>Dockerfile.deploy</code>, pinned image tag <code>sha-c16e020</code>, and image digest <code>sha256:9c8a844fdfe52a201adea5755a3d5d61c498d8ba6cdc84c2f64a151d3bf27c89</code>.</p>
+              <p>Corrected the Railway version environment so <code>BUILD_VERSION</code>, <code>BUILD_SHA</code>, <code>DD_VERSION</code>, and Datadog version tagging match <code>c16e0201c1490e0496f4964f5c72b704bb8cd216</code>. Authenticated <code>/paw/version</code> reports <code>sha-c16e020</code> and <code>/readyz</code> reports ready with Discord connected.</p>
+            </div>
+            <div class="log-entry">
+              <time datetime="2026-05-17T00:17:00-04:00">2026-05-17 00:17 EDT</time>
+              <p>Ran live PERF-003 OData proof <code>perf-003-projection-fast-path-proof-20260517041730.md</code> against production. It created File <code>fl-019e3427-4b90-7801-be94-d4af896aa315</code>, performed three <code>PUT $value</code> writes at <code>349.2 ms</code>, <code>366.5 ms</code>, and <code>344.8 ms</code>, verified exact <code>GET $value</code> readback after each write, and verified direct File reads with min <code>54.9 ms</code>, p50 <code>65.3 ms</code>, and max <code>71.9 ms</code>.</p>
+              <p>Correctness proof passed: the File reached <code>Ready</code> with <code>VersionCount=3</code> and last version <code>019e3427-58a6-7331-9614-b6982a5347dc</code>; FileVersions were <code>Superseded</code>, <code>Superseded</code>, and <code>Current</code>; filtered OData reads by <code>Name</code> and <code>Path</code> found the proof row. Lowercase <code>name</code> returned zero rows, which is an API ergonomics caveat rather than a projection failure.</p>
+            </div>
+            <div class="log-entry">
+              <time datetime="2026-05-17T00:24:00-04:00">2026-05-17 00:24 EDT</time>
+              <p>Completed direct production database proof through Railway Postgres. <code>entity_catalog</code> contains the proof File at sequence <code>7</code>, status <code>Ready</code>, projection version <code>2</code>, <code>version_count=3</code>, and the expected last version id. <code>entity_field_index</code> contains <code>14</code> indexed File rows for the proof entity, and the three FileVersion catalog rows preserve the expected <code>previous_version_id</code> chain. FileVersion <code>file_id</code> index count is <code>3</code>.</p>
+              <p>Datadog proof is useful but still a small sample. Current-version c16 metrics show <code>query_projection_upsert</code> transaction p95 buckets between <code>12.9 ms</code> and <code>385.6 ms</code>, <code>event_append</code> p95 between <code>12.7 ms</code> and <code>25.2 ms</code>, and reconciliation-path counts <code>diff=233</code>, <code>insert=25</code>, <code>skipped_unchanged=17</code>. Projection end-to-end p95 is healthy for File/FileVersion background dispatch at about <code>50-73 ms</code>, while <code>Session/background_dispatch</code> remains the next suspicious residual at about <code>245-386 ms</code>.</p>
+            </div>
+            <div class="log-entry">
+              <time datetime="2026-05-17T00:28:00-04:00">2026-05-17 00:28 EDT</time>
+              <p>Queried Datadog profiling and DBM. No fresh continuous profiler upload series appeared in the latest window; the Railway capability endpoint reports <code>TEMPER_DDPROF_ENABLED=false</code>, <code>ddprof_present=true</code>, <code>perf_event_paranoid=3</code>, and <code>CAP_PERFMON=false</code>, so profiling should be treated as targeted/canary evidence on Railway until the platform permission gap is solved or documented.</p>
+              <p>DBM is now giving actionable current-version samples with <code>service:temperpaw</code>, <code>database_instance:temperpaw-postgres</code>, and <code>version:c16e0201...</code>. Samples include low-duration <code>entity_field_index</code> upserts and one <code>SELECT status, projection_hash FROM entity_catalog ... FOR UPDATE</code> sample with about <code>56 ms</code> transaction time and a transaction-id lock wait during concurrent proof traffic. That keeps the next work measured: longer c16 observation first, then the Session/background_dispatch and catalog-lock residuals.</p>
+            </div>
           </div>
         </div>
       </div>
@@ -1524,9 +1961,9 @@
             </tr>
             <tr>
               <td>OBS-003 projection correctness metrics</td>
-              <td>Added and deployed source-tagged projection metrics. Datadog now returns <code>source:background_dispatch</code> p95 queue wait under 0.04 ms and p95 end-to-end update around 75-102 ms. The broader set includes applied sequence, backfill, shadow-check, replay parity, and sequence-gap metrics.</td>
-              <td>Projection writes are now observable by source, catalog-fast reads can opt into deterministic sampled shadow checks via <code>TEMPER_ODATA_CATALOG_SHADOW_READ_EVERY</code>, and active projection rows can be compared against event-replayed authoritative state. The current live bottleneck is update work, not queueing.</td>
-              <td>Run scheduled/live parity and shadow-read checks against deployed data before making projection write-amp changes.</td>
+              <td>Added and deployed source-tagged projection metrics. The previous projection proof returned File projection p95 of <code>42.6 ms</code> for <code>source:create</code> and <code>91.1 ms</code> for <code>source:background_dispatch</code>. The PERF-005B proof window emitted File projection throughput counters: <code>30</code> update-started and <code>24</code> update-enqueued samples. The broader set includes applied sequence, backfill, shadow-check, replay parity, and sequence-gap metrics.</td>
+              <td>Projection writes are now observable by source, catalog-fast reads can opt into deterministic sampled shadow checks via <code>TEMPER_ODATA_CATALOG_SHADOW_READ_EVERY</code>, and active projection rows can be compared against event-replayed authoritative state. PERF-002 improved write amplification and live DB proof confirms the indexed catalog state for the proof rows, but replay/shadow metrics did not emit recent samples.</td>
+              <td>Turn replay parity and sampled shadow reads into scheduled production checks so correctness remains continuously visible instead of only probe-driven.</td>
             </tr>
             <tr>
               <td>Railway production access</td>
@@ -1536,37 +1973,49 @@
             </tr>
             <tr>
               <td>Datadog monitor deployment</td>
-              <td>Dashboard <a href="https://app.datadoghq.com/dashboard/mn4-k3k-i66">mn4-k3k-i66</a> was updated. The refreshed 76-monitor catalog is deployed and 41 legacy/orphan monitors were reconciled away. Standard APM monitors are present: request-rate id <code>283342070</code>, 5xx id <code>283342074</code>, duration id <code>283342076</code>, and error-rate id <code>283345345</code>. Latest Datadog MCP check found no matching active alert groups.</td>
-              <td>The Datadog dashboard/monitor source now exists in production Datadog. Service coverage analyzer recognizes rate, duration, and error coverage for <code>service:temperpaw</code>.</td>
-              <td>Keep source-of-truth monitor deployment in the release checklist and add SLO objects after latency targets are finalized.</td>
+              <td>Dashboard <a href="https://app.datadoghq.com/dashboard/mn4-k3k-i66">mn4-k3k-i66</a> was updated again for PERF-005C. Native blob transport percentile configs were created for duration/request bytes/response bytes. The monitor catalog now includes native blob duration spike id <code>283877764</code> and native blob p95 regression id <code>283877770</code>, alongside the standard APM request-rate id <code>283342070</code>, 5xx id <code>283342074</code>, duration id <code>283342076</code>, and error-rate id <code>283345345</code>.</td>
+              <td>The Datadog dashboard/monitor source now exists in production Datadog and covers the formerly blind native object-store boundary. Service coverage analyzer recognizes rate, duration, and error coverage for <code>service:temperpaw</code>.</td>
+              <td>Keep source-of-truth monitor deployment in the release checklist, add SLO objects after latency targets are finalized, and keep native blob percentiles in every future File/data-plane rollout proof.</td>
             </tr>
             <tr>
               <td>Production health probe</td>
-              <td><code>https://openpaw-production.up.railway.app/readyz</code> returned ready JSON and <code>/healthz</code> returned HTTP 200 after deployment <code>a3564c57-a16f-49e9-ac5a-355dd0013f88</code>. Authenticated <code>/paw/version</code> returns <code>sha-2b0ec6e9</code> and <code>2b0ec6e9849d5eabacb480678a9bfc92fff6f1c4</code>.</td>
-              <td>The Railway app is alive on the Railway domain and version-correct. The deploy also exposed and fixed stale Railway service-level version variables that overrode image environment.</td>
-              <td>Keep the Railway domain as the canonical smoke target until custom-domain DNS is separately verified.</td>
+              <td><code>https://openpaw-production.up.railway.app/readyz</code> returned ready JSON after PERF-003 deployment <code>6e42424f-7ad4-4577-b127-9e3a0a36abeb</code>, including Discord <code>connected</code>. Authenticated <code>/paw/version</code> returns <code>sha-c16e020</code> with SHA <code>c16e0201c1490e0496f4964f5c72b704bb8cd216</code>. The deployment uses <code>ghcr.io/nerdsane/temperpaw:sha-c16e020</code>; the image digest is <code>sha256:9c8a844fdfe52a201adea5755a3d5d61c498d8ba6cdc84c2f64a151d3bf27c89</code>.</td>
+              <td>The Railway app is alive on the Railway domain and version-correct for the merged PERF-003 rollout. A version-variable mismatch and accidental config/source deploy were found and corrected before final proof traffic, so Datadog tags now match the deployed code.</td>
+              <td>Keep immutable image tags for proof deployments and automate <code>BUILD_SHA</code>/<code>DD_VERSION</code>/<code>DD_GIT_COMMIT_SHA</code>/OTEL version updates so Datadog tags cannot drift on future rollouts.</td>
             </tr>
             <tr>
               <td>Datadog metric snapshot</td>
-              <td>Read-only Datadog query via <code>scripts/read_datadog_snapshot.py</code> and Railway found <code>temper_up=1</code> over 1h/24h, 23,481 counted Cedar evaluations over 24h, dispatch p95 around 20.5 ms in the latest bucket, and Postgres pool p95 around 2.36 ms. Datadog MCP found new p95 series for Cedar ms/phase, Postgres, projection queue, and projection e2e metrics.</td>
-              <td>The core service, current-tail distributions, Postgres app timing, projection timing, trace sampler metrics, DBM plans, and targeted CPU profiler path are live under <code>service:temperpaw</code>. Continuous/native profiling and scheduled projection parity remain the main observability gaps.</td>
-              <td>Use this evidence to pick the next optimization slice; do not broadly rewrite storage or authorization until profiler/parity evidence supports it.</td>
+              <td>PERF-003 metrics are live under <code>version:c16e0201c1490e0496f4964f5c72b704bb8cd216</code>. The post-deploy window shows <code>temper_postgres_projection_index_reconciliations_total</code> path counts <code>diff=233</code>, <code>insert=25</code>, and <code>skipped_unchanged=17</code>. <code>query_projection_upsert</code> transaction p95 is currently a tiny sample, with buckets from <code>12.9 ms</code> to <code>385.6 ms</code>; <code>event_append</code> p95 is <code>12.7-25.2 ms</code>; File/FileVersion projection e2e p95 is about <code>50-73 ms</code>; Session/background dispatch remains about <code>245-386 ms</code>.</td>
+              <td>The core service, current-tail distributions, Postgres app timing, projection timing, trace sampler metrics, DBM plans, targeted CPU profiler path, AuthZ candidate metrics, projection diff-index proof metrics, background reaction spans, native blob transport metrics, and new reconciliation-path counters are live under <code>service:temperpaw</code>. The next observability gap remains continuous shadow/replay parity emission and truly useful continuous profiler uploads.</td>
+              <td>Run a longer c16 observation window, activate scheduled projection replay parity and sampled shadow reads, then choose the next latency slice from Session/background_dispatch or catalog-lock residuals.</td>
             </tr>
             <tr>
               <td>Production observe-only e2e</td>
-              <td>Corrected proof passed on <code>2026-05-15 16:41 EDT</code>. Production created File <code>latency-proof-20260515204138</code>, uploaded <code>36</code> bytes through <code>$value</code>, projected status <code>Ready</code>, and read back matching SHA-256 <code>e49fc50a33d635d264263ba3f6a5e4dddb179b2710cfbc5b346e5cba14996a28</code>. Datadog trace IDs include create <code>59310f819835edb75e2f8a8fdab0ab81</code>, upload <code>20be98473ad99f787fa0d007f36b9b7b</code>, and read-back <code>4b80f016eba65d6d174b9dadf1edc4ae</code>. Historical worker-specific attempts still recorded RepoGraphSnapshot <code>en-019e2af1-84dd-7b62-abb1-f2d28216efac</code> and <code>en-019e2bcb-8cea-7463-b044-7475c5733934</code>, but those are no longer goal blockers.</td>
-              <td>The corrected e2e proof exercises production auth, OData dispatch, event append, projection update, blob/object storage, read-after-write, and Datadog APM. It proves the deployed path is correct and observable while also revealing the next latency target.</td>
-              <td>Promote this into a repeatable smoke/load script and use the same proof shape for before/after latency comparisons on the file/blob path, Cedar/AuthZ, and projection-write PRs.</td>
+              <td>Baseline proof passed at <code>2026-05-15 16:41 EDT</code> with trace <code>20be98473ad99f787fa0d007f36b9b7b</code>. Post-fast-path proof passed at <code>2026-05-15 19:56 EDT</code> with trace <code>f3723cc99d48e9a65d5cc7ac4b61fc23</code>. Corrected AuthZ rollout proof passed at <code>2026-05-16 10:12 EDT</code>. Projection diff proof <code>projection-diff-live-proof-20260516191623</code> passed at <code>2026-05-16 15:16 EDT</code>. Background reaction proof <code>file-reaction-background-live-proof-20260516215205</code> passed at <code>2026-05-16 17:52 EDT</code>. Native blob transport proof <code>blob-transport-live-proof-20260517001121</code> passed at <code>2026-05-16 20:11 EDT</code>. Native-first read proof <code>blob-read-key-order-live-proof-20260517022158</code> passed at <code>2026-05-16 22:21 EDT</code>. PERF-003 proof <code>perf-003-projection-fast-path-proof-20260517041730.md</code> passed at <code>2026-05-17 00:17 EDT</code> with three File <code>$value</code> versions, exact readbacks, FileVersion chain validation, Datadog reconciliation metrics, DBM samples, and direct production DB correctness proof.</td>
+              <td>The proof exercises production auth, OData dispatch, event append, projection update, blob/object storage, read-after-write, FileVersion creation, Datadog APM/logs/native blob metrics, reconciliation-path metrics, DBM, and the projection lookup path. It now proves correctness and version-tagged observability for every shipped latency slice through PERF-003.</td>
+              <td>Promote this into a repeatable smoke/load script and add a small load loop so future before/after p95/p99 values have enough samples, not just one proof bucket.</td>
+            </tr>
+            <tr>
+              <td>AuthZ candidate filter</td>
+              <td>Temper PR <a href="https://github.com/nerdsane/temper/pull/239">#239</a> and TemperPaw PR <a href="https://github.com/nerdsane/temperpaw/pull/270">#270</a> are merged, CI/Docker are green, Railway deployment <code>8ad1c472-1c63-4473-a9ed-10f7458df253</code> is live, and Datadog shows candidate metrics under <code>version:7726e4dfba5453c337dafb7411f88c239f3d5bd5</code>. The live proof reduced policy volume from <code>16,497</code> to <code>48</code> candidates per evaluation. PUT trace <code>0878a09bf0de8803b19bac5b6764744f</code> still shows <code>authz.Create</code> at <code>19.6 ms</code> and <code>authz.RecordVersion</code> at <code>26.1 ms</code>.</td>
+              <td>This is a correctness-preserving optimization that moved the bottleneck: Cedar evaluator time is now small, but per-request candidate selection/rebuilding remains visible. The design direction is right; the implementation needs an index/reuse layer to become "really fast."</td>
+              <td>Create the next main-based Temper worktree, write an ADR for static policy candidate indexes or reusable candidate policy sets, prove conservative invalidation, and target <code>policy_candidates</code> p95 under 2 ms without any decision cache.</td>
+            </tr>
+            <tr>
+              <td>File <code>$value</code> fast path</td>
+              <td>Before: trace <code>20be98473ad99f787fa0d007f36b9b7b</code>, HTTP server span 3,159.5 ms, <code>PUT /odata/{path}</code> 3,159.4 ms, <code>PUT $value</code> 3,159.4 ms, <code>wasm.invoke</code> 516.1 ms, and R2 host <code>PUT</code> 220.8 ms. After: trace <code>f3723cc99d48e9a65d5cc7ac4b61fc23</code>, HTTP server span 353.3 ms, <code>PUT /odata/{path}</code> 353.2 ms, <code>PUT $value</code> 353.2 ms, native <code>state.put_file_stream_content.native</code> 353.1 ms, no matching <code>wasm.invoke</code>/<code>blob_adapter</code> span, and direct curl upload wall time 412.4 ms.</td>
+              <td>This is the first completed actual latency win: about 8.9x faster by Datadog server-span timing and about 7.7x faster by direct proof wall timing, while preserving byte hash equality, <code>StreamUpdated</code>, FileVersion behavior, projection status, and audit/event flow.</td>
+              <td>Keep this fast path deployed, add a reusable proof script, then move to the next measured latency slice rather than widening the data-plane change prematurely.</td>
             </tr>
             <tr>
               <td>Review gates</td>
-              <td>DST review PASS, code-quality review PASS, changed sim-visible files passed the determinism guard loop, Temper pre-push passed rustfmt/clippy/readability/full workspace tests, TemperPaw passed focused Datadog tests and full <code>cargo test -p temperpaw --tests</code>, GitHub CI passed for both PRs, and Docker main build pushed the deployed image digest.</td>
-              <td>The code package is merged, CI-proven, deployed, and now backed by a representative production e2e proof. Residual risk has moved from proof-route uncertainty to actual optimization work and correctness-safe latency changes.</td>
-              <td>Begin the first latency-improvement PR from <code>main</code> in a new worktree, write an ADR first if the change alters architecture, and keep this dashboard updated with before/after evidence.</td>
+              <td>DST review PASS, code-quality review PASS, changed sim-visible files passed the determinism guard loop, Temper pre-push passed rustfmt/clippy/readability/full workspace tests, TemperPaw pin-bump local validation passed, GitHub CI passed for all shipped rollout PRs, TemperPaw main CI passed, Docker main build pushed the deployed image digest, Railway deployed it, live e2e proofs passed, Datadog current-version evidence exists, native blob monitors/percentiles are deployed, and direct DB correctness checks passed for the projection, FileVersion, and native blob proof slices.</td>
+              <td>Five latency-improvement packages plus one key observability package are merged, CI-proven, deployed, and backed by production evidence. Residual risk has moved to choosing and safely executing the next latency slice while making projection parity checks continuous.</td>
+              <td>Start the next latency-improvement PR from <code>main</code> in a new worktree, write an ADR first if the change alters architecture, and keep this dashboard updated with before/after evidence.</td>
             </tr>
             <tr>
               <td>OBS-004 Datadog dashboard and monitors</td>
-              <td>The refreshed TemperPaw source has a deployed 76-monitor catalog and 24-widget dashboard combining main's session/LLMObs/DBM/log restructuring with latency-program projection, Postgres, dispatch, WASM, blob, Monty, AuthZ, and trace-budget coverage. Queries are scoped to production's <code>service:temperpaw</code> tag, and the runtime-only metric widgets now have first live samples.</td>
+              <td>The refreshed TemperPaw source has a deployed dashboard combining main's session/LLMObs/DBM/log restructuring with latency-program projection, Postgres, dispatch, WASM, blob, Monty, AuthZ, native blob transport, and trace-budget coverage. Queries are scoped to production's <code>service:temperpaw</code> tag, and native blob percentile panels now have live samples.</td>
               <td>The live Datadog account has the merged target config plus post-deploy runtime data. Some workflow-specific panels can remain sparse until parity/backfill/profiler schedules run.</td>
               <td>Capture screenshots/links for the next review packet and add formal SLO objects after targets are approved.</td>
             </tr>
@@ -1641,27 +2090,33 @@
             </tr>
             <tr>
               <td>Performance slice 1</td>
-              <td><span class="status ok">Measurement live</span></td>
-              <td>Cedar/AuthZ phase metrics, request-shape metrics, percentile config proof, profiler before/after, tests, and live latency evidence.</td>
-              <td>AuthZ p95/p99 evidence is now live: the authorizer phase dominates while request-shape phases are tiny, so the next optimization can be narrow and governance-preserving.</td>
+              <td><span class="status watch">First AuthZ slice live</span></td>
+              <td>Cedar/AuthZ phase metrics, request-shape metrics, candidate-count metrics, percentile config proof, tests, deployment, and live latency evidence.</td>
+              <td>AuthZ candidate filtering is merged and deployed. It reduced policy volume from <code>16,497</code> to <code>48</code> candidates per sampled evaluation, but live evidence now points at <code>policy_candidates</code> selection/rebuild overhead as the follow-up target.</td>
             </tr>
             <tr>
               <td>Performance slice 2</td>
-              <td><span class="status watch">Planned</span></td>
-              <td>Projection write amplification before/after, drift proof, and replay parity.</td>
-              <td>Projection update tail reduced without data drift.</td>
+              <td><span class="status ok">Live proof complete</span></td>
+              <td>ADR-0091, Postgres projection diff-index implementation, storage tests, before/after Datadog projection latency/write-count proof, direct DB correctness proof, and replay/shadow gap classification.</td>
+              <td>PERF-002 is merged, rolled out, deployed, live-proven, Datadog-proven, and direct-DB-proven. Remaining follow-up is to run replay/shadow parity continuously rather than probe-only.</td>
+            </tr>
+            <tr>
+              <td>Performance slice 3</td>
+              <td><span class="status ok">Live proof complete</span></td>
+              <td>ADR-0092, bounded background File reactions, focused tests, clippy/check, PR/CI, TemperPaw rollout, Railway deployment, live File proof, Datadog before/after, and direct File/FileVersion correctness.</td>
+              <td>PERF-005B is merged, deployed, live-proven, Datadog-proven, and direct-DB-proven. The proof shows File <code>$value</code> response latency improved while bytes remain immediately readable and the FileVersion/RecordVersion chain converges correctly.</td>
             </tr>
             <tr>
               <td>Structural slices</td>
-              <td><span class="status watch">Planned</span></td>
+              <td><span class="status ok">First data-plane slice live</span></td>
               <td>Workflow executor/blob data-plane ADRs, implementation PRs, live run evidence.</td>
-              <td>Slow external/data-plane work no longer defines control-plane latency.</td>
+              <td>ADR-0088, local tests, GitHub CI, Temper/TemperPaw PR merges, Railway deployment, and Datadog before/after proof show built-in File uploads no longer force a WASM blob-adapter invocation. ADR-0093 now shows the remaining native object-store transport cost directly. Remaining structural work is broader data-plane design and workflow executor latency.</td>
             </tr>
             <tr>
               <td>Final verification</td>
-              <td><span class="status ok">Representative e2e passed</span></td>
+              <td><span class="status watch">Five latency e2es plus blob-observability proof passed</span></td>
               <td>Local tests, live runs, live e2e tests, PR links, merge proof, deployment proof.</td>
-              <td>All observability code PRs are merged and deployed; this dashboard contains the evidence trail and a production file/OData read-after-write proof. Final goal completion still requires actual latency-improvement PRs to merge, deploy, and prove before/after wins.</td>
+              <td>Observability code, five actual latency-improvement PR sets, and the native blob transport observability rollout are merged and deployed; this dashboard contains the evidence trail and production File/OData read-after-write proofs. Final goal completion still requires the next evidence-driven latency PRs, plus continuous profiling/parity, to merge, deploy, and prove before/after wins.</td>
             </tr>
           </tbody>
         </table>
@@ -1731,23 +2186,30 @@
             <tr>
               <td>PERF-001</td>
               <td>Measure then optimize Cedar/AuthZ CPU path without weakening governance.</td>
-              <td><span class="status watch">Measured; optimization pending</span></td>
-              <td><a href="https://github.com/nerdsane/temper/pull/229">Temper PR #229</a> merged; <a href="https://github.com/nerdsane/temperpaw/pull/266">TemperPaw PR #266</a> merged</td>
-              <td>ADR-0084, canonical counter cleanup, ms duration metric, phase metrics, request-shape histograms, AuthZ dashboard group, focused AuthZ test, full AuthZ suite, and package preflight passed locally and are deployed. Live p95 shows Cedar total around 50 ms, with <code>phase:authorizer</code> around 50 ms and request/context/resource construction phases in microseconds. Next optimization should target Cedar policy/entity evaluation itself, not broad request-construction surgery.</td>
+              <td><span class="status watch">Live; follow-up target found</span></td>
+              <td>ADR-0089; <a href="https://github.com/nerdsane/temper/pull/239">Temper PR #239</a> merged as <code>b0b898a2</code>; <a href="https://github.com/nerdsane/temperpaw/pull/270">TemperPaw PR #270</a> merged as <code>7726e4df</code>; CI runs <a href="https://github.com/nerdsane/temper/actions/runs/25949367580">Temper</a> / <a href="https://github.com/nerdsane/temperpaw/actions/runs/25949959572">TemperPaw PR</a> / <a href="https://github.com/nerdsane/temperpaw/actions/runs/25950252249">TemperPaw main</a> / <a href="https://github.com/nerdsane/temperpaw/actions/runs/25950252254">Docker</a></td>
+              <td>ADR-0084 proved the old authorizer phase dominated; ADR-0089 implements the first safe optimization: per-request Cedar candidate policy sets using principal/action/resource scope constraints only. Local semantic tests, focused server check, focused clippy, full pre-push pipeline, GitHub CI, TemperPaw pin checks, main CI, Docker, Railway deploy, and live proof all pass. Datadog now shows the candidate-count win and the next bottleneck: <code>phase:policy_candidates</code> selection/rebuild time.</td>
+            </tr>
+            <tr>
+              <td>PERF-001B</td>
+              <td>Make AuthZ candidate selection itself fast through indexed/reusable policy subsets.</td>
+              <td><span class="status watch">Live; narrow follow-up</span></td>
+              <td>ADR-0090 and branch <code>codex/latency-authz-candidate-index-20260516</code> merged through PR <a href="https://github.com/nerdsane/temper/pull/240">nerdsane/temper#240</a>. CI run <a href="https://github.com/nerdsane/temper/actions/runs/25965850115">25965850115</a> passed and Temper main now contains <code>84e95c6677f4a03364dea796cc67237bbc8275ce</code>. TemperPaw rollout PR <a href="https://github.com/nerdsane/temperpaw/pull/271">#271</a> passed PR CI run <a href="https://github.com/nerdsane/temperpaw/actions/runs/25966397547">25966397547</a> and merged as <code>1118183f</code>; main CI and Docker are green with image <code>sha-1118183</code>.</td>
+              <td>Precomputed per-policy-set index preserves Cedar semantics: no decision cache, no skipped forbids, default deny intact, conservative fallback on unsafe policy sets, explicit rebuild on policy reload. Railway deploy <code>ee997c77-7abb-4682-aa76-4a5155f05c1f</code>, live e2e proof <code>authz-index-live-proof-20260516164954</code>, and Datadog proof are complete. Outcome: warm <code>policy_candidates</code> p95 dropped from about <code>13.4 ms</code> to <code>0.26-0.34 ms</code>, but the heavy File proof bucket reached <code>2.685 ms</code>; keep a small follow-up if the hard target remains sub-<code>2 ms</code> for every heavy path.</td>
             </tr>
             <tr>
               <td>PERF-002</td>
               <td>Reduce projection write amplification with diffing, batching, coalescing, and selective indexing.</td>
-              <td><span class="status watch">Planned</span></td>
-              <td>Pending PR</td>
-              <td>Before/after projection latency and write count; replay/shadow-read drift proof.</td>
+              <td><span class="status ok">Live proof complete</span></td>
+              <td>ADR-0091; Temper PR <a href="https://github.com/nerdsane/temper/pull/241">nerdsane/temper#241</a> merged as <code>ed68e785</code>; TemperPaw rollout PR <a href="https://github.com/nerdsane/temperpaw/pull/272">nerdsane/temperpaw#272</a> passed PR CI run <a href="https://github.com/nerdsane/temperpaw/actions/runs/25969575912">25969575912</a>, merged as <code>73e756a0bdb5f9a3084c5dd33c424154871fb873</code>, passed main CI <a href="https://github.com/nerdsane/temperpaw/actions/runs/25969887628">25969887628</a> and Docker <a href="https://github.com/nerdsane/temperpaw/actions/runs/25969887617">25969887617</a>, then deployed to Railway as <code>72635a45-5744-4c72-82e0-7b7143e9a548</code>.</td>
+              <td>Temper local, full pre-push, and GitHub CI passed. TemperPaw rollout local checks, tests, WASM build, dashboard build, PR CI, merge, main CI, Docker, Railway deployment, live File/OData proof, Datadog current-version projection metrics, and direct production DB correctness proof passed. Residual gap: replay/shadow parity metrics are implemented but did not emit recent samples, so they need scheduled/live activation.</td>
             </tr>
             <tr>
               <td>PERF-003</td>
               <td>Improve DB transaction shape and event append path where evidence justifies it.</td>
-              <td><span class="status watch">Planned</span></td>
-              <td>Pending PR</td>
-              <td>No recurring idle-in-transaction samples; concurrency/event replay tests pass.</td>
+              <td><span class="status ok">Live proof complete</span></td>
+              <td>ADR-0095 and Temper PR <a href="https://github.com/nerdsane/temper/pull/245">#245</a> merged as <code>6439a8a0</code>. TemperPaw rollout PR <a href="https://github.com/nerdsane/temperpaw/pull/276">#276</a> passed PR CI <a href="https://github.com/nerdsane/temperpaw/actions/runs/25980160694">25980160694</a>, merged as <code>c16e0201</code>, then passed main CI <a href="https://github.com/nerdsane/temperpaw/actions/runs/25980450147">25980450147</a> and Docker <a href="https://github.com/nerdsane/temperpaw/actions/runs/25980450153">25980450153</a>.</td>
+              <td>Railway deployment <code>6e42424f-7ad4-4577-b127-9e3a0a36abeb</code> is live and version-correct. Live File/OData proof, direct production DB proof, Datadog transaction/reconciliation metrics, and DBM/APM correlation are complete. Remaining work is not rollout: collect a longer c16 post-deploy window before claiming tail improvement, then decide whether the next DB slice is Session/background_dispatch, catalog locking under concurrency, or event append sequence shape.</td>
             </tr>
             <tr>
               <td>PERF-004</td>
@@ -1759,16 +2221,37 @@
             <tr>
               <td>PERF-005</td>
               <td>Split blob/data plane with streaming or direct upload while preserving Temper metadata and verification.</td>
-              <td><span class="status watch">Planned</span></td>
-              <td>Pending ADR/PR</td>
-              <td>Large upload live run passes; hash/content verification and lifecycle callbacks proven.</td>
+              <td><span class="status ok">First fast path deployed</span></td>
+              <td><a href="https://github.com/nerdsane/temper/pull/238">Temper PR #238</a> merged; <a href="https://github.com/nerdsane/temperpaw/pull/269">TemperPaw PR #269</a> merged; Railway deployment <code>d950fb9e-feb7-498f-b794-665fce9913bc</code></td>
+              <td>ADR-0088 exists. Temper local checks, pre-push, GitHub CI, and merge are complete. TemperPaw pin-bump validation, CI, merge, main CI, Docker, Railway deployment, health/version probes, live read-after-write proof, and Datadog before/after trace evidence are complete. Remaining data-plane work is to turn the proof into a reusable script and decide whether further direct-upload/streaming architecture is justified by evidence.</td>
+            </tr>
+            <tr>
+              <td>PERF-005B</td>
+              <td>Remove post-commit File reaction fanout from the synchronous native File <code>$value</code> response path.</td>
+              <td><span class="status ok">Live proof complete</span></td>
+              <td>ADR-0092 and branch <code>codex/latency-file-value-residual-20260516</code> merged through Temper PR <a href="https://github.com/nerdsane/temper/pull/242">nerdsane/temper#242</a> as <code>1796c4f0</code>. Rollout branch <code>codex/bump-temper-file-value-residual-20260516</code> merged through TemperPaw PR <a href="https://github.com/nerdsane/temperpaw/pull/273">#273</a> as <code>e8457ca4</code> after PR CI run <a href="https://github.com/nerdsane/temperpaw/actions/runs/25972634147">25972634147</a>. Main CI <a href="https://github.com/nerdsane/temperpaw/actions/runs/25972955841">25972955841</a> and Docker <a href="https://github.com/nerdsane/temperpaw/actions/runs/25972955833">25972955833</a> are green; Docker image digest <code>sha256:4956e8d7ed26af68168b64643b6aefc0e03e5cc114cbb8377382649c3a9eadfa</code>. Railway deployment <code>5778571f-b325-4237-a792-cb13342963a4</code> is live and version-correct.</td>
+              <td>Temper local/pre-push/CI are green and merged. TemperPaw rollout local checks, PR CI, main CI, Docker, Railway deploy, health probe, version probe, live File proof, Datadog evidence, and direct DB correctness proof are green. The sampled proof window shows <code>PUT $value</code> p95 <code>238.7 ms</code> versus previous <code>490.3 ms</code>, with <code>reaction.dispatch.background</code> running after the HTTP span.</td>
+            </tr>
+            <tr>
+              <td>PERF-005C</td>
+              <td>Instrument native blob transport duration, status, and bytes so the remaining File <code>$value</code> residual can be attributed before the next data-plane architecture change.</td>
+              <td><span class="status ok">Live proof complete</span></td>
+              <td>ADR-0093 and branch <code>codex/latency-blob-transport-observability-20260516</code> merged through Temper PR <a href="https://github.com/nerdsane/temper/pull/243">nerdsane/temper#243</a> as <code>88c9d797</code> after CI run <a href="https://github.com/nerdsane/temper/actions/runs/25974966315">25974966315</a> passed. TemperPaw rollout PR <a href="https://github.com/nerdsane/temperpaw/pull/274">nerdsane/temperpaw#274</a> passed PR CI run <a href="https://github.com/nerdsane/temperpaw/actions/runs/25975556316">25975556316</a> and merged as <code>9fcd4b2b</code>. Main CI <a href="https://github.com/nerdsane/temperpaw/actions/runs/25975834289">25975834289</a> and Docker <a href="https://github.com/nerdsane/temperpaw/actions/runs/25975834282">25975834282</a> passed; Docker image digest is <code>sha256:74d398d56362de4b31cf09334e975952ec8f455a29e92a80fee99a6d5edf65bb</code>.</td>
+              <td>Temper local validation, pre-push gates, GitHub CI, and merge are green. TemperPaw rollout local validation, PR CI, main CI, Docker, Railway deploy <code>37edf6ad-5f71-4865-85e3-46a05dd7cc78</code>, live proof <code>blob-transport-live-proof-20260517001121</code>, Datadog native transport proof, dashboard/monitor/percentile deploy, and direct DB correctness check are green. Outcome: the residual File <code>$value</code> path is now attributable down to native object-store transport.</td>
+            </tr>
+            <tr>
+              <td>PERF-005D</td>
+              <td>Remove the extra legacy external-key 404 from fresh native File reads by preferring the native <code>temper-fs/{content_hash}</code> blob key while preserving legacy WASM fallback.</td>
+              <td><span class="status done">Deployed/proven</span></td>
+              <td>ADR-0094 and branch <code>codex/latency-file-blob-read-key-order-20260517</code> merged through Temper PR <a href="https://github.com/nerdsane/temper/pull/244">#244</a> as <code>ff79974d</code> after CI run <a href="https://github.com/nerdsane/temper/actions/runs/25977404056">25977404056</a> passed. TemperPaw rollout PR <a href="https://github.com/nerdsane/temperpaw/pull/275">#275</a> passed PR CI run <a href="https://github.com/nerdsane/temperpaw/actions/runs/25977831129">25977831129</a> and merged as <code>821d6c6e</code>. Main CI <a href="https://github.com/nerdsane/temperpaw/actions/runs/25978275903">25978275903</a> and Docker <a href="https://github.com/nerdsane/temperpaw/actions/runs/25978275890">25978275890</a> passed. Railway deployment <code>b628e727-b013-4c89-9eaa-f65f4f7e7433</code> is live and version-correct.</td>
+              <td>Temper local checks, full pre-push gate, GitHub CI, TemperPaw rollout local checks, PR CI, main CI, Docker, Railway deploy, health/version probes, live proof <code>blob-read-key-order-live-proof-20260517022158</code>, Datadog no-extra-404 proof, and DBM sample proof are green. Legacy fallback is still covered locally; a live legacy-only fixture remains optional if we want production proof for historical WASM-only blobs.</td>
             </tr>
             <tr>
               <td>VERIFY-001</td>
               <td>Build repeatable load/replay/e2e verification and deployment evidence trail.</td>
               <td><span class="status ok">Representative e2e passed; repeatable script pending</span></td>
-              <td><a href="https://github.com/nerdsane/temper/pull/229">Temper PR #229</a> merged; <a href="https://github.com/nerdsane/temperpaw/pull/266">TemperPaw PR #266</a> merged; final evidence report <a href="https://github.com/nerdsane/temper/pull/230">Temper PR #230</a> merged; auth checkpoint <a href="https://github.com/nerdsane/temper/pull/231">Temper PR #231</a> merged; auth retry <a href="https://github.com/nerdsane/temper/pull/232">Temper PR #232</a> merged; auth-path <a href="https://github.com/nerdsane/temper/pull/233">Temper PR #233</a> merged; local-proof blocker <a href="https://github.com/nerdsane/temper/pull/234">Temper PR #234</a> merged; current blocker report <a href="https://github.com/nerdsane/temper/pull/235">Temper PR #235</a> merged; second auth-timeout report <a href="https://github.com/nerdsane/temper/pull/236">Temper PR #236</a> merged; correction report <a href="https://github.com/nerdsane/temper/pull/237">Temper PR #237</a> open</td>
-              <td>Local tests, GitHub CI, Docker image push, Railway deployment, health probes, version proof, Datadog monitor coverage, APM spans, DBM plans, runtime metrics, and a production OData/File read-after-write proof are recorded. Remaining verification work is to make the proof repeatable and run it before/after each latency PR.</td>
+              <td><a href="https://github.com/nerdsane/temper/pull/229">Temper PR #229</a> merged; <a href="https://github.com/nerdsane/temperpaw/pull/266">TemperPaw PR #266</a> merged; final evidence report <a href="https://github.com/nerdsane/temper/pull/230">Temper PR #230</a> merged; auth checkpoint <a href="https://github.com/nerdsane/temper/pull/231">Temper PR #231</a> merged; auth retry <a href="https://github.com/nerdsane/temper/pull/232">Temper PR #232</a> merged; auth-path <a href="https://github.com/nerdsane/temper/pull/233">Temper PR #233</a> merged; local-proof blocker <a href="https://github.com/nerdsane/temper/pull/234">Temper PR #234</a> merged; current blocker report <a href="https://github.com/nerdsane/temper/pull/235">Temper PR #235</a> merged; second auth-timeout report <a href="https://github.com/nerdsane/temper/pull/236">Temper PR #236</a> merged; correction report <a href="https://github.com/nerdsane/temper/pull/237">Temper PR #237</a> merged; File fast-path <a href="https://github.com/nerdsane/temper/pull/238">Temper PR #238</a> merged; rollout <a href="https://github.com/nerdsane/temperpaw/pull/269">TemperPaw PR #269</a> merged</td>
+              <td>Local tests, GitHub CI, Docker image push, Railway deployment, health probes, version proof, Datadog monitor coverage, APM spans, DBM plans, runtime metrics, baseline production OData/File proof, and fast-path production OData/File proof are recorded. Remaining verification work is to make the proof repeatable and run it before/after each latency PR.</td>
             </tr>
           </tbody>
         </table>
@@ -1898,35 +2381,39 @@ sequenceDiagram
       <div class="callout">
         <div>
           <strong>Scope.</strong>
-          Datadog was queried for <code>temperpaw</code> on May 14-15, 2026. The first pass used 24-hour
-          APM/DBM evidence; the latest refresh used a live two-hour APM, metric, monitor-coverage,
-          DBM query-performance, Datadog monitor deployment, percentile-configuration, and post-runtime-deploy window.
+          Datadog was queried for <code>temperpaw</code> on May 14-17, 2026. The first pass used 24-hour
+          APM/DBM evidence; the latest refresh used live deployment-corrected APM, metric, monitor-coverage,
+          DBM query-performance, Datadog monitor deployment, percentile-configuration, and post-PERF-003 deployment windows.
           Production observability includes projection symbols missing from this local checkout,
           and production currently emits <code>DD_SERVICE=temperpaw</code> with version
-          <code>2b0ec6e9849d5eabacb480678a9bfc92fff6f1c4</code>.
+          <code>c16e0201c1490e0496f4964f5c72b704bb8cd216</code>.
         </div>
       </div>
 
       <div class="metrics" style="margin-top: 15px;">
         <div class="metric"><div class="label">OData reads</div><strong>7 / 17 / 30 ms</strong><p><code>GET /odata/{path}</code> p50 / p95 / p99.</p></div>
-        <div class="metric"><div class="label">Projection phase</div><strong>88 ms / 1.25 s</strong><p><code>query_projection</code> p50 / p95 overall.</p></div>
+        <div class="metric"><div class="label">Projection e2e</div><strong>50-73 ms</strong><p>Post-PERF-003 File/FileVersion background-dispatch p95 buckets; Session remains hotter.</p></div>
         <div class="metric"><div class="label">AuthZ CPU</div><strong>81 / 203 / 253 ms</strong><p><code>authorize_with_context</code> p50 / p95 / p99.</p></div>
         <div class="metric"><div class="label">WASM integrations</div><strong>4.4 / 19 / 50 s</strong><p><code>background_wasm_integrations</code> p50 / p95 / p99.</p></div>
         <div class="metric"><div class="label">Fan-out trace</div><strong>166k spans</strong><p>One trace had 104k field-index inserts.</p></div>
-        <div class="metric"><div class="label">Field index upsert</div><strong>3.4 / 8.1 / 23 ms</strong><p>Small per-row SQL, huge volume.</p></div>
-        <div class="metric"><div class="label">Catalog upsert</div><strong>3.8 / 48 / 220 ms</strong><p>Tail latency plus workload anomaly.</p></div>
-        <div class="metric"><div class="label">Profiler</div><strong>26.4 KB</strong><p>Loaded production CPU capture parsed by <code>go tool pprof</code>; Datadog saw fresh <code>profile_type:cpu</code> uploads.</p></div>
-        <div class="metric"><div class="label">Runtime deploy</div><strong>2b0ec6e9</strong><p>Railway <code>/paw/version</code>, APM spans, DBM plans, and metrics all show the merged deployment SHA.</p></div>
+        <div class="metric"><div class="label">Reconcile paths</div><strong>233 / 25 / 17</strong><p>PERF-003 c16 counts: <code>diff</code> / <code>insert</code> / <code>skipped_unchanged</code>.</p></div>
+        <div class="metric"><div class="label">Catalog lock</div><strong>~56 ms</strong><p>DBM sampled one bounded <code>FOR UPDATE</code> transaction-id wait under concurrent proof traffic.</p></div>
+        <div class="metric"><div class="label">Profiler</div><strong>canary only</strong><p>Targeted CPU captures work; continuous <code>ddprof</code> is packaged but not active/useful on Railway yet.</p></div>
+        <div class="metric"><div class="label">Runtime deploy</div><strong>c16e020</strong><p>Railway <code>/paw/version</code>, <code>DD_VERSION</code>, APM spans, DBM samples, and production code paths show the merged PERF-003 rollout.</p></div>
         <div class="metric"><div class="label">Monitor coverage</div><strong>3 / 3</strong><p>Datadog recognizes request rate, error, and duration monitors for <code>service:temperpaw</code>.</p></div>
         <div class="metric"><div class="label">APM traffic</div><strong>14,133 spans</strong><p>Latest one-hour <code>service:temperpaw env:prod</code> query; no matching error spans for deployed version.</p></div>
         <div class="metric"><div class="label">Dispatch p95</div><strong>20.5 ms</strong><p>Latest post-deploy <code>p95:temper_dispatch_ask_latency_ms</code> bucket.</p></div>
         <div class="metric"><div class="label">Cedar p95</div><strong>50 ms</strong><p><code>temper_cedar_evaluation_duration_ms</code> is now live and percentile-enabled.</p></div>
-        <div class="metric"><div class="label">AuthZ phase p95</div><strong>50 ms</strong><p><code>phase:authorizer</code> dominates; request/context/resource phase p95s are microseconds.</p></div>
-        <div class="metric"><div class="label">Postgres pool p95</div><strong>2.4 ms</strong><p>App-side pool-acquire metric is live for projection upsert and event append.</p></div>
-        <div class="metric"><div class="label">Projection e2e p95</div><strong>75-102 ms</strong><p>Background projection queue wait is below 0.04 ms; update work itself is the measured cost.</p></div>
-        <div class="metric"><div class="label">File write proof</div><strong>3.16 s</strong><p>Live <code>$value</code> upload trace <code>20be98473ad99f787fa0d007f36b9b7b</code>; correctness SHA matched on read-back.</p></div>
+        <div class="metric"><div class="label">AuthZ policy count</div><strong>344x less</strong><p>Latest corrected proof: <code>16,497</code> full policies vs <code>48</code> candidates per evaluation.</p></div>
+        <div class="metric"><div class="label">AuthZ phase p95</div><strong>0.26-2.69 ms</strong><p><code>phase:policy_candidates</code> is mostly sub-ms after warmup; the heavy File proof bucket is just above the <code>2 ms</code> target.</p></div>
+        <div class="metric"><div class="label">Proof trace</div><strong>62.5 / 65.0 ms</strong><p>Exact live File create trace p50 / p95 for <code>POST /odata/{path}</code>; projection phase p95 is <code>25.4 ms</code>.</p></div>
+        <div class="metric"><div class="label">Postgres pool p95</div><strong>4.1 ms</strong><p>Small c16 proof sample; pool acquire is still not the primary residual.</p></div>
+        <div class="metric"><div class="label">Session p95</div><strong>245-386 ms</strong><p><code>Session/background_dispatch</code> is the next visible projection-update residual.</p></div>
+        <div class="metric"><div class="label">File write proof</div><strong>353 ms</strong><p>Fast-path trace <code>f3723cc99d48e9a65d5cc7ac4b61fc23</code>; down from 3.16 s baseline trace <code>20be98473ad99f787fa0d007f36b9b7b</code>.</p></div>
         <div class="metric"><div class="label">DBM plan health</div><strong>usable</strong><p>Fresh plans now include real index payloads; schema collection remains a separate gap.</p></div>
-        <div class="metric"><div class="label">E2E proof</div><strong>passed</strong><p>Production File <code>latency-proof-20260515204138</code> reached <code>Ready</code> and read back the same bytes.</p></div>
+        <div class="metric"><div class="label">E2E proof</div><strong>passed x8</strong><p>All shipped slices through PERF-003 have production proof traffic and version-tagged evidence.</p></div>
+        <div class="metric"><div class="label">DB proof</div><strong>1 / 14 / 3</strong><p>Latest proof: one File, fourteen File index rows, three FileVersion rows and file_id indexes.</p></div>
+        <div class="metric"><div class="label">Parity gap</div><strong>no recent data</strong><p>Replay and sampled shadow metrics exist but returned no recent samples; schedule or trigger them continuously.</p></div>
       </div>
 
       <div class="diagram diagram-wide" style="margin-top: 15px;">
@@ -1934,15 +2421,15 @@ sequenceDiagram
         <pre class="mermaid">
 flowchart TB
   Request["User-visible request"] --> Core["Verified actor core<br/>fast: microseconds to sub-ms phases"]
-  Request --> Auth["Cedar authorization<br/>hot: CPU-bound p95 around 200 ms"]
-  Request --> Read["Projected reads<br/>healthy: GET p95 around 17 ms"]
-  Request --> Projection["Projection writes<br/>hot tail: fan-out + per-field upserts"]
-  Request --> Event["Event journal<br/>moderate tail: SELECT MAX + INSERT"]
+  Request --> Auth["Cedar authorization<br/>improved: scoped candidates + index"]
+  Request --> Read["Projected reads<br/>healthy: proof GET p50 65 ms"]
+  Request --> Projection["Projection writes<br/>File healthy; Session residual"]
+  Request --> Event["Event journal<br/>currently modest p95 in c16 sample"]
   Request --> Wasm["WASM/external workflows<br/>seconds to tens of seconds"]
-  Request --> Blob["Blob upload path<br/>seconds during bursts"]
-  Projection --> Trace["Trace cardinality<br/>100k+ spans on fan-out traces"]
-  Auth --> Profile["Need fresh CPU/alloc profiles"]
-  Projection --> Drift["Need drift + lag proof"]
+  Request --> Blob["Blob path<br/>native transport attributed"]
+  Projection --> Lock["Catalog lock samples<br/>bounded but visible"]
+  Projection --> Drift["Need continuous replay/shadow proof"]
+  Auth --> Profile["Profiling<br/>targeted/canary only on Railway"]
         </pre>
       </div>
 
@@ -2254,16 +2741,16 @@ flowchart LR
         <article class="task">
           <header>OBS-001 / profiler restoration</header>
           <div class="body">
-            <p>Make Datadog profiling continuously useful. Targeted production CPU profiling is live-proven under load; continuous and native profiling are still pending.</p>
+            <p>Make Datadog profiling continuously useful. Targeted production CPU profiling is live-proven under load; continuous/native profiling is packaged but currently blocked or canary-only on Railway.</p>
             <ul>
               <li>Local: added profiler config, capture, freshness, upload, and continuous-mode metrics.</li>
               <li>Local: added opt-in continuous CPU capture with Datadog Agent auto-upload requirement.</li>
               <li>Live: verified <code>/_admin/profile/cpu</code> under authenticated read load; Datadog received fresh CPU upload counters and the pprof file parses locally.</li>
-              <li>Live: evaluate Datadog <code>ddprof</code> for the production Rust process and compare it with the in-process fallback.</li>
-              <li>Live: enable continuous profiler gates after runtime deploy and confirm fresh profiles without manual load generation.</li>
+              <li>Live: capability endpoint reports <code>TEMPER_DDPROF_ENABLED=false</code>, <code>ddprof_present=true</code>, <code>perf_event_paranoid=3</code>, and <code>CAP_PERFMON=false</code>; Datadog continuous profiler uploads did not appear in the latest window.</li>
+              <li>Next: run profiler as a controlled canary or targeted capture for suspected CPU paths, and document the Railway permission limit if native continuous profiling cannot be enabled safely.</li>
               <li>Next: confirm allocation/lock profile path or document Rust profiler limitations.</li>
             </ul>
-            <p class="small">Acceptance: fresh profiles within 10 minutes and no stale profiler monitor for 24 hours.</p>
+            <p class="small">Acceptance: either fresh profiles within 10 minutes for the canary path, or an explicit documented platform limit plus a repeatable targeted-profile fallback.</p>
           </div>
         </article>
         <article class="task">
@@ -2326,14 +2813,37 @@ flowchart LR
         <article class="task">
           <header>PERF-001 / Cedar CPU path</header>
           <div class="body">
-            <p>Reduce authorization latency without weakening governance. The measurement layer is now in place; actual CPU-path optimization is the next implementation slice.</p>
+            <p>Reduce authorization latency without weakening governance. The measurement layer is deployed, and the first local optimization now reduces the Cedar candidate set before authorization while preserving default-deny and forbid semantics.</p>
             <ul>
               <li>Local: added ADR-0084 for AuthZ phase instrumentation and Datadog percentile gates.</li>
               <li>Local: canonicalized <code>temper_cedar_evaluations_total</code> to the decision-tagged <code>temper.authz</code> scope and added an <code>error</code> decision label.</li>
               <li>Local: added <code>temper_cedar_evaluation_duration_ms</code>, <code>temper_cedar_evaluation_phase_duration_ms</code>, and <code>temper_cedar_request_attribute_count</code>.</li>
               <li>Local: added TemperPaw AuthZ phase dashboard widgets plus max-duration and phase-error monitors.</li>
               <li>Live: enabled percentiles for the new Cedar ms/phase metrics after runtime deployment. Latest p95 is about 50 ms overall and about 50 ms in <code>phase:authorizer</code>; request-shape phases are microseconds.</li>
-              <li>Next: profile Cedar authorizer execution, then implement the smallest proven optimization: policy/entity reuse, conversion cleanup, or a separate deny-safe cache ADR if invalidation is provable.</li>
+              <li>Local: added ADR-0089 and <code>crates/temper-authz/src/engine/candidates.rs</code> for scope-safe Cedar policy candidate selection. This drops only impossible principal/action/resource scope mismatches, includes all matching forbids, preserves named policy diagnostics, and does not cache decisions.</li>
+              <li>Local: added <code>temper_cedar_policy_candidate_count</code> with <code>source=full|candidate</code> and <code>outcome=full|filtered|fallback</code> labels so Datadog can correlate policy volume with AuthZ latency.</li>
+              <li>Local: <code>cargo test -p temper-authz</code> passes 62 tests and <code>cargo check -p temper-server</code> passes.</li>
+              <li>Local: <code>cargo fmt --all -- --check</code>, focused clippy for <code>temper-authz</code> and <code>temper-server</code>, HTML module syntax, and <code>git diff --check</code> pass.</li>
+              <li>Local: full pre-push gate passed rustfmt, workspace clippy, readability ratchet, and full <code>cargo test --workspace</code>; slowest DST random workload was 526.04 seconds.</li>
+              <li>Remote: GitHub CI run <a href="https://github.com/nerdsane/temper/actions/runs/25949367580">25949367580</a> passed, and Temper PR <a href="https://github.com/nerdsane/temper/pull/239">#239</a> merged as <code>b0b898a2</code>.</li>
+              <li>TemperPaw local: pinned crate, WASM SDK, Docker, and observability contract references to <code>b0b898a2</code>; <code>cargo check -p temperpaw --locked</code>, all 31 <code>datadog_observability_contract</code> tests, formatting, and diff checks pass.</li>
+              <li>Remote: TemperPaw rollout PR <a href="https://github.com/nerdsane/temperpaw/pull/270">#270</a> passed PR CI and merged as <code>7726e4df</code>.</li>
+              <li>Remote: TemperPaw main CI and Docker passed; Railway deployment <code>8ad1c472-1c63-4473-a9ed-10f7458df253</code> is live on <code>sha-7726e4d</code> with <code>/paw/version</code> and <code>DD_VERSION</code> both set to <code>7726e4dfba5453c337dafb7411f88c239f3d5bd5</code>.</li>
+              <li>Live: File proof <code>authz-candidates-ddversion-20260516141213</code> passed read-after-write correctness and produced exact-file APM traces for POST, PUT <code>$value</code>, entity GET, and byte GET.</li>
+              <li>Live: Datadog candidate metrics show <code>16,497</code> full policies versus <code>48</code> candidates per sampled evaluation, about <code>344x</code> fewer policies reaching Cedar.</li>
+              <li>Measured next target: <code>phase:authorizer</code> p95 is down around <code>0.23 ms</code>, but <code>phase:policy_candidates</code> is around <code>13.4 ms</code> and full AuthZ spans in the PUT trace remain <code>19.6-26.1 ms</code>.</li>
+              <li>Local PERF-001B: created branch <code>codex/latency-authz-candidate-index-20260516</code>, added ADR-0090, implemented a precomputed candidate index, and split selector tests into <code>crates/temper-authz/src/engine/candidates_tests.rs</code>.</li>
+              <li>Local PERF-001B: the new <code>1,002</code>-policy equivalence test, full <code>cargo test -p temper-authz</code> with <code>64</code> tests, <code>cargo check -p temper-server</code>, focused clippy, rustfmt, and diff check are green.</li>
+              <li>Remote PERF-001B: committed <code>247c7d6b</code>, pushed <code>codex/latency-authz-candidate-index-20260516</code>, and opened PR <a href="https://github.com/nerdsane/temper/pull/240">#240</a>. The second full pre-push run passed rustfmt, workspace clippy, readability ratchet, full workspace tests, and doctests.</li>
+              <li>Remote PERF-001B: GitHub CI run <a href="https://github.com/nerdsane/temper/actions/runs/25965850115">25965850115</a> passed and PR <a href="https://github.com/nerdsane/temper/pull/240">#240</a> merged into Temper main as <code>84e95c66</code>.</li>
+              <li>TemperPaw rollout PERF-001B: created branch <code>codex/bump-temper-authz-index-20260516</code> in worktree <code>/Users/seshendranalla/Development/temperpaw-worktrees/bump-temper-authz-index-20260516</code>, pinned crate dependencies, Docker observability clone, Datadog contract expectations, WASM SDK manifests, and stale WASM lockfiles to <code>84e95c66</code>.</li>
+              <li>TemperPaw local PERF-001B: <code>cargo check -p temperpaw --locked</code>, all 31 <code>datadog_observability_contract</code> tests, formatting, and diff checks pass.</li>
+              <li>Remote TemperPaw PERF-001B: committed <code>a5fb5e04</code>, pushed the rollout branch, opened PR <a href="https://github.com/nerdsane/temperpaw/pull/271">#271</a>, passed PR CI run <a href="https://github.com/nerdsane/temperpaw/actions/runs/25966397547">25966397547</a>, and merged as <code>1118183f</code>.</li>
+              <li>Remote TemperPaw main PERF-001B: main CI run <a href="https://github.com/nerdsane/temperpaw/actions/runs/25966733023">25966733023</a> and Docker run <a href="https://github.com/nerdsane/temperpaw/actions/runs/25966733035">25966733035</a> passed; Docker pushed <code>ghcr.io/nerdsane/temperpaw:sha-1118183</code> with digest <code>sha256:7843528813075858ba12403af1fc326e314425d00b44643da987e982687e78b9</code>.</li>
+              <li>Railway PERF-001B: production deployment <code>ee997c77-7abb-4682-aa76-4a5155f05c1f</code> succeeded through <code>Dockerfile.deploy</code>; <code>/readyz</code>, <code>/healthz</code>, and authenticated <code>/paw/version</code> are healthy and version-correct for <code>1118183f47239401f216a771d6cd6fa6c1376a07</code>.</li>
+              <li>Live PERF-001B: production proof <code>authz-index-live-proof-20260516164954</code> created six Files, uploaded bytes through <code>$value</code>, reached <code>Ready</code>, read matching bytes back, and retained Datadog trace <code>ba53ebea1c7c4952ac11400d6b8e90a8</code>.</li>
+              <li>Datadog PERF-001B: current-version <code>phase:policy_candidates</code> p95 moved from the old <code>13.4 ms</code> class to post-warm buckets of <code>0.335 ms</code> and <code>0.262 ms</code>; the live File proof bucket is <code>2.685 ms</code>. Candidate volume remains <code>16,497</code> full policies versus <code>48</code> candidates for heavy File evaluations.</li>
+              <li>Next: decide whether to spend one more small AuthZ pass to make the heavy-path p95 strictly sub-<code>2 ms</code>, or move directly to the larger measured latency pools: projection write amplification, actor-spawn/query-projection fanout, and File <code>$value</code> transfer time.</li>
             </ul>
             <p class="small">Target: p95 under 20 ms initially, p99 under 50 ms, with no Cedar bypass and no cache until invalidation is proven.</p>
           </div>
@@ -2341,11 +2851,22 @@ flowchart LR
         <article class="task">
           <header>PERF-002 / projection write amp</header>
           <div class="body">
-            <p>Make projection updates fast and bounded. This is an actual latency-improvement slice, not additional observability.</p>
+            <p>Make projection updates fast and bounded. This is an actual latency-improvement slice, not additional observability. The first Postgres-only implementation is merged into Temper and TemperPaw, deployed to Railway, and proven with live requests, Datadog, and direct database correctness checks.</p>
             <ul>
-              <li>Diff previous/new state and update changed indexed fields only.</li>
-              <li>Batch field-index upserts and deletes.</li>
-              <li>Make indexing schema/query-driven rather than every-field by default.</li>
+              <li>Local: created ADR-0091 and branch <code>codex/latency-projection-diff-index-20260516</code> in fresh worktree <code>/Users/seshendranalla/Development/temper-worktrees/latency-projection-diff-index-20260516</code>.</li>
+              <li>Local: implemented Postgres field-index diff upserts. Unchanged rows are preserved, changed rows are rewritten, removed fields are deleted, and oversized fields stay in <code>entity_catalog</code> while leaving <code>entity_field_index</code>.</li>
+              <li>Local: added storage tests for unchanged row preservation, changed row rewrite, stale row removal, oversized field removal, catalog field preservation, and sequence preservation.</li>
+              <li>Local: <code>cargo fmt --all -- --check</code>, <code>cargo check -p temper-store-postgres</code>, <code>cargo clippy -p temper-store-postgres --all-targets -- -D warnings</code>, full <code>cargo test -p temper-store-postgres -- --nocapture</code>, <code>git diff --check</code>, readability ratchet, and full pre-push <code>cargo test --workspace</code> pass.</li>
+              <li>GitHub: Temper PR <a href="https://github.com/nerdsane/temper/pull/241">nerdsane/temper#241</a> passed CI run <a href="https://github.com/nerdsane/temper/actions/runs/25968899080">25968899080</a> and merged as <code>ed68e78539f5511b453e34e554bc95b0afb91a0d</code>.</li>
+              <li>TemperPaw rollout: branch <code>codex/bump-temper-projection-diff-index-20260516</code> pins root Temper crates, packaged <code>temper-wasm-sdk</code> manifests/locks, Docker <code>TEMPER_OBSERVABILITY_REV</code>, and Datadog observability contract expectations to <code>ed68e785</code>.</li>
+              <li>TemperPaw local: locked check, fmt, diff check, CI script syntax/smokes, clippy, TemperPaw/worker/review-gate tests, all packaged WASM build scripts, and dashboard build pass.</li>
+              <li>GitHub: TemperPaw rollout PR <a href="https://github.com/nerdsane/temperpaw/pull/272">nerdsane/temperpaw#272</a> passed PR CI run <a href="https://github.com/nerdsane/temperpaw/actions/runs/25969575912">25969575912</a>, was marked ready, and merged as <code>73e756a0bdb5f9a3084c5dd33c424154871fb873</code>.</li>
+              <li>Main: CI run <a href="https://github.com/nerdsane/temperpaw/actions/runs/25969887628">25969887628</a> and Docker run <a href="https://github.com/nerdsane/temperpaw/actions/runs/25969887617">25969887617</a> are green for <code>73e756a0</code>.</li>
+              <li>Railway: deployment <code>72635a45-5744-4c72-82e0-7b7143e9a548</code> succeeded on <code>sha-73e756a</code>; <code>/readyz</code>, <code>/healthz</code>, and authenticated <code>/paw/version</code> pass.</li>
+              <li>Live: proof <code>projection-diff-live-proof-20260516191623</code> created four Files, double-uploaded bytes, reached <code>Ready</code> in one poll, read matching bytes, and listed by <code>Name</code> through projection.</li>
+              <li>Datadog: current-version File projection upsert p95 is <code>42.6 ms</code> for <code>source:create</code> and <code>91.1 ms</code> for <code>source:background_dispatch</code>; sampled APM shows list/entity reads mostly below <code>20 ms</code> and <code>PUT $value</code> around <code>420 ms</code> average in the proof window.</li>
+              <li>Correctness: direct DB proof shows the four proof Files in <code>entity_catalog</code> at <code>Status=Ready</code>, <code>sequence_nr=5</code>, with <code>14</code> matching <code>entity_field_index</code> rows per File, including <code>Name</code>, <code>MimeType</code>, and <code>content_hash</code>.</li>
+              <li>Next: turn replay parity and sampled shadow reads into scheduled/current production checks, then pick the next measured latency pool.</li>
             </ul>
             <p class="small">Target: normal <code>query_projection</code> p95 under 50 ms and zero unexplained drift.</p>
           </div>
@@ -2353,12 +2874,41 @@ flowchart LR
         <article class="task">
           <header>PERF-003 / DB transaction shape</header>
           <div class="body">
-            <p>Remove avoidable database tail latency.</p>
+            <p>Remove avoidable database tail latency. The first shipped slice targeted measured projection transaction tail, not speculative pool tuning.</p>
             <ul>
-              <li>Eliminate idle-in-transaction on projection upserts.</li>
-              <li>Measure pool acquire time separately from SQL execution.</li>
-              <li>Replace event append <code>SELECT MAX</code> shape with optimistic insert or sequence metadata.</li>
+              <li>Datadog selection: current version <code>821d6c6e</code> shows <code>query_projection_upsert</code> transaction p95 around <code>429-443 ms</code>, pool-acquire p95 around <code>4.8-5.0 ms</code>, and projection end-to-end p95 around <code>471-478 ms</code> for <code>Session/background_dispatch</code>.</li>
+              <li>Local: created fresh main-based worktree <code>/Users/seshendranalla/Development/temper-worktrees/latency-db-transaction-shape-20260517</code> on branch <code>codex/latency-db-transaction-shape-20260517</code>.</li>
+              <li>ADR: added <code>docs/adrs/0095-projection-transaction-fast-path.md</code> for a Postgres-only projection transaction fast path.</li>
+              <li>Implementation: <code>upsert_query_projection</code> now computes scalar index fields before opening the transaction, locks the existing catalog fingerprint first, updates only catalog sequence/metadata when projection hash and status are unchanged, and preserves full diff reconciliation when fields or status change.</li>
+              <li>Observability: added <code>temper_postgres_projection_index_reconciliations_total</code> with low-cardinality <code>path</code> tags so rollout proof can separate <code>insert</code>, <code>diff</code>, and <code>skipped_unchanged</code> traffic.</li>
+              <li>Correctness: added a focused no-op projection test proving sequence advancement does not rewrite unchanged <code>entity_field_index</code> rows; existing changed-field and long-field reconciliation tests still pass.</li>
+              <li>Local checks: focused projection tests, full <code>temper-store-postgres</code> tests, clippy, store check, server check, rustfmt, diff check, code-quality review, and the full Temper pre-push gate are green. Local Postgres integration paths still skip without <code>DATABASE_URL</code>.</li>
+              <li>Temper GitHub: commit <code>f0e3a18c</code> went through draft PR <a href="https://github.com/nerdsane/temper/pull/245">#245</a>, passed CI run <a href="https://github.com/nerdsane/temper/actions/runs/25979739482">25979739482</a>, and merged as <code>6439a8a0</code>.</li>
+              <li>TemperPaw rollout: commit <code>beaaf466</code> bumped all Temper runtime/server/store/SDK pins and checked-in WASM lockfiles to <code>6439a8a0</code>; PR <a href="https://github.com/nerdsane/temperpaw/pull/276">#276</a> passed PR CI run <a href="https://github.com/nerdsane/temperpaw/actions/runs/25980160694">25980160694</a> and merged as <code>c16e0201</code>.</li>
+              <li>Main/Docker: TemperPaw main CI run <a href="https://github.com/nerdsane/temperpaw/actions/runs/25980450147">25980450147</a> and Docker run <a href="https://github.com/nerdsane/temperpaw/actions/runs/25980450153">25980450153</a> passed; Docker image <code>sha-c16e020</code> is the production image.</li>
+              <li>Railway: deployment <code>6e42424f-7ad4-4577-b127-9e3a0a36abeb</code> is live, <code>/paw/version</code> reports <code>sha-c16e020</code> / <code>c16e0201c1490e0496f4964f5c72b704bb8cd216</code>, and <code>/readyz</code> is ready.</li>
+              <li>Live proof: proof File <code>fl-019e3427-4b90-7801-be94-d4af896aa315</code> received three <code>PUT $value</code> writes, exact readback after each write, <code>VersionCount=3</code>, correct FileVersion chain, and direct File GET p50 <code>65.3 ms</code>.</li>
+              <li>Production DB proof: <code>entity_catalog</code> and <code>entity_field_index</code> contain the expected File and FileVersion rows, including <code>14</code> indexed File fields and <code>3</code> FileVersion <code>file_id</code> index rows.</li>
+              <li>Datadog proof: current-version c16 tags are present, reconciliation paths emit <code>diff=233</code>, <code>insert=25</code>, and <code>skipped_unchanged=17</code>, and DBM samples correlate to APM with <code>ddpv='c16e0201...'</code>.</li>
+              <li>Residual: the c16 sample is still small. File/FileVersion background projection p95 is roughly <code>50-73 ms</code>, but <code>Session/background_dispatch</code> remains around <code>245-386 ms</code>; catalog-lock waits are visible but bounded in DBM. Next gate is a longer post-deploy observation window, then the next measured slice.</li>
+              <li>Follow-up after this slice: replace event append <code>SELECT MAX</code> shape with optimistic insert or sequence metadata only if fresh evidence still points there after the Session/background_dispatch residual is explained.</li>
             </ul>
+            <div class="diagram" style="margin-top: 14px;">
+              <div class="panel-title"><span>PERF-003 shipped path</span><span>transaction shape</span></div>
+              <pre class="mermaid">
+flowchart LR
+  Event["Entity event applied"] --> Queue["Projection update"]
+  Queue --> Precompute["Precompute scalar index fields<br/>outside pool + transaction"]
+  Precompute --> Begin["Acquire connection + BEGIN"]
+  Begin --> Lock["Lock catalog fingerprint<br/>status + projection_hash"]
+  Lock --> Same{"Hash/status unchanged?"}
+  Same -->|yes| CatalogOnly["Update catalog sequence + metadata only"]
+  Same -->|no| Diff["Diff/reconcile entity_field_index"]
+  CatalogOnly --> Metrics["path:skipped_unchanged"]
+  Diff --> Metrics
+  Metrics --> DBM["Datadog metrics + DBM/APM correlation"]
+              </pre>
+            </div>
             <p class="small">Target: no recurring idle-in-transaction samples for hot writes.</p>
           </div>
         </article>
@@ -2379,9 +2929,42 @@ flowchart LR
           <div class="body">
             <p>Stop routing large bytes through the hottest control path.</p>
             <ul>
-              <li>Measure payload size, copy bytes, hash time, upload time, and registry pressure.</li>
-              <li>Support true streaming or presigned/direct object-store upload.</li>
-              <li>Keep Temper in charge of metadata, lifecycle, policy, and callbacks.</li>
+              <li>Local: ADR-0088 defines a native built-in File <code>$value</code> write fast path.</li>
+              <li>Local: built-in File uploads now store content through native content-addressed blob storage, then dispatch the verified <code>StreamUpdated</code> action.</li>
+              <li>Local: remote content-addressed writes avoid the existing native <code>HEAD</code>-then-<code>PUT</code> shape and use a direct <code>PUT</code>.</li>
+              <li>Local: <code>cargo check -p temper-server</code> and <code>cargo test -p temper-server --test file_value_fast_path</code> passed; OData File <code>$value</code> succeeds without any blob_adapter registered.</li>
+              <li>Live: Temper PR <a href="https://github.com/nerdsane/temper/pull/238">#238</a> and TemperPaw PR <a href="https://github.com/nerdsane/temperpaw/pull/269">#269</a> merged, Railway deployed <code>fd83c31b</code>, and production read-back proof passed.</li>
+              <li>Measured: Datadog upload trace moved from 3,159.5 ms with <code>wasm.invoke</code> to 353.3 ms with native <code>state.put_file_stream_content.native</code> and no matching WASM/blob-adapter span.</li>
+              <li>PERF-005B local: ADR-0092 and branch <code>codex/latency-file-value-residual-20260516</code> target the remaining measured tail where File upload still waits on post-commit reaction fanout.</li>
+              <li>PERF-005B local: dispatch now has explicit <code>await_reactions</code>; all existing generic/OData/platform callers preserve inline reaction semantics, while native File <code>$value</code> writes commit bytes and <code>StreamUpdated</code> synchronously, then run the FileVersion/RecordVersion trigger chain in a bounded background lane.</li>
+              <li>PERF-005B local checks: background trigger test, File <code>$value</code> fast-path test suite, focused adapter/reaction/trigger/WASM suite, <code>cargo check -p temper-server -p temper-platform</code>, clippy for both crates, and the full pre-push gate all pass.</li>
+              <li>PERF-005B Temper PR: <a href="https://github.com/nerdsane/temper/pull/242">#242</a> passed CI run <a href="https://github.com/nerdsane/temper/actions/runs/25971893778">25971893778</a> and merged as <code>1796c4f0</code>.</li>
+              <li>PERF-005B TemperPaw rollout local: branch <code>codex/bump-temper-file-value-residual-20260516</code> pins Temper to <code>1796c4f0</code>, preserves setup API inline reaction behavior with <code>await_reactions: true</code>, and passes locked check, Datadog contracts, rustfmt, clippy/check, worker/review-gate tests, full TemperPaw tests, packaged WASM builds, and dashboard build.</li>
+              <li>PERF-005B TemperPaw rollout PR: <a href="https://github.com/nerdsane/temperpaw/pull/273">#273</a> passed PR CI run <a href="https://github.com/nerdsane/temperpaw/actions/runs/25972634147">25972634147</a> and merged as <code>e8457ca4</code>.</li>
+              <li>PERF-005B mainline: TemperPaw main CI <a href="https://github.com/nerdsane/temperpaw/actions/runs/25972955841">25972955841</a> and Docker <a href="https://github.com/nerdsane/temperpaw/actions/runs/25972955833">25972955833</a> passed; Docker pushed <code>ghcr.io/nerdsane/temperpaw:sha-e8457ca</code> with digest <code>sha256:4956e8d7ed26af68168b64643b6aefc0e03e5cc114cbb8377382649c3a9eadfa</code>.</li>
+              <li>PERF-005B deploy: Railway deployment <code>5778571f-b325-4237-a792-cb13342963a4</code> succeeded on <code>sha-e8457ca4</code>; <code>/readyz</code>, <code>/healthz</code>, and authenticated <code>/paw/version</code> pass with <code>DD_VERSION=e8457ca4a4891b05710980c7aebe1ed822d55f87</code>.</li>
+              <li>PERF-005B live: proof <code>file-reaction-background-live-proof-20260516215205</code> created six Files, ran twelve <code>$value</code> writes, read matching bytes back, verified projection reads, confirmed FileVersion chains, and passed direct production DB checks.</li>
+              <li>Measured: Datadog sampled <code>PUT $value</code> p95 moved from <code>490.3 ms</code> to <code>238.7 ms</code>; <code>File.StreamUpdated</code> p95 moved from <code>223.1 ms</code> to <code>13.7 ms</code>; <code>reaction.dispatch.background</code> p95 is <code>89.6 ms</code> and starts after the HTTP response span.</li>
+              <li>PERF-005C selected: current residual latency sits inside native File byte work, but native blob observability only measured semaphore queue wait, not object-store transport. ADR-0093 defines bounded transport spans and percentile metrics.</li>
+              <li>PERF-005C local: branch <code>codex/latency-blob-transport-observability-20260516</code> adds native <code>blob.transport.*</code> spans and transport duration/request/byte metrics for local filesystem and S3/R2 <code>put</code>, <code>put_content</code>, <code>get</code>, and <code>head</code> operations.</li>
+              <li>PERF-005C local checks: <code>cargo check -p temper-server</code>, <code>cargo clippy -p temper-server --all-targets -- -D warnings</code>, <code>cargo test -p temper-server blob</code>, <code>cargo test -p temper-server --test file_value_fast_path</code>, <code>cargo fmt --all -- --check</code>, and <code>git diff --check</code> all pass.</li>
+              <li>PERF-005C GitHub: commit <code>8fc79f3c</code> was pushed, the full pre-push gate passed, Temper PR <a href="https://github.com/nerdsane/temper/pull/243">#243</a> passed CI run <a href="https://github.com/nerdsane/temper/actions/runs/25974966315">25974966315</a>, and merged into <code>main</code> as <code>88c9d797</code>.</li>
+              <li>PERF-005C TemperPaw rollout local: branch <code>codex/bump-temper-blob-transport-observability-20260516</code> pins Temper to <code>88c9d797</code>, extends Datadog dashboard/monitor/percentile contract coverage for native blob transport metrics, and passes JSON validation, script compile, diff check, rustfmt, locked package check, Datadog contract tests, monitor config tests, full 187-test TemperPaw suite, and focused <code>workspace_fs</code> WASM SDK test.</li>
+              <li>PERF-005C TemperPaw rollout PR: commit <code>04c6d3bf</code> was pushed, PR <a href="https://github.com/nerdsane/temperpaw/pull/274">#274</a> passed CI run <a href="https://github.com/nerdsane/temperpaw/actions/runs/25975556316">25975556316</a>, and the PR merged as <code>9fcd4b2b</code>.</li>
+              <li>PERF-005C TemperPaw rollout merge: main CI run <a href="https://github.com/nerdsane/temperpaw/actions/runs/25975834289">25975834289</a> and Docker run <a href="https://github.com/nerdsane/temperpaw/actions/runs/25975834282">25975834282</a> passed for <code>9fcd4b2b</code>.</li>
+              <li>PERF-005C TemperPaw mainline: CI run <a href="https://github.com/nerdsane/temperpaw/actions/runs/25975834289">25975834289</a> and Docker run <a href="https://github.com/nerdsane/temperpaw/actions/runs/25975834282">25975834282</a> passed; GHCR image <code>sha-9fcd4b2</code> has digest <code>sha256:74d398d56362de4b31cf09334e975952ec8f455a29e92a80fee99a6d5edf65bb</code>.</li>
+              <li>PERF-005C deploy: Railway deployment <code>37edf6ad-5f71-4865-85e3-46a05dd7cc78</code> succeeded on <code>sha-9fcd4b2b</code>; <code>/readyz</code>, <code>/healthz</code>, authenticated <code>/paw/version</code>, and Railway <code>DD_VERSION</code> checks pass.</li>
+              <li>PERF-005C Datadog config: percentile configs for native transport duration/request bytes/response bytes are created; dashboard <a href="https://app.datadoghq.com/dashboard/mn4-k3k-i66">mn4-k3k-i66</a> is updated; native blob duration spike monitor <code>283877764</code> and native blob p95 regression monitor <code>283877770</code> are live.</li>
+              <li>PERF-005C live: proof <code>blob-transport-live-proof-20260517001121</code> created six Files, ran twelve <code>$value</code> writes, read matching bytes back, verified projection reads, confirmed FileVersion chains, and passed direct production DB checks.</li>
+              <li>Measured: Datadog native blob metrics show <code>put_content</code> count <code>12</code>, average <code>195.2 ms</code>, p95/p99 <code>223.8 ms</code>; expanded trace <a href="https://app.datadoghq.com/apm/trace/a29ccff5afb451042e8bcd8ec1247b88">a29ccff5afb451042e8bcd8ec1247b88</a> shows <code>PUT $value</code> 264.4 ms, <code>state.put_file_stream_content.native</code> 235.7 ms, and child <code>blob.transport.put_content</code> 186.5 ms.</li>
+              <li>PERF-005D selected: the same Datadog proof showed fresh native reads paying one legacy external-key <code>blob.transport.get</code> 404 before the successful native <code>temper-fs/{content_hash}</code> get. ADR-0094 defines native-first read-key order plus legacy fallback.</li>
+              <li>PERF-005D local: branch <code>codex/latency-file-blob-read-key-order-20260517</code> changes <code>file_read_blobs.rs</code> so File reads try <code>temper-fs/{content_hash}</code> first and only probe the legacy external <code>{content_hash}</code> key for external endpoints when the native key is missing.</li>
+              <li>PERF-005D local checks: <code>cargo test -p temper-server file_blob_read_keys</code>, <code>cargo test -p temper-server --test file_value_fast_path</code>, <code>cargo check -p temper-server</code>, <code>cargo fmt --all -- --check</code>, and <code>git diff --check</code> all pass.</li>
+              <li>PERF-005D GitHub: Temper PR <a href="https://github.com/nerdsane/temper/pull/244">#244</a> passed CI run <a href="https://github.com/nerdsane/temper/actions/runs/25977404056">25977404056</a> and merged as <code>ff79974d</code>.</li>
+              <li>PERF-005D rollout: TemperPaw commit <code>709876f3</code> bumped all runtime/server/SDK pins to <code>ff79974d88a5b1a67e1fa9c4a746b422e12b29c3</code>. PR <a href="https://github.com/nerdsane/temperpaw/pull/275">#275</a> passed CI run <a href="https://github.com/nerdsane/temperpaw/actions/runs/25977831129">25977831129</a> and merged as <code>821d6c6e</code>; main CI <a href="https://github.com/nerdsane/temperpaw/actions/runs/25978275903">25978275903</a> and Docker <a href="https://github.com/nerdsane/temperpaw/actions/runs/25978275890">25978275890</a> passed.</li>
+              <li>PERF-005D deploy: Railway deployment <code>b628e727-b013-4c89-9eaa-f65f4f7e7433</code> succeeded from <code>ghcr.io/nerdsane/temperpaw:sha-821d6c6</code>. Runtime version tags now match <code>821d6c6ee28845e6b1365d78f3b85c3b5cc1ad15</code> across <code>/paw/version</code>, <code>DD_VERSION</code>, <code>DD_GIT_COMMIT_SHA</code>, and OTEL <code>service.version</code>.</li>
+              <li>PERF-005D live proof: <code>blob-read-key-order-live-proof-20260517022158</code> created <code>12</code> fresh Files, wrote and read back <code>1,802</code> bytes, verified SHA-256 <code>ContentHash</code>, <code>SizeBytes</code>, <code>Ready</code> status, <code>VersionCount=1</code>, and <code>LastVersionId</code> for every File.</li>
+              <li>PERF-005D Datadog proof: old version window showed <code>12</code> <code>get/outcome:ok</code> plus <code>12</code> <code>get/outcome:not_found</code>; new version window shows <code>get/outcome:ok</code> count <code>19</code>, <code>put_content/outcome:ok</code> count <code>13</code>, and no <code>get/outcome:not_found</code> series. New get duration p50/p95 is <code>98.4 ms</code>/<code>223.8 ms</code>.</li>
             </ul>
             <p class="small">Target: large upload latency scales with storage path, not actor/control-plane CPU.</p>
           </div>
