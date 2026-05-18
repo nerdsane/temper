@@ -1,4 +1,4 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
 use async_trait::async_trait;
@@ -36,7 +36,8 @@ impl LocalTDataWasmHost {
         headers: &[(String, String)],
         body: &str,
     ) -> Result<Option<(u16, String)>, String> {
-        let Some(request) = LocalTDataRequest::parse(url) else {
+        let Some(request) = LocalTDataRequest::parse(url, self.state.local_tdata_hosts.as_ref())
+        else {
             return Ok(None);
         };
 
@@ -155,13 +156,13 @@ struct LocalTDataRequest {
 }
 
 impl LocalTDataRequest {
-    fn parse(url: &str) -> Option<Self> {
+    fn parse(url: &str, local_tdata_hosts: &BTreeSet<String>) -> Option<Self> {
         let parsed = Url::parse(url).ok()?;
         if !matches!(parsed.scheme(), "http" | "https") {
             return None;
         }
         let host = parsed.host_str()?;
-        if !is_loopback_host(host) {
+        if !is_local_tdata_host(host, local_tdata_hosts) {
             return None;
         }
 
@@ -185,6 +186,13 @@ impl LocalTDataRequest {
 
 fn is_loopback_host(host: &str) -> bool {
     matches!(host, "127.0.0.1" | "localhost" | "::1" | "[::1]")
+}
+
+fn is_local_tdata_host(host: &str, local_tdata_hosts: &BTreeSet<String>) -> bool {
+    if is_loopback_host(host) {
+        return true;
+    }
+    local_tdata_hosts.contains(&host.to_ascii_lowercase())
 }
 
 fn is_file_value_path(path: &str) -> bool {
@@ -324,6 +332,7 @@ to = "Submitted"
     fn parses_loopback_tdata_request() {
         let request = LocalTDataRequest::parse(
             "http://127.0.0.1:8787/tdata/SessionEntries?$filter=SessionId%20eq%20%27s1%27&$top=1",
+            &BTreeSet::new(),
         )
         .expect("loopback TData URL should parse");
 
@@ -337,9 +346,26 @@ to = "Submitted"
 
     #[test]
     fn ignores_non_tdata_or_non_loopback_urls() {
-        assert!(LocalTDataRequest::parse("https://api.example.com/tdata/Orders").is_none());
-        assert!(LocalTDataRequest::parse("http://127.0.0.1:8787/api/health").is_none());
-        assert!(LocalTDataRequest::parse("not a url").is_none());
+        assert!(
+            LocalTDataRequest::parse("https://api.example.com/tdata/Orders", &BTreeSet::new())
+                .is_none()
+        );
+        assert!(
+            LocalTDataRequest::parse("http://127.0.0.1:8787/api/health", &BTreeSet::new())
+                .is_none()
+        );
+        assert!(LocalTDataRequest::parse("not a url", &BTreeSet::new()).is_none());
+    }
+
+    #[test]
+    fn parses_allowlisted_public_tdata_request() {
+        let local_hosts = BTreeSet::from(["temper.example".to_string()]);
+        let request =
+            LocalTDataRequest::parse("https://TEMPER.example/tdata/Orders?$top=1", &local_hosts)
+                .expect("allowlisted public TData URL should parse");
+
+        assert_eq!(request.path, "Orders");
+        assert_eq!(request.query.get("$top").map(String::as_str), Some("1"));
     }
 
     #[tokio::test]
@@ -424,5 +450,43 @@ to = "Submitted"
         }
 
         assert_eq!(calls.load(Ordering::SeqCst), delegated.len());
+    }
+
+    #[tokio::test]
+    async fn allowlisted_public_tdata_calls_use_odata_handlers() {
+        let mut state = test_state();
+        state.local_tdata_hosts = Arc::new(BTreeSet::from(["temper.example".to_string()]));
+        let host = LocalTDataWasmHost::new(state, Arc::new(FailingHost));
+        let headers = vec![
+            ("x-tenant-id".to_string(), "default".to_string()),
+            ("content-type".to_string(), "application/json".to_string()),
+            ("accept".to_string(), "application/json".to_string()),
+        ];
+
+        let (status, body) = host
+            .http_call(
+                "POST",
+                "https://temper.example/tdata/Orders",
+                &headers,
+                r#"{"id":"order-public-local-1","Customer":"Grace"}"#,
+            )
+            .await
+            .expect("allowlisted public host should dispatch locally");
+        assert_eq!(status, StatusCode::CREATED.as_u16());
+        let created: serde_json::Value = serde_json::from_str(&body).expect("created JSON");
+        assert_eq!(created["entity_id"], "order-public-local-1");
+
+        let (status, body) = host
+            .http_call(
+                "GET",
+                "https://temper.example/tdata/Orders('order-public-local-1')",
+                &headers,
+                "",
+            )
+            .await
+            .expect("allowlisted public host read should dispatch locally");
+        assert_eq!(status, StatusCode::OK.as_u16());
+        let fetched: serde_json::Value = serde_json::from_str(&body).expect("fetched JSON");
+        assert_eq!(fetched["fields"]["Customer"], "Grace");
     }
 }

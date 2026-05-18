@@ -194,6 +194,68 @@ fn env_usize(name: &str, default: usize) -> usize {
         .unwrap_or(default)
 }
 
+fn normalize_local_tdata_host(raw: &str) -> Option<String> {
+    let trimmed = raw.trim().trim_end_matches('/');
+    if trimmed.is_empty() {
+        return None;
+    }
+
+    let hostish = trimmed
+        .split_once("://")
+        .map(|(_, rest)| rest)
+        .unwrap_or(trimmed)
+        .split('/')
+        .next()
+        .unwrap_or("")
+        .trim();
+    if hostish.is_empty() {
+        return None;
+    }
+
+    let host = if let Some(rest) = hostish.strip_prefix('[') {
+        rest.split(']').next().unwrap_or("")
+    } else {
+        hostish.split(':').next().unwrap_or("")
+    }
+    .trim()
+    .trim_matches('.')
+    .to_ascii_lowercase();
+
+    if host.is_empty() || host.chars().any(char::is_whitespace) {
+        return None;
+    }
+
+    Some(host)
+}
+
+fn env_local_tdata_hosts() -> BTreeSet<String> {
+    let mut hosts = BTreeSet::new();
+    if let Ok(raw) = std::env::var("TEMPER_LOCAL_TDATA_HOSTS") {
+        // determinism-ok: read once at startup
+        for item in raw.split(',') {
+            if let Some(host) = normalize_local_tdata_host(item) {
+                hosts.insert(host);
+            }
+        }
+    }
+
+    for name in [
+        "TEMPER_PUBLIC_BASE_URL",
+        "PUBLIC_BASE_URL",
+        "RAILWAY_PUBLIC_DOMAIN",
+        "RAILWAY_STATIC_URL",
+    ] {
+        if let Ok(raw) = std::env::var(name) {
+            // determinism-ok: read once at startup
+            if let Some(host) = normalize_local_tdata_host(&raw) {
+                hosts.insert(host);
+            }
+        }
+    }
+
+    hosts
+}
+
 fn state_cache_budget() -> usize {
     static STATE_CACHE_BUDGET: OnceLock<usize> = OnceLock::new();
     *STATE_CACHE_BUDGET.get_or_init(|| env_usize("TEMPER_STATE_CACHE_BUDGET", 10_000))
@@ -386,6 +448,9 @@ pub struct ServerState {
     pub http_stream_registry: Arc<temper_wasm::http_stream::HttpStreamRegistry>,
     /// Long-lived workflow root spans keyed by workflow.run_id.
     pub(crate) workflow_spans: Arc<crate::workflow_tracing::WorkflowSpanRegistry>,
+    /// Public hostnames owned by this process that may use in-process TData
+    /// dispatch from WASM guests instead of leaving through the public edge.
+    pub(crate) local_tdata_hosts: Arc<BTreeSet<String>>,
 }
 
 /// Install a one-time hook so liveness violations surfaced by temper-spec
@@ -517,6 +582,7 @@ impl ServerState {
             http_endpoint_tables: Arc::new(crate::http_endpoint::HttpEndpointTables::new()),
             http_stream_registry: Arc::new(temper_wasm::http_stream::HttpStreamRegistry::new()),
             workflow_spans: Arc::new(crate::workflow_tracing::WorkflowSpanRegistry::default()),
+            local_tdata_hosts: Arc::new(env_local_tdata_hosts()),
         };
 
         // Pre-register built-in WASM modules (http_fetch for generic HTTP integrations).
@@ -753,6 +819,7 @@ impl ServerState {
             http_endpoint_tables: Arc::new(crate::http_endpoint::HttpEndpointTables::new()),
             http_stream_registry: Arc::new(temper_wasm::http_stream::HttpStreamRegistry::new()),
             workflow_spans: Arc::new(crate::workflow_tracing::WorkflowSpanRegistry::default()),
+            local_tdata_hosts: Arc::new(env_local_tdata_hosts()),
         };
         state.register_builtin_wasm_modules();
         state
@@ -1183,5 +1250,33 @@ impl ServerState {
             return Vec::new();
         };
         provider.all_stores().await
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::normalize_local_tdata_host;
+
+    #[test]
+    fn normalize_local_tdata_host_accepts_urls_domains_and_ports() {
+        assert_eq!(
+            normalize_local_tdata_host("https://Temper.Example/tdata"),
+            Some("temper.example".to_string())
+        );
+        assert_eq!(
+            normalize_local_tdata_host("openpaw-production.up.railway.app"),
+            Some("openpaw-production.up.railway.app".to_string())
+        );
+        assert_eq!(
+            normalize_local_tdata_host("http://127.0.0.1:8080"),
+            Some("127.0.0.1".to_string())
+        );
+    }
+
+    #[test]
+    fn normalize_local_tdata_host_rejects_empty_or_whitespace_hosts() {
+        assert_eq!(normalize_local_tdata_host(""), None);
+        assert_eq!(normalize_local_tdata_host("https:///tdata"), None);
+        assert_eq!(normalize_local_tdata_host("bad host.example"), None);
     }
 }
