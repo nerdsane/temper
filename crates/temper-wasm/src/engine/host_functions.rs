@@ -72,6 +72,15 @@ where
     }
 }
 
+fn redact_url_for_log(url: &str) -> String {
+    let without_fragment = url.split('#').next().unwrap_or(url);
+    without_fragment
+        .split('?')
+        .next()
+        .unwrap_or(without_fragment)
+        .to_string()
+}
+
 /// Outcome of resolving an entity-state field against a `HostState`.
 ///
 /// Pulled out of the `host_read_field` closure so the pure logic is unit-testable
@@ -1471,6 +1480,8 @@ pub(super) fn link_host_functions(linker: &mut Linker<HostState>) -> Result<(), 
                     url,
                     headers,
                 };
+                let method_for_log = head.method.clone();
+                let url_for_log = redact_url_for_log(&head.url);
                 let result = tokio::task::block_in_place(|| {
                     tokio::runtime::Handle::current()
                         .block_on(host.http_stream_begin_outbound(head))
@@ -1478,7 +1489,15 @@ pub(super) fn link_host_functions(linker: &mut Linker<HostState>) -> Result<(), 
 
                 let handles = match result {
                     Ok(h) => h,
-                    Err(_) => return -4,
+                    Err(err) => {
+                        tracing::warn!(
+                            http_method = %method_for_log,
+                            url = %url_for_log,
+                            error = %err,
+                            "WASM outbound HTTP stream begin failed"
+                        );
+                        return -4;
+                    }
                 };
 
                 let req_bytes = handles.request_body.0.to_le_bytes();
@@ -1537,7 +1556,14 @@ pub(super) fn link_host_functions(linker: &mut Linker<HostState>) -> Result<(), 
                     Err(crate::http_stream::StreamError::WouldBlock) => -1,
                     Err(crate::http_stream::StreamError::Closed) => -2,
                     Err(crate::http_stream::StreamError::InvalidHandle) => -3,
-                    Err(crate::http_stream::StreamError::Aborted(_)) => -4,
+                    Err(crate::http_stream::StreamError::Aborted(reason)) => {
+                        tracing::warn!(
+                            stream_handle = handle,
+                            error = %reason,
+                            "WASM HTTP stream read aborted"
+                        );
+                        -4
+                    }
                 }
             },
         )
@@ -1569,7 +1595,14 @@ pub(super) fn link_host_functions(linker: &mut Linker<HostState>) -> Result<(), 
                     Err(crate::http_stream::StreamError::WouldBlock) => -1,
                     Err(crate::http_stream::StreamError::Closed) => -2,
                     Err(crate::http_stream::StreamError::InvalidHandle) => -3,
-                    Err(crate::http_stream::StreamError::Aborted(_)) => -4,
+                    Err(crate::http_stream::StreamError::Aborted(reason)) => {
+                        tracing::warn!(
+                            stream_handle = handle,
+                            error = %reason,
+                            "WASM HTTP stream write aborted"
+                        );
+                        -4
+                    }
                 }
             },
         )
@@ -1592,7 +1625,28 @@ pub(super) fn link_host_functions(linker: &mut Linker<HostState>) -> Result<(), 
                 match result {
                     Ok(()) => 0,
                     Err(crate::http_stream::StreamError::InvalidHandle) => -3,
-                    Err(_) => -4,
+                    Err(crate::http_stream::StreamError::WouldBlock) => {
+                        tracing::warn!(
+                            stream_handle = handle,
+                            "WASM HTTP stream close unexpectedly returned WouldBlock"
+                        );
+                        -4
+                    }
+                    Err(crate::http_stream::StreamError::Closed) => {
+                        tracing::warn!(
+                            stream_handle = handle,
+                            "WASM HTTP stream close saw already closed handle"
+                        );
+                        -4
+                    }
+                    Err(crate::http_stream::StreamError::Aborted(reason)) => {
+                        tracing::warn!(
+                            stream_handle = handle,
+                            error = %reason,
+                            "WASM HTTP stream close aborted"
+                        );
+                        -4
+                    }
                 }
             },
         )
@@ -1625,7 +1679,14 @@ pub(super) fn link_host_functions(linker: &mut Linker<HostState>) -> Result<(), 
                 });
                 let head = match result {
                     Ok(h) => h,
-                    Err(_) => return -4,
+                    Err(err) => {
+                        tracing::warn!(
+                            stream_handle = resp_handle,
+                            error = %err,
+                            "WASM HTTP stream response head failed"
+                        );
+                        return -4;
+                    }
                 };
                 let encoded = serde_json::json!({
                     "status": head.status,
@@ -1695,7 +1756,28 @@ pub(super) fn link_host_functions(linker: &mut Linker<HostState>) -> Result<(), 
                 match result {
                     Ok(()) => 0,
                     Err(crate::http_stream::StreamError::InvalidHandle) => -3,
-                    Err(_) => -4,
+                    Err(crate::http_stream::StreamError::WouldBlock) => {
+                        tracing::warn!(
+                            stream_handle = resp_handle,
+                            "WASM HTTP stream send response head unexpectedly returned WouldBlock"
+                        );
+                        -4
+                    }
+                    Err(crate::http_stream::StreamError::Closed) => {
+                        tracing::warn!(
+                            stream_handle = resp_handle,
+                            "WASM HTTP stream send response head saw closed handle"
+                        );
+                        -4
+                    }
+                    Err(crate::http_stream::StreamError::Aborted(reason)) => {
+                        tracing::warn!(
+                            stream_handle = resp_handle,
+                            error = %reason,
+                            "WASM HTTP stream send response head aborted"
+                        );
+                        -4
+                    }
                 }
             },
         )
