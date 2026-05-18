@@ -3,7 +3,10 @@ use std::sync::Mutex;
 use std::time::Duration;
 
 use opentelemetry::trace::TraceContextExt;
+use tracing::Instrument;
 use tracing_opentelemetry::OpenTelemetrySpanExt;
+
+const WORKFLOW_ROOT_DRAIN_GRACE: Duration = Duration::from_secs(2);
 
 #[derive(Debug)]
 struct WorkflowRootSpan {
@@ -46,6 +49,9 @@ impl WorkflowSpanRegistry {
             workflow.root_entity_type = %root_entity_type,
             workflow.root_entity_id = %root_entity_id,
             workflow.run_id = %workflow_run_id,
+            workflow.terminal_status = tracing::field::Empty,
+            workflow.drain_grace_ms = tracing::field::Empty,
+            workflow.drain_reason = tracing::field::Empty,
             session.id = session_id.unwrap_or(""),
         );
         let context = span.context();
@@ -88,6 +94,35 @@ impl WorkflowSpanRegistry {
         should_finish
     }
 
+    fn mark_terminal_drain_scheduled(
+        &self,
+        workflow_run_id: &str,
+        entity_type: &str,
+        entity_id: &str,
+        status: &str,
+    ) -> Option<opentelemetry::Context> {
+        let spans = self.spans.lock().ok()?;
+        let root = spans.get(workflow_run_id)?;
+        if root.root_entity_type != entity_type || root.root_entity_id != entity_id {
+            return None;
+        }
+
+        root.span.record("workflow.terminal_status", status);
+        root.span.record(
+            "workflow.drain_grace_ms",
+            workflow_root_drain_grace_ms() as i64,
+        );
+        root.span
+            .record("workflow.drain_reason", "post_dispatch_telemetry");
+
+        let context = root.span.context();
+        if context.span().span_context().is_valid() {
+            Some(context)
+        } else {
+            None
+        }
+    }
+
     pub(crate) fn finish_if_terminal_after_drain(
         self: &std::sync::Arc<Self>,
         workflow_run_id: String,
@@ -100,13 +135,43 @@ impl WorkflowSpanRegistry {
         }
 
         let registry = std::sync::Arc::clone(self);
+        let drain_context = registry.mark_terminal_drain_scheduled(
+            &workflow_run_id,
+            &entity_type,
+            &entity_id,
+            &status,
+        );
         tokio::spawn(async move {
             // determinism-ok: observability-only root span cleanup after
             // post-dispatch telemetry has had a chance to attach.
-            tokio::time::sleep(Duration::from_secs(2)).await;
+            if let Some(parent_context) = drain_context {
+                let span = tracing::info_span!(
+                    parent: None,
+                    "temper.workflow.drain_grace",
+                    otel.name = "temper.workflow.drain_grace",
+                    workflow.run_id = %workflow_run_id,
+                    workflow.root_entity_type = %entity_type,
+                    workflow.root_entity_id = %entity_id,
+                    workflow.terminal_status = %status,
+                    workflow.drain_grace_ms = workflow_root_drain_grace_ms() as i64,
+                    workflow.drain_reason = "post_dispatch_telemetry",
+                );
+                span.set_parent(parent_context);
+                async {
+                    tokio::time::sleep(WORKFLOW_ROOT_DRAIN_GRACE).await;
+                }
+                .instrument(span)
+                .await;
+            } else {
+                tokio::time::sleep(WORKFLOW_ROOT_DRAIN_GRACE).await;
+            }
             registry.finish_if_terminal(&workflow_run_id, &entity_type, &entity_id, &status);
         });
     }
+}
+
+fn workflow_root_drain_grace_ms() -> u64 {
+    WORKFLOW_ROOT_DRAIN_GRACE.as_millis() as u64
 }
 
 pub(crate) fn should_use_workflow_root_span(
@@ -200,6 +265,35 @@ mod tests {
         assert!(!registry.finish_if_terminal("Session:ss-1", "Child", "child-1", "Completed"));
         assert!(registry.finish_if_terminal("Session:ss-1", "Session", "ss-1", "Completed"));
         assert!(!registry.finish_if_terminal("Session:ss-1", "Session", "ss-1", "Completed"));
+    }
+
+    #[test]
+    fn workflow_root_drain_grace_is_explicit() {
+        assert_eq!(super::workflow_root_drain_grace_ms(), 2_000);
+    }
+
+    #[test]
+    fn workflow_root_drain_attribution_only_marks_root_terminal_status() {
+        let tracer_provider = opentelemetry_sdk::trace::SdkTracerProvider::builder().build();
+        let subscriber = tracing_subscriber::registry().with(
+            tracing_opentelemetry::layer()
+                .with_tracer(tracer_provider.tracer("temper-server-workflow-root-drain-test")),
+        );
+        let _subscriber_guard = tracing::subscriber::set_default(subscriber);
+
+        let registry = super::WorkflowSpanRegistry::default();
+        registry.parent_context("default", "Session", "ss-1", "Session:ss-1", Some("ss-1"));
+
+        assert!(
+            registry
+                .mark_terminal_drain_scheduled("Session:ss-1", "Child", "child-1", "Completed")
+                .is_none()
+        );
+        assert!(
+            registry
+                .mark_terminal_drain_scheduled("Session:ss-1", "Session", "ss-1", "Completed")
+                .is_some()
+        );
     }
 
     #[test]
