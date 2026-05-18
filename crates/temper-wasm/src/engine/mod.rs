@@ -104,6 +104,8 @@ impl ResourceLimiter for MemoryLimiter {
 
 /// Compiled module cache entry.
 struct CachedModule {
+    /// SHA-256 hash that keys this compiled module in the cache.
+    hash: String,
     /// The compiled wasmtime module.
     module: Module,
     /// Pre-linked instance template for non-WASI modules.
@@ -284,6 +286,7 @@ impl WasmEngine {
         };
 
         let cached = Arc::new(CachedModule {
+            hash: hash.clone(),
             module,
             instance_pre,
             instance_pre_wasi,
@@ -310,33 +313,6 @@ impl WasmEngine {
     /// `i32` where the inputs are (context_ptr, context_len) and the return
     /// is a result pointer. Alternatively, the module can use `host_set_result`
     /// to provide the result via host call.
-    #[tracing::instrument(
-        name = "wasm.invoke",
-        skip(self, context, host, limits, streams),
-        fields(
-            otel.name = "wasm.invoke",
-            tenant = %context.tenant,
-            entity_type = %context.entity_type,
-            entity_id = %context.entity_id,
-            trigger_action = %context.trigger_action,
-            module_hash = %module_hash,
-            agent_id = tracing::field::Empty,
-            session_id = tracing::field::Empty,
-            max_fuel = limits.max_fuel,
-            max_memory = limits.max_memory as u64,
-            max_response_bytes = limits.max_response_bytes as u64,
-            stream_count_before = tracing::field::Empty,
-            stream_count_after = tracing::field::Empty,
-            needs_wasi = tracing::field::Empty,
-            success = tracing::field::Empty,
-            callback_action = tracing::field::Empty,
-            duration_ms = tracing::field::Empty,
-            error = tracing::field::Empty,
-            error.type = tracing::field::Empty,
-            error.message = tracing::field::Empty,
-            exception.message = tracing::field::Empty,
-        )
-    )]
     pub async fn invoke(
         &self,
         module_hash: &str,
@@ -356,6 +332,36 @@ impl WasmEngine {
     /// their decoded bytes. Keys correspond to oversize blob refs present in
     /// `context.entity_state` that exceed the caller's declared inline ceiling.
     /// Keys the guest does not read are discarded with the invocation.
+    #[tracing::instrument(
+        name = "wasm.invoke",
+        skip(self, context, host, limits, streams, blob_cache),
+        fields(
+            otel.name = "wasm.invoke",
+            tenant = %context.tenant,
+            entity_type = %context.entity_type,
+            entity_id = %context.entity_id,
+            trigger_action = %context.trigger_action,
+            module_hash = %module_hash,
+            agent_id = tracing::field::Empty,
+            session_id = tracing::field::Empty,
+            max_fuel = limits.max_fuel,
+            max_memory = limits.max_memory as u64,
+            max_response_bytes = limits.max_response_bytes as u64,
+            stream_count_before = tracing::field::Empty,
+            stream_count_after = tracing::field::Empty,
+            blob_cache_entries = tracing::field::Empty,
+            blob_cache_bytes = tracing::field::Empty,
+            context_bytes = tracing::field::Empty,
+            needs_wasi = tracing::field::Empty,
+            success = tracing::field::Empty,
+            callback_action = tracing::field::Empty,
+            duration_ms = tracing::field::Empty,
+            error = tracing::field::Empty,
+            error.type = tracing::field::Empty,
+            error.message = tracing::field::Empty,
+            exception.message = tracing::field::Empty,
+        )
+    )]
     pub async fn invoke_with_blobs(
         &self,
         module_hash: &str,
@@ -376,6 +382,13 @@ impl WasmEngine {
         let engine = self.engine.clone();
         let context_owned = context.clone();
         let limits_owned = limits.clone();
+        let blob_cache_entries = blob_cache.len() as u64;
+        let blob_cache_bytes = blob_cache
+            .values()
+            .map(|bytes| bytes.len() as u64)
+            .sum::<u64>();
+        tracing::Span::current().record("blob_cache_entries", blob_cache_entries);
+        tracing::Span::current().record("blob_cache_bytes", blob_cache_bytes);
         let span = tracing::Span::current();
 
         tokio::task::spawn_blocking(move || {
@@ -403,9 +416,24 @@ impl WasmEngine {
         streams: Arc<RwLock<StreamRegistry>>,
         blob_cache: BTreeMap<String, Vec<u8>>,
     ) -> Result<WasmInvocationResult, WasmError> {
+        let module_hash = cached.hash.as_str();
+        let invocation_span = tracing::Span::current();
         let start = std::time::Instant::now(); // determinism-ok: wall-clock timing for WASM sandbox
-        let context_json = serde_json::to_string(&context)
-            .map_err(|e| WasmError::Invocation(format!("failed to serialize context: {e}")))?;
+        let context_json = {
+            let phase = tracing::info_span!(
+                "wasm.invoke.serialize_context",
+                otel.name = "wasm.invoke.serialize_context",
+                module_hash = %module_hash,
+                context_bytes = tracing::field::Empty,
+            );
+            let _entered = phase.enter();
+            let serialized = serde_json::to_string(&context)
+                .map_err(|e| WasmError::Invocation(format!("failed to serialize context: {e}")))?;
+            let context_bytes = serialized.len() as u64;
+            phase.record("context_bytes", context_bytes);
+            invocation_span.record("context_bytes", context_bytes);
+            serialized
+        };
 
         let needs_wasi = cached
             .module
@@ -413,127 +441,206 @@ impl WasmEngine {
             .any(|imp| imp.module() == "wasi_snapshot_preview1");
         telemetry::record_invocation_start(&context, needs_wasi, &streams);
 
-        let wasi_stderr_pipe = if needs_wasi {
-            Some(wasmtime_wasi::pipe::MemoryOutputPipe::new(64 * 1024))
-        } else {
-            None
-        };
-        let wasi_ctx = if needs_wasi {
-            let mut builder = WasiCtxBuilder::new();
-            if let Some(ref pipe) = wasi_stderr_pipe {
-                builder.stderr(pipe.clone());
-            }
-            Some(builder.build_p1())
-        } else {
-            None
+        let (wasi_stderr_pipe, host_state) = {
+            let phase = tracing::info_span!(
+                "wasm.invoke.prepare_host_state",
+                otel.name = "wasm.invoke.prepare_host_state",
+                module_hash = %module_hash,
+                needs_wasi,
+                blob_cache_entries = blob_cache.len() as u64,
+            );
+            let _entered = phase.enter();
+            let wasi_stderr_pipe = if needs_wasi {
+                Some(wasmtime_wasi::pipe::MemoryOutputPipe::new(64 * 1024))
+            } else {
+                None
+            };
+            let wasi_ctx = if needs_wasi {
+                let mut builder = WasiCtxBuilder::new();
+                if let Some(ref pipe) = wasi_stderr_pipe {
+                    builder.stderr(pipe.clone());
+                }
+                Some(builder.build_p1())
+            } else {
+                None
+            };
+
+            let host_state = HostState {
+                context_json: context_json.clone(),
+                result_json: None,
+                host,
+                limiter: MemoryLimiter {
+                    max_memory: limits.max_memory,
+                },
+                streams,
+                wasi_ctx,
+                blob_cache,
+                guest_spans: GuestSpanRegistry::for_invocation(context.clone(), needs_wasi),
+            };
+            (wasi_stderr_pipe, host_state)
         };
 
-        let host_state = HostState {
-            context_json: context_json.clone(),
-            result_json: None,
-            host,
-            limiter: MemoryLimiter {
-                max_memory: limits.max_memory,
-            },
-            streams,
-            wasi_ctx,
-            blob_cache,
-            guest_spans: GuestSpanRegistry::for_invocation(context.clone(), needs_wasi),
+        let mut store = {
+            let phase = tracing::info_span!(
+                "wasm.invoke.create_store",
+                otel.name = "wasm.invoke.create_store",
+                module_hash = %module_hash,
+                needs_wasi,
+                max_fuel = limits.max_fuel,
+                max_memory = limits.max_memory as u64,
+            );
+            let _entered = phase.enter();
+            let mut store = Store::new(&engine, host_state);
+            store
+                .set_fuel(limits.max_fuel)
+                .map_err(|e| WasmError::Invocation(format!("failed to set fuel: {e}")))?;
+            store.limiter(|state| &mut state.limiter);
+            store.set_epoch_deadline(epoch_deadline_ticks(limits.max_duration));
+            store
         };
-        let mut store = Store::new(&engine, host_state);
-        store
-            .set_fuel(limits.max_fuel)
-            .map_err(|e| WasmError::Invocation(format!("failed to set fuel: {e}")))?;
-        store.limiter(|state| &mut state.limiter);
-        store.set_epoch_deadline(epoch_deadline_ticks(limits.max_duration));
 
-        let instance = if needs_wasi {
-            if let Some(ref pre) = cached.instance_pre_wasi {
+        let instance = {
+            let phase = tracing::info_span!(
+                "wasm.invoke.instantiate",
+                otel.name = "wasm.invoke.instantiate",
+                module_hash = %module_hash,
+                needs_wasi,
+                prelinked = true,
+            );
+            let _entered = phase.enter();
+            if needs_wasi {
+                if let Some(ref pre) = cached.instance_pre_wasi {
+                    pre.instantiate(&mut store)
+                        .map_err(|e| WasmError::Instantiation(e.to_string()))?
+                } else {
+                    phase.record("prelinked", false);
+                    let mut linker = Linker::new(&engine);
+                    host_functions::link_host_functions(&mut linker)?;
+                    preview1::add_to_linker_sync(&mut linker, |state: &mut HostState| {
+                        state.wasi_ctx.as_mut().expect("wasi_ctx must be Some")
+                    })
+                    .map_err(|e| WasmError::Compilation(format!("failed to link WASI: {e}")))?;
+                    linker
+                        .instantiate(&mut store, &cached.module)
+                        .map_err(|e| WasmError::Instantiation(e.to_string()))?
+                }
+            } else if let Some(ref pre) = cached.instance_pre {
                 pre.instantiate(&mut store)
                     .map_err(|e| WasmError::Instantiation(e.to_string()))?
             } else {
+                phase.record("prelinked", false);
                 let mut linker = Linker::new(&engine);
                 host_functions::link_host_functions(&mut linker)?;
-                preview1::add_to_linker_sync(&mut linker, |state: &mut HostState| {
-                    state.wasi_ctx.as_mut().expect("wasi_ctx must be Some")
-                })
-                .map_err(|e| WasmError::Compilation(format!("failed to link WASI: {e}")))?;
                 linker
                     .instantiate(&mut store, &cached.module)
                     .map_err(|e| WasmError::Instantiation(e.to_string()))?
             }
-        } else if let Some(ref pre) = cached.instance_pre {
-            pre.instantiate(&mut store)
-                .map_err(|e| WasmError::Instantiation(e.to_string()))?
-        } else {
-            let mut linker = Linker::new(&engine);
-            host_functions::link_host_functions(&mut linker)?;
-            linker
-                .instantiate(&mut store, &cached.module)
-                .map_err(|e| WasmError::Instantiation(e.to_string()))?
         };
 
-        let run_fn = instance
-            .get_typed_func::<(i32, i32), i32>(&mut store, "run")
-            .map_err(|e| WasmError::Invocation(format!("module missing 'run' export: {e}")))?;
+        let (run_fn, memory) = {
+            let phase = tracing::info_span!(
+                "wasm.invoke.bind_exports",
+                otel.name = "wasm.invoke.bind_exports",
+                module_hash = %module_hash,
+            );
+            let _entered = phase.enter();
+            let run_fn = instance
+                .get_typed_func::<(i32, i32), i32>(&mut store, "run")
+                .map_err(|e| WasmError::Invocation(format!("module missing 'run' export: {e}")))?;
 
-        let memory = instance
-            .get_memory(&mut store, "memory")
-            .ok_or_else(|| WasmError::Invocation("module missing 'memory' export".into()))?;
+            let memory = instance
+                .get_memory(&mut store, "memory")
+                .ok_or_else(|| WasmError::Invocation("module missing 'memory' export".into()))?;
+            (run_fn, memory)
+        };
 
         let ctx_bytes = context_json.as_bytes();
         let ctx_ptr = 1024_usize;
-        memory.write(&mut store, ctx_ptr, ctx_bytes).map_err(|e| {
-            WasmError::Invocation(format!("failed to write context to memory: {e}"))
-        })?;
+        {
+            let phase = tracing::info_span!(
+                "wasm.invoke.write_context",
+                otel.name = "wasm.invoke.write_context",
+                module_hash = %module_hash,
+                context_bytes = ctx_bytes.len() as u64,
+            );
+            let _entered = phase.enter();
+            memory.write(&mut store, ctx_ptr, ctx_bytes).map_err(|e| {
+                WasmError::Invocation(format!("failed to write context to memory: {e}"))
+            })?;
+        }
 
-        let result_ptr = match run_fn.call(&mut store, (ctx_ptr as i32, ctx_bytes.len() as i32)) {
-            Ok(result_ptr) => result_ptr,
-            Err(e) => {
-                let err = telemetry::map_invoke_error(
-                    e,
-                    &context,
-                    needs_wasi,
-                    limits.max_duration,
-                    start,
-                );
-                store.data_mut().guest_spans.cleanup_unclosed();
-                return Err(err);
+        let result_ptr = {
+            let phase = tracing::info_span!(
+                "wasm.invoke.run",
+                otel.name = "wasm.invoke.run",
+                module_hash = %module_hash,
+                context_bytes = ctx_bytes.len() as u64,
+            );
+            let _entered = phase.enter();
+            match run_fn.call(&mut store, (ctx_ptr as i32, ctx_bytes.len() as i32)) {
+                Ok(result_ptr) => result_ptr,
+                Err(e) => {
+                    let err = telemetry::map_invoke_error(
+                        e,
+                        &context,
+                        needs_wasi,
+                        limits.max_duration,
+                        start,
+                    );
+                    store.data_mut().guest_spans.cleanup_unclosed();
+                    return Err(err);
+                }
             }
         };
 
         let duration_ms = start.elapsed().as_millis() as u64;
         tracing::Span::current().record("duration_ms", duration_ms);
 
-        let result_json = if let Some(ref host_result) = store.data().result_json {
-            host_result.clone()
-        } else if result_ptr > 0 {
-            let mut len_bytes = [0u8; 4];
-            if let Err(e) = memory.read(&store, (result_ptr - 4) as usize, &mut len_bytes) {
-                store.data_mut().guest_spans.cleanup_unclosed();
-                return Err(WasmError::Invocation(format!(
-                    "failed to read result length: {e}"
-                )));
-            }
-            let result_len = u32::from_le_bytes(len_bytes) as usize;
-
-            let mut result_bytes = vec![0u8; result_len];
-            if let Err(e) = memory.read(&store, result_ptr as usize, &mut result_bytes) {
-                store.data_mut().guest_spans.cleanup_unclosed();
-                return Err(WasmError::Invocation(format!("failed to read result: {e}")));
-            }
-
-            match String::from_utf8(result_bytes) {
-                Ok(result) => result,
-                Err(e) => {
+        let result_json = {
+            let phase = tracing::info_span!(
+                "wasm.invoke.read_result",
+                otel.name = "wasm.invoke.read_result",
+                module_hash = %module_hash,
+                result_source = tracing::field::Empty,
+                result_bytes = tracing::field::Empty,
+            );
+            let _entered = phase.enter();
+            if let Some(ref host_result) = store.data().result_json {
+                phase.record("result_source", "host_set_result");
+                phase.record("result_bytes", host_result.len() as u64);
+                host_result.clone()
+            } else if result_ptr > 0 {
+                phase.record("result_source", "memory_ptr");
+                let mut len_bytes = [0u8; 4];
+                if let Err(e) = memory.read(&store, (result_ptr - 4) as usize, &mut len_bytes) {
                     store.data_mut().guest_spans.cleanup_unclosed();
                     return Err(WasmError::Invocation(format!(
-                        "result is not valid UTF-8: {e}"
+                        "failed to read result length: {e}"
                     )));
                 }
+                let result_len = u32::from_le_bytes(len_bytes) as usize;
+                phase.record("result_bytes", result_len as u64);
+
+                let mut result_bytes = vec![0u8; result_len];
+                if let Err(e) = memory.read(&store, result_ptr as usize, &mut result_bytes) {
+                    store.data_mut().guest_spans.cleanup_unclosed();
+                    return Err(WasmError::Invocation(format!("failed to read result: {e}")));
+                }
+
+                match String::from_utf8(result_bytes) {
+                    Ok(result) => result,
+                    Err(e) => {
+                        store.data_mut().guest_spans.cleanup_unclosed();
+                        return Err(WasmError::Invocation(format!(
+                            "result is not valid UTF-8: {e}"
+                        )));
+                    }
+                }
+            } else {
+                phase.record("result_source", "empty");
+                phase.record("result_bytes", 0_u64);
+                String::new()
             }
-        } else {
-            String::new()
         };
 
         if result_json.is_empty() {
@@ -555,14 +662,22 @@ impl WasmEngine {
             return Ok(result);
         }
 
-        let parsed =
+        let parsed = {
+            let phase = tracing::info_span!(
+                "wasm.invoke.parse_result",
+                otel.name = "wasm.invoke.parse_result",
+                module_hash = %module_hash,
+                result_bytes = result_json.len() as u64,
+            );
+            let _entered = phase.enter();
             match telemetry::parse_result_json(&result_json, &context, needs_wasi, duration_ms) {
                 Ok(parsed) => parsed,
                 Err(err) => {
                     store.data_mut().guest_spans.cleanup_unclosed();
                     return Err(err);
                 }
-            };
+            }
+        };
 
         let result = telemetry::finalize_result(&store, parsed, &context, needs_wasi, duration_ms);
         store.data_mut().guest_spans.cleanup_unclosed();
