@@ -297,19 +297,48 @@ impl EventStore for PostgresEventStore {
         entity_type: &str,
     ) -> Result<Vec<String>, PersistenceError> {
         let rows: Vec<String> = crate::dbm::postgres_query_scalar!(
-            "SELECT DISTINCT e.entity_id \
-             FROM events e \
-             WHERE e.tenant = $1 \
-               AND e.entity_type = $2 \
-               AND NOT EXISTS ( \
-                 SELECT 1 \
-                 FROM events d \
-                 WHERE d.tenant = e.tenant \
-                   AND d.entity_type = e.entity_type \
-                   AND d.entity_id = e.entity_id \
-                   AND d.event_type = 'Deleted' \
-               ) \
-             ORDER BY e.entity_id",
+            "SELECT entity_id \
+             FROM ( \
+               SELECT c.entity_id \
+               FROM entity_catalog c \
+               WHERE c.tenant = $1 \
+                 AND c.entity_type = $2 \
+                 AND NOT EXISTS ( \
+                   SELECT 1 \
+                   FROM events d \
+                   WHERE d.tenant = c.tenant \
+                     AND d.entity_type = c.entity_type \
+                     AND d.entity_id = c.entity_id \
+                     AND d.event_type = 'Deleted' \
+                 ) \
+               UNION \
+               SELECT f.entity_id \
+               FROM entity_field_index f \
+               WHERE f.tenant = $1 \
+                 AND f.entity_type = $2 \
+                 AND NOT EXISTS ( \
+                   SELECT 1 \
+                   FROM events d \
+                   WHERE d.tenant = f.tenant \
+                     AND d.entity_type = f.entity_type \
+                     AND d.entity_id = f.entity_id \
+                     AND d.event_type = 'Deleted' \
+                 ) \
+               UNION \
+               SELECT DISTINCT e.entity_id \
+               FROM events e \
+               WHERE e.tenant = $1 \
+                 AND e.entity_type = $2 \
+                 AND NOT EXISTS ( \
+                   SELECT 1 \
+                   FROM events d \
+                   WHERE d.tenant = e.tenant \
+                     AND d.entity_type = e.entity_type \
+                     AND d.entity_id = e.entity_id \
+                     AND d.event_type = 'Deleted' \
+                 ) \
+             ) ids \
+             ORDER BY entity_id",
         )
         .bind(tenant)
         .bind(entity_type)

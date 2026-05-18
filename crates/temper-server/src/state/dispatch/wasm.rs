@@ -498,8 +498,11 @@ impl crate::state::ServerState {
                     current_otel_trace_id(active_span).or_else(|| ctx.agent_ctx.trace_id.clone()),
                 ),
         );
-        let inner: Arc<dyn WasmHost> =
-            Arc::new(LocalTDataWasmHost::new(self.clone(), production_host));
+        let inner: Arc<dyn WasmHost> = Arc::new(LocalTDataWasmHost::new(
+            self.clone(),
+            ctx.entity_ref.tenant.clone(),
+            production_host,
+        ));
         let host: Arc<dyn WasmHost> = Arc::new(AuthorizedWasmHost::new(inner, gate, authz_ctx));
         let max_response_bytes = integration
             .config
@@ -1062,8 +1065,11 @@ impl crate::state::ServerState {
             base_host = base_host.with_binary_http_interceptor(interceptor);
         }
         let production_host: Arc<dyn WasmHost> = Arc::new(base_host);
-        let inner: Arc<dyn WasmHost> =
-            Arc::new(LocalTDataWasmHost::new(self.clone(), production_host));
+        let inner: Arc<dyn WasmHost> = Arc::new(LocalTDataWasmHost::new(
+            self.clone(),
+            tenant.clone(),
+            production_host,
+        ));
         let host: Arc<dyn WasmHost> =
             Arc::new(AuthorizedWasmHost::new(inner, base_gate, authz_ctx));
         let limits = WasmResourceLimits::default();

@@ -251,7 +251,7 @@ impl EventStore for TursoEventStore {
         tenant: &str,
         entity_type: &str,
     ) -> Result<Vec<String>, PersistenceError> {
-        self.list_entity_ids_by_type_catalog_first(tenant, entity_type)
+        self.list_entity_ids_by_type_from_read_sources(tenant, entity_type)
             .await
     }
 }

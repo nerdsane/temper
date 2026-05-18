@@ -274,7 +274,84 @@ async fn list_entity_ids_by_type_uses_entity_catalog() {
 }
 
 #[tokio::test]
-async fn list_entity_ids_by_type_falls_back_to_events_and_excludes_deleted() {
+async fn list_entity_ids_by_type_unions_catalog_field_index_and_events() {
+    let store = make_store("entity-list-by-type-union").await;
+    let tenant = format!("tenant-{}", uuid::Uuid::new_v4());
+
+    store
+        .upsert_query_projection(
+            &tenant,
+            "AgentRoute",
+            "route-catalog",
+            "Ready",
+            &serde_json::json!({ "Name": "catalog" }),
+            3,
+        )
+        .await
+        .expect("upsert catalog projection");
+    store
+        .upsert_query_projection(
+            &tenant,
+            "AgentRoute",
+            "route-deleted",
+            "Ready",
+            &serde_json::json!({ "Name": "deleted" }),
+            3,
+        )
+        .await
+        .expect("upsert deleted projection");
+
+    let conn = store.connection().expect("connection");
+    conn.execute(
+        "INSERT INTO entity_field_index \
+         (tenant, entity_type, entity_id, field_name, field_value, status) \
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+        params![
+            tenant.clone(),
+            "AgentRoute",
+            "route-index",
+            "Name",
+            "index",
+            "Ready"
+        ],
+    )
+    .await
+    .expect("insert field-index-only row");
+
+    store
+        .append(
+            &format!("{tenant}:AgentRoute:route-event"),
+            0,
+            &[test_envelope("Created", serde_json::json!({}))],
+        )
+        .await
+        .expect("append event-only route");
+    store
+        .append(
+            &format!("{tenant}:AgentRoute:route-deleted"),
+            0,
+            &[test_envelope("Deleted", serde_json::json!({}))],
+        )
+        .await
+        .expect("append deleted tombstone");
+
+    let ids = store
+        .list_entity_ids_by_type(&tenant, "AgentRoute")
+        .await
+        .expect("list AgentRoute IDs by type");
+
+    assert_eq!(
+        ids,
+        vec![
+            "route-catalog".to_string(),
+            "route-event".to_string(),
+            "route-index".to_string(),
+        ]
+    );
+}
+
+#[tokio::test]
+async fn list_entity_ids_by_type_includes_events_and_excludes_deleted() {
     let store = make_store("entity-list-by-type-events").await;
     let tenant = format!("tenant-{}", uuid::Uuid::new_v4());
 
@@ -314,7 +391,7 @@ async fn list_entity_ids_by_type_falls_back_to_events_and_excludes_deleted() {
     let ids = store
         .list_entity_ids_by_type(&tenant, "Order")
         .await
-        .expect("list Order IDs by type from event fallback");
+        .expect("list Order IDs by type from events");
 
     assert_eq!(ids, vec!["ord-active".to_string()]);
 }
