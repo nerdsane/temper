@@ -212,7 +212,11 @@ fn parses_allowlisted_public_tdata_request() {
 
 #[tokio::test]
 async fn local_tdata_calls_use_odata_handlers() {
-    let host = LocalTDataWasmHost::new(test_state(), Arc::new(FailingHost));
+    let host = LocalTDataWasmHost::new(
+        test_state(),
+        temper_runtime::tenant::TenantId::default(),
+        Arc::new(FailingHost),
+    );
     let headers = vec![
         ("x-tenant-id".to_string(), "default".to_string()),
         ("content-type".to_string(), "application/json".to_string()),
@@ -260,10 +264,50 @@ async fn local_tdata_calls_use_odata_handlers() {
 }
 
 #[tokio::test]
+async fn local_tdata_synthesizes_invocation_tenant_header() {
+    let mut state = test_state();
+    state.single_tenant_mode = false;
+    let host = LocalTDataWasmHost::new(
+        state,
+        temper_runtime::tenant::TenantId::default(),
+        Arc::new(FailingHost),
+    );
+    let headers = vec![
+        ("content-type".to_string(), "application/json".to_string()),
+        ("accept".to_string(), "application/json".to_string()),
+    ];
+
+    let (status, body) = host
+        .http_call(
+            "POST",
+            "http://127.0.0.1:8787/tdata/Orders",
+            &headers,
+            r#"{"id":"order-local-no-header","Customer":"Lin"}"#,
+        )
+        .await
+        .expect("local create should synthesize tenant header");
+    assert_eq!(status, StatusCode::CREATED.as_u16(), "{body}");
+
+    let (status, body) = host
+        .http_call(
+            "GET",
+            "http://127.0.0.1:8787/tdata/Orders('order-local-no-header')",
+            &headers,
+            "",
+        )
+        .await
+        .expect("local read should synthesize tenant header");
+    assert_eq!(status, StatusCode::OK.as_u16(), "{body}");
+    let fetched: serde_json::Value = serde_json::from_str(&body).expect("fetched JSON");
+    assert_eq!(fetched["fields"]["Customer"], "Lin");
+}
+
+#[tokio::test]
 async fn boundary_paths_delegate_to_production_host() {
     let calls = Arc::new(AtomicUsize::new(0));
     let host = LocalTDataWasmHost::new(
         test_state(),
+        temper_runtime::tenant::TenantId::default(),
         Arc::new(CountingHost {
             calls: calls.clone(),
             stream_calls: Arc::new(AtomicUsize::new(0)),
@@ -300,6 +344,7 @@ async fn outbound_streaming_delegates_to_production_host() {
     let stream_calls = Arc::new(AtomicUsize::new(0));
     let host = LocalTDataWasmHost::new(
         test_state(),
+        temper_runtime::tenant::TenantId::default(),
         Arc::new(CountingHost {
             calls: Arc::new(AtomicUsize::new(0)),
             stream_calls: stream_calls.clone(),
@@ -362,7 +407,11 @@ async fn outbound_streaming_delegates_to_production_host() {
 async fn allowlisted_public_tdata_calls_use_odata_handlers() {
     let mut state = test_state();
     state.local_tdata_hosts = Arc::new(BTreeSet::from(["temper.example".to_string()]));
-    let host = LocalTDataWasmHost::new(state, Arc::new(FailingHost));
+    let host = LocalTDataWasmHost::new(
+        state,
+        temper_runtime::tenant::TenantId::default(),
+        Arc::new(FailingHost),
+    );
     let headers = vec![
         ("x-tenant-id".to_string(), "default".to_string()),
         ("content-type".to_string(), "application/json".to_string()),

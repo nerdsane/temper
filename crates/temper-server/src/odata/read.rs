@@ -456,6 +456,18 @@ pub(super) async fn handle_odata_get_for_tenant(
 }
 
 /// Handle `EntitySet` path: list all entities in a set with query options.
+#[instrument(skip_all, fields(
+    otel.name = "odata.entity_set_read",
+    tenant = %tenant,
+    entity_set = %name,
+    entity_type = tracing::field::Empty,
+    filter_pushdown = tracing::field::Empty,
+    id_source = tracing::field::Empty,
+    catalog_materialization = tracing::field::Empty,
+    candidate_count = tracing::field::Empty,
+    materialized_count = tracing::field::Empty,
+    returned_count = tracing::field::Empty,
+))]
 async fn handle_entity_set(
     state: &ServerState,
     tenant: &TenantId,
@@ -467,6 +479,8 @@ async fn handle_entity_set(
         Some(t) => t,
         None => return entity_set_not_found_response(state, tenant, name).await,
     };
+    let span = tracing::Span::current();
+    span.record("entity_type", entity_type.as_str());
 
     let default_page_size = odata_default_page_size();
     let max_entities = odata_max_entities();
@@ -511,7 +525,8 @@ async fn handle_entity_set(
         None // no filter
     };
 
-    let prefer_catalog_materialization = sql_pushdown_ids.is_some();
+    let filter_pushdown = sql_pushdown_ids.is_some();
+    let prefer_catalog_materialization = filter_pushdown || state.query_plane_store().is_some();
     let (entity_ids, apply_options, precomputed_count) = if let Some(pushed_ids) = sql_pushdown_ids
     {
         // SQL push-down already filtered — apply pagination only.
@@ -534,6 +549,17 @@ async fn handle_entity_set(
             max_entities,
         )
     };
+    span.record("filter_pushdown", filter_pushdown);
+    span.record("catalog_materialization", prefer_catalog_materialization);
+    span.record(
+        "id_source",
+        if filter_pushdown {
+            "filter_pushdown"
+        } else {
+            "read_source_union"
+        },
+    );
+    span.record("candidate_count", entity_ids.len() as u64);
 
     let entities = materialize_entity_set_entities(
         state,
@@ -544,8 +570,10 @@ async fn handle_entity_set(
         prefer_catalog_materialization,
     )
     .await;
+    span.record("materialized_count", entities.len() as u64);
 
     let (mut result, mut count) = apply_query_options(entities, &apply_options);
+    span.record("returned_count", result.len() as u64);
     if count.is_none() {
         count = precomputed_count;
     }

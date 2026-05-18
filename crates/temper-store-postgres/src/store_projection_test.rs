@@ -2,6 +2,120 @@ use super::*;
 use crate::migration::run_migrations;
 use sqlx::PgPool;
 
+fn test_envelope(event_type: &str, payload: serde_json::Value) -> PersistenceEnvelope {
+    PersistenceEnvelope {
+        sequence_nr: 0,
+        event_type: event_type.to_string(),
+        payload,
+        metadata: EventMetadata {
+            event_id: uuid::Uuid::new_v4(),
+            causation_id: uuid::Uuid::new_v4(),
+            correlation_id: uuid::Uuid::new_v4(),
+            timestamp: chrono::Utc::now(),
+            actor_id: "store-projection-test".to_string(),
+        },
+    }
+}
+
+#[test]
+fn list_entity_ids_by_type_unions_catalog_field_index_and_events() {
+    let database_url = match std::env::var("DATABASE_URL") {
+        Ok(url) => url,
+        Err(_) => return,
+    };
+
+    sqlx::test_block_on(async {
+        let pool = PgPool::connect(&database_url).await.unwrap();
+        run_migrations(&pool).await.unwrap();
+        let store = PostgresEventStore::new(pool.clone());
+        let tenant = format!("tenant-projection-list-{}", uuid::Uuid::new_v4());
+        let entity_type = "DesignLanguage";
+
+        store
+            .upsert_query_projection(
+                &tenant,
+                entity_type,
+                "dl-catalog",
+                "Published",
+                &serde_json::json!({ "Name": "Catalog" }),
+                1,
+            )
+            .await
+            .unwrap();
+        store
+            .upsert_query_projection(
+                &tenant,
+                entity_type,
+                "dl-deleted",
+                "Published",
+                &serde_json::json!({ "Name": "Deleted" }),
+                1,
+            )
+            .await
+            .unwrap();
+        crate::dbm::postgres_query!(
+            "INSERT INTO entity_field_index \
+             (tenant, entity_type, entity_id, field_name, field_value, status) \
+             VALUES ($1, $2, $3, $4, $5, $6)",
+        )
+        .bind(&tenant)
+        .bind(entity_type)
+        .bind("dl-index")
+        .bind("Name")
+        .bind("Index")
+        .bind("Published")
+        .execute(&pool)
+        .await
+        .unwrap();
+        store
+            .append(
+                &format!("{tenant}:{entity_type}:dl-event"),
+                0,
+                &[test_envelope("Created", serde_json::json!({}))],
+            )
+            .await
+            .unwrap();
+        store
+            .append(
+                &format!("{tenant}:{entity_type}:dl-deleted"),
+                0,
+                &[test_envelope("Deleted", serde_json::json!({}))],
+            )
+            .await
+            .unwrap();
+
+        let ids = store
+            .list_entity_ids_by_type(&tenant, entity_type)
+            .await
+            .unwrap();
+
+        assert_eq!(
+            ids,
+            vec![
+                "dl-catalog".to_string(),
+                "dl-event".to_string(),
+                "dl-index".to_string(),
+            ]
+        );
+
+        crate::dbm::postgres_query!("DELETE FROM entity_field_index WHERE tenant = $1")
+            .bind(&tenant)
+            .execute(&pool)
+            .await
+            .unwrap();
+        crate::dbm::postgres_query!("DELETE FROM entity_catalog WHERE tenant = $1")
+            .bind(&tenant)
+            .execute(&pool)
+            .await
+            .unwrap();
+        crate::dbm::postgres_query!("DELETE FROM events WHERE tenant = $1")
+            .bind(&tenant)
+            .execute(&pool)
+            .await
+            .unwrap();
+    });
+}
+
 #[test]
 fn upsert_query_projection_diffs_field_index_rows() {
     let database_url = match std::env::var("DATABASE_URL") {

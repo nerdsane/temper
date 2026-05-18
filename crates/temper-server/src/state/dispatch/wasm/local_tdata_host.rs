@@ -7,6 +7,7 @@ use axum::extract::{Path, Query, State};
 use axum::http::{HeaderMap, HeaderName, HeaderValue};
 use axum::response::IntoResponse;
 use reqwest::Url;
+use temper_runtime::tenant::TenantId;
 use temper_wasm::WasmHost;
 use temper_wasm::http_stream::{
     HttpRequestHead, HttpResponseHead, HttpStreamHandles, StreamError, StreamHandle,
@@ -23,13 +24,18 @@ const LOCAL_TDATA_RESPONSE_LIMIT_BYTES: usize = 64 * 1024 * 1024;
 /// through the same OData handlers as external HTTP traffic.
 pub(super) struct LocalTDataWasmHost {
     state: ServerState,
+    tenant: TenantId,
     delegate: Arc<dyn WasmHost>,
 }
 
 impl LocalTDataWasmHost {
     /// Create a local-TData wrapper around an existing host implementation.
-    pub(super) fn new(state: ServerState, delegate: Arc<dyn WasmHost>) -> Self {
-        Self { state, delegate }
+    pub(super) fn new(state: ServerState, tenant: TenantId, delegate: Arc<dyn WasmHost>) -> Self {
+        Self {
+            state,
+            tenant,
+            delegate,
+        }
     }
 
     async fn local_http_call(
@@ -48,7 +54,7 @@ impl LocalTDataWasmHost {
         if !matches!(method_upper.as_str(), "GET" | "POST") {
             return Ok(None);
         }
-        let headers = header_map(headers);
+        let headers = header_map(headers, &self.tenant);
         let path_for_span = request.path.clone();
         let span = tracing::info_span!(
             "wasm.local_tdata_http_call",
@@ -264,7 +270,7 @@ fn is_file_value_path(path: &str) -> bool {
     path.starts_with("Files('") && path.ends_with("')/$value")
 }
 
-fn header_map(headers: &[(String, String)]) -> HeaderMap {
+fn header_map(headers: &[(String, String)], tenant: &TenantId) -> HeaderMap {
     let mut map = HeaderMap::new();
     for (name, value) in headers {
         let Ok(name) = HeaderName::from_bytes(name.as_bytes()) else {
@@ -274,6 +280,11 @@ fn header_map(headers: &[(String, String)]) -> HeaderMap {
             continue;
         };
         map.insert(name, value);
+    }
+    if !map.contains_key("x-tenant-id") {
+        let value =
+            HeaderValue::from_str(tenant.as_str()).expect("TenantId is a valid HTTP header value");
+        map.insert(HeaderName::from_static("x-tenant-id"), value);
     }
     map
 }

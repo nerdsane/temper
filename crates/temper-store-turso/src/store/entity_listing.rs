@@ -12,7 +12,7 @@ impl TursoEventStore {
         entity_type,
         otel.name = "turso.list_entity_ids_by_type"
     ))]
-    pub(crate) async fn list_entity_ids_by_type_catalog_first(
+    pub(crate) async fn list_entity_ids_by_type_from_read_sources(
         &self,
         tenant: &str,
         entity_type: &str,
@@ -21,37 +21,47 @@ impl TursoEventStore {
         let mut rows = conn
             .query(
                 "SELECT entity_id
-                 FROM entity_catalog
-                 WHERE tenant = ?1 AND entity_type = ?2
+                 FROM (
+                   SELECT c.entity_id
+                   FROM entity_catalog c
+                   WHERE c.tenant = ?1
+                     AND c.entity_type = ?2
+                     AND NOT EXISTS (
+                       SELECT 1
+                       FROM events d
+                       WHERE d.tenant = c.tenant
+                         AND d.entity_type = c.entity_type
+                         AND d.entity_id = c.entity_id
+                         AND d.event_type = 'Deleted'
+                     )
+                   UNION
+                   SELECT f.entity_id
+                   FROM entity_field_index f
+                   WHERE f.tenant = ?1
+                     AND f.entity_type = ?2
+                     AND NOT EXISTS (
+                       SELECT 1
+                       FROM events d
+                       WHERE d.tenant = f.tenant
+                         AND d.entity_type = f.entity_type
+                         AND d.entity_id = f.entity_id
+                         AND d.event_type = 'Deleted'
+                     )
+                   UNION
+                   SELECT DISTINCT e.entity_id
+                   FROM events e
+                   WHERE e.tenant = ?1
+                     AND e.entity_type = ?2
+                     AND NOT EXISTS (
+                       SELECT 1
+                       FROM events d
+                       WHERE d.tenant = e.tenant
+                         AND d.entity_type = e.entity_type
+                         AND d.entity_id = e.entity_id
+                         AND d.event_type = 'Deleted'
+                     )
+                 )
                  ORDER BY entity_id",
-                params![tenant, entity_type],
-            )
-            .await
-            .map_err(storage_error)?;
-
-        let mut catalog_ids = Vec::new();
-        while let Some(row) = rows.next().await.map_err(storage_error)? {
-            catalog_ids.push(row.get::<String>(0).map_err(storage_error)?);
-        }
-        if !catalog_ids.is_empty() {
-            return Ok(catalog_ids);
-        }
-
-        let mut rows = conn
-            .query(
-                "SELECT DISTINCT e.entity_id
-                 FROM events e
-                 WHERE e.tenant = ?1
-                   AND e.entity_type = ?2
-                   AND NOT EXISTS (
-                     SELECT 1
-                     FROM events d
-                     WHERE d.tenant = e.tenant
-                       AND d.entity_type = e.entity_type
-                       AND d.entity_id = e.entity_id
-                       AND d.event_type = 'Deleted'
-                   )
-                 ORDER BY e.entity_id",
                 params![tenant, entity_type],
             )
             .await
