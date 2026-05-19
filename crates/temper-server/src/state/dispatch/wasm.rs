@@ -216,7 +216,7 @@ fn local_blob_binary_interceptor(
 }
 
 fn internal_api_base_url(state: &crate::state::ServerState) -> Option<String> {
-    std::env::var("TEMPER_API_URL")
+    std::env::var("TEMPER_API_URL") // determinism-ok: production host loopback config
         .ok()
         .map(|value| value.trim_end_matches('/').to_string())
         .filter(|value| !value.is_empty())
@@ -552,7 +552,18 @@ impl crate::state::ServerState {
             ctx,
             &module_name,
             WASM_DISPATCH_PHASE_AUTHZ_SECRET_RESOLUTION,
-            || self.get_authorized_wasm_secrets(ctx.entity_ref.tenant, &*gate, &authz_ctx),
+            || {
+                self.get_authorized_wasm_host_bootstrap_secrets(
+                    ctx.entity_ref.tenant,
+                    &*gate,
+                    &authz_ctx,
+                )
+            },
+        );
+        let secret_resolver = self.authorized_wasm_secret_resolver(
+            ctx.entity_ref.tenant,
+            Arc::clone(&gate),
+            authz_ctx.clone(),
         );
         let (host, limits) = with_wasm_dispatch_phase(
             &active_parent_span,
@@ -619,9 +630,9 @@ impl crate::state::ServerState {
                     module_name.clone(),
                 );
                 let host_invocation_context = inv_ctx.clone();
-                let internal_api_key = std::env::var("TEMPER_API_KEY").ok();
+                let internal_api_key = std::env::var("TEMPER_API_KEY").ok(); // determinism-ok: production host loopback config
                 let internal_api_url = internal_api_base_url(self);
-                let production_host: Arc<dyn WasmHost> = Arc::new(
+                let mut production_host_builder =
                     ProductionWasmHost::with_timeout(tenant_secrets, http_timeout)
                         .with_binary_http_interceptor(
                             local_blob_interceptor
@@ -639,8 +650,12 @@ impl crate::state::ServerState {
                         .with_trace_id(
                             current_otel_trace_id(active_span)
                                 .or_else(|| ctx.agent_ctx.trace_id.clone()),
-                        ),
-                );
+                        );
+                if let Some(resolver) = secret_resolver.clone() {
+                    production_host_builder =
+                        production_host_builder.with_secret_resolver(resolver);
+                }
+                let production_host: Arc<dyn WasmHost> = Arc::new(production_host_builder);
                 let inner: Arc<dyn WasmHost> = Arc::new(LocalTDataWasmHost::new(
                     self.clone(),
                     ctx.entity_ref.tenant.clone(),
@@ -1265,7 +1280,10 @@ impl crate::state::ServerState {
             entity_type: context.entity_type.clone(),
             trigger_action: context.trigger_action.clone(),
         };
-        let tenant_secrets = self.get_authorized_wasm_secrets(tenant, &*base_gate, &authz_ctx);
+        let tenant_secrets =
+            self.get_authorized_wasm_host_bootstrap_secrets(tenant, &*base_gate, &authz_ctx);
+        let secret_resolver =
+            self.authorized_wasm_secret_resolver(tenant, Arc::clone(&base_gate), authz_ctx.clone());
         let local_blob_interceptor = local_blob_binary_interceptor(
             self.clone(),
             tenant.clone(),
@@ -1282,8 +1300,11 @@ impl crate::state::ServerState {
             .with_spec_evaluator(spec_evaluator_fn())
             .with_progress_emitter(progress_emitter)
             .with_internal_api_base_url(internal_api_base_url(self))
-            .with_internal_api_key(std::env::var("TEMPER_API_KEY").ok())
+            .with_internal_api_key(std::env::var("TEMPER_API_KEY").ok()) // determinism-ok: production host loopback config
             .with_invocation_context(context.clone());
+        if let Some(resolver) = secret_resolver {
+            base_host = base_host.with_secret_resolver(resolver);
+        }
         if let Some(interceptor) = local_blob_interceptor {
             base_host = base_host.with_binary_http_interceptor(interceptor);
         }
@@ -1827,7 +1848,7 @@ fn llmobs_agent_start_ns_for_duration(duration_ms: u64) -> u64 {
 }
 
 fn current_unix_ns() -> u64 {
-    SystemTime::now()
+    SystemTime::now() // determinism-ok: LLM observability timestamp translation
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
         .as_nanos() as u64
