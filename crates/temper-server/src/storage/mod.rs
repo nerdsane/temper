@@ -361,6 +361,39 @@ pub trait QueryPlaneStore: Send + Sync {
     ) -> Result<Option<Vec<(String, u64)>>, PersistenceError>;
 }
 
+/// Inputs for a native brand-new data-only entity create.
+///
+/// This capability is only valid for entities whose first durable event and
+/// first query projection row can be inserted atomically by a storage backend.
+pub struct DataOnlyCreateRecord<'a> {
+    /// Tenant that owns the entity.
+    pub tenant: &'a str,
+    /// Entity type being created.
+    pub entity_type: &'a str,
+    /// Entity id being created.
+    pub entity_id: &'a str,
+    /// Initial entity status.
+    pub status: &'a str,
+    /// Projection fields to store in the query catalog and scalar index.
+    pub fields: &'a serde_json::Value,
+    /// First event envelope to append at sequence number 1.
+    pub event: &'a PersistenceEnvelope,
+}
+
+/// Optional native storage capability for brand-new data-only creates.
+#[async_trait::async_trait]
+pub trait DataOnlyCreateStore: Send + Sync {
+    /// Persist the first event and initial projection atomically.
+    ///
+    /// Returns the new sequence number on success. Duplicate first events or
+    /// duplicate projection rows should return [`PersistenceError::ConcurrencyViolation`]
+    /// so the caller can decline the fast path and use the generic path.
+    async fn create_data_only_entity(
+        &self,
+        record: DataOnlyCreateRecord<'_>,
+    ) -> Result<u64, PersistenceError>;
+}
+
 /// Durable observe trajectory sink.
 #[async_trait::async_trait]
 pub trait TrajectorySink: Send + Sync {
@@ -718,6 +751,7 @@ pub struct StorageStack {
     pub platform: Option<Arc<dyn PlatformStore>>,
     pub policies: Option<Arc<dyn PolicyStore>>,
     pub query_plane: Option<Arc<dyn QueryPlaneStore>>,
+    pub data_only_create: Option<Arc<dyn DataOnlyCreateStore>>,
     pub trajectory: Option<Arc<dyn TrajectorySink>>,
     pub metadata: Option<Arc<dyn MetadataStoreProvider>>,
 }
@@ -732,6 +766,7 @@ impl StorageStack {
         platform: Option<Arc<dyn PlatformStore>>,
         policies: Option<Arc<dyn PolicyStore>>,
         query_plane: Option<Arc<dyn QueryPlaneStore>>,
+        data_only_create: Option<Arc<dyn DataOnlyCreateStore>>,
         trajectory: Option<Arc<dyn TrajectorySink>>,
         metadata: Option<Arc<dyn MetadataStoreProvider>>,
     ) -> Self {
@@ -743,6 +778,7 @@ impl StorageStack {
             platform,
             policies,
             query_plane,
+            data_only_create,
             trajectory,
             metadata,
         }
@@ -758,6 +794,7 @@ impl StorageStack {
             Some(store.clone() as Arc<dyn PlatformStore>),
             Some(store.clone() as Arc<dyn PolicyStore>),
             Some(store.clone() as Arc<dyn QueryPlaneStore>),
+            Some(store.clone() as Arc<dyn DataOnlyCreateStore>),
             Some(store.clone() as Arc<dyn TrajectorySink>),
             Some(Arc::new(SingleMetadataStoreProvider::new(store))),
         )
@@ -773,6 +810,7 @@ impl StorageStack {
             Some(store.clone() as Arc<dyn PlatformStore>),
             Some(store.clone() as Arc<dyn PolicyStore>),
             Some(store.clone() as Arc<dyn QueryPlaneStore>),
+            None,
             Some(store.clone() as Arc<dyn TrajectorySink>),
             Some(Arc::new(SingleMetadataStoreProvider::new(store))),
         )
@@ -791,6 +829,7 @@ impl StorageStack {
             Some(platform_store),
             Some(router.clone() as Arc<dyn PolicyStore>),
             Some(router.clone() as Arc<dyn QueryPlaneStore>),
+            None,
             Some(router.clone() as Arc<dyn TrajectorySink>),
             Some(Arc::new(TenantRoutedMetadataStoreProvider::new(
                 router.as_ref().clone(),
@@ -803,6 +842,7 @@ impl StorageStack {
         Self::new(
             BackendLabel::Redis,
             BoxedEventStore::from_arc(store),
+            None,
             None,
             None,
             None,
@@ -826,6 +866,7 @@ impl StorageStack {
             None,
             None,
             platform,
+            None,
             None,
             None,
             None,
@@ -2301,6 +2342,24 @@ impl QueryPlaneStore for TursoEventStore {
         TursoEventStore::projected_entity_counts_by_tenant(self)
             .await
             .map(Some)
+    }
+}
+
+#[async_trait::async_trait]
+impl DataOnlyCreateStore for PostgresEventStore {
+    async fn create_data_only_entity(
+        &self,
+        record: DataOnlyCreateRecord<'_>,
+    ) -> Result<u64, PersistenceError> {
+        self.create_data_only_entity_native(
+            record.tenant,
+            record.entity_type,
+            record.entity_id,
+            record.status,
+            record.fields,
+            record.event,
+        )
+        .await
     }
 }
 
