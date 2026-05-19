@@ -133,6 +133,8 @@ impl ServerState {
             }
         }
 
+        let existing_blob_ids = self.existing_blob_create_ids(tenant, writes).await?;
+        let mut repository_owner_cache: BTreeMap<String, Option<String>> = BTreeMap::new();
         let mut touched_owners = BTreeSet::new();
         let mut additional_by_owner: BTreeMap<String, i64> = BTreeMap::new();
         for write in writes {
@@ -147,7 +149,7 @@ impl ServerState {
                 continue;
             }
 
-            if self.blob_already_exists(tenant, &write.entity_id).await {
+            if existing_blob_ids.contains(&write.entity_id) {
                 continue;
             }
 
@@ -165,12 +167,18 @@ impl ServerState {
             let owner_id = if let Some(owner_id) = pending_repositories.get(&repository_id) {
                 owner_id.clone()
             } else {
-                self.repository_owner_id(tenant, &repository_id).await?
-                    .ok_or_else(|| {
-                        CommonsStorageCapError::MissingAttribution(format!(
-                            "Repository '{repository_id}' is required for commons storage attribution"
-                        ))
-                    })?
+                let owner = if let Some(owner) = repository_owner_cache.get(&repository_id) {
+                    owner.clone()
+                } else {
+                    let owner = self.repository_owner_id(tenant, &repository_id).await?;
+                    repository_owner_cache.insert(repository_id.clone(), owner.clone());
+                    owner
+                };
+                owner.ok_or_else(|| {
+                    CommonsStorageCapError::MissingAttribution(format!(
+                        "Repository '{repository_id}' is required for commons storage attribution"
+                    ))
+                })?
             };
 
             touched_owners.insert(owner_id.clone());
@@ -209,6 +217,52 @@ impl ServerState {
         }
 
         Ok(())
+    }
+
+    async fn existing_blob_create_ids(
+        &self,
+        tenant: &TenantId,
+        writes: &[CommonsStorageWrite],
+    ) -> Result<BTreeSet<String>, CommonsStorageCapError> {
+        let mut existing = BTreeSet::new();
+        let mut candidates = BTreeSet::new();
+        for write in writes {
+            if write.entity_type != BLOB_ENTITY_TYPE || !is_create_action(&write.action) {
+                continue;
+            }
+            if self.entity_exists(tenant, BLOB_ENTITY_TYPE, &write.entity_id) {
+                existing.insert(write.entity_id.clone());
+            } else {
+                candidates.insert(write.entity_id.clone());
+            }
+        }
+
+        if candidates.is_empty() {
+            return Ok(existing);
+        }
+
+        if let Some(query_plane) = self.query_plane_store() {
+            let blob_ids = candidates.iter().cloned().collect::<Vec<_>>();
+            if let Some(rows) = query_plane
+                .load_entity_catalog_rows(tenant.as_str(), BLOB_ENTITY_TYPE, &blob_ids)
+                .await
+                .map_err(|e| {
+                    CommonsStorageCapError::Internal(format!(
+                        "blob storage cap preflight failed: {e}"
+                    ))
+                })?
+            {
+                existing.extend(rows.into_iter().map(|row| row.entity_id));
+                return Ok(existing);
+            }
+        }
+
+        for blob_id in candidates {
+            if self.blob_already_exists(tenant, &blob_id).await {
+                existing.insert(blob_id);
+            }
+        }
+        Ok(existing)
     }
 
     pub(crate) async fn commons_storage_projection_for_owner(

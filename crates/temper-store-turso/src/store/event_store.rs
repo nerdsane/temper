@@ -1,6 +1,6 @@
 //! [`EventStore`] trait implementation for Turso/libSQL.
 
-use libsql::{TransactionBehavior, params};
+use libsql::{TransactionBehavior, Value, params, params_from_iter};
 use std::time::Duration;
 use temper_runtime::persistence::{
     EventMetadata, EventStore, PersistenceAppend, PersistenceAppendResult, PersistenceEnvelope,
@@ -15,6 +15,19 @@ use super::instrumentation::record_turso_query_duration;
 use super::write_gate::WritePriority;
 use crate::metrics::record_turso_write_retry;
 use crate::retry::{is_transient_write_error, retry_delay_ms};
+
+const APPEND_BATCH_INSERT_CHUNK_ROWS: usize = 400;
+
+struct PreparedEventInsert {
+    tenant: String,
+    entity_type: String,
+    entity_id: String,
+    sequence_nr: u64,
+    event_type: String,
+    payload_json: String,
+    metadata_json: String,
+    expected_sequence: u64,
+}
 
 impl EventStore for TursoEventStore {
     #[instrument(skip_all, fields(persistence_id, otel.name = "turso.append"))]
@@ -529,6 +542,15 @@ impl TursoEventStore {
                 parse_persistence_id_parts(&append.persistence_id)
                     .map_err(PersistenceError::Storage)?;
 
+            if append.expected_sequence == 0 && !append.events.is_empty() {
+                parsed.push((
+                    tenant.to_string(),
+                    entity_type.to_string(),
+                    entity_id.to_string(),
+                ));
+                continue;
+            }
+
             let select_start = std::time::Instant::now();
             let rows_result = tx
                 .query(
@@ -573,6 +595,7 @@ impl TursoEventStore {
         }
 
         let mut results = Vec::with_capacity(appends.len());
+        let mut event_rows = Vec::new();
         for (append, (tenant, entity_type, entity_id)) in appends.iter().zip(parsed.iter()) {
             let mut new_seq = append.expected_sequence;
             for event in &append.events {
@@ -586,47 +609,72 @@ impl TursoEventStore {
                     PersistenceError::Serialization(e.to_string())
                 })?;
 
-                let insert_start = std::time::Instant::now();
-                let insert_result = tx
-                    .execute(
-                        "INSERT INTO events
-                         (tenant, entity_type, entity_id, sequence_nr, event_type, payload, metadata)
-                         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
-                        params![
-                            tenant.as_str(),
-                            entity_type.as_str(),
-                            entity_id.as_str(),
-                            new_seq as i64,
-                            event.event_type.as_str(),
-                            payload_json,
-                            metadata_json
-                        ],
-                    )
-                    .await;
-                record_turso_query_duration(
-                    insert_start.elapsed(),
-                    "execute",
-                    "transaction",
-                    insert_result.is_ok(),
-                );
-
-                if let Err(e) = insert_result {
-                    let msg = e.to_string();
-                    tracing::error!(error = %e, "event batch insert failed");
-                    let _ = tx.rollback().await;
-                    if msg.contains("UNIQUE constraint failed") || msg.contains("UNIQUE") {
-                        return Err(PersistenceError::ConcurrencyViolation {
-                            expected: append.expected_sequence,
-                            actual: new_seq,
-                        });
-                    }
-                    return Err(PersistenceError::Storage(msg));
-                }
+                event_rows.push(PreparedEventInsert {
+                    tenant: tenant.clone(),
+                    entity_type: entity_type.clone(),
+                    entity_id: entity_id.clone(),
+                    sequence_nr: new_seq,
+                    event_type: event.event_type.clone(),
+                    payload_json,
+                    metadata_json,
+                    expected_sequence: append.expected_sequence,
+                });
             }
             results.push(PersistenceAppendResult {
                 persistence_id: append.persistence_id.clone(),
                 sequence_nr: new_seq,
             });
+        }
+
+        for chunk in event_rows.chunks(APPEND_BATCH_INSERT_CHUNK_ROWS) {
+            if chunk.is_empty() {
+                continue;
+            }
+
+            let mut insert_sql = String::from(
+                "INSERT INTO events \
+                 (tenant, entity_type, entity_id, sequence_nr, event_type, payload, metadata) \
+                 VALUES ",
+            );
+            let mut insert_values = Vec::with_capacity(chunk.len() * 7);
+            for (index, row) in chunk.iter().enumerate() {
+                if index > 0 {
+                    insert_sql.push_str(", ");
+                }
+                insert_sql.push_str("(?, ?, ?, ?, ?, ?, ?)");
+                insert_values.push(Value::from(row.tenant.clone()));
+                insert_values.push(Value::from(row.entity_type.clone()));
+                insert_values.push(Value::from(row.entity_id.clone()));
+                insert_values.push(Value::from(row.sequence_nr as i64));
+                insert_values.push(Value::from(row.event_type.clone()));
+                insert_values.push(Value::from(row.payload_json.clone()));
+                insert_values.push(Value::from(row.metadata_json.clone()));
+            }
+
+            let insert_start = std::time::Instant::now();
+            let insert_result = tx
+                .execute(&insert_sql, params_from_iter(insert_values))
+                .await;
+            record_turso_query_duration(
+                insert_start.elapsed(),
+                "execute",
+                "transaction",
+                insert_result.is_ok(),
+            );
+
+            if let Err(e) = insert_result {
+                let msg = e.to_string();
+                tracing::error!(error = %e, "event batch insert failed");
+                let _ = tx.rollback().await;
+                if msg.contains("UNIQUE constraint failed") || msg.contains("UNIQUE") {
+                    let first = &chunk[0];
+                    return Err(PersistenceError::ConcurrencyViolation {
+                        expected: first.expected_sequence,
+                        actual: first.sequence_nr,
+                    });
+                }
+                return Err(PersistenceError::Storage(msg));
+            }
         }
 
         tx.commit().await.map_err(storage_error)?;

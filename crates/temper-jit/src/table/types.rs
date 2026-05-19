@@ -55,12 +55,28 @@ pub struct StateVarMetadata {
 }
 
 /// Parsed metadata for a first-class Composite action.
-#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct CompositeActionMetadata {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cedar_gate: Option<CompositeCedarGate>,
+    #[serde(default = "default_record_parent_event")]
+    pub record_parent_event: bool,
     #[serde(default)]
     pub sub_writes: Vec<SubWriteSpec>,
+}
+
+impl Default for CompositeActionMetadata {
+    fn default() -> Self {
+        Self {
+            cedar_gate: None,
+            record_parent_event: true,
+            sub_writes: Vec::new(),
+        }
+    }
+}
+
+fn default_record_parent_event() -> bool {
+    true
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]

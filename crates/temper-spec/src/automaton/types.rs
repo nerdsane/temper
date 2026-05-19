@@ -160,6 +160,9 @@ pub struct Action {
     pub params: Vec<ActionParam>,
     /// Agent hint for this action.
     pub hint: Option<String>,
+    /// Whether a Composite action records an audit/idempotency event on the parent stream.
+    #[serde(default = "default_record_parent_event")]
+    pub record_parent_event: bool,
     /// Outgoing triggers fired post-commit of this action (ADR-0046).
     ///
     /// Each trigger describes one cross-entity dispatch, WASM module
@@ -178,6 +181,10 @@ pub struct Action {
 
 fn default_internal() -> String {
     "internal".to_string()
+}
+
+fn default_record_parent_event() -> bool {
+    true
 }
 
 /// The single Cedar gate evaluated for a Composite action.

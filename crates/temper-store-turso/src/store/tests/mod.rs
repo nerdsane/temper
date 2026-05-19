@@ -2,10 +2,10 @@
 
 use libsql::params;
 use temper_runtime::persistence::{
-    EventMetadata, EventStore, PersistenceEnvelope, PersistenceError,
+    EventMetadata, EventStore, PersistenceAppend, PersistenceEnvelope, PersistenceError,
 };
 
-use super::{PublishedArtifactUpsert, TursoEventStore};
+use super::{PublishedArtifactUpsert, QueryProjectionUpsert, TursoEventStore};
 use crate::TursoSpecVerificationUpdate;
 
 fn test_envelope(event_type: &str, payload: serde_json::Value) -> PersistenceEnvelope {
@@ -101,6 +101,48 @@ async fn append_with_wrong_sequence_fails_with_concurrency_violation() {
             actual: 1
         }
     ));
+}
+
+#[tokio::test]
+async fn append_batch_zero_sequence_detects_existing_stream_by_unique_key() {
+    let store = make_store("append-batch-zero-seq-conflict").await;
+    let persistence_id = "tenant-a:Order:ord-batch-conflict";
+
+    store
+        .append(
+            persistence_id,
+            0,
+            &[test_envelope(
+                "OrderCreated",
+                serde_json::json!({ "id": "ord-batch-conflict" }),
+            )],
+        )
+        .await
+        .unwrap();
+
+    let err = store
+        .append_batch(&[PersistenceAppend {
+            persistence_id: persistence_id.to_string(),
+            expected_sequence: 0,
+            events: vec![test_envelope(
+                "OrderUpdated",
+                serde_json::json!({ "step": 2 }),
+            )],
+        }])
+        .await
+        .unwrap_err();
+
+    assert!(matches!(
+        err,
+        PersistenceError::ConcurrencyViolation {
+            expected: 0,
+            actual: 1
+        }
+    ));
+
+    let events = store.read_events(persistence_id, 0).await.unwrap();
+    assert_eq!(events.len(), 1);
+    assert_eq!(events[0].event_type, "OrderCreated");
 }
 
 #[tokio::test]
@@ -613,6 +655,129 @@ async fn query_projection_roundtrip_updates_catalog_and_field_index() {
     assert!(
         counts.is_empty(),
         "entity catalog should be empty after removing the projection"
+    );
+}
+
+#[tokio::test]
+async fn query_projection_batch_updates_catalog_and_field_index() {
+    let store = make_store("query-projection-batch").await;
+    let tenant = format!("tenant-{}", uuid::Uuid::new_v4());
+
+    store
+        .upsert_query_projections(
+            &tenant,
+            &[
+                QueryProjectionUpsert {
+                    entity_type: "Order".to_string(),
+                    entity_id: "ord-batch-a".to_string(),
+                    status: "Draft".to_string(),
+                    fields: serde_json::json!({
+                        "Title": "Batch A",
+                        "Owner": "alice",
+                    }),
+                    indexed_fields: serde_json::json!({
+                        "Title": "Batch A",
+                        "Owner": "alice",
+                    }),
+                    sequence_nr: 2,
+                    known_new: false,
+                },
+                QueryProjectionUpsert {
+                    entity_type: "Order".to_string(),
+                    entity_id: "ord-batch-b".to_string(),
+                    status: "Ready".to_string(),
+                    fields: serde_json::json!({
+                        "Title": "Batch B",
+                        "Owner": "bob",
+                    }),
+                    indexed_fields: serde_json::json!({
+                        "Title": "Batch B",
+                        "Owner": "bob",
+                    }),
+                    sequence_nr: 3,
+                    known_new: false,
+                },
+            ],
+        )
+        .await
+        .expect("batch projection upsert");
+
+    let owner_matches = store
+        .query_field_index(
+            &tenant,
+            "Order",
+            "field_name = ?3 AND field_value = ?4",
+            vec!["Owner".to_string(), "alice".to_string()],
+        )
+        .await
+        .expect("query field index by owner");
+    assert_eq!(owner_matches, vec!["ord-batch-a".to_string()]);
+
+    let rows = store
+        .load_entity_catalog_rows(
+            &tenant,
+            "Order",
+            &["ord-batch-a".to_string(), "ord-batch-b".to_string()],
+        )
+        .await
+        .expect("load catalog rows");
+    assert_eq!(rows.len(), 2);
+    assert_eq!(rows[0].sequence_nr, 2);
+    assert_eq!(rows[1].sequence_nr, 3);
+}
+
+#[tokio::test]
+async fn query_projection_batch_can_store_fields_without_indexing_them() {
+    let store = make_store("query-projection-batch-index-subset").await;
+    let tenant = format!("tenant-{}", uuid::Uuid::new_v4());
+
+    store
+        .upsert_query_projections(
+            &tenant,
+            &[QueryProjectionUpsert {
+                entity_type: "Blob".to_string(),
+                entity_id: "blob-index-subset".to_string(),
+                status: "Durable".to_string(),
+                fields: serde_json::json!({
+                    "Id": "blob-index-subset",
+                    "RepositoryId": "repo-1",
+                    "CanonicalBytes": "full-canonical-payload",
+                }),
+                indexed_fields: serde_json::json!({
+                    "Id": "blob-index-subset",
+                    "RepositoryId": "repo-1",
+                }),
+                sequence_nr: 1,
+                known_new: true,
+            }],
+        )
+        .await
+        .expect("batch projection upsert");
+
+    let rows = store
+        .load_entity_catalog_rows(&tenant, "Blob", &["blob-index-subset".to_string()])
+        .await
+        .expect("load catalog row");
+    assert_eq!(
+        rows[0].fields["CanonicalBytes"],
+        serde_json::json!("full-canonical-payload")
+    );
+
+    let canonical_matches = store
+        .query_field_index(
+            &tenant,
+            "Blob",
+            "field_name = ?3 AND field_value = ?4",
+            vec![
+                "CanonicalBytes".to_string(),
+                "full-canonical-payload".to_string(),
+            ],
+        )
+        .await
+        .expect("query canonical field");
+    assert!(
+        canonical_matches.is_empty(),
+        "filtered fields should stay out of entity_field_index"
     );
 }
 

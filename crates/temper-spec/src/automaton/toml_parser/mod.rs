@@ -207,6 +207,11 @@ impl ParseState {
             "to" => action.to = Some(value.to_string()),
             "params" => action.params = parse_action_params(value),
             "hint" => action.hint = Some(value.to_string()),
+            "record_parent_event" => match value.trim() {
+                "true" => action.record_parent_event = true,
+                "false" => action.record_parent_event = false,
+                _ => {}
+            },
             "guard" => parse_guard_value(value, &mut action.guard)?,
             "effect" => parse_effect_value(value, &mut action.effect)?,
             _ => {}
@@ -328,6 +333,7 @@ impl ParseState {
             effect: Vec::new(),
             params: Vec::new(),
             hint: None,
+            record_parent_event: true,
             triggers: Vec::new(),
             cedar_gate: None,
             sub_writes: Vec::new(),

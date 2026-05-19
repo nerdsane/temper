@@ -101,6 +101,7 @@ impl TransitionTable {
                         resource: gate.resource.clone(),
                         action: gate.action.clone(),
                     }),
+                    record_parent_event: action.record_parent_event,
                     sub_writes: action
                         .sub_writes
                         .iter()
@@ -244,6 +245,7 @@ name = "IngestPack"
 kind = "Composite"
 from = ["Active"]
 to = "Active"
+record_parent_event = false
 
 [[action.cedar_gate]]
 principal = "request.principal"
@@ -266,6 +268,7 @@ generated_from = "pack_bytes"
                 .map(|gate| gate.action.as_str()),
             Some("Repository::IngestPack")
         );
+        assert!(!metadata.record_parent_event);
         assert_eq!(metadata.sub_writes.len(), 1);
         assert_eq!(metadata.sub_writes[0].target_entity, "Blob");
     }

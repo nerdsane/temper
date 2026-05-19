@@ -15,6 +15,10 @@ use tracing::instrument;
 use super::write_gate::WritePriority;
 use super::{TursoEventStore, TursoQueryProjectionRow};
 
+/// Match the Postgres query-plane limit: large scalar values stay in
+/// `entity_catalog.fields` but are not copied into the filter index.
+const MAX_INDEXABLE_FIELD_VALUE_BYTES: usize = 2000;
+
 fn projection_hash(status: &str, fields: &serde_json::Value) -> String {
     let mut hasher = Sha256::new();
     hasher.update(status.as_bytes());
@@ -54,6 +58,18 @@ pub struct EntityCatalogRow {
     pub status: String,
     pub fields: serde_json::Value,
     pub sequence_nr: u64,
+}
+
+/// One durable projection upsert in a batch.
+#[derive(Debug, Clone, PartialEq)]
+pub struct QueryProjectionUpsert {
+    pub entity_type: String,
+    pub entity_id: String,
+    pub status: String,
+    pub fields: serde_json::Value,
+    pub indexed_fields: serde_json::Value,
+    pub sequence_nr: u64,
+    pub known_new: bool,
 }
 
 impl TursoEventStore {
@@ -198,6 +214,210 @@ impl TursoEventStore {
             tx.execute(&sql, params_from_iter(values))
                 .await
                 .map_err(storage_error)?;
+        }
+
+        tx.commit().await.map_err(storage_error)?;
+        Ok(())
+    }
+
+    /// Upsert several durable query-plane projections in one transaction.
+    #[instrument(skip_all, fields(
+        otel.name = "turso.upsert_query_projections",
+        tenant,
+        projection_count = projections.len(),
+    ))]
+    pub async fn upsert_query_projections(
+        &self,
+        tenant: &str,
+        projections: &[QueryProjectionUpsert],
+    ) -> Result<(), PersistenceError> {
+        if projections.is_empty() {
+            return Ok(());
+        }
+
+        let _write_permit = self
+            .acquire_write_permit("turso.upsert_query_projections", WritePriority::Low)
+            .await?;
+        let conn = self.configured_connection().await?;
+        let tx = conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .await
+            .map_err(storage_error)?;
+        let updated_at = sim_now().to_rfc3339();
+        let mut existing = BTreeMap::new();
+        let existing_candidates = projections
+            .iter()
+            .filter(|projection| !projection.known_new)
+            .collect::<Vec<_>>();
+        if !existing_candidates.is_empty() {
+            let mut existing_sql = String::from(
+                "SELECT entity_type, entity_id, sequence_nr, projection_hash \
+                 FROM entity_catalog WHERE tenant = ? AND (",
+            );
+            let mut existing_values = Vec::with_capacity(1 + existing_candidates.len() * 2);
+            existing_values.push(Value::from(tenant.to_string()));
+            for (index, projection) in existing_candidates.iter().enumerate() {
+                if index > 0 {
+                    existing_sql.push_str(" OR ");
+                }
+                existing_sql.push_str("(entity_type = ? AND entity_id = ?)");
+                existing_values.push(Value::from(projection.entity_type.clone()));
+                existing_values.push(Value::from(projection.entity_id.clone()));
+            }
+            existing_sql.push(')');
+
+            let mut existing_rows = tx
+                .query(&existing_sql, params_from_iter(existing_values))
+                .await
+                .map_err(storage_error)?;
+            while let Some(row) = existing_rows.next().await.map_err(storage_error)? {
+                let entity_type: String = row.get(0).map_err(storage_error)?;
+                let entity_id: String = row.get(1).map_err(storage_error)?;
+                let sequence_nr: i64 = row.get(2).map_err(storage_error)?;
+                let projection_hash: String = row.get(3).map_err(storage_error)?;
+                existing.insert((entity_type, entity_id), (sequence_nr, projection_hash));
+            }
+            drop(existing_rows);
+        }
+
+        struct PreparedProjection {
+            entity_type: String,
+            entity_id: String,
+            status: String,
+            fields_json: String,
+            sequence_nr: i64,
+            projection_hash: String,
+        }
+
+        let mut catalog_upserts = Vec::new();
+        let mut changed_indexes = Vec::new();
+        for projection in projections {
+            let new_projection_hash = projection_hash(&projection.status, &projection.fields);
+            let fields_json = serde_json::to_string(&projection.fields)
+                .map_err(|error| PersistenceError::Serialization(error.to_string()))?;
+            let sequence_nr = i64::try_from(projection.sequence_nr).unwrap_or(i64::MAX);
+            let key = (projection.entity_type.clone(), projection.entity_id.clone());
+            let existing_row = existing.get(&key);
+            if existing_row.is_some_and(|(existing_sequence, _)| *existing_sequence > sequence_nr) {
+                continue;
+            }
+            if !existing_row.is_some_and(|(_, existing_hash)| existing_hash == &new_projection_hash)
+            {
+                changed_indexes.push((
+                    projection.entity_type.clone(),
+                    projection.entity_id.clone(),
+                    projection.status.clone(),
+                    indexed_projection_fields(&projection.status, &projection.indexed_fields),
+                    projection.known_new,
+                ));
+            }
+            catalog_upserts.push(PreparedProjection {
+                entity_type: projection.entity_type.clone(),
+                entity_id: projection.entity_id.clone(),
+                status: projection.status.clone(),
+                fields_json,
+                sequence_nr,
+                projection_hash: new_projection_hash,
+            });
+        }
+
+        if !catalog_upserts.is_empty() {
+            let mut upsert_sql = String::from(
+                "INSERT INTO entity_catalog \
+                 (tenant, entity_type, entity_id, status, fields, updated_at, sequence_nr, projection_version, projection_hash) \
+                 VALUES ",
+            );
+            let mut upsert_values = Vec::with_capacity(catalog_upserts.len() * 8);
+            for (index, projection) in catalog_upserts.iter().enumerate() {
+                if index > 0 {
+                    upsert_sql.push_str(", ");
+                }
+                upsert_sql.push_str("(?, ?, ?, ?, ?, ?, ?, 2, ?)");
+                upsert_values.push(Value::from(tenant.to_string()));
+                upsert_values.push(Value::from(projection.entity_type.clone()));
+                upsert_values.push(Value::from(projection.entity_id.clone()));
+                upsert_values.push(Value::from(projection.status.clone()));
+                upsert_values.push(Value::from(projection.fields_json.clone()));
+                upsert_values.push(Value::from(updated_at.clone()));
+                upsert_values.push(Value::from(projection.sequence_nr));
+                upsert_values.push(Value::from(projection.projection_hash.clone()));
+            }
+            upsert_sql.push_str(
+                " ON CONFLICT(tenant, entity_type, entity_id) DO UPDATE SET \
+                 status = excluded.status, \
+                 fields = excluded.fields, \
+                 updated_at = excluded.updated_at, \
+                 sequence_nr = excluded.sequence_nr, \
+                 projection_version = excluded.projection_version, \
+                 projection_hash = excluded.projection_hash \
+                 WHERE entity_catalog.sequence_nr <= excluded.sequence_nr",
+            );
+            tx.execute(&upsert_sql, params_from_iter(upsert_values))
+                .await
+                .map_err(storage_error)?;
+        }
+
+        if !changed_indexes.is_empty() {
+            let delete_targets = changed_indexes
+                .iter()
+                .filter(|(_, _, _, _, known_new)| !known_new)
+                .collect::<Vec<_>>();
+            if !delete_targets.is_empty() {
+                let mut delete_sql =
+                    String::from("DELETE FROM entity_field_index WHERE tenant = ? AND (");
+                let mut delete_values = Vec::with_capacity(1 + delete_targets.len() * 2);
+                delete_values.push(Value::from(tenant.to_string()));
+                for (index, (entity_type, entity_id, _, _, _)) in delete_targets.iter().enumerate()
+                {
+                    if index > 0 {
+                        delete_sql.push_str(" OR ");
+                    }
+                    delete_sql.push_str("(entity_type = ? AND entity_id = ?)");
+                    delete_values.push(Value::from(entity_type.clone()));
+                    delete_values.push(Value::from(entity_id.clone()));
+                }
+                delete_sql.push(')');
+                tx.execute(&delete_sql, params_from_iter(delete_values))
+                    .await
+                    .map_err(storage_error)?;
+            }
+
+            let indexed_field_count = changed_indexes
+                .iter()
+                .map(|(_, _, _, fields, _)| fields.len())
+                .sum::<usize>();
+            if indexed_field_count > 0 {
+                let mut insert_sql = String::from(
+                    "INSERT INTO entity_field_index \
+                     (tenant, entity_type, entity_id, field_name, field_value, status) VALUES ",
+                );
+                let mut insert_values = Vec::with_capacity(indexed_field_count * 6);
+                let mut field_index = 0usize;
+                for (entity_type, entity_id, status, indexed_fields, _) in &changed_indexes {
+                    for (field_name, field_value) in indexed_fields {
+                        if field_index > 0 {
+                            insert_sql.push_str(", ");
+                        }
+                        insert_sql.push_str("(?, ?, ?, ?, ?, ?)");
+                        insert_values.push(Value::from(tenant.to_string()));
+                        insert_values.push(Value::from(entity_type.clone()));
+                        insert_values.push(Value::from(entity_id.clone()));
+                        insert_values.push(Value::from(field_name.clone()));
+                        insert_values.push(
+                            field_value
+                                .as_ref()
+                                .map(|value| Value::from(value.clone()))
+                                .unwrap_or(Value::Null),
+                        );
+                        insert_values.push(Value::from(status.clone()));
+                        field_index += 1;
+                    }
+                }
+
+                tx.execute(&insert_sql, params_from_iter(insert_values))
+                    .await
+                    .map_err(storage_error)?;
+            }
         }
 
         tx.commit().await.map_err(storage_error)?;
@@ -568,6 +788,12 @@ fn indexed_projection_fields(
             if field_value.is_none() && !value.is_null() {
                 continue;
             }
+            if field_value
+                .as_ref()
+                .is_some_and(|value| value.len() > MAX_INDEXABLE_FIELD_VALUE_BYTES)
+            {
+                continue;
+            }
 
             indexed_fields.push((field_name.clone(), field_value));
         }
@@ -603,5 +829,28 @@ mod tests {
     fn scalar_to_text_skips_complex_types() {
         assert_eq!(scalar_to_text(&serde_json::json!({"a": 1})), None);
         assert_eq!(scalar_to_text(&serde_json::json!([1, 2, 3])), None);
+    }
+
+    #[test]
+    fn indexed_projection_fields_skips_oversized_scalars() {
+        let long = "x".repeat(MAX_INDEXABLE_FIELD_VALUE_BYTES + 1);
+        let fields = serde_json::json!({
+            "Title": "short",
+            "Payload": long,
+        });
+
+        let indexed = indexed_projection_fields("Active", &fields);
+
+        assert!(
+            indexed
+                .iter()
+                .any(|(name, value)| name == "Title" && value.as_deref() == Some("short"))
+        );
+        assert!(indexed.iter().all(|(name, _)| name != "Payload"));
+        assert!(
+            indexed
+                .iter()
+                .any(|(name, value)| name == "Status" && value.as_deref() == Some("Active"))
+        );
     }
 }

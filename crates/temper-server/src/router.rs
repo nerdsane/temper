@@ -563,7 +563,7 @@ async fn dispatch_action_bridge_result(
             crate::state::DispatchExtOptions {
                 agent_ctx: &agent_ctx,
                 await_integration: true,
-                await_reactions: true,
+                await_reactions: false,
             },
         )
         .await;

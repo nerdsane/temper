@@ -24,9 +24,9 @@ use temper_store_postgres::{PostgresEventStore, PostgresPolicyRow, PostgresTraje
 use temper_store_turso::{
     ActionStats, AgentSummary, DesignTimeEventRow, EvolutionRecordRow, FeatureRequestRow,
     OtsTrajectoryParams, OtsTrajectoryRow, PolicyDenialPatternRow, PolicyRow as TursoPolicyRow,
-    TenantStoreRouter, TenantUserRow, TursoEventStore, TursoTrajectoryInsert, TursoTrajectoryRow,
-    TursoWasmInvocationInsert, TursoWasmInvocationRow, TursoWasmModuleMetadataRow,
-    UnmetIntentAggRow, store::TrajectoryStats,
+    QueryProjectionUpsert as TursoQueryProjectionUpsert, TenantStoreRouter, TenantUserRow,
+    TursoEventStore, TursoTrajectoryInsert, TursoTrajectoryRow, TursoWasmInvocationInsert,
+    TursoWasmInvocationRow, TursoWasmModuleMetadataRow, UnmetIntentAggRow, store::TrajectoryStats,
 };
 
 use crate::platform_store::PlatformStore;
@@ -285,6 +285,18 @@ pub struct EntityCatalogRow {
     pub sequence_nr: u64,
 }
 
+/// Backend-neutral durable projection upsert.
+#[derive(Clone, Debug, PartialEq)]
+pub struct QueryProjectionUpsert {
+    pub entity_type: String,
+    pub entity_id: String,
+    pub status: String,
+    pub fields: serde_json::Value,
+    pub indexed_fields: serde_json::Value,
+    pub sequence_nr: u64,
+    pub known_new: bool,
+}
+
 /// Backend-neutral row for one granular Cedar policy entry.
 #[derive(Clone, Debug)]
 pub struct PolicyStoreRow {
@@ -337,6 +349,25 @@ pub trait QueryPlaneStore: Send + Sync {
         fields: &serde_json::Value,
         sequence_nr: u64,
     ) -> Result<(), PersistenceError>;
+
+    async fn upsert_projections(
+        &self,
+        tenant: &str,
+        projections: &[QueryProjectionUpsert],
+    ) -> Result<(), PersistenceError> {
+        for projection in projections {
+            self.upsert_projection(
+                tenant,
+                &projection.entity_type,
+                &projection.entity_id,
+                &projection.status,
+                &projection.fields,
+                projection.sequence_nr,
+            )
+            .await?;
+        }
+        Ok(())
+    }
 
     async fn remove_projection(
         &self,
@@ -2250,6 +2281,27 @@ impl QueryPlaneStore for TursoEventStore {
             .await
     }
 
+    async fn upsert_projections(
+        &self,
+        tenant: &str,
+        projections: &[QueryProjectionUpsert],
+    ) -> Result<(), PersistenceError> {
+        let turso_projections = projections
+            .iter()
+            .map(|projection| TursoQueryProjectionUpsert {
+                entity_type: projection.entity_type.clone(),
+                entity_id: projection.entity_id.clone(),
+                status: projection.status.clone(),
+                fields: projection.fields.clone(),
+                indexed_fields: projection.indexed_fields.clone(),
+                sequence_nr: projection.sequence_nr,
+                known_new: projection.known_new,
+            })
+            .collect::<Vec<_>>();
+        self.upsert_query_projections(tenant, &turso_projections)
+            .await
+    }
+
     async fn remove_projection(
         &self,
         tenant: &str,
@@ -2339,6 +2391,29 @@ impl QueryPlaneStore for TenantStoreRouter {
         let store = self.store_for_tenant(tenant).await?;
         store
             .upsert_query_projection(tenant, entity_type, entity_id, status, fields, sequence_nr)
+            .await
+    }
+
+    async fn upsert_projections(
+        &self,
+        tenant: &str,
+        projections: &[QueryProjectionUpsert],
+    ) -> Result<(), PersistenceError> {
+        let store = self.store_for_tenant(tenant).await?;
+        let turso_projections = projections
+            .iter()
+            .map(|projection| TursoQueryProjectionUpsert {
+                entity_type: projection.entity_type.clone(),
+                entity_id: projection.entity_id.clone(),
+                status: projection.status.clone(),
+                fields: projection.fields.clone(),
+                indexed_fields: projection.indexed_fields.clone(),
+                sequence_nr: projection.sequence_nr,
+                known_new: projection.known_new,
+            })
+            .collect::<Vec<_>>();
+        store
+            .upsert_query_projections(tenant, &turso_projections)
             .await
     }
 

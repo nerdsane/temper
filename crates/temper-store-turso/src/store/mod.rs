@@ -38,6 +38,7 @@ mod trajectory;
 mod wasm;
 mod write_gate;
 
+pub use field_index::QueryProjectionUpsert;
 use instrumentation::InstrumentedConnection;
 pub use published_artifacts::{PublishedArtifactRow, PublishedArtifactUpsert};
 
