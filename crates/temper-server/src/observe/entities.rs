@@ -168,8 +168,9 @@ pub(crate) struct EntityEventStreamParams {
     skip_all,
     fields(
         otel.name = "GET /observe/entities/{entity_type}/{entity_id}/wait",
-        entity_type,
-        entity_id,
+        tenant = tracing::field::Empty,
+        entity_type = tracing::field::Empty,
+        entity_id = tracing::field::Empty,
         wait.mode = "event_driven",
         wait.wake_reason = tracing::field::Empty,
         wait.poll_ms = tracing::field::Empty,
@@ -184,6 +185,7 @@ pub(crate) async fn handle_wait_for_entity_state(
 ) -> Result<Json<serde_json::Value>, StatusCode> {
     require_observe_auth(&state, &headers, "read", &entity_type)?;
     let tenant = extract_tenant(&headers, &state).map_err(|(code, _)| code)?;
+    record_wait_span_identity(&tenant, &entity_type, &entity_id);
 
     let target_statuses: std::collections::BTreeSet<String> = params
         .statuses
@@ -256,6 +258,17 @@ pub(crate) async fn handle_wait_for_entity_state(
             }
         }
     }
+}
+
+pub(super) fn record_wait_span_identity(
+    tenant: &temper_runtime::tenant::TenantId,
+    entity_type: &str,
+    entity_id: &str,
+) {
+    let span = tracing::Span::current();
+    span.record("tenant", tenant.as_str());
+    span.record("entity_type", entity_type);
+    span.record("entity_id", entity_id);
 }
 
 async fn load_wait_entity_state(
