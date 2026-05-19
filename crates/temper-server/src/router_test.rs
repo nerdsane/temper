@@ -2,10 +2,13 @@ use super::*;
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
 use temper_runtime::ActorSystem;
+use temper_runtime::tenant::TenantId;
 use temper_spec::csdl::parse_csdl;
+use temper_store_turso::TursoEventStore;
 use tower::ServiceExt;
 
 use crate::events::EntityStateChange;
+use crate::storage::StorageStack;
 
 fn test_state() -> ServerState {
     let csdl_xml = include_str!("../../../test-fixtures/specs/model.csdl.xml");
@@ -75,6 +78,54 @@ params = ["RepositoryId", "Size", "Content", "CanonicalBytes", "CreatedAt"]
     let mut specs = std::collections::BTreeMap::new();
     specs.insert("Blob".to_string(), blob_ioa.to_string());
     ServerState::with_specs(system, csdl, csdl_xml.to_string(), specs).unwrap()
+}
+
+async fn test_state_with_data_only_ioa_and_turso() -> ServerState {
+    static COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let id = COUNTER.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    let db_url = format!(
+        "file:/tmp/temper-data-only-fast-path-test-{}-{}.db",
+        std::process::id(),
+        id
+    );
+    let _ = std::fs::remove_file(db_url.strip_prefix("file:").unwrap_or(&db_url));
+    let turso = TursoEventStore::new(&db_url, None)
+        .await
+        .expect("create local turso db");
+    let csdl_xml = r#"<?xml version="1.0" encoding="utf-8"?>
+<edmx:Edmx Version="4.0" xmlns:edmx="http://docs.oasis-open.org/odata/ns/edmx">
+  <edmx:DataServices>
+    <Schema Namespace="Temper.DataOnly" xmlns="http://docs.oasis-open.org/odata/ns/edm">
+      <EntityType Name="LogEntry">
+        <Key><PropertyRef Name="Id"/></Key>
+        <Property Name="Id" Type="Edm.String" Nullable="false"/>
+        <Property Name="Status" Type="Edm.String" Nullable="false"/>
+        <Property Name="Body" Type="Edm.String" Nullable="false"/>
+      </EntityType>
+      <EntityContainer Name="Container">
+        <EntitySet Name="LogEntries" EntityType="Temper.DataOnly.LogEntry"/>
+      </EntityContainer>
+    </Schema>
+  </edmx:DataServices>
+</edmx:Edmx>"#;
+    let log_entry_ioa = r#"
+[automaton]
+name = "LogEntry"
+states = ["Recorded"]
+initial = "Recorded"
+
+[[state]]
+name = "Body"
+type = "string"
+initial = ""
+"#;
+    let csdl = parse_csdl(csdl_xml).unwrap();
+    let system = ActorSystem::new("test-data-only-fast-path");
+    let mut specs = std::collections::BTreeMap::new();
+    specs.insert("LogEntry".to_string(), log_entry_ioa.to_string());
+    let mut state = ServerState::with_specs(system, csdl, csdl_xml.to_string(), specs).unwrap();
+    state.set_storage_stack(StorageStack::from_turso(turso));
+    state
 }
 
 #[tokio::test]
@@ -239,6 +290,75 @@ async fn test_post_entity_creation_uses_odata_id_property() {
         .await
         .unwrap();
     assert_eq!(get_response.status(), StatusCode::OK);
+}
+
+#[tokio::test]
+async fn test_data_only_entity_create_fast_path_persists_projection_without_actor_spawn() {
+    let state = test_state_with_data_only_ioa_and_turso().await;
+    let app = build_router(state.clone());
+
+    let create_response = app
+        .clone()
+        .oneshot(
+            Request::post("/tdata/LogEntries")
+                .header("Content-Type", "application/json")
+                .body(Body::from(
+                    r#"{"Id": "entry-1", "Body": "created through fast path"}"#,
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(create_response.status(), StatusCode::CREATED);
+    let create_body = axum::body::to_bytes(create_response.into_body(), 1024 * 1024)
+        .await
+        .unwrap();
+    let create_json: serde_json::Value = serde_json::from_slice(&create_body).unwrap();
+    assert_eq!(create_json["status"], "Recorded");
+    assert_eq!(create_json["fields"]["Body"], "created through fast path");
+
+    let actor_key = "default:LogEntry:entry-1";
+    assert!(
+        !state.actor_registry.read().unwrap().contains_key(actor_key),
+        "data-only fast path should not hydrate an actor during create"
+    );
+
+    let get_response = app
+        .oneshot(
+            Request::get("/tdata/LogEntries('entry-1')")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(get_response.status(), StatusCode::OK);
+
+    let hydrated = state
+        .get_tenant_entity_state(&TenantId::default(), "LogEntry", "entry-1")
+        .await
+        .expect("fast-path entity should replay through actor hydration");
+    assert_eq!(hydrated.state.status, "Recorded");
+    assert_eq!(hydrated.state.sequence_nr, 1);
+    assert_eq!(hydrated.state.fields["Body"], "created through fast path");
+    assert!(state.actor_registry.read().unwrap().contains_key(actor_key));
+}
+
+#[tokio::test]
+async fn test_data_only_create_fast_path_declines_action_bearing_entities() {
+    let state = test_state_with_ioa();
+    let response = state
+        .try_create_data_only_tenant_entity(
+            &TenantId::default(),
+            "Order",
+            "order-fast-path-skip",
+            serde_json::json!({"Id": "order-fast-path-skip", "Status": "Draft"}),
+        )
+        .await
+        .unwrap();
+    assert!(
+        response.is_none(),
+        "entities with transition rules must stay on the actor-backed create path"
+    );
 }
 
 #[tokio::test]
