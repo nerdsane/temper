@@ -26,6 +26,57 @@ fn guest_metric_tags_reject_high_cardinality_correlation_ids() {
     assert!(!guest_metric_tag_allowed("tool.call_id"));
 }
 
+#[test]
+fn production_host_uses_lazy_secret_resolver_for_missing_eager_key() {
+    let requested = Arc::new(Mutex::new(Vec::new()));
+    let requested_for_resolver = Arc::clone(&requested);
+    let resolver: SecretResolverFn = Arc::new(move |key| {
+        requested_for_resolver
+            .lock()
+            .expect("requested keys lock poisoned")
+            .push(key.to_string());
+        Ok(format!("lazy:{key}"))
+    });
+    let host = ProductionWasmHost::new(BTreeMap::new()).with_secret_resolver(resolver);
+
+    assert_eq!(
+        host.get_secret("provider_api_key"),
+        Ok("lazy:provider_api_key".to_string())
+    );
+    assert_eq!(
+        *requested.lock().expect("requested keys lock poisoned"),
+        vec!["provider_api_key".to_string()]
+    );
+}
+
+#[test]
+fn production_host_uses_lazy_resolver_for_guest_lookup_even_when_eager_key_exists() {
+    let requested = Arc::new(Mutex::new(Vec::<String>::new()));
+    let requested_for_resolver = Arc::clone(&requested);
+    let resolver: SecretResolverFn = Arc::new(move |key| {
+        requested_for_resolver
+            .lock()
+            .expect("requested keys lock poisoned")
+            .push(key.to_string());
+        Ok(format!("lazy:{key}"))
+    });
+    let mut secrets = BTreeMap::new();
+    secrets.insert(
+        "blob_endpoint".to_string(),
+        "https://blob.example".to_string(),
+    );
+    let host = ProductionWasmHost::new(secrets).with_secret_resolver(resolver);
+
+    assert_eq!(
+        host.get_secret("blob_endpoint"),
+        Ok("lazy:blob_endpoint".to_string())
+    );
+    assert_eq!(
+        *requested.lock().expect("requested keys lock poisoned"),
+        vec!["blob_endpoint".to_string()]
+    );
+}
+
 /// Build a Connect frame: [flags(1)][length(4 big-endian)][payload].
 fn make_frame(flags: u8, payload: &[u8]) -> Vec<u8> {
     let mut frame = Vec::with_capacity(5 + payload.len());
@@ -455,6 +506,9 @@ fn guest_log_span_event_is_named_for_trace_export() {
     assert!(names.iter().any(|name| name == "wasm_guest.log"));
 }
 
+#[path = "tests/host_boundary_observability.rs"]
 mod host_boundary_observability;
+#[path = "tests/log_correlation.rs"]
 mod log_correlation;
+#[path = "tests/span_hint_tests.rs"]
 mod span_hint_tests;
