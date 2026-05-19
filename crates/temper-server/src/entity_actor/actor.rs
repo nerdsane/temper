@@ -28,7 +28,9 @@ use std::time::Instant;
 use temper_jit::table::TransitionTable;
 use temper_observe::wide_event;
 use temper_runtime::actor::{Actor, ActorContext, ActorError};
-use temper_runtime::persistence::{EventMetadata, PersistenceEnvelope, PersistenceError};
+use temper_runtime::persistence::{
+    COMPOSITE_EVENT_TYPE, EventMetadata, PersistenceEnvelope, PersistenceError,
+};
 use temper_runtime::scheduler::{sim_now, sim_uuid};
 
 use crate::storage::{BackendLabel, BoxedEventStore};
@@ -111,6 +113,7 @@ impl EntityActor {
             events: std::collections::VecDeque::new(),
             total_event_count: 0,
             sequence_nr: 0,
+            processed_idempotency_keys: BTreeMap::new(),
         }
     }
 
@@ -384,6 +387,11 @@ impl EntityActor {
         match store.read_events(persistence_id, from_sequence).await {
             Ok(envelopes) => {
                 for env in &envelopes {
+                    if env.event_type == COMPOSITE_EVENT_TYPE {
+                        state.sequence_nr = env.sequence_nr;
+                        continue;
+                    }
+
                     let parsed_event = serde_json::from_value::<EntityEvent>(env.payload.clone());
 
                     // Tombstone is terminal: once deleted, entity must not replay
@@ -395,6 +403,7 @@ impl EntityActor {
                             to_status: "Deleted".to_string(),
                             timestamp: env.metadata.timestamp,
                             params: serde_json::json!({}),
+                            idempotency_key: None,
                         });
                         state.status = tombstone.to_status.clone();
                         if let Some(obj) = state.fields.as_object_mut() {
@@ -596,6 +605,7 @@ impl Actor for EntityActor {
                 to_status: state.status.clone(),
                 timestamp: sim_now(),
                 params: self.initial_fields.clone(),
+                idempotency_key: None,
             };
 
             if let (Some(store), Some(backend)) = (self.event_journal.as_ref(), self.event_backend)
@@ -649,6 +659,20 @@ impl Actor for EntityActor {
                     && let Some(cached) = cache.get(&actor_key, key)
                 {
                     ctx.reply(cached);
+                    return Ok(());
+                }
+                if let Some(key) = idempotency_key.as_deref()
+                    && state.has_processed_idempotency_key(key)
+                {
+                    ctx.reply(EntityResponse {
+                        success: true,
+                        state: state.clone(),
+                        error: None,
+                        custom_effects: vec![],
+                        scheduled_actions: vec![],
+                        spawn_requests: vec![],
+                        spec_governed: true,
+                    });
                     return Ok(());
                 }
 
@@ -740,6 +764,7 @@ impl Actor for EntityActor {
                         .event
                         .clone()
                         .expect("successful process_action always returns event"); // ci-ok: post-assertion, success guarantees Some
+                    event.idempotency_key = idempotency_key.clone();
 
                     if !result.overflow_blobs.is_empty()
                         && let Err(e) = Self::persist_overflow_blobs(
@@ -890,6 +915,8 @@ impl Actor for EntityActor {
                                         .event
                                         .clone()
                                         .expect("successful process_action always returns event"); // ci-ok: post-assertion, success guarantees Some
+                                    let mut retry_event = retry_event;
+                                    retry_event.idempotency_key = idempotency_key.clone();
 
                                     // Overflow blobs for the re-evaluated result.
                                     if !retry_result.overflow_blobs.is_empty()
@@ -1209,6 +1236,7 @@ impl Actor for EntityActor {
                     to_status: "Deleted".to_string(),
                     timestamp: sim_now(),
                     params: serde_json::json!({}),
+                    idempotency_key: None,
                 };
 
                 if let (Some(store), Some(backend)) =

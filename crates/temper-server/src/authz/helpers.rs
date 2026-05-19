@@ -21,7 +21,9 @@ pub(crate) fn extract_temper_headers(headers: &HeaderMap) -> Vec<(String, String
         .iter()
         .filter_map(|(name, value)| {
             let key = name.as_str().to_lowercase();
-            if key.starts_with("x-temper-") {
+            if key == "x-temper-action-context" {
+                None
+            } else if key.starts_with("x-temper-") {
                 value.to_str().ok().map(|v| (key, v.to_string()))
             } else {
                 None
@@ -489,5 +491,25 @@ mod tests {
             ctx.principal.attributes.get("region"),
             Some(&Value::String("us-east-1".to_string()))
         );
+    }
+
+    #[test]
+    fn security_context_from_headers_drops_action_context_from_http_headers() {
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            "x-temper-principal-id",
+            AxumHeaderValue::from_static("bot-1"),
+        );
+        headers.insert(
+            "x-temper-principal-kind",
+            AxumHeaderValue::from_static("agent"),
+        );
+        headers.insert(
+            "x-temper-action-context",
+            AxumHeaderValue::from_static("composite:App.Fork"),
+        );
+
+        let ctx = security_context_from_headers(&headers, None, None, None);
+        assert!(ctx.principal.attributes.get("action_context").is_none());
     }
 }

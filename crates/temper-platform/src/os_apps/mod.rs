@@ -23,6 +23,7 @@ use crate::state::PlatformState;
 
 mod agent_bootstrap;
 mod app_catalog;
+mod closure_bootstrap;
 pub mod git_sources;
 mod reconcile;
 mod runtime_heal;
@@ -32,6 +33,11 @@ pub(super) use app_catalog::catalog;
 pub use app_catalog::{
     add_os_apps_dir, list_startup_os_apps, reload_os_apps, reload_skills, set_os_apps_dir,
     set_skills_dir,
+};
+pub use closure_bootstrap::{
+    ClosureBootstrapResult, OS_APP_CLOSURE_RESOLVER_VERSION, OsAppClosure,
+    bootstrap_closure_manifest, os_app_closure_for_roots, parse_bootstrap_manifest_str,
+    startup_os_app_closure,
 };
 pub use reconcile::{os_app_bundle_digest, reconcile_os_app, resolve_os_app_install_order};
 pub(crate) use runtime_heal::{
@@ -252,6 +258,47 @@ fn find_cedar_policies(app_dir: &Path) -> Vec<PathBuf> {
         .collect();
     files.sort();
     files
+}
+
+fn find_commons_cedar_policies(app_dir: &Path) -> Vec<PathBuf> {
+    let policies_dir = app_dir.join("policies").join("commons");
+    if !policies_dir.is_dir() {
+        return Vec::new();
+    }
+    let Ok(entries) = std::fs::read_dir(&policies_dir) else {
+        return Vec::new();
+    };
+    let mut files: Vec<PathBuf> = entries
+        .filter_map(|e| e.ok())
+        .filter(|e| e.file_name().to_string_lossy().ends_with(".cedar"))
+        .map(|e| e.path())
+        .collect();
+    files.sort();
+    files
+}
+
+fn effective_app_deployment_mode(manifest: &AppManifest) -> AppDeploymentMode {
+    let app_key = manifest
+        .name
+        .chars()
+        .map(|ch| {
+            if ch.is_ascii_alphanumeric() {
+                ch.to_ascii_uppercase()
+            } else {
+                '_'
+            }
+        })
+        .collect::<String>();
+    let specific_key = format!("TEMPER_OS_APP_{app_key}_MODE");
+    let raw = std::env::var(&specific_key)
+        .or_else(|_| std::env::var("TEMPER_OS_APP_MODE"))
+        .ok();
+
+    match raw.as_deref().map(str::trim) {
+        Some("commons") | Some("Commons") | Some("COMMONS") => AppDeploymentMode::Commons,
+        Some("operator") | Some("Operator") | Some("OPERATOR") => AppDeploymentMode::Operator,
+        _ => manifest.mode,
+    }
 }
 
 /// Find compiled WASM module binaries in an app directory.
@@ -808,6 +855,7 @@ pub fn get_skill_guide(name: &str) -> Option<String> {
 /// Load a complete app bundle from a directory on disk.
 fn load_app_bundle(app_dir: &Path) -> Option<AppBundle> {
     let manifest = read_app_manifest(app_dir)?;
+    let deployment_mode = effective_app_deployment_mode(&manifest);
     let legacy_reaction_paths = [
         app_dir.join("reactions").join("reactions.toml"),
         app_dir.join("specs").join("reactions.toml"),
@@ -835,7 +883,11 @@ fn load_app_bundle(app_dir: &Path) -> Option<AppBundle> {
         std::fs::read_to_string(app_dir.join("specs").join("cross-invariants.toml")).ok();
 
     // Read Cedar policies.
-    let cedar_policies: Vec<String> = find_cedar_policies(app_dir)
+    let mut cedar_policy_files = find_cedar_policies(app_dir);
+    if deployment_mode == AppDeploymentMode::Commons {
+        cedar_policy_files.extend(find_commons_cedar_policies(app_dir));
+    }
+    let cedar_policies: Vec<String> = cedar_policy_files
         .into_iter()
         .filter_map(|p| std::fs::read_to_string(&p).ok())
         .collect();
@@ -878,6 +930,7 @@ fn load_app_bundle(app_dir: &Path) -> Option<AppBundle> {
     }
 
     Some(AppBundle {
+        deployment_mode,
         specs,
         csdl,
         cross_invariants_toml,
@@ -961,6 +1014,9 @@ pub(super) async fn install_os_app_with_plan(
             app_dir.display()
         )
     })?;
+    if bundle.deployment_mode == AppDeploymentMode::Commons {
+        state.server.enable_commons_guardrails(tenant);
+    }
     let tenant_id = TenantId::new(tenant);
     let replace_uploaded_wasm = if plan.wasm && !bundle.wasm_modules.is_empty() {
         should_replace_uploaded_wasm_for_bundle_reconcile(state, tenant, app_name, &bundle).await

@@ -150,9 +150,10 @@ impl AuthzEngine {
         tenant: &str,
         policy_text: &str,
     ) -> Result<(), AuthzError> {
-        let new_policy_set = policy_text
+        let mut new_policy_set = policy_text
             .parse::<PolicySet>()
             .map_err(|e| AuthzError::PolicyParse(e.to_string()))?;
+        merge_system_platform_policy(&mut new_policy_set);
 
         let mut tenants = self
             .tenant_policies
@@ -218,6 +219,8 @@ impl AuthzEngine {
             combined_text.push_str(cedar_text);
         }
 
+        merge_system_platform_policy(&mut combined_set);
+
         let mut tenants = self
             .tenant_policies
             .write()
@@ -254,9 +257,10 @@ impl AuthzEngine {
     /// for per-tenant isolation. This method exists for backward compatibility
     /// during migration.
     pub fn reload_policies(&self, policy_text: &str) -> Result<(), AuthzError> {
-        let new_policy_set = policy_text
+        let mut new_policy_set = policy_text
             .parse::<PolicySet>()
             .map_err(|e| AuthzError::PolicyParse(e.to_string()))?;
+        merge_system_platform_policy(&mut new_policy_set);
 
         let mut current = self
             .fallback_policy_set

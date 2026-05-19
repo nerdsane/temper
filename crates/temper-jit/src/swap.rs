@@ -94,6 +94,7 @@ mod tests {
                 effects: vec![],
             }],
             state_var_metadata: Default::default(),
+            composite_actions: Default::default(),
             rule_index: Default::default(),
         };
         table.rebuild_index();

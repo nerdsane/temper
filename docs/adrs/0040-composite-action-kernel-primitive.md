@@ -269,7 +269,9 @@ removes the redundant plumbing.
 - Pre-compiled Cedar (separate µs-floor primitive; future ADR).
 - Hot in-memory projections (separate; future ADR).
 - Group-commit on the event log (separate; future ADR).
-- Direct-dispatch host_call (separate; see ADR-0041 in this PR).
+- WASM-initiated action orchestration. Specs declare actions,
+  triggers, integrations, and composite sub-writes; WASM integrations
+  return data for the kernel to apply through those spec contracts.
 
 ## Alternatives Considered
 

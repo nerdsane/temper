@@ -15,6 +15,8 @@ pub const MAX_EVENTS_PER_ENTITY: usize = 10_000;
 pub const RECENT_EVENTS_BUDGET_DEFAULT: usize = 50;
 /// Maximum items an entity can hold.
 pub const MAX_ITEMS_PER_ENTITY: usize = 1_000;
+/// Maximum durable idempotency keys retained per entity.
+pub const MAX_DURABLE_IDEMPOTENCY_KEYS_PER_ENTITY: usize = 1_000;
 
 /// Number of recent events retained in memory per entity.
 ///
@@ -91,6 +93,12 @@ pub struct EntityState {
     /// Current event sourcing sequence number (for persistence).
     #[serde(default)]
     pub sequence_nr: u64,
+    /// Idempotency keys that have already produced durable events.
+    ///
+    /// Rebuilt from [`EntityEvent::idempotency_key`] during replay so a retry
+    /// after process restart can return success without re-applying the action.
+    #[serde(default)]
+    pub processed_idempotency_keys: BTreeMap<String, u64>,
 }
 
 impl EntityState {
@@ -102,11 +110,36 @@ impl EntityState {
     /// Append an event to recent history while enforcing bounded memory.
     pub fn push_event_bounded(&mut self, event: EntityEvent) {
         self.total_event_count = self.total_event_count.saturating_add(1);
+        if let Some(key) = event.idempotency_key.as_deref() {
+            self.record_processed_idempotency_key(key);
+        }
         self.events.push_back(event);
 
         let budget = recent_events_budget();
         while self.events.len() > budget {
             self.events.pop_front();
+        }
+    }
+
+    pub fn has_processed_idempotency_key(&self, key: &str) -> bool {
+        self.processed_idempotency_keys.contains_key(key)
+    }
+
+    fn record_processed_idempotency_key(&mut self, key: &str) {
+        let sequence = self.sequence_nr.max(self.total_event_count as u64);
+        self.processed_idempotency_keys
+            .insert(key.to_string(), sequence);
+
+        while self.processed_idempotency_keys.len() > MAX_DURABLE_IDEMPOTENCY_KEYS_PER_ENTITY {
+            let Some(oldest_key) = self
+                .processed_idempotency_keys
+                .iter()
+                .min_by_key(|(_, sequence)| **sequence)
+                .map(|(key, _)| key.clone())
+            else {
+                break;
+            };
+            self.processed_idempotency_keys.remove(&oldest_key);
         }
     }
 }
@@ -124,6 +157,9 @@ pub struct EntityEvent {
     pub timestamp: chrono::DateTime<chrono::Utc>,
     /// Parameters passed with the action.
     pub params: serde_json::Value,
+    /// Optional idempotency key that caused this transition.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub idempotency_key: Option<String>,
 }
 
 /// Default value for `spec_governed`: actions are spec-governed unless explicitly marked otherwise.
@@ -177,6 +213,7 @@ mod tests {
             events: VecDeque::new(),
             total_event_count: 0,
             sequence_nr: 0,
+            processed_idempotency_keys: std::collections::BTreeMap::new(),
         };
         let serialized = serde_json::to_string(&state).unwrap();
         let deserialized: EntityState = serde_json::from_str(&serialized).unwrap();
@@ -237,6 +274,7 @@ mod tests {
             events: VecDeque::new(),
             total_event_count: 0,
             sequence_nr: 0,
+            processed_idempotency_keys: std::collections::BTreeMap::new(),
         };
         let resp = EntityResponse {
             success: true,

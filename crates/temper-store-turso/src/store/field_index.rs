@@ -89,7 +89,8 @@ impl TursoEventStore {
             .execute(
                 "UPDATE entity_catalog \
                  SET status = ?4, updated_at = ?5, sequence_nr = ?6, projection_version = 2, fields = ?8 \
-                 WHERE tenant = ?1 AND entity_type = ?2 AND entity_id = ?3 AND projection_hash = ?7",
+                 WHERE tenant = ?1 AND entity_type = ?2 AND entity_id = ?3 AND projection_hash = ?7 \
+                   AND sequence_nr <= ?6",
                 params![
                     tenant,
                     entity_type,
@@ -112,6 +113,26 @@ impl TursoEventStore {
             .transaction_with_behavior(TransactionBehavior::Immediate)
             .await
             .map_err(storage_error)?;
+
+        let existing_sequence = {
+            let mut existing_rows = tx
+                .query(
+                    "SELECT sequence_nr FROM entity_catalog \
+                     WHERE tenant = ?1 AND entity_type = ?2 AND entity_id = ?3",
+                    params![tenant, entity_type, entity_id],
+                )
+                .await
+                .map_err(storage_error)?;
+            if let Some(row) = existing_rows.next().await.map_err(storage_error)? {
+                Some(row.get::<i64>(0).map_err(storage_error)?)
+            } else {
+                None
+            }
+        };
+        if existing_sequence.is_some_and(|existing| existing > sequence_nr) {
+            tx.commit().await.map_err(storage_error)?;
+            return Ok(());
+        }
 
         tx.execute(
             "INSERT INTO entity_catalog \

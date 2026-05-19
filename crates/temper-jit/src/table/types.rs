@@ -28,6 +28,9 @@ pub struct TransitionTable {
     /// declare any per-field overrides.
     #[serde(default)]
     pub state_var_metadata: BTreeMap<String, StateVarMetadata>,
+    /// Composite-action metadata keyed by action name (ADR-0040).
+    #[serde(default)]
+    pub composite_actions: BTreeMap<String, CompositeActionMetadata>,
     /// Pre-built index: action name → indices into `rules`.
     ///
     /// Eliminates the O(N) linear scan + Vec allocation in [`evaluate_ctx()`].
@@ -51,6 +54,30 @@ pub struct StateVarMetadata {
     pub overflow_ttl_seconds: Option<u64>,
 }
 
+/// Parsed metadata for a first-class Composite action.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct CompositeActionMetadata {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cedar_gate: Option<CompositeCedarGate>,
+    #[serde(default)]
+    pub sub_writes: Vec<SubWriteSpec>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct CompositeCedarGate {
+    pub principal: String,
+    pub resource: String,
+    pub action: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct SubWriteSpec {
+    pub target_entity: String,
+    pub action: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub generated_from: Option<String>,
+}
+
 impl<'de> Deserialize<'de> for TransitionTable {
     fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
     where
@@ -65,6 +92,8 @@ impl<'de> Deserialize<'de> for TransitionTable {
             rules: Vec<TransitionRule>,
             #[serde(default)]
             state_var_metadata: BTreeMap<String, StateVarMetadata>,
+            #[serde(default)]
+            composite_actions: BTreeMap<String, CompositeActionMetadata>,
         }
 
         let raw = TransitionTableRaw::deserialize(deserializer)?;
@@ -74,6 +103,7 @@ impl<'de> Deserialize<'de> for TransitionTable {
             initial_state: raw.initial_state,
             rules: raw.rules,
             state_var_metadata: raw.state_var_metadata,
+            composite_actions: raw.composite_actions,
             rule_index: BTreeMap::new(),
         };
         table.rebuild_index();
@@ -399,6 +429,7 @@ mod tests {
                 },
             ],
             state_var_metadata: BTreeMap::new(),
+            composite_actions: BTreeMap::new(),
             rule_index: BTreeMap::new(),
         };
         table.rebuild_index();

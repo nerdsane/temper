@@ -614,6 +614,54 @@ fn test_per_tenant_isolation() {
 }
 
 #[test]
+fn tenant_policy_reloads_keep_system_platform_policy() {
+    let engine = AuthzEngine::empty();
+    let mut attrs = HashMap::new();
+    attrs.insert("id".to_string(), serde_json::json!("commit-1"));
+
+    engine
+        .reload_tenant_policies(
+            "flat",
+            r#"permit(principal is Customer, action == Action::"read", resource is Commit);"#,
+        )
+        .unwrap();
+
+    let system = SecurityContext::system();
+    assert!(
+        engine
+            .authorize_for_tenant("flat", &system, "Create", "Commit", &attrs)
+            .is_allowed(),
+        "System must keep its built-in Cedar permit after flat tenant reload"
+    );
+
+    let customer = customer_context("user-1");
+    assert!(
+        !engine
+            .authorize_for_tenant("flat", &customer, "Create", "Commit", &attrs)
+            .is_allowed(),
+        "tenant user policies should still default-deny unrelated customer writes"
+    );
+
+    engine
+        .reload_tenant_policies_named(
+            "named",
+            &[(
+                "commit-read".to_string(),
+                r#"permit(principal is Customer, action == Action::"read", resource is Commit);"#
+                    .to_string(),
+            )],
+        )
+        .unwrap();
+
+    assert!(
+        engine
+            .authorize_for_tenant("named", &system, "Create", "Commit", &attrs)
+            .is_allowed(),
+        "System must keep its built-in Cedar permit after named tenant reload"
+    );
+}
+
+#[test]
 fn test_named_policies_produce_meaningful_ids() {
     let engine = AuthzEngine::empty();
 

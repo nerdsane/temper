@@ -465,6 +465,7 @@ mod tests {
             to_status: to.to_string(),
             timestamp: ts,
             params: serde_json::json!({}),
+            idempotency_key: None,
         }
     }
 

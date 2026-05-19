@@ -374,7 +374,7 @@ pub fn to_state_machine(automaton: &Automaton) -> StateMachine {
         .map(|a| {
             let from_states = if a.from.is_empty() {
                 // Input actions are always enabled (I/O automata property)
-                if a.kind == "input" {
+                if a.kind == "input" || a.kind.eq_ignore_ascii_case("composite") {
                     automaton.automaton.states.clone()
                 } else {
                     vec![]

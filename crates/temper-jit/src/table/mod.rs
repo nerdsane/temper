@@ -9,5 +9,6 @@ mod evaluate;
 pub mod types;
 
 pub use types::{
-    Effect, EvalContext, Guard, StateVarMetadata, TransitionResult, TransitionRule, TransitionTable,
+    CompositeActionMetadata, CompositeCedarGate, Effect, EvalContext, Guard, StateVarMetadata,
+    SubWriteSpec, TransitionResult, TransitionRule, TransitionTable,
 };

@@ -6,7 +6,10 @@
 
 use temper_spec::automaton::{self, Automaton, ResolvedEffect, ResolvedGuard, translate_actions};
 
-use super::types::{Effect, Guard, TransitionRule, TransitionTable};
+use super::types::{
+    CompositeActionMetadata, CompositeCedarGate, Effect, Guard, SubWriteSpec, TransitionRule,
+    TransitionTable,
+};
 
 impl TransitionTable {
     /// Build a TransitionTable from I/O Automaton TOML source.
@@ -85,12 +88,39 @@ impl TransitionTable {
             }
         }
 
+        let mut composite_actions = std::collections::BTreeMap::new();
+        for action in &automaton.actions {
+            if !action.kind.eq_ignore_ascii_case("composite") {
+                continue;
+            }
+            composite_actions.insert(
+                action.name.clone(),
+                CompositeActionMetadata {
+                    cedar_gate: action.cedar_gate.as_ref().map(|gate| CompositeCedarGate {
+                        principal: gate.principal.clone(),
+                        resource: gate.resource.clone(),
+                        action: gate.action.clone(),
+                    }),
+                    sub_writes: action
+                        .sub_writes
+                        .iter()
+                        .map(|write| SubWriteSpec {
+                            target_entity: write.target_entity.clone(),
+                            action: write.action.clone(),
+                            generated_from: write.generated_from.clone(),
+                        })
+                        .collect(),
+                },
+            );
+        }
+
         TransitionTable {
             entity_name: automaton.automaton.name.clone(),
             states: automaton.automaton.states.clone(),
             initial_state: automaton.automaton.initial.clone(),
             rules,
             state_var_metadata,
+            composite_actions,
             rule_index,
         }
     }
@@ -199,6 +229,45 @@ effect = [{ type = "schedule", action = "Refresh", delay_seconds = 2700 }]
             "expected ScheduleAction effect, got: {:?}",
             rule.effects
         );
+    }
+
+    #[test]
+    fn composite_metadata_is_registered_on_transition_table() {
+        let spec = r#"
+[automaton]
+name = "Repository"
+states = ["Active"]
+initial = "Active"
+
+[[action]]
+name = "IngestPack"
+kind = "Composite"
+from = ["Active"]
+to = "Active"
+
+[[action.cedar_gate]]
+principal = "request.principal"
+resource = "this"
+action = "Repository::IngestPack"
+
+[[action.sub_writes]]
+target_entity = "Blob"
+action = "Create"
+generated_from = "pack_bytes"
+"#;
+
+        let table = TransitionTable::from_ioa_source(spec);
+        let metadata = table.composite_actions.get("IngestPack").unwrap();
+
+        assert_eq!(
+            metadata
+                .cedar_gate
+                .as_ref()
+                .map(|gate| gate.action.as_str()),
+            Some("Repository::IngestPack")
+        );
+        assert_eq!(metadata.sub_writes.len(), 1);
+        assert_eq!(metadata.sub_writes[0].target_entity, "Blob");
     }
 }
 

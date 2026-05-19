@@ -33,6 +33,9 @@ enum Section {
     /// skips the body; triggers are extracted via serde in the second pass
     /// and merged into their action by name.
     ActionTrigger,
+    /// ADR-0040: nested composite-action metadata blocks. Hand-rolled parser
+    /// skips the body; metadata is extracted via serde in the second pass.
+    CompositeActionMetadata,
 }
 
 #[derive(Debug, Default)]
@@ -77,6 +80,11 @@ impl ParseState {
                 self.current_section = Section::ActionTrigger;
                 true
             }
+            "[[action.cedar_gate]]" | "[[action.sub_writes]]" => {
+                self.flush_items();
+                self.current_section = Section::CompositeActionMetadata;
+                true
+            }
             _ => false,
         }
     }
@@ -93,6 +101,7 @@ impl ParseState {
             | Section::StateTimeout
             | Section::Webhook
             | Section::ActionTrigger
+            | Section::CompositeActionMetadata
             | Section::None => {}
         }
 
@@ -112,10 +121,15 @@ impl ParseState {
         // ADR-0046: extract [[action.triggers]] via serde and merge into
         // actions by name. The hand-rolled parser skips these blocks.
         let mut triggers_by_action = extract_action_triggers(input)?;
+        let mut composite_by_action = extract_action_composite_metadata(input)?;
         let mut actions = self.actions;
         for action in &mut actions {
             if let Some(trigs) = triggers_by_action.remove(&action.name) {
                 action.triggers.extend(trigs);
+            }
+            if let Some(metadata) = composite_by_action.remove(&action.name) {
+                action.cedar_gate = metadata.cedar_gate;
+                action.sub_writes.extend(metadata.sub_writes);
             }
         }
 
@@ -315,6 +329,8 @@ impl ParseState {
             params: Vec::new(),
             hint: None,
             triggers: Vec::new(),
+            cedar_gate: None,
+            sub_writes: Vec::new(),
         });
         self.current_section = Section::Action;
         true
@@ -466,6 +482,55 @@ fn extract_action_triggers(
             continue;
         }
         map.entry(action.name).or_default().extend(action.triggers);
+    }
+    Ok(map)
+}
+
+#[derive(Debug, Default)]
+struct ParsedCompositeActionMetadata {
+    cedar_gate: Option<super::types::CompositeCedarGate>,
+    sub_writes: Vec<super::types::SubWriteSpec>,
+}
+
+/// Extract nested `[[action.cedar_gate]]` and `[[action.sub_writes]]`
+/// sections via serde (ADR-0040).
+fn extract_action_composite_metadata(
+    source: &str,
+) -> Result<std::collections::BTreeMap<String, ParsedCompositeActionMetadata>, AutomatonParseError>
+{
+    let slice = isolate_action_sections(source);
+    if slice.trim().is_empty() {
+        return Ok(std::collections::BTreeMap::new());
+    }
+
+    #[derive(serde::Deserialize)]
+    struct ActionCompositeWrapper {
+        #[serde(default, rename = "action")]
+        actions: Vec<ActionSkeleton>,
+    }
+    #[derive(serde::Deserialize)]
+    struct ActionSkeleton {
+        #[serde(default)]
+        name: String,
+        #[serde(default)]
+        cedar_gate: Vec<super::types::CompositeCedarGate>,
+        #[serde(default)]
+        sub_writes: Vec<super::types::SubWriteSpec>,
+    }
+    let wrapper: ActionCompositeWrapper = toml::from_str(&slice)
+        .map_err(|e| AutomatonParseError::Toml(format!("action composite metadata: {e}")))?;
+    let mut map: std::collections::BTreeMap<String, ParsedCompositeActionMetadata> =
+        std::collections::BTreeMap::new();
+    for action in wrapper.actions {
+        if action.name.is_empty() || (action.cedar_gate.is_empty() && action.sub_writes.is_empty())
+        {
+            continue;
+        }
+        let metadata = map.entry(action.name).or_default();
+        if let Some(gate) = action.cedar_gate.into_iter().next() {
+            metadata.cedar_gate = Some(gate);
+        }
+        metadata.sub_writes.extend(action.sub_writes);
     }
     Ok(map)
 }

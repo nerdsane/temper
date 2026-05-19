@@ -501,34 +501,46 @@ impl crate::state::ServerState {
                     action_params: ctx.action_params,
                     mode: super::WasmDispatchMode::Inline,
                 };
-                if let Ok(Some(final_response)) =
-                    Box::pin(self.dispatch_wasm_integrations_internal(&req)).await
-                {
-                    // Silent-exit regression guard: trigger integration
-                    // returned but state didn't advance. Under healthy
-                    // operation the consumer-side WASM invariant (openpaw
-                    // ADR-0039 Sub-Decision 3a) and the Turso persist retry
-                    // (ADR-0056 Sub-Decision 2) prevent this; any nonzero
-                    // reading of the counter is a critical-severity alert
-                    // that something regressed.
-                    if final_response.state.status == pre_integration_status {
-                        tracing::warn!(
-                            target: "temper_server::integration",
-                            tenant = %ctx.tenant,
-                            entity_type = ctx.entity_type,
-                            entity_id = ctx.entity_id,
-                            action = ctx.action,
-                            state = %pre_integration_status,
-                            "integration returned without state transition \u{2014} invariant violation"
-                        );
-                        crate::runtime_metrics::record_integration_silent_exit(
-                            ctx.tenant.as_str(),
-                            ctx.entity_type,
-                            ctx.action,
-                            &pre_integration_status,
-                        );
+                match Box::pin(self.dispatch_wasm_integrations_internal(&req)).await {
+                    Ok(Some(final_response)) => {
+                        // Silent-exit regression guard: trigger integration
+                        // returned but state didn't advance. Under healthy
+                        // operation the consumer-side WASM invariant (openpaw
+                        // ADR-0039 Sub-Decision 3a) and the Turso persist retry
+                        // (ADR-0056 Sub-Decision 2) prevent this; any nonzero
+                        // reading of the counter is a critical-severity alert
+                        // that something regressed.
+                        if final_response.state.status == pre_integration_status {
+                            tracing::warn!(
+                                target: "temper_server::integration",
+                                tenant = %ctx.tenant,
+                                entity_type = ctx.entity_type,
+                                entity_id = ctx.entity_id,
+                                action = ctx.action,
+                                state = %pre_integration_status,
+                                "integration returned without state transition \u{2014} invariant violation"
+                            );
+                            crate::runtime_metrics::record_integration_silent_exit(
+                                ctx.tenant.as_str(),
+                                ctx.entity_type,
+                                ctx.action,
+                                &pre_integration_status,
+                            );
+                        }
+                        inline_response = Some(final_response);
                     }
-                    inline_response = Some(final_response);
+                    Ok(None) => {}
+                    Err(err) => {
+                        return EntityResponse {
+                            success: false,
+                            state: response.state.clone(),
+                            error: Some(format!("WASM integration failed: {err}")),
+                            custom_effects: response.custom_effects.clone(),
+                            scheduled_actions: Vec::new(),
+                            spawn_requests: Vec::new(),
+                            spec_governed: response.spec_governed,
+                        };
+                    }
                 }
 
                 let adapter_state = inline_response
@@ -546,10 +558,22 @@ impl crate::state::ServerState {
                     action_params: ctx.action_params,
                     mode: super::WasmDispatchMode::Inline,
                 };
-                if let Ok(Some(final_response)) =
-                    Box::pin(self.dispatch_adapter_integrations_internal(&adapter_req)).await
-                {
-                    inline_response = Some(final_response);
+                match Box::pin(self.dispatch_adapter_integrations_internal(&adapter_req)).await {
+                    Ok(Some(final_response)) => {
+                        inline_response = Some(final_response);
+                    }
+                    Ok(None) => {}
+                    Err(err) => {
+                        return EntityResponse {
+                            success: false,
+                            state: response.state.clone(),
+                            error: Some(format!("adapter integration failed: {err}")),
+                            custom_effects: response.custom_effects.clone(),
+                            scheduled_actions: Vec::new(),
+                            spawn_requests: Vec::new(),
+                            spec_governed: response.spec_governed,
+                        };
+                    }
                 }
 
                 if let Some(final_response) = inline_response {

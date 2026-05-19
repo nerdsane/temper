@@ -30,6 +30,77 @@ pub struct HttpResponse {
     pub body: String,
 }
 
+/// One buffered write returned by a Composite action integration.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SubWrite {
+    pub entity_type: String,
+    pub entity_id: String,
+    pub action: String,
+    pub params: Value,
+}
+
+/// Builder for ADR-0040 Composite action integration results.
+///
+/// The builder only produces the `sub_writes` data envelope. The WASM module
+/// does not dispatch actions; it returns this data from a spec-declared
+/// integration, and the kernel validates/applies it against the Composite
+/// action contract.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct SubWriteBuilder {
+    sub_writes: Vec<SubWrite>,
+}
+
+impl SubWriteBuilder {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn add(
+        &mut self,
+        entity_type: impl Into<String>,
+        entity_id: impl Into<String>,
+        action: impl Into<String>,
+        params: Value,
+    ) -> &mut Self {
+        self.sub_writes.push(SubWrite {
+            entity_type: entity_type.into(),
+            entity_id: entity_id.into(),
+            action: action.into(),
+            params,
+        });
+        self
+    }
+
+    pub fn len(&self) -> usize {
+        self.sub_writes.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.sub_writes.is_empty()
+    }
+
+    pub fn as_slice(&self) -> &[SubWrite] {
+        &self.sub_writes
+    }
+
+    pub fn into_sub_writes(self) -> Vec<SubWrite> {
+        self.sub_writes
+    }
+
+    pub fn into_params(self, mut params: Value) -> Value {
+        if !params.is_object() {
+            params = Value::Object(Default::default());
+        }
+        if let Some(obj) = params.as_object_mut() {
+            obj.insert(
+                "sub_writes".to_string(),
+                serde_json::to_value(self.sub_writes).unwrap_or(Value::Array(Vec::new())),
+            );
+        }
+        params
+    }
+}
+
 /// Typed invocation context for a Temper WASM module.
 ///
 /// Provides access to integration config, trigger parameters, entity state,
@@ -348,6 +419,11 @@ impl Context {
 
         serde_json::from_str(&response_json)
             .map_err(|e| format!("failed to parse batch HTTP responses: {e}"))
+    }
+
+    /// Create a builder for Composite action sub-writes.
+    pub fn sub_write_builder(&self) -> SubWriteBuilder {
+        SubWriteBuilder::new()
     }
 
     /// Make a Connect protocol server-streaming RPC call via the host.

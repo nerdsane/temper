@@ -238,6 +238,7 @@ pub fn process_action_with_xref_and_field_mode(
                 to_status: state.status.clone(),
                 timestamp: sim_now(),
                 params: params.clone(),
+                idempotency_key: None,
             };
 
             ProcessResult {
@@ -751,6 +752,7 @@ effect = [{ type = "schedule", action = "Refresh", delay_seconds = 2700 }]
             events: std::collections::VecDeque::new(),
             total_event_count: 0,
             sequence_nr: 0,
+            processed_idempotency_keys: std::collections::BTreeMap::new(),
         };
 
         let result = process_action(&mut state, &table, "Activate", &serde_json::json!({}));
@@ -784,6 +786,7 @@ effect = [{ type = "schedule", action = "Refresh", delay_seconds = 2700 }]
             events: std::collections::VecDeque::new(),
             total_event_count: 0,
             sequence_nr: 0,
+            processed_idempotency_keys: std::collections::BTreeMap::new(),
         };
 
         let (custom, scheduled, _spawns, _schedule_at) =
@@ -821,6 +824,7 @@ effect = [{ type = "schedule", action = "Refresh", delay_seconds = 2700 }]
             events: std::collections::VecDeque::new(),
             total_event_count: 0,
             sequence_nr: 0,
+            processed_idempotency_keys: std::collections::BTreeMap::new(),
         };
 
         let (_custom, _scheduled, _spawns, _schedule_at) = apply_effects(
@@ -867,6 +871,7 @@ effect = [
             events: std::collections::VecDeque::new(),
             total_event_count: 0,
             sequence_nr: 0,
+            processed_idempotency_keys: std::collections::BTreeMap::new(),
         };
 
         let result = process_action(&mut state, &table, "StartPlan", &serde_json::json!({}));
@@ -923,6 +928,7 @@ guard = [
             events: std::collections::VecDeque::new(),
             total_event_count: 0,
             sequence_nr: 0,
+            processed_idempotency_keys: std::collections::BTreeMap::new(),
         };
 
         // Without cross-entity booleans, guard should fail
@@ -979,6 +985,7 @@ effect = [{ type = "schedule_at", field = "next_run_at", action = "Trigger" }]
             events: std::collections::VecDeque::new(),
             total_event_count: 0,
             sequence_nr: 0,
+            processed_idempotency_keys: std::collections::BTreeMap::new(),
         };
 
         // Provide next_run_at as a param (simulates WASM callback)
@@ -1034,6 +1041,7 @@ effect = [{ type = "schedule_at", field = "next_run_at", action = "Trigger" }]
             events: std::collections::VecDeque::new(),
             total_event_count: 0,
             sequence_nr: 0,
+            processed_idempotency_keys: std::collections::BTreeMap::new(),
         };
 
         // Provide a timestamp in the past
@@ -1080,6 +1088,7 @@ effect = [{ type = "schedule_at", field = "next_run_at", action = "Trigger" }]
             events: std::collections::VecDeque::new(),
             total_event_count: 0,
             sequence_nr: 0,
+            processed_idempotency_keys: std::collections::BTreeMap::new(),
         };
 
         let result = process_action(&mut state, &table, "Complete", &serde_json::json!({}));
@@ -1125,6 +1134,7 @@ effect = [{ type = "set_counter_from_param", var = "size_bytes", param = "payloa
             events: std::collections::VecDeque::new(),
             total_event_count: 0,
             sequence_nr: 0,
+            processed_idempotency_keys: std::collections::BTreeMap::new(),
         };
 
         let result = process_action(
@@ -1188,6 +1198,7 @@ effect = [
             events: std::collections::VecDeque::new(),
             total_event_count: 0,
             sequence_nr: 0,
+            processed_idempotency_keys: std::collections::BTreeMap::new(),
         };
 
         let result = process_action(&mut state, &table, "Launch", &serde_json::json!({}));
@@ -1224,6 +1235,7 @@ effect = [
             events: std::collections::VecDeque::new(),
             total_event_count: 0,
             sequence_nr: 0,
+            processed_idempotency_keys: std::collections::BTreeMap::new(),
         }
     }
 

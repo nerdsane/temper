@@ -24,6 +24,7 @@ fn event_budget_workspace_id_uses_workspace_entity_id_or_field() {
         events: std::collections::VecDeque::new(),
         total_event_count: 0,
         sequence_nr: 0,
+        processed_idempotency_keys: BTreeMap::new(),
     };
     assert_eq!(event_budget_workspace_id(&workspace_state), "ws-1");
 
@@ -39,6 +40,7 @@ fn event_budget_workspace_id_uses_workspace_entity_id_or_field() {
         events: std::collections::VecDeque::new(),
         total_event_count: 0,
         sequence_nr: 0,
+        processed_idempotency_keys: BTreeMap::new(),
     };
     assert_eq!(event_budget_workspace_id(&file_state), "ws-2");
 }

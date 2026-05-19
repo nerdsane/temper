@@ -190,6 +190,7 @@ mod tests {
                 events: std::collections::VecDeque::new(),
                 total_event_count: 0,
                 sequence_nr: 0,
+                processed_idempotency_keys: BTreeMap::new(),
             },
             error: None,
             custom_effects: vec![],

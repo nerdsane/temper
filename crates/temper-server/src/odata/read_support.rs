@@ -127,9 +127,10 @@ async fn try_load_catalog_rows(
 /// Try to load a single entity body from the durable `entity_catalog`.
 ///
 /// Returns `Some(json)` when the catalog has a row for `(tenant, entity_type,
-/// key)` and the catalog fast-read feature flag is enabled. Returns `None`
-/// when the flag is off, the catalog has no row, or the read fails — caller
-/// is expected to fall back to actor hydration in that case.
+/// key)` and catalog materialization is preferred or the catalog fast-read
+/// feature flag is enabled. Returns `None` when catalog reads are disabled,
+/// the catalog has no row, or the read fails — caller is expected to fall
+/// back to actor hydration in that case.
 ///
 /// The returned JSON has the same shape as the actor's serialized
 /// `EntityState` so downstream code (`enrich_entity_response`, OData
@@ -140,8 +141,9 @@ pub(super) async fn try_load_entity_body_from_catalog(
     entity_type: &str,
     entity_set_name: &str,
     key: &str,
+    prefer_catalog: bool,
 ) -> Option<serde_json::Value> {
-    if !catalog_fast_read_enabled() {
+    if !should_read_catalog_for_materialization(prefer_catalog) {
         return None;
     }
     let ids = [key.to_string()];

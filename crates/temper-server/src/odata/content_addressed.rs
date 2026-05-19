@@ -26,8 +26,10 @@ use axum::response::IntoResponse;
 use sha1::Digest;
 use tokio_stream::StreamExt as _;
 
+use super::account_verification::enforce_commons_account_verified_for_write;
 use super::common::{extract_tenant, run_write_prechecks};
 use super::response::annotate_entity;
+use super::storage_guardrails::enforce_commons_storage_cap;
 use crate::request_context::extract_agent_context;
 use crate::response::{ODataResponse, odata_error};
 use crate::state::ServerState;
@@ -172,6 +174,8 @@ async fn ingest_raw_inner(
         "CreatedAt": now,
     });
 
+    let _commons_guardrail_lock = state.acquire_commons_write_guardrail_lock(&tenant).await;
+
     if let Err(resp) = run_write_prechecks(
         &state,
         &tenant,
@@ -186,12 +190,33 @@ async fn ingest_raw_inner(
         return resp;
     }
 
+    if let Err(resp) =
+        enforce_commons_account_verified_for_write(&state, &tenant, entity_type, &initial_fields)
+            .await
+    {
+        return resp;
+    }
+
+    if let Err(resp) = enforce_commons_storage_cap(
+        &state,
+        &tenant,
+        entity_type,
+        &sha,
+        "Create",
+        &initial_fields,
+    )
+    .await
+    {
+        return resp;
+    }
+
     match state
         .get_or_create_tenant_entity(&tenant, entity_type, &sha, initial_fields)
         .await
     {
         Ok(response) => {
             let _ = agent_ctx;
+            state.clear_commons_storage_projection_cache_for_entity(entity_type);
             let mut state_json = serde_json::to_value(&response.state).unwrap_or_default();
             crate::blobs::hydrate_blob_refs_for_tenant(&state, &tenant, &mut state_json).await;
             let body = annotate_entity(

@@ -17,7 +17,9 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use sqlx::PgPool;
-use temper_runtime::persistence::{EventStore, PersistenceEnvelope, PersistenceError};
+use temper_runtime::persistence::{
+    EventStore, PersistenceAppend, PersistenceAppendResult, PersistenceEnvelope, PersistenceError,
+};
 use temper_store_postgres::{PostgresEventStore, PostgresPolicyRow, PostgresTrajectoryInsert};
 use temper_store_turso::{
     ActionStats, AgentSummary, DesignTimeEventRow, EvolutionRecordRow, FeatureRequestRow,
@@ -47,6 +49,11 @@ pub trait DynEventStore: Send + Sync {
         expected_sequence: u64,
         events: &'a [PersistenceEnvelope],
     ) -> EventStoreFuture<'a, Result<u64, PersistenceError>>;
+
+    fn append_batch<'a>(
+        &'a self,
+        appends: &'a [PersistenceAppend],
+    ) -> EventStoreFuture<'a, Result<Vec<PersistenceAppendResult>, PersistenceError>>;
 
     fn read_events<'a>(
         &'a self,
@@ -94,6 +101,13 @@ where
             expected_sequence,
             events,
         ))
+    }
+
+    fn append_batch<'a>(
+        &'a self,
+        appends: &'a [PersistenceAppend],
+    ) -> EventStoreFuture<'a, Result<Vec<PersistenceAppendResult>, PersistenceError>> {
+        Box::pin(EventStore::append_batch(self, appends))
     }
 
     fn read_events<'a>(
@@ -177,6 +191,13 @@ impl BoxedEventStore {
         self.0
             .append(persistence_id, expected_sequence, events)
             .await
+    }
+
+    pub async fn append_batch(
+        &self,
+        appends: &[PersistenceAppend],
+    ) -> Result<Vec<PersistenceAppendResult>, PersistenceError> {
+        self.0.append_batch(appends).await
     }
 
     pub async fn read_events(

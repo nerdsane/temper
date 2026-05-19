@@ -1404,6 +1404,7 @@ startup_loading = "lazy"
     .unwrap();
 
     let manifest = read_app_manifest(&temp_dir).expect("manifest should parse");
+    assert_eq!(manifest.mode, AppDeploymentMode::Operator);
     assert_eq!(manifest.startup_install, StartupInstallMode::Core);
     assert_eq!(manifest.wasm_modules.len(), 1);
     assert_eq!(manifest.wasm_modules[0].name, "echo");
@@ -1414,6 +1415,47 @@ startup_loading = "lazy"
     assert_eq!(
         manifest.wasm_modules[0].startup_loading,
         WasmStartupLoading::Lazy
+    );
+
+    let _ = fs::remove_dir_all(&temp_dir);
+}
+
+#[test]
+fn test_manifest_commons_mode_loads_commons_policy_overlay() {
+    let temp_dir =
+        std::env::temp_dir().join(format!("temper-app-commons-test-{}", uuid::Uuid::new_v4()));
+    fs::create_dir_all(temp_dir.join("policies/commons")).unwrap();
+    fs::write(
+        temp_dir.join("app.toml"),
+        r#"name = "commons-app"
+description = "Commons app"
+version = "1.0.0"
+mode = "commons"
+"#,
+    )
+    .unwrap();
+    fs::write(
+        temp_dir.join("policies/base.cedar"),
+        r#"permit(principal, action == Action::"read", resource);"#,
+    )
+    .unwrap();
+    fs::write(
+        temp_dir.join("policies/commons/guardrail.cedar"),
+        r#"forbid(principal, action == Action::"Create", resource);"#,
+    )
+    .unwrap();
+
+    let manifest = read_app_manifest(&temp_dir).expect("manifest should parse");
+    assert_eq!(manifest.mode, AppDeploymentMode::Commons);
+
+    let bundle = load_app_bundle(&temp_dir).expect("bundle should load policies");
+    assert_eq!(bundle.deployment_mode, AppDeploymentMode::Commons);
+    assert_eq!(bundle.cedar_policies.len(), 2);
+    assert!(
+        bundle
+            .cedar_policies
+            .iter()
+            .any(|policy| policy.contains("forbid"))
     );
 
     let _ = fs::remove_dir_all(&temp_dir);

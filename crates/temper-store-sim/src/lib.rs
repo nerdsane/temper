@@ -12,7 +12,9 @@ use std::collections::{BTreeMap, VecDeque};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use temper_runtime::persistence::{EventStore, PersistenceEnvelope, PersistenceError};
+use temper_runtime::persistence::{
+    EventStore, PersistenceAppend, PersistenceAppendResult, PersistenceEnvelope, PersistenceError,
+};
 use temper_runtime::tenant::parse_persistence_id_parts;
 
 /// Fault injection configuration for simulation.
@@ -366,6 +368,103 @@ impl EventStore for SimEventStore {
         Ok(new_seq)
     }
 
+    async fn append_batch(
+        &self,
+        appends: &[PersistenceAppend],
+    ) -> Result<Vec<PersistenceAppendResult>, PersistenceError> {
+        if appends.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        let mut inner = self.inner.lock().expect("SimEventStore lock poisoned"); // ci-ok: infallible lock
+
+        let mut seen = std::collections::BTreeSet::new();
+        for append in appends {
+            if !seen.insert(append.persistence_id.as_str()) {
+                return Err(PersistenceError::Storage(format!(
+                    "SimEventStore: duplicate persistence_id '{}' in append_batch",
+                    append.persistence_id
+                )));
+            }
+        }
+
+        for append in appends {
+            let pending_cv = inner
+                .pending_concurrency_violations
+                .get(&append.persistence_id)
+                .copied()
+                .unwrap_or(0);
+            if pending_cv > 0 {
+                if pending_cv == 1 {
+                    inner
+                        .pending_concurrency_violations
+                        .remove(&append.persistence_id);
+                } else {
+                    inner
+                        .pending_concurrency_violations
+                        .insert(append.persistence_id.clone(), pending_cv - 1);
+                }
+                return Err(PersistenceError::ConcurrencyViolation {
+                    expected: append.expected_sequence,
+                    actual: append.expected_sequence,
+                });
+            }
+        }
+
+        // Fault injection happens before mutation so a batch either writes
+        // every stream or no stream.
+        let cv_prob = inner.faults.concurrency_violation_prob;
+        if inner.rng.chance(cv_prob) {
+            let first = &appends[0];
+            return Err(PersistenceError::ConcurrencyViolation {
+                expected: first.expected_sequence,
+                actual: first.expected_sequence.wrapping_add(1),
+            });
+        }
+        let wf_prob = inner.faults.write_failure_prob;
+        if inner.rng.chance(wf_prob) {
+            return Err(PersistenceError::Storage(
+                "SimEventStore: injected batch write failure".into(),
+            ));
+        }
+
+        for append in appends {
+            let current_seq = inner
+                .journals
+                .get(&append.persistence_id)
+                .and_then(|journal| journal.last())
+                .map(|event| event.sequence_nr)
+                .unwrap_or(0);
+            if current_seq != append.expected_sequence {
+                return Err(PersistenceError::ConcurrencyViolation {
+                    expected: append.expected_sequence,
+                    actual: current_seq,
+                });
+            }
+        }
+
+        let mut results = Vec::with_capacity(appends.len());
+        for append in appends {
+            let journal = inner
+                .journals
+                .entry(append.persistence_id.clone())
+                .or_default();
+            let mut new_seq = append.expected_sequence;
+            for event in &append.events {
+                new_seq += 1;
+                let mut stored = event.clone();
+                stored.sequence_nr = new_seq;
+                journal.push(stored);
+            }
+            results.push(PersistenceAppendResult {
+                persistence_id: append.persistence_id.clone(),
+                sequence_nr: new_seq,
+            });
+        }
+
+        Ok(results)
+    }
+
     async fn read_events(
         &self,
         persistence_id: &str,
@@ -525,6 +624,84 @@ mod tests {
         assert_eq!(events.len(), 2);
         assert_eq!(events[0].sequence_nr, 1);
         assert_eq!(events[1].sequence_nr, 2);
+    }
+
+    #[tokio::test]
+    async fn append_batch_commits_multiple_journals_atomically() {
+        let store = SimEventStore::no_faults(42);
+        let appends = vec![
+            PersistenceAppend {
+                persistence_id: "default:Order:ord-a".to_string(),
+                expected_sequence: 0,
+                events: vec![test_envelope(0, "Created")],
+            },
+            PersistenceAppend {
+                persistence_id: "default:Order:ord-b".to_string(),
+                expected_sequence: 0,
+                events: vec![test_envelope(0, "Created"), test_envelope(0, "Submitted")],
+            },
+        ];
+
+        let results = store.append_batch(&appends).await.unwrap();
+
+        assert_eq!(
+            results,
+            vec![
+                PersistenceAppendResult {
+                    persistence_id: "default:Order:ord-a".to_string(),
+                    sequence_nr: 1,
+                },
+                PersistenceAppendResult {
+                    persistence_id: "default:Order:ord-b".to_string(),
+                    sequence_nr: 2,
+                },
+            ]
+        );
+        assert_eq!(store.dump_journal("default:Order:ord-a").len(), 1);
+        assert_eq!(store.dump_journal("default:Order:ord-b").len(), 2);
+    }
+
+    #[tokio::test]
+    async fn append_batch_conflict_leaves_all_journals_untouched() {
+        let store = SimEventStore::no_faults(42);
+        store
+            .append(
+                "default:Order:ord-existing",
+                0,
+                &[test_envelope(0, "Created")],
+            )
+            .await
+            .unwrap();
+
+        let err = store
+            .append_batch(&[
+                PersistenceAppend {
+                    persistence_id: "default:Order:ord-new".to_string(),
+                    expected_sequence: 0,
+                    events: vec![test_envelope(0, "Created")],
+                },
+                PersistenceAppend {
+                    persistence_id: "default:Order:ord-existing".to_string(),
+                    expected_sequence: 0,
+                    events: vec![test_envelope(0, "Submitted")],
+                },
+            ])
+            .await
+            .expect_err("second journal conflict should abort entire batch");
+
+        assert!(
+            matches!(err, PersistenceError::ConcurrencyViolation { .. }),
+            "unexpected error: {err}"
+        );
+        assert!(
+            store.dump_journal("default:Order:ord-new").is_empty(),
+            "first append must not be persisted when a later stream conflicts"
+        );
+        assert_eq!(
+            store.dump_journal("default:Order:ord-existing").len(),
+            1,
+            "conflicting stream must keep its original journal only"
+        );
     }
 
     #[tokio::test]

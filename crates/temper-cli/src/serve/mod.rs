@@ -249,7 +249,7 @@ pub async fn run(
     // Phase 8: Bootstrap system + agent tenants
     bootstrap::bootstrap_tenants(&state, &apps).await;
     // Phase 8b: Restore persisted skills + apply CLI `--skill` requests.
-    bootstrap::bootstrap_installed_apps(&state, &skills).await;
+    bootstrap::bootstrap_installed_apps(&state, &skills).await?;
     if actor_runtime == ActorRuntimeBackend::Postgres {
         pg_actor_runtime_cancel = Some(
             actor_runtime::install_postgres_actor_runtime(

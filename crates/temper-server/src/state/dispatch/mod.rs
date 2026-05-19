@@ -10,6 +10,7 @@ use tracing::Instrument;
 
 mod actions;
 mod adapter;
+mod composite;
 mod cross_entity;
 mod effects;
 pub(crate) mod retry;
@@ -99,6 +100,14 @@ pub enum DispatchError {
     #[error("authorization denied: {0}")]
     #[allow(dead_code)] // Reserved for structured error handling migration
     AuthzDenied(String),
+
+    /// A tenant or owner quota denied the action before dispatch.
+    #[error("quota exceeded: {0}")]
+    QuotaExceeded(String),
+
+    /// The request conflicts with an existing governed row.
+    #[error("conflict: {0}")]
+    Conflict(String),
 
     /// The entity type has no registered spec — all actions are denied by default.
     #[error("entity type '{0}' is not governed by any registered spec")]

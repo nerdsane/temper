@@ -17,7 +17,7 @@ pub struct Automaton {
     /// State variable declarations.
     #[serde(default)]
     pub state: Vec<StateVar>,
-    /// All actions (input, output, internal).
+    /// All actions (input, output, internal, Composite).
     #[serde(default, rename = "action")]
     pub actions: Vec<Action>,
     /// Safety invariants (must always hold).
@@ -134,13 +134,14 @@ impl ActionParam {
 /// - `input`: arrives from the environment (HTTP request), always enabled
 /// - `output`: emitted to the environment (event to Postgres, span to ClickHouse)
 /// - `internal`: private state transition (the state machine step)
+/// - `Composite`: one governed intent that may produce declared sub-writes
 ///
 /// Each action has a precondition (guard) and effects (state changes).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Action {
     /// Action name (e.g., "SubmitOrder").
     pub name: String,
-    /// Action kind: "input", "output", or "internal".
+    /// Action kind: "input", "output", "internal", or "Composite".
     #[serde(default = "default_internal")]
     pub kind: String,
     /// Precondition: states from which this action can fire.
@@ -167,10 +168,39 @@ pub struct Action {
     /// source). Kind-specific fields are validated at parse time.
     #[serde(default, rename = "triggers")]
     pub triggers: Vec<ActionTrigger>,
+    /// Composite-action Cedar gate declaration (ADR-0040).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cedar_gate: Option<CompositeCedarGate>,
+    /// Declared sub-write contract for Composite actions (ADR-0040).
+    #[serde(default, rename = "sub_writes")]
+    pub sub_writes: Vec<SubWriteSpec>,
 }
 
 fn default_internal() -> String {
     "internal".to_string()
+}
+
+/// The single Cedar gate evaluated for a Composite action.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct CompositeCedarGate {
+    /// Principal expression, usually `request.principal`.
+    pub principal: String,
+    /// Resource expression, usually `this`.
+    pub resource: String,
+    /// Cedar action identifier for the composite intent.
+    pub action: String,
+}
+
+/// Declared write shape emitted by a Composite action.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct SubWriteSpec {
+    /// Target entity type receiving the write.
+    pub target_entity: String,
+    /// Target action, e.g. `Create` or `Update`.
+    pub action: String,
+    /// Handler input or source that generates this write.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub generated_from: Option<String>,
 }
 
 /// A guard condition (precondition predicate on pre-state).

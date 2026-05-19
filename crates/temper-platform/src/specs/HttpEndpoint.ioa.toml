@@ -26,7 +26,17 @@ states = ["Active", "Paused", "Deleted"]
 name = "Create"
 kind = "input"
 from = ["Active"]
-params = ["path_prefix", "methods", "integration_module", "requires_auth", "timeout_secs"]
+params = [
+  "path_prefix",
+  "methods",
+  "integration_module",
+  "requires_auth",
+  "timeout_secs",
+  "action_bridge_entity_type",
+  "action_bridge_entity_id",
+  "action_bridge_action",
+  "action_bridge_response",
+]
 hint = "Initialize endpoint fields. Self-loop on initial state; from_states follow IOA convention."
 
 [[action]]

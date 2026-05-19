@@ -27,7 +27,7 @@ const QUERY_PROJECTION_UPSERT_OPERATION: &str = "query_projection_upsert";
 const QUERY_PROJECTION_REMOVE_OPERATION: &str = "query_projection_remove";
 
 type ScalarFieldIndex = BTreeMap<String, String>;
-type CatalogProjectionFingerprint = (String, String);
+type CatalogProjectionFingerprint = (String, String, i64);
 
 struct QueryProjectionCatalogUpdate<'a> {
     tenant: &'a str,
@@ -531,7 +531,7 @@ impl PostgresEventStore {
 
         let previous_catalog: Option<CatalogProjectionFingerprint> =
             crate::dbm::postgres_query_as!(
-                "SELECT status, projection_hash \
+                "SELECT status, projection_hash, sequence_nr \
                  FROM entity_catalog \
                  WHERE tenant = $1 AND entity_type = $2 AND entity_id = $3 \
                  FOR UPDATE",
@@ -543,7 +543,30 @@ impl PostgresEventStore {
             .await
             .map_err(storage_error)?;
 
-        let previous_catalog = if previous_catalog.is_some() {
+        let new_sequence_nr = sequence_nr as i64;
+        let previous_catalog = if previous_catalog
+            .as_ref()
+            .is_some_and(|(_, _, existing_sequence)| *existing_sequence > new_sequence_nr)
+        {
+            let commit_started = Instant::now();
+            tx.commit().await.map_err(|e| {
+                record_postgres_transaction_commit_duration(
+                    commit_started.elapsed(),
+                    QUERY_PROJECTION_UPSERT_OPERATION,
+                    "error",
+                );
+                storage_error(e)
+            })?;
+            record_postgres_transaction_commit_duration(
+                commit_started.elapsed(),
+                QUERY_PROJECTION_UPSERT_OPERATION,
+                "ok",
+            );
+            record_postgres_projection_index_fields(indexed_fields, skipped_fields);
+            record_postgres_projection_index_reconciliation("stale_skipped");
+            transaction_timer.set_outcome("stale_skipped");
+            return Ok(());
+        } else if previous_catalog.is_some() {
             update_query_projection_catalog_row(
                 &mut tx,
                 QueryProjectionCatalogUpdate {
@@ -582,7 +605,7 @@ impl PostgresEventStore {
             } else {
                 let raced_catalog: Option<CatalogProjectionFingerprint> =
                     crate::dbm::postgres_query_as!(
-                        "SELECT status, projection_hash \
+                        "SELECT status, projection_hash, sequence_nr \
                          FROM entity_catalog \
                          WHERE tenant = $1 AND entity_type = $2 AND entity_id = $3 \
                          FOR UPDATE",
@@ -593,6 +616,29 @@ impl PostgresEventStore {
                     .fetch_optional(&mut *tx)
                     .await
                     .map_err(storage_error)?;
+                if raced_catalog
+                    .as_ref()
+                    .is_some_and(|(_, _, existing_sequence)| *existing_sequence > new_sequence_nr)
+                {
+                    let commit_started = Instant::now();
+                    tx.commit().await.map_err(|e| {
+                        record_postgres_transaction_commit_duration(
+                            commit_started.elapsed(),
+                            QUERY_PROJECTION_UPSERT_OPERATION,
+                            "error",
+                        );
+                        storage_error(e)
+                    })?;
+                    record_postgres_transaction_commit_duration(
+                        commit_started.elapsed(),
+                        QUERY_PROJECTION_UPSERT_OPERATION,
+                        "ok",
+                    );
+                    record_postgres_projection_index_fields(indexed_fields, skipped_fields);
+                    record_postgres_projection_index_reconciliation("stale_skipped");
+                    transaction_timer.set_outcome("stale_skipped");
+                    return Ok(());
+                }
                 update_query_projection_catalog_row(
                     &mut tx,
                     QueryProjectionCatalogUpdate {
@@ -613,7 +659,7 @@ impl PostgresEventStore {
         let should_reconcile_index =
             previous_catalog
                 .as_ref()
-                .is_none_or(|(old_status, old_hash)| {
+                .is_none_or(|(old_status, old_hash, _)| {
                     old_status.as_str() != status || old_hash.as_str() != projection_hash.as_str()
                 });
         let reconciliation_path = if should_reconcile_index {

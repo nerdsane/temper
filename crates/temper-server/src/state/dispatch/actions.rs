@@ -163,6 +163,13 @@ impl crate::state::ServerState {
             await_reactions,
         } = cmd;
 
+        if self
+            .composite_metadata_for(tenant, entity_type, action)?
+            .is_some()
+        {
+            self.reject_action_supplied_sub_writes(entity_type, action, &params)?;
+        }
+
         let response = self
             .dispatch_tenant_action_core(
                 tenant,
@@ -675,6 +682,9 @@ impl crate::state::ServerState {
             let actor_key = format!("{tenant}:{entity_type}:{entity_id}");
             self.idempotency_cache
                 .mark_effects_applied(&actor_key, idem_key);
+        }
+        if response.success {
+            self.clear_commons_storage_projection_cache_for_entity(entity_type);
         }
 
         tracing::Span::current().record("success", response.success);

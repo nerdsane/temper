@@ -3,7 +3,8 @@
 use libsql::{TransactionBehavior, params};
 use std::time::Duration;
 use temper_runtime::persistence::{
-    EventMetadata, EventStore, PersistenceEnvelope, PersistenceError, storage_error,
+    EventMetadata, EventStore, PersistenceAppend, PersistenceAppendResult, PersistenceEnvelope,
+    PersistenceError, storage_error,
 };
 use temper_runtime::tenant::parse_persistence_id_parts;
 use tracing::{instrument, warn};
@@ -93,6 +94,73 @@ impl EventStore for TursoEventStore {
             }
         }
         record_turso_write_retry("turso.append", total_attempts as u64, "exhausted");
+        Err(last_err.expect("retry loop captured at least one error"))
+    }
+
+    #[instrument(skip_all, fields(otel.name = "turso.append_batch"))]
+    async fn append_batch(
+        &self,
+        appends: &[PersistenceAppend],
+    ) -> Result<Vec<PersistenceAppendResult>, PersistenceError> {
+        if appends.is_empty() {
+            return Ok(Vec::new());
+        }
+        if let [append] = appends {
+            let sequence_nr = self
+                .append(
+                    &append.persistence_id,
+                    append.expected_sequence,
+                    &append.events,
+                )
+                .await?;
+            return Ok(vec![PersistenceAppendResult {
+                persistence_id: append.persistence_id.clone(),
+                sequence_nr,
+            }]);
+        }
+
+        let attempt_timeout = append_attempt_timeout();
+        let total_attempts = append_max_attempts();
+        let mut last_err: Option<PersistenceError> = None;
+        for attempt in 0..total_attempts {
+            if attempt > 0 {
+                tokio::time::sleep(Duration::from_millis(retry_delay_ms(attempt - 1))).await;
+            }
+            let _write_permit = self
+                .acquire_write_permit("turso.append_batch", WritePriority::High)
+                .await?;
+            let attempt_result =
+                tokio::time::timeout(attempt_timeout, self.append_batch_inner(appends))
+                    .await
+                    .unwrap_or_else(|_| {
+                        warn!(
+                            attempt,
+                            timeout_ms = attempt_timeout.as_millis() as u64,
+                            "turso.append_batch attempt timed out"
+                        );
+                        Err(PersistenceError::Storage(format!(
+                            "turso.append_batch timed out after {}ms",
+                            attempt_timeout.as_millis()
+                        )))
+                    });
+
+            match attempt_result {
+                Ok(result) => {
+                    if attempt > 0 {
+                        record_turso_write_retry("turso.append_batch", attempt as u64, "succeeded");
+                    }
+                    return Ok(result);
+                }
+                Err(err) => {
+                    let transient = matches!(&err, PersistenceError::Storage(msg) if is_transient_write_error(msg));
+                    if !transient {
+                        return Err(err);
+                    }
+                    last_err = Some(err);
+                }
+            }
+        }
+        record_turso_write_retry("turso.append_batch", total_attempts as u64, "exhausted");
         Err(last_err.expect("retry loop captured at least one error"))
     }
 
@@ -433,6 +501,136 @@ impl TursoEventStore {
 
         tx.commit().await.map_err(storage_error)?;
         Ok(new_seq)
+    }
+
+    async fn append_batch_inner(
+        &self,
+        appends: &[PersistenceAppend],
+    ) -> Result<Vec<PersistenceAppendResult>, PersistenceError> {
+        let mut seen = std::collections::BTreeSet::new();
+        for append in appends {
+            if !seen.insert(append.persistence_id.as_str()) {
+                return Err(PersistenceError::Storage(format!(
+                    "duplicate persistence_id '{}' in append_batch",
+                    append.persistence_id
+                )));
+            }
+        }
+
+        let conn = self.configured_connection().await?;
+        let tx = conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .await
+            .map_err(storage_error)?;
+
+        let mut parsed = Vec::with_capacity(appends.len());
+        for append in appends {
+            let (tenant, entity_type, entity_id) =
+                parse_persistence_id_parts(&append.persistence_id)
+                    .map_err(PersistenceError::Storage)?;
+
+            let select_start = std::time::Instant::now();
+            let rows_result = tx
+                .query(
+                    "SELECT COALESCE(MAX(sequence_nr), 0)
+                     FROM events
+                     WHERE tenant = ?1 AND entity_type = ?2 AND entity_id = ?3",
+                    params![tenant, entity_type, entity_id],
+                )
+                .await;
+            record_turso_query_duration(
+                select_start.elapsed(),
+                "query",
+                "transaction",
+                rows_result.is_ok(),
+            );
+            let mut rows = rows_result.map_err(storage_error)?;
+
+            let current_seq = match rows.next().await.map_err(storage_error)? {
+                Some(row) => row.get::<i64>(0).map_err(storage_error)? as u64,
+                None => 0,
+            };
+            drop(rows);
+
+            if current_seq != append.expected_sequence {
+                tracing::error!(
+                    expected = append.expected_sequence,
+                    actual = current_seq,
+                    persistence_id = %append.persistence_id,
+                    "concurrency violation on append_batch"
+                );
+                let _ = tx.rollback().await;
+                return Err(PersistenceError::ConcurrencyViolation {
+                    expected: append.expected_sequence,
+                    actual: current_seq,
+                });
+            }
+            parsed.push((
+                tenant.to_string(),
+                entity_type.to_string(),
+                entity_id.to_string(),
+            ));
+        }
+
+        let mut results = Vec::with_capacity(appends.len());
+        for (append, (tenant, entity_type, entity_id)) in appends.iter().zip(parsed.iter()) {
+            let mut new_seq = append.expected_sequence;
+            for event in &append.events {
+                new_seq += 1;
+                let payload_json = serde_json::to_string(&event.payload).map_err(|e| {
+                    tracing::error!(error = %e, "failed to serialize event payload");
+                    PersistenceError::Serialization(e.to_string())
+                })?;
+                let metadata_json = serde_json::to_string(&event.metadata).map_err(|e| {
+                    tracing::error!(error = %e, "failed to serialize event metadata");
+                    PersistenceError::Serialization(e.to_string())
+                })?;
+
+                let insert_start = std::time::Instant::now();
+                let insert_result = tx
+                    .execute(
+                        "INSERT INTO events
+                         (tenant, entity_type, entity_id, sequence_nr, event_type, payload, metadata)
+                         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+                        params![
+                            tenant.as_str(),
+                            entity_type.as_str(),
+                            entity_id.as_str(),
+                            new_seq as i64,
+                            event.event_type.as_str(),
+                            payload_json,
+                            metadata_json
+                        ],
+                    )
+                    .await;
+                record_turso_query_duration(
+                    insert_start.elapsed(),
+                    "execute",
+                    "transaction",
+                    insert_result.is_ok(),
+                );
+
+                if let Err(e) = insert_result {
+                    let msg = e.to_string();
+                    tracing::error!(error = %e, "event batch insert failed");
+                    let _ = tx.rollback().await;
+                    if msg.contains("UNIQUE constraint failed") || msg.contains("UNIQUE") {
+                        return Err(PersistenceError::ConcurrencyViolation {
+                            expected: append.expected_sequence,
+                            actual: new_seq,
+                        });
+                    }
+                    return Err(PersistenceError::Storage(msg));
+                }
+            }
+            results.push(PersistenceAppendResult {
+                persistence_id: append.persistence_id.clone(),
+                sequence_nr: new_seq,
+            });
+        }
+
+        tx.commit().await.map_err(storage_error)?;
+        Ok(results)
     }
 
     /// Atomic fast path for the common event-store case: one entity action

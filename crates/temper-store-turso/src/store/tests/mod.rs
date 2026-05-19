@@ -711,6 +711,69 @@ async fn unchanged_projection_updates_catalog_without_rebuilding_field_rows() {
 }
 
 #[tokio::test]
+async fn stale_projection_upsert_does_not_overwrite_newer_catalog_row() {
+    let store = make_store("query-projection-stale-sequence-skip").await;
+    let tenant = format!("tenant-{}", uuid::Uuid::new_v4());
+    let entity_type = "App";
+    let entity_id = "app-stale-projection";
+
+    store
+        .upsert_query_projection(
+            &tenant,
+            entity_type,
+            entity_id,
+            "Active",
+            &serde_json::json!({
+                "OwnerId": "owner-a",
+                "Name": "registered",
+                "LatestVersionHash": "newer",
+            }),
+            4,
+        )
+        .await
+        .expect("fresh projection upsert");
+
+    store
+        .upsert_query_projection(
+            &tenant,
+            entity_type,
+            entity_id,
+            "Active",
+            &serde_json::json!({
+                "Name": "registered",
+                "RepositoryId": "repo-a",
+            }),
+            2,
+        )
+        .await
+        .expect("stale projection upsert is ignored");
+
+    let conn = store.connection().expect("connection");
+    let mut rows = conn
+        .query(
+            "SELECT sequence_nr, fields FROM entity_catalog \
+             WHERE tenant = ?1 AND entity_type = ?2 AND entity_id = ?3",
+            params![tenant, entity_type, entity_id],
+        )
+        .await
+        .expect("query catalog row");
+    let row = rows
+        .next()
+        .await
+        .expect("read catalog row")
+        .expect("catalog row should exist");
+    let sequence_nr = row.get::<i64>(0).expect("catalog sequence_nr");
+    let fields_json = row.get::<String>(1).expect("catalog fields");
+    let fields: serde_json::Value =
+        serde_json::from_str(&fields_json).expect("catalog fields are json");
+
+    assert_eq!(sequence_nr, 4);
+    assert_eq!(fields["OwnerId"], "owner-a");
+    assert_eq!(fields["LatestVersionHash"], "newer");
+    assert!(fields.get("RepositoryId").is_none());
+}
+
+#[tokio::test]
 async fn load_query_projection_fields_many_returns_requested_fields_by_entity() {
     let store = make_store("query-projection-fields-many").await;
     let tenant = format!("tenant-{}", uuid::Uuid::new_v4());

@@ -528,7 +528,10 @@ enum AppBootstrapSource {
 ///
 /// This phase replays persisted installs so skill entities remain available
 /// after restart, and then applies explicit CLI installs for `default`.
-pub(super) async fn bootstrap_installed_apps(state: &PlatformState, skills: &[String]) {
+pub(super) async fn bootstrap_installed_apps(
+    state: &PlatformState,
+    skills: &[String],
+) -> anyhow::Result<()> {
     let mut requested: BTreeMap<(String, String), AppBootstrapSource> = BTreeMap::new();
 
     if let Some(platform_store) = state
@@ -571,6 +574,26 @@ pub(super) async fn bootstrap_installed_apps(state: &PlatformState, skills: &[St
             .or_insert(AppBootstrapSource::Cli);
     }
 
+    if let Some(manifest_path) = std::env::var_os("TEMPER_BOOTSTRAP_MANIFEST")
+        .map(std::path::PathBuf::from)
+        .filter(|path| !path.as_os_str().is_empty())
+    {
+        let tenant = std::env::var("TEMPER_BOOTSTRAP_TENANT")
+            .ok()
+            .filter(|tenant| !tenant.trim().is_empty())
+            .unwrap_or_else(|| "default".to_string());
+        let result =
+            temper_platform::os_apps::bootstrap_closure_manifest(state, &tenant, &manifest_path)
+                .await
+                .map_err(anyhow::Error::msg)?;
+        println!(
+            "  Bootstrap closure '{}' installed for '{}': {}",
+            result.closure.id,
+            tenant,
+            result.installed_apps.join(", ")
+        );
+    }
+
     for ((tenant, app_name), source) in requested {
         // Replay through the real installer every startup. Presence-only checks
         // are not sufficient because an installed app's bundle can drift:
@@ -610,6 +633,8 @@ pub(super) async fn bootstrap_installed_apps(state: &PlatformState, skills: &[St
             }
         }
     }
+
+    Ok(())
 }
 
 #[cfg(test)]
@@ -659,7 +684,9 @@ mod tests {
             .server
             .set_storage_stack(StorageStack::from_turso(turso));
 
-        bootstrap_installed_apps(&state, &[]).await;
+        bootstrap_installed_apps(&state, &[])
+            .await
+            .expect("bootstrap should replay persisted apps");
 
         let tenant_id = TenantId::new(tenant);
         let registry = state.registry.read().unwrap();
