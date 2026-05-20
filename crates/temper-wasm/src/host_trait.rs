@@ -283,6 +283,15 @@ pub type SpecEvaluatorFn =
 /// Callback for replayable progress events emitted by guest WASM modules.
 pub type ProgressEmitterFn = Arc<dyn Fn(&str) -> Result<(), String> + Send + Sync>;
 
+/// Callback for lazily resolving a secret by key.
+///
+/// Production hosts can use this to avoid eagerly materializing every tenant
+/// secret before invocation. When configured, the resolver is authoritative for
+/// guest `host_get_secret` lookups; the eager secret map remains available for
+/// host-internal bootstrap behavior. The callback is responsible for any
+/// authorization checks needed before returning the plaintext value.
+pub type SecretResolverFn = Arc<dyn Fn(&str) -> Result<String, String> + Send + Sync>;
+
 /// Future returned by a binary HTTP interceptor.
 pub type BinaryHttpInterceptorFuture =
     Pin<Box<dyn Future<Output = Option<Result<(u16, Vec<u8>), String>>> + Send>>;
@@ -317,6 +326,8 @@ pub struct ProductionWasmHost {
     client: reqwest::Client,
     /// Secrets from env vars or a secret store.
     secrets: BTreeMap<String, String>,
+    /// Optional lazy secret resolver authoritative for guest secret lookups.
+    secret_resolver: Option<SecretResolverFn>,
     /// Canonical base URL for the local Temper API when known directly by the server.
     internal_api_base_url: Option<String>,
     /// Ambient platform bearer token for internal loopback calls.
@@ -503,6 +514,7 @@ impl ProductionWasmHost {
         Self {
             client: builder.build().unwrap_or_default(),
             secrets,
+            secret_resolver: None,
             internal_api_base_url: None,
             internal_api_key: None,
             spec_evaluator: None,
@@ -524,6 +536,12 @@ impl ProductionWasmHost {
     /// Create with a progress emitter for `host_emit_progress` support.
     pub fn with_progress_emitter(mut self, emitter: ProgressEmitterFn) -> Self {
         self.progress_emitter = Some(emitter);
+        self
+    }
+
+    /// Create with a lazy secret resolver for `host_get_secret` support.
+    pub fn with_secret_resolver(mut self, resolver: SecretResolverFn) -> Self {
+        self.secret_resolver = Some(resolver);
         self
     }
 
@@ -1271,10 +1289,15 @@ impl WasmHost for ProductionWasmHost {
         record_invocation_context_on_span(&span, self.invocation_context.as_ref(), "secret_lookup");
         let _guard = span.enter();
         let result = self
-            .secrets
-            .get(key)
-            .cloned()
-            .ok_or_else(|| format!("secret not found: {key}"));
+            .secret_resolver
+            .as_ref()
+            .map(|resolver| resolver(key))
+            .unwrap_or_else(|| {
+                self.secrets
+                    .get(key)
+                    .cloned()
+                    .ok_or_else(|| format!("secret not found: {key}"))
+            });
         tracing::Span::current().record("success", result.is_ok());
         tracing::Span::current().record("duration_ms", started.elapsed().as_millis() as u64);
         if let Err(error) = &result {
@@ -2659,4 +2682,5 @@ impl WasmHost for SimWasmHost {
 }
 
 #[cfg(test)]
+#[path = "host_trait/host_trait_test.rs"]
 mod tests;

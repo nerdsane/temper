@@ -117,24 +117,29 @@ pub(crate) fn record_postgres_transaction_commit_duration(
     );
 }
 
-pub(crate) fn record_postgres_projection_index_fields(indexed_fields: u64, skipped_fields: u64) {
-    metrics().projection_index_fields.record(
-        indexed_fields,
-        &[KeyValue::new("operation", "query_projection_upsert")],
-    );
+pub(crate) fn record_postgres_projection_index_fields(
+    operation: &'static str,
+    indexed_fields: u64,
+    skipped_fields: u64,
+) {
+    metrics()
+        .projection_index_fields
+        .record(indexed_fields, &[KeyValue::new("operation", operation)]);
     if skipped_fields > 0 {
-        metrics().projection_skipped_index_fields_total.add(
-            skipped_fields,
-            &[KeyValue::new("operation", "query_projection_upsert")],
-        );
+        metrics()
+            .projection_skipped_index_fields_total
+            .add(skipped_fields, &[KeyValue::new("operation", operation)]);
     }
 }
 
-pub(crate) fn record_postgres_projection_index_reconciliation(path: &'static str) {
+pub(crate) fn record_postgres_projection_index_reconciliation(
+    operation: &'static str,
+    path: &'static str,
+) {
     metrics().projection_index_reconciliations_total.add(
         1,
         &[
-            KeyValue::new("operation", "query_projection_upsert"),
+            KeyValue::new("operation", operation),
             KeyValue::new("path", path),
         ],
     );
@@ -183,8 +188,11 @@ mod tests {
         record_postgres_pool_acquire_duration(Duration::from_millis(2), "event_append", "ok");
         record_postgres_transaction_begin_duration(Duration::from_millis(1), "event_append", "ok");
         record_postgres_transaction_commit_duration(Duration::from_millis(3), "event_append", "ok");
-        record_postgres_projection_index_fields(4, 1);
-        record_postgres_projection_index_reconciliation("skipped_unchanged");
+        record_postgres_projection_index_fields("query_projection_upsert", 4, 1);
+        record_postgres_projection_index_reconciliation(
+            "query_projection_upsert",
+            "skipped_unchanged",
+        );
 
         let mut timer = PostgresTransactionTimer::start("event_append");
         timer.set_outcome("ok");

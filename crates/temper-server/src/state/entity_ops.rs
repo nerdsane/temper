@@ -4,19 +4,20 @@ use std::collections::BTreeMap;
 use std::sync::{Arc, OnceLock, RwLock};
 use std::time::Instant;
 
-use tracing::instrument;
+use tracing::{Instrument, instrument};
 
 use temper_observe::wide_event;
-use temper_runtime::persistence::PersistenceEnvelope;
-use temper_runtime::scheduler::sim_now;
+use temper_runtime::persistence::{EventMetadata, PersistenceEnvelope, PersistenceError};
+use temper_runtime::scheduler::{sim_now, sim_uuid};
 use temper_runtime::tenant::TenantId;
 
 use super::dispatch::retry;
 use super::{ServerState, projection_backfill};
-use crate::entity_actor::{EntityActor, EntityMsg, EntityResponse};
+use crate::entity_actor::{EntityActor, EntityEvent, EntityMsg, EntityResponse, EntityState};
 use crate::events::EntityStateChange;
 use crate::registry::{VerificationDetail, VerificationStatus};
 use crate::runtime_metrics;
+use crate::storage::DataOnlyCreateRecord;
 
 fn actor_idle_timeout_secs() -> i64 {
     static ACTOR_IDLE_TIMEOUT: OnceLock<i64> = OnceLock::new();
@@ -819,6 +820,276 @@ impl ServerState {
         }
 
         Ok(response)
+    }
+
+    /// Create a durable data-only entity without spawning an actor.
+    ///
+    /// This path is only eligible for transition tables with no rules. It
+    /// preserves the event journal, projection acknowledgement, in-memory
+    /// entity index, and observe/SSE event contracts used by the actor path.
+    #[instrument(skip_all, fields(otel.name = "entity.create_data_only_tenant_entity_fast_path", tenant = %tenant, entity_type, entity_id))]
+    pub async fn try_create_data_only_tenant_entity(
+        &self,
+        tenant: &TenantId,
+        entity_type: &str,
+        entity_id: &str,
+        initial_fields: serde_json::Value,
+    ) -> Result<Option<EntityResponse>, String> {
+        if !initial_fields.is_object() {
+            return Ok(None);
+        }
+        if self.is_pg_actor_backed(tenant, entity_type) {
+            return Ok(None);
+        }
+
+        let table = {
+            let reg = self.registry.read().unwrap();
+            reg.get_table_live(tenant, entity_type)
+        }
+        .or_else(|| {
+            self.transition_tables
+                .get(entity_type)
+                .map(|t| Arc::new(RwLock::new((**t).clone())))
+        });
+        let Some(table_ref) = table else {
+            return Ok(None);
+        };
+        let table = table_ref
+            .read()
+            .expect("transition table lock poisoned")
+            .clone();
+        if !table.rules.is_empty() {
+            return Ok(None);
+        }
+
+        let Some((store, backend)) = self.event_journal() else {
+            return Ok(None);
+        };
+        let Some(query_plane) = self.query_plane_store() else {
+            return Ok(None);
+        };
+
+        let persistence_id = format!("{tenant}:{entity_type}:{entity_id}");
+        let mut fields = initial_fields.clone();
+        if let Some(obj) = fields.as_object_mut() {
+            obj.entry("Id".to_string())
+                .or_insert(serde_json::Value::String(entity_id.to_string()));
+            obj.entry("Status".to_string())
+                .or_insert(serde_json::Value::String(table.initial_state.clone()));
+        }
+
+        let mut state = EntityState {
+            entity_type: entity_type.to_string(),
+            entity_id: entity_id.to_string(),
+            status: table.initial_state.clone(),
+            item_count: 0,
+            counters: BTreeMap::new(),
+            booleans: BTreeMap::new(),
+            lists: BTreeMap::new(),
+            fields,
+            events: std::collections::VecDeque::new(),
+            total_event_count: 0,
+            sequence_nr: 0,
+            processed_idempotency_keys: BTreeMap::new(),
+        };
+
+        let created = EntityEvent {
+            action: "Created".to_string(),
+            from_status: String::new(),
+            to_status: state.status.clone(),
+            timestamp: sim_now(),
+            params: initial_fields,
+            idempotency_key: None,
+        };
+        let payload = serde_json::to_value(&created)
+            .map_err(|e| format!("failed to serialize Created event: {e}"))?;
+        let envelope = PersistenceEnvelope {
+            sequence_nr: 1,
+            event_type: created.action.clone(),
+            payload,
+            metadata: EventMetadata {
+                event_id: sim_uuid(),
+                causation_id: sim_uuid(),
+                correlation_id: sim_uuid(),
+                timestamp: created.timestamp,
+                actor_id: persistence_id.clone(),
+            },
+        };
+
+        let projection_fields = self.query_projection_fields(tenant, entity_type, &state.fields);
+        if let Some(native_store) = self.data_only_create_store() {
+            let operation = "native_create";
+            let source = "data_only_create_fast_path";
+            record_projection_update_started(tenant, entity_type, operation, source);
+            let projection_started_at = Instant::now(); // determinism-ok: production-only projection duration metric
+            let native_span = tracing::info_span!(
+                "entity.data_only_create_native_storage",
+                otel.name = "entity.data_only_create_native_storage",
+                tenant = %tenant,
+                entity_type,
+                entity_id,
+            );
+            match native_store
+                .create_data_only_entity(DataOnlyCreateRecord {
+                    tenant: tenant.as_str(),
+                    entity_type,
+                    entity_id,
+                    status: &state.status,
+                    fields: &projection_fields,
+                    event: &envelope,
+                })
+                .instrument(native_span)
+                .await
+            {
+                Ok(new_seq) => {
+                    state.sequence_nr = new_seq;
+                    record_projection_update_success(
+                        tenant,
+                        entity_type,
+                        operation,
+                        source,
+                        state.sequence_nr,
+                        projection_started_at,
+                    );
+                }
+                Err(PersistenceError::ConcurrencyViolation { .. }) => {
+                    record_projection_update_error(
+                        tenant,
+                        entity_type,
+                        operation,
+                        source,
+                        projection_started_at,
+                    );
+                    return Ok(None);
+                }
+                Err(e) => {
+                    record_projection_update_error(
+                        tenant,
+                        entity_type,
+                        operation,
+                        source,
+                        projection_started_at,
+                    );
+                    tracing::error!(
+                        error = %e,
+                        tenant = %tenant,
+                        entity_type = %entity_type,
+                        entity_id = %entity_id,
+                        "failed to update query projection during native data-only create fast path"
+                    );
+                    return Err(format!(
+                        "native data-only create failed for {entity_type}:{entity_id}: {e}"
+                    ));
+                }
+            }
+        } else {
+            let append_started_at = Instant::now(); // determinism-ok: production-only append wait metric
+            let append_result = store
+                .append(&persistence_id, state.sequence_nr, &[envelope])
+                .await;
+            runtime_metrics::record_event_store_append_wait(
+                backend.as_str(),
+                "append",
+                append_started_at.elapsed(),
+            );
+            match append_result {
+                Ok(new_seq) => {
+                    state.sequence_nr = new_seq;
+                }
+                Err(PersistenceError::ConcurrencyViolation { .. }) => {
+                    return Ok(None);
+                }
+                Err(e) => {
+                    return Err(format!(
+                        "failed to persist data-only Created event for {entity_type}:{entity_id}: {e}"
+                    ));
+                }
+            }
+
+            let operation = "upsert";
+            let source = "data_only_create_fast_path";
+            record_projection_update_started(tenant, entity_type, operation, source);
+            let projection_started_at = Instant::now(); // determinism-ok: production-only projection duration metric
+            if let Err(e) = query_plane
+                .upsert_projection(
+                    tenant.as_str(),
+                    entity_type,
+                    entity_id,
+                    &state.status,
+                    &projection_fields,
+                    state.sequence_nr,
+                )
+                .await
+            {
+                record_projection_update_error(
+                    tenant,
+                    entity_type,
+                    operation,
+                    source,
+                    projection_started_at,
+                );
+                tracing::error!(
+                    error = %e,
+                    tenant = %tenant,
+                    entity_type = %entity_type,
+                    entity_id = %entity_id,
+                    "failed to update query projection during data-only create fast path"
+                );
+                return Err(format!(
+                    "query projection write failed during data-only create: {e}"
+                ));
+            }
+            record_projection_update_success(
+                tenant,
+                entity_type,
+                operation,
+                source,
+                state.sequence_nr,
+                projection_started_at,
+            );
+        }
+        state.push_event_bounded(created);
+
+        {
+            let index_key = format!("{tenant}:{entity_type}");
+            let mut index = self.entity_index.write().unwrap();
+            index
+                .entry(index_key)
+                .or_default()
+                .insert(entity_id.to_string());
+        }
+        runtime_metrics::record_server_state_metrics(self);
+
+        let seq = self.next_entity_event_sequence(tenant.as_str(), entity_type, entity_id);
+        let change = EntityStateChange {
+            seq,
+            entity_type: entity_type.to_string(),
+            entity_id: entity_id.to_string(),
+            action: "Created".to_string(),
+            status: state.status.clone(),
+            tenant: tenant.to_string(),
+            agent_id: None,
+            session_id: None,
+        };
+        self.record_entity_observe_event_with_seq(
+            tenant.as_str(),
+            entity_type,
+            entity_id,
+            seq,
+            "state_change",
+            serde_json::to_value(&change).unwrap_or_default(),
+        );
+        let _ = self.event_tx.send(change);
+
+        Ok(Some(EntityResponse {
+            success: true,
+            state,
+            error: None,
+            custom_effects: vec![],
+            scheduled_actions: vec![],
+            spawn_requests: vec![],
+            spec_governed: true,
+        }))
     }
 
     /// Update fields on an existing entity.

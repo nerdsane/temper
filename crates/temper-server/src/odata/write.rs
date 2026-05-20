@@ -508,6 +508,36 @@ pub async fn handle_odata_post(
             }
 
             match state
+                .try_create_data_only_tenant_entity(
+                    &tenant,
+                    &entity_type,
+                    &entity_id,
+                    initial_fields.clone(),
+                )
+                .await
+            {
+                Ok(Some(response)) => {
+                    let mut state_json = serde_json::to_value(&response.state).unwrap_or_default();
+                    hydrate_blob_refs_for_tenant(&state, &tenant, &mut state_json).await;
+                    let body = annotate_entity(
+                        state_json,
+                        format!("$metadata#{name}/$entity"),
+                        Some(format!("{name}('{entity_id}')")),
+                    );
+                    return ODataResponse {
+                        status: StatusCode::CREATED,
+                        body,
+                    }
+                    .into_response();
+                }
+                Ok(None) => {}
+                Err(e) => {
+                    return odata_error(StatusCode::INTERNAL_SERVER_ERROR, "CreateError", &e)
+                        .into_response();
+                }
+            }
+
+            match state
                 .get_or_create_tenant_entity(&tenant, &entity_type, &entity_id, initial_fields)
                 .await
             {

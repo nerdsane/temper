@@ -1,7 +1,8 @@
 use super::*;
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
-use std::sync::Arc;
+use std::collections::BTreeMap;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use temper_runtime::ActorSystem;
 use temper_runtime::scheduler::sim_now;
@@ -9,6 +10,12 @@ use temper_runtime::tenant::TenantId;
 use temper_spec::csdl::parse_csdl;
 use temper_store_turso::TursoEventStore;
 use tower::ServiceExt;
+use tracing::field::{Field, Visit};
+use tracing::span::{Attributes, Record};
+use tracing::{Id, Subscriber};
+use tracing_subscriber::Layer;
+use tracing_subscriber::layer::Context;
+use tracing_subscriber::registry::LookupSpan;
 
 use crate::registry::SpecRegistry;
 use crate::request_context::AgentContext;
@@ -178,6 +185,93 @@ fn build_app_with_state(state: ServerState) -> Router {
         .nest("/observe", build_observe_router())
         .nest("/api", crate::api::build_api_router())
         .with_state(state)
+}
+
+#[derive(Clone, Default)]
+struct CapturedSpans {
+    spans: Arc<Mutex<Vec<CapturedSpan>>>,
+}
+
+#[derive(Clone, Debug)]
+struct CapturedSpan {
+    name: String,
+    fields: BTreeMap<String, String>,
+}
+
+#[derive(Clone, Copy)]
+struct CapturedSpanIndex(usize);
+
+impl<S> Layer<S> for CapturedSpans
+where
+    S: Subscriber + for<'lookup> LookupSpan<'lookup>,
+{
+    fn on_new_span(&self, attrs: &Attributes<'_>, id: &Id, ctx: Context<'_, S>) {
+        let mut visitor = CapturedFieldVisitor::default();
+        attrs.record(&mut visitor);
+
+        let mut spans = self.spans.lock().expect("span capture lock poisoned");
+        let index = spans.len();
+        spans.push(CapturedSpan {
+            name: attrs.metadata().name().to_string(),
+            fields: visitor.fields,
+        });
+
+        if let Some(span) = ctx.span(id) {
+            span.extensions_mut().insert(CapturedSpanIndex(index));
+        }
+    }
+
+    fn on_record(&self, id: &Id, values: &Record<'_>, ctx: Context<'_, S>) {
+        let Some(span) = ctx.span(id) else {
+            return;
+        };
+        let Some(index) = span.extensions().get::<CapturedSpanIndex>().copied() else {
+            return;
+        };
+
+        let mut visitor = CapturedFieldVisitor::default();
+        values.record(&mut visitor);
+        if let Some(captured) = self
+            .spans
+            .lock()
+            .expect("span capture lock poisoned")
+            .get_mut(index.0)
+        {
+            captured.fields.extend(visitor.fields);
+        }
+    }
+}
+
+#[derive(Default)]
+struct CapturedFieldVisitor {
+    fields: BTreeMap<String, String>,
+}
+
+impl Visit for CapturedFieldVisitor {
+    fn record_bool(&mut self, field: &Field, value: bool) {
+        self.fields
+            .insert(field.name().to_string(), value.to_string());
+    }
+
+    fn record_i64(&mut self, field: &Field, value: i64) {
+        self.fields
+            .insert(field.name().to_string(), value.to_string());
+    }
+
+    fn record_u64(&mut self, field: &Field, value: u64) {
+        self.fields
+            .insert(field.name().to_string(), value.to_string());
+    }
+
+    fn record_str(&mut self, field: &Field, value: &str) {
+        self.fields
+            .insert(field.name().to_string(), value.to_string());
+    }
+
+    fn record_debug(&mut self, field: &Field, value: &dyn std::fmt::Debug) {
+        self.fields
+            .insert(field.name().to_string(), format!("{value:?}"));
+    }
 }
 
 #[tokio::test]
@@ -1001,6 +1095,106 @@ async fn test_entity_wait_returns_terminal_state() {
         ))
         .await
         .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(response.into_body(), 1024 * 1024)
+        .await
+        .unwrap();
+    let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(json["status"], "Submitted");
+    assert_eq!(json["timed_out"], false);
+}
+
+#[test]
+fn test_wait_span_identity_recorder_sets_datadog_filter_fields() {
+    use tracing_subscriber::prelude::*;
+
+    let captured = CapturedSpans::default();
+    let subscriber = tracing_subscriber::registry().with(captured.clone());
+    let _subscriber_guard = tracing::subscriber::set_default(subscriber);
+
+    let span = tracing::info_span!(
+        "handle_wait_for_entity_state",
+        otel.name = "GET /observe/entities/{entity_type}/{entity_id}/wait",
+        tenant = tracing::field::Empty,
+        entity_type = tracing::field::Empty,
+        entity_id = tracing::field::Empty,
+        wait.wake_reason = tracing::field::Empty
+    );
+    let _span_guard = span.enter();
+    entities::record_wait_span_identity(&TenantId::default(), "Order", "order-wait-span-1");
+    tracing::Span::current().record("wait.wake_reason", "initial_state");
+
+    let spans = captured.spans.lock().expect("span capture lock poisoned");
+    let wait_span = spans
+        .iter()
+        .find(|span| span.name == "handle_wait_for_entity_state")
+        .expect("wait route span should be captured");
+
+    assert_eq!(
+        wait_span.fields.get("otel.name").map(String::as_str),
+        Some("GET /observe/entities/{entity_type}/{entity_id}/wait")
+    );
+    assert_eq!(
+        wait_span.fields.get("tenant").map(String::as_str),
+        Some("default")
+    );
+    assert_eq!(
+        wait_span.fields.get("entity_type").map(String::as_str),
+        Some("Order")
+    );
+    assert_eq!(
+        wait_span.fields.get("entity_id").map(String::as_str),
+        Some("order-wait-span-1")
+    );
+    assert_eq!(
+        wait_span.fields.get("wait.wake_reason").map(String::as_str),
+        Some("initial_state")
+    );
+}
+
+#[tokio::test]
+async fn test_entity_wait_wakes_from_state_change_event_before_poll_interval() {
+    let state = test_state_with_registry();
+    let tenant = TenantId::default();
+    let create = state
+        .dispatch_tenant_action(
+            &tenant,
+            "Order",
+            "order-wait-event-1",
+            "AddItem",
+            serde_json::json!({}),
+            &AgentContext::default(),
+        )
+        .await;
+    assert!(create.is_ok(), "AddItem failed: {create:?}");
+
+    let delayed_state = state.clone();
+    tokio::spawn(async move {
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        delayed_state
+            .dispatch_tenant_action(
+                &TenantId::default(),
+                "Order",
+                "order-wait-event-1",
+                "SubmitOrder",
+                serde_json::json!({}),
+                &AgentContext::default(),
+            )
+            .await
+            .expect("SubmitOrder should succeed");
+    });
+
+    let app = build_app_with_state(state);
+    let response = tokio::time::timeout(
+        Duration::from_millis(1500),
+        app.oneshot(system_get(
+            "/observe/entities/Order/order-wait-event-1/wait?statuses=Submitted&timeout_ms=3000&poll_ms=5000",
+        )),
+    )
+    .await
+    .expect("event-driven wait should return before the fallback poll interval")
+    .unwrap();
 
     assert_eq!(response.status(), StatusCode::OK);
     let body = axum::body::to_bytes(response.into_body(), 1024 * 1024)

@@ -164,7 +164,19 @@ pub(crate) struct EntityEventStreamParams {
 }
 
 /// GET /observe/entities/{entity_type}/{entity_id}/wait -- wait for an entity to reach a target status.
-#[instrument(skip_all, fields(otel.name = "GET /observe/entities/{entity_type}/{entity_id}/wait", entity_type, entity_id))]
+#[instrument(
+    skip_all,
+    fields(
+        otel.name = "GET /observe/entities/{entity_type}/{entity_id}/wait",
+        tenant = tracing::field::Empty,
+        entity_type = tracing::field::Empty,
+        entity_id = tracing::field::Empty,
+        wait.mode = "event_driven",
+        wait.wake_reason = tracing::field::Empty,
+        wait.poll_ms = tracing::field::Empty,
+        wait.target_status_count = tracing::field::Empty
+    )
+)]
 pub(crate) async fn handle_wait_for_entity_state(
     State(state): State<ServerState>,
     headers: HeaderMap,
@@ -173,6 +185,7 @@ pub(crate) async fn handle_wait_for_entity_state(
 ) -> Result<Json<serde_json::Value>, StatusCode> {
     require_observe_auth(&state, &headers, "read", &entity_type)?;
     let tenant = extract_tenant(&headers, &state).map_err(|(code, _)| code)?;
+    record_wait_span_identity(&tenant, &entity_type, &entity_id);
 
     let target_statuses: std::collections::BTreeSet<String> = params
         .statuses
@@ -189,28 +202,102 @@ pub(crate) async fn handle_wait_for_entity_state(
 
     let timeout_ms = params.timeout_ms.unwrap_or(120_000).clamp(1, 300_000);
     let poll_ms = params.poll_ms.unwrap_or(250).clamp(10, 5_000);
+    tracing::Span::current().record("wait.poll_ms", poll_ms);
+    tracing::Span::current().record("wait.target_status_count", target_statuses.len() as u64);
+
+    let mut events = state.event_tx.subscribe();
     let deadline = tokio::time::Instant::now() + Duration::from_millis(timeout_ms); // determinism-ok: HTTP handler, not actor code
+    let poll_delay = Duration::from_millis(poll_ms);
+    let poll_sleep = tokio::time::sleep_until(tokio::time::Instant::now() + poll_delay); // determinism-ok: HTTP handler, not actor code
+    let deadline_sleep = tokio::time::sleep_until(deadline); // determinism-ok: HTTP handler, not actor code
+    tokio::pin!(poll_sleep);
+    tokio::pin!(deadline_sleep);
 
-    loop {
-        let entity = state
-            .get_tenant_entity_state(&tenant, &entity_type, &entity_id)
-            .await
-            .map_err(|_| StatusCode::NOT_FOUND)?;
-        let status = entity.state.status.clone();
-        let timed_out = tokio::time::Instant::now() >= deadline; // determinism-ok: HTTP handler, not actor code
-
-        if target_statuses.contains(&status) || timed_out {
-            let mut json = serde_json::to_value(&entity.state)
-                .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-            hydrate_blob_refs_for_tenant(&state, &tenant, &mut json).await;
-            if let Some(obj) = json.as_object_mut() {
-                obj.insert("timed_out".to_string(), serde_json::json!(timed_out));
-            }
-            return Ok(Json(json));
-        }
-
-        tokio::time::sleep(Duration::from_millis(poll_ms)).await; // determinism-ok: HTTP handler, not actor code
+    let entity = load_wait_entity_state(&state, &tenant, &entity_type, &entity_id).await?;
+    if target_statuses.contains(&entity.state.status) {
+        return wait_entity_response(&state, &tenant, &entity, false, "initial_state").await;
     }
+
+    let mut events_closed = false;
+    loop {
+        tokio::select! {
+            event = events.recv(), if !events_closed => {
+                match event {
+                    Ok(change)
+                        if change.tenant == tenant.as_str()
+                            && change.entity_type == entity_type
+                            && change.entity_id == entity_id =>
+                    {
+                        let entity = load_wait_entity_state(&state, &tenant, &entity_type, &entity_id).await?;
+                        if target_statuses.contains(&entity.state.status) {
+                            return wait_entity_response(&state, &tenant, &entity, false, "event").await;
+                        }
+                    }
+                    Ok(_) => {}
+                    Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {
+                        let entity = load_wait_entity_state(&state, &tenant, &entity_type, &entity_id).await?;
+                        if target_statuses.contains(&entity.state.status) {
+                            return wait_entity_response(&state, &tenant, &entity, false, "lagged").await;
+                        }
+                    }
+                    Err(tokio::sync::broadcast::error::RecvError::Closed) => {
+                        events_closed = true;
+                    }
+                }
+            }
+            _ = &mut poll_sleep => {
+                let entity = load_wait_entity_state(&state, &tenant, &entity_type, &entity_id).await?;
+                if target_statuses.contains(&entity.state.status) {
+                    return wait_entity_response(&state, &tenant, &entity, false, "poll").await;
+                }
+                poll_sleep.as_mut().reset(tokio::time::Instant::now() + poll_delay); // determinism-ok: HTTP handler, not actor code
+            }
+            _ = &mut deadline_sleep => {
+                let entity = load_wait_entity_state(&state, &tenant, &entity_type, &entity_id).await?;
+                return wait_entity_response(&state, &tenant, &entity, true, "timeout").await;
+            }
+        }
+    }
+}
+
+pub(super) fn record_wait_span_identity(
+    tenant: &temper_runtime::tenant::TenantId,
+    entity_type: &str,
+    entity_id: &str,
+) {
+    let span = tracing::Span::current();
+    span.record("tenant", tenant.as_str());
+    span.record("entity_type", entity_type);
+    span.record("entity_id", entity_id);
+}
+
+async fn load_wait_entity_state(
+    state: &ServerState,
+    tenant: &temper_runtime::tenant::TenantId,
+    entity_type: &str,
+    entity_id: &str,
+) -> Result<EntityResponse, StatusCode> {
+    state
+        .get_tenant_entity_state(tenant, entity_type, entity_id)
+        .await
+        .map_err(|_| StatusCode::NOT_FOUND)
+}
+
+async fn wait_entity_response(
+    state: &ServerState,
+    tenant: &temper_runtime::tenant::TenantId,
+    entity: &EntityResponse,
+    timed_out: bool,
+    wake_reason: &'static str,
+) -> Result<Json<serde_json::Value>, StatusCode> {
+    tracing::Span::current().record("wait.wake_reason", wake_reason);
+    let mut json =
+        serde_json::to_value(&entity.state).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    hydrate_blob_refs_for_tenant(state, tenant, &mut json).await;
+    if let Some(obj) = json.as_object_mut() {
+        obj.insert("timed_out".to_string(), serde_json::json!(timed_out));
+    }
+    Ok(Json(json))
 }
 
 /// GET /observe/entities/{entity_type}/{entity_id}/events -- replayable SSE stream for one entity.

@@ -26,7 +26,7 @@ const MAX_INDEXABLE_FIELD_VALUE_BYTES: usize = 2000;
 const QUERY_PROJECTION_UPSERT_OPERATION: &str = "query_projection_upsert";
 const QUERY_PROJECTION_REMOVE_OPERATION: &str = "query_projection_remove";
 
-type ScalarFieldIndex = BTreeMap<String, String>;
+pub(crate) type ScalarFieldIndex = BTreeMap<String, String>;
 type CatalogProjectionFingerprint = (String, String, i64);
 
 struct QueryProjectionCatalogUpdate<'a> {
@@ -562,8 +562,15 @@ impl PostgresEventStore {
                 QUERY_PROJECTION_UPSERT_OPERATION,
                 "ok",
             );
-            record_postgres_projection_index_fields(indexed_fields, skipped_fields);
-            record_postgres_projection_index_reconciliation("stale_skipped");
+            record_postgres_projection_index_fields(
+                QUERY_PROJECTION_UPSERT_OPERATION,
+                indexed_fields,
+                skipped_fields,
+            );
+            record_postgres_projection_index_reconciliation(
+                QUERY_PROJECTION_UPSERT_OPERATION,
+                "stale_skipped",
+            );
             transaction_timer.set_outcome("stale_skipped");
             return Ok(());
         } else if previous_catalog.is_some() {
@@ -634,8 +641,15 @@ impl PostgresEventStore {
                         QUERY_PROJECTION_UPSERT_OPERATION,
                         "ok",
                     );
-                    record_postgres_projection_index_fields(indexed_fields, skipped_fields);
-                    record_postgres_projection_index_reconciliation("stale_skipped");
+                    record_postgres_projection_index_fields(
+                        QUERY_PROJECTION_UPSERT_OPERATION,
+                        indexed_fields,
+                        skipped_fields,
+                    );
+                    record_postgres_projection_index_reconciliation(
+                        QUERY_PROJECTION_UPSERT_OPERATION,
+                        "stale_skipped",
+                    );
                     transaction_timer.set_outcome("stale_skipped");
                     return Ok(());
                 }
@@ -698,8 +712,15 @@ impl PostgresEventStore {
             QUERY_PROJECTION_UPSERT_OPERATION,
             "ok",
         );
-        record_postgres_projection_index_fields(indexed_fields, skipped_fields);
-        record_postgres_projection_index_reconciliation(reconciliation_path);
+        record_postgres_projection_index_fields(
+            QUERY_PROJECTION_UPSERT_OPERATION,
+            indexed_fields,
+            skipped_fields,
+        );
+        record_postgres_projection_index_reconciliation(
+            QUERY_PROJECTION_UPSERT_OPERATION,
+            reconciliation_path,
+        );
         transaction_timer.set_outcome("ok");
         Ok(())
     }
@@ -2311,7 +2332,7 @@ impl PostgresEventStore {
     }
 }
 
-fn storage_error(err: impl std::fmt::Display) -> PersistenceError {
+pub(crate) fn storage_error(err: impl std::fmt::Display) -> PersistenceError {
     PersistenceError::Storage(err.to_string())
 }
 
@@ -2335,7 +2356,7 @@ fn parse_optional_rfc3339(
     value.map(parse_rfc3339).transpose()
 }
 
-fn json_hash(value: &serde_json::Value) -> String {
+pub(crate) fn json_hash(value: &serde_json::Value) -> String {
     let mut hasher = Sha256::new();
     hasher.update(value.to_string().as_bytes());
     format!("{:x}", hasher.finalize())
@@ -2357,7 +2378,7 @@ fn scalar_field_value(value: &serde_json::Value) -> Option<String> {
     }
 }
 
-fn scalar_index_fields(fields: &serde_json::Value) -> (ScalarFieldIndex, u64, u64) {
+pub(crate) fn scalar_index_fields(fields: &serde_json::Value) -> (ScalarFieldIndex, u64, u64) {
     let mut indexed = ScalarFieldIndex::new();
     let mut skipped_fields = 0_u64;
 

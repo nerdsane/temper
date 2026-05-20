@@ -63,8 +63,8 @@ use crate::idempotency::IdempotencyCache;
 use crate::registry::SpecRegistry;
 use crate::secrets::vault::SecretsVault;
 use crate::storage::{
-    BackendLabel, BoxedEventStore, MetadataStore, PolicyStore, QueryPlaneStore, StorageStack,
-    TrajectorySink,
+    BackendLabel, BoxedEventStore, DataOnlyCreateStore, MetadataStore, PolicyStore,
+    QueryPlaneStore, StorageStack, TrajectorySink,
 };
 use crate::trigger::ReactionDispatcher;
 use crate::wasm_registry::WasmModuleRegistry;
@@ -251,8 +251,8 @@ fn normalize_local_tdata_host(raw: &str) -> Option<String> {
 
 fn env_local_tdata_hosts() -> BTreeSet<String> {
     let mut hosts = BTreeSet::new();
-    if let Ok(raw) = std::env::var("TEMPER_LOCAL_TDATA_HOSTS") {
-        // determinism-ok: read once at startup
+    let configured_hosts = std::env::var("TEMPER_LOCAL_TDATA_HOSTS"); // determinism-ok: read once at startup
+    if let Ok(raw) = configured_hosts {
         for item in raw.split(',') {
             if let Some(host) = normalize_local_tdata_host(item) {
                 hosts.insert(host);
@@ -266,11 +266,11 @@ fn env_local_tdata_hosts() -> BTreeSet<String> {
         "RAILWAY_PUBLIC_DOMAIN",
         "RAILWAY_STATIC_URL",
     ] {
-        if let Ok(raw) = std::env::var(name) {
-            // determinism-ok: read once at startup
-            if let Some(host) = normalize_local_tdata_host(&raw) {
-                hosts.insert(host);
-            }
+        let raw = std::env::var(name); // determinism-ok: read once at startup
+        if let Ok(raw) = raw
+            && let Some(host) = normalize_local_tdata_host(&raw)
+        {
+            hosts.insert(host);
         }
     }
 
@@ -539,6 +539,13 @@ impl ServerState {
         self.storage_stack
             .as_ref()
             .and_then(|stack| stack.query_plane.clone())
+    }
+
+    /// Return the native data-only create capability when the backend supports it.
+    pub(crate) fn data_only_create_store(&self) -> Option<Arc<dyn DataOnlyCreateStore>> {
+        self.storage_stack
+            .as_ref()
+            .and_then(|stack| stack.data_only_create.clone())
     }
 
     /// Return the runtime event journal capability plus backend label.

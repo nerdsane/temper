@@ -281,6 +281,116 @@ fn upsert_query_projection_diffs_field_index_rows() {
 }
 
 #[test]
+fn native_data_only_create_inserts_event_catalog_and_index_atomically() {
+    let database_url = match std::env::var("DATABASE_URL") {
+        Ok(url) => url,
+        Err(_) => return,
+    };
+
+    sqlx::test_block_on(async {
+        let pool = PgPool::connect(&database_url).await.unwrap();
+        run_migrations(&pool).await.unwrap();
+        let store = PostgresEventStore::new(pool.clone());
+        let tenant = format!("tenant-native-data-only-{}", uuid::Uuid::new_v4());
+        let entity_type = "SessionEntry";
+        let entity_id = "entry-native";
+        let fields = serde_json::json!({
+            "Id": entity_id,
+            "SessionId": "ss-native",
+            "EntryId": entity_id,
+            "Role": "assistant",
+            "Sequence": 2,
+            "Content": "hello"
+        });
+        let mut envelope = test_envelope("Created", fields.clone());
+        envelope.sequence_nr = 1;
+
+        let sequence_nr = store
+            .create_data_only_entity_native(
+                &tenant,
+                entity_type,
+                entity_id,
+                "Active",
+                &fields,
+                &envelope,
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(sequence_nr, 1);
+        let event_count: i64 = crate::dbm::postgres_query_scalar!(
+            "SELECT COUNT(*)::bigint FROM events \
+             WHERE tenant = $1 AND entity_type = $2 AND entity_id = $3",
+        )
+        .bind(&tenant)
+        .bind(entity_type)
+        .bind(entity_id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(event_count, 1);
+
+        let catalog: Option<(String, serde_json::Value, i64)> = crate::dbm::postgres_query_as!(
+            "SELECT status, fields, sequence_nr FROM entity_catalog \
+             WHERE tenant = $1 AND entity_type = $2 AND entity_id = $3",
+        )
+        .bind(&tenant)
+        .bind(entity_type)
+        .bind(entity_id)
+        .fetch_optional(&pool)
+        .await
+        .unwrap();
+        let (status, stored_fields, stored_sequence) = catalog.unwrap();
+        assert_eq!(status, "Active");
+        assert_eq!(stored_fields, fields);
+        assert_eq!(stored_sequence, 1);
+
+        let indexed_count: i64 = crate::dbm::postgres_query_scalar!(
+            "SELECT COUNT(*)::bigint FROM entity_field_index \
+             WHERE tenant = $1 AND entity_type = $2 AND entity_id = $3",
+        )
+        .bind(&tenant)
+        .bind(entity_type)
+        .bind(entity_id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert!(indexed_count >= 5);
+
+        let duplicate = store
+            .create_data_only_entity_native(
+                &tenant,
+                entity_type,
+                entity_id,
+                "Active",
+                &fields,
+                &envelope,
+            )
+            .await;
+        assert!(matches!(
+            duplicate,
+            Err(PersistenceError::ConcurrencyViolation { .. })
+        ));
+
+        crate::dbm::postgres_query!("DELETE FROM entity_field_index WHERE tenant = $1")
+            .bind(&tenant)
+            .execute(&pool)
+            .await
+            .unwrap();
+        crate::dbm::postgres_query!("DELETE FROM entity_catalog WHERE tenant = $1")
+            .bind(&tenant)
+            .execute(&pool)
+            .await
+            .unwrap();
+        crate::dbm::postgres_query!("DELETE FROM events WHERE tenant = $1")
+            .bind(&tenant)
+            .execute(&pool)
+            .await
+            .unwrap();
+    });
+}
+
+#[test]
 fn upsert_query_projection_advances_sequence_without_rewriting_unchanged_index() {
     let database_url = match std::env::var("DATABASE_URL") {
         Ok(url) => url,
