@@ -62,8 +62,23 @@ enum Commands {
         #[arg(short, long, default_value = "specs")]
         specs_dir: String,
     },
-    /// Install the Temper App Builder skill into Claude Code (global)
-    Install,
+    /// Install Claude/Codex helper skills, or install a Genesis app ref into Temper
+    Install {
+        /// Genesis app ref to install, for example `owner/app@hash`. Omit to install Claude/Codex helper skills.
+        app_ref: Option<String>,
+        /// Target tenant for Genesis app installation.
+        #[arg(long, default_value = "default")]
+        tenant: String,
+        /// Tenant that hosts the Genesis registry App row.
+        #[arg(long, default_value = "default")]
+        registry_tenant: String,
+        /// Base URL for the Temper/Genesis server.
+        #[arg(long, default_value = "http://127.0.0.1:3000")]
+        url: String,
+        /// Installer identity recorded on the AppInstallation row.
+        #[arg(long, default_value = "temper-cli")]
+        installer: String,
+    },
     /// Approve or deny pending governance decisions from the terminal
     Decide {
         /// Port where Temper HTTP server is running
@@ -104,8 +119,8 @@ enum Commands {
         ///   --app NAME=DIR       load a user app's specs from a directory
         ///                        (e.g. --app ecommerce=reference-apps/ecommerce/specs)
         ///
-        /// `--skill` and `--os-app` are accepted as aliases for backward compatibility.
-        #[arg(long, visible_aliases = ["os-app", "skill"])]
+        /// `--os-app` is accepted as an alias for backward compatibility.
+        #[arg(long, visible_alias = "os-app")]
         app: Vec<String>,
         /// Skip the Observe UI (Next.js dev server in observe/)
         #[arg(long)]
@@ -233,7 +248,19 @@ async fn main() -> anyhow::Result<()> {
 
     match cli.command {
         Commands::Init { name } => init::run(&name)?,
-        Commands::Install => install::run()?,
+        Commands::Install {
+            app_ref,
+            tenant,
+            registry_tenant,
+            url,
+            installer,
+        } => match app_ref {
+            Some(app_ref) => {
+                install::run_genesis_app(&url, &registry_tenant, &tenant, &app_ref, &installer)
+                    .await?
+            }
+            None => install::run()?,
+        },
         Commands::Decide { port, tenant } => decide::run(port, &tenant).await?,
         Commands::Codegen {
             specs_dir,
@@ -412,7 +439,40 @@ mod tests {
     fn test_cli_parse_install() {
         let cli = Cli::parse_from(["temper", "install"]);
         match cli.command {
-            Commands::Install => {}
+            Commands::Install { app_ref, .. } => assert!(app_ref.is_none()),
+            _ => panic!("expected Install command"),
+        }
+    }
+
+    #[test]
+    fn test_cli_parse_genesis_app_install() {
+        let cli = Cli::parse_from([
+            "temper",
+            "install",
+            "acme/notes@abc123",
+            "--tenant",
+            "tenant-a",
+            "--registry-tenant",
+            "genesis",
+            "--url",
+            "https://genesis.example",
+            "--installer",
+            "temperpaw",
+        ]);
+        match cli.command {
+            Commands::Install {
+                app_ref,
+                tenant,
+                registry_tenant,
+                url,
+                installer,
+            } => {
+                assert_eq!(app_ref.as_deref(), Some("acme/notes@abc123"));
+                assert_eq!(tenant, "tenant-a");
+                assert_eq!(registry_tenant, "genesis");
+                assert_eq!(url, "https://genesis.example");
+                assert_eq!(installer, "temperpaw");
+            }
             _ => panic!("expected Install command"),
         }
     }
@@ -633,19 +693,6 @@ mod tests {
     fn test_cli_parse_serve_with_app_install() {
         // Bare `--app NAME` (no =) installs a built-in OS app.
         let cli = Cli::parse_from(["temper", "serve", "--app", "project-management"]);
-        match cli.command {
-            Commands::Serve { app, .. } => {
-                assert_eq!(app.len(), 1);
-                assert_eq!(app[0], "project-management");
-            }
-            _ => panic!("expected Serve command"),
-        }
-    }
-
-    #[test]
-    fn test_cli_parse_serve_with_skill_alias() {
-        // --skill is a backward-compatible alias for --app.
-        let cli = Cli::parse_from(["temper", "serve", "--skill", "project-management"]);
         match cli.command {
             Commands::Serve { app, .. } => {
                 assert_eq!(app.len(), 1);

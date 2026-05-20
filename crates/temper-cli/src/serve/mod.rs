@@ -57,7 +57,7 @@ struct LoadedTenantSpecs {
 pub async fn run(
     port: u16,
     apps: Vec<(String, String)>,
-    skills: Vec<String>,
+    os_app_installs: Vec<String>,
     storage: StorageBackend,
     storage_explicit: bool,
     actor_runtime: ActorRuntimeBackend,
@@ -78,7 +78,7 @@ pub async fn run(
         bootstrap::init_storage(storage.clone(), storage_explicit).await?;
 
     // Phase 2: Registry (restore + disk apps)
-    let (registry, mut tenant_policy_seed) =
+    let (registry, tenant_policy_seed) =
         bootstrap::build_registry(pg_pool.as_ref(), storage_stack.as_ref(), &apps).await?;
 
     // Assemble platform state
@@ -92,15 +92,7 @@ pub async fn run(
     let data_dir = Path::new(&home).join(".local/share/temper");
     state.server.data_dir = data_dir.clone();
 
-    // Phase 3: Auto-reload previously registered specs
-    let (auto_reloaded, auto_reloaded_policies) = bootstrap::auto_reload_specs(&state, &data_dir);
-    tenant_policy_seed.extend(auto_reloaded_policies);
-
     seed_cedar_policies(&state, tenant_policy_seed);
-    println!(
-        "  Auto-reloaded {auto_reloaded} specs entries from {}",
-        data_dir.join("specs-registry.json").display()
-    );
     state.server.rebuild_reaction_dispatcher();
 
     // Configure subprocess verification if requested.
@@ -248,8 +240,8 @@ pub async fn run(
 
     // Phase 8: Bootstrap system + agent tenants
     bootstrap::bootstrap_tenants(&state, &apps).await;
-    // Phase 8b: Restore persisted skills + apply CLI `--skill` requests.
-    bootstrap::bootstrap_installed_apps(&state, &skills).await?;
+    // Phase 8b: Restore persisted apps + apply CLI `--app` requests.
+    bootstrap::bootstrap_installed_apps(&state, &os_app_installs).await?;
     if actor_runtime == ActorRuntimeBackend::Postgres {
         pg_actor_runtime_cancel = Some(
             actor_runtime::install_postgres_actor_runtime(

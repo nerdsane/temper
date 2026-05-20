@@ -32,7 +32,7 @@ async fn dst_boot_cycle_full_lifecycle() {
         let entity_types = harness
             .install_app(TENANT, "project-management")
             .await
-            .unwrap_or_else(|e| panic!("seed {seed}: install_skill failed: {e}"));
+            .unwrap_or_else(|e| panic!("seed {seed}: install_os_app failed: {e}"));
         assert!(
             !entity_types.is_empty(),
             "seed {seed}: no entity types installed"

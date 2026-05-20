@@ -90,7 +90,7 @@ impl SimPlatformHarness {
     /// Override an existing entity's IOA spec inline (hot-swap).
     ///
     /// Useful for testing state machines in isolation without WASM integrations.
-    /// The tenant and entity type must already be registered (via `install_skill`).
+    /// The tenant and entity type must already be registered (via `install_os_app`).
     pub fn register_inline_spec(&self, tenant: &str, entity_type: &str, ioa_source: &str) {
         let automaton =
             temper_spec::automaton::parse_automaton(ioa_source).expect("inline IOA should parse");

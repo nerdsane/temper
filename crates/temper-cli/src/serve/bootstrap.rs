@@ -182,48 +182,6 @@ pub(super) async fn build_registry(
     Ok((registry, tenant_policy_seed))
 }
 
-/// Phase 3: Auto-reload previously registered specs from `specs-registry.json`.
-pub(super) fn auto_reload_specs(
-    state: &PlatformState,
-    data_dir: &Path,
-) -> (usize, BTreeMap<String, String>) {
-    let specs_registry_path = data_dir.join("specs-registry.json");
-    let mut auto_reloaded = 0usize;
-    let mut tenant_policy_seed = BTreeMap::new();
-
-    if let Ok(content) = fs::read_to_string(&specs_registry_path)
-        && let Ok(value) = serde_json::from_str::<serde_json::Value>(&content)
-        && let Some(entries) = value.as_object()
-    {
-        for (tenant, specs_dir) in entries {
-            let Some(specs_dir) = specs_dir.as_str() else {
-                continue;
-            };
-
-            let loaded = {
-                let mut guard = state.registry.write().unwrap(); // ci-ok: infallible lock
-                load_into_registry(&mut guard, specs_dir, tenant)
-            };
-
-            match loaded {
-                Ok(loaded) => {
-                    auto_reloaded += 1;
-                    if let Some(text) = loaded.cedar_policy_text {
-                        tenant_policy_seed.insert(tenant.clone(), text);
-                    }
-                }
-                Err(e) => {
-                    eprintln!(
-                        "  Warning: failed to auto-reload app {tenant} from {specs_dir}: {e}"
-                    );
-                }
-            }
-        }
-    }
-
-    (auto_reloaded, tenant_policy_seed)
-}
-
 /// Phase 4: Load webhook configurations from app directories.
 pub(super) fn load_webhooks(apps: &[(String, String)]) -> Option<Arc<WebhookDispatcher>> {
     let mut all_configs = Vec::new();
@@ -520,17 +478,17 @@ enum AppBootstrapSource {
     Cli,
 }
 
-/// Phase 8b: Restore persisted skills and apply `--skill` requests.
+/// Phase 8b: Restore persisted local apps and apply explicit `--app` requests.
 ///
 /// Why this exists:
 /// - agent bootstrap (Phase 8) can replace tenant specs;
-/// - Skill installs are durably tracked in `tenant_installed_apps`.
+/// - App installs are durably tracked in `tenant_installed_apps`.
 ///
-/// This phase replays persisted installs so skill entities remain available
+/// This phase replays persisted installs so app entities remain available
 /// after restart, and then applies explicit CLI installs for `default`.
 pub(super) async fn bootstrap_installed_apps(
     state: &PlatformState,
-    skills: &[String],
+    apps: &[String],
 ) -> anyhow::Result<()> {
     let mut requested: BTreeMap<(String, String), AppBootstrapSource> = BTreeMap::new();
 
@@ -552,24 +510,9 @@ pub(super) async fn bootstrap_installed_apps(
         }
     }
 
-    // Fix (dark-helix): when TEMPER_AUTO_INSTALL_APPS=true, auto-install
-    // every app discovered in the OS-app catalog into the tenant named by
-    // TEMPER_TENANT (defaulting to "default"). Unblocks Postgres-only
-    // deployments whose registry is wiped on restart and where
-    // list_all_installed_apps isn't tracked in the store. See
-    // nerdsane/temper#150.
-    if std::env::var("TEMPER_AUTO_INSTALL_APPS").ok().as_deref() == Some("true") {
-        let auto_tenant = std::env::var("TEMPER_TENANT").unwrap_or_else(|_| "default".to_string());
-        for entry in temper_platform::os_apps::list_os_apps() {
-            requested
-                .entry((auto_tenant.clone(), entry.name.clone()))
-                .or_insert(AppBootstrapSource::Cli);
-        }
-    }
-
-    for skill_name in skills {
+    for app_name in apps {
         requested
-            .entry(("default".to_string(), skill_name.clone()))
+            .entry(("default".to_string(), app_name.clone()))
             .and_modify(|source| *source = AppBootstrapSource::Cli)
             .or_insert(AppBootstrapSource::Cli);
     }
@@ -594,6 +537,12 @@ pub(super) async fn bootstrap_installed_apps(
         );
     }
 
+    let restored_genesis_caches =
+        temper_platform::genesis_install::restore_genesis_app_cache_roots(state).await;
+    if restored_genesis_caches > 0 {
+        println!("  Restored {restored_genesis_caches} Genesis app cache roots");
+    }
+
     for ((tenant, app_name), source) in requested {
         // Replay through the real installer every startup. Presence-only checks
         // are not sufficient because an installed app's bundle can drift:
@@ -610,7 +559,7 @@ pub(super) async fn bootstrap_installed_apps(
                         .cloned()
                         .collect();
                     println!(
-                        "  Restored skill '{app_name}' for '{tenant}': {}",
+                        "  Restored app '{app_name}' for '{tenant}': {}",
                         all.join(", ")
                     );
                 }
@@ -623,13 +572,13 @@ pub(super) async fn bootstrap_installed_apps(
                         .cloned()
                         .collect();
                     println!(
-                        "  Skill '{app_name}' installed for '{tenant}': {}",
+                        "  App '{app_name}' installed for '{tenant}': {}",
                         all.join(", ")
                     );
                 }
             },
             Err(e) => {
-                eprintln!("  Warning: failed to install skill '{app_name}' for '{tenant}': {e}");
+                eprintln!("  Warning: failed to install app '{app_name}' for '{tenant}': {e}");
             }
         }
     }

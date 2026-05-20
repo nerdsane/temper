@@ -190,9 +190,6 @@ pub struct AppEntry {
     pub dependencies: Vec<String>,
 }
 
-// Backward-compatible alias: SkillEntry → AppEntry.
-pub type SkillEntry = AppEntry;
-
 /// Full spec bundle for an app (owned, loaded from disk).
 pub struct AppBundle {
     /// Effective deployment mode used while loading the bundle.

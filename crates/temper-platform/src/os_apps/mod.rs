@@ -1,11 +1,8 @@
-//! OS App Catalog — agent-installable pre-built application specs.
+//! OS App Catalog — dev/local pre-built application specs.
 //!
 //! OS apps are spec bundles (IOA TOML + CSDL + Cedar policies) loaded from
-//! the `os-apps/` directory at runtime. Agents discover them via
+//! the `os-apps/` directory in local development and tests. Agents discover them via
 //! `list_os_apps()` / `install_os_app()`.
-//!
-//! Backward-compatible skill aliases are preserved (`list_skills()`,
-//! `install_skill()`) to avoid breaking older callers.
 //!
 //! Install reuses [`crate::bootstrap::bootstrap_tenant_specs`] so every app goes through the same verification cascade as system specs.
 
@@ -24,16 +21,12 @@ use crate::state::PlatformState;
 mod agent_bootstrap;
 mod app_catalog;
 mod closure_bootstrap;
-pub mod git_sources;
 mod reconcile;
 mod runtime_heal;
 mod system_files;
 mod types;
 pub(super) use app_catalog::catalog;
-pub use app_catalog::{
-    add_os_apps_dir, list_startup_os_apps, reload_os_apps, reload_skills, set_os_apps_dir,
-    set_skills_dir,
-};
+pub use app_catalog::{add_os_apps_dir, list_startup_os_apps, reload_os_apps, set_os_apps_dir};
 pub use closure_bootstrap::{
     ClosureBootstrapResult, OS_APP_CLOSURE_RESOLVER_VERSION, OsAppClosure,
     bootstrap_closure_manifest, os_app_closure_for_roots, parse_bootstrap_manifest_str,
@@ -153,9 +146,6 @@ struct SeedFile {
     #[serde(rename = "instance", default)]
     instances: Vec<SeedInstance>,
 }
-
-// Backward-compatible alias: SkillBundle → AppBundle.
-pub type SkillBundle = AppBundle;
 
 // Backward-compatible type aliases.
 pub type OsAppEntry = AppEntry;
@@ -818,11 +808,6 @@ pub fn list_os_apps() -> Vec<AppEntry> {
     cat.entries.clone()
 }
 
-/// Backward-compatible alias.
-pub fn list_skills() -> Vec<AppEntry> {
-    list_os_apps()
-}
-
 /// Get the full spec bundle for an OS app by name.
 ///
 /// Reads IOA, CSDL, and Cedar files from disk on each call so changes
@@ -833,11 +818,6 @@ pub fn get_os_app(name: &str) -> Option<AppBundle> {
     load_app_bundle(app_dir)
 }
 
-/// Backward-compatible alias.
-pub fn get_skill(name: &str) -> Option<AppBundle> {
-    get_os_app(name)
-}
-
 /// Get the full app guide markdown for an app by name.
 pub fn get_app_guide(name: &str) -> Option<String> {
     let cat = catalog().read().unwrap(); // ci-ok: infallible lock
@@ -845,11 +825,6 @@ pub fn get_app_guide(name: &str) -> Option<String> {
         .iter()
         .find(|e| e.name == name)
         .and_then(|e| e.app_guide.clone())
-}
-
-/// Backward-compatible alias.
-pub fn get_skill_guide(name: &str) -> Option<String> {
-    get_app_guide(name)
 }
 
 /// Load a complete app bundle from a directory on disk.
@@ -1509,15 +1484,6 @@ async fn should_replace_uploaded_wasm_for_bundle_reconcile(
             false
         }
     }
-}
-
-/// Backward-compatible alias.
-pub async fn install_skill(
-    state: &PlatformState,
-    tenant: &str,
-    skill_name: &str,
-) -> Result<InstallResult, String> {
-    install_os_app(state, tenant, skill_name).await
 }
 
 // ── Bootstrap helpers (entity creation during install) ───────────────

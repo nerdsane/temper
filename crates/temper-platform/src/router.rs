@@ -42,19 +42,6 @@ pub fn build_platform_router(state: PlatformState) -> Router {
             "/observe/os-apps/{name}/install",
             routing::post(crate::tenant_api::install_os_app),
         )
-        // Backward-compatible aliases
-        .route(
-            "/observe/skills",
-            routing::get(crate::tenant_api::list_skills),
-        )
-        .route(
-            "/observe/skills/{name}",
-            routing::get(crate::tenant_api::get_skill_guide),
-        )
-        .route(
-            "/observe/skills/{name}/install",
-            routing::post(crate::tenant_api::install_skill),
-        )
         .route(
             "/observe/tenants/{id}",
             routing::delete(crate::tenant_api::delete_tenant),
@@ -168,23 +155,12 @@ mod tests {
         let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
         let apps = json["apps"].as_array().unwrap();
         assert!(!apps.is_empty());
-        // Verify a known skill is present (order depends on filesystem scan).
+        // Verify a known app is present (order depends on filesystem scan).
         let names: Vec<&str> = apps.iter().filter_map(|a| a["name"].as_str()).collect();
         assert!(
             names.contains(&"project-management"),
             "missing project-management: {names:?}"
         );
-    }
-
-    #[tokio::test]
-    async fn test_get_skills_alias_returns_200() {
-        let app = build_platform_router(test_state());
-        let response = app
-            .oneshot(Request::get("/api/skills").body(Body::empty()).unwrap())
-            .await
-            .unwrap();
-
-        assert_eq!(response.status(), StatusCode::OK);
     }
 
     #[tokio::test]
@@ -234,7 +210,7 @@ mod tests {
         let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
         let apps = json["apps"].as_array().unwrap();
         assert!(!apps.is_empty());
-        // Verify a known skill is present (order depends on filesystem scan).
+        // Verify a known app is present (order depends on filesystem scan).
         let names: Vec<&str> = apps.iter().filter_map(|a| a["name"].as_str()).collect();
         assert!(
             names.contains(&"project-management"),

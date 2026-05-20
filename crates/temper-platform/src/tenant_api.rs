@@ -89,10 +89,6 @@ pub fn tenant_api_router() -> Router<PlatformState> {
         .route("/os-apps", routing::get(list_os_apps))
         .route("/os-apps/{name}", routing::get(get_os_app_guide))
         .route("/os-apps/{name}/install", routing::post(install_os_app))
-        // Backward-compatible aliases
-        .route("/skills", routing::get(list_skills))
-        .route("/skills/{name}", routing::get(get_skill_guide))
-        .route("/skills/{name}/install", routing::post(install_skill))
 }
 
 /// `POST /api/tenants` — provision a new tenant database.
@@ -395,23 +391,4 @@ pub(crate) async fn install_os_app(
             Json(serde_json::json!({ "error": e })),
         ),
     }
-}
-
-/// Backward-compatible alias for `/api/skills`.
-pub(crate) async fn list_skills() -> impl IntoResponse {
-    list_os_apps().await
-}
-
-/// Backward-compatible alias for `/api/skills/:name`.
-pub(crate) async fn get_skill_guide(path: axum::extract::Path<String>) -> impl IntoResponse {
-    get_os_app_guide(path).await
-}
-
-/// Backward-compatible alias for `/api/skills/:name/install`.
-pub(crate) async fn install_skill(
-    state: State<PlatformState>,
-    path: axum::extract::Path<String>,
-    body: Json<InstallAppRequest>,
-) -> impl IntoResponse {
-    install_os_app(state, path, body).await
 }

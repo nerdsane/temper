@@ -77,16 +77,6 @@ pub fn reload_os_apps() {
     *catalog().write().unwrap() = new; // ci-ok: infallible lock
 }
 
-/// Backward-compatible alias.
-pub fn set_skills_dir(dir: PathBuf) {
-    set_os_apps_dir(dir);
-}
-
-/// Backward-compatible alias.
-pub fn reload_skills() {
-    reload_os_apps();
-}
-
 /// List OS apps that belong to the default startup surface.
 pub fn list_startup_os_apps() -> Vec<String> {
     let cat = match catalog().read() {
@@ -119,18 +109,6 @@ impl AppCatalog {
             }
         }
 
-        // Priority 1b: legacy TEMPER_SKILLS_DIR env var.
-        if let Ok(dir) = std::env::var("TEMPER_SKILLS_DIR") {
-            let path = PathBuf::from(dir);
-            if path.is_dir() {
-                tracing::info!(
-                    "Loading OS apps from legacy TEMPER_SKILLS_DIR: {}",
-                    path.display()
-                );
-                return Self::from_dir(path);
-            }
-        }
-
         // Priority 2: Relative to this crate's source (works in dev and cargo test).
         let compile_time_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
             .join("..")
@@ -152,22 +130,7 @@ impl AppCatalog {
             return Self::from_dir(canonical);
         }
 
-        // Priority 4: ./skills/ (legacy fallback).
-        let legacy_cwd_dir = PathBuf::from("skills");
-        if legacy_cwd_dir.is_dir() {
-            let canonical = legacy_cwd_dir
-                .canonicalize()
-                .unwrap_or(legacy_cwd_dir.clone());
-            tracing::info!(
-                "Loading OS apps from legacy CWD skills/: {}",
-                canonical.display()
-            );
-            return Self::from_dir(canonical);
-        }
-
-        tracing::warn!(
-            "No os-apps directory found. Set TEMPER_OS_APPS_DIR (or legacy TEMPER_SKILLS_DIR)."
-        );
+        tracing::warn!("No os-apps directory found. Set TEMPER_OS_APPS_DIR for dev/local apps.");
         Self {
             apps_dir: PathBuf::new(),
             additional_dirs: Vec::new(),

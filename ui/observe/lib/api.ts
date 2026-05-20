@@ -24,7 +24,6 @@ import type {
   ExtendedSentinelCheckResponse,
   FeatureRequest,
   FeatureRequestDisposition,
-  SkillsResponse,
   OsAppsResponse,
   PoliciesResponse,
   AllPoliciesResponse,
@@ -491,7 +490,7 @@ export async function fetchFeatureRequests(disposition?: FeatureRequestDispositi
 }
 
 /** Fetch available OS apps from the catalog */
-export async function fetchOsApps(): Promise<SkillsResponse> {
+export async function fetchOsApps(): Promise<OsAppsResponse> {
   const res = await fetchWithRetry(`${API_BASE}/observe/os-apps`, { cache: "no-store" });
   if (!res.ok) throw new ApiError(`Failed to fetch os-apps: ${res.status}`, res.status);
   return res.json();
@@ -507,10 +506,6 @@ export async function installOsApp(name: string, tenant: string): Promise<Record
   if (!res.ok) throw new ApiError(`Failed to install os-app: ${res.status}`, res.status);
   return res.json();
 }
-
-/** Backward-compatible aliases */
-export const fetchSkills = fetchOsApps;
-export const installSkill = installOsApp;
 
 /** Delete a tenant */
 export async function deleteTenant(tenantId: string): Promise<Record<string, unknown>> {

@@ -1,7 +1,7 @@
 //! Platform-level storage abstraction for DST (deterministic simulation testing).
 //!
 //! [`PlatformStore`] abstracts the ~12 platform storage methods used by
-//! `install_skill`, bootstrap, and the verification cascade. The production
+//! `install_os_app`, bootstrap, and the verification cascade. The production
 //! implementation delegates to [`TursoEventStore`]; the simulation implementation
 //! ([`SimPlatformStore`], behind `#[cfg(feature = "sim")]`) uses in-memory
 //! `BTreeMap` storage with fault injection for deterministic testing.
@@ -106,7 +106,7 @@ pub trait PlatformStore: Send + Sync {
 
     /// Delete a spec for a given tenant/entity_type.
     ///
-    /// Used for cleanup when `install_skill` fails mid-write (atomicity)
+    /// Used for cleanup when `install_os_app` fails mid-write (atomicity)
     /// and for reconciliation during `restore_registry_from_platform_store`.
     async fn delete_spec(&self, tenant: &str, entity_type: &str) -> Result<(), String>;
 

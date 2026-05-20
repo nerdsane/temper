@@ -112,9 +112,9 @@ fn test_agent_orchestration_specs_verify() {
 }
 
 #[test]
-fn test_list_skills_returns_catalog() {
-    let apps = list_skills();
-    // Should find the built-in spec-bearing skills.
+fn test_list_os_apps_returns_catalog() {
+    let apps = list_os_apps();
+    // Should find the built-in spec-bearing apps.
     let names: Vec<&str> = apps.iter().map(|e| e.name.as_str()).collect();
     assert!(
         names.contains(&"project-management"),
@@ -229,7 +229,7 @@ async fn test_reconcile_os_app_skips_unchanged_bundle_digest() {
         .server
         .set_storage_stack(temper_server::StorageStack::from_turso(turso));
 
-    install_skill(&state, "test-digest", "project-management")
+    install_os_app(&state, "test-digest", "project-management")
         .await
         .expect("initial install should succeed");
 
@@ -252,7 +252,7 @@ async fn test_install_plan_without_spec_phase_does_not_reclassify_specs() {
     let state = PlatformState::new(None);
     let tenant = "test-install-plan-skip-specs";
 
-    install_skill(&state, tenant, "project-management")
+    install_os_app(&state, tenant, "project-management")
         .await
         .expect("initial install should succeed");
 
@@ -297,7 +297,7 @@ async fn test_reconcile_os_app_delta_content_change_skips_specs() {
         .set_storage_stack(temper_server::StorageStack::from_turso(turso));
     let tenant = "test-delta-content";
 
-    install_skill(&state, tenant, "project-management")
+    install_os_app(&state, tenant, "project-management")
         .await
         .expect("initial install should succeed");
 
@@ -359,7 +359,7 @@ async fn test_reconcile_os_app_repairs_spec_content_drift_despite_matching_diges
     let tenant_name = "test-spec-drift";
     let tenant = TenantId::new(tenant_name);
 
-    install_skill(&state, tenant_name, "project-management")
+    install_os_app(&state, tenant_name, "project-management")
         .await
         .expect("initial install should succeed");
 
@@ -456,7 +456,7 @@ async fn test_reconcile_os_app_repairs_entity_set_map_from_matching_digest() {
     let tenant_name = "test-reconcile-map";
     let tenant = TenantId::new(tenant_name);
 
-    install_skill(&state, tenant_name, "project-management")
+    install_os_app(&state, tenant_name, "project-management")
         .await
         .expect("initial install should succeed");
 
@@ -586,7 +586,7 @@ fn test_intent_discovery_specs_verify() {
 }
 
 #[test]
-fn test_get_skill_project_management() {
+fn test_get_app_project_management() {
     let bundle = get_os_app("project-management");
     assert!(bundle.is_some());
     let bundle = bundle.unwrap();
@@ -651,7 +651,7 @@ fn test_agent_specs_verify() {
 }
 
 #[test]
-fn test_get_skill_agent_orchestration() {
+fn test_get_app_agent_orchestration() {
     let bundle = get_os_app("agent-orchestration");
     assert!(bundle.is_some());
     let bundle = bundle.unwrap();
@@ -662,7 +662,7 @@ fn test_get_skill_agent_orchestration() {
 }
 
 #[test]
-fn test_get_skill_temper_agent() {
+fn test_get_app_temper_agent() {
     let bundle = get_os_app("temper-agent");
     assert!(bundle.is_some());
     let bundle = bundle.unwrap();
@@ -673,7 +673,7 @@ fn test_get_skill_temper_agent() {
 }
 
 #[test]
-fn test_get_skill_intent_discovery() {
+fn test_get_app_intent_discovery() {
     let bundle = get_os_app("intent-discovery");
     assert!(bundle.is_some());
     let bundle = bundle.unwrap();
@@ -684,14 +684,14 @@ fn test_get_skill_intent_discovery() {
 }
 
 #[test]
-fn test_get_skill_nonexistent() {
+fn test_get_app_nonexistent() {
     assert!(get_os_app("nonexistent").is_none());
 }
 
 #[tokio::test]
-async fn test_install_skill_registers_entities() {
+async fn test_install_os_app_registers_entities() {
     let state = PlatformState::new(None);
-    let result = install_skill(&state, "test-pm", "project-management").await;
+    let result = install_os_app(&state, "test-pm", "project-management").await;
     assert!(result.is_ok());
     let result = result.unwrap();
     // Fresh tenant — all 5 specs should be new.
@@ -720,9 +720,9 @@ async fn test_install_skill_registers_entities() {
 }
 
 #[tokio::test]
-async fn test_install_skill_agent_orchestration_registers_entities() {
+async fn test_install_os_app_agent_orchestration_registers_entities() {
     let state = PlatformState::new(None);
-    let result = install_skill(&state, "test-ao", "agent-orchestration").await;
+    let result = install_os_app(&state, "test-ao", "agent-orchestration").await;
     assert!(result.is_ok());
     let result = result.unwrap();
     assert_eq!(
@@ -779,23 +779,23 @@ fn test_bootstrapped_agent_soul_ids_are_stable_and_slugged() {
 }
 
 #[tokio::test]
-async fn test_install_skill_nonexistent_returns_error() {
+async fn test_install_os_app_nonexistent_returns_error() {
     let state = PlatformState::new(None);
-    let result = install_skill(&state, "test", "nonexistent").await;
+    let result = install_os_app(&state, "test", "nonexistent").await;
     assert!(result.is_err());
     assert!(result.unwrap_err().contains("not found in catalog"));
 }
 
 #[tokio::test]
-async fn test_install_multiple_skills_merges_and_is_idempotent() {
+async fn test_install_multiple_apps_merges_and_is_idempotent() {
     let state = PlatformState::new(None);
     let tenant = TenantId::new("test-merge");
 
-    install_skill(&state, "test-merge", "project-management")
+    install_os_app(&state, "test-merge", "project-management")
         .await
         .expect("install project-management");
 
-    install_skill(&state, "test-merge", "agent-orchestration")
+    install_os_app(&state, "test-merge", "agent-orchestration")
         .await
         .expect("install agent-orchestration");
 
@@ -830,7 +830,7 @@ async fn test_install_multiple_skills_merges_and_is_idempotent() {
         );
     }
 
-    let reinstall = install_skill(&state, "test-merge", "project-management")
+    let reinstall = install_os_app(&state, "test-merge", "project-management")
         .await
         .expect("reinstall project-management");
 
@@ -878,7 +878,7 @@ async fn test_reinstall_of_skipped_specs_repairs_entity_set_map() {
     let tenant_name = "test-skipped-map-repair";
     let tenant = TenantId::new(tenant_name);
 
-    install_skill(&state, tenant_name, "project-management")
+    install_os_app(&state, tenant_name, "project-management")
         .await
         .expect("install project-management");
 
@@ -948,7 +948,7 @@ async fn test_reinstall_of_skipped_specs_repairs_entity_set_map() {
         );
     }
 
-    let reinstall = install_skill(&state, tenant_name, "project-management")
+    let reinstall = install_os_app(&state, tenant_name, "project-management")
         .await
         .expect("reinstall project-management");
 
@@ -969,10 +969,10 @@ async fn test_reinstall_of_skipped_specs_repairs_entity_set_map() {
 }
 
 #[tokio::test]
-async fn test_install_skill_activates_tenant_cedar_policies() {
+async fn test_install_os_app_activates_tenant_cedar_policies() {
     let state = PlatformState::new(None);
 
-    install_skill(&state, "test-authz", "project-management")
+    install_os_app(&state, "test-authz", "project-management")
         .await
         .expect("install project-management");
 
@@ -992,10 +992,10 @@ async fn test_install_skill_activates_tenant_cedar_policies() {
     );
     assert!(
         admin_decision.is_allowed(),
-        "expected admin Issue.MoveToTodo to be allowed after skill install: {admin_decision:?}"
+        "expected admin Issue.MoveToTodo to be allowed after app install: {admin_decision:?}"
     );
 
-    install_skill(&state, "test-authz", "temper-agent")
+    install_os_app(&state, "test-authz", "temper-agent")
         .await
         .expect("install temper-agent");
 
@@ -1011,7 +1011,7 @@ async fn test_install_skill_activates_tenant_cedar_policies() {
     );
     assert!(
         configure_decision.is_allowed(),
-        "expected admin TemperAgent.Configure to be allowed after skill install: {configure_decision:?}"
+        "expected admin TemperAgent.Configure to be allowed after app install: {configure_decision:?}"
     );
 }
 
@@ -1023,7 +1023,7 @@ async fn test_install_skill_activates_tenant_cedar_policies() {
 /// 4. Restore registry from Turso.
 /// 5. Verify specs survived the "restart".
 #[tokio::test]
-async fn test_skill_install_survives_restart() {
+async fn test_app_install_survives_restart() {
     use temper_server::registry_bootstrap::restore_registry_from_turso;
     use temper_store_turso::TursoEventStore;
 
@@ -1041,7 +1041,7 @@ async fn test_skill_install_survives_restart() {
     ));
     std::fs::create_dir_all(&state.server.data_dir).unwrap();
 
-    let result = install_skill(&state, "test-ws", "project-management").await;
+    let result = install_os_app(&state, "test-ws", "project-management").await;
     assert!(result.is_ok(), "install failed: {:?}", result.err());
     let result = result.unwrap();
     assert_eq!(result.added.len(), 5);
@@ -1136,7 +1136,7 @@ async fn test_restore_installed_app_heals_pending_specs_on_restart() {
         .server
         .set_storage_stack(temper_server::StorageStack::from_turso(turso));
 
-    install_skill(&state, "test-heal", "project-management")
+    install_os_app(&state, "test-heal", "project-management")
         .await
         .expect("install should succeed");
 
@@ -1212,7 +1212,7 @@ async fn test_runtime_recovery_heals_matching_digest_without_hot_reinstall() {
         .server
         .set_storage_stack(temper_server::StorageStack::from_turso(turso));
 
-    install_skill(&state, "test-runtime-heal", "project-management")
+    install_os_app(&state, "test-runtime-heal", "project-management")
         .await
         .expect("install should succeed");
 
@@ -1301,7 +1301,7 @@ async fn test_runtime_recovery_heals_missing_entity_set_map_from_matching_digest
     let tenant_name = "test-runtime-map-heal";
     let tenant = TenantId::new(tenant_name);
 
-    install_skill(&state, tenant_name, "project-management")
+    install_os_app(&state, tenant_name, "project-management")
         .await
         .expect("install should succeed");
 
@@ -1375,12 +1375,9 @@ async fn test_runtime_recovery_heals_missing_entity_set_map_from_matching_digest
 
 #[test]
 fn test_reload_picks_up_disk_changes() {
-    reload_skills();
-    let skills = list_skills();
-    assert!(
-        !skills.is_empty(),
-        "catalog should not be empty after reload"
-    );
+    reload_os_apps();
+    let apps = list_os_apps();
+    assert!(!apps.is_empty(), "catalog should not be empty after reload");
 }
 
 #[test]
@@ -1977,7 +1974,7 @@ async fn test_install_app_bootstraps_adrs_into_temper_fs() {
     std::fs::create_dir_all(&state.server.data_dir).unwrap();
 
     // Re-add the temp dir before each install — the concurrent
-    // `test_reload_picks_up_disk_changes` test calls `reload_skills()`
+    // `test_reload_picks_up_disk_changes` test calls `reload_os_apps()`
     // which replaces the global catalog, potentially wiping our entry.
     add_os_apps_dir(app_root.clone());
     install_os_app(&state, "test-adr-app", "temper-fs")

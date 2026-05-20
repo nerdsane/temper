@@ -71,6 +71,23 @@ use crate::wasm_registry::WasmModuleRegistry;
 use crate::webhooks::WebhookDispatcher;
 use temper_wasm::{StreamRegistry, WasmEngine, WasmInvocationContext};
 
+/// Platform extension point invoked after a governed OData bound action
+/// succeeds. The hook is deliberately post-dispatch and action-scoped: specs
+/// still define the action, authorize it, and produce any declared writes.
+#[async_trait::async_trait]
+pub trait BoundActionHook: Send + Sync {
+    async fn after_bound_action(
+        &self,
+        state: &ServerState,
+        tenant: &TenantId,
+        entity_type: &str,
+        entity_id: &str,
+        action: &str,
+        params: &serde_json::Value,
+        state_json: &serde_json::Value,
+    ) -> Result<Option<serde_json::Value>, String>;
+}
+
 /// An agent progress event for remote observation via SSE.
 ///
 /// These events are broadcast so that the executor (or any observer) can
@@ -462,6 +479,9 @@ pub struct ServerState {
     /// point that `temper-platform` uses to wire `hooks.rs` into the
     /// dispatch pipeline.
     pub custom_effect_handler: Option<Arc<dyn custom_effects::CustomEffectHandler>>,
+    /// Optional hook for platform-owned post-action work such as installing a
+    /// Genesis app after the spec-owned `App.Install` action succeeds.
+    pub bound_action_hook: Option<Arc<dyn BoundActionHook>>,
     /// Per-tenant HttpEndpoint route tables (ADR-0069 Phase 2).
     /// Consulted by the router fallback to dispatch to WASM
     /// integrations registered via the HttpEndpoint entity.
@@ -625,6 +645,7 @@ impl ServerState {
             suggestion_engine: Arc::new(RwLock::new(PolicySuggestionEngine::new())),
             verify_subprocess_bin: None,
             custom_effect_handler: None,
+            bound_action_hook: None,
             http_endpoint_tables: Arc::new(crate::http_endpoint::HttpEndpointTables::new()),
             http_stream_registry: Arc::new(temper_wasm::http_stream::HttpStreamRegistry::new()),
             workflow_spans: Arc::new(crate::workflow_tracing::WorkflowSpanRegistry::default()),
@@ -866,6 +887,7 @@ impl ServerState {
             suggestion_engine: Arc::new(RwLock::new(PolicySuggestionEngine::new())),
             verify_subprocess_bin: None,
             custom_effect_handler: None,
+            bound_action_hook: None,
             http_endpoint_tables: Arc::new(crate::http_endpoint::HttpEndpointTables::new()),
             http_stream_registry: Arc::new(temper_wasm::http_stream::HttpStreamRegistry::new()),
             workflow_spans: Arc::new(crate::workflow_tracing::WorkflowSpanRegistry::default()),

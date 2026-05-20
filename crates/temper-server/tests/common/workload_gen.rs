@@ -130,7 +130,7 @@ impl WorkloadGenerator {
     }
 
     /// Record that an app was successfully installed (called by the test
-    /// runner after a successful `install_skill`).
+    /// runner after a successful `install_os_app`).
     pub fn record_install(&mut self, tenant: &str, app: &str) {
         let apps = self.installed_apps.entry(tenant.to_string()).or_default();
         if !apps.contains(&app.to_string()) {

@@ -1,7 +1,8 @@
-//! Global skill installation for `temper install`.
+//! Install helpers for `temper install`.
 //!
-//! Copies the Temper App Builder skill to `~/.claude/skills/temper/SKILL.md`
-//! so it auto-triggers on "build me an app" requests from any directory.
+//! With no positional app ref this copies Claude/Codex helper skills into
+//! `~/.claude/skills`. With an `owner/app@hash` ref it invokes the spec-owned
+//! Genesis `App.Install` action on a Temper server.
 
 use std::fs;
 use std::path::Path;
@@ -105,6 +106,80 @@ pub fn run() -> Result<()> {
     let home = dirs::home_dir().context("Could not determine home directory")?;
     let skills_root = home.join(".claude").join("skills");
     install_to(&skills_root)
+}
+
+/// Install a pinned Genesis app ref into a Temper tenant through OData.
+pub async fn run_genesis_app(
+    base_url: &str,
+    registry_tenant: &str,
+    target_tenant: &str,
+    app_ref: &str,
+    installer: &str,
+) -> Result<()> {
+    let (owner, name, _hash) = parse_app_ref(app_ref)?;
+    let app_id = format!(
+        "app-{}-{}",
+        sanitize_id_component(owner),
+        sanitize_id_component(name)
+    );
+    let url = format!(
+        "{}/tdata/Apps('{}')/App.Install",
+        base_url.trim_end_matches('/'),
+        app_id.replace('\'', "''")
+    );
+    let response = reqwest::Client::new()
+        .post(&url)
+        .header("X-Tenant-Id", registry_tenant)
+        .json(&serde_json::json!({
+            "TargetTenant": target_tenant,
+            "AppRef": app_ref,
+            "Installer": installer,
+        }))
+        .send()
+        .await
+        .with_context(|| format!("failed to call Genesis App.Install at {url}"))?;
+    let status = response.status();
+    let body = response.text().await.unwrap_or_default();
+    if !status.is_success() {
+        anyhow::bail!("Genesis app install failed ({status}): {body}");
+    }
+    println!("Installed Genesis app {app_ref} into tenant {target_tenant}");
+    if !body.trim().is_empty() {
+        println!("{body}");
+    }
+    Ok(())
+}
+
+fn parse_app_ref(app_ref: &str) -> Result<(&str, &str, &str)> {
+    let (path, hash) = app_ref
+        .split_once('@')
+        .filter(|(_, hash)| !hash.trim().is_empty())
+        .with_context(|| format!("invalid Genesis app ref '{app_ref}', expected owner/app@hash"))?;
+    let (owner, name) = path
+        .split_once('/')
+        .filter(|(owner, name)| !owner.trim().is_empty() && !name.trim().is_empty())
+        .with_context(|| format!("invalid Genesis app ref '{app_ref}', expected owner/app@hash"))?;
+    Ok((owner, name, hash))
+}
+
+fn sanitize_id_component(input: &str) -> String {
+    let mut out = String::new();
+    let mut last_dash = false;
+    for ch in input.chars().flat_map(char::to_lowercase) {
+        if ch.is_ascii_alphanumeric() {
+            out.push(ch);
+            last_dash = false;
+        } else if !last_dash {
+            out.push('-');
+            last_dash = true;
+        }
+    }
+    let trimmed = out.trim_matches('-').to_string();
+    if trimmed.is_empty() {
+        "item".to_string()
+    } else {
+        trimmed
+    }
 }
 
 #[cfg(test)]
@@ -234,5 +309,22 @@ mod tests {
             !legacy_user_path.exists(),
             "legacy temper-user.md should be removed"
         );
+    }
+
+    #[test]
+    fn parses_genesis_app_refs() {
+        let (owner, name, hash) = parse_app_ref("acme/notes@0123abcd").unwrap();
+        assert_eq!(owner, "acme");
+        assert_eq!(name, "notes");
+        assert_eq!(hash, "0123abcd");
+        assert!(parse_app_ref("acme/notes").is_err());
+        assert!(parse_app_ref("acme/@0123").is_err());
+        assert!(parse_app_ref("/notes@0123").is_err());
+    }
+
+    #[test]
+    fn sanitizes_app_id_components() {
+        assert_eq!(sanitize_id_component("Acme Labs"), "acme-labs");
+        assert_eq!(sanitize_id_component("../"), "item");
     }
 }

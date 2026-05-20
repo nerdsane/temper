@@ -263,7 +263,7 @@ pub(super) async fn dispatch_bound_action(
             entity_type,
             key_str,
             action,
-            body_json,
+            body_json.clone(),
             DispatchExtOptions {
                 agent_ctx: &dispatch_agent_ctx,
                 await_integration,
@@ -289,6 +289,42 @@ pub(super) async fn dispatch_bound_action(
                 http_span.set_attribute(OtelKeyValue::new("http.status_code", 200i64));
 
                 let mut state_json = serde_json::to_value(&response.state).unwrap_or_default();
+                if let Some(hook) = state.bound_action_hook.as_ref() {
+                    match hook
+                        .after_bound_action(
+                            state,
+                            tenant,
+                            entity_type,
+                            key_str,
+                            action,
+                            &body_json,
+                            &state_json,
+                        )
+                        .await
+                    {
+                        Ok(Some(hook_json)) => {
+                            if let (Some(dst), Some(src)) =
+                                (state_json.as_object_mut(), hook_json.as_object())
+                            {
+                                dst.insert(
+                                    "postAction".to_string(),
+                                    serde_json::Value::Object(src.clone()),
+                                );
+                            }
+                        }
+                        Ok(None) => {}
+                        Err(error) => {
+                            http_span.set_status(Status::error(error.clone()));
+                            http_span.set_attribute(OtelKeyValue::new("http.status_code", 500i64));
+                            return odata_error(
+                                StatusCode::INTERNAL_SERVER_ERROR,
+                                "PostActionHookFailed",
+                                &error,
+                            )
+                            .into_response();
+                        }
+                    }
+                }
                 hydrate_blob_refs_for_tenant(state, tenant, &mut state_json).await;
                 let body =
                     annotate_entity(state_json, format!("$metadata#{set_name}/$entity"), None);

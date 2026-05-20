@@ -134,9 +134,9 @@ cargo run -p temper-cli -- serve \
   --port 3463 \
   --storage turso \
   --no-observe \
-  --skill project-management \
-  --skill temper-agent \
-  --skill intent-discovery
+  --app project-management \
+  --app temper-agent \
+  --app intent-discovery
 ```
 
 ### Real end-to-end proof harness

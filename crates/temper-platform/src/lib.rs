@@ -15,6 +15,7 @@ pub mod bearer_auth;
 pub mod bootstrap;
 pub mod deploy;
 pub mod evolution;
+pub mod genesis_install;
 pub mod hooks;
 pub mod identity_cache;
 pub mod integration;
@@ -34,7 +35,5 @@ pub use bootstrap::{
     persist_agent_verification, persist_system_verification,
 };
 pub use os_apps::{AppBundle, AppEntry, AppManifest, InstallResult, install_os_app, list_os_apps};
-// Backward-compatible skill aliases.
-pub use os_apps::{install_skill, list_skills};
 pub use protocol::{PlatformEvent, VerifyStepStatus};
 pub use state::PlatformState;

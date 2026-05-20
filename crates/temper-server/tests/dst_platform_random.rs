@@ -118,7 +118,7 @@ async fn run_workload(
         // Per-operation invariant checking (with faults disabled for reads).
         //
         // P1/P2 (registry-store consistency) can be transiently violated when:
-        //   (a) `install_skill` fails mid-write AND cleanup `delete_spec` fails, OR
+        //   (a) `install_os_app` fails mid-write AND cleanup `delete_spec` fails, OR
         //   (b) A faulted `Restart` runs reconciliation but `delete_spec` also fails
         //
         // These orphans are reconciled on a CLEAN restart (faults disabled).
