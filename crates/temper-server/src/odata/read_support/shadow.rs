@@ -13,6 +13,12 @@ fn catalog_shadow_read_sample_every() -> usize {
     *SAMPLE_EVERY.get_or_init(|| super::env_usize("TEMPER_ODATA_CATALOG_SHADOW_READ_EVERY", 0))
 }
 
+fn catalog_shadow_read_max_per_response() -> usize {
+    static MAX_PER_RESPONSE: OnceLock<usize> = OnceLock::new();
+    *MAX_PER_RESPONSE
+        .get_or_init(|| super::env_usize("TEMPER_ODATA_CATALOG_SHADOW_READ_MAX_PER_RESPONSE", 2))
+}
+
 fn stable_shadow_sample_hash(tenant: &TenantId, entity_type: &str, entity_id: &str) -> u64 {
     let mut hasher = Sha256::new();
     hasher.update(tenant.as_str().as_bytes());
@@ -28,6 +34,15 @@ fn stable_shadow_sample_hash(tenant: &TenantId, entity_type: &str, entity_id: &s
 
 fn should_shadow_check_catalog_row(tenant: &TenantId, entity_type: &str, entity_id: &str) -> bool {
     let sample_every = catalog_shadow_read_sample_every();
+    should_shadow_check_catalog_row_with_sample_every(tenant, entity_type, entity_id, sample_every)
+}
+
+fn should_shadow_check_catalog_row_with_sample_every(
+    tenant: &TenantId,
+    entity_type: &str,
+    entity_id: &str,
+    sample_every: usize,
+) -> bool {
     sample_every > 0
         && stable_shadow_sample_hash(tenant, entity_type, entity_id)
             .is_multiple_of(sample_every as u64)
@@ -59,16 +74,101 @@ fn projection_drift_kind(
     }
 }
 
+pub(super) struct CatalogShadowReadBudget {
+    configured: usize,
+    remaining: usize,
+    scheduled: usize,
+}
+
+impl CatalogShadowReadBudget {
+    pub(super) fn for_entity_set() -> Self {
+        Self::new(catalog_shadow_read_max_per_response())
+    }
+
+    fn new(configured: usize) -> Self {
+        Self {
+            configured,
+            remaining: configured,
+            scheduled: 0,
+        }
+    }
+
+    pub(super) fn configured(&self) -> usize {
+        self.configured
+    }
+
+    pub(super) fn scheduled(&self) -> usize {
+        self.scheduled
+    }
+
+    fn take_if_eligible_with_sample_every(
+        &mut self,
+        tenant: &TenantId,
+        entity_type: &str,
+        entity_id: &str,
+        sample_every: usize,
+    ) -> bool {
+        if self.remaining == 0
+            || !should_shadow_check_catalog_row_with_sample_every(
+                tenant,
+                entity_type,
+                entity_id,
+                sample_every,
+            )
+        {
+            return false;
+        }
+
+        self.remaining -= 1;
+        self.scheduled += 1;
+        true
+    }
+
+    fn take_if_eligible(&mut self, tenant: &TenantId, entity_type: &str, entity_id: &str) -> bool {
+        self.take_if_eligible_with_sample_every(
+            tenant,
+            entity_type,
+            entity_id,
+            catalog_shadow_read_sample_every(),
+        )
+    }
+}
+
 pub(super) fn maybe_spawn_catalog_shadow_check(
     state: &ServerState,
     tenant: &TenantId,
     entity_type: &str,
     row: &EntityCatalogRow,
-) {
+) -> bool {
     if !should_shadow_check_catalog_row(tenant, entity_type, &row.entity_id) {
-        return;
+        return false;
     }
 
+    spawn_catalog_shadow_check_for_row(state, tenant, entity_type, row);
+    true
+}
+
+pub(super) fn maybe_spawn_catalog_shadow_check_with_budget(
+    state: &ServerState,
+    tenant: &TenantId,
+    entity_type: &str,
+    row: &EntityCatalogRow,
+    budget: &mut CatalogShadowReadBudget,
+) -> bool {
+    if !budget.take_if_eligible(tenant, entity_type, &row.entity_id) {
+        return false;
+    }
+
+    spawn_catalog_shadow_check_for_row(state, tenant, entity_type, row);
+    true
+}
+
+fn spawn_catalog_shadow_check_for_row(
+    state: &ServerState,
+    tenant: &TenantId,
+    entity_type: &str,
+    row: &EntityCatalogRow,
+) {
     let state = state.clone();
     let tenant = tenant.clone();
     let entity_type = entity_type.to_string();
@@ -142,7 +242,10 @@ pub(super) fn maybe_spawn_catalog_shadow_check(
 
 #[cfg(test)]
 mod tests {
-    use super::{projection_drift_kind, shadow_sequence_gap, stable_shadow_sample_hash};
+    use super::{
+        CatalogShadowReadBudget, projection_drift_kind, shadow_sequence_gap,
+        stable_shadow_sample_hash,
+    };
     use crate::storage::EntityCatalogRow;
     use temper_runtime::tenant::TenantId;
 
@@ -203,5 +306,33 @@ mod tests {
         assert_eq!(shadow_sequence_gap(4, 9), ("catalog_behind", 5));
         assert_eq!(shadow_sequence_gap(9, 4), ("catalog_ahead", 5));
         assert_eq!(shadow_sequence_gap(7, 7), ("equal", 0));
+    }
+
+    #[test]
+    fn catalog_shadow_budget_caps_eligible_rows_per_response() {
+        let tenant = TenantId::from("tenant-a");
+        let mut budget = CatalogShadowReadBudget::new(2);
+
+        for index in 0..10 {
+            let scheduled = budget.take_if_eligible_with_sample_every(
+                &tenant,
+                "Taxonomy",
+                &format!("tax-{index}"),
+                1,
+            );
+            assert_eq!(scheduled, index < 2);
+        }
+
+        assert_eq!(budget.configured(), 2);
+        assert_eq!(budget.scheduled(), 2);
+    }
+
+    #[test]
+    fn catalog_shadow_budget_preserves_disabled_sampling() {
+        let tenant = TenantId::from("tenant-a");
+        let mut budget = CatalogShadowReadBudget::new(2);
+
+        assert!(!budget.take_if_eligible_with_sample_every(&tenant, "Taxonomy", "tax-1", 0));
+        assert_eq!(budget.scheduled(), 0);
     }
 }
