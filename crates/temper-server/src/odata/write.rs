@@ -333,7 +333,7 @@ pub async fn handle_odata_post(
             )
             .await
             {
-                return resp;
+                return *resp;
             }
 
             if let Err(resp) = enforce_commons_app_name_unique_for_write(
@@ -759,7 +759,7 @@ pub async fn handle_odata_patch(
             )
             .await
             {
-                return resp;
+                return *resp;
             }
 
             if let Err(resp) = enforce_commons_app_name_unique_for_write(
@@ -887,7 +887,7 @@ pub async fn handle_odata_put(
             )
             .await
             {
-                return resp;
+                return *resp;
             }
 
             if let Err(resp) = enforce_commons_app_name_unique_for_write(
@@ -1029,7 +1029,7 @@ pub async fn handle_odata_delete(
             )
             .await
             {
-                return resp;
+                return *resp;
             }
 
             if let Err(resp) = enforce_commons_write_rate_limit(

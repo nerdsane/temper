@@ -510,6 +510,6 @@ mod tests {
         );
 
         let ctx = security_context_from_headers(&headers, None, None, None);
-        assert!(ctx.principal.attributes.get("action_context").is_none());
+        assert!(!ctx.principal.attributes.contains_key("action_context"));
     }
 }

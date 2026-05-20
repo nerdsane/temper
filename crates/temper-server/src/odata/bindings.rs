@@ -19,7 +19,7 @@ use crate::blobs::hydrate_blob_refs_for_tenant;
 use crate::identity::ResolvedIdentity;
 use crate::request_context::AgentContext;
 use crate::response::{ODataResponse, odata_error};
-use crate::state::{DispatchError, DispatchExtOptions, ServerState};
+use crate::state::{BoundActionHookContext, DispatchError, DispatchExtOptions, ServerState};
 
 fn idempotency_actor_key(tenant: &TenantId, entity_type: &str, entity_id: &str) -> String {
     format!("{tenant}:{entity_type}:{entity_id}")
@@ -155,7 +155,7 @@ pub(super) async fn dispatch_bound_action(
         http_span.set_attribute(OtelKeyValue::new("http.status_code", 403i64));
         let end_time: std::time::SystemTime = sim_now().into();
         http_span.end_with_timestamp(end_time);
-        return resp;
+        return *resp;
     }
 
     if let Err(resp) = enforce_commons_write_rate_limit(
@@ -291,15 +291,15 @@ pub(super) async fn dispatch_bound_action(
                 let mut state_json = serde_json::to_value(&response.state).unwrap_or_default();
                 if let Some(hook) = state.bound_action_hook.as_ref() {
                     match hook
-                        .after_bound_action(
+                        .after_bound_action(BoundActionHookContext {
                             state,
                             tenant,
                             entity_type,
-                            key_str,
+                            entity_id: key_str,
                             action,
-                            &body_json,
-                            &state_json,
-                        )
+                            params: &body_json,
+                            state_json: &state_json,
+                        })
                         .await
                     {
                         Ok(Some(hook_json)) => {

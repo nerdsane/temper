@@ -97,6 +97,13 @@ pub mod http_stream {
         pub headers: Vec<(String, String)>,
     }
 
+    pub type ResponseHeadFetcher = fn() -> Result<HttpResponseHead, StreamError>;
+    pub type StreamingCallParts = (
+        HttpRequestBodyWriter,
+        HttpResponseBodyReader,
+        ResponseHeadFetcher,
+    );
+
     /// Inbound HTTP dispatch context delivered through `WasmInvocationContext.http_request`.
     #[derive(Debug, Clone, serde::Deserialize)]
     pub struct InboundHttp {
@@ -136,14 +143,7 @@ pub mod http_stream {
         _method: &str,
         _url: &str,
         _headers: &[(&str, &str)],
-    ) -> Result<
-        (
-            HttpRequestBodyWriter,
-            HttpResponseBodyReader,
-            fn() -> Result<HttpResponseHead, StreamError>,
-        ),
-        StreamError,
-    > {
+    ) -> Result<StreamingCallParts, StreamError> {
         Err(StreamError::Other(
             "http streaming host functions are only available on wasm32".to_string(),
         ))

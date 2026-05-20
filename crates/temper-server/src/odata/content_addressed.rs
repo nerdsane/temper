@@ -194,7 +194,7 @@ async fn ingest_raw_inner(
         enforce_commons_account_verified_for_write(&state, &tenant, entity_type, &initial_fields)
             .await
     {
-        return resp;
+        return *resp;
     }
 
     if let Err(resp) = enforce_commons_storage_cap(

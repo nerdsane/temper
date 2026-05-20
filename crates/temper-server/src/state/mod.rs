@@ -74,17 +74,21 @@ use temper_wasm::{StreamRegistry, WasmEngine, WasmInvocationContext};
 /// Platform extension point invoked after a governed OData bound action
 /// succeeds. The hook is deliberately post-dispatch and action-scoped: specs
 /// still define the action, authorize it, and produce any declared writes.
+pub struct BoundActionHookContext<'a> {
+    pub state: &'a ServerState,
+    pub tenant: &'a TenantId,
+    pub entity_type: &'a str,
+    pub entity_id: &'a str,
+    pub action: &'a str,
+    pub params: &'a serde_json::Value,
+    pub state_json: &'a serde_json::Value,
+}
+
 #[async_trait::async_trait]
 pub trait BoundActionHook: Send + Sync {
     async fn after_bound_action(
         &self,
-        state: &ServerState,
-        tenant: &TenantId,
-        entity_type: &str,
-        entity_id: &str,
-        action: &str,
-        params: &serde_json::Value,
-        state_json: &serde_json::Value,
+        ctx: BoundActionHookContext<'_>,
     ) -> Result<Option<serde_json::Value>, String>;
 }
 

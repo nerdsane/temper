@@ -271,7 +271,7 @@ impl RuntimeRateLimitBucket {
 fn read_string(fields: &Value, key: &str) -> Option<String> {
     fields
         .get(key)
-        .or_else(|| fields.get(&key.to_ascii_lowercase()))
+        .or_else(|| fields.get(key.to_ascii_lowercase()))
         .and_then(|v| v.as_str())
         .map(str::trim)
         .filter(|s| !s.is_empty())
@@ -281,7 +281,7 @@ fn read_string(fields: &Value, key: &str) -> Option<String> {
 fn read_i64(fields: &Value, key: &str) -> Option<i64> {
     let value = fields
         .get(key)
-        .or_else(|| fields.get(&key.to_ascii_lowercase()))?;
+        .or_else(|| fields.get(key.to_ascii_lowercase()))?;
     value
         .as_i64()
         .or_else(|| value.as_u64().and_then(|v| i64::try_from(v).ok()))

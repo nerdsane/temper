@@ -126,10 +126,11 @@ impl ServerState {
 
         let mut pending_repositories = BTreeMap::new();
         for write in writes {
-            if write.entity_type == REPOSITORY_ENTITY_TYPE && is_create_action(&write.action) {
-                if let Some(owner_id) = repository_owner_from_fields(&write.fields) {
-                    pending_repositories.insert(write.entity_id.clone(), owner_id);
-                }
+            if write.entity_type == REPOSITORY_ENTITY_TYPE
+                && is_create_action(&write.action)
+                && let Some(owner_id) = repository_owner_from_fields(&write.fields)
+            {
+                pending_repositories.insert(write.entity_id.clone(), owner_id);
             }
         }
 

@@ -301,8 +301,7 @@ impl TursoEventStore {
             if existing_row.is_some_and(|(existing_sequence, _)| *existing_sequence > sequence_nr) {
                 continue;
             }
-            if !existing_row.is_some_and(|(_, existing_hash)| existing_hash == &new_projection_hash)
-            {
+            if existing_row.is_none_or(|(_, existing_hash)| existing_hash != &new_projection_hash) {
                 changed_indexes.push((
                     projection.entity_type.clone(),
                     projection.entity_id.clone(),

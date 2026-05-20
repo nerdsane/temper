@@ -9,7 +9,7 @@ use std::path::{Path, PathBuf};
 use base64::Engine as _;
 use serde_json::Value;
 use temper_runtime::tenant::TenantId;
-use temper_server::state::{BoundActionHook, DispatchCommand, ServerState};
+use temper_server::state::{BoundActionHook, BoundActionHookContext, DispatchCommand, ServerState};
 
 use crate::os_apps::{add_os_apps_dir, install_os_app};
 use crate::state::PlatformState;
@@ -115,14 +115,18 @@ pub async fn restore_genesis_app_cache_roots(platform: &PlatformState) -> usize 
 impl BoundActionHook for GenesisInstallHook {
     async fn after_bound_action(
         &self,
-        state: &ServerState,
-        tenant: &TenantId,
-        entity_type: &str,
-        entity_id: &str,
-        action: &str,
-        params: &Value,
-        state_json: &Value,
+        ctx: BoundActionHookContext<'_>,
     ) -> Result<Option<Value>, String> {
+        let BoundActionHookContext {
+            state,
+            tenant,
+            entity_type,
+            entity_id,
+            action,
+            params,
+            state_json,
+        } = ctx;
+
         if entity_type != "App" || action.rsplit('.').next().unwrap_or(action) != "Install" {
             return Ok(None);
         }

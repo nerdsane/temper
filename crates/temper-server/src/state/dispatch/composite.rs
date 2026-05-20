@@ -48,6 +48,15 @@ struct PreparedCompositeSubWrite {
     uses_parent_gate: bool,
 }
 
+struct AtomicCompositeParent<'a> {
+    tenant: &'a TenantId,
+    entity_type: &'a str,
+    entity_id: &'a str,
+    action: &'a str,
+    idempotency: &'a str,
+    record_event: bool,
+}
+
 #[derive(Debug, Clone)]
 struct PreflightCompositeTarget {
     target_existed: bool,
@@ -152,14 +161,15 @@ impl crate::state::ServerState {
 
         if self
             .apply_composite_sub_writes_atomic(
-                tenant,
-                entity_type,
-                entity_id,
-                action,
+                AtomicCompositeParent {
+                    tenant,
+                    entity_type,
+                    entity_id,
+                    action,
+                    idempotency: &parent_idempotency,
+                    record_event: metadata.record_parent_event,
+                },
                 &prepared_sub_writes,
-                &parent_idempotency,
-                &composite_agent_ctx,
-                metadata.record_parent_event,
             )
             .await?
         {
@@ -199,15 +209,15 @@ impl crate::state::ServerState {
 
     async fn apply_composite_sub_writes_atomic(
         &self,
-        tenant: &TenantId,
-        parent_entity_type: &str,
-        parent_entity_id: &str,
-        parent_action: &str,
+        parent: AtomicCompositeParent<'_>,
         prepared_sub_writes: &[PreparedCompositeSubWrite],
-        parent_idempotency: &str,
-        _composite_agent_ctx: &AgentContext,
-        record_parent_event: bool,
     ) -> Result<bool, DispatchError> {
+        let tenant = parent.tenant;
+        let parent_entity_type = parent.entity_type;
+        let parent_entity_id = parent.entity_id;
+        let parent_action = parent.action;
+        let parent_idempotency = parent.idempotency;
+
         let Some((store, backend)) = self.event_journal() else {
             return Ok(false);
         };
@@ -223,7 +233,7 @@ impl crate::state::ServerState {
         let total_started_at = timing_enabled.then(std::time::Instant::now);
         let parent_started_at = timing_enabled.then(std::time::Instant::now);
 
-        if record_parent_event
+        if parent.record_event
             && !self
                 .composite_event_already_persisted(
                     &store,
@@ -1623,14 +1633,16 @@ params = ["OwnerId", "Name"]
     async fn composite_app_create_sub_write_authorization_can_enforce_owner_scope() {
         let state = composite_test_state();
         let tenant = TenantId::default();
-        let mut agent = AgentContext::default();
-        agent.security_ctx = Some(SecurityContext::from_headers(&[
-            ("X-Temper-Principal-Id".to_string(), "alice".to_string()),
-            (
-                "X-Temper-Principal-Kind".to_string(),
-                "customer".to_string(),
-            ),
-        ]));
+        let agent = AgentContext {
+            security_ctx: Some(SecurityContext::from_headers(&[
+                ("X-Temper-Principal-Id".to_string(), "alice".to_string()),
+                (
+                    "X-Temper-Principal-Kind".to_string(),
+                    "customer".to_string(),
+                ),
+            ])),
+            ..Default::default()
+        };
 
         state
             .authz
