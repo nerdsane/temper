@@ -467,6 +467,8 @@ pub(super) async fn handle_odata_get_for_tenant(
     candidate_count = tracing::field::Empty,
     materialized_count = tracing::field::Empty,
     returned_count = tracing::field::Empty,
+    catalog_shadow_check_budget = tracing::field::Empty,
+    catalog_shadow_check_scheduled = tracing::field::Empty,
 ))]
 async fn handle_entity_set(
     state: &ServerState,
@@ -561,7 +563,7 @@ async fn handle_entity_set(
     );
     span.record("candidate_count", entity_ids.len() as u64);
 
-    let entities = materialize_entity_set_entities(
+    let materialized = materialize_entity_set_entities(
         state,
         tenant,
         &entity_type,
@@ -570,9 +572,17 @@ async fn handle_entity_set(
         prefer_catalog_materialization,
     )
     .await;
-    span.record("materialized_count", entities.len() as u64);
+    span.record("materialized_count", materialized.entities.len() as u64);
+    span.record(
+        "catalog_shadow_check_budget",
+        materialized.catalog_shadow_check_budget as u64,
+    );
+    span.record(
+        "catalog_shadow_check_scheduled",
+        materialized.catalog_shadow_check_scheduled as u64,
+    );
 
-    let (mut result, mut count) = apply_query_options(entities, &apply_options);
+    let (mut result, mut count) = apply_query_options(materialized.entities, &apply_options);
     span.record("returned_count", result.len() as u64);
     if count.is_none() {
         count = precomputed_count;
