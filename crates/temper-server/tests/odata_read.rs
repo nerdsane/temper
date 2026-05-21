@@ -256,6 +256,63 @@ async fn filtered_entity_set_returns_entities_created_via_odata_post() {
 }
 
 #[tokio::test]
+async fn filtered_entity_set_repairs_missing_catalog_rows_before_trusting_pushdown() {
+    let db_path = std::env::temp_dir().join(format!(
+        "temper-odata-read-missing-catalog-filter-{}.db",
+        uuid::Uuid::new_v4()
+    ));
+    let db_url = format!("file:{}", db_path.display());
+    let store = TursoEventStore::new(&db_url, None)
+        .await
+        .expect("create local turso db");
+    let state = build_turso_state("odata-read-missing-catalog-filter", store.clone());
+
+    let entity_id = "ord-missing-catalog-filter";
+    let (status, body) = post_json(
+        &state,
+        "/tdata/Orders",
+        serde_json::json!({
+            "id": entity_id,
+            "Currency": "USD",
+            "Notes": "catalog row will be removed"
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "seed create failed: {body:?}");
+
+    store
+        .remove_query_projection(TenantId::default().as_str(), "Order", entity_id)
+        .await
+        .expect("remove catalog row to simulate projection drift");
+
+    let (status, body) = get_json(&state, "/tdata/Orders?$filter=Status%20eq%20'Draft'").await;
+    assert_eq!(status, StatusCode::OK);
+    let values = body["value"].as_array().expect("value array");
+    assert!(
+        values
+            .iter()
+            .any(|value| value["entity_id"].as_str() == Some(entity_id)),
+        "filtered reads should hydrate missing catalog rows before trusting pushdown: {body:?}"
+    );
+
+    let repaired = store
+        .query_field_index(
+            TenantId::default().as_str(),
+            "Order",
+            "status = ?3",
+            vec!["Draft".to_string()],
+        )
+        .await
+        .expect("query repaired status projection");
+    assert!(
+        repaired.iter().any(|id| id == entity_id),
+        "actor fallback should repair the durable catalog for future pushdown reads: {repaired:?}"
+    );
+
+    let _ = std::fs::remove_file(db_path);
+}
+
+#[tokio::test]
 async fn filtered_entity_set_reflects_odata_patch_updates() {
     let db_path = std::env::temp_dir().join(format!(
         "temper-odata-read-patch-filter-{}.db",

@@ -29,6 +29,17 @@ const QUERY_PROJECTION_REMOVE_OPERATION: &str = "query_projection_remove";
 pub(crate) type ScalarFieldIndex = BTreeMap<String, String>;
 type CatalogProjectionFingerprint = (String, String);
 
+pub(crate) fn canonical_projection_status<'a>(
+    fallback: &'a str,
+    state: &'a serde_json::Value,
+) -> &'a str {
+    state
+        .get("status")
+        .and_then(|value| value.as_str())
+        .filter(|status| !status.is_empty())
+        .unwrap_or(fallback)
+}
+
 struct QueryProjectionCatalogUpdate<'a> {
     tenant: &'a str,
     entity_type: &'a str,
@@ -526,6 +537,7 @@ impl PostgresEventStore {
         state: &serde_json::Value,
         sequence_nr: u64,
     ) -> Result<(), PersistenceError> {
+        let status = canonical_projection_status(status, state);
         let projection_hash = json_hash(fields);
         let (new_index, indexed_fields, skipped_fields) = scalar_index_fields(fields);
         let mut transaction_timer =

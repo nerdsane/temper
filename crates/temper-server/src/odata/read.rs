@@ -1,5 +1,6 @@
 //! OData read handlers (`GET` and metadata/service endpoints).
 
+use std::collections::BTreeSet;
 use std::sync::{Arc, RwLock};
 
 use axum::extract::{Query, State};
@@ -17,9 +18,9 @@ use super::common::{
     resolve_value_parent, tenant_csdl_xml, tenant_entity_sets,
 };
 use super::read_support::{
-    materialize_entity_set_entities, odata_default_page_size, odata_max_entities,
-    record_entity_set_not_found, resolve_entity_set_name, select_entity_ids_for_materialization,
-    try_load_entity_body_from_catalog,
+    materialize_entity_set_entities, missing_catalog_entity_ids, odata_default_page_size,
+    odata_max_entities, record_entity_set_not_found, resolve_entity_set_name,
+    select_entity_ids_for_materialization, try_load_entity_body_from_catalog,
 };
 use super::response::annotate_entity;
 use super::stream_fast_path::try_file_stream_fast_path;
@@ -455,6 +456,13 @@ pub(super) async fn handle_odata_get_for_tenant(
     }
 }
 
+fn filter_only_query_options(query_options: &QueryOptions) -> QueryOptions {
+    QueryOptions {
+        filter: query_options.filter.clone(),
+        ..QueryOptions::default()
+    }
+}
+
 /// Handle `EntitySet` path: list all entities in a set with query options.
 #[instrument(skip_all, fields(
     otel.name = "odata.entity_set_read",
@@ -469,6 +477,8 @@ pub(super) async fn handle_odata_get_for_tenant(
     returned_count = tracing::field::Empty,
     catalog_shadow_check_budget = tracing::field::Empty,
     catalog_shadow_check_scheduled = tracing::field::Empty,
+    catalog_coverage_missing = tracing::field::Empty,
+    catalog_coverage_matched = tracing::field::Empty,
 ))]
 async fn handle_entity_set(
     state: &ServerState,
@@ -486,6 +496,8 @@ async fn handle_entity_set(
 
     let default_page_size = odata_default_page_size();
     let max_entities = odata_max_entities();
+    span.record("catalog_coverage_missing", 0_u64);
+    span.record("catalog_coverage_matched", 0_u64);
 
     // ---- Filter push-down: try SQL-level filtering first ----
     let sql_pushdown_ids = if let Some(filter) = &query_options.filter {
@@ -529,8 +541,34 @@ async fn handle_entity_set(
 
     let filter_pushdown = sql_pushdown_ids.is_some();
     let prefer_catalog_materialization = filter_pushdown || state.query_plane_store().is_some();
+    let mut pushdown_coverage_entities = Vec::new();
     let (entity_ids, apply_options, precomputed_count) = if let Some(pushed_ids) = sql_pushdown_ids
     {
+        let all_entity_ids = state.list_entity_ids_lazy(tenant, &entity_type).await;
+        let pushed_id_set = pushed_ids.iter().cloned().collect::<BTreeSet<_>>();
+        let mut missing_ids =
+            missing_catalog_entity_ids(state, tenant, &entity_type, &all_entity_ids).await;
+        missing_ids.retain(|id| !pushed_id_set.contains(id));
+        span.record("catalog_coverage_missing", missing_ids.len() as u64);
+        if !missing_ids.is_empty() {
+            let missing = materialize_entity_set_entities(
+                state,
+                tenant,
+                &entity_type,
+                name,
+                &missing_ids,
+                true,
+            )
+            .await;
+            let filter_options = filter_only_query_options(query_options);
+            let (matching_missing, _) = apply_query_options(missing.entities, &filter_options);
+            let matched_count = matching_missing
+                .iter()
+                .filter_map(|entity| entity.get("entity_id").and_then(|id| id.as_str()))
+                .count();
+            span.record("catalog_coverage_matched", matched_count as u64);
+            pushdown_coverage_entities = matching_missing;
+        }
         // SQL push-down already filtered — apply pagination only.
         // The $filter is still in query_options for apply_query_options to
         // re-verify in memory (belt-and-suspenders), but we've reduced the
@@ -561,7 +599,10 @@ async fn handle_entity_set(
             "read_source_union"
         },
     );
-    span.record("candidate_count", entity_ids.len() as u64);
+    span.record(
+        "candidate_count",
+        (entity_ids.len() + pushdown_coverage_entities.len()) as u64,
+    );
 
     let materialized = materialize_entity_set_entities(
         state,
@@ -572,7 +613,9 @@ async fn handle_entity_set(
         prefer_catalog_materialization,
     )
     .await;
-    span.record("materialized_count", materialized.entities.len() as u64);
+    let total_materialized_count =
+        materialized.entities.len() as u64 + pushdown_coverage_entities.len() as u64;
+    span.record("materialized_count", total_materialized_count);
     span.record(
         "catalog_shadow_check_budget",
         materialized.catalog_shadow_check_budget as u64,
@@ -582,7 +625,9 @@ async fn handle_entity_set(
         materialized.catalog_shadow_check_scheduled as u64,
     );
 
-    let (mut result, mut count) = apply_query_options(materialized.entities, &apply_options);
+    let mut entities = materialized.entities;
+    entities.extend(pushdown_coverage_entities);
+    let (mut result, mut count) = apply_query_options(entities, &apply_options);
     span.record("returned_count", result.len() as u64);
     if count.is_none() {
         count = precomputed_count;
