@@ -1,9 +1,13 @@
-//! OData `$filter` → SQL WHERE clause translator for the entity field index.
+//! OData `$filter` → SQL WHERE clause translator for the query projection.
 //!
 //! Translates a parsed [`FilterExpr`] AST into a SQL WHERE clause that can be
-//! executed against the `entity_field_index` EAV table. This enables filter
-//! push-down: instead of materializing every entity actor and filtering in
-//! memory, we query the index to get only the matching entity IDs.
+//! executed against the query projection. This enables filter push-down:
+//! instead of materializing every entity actor and filtering in memory, we query
+//! the projection to get only the matching entity IDs.
+//!
+//! Ordinary fields are matched through the `entity_field_index` EAV table.
+//! `Status` is the canonical entity lifecycle column, so status predicates bind
+//! directly to the projection row's `status` column.
 //!
 //! The translator returns `None` for expressions it cannot handle, signalling
 //! the caller to fall back to the existing in-memory filter path.
@@ -126,6 +130,10 @@ fn translate_comparison(
         _ => return None,
     };
 
+    if is_status_property(&field_name) {
+        return translate_status_comparison(sql_op, op, value, ctx);
+    }
+
     // Handle null comparison specially
     if matches!(value, ODataValue::Null) {
         let field_param = ctx.add_param(field_name);
@@ -153,6 +161,29 @@ fn translate_comparison(
          WHERE tenant = ?1 AND entity_type = ?2 \
          AND field_name = {field_param} AND field_value {sql_op} {value_param})"
     ))
+}
+
+fn is_status_property(field_name: &str) -> bool {
+    field_name == "Status" || field_name == "status"
+}
+
+fn translate_status_comparison(
+    sql_op: &str,
+    op: BinaryOperator,
+    value: &ODataValue,
+    ctx: &mut TranslateCtx,
+) -> Option<String> {
+    if matches!(value, ODataValue::Null) {
+        return match op {
+            BinaryOperator::Eq => Some("status IS NULL".to_string()),
+            BinaryOperator::Ne => Some("status IS NOT NULL".to_string()),
+            _ => None,
+        };
+    }
+
+    let text_value = odata_value_to_text(value)?;
+    let value_param = ctx.add_param(text_value);
+    Some(format!("status {sql_op} {value_param}"))
 }
 
 /// Translate OData string functions to SQL LIKE patterns.
@@ -220,9 +251,33 @@ mod tests {
             right: Box::new(FilterExpr::Literal(ODataValue::String("Active".into()))),
         };
         let result = try_translate_filter(&filter).unwrap();
+        assert_eq!(result.where_clause, "status = ?3");
+        assert_eq!(result.params, vec!["Active"]);
+    }
+
+    #[test]
+    fn lowercase_status_uses_catalog_status_column() {
+        let filter = FilterExpr::BinaryOp {
+            left: Box::new(FilterExpr::Property("status".into())),
+            op: BinaryOperator::Ne,
+            right: Box::new(FilterExpr::Literal(ODataValue::String("Archived".into()))),
+        };
+        let result = try_translate_filter(&filter).unwrap();
+        assert_eq!(result.where_clause, "status != ?3");
+        assert_eq!(result.params, vec!["Archived"]);
+    }
+
+    #[test]
+    fn ordinary_field_eq_filter_uses_field_index() {
+        let filter = FilterExpr::BinaryOp {
+            left: Box::new(FilterExpr::Property("Priority".into())),
+            op: BinaryOperator::Eq,
+            right: Box::new(FilterExpr::Literal(ODataValue::String("High".into()))),
+        };
+        let result = try_translate_filter(&filter).unwrap();
         assert!(result.where_clause.contains("field_name = ?3"));
         assert!(result.where_clause.contains("field_value = ?4"));
-        assert_eq!(result.params, vec!["Status", "Active"]);
+        assert_eq!(result.params, vec!["Priority", "High"]);
     }
 
     #[test]
@@ -242,7 +297,7 @@ mod tests {
         };
         let result = try_translate_filter(&filter).unwrap();
         assert!(result.where_clause.contains("AND"));
-        assert_eq!(result.params.len(), 4);
+        assert_eq!(result.params, vec!["Active", "Priority", "5"]);
     }
 
     #[test]
@@ -310,6 +365,18 @@ mod tests {
         };
         let result = try_translate_filter(&filter).unwrap();
         assert!(result.where_clause.contains("IS NULL"));
+    }
+
+    #[test]
+    fn status_null_filter_uses_catalog_status_column() {
+        let filter = FilterExpr::BinaryOp {
+            left: Box::new(FilterExpr::Property("Status".into())),
+            op: BinaryOperator::Ne,
+            right: Box::new(FilterExpr::Literal(ODataValue::Null)),
+        };
+        let result = try_translate_filter(&filter).unwrap();
+        assert_eq!(result.where_clause, "status IS NOT NULL");
+        assert!(result.params.is_empty());
     }
 
     #[test]
