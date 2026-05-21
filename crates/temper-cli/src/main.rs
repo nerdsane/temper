@@ -23,6 +23,8 @@ use std::path::PathBuf;
 
 use clap::{Parser, Subcommand, ValueEnum};
 
+const DEFAULT_TOKIO_THREAD_STACK_BYTES: usize = 16 * 1024 * 1024;
+
 #[derive(Clone, Debug, ValueEnum, PartialEq, Eq)]
 pub(crate) enum StorageBackend {
     Postgres,
@@ -239,11 +241,45 @@ fn resolve_actor_runtime_backend(
     }
 }
 
-#[tokio::main]
-async fn main() -> anyhow::Result<()> {
+fn resolve_tokio_thread_stack_bytes(env_value: Option<&str>) -> Result<usize, String> {
+    let Some(value) = env_value.map(str::trim).filter(|value| !value.is_empty()) else {
+        return Ok(DEFAULT_TOKIO_THREAD_STACK_BYTES);
+    };
+
+    value
+        .parse::<usize>()
+        .map_err(|_| format!("TEMPER_TOKIO_THREAD_STACK_BYTES must be an integer; got {value:?}"))
+        .and_then(|bytes| {
+            if bytes < 2 * 1024 * 1024 {
+                Err(format!(
+                    "TEMPER_TOKIO_THREAD_STACK_BYTES must be at least 2097152; got {bytes}"
+                ))
+            } else {
+                Ok(bytes)
+            }
+        })
+}
+
+fn main() -> anyhow::Result<()> {
     // Load .env file from project root (silently ignored if missing).
     dotenvy::dotenv().ok();
 
+    let tokio_thread_stack_bytes = resolve_tokio_thread_stack_bytes(
+        std::env::var("TEMPER_TOKIO_THREAD_STACK_BYTES")
+            .ok()
+            .as_deref(),
+    )
+    .map_err(|err| anyhow::anyhow!(err))?;
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .thread_name("temper-cli")
+        .thread_stack_size(tokio_thread_stack_bytes)
+        .build()?;
+
+    runtime.block_on(async_main())
+}
+
+async fn async_main() -> anyhow::Result<()> {
     let cli = Cli::parse();
 
     match cli.command {
@@ -632,6 +668,25 @@ mod tests {
             resolve_actor_runtime_backend(ActorRuntimeBackend::Legacy, false, Some("sqlite"))
                 .expect_err("unknown actor runtime should fail");
         assert!(error.contains("TEMPER_ACTOR_RUNTIME"));
+    }
+
+    #[test]
+    fn tokio_thread_stack_defaults_and_accepts_override() {
+        assert_eq!(
+            resolve_tokio_thread_stack_bytes(None).expect("default stack size should resolve"),
+            DEFAULT_TOKIO_THREAD_STACK_BYTES
+        );
+        assert_eq!(
+            resolve_tokio_thread_stack_bytes(Some("8388608"))
+                .expect("valid stack override should parse"),
+            8 * 1024 * 1024
+        );
+    }
+
+    #[test]
+    fn tokio_thread_stack_rejects_tiny_or_invalid_override() {
+        assert!(resolve_tokio_thread_stack_bytes(Some("abc")).is_err());
+        assert!(resolve_tokio_thread_stack_bytes(Some("1048576")).is_err());
     }
 
     #[test]

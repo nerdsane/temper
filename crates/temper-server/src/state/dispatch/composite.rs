@@ -314,6 +314,13 @@ impl crate::state::ServerState {
                 continue;
             }
 
+            validate_composite_ref_compare_and_set(
+                parent_entity_type,
+                parent_action,
+                write,
+                stream,
+            )?;
+
             let result = process_action_with_xref_and_field_mode(
                 &mut stream.state,
                 &table,
@@ -826,6 +833,13 @@ impl crate::state::ServerState {
             return Ok(preflight_target);
         }
 
+        validate_composite_ref_preflight_compare_and_set(
+            parent_entity_type,
+            parent_action,
+            write,
+            &preflight_target,
+        )?;
+
         if !target_state.can_accept_event() {
             return Err(DispatchError::Internal(format!(
                 "composite {parent_entity_type}.{parent_action} sub-write {} would exceed the event budget for {}:{}",
@@ -1064,17 +1078,20 @@ fn composite_sub_write_uses_parent_gate(
     entity_type: &str,
     action: &str,
 ) -> bool {
-    if metadata.cedar_gate.is_none()
-        || action != "Create"
-        || !matches!(entity_type, "Blob" | "Tree" | "Commit" | "Tag")
-    {
+    if metadata.cedar_gate.is_none() {
         return false;
     }
 
     metadata.sub_writes.iter().any(|spec| {
-        spec.target_entity == entity_type
-            && spec.action == action
-            && spec.generated_from.as_deref() == Some("pack_bytes")
+        if spec.target_entity != entity_type || spec.action != action {
+            return false;
+        }
+
+        match (entity_type, action, spec.generated_from.as_deref()) {
+            ("Blob" | "Tree" | "Commit" | "Tag", "Create", Some("pack_bytes")) => true,
+            ("Ref", "Create" | "Update" | "Delete", Some("ref_updates")) => true,
+            _ => false,
+        }
     })
 }
 
@@ -1102,6 +1119,94 @@ fn is_incomplete_existing_pack_object_create(
 
 fn is_pack_object_entity(entity_type: &str) -> bool {
     matches!(entity_type, "Blob" | "Tree" | "Commit" | "Tag")
+}
+
+fn validate_composite_ref_compare_and_set(
+    parent_entity_type: &str,
+    parent_action: &str,
+    write: &PreparedCompositeSubWrite,
+    stream: &AtomicCompositeStream,
+) -> Result<(), DispatchError> {
+    validate_ref_sub_write_compare_and_set(
+        parent_entity_type,
+        parent_action,
+        write,
+        stream.target_existed,
+        &stream.state,
+    )
+}
+
+fn validate_composite_ref_preflight_compare_and_set(
+    parent_entity_type: &str,
+    parent_action: &str,
+    write: &PreparedCompositeSubWrite,
+    target: &PreflightCompositeTarget,
+) -> Result<(), DispatchError> {
+    validate_ref_sub_write_compare_and_set(
+        parent_entity_type,
+        parent_action,
+        write,
+        target.target_existed,
+        &target.state,
+    )
+}
+
+fn validate_ref_sub_write_compare_and_set(
+    parent_entity_type: &str,
+    parent_action: &str,
+    write: &PreparedCompositeSubWrite,
+    target_existed: bool,
+    state: &EntityState,
+) -> Result<(), DispatchError> {
+    if write.entity_type != "Ref"
+        || !matches!(write.action.as_str(), "Create" | "Update" | "Delete")
+    {
+        return Ok(());
+    }
+
+    let Some(expected) = json_string_field(&write.params, "PreviousCommitSha") else {
+        return Ok(());
+    };
+
+    let current = current_ref_target(target_existed, state);
+    let expected_missing = is_zero_git_sha(&expected);
+    let valid = if expected_missing {
+        current.is_none() || current.is_some_and(is_zero_git_sha)
+    } else {
+        current == Some(expected.as_str())
+    };
+    if valid {
+        return Ok(());
+    }
+
+    let found = current.unwrap_or("missing ref");
+    Err(DispatchError::Conflict(format!(
+        "composite {parent_entity_type}.{parent_action} sub-write {} stale ref {}: expected {}, found {}",
+        write.idx, write.entity_id, expected, found
+    )))
+}
+
+fn current_ref_target(target_existed: bool, state: &EntityState) -> Option<&str> {
+    if !target_existed || state.status == "Deleted" {
+        return None;
+    }
+    state
+        .fields
+        .get("TargetCommitSha")
+        .and_then(Value::as_str)
+        .filter(|sha| !sha.is_empty())
+}
+
+fn json_string_field(value: &Value, field: &str) -> Option<String> {
+    value.get(field).and_then(|value| match value {
+        Value::String(value) => Some(value.clone()),
+        Value::Number(value) => Some(value.to_string()),
+        _ => None,
+    })
+}
+
+fn is_zero_git_sha(value: &str) -> bool {
+    value.len() == 40 && value.bytes().all(|byte| byte == b'0')
 }
 
 fn has_complete_git_object_payload(fields: &Value) -> bool {
@@ -1319,7 +1424,7 @@ mod tests {
     }
 
     #[test]
-    fn pack_object_sub_writes_use_parent_composite_gate_only() {
+    fn ingest_pack_generated_sub_writes_use_parent_composite_gate_only() {
         let metadata = CompositeActionMetadata {
             cedar_gate: Some(temper_jit::table::CompositeCedarGate {
                 principal: "request.principal".to_string(),
@@ -1344,8 +1449,13 @@ mod tests {
         assert!(composite_sub_write_uses_parent_gate(
             &metadata, "Blob", "Create"
         ));
-        assert!(!composite_sub_write_uses_parent_gate(
+        assert!(composite_sub_write_uses_parent_gate(
             &metadata, "Ref", "Delete"
+        ));
+        assert!(!composite_sub_write_uses_parent_gate(
+            &metadata,
+            "Ref",
+            "ForceUpdate"
         ));
         assert!(!composite_sub_write_uses_parent_gate(
             &CompositeActionMetadata {
@@ -1386,11 +1496,21 @@ mod tests {
         <Property Name="CanonicalBytes" Type="Edm.String"/>
         <Property Name="Status" Type="Edm.String" Nullable="false"/>
       </EntityType>
+      <EntityType Name="Ref">
+        <Key><PropertyRef Name="Id"/></Key>
+        <Property Name="Id" Type="Edm.String" Nullable="false"/>
+        <Property Name="RepositoryId" Type="Edm.String" Nullable="false"/>
+        <Property Name="Name" Type="Edm.String" Nullable="false"/>
+        <Property Name="TargetCommitSha" Type="Edm.String" Nullable="false"/>
+        <Property Name="Kind" Type="Edm.String" Nullable="false"/>
+        <Property Name="Status" Type="Edm.String" Nullable="false"/>
+      </EntityType>
       <EntityContainer Name="Container">
         <EntitySet Name="Parents" EntityType="Temper.CompositeTest.Parent"/>
         <EntitySet Name="Children" EntityType="Temper.CompositeTest.Child"/>
         <EntitySet Name="Apps" EntityType="Temper.CompositeTest.App"/>
         <EntitySet Name="Blobs" EntityType="Temper.CompositeTest.Blob"/>
+        <EntitySet Name="Refs" EntityType="Temper.CompositeTest.Ref"/>
       </EntityContainer>
     </Schema>
   </edmx:DataServices>
@@ -1436,6 +1556,21 @@ action = "Repository::IngestPack"
 target_entity = "Blob"
 action = "Create"
 generated_from = "pack_bytes"
+
+[[action.sub_writes]]
+target_entity = "Ref"
+action = "Create"
+generated_from = "ref_updates"
+
+[[action.sub_writes]]
+target_entity = "Ref"
+action = "Update"
+generated_from = "ref_updates"
+
+[[action.sub_writes]]
+target_entity = "Ref"
+action = "Delete"
+generated_from = "ref_updates"
 
 [[action]]
 name = "DeleteChild"
@@ -1522,6 +1657,40 @@ from = ["Durable"]
 params = ["RepositoryId", "CanonicalBytes"]
 "#;
 
+    const REF_IOA: &str = r#"
+[automaton]
+name = "Ref"
+states = ["Active", "Deleted"]
+initial = "Active"
+allow_indefinite_states = ["Active"]
+
+[[state]]
+name = "TargetCommitSha"
+type = "string"
+initial = ""
+
+[[action]]
+name = "Create"
+kind = "input"
+from = ["Active"]
+to = "Active"
+params = ["RepositoryId", "Name", "TargetCommitSha", "Kind"]
+
+[[action]]
+name = "Update"
+kind = "input"
+from = ["Active"]
+to = "Active"
+params = ["PreviousCommitSha", "NewCommitSha", "TargetCommitSha"]
+
+[[action]]
+name = "Delete"
+kind = "input"
+from = ["Active"]
+to = "Deleted"
+params = ["PreviousCommitSha"]
+"#;
+
     fn composite_test_state() -> ServerState {
         let csdl = parse_csdl(COMPOSITE_CSDL).expect("test CSDL should parse");
         let mut specs = BTreeMap::new();
@@ -1529,6 +1698,7 @@ params = ["RepositoryId", "CanonicalBytes"]
         specs.insert("Child".to_string(), CHILD_IOA.to_string());
         specs.insert("App".to_string(), APP_IOA.to_string());
         specs.insert("Blob".to_string(), BLOB_IOA.to_string());
+        specs.insert("Ref".to_string(), REF_IOA.to_string());
         ServerState::with_specs(
             ActorSystem::new("composite-dispatch-test"),
             csdl,
@@ -1546,6 +1716,7 @@ params = ["RepositoryId", "CanonicalBytes"]
         specs.insert("Child".to_string(), CHILD_IOA.to_string());
         specs.insert("App".to_string(), APP_IOA.to_string());
         specs.insert("Blob".to_string(), BLOB_IOA.to_string());
+        specs.insert("Ref".to_string(), REF_IOA.to_string());
         ServerState::with_storage_stack(
             ActorSystem::new("composite-dispatch-test"),
             csdl,
@@ -1722,6 +1893,67 @@ params = ["RepositoryId", "CanonicalBytes"]
         assert!(
             err.contains("sub-write 0 denied"),
             "unexpected error: {err}"
+        );
+    }
+
+    #[tokio::test]
+    async fn composite_ref_sub_write_uses_parent_gate_for_declared_ref_updates() {
+        let state = composite_test_state();
+        let tenant = TenantId::default();
+        let agent = AgentContext::for_service("composite-test");
+
+        state
+            .authz
+            .reload_tenant_policies_named(
+                tenant.as_str(),
+                &[(
+                    "unrelated-child-create".to_string(),
+                    r#"
+                    permit(
+                      principal is Agent,
+                      action == Action::"Create",
+                      resource is Child
+                    );
+                    "#
+                    .to_string(),
+                )],
+            )
+            .expect("unrelated tenant policy should load");
+
+        let applied = state
+            .apply_composite_integration_result(
+                &tenant,
+                "Parent",
+                "repo-auth",
+                "IngestPack",
+                &json!({
+                    "sub_writes": [{
+                        "entity_type": "Ref",
+                        "entity_id": "rf-auth-main",
+                        "action": "Create",
+                        "params": {
+                            "RepositoryId": "repo-auth",
+                            "Name": "refs/heads/main",
+                            "TargetCommitSha": "1111111111111111111111111111111111111111",
+                            "Kind": "branch",
+                            "PreviousCommitSha": "0000000000000000000000000000000000000000"
+                        }
+                    }]
+                }),
+                &agent,
+            )
+            .await
+            .expect("declared ref_updates sub-write should use the parent composite gate");
+
+        assert!(applied);
+        let reference = state
+            .get_tenant_entity_state(&tenant, "Ref", "rf-auth-main")
+            .await
+            .expect("ref state should be readable");
+        assert_eq!(reference.state.status, "Active");
+        assert_eq!(
+            reference.state.fields.get("TargetCommitSha"),
+            Some(&json!("1111111111111111111111111111111111111111"))
         );
     }
 
@@ -2268,6 +2500,173 @@ params = ["RepositoryId", "CanonicalBytes"]
             store.dump_journal(&blob_pid).len(),
             first_len,
             "complete pack objects should not accumulate duplicate Create events"
+        );
+    }
+
+    #[cfg(feature = "sim")]
+    #[tokio::test]
+    async fn composite_ref_create_cas_rejects_existing_ref_without_pack_object_leak() {
+        let store = SimEventStore::no_faults(40);
+        let state = composite_test_state_with_store(store.clone());
+        let tenant = TenantId::default();
+        let agent = AgentContext::for_service("composite-test");
+        let ref_id = "ref-main-create-cas";
+        let old_sha = "1111111111111111111111111111111111111111";
+        let new_sha = "2222222222222222222222222222222222222222";
+
+        let created = state
+            .dispatch_tenant_action(
+                &tenant,
+                "Ref",
+                ref_id,
+                "Create",
+                json!({
+                    "RepositoryId": "repo-test",
+                    "Name": "refs/heads/main",
+                    "TargetCommitSha": old_sha,
+                    "Kind": "branch"
+                }),
+                &agent,
+            )
+            .await
+            .expect("existing ref create should run");
+        assert!(created.success);
+
+        let err = state
+            .apply_composite_integration_result(
+                &tenant,
+                "Parent",
+                "repo-test",
+                "IngestPack",
+                &json!({
+                    "sub_writes": [
+                        {
+                            "entity_type": "Blob",
+                            "entity_id": "repo-test-cas-create-blob",
+                            "action": "Create",
+                            "params": {
+                                "Id": "cas-create-blob",
+                                "RepositoryId": "repo-test",
+                                "CanonicalBytes": "YmxvYiAwAA=="
+                            }
+                        },
+                        {
+                            "entity_type": "Ref",
+                            "entity_id": ref_id,
+                            "action": "Create",
+                            "params": {
+                                "RepositoryId": "repo-test",
+                                "Name": "refs/heads/main",
+                                "PreviousCommitSha": "0000000000000000000000000000000000000000",
+                                "TargetCommitSha": new_sha,
+                                "Kind": "branch"
+                            }
+                        }
+                    ]
+                }),
+                &agent,
+            )
+            .await
+            .expect_err("stale ref create should fail before appending pack objects")
+            .to_string();
+
+        assert!(err.contains("stale ref"), "unexpected error: {err}");
+        assert!(
+            store
+                .dump_journal("default:Blob:repo-test-cas-create-blob")
+                .is_empty(),
+            "losing pack object must not persist when the ref create CAS fails"
+        );
+        let ref_state = state
+            .get_tenant_entity_state(&tenant, "Ref", ref_id)
+            .await
+            .expect("original ref should remain readable");
+        assert_eq!(
+            ref_state.state.fields.get("TargetCommitSha"),
+            Some(&json!(old_sha))
+        );
+    }
+
+    #[cfg(feature = "sim")]
+    #[tokio::test]
+    async fn composite_ref_update_cas_rejects_stale_previous_without_pack_object_leak() {
+        let store = SimEventStore::no_faults(40);
+        let state = composite_test_state_with_store(store.clone());
+        let tenant = TenantId::default();
+        let agent = AgentContext::for_service("composite-test");
+        let ref_id = "ref-main-update-cas";
+        let current_sha = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+        let stale_sha = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+        let new_sha = "cccccccccccccccccccccccccccccccccccccccc";
+
+        let created = state
+            .dispatch_tenant_action(
+                &tenant,
+                "Ref",
+                ref_id,
+                "Create",
+                json!({
+                    "RepositoryId": "repo-test",
+                    "Name": "refs/heads/main",
+                    "TargetCommitSha": current_sha,
+                    "Kind": "branch"
+                }),
+                &agent,
+            )
+            .await
+            .expect("existing ref create should run");
+        assert!(created.success);
+
+        let err = state
+            .apply_composite_integration_result(
+                &tenant,
+                "Parent",
+                "repo-test",
+                "IngestPack",
+                &json!({
+                    "sub_writes": [
+                        {
+                            "entity_type": "Blob",
+                            "entity_id": "repo-test-cas-update-blob",
+                            "action": "Create",
+                            "params": {
+                                "Id": "cas-update-blob",
+                                "RepositoryId": "repo-test",
+                                "CanonicalBytes": "YmxvYiAxAA=="
+                            }
+                        },
+                        {
+                            "entity_type": "Ref",
+                            "entity_id": ref_id,
+                            "action": "Update",
+                            "params": {
+                                "PreviousCommitSha": stale_sha,
+                                "NewCommitSha": new_sha,
+                                "TargetCommitSha": new_sha
+                            }
+                        }
+                    ]
+                }),
+                &agent,
+            )
+            .await
+            .expect_err("stale ref update should fail before appending pack objects")
+            .to_string();
+
+        assert!(err.contains("stale ref"), "unexpected error: {err}");
+        assert!(
+            store
+                .dump_journal("default:Blob:repo-test-cas-update-blob")
+                .is_empty(),
+            "losing pack object must not persist when the ref update CAS fails"
+        );
+        let ref_state = state
+            .get_tenant_entity_state(&tenant, "Ref", ref_id)
+            .await
+            .expect("original ref should remain readable");
+        assert_eq!(
+            ref_state.state.fields.get("TargetCommitSha"),
+            Some(&json!(current_sha))
         );
     }
 
