@@ -25,7 +25,7 @@ use std::collections::BTreeMap;
 use std::sync::{Arc, OnceLock, RwLock};
 use std::time::Instant;
 
-use temper_jit::table::TransitionTable;
+use temper_jit::table::{Effect, TransitionTable};
 use temper_observe::wide_event;
 use temper_runtime::actor::{Actor, ActorContext, ActorError};
 use temper_runtime::persistence::{
@@ -35,7 +35,10 @@ use temper_runtime::scheduler::{sim_now, sim_uuid};
 
 use crate::storage::{BackendLabel, BoxedEventStore};
 
-use super::effects::{FieldSyncMode, process_action_with_xref_and_field_mode};
+use super::effects::{
+    FieldSyncMode, build_eval_context_with_xref, process_action_with_xref_and_field_mode,
+    prune_transient_action_fields_from_state,
+};
 use super::types::{
     EntityEvent, EntityMsg, EntityResponse, EntityState, MAX_EVENTS_PER_ENTITY,
     MAX_ITEMS_PER_ENTITY,
@@ -58,6 +61,33 @@ fn event_budget_workspace_id(state: &EntityState) -> String {
     }
 
     String::new()
+}
+
+fn duplicate_idempotency_custom_effects(
+    table: &TransitionTable,
+    state: &EntityState,
+    action: &str,
+    cross_entity_booleans: &BTreeMap<String, bool>,
+) -> Vec<String> {
+    if !table.composite_actions.contains_key(action) {
+        return Vec::new();
+    }
+
+    let ctx = build_eval_context_with_xref(state, cross_entity_booleans);
+    table
+        .evaluate_ctx(&state.status, &ctx, action)
+        .filter(|result| result.success)
+        .map(|result| {
+            result
+                .effects
+                .into_iter()
+                .filter_map(|effect| match effect {
+                    Effect::Custom(name) => Some(name),
+                    _ => None,
+                })
+                .collect()
+        })
+        .unwrap_or_default()
 }
 
 /// The entity actor -- processes actions through a TransitionTable.
@@ -646,6 +676,10 @@ impl Actor for EntityActor {
                 // outside the DST boundary; using Instant here is safe.
                 let ask_reply_start = Instant::now(); // determinism-ok: observability only
 
+                // Snapshot the current table for this action dispatch.
+                // On the next action, any hot-swapped table will be picked up.
+                let table = self.table.read().expect("table lock poisoned").clone();
+
                 // ADR-0048 sub-decision 5: actor-side idempotency dedup.
                 // A dispatch-layer retry can produce a second `ask` after the
                 // caller's budget expires while the first ask is still in
@@ -664,21 +698,27 @@ impl Actor for EntityActor {
                 if let Some(key) = idempotency_key.as_deref()
                     && state.has_processed_idempotency_key(key)
                 {
+                    let custom_effects = duplicate_idempotency_custom_effects(
+                        &table,
+                        state,
+                        &name,
+                        &cross_entity_booleans,
+                    );
+                    let mut response_state = state.clone();
+                    if !custom_effects.is_empty() {
+                        prune_transient_action_fields_from_state(&mut response_state);
+                    }
                     ctx.reply(EntityResponse {
                         success: true,
-                        state: state.clone(),
+                        state: response_state,
                         error: None,
-                        custom_effects: vec![],
+                        custom_effects,
                         scheduled_actions: vec![],
                         spawn_requests: vec![],
                         spec_governed: true,
                     });
                     return Ok(());
                 }
-
-                // Snapshot the current table for this action dispatch.
-                // On the next action, any hot-swapped table will be picked up.
-                let table = self.table.read().expect("table lock poisoned").clone();
 
                 // TigerStyle: Assert preconditions before every transition.
                 // These run in production, not just tests.

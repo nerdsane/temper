@@ -4,6 +4,7 @@
 //! governed action has succeeded, then materializes the pinned Genesis commit
 //! into the platform's app installer.
 
+use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 
 use base64::Engine as _;
@@ -11,8 +12,10 @@ use serde_json::Value;
 use temper_runtime::tenant::TenantId;
 use temper_server::state::{BoundActionHook, BoundActionHookContext, DispatchCommand, ServerState};
 
-use crate::os_apps::{add_os_apps_dir, install_os_app};
+use crate::os_apps::{AppManifest, add_os_apps_dir, install_os_app};
 use crate::state::PlatformState;
+
+const FIELD_OVERFLOW_REF_KEY: &str = "__temper_blob_ref";
 
 pub struct GenesisInstallHook {
     platform: PlatformState,
@@ -81,17 +84,14 @@ pub async fn restore_genesis_app_cache_roots(platform: &PlatformState) -> usize 
                 format!("{owner}/{name}@{}", version_hash.trim_start_matches('@'))
             });
             let cache_root = genesis_cache_root(&platform.server, &app_ref);
-            let app_dir = cache_root.join(&name);
-            match materialize_commit_tree(
-                &platform.server,
-                &tenant,
-                &repository_id,
-                &version_hash,
-                &app_dir,
-            )
-            .await
-            {
-                Ok(()) => {
+            let root = GenesisAppBundle {
+                owner,
+                name,
+                repository_id,
+                version_hash,
+            };
+            match materialize_app_closure(&platform.server, &tenant, &cache_root, root).await {
+                Ok(_) => {
                     add_os_apps_dir(cache_root);
                     restored += 1;
                 }
@@ -148,8 +148,19 @@ impl BoundActionHook for GenesisInstallHook {
         let installation_id = installation_id(entity_id, &target_tenant, &version_hash);
 
         let cache_root = genesis_cache_root(state, &app_ref);
+        let materialized_apps = materialize_app_closure(
+            state,
+            tenant,
+            &cache_root,
+            GenesisAppBundle {
+                owner,
+                name: name.clone(),
+                repository_id,
+                version_hash: version_hash.clone(),
+            },
+        )
+        .await?;
         let app_dir = cache_root.join(&name);
-        materialize_commit_tree(state, tenant, &repository_id, &version_hash, &app_dir).await?;
         add_os_apps_dir(cache_root);
 
         let mut platform = self.platform.clone();
@@ -181,6 +192,7 @@ impl BoundActionHook for GenesisInstallHook {
                     "targetTenant": target_tenant,
                     "installationId": installation_id,
                     "materializedPath": app_dir,
+                    "materializedApps": materialized_apps,
                     "added": result.added,
                     "updated": result.updated,
                     "skipped": result.skipped,
@@ -207,6 +219,164 @@ impl BoundActionHook for GenesisInstallHook {
                 Err(format!("Genesis App.Install failed for {app_ref}: {error}"))
             }
         }
+    }
+}
+
+#[derive(Debug, Clone)]
+struct GenesisAppBundle {
+    owner: String,
+    name: String,
+    repository_id: String,
+    version_hash: String,
+}
+
+async fn materialize_app_closure(
+    state: &ServerState,
+    tenant: &TenantId,
+    cache_root: &Path,
+    root: GenesisAppBundle,
+) -> Result<Vec<String>, String> {
+    let mut stack = vec![root];
+    let mut seen = BTreeSet::new();
+    let mut materialized = Vec::new();
+
+    while let Some(app) = stack.pop() {
+        if !seen.insert(app.name.clone()) {
+            continue;
+        }
+
+        let app_dir = cache_root.join(&app.name);
+        materialize_commit_tree(
+            state,
+            tenant,
+            &app.repository_id,
+            &app.version_hash,
+            &app_dir,
+        )
+        .await?;
+        materialized.push(app.name.clone());
+
+        for dependency in read_manifest_dependencies(&app_dir)?.into_iter().rev() {
+            let dependency = resolve_genesis_dependency(state, tenant, &app.owner, &dependency)
+                .await
+                .map_err(|error| {
+                    format!(
+                        "resolve dependency '{}' for Genesis app '{}': {error}",
+                        dependency, app.name
+                    )
+                })?;
+            if !seen.contains(&dependency.name) {
+                stack.push(dependency);
+            }
+        }
+    }
+
+    Ok(materialized)
+}
+
+fn read_manifest_dependencies(app_dir: &Path) -> Result<Vec<String>, String> {
+    let path = app_dir.join("app.toml");
+    let content = std::fs::read_to_string(&path)
+        .map_err(|error| format!("read Genesis app manifest '{}': {error}", path.display()))?;
+    let manifest: AppManifest = toml::from_str(&content)
+        .map_err(|error| format!("parse Genesis app manifest '{}': {error}", path.display()))?;
+    Ok(manifest.dependencies)
+}
+
+async fn resolve_genesis_dependency(
+    state: &ServerState,
+    tenant: &TenantId,
+    preferred_owner: &str,
+    dependency: &str,
+) -> Result<GenesisAppBundle, String> {
+    let requested = parse_dependency_ref(dependency, preferred_owner);
+    let ids = state.list_entity_ids_lazy(tenant, "App").await;
+    let mut matches = Vec::new();
+
+    for entity_id in ids {
+        let candidate = state
+            .get_tenant_entity_state(tenant, "App", &entity_id)
+            .await
+            .map_err(|error| format!("read Genesis App {entity_id}: {error}"))?;
+        if candidate.state.status != "Active" {
+            continue;
+        }
+        let fields = &candidate.state.fields;
+        let Some(name) = string_field(fields, "Name") else {
+            continue;
+        };
+        if name != requested.name {
+            continue;
+        }
+        let Some(owner) = string_field(fields, "OwnerId") else {
+            continue;
+        };
+        if let Some(requested_owner) = requested.owner.as_deref()
+            && owner != requested_owner
+        {
+            continue;
+        }
+        let Some(repository_id) = string_field(fields, "RepositoryId") else {
+            continue;
+        };
+        let version_hash = requested
+            .version_hash
+            .clone()
+            .or_else(|| string_field(fields, "LatestVersionHash"))
+            .ok_or_else(|| format!("Genesis App {entity_id} is missing LatestVersionHash"))?;
+        matches.push(GenesisAppBundle {
+            owner,
+            name,
+            repository_id,
+            version_hash,
+        });
+    }
+
+    if matches.len() == 1 {
+        return Ok(matches.remove(0));
+    }
+    if matches.is_empty() {
+        return Err(format!(
+            "no active Genesis App row found for '{}'",
+            dependency
+        ));
+    }
+
+    matches
+        .into_iter()
+        .find(|app| app.owner == preferred_owner)
+        .ok_or_else(|| format!("multiple Genesis App rows match '{}'", dependency))
+}
+
+#[derive(Debug, PartialEq, Eq)]
+struct DependencyRef {
+    owner: Option<String>,
+    name: String,
+    version_hash: Option<String>,
+}
+
+fn parse_dependency_ref(input: &str, preferred_owner: &str) -> DependencyRef {
+    let trimmed = input.trim();
+    let (owner_and_name, version_hash) = trimmed
+        .split_once('@')
+        .map(|(left, right)| (left, Some(right.trim_start_matches('@').to_string())))
+        .unwrap_or((trimmed, None));
+    let (owner, name) = owner_and_name
+        .split_once('/')
+        .map(|(owner, name)| (Some(owner.to_string()), name.to_string()))
+        .unwrap_or_else(|| {
+            let owner = if preferred_owner.is_empty() {
+                None
+            } else {
+                Some(preferred_owner.to_string())
+            };
+            (owner, owner_and_name.to_string())
+        });
+
+    DependencyRef {
+        owner,
+        name,
+        version_hash,
     }
 }
 
@@ -269,7 +439,8 @@ async fn materialize_tree(
         let tree = load_genesis_object(state, tenant, "Tree", repository_id, &current_tree)
             .await?
             .ok_or_else(|| format!("Genesis tree {current_tree} not found for {repository_id}"))?;
-        let canonical = string_field(&tree.state.fields, "CanonicalBytes")
+        let canonical = string_field_resolved(state, tenant, &tree.state.fields, "CanonicalBytes")
+            .await?
             .ok_or_else(|| format!("Genesis tree {current_tree} is missing CanonicalBytes"))?;
         for entry in parse_tree_entries(&decode_git_object_body(&canonical, "tree")?)? {
             validate_tree_entry_name(&entry.name)?;
@@ -294,7 +465,8 @@ async fn materialize_tree(
                     entry.object_sha, blob_repository, repository_id
                 ));
             }
-            let content = string_field(&blob.state.fields, "Content")
+            let content = string_field_resolved(state, tenant, &blob.state.fields, "Content")
+                .await?
                 .ok_or_else(|| format!("Genesis blob {} is missing Content", entry.object_sha))?;
             if let Some(parent) = path.parent() {
                 std::fs::create_dir_all(parent)
@@ -440,6 +612,45 @@ fn string_field(value: &Value, key: &str) -> Option<String> {
         .map(ToString::to_string)
 }
 
+async fn string_field_resolved(
+    state: &ServerState,
+    tenant: &TenantId,
+    value: &Value,
+    key: &str,
+) -> Result<Option<String>, String> {
+    let Some(field) = value
+        .get(key)
+        .or_else(|| value.get("fields").and_then(|fields| fields.get(key)))
+    else {
+        return Ok(None);
+    };
+    if let Some(value) = field.as_str() {
+        return Ok(Some(value.to_string()));
+    }
+
+    let Some(blob_key) = field
+        .as_object()
+        .and_then(|object| object.get(FIELD_OVERFLOW_REF_KEY))
+        .and_then(Value::as_str)
+    else {
+        return Ok(None);
+    };
+    let Some(bytes) = state
+        .get_blob_with_legacy_fallback(tenant, blob_key)
+        .await
+        .map_err(|error| format!("read Genesis field overflow blob {blob_key}: {error}"))?
+    else {
+        return Err(format!("Genesis field overflow blob {blob_key} not found"));
+    };
+    let restored: Value = serde_json::from_slice(&bytes)
+        .map_err(|error| format!("decode Genesis field overflow blob {blob_key}: {error}"))?;
+    restored
+        .as_str()
+        .map(ToString::to_string)
+        .ok_or_else(|| format!("Genesis field overflow blob {blob_key} is not a string"))
+        .map(Some)
+}
+
 fn genesis_cache_root(state: &ServerState, app_ref: &str) -> PathBuf {
     let root = if state.data_dir.as_os_str().is_empty() {
         std::env::temp_dir().join("temper-genesis-app-cache")
@@ -548,6 +759,26 @@ mod tests {
             "ai-app-acme-notes-tenant-a-abcdef0123456789"
         );
         assert_eq!(sanitize_fragment("../"), "item");
+    }
+
+    #[test]
+    fn parses_dependency_refs() {
+        assert_eq!(
+            parse_dependency_ref("paw-agent", "temperpaw"),
+            DependencyRef {
+                owner: Some("temperpaw".to_string()),
+                name: "paw-agent".to_string(),
+                version_hash: None,
+            }
+        );
+        assert_eq!(
+            parse_dependency_ref("katagami/katagami-commons@abc123", "temperpaw"),
+            DependencyRef {
+                owner: Some("katagami".to_string()),
+                name: "katagami-commons".to_string(),
+                version_hash: Some("abc123".to_string()),
+            }
+        );
     }
 
     #[test]

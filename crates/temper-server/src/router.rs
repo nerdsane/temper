@@ -14,6 +14,7 @@ use crate::state::ServerState;
 use crate::webhooks::receiver as webhook_receiver;
 
 use axum::body::Body;
+use axum::extract::DefaultBodyLimit;
 use axum::extract::State;
 use axum::http::HeaderMap;
 use axum::http::Uri;
@@ -21,6 +22,7 @@ use axum::response::Response;
 use temper_runtime::tenant::TenantId;
 
 const TEMPER_CLIENT_JS: &str = include_str!("../static/temper-client.js");
+const INTERNAL_BLOB_BODY_LIMIT_BYTES: usize = 128 * 1024 * 1024;
 
 async fn serve_temper_client() -> (
     StatusCode,
@@ -90,7 +92,9 @@ pub fn build_router(state: ServerState) -> Router {
         )
         .route(
             "/_internal/blobs/{*path}",
-            put(blobs::put_blob).get(blobs::get_blob),
+            put(blobs::put_blob)
+                .get(blobs::get_blob)
+                .layer(DefaultBodyLimit::max(INTERNAL_BLOB_BODY_LIMIT_BYTES)),
         )
         // ADR-0069 Phase 2 dispatcher fallback. Matched paths that
         // aren't served by any built-in route above fall through to
@@ -342,10 +346,19 @@ async fn dispatch_matched_route(
 
     // Spawn task B: invoke the WASM module. Runs to completion
     // (guest writes head + body via FFI; we drain on the axum side).
-    let limits = temper_wasm::types::WasmResourceLimits {
+    let mut limits = temper_wasm::types::WasmResourceLimits {
         max_duration: std::time::Duration::from_secs(route.route.timeout_secs as u64),
         ..Default::default()
     };
+    if let Some(max_fuel) = route.route.max_fuel {
+        limits.max_fuel = max_fuel;
+    }
+    if let Some(max_memory) = route.route.max_memory {
+        limits.max_memory = max_memory;
+    }
+    if let Some(max_response_bytes) = route.route.max_response_bytes {
+        limits.max_response_bytes = max_response_bytes;
+    }
     let engine = state.wasm_engine.clone();
     let invoke_streams = std::sync::Arc::new(std::sync::RwLock::new(
         temper_wasm::stream::StreamRegistry::default(),

@@ -10,6 +10,36 @@ fn order_table() -> Arc<RwLock<TransitionTable>> {
     Arc::new(RwLock::new(TransitionTable::from_ioa_source(ORDER_IOA)))
 }
 
+fn composite_table() -> Arc<RwLock<TransitionTable>> {
+    Arc::new(RwLock::new(TransitionTable::from_ioa_source(
+        r#"
+[automaton]
+name = "Repository"
+version = "1.0.0"
+states = ["Active"]
+initial = "Active"
+
+[[action]]
+name = "IngestPack"
+kind = "Composite"
+from = ["Active"]
+to = "Active"
+params = ["PackBytes", "RefUpdates", "ClientRequestId"]
+effect = [{ type = "trigger", name = "scm_ingest_pack" }]
+
+[[action.sub_writes]]
+target_entity = "Commit"
+action = "Create"
+
+[[integration]]
+name = "scm_ingest_pack"
+trigger = "scm_ingest_pack"
+type = "wasm"
+module = "scm_ingest_pack"
+"#,
+    )))
+}
+
 #[test]
 fn event_budget_workspace_id_uses_workspace_entity_id_or_field() {
     let workspace_state = EntityState {
@@ -107,6 +137,60 @@ async fn dst_add_item_then_submit() {
     assert!(r.success, "submit should succeed, got: {:?}", r.error);
     assert_eq!(r.state.status, "Submitted");
     assert_eq!(r.state.events.len(), 2); // AddItem + SubmitOrder
+}
+
+#[tokio::test]
+async fn duplicate_composite_idempotency_reemits_spec_trigger() {
+    let system = ActorSystem::new("composite-idempotency");
+    let actor = EntityActor::new(
+        "Repository",
+        "rp-acme-app",
+        composite_table(),
+        serde_json::json!({}),
+    );
+    let actor_ref = system.spawn(actor, "rp-acme-app");
+    let params = serde_json::json!({
+        "PackBytes": "pack",
+        "RefUpdates": [{"Name": "refs/heads/main"}],
+        "ClientRequestId": "same-pack"
+    });
+
+    let first: EntityResponse = actor_ref
+        .ask(
+            EntityMsg::Action {
+                name: "IngestPack".into(),
+                params: params.clone(),
+                cross_entity_booleans: std::collections::BTreeMap::new(),
+                idempotency_key: Some("same-pack".into()),
+            },
+            Duration::from_secs(1),
+        )
+        .await
+        .unwrap();
+    assert_eq!(first.custom_effects, vec!["scm_ingest_pack"]);
+
+    let duplicate: EntityResponse = actor_ref
+        .ask(
+            EntityMsg::Action {
+                name: "IngestPack".into(),
+                params,
+                cross_entity_booleans: std::collections::BTreeMap::new(),
+                idempotency_key: Some("same-pack".into()),
+            },
+            Duration::from_secs(1),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(duplicate.custom_effects, vec!["scm_ingest_pack"]);
+    assert!(duplicate.state.fields.get("PackBytes").is_none());
+    assert!(duplicate.state.fields.get("RefUpdates").is_none());
+    assert!(duplicate.state.fields.get("ClientRequestId").is_none());
+    assert_eq!(
+        duplicate.state.events.len(),
+        1,
+        "duplicate idempotency must not append another parent event"
+    );
 }
 
 #[tokio::test]

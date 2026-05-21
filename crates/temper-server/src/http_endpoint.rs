@@ -45,6 +45,12 @@ pub struct HttpEndpointRoute {
     pub requires_auth: bool,
     /// Hard cap on invocation wall time (seconds).
     pub timeout_secs: u32,
+    /// Optional instruction budget for the endpoint adapter.
+    pub max_fuel: Option<u64>,
+    /// Optional linear-memory budget for the endpoint adapter.
+    pub max_memory: Option<usize>,
+    /// Optional host HTTP response ceiling for the endpoint adapter.
+    pub max_response_bytes: Option<usize>,
     /// Optional kernel-owned bridge from the adapter result to a
     /// spec-defined action. The WASM module supplies parameters only;
     /// the endpoint row supplies the target action and entity template.
@@ -336,6 +342,22 @@ pub fn route_from_entity_fields(id: &str, fields: &serde_json::Value) -> Option<
         .get("TimeoutSecs")
         .and_then(|v| v.as_u64())
         .unwrap_or(60);
+    let git_pack_defaults =
+        integration_module == "git_receive_pack" || integration_module == "git_upload_pack";
+    let max_fuel = obj
+        .get("MaxFuel")
+        .and_then(|v| v.as_u64())
+        .or_else(|| git_pack_defaults.then_some(20_000_000_000));
+    let max_memory = obj
+        .get("MaxMemory")
+        .and_then(|v| v.as_u64())
+        .and_then(|v| usize::try_from(v).ok())
+        .or_else(|| git_pack_defaults.then_some(512 * 1024 * 1024));
+    let max_response_bytes = obj
+        .get("MaxResponseBytes")
+        .and_then(|v| v.as_u64())
+        .and_then(|v| usize::try_from(v).ok())
+        .or_else(|| git_pack_defaults.then_some(128 * 1024 * 1024));
     let action_bridge = optional_action_bridge(obj)?;
     Some(HttpEndpointRoute {
         id: id.to_string(),
@@ -344,6 +366,9 @@ pub fn route_from_entity_fields(id: &str, fields: &serde_json::Value) -> Option<
         integration_module,
         requires_auth,
         timeout_secs: timeout_secs.min(u32::MAX as u64) as u32,
+        max_fuel,
+        max_memory,
+        max_response_bytes,
         action_bridge,
     })
 }
@@ -473,6 +498,9 @@ mod tests {
             integration_module: integration_module.to_string(),
             requires_auth: false,
             timeout_secs: 60,
+            max_fuel: None,
+            max_memory: None,
+            max_response_bytes: None,
             action_bridge: None,
         }
     }
@@ -596,6 +624,9 @@ mod tests {
             "IntegrationModule": "git_upload_pack",
             "RequiresAuth": true,
             "TimeoutSecs": 120,
+            "MaxFuel": 20000000000u64,
+            "MaxMemory": 536870912u64,
+            "MaxResponseBytes": 134217728u64,
         });
         let r = route_from_entity_fields("he-abc", &fields).unwrap();
         assert_eq!(r.id, "he-abc");
@@ -603,6 +634,9 @@ mod tests {
         assert_eq!(r.integration_module, "git_upload_pack");
         assert!(r.requires_auth);
         assert_eq!(r.timeout_secs, 120);
+        assert_eq!(r.max_fuel, Some(20_000_000_000));
+        assert_eq!(r.max_memory, Some(536_870_912));
+        assert_eq!(r.max_response_bytes, Some(134_217_728));
         assert!(r.action_bridge.is_none());
     }
 
@@ -620,6 +654,9 @@ mod tests {
             "ActionBridgeResponse": "git-receive-pack",
         });
         let r = route_from_entity_fields("he-receive", &fields).unwrap();
+        assert_eq!(r.max_fuel, Some(20_000_000_000));
+        assert_eq!(r.max_memory, Some(512 * 1024 * 1024));
+        assert_eq!(r.max_response_bytes, Some(128 * 1024 * 1024));
         let bridge = r.action_bridge.unwrap();
         assert_eq!(bridge.entity_type, "Repository");
         assert_eq!(bridge.entity_id_template, "rp-{owner}-{repo}");

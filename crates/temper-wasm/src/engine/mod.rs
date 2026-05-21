@@ -555,7 +555,7 @@ impl WasmEngine {
         };
 
         let ctx_bytes = context_json.as_bytes();
-        let ctx_ptr = 1024_usize;
+        let mut ctx_ptr = 1024_usize;
         {
             let phase = tracing::info_span!(
                 "wasm.invoke.write_context",
@@ -564,9 +564,17 @@ impl WasmEngine {
                 context_bytes = ctx_bytes.len() as u64,
             );
             let _entered = phase.enter();
-            memory.write(&mut store, ctx_ptr, ctx_bytes).map_err(|e| {
-                WasmError::Invocation(format!("failed to write context to memory: {e}"))
-            })?;
+            let current_len = memory.data_size(&store);
+            if ctx_bytes.len() <= current_len.saturating_sub(ctx_ptr) {
+                memory.write(&mut store, ctx_ptr, ctx_bytes).map_err(|e| {
+                    WasmError::Invocation(format!("failed to write context to memory: {e}"))
+                })?;
+            } else {
+                // SDK-backed modules read the canonical context through host_get_context.
+                // Avoid growing and dirtying fresh guest heap pages before the guest
+                // allocator can initialize them; that can corrupt large-context parses.
+                ctx_ptr = 0;
+            }
         }
 
         let result_ptr = {

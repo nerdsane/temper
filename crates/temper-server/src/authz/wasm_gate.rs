@@ -40,6 +40,10 @@ impl WasmAuthzGate for CedarWasmAuthzGate {
         url: &str,
         ctx: &WasmAuthzContext,
     ) -> WasmAuthzDecision {
+        if crate::blob_store::is_local_internal_blob_endpoint(url) {
+            return WasmAuthzDecision::Allow;
+        }
+
         let security_ctx = build_wasm_security_context(ctx);
 
         // Build resource attrs with BTreeMap (DST compliant)
@@ -213,6 +217,22 @@ mod tests {
             result,
             WasmAuthzDecision::Deny("no matching permit policy".into()),
         );
+    }
+
+    #[test]
+    fn cedar_gate_allows_local_internal_blob_endpoint() {
+        let engine = Arc::new(AuthzEngine::empty());
+        let gate = CedarWasmAuthzGate::new(engine);
+        let ctx = test_ctx();
+
+        let result = gate.authorize_http_call(
+            "127.0.0.1:3000",
+            "PUT",
+            "http://127.0.0.1:3000/_internal/blobs/field-overflow/sha256/abc.json",
+            &ctx,
+        );
+
+        assert_eq!(result, WasmAuthzDecision::Allow);
     }
 
     #[test]

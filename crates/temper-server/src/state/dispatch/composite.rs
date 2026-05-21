@@ -299,9 +299,17 @@ impl crate::state::ServerState {
                 .get_mut(&persistence_id)
                 .expect("stream inserted before processing sub-write");
 
-            if stream
-                .state
-                .has_processed_idempotency_key(&write.idempotency_key)
+            let incomplete_pack_object_repair =
+                is_incomplete_existing_pack_object_create(write, stream);
+
+            if should_skip_existing_pack_object_create(write, stream) {
+                continue;
+            }
+
+            if !incomplete_pack_object_repair
+                && stream
+                    .state
+                    .has_processed_idempotency_key(&write.idempotency_key)
             {
                 continue;
             }
@@ -680,14 +688,6 @@ impl crate::state::ServerState {
             .await?;
 
         for write in &mut prepared {
-            if write.uses_parent_gate && write.action == "Create" {
-                let table = self.transition_table_for_dispatch(tenant, &write.entity_type)?;
-                write.preflight_target = Some(PreflightCompositeTarget {
-                    target_existed: false,
-                    state: synthetic_initial_state(&write.entity_type, &write.entity_id, &table),
-                });
-                continue;
-            }
             let known_absent_create = known_absent_create_targets
                 .contains(&(write.entity_type.clone(), write.entity_id.clone()));
             write.preflight_target = Some(
@@ -1077,6 +1077,49 @@ fn composite_sub_write_uses_parent_gate(
     })
 }
 
+fn should_skip_existing_pack_object_create(
+    write: &PreparedCompositeSubWrite,
+    stream: &AtomicCompositeStream,
+) -> bool {
+    write.uses_parent_gate
+        && write.action == "Create"
+        && stream.target_existed
+        && is_pack_object_entity(&write.entity_type)
+        && has_complete_git_object_payload(&stream.state.fields)
+}
+
+fn is_incomplete_existing_pack_object_create(
+    write: &PreparedCompositeSubWrite,
+    stream: &AtomicCompositeStream,
+) -> bool {
+    write.uses_parent_gate
+        && write.action == "Create"
+        && stream.target_existed
+        && is_pack_object_entity(&write.entity_type)
+        && !has_complete_git_object_payload(&stream.state.fields)
+}
+
+fn is_pack_object_entity(entity_type: &str) -> bool {
+    matches!(entity_type, "Blob" | "Tree" | "Commit" | "Tag")
+}
+
+fn has_complete_git_object_payload(fields: &Value) -> bool {
+    fields
+        .as_object()
+        .and_then(|fields| fields.get("CanonicalBytes"))
+        .is_some_and(non_empty_json_value)
+}
+
+fn non_empty_json_value(value: &Value) -> bool {
+    match value {
+        Value::String(value) => !value.is_empty(),
+        Value::Object(map) => !map.is_empty(),
+        Value::Array(values) => !values.is_empty(),
+        Value::Null => false,
+        Value::Bool(_) | Value::Number(_) => true,
+    }
+}
+
 fn composite_create_resource_attrs_from_defaults(
     entity_id: &str,
     params: &Value,
@@ -1335,10 +1378,18 @@ mod tests {
         <Property Name="Name" Type="Edm.String" Nullable="false"/>
         <Property Name="Status" Type="Edm.String" Nullable="false"/>
       </EntityType>
+      <EntityType Name="Blob">
+        <Key><PropertyRef Name="Id"/></Key>
+        <Property Name="Id" Type="Edm.String" Nullable="false"/>
+        <Property Name="RepositoryId" Type="Edm.String" Nullable="false"/>
+        <Property Name="CanonicalBytes" Type="Edm.String"/>
+        <Property Name="Status" Type="Edm.String" Nullable="false"/>
+      </EntityType>
       <EntityContainer Name="Container">
         <EntitySet Name="Parents" EntityType="Temper.CompositeTest.Parent"/>
         <EntitySet Name="Children" EntityType="Temper.CompositeTest.Child"/>
         <EntitySet Name="Apps" EntityType="Temper.CompositeTest.App"/>
+        <EntitySet Name="Blobs" EntityType="Temper.CompositeTest.Blob"/>
       </EntityContainer>
     </Schema>
   </edmx:DataServices>
@@ -1366,6 +1417,24 @@ generated_from = "child"
 target_entity = "App"
 action = "Create"
 generated_from = "app_metadata"
+
+[[action]]
+name = "IngestPack"
+kind = "Composite"
+from = ["Active"]
+to = "Active"
+record_parent_event = false
+params = ["Reason"]
+
+[[action.cedar_gate]]
+principal = "request.principal"
+resource = "this"
+action = "Repository::IngestPack"
+
+[[action.sub_writes]]
+target_entity = "Blob"
+action = "Create"
+generated_from = "pack_bytes"
 
 [[action]]
 name = "DeleteChild"
@@ -1428,12 +1497,37 @@ to = "Active"
 params = ["OwnerId", "Name"]
 "#;
 
+    const BLOB_IOA: &str = r#"
+[automaton]
+name = "Blob"
+states = ["Durable"]
+initial = "Durable"
+allow_indefinite_states = ["Durable"]
+
+[[state]]
+name = "RepositoryId"
+type = "string"
+initial = ""
+
+[[state]]
+name = "CanonicalBytes"
+type = "string"
+initial = ""
+
+[[action]]
+name = "Create"
+kind = "input"
+from = ["Durable"]
+params = ["RepositoryId", "CanonicalBytes"]
+"#;
+
     fn composite_test_state() -> ServerState {
         let csdl = parse_csdl(COMPOSITE_CSDL).expect("test CSDL should parse");
         let mut specs = BTreeMap::new();
         specs.insert("Parent".to_string(), PARENT_IOA.to_string());
         specs.insert("Child".to_string(), CHILD_IOA.to_string());
         specs.insert("App".to_string(), APP_IOA.to_string());
+        specs.insert("Blob".to_string(), BLOB_IOA.to_string());
         ServerState::with_specs(
             ActorSystem::new("composite-dispatch-test"),
             csdl,
@@ -1450,6 +1544,7 @@ params = ["OwnerId", "Name"]
         specs.insert("Parent".to_string(), PARENT_IOA.to_string());
         specs.insert("Child".to_string(), CHILD_IOA.to_string());
         specs.insert("App".to_string(), APP_IOA.to_string());
+        specs.insert("Blob".to_string(), BLOB_IOA.to_string());
         ServerState::with_storage_stack(
             ActorSystem::new("composite-dispatch-test"),
             csdl,
@@ -2043,6 +2138,135 @@ params = ["OwnerId", "Name"]
                 .map(|event| event.event_type.as_str())
                 .collect::<Vec<_>>(),
             vec!["Created", "Create"]
+        );
+    }
+
+    #[cfg(feature = "sim")]
+    #[tokio::test]
+    async fn parent_gated_pack_object_create_repairs_partial_existing_object() {
+        let store = SimEventStore::no_faults(40);
+        let state = composite_test_state_with_store(store.clone());
+        let tenant = TenantId::default();
+        let mut agent = AgentContext::for_service("composite-test");
+        agent.idempotency_key = Some("legacy-partial-pack".to_string());
+        let blob_id = "rp-test-abc123";
+        let blob_pid = format!("default:Blob:{blob_id}");
+
+        state
+            .apply_composite_integration_result(
+                &tenant,
+                "Parent",
+                "repo-test",
+                "IngestPack",
+                &json!({
+                    "sub_writes": [{
+                        "entity_type": "Blob",
+                        "entity_id": blob_id,
+                        "action": "Create",
+                        "params": {
+                            "Id": "abc123",
+                            "RepositoryId": "rp-test"
+                        }
+                    }]
+                }),
+                &agent,
+            )
+            .await
+            .expect("partial legacy pack object should stage");
+
+        assert_eq!(store.dump_journal(&blob_pid).len(), 1);
+
+        state
+            .apply_composite_integration_result(
+                &tenant,
+                "Parent",
+                "repo-test",
+                "IngestPack",
+                &json!({
+                    "sub_writes": [{
+                        "entity_type": "Blob",
+                        "entity_id": blob_id,
+                        "action": "Create",
+                        "params": {
+                            "Id": "abc123",
+                            "RepositoryId": "rp-test",
+                            "CanonicalBytes": "YmxvYiAwAA=="
+                        }
+                    }]
+                }),
+                &agent,
+            )
+            .await
+            .expect("complete pack object should repair the partial stream");
+
+        let blob = state
+            .get_tenant_entity_state(&tenant, "Blob", blob_id)
+            .await
+            .expect("repaired blob should be readable");
+        assert_eq!(
+            blob.state.fields.get("CanonicalBytes"),
+            Some(&json!("YmxvYiAwAA=="))
+        );
+        assert_eq!(
+            store.dump_journal(&blob_pid).len(),
+            2,
+            "repair appends at the current sequence instead of expecting zero"
+        );
+    }
+
+    #[cfg(feature = "sim")]
+    #[tokio::test]
+    async fn parent_gated_pack_object_create_skips_complete_existing_object() {
+        let store = SimEventStore::no_faults(40);
+        let state = composite_test_state_with_store(store.clone());
+        let tenant = TenantId::default();
+        let mut agent = AgentContext::for_service("composite-test");
+        let blob_id = "rp-test-def456";
+        let blob_pid = format!("default:Blob:{blob_id}");
+        let callback_params = json!({
+            "sub_writes": [{
+                "entity_type": "Blob",
+                "entity_id": blob_id,
+                "action": "Create",
+                "params": {
+                    "Id": "def456",
+                    "RepositoryId": "rp-test",
+                    "CanonicalBytes": "YmxvYiAwAA=="
+                }
+            }]
+        });
+
+        agent.idempotency_key = Some("first-pack".to_string());
+        state
+            .apply_composite_integration_result(
+                &tenant,
+                "Parent",
+                "repo-test",
+                "IngestPack",
+                &callback_params,
+                &agent,
+            )
+            .await
+            .expect("first complete object write should append");
+        let first_len = store.dump_journal(&blob_pid).len();
+
+        agent.idempotency_key = Some("second-pack".to_string());
+        state
+            .apply_composite_integration_result(
+                &tenant,
+                "Parent",
+                "repo-test",
+                "IngestPack",
+                &callback_params,
+                &agent,
+            )
+            .await
+            .expect("complete duplicate object should no-op");
+
+        assert_eq!(
+            store.dump_journal(&blob_pid).len(),
+            first_len,
+            "complete pack objects should not accumulate duplicate Create events"
         );
     }
 

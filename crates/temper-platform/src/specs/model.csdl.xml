@@ -282,6 +282,9 @@
         <Property Name="IntegrationModule" Type="Edm.String" />
         <Property Name="RequiresAuth" Type="Edm.Boolean" />
         <Property Name="TimeoutSecs" Type="Edm.Int32" />
+        <Property Name="MaxFuel" Type="Edm.Int64" />
+        <Property Name="MaxMemory" Type="Edm.Int64" />
+        <Property Name="MaxResponseBytes" Type="Edm.Int64" />
         <Property Name="ActionBridgeEntityType" Type="Edm.String" />
         <Property Name="ActionBridgeEntityId" Type="Edm.String" />
         <Property Name="ActionBridgeAction" Type="Edm.String" />

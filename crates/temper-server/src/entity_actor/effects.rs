@@ -616,9 +616,13 @@ pub fn sync_fields_with_metadata(
             "Status".to_string(),
             serde_json::Value::String(state.status.clone()),
         );
+        prune_transient_action_fields(&entity_type, obj);
         // Project action params into fields
         if let Some(p) = params.as_object() {
             for (k, v) in p {
+                if is_transient_action_field(&entity_type, k) {
+                    continue;
+                }
                 let field_meta = state_var_metadata.and_then(|m| m.get(k.as_str()));
                 obj.insert(
                     k.clone(),
@@ -664,6 +668,29 @@ pub fn sync_fields_with_metadata(
         }
     }
     overflow_blobs
+}
+
+fn prune_transient_action_fields(
+    entity_type: &str,
+    fields: &mut serde_json::Map<String, serde_json::Value>,
+) {
+    if entity_type != "Repository" {
+        return;
+    }
+    fields.remove("PackBytes");
+    fields.remove("RefUpdates");
+    fields.remove("ClientRequestId");
+}
+
+fn is_transient_action_field(entity_type: &str, field_name: &str) -> bool {
+    entity_type == "Repository"
+        && matches!(field_name, "PackBytes" | "RefUpdates" | "ClientRequestId")
+}
+
+pub(crate) fn prune_transient_action_fields_from_state(state: &mut EntityState) {
+    if let Some(obj) = state.fields.as_object_mut() {
+        prune_transient_action_fields(&state.entity_type, obj);
+    }
 }
 
 fn project_field_value(
@@ -1335,6 +1362,35 @@ effect = [
             .and_then(|v| v.as_str())
             .expect("truncation produces a string placeholder");
         assert!(v.starts_with("[truncated:"), "placeholder shape preserved");
+    }
+
+    #[test]
+    fn repository_receive_pack_fields_are_transient() {
+        let mut state = make_state("Repository", "rp-acme-app");
+        state.fields = serde_json::json!({
+            "OwnerAccountId": "acme",
+            "Name": "app",
+            "DefaultBranch": "main",
+            "PackBytes": "stale-pack",
+            "RefUpdates": [{"Name": "refs/heads/main"}],
+            "ClientRequestId": "stale-request"
+        });
+        let params = serde_json::json!({
+            "PackBytes": "fresh-pack",
+            "RefUpdates": [{"Name": "refs/heads/main", "NewCommitSha": "abc"}],
+            "ClientRequestId": "fresh-request"
+        });
+
+        let overflow = sync_fields(&mut state, &params, FieldSyncMode::blob_refs_default());
+
+        assert!(overflow.is_empty());
+        assert!(state.fields.get("PackBytes").is_none());
+        assert!(state.fields.get("RefUpdates").is_none());
+        assert!(state.fields.get("ClientRequestId").is_none());
+        assert_eq!(
+            state.fields.get("OwnerAccountId").and_then(|v| v.as_str()),
+            Some("acme")
+        );
     }
 
     #[test]
