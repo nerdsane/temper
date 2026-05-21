@@ -952,6 +952,29 @@ impl ServerState {
         serde_json::Value::Object(projected)
     }
 
+    pub(crate) fn query_projection_state(
+        &self,
+        state: &crate::entity_actor::EntityState,
+    ) -> serde_json::Value {
+        let mut projected = match serde_json::to_value(state) {
+            Ok(value) => value,
+            Err(error) => {
+                tracing::error!(
+                    error = %error,
+                    tenant = "unknown",
+                    entity_type = %state.entity_type,
+                    entity_id = %state.entity_id,
+                    "failed to serialize query projection state"
+                );
+                return serde_json::json!({});
+            }
+        };
+        if let Some(obj) = projected.as_object_mut() {
+            obj.insert("events".to_string(), serde_json::json!([]));
+        }
+        projected
+    }
+
     /// Attach a webhook dispatcher for external system notifications.
     pub fn with_webhook_dispatcher(mut self, dispatcher: Arc<WebhookDispatcher>) -> Self {
         self.webhook_dispatcher = Some(dispatcher);

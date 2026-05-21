@@ -57,6 +57,7 @@ pub struct EntityCatalogRow {
     pub entity_id: String,
     pub status: String,
     pub fields: serde_json::Value,
+    pub state: Option<serde_json::Value>,
     pub sequence_nr: u64,
 }
 
@@ -67,6 +68,7 @@ pub struct QueryProjectionUpsert {
     pub entity_id: String,
     pub status: String,
     pub fields: serde_json::Value,
+    pub state: serde_json::Value,
     pub indexed_fields: serde_json::Value,
     pub sequence_nr: u64,
     pub known_new: bool,
@@ -91,6 +93,42 @@ impl TursoEventStore {
         fields: &serde_json::Value,
         sequence_nr: u64,
     ) -> Result<(), PersistenceError> {
+        let state = serde_json::json!({
+            "entity_type": entity_type,
+            "entity_id": entity_id,
+            "status": status,
+            "item_count": 0,
+            "counters": {},
+            "booleans": {},
+            "lists": {},
+            "fields": fields,
+            "events": [],
+            "total_event_count": sequence_nr,
+            "sequence_nr": sequence_nr
+        });
+        self.upsert_query_projection_with_state(
+            tenant,
+            entity_type,
+            entity_id,
+            status,
+            fields,
+            &state,
+            sequence_nr,
+        )
+        .await
+    }
+
+    #[expect(clippy::too_many_arguments, reason = "projection upsert boundary")]
+    pub async fn upsert_query_projection_with_state(
+        &self,
+        tenant: &str,
+        entity_type: &str,
+        entity_id: &str,
+        status: &str,
+        fields: &serde_json::Value,
+        state: &serde_json::Value,
+        sequence_nr: u64,
+    ) -> Result<(), PersistenceError> {
         let _write_permit = self
             .acquire_write_permit("turso.upsert_query_projection", WritePriority::Low)
             .await?;
@@ -98,13 +136,15 @@ impl TursoEventStore {
         let new_projection_hash = projection_hash(status, fields);
         let fields_json = serde_json::to_string(fields)
             .map_err(|error| PersistenceError::Serialization(error.to_string()))?;
+        let state_json = serde_json::to_string(state)
+            .map_err(|error| PersistenceError::Serialization(error.to_string()))?;
         let updated_at = sim_now().to_rfc3339();
         let sequence_nr = i64::try_from(sequence_nr).unwrap_or(i64::MAX);
 
         let unchanged_rows = conn
             .execute(
                 "UPDATE entity_catalog \
-                 SET status = ?4, updated_at = ?5, sequence_nr = ?6, projection_version = 2, fields = ?8 \
+                 SET status = ?4, updated_at = ?5, sequence_nr = ?6, projection_version = 2, fields = ?8, state = ?9 \
                  WHERE tenant = ?1 AND entity_type = ?2 AND entity_id = ?3 AND projection_hash = ?7 \
                    AND sequence_nr <= ?6",
                 params![
@@ -116,6 +156,7 @@ impl TursoEventStore {
                     sequence_nr,
                     new_projection_hash.as_str(),
                     fields_json.as_str(),
+                    state_json.as_str(),
                 ],
             )
             .await
@@ -152,11 +193,12 @@ impl TursoEventStore {
 
         tx.execute(
             "INSERT INTO entity_catalog \
-             (tenant, entity_type, entity_id, status, fields, updated_at, sequence_nr, projection_version, projection_hash) \
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, 2, ?8) \
+             (tenant, entity_type, entity_id, status, fields, state, updated_at, sequence_nr, projection_version, projection_hash) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, 2, ?9) \
              ON CONFLICT(tenant, entity_type, entity_id) DO UPDATE SET \
                  status = excluded.status, \
                  fields = excluded.fields, \
+                 state = excluded.state, \
                  updated_at = excluded.updated_at, \
                  sequence_nr = excluded.sequence_nr, \
                  projection_version = excluded.projection_version, \
@@ -167,6 +209,7 @@ impl TursoEventStore {
                 entity_id,
                 status,
                 fields_json.as_str(),
+                state_json.as_str(),
                 updated_at.as_str(),
                 sequence_nr,
                 new_projection_hash.as_str(),
@@ -285,6 +328,7 @@ impl TursoEventStore {
             entity_id: String,
             status: String,
             fields_json: String,
+            state_json: String,
             sequence_nr: i64,
             projection_hash: String,
         }
@@ -294,6 +338,8 @@ impl TursoEventStore {
         for projection in projections {
             let new_projection_hash = projection_hash(&projection.status, &projection.fields);
             let fields_json = serde_json::to_string(&projection.fields)
+                .map_err(|error| PersistenceError::Serialization(error.to_string()))?;
+            let state_json = serde_json::to_string(&projection.state)
                 .map_err(|error| PersistenceError::Serialization(error.to_string()))?;
             let sequence_nr = i64::try_from(projection.sequence_nr).unwrap_or(i64::MAX);
             let key = (projection.entity_type.clone(), projection.entity_id.clone());
@@ -315,6 +361,7 @@ impl TursoEventStore {
                 entity_id: projection.entity_id.clone(),
                 status: projection.status.clone(),
                 fields_json,
+                state_json,
                 sequence_nr,
                 projection_hash: new_projection_hash,
             });
@@ -323,20 +370,21 @@ impl TursoEventStore {
         if !catalog_upserts.is_empty() {
             let mut upsert_sql = String::from(
                 "INSERT INTO entity_catalog \
-                 (tenant, entity_type, entity_id, status, fields, updated_at, sequence_nr, projection_version, projection_hash) \
+                 (tenant, entity_type, entity_id, status, fields, state, updated_at, sequence_nr, projection_version, projection_hash) \
                  VALUES ",
             );
-            let mut upsert_values = Vec::with_capacity(catalog_upserts.len() * 8);
+            let mut upsert_values = Vec::with_capacity(catalog_upserts.len() * 9);
             for (index, projection) in catalog_upserts.iter().enumerate() {
                 if index > 0 {
                     upsert_sql.push_str(", ");
                 }
-                upsert_sql.push_str("(?, ?, ?, ?, ?, ?, ?, 2, ?)");
+                upsert_sql.push_str("(?, ?, ?, ?, ?, ?, ?, ?, 2, ?)");
                 upsert_values.push(Value::from(tenant.to_string()));
                 upsert_values.push(Value::from(projection.entity_type.clone()));
                 upsert_values.push(Value::from(projection.entity_id.clone()));
                 upsert_values.push(Value::from(projection.status.clone()));
                 upsert_values.push(Value::from(projection.fields_json.clone()));
+                upsert_values.push(Value::from(projection.state_json.clone()));
                 upsert_values.push(Value::from(updated_at.clone()));
                 upsert_values.push(Value::from(projection.sequence_nr));
                 upsert_values.push(Value::from(projection.projection_hash.clone()));
@@ -345,6 +393,7 @@ impl TursoEventStore {
                 " ON CONFLICT(tenant, entity_type, entity_id) DO UPDATE SET \
                  status = excluded.status, \
                  fields = excluded.fields, \
+                 state = excluded.state, \
                  updated_at = excluded.updated_at, \
                  sequence_nr = excluded.sequence_nr, \
                  projection_version = excluded.projection_version, \
@@ -436,8 +485,29 @@ impl TursoEventStore {
         status: &str,
         fields: &serde_json::Value,
     ) -> Result<(), PersistenceError> {
-        self.upsert_query_projection(tenant, entity_type, entity_id, status, fields, 0)
-            .await
+        let state = serde_json::json!({
+            "entity_type": entity_type,
+            "entity_id": entity_id,
+            "status": status,
+            "item_count": 0,
+            "counters": {},
+            "booleans": {},
+            "lists": {},
+            "fields": fields,
+            "events": [],
+            "total_event_count": 0,
+            "sequence_nr": 0
+        });
+        self.upsert_query_projection_with_state(
+            tenant,
+            entity_type,
+            entity_id,
+            status,
+            fields,
+            &state,
+            0,
+        )
+        .await
     }
 
     /// Remove the durable query-plane projection for a single entity.
@@ -726,7 +796,7 @@ impl TursoEventStore {
             .collect::<Vec<_>>()
             .join(", ");
         let sql = format!(
-            "SELECT entity_id, status, fields, sequence_nr \
+            "SELECT entity_id, status, fields, state, sequence_nr \
              FROM entity_catalog \
              WHERE tenant = ? AND entity_type = ? AND entity_id IN ({placeholders}) \
              ORDER BY entity_id"
@@ -743,13 +813,19 @@ impl TursoEventStore {
             let entity_id: String = row.get(0).map_err(storage_error)?;
             let status: String = row.get(1).map_err(storage_error)?;
             let fields_text: String = row.get(2).map_err(storage_error)?;
-            let sequence_nr: i64 = row.get(3).map_err(storage_error)?;
+            let state_text: Option<String> = row.get(3).map_err(storage_error)?;
+            let sequence_nr: i64 = row.get(4).map_err(storage_error)?;
             let fields: serde_json::Value = serde_json::from_str(&fields_text)
+                .map_err(|error| PersistenceError::Serialization(error.to_string()))?;
+            let state = state_text
+                .map(|state_text| serde_json::from_str(&state_text))
+                .transpose()
                 .map_err(|error| PersistenceError::Serialization(error.to_string()))?;
             out.push(EntityCatalogRow {
                 entity_id,
                 status,
                 fields,
+                state,
                 sequence_nr: sequence_nr.max(0) as u64,
             });
         }

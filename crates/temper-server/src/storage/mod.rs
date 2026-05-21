@@ -282,6 +282,8 @@ pub struct EntityCatalogRow {
     pub status: String,
     /// Raw JSONB fields object as written by the projection upsert.
     pub fields: serde_json::Value,
+    /// Full projected entity response state, with unbounded event history removed.
+    pub state: Option<serde_json::Value>,
     pub sequence_nr: u64,
 }
 
@@ -292,6 +294,7 @@ pub struct QueryProjectionUpsert {
     pub entity_id: String,
     pub status: String,
     pub fields: serde_json::Value,
+    pub state: serde_json::Value,
     pub indexed_fields: serde_json::Value,
     pub sequence_nr: u64,
     pub known_new: bool,
@@ -340,6 +343,7 @@ impl From<PostgresPolicyRow> for PolicyStoreRow {
 /// Durable query-plane capability.
 #[async_trait::async_trait]
 pub trait QueryPlaneStore: Send + Sync {
+    #[expect(clippy::too_many_arguments, reason = "projection upsert boundary")]
     async fn upsert_projection(
         &self,
         tenant: &str,
@@ -347,6 +351,7 @@ pub trait QueryPlaneStore: Send + Sync {
         entity_id: &str,
         status: &str,
         fields: &serde_json::Value,
+        state: &serde_json::Value,
         sequence_nr: u64,
     ) -> Result<(), PersistenceError>;
 
@@ -362,6 +367,7 @@ pub trait QueryPlaneStore: Send + Sync {
                 &projection.entity_id,
                 &projection.status,
                 &projection.fields,
+                &projection.state,
                 projection.sequence_nr,
             )
             .await?;
@@ -428,6 +434,8 @@ pub struct DataOnlyCreateRecord<'a> {
     pub status: &'a str,
     /// Projection fields to store in the query catalog and scalar index.
     pub fields: &'a serde_json::Value,
+    /// Full response projection to store in the query catalog.
+    pub state: &'a serde_json::Value,
     /// First event envelope to append at sequence number 1.
     pub event: &'a PersistenceEnvelope,
 }
@@ -2226,10 +2234,19 @@ impl QueryPlaneStore for PostgresEventStore {
         entity_id: &str,
         status: &str,
         fields: &serde_json::Value,
+        state: &serde_json::Value,
         sequence_nr: u64,
     ) -> Result<(), PersistenceError> {
-        self.upsert_query_projection(tenant, entity_type, entity_id, status, fields, sequence_nr)
-            .await
+        self.upsert_query_projection_with_state(
+            tenant,
+            entity_type,
+            entity_id,
+            status,
+            fields,
+            state,
+            sequence_nr,
+        )
+        .await
     }
 
     async fn remove_projection(
@@ -2291,6 +2308,7 @@ impl QueryPlaneStore for PostgresEventStore {
                             entity_id: row.entity_id,
                             status: row.status,
                             fields: row.fields,
+                            state: row.state,
                             sequence_nr: row.sequence_nr,
                         })
                         .collect(),
@@ -2316,10 +2334,19 @@ impl QueryPlaneStore for TursoEventStore {
         entity_id: &str,
         status: &str,
         fields: &serde_json::Value,
+        state: &serde_json::Value,
         sequence_nr: u64,
     ) -> Result<(), PersistenceError> {
-        self.upsert_query_projection(tenant, entity_type, entity_id, status, fields, sequence_nr)
-            .await
+        self.upsert_query_projection_with_state(
+            tenant,
+            entity_type,
+            entity_id,
+            status,
+            fields,
+            state,
+            sequence_nr,
+        )
+        .await
     }
 
     async fn upsert_projections(
@@ -2334,6 +2361,7 @@ impl QueryPlaneStore for TursoEventStore {
                 entity_id: projection.entity_id.clone(),
                 status: projection.status.clone(),
                 fields: projection.fields.clone(),
+                state: projection.state.clone(),
                 indexed_fields: projection.indexed_fields.clone(),
                 sequence_nr: projection.sequence_nr,
                 known_new: projection.known_new,
@@ -2402,6 +2430,7 @@ impl QueryPlaneStore for TursoEventStore {
                             entity_id: row.entity_id,
                             status: row.status,
                             fields: row.fields,
+                            state: row.state,
                             sequence_nr: row.sequence_nr,
                         })
                         .collect(),
@@ -2424,12 +2453,13 @@ impl DataOnlyCreateStore for PostgresEventStore {
         &self,
         record: DataOnlyCreateRecord<'_>,
     ) -> Result<u64, PersistenceError> {
-        self.create_data_only_entity_native(
+        self.create_data_only_entity_native_with_state(
             record.tenant,
             record.entity_type,
             record.entity_id,
             record.status,
             record.fields,
+            record.state,
             record.event,
         )
         .await
@@ -2445,11 +2475,20 @@ impl QueryPlaneStore for TenantStoreRouter {
         entity_id: &str,
         status: &str,
         fields: &serde_json::Value,
+        state: &serde_json::Value,
         sequence_nr: u64,
     ) -> Result<(), PersistenceError> {
         let store = self.store_for_tenant(tenant).await?;
         store
-            .upsert_query_projection(tenant, entity_type, entity_id, status, fields, sequence_nr)
+            .upsert_query_projection_with_state(
+                tenant,
+                entity_type,
+                entity_id,
+                status,
+                fields,
+                state,
+                sequence_nr,
+            )
             .await
     }
 
@@ -2466,6 +2505,7 @@ impl QueryPlaneStore for TenantStoreRouter {
                 entity_id: projection.entity_id.clone(),
                 status: projection.status.clone(),
                 fields: projection.fields.clone(),
+                state: projection.state.clone(),
                 indexed_fields: projection.indexed_fields.clone(),
                 sequence_nr: projection.sequence_nr,
                 known_new: projection.known_new,
@@ -2541,6 +2581,7 @@ impl QueryPlaneStore for TenantStoreRouter {
                             entity_id: row.entity_id,
                             status: row.status,
                             fields: row.fields,
+                            state: row.state,
                             sequence_nr: row.sequence_nr,
                         })
                         .collect(),

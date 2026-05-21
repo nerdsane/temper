@@ -6,6 +6,7 @@ CREATE TABLE IF NOT EXISTS entity_catalog (
     entity_id          TEXT NOT NULL,
     status             TEXT NOT NULL,
     fields             TEXT NOT NULL DEFAULT '{}',
+    state              TEXT,
     updated_at         TEXT NOT NULL,
     sequence_nr        INTEGER NOT NULL DEFAULT 0,
     projection_version INTEGER NOT NULL DEFAULT 2,

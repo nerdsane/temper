@@ -675,6 +675,16 @@ async fn query_projection_batch_updates_catalog_and_field_index() {
                         "Title": "Batch A",
                         "Owner": "alice",
                     }),
+                    state: serde_json::json!({
+                        "entity_type": "Order",
+                        "entity_id": "ord-batch-a",
+                        "status": "Draft",
+                        "fields": {
+                            "Title": "Batch A",
+                            "Owner": "alice",
+                        },
+                        "sequence_nr": 2,
+                    }),
                     indexed_fields: serde_json::json!({
                         "Title": "Batch A",
                         "Owner": "alice",
@@ -689,6 +699,16 @@ async fn query_projection_batch_updates_catalog_and_field_index() {
                     fields: serde_json::json!({
                         "Title": "Batch B",
                         "Owner": "bob",
+                    }),
+                    state: serde_json::json!({
+                        "entity_type": "Order",
+                        "entity_id": "ord-batch-b",
+                        "status": "Ready",
+                        "fields": {
+                            "Title": "Batch B",
+                            "Owner": "bob",
+                        },
+                        "sequence_nr": 3,
                     }),
                     indexed_fields: serde_json::json!({
                         "Title": "Batch B",
@@ -742,6 +762,17 @@ async fn query_projection_batch_can_store_fields_without_indexing_them() {
                     "Id": "blob-index-subset",
                     "RepositoryId": "repo-1",
                     "CanonicalBytes": "full-canonical-payload",
+                }),
+                state: serde_json::json!({
+                    "entity_type": "Blob",
+                    "entity_id": "blob-index-subset",
+                    "status": "Durable",
+                    "fields": {
+                        "Id": "blob-index-subset",
+                        "RepositoryId": "repo-1",
+                        "CanonicalBytes": "full-canonical-payload",
+                    },
+                    "sequence_nr": 1,
                 }),
                 indexed_fields: serde_json::json!({
                     "Id": "blob-index-subset",
@@ -1025,24 +1056,31 @@ async fn load_entity_catalog_rows_returns_full_projected_fields() {
     let store = make_store("entity-catalog-rows-full-fields").await;
     let tenant = format!("tenant-{}", uuid::Uuid::new_v4());
 
+    let fields = serde_json::json!({
+        "Path": "/notes/readme.md",
+        "WorkspaceId": "ws-a",
+        "MimeType": "text/markdown",
+        "HasContent": true,
+        "content_hash": "sha256:file-a",
+        "has_content": true,
+        "size_bytes": 12,
+        "nested": { "kept": true },
+    });
+    let state = serde_json::json!({
+        "entity_type": "File",
+        "entity_id": "file-a",
+        "status": "Ready",
+        "item_count": 2,
+        "counters": {"Views": 3},
+        "booleans": {"Pinned": true},
+        "lists": {"Tags": ["docs"]},
+        "fields": fields.clone(),
+        "events": [],
+        "total_event_count": 7,
+        "sequence_nr": 7,
+    });
     store
-        .upsert_query_projection(
-            &tenant,
-            "File",
-            "file-a",
-            "Ready",
-            &serde_json::json!({
-                "Path": "/notes/readme.md",
-                "WorkspaceId": "ws-a",
-                "MimeType": "text/markdown",
-                "HasContent": true,
-                "content_hash": "sha256:file-a",
-                "has_content": true,
-                "size_bytes": 12,
-                "nested": { "kept": true },
-            }),
-            7,
-        )
+        .upsert_query_projection_with_state(&tenant, "File", "file-a", "Ready", &fields, &state, 7)
         .await
         .expect("upsert file projection");
 
@@ -1067,6 +1105,9 @@ async fn load_entity_catalog_rows_returns_full_projected_fields() {
     assert_eq!(rows[0].fields["has_content"], true);
     assert_eq!(rows[0].fields["size_bytes"], 12);
     assert_eq!(rows[0].fields["nested"]["kept"], true);
+    assert_eq!(rows[0].state.as_ref().unwrap()["counters"]["Views"], 3);
+    assert_eq!(rows[0].state.as_ref().unwrap()["booleans"]["Pinned"], true);
+    assert_eq!(rows[0].state.as_ref().unwrap()["lists"]["Tags"][0], "docs");
 }
 
 #[tokio::test]

@@ -416,6 +416,7 @@ impl crate::state::ServerState {
                     entity_id: stream.entity_id.clone(),
                     status: stream.state.status.clone(),
                     fields,
+                    state: self.query_projection_state(&stream.state),
                     indexed_fields,
                     sequence_nr: stream.state.sequence_nr,
                     known_new: !stream.target_existed,
