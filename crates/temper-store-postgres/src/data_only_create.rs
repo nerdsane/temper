@@ -11,7 +11,7 @@ use crate::metrics::{
     record_postgres_projection_index_fields, record_postgres_projection_index_reconciliation,
     record_postgres_transaction_begin_duration, record_postgres_transaction_commit_duration,
 };
-use crate::platform::{json_hash, scalar_index_fields, storage_error};
+use crate::platform::{canonical_projection_status, json_hash, scalar_index_fields, storage_error};
 
 const DATA_ONLY_CREATE_OPERATION: &str = "data_only_create";
 
@@ -70,6 +70,7 @@ impl PostgresEventStore {
             event.sequence_nr, 1,
             "native data-only create requires first event sequence"
         );
+        let status = canonical_projection_status(status, state);
         let projection_hash = json_hash(fields);
         let (new_index, indexed_fields, skipped_fields) = scalar_index_fields(fields);
         let mut field_names = Vec::with_capacity(new_index.len());

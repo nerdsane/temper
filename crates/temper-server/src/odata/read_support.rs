@@ -1,6 +1,6 @@
 //! Shared helpers for OData read handlers.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::sync::OnceLock;
 
 use futures_util::stream::{self, StreamExt};
@@ -152,6 +152,47 @@ async fn try_load_catalog_rows(
     }
 }
 
+pub(super) async fn missing_catalog_entity_ids(
+    state: &ServerState,
+    tenant: &TenantId,
+    entity_type: &str,
+    entity_ids: &[String],
+) -> Vec<String> {
+    if entity_ids.is_empty() {
+        return Vec::new();
+    }
+    let Some(query_plane) = state.query_plane_store() else {
+        return Vec::new();
+    };
+
+    match query_plane
+        .load_entity_catalog_rows(tenant.as_str(), entity_type, entity_ids)
+        .await
+    {
+        Ok(Some(rows)) => {
+            let present = rows
+                .into_iter()
+                .map(|row| row.entity_id)
+                .collect::<BTreeSet<_>>();
+            entity_ids
+                .iter()
+                .filter(|id| !present.contains(*id))
+                .cloned()
+                .collect()
+        }
+        Ok(None) => Vec::new(),
+        Err(error) => {
+            tracing::warn!(
+                error = %error,
+                tenant = %tenant,
+                entity_type = %entity_type,
+                "catalog coverage check failed; trusting SQL filter push-down result"
+            );
+            Vec::new()
+        }
+    }
+}
+
 /// Try to load a single entity body from the durable `entity_catalog`.
 ///
 /// Returns `Some(json)` when the catalog has a row for `(tenant, entity_type,
@@ -226,6 +267,36 @@ pub(super) async fn materialize_entity_set_entities(
                     .await
                 {
                     Ok(response) => {
+                        if response.state.status != "Deleted"
+                            && let Some(query_plane) = state.query_plane_store()
+                        {
+                            let fields = state.query_projection_fields(
+                                &tenant,
+                                &entity_type,
+                                &response.state.fields,
+                            );
+                            let projected_state = state.query_projection_state(&response.state);
+                            if let Err(error) = query_plane
+                                .upsert_projection(
+                                    tenant.as_str(),
+                                    &entity_type,
+                                    &id,
+                                    &response.state.status,
+                                    &fields,
+                                    &projected_state,
+                                    response.state.sequence_nr,
+                                )
+                                .await
+                            {
+                                tracing::debug!(
+                                    error = %error,
+                                    tenant = %tenant,
+                                    entity_type = %entity_type,
+                                    entity_id = %id,
+                                    "failed to repair query projection after actor materialization fallback"
+                                );
+                            }
+                        }
                         let mut entity = serde_json::to_value(&response.state).unwrap_or_default();
                         hydrate_blob_refs_for_tenant(&state, &tenant, &mut entity).await;
                         if let Some(obj) = entity.as_object_mut() {
