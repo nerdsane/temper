@@ -1,7 +1,6 @@
 //! Shared helpers for OData read handlers.
 
 use std::collections::{BTreeMap, BTreeSet};
-use std::sync::OnceLock;
 
 use futures_util::stream::{self, StreamExt};
 use temper_runtime::tenant::TenantId;
@@ -10,59 +9,20 @@ use crate::blobs::hydrate_blob_refs_for_tenant;
 use crate::state::ServerState;
 use crate::storage::EntityCatalogRow;
 
+mod config;
+mod pushdown_page;
 mod select_projection;
 mod shadow;
 
+use config::{catalog_fast_read_enabled, entity_set_materialization_concurrency};
+pub(super) use config::{odata_default_page_size, odata_max_entities};
+pub(super) use pushdown_page::{PushdownPageRequest, try_select_paged_pushdown_entity_ids};
 use select_projection::catalog_row_to_selected_entity_body;
 pub(super) use select_projection::catalog_select_projection_fields;
 use shadow::{
     CatalogShadowReadBudget, maybe_spawn_catalog_shadow_check,
     maybe_spawn_catalog_shadow_check_with_budget,
 };
-
-fn env_usize(name: &str, default: usize) -> usize {
-    std::env::var(name) // determinism-ok: read once at startup
-        .ok()
-        .and_then(|v| v.trim().parse::<usize>().ok())
-        .filter(|v| *v > 0)
-        .unwrap_or(default)
-}
-
-fn env_bool(name: &str, default: bool) -> bool {
-    std::env::var(name) // determinism-ok: read once at startup
-        .ok()
-        .and_then(|v| match v.trim().to_ascii_lowercase().as_str() {
-            "1" | "true" | "yes" | "on" => Some(true),
-            "0" | "false" | "no" | "off" => Some(false),
-            _ => None,
-        })
-        .unwrap_or(default)
-}
-
-pub(super) fn odata_default_page_size() -> usize {
-    static DEFAULT_PAGE_SIZE: OnceLock<usize> = OnceLock::new();
-    *DEFAULT_PAGE_SIZE.get_or_init(|| env_usize("TEMPER_ODATA_DEFAULT_PAGE_SIZE", 100))
-}
-
-pub(super) fn odata_max_entities() -> usize {
-    static MAX_ENTITIES: OnceLock<usize> = OnceLock::new();
-    *MAX_ENTITIES.get_or_init(|| env_usize("TEMPER_ODATA_MAX_ENTITIES", 1000))
-}
-
-fn entity_set_materialization_concurrency() -> usize {
-    static CONCURRENCY: OnceLock<usize> = OnceLock::new();
-    *CONCURRENCY
-        .get_or_init(|| env_usize("TEMPER_ODATA_ENTITY_SET_MATERIALIZATION_CONCURRENCY", 16))
-}
-
-/// When true, list materialization reads each row from the durable
-/// `entity_catalog` projection in a single batch query, avoiding the per-row
-/// actor hydration cost. IDs that are absent from the catalog still fall
-/// back to the actor path on a per-id basis.
-fn catalog_fast_read_enabled() -> bool {
-    static ENABLED: OnceLock<bool> = OnceLock::new();
-    *ENABLED.get_or_init(|| env_bool("TEMPER_ODATA_CATALOG_FAST_READ", false))
-}
 
 fn should_read_catalog_for_materialization(prefer_catalog: bool) -> bool {
     prefer_catalog || catalog_fast_read_enabled()
@@ -472,7 +432,10 @@ pub(super) fn resolve_entity_set_name(
     tenant: &TenantId,
     entity_type: &str,
 ) -> String {
-    let registry = state.registry.read().unwrap(); // ci-ok: infallible lock
+    let registry = state
+        .registry
+        .read()
+        .expect("registry lock should not be poisoned"); // ci-ok: infallible lock
     if let Some(tc) = registry.get_tenant(tenant) {
         for (set_name, type_name) in &tc.entity_set_map {
             if type_name == entity_type {

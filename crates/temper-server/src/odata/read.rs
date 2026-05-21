@@ -18,10 +18,10 @@ use super::common::{
     resolve_value_parent, tenant_csdl_xml, tenant_entity_sets,
 };
 use super::read_support::{
-    catalog_select_projection_fields, materialize_entity_set_entities, missing_catalog_entity_ids,
-    odata_default_page_size, odata_max_entities, record_entity_set_not_found,
-    resolve_entity_set_name, select_entity_ids_for_materialization,
-    try_load_entity_body_from_catalog,
+    PushdownPageRequest, catalog_select_projection_fields, materialize_entity_set_entities,
+    missing_catalog_entity_ids, odata_default_page_size, odata_max_entities,
+    record_entity_set_not_found, resolve_entity_set_name, select_entity_ids_for_materialization,
+    try_load_entity_body_from_catalog, try_select_paged_pushdown_entity_ids,
 };
 use super::response::annotate_entity;
 use super::stream_fast_path::try_file_stream_fast_path;
@@ -141,7 +141,10 @@ fn resolve_navigation_target_type(
     parent_type: &str,
     property: &str,
 ) -> Result<String, (StatusCode, String)> {
-    let registry = state.registry.read().unwrap(); // ci-ok: infallible lock
+    let registry = state
+        .registry
+        .read()
+        .expect("registry lock should not be poisoned"); // ci-ok: infallible lock
     let tenant_config = registry.get_tenant(tenant);
     tenant_config
         .and_then(|tc| crate::query_eval::find_nav_target(&tc.csdl, parent_type, property))
@@ -310,7 +313,10 @@ fn enrich_entity_response(
     state: &ServerState,
     tenant: &TenantId,
 ) {
-    let registry = state.registry.read().unwrap(); // ci-ok: infallible lock
+    let registry = state
+        .registry
+        .read()
+        .expect("registry lock should not be poisoned"); // ci-ok: infallible lock
     let tenant_config = registry.get_tenant(tenant);
 
     // --- @odata.actions: actions available from current state ---
@@ -482,6 +488,9 @@ fn filter_only_query_options(query_options: &QueryOptions) -> QueryOptions {
     catalog_coverage_matched = tracing::field::Empty,
     catalog_select_projection = tracing::field::Empty,
     select_count = tracing::field::Empty,
+    pushdown_sparse_page = tracing::field::Empty,
+    pushdown_sparse_probe_count = tracing::field::Empty,
+    pushdown_page_count = tracing::field::Empty,
 ))]
 async fn handle_entity_set(
     state: &ServerState,
@@ -510,6 +519,9 @@ async fn handle_entity_set(
         "select_count",
         query_options.select.as_ref().map_or(0, Vec::len) as u64,
     );
+    span.record("pushdown_sparse_page", false);
+    span.record("pushdown_sparse_probe_count", 0_u64);
+    span.record("pushdown_page_count", 0_u64);
 
     // ---- Filter push-down: try SQL-level filtering first ----
     let sql_pushdown_ids = if let Some(filter) = &query_options.filter {
@@ -554,8 +566,11 @@ async fn handle_entity_set(
     let filter_pushdown = sql_pushdown_ids.is_some();
     let prefer_catalog_materialization = filter_pushdown || state.query_plane_store().is_some();
     let mut pushdown_coverage_entities = Vec::new();
+    let mut final_selected_catalog_fields = selected_catalog_fields;
+    let candidate_count_for_span;
     let (entity_ids, apply_options, precomputed_count) = if let Some(pushed_ids) = sql_pushdown_ids
     {
+        candidate_count_for_span = pushed_ids.len();
         let all_entity_ids = state.list_entity_ids_lazy(tenant, &entity_type).await;
         let pushed_id_set = pushed_ids.iter().cloned().collect::<BTreeSet<_>>();
         let mut missing_ids =
@@ -582,25 +597,63 @@ async fn handle_entity_set(
             span.record("catalog_coverage_matched", matched_count as u64);
             pushdown_coverage_entities = matching_missing;
         }
-        // SQL push-down already filtered — apply pagination only.
-        // The $filter is still in query_options for apply_query_options to
-        // re-verify in memory (belt-and-suspenders), but we've reduced the
-        // materialization set dramatically.
-        let mut opts = query_options.clone();
-        if opts.top.is_none() {
-            opts.top = Some(default_page_size);
-        } else if let Some(top) = opts.top {
-            opts.top = Some(top.min(max_entities));
+
+        if missing_ids.is_empty()
+            && let Some(selection) = try_select_paged_pushdown_entity_ids(
+                state,
+                PushdownPageRequest {
+                    tenant,
+                    entity_type: &entity_type,
+                    entity_set_name: name,
+                    pushed_ids: &pushed_ids,
+                    query_options,
+                    default_page_size,
+                    max_entities,
+                },
+            )
+            .await
+        {
+            span.record("pushdown_sparse_page", true);
+            span.record(
+                "pushdown_sparse_probe_count",
+                selection.sparse_materialized_count as u64,
+            );
+            span.record("pushdown_page_count", selection.entity_ids.len() as u64);
+
+            let mut opts = query_options.clone();
+            opts.filter = None;
+            opts.orderby = None;
+            opts.top = None;
+            opts.skip = None;
+            opts.count = None;
+            if query_options.select.is_some() && query_options.expand.is_none() {
+                final_selected_catalog_fields = query_options.select.as_deref();
+                opts.select = None;
+            }
+            (selection.entity_ids, opts, selection.count)
+        } else {
+            // SQL push-down already filtered — apply pagination only.
+            // The $filter is still in query_options for apply_query_options to
+            // re-verify in memory (belt-and-suspenders), but we've reduced the
+            // materialization set dramatically.
+            let mut opts = query_options.clone();
+            if opts.top.is_none() {
+                opts.top = Some(default_page_size);
+            } else if let Some(top) = opts.top {
+                opts.top = Some(top.min(max_entities));
+            }
+            (pushed_ids, opts, None)
         }
-        (pushed_ids, opts, None)
     } else {
         // No push-down — use existing materialization path.
-        select_entity_ids_for_materialization(
+        let selected = select_entity_ids_for_materialization(
             state.list_entity_ids_lazy(tenant, &entity_type).await,
             query_options,
             default_page_size,
             max_entities,
-        )
+        );
+        candidate_count_for_span = selected.0.len();
+        selected
     };
     span.record("filter_pushdown", filter_pushdown);
     span.record("catalog_materialization", prefer_catalog_materialization);
@@ -614,7 +667,7 @@ async fn handle_entity_set(
     );
     span.record(
         "candidate_count",
-        (entity_ids.len() + pushdown_coverage_entities.len()) as u64,
+        (candidate_count_for_span + pushdown_coverage_entities.len()) as u64,
     );
 
     let materialized = materialize_entity_set_entities(
@@ -624,7 +677,7 @@ async fn handle_entity_set(
         name,
         &entity_ids,
         prefer_catalog_materialization,
-        selected_catalog_fields,
+        final_selected_catalog_fields,
     )
     .await;
     let total_materialized_count =
@@ -1008,7 +1061,11 @@ pub async fn handle_metadata(
 
 #[instrument(skip_all, fields(otel.name = "GET /odata/hints"))]
 pub async fn handle_hints(State(state): State<ServerState>) -> impl IntoResponse {
-    let hints = state.agent_hints.read().unwrap().clone();
+    let hints = state
+        .agent_hints
+        .read()
+        .expect("agent hints lock should not be poisoned")
+        .clone();
     ODataResponse {
         status: StatusCode::OK,
         body: serde_json::to_value(&hints).unwrap_or_default(),
@@ -1135,7 +1192,9 @@ async fn handle_stream_get(
 
     // 6. Read bytes from StreamRegistry
     let body_bytes = {
-        let mut s = streams.write().unwrap(); // ci-ok: infallible lock
+        let mut s = streams
+            .write()
+            .expect("stream registry lock should not be poisoned"); // ci-ok: infallible lock
         s.take_stream(&response_stream_id).unwrap_or_default()
     };
 
