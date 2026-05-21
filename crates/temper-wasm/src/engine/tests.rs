@@ -321,6 +321,40 @@ async fn timeout_enforced_by_epoch() {
     );
 }
 
+/// Host calls must be bounded by the configured invocation duration, not by a
+/// hidden platform-wide deadline or the eventual completion of the host future.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn host_call_respects_invocation_duration_budget() {
+    let engine = WasmEngine::new().unwrap();
+    let hash = engine
+        .compile_and_cache(WAT_HOST_CALL_THEN_RETURN.as_bytes())
+        .unwrap();
+
+    let limits = WasmResourceLimits {
+        max_fuel: u64::MAX,
+        max_duration: Duration::from_millis(50),
+        ..WasmResourceLimits::default()
+    };
+    let host: Arc<dyn WasmHost> = Arc::new(SlowHttpHost {
+        delay: Duration::from_millis(350),
+    });
+
+    let start = std::time::Instant::now();
+    let result = engine
+        .invoke(&hash, &make_context(), host, &limits, make_streams())
+        .await;
+    let elapsed = start.elapsed();
+
+    assert!(
+        result.is_ok() || matches!(result, Err(WasmError::Timeout(_))),
+        "host-call budget expiry should return through the WASM invocation path, got: {result:?}"
+    );
+    assert!(
+        elapsed < Duration::from_millis(250),
+        "host call should return on the configured invocation budget, got {elapsed:?}"
+    );
+}
+
 /// Timeout isolation: one invocation timing out must not interrupt a different
 /// active store that has not exhausted its own deadline.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
