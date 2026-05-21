@@ -32,6 +32,7 @@ mod tests {
             include_str!("../migrations/0001_initial.sql"),
             include_str!("../migrations/0002_wasm_modules_source.sql"),
             include_str!("../migrations/0003_published_artifacts.sql"),
+            include_str!("../migrations/0004_entity_catalog_state.sql"),
         ]
         .join("\n")
         .to_lowercase();

@@ -67,20 +67,45 @@ fn should_read_catalog_for_materialization(prefer_catalog: bool) -> bool {
 
 /// Build the OData JSON body for a single catalog row.
 ///
-/// Mirrors the actor's serialized `EntityState` shape (`status`, `fields`,
-/// `entity_type`, `entity_id`, `sequence_nr`, `total_event_count`,
-/// `item_count`, `counters`, `booleans`, `lists`, `events`) so downstream
-/// `enrich_entity_response` and OData clients see the same payload as the
-/// actor path. Counters/booleans/lists are emitted as empty maps because the
-/// catalog only persists `status` + `fields`; entity types that depend on
-/// those collections in their OData response should leave the fast-read
-/// flag off until the projection is extended.
+/// Prefer the full projected `EntityState` payload when present. Older rows
+/// can still be synthesized from `status` + `fields` during rolling deploys,
+/// but those legacy rows do not carry counters, booleans, lists, item counts,
+/// or fields omitted from the query projection.
 fn catalog_row_to_entity_body(
     entity_type: &str,
     entity_set_name: &str,
     row: EntityCatalogRow,
 ) -> serde_json::Value {
-    let id = row.entity_id;
+    let id = row.entity_id.clone();
+    if let Some(mut state) = row.state
+        && let Some(obj) = state.as_object_mut()
+    {
+        obj.insert("entity_type".to_string(), serde_json::json!(entity_type));
+        obj.insert("entity_id".to_string(), serde_json::json!(id.clone()));
+        obj.insert("status".to_string(), serde_json::json!(row.status));
+        obj.entry("fields".to_string()).or_insert(row.fields);
+        obj.entry("item_count".to_string())
+            .or_insert(serde_json::json!(0));
+        obj.entry("counters".to_string())
+            .or_insert(serde_json::json!({}));
+        obj.entry("booleans".to_string())
+            .or_insert(serde_json::json!({}));
+        obj.entry("lists".to_string())
+            .or_insert(serde_json::json!({}));
+        obj.insert("events".to_string(), serde_json::json!([]));
+        obj.entry("total_event_count".to_string())
+            .or_insert(serde_json::json!(row.sequence_nr));
+        obj.insert(
+            "sequence_nr".to_string(),
+            serde_json::json!(row.sequence_nr),
+        );
+        obj.insert(
+            "@odata.id".to_string(),
+            serde_json::json!(format!("{entity_set_name}('{id}')")),
+        );
+        return state;
+    }
+
     serde_json::json!({
         "entity_type": entity_type,
         "entity_id": id,

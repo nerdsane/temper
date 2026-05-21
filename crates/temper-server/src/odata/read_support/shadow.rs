@@ -60,16 +60,22 @@ fn projection_drift_kind(
     catalog: &EntityCatalogRow,
     actor_status: &str,
     actor_fields: &serde_json::Value,
+    actor_state: &serde_json::Value,
     actor_sequence: u64,
 ) -> &'static str {
     let status_drift = catalog.status != actor_status;
     let fields_drift = catalog.fields != *actor_fields;
+    let state_drift = catalog
+        .state
+        .as_ref()
+        .is_some_and(|catalog_state| catalog_state != actor_state);
     let sequence_drift = catalog.sequence_nr != actor_sequence;
-    match (status_drift, fields_drift, sequence_drift) {
-        (false, false, false) => "none",
-        (true, false, false) => "status",
-        (false, true, false) => "fields",
-        (false, false, true) => "sequence",
+    match (status_drift, fields_drift, state_drift, sequence_drift) {
+        (false, false, false, false) => "none",
+        (true, false, false, false) => "status",
+        (false, true, false, false) => "fields",
+        (false, false, true, false) => "state",
+        (false, false, false, true) => "sequence",
         _ => "multiple",
     }
 }
@@ -182,10 +188,12 @@ fn spawn_catalog_shadow_check_for_row(
             Ok(response) => {
                 let actor_fields =
                     state.query_projection_fields(&tenant, &entity_type, &response.state.fields);
+                let actor_state = state.query_projection_state(&response.state);
                 let drift_kind = projection_drift_kind(
                     &catalog,
                     &response.state.status,
                     &actor_fields,
+                    &actor_state,
                     response.state.sequence_nr,
                 );
                 let (sequence_direction, sequence_gap) =
@@ -266,11 +274,26 @@ mod tests {
             entity_id: "file-1".to_string(),
             status: "Ready".to_string(),
             fields: serde_json::json!({"Name": "alpha"}),
+            state: None,
             sequence_nr: 7,
         };
+        let actor_state = serde_json::json!({
+            "entity_type": "File",
+            "entity_id": "file-1",
+            "status": "Ready",
+            "fields": {"Name": "alpha"},
+            "events": [],
+            "sequence_nr": 7
+        });
 
         assert_eq!(
-            projection_drift_kind(&catalog, "Ready", &serde_json::json!({"Name": "alpha"}), 7),
+            projection_drift_kind(
+                &catalog,
+                "Ready",
+                &serde_json::json!({"Name": "alpha"}),
+                &actor_state,
+                7,
+            ),
             "none"
         );
         assert_eq!(
@@ -278,16 +301,29 @@ mod tests {
                 &catalog,
                 "Archived",
                 &serde_json::json!({"Name": "alpha"}),
+                &actor_state,
                 7,
             ),
             "status"
         );
         assert_eq!(
-            projection_drift_kind(&catalog, "Ready", &serde_json::json!({"Name": "beta"}), 7),
+            projection_drift_kind(
+                &catalog,
+                "Ready",
+                &serde_json::json!({"Name": "beta"}),
+                &actor_state,
+                7,
+            ),
             "fields"
         );
         assert_eq!(
-            projection_drift_kind(&catalog, "Ready", &serde_json::json!({"Name": "alpha"}), 8),
+            projection_drift_kind(
+                &catalog,
+                "Ready",
+                &serde_json::json!({"Name": "alpha"}),
+                &actor_state,
+                8,
+            ),
             "sequence"
         );
         assert_eq!(
@@ -295,9 +331,39 @@ mod tests {
                 &catalog,
                 "Archived",
                 &serde_json::json!({"Name": "beta"}),
+                &actor_state,
                 8,
             ),
             "multiple"
+        );
+
+        let mut state_catalog = catalog.clone();
+        state_catalog.state = Some(serde_json::json!({
+            "entity_type": "File",
+            "entity_id": "file-1",
+            "status": "Ready",
+            "fields": {"Name": "alpha"},
+            "counters": {"Views": 41},
+            "events": [],
+            "sequence_nr": 7
+        }));
+        assert_eq!(
+            projection_drift_kind(
+                &state_catalog,
+                "Ready",
+                &serde_json::json!({"Name": "alpha"}),
+                &serde_json::json!({
+                    "entity_type": "File",
+                    "entity_id": "file-1",
+                    "status": "Ready",
+                    "fields": {"Name": "alpha"},
+                    "counters": {"Views": 42},
+                    "events": [],
+                    "sequence_nr": 7
+                }),
+                7,
+            ),
+            "state"
         );
     }
 

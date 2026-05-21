@@ -330,19 +330,24 @@ fn native_data_only_create_inserts_event_catalog_and_index_atomically() {
         .unwrap();
         assert_eq!(event_count, 1);
 
-        let catalog: Option<(String, serde_json::Value, i64)> = crate::dbm::postgres_query_as!(
-            "SELECT status, fields, sequence_nr FROM entity_catalog \
+        let catalog: Option<(String, serde_json::Value, Option<serde_json::Value>, i64)> =
+            crate::dbm::postgres_query_as!(
+                "SELECT status, fields, state, sequence_nr FROM entity_catalog \
              WHERE tenant = $1 AND entity_type = $2 AND entity_id = $3",
-        )
-        .bind(&tenant)
-        .bind(entity_type)
-        .bind(entity_id)
-        .fetch_optional(&pool)
-        .await
-        .unwrap();
-        let (status, stored_fields, stored_sequence) = catalog.unwrap();
+            )
+            .bind(&tenant)
+            .bind(entity_type)
+            .bind(entity_id)
+            .fetch_optional(&pool)
+            .await
+            .unwrap();
+        let (status, stored_fields, stored_state, stored_sequence) = catalog.unwrap();
         assert_eq!(status, "Active");
         assert_eq!(stored_fields, fields);
+        let stored_state = stored_state.expect("native create should store full catalog state");
+        assert_eq!(stored_state["fields"], fields);
+        assert_eq!(stored_state["sequence_nr"], 1);
+        assert_eq!(stored_state["total_event_count"], 1);
         assert_eq!(stored_sequence, 1);
 
         let indexed_count: i64 = crate::dbm::postgres_query_scalar!(
