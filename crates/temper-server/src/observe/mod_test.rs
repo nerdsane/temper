@@ -109,6 +109,98 @@ async fn wait_for_trajectory_total(app: Router, uri: &str, min_total: u64) -> se
     observe_json(app, uri).await
 }
 
+// -- Projection correctness probe tests --
+
+#[tokio::test]
+async fn projection_replay_parity_endpoint_reports_clean_bounded_scope() {
+    let state = test_state_with_turso().await;
+    let tenant = TenantId::default();
+    state
+        .get_or_create_tenant_entity(
+            &tenant,
+            "Order",
+            "projection-probe-clean-a",
+            serde_json::json!({"Title": "Projection Probe Clean"}),
+        )
+        .await
+        .expect("create projected entity");
+    state
+        .get_or_create_tenant_entity(
+            &tenant,
+            "Order",
+            "projection-probe-clean-b",
+            serde_json::json!({"Title": "Projection Probe Clean Extra"}),
+        )
+        .await
+        .expect("create second projected entity");
+
+    let app = build_app_with_state(state);
+    let json = observe_json(
+        app,
+        "/observe/projections/replay-parity?entity_type=Order&limit=1",
+    )
+    .await;
+
+    assert_eq!(json["kind"], "query_projection_replay_parity");
+    assert_eq!(json["clean"], true);
+    assert_eq!(json["limit"], 1);
+    assert_eq!(json["report"]["tenant"], "default");
+    assert_eq!(json["report"]["entity_type"], "Order");
+    assert_eq!(json["report"]["entity_limit"], 1);
+    assert_eq!(json["report"]["checked"], 1);
+    assert_eq!(json["report"]["matched"], 1);
+    assert_eq!(json["report"]["drifted"], 0);
+}
+
+#[tokio::test]
+async fn projection_replay_parity_endpoint_reports_projection_drift() {
+    let state = test_state_with_turso().await;
+    let tenant = TenantId::default();
+    let entity_id = "projection-probe-drift";
+    state
+        .get_or_create_tenant_entity(
+            &tenant,
+            "Order",
+            entity_id,
+            serde_json::json!({"Title": "Projection Probe Original"}),
+        )
+        .await
+        .expect("create projected entity");
+    let actor_state = state
+        .get_tenant_entity_state(&tenant, "Order", entity_id)
+        .await
+        .expect("load authoritative entity");
+    let projection_state = state.query_projection_state(&actor_state.state);
+    state
+        .query_plane_store()
+        .expect("query-plane store")
+        .upsert_projection(
+            tenant.as_str(),
+            "Order",
+            entity_id,
+            &actor_state.state.status,
+            &serde_json::json!({"Title": "Projection Probe Drift"}),
+            &projection_state,
+            actor_state.state.sequence_nr,
+        )
+        .await
+        .expect("inject projection drift");
+
+    let app = build_app_with_state(state);
+    let json = observe_json(
+        app,
+        "/observe/projections/replay-parity?entity_type=Order&limit=10",
+    )
+    .await;
+
+    assert_eq!(json["clean"], false);
+    assert_eq!(json["report"]["checked"], 1);
+    assert_eq!(json["report"]["matched"], 0);
+    assert_eq!(json["report"]["drifted"], 1);
+    assert_eq!(json["report"]["drift_examples"][0]["entity_id"], entity_id);
+    assert_eq!(json["report"]["drift_examples"][0]["drift_kind"], "fields");
+}
+
 /// Build a POST request with admin auth headers for observe endpoints.
 fn system_post(uri: &str, body: &str) -> Request<Body> {
     Request::post(uri)

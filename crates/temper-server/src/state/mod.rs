@@ -262,10 +262,16 @@ fn state_cache_budget() -> usize {
 }
 
 /// Summary of a query-projection replay parity verification run.
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, serde::Serialize)]
 pub struct QueryProjectionReplayParityReport {
     /// Tenant whose persisted journals and projection rows were compared.
     pub tenant: String,
+    /// Optional entity type scope applied to this verifier run.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub entity_type: Option<String>,
+    /// Optional maximum number of entities considered by this verifier run.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub entity_limit: Option<u64>,
     /// Number of persisted entities considered by the verifier.
     pub checked: u64,
     /// Number of non-deleted entities whose projection row matched replayed state.
@@ -290,7 +296,7 @@ impl QueryProjectionReplayParityReport {
 }
 
 /// One bounded replay parity drift or error example.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize)]
 pub struct QueryProjectionReplayParityDrift {
     /// Entity type whose projection diverged from replayed state.
     pub entity_type: String,
