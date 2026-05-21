@@ -25,6 +25,12 @@ struct QueryProjectionMetrics {
     replay_parity_check_total: Counter<u64>,
     replay_parity_duration_ms: Histogram<f64>,
     replay_parity_sequence_gap: Histogram<u64>,
+    replay_parity_run_total: Counter<u64>,
+    replay_parity_run_duration_ms: Histogram<f64>,
+    replay_parity_run_checked_entities: Histogram<u64>,
+    replay_parity_run_drifted_entities: Histogram<u64>,
+    replay_parity_run_missing_entities: Histogram<u64>,
+    replay_parity_run_error_entities: Histogram<u64>,
 }
 
 fn metrics() -> &'static QueryProjectionMetrics {
@@ -129,6 +135,33 @@ fn metrics() -> &'static QueryProjectionMetrics {
                 .with_description(
                     "Absolute sequence-number gap found by query-projection replay parity verification.",
                 )
+                .build(),
+            replay_parity_run_total: meter
+                .u64_counter("temper_query_projection_replay_parity_run_total")
+                .with_description(
+                    "Bounded query-projection replay parity verifier runs by scope and result.",
+                )
+                .build(),
+            replay_parity_run_duration_ms: meter
+                .f64_histogram("temper_query_projection_replay_parity_run_duration_ms")
+                .with_unit("ms")
+                .with_description("Wall time spent by one replay parity verifier run.")
+                .build(),
+            replay_parity_run_checked_entities: meter
+                .u64_histogram("temper_query_projection_replay_parity_run_checked_entities")
+                .with_description("Entities checked by one replay parity verifier run.")
+                .build(),
+            replay_parity_run_drifted_entities: meter
+                .u64_histogram("temper_query_projection_replay_parity_run_drifted_entities")
+                .with_description("Drifted entities found by one replay parity verifier run.")
+                .build(),
+            replay_parity_run_missing_entities: meter
+                .u64_histogram("temper_query_projection_replay_parity_run_missing_entities")
+                .with_description("Active entities missing from projection during one parity verifier run.")
+                .build(),
+            replay_parity_run_error_entities: meter
+                .u64_histogram("temper_query_projection_replay_parity_run_error_entities")
+                .with_description("Entities the replay parity verifier could not compare in one run.")
                 .build(),
         }
     })
@@ -332,6 +365,45 @@ pub(crate) fn record_replay_parity_check(
         .record(sequence_gap, &attrs);
 }
 
+#[expect(
+    clippy::too_many_arguments,
+    reason = "metric emission needs explicit low-cardinality dimensions and counts"
+)]
+pub(crate) fn record_replay_parity_run(
+    tenant: &str,
+    entity_type: &str,
+    source: &str,
+    result: &str,
+    checked: u64,
+    drifted: u64,
+    missing: u64,
+    errors: u64,
+    duration: Duration,
+) {
+    let attrs = [
+        KeyValue::new("tenant", tenant.to_string()),
+        KeyValue::new("entity_type", entity_type.to_string()),
+        KeyValue::new("source", source.to_string()),
+        KeyValue::new("result", result.to_string()),
+    ];
+    metrics().replay_parity_run_total.add(1, &attrs);
+    metrics()
+        .replay_parity_run_duration_ms
+        .record(duration.as_secs_f64() * 1000.0, &attrs);
+    metrics()
+        .replay_parity_run_checked_entities
+        .record(checked, &attrs);
+    metrics()
+        .replay_parity_run_drifted_entities
+        .record(drifted, &attrs);
+    metrics()
+        .replay_parity_run_missing_entities
+        .record(missing, &attrs);
+    metrics()
+        .replay_parity_run_error_entities
+        .record(errors, &attrs);
+}
+
 #[cfg(test)]
 mod tests {
     use std::time::Duration;
@@ -391,6 +463,17 @@ mod tests {
             "catalog_behind",
             2,
             Duration::from_millis(21),
+        );
+        super::record_replay_parity_run(
+            "tenant",
+            "Session",
+            "observe_probe",
+            "drift",
+            10,
+            1,
+            0,
+            0,
+            Duration::from_millis(34),
         );
     }
 }

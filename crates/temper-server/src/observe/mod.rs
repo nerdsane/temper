@@ -7,6 +7,7 @@ mod agents;
 mod entities;
 pub(crate) mod evolution;
 mod metrics;
+mod projections;
 mod refresh;
 pub(crate) mod specs;
 mod specs_helpers;
@@ -179,6 +180,10 @@ pub fn build_observe_router() -> Router<ServerState> {
         .route("/workflows", get(verification::handle_workflows))
         .route("/health", get(metrics::handle_health))
         .route("/metrics", get(metrics::handle_metrics))
+        .route(
+            "/projections/replay-parity",
+            get(projections::handle_replay_parity),
+        )
         .route("/trajectories", get(evolution::handle_trajectories))
         .route(
             "/evolution/records",
