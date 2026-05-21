@@ -13,32 +13,31 @@ use wasmtime::{Caller, Linker};
 
 use super::{HostState, WasmError};
 
-/// Outer deadline for each host-side async call invoked from a WASM guest.
+/// Minimal deadline for host-side async calls entered after the invocation
+/// budget has already been consumed.
 ///
-/// `WasmHost` implementations (notably `ProductionWasmHost` via `reqwest`)
-/// carry their own inner timeouts (currently 30 s for HTTP, 10 s for
-/// connect), so in the happy path this bound is never reached. The outer
-/// wrapper is defensive: if the inner timeout fails to fire — for example
-/// when the async host call is starved because the FFI thread is holding
-/// the current tokio worker via `block_in_place` — this deadline guarantees
-/// the guest always gets a result instead of pinning the entity actor until
-/// passivation. Observed in production: a hung `http_call` held an actor
-/// unresponsive for 6+ minutes until the passivation timer fired.
-const HOST_CALL_OUTER_TIMEOUT: Duration = Duration::from_secs(60);
+/// The outer wrapper is defensive: if the inner host implementation timeout
+/// fails to fire, this deadline guarantees the guest gets a result instead of
+/// pinning the entity actor until passivation.
+const MIN_HOST_CALL_OUTER_TIMEOUT: Duration = Duration::from_millis(1);
 
 /// Run an async host-side future from a synchronous WASM FFI context with an
-/// outer deadline. See `HOST_CALL_OUTER_TIMEOUT` for rationale.
+/// outer deadline derived from the current invocation budget.
 ///
 /// Returns `Err(())` on outer timeout (logged via `tracing::warn`); the
 /// caller should translate this to the WASM ABI's error sentinel (`-1`).
 ///
 /// The `label` is used in the timeout log line so operators can tell which
 /// host function hit the deadline without attaching a debugger.
-pub(crate) fn run_host_call_with_timeout<T, F>(label: &'static str, fut: F) -> Result<T, ()>
+pub(crate) fn run_host_call_with_timeout<T, F>(
+    label: &'static str,
+    deadline: Duration,
+    fut: F,
+) -> Result<T, ()>
 where
     F: Future<Output = T>,
 {
-    run_host_call_with_timeout_impl(label, HOST_CALL_OUTER_TIMEOUT, fut)
+    run_host_call_with_timeout_impl(label, deadline.max(MIN_HOST_CALL_OUTER_TIMEOUT), fut)
 }
 
 /// Implementation seam for `run_host_call_with_timeout` that accepts the
@@ -65,6 +64,7 @@ where
             tracing::warn!(
                 host_fn = label,
                 timeout_secs = deadline.as_secs(),
+                timeout_ms = deadline.as_millis() as u64,
                 "WASM host call exceeded outer deadline; returning error to guest"
             );
             Err(())
@@ -584,9 +584,12 @@ pub(super) fn link_host_functions(linker: &mut Linker<HostState>) -> Result<(), 
                 // host call can never pin the actor indefinitely.
                 let _guest_span = caller.data().guest_spans.enter_active();
                 let host = caller.data().host.clone();
-                let Ok(result) = run_host_call_with_timeout("host_http_call", async move {
-                    host.http_call(&method, &url, &headers, &body).await
-                }) else {
+                let deadline = caller.data().remaining_host_call_timeout();
+                let Ok(result) =
+                    run_host_call_with_timeout("host_http_call", deadline, async move {
+                        host.http_call(&method, &url, &headers, &body).await
+                    })
+                else {
                     return -1;
                 };
 
@@ -637,8 +640,9 @@ pub(super) fn link_host_functions(linker: &mut Linker<HostState>) -> Result<(), 
 
                 let _guest_span = caller.data().guest_spans.enter_active();
                 let host = caller.data().host.clone();
-                let result = tokio::task::block_in_place(|| {
-                    tokio::runtime::Handle::current().block_on(
+                let deadline = caller.data().remaining_host_call_timeout();
+                let Ok(result) =
+                    run_host_call_with_timeout("host_http_call_batch", deadline, async move {
                         host.http_call_batch(
                             &requests
                                 .iter()
@@ -649,9 +653,12 @@ pub(super) fn link_host_functions(linker: &mut Linker<HostState>) -> Result<(), 
                                     body: request.body.clone(),
                                 })
                                 .collect::<Vec<_>>(),
-                        ),
-                    )
-                });
+                        )
+                        .await
+                    })
+                else {
+                    return -1;
+                };
 
                 match result {
                     Ok(responses) => {
@@ -729,9 +736,12 @@ pub(super) fn link_host_functions(linker: &mut Linker<HostState>) -> Result<(), 
                 // host call can never pin the actor indefinitely.
                 let _guest_span = caller.data().guest_spans.enter_active();
                 let host = caller.data().host.clone();
-                let Ok(result) = run_host_call_with_timeout("host_connect_call", async move {
-                    host.connect_call(&url, &headers, &body).await
-                }) else {
+                let deadline = caller.data().remaining_host_call_timeout();
+                let Ok(result) =
+                    run_host_call_with_timeout("host_connect_call", deadline, async move {
+                        host.connect_call(&url, &headers, &body).await
+                    })
+                else {
                     return -1;
                 };
 
@@ -831,10 +841,13 @@ pub(super) fn link_host_functions(linker: &mut Linker<HostState>) -> Result<(), 
                 // host call can never pin the actor indefinitely.
                 let _guest_span = caller.data().guest_spans.enter_active();
                 let host = caller.data().host.clone();
-                let Ok(result) = run_host_call_with_timeout("host_http_call_stream", async move {
-                    host.http_call_binary(&method, &url, &headers, &body_bytes)
-                        .await
-                }) else {
+                let deadline = caller.data().remaining_host_call_timeout();
+                let Ok(result) =
+                    run_host_call_with_timeout("host_http_call_stream", deadline, async move {
+                        host.http_call_binary(&method, &url, &headers, &body_bytes)
+                            .await
+                    })
+                else {
                     return -1;
                 };
 
@@ -1482,10 +1495,14 @@ pub(super) fn link_host_functions(linker: &mut Linker<HostState>) -> Result<(), 
                 };
                 let method_for_log = head.method.clone();
                 let url_for_log = redact_url_for_log(&head.url);
-                let result = tokio::task::block_in_place(|| {
-                    tokio::runtime::Handle::current()
-                        .block_on(host.http_stream_begin_outbound(head))
-                });
+                let deadline = caller.data().remaining_host_call_timeout();
+                let Ok(result) = run_host_call_with_timeout(
+                    "host_http_stream_begin_outbound",
+                    deadline,
+                    async move { host.http_stream_begin_outbound(head).await },
+                ) else {
+                    return -4;
+                };
 
                 let handles = match result {
                     Ok(h) => h,
@@ -1539,10 +1556,14 @@ pub(super) fn link_host_functions(linker: &mut Linker<HostState>) -> Result<(), 
                 let _guest_span = caller.data().guest_spans.enter_active();
                 let host = caller.data().host.clone();
                 let sh = crate::http_stream::StreamHandle(handle as u32);
-                let result = tokio::task::block_in_place(|| {
-                    tokio::runtime::Handle::current()
-                        .block_on(host.http_stream_read_bounded(sh, buf_cap as usize))
-                });
+                let deadline = caller.data().remaining_host_call_timeout();
+                let Ok(result) =
+                    run_host_call_with_timeout("host_http_stream_read", deadline, async move {
+                        host.http_stream_read_bounded(sh, buf_cap as usize).await
+                    })
+                else {
+                    return -4;
+                };
                 match result {
                     Ok(chunk) => {
                         if chunk.is_empty() {
@@ -1587,9 +1608,14 @@ pub(super) fn link_host_functions(linker: &mut Linker<HostState>) -> Result<(), 
                 let _guest_span = caller.data().guest_spans.enter_active();
                 let host = caller.data().host.clone();
                 let sh = crate::http_stream::StreamHandle(handle as u32);
-                let result = tokio::task::block_in_place(|| {
-                    tokio::runtime::Handle::current().block_on(host.http_stream_try_write(sh, buf))
-                });
+                let deadline = caller.data().remaining_host_call_timeout();
+                let Ok(result) = run_host_call_with_timeout(
+                    "host_http_stream_try_write",
+                    deadline,
+                    async move { host.http_stream_try_write(sh, buf).await },
+                ) else {
+                    return -4;
+                };
                 match result {
                     Ok(n) => n as i32,
                     Err(crate::http_stream::StreamError::WouldBlock) => -1,
@@ -1619,9 +1645,14 @@ pub(super) fn link_host_functions(linker: &mut Linker<HostState>) -> Result<(), 
                 let _guest_span = caller.data().guest_spans.enter_active();
                 let host = caller.data().host.clone();
                 let sh = crate::http_stream::StreamHandle(handle as u32);
-                let result = tokio::task::block_in_place(|| {
-                    tokio::runtime::Handle::current().block_on(host.http_stream_close(sh))
-                });
+                let deadline = caller.data().remaining_host_call_timeout();
+                let Ok(result) =
+                    run_host_call_with_timeout("host_http_stream_close", deadline, async move {
+                        host.http_stream_close(sh).await
+                    })
+                else {
+                    return -4;
+                };
                 match result {
                     Ok(()) => 0,
                     Err(crate::http_stream::StreamError::InvalidHandle) => -3,
@@ -1674,9 +1705,14 @@ pub(super) fn link_host_functions(linker: &mut Linker<HostState>) -> Result<(), 
                 let _guest_span = caller.data().guest_spans.enter_active();
                 let host = caller.data().host.clone();
                 let sh = crate::http_stream::StreamHandle(resp_handle as u32);
-                let result = tokio::task::block_in_place(|| {
-                    tokio::runtime::Handle::current().block_on(host.http_stream_response_head(sh))
-                });
+                let deadline = caller.data().remaining_host_call_timeout();
+                let Ok(result) = run_host_call_with_timeout(
+                    "host_http_stream_response_head",
+                    deadline,
+                    async move { host.http_stream_response_head(sh).await },
+                ) else {
+                    return -4;
+                };
                 let head = match result {
                     Ok(h) => h,
                     Err(err) => {
@@ -1749,10 +1785,14 @@ pub(super) fn link_host_functions(linker: &mut Linker<HostState>) -> Result<(), 
                 let _guest_span = caller.data().guest_spans.enter_active();
                 let host = caller.data().host.clone();
                 let sh = crate::http_stream::StreamHandle(resp_handle as u32);
-                let result = tokio::task::block_in_place(|| {
-                    tokio::runtime::Handle::current()
-                        .block_on(host.http_stream_send_response_head(sh, head))
-                });
+                let deadline = caller.data().remaining_host_call_timeout();
+                let Ok(result) = run_host_call_with_timeout(
+                    "host_http_stream_send_response_head",
+                    deadline,
+                    async move { host.http_stream_send_response_head(sh, head).await },
+                ) else {
+                    return -4;
+                };
                 match result {
                     Ok(()) => 0,
                     Err(crate::http_stream::StreamError::InvalidHandle) => -3,
@@ -1945,7 +1985,10 @@ mod tests {
     /// production-length deadline.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn run_host_call_public_wrapper_passes_fast_futures() {
-        let result = run_host_call_with_timeout("test_public_fast", async { "hello" });
+        let result =
+            run_host_call_with_timeout("test_public_fast", Duration::from_secs(5), async {
+                "hello"
+            });
         assert_eq!(result, Ok("hello"));
     }
 }
