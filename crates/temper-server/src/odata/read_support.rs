@@ -10,8 +10,11 @@ use crate::blobs::hydrate_blob_refs_for_tenant;
 use crate::state::ServerState;
 use crate::storage::EntityCatalogRow;
 
+mod select_projection;
 mod shadow;
 
+use select_projection::catalog_row_to_selected_entity_body;
+pub(super) use select_projection::catalog_select_projection_fields;
 use shadow::{
     CatalogShadowReadBudget, maybe_spawn_catalog_shadow_check,
     maybe_spawn_catalog_shadow_check_with_budget,
@@ -152,6 +155,42 @@ async fn try_load_catalog_rows(
     }
 }
 
+async fn try_load_selected_catalog_rows(
+    state: &ServerState,
+    tenant: &TenantId,
+    entity_type: &str,
+    entity_ids: &[String],
+    selected_fields: &[String],
+) -> BTreeMap<String, EntityCatalogRow> {
+    let Some(query_plane) = state.query_plane_store() else {
+        return BTreeMap::new();
+    };
+    match query_plane
+        .load_selected_entity_catalog_rows(
+            tenant.as_str(),
+            entity_type,
+            entity_ids,
+            selected_fields,
+        )
+        .await
+    {
+        Ok(Some(rows)) => rows
+            .into_iter()
+            .map(|row| (row.entity_id.clone(), row))
+            .collect(),
+        Ok(None) => try_load_catalog_rows(state, tenant, entity_type, entity_ids).await,
+        Err(error) => {
+            tracing::warn!(
+                error = %error,
+                tenant = %tenant,
+                entity_type = %entity_type,
+                "selected catalog fast-read failed; falling back to full catalog materialization"
+            );
+            try_load_catalog_rows(state, tenant, entity_type, entity_ids).await
+        }
+    }
+}
+
 pub(super) async fn missing_catalog_entity_ids(
     state: &ServerState,
     tenant: &TenantId,
@@ -229,10 +268,18 @@ pub(super) async fn materialize_entity_set_entities(
     entity_set_name: &str,
     entity_ids: &[String],
     prefer_catalog: bool,
+    selected_catalog_fields: Option<&[String]>,
 ) -> MaterializedEntitySet {
+    let selected_catalog_fields_owned = selected_catalog_fields.map(Vec::from);
     let mut catalog_hits: BTreeMap<String, EntityCatalogRow> =
         if should_read_catalog_for_materialization(prefer_catalog) {
-            try_load_catalog_rows(state, tenant, entity_type, entity_ids).await
+            match selected_catalog_fields {
+                Some(select) => {
+                    try_load_selected_catalog_rows(state, tenant, entity_type, entity_ids, select)
+                        .await
+                }
+                None => try_load_catalog_rows(state, tenant, entity_type, entity_ids).await,
+            }
         } else {
             BTreeMap::new()
         };
@@ -242,7 +289,9 @@ pub(super) async fn materialize_entity_set_entities(
     let entities = stream::iter(entity_ids.iter().cloned())
         .map(|id| {
             let catalog_row = catalog_hits.remove(&id);
-            if let Some(row) = catalog_row.as_ref() {
+            if selected_catalog_fields_owned.is_none()
+                && let Some(row) = catalog_row.as_ref()
+            {
                 let _ = maybe_spawn_catalog_shadow_check_with_budget(
                     state,
                     tenant,
@@ -255,10 +304,18 @@ pub(super) async fn materialize_entity_set_entities(
             let tenant = tenant.clone();
             let entity_type = entity_type.to_string();
             let entity_set_name = entity_set_name.to_string();
+            let selected_catalog_fields = selected_catalog_fields_owned.clone();
             async move {
                 if let Some(row) = catalog_row {
-                    let mut entity =
-                        catalog_row_to_entity_body(&entity_type, &entity_set_name, row);
+                    let mut entity = match selected_catalog_fields.as_deref() {
+                        Some(select) => catalog_row_to_selected_entity_body(
+                            &entity_type,
+                            &entity_set_name,
+                            row,
+                            select,
+                        ),
+                        None => catalog_row_to_entity_body(&entity_type, &entity_set_name, row),
+                    };
                     hydrate_blob_refs_for_tenant(&state, &tenant, &mut entity).await;
                     return Some(entity);
                 }
