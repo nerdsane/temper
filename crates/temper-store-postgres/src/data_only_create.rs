@@ -26,6 +26,46 @@ impl PostgresEventStore {
         fields: &serde_json::Value,
         event: &PersistenceEnvelope,
     ) -> Result<u64, PersistenceError> {
+        let state = serde_json::json!({
+            "entity_type": entity_type,
+            "entity_id": entity_id,
+            "status": status,
+            "item_count": 0,
+            "counters": {},
+            "booleans": {},
+            "lists": {},
+            "fields": fields,
+            "events": [],
+            "total_event_count": 1,
+            "sequence_nr": 1
+        });
+        self.create_data_only_entity_native_with_state(
+            tenant,
+            entity_type,
+            entity_id,
+            status,
+            fields,
+            &state,
+            event,
+        )
+        .await
+    }
+
+    /// Atomically insert the first data-only event and its initial full-state query projection.
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "native data-only create storage boundary"
+    )]
+    pub async fn create_data_only_entity_native_with_state(
+        &self,
+        tenant: &str,
+        entity_type: &str,
+        entity_id: &str,
+        status: &str,
+        fields: &serde_json::Value,
+        state: &serde_json::Value,
+        event: &PersistenceEnvelope,
+    ) -> Result<u64, PersistenceError> {
         assert_eq!(
             event.sequence_nr, 1,
             "native data-only create requires first event sequence"
@@ -108,14 +148,15 @@ impl PostgresEventStore {
 
         if let Err(e) = crate::dbm::postgres_query!(
             "INSERT INTO entity_catalog \
-             (tenant, entity_type, entity_id, status, fields, sequence_nr, projection_version, projection_hash, updated_at) \
-             VALUES ($1, $2, $3, $4, $5, 1, 2, $6, now())",
+             (tenant, entity_type, entity_id, status, fields, state, sequence_nr, projection_version, projection_hash, updated_at) \
+             VALUES ($1, $2, $3, $4, $5, $6, 1, 2, $7, now())",
         )
         .bind(tenant)
         .bind(entity_type)
         .bind(entity_id)
         .bind(status)
         .bind(fields)
+        .bind(state)
         .bind(projection_hash.as_str())
         .execute(&mut *tx)
         .await

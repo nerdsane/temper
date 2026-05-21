@@ -736,6 +736,7 @@ impl ServerState {
         if let Some(query_plane) = self.query_plane_store() {
             let status = response.state.status.clone();
             let fields = self.query_projection_fields(tenant, entity_type, &response.state.fields);
+            let projected_state = self.query_projection_state(&response.state);
             let sequence_nr = response.state.sequence_nr;
             let operation = "upsert";
             let source = "create";
@@ -748,6 +749,7 @@ impl ServerState {
                     entity_id,
                     &status,
                     &fields,
+                    &projected_state,
                     sequence_nr,
                 )
                 .await
@@ -884,6 +886,10 @@ impl ServerState {
         };
 
         let projection_fields = self.query_projection_fields(tenant, entity_type, &state.fields);
+        let mut created_projection_state = state.clone();
+        created_projection_state.sequence_nr = 1;
+        created_projection_state.push_event_bounded(created.clone());
+        let projection_state = self.query_projection_state(&created_projection_state);
         if let Some(native_store) = self.data_only_create_store() {
             let operation = "native_create";
             let source = "data_only_create_fast_path";
@@ -903,6 +909,7 @@ impl ServerState {
                     entity_id,
                     status: &state.status,
                     fields: &projection_fields,
+                    state: &projection_state,
                     event: &envelope,
                 })
                 .instrument(native_span)
@@ -984,6 +991,7 @@ impl ServerState {
                     entity_id,
                     &state.status,
                     &projection_fields,
+                    &projection_state,
                     state.sequence_nr,
                 )
                 .await
@@ -1094,6 +1102,7 @@ impl ServerState {
         {
             let status = response.state.status.clone();
             let fields = self.query_projection_fields(tenant, entity_type, &response.state.fields);
+            let projected_state = self.query_projection_state(&response.state);
             let sequence_nr = response.state.sequence_nr;
             let operation = "upsert";
             let source = "field_update";
@@ -1106,6 +1115,7 @@ impl ServerState {
                     entity_id,
                     &status,
                     &fields,
+                    &projected_state,
                     sequence_nr,
                 )
                 .await

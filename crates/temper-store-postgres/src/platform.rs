@@ -35,6 +35,7 @@ struct QueryProjectionCatalogUpdate<'a> {
     entity_id: &'a str,
     status: &'a str,
     fields: &'a serde_json::Value,
+    state: &'a serde_json::Value,
     sequence_nr: u64,
     projection_hash: &'a str,
 }
@@ -50,6 +51,7 @@ async fn update_query_projection_catalog_row(
              sequence_nr = $6, \
              projection_version = 2, \
              projection_hash = $7, \
+             state = $8, \
              updated_at = now() \
          WHERE tenant = $1 AND entity_type = $2 AND entity_id = $3",
     )
@@ -60,6 +62,7 @@ async fn update_query_projection_catalog_row(
     .bind(update.fields)
     .bind(update.sequence_nr as i64)
     .bind(update.projection_hash)
+    .bind(update.state)
     .execute(&mut **tx)
     .await
     .map_err(storage_error)?;
@@ -254,6 +257,7 @@ pub struct PostgresEntityCatalogRow {
     pub entity_id: String,
     pub status: String,
     pub fields: serde_json::Value,
+    pub state: Option<serde_json::Value>,
     pub sequence_nr: u64,
 }
 
@@ -486,6 +490,42 @@ impl PostgresEventStore {
         fields: &serde_json::Value,
         sequence_nr: u64,
     ) -> Result<(), PersistenceError> {
+        let state = serde_json::json!({
+            "entity_type": entity_type,
+            "entity_id": entity_id,
+            "status": status,
+            "item_count": 0,
+            "counters": {},
+            "booleans": {},
+            "lists": {},
+            "fields": fields,
+            "events": [],
+            "total_event_count": sequence_nr,
+            "sequence_nr": sequence_nr
+        });
+        self.upsert_query_projection_with_state(
+            tenant,
+            entity_type,
+            entity_id,
+            status,
+            fields,
+            &state,
+            sequence_nr,
+        )
+        .await
+    }
+
+    #[expect(clippy::too_many_arguments, reason = "projection upsert boundary")]
+    pub async fn upsert_query_projection_with_state(
+        &self,
+        tenant: &str,
+        entity_type: &str,
+        entity_id: &str,
+        status: &str,
+        fields: &serde_json::Value,
+        state: &serde_json::Value,
+        sequence_nr: u64,
+    ) -> Result<(), PersistenceError> {
         let projection_hash = json_hash(fields);
         let (new_index, indexed_fields, skipped_fields) = scalar_index_fields(fields);
         let mut transaction_timer =
@@ -552,6 +592,7 @@ impl PostgresEventStore {
                     entity_id,
                     status,
                     fields,
+                    state,
                     sequence_nr,
                     projection_hash: projection_hash.as_str(),
                 },
@@ -561,8 +602,8 @@ impl PostgresEventStore {
         } else {
             let inserted: Option<i32> = crate::dbm::postgres_query_scalar!(
                 "INSERT INTO entity_catalog \
-                 (tenant, entity_type, entity_id, status, fields, sequence_nr, projection_version, projection_hash, updated_at) \
-                 VALUES ($1, $2, $3, $4, $5, $6, 2, $7, now()) \
+                 (tenant, entity_type, entity_id, status, fields, state, sequence_nr, projection_version, projection_hash, updated_at) \
+                 VALUES ($1, $2, $3, $4, $5, $6, $7, 2, $8, now()) \
                  ON CONFLICT (tenant, entity_type, entity_id) DO NOTHING \
                  RETURNING 1",
             )
@@ -571,6 +612,7 @@ impl PostgresEventStore {
             .bind(entity_id)
             .bind(status)
             .bind(fields)
+            .bind(state)
             .bind(sequence_nr as i64)
             .bind(projection_hash.as_str())
             .fetch_optional(&mut *tx)
@@ -601,6 +643,7 @@ impl PostgresEventStore {
                         entity_id,
                         status,
                         fields,
+                        state,
                         sequence_nr,
                         projection_hash: projection_hash.as_str(),
                     },
@@ -863,8 +906,14 @@ impl PostgresEventStore {
         if entity_ids.is_empty() {
             return Ok(Vec::new());
         }
-        let rows: Vec<(String, String, serde_json::Value, i64)> = crate::dbm::postgres_query_as!(
-            "SELECT entity_id, status, fields, sequence_nr \
+        let rows: Vec<(
+            String,
+            String,
+            serde_json::Value,
+            Option<serde_json::Value>,
+            i64,
+        )> = crate::dbm::postgres_query_as!(
+            "SELECT entity_id, status, fields, state, sequence_nr \
              FROM entity_catalog \
              WHERE tenant = $1 AND entity_type = $2 AND entity_id = ANY($3) \
              ORDER BY entity_id",
@@ -877,14 +926,15 @@ impl PostgresEventStore {
         .map_err(storage_error)?;
         Ok(rows
             .into_iter()
-            .map(
-                |(entity_id, status, fields, seq)| crate::platform::PostgresEntityCatalogRow {
+            .map(|(entity_id, status, fields, state, seq)| {
+                crate::platform::PostgresEntityCatalogRow {
                     entity_id,
                     status,
                     fields,
+                    state,
                     sequence_nr: seq.max(0) as u64,
-                },
-            )
+                }
+            })
             .collect())
     }
 

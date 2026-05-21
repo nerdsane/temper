@@ -305,6 +305,7 @@ CREATE TABLE IF NOT EXISTS entity_catalog (
     entity_id          TEXT         NOT NULL,
     status             TEXT         NOT NULL,
     fields             JSONB        NOT NULL DEFAULT '{}'::jsonb,
+    state              JSONB,
     updated_at         TIMESTAMPTZ  NOT NULL DEFAULT now(),
     sequence_nr        BIGINT       NOT NULL DEFAULT 0,
     projection_version INT          NOT NULL DEFAULT 2,

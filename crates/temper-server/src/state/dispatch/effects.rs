@@ -74,6 +74,7 @@ impl crate::state::ServerState {
         let status = response.state.status.clone();
         let fields =
             self.query_projection_fields(ctx.tenant, ctx.entity_type, &response.state.fields);
+        let projected_state = self.query_projection_state(&response.state);
         let sequence_nr = response.state.sequence_nr;
         let operation = if status == "Deleted" {
             "remove"
@@ -128,6 +129,7 @@ impl crate::state::ServerState {
                             &entity_id,
                             &status,
                             &fields,
+                            &projected_state,
                             sequence_nr,
                         )
                         .await

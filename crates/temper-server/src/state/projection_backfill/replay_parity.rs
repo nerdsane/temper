@@ -25,16 +25,22 @@ fn replay_parity_drift_kind(
     catalog: &EntityCatalogRow,
     authoritative_status: &str,
     authoritative_fields: &serde_json::Value,
+    authoritative_state: &serde_json::Value,
     authoritative_sequence: u64,
 ) -> &'static str {
     let status_drift = catalog.status != authoritative_status;
     let fields_drift = catalog.fields != *authoritative_fields;
+    let state_drift = catalog
+        .state
+        .as_ref()
+        .is_some_and(|catalog_state| catalog_state != authoritative_state);
     let sequence_drift = catalog.sequence_nr != authoritative_sequence;
-    match (status_drift, fields_drift, sequence_drift) {
-        (false, false, false) => "none",
-        (true, false, false) => "status",
-        (false, true, false) => "fields",
-        (false, false, true) => "sequence",
+    match (status_drift, fields_drift, state_drift, sequence_drift) {
+        (false, false, false, false) => "none",
+        (true, false, false, false) => "status",
+        (false, true, false, false) => "fields",
+        (false, false, true, false) => "state",
+        (false, false, false, true) => "sequence",
         _ => "multiple",
     }
 }
@@ -292,10 +298,12 @@ pub(in crate::state) async fn verify_query_projection_replay_parity(
 
             let projected_fields =
                 state.query_projection_fields(tenant, &entity_type, &replayed.fields);
+            let projected_state = state.query_projection_state(&replayed);
             let drift_kind = replay_parity_drift_kind(
                 catalog,
                 &replayed.status,
                 &projected_fields,
+                &projected_state,
                 replayed.sequence_nr,
             );
             let (sequence_direction, sequence_gap) =

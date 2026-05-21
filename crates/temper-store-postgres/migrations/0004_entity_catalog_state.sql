@@ -1,0 +1,2 @@
+ALTER TABLE entity_catalog
+    ADD COLUMN IF NOT EXISTS state JSONB;

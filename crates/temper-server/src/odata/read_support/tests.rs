@@ -13,6 +13,7 @@ fn catalog_row_serializes_to_entity_state_shape() {
         entity_id: "en-123".to_string(),
         status: "Published".to_string(),
         fields: serde_json::json!({"Name": "Foo", "Score": 7}),
+        state: None,
         sequence_nr: 14,
     };
     let body = catalog_row_to_entity_body("DesignLanguage", "DesignLanguages", row);
@@ -51,6 +52,7 @@ fn catalog_row_body_matches_actor_serialization_for_single_key_path() {
             "content_hash": "sha256:c74e77",
             "size_bytes": 8427,
         }),
+        state: None,
         sequence_nr: 3,
     };
     let body = catalog_row_to_entity_body("File", "Files", row);
@@ -80,6 +82,43 @@ fn catalog_row_body_matches_actor_serialization_for_single_key_path() {
     // Fields blob is preserved verbatim.
     assert_eq!(body["fields"]["Name"], "phosphor-command-grid.html");
     assert_eq!(body["fields"]["content_hash"], "sha256:c74e77");
+}
+
+#[test]
+fn catalog_row_prefers_full_state_payload_when_available() {
+    let row = EntityCatalogRow {
+        entity_id: "en-456".to_string(),
+        status: "Published".to_string(),
+        fields: serde_json::json!({"Name": "Indexed Only"}),
+        state: Some(serde_json::json!({
+            "entity_type": "DesignLanguage",
+            "entity_id": "en-456",
+            "status": "Published",
+            "item_count": 3,
+            "counters": {"Views": 42},
+            "booleans": {"Featured": true},
+            "lists": {"Tags": ["vapor", "terminal"]},
+            "fields": {
+                "Name": "Full State",
+                "PrivateNotes": "not indexed"
+            },
+            "events": [{"action": "Publish"}],
+            "total_event_count": 9,
+            "sequence_nr": 9
+        })),
+        sequence_nr: 9,
+    };
+
+    let body = catalog_row_to_entity_body("DesignLanguage", "DesignLanguages", row);
+
+    assert_eq!(body["item_count"], 3);
+    assert_eq!(body["counters"]["Views"], 42);
+    assert_eq!(body["booleans"]["Featured"], true);
+    assert_eq!(body["lists"]["Tags"][0], "vapor");
+    assert_eq!(body["fields"]["Name"], "Full State");
+    assert_eq!(body["fields"]["PrivateNotes"], "not indexed");
+    assert_eq!(body["events"], serde_json::json!([]));
+    assert_eq!(body["@odata.id"], "DesignLanguages('en-456')");
 }
 
 #[test]

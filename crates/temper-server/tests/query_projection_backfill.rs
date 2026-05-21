@@ -441,13 +441,18 @@ async fn replay_parity_verifier_detects_projection_drift() {
         .get_tenant_entity_state(&tenant, entity_type, active_id)
         .await
         .expect("load active state");
+    let mut catalog_state = serde_json::to_value(&actor_state.state).expect("serialize state");
+    if let Some(obj) = catalog_state.as_object_mut() {
+        obj.insert("events".to_string(), serde_json::json!([]));
+    }
     store
-        .upsert_query_projection(
+        .upsert_query_projection_with_state(
             tenant.as_str(),
             entity_type,
             active_id,
             &actor_state.state.status,
             &serde_json::json!({"Title": "Parity Drift"}),
+            &catalog_state,
             actor_state.state.sequence_nr,
         )
         .await

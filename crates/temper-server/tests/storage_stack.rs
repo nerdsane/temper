@@ -25,6 +25,7 @@ impl QueryPlaneStore for RecordingQueryPlane {
         entity_id: &str,
         status: &str,
         fields: &serde_json::Value,
+        state: &serde_json::Value,
         sequence_nr: u64,
     ) -> Result<(), PersistenceError> {
         assert_eq!(
@@ -32,6 +33,7 @@ impl QueryPlaneStore for RecordingQueryPlane {
             ("default", "Ticket", "t-1", "Open")
         );
         assert_eq!(fields["title"], "hello");
+        assert_eq!(state["fields"]["title"], "hello");
         assert_eq!(sequence_nr, 7);
         Ok(())
     }
@@ -259,6 +261,7 @@ async fn storage_stack_exposes_query_plane_and_trajectory_capabilities() {
             "t-1",
             "Open",
             &serde_json::json!({"title": "hello"}),
+            &serde_json::json!({"fields": {"title": "hello"}}),
             7,
         )
         .await
