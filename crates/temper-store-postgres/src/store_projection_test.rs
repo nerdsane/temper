@@ -117,6 +117,92 @@ fn list_entity_ids_by_type_unions_catalog_field_index_and_events() {
 }
 
 #[test]
+fn load_selected_entity_catalog_rows_pg_returns_sparse_json_values() {
+    let database_url = match std::env::var("DATABASE_URL") {
+        Ok(url) => url,
+        Err(_) => return,
+    };
+
+    sqlx::test_block_on(async {
+        let pool = PgPool::connect(&database_url).await.unwrap();
+        run_migrations(&pool).await.unwrap();
+        let store = PostgresEventStore::new(pool.clone());
+        let tenant = format!("tenant-selected-catalog-{}", uuid::Uuid::new_v4());
+        let entity_type = "DesignLanguage";
+        let entity_id = "dl-sparse";
+        let fields = serde_json::json!({
+            "Id": entity_id,
+            "Name": "Sparse Projection",
+            "Status": "Published",
+            "JsonField": { "kind": "nested", "score": 9 },
+            "Large": "x".repeat(4096),
+        });
+        let state = serde_json::json!({
+            "entity_type": entity_type,
+            "entity_id": entity_id,
+            "status": "Published",
+            "Title": "State title",
+            "fields": fields,
+            "events": [{ "type": "ShouldNotLoad" }],
+            "sequence_nr": 7,
+            "total_event_count": 7,
+        });
+
+        store
+            .upsert_query_projection_with_state(
+                &tenant,
+                entity_type,
+                entity_id,
+                "Published",
+                state.get("fields").unwrap(),
+                &state,
+                7,
+            )
+            .await
+            .unwrap();
+
+        let rows = store
+            .load_selected_entity_catalog_rows_pg(
+                &tenant,
+                entity_type,
+                &[entity_id.to_string(), "missing".to_string()],
+                &[
+                    "Id".to_string(),
+                    "Title".to_string(),
+                    "JsonField".to_string(),
+                    "Status".to_string(),
+                    "Missing".to_string(),
+                ],
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].entity_id, entity_id);
+        assert_eq!(rows[0].status, "Published");
+        assert_eq!(rows[0].sequence_nr, 7);
+        assert!(rows[0].state.is_none());
+        assert_eq!(rows[0].fields["Id"], entity_id);
+        assert_eq!(rows[0].fields["Title"], "State title");
+        assert_eq!(rows[0].fields["JsonField"]["kind"], "nested");
+        assert_eq!(rows[0].fields["Status"], "Published");
+        assert!(rows[0].fields.get("Large").is_none());
+        assert!(rows[0].fields.get("Missing").is_none());
+
+        crate::dbm::postgres_query!("DELETE FROM entity_field_index WHERE tenant = $1")
+            .bind(&tenant)
+            .execute(&pool)
+            .await
+            .unwrap();
+        crate::dbm::postgres_query!("DELETE FROM entity_catalog WHERE tenant = $1")
+            .bind(&tenant)
+            .execute(&pool)
+            .await
+            .unwrap();
+    });
+}
+
+#[test]
 fn upsert_query_projection_diffs_field_index_rows() {
     let database_url = match std::env::var("DATABASE_URL") {
         Ok(url) => url,

@@ -18,6 +18,7 @@ mod metrics;
 pub mod migration;
 pub mod platform;
 pub mod schema;
+mod selected_catalog;
 pub mod store;
 
 pub use metrics::init_metrics;

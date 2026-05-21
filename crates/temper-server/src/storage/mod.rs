@@ -360,6 +360,23 @@ pub trait QueryPlaneStore: Send + Sync {
         Ok(None)
     }
 
+    /// Batch-fetch catalog rows with only the JSON properties required by a
+    /// safe `$select` collection read.
+    ///
+    /// The returned rows preserve `entity_id`, `status`, and `sequence_nr`,
+    /// but may set `state` to `None` and store the selected properties in
+    /// `fields`. Backends that cannot perform a sparse catalog load return
+    /// `None`, allowing callers to use [`QueryPlaneStore::load_entity_catalog_rows`].
+    async fn load_selected_entity_catalog_rows(
+        &self,
+        _tenant: &str,
+        _entity_type: &str,
+        _entity_ids: &[String],
+        _selected_fields: &[String],
+    ) -> Result<Option<Vec<EntityCatalogRow>>, PersistenceError> {
+        Ok(None)
+    }
+
     async fn projected_entity_counts_by_tenant(
         &self,
     ) -> Result<Option<Vec<(String, u64)>>, PersistenceError>;
@@ -2246,6 +2263,30 @@ impl QueryPlaneStore for PostgresEventStore {
         entity_ids: &[String],
     ) -> Result<Option<Vec<EntityCatalogRow>>, PersistenceError> {
         self.load_entity_catalog_rows_pg(tenant, entity_type, entity_ids)
+            .await
+            .map(|rows| {
+                Some(
+                    rows.into_iter()
+                        .map(|row| EntityCatalogRow {
+                            entity_id: row.entity_id,
+                            status: row.status,
+                            fields: row.fields,
+                            state: row.state,
+                            sequence_nr: row.sequence_nr,
+                        })
+                        .collect(),
+                )
+            })
+    }
+
+    async fn load_selected_entity_catalog_rows(
+        &self,
+        tenant: &str,
+        entity_type: &str,
+        entity_ids: &[String],
+        selected_fields: &[String],
+    ) -> Result<Option<Vec<EntityCatalogRow>>, PersistenceError> {
+        self.load_selected_entity_catalog_rows_pg(tenant, entity_type, entity_ids, selected_fields)
             .await
             .map(|rows| {
                 Some(

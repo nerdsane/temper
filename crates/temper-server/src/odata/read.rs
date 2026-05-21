@@ -18,9 +18,10 @@ use super::common::{
     resolve_value_parent, tenant_csdl_xml, tenant_entity_sets,
 };
 use super::read_support::{
-    materialize_entity_set_entities, missing_catalog_entity_ids, odata_default_page_size,
-    odata_max_entities, record_entity_set_not_found, resolve_entity_set_name,
-    select_entity_ids_for_materialization, try_load_entity_body_from_catalog,
+    catalog_select_projection_fields, materialize_entity_set_entities, missing_catalog_entity_ids,
+    odata_default_page_size, odata_max_entities, record_entity_set_not_found,
+    resolve_entity_set_name, select_entity_ids_for_materialization,
+    try_load_entity_body_from_catalog,
 };
 use super::response::annotate_entity;
 use super::stream_fast_path::try_file_stream_fast_path;
@@ -479,6 +480,8 @@ fn filter_only_query_options(query_options: &QueryOptions) -> QueryOptions {
     catalog_shadow_check_scheduled = tracing::field::Empty,
     catalog_coverage_missing = tracing::field::Empty,
     catalog_coverage_matched = tracing::field::Empty,
+    catalog_select_projection = tracing::field::Empty,
+    select_count = tracing::field::Empty,
 ))]
 async fn handle_entity_set(
     state: &ServerState,
@@ -498,6 +501,15 @@ async fn handle_entity_set(
     let max_entities = odata_max_entities();
     span.record("catalog_coverage_missing", 0_u64);
     span.record("catalog_coverage_matched", 0_u64);
+    let selected_catalog_fields = catalog_select_projection_fields(query_options);
+    span.record(
+        "catalog_select_projection",
+        selected_catalog_fields.is_some(),
+    );
+    span.record(
+        "select_count",
+        query_options.select.as_ref().map_or(0, Vec::len) as u64,
+    );
 
     // ---- Filter push-down: try SQL-level filtering first ----
     let sql_pushdown_ids = if let Some(filter) = &query_options.filter {
@@ -558,6 +570,7 @@ async fn handle_entity_set(
                 name,
                 &missing_ids,
                 true,
+                None,
             )
             .await;
             let filter_options = filter_only_query_options(query_options);
@@ -611,6 +624,7 @@ async fn handle_entity_set(
         name,
         &entity_ids,
         prefer_catalog_materialization,
+        selected_catalog_fields,
     )
     .await;
     let total_materialized_count =

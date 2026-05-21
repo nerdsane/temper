@@ -1,5 +1,6 @@
 use super::{
-    catalog_row_to_entity_body, select_entity_ids_for_materialization,
+    catalog_row_to_entity_body, catalog_row_to_selected_entity_body,
+    catalog_select_projection_fields, select_entity_ids_for_materialization,
     should_read_catalog_for_materialization,
 };
 use crate::storage::EntityCatalogRow;
@@ -119,6 +120,84 @@ fn catalog_row_prefers_full_state_payload_when_available() {
     assert_eq!(body["fields"]["PrivateNotes"], "not indexed");
     assert_eq!(body["events"], serde_json::json!([]));
     assert_eq!(body["@odata.id"], "DesignLanguages('en-456')");
+}
+
+#[test]
+fn selected_catalog_body_resolves_fields_and_omits_unselected_payload() {
+    let row = EntityCatalogRow {
+        entity_id: "dl-selected".to_string(),
+        status: "Published".to_string(),
+        fields: serde_json::json!({
+            "Id": "dl-selected",
+            "Status": "Published",
+            "Name": "Selected",
+            "HugeCss": "x".repeat(32_000)
+        }),
+        state: Some(serde_json::json!({
+            "entity_type": "DesignLanguage",
+            "entity_id": "dl-selected",
+            "status": "Published",
+            "item_count": 2,
+            "counters": {"Views": 9},
+            "fields": {
+                "Id": "dl-selected",
+                "Status": "Published",
+                "Name": "Selected",
+                "HugeCss": "x".repeat(32_000)
+            },
+            "sequence_nr": 5
+        })),
+        sequence_nr: 5,
+    };
+    let select = vec![
+        "Id".to_string(),
+        "Name".to_string(),
+        "Status".to_string(),
+        "entity_id".to_string(),
+        "sequence_nr".to_string(),
+    ];
+
+    let body =
+        catalog_row_to_selected_entity_body("DesignLanguage", "DesignLanguages", row, &select);
+
+    assert_eq!(body["Id"], "dl-selected");
+    assert_eq!(body["Name"], "Selected");
+    assert_eq!(body["Status"], "Published");
+    assert_eq!(body["entity_id"], "dl-selected");
+    assert_eq!(body["sequence_nr"], 5);
+    assert_eq!(body["@odata.id"], "DesignLanguages('dl-selected')");
+    assert!(body.get("HugeCss").is_none());
+    assert!(body.get("fields").is_none());
+    assert!(body.get("counters").is_none());
+}
+
+#[test]
+fn selected_catalog_projection_only_applies_to_safe_select_only_reads() {
+    let selected = QueryOptions {
+        select: Some(vec!["Id".to_string(), "Status".to_string()]),
+        ..QueryOptions::default()
+    };
+    assert_eq!(
+        catalog_select_projection_fields(&selected).map(|fields| fields.len()),
+        Some(2)
+    );
+
+    let filtered = QueryOptions {
+        select: Some(vec!["Id".to_string()]),
+        filter: Some(FilterExpr::Literal(ODataValue::Boolean(true))),
+        ..QueryOptions::default()
+    };
+    assert!(catalog_select_projection_fields(&filtered).is_none());
+
+    let ordered = QueryOptions {
+        select: Some(vec!["Id".to_string()]),
+        orderby: Some(vec![OrderByClause {
+            property: "Name".to_string(),
+            direction: OrderDirection::Asc,
+        }]),
+        ..QueryOptions::default()
+    };
+    assert!(catalog_select_projection_fields(&ordered).is_none());
 }
 
 #[test]
