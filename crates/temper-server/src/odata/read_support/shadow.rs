@@ -10,13 +10,15 @@ use crate::storage::EntityCatalogRow;
 
 fn catalog_shadow_read_sample_every() -> usize {
     static SAMPLE_EVERY: OnceLock<usize> = OnceLock::new();
-    *SAMPLE_EVERY.get_or_init(|| super::env_usize("TEMPER_ODATA_CATALOG_SHADOW_READ_EVERY", 0))
+    *SAMPLE_EVERY
+        .get_or_init(|| super::config::env_usize("TEMPER_ODATA_CATALOG_SHADOW_READ_EVERY", 0))
 }
 
 fn catalog_shadow_read_max_per_response() -> usize {
     static MAX_PER_RESPONSE: OnceLock<usize> = OnceLock::new();
-    *MAX_PER_RESPONSE
-        .get_or_init(|| super::env_usize("TEMPER_ODATA_CATALOG_SHADOW_READ_MAX_PER_RESPONSE", 2))
+    *MAX_PER_RESPONSE.get_or_init(|| {
+        super::config::env_usize("TEMPER_ODATA_CATALOG_SHADOW_READ_MAX_PER_RESPONSE", 2)
+    })
 }
 
 fn stable_shadow_sample_hash(tenant: &TenantId, entity_type: &str, entity_id: &str) -> u64 {
