@@ -491,6 +491,7 @@ fn filter_only_query_options(query_options: &QueryOptions) -> QueryOptions {
     pushdown_sparse_page = tracing::field::Empty,
     pushdown_sparse_probe_count = tracing::field::Empty,
     pushdown_page_count = tracing::field::Empty,
+    pushdown_sparse_skip_reason = tracing::field::Empty,
 ))]
 async fn handle_entity_set(
     state: &ServerState,
@@ -508,8 +509,6 @@ async fn handle_entity_set(
 
     let default_page_size = odata_default_page_size();
     let max_entities = odata_max_entities();
-    span.record("catalog_coverage_missing", 0_u64);
-    span.record("catalog_coverage_matched", 0_u64);
     let selected_catalog_fields = catalog_select_projection_fields(query_options);
     span.record(
         "catalog_select_projection",
@@ -519,9 +518,6 @@ async fn handle_entity_set(
         "select_count",
         query_options.select.as_ref().map_or(0, Vec::len) as u64,
     );
-    span.record("pushdown_sparse_page", false);
-    span.record("pushdown_sparse_probe_count", 0_u64);
-    span.record("pushdown_page_count", 0_u64);
 
     // ---- Filter push-down: try SQL-level filtering first ----
     let sql_pushdown_ids = if let Some(filter) = &query_options.filter {
@@ -567,6 +563,16 @@ async fn handle_entity_set(
     let prefer_catalog_materialization = filter_pushdown || state.query_plane_store().is_some();
     let mut pushdown_coverage_entities = Vec::new();
     let mut final_selected_catalog_fields = selected_catalog_fields;
+    let mut catalog_coverage_missing = 0_usize;
+    let mut catalog_coverage_matched = 0_usize;
+    let mut pushdown_sparse_page = false;
+    let mut pushdown_sparse_probe_count = 0_usize;
+    let mut pushdown_page_count = 0_usize;
+    let mut pushdown_sparse_skip_reason = if filter_pushdown {
+        "not_checked"
+    } else {
+        "no_filter_pushdown"
+    };
     let candidate_count_for_span;
     let (entity_ids, apply_options, precomputed_count) = if let Some(pushed_ids) = sql_pushdown_ids
     {
@@ -576,7 +582,7 @@ async fn handle_entity_set(
         let mut missing_ids =
             missing_catalog_entity_ids(state, tenant, &entity_type, &all_entity_ids).await;
         missing_ids.retain(|id| !pushed_id_set.contains(id));
-        span.record("catalog_coverage_missing", missing_ids.len() as u64);
+        catalog_coverage_missing = missing_ids.len();
         if !missing_ids.is_empty() {
             let missing = materialize_entity_set_entities(
                 state,
@@ -594,12 +600,12 @@ async fn handle_entity_set(
                 .iter()
                 .filter_map(|entity| entity.get("entity_id").and_then(|id| id.as_str()))
                 .count();
-            span.record("catalog_coverage_matched", matched_count as u64);
+            catalog_coverage_matched = matched_count;
             pushdown_coverage_entities = matching_missing;
         }
 
-        if missing_ids.is_empty()
-            && let Some(selection) = try_select_paged_pushdown_entity_ids(
+        let sparse_selection = if missing_ids.is_empty() {
+            match try_select_paged_pushdown_entity_ids(
                 state,
                 PushdownPageRequest {
                     tenant,
@@ -612,13 +618,23 @@ async fn handle_entity_set(
                 },
             )
             .await
-        {
-            span.record("pushdown_sparse_page", true);
-            span.record(
-                "pushdown_sparse_probe_count",
-                selection.sparse_materialized_count as u64,
-            );
-            span.record("pushdown_page_count", selection.entity_ids.len() as u64);
+            {
+                Ok(selection) => Some(selection),
+                Err(reason) => {
+                    pushdown_sparse_skip_reason = reason.as_str();
+                    None
+                }
+            }
+        } else {
+            pushdown_sparse_skip_reason = "catalog_coverage_missing";
+            None
+        };
+
+        if let Some(selection) = sparse_selection {
+            pushdown_sparse_page = true;
+            pushdown_sparse_skip_reason = "engaged";
+            pushdown_sparse_probe_count = selection.sparse_materialized_count;
+            pushdown_page_count = selection.entity_ids.len();
 
             let mut opts = query_options.clone();
             opts.filter = None;
@@ -669,6 +685,15 @@ async fn handle_entity_set(
         "candidate_count",
         (candidate_count_for_span + pushdown_coverage_entities.len()) as u64,
     );
+    span.record("catalog_coverage_missing", catalog_coverage_missing as u64);
+    span.record("catalog_coverage_matched", catalog_coverage_matched as u64);
+    span.record("pushdown_sparse_page", pushdown_sparse_page);
+    span.record(
+        "pushdown_sparse_probe_count",
+        pushdown_sparse_probe_count as u64,
+    );
+    span.record("pushdown_page_count", pushdown_page_count as u64);
+    span.record("pushdown_sparse_skip_reason", pushdown_sparse_skip_reason);
 
     let materialized = materialize_entity_set_entities(
         state,

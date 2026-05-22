@@ -16,6 +16,34 @@ pub(in crate::odata) struct PushdownPageSelection {
     pub(in crate::odata) sparse_materialized_count: usize,
 }
 
+/// Reason sparse page planning was safely skipped.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(in crate::odata) enum PushdownPageSkipReason {
+    /// SQL pushdown returned no candidate IDs.
+    EmptyCandidates,
+    /// Sparse planning requires a filter to define the candidate set.
+    NoFilter,
+    /// Expanded reads need full entity bodies before navigation hydration.
+    HasExpand,
+    /// The requested page would not reduce the candidate set.
+    PageNotReduced,
+    /// Required filter/order fields could not be derived.
+    MissingRequiredFields,
+}
+
+impl PushdownPageSkipReason {
+    /// Stable low-cardinality span label.
+    pub(in crate::odata) fn as_str(self) -> &'static str {
+        match self {
+            Self::EmptyCandidates => "empty_candidates",
+            Self::NoFilter => "no_filter",
+            Self::HasExpand => "has_expand",
+            Self::PageNotReduced => "page_not_reduced",
+            Self::MissingRequiredFields => "missing_required_fields",
+        }
+    }
+}
+
 /// Inputs for sparse page planning over SQL-pushed OData candidate IDs.
 pub(in crate::odata) struct PushdownPageRequest<'a> {
     /// Tenant whose catalog rows should be inspected.
@@ -42,17 +70,18 @@ pub(in crate::odata) struct PushdownPageRequest<'a> {
 pub(in crate::odata) async fn try_select_paged_pushdown_entity_ids(
     state: &ServerState,
     request: PushdownPageRequest<'_>,
-) -> Option<PushdownPageSelection> {
-    if !should_plan_sparse_page(
+) -> Result<PushdownPageSelection, PushdownPageSkipReason> {
+    if let Some(reason) = sparse_page_skip_reason(
         request.pushed_ids.len(),
         request.query_options,
         request.default_page_size,
         request.max_entities,
     ) {
-        return None;
+        return Err(reason);
     }
 
-    let required_fields = sparse_page_fields(request.query_options)?;
+    let required_fields = sparse_page_fields(request.query_options)
+        .ok_or(PushdownPageSkipReason::MissingRequiredFields)?;
     let sparse = super::materialize_entity_set_entities(
         state,
         request.tenant,
@@ -76,21 +105,27 @@ pub(in crate::odata) async fn try_select_paged_pushdown_entity_ids(
 
     let (entity_ids, count) = select_sparse_page_entity_ids(sparse.entities, &page_options);
 
-    Some(PushdownPageSelection {
+    Ok(PushdownPageSelection {
         entity_ids,
         count,
         sparse_materialized_count,
     })
 }
 
-fn should_plan_sparse_page(
+fn sparse_page_skip_reason(
     candidate_count: usize,
     query_options: &QueryOptions,
     default_page_size: usize,
     max_entities: usize,
-) -> bool {
-    if candidate_count == 0 || query_options.filter.is_none() || query_options.expand.is_some() {
-        return false;
+) -> Option<PushdownPageSkipReason> {
+    if candidate_count == 0 {
+        return Some(PushdownPageSkipReason::EmptyCandidates);
+    }
+    if query_options.filter.is_none() {
+        return Some(PushdownPageSkipReason::NoFilter);
+    }
+    if query_options.expand.is_some() {
+        return Some(PushdownPageSkipReason::HasExpand);
     }
 
     let skip = query_options.skip.unwrap_or(0);
@@ -98,7 +133,27 @@ fn should_plan_sparse_page(
         .top
         .unwrap_or(default_page_size)
         .min(max_entities);
-    skip > 0 || top < candidate_count
+    if skip > 0 || top < candidate_count {
+        None
+    } else {
+        Some(PushdownPageSkipReason::PageNotReduced)
+    }
+}
+
+#[cfg(test)]
+fn should_plan_sparse_page(
+    candidate_count: usize,
+    query_options: &QueryOptions,
+    default_page_size: usize,
+    max_entities: usize,
+) -> bool {
+    sparse_page_skip_reason(
+        candidate_count,
+        query_options,
+        default_page_size,
+        max_entities,
+    )
+    .is_none()
 }
 
 fn select_sparse_page_entity_ids(
@@ -158,6 +213,7 @@ fn collect_filter_properties(expr: &FilterExpr, fields: &mut BTreeSet<String>) {
 mod tests {
     use super::*;
     use serde_json::json;
+    use temper_odata::query::parse_query_options;
     use temper_odata::query::types::{BinaryOperator, ODataValue, OrderByClause, OrderDirection};
 
     #[test]
@@ -213,6 +269,38 @@ mod tests {
 
         assert!(should_plan_sparse_page(101, &options, 100, 1000));
         assert!(!should_plan_sparse_page(100, &options, 100, 1000));
+    }
+
+    #[test]
+    fn sparse_page_planning_accepts_sessionentries_latest_query_shape() {
+        let options =
+            parse_query_options("$filter=SessionId eq 'ss-1'&$orderby=Sequence desc&$top=1")
+                .expect("query options");
+
+        assert_eq!(sparse_page_skip_reason(1141, &options, 100, 1000), None);
+        assert!(should_plan_sparse_page(1141, &options, 100, 1000));
+    }
+
+    #[test]
+    fn sparse_page_skip_reason_explains_unsupported_shapes() {
+        let no_filter = QueryOptions {
+            top: Some(1),
+            ..QueryOptions::default()
+        };
+        assert_eq!(
+            sparse_page_skip_reason(1141, &no_filter, 100, 1000),
+            Some(PushdownPageSkipReason::NoFilter)
+        );
+
+        let full_page = QueryOptions {
+            filter: Some(FilterExpr::Literal(ODataValue::Boolean(true))),
+            top: Some(100),
+            ..QueryOptions::default()
+        };
+        assert_eq!(
+            sparse_page_skip_reason(100, &full_page, 100, 1000),
+            Some(PushdownPageSkipReason::PageNotReduced)
+        );
     }
 
     #[test]
