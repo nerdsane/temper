@@ -15,6 +15,8 @@ pub mod bearer_auth;
 pub mod bootstrap;
 pub mod deploy;
 pub mod evolution;
+pub mod genesis_install;
+pub(crate) mod genesis_materialize;
 pub mod hooks;
 pub mod identity_cache;
 pub mod integration;

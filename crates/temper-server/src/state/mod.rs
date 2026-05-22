@@ -35,6 +35,7 @@ use temper_jit::table::TransitionTable;
 use temper_runtime::ActorSystem;
 use temper_runtime::actor::ActorRef;
 use temper_runtime::scheduler::sim_now;
+use temper_runtime::tenant::TenantId;
 use temper_spec::csdl::CsdlDocument;
 use temper_store_postgres::PostgresEventStore;
 
@@ -49,6 +50,29 @@ use crate::secrets::vault::SecretsVault;
 use crate::wasm_registry::WasmModuleRegistry;
 use crate::webhooks::WebhookDispatcher;
 use temper_wasm::WasmEngine;
+
+/// Context passed to a `BoundActionHook` after a governed bound action succeeds.
+pub struct BoundActionHookContext<'a> {
+    pub state: &'a ServerState,
+    pub tenant: &'a TenantId,
+    pub entity_type: &'a str,
+    pub entity_id: &'a str,
+    pub action: &'a str,
+    pub params: &'a serde_json::Value,
+    pub state_json: &'a serde_json::Value,
+}
+
+/// Platform extension point invoked after a governed OData bound action succeeds.
+///
+/// The hook is deliberately post-dispatch and action-scoped: specs still define
+/// the action, authorize it, and produce any declared writes.
+#[async_trait::async_trait]
+pub trait BoundActionHook: Send + Sync {
+    async fn after_bound_action(
+        &self,
+        ctx: BoundActionHookContext<'_>,
+    ) -> Result<Option<serde_json::Value>, String>;
+}
 
 /// An agent progress event for remote observation via SSE.
 ///
@@ -227,6 +251,9 @@ pub struct ServerState {
     /// Each entity's IOA source is written to stdin; the result is read from stdout
     /// as JSON. A 30-second timeout is applied per entity.
     pub verify_subprocess_bin: Option<Arc<std::path::PathBuf>>,
+    /// Optional hook for platform-owned post-action work (e.g., installing a
+    /// Genesis app after the spec-owned `App.Install` action succeeds).
+    pub bound_action_hook: Option<Arc<dyn BoundActionHook>>,
 }
 
 #[allow(deprecated)] // ADR-0025 Phase 4: RecordStore used until chain validation replaced
@@ -294,6 +321,7 @@ impl ServerState {
             single_tenant_mode: true,
             suggestion_engine: Arc::new(RwLock::new(PolicySuggestionEngine::new())),
             verify_subprocess_bin: None,
+            bound_action_hook: None,
         };
 
         // Pre-register built-in WASM modules (http_fetch for generic HTTP integrations).
@@ -435,6 +463,7 @@ impl ServerState {
             single_tenant_mode: false,
             suggestion_engine: Arc::new(RwLock::new(PolicySuggestionEngine::new())),
             verify_subprocess_bin: None,
+            bound_action_hook: None,
         };
         state.register_builtin_wasm_modules();
         state

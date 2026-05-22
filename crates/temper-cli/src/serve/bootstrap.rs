@@ -22,7 +22,7 @@ use temper_server::webhooks::WebhookDispatcher;
 use temper_store_redis::RedisEventStore;
 use temper_store_turso::{TenantStoreRouter, TursoEventStore};
 
-use crate::StorageBackend;
+use crate::cli::StorageBackend;
 
 use super::loader::load_into_registry;
 use super::storage::{
@@ -565,6 +565,10 @@ pub(super) async fn bootstrap_installed_os_apps(state: &PlatformState, os_apps: 
             .and_modify(|source| *source = OsAppBootstrapSource::Cli)
             .or_insert(OsAppBootstrapSource::Cli);
     }
+
+    let restored_genesis_caches =
+        temper_platform::genesis_install::restore_genesis_app_cache_roots(state).await;
+    let _ = restored_genesis_caches;
 
     for ((tenant, app_name), source) in requested {
         if tenant_has_os_app_specs(state, &tenant, &app_name) {

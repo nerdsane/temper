@@ -15,7 +15,7 @@ use crate::authz::{DenialInput, record_authz_denial, security_context_from_heade
 use crate::identity::ResolvedIdentity;
 use crate::request_context::AgentContext;
 use crate::response::{ODataResponse, odata_error};
-use crate::state::{DispatchError, DispatchExtOptions, ServerState};
+use crate::state::{BoundActionHookContext, DispatchError, DispatchExtOptions, ServerState};
 
 #[allow(clippy::too_many_arguments)]
 pub(super) async fn dispatch_bound_action(
@@ -280,7 +280,7 @@ pub(super) async fn dispatch_bound_action(
             entity_type,
             key_str,
             action,
-            body_json,
+            body_json.clone(),
             DispatchExtOptions {
                 agent_ctx,
                 await_integration,
@@ -302,11 +302,45 @@ pub(super) async fn dispatch_bound_action(
                 http_span.set_status(Status::Ok);
                 http_span.set_attribute(OtelKeyValue::new("http.status_code", 200i64));
 
-                let body = annotate_entity(
-                    serde_json::to_value(&response.state).unwrap_or_default(),
-                    format!("$metadata#{set_name}/$entity"),
-                    None,
-                );
+                let mut state_json = serde_json::to_value(&response.state).unwrap_or_default();
+                if let Some(hook) = state.bound_action_hook.as_ref() {
+                    match hook
+                        .after_bound_action(BoundActionHookContext {
+                            state,
+                            tenant,
+                            entity_type,
+                            entity_id: key_str,
+                            action,
+                            params: &body_json,
+                            state_json: &state_json,
+                        })
+                        .await
+                    {
+                        Ok(Some(hook_json)) => {
+                            if let (Some(dst), Some(src)) =
+                                (state_json.as_object_mut(), hook_json.as_object())
+                            {
+                                dst.insert(
+                                    "postAction".to_string(),
+                                    serde_json::Value::Object(src.clone()),
+                                );
+                            }
+                        }
+                        Ok(None) => {}
+                        Err(error) => {
+                            http_span.set_status(Status::error(error.clone()));
+                            http_span.set_attribute(OtelKeyValue::new("http.status_code", 500i64));
+                            return odata_error(
+                                StatusCode::INTERNAL_SERVER_ERROR,
+                                "PostActionHookFailed",
+                                &error,
+                            )
+                            .into_response();
+                        }
+                    }
+                }
+                let body =
+                    annotate_entity(state_json, format!("$metadata#{set_name}/$entity"), None);
                 ODataResponse {
                     status: StatusCode::OK,
                     body,

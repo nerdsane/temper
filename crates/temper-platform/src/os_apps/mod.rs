@@ -385,5 +385,23 @@ pub async fn install_os_app(
     })
 }
 
+/// Minimal app manifest structure for Genesis app dependency resolution.
+///
+/// Full manifest parsing lives in the disk-scanning catalog; this subset
+/// supports the `dependencies` field needed by genesis_install.
+#[derive(Debug, Default, serde::Deserialize)]
+pub struct AppManifest {
+    #[serde(default)]
+    pub dependencies: Vec<String>,
+}
+
+/// Register an additional OS apps directory to scan.
+///
+/// No-op on staging (static catalog only). In production this wires into
+/// the dynamic app catalog scanner.
+pub fn add_os_apps_dir(_dir: std::path::PathBuf) {
+    // static catalog only: dynamic disk-scanning added in a later migration
+}
+
 #[cfg(test)]
 mod tests;

@@ -29,6 +29,9 @@ tracing = { workspace = true }
 anyhow = { workspace = true }
 thiserror = { workspace = true }
 sha2 = { workspace = true }
+async-trait = { workspace = true }
+toml = { workspace = true }
+base64 = "0.22"
 
 [dev-dependencies]
 temper-codegen = { workspace = true }

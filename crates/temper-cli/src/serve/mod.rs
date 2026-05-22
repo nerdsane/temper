@@ -29,7 +29,7 @@ use temper_server::registry::{EntityLevelSummary, EntityVerificationResult, Veri
 use temper_server::state::DesignTimeEvent;
 use temper_verify::cascade::VerificationCascade;
 
-use crate::StorageBackend;
+use crate::cli::StorageBackend;
 
 use loader::read_ioa_sources;
 

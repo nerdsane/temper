@@ -5678,7 +5678,9 @@ name = "temper-platform"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "async-trait",
  "axum 0.8.8",
+ "base64 0.22.1",
  "chrono",
  "hyper 1.8.1",
  "opentelemetry",
@@ -5700,6 +5702,7 @@ dependencies = [
  "thiserror 2.0.18",
  "tokio",
  "tokio-test",
+ "toml",
  "tower 0.5.3",
  "tracing",
  "uuid",

@@ -8,6 +8,25 @@ use std::sync::{Arc, RwLock};
 
 use tokio::sync::broadcast;
 
+/// Cedar policy for the temper-system tenant.
+///
+/// Platform entities (GovernanceDecision, etc.) live in the temper-system
+/// tenant but have no os-app to ship policies with. This baseline policy
+/// permits admin principals to manage governance decisions — needed so that
+/// WASM modules can register callbacks via HTTP (system principal is blocked
+/// from HTTP headers as a privilege-escalation safeguard).
+const SYSTEM_TENANT_POLICY: &str = r#"
+// Baseline policy for the temper-system tenant.
+// Admin principals get full access to all platform entities (GovernanceDecision,
+// Project, etc.). This matches the global fallback behavior — without it, loading
+// any tenant-specific policy would shadow the global set and deny unlisted actions.
+permit(
+  principal is Admin,
+  action,
+  resource
+);
+"#;
+
 #[allow(deprecated)]
 // ADR-0025 Phase 4: remove after feedback.rs migrated to IOA entity dispatch
 use temper_evolution::store::RecordStore;
@@ -59,7 +78,7 @@ impl PlatformState {
         let server = ServerState::from_registry_shared(system, registry.clone());
         let (broadcast_tx, _) = broadcast::channel(BROADCAST_CAPACITY);
 
-        Self {
+        let mut state = Self {
             server,
             registry,
             broadcast_tx,
@@ -68,7 +87,18 @@ impl PlatformState {
             api_token: None,
             spec_store: Arc::new(RwLock::new(SpecStore::new())),
             identity_resolver: Arc::new(IdentityResolver::new()),
+        };
+        if let Err(e) = state
+            .server
+            .authz
+            .reload_tenant_policies("temper-system", SYSTEM_TENANT_POLICY)
+        {
+            tracing::warn!(error = %e, "failed to load temper-system Cedar policies");
         }
+        state.server.bound_action_hook = Some(Arc::new(
+            crate::genesis_install::GenesisInstallHook::new(state.clone()),
+        ));
+        state
     }
 
     /// Create a new platform state with a pre-loaded registry.
@@ -78,7 +108,7 @@ impl PlatformState {
         let server = ServerState::from_registry_shared(system, registry.clone());
         let (broadcast_tx, _) = broadcast::channel(BROADCAST_CAPACITY);
 
-        Self {
+        let mut state = Self {
             server,
             registry,
             broadcast_tx,
@@ -87,7 +117,18 @@ impl PlatformState {
             api_token: None,
             spec_store: Arc::new(RwLock::new(SpecStore::new())),
             identity_resolver: Arc::new(IdentityResolver::new()),
+        };
+        if let Err(e) = state
+            .server
+            .authz
+            .reload_tenant_policies("temper-system", SYSTEM_TENANT_POLICY)
+        {
+            tracing::warn!(error = %e, "failed to load temper-system Cedar policies");
         }
+        state.server.bound_action_hook = Some(Arc::new(
+            crate::genesis_install::GenesisInstallHook::new(state.clone()),
+        ));
+        state
     }
 
     /// Subscribe to the broadcast channel for platform events.

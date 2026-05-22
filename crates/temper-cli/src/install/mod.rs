@@ -2,6 +2,7 @@
 //!
 //! Copies the Temper App Builder skill to `~/.claude/skills/temper/SKILL.md`
 //! so it auto-triggers on "build me an app" requests from any directory.
+//! Also provides `run_genesis_app` for installing pinned Genesis apps into Temper.
 
 use std::fs;
 use std::path::Path;
@@ -105,6 +106,77 @@ pub fn run() -> Result<()> {
     let home = dirs::home_dir().context("Could not determine home directory")?;
     let skills_root = home.join(".claude").join("skills");
     install_to(&skills_root)
+}
+
+/// Install a pinned Genesis app ref into a Temper tenant through OData.
+pub async fn run_genesis_app(
+    base_url: &str,
+    registry_tenant: &str,
+    target_tenant: &str,
+    app_ref: &str,
+    installer: &str,
+) -> Result<()> {
+    let (owner, name, _hash) = parse_app_ref(app_ref)?;
+    let app_id = format!(
+        "app-{}-{}",
+        sanitize_id_component(owner),
+        sanitize_id_component(name)
+    );
+    let url = format!(
+        "{}/tdata/Apps('{}')/App.Install",
+        base_url.trim_end_matches('/'),
+        app_id.replace('\'', "''")
+    );
+    let response = reqwest::Client::new()
+        .post(&url)
+        .header("X-Tenant-Id", registry_tenant)
+        .json(&serde_json::json!({
+            "TargetTenant": target_tenant,
+            "AppRef": app_ref,
+            "Installer": installer,
+        }))
+        .send()
+        .await
+        .with_context(|| format!("failed to call Genesis App.Install at {url}"))?;
+    let status = response.status();
+    let body = response.text().await.unwrap_or_default();
+    if !status.is_success() {
+        anyhow::bail!("Genesis app install failed ({status}): {body}");
+    }
+    let _ = (target_tenant, body);
+    Ok(())
+}
+
+fn parse_app_ref(app_ref: &str) -> Result<(&str, &str, &str)> {
+    let (path, hash) = app_ref
+        .split_once('@')
+        .filter(|(_, hash)| !hash.trim().is_empty())
+        .with_context(|| format!("invalid Genesis app ref '{app_ref}', expected owner/app@hash"))?;
+    let (owner, name) = path
+        .split_once('/')
+        .filter(|(owner, name)| !owner.trim().is_empty() && !name.trim().is_empty())
+        .with_context(|| format!("invalid Genesis app ref '{app_ref}', expected owner/app@hash"))?;
+    Ok((owner, name, hash))
+}
+
+fn sanitize_id_component(input: &str) -> String {
+    let mut out = String::new();
+    let mut last_dash = false;
+    for ch in input.chars().flat_map(char::to_lowercase) {
+        if ch.is_ascii_alphanumeric() {
+            out.push(ch);
+            last_dash = false;
+        } else if !last_dash {
+            out.push('-');
+            last_dash = true;
+        }
+    }
+    let trimmed = out.trim_matches('-').to_string();
+    if trimmed.is_empty() {
+        "item".to_string()
+    } else {
+        trimmed
+    }
 }
 
 #[cfg(test)]
@@ -234,5 +306,48 @@ mod tests {
             !legacy_user_path.exists(),
             "legacy temper-user.md should be removed"
         );
+    }
+
+    #[test]
+    fn test_parse_app_ref_valid() {
+        let (owner, name, hash) = parse_app_ref("acme/my-app@abc123").unwrap();
+        assert_eq!(owner, "acme");
+        assert_eq!(name, "my-app");
+        assert_eq!(hash, "abc123");
+    }
+
+    #[test]
+    fn test_parse_app_ref_missing_hash() {
+        assert!(parse_app_ref("acme/my-app").is_err());
+        assert!(parse_app_ref("acme/my-app@").is_err());
+    }
+
+    #[test]
+    fn test_parse_app_ref_missing_owner() {
+        assert!(parse_app_ref("my-app@abc123").is_err());
+        assert!(parse_app_ref("/my-app@abc123").is_err());
+    }
+
+    #[test]
+    fn test_sanitize_id_component() {
+        assert_eq!(sanitize_id_component("My App"), "my-app");
+        assert_eq!(sanitize_id_component("acme"), "acme");
+        assert_eq!(sanitize_id_component("Acme Corp!"), "acme-corp");
+        assert_eq!(sanitize_id_component(""), "item");
+        assert_eq!(sanitize_id_component("---"), "item");
+    }
+
+    #[test]
+    fn test_cli_parse_genesis_app_install() {
+        let (owner, name, hash) = parse_app_ref("nerdsane/temper-pm@deadbeef01234567").unwrap();
+        assert_eq!(owner, "nerdsane");
+        assert_eq!(name, "temper-pm");
+        assert_eq!(hash, "deadbeef01234567");
+        let app_id = format!(
+            "app-{}-{}",
+            sanitize_id_component(owner),
+            sanitize_id_component(name)
+        );
+        assert_eq!(app_id, "app-nerdsane-temper-pm");
     }
 }
