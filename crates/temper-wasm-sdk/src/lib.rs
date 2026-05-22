@@ -20,9 +20,137 @@
 
 pub mod context;
 pub mod host;
+
+#[cfg(target_arch = "wasm32")]
 pub mod http_stream;
 
-pub use context::{Context, HttpRequest, HttpResponse, WasmSpan};
+#[cfg(not(target_arch = "wasm32"))]
+pub mod http_stream {
+    /// One end of a streaming channel owned by the host.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    pub struct StreamHandle(pub u32);
+
+    /// Errors surfaced by the streaming wrappers.
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    pub enum StreamError {
+        Closed,
+        InvalidHandle,
+        Other(String),
+    }
+
+    impl core::fmt::Display for StreamError {
+        fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+            match self {
+                StreamError::Closed => write!(f, "stream closed"),
+                StreamError::InvalidHandle => write!(f, "invalid stream handle"),
+                StreamError::Other(msg) => write!(f, "stream error: {msg}"),
+            }
+        }
+    }
+
+    /// Host-build placeholder for the wasm32 request-body writer.
+    pub struct HttpRequestBodyWriter;
+
+    impl HttpRequestBodyWriter {
+        pub fn handle(&self) -> StreamHandle {
+            StreamHandle(0)
+        }
+
+        pub fn write_all_chunk(&mut self, _chunk: &[u8]) -> Result<usize, StreamError> {
+            Err(StreamError::Other(
+                "http streaming host functions are only available on wasm32".to_string(),
+            ))
+        }
+
+        pub fn finish(self) -> Result<(), StreamError> {
+            Err(StreamError::Other(
+                "http streaming host functions are only available on wasm32".to_string(),
+            ))
+        }
+    }
+
+    /// Host-build placeholder for the wasm32 response-body reader.
+    pub struct HttpResponseBodyReader;
+
+    impl HttpResponseBodyReader {
+        pub fn handle(&self) -> StreamHandle {
+            StreamHandle(0)
+        }
+
+        pub fn read_next_chunk(&mut self, _buf: &mut [u8]) -> Result<Option<usize>, StreamError> {
+            Err(StreamError::Other(
+                "http streaming host functions are only available on wasm32".to_string(),
+            ))
+        }
+
+        pub fn close(self) -> Result<(), StreamError> {
+            Err(StreamError::Other(
+                "http streaming host functions are only available on wasm32".to_string(),
+            ))
+        }
+    }
+
+    /// Response head handed to the guest once the host has parsed the HTTP response.
+    #[derive(Debug, Clone, Default)]
+    pub struct HttpResponseHead {
+        pub status: u16,
+        pub headers: Vec<(String, String)>,
+    }
+
+    pub type ResponseHeadFetcher = fn() -> Result<HttpResponseHead, StreamError>;
+    pub type StreamingCallParts = (
+        HttpRequestBodyWriter,
+        HttpResponseBodyReader,
+        ResponseHeadFetcher,
+    );
+
+    /// Inbound HTTP dispatch context delivered through `WasmInvocationContext.http_request`.
+    #[derive(Debug, Clone, serde::Deserialize)]
+    pub struct InboundHttp {
+        pub method: String,
+        pub path: String,
+        #[serde(default)]
+        pub params: std::collections::BTreeMap<String, String>,
+        #[serde(default)]
+        pub headers: Vec<(String, String)>,
+        #[serde(default)]
+        pub principal_id: Option<String>,
+        pub request_body_handle: u32,
+        pub response_body_handle: u32,
+    }
+
+    impl InboundHttp {
+        pub fn request_body(&self) -> HttpResponseBodyReader {
+            HttpResponseBodyReader
+        }
+
+        pub fn response_body(&self) -> HttpRequestBodyWriter {
+            HttpRequestBodyWriter
+        }
+
+        pub fn submit_response_head(
+            &self,
+            _status: u16,
+            _headers: &[(&str, &str)],
+        ) -> Result<(), StreamError> {
+            Err(StreamError::Other(
+                "http streaming host functions are only available on wasm32".to_string(),
+            ))
+        }
+    }
+
+    pub fn streaming_call(
+        _method: &str,
+        _url: &str,
+        _headers: &[(&str, &str)],
+    ) -> Result<StreamingCallParts, StreamError> {
+        Err(StreamError::Other(
+            "http streaming host functions are only available on wasm32".to_string(),
+        ))
+    }
+}
+
+pub use context::{Context, HttpRequest, HttpResponse, SubWrite, SubWriteBuilder, WasmSpan};
 
 /// Re-export serde_json types for convenience.
 pub use serde_json::{self, Value, json};
@@ -103,6 +231,8 @@ macro_rules! temper_module {
 /// use temper_wasm_sdk::prelude::*;
 /// ```
 pub mod prelude {
-    pub use crate::context::{Context, HttpRequest, HttpResponse, WasmSpan};
+    pub use crate::context::{
+        Context, HttpRequest, HttpResponse, SubWrite, SubWriteBuilder, WasmSpan,
+    };
     pub use crate::{Value, json, serde_json, set_error_result, set_success_result, temper_module};
 }

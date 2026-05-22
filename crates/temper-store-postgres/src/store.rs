@@ -8,7 +8,8 @@ use std::time::Instant;
 
 use sqlx::{Acquire, PgPool};
 use temper_runtime::persistence::{
-    EventMetadata, EventStore, PersistenceEnvelope, PersistenceError,
+    EventMetadata, EventStore, PersistenceAppend, PersistenceAppendResult, PersistenceEnvelope,
+    PersistenceError,
 };
 use temper_runtime::tenant::parse_persistence_id_parts;
 
@@ -174,6 +175,157 @@ impl EventStore for PostgresEventStore {
         transaction_timer.set_outcome("ok");
 
         Ok(new_seq)
+    }
+
+    /// Atomically append to multiple entity journals in one PostgreSQL
+    /// transaction. Used as the storage foundation for cross-actor Composite
+    /// transactions: every stream's optimistic-concurrency check must pass
+    /// before any event is inserted.
+    async fn append_batch(
+        &self,
+        appends: &[PersistenceAppend],
+    ) -> Result<Vec<PersistenceAppendResult>, PersistenceError> {
+        if appends.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        let mut seen = std::collections::BTreeSet::new();
+        for append in appends {
+            if !seen.insert(append.persistence_id.as_str()) {
+                return Err(PersistenceError::Storage(format!(
+                    "duplicate persistence_id '{}' in append_batch",
+                    append.persistence_id
+                )));
+            }
+        }
+
+        let mut transaction_timer = PostgresTransactionTimer::start(EVENT_APPEND_OPERATION);
+        let acquire_started = Instant::now();
+        let mut conn = match self.pool.acquire().await {
+            Ok(conn) => {
+                record_postgres_pool_acquire_duration(
+                    acquire_started.elapsed(),
+                    EVENT_APPEND_OPERATION,
+                    "ok",
+                );
+                conn
+            }
+            Err(e) => {
+                record_postgres_pool_acquire_duration(
+                    acquire_started.elapsed(),
+                    EVENT_APPEND_OPERATION,
+                    "error",
+                );
+                return Err(PersistenceError::Storage(e.to_string()));
+            }
+        };
+        let begin_started = Instant::now();
+        let mut tx = match conn.begin().await {
+            Ok(tx) => {
+                record_postgres_transaction_begin_duration(
+                    begin_started.elapsed(),
+                    EVENT_APPEND_OPERATION,
+                    "ok",
+                );
+                tx
+            }
+            Err(e) => {
+                record_postgres_transaction_begin_duration(
+                    begin_started.elapsed(),
+                    EVENT_APPEND_OPERATION,
+                    "error",
+                );
+                return Err(PersistenceError::Storage(e.to_string()));
+            }
+        };
+
+        let mut parsed = Vec::with_capacity(appends.len());
+        for append in appends {
+            let (tenant, entity_type, entity_id) =
+                parse_persistence_id_parts(&append.persistence_id)
+                    .map_err(PersistenceError::Storage)?;
+            let row: Option<(i64,)> = crate::dbm::postgres_query_as!(
+                "SELECT COALESCE(MAX(sequence_nr), 0) FROM events \
+                 WHERE tenant = $1 AND entity_type = $2 AND entity_id = $3",
+            )
+            .bind(tenant)
+            .bind(entity_type)
+            .bind(entity_id)
+            .fetch_optional(&mut *tx)
+            .await
+            .map_err(|e| PersistenceError::Storage(e.to_string()))?;
+
+            let current_seq = row.map(|r| r.0 as u64).unwrap_or(0);
+            if current_seq != append.expected_sequence {
+                transaction_timer.set_outcome("concurrency_violation");
+                return Err(PersistenceError::ConcurrencyViolation {
+                    expected: append.expected_sequence,
+                    actual: current_seq,
+                });
+            }
+            parsed.push((
+                tenant.to_string(),
+                entity_type.to_string(),
+                entity_id.to_string(),
+            ));
+        }
+
+        let mut results = Vec::with_capacity(appends.len());
+        for (append, (tenant, entity_type, entity_id)) in appends.iter().zip(parsed.iter()) {
+            let mut new_seq = append.expected_sequence;
+            for event in &append.events {
+                new_seq += 1;
+                let metadata_json = serde_json::to_value(&event.metadata)
+                    .map_err(|e| PersistenceError::Serialization(e.to_string()))?;
+
+                if let Err(e) = crate::dbm::postgres_query!(
+                    "INSERT INTO events (tenant, entity_type, entity_id, sequence_nr, event_type, payload, metadata) \
+                     VALUES ($1, $2, $3, $4, $5, $6, $7)",
+                )
+                .bind(tenant)
+                .bind(entity_type)
+                .bind(entity_id)
+                .bind(new_seq as i64)
+                .bind(&event.event_type)
+                .bind(&event.payload)
+                .bind(metadata_json)
+                .execute(&mut *tx)
+                .await
+                {
+                    let msg = e.to_string();
+                    if msg.contains("unique") || msg.contains("duplicate key") {
+                        transaction_timer.set_outcome("concurrency_violation");
+                        return Err(PersistenceError::ConcurrencyViolation {
+                            expected: append.expected_sequence,
+                            actual: new_seq,
+                        });
+                    }
+                    return Err(PersistenceError::Storage(msg));
+                }
+            }
+            results.push(PersistenceAppendResult {
+                persistence_id: append.persistence_id.clone(),
+                sequence_nr: new_seq,
+            });
+        }
+
+        let commit_started = Instant::now();
+        tx.commit().await.map_err(|e| {
+            record_postgres_transaction_commit_duration(
+                commit_started.elapsed(),
+                EVENT_APPEND_OPERATION,
+                "error",
+            );
+            PersistenceError::Storage(e.to_string())
+        })?;
+        record_postgres_transaction_commit_duration(
+            commit_started.elapsed(),
+            EVENT_APPEND_OPERATION,
+            "ok",
+        );
+        transaction_timer.set_outcome("ok");
+
+        Ok(results)
     }
 
     /// Read events from the journal starting after `from_sequence`.

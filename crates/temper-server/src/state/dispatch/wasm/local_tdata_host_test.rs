@@ -210,11 +210,46 @@ fn parses_allowlisted_public_tdata_request() {
     assert_eq!(request.query.get("$top").map(String::as_str), Some("1"));
 }
 
+#[test]
+fn local_tdata_headers_inherit_invoking_security_context() {
+    let inherited = SecurityContext::from_headers(&[
+        ("x-temper-principal-id".to_string(), "admin-1".to_string()),
+        ("x-temper-principal-kind".to_string(), "admin".to_string()),
+        (
+            "x-temper-principal-scopes".to_string(),
+            "admin:repos,repo:write".to_string(),
+        ),
+    ]);
+    let inherited_headers = security_context_headers(&inherited);
+    let map = header_map(
+        &[("accept".to_string(), "application/json".to_string())],
+        &temper_runtime::tenant::TenantId::default(),
+        &inherited_headers,
+    );
+
+    assert_eq!(
+        map.get("x-temper-principal-id")
+            .and_then(|v| v.to_str().ok()),
+        Some("admin-1")
+    );
+    assert_eq!(
+        map.get("x-temper-principal-kind")
+            .and_then(|v| v.to_str().ok()),
+        Some("admin")
+    );
+    assert_eq!(
+        map.get("x-temper-principal-scopes")
+            .and_then(|v| v.to_str().ok()),
+        Some("admin:repos,repo:write")
+    );
+}
+
 #[tokio::test]
 async fn local_tdata_calls_use_odata_handlers() {
     let host = LocalTDataWasmHost::new(
         test_state(),
         temper_runtime::tenant::TenantId::default(),
+        None,
         Arc::new(FailingHost),
     );
     let headers = vec![
@@ -270,6 +305,7 @@ async fn local_tdata_synthesizes_invocation_tenant_header() {
     let host = LocalTDataWasmHost::new(
         state,
         temper_runtime::tenant::TenantId::default(),
+        None,
         Arc::new(FailingHost),
     );
     let headers = vec![
@@ -308,6 +344,7 @@ async fn boundary_paths_delegate_to_production_host() {
     let host = LocalTDataWasmHost::new(
         test_state(),
         temper_runtime::tenant::TenantId::default(),
+        None,
         Arc::new(CountingHost {
             calls: calls.clone(),
             stream_calls: Arc::new(AtomicUsize::new(0)),
@@ -345,6 +382,7 @@ async fn outbound_streaming_delegates_to_production_host() {
     let host = LocalTDataWasmHost::new(
         test_state(),
         temper_runtime::tenant::TenantId::default(),
+        None,
         Arc::new(CountingHost {
             calls: Arc::new(AtomicUsize::new(0)),
             stream_calls: stream_calls.clone(),
@@ -410,6 +448,7 @@ async fn allowlisted_public_tdata_calls_use_odata_handlers() {
     let host = LocalTDataWasmHost::new(
         state,
         temper_runtime::tenant::TenantId::default(),
+        None,
         Arc::new(FailingHost),
     );
     let headers = vec![

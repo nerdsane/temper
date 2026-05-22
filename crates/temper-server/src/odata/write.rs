@@ -12,14 +12,19 @@ use tracing_opentelemetry::OpenTelemetrySpanExt;
 
 use axum::Extension;
 
+use super::account_verification::enforce_commons_account_verified_for_write;
+use super::app_uniqueness::enforce_commons_app_name_unique_for_write;
 use super::bindings::dispatch_bound_action;
 use super::common::{
     constraint_violation_response, extract_key, extract_tenant, load_entity_or_404,
     resolve_entity_type, run_write_prechecks, verification_gate_response,
 };
 use super::constraints::pre_delete_relation_checks;
+use super::rate_limit::{enforce_commons_write_rate_limit, owner_id_from_fields};
 use super::response::annotate_entity;
+use super::storage_guardrails::enforce_commons_storage_cap;
 use super::stream_put::handle_stream_put;
+use crate::authz::{DenialInput, record_authz_denial, security_context_from_headers};
 use crate::blobs::hydrate_blob_refs_for_tenant;
 use crate::identity::ResolvedIdentity;
 use crate::request_context::{AgentContext, extract_agent_context, remote_parent_context};
@@ -130,6 +135,87 @@ fn check_verification_gate_or_423(
         .map_err(|e| Box::new(verification_gate_response(e)))
 }
 
+#[allow(clippy::too_many_arguments)]
+async fn authorize_commons_collection_create(
+    state: &ServerState,
+    tenant: &TenantId,
+    entity_type: &str,
+    entity_id: &str,
+    fields: &serde_json::Value,
+    headers: &HeaderMap,
+    agent_ctx: &AgentContext,
+    resolved_identity: Option<&ResolvedIdentity>,
+) -> Result<(), ODataWriteError> {
+    if !state.commons_guardrails_enabled(tenant) {
+        return Ok(());
+    }
+
+    let security_ctx = if let Some(identity) = resolved_identity {
+        temper_authz::SecurityContext::from_resolved_identity(
+            &identity.agent_instance_id,
+            &identity.agent_type_name,
+            agent_ctx.session_id.as_deref(),
+        )
+    } else {
+        security_context_from_headers(headers, None, agent_ctx.session_id.as_deref(), None)
+    };
+
+    let mut resource_attrs = std::collections::BTreeMap::new();
+    resource_attrs.insert(
+        "id".to_string(),
+        serde_json::Value::String(entity_id.to_string()),
+    );
+    resource_attrs.insert(
+        "status".to_string(),
+        fields
+            .get("Status")
+            .or_else(|| fields.get("status"))
+            .cloned()
+            .unwrap_or_else(|| serde_json::Value::String(String::new())),
+    );
+    if let serde_json::Value::Object(obj) = fields {
+        for (key, value) in obj {
+            resource_attrs.insert(key.clone(), value.clone());
+        }
+    }
+    let has_spec = state
+        .has_registered_spec(tenant, entity_type)
+        .unwrap_or(false);
+    resource_attrs.insert("has_spec".to_string(), serde_json::Value::Bool(has_spec));
+
+    if let Err(denial) = state.authorize_with_context(
+        &security_ctx,
+        "Create",
+        entity_type,
+        &resource_attrs,
+        tenant.as_str(),
+    ) {
+        let reason = denial.to_string();
+        let _ = record_authz_denial(
+            state,
+            DenialInput {
+                tenant: tenant.as_str(),
+                security_ctx: &security_ctx,
+                agent_id_override: agent_ctx.agent_id.as_deref(),
+                action: "Create",
+                resource_type: entity_type,
+                resource_id: entity_id,
+                resource_attrs: serde_json::to_value(&resource_attrs).unwrap_or_default(),
+                reason: &reason,
+                module_name: None,
+                from_status: None,
+            },
+        )
+        .await;
+
+        return Err(Box::new(
+            odata_error(StatusCode::FORBIDDEN, "AuthorizationDenied", &reason).into_response(),
+        ));
+    }
+
+    Ok(())
+}
+
 fn ensure_entity_exists_or_404(
     state: &ServerState,
     tenant: &TenantId,
@@ -223,6 +309,8 @@ pub async fn handle_odata_post(
                 });
 
             let initial_fields = body_json.clone();
+            let _commons_guardrail_lock = state.acquire_commons_write_guardrail_lock(&tenant).await;
+
             if let Err(resp) = run_write_prechecks(
                 &state,
                 &tenant,
@@ -235,6 +323,71 @@ pub async fn handle_odata_post(
             .await
             {
                 return resp;
+            }
+
+            if let Err(resp) = enforce_commons_account_verified_for_write(
+                &state,
+                &tenant,
+                &entity_type,
+                &initial_fields,
+            )
+            .await
+            {
+                return *resp;
+            }
+
+            if let Err(resp) = enforce_commons_app_name_unique_for_write(
+                &state,
+                &tenant,
+                &entity_type,
+                &entity_id,
+                &initial_fields,
+            )
+            .await
+            {
+                return resp;
+            }
+
+            if let Err(resp) = enforce_commons_storage_cap(
+                &state,
+                &tenant,
+                &entity_type,
+                &entity_id,
+                "Create",
+                &initial_fields,
+            )
+            .await
+            {
+                return resp;
+            }
+
+            if let Err(resp) = enforce_commons_write_rate_limit(
+                &state,
+                &tenant,
+                &entity_type,
+                owner_id_from_fields(&initial_fields),
+                &headers,
+                &agent_ctx,
+                resolved_identity.as_ref(),
+            )
+            .await
+            {
+                return resp;
+            }
+
+            if let Err(resp) = authorize_commons_collection_create(
+                &state,
+                &tenant,
+                &entity_type,
+                &entity_id,
+                &initial_fields,
+                &headers,
+                &agent_ctx,
+                resolved_identity.as_ref(),
+            )
+            .await
+            {
+                return *resp;
             }
 
             // ToolDefinition: forward tool metadata to the session's ToolRegistry.
@@ -389,6 +542,10 @@ pub async fn handle_odata_post(
                 .await
             {
                 Ok(response) => {
+                    if entity_type == "RateLimit" {
+                        state.clear_commons_rate_limit_cache();
+                    }
+                    state.clear_commons_storage_projection_cache_for_entity(&entity_type);
                     let mut state_json = serde_json::to_value(&response.state).unwrap_or_default();
                     hydrate_blob_refs_for_tenant(&state, &tenant, &mut state_json).await;
                     let body = annotate_entity(
@@ -531,6 +688,7 @@ pub async fn handle_odata_patch(
         Ok(p) => p,
         Err(resp) => return *resp,
     };
+    let agent_ctx = extract_agent_context(&headers);
 
     match odata_path {
         ODataPath::Entity(set_name, key) => {
@@ -577,6 +735,8 @@ pub async fn handle_odata_patch(
                 prospective_fields = body_json.clone();
             }
 
+            let _commons_guardrail_lock = state.acquire_commons_write_guardrail_lock(&tenant).await;
+
             if let Err(resp) = run_write_prechecks(
                 &state,
                 &tenant,
@@ -591,11 +751,52 @@ pub async fn handle_odata_patch(
                 return resp;
             }
 
+            if let Err(resp) = enforce_commons_account_verified_for_write(
+                &state,
+                &tenant,
+                &entity_type,
+                &prospective_fields,
+            )
+            .await
+            {
+                return *resp;
+            }
+
+            if let Err(resp) = enforce_commons_app_name_unique_for_write(
+                &state,
+                &tenant,
+                &entity_type,
+                &key_str,
+                &prospective_fields,
+            )
+            .await
+            {
+                return resp;
+            }
+
+            if let Err(resp) = enforce_commons_write_rate_limit(
+                &state,
+                &tenant,
+                &entity_type,
+                owner_id_from_fields(&prospective_fields),
+                &headers,
+                &agent_ctx,
+                None,
+            )
+            .await
+            {
+                return resp;
+            }
+
             match state
                 .update_tenant_entity_fields(&tenant, &entity_type, &key_str, body_json, false)
                 .await
             {
                 Ok(response) => {
+                    if entity_type == "RateLimit" {
+                        state.clear_commons_rate_limit_cache();
+                    }
+                    state.clear_commons_storage_projection_cache_for_entity(&entity_type);
                     let mut state_json = serde_json::to_value(&response.state).unwrap_or_default();
                     hydrate_blob_refs_for_tenant(&state, &tenant, &mut state_json).await;
                     let body = annotate_entity(
@@ -638,6 +839,7 @@ pub async fn handle_odata_put(
         Ok(p) => p,
         Err(resp) => return *resp,
     };
+    let agent_ctx = extract_agent_context(&headers);
 
     match odata_path {
         ODataPath::Entity(set_name, key) => {
@@ -661,6 +863,8 @@ pub async fn handle_odata_put(
                 Err(resp) => return *resp,
             };
 
+            let _commons_guardrail_lock = state.acquire_commons_write_guardrail_lock(&tenant).await;
+
             if let Err(resp) = run_write_prechecks(
                 &state,
                 &tenant,
@@ -675,11 +879,52 @@ pub async fn handle_odata_put(
                 return resp;
             }
 
+            if let Err(resp) = enforce_commons_account_verified_for_write(
+                &state,
+                &tenant,
+                &entity_type,
+                &body_json,
+            )
+            .await
+            {
+                return *resp;
+            }
+
+            if let Err(resp) = enforce_commons_app_name_unique_for_write(
+                &state,
+                &tenant,
+                &entity_type,
+                &key_str,
+                &body_json,
+            )
+            .await
+            {
+                return resp;
+            }
+
+            if let Err(resp) = enforce_commons_write_rate_limit(
+                &state,
+                &tenant,
+                &entity_type,
+                owner_id_from_fields(&body_json),
+                &headers,
+                &agent_ctx,
+                None,
+            )
+            .await
+            {
+                return resp;
+            }
+
             match state
                 .update_tenant_entity_fields(&tenant, &entity_type, &key_str, body_json, true)
                 .await
             {
                 Ok(response) => {
+                    if entity_type == "RateLimit" {
+                        state.clear_commons_rate_limit_cache();
+                    }
+                    state.clear_commons_storage_projection_cache_for_entity(&entity_type);
                     let mut state_json = serde_json::to_value(&response.state).unwrap_or_default();
                     hydrate_blob_refs_for_tenant(&state, &tenant, &mut state_json).await;
                     let body = annotate_entity(
@@ -727,6 +972,7 @@ pub async fn handle_odata_delete(
         Ok(p) => p,
         Err(resp) => return *resp,
     };
+    let agent_ctx = extract_agent_context(&headers);
 
     match odata_path {
         ODataPath::Entity(set_name, key) => {
@@ -775,11 +1021,42 @@ pub async fn handle_odata_delete(
                 return resp;
             }
 
+            if let Err(resp) = enforce_commons_account_verified_for_write(
+                &state,
+                &tenant,
+                &entity_type,
+                &current_state.state.fields,
+            )
+            .await
+            {
+                return *resp;
+            }
+
+            if let Err(resp) = enforce_commons_write_rate_limit(
+                &state,
+                &tenant,
+                &entity_type,
+                owner_id_from_fields(&current_state.state.fields),
+                &headers,
+                &agent_ctx,
+                None,
+            )
+            .await
+            {
+                return resp;
+            }
+
             match state
                 .delete_tenant_entity(&tenant, &entity_type, &key_str)
                 .await
             {
-                Ok(_) => (StatusCode::NO_CONTENT, "").into_response(),
+                Ok(_) => {
+                    if entity_type == "RateLimit" {
+                        state.clear_commons_rate_limit_cache();
+                    }
+                    state.clear_commons_storage_projection_cache_for_entity(&entity_type);
+                    (StatusCode::NO_CONTENT, "").into_response()
+                }
                 Err(e) => odata_error(StatusCode::INTERNAL_SERVER_ERROR, "DeleteError", &e)
                     .into_response(),
             }

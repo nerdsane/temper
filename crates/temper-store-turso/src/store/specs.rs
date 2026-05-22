@@ -448,12 +448,19 @@ impl TursoEventStore {
         let conn = self.configured_connection().await?;
         conn.execute(
             "INSERT INTO tenant_installed_apps (
-                 tenant_id, app_name, app_version, bundle_digest, spec_digest,
+                 tenant_id, app_name, source_kind, app_ref, version_hash, closure_id,
+                 registry_url, registry_tenant, app_version, bundle_digest, spec_digest,
                  policy_digest, wasm_digest, content_digest, seed_digest,
                  installed_at, last_reconciled_at, status
              )
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, datetime('now'), datetime('now'), ?10)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, datetime('now'), datetime('now'), ?16)
              ON CONFLICT(tenant_id, app_name) DO UPDATE SET
+                 source_kind = excluded.source_kind,
+                 app_ref = excluded.app_ref,
+                 version_hash = excluded.version_hash,
+                 closure_id = excluded.closure_id,
+                 registry_url = excluded.registry_url,
+                 registry_tenant = excluded.registry_tenant,
                  app_version = excluded.app_version,
                  bundle_digest = excluded.bundle_digest,
                  spec_digest = excluded.spec_digest,
@@ -466,6 +473,12 @@ impl TursoEventStore {
             params![
                 record.tenant_id.as_str(),
                 record.app_name.as_str(),
+                record.source_kind.as_str(),
+                record.app_ref.as_str(),
+                record.version_hash.as_str(),
+                record.closure_id.as_str(),
+                record.registry_url.as_str(),
+                record.registry_tenant.as_str(),
                 record.app_version.as_str(),
                 record.bundle_digest.as_str(),
                 record.spec_digest.as_str(),
@@ -492,7 +505,8 @@ impl TursoEventStore {
         let conn = self.configured_connection().await?;
         let mut rows = conn
             .query(
-                "SELECT tenant_id, app_name, app_version, bundle_digest, spec_digest,
+                "SELECT tenant_id, app_name, source_kind, app_ref, version_hash, closure_id,
+                        registry_url, registry_tenant, app_version, bundle_digest, spec_digest,
                         policy_digest, wasm_digest, content_digest, seed_digest,
                         installed_at, last_reconciled_at, status
                  FROM tenant_installed_apps
@@ -510,16 +524,22 @@ impl TursoEventStore {
         Ok(Some(TursoInstalledAppRow {
             tenant_id: row.get(0).map_err(storage_error)?,
             app_name: row.get(1).map_err(storage_error)?,
-            app_version: row.get(2).map_err(storage_error)?,
-            bundle_digest: row.get(3).map_err(storage_error)?,
-            spec_digest: row.get(4).map_err(storage_error)?,
-            policy_digest: row.get(5).map_err(storage_error)?,
-            wasm_digest: row.get(6).map_err(storage_error)?,
-            content_digest: row.get(7).map_err(storage_error)?,
-            seed_digest: row.get(8).map_err(storage_error)?,
-            installed_at: row.get(9).map_err(storage_error)?,
-            last_reconciled_at: row.get(10).map_err(storage_error)?,
-            status: row.get(11).map_err(storage_error)?,
+            source_kind: row.get(2).map_err(storage_error)?,
+            app_ref: row.get(3).map_err(storage_error)?,
+            version_hash: row.get(4).map_err(storage_error)?,
+            closure_id: row.get(5).map_err(storage_error)?,
+            registry_url: row.get(6).map_err(storage_error)?,
+            registry_tenant: row.get(7).map_err(storage_error)?,
+            app_version: row.get(8).map_err(storage_error)?,
+            bundle_digest: row.get(9).map_err(storage_error)?,
+            spec_digest: row.get(10).map_err(storage_error)?,
+            policy_digest: row.get(11).map_err(storage_error)?,
+            wasm_digest: row.get(12).map_err(storage_error)?,
+            content_digest: row.get(13).map_err(storage_error)?,
+            seed_digest: row.get(14).map_err(storage_error)?,
+            installed_at: row.get(15).map_err(storage_error)?,
+            last_reconciled_at: row.get(16).map_err(storage_error)?,
+            status: row.get(17).map_err(storage_error)?,
         }))
     }
 

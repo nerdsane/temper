@@ -88,11 +88,7 @@ pub fn tenant_api_router() -> Router<PlatformState> {
         )
         .route("/os-apps", routing::get(list_os_apps))
         .route("/os-apps/{name}", routing::get(get_os_app_guide))
-        .route("/os-apps/{name}/install", routing::post(install_os_app))
-        // Backward-compatible aliases
-        .route("/skills", routing::get(list_skills))
-        .route("/skills/{name}", routing::get(get_skill_guide))
-        .route("/skills/{name}/install", routing::post(install_skill))
+        .route("/genesis/apps/install", routing::post(install_genesis_app))
 }
 
 /// `POST /api/tenants` — provision a new tenant database.
@@ -345,73 +341,20 @@ pub(crate) async fn get_os_app_guide(
     }
 }
 
-/// Request body for `POST /api/os-apps/:name/install`.
-#[derive(Debug, Deserialize)]
-pub struct InstallAppRequest {
-    pub tenant: String,
-}
-
-/// `POST /api/os-apps/:name/install` — install an app into a tenant.
-///
-/// Ensures the tenant is registered in persistence (Turso) before loading
-/// specs into the in-memory registry. Without this, actors would fail to
-/// persist events because the storage layer rejects unknown tenants.
-pub(crate) async fn install_os_app(
+/// `POST /api/genesis/apps/install` — install a pinned Genesis app into this instance.
+pub(crate) async fn install_genesis_app(
     State(state): State<PlatformState>,
-    axum::extract::Path(app_name): axum::extract::Path<String>,
-    Json(req): Json<InstallAppRequest>,
+    Json(req): Json<crate::genesis_install::GenesisRegistryInstallRequest>,
 ) -> impl IntoResponse {
-    // Ensure tenant exists in persistence before loading specs.
-    if let Some(provider) = turso_provider(&state)
-        && provider.supports_tenant_admin()
-        && let Err(e) = provider.ensure_tenant(&req.tenant).await
-    {
-        return (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(serde_json::json!({
-                "error": format!("failed to ensure tenant in persistence: {e}"),
-            })),
-        );
-    }
-
-    match crate::os_apps::install_os_app(&state, &req.tenant, &app_name).await {
-        Ok(result) => (
-            StatusCode::OK,
-            Json(serde_json::json!({
-                "app": app_name,
-                "tenant": req.tenant,
-                "added": result.added,
-                "updated": result.updated,
-                "skipped": result.skipped,
-                "status": "installed",
-            })),
-        ),
-        Err(e) if e.contains("not found") => (
+    match crate::genesis_install::install_genesis_app_from_registry(&state, req).await {
+        Ok(result) => (StatusCode::OK, Json(serde_json::json!(result))),
+        Err(error) if error.contains("not found") => (
             StatusCode::NOT_FOUND,
-            Json(serde_json::json!({ "error": e })),
+            Json(serde_json::json!({ "error": error })),
         ),
-        Err(e) => (
+        Err(error) => (
             StatusCode::INTERNAL_SERVER_ERROR,
-            Json(serde_json::json!({ "error": e })),
+            Json(serde_json::json!({ "error": error })),
         ),
     }
-}
-
-/// Backward-compatible alias for `/api/skills`.
-pub(crate) async fn list_skills() -> impl IntoResponse {
-    list_os_apps().await
-}
-
-/// Backward-compatible alias for `/api/skills/:name`.
-pub(crate) async fn get_skill_guide(path: axum::extract::Path<String>) -> impl IntoResponse {
-    get_os_app_guide(path).await
-}
-
-/// Backward-compatible alias for `/api/skills/:name/install`.
-pub(crate) async fn install_skill(
-    state: State<PlatformState>,
-    path: axum::extract::Path<String>,
-    body: Json<InstallAppRequest>,
-) -> impl IntoResponse {
-    install_os_app(state, path, body).await
 }

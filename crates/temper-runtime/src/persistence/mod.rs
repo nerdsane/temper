@@ -1,5 +1,33 @@
 use serde::{Deserialize, Serialize};
 
+/// Event type used for the parent-journal record of a Composite action.
+///
+/// Concrete sub-write events remain the state-changing events on their target
+/// journals. This event records the composite intent and the exact sub-write
+/// journals/idempotency keys that were committed atomically with it.
+pub const COMPOSITE_EVENT_TYPE: &str = "CompositeEvent";
+
+/// Replay/audit record for one Composite action application.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CompositeEvent {
+    pub tenant: String,
+    pub parent_entity_type: String,
+    pub parent_entity_id: String,
+    pub parent_action: String,
+    pub composite_idempotency_key: String,
+    pub sub_writes: Vec<CompositeEventSubWrite>,
+}
+
+/// One concrete sub-write recorded in a [`CompositeEvent`].
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CompositeEventSubWrite {
+    pub index: usize,
+    pub entity_type: String,
+    pub entity_id: String,
+    pub action: String,
+    pub idempotency_key: String,
+}
+
 /// Marker trait for domain events.
 /// Events must be serializable (for persistence) and Send + 'static (for async).
 pub trait DomainEvent:
@@ -65,6 +93,16 @@ pub trait EventStore: Send + Sync + 'static {
         expected_sequence: u64,
         events: &[PersistenceEnvelope],
     ) -> impl std::future::Future<Output = Result<u64, PersistenceError>> + Send;
+
+    /// Atomically append events to multiple journals.
+    ///
+    /// Backends must either commit every append in `appends`, or commit none.
+    /// This is the storage primitive composite actions need before they can
+    /// persist cross-actor sub-writes as one physical unit.
+    fn append_batch(
+        &self,
+        appends: &[PersistenceAppend],
+    ) -> impl std::future::Future<Output = Result<Vec<PersistenceAppendResult>, PersistenceError>> + Send;
 
     /// Read events from the journal, starting after the given sequence number.
     fn read_events(
@@ -143,6 +181,26 @@ pub struct PersistenceEnvelope {
     pub payload: serde_json::Value,
     /// Event metadata (causation, correlation, timestamp).
     pub metadata: EventMetadata,
+}
+
+/// One stream append inside an atomic multi-journal append.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PersistenceAppend {
+    /// Persistence ID in the form `{tenant}:{entity_type}:{entity_id}`.
+    pub persistence_id: String,
+    /// Optimistic-concurrency sequence expected before this append.
+    pub expected_sequence: u64,
+    /// Events to append to this journal.
+    pub events: Vec<PersistenceEnvelope>,
+}
+
+/// New sequence number for one stream after an atomic batch append.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PersistenceAppendResult {
+    /// Persistence ID that was appended.
+    pub persistence_id: String,
+    /// New highest sequence number for this journal.
+    pub sequence_nr: u64,
 }
 
 /// Errors that can occur during event persistence operations.

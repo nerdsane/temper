@@ -597,19 +597,11 @@ async fn dispatch_apps(
             .await
         }
         "install_app" => {
-            let app_name = expect_string_arg(args, 0, "app_name", method)?;
-            let payload = serde_json::json!({ "tenant": ctx.tenant });
-            temper_request(
-                ctx.http,
-                ctx.base_url,
-                ctx.tenant,
-                &ctx.identity(),
-                ctx.api_key,
-                Method::POST,
-                &format!("/api/os-apps/{app_name}/install"),
-                Some(&payload),
+            let _ = args;
+            Err(
+                "local OS-app install is removed from the normal agent path; install pinned Genesis refs through App.Install or /api/genesis/apps/install"
+                    .to_string(),
             )
-            .await
         }
         _ => unreachable!("dispatch_apps called with non-app method"),
     }

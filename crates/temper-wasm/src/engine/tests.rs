@@ -53,9 +53,9 @@ const WAT_TRAP: &str = r#"
     )
 "#;
 
-// Makes one host call, then returns normally. The host call gives another
+// Makes one host HTTP function call, then returns normally. That call gives another
 // invocation enough time to time out while this store is still active.
-const WAT_HOST_CALL_THEN_RETURN: &str = r#"
+const WAT_HOST_HTTP_THEN_RETURN: &str = r#"
     (module
       (import "env" "host_http_call" (func $host_http_call
         (param i32 i32 i32 i32 i32 i32 i32 i32 i32 i32) (result i32)))
@@ -327,7 +327,7 @@ async fn timeout_enforced_by_epoch() {
 async fn host_call_respects_invocation_duration_budget() {
     let engine = WasmEngine::new().unwrap();
     let hash = engine
-        .compile_and_cache(WAT_HOST_CALL_THEN_RETURN.as_bytes())
+        .compile_and_cache(WAT_HOST_HTTP_THEN_RETURN.as_bytes())
         .unwrap();
 
     let limits = WasmResourceLimits {
@@ -361,7 +361,7 @@ async fn host_call_respects_invocation_duration_budget() {
 async fn timed_out_invocation_does_not_interrupt_unrelated_active_invocation() {
     let engine = Arc::new(WasmEngine::new().unwrap());
     let slow_hash = engine
-        .compile_and_cache(WAT_HOST_CALL_THEN_RETURN.as_bytes())
+        .compile_and_cache(WAT_HOST_HTTP_THEN_RETURN.as_bytes())
         .unwrap();
     let timeout_hash = engine
         .compile_and_cache(WAT_INFINITE_LOOP.as_bytes())

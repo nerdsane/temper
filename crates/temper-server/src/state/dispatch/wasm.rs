@@ -526,6 +526,13 @@ impl crate::state::ServerState {
                 (authz_ctx, inv_ctx)
             },
         );
+        if !inv_ctx.integration_config.contains_key("temper_api_url")
+            && let Some(api_url) = internal_api_base_url(self)
+        {
+            inv_ctx
+                .integration_config
+                .insert("temper_api_url".to_string(), api_url);
+        }
         // ADR-0046: inline-hydrate blob refs below the 128KB ceiling; defer
         // oversize refs into a blob_cache the WASM guest can read via
         // host_read_field_stream. No-op on tenants without a Turso store.
@@ -659,6 +666,7 @@ impl crate::state::ServerState {
                 let inner: Arc<dyn WasmHost> = Arc::new(LocalTDataWasmHost::new(
                     self.clone(),
                     ctx.entity_ref.tenant.clone(),
+                    ctx.agent_ctx.security_ctx.as_ref(),
                     production_host,
                 ));
                 let host: Arc<dyn WasmHost> =
@@ -1112,12 +1120,34 @@ impl crate::state::ServerState {
                 )
                 .await;
 
+                let callback_params = strip_private_observability_params(result.callback_params);
+                let composite_result_consumed = self
+                    .apply_composite_integration_result(
+                        ctx.entity_ref.tenant,
+                        ctx.entity_ref.entity_type,
+                        ctx.entity_ref.entity_id,
+                        ctx.action,
+                        &callback_params,
+                        ctx.agent_ctx,
+                    )
+                    .await
+                    .map_err(|e| e.to_string())?;
+
                 // Determine callback action: prefer static on_success from spec,
-                // fall back to dynamic callback_action from WASM result.
-                let callback_action = integration
+                // fall back to dynamic callback_action from WASM result. Composite
+                // integrations may return only a data envelope for the kernel to
+                // apply; the default SDK "callback" action should not become an
+                // implicit source-entity dispatch in that path.
+                let mut callback_action = integration
                     .on_success
                     .as_deref()
                     .unwrap_or(&result.callback_action);
+                if composite_result_consumed
+                    && integration.on_success.is_none()
+                    && result.callback_action == "callback"
+                {
+                    callback_action = "";
+                }
 
                 if !callback_action.is_empty() {
                     let callback_response = instrument_wasm_dispatch_phase_result(
@@ -1128,7 +1158,7 @@ impl crate::state::ServerState {
                         self.dispatch_wasm_callback(
                             ctx.entity_ref,
                             callback_action,
-                            strip_private_observability_params(result.callback_params),
+                            callback_params,
                             ctx.agent_ctx,
                             ctx.mode,
                         ),
@@ -1312,6 +1342,7 @@ impl crate::state::ServerState {
         let inner: Arc<dyn WasmHost> = Arc::new(LocalTDataWasmHost::new(
             self.clone(),
             tenant.clone(),
+            None,
             production_host,
         ));
         let host: Arc<dyn WasmHost> =
@@ -2060,6 +2091,7 @@ mod tests {
             events: std::collections::VecDeque::new(),
             total_event_count: 0,
             sequence_nr: 0,
+            processed_idempotency_keys: std::collections::BTreeMap::new(),
         };
         let callback_params = json!({
             "_gen_ai_model": "gpt-5.4",
@@ -2116,6 +2148,7 @@ mod tests {
             events: std::collections::VecDeque::new(),
             total_event_count: 0,
             sequence_nr: 0,
+            processed_idempotency_keys: std::collections::BTreeMap::new(),
         };
         let integration = temper_spec::automaton::Integration {
             name: "provider_caller".to_string(),
@@ -2198,6 +2231,7 @@ mod tests {
             events: std::collections::VecDeque::new(),
             total_event_count: 0,
             sequence_nr: 0,
+            processed_idempotency_keys: std::collections::BTreeMap::new(),
         };
         let (llm_trace_id, llm_span_id) = dispatch_parent.in_scope(|| {
             let llm_span = tracing::info_span!("llm_caller.trace");
@@ -2292,6 +2326,7 @@ mod tests {
             events: std::collections::VecDeque::new(),
             total_event_count: 0,
             sequence_nr: 0,
+            processed_idempotency_keys: std::collections::BTreeMap::new(),
         };
 
         let mut callback_params = json!({});
@@ -2332,6 +2367,7 @@ mod tests {
             events: std::collections::VecDeque::new(),
             total_event_count: 0,
             sequence_nr: 0,
+            processed_idempotency_keys: std::collections::BTreeMap::new(),
         };
 
         assert_eq!(

@@ -54,6 +54,19 @@ pub struct EntityCatalogRow {
     pub sequence_nr: u64,
 }
 
+/// Backend-neutral durable projection upsert.
+#[derive(Clone, Debug, PartialEq)]
+pub struct QueryProjectionUpsert {
+    pub entity_type: String,
+    pub entity_id: String,
+    pub status: String,
+    pub fields: serde_json::Value,
+    pub state: serde_json::Value,
+    pub indexed_fields: serde_json::Value,
+    pub sequence_nr: u64,
+    pub known_new: bool,
+}
+
 /// Durable query-plane capability.
 #[async_trait::async_trait]
 pub trait QueryPlaneStore: Send + Sync {
@@ -68,6 +81,26 @@ pub trait QueryPlaneStore: Send + Sync {
         state: &serde_json::Value,
         sequence_nr: u64,
     ) -> Result<(), PersistenceError>;
+
+    async fn upsert_projections(
+        &self,
+        tenant: &str,
+        projections: &[QueryProjectionUpsert],
+    ) -> Result<(), PersistenceError> {
+        for projection in projections {
+            self.upsert_projection(
+                tenant,
+                &projection.entity_type,
+                &projection.entity_id,
+                &projection.status,
+                &projection.fields,
+                &projection.state,
+                projection.sequence_nr,
+            )
+            .await?;
+        }
+        Ok(())
+    }
 
     async fn remove_projection(
         &self,

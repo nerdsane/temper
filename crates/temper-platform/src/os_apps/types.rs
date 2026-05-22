@@ -96,6 +96,8 @@ pub struct AppManifest {
     #[serde(default = "default_version")]
     pub version: String,
     #[serde(default)]
+    pub mode: AppDeploymentMode,
+    #[serde(default)]
     pub startup_install: StartupInstallMode,
     #[serde(default)]
     pub dependencies: Vec<String>,
@@ -105,6 +107,17 @@ pub struct AppManifest {
 
 fn default_version() -> String {
     "0.1.0".to_string()
+}
+
+/// Deployment mode for app-local policy overlays.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Deserialize, serde::Serialize, Default)]
+#[serde(rename_all = "kebab-case")]
+pub enum AppDeploymentMode {
+    /// Single-operator install with the app's normal policy surface.
+    #[default]
+    Operator,
+    /// Public commons install with extra guardrail policies.
+    Commons,
 }
 
 /// Whether an app should be installed during the default OpenPaw startup path.
@@ -177,11 +190,10 @@ pub struct AppEntry {
     pub dependencies: Vec<String>,
 }
 
-// Backward-compatible alias: SkillEntry → AppEntry.
-pub type SkillEntry = AppEntry;
-
 /// Full spec bundle for an app (owned, loaded from disk).
 pub struct AppBundle {
+    /// Effective deployment mode used while loading the bundle.
+    pub deployment_mode: AppDeploymentMode,
     /// IOA spec sources as `(entity_type, ioa_toml_source)` pairs.
     pub specs: Vec<(String, String)>,
     /// CSDL XML source (None if app has no IOA specs).

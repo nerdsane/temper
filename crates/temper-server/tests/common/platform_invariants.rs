@@ -882,7 +882,7 @@ pub async fn assert_p17_spec_roundtrip_equivalence(
 /// Check invariants that must hold even mid-operation under fault injection.
 ///
 /// P1/P2 (registry-store consistency) may be transiently violated when
-/// `delete_spec` cleanup fails during a faulty `install_skill`. These
+/// `delete_spec` cleanup fails during a faulty `install_os_app`. These
 /// orphans are reconciled on the next restart by
 /// `restore_registry_from_platform_store`. So mid-operation, we only check
 /// invariants that cannot be transiently violated by cleanup failures.

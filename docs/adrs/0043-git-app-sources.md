@@ -2,7 +2,13 @@
 
 ## Status
 
-Proposed
+Superseded by Genesis-only install.
+
+The implementation described here has been removed. Runtime apps are no
+longer loaded from external git source lists, local symlink farms, or
+app-as-skill aliases. Genesis is the registry source of truth: bootstrap
+the minimal Genesis app, then install normal Temper apps by pinned
+Genesis ref through spec-owned `App.Install`.
 
 ## Date
 
@@ -41,27 +47,11 @@ The gap: there is no way for a Temper deployment to declaratively specify
 
 ## Decision
 
-### Sub-Decision 1: `TEMPER_APP_SOURCES` Environment Variable
+### Sub-Decision 1: external git source environment variable
 
-Add a new env var `TEMPER_APP_SOURCES` that specifies git repositories
-containing Temper apps. Format:
-
-```
-TEMPER_APP_SOURCES=<url>[@<ref>][,<url>[@<ref>],...]
-```
-
-Examples:
-```bash
-# Single repo, default branch (main)
-TEMPER_APP_SOURCES=https://github.com/arni-labs/palimpsest.git
-
-# Multiple repos with explicit refs
-TEMPER_APP_SOURCES=https://github.com/arni-labs/palimpsest.git@main,https://github.com/arni-labs/katagami.git@v2
-```
-
-**Why this approach**: Consistent with existing `TEMPER_OS_APPS_DIR` pattern —
-env-var-driven, no config files, works in dev and Docker via `.env` or container
-env. Comma-separated is simple to parse and set in CI/CD.
+This sub-decision was not kept. Temper no longer accepts a runtime git
+source list for app installation. App bytes must be published into Genesis
+objects and installed by pinned ref.
 
 ### Sub-Decision 2: Git via `std::process::Command`
 

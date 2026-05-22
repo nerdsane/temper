@@ -1,17 +1,15 @@
 "use client";
 
 import { useState, useCallback, useEffect, useMemo } from "react";
-import { fetchOsApps, installOsApp, fetchSpecs } from "@/lib/api";
+import { fetchOsApps, fetchSpecs } from "@/lib/api";
 import { useSSERefresh } from "@/lib/hooks";
-import type { SkillsResponse, SpecSummary } from "@/lib/types";
+import type { OsAppsResponse, SpecSummary } from "@/lib/types";
 import ErrorDisplay from "@/components/ErrorDisplay";
 import StatCard from "@/components/StatCard";
 
 export default function OsAppsPage() {
   const [initialLoading, setInitialLoading] = useState(true);
   const [initialError, setInitialError] = useState<string | null>(null);
-  const [installing, setInstalling] = useState<string | null>(null);
-  const [installResult, setInstallResult] = useState<{ app: string; status: string } | null>(null);
 
   const loadInitial = useCallback(async () => {
     setInitialLoading(true);
@@ -29,7 +27,7 @@ export default function OsAppsPage() {
     loadInitial();
   }, [loadInitial]);
 
-  const appsPoll = useSSERefresh<SkillsResponse>({
+  const appsPoll = useSSERefresh<OsAppsResponse>({
     fetcher: fetchOsApps,
     sseKinds: ["OsApps", "Entities"],
     enabled: !initialLoading && !initialError,
@@ -55,26 +53,6 @@ export default function OsAppsPage() {
       app.entity_types.every((et) => loadedEntityTypes.has(et)),
     ).length;
   }, [apps, loadedEntityTypes]);
-
-  const handleInstall = async (appName: string) => {
-    const tenant = window.prompt("Install to which tenant (workspace)?");
-    if (!tenant) return;
-    setInstalling(appName);
-    setInstallResult(null);
-    try {
-      await installOsApp(appName, tenant);
-      setInstallResult({ app: appName, status: "installed" });
-      specsPoll.refresh();
-      appsPoll.refresh();
-    } catch (err) {
-      setInstallResult({
-        app: appName,
-        status: err instanceof Error ? err.message : "Install failed",
-      });
-    } finally {
-      setInstalling(null);
-    }
-  };
 
   if (initialLoading) {
     return (
@@ -102,7 +80,7 @@ export default function OsAppsPage() {
       <div className="mb-6">
         <h1 className="text-2xl text-[var(--color-text-primary)] tracking-tight font-serif">Apps</h1>
         <p className="text-sm text-[var(--color-text-muted)] mt-0.5">
-          Pre-built application specs ready to install
+          Local development catalog. Genesis is the install source of truth.
         </p>
       </div>
 
@@ -111,25 +89,10 @@ export default function OsAppsPage() {
         <StatCard label="Installed" value={installedCount} />
       </div>
 
-      {installResult && (
-        <div
-          className={`mb-4 px-4 py-2.5 rounded text-[13px] ${
-            installResult.status === "installed"
-              ? "bg-[var(--color-accent-teal-dim)] text-[var(--color-accent-teal)] border border-[var(--color-accent-teal)]/20"
-              : "bg-[var(--color-accent-pink-dim)] text-[var(--color-accent-pink)] border border-[var(--color-accent-pink)]/20"
-          }`}
-        >
-          {installResult.status === "installed"
-            ? `${installResult.app} installed successfully`
-            : `Failed to install ${installResult.app}: ${installResult.status}`}
-        </div>
-      )}
-
       {apps && apps.apps.length > 0 ? (
         <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
           {apps.apps.map((app) => {
             const isInstalled = app.entity_types.every((et) => loadedEntityTypes.has(et));
-            const isInstalling = installing === app.name;
 
             return (
               <div key={app.name} className="glass rounded-[2px] p-5 flex flex-col gap-3">
@@ -145,13 +108,9 @@ export default function OsAppsPage() {
                       Installed
                     </span>
                   ) : (
-                    <button
-                      onClick={() => handleInstall(app.name)}
-                      disabled={isInstalling}
-                      className="text-[11px] font-medium bg-[var(--color-bg-elevated)] text-[var(--color-text-secondary)] px-3 py-1.5 rounded hover:bg-[var(--color-border)] transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
-                    >
-                      {isInstalling ? "Installing..." : "Install"}
-                    </button>
+                    <span className="text-[10px] font-medium bg-[var(--color-bg-elevated)] text-[var(--color-text-secondary)] px-2 py-1 rounded">
+                      Dev only
+                    </span>
                   )}
                 </div>
 

@@ -2,10 +2,10 @@
 
 use libsql::params;
 use temper_runtime::persistence::{
-    EventMetadata, EventStore, PersistenceEnvelope, PersistenceError,
+    EventMetadata, EventStore, PersistenceAppend, PersistenceEnvelope, PersistenceError,
 };
 
-use super::{PublishedArtifactUpsert, TursoEventStore};
+use super::{PublishedArtifactUpsert, QueryProjectionUpsert, TursoEventStore};
 use crate::TursoSpecVerificationUpdate;
 
 fn test_envelope(event_type: &str, payload: serde_json::Value) -> PersistenceEnvelope {
@@ -101,6 +101,48 @@ async fn append_with_wrong_sequence_fails_with_concurrency_violation() {
             actual: 1
         }
     ));
+}
+
+#[tokio::test]
+async fn append_batch_zero_sequence_detects_existing_stream_by_unique_key() {
+    let store = make_store("append-batch-zero-seq-conflict").await;
+    let persistence_id = "tenant-a:Order:ord-batch-conflict";
+
+    store
+        .append(
+            persistence_id,
+            0,
+            &[test_envelope(
+                "OrderCreated",
+                serde_json::json!({ "id": "ord-batch-conflict" }),
+            )],
+        )
+        .await
+        .unwrap();
+
+    let err = store
+        .append_batch(&[PersistenceAppend {
+            persistence_id: persistence_id.to_string(),
+            expected_sequence: 0,
+            events: vec![test_envelope(
+                "OrderUpdated",
+                serde_json::json!({ "step": 2 }),
+            )],
+        }])
+        .await
+        .unwrap_err();
+
+    assert!(matches!(
+        err,
+        PersistenceError::ConcurrencyViolation {
+            expected: 0,
+            actual: 1
+        }
+    ));
+
+    let events = store.read_events(persistence_id, 0).await.unwrap();
+    assert_eq!(events.len(), 1);
+    assert_eq!(events[0].event_type, "OrderCreated");
 }
 
 #[tokio::test]
@@ -617,6 +659,160 @@ async fn query_projection_roundtrip_updates_catalog_and_field_index() {
 }
 
 #[tokio::test]
+async fn query_projection_batch_updates_catalog_and_field_index() {
+    let store = make_store("query-projection-batch").await;
+    let tenant = format!("tenant-{}", uuid::Uuid::new_v4());
+
+    store
+        .upsert_query_projections(
+            &tenant,
+            &[
+                QueryProjectionUpsert {
+                    entity_type: "Order".to_string(),
+                    entity_id: "ord-batch-a".to_string(),
+                    status: "Draft".to_string(),
+                    fields: serde_json::json!({
+                        "Title": "Batch A",
+                        "Owner": "alice",
+                    }),
+                    state: serde_json::json!({
+                        "entity_type": "Order",
+                        "entity_id": "ord-batch-a",
+                        "status": "Draft",
+                        "fields": {
+                            "Title": "Batch A",
+                            "Owner": "alice",
+                        },
+                        "sequence_nr": 2,
+                    }),
+                    indexed_fields: serde_json::json!({
+                        "Title": "Batch A",
+                        "Owner": "alice",
+                    }),
+                    sequence_nr: 2,
+                    known_new: false,
+                },
+                QueryProjectionUpsert {
+                    entity_type: "Order".to_string(),
+                    entity_id: "ord-batch-b".to_string(),
+                    status: "Ready".to_string(),
+                    fields: serde_json::json!({
+                        "Title": "Batch B",
+                        "Owner": "bob",
+                    }),
+                    state: serde_json::json!({
+                        "entity_type": "Order",
+                        "entity_id": "ord-batch-b",
+                        "status": "Ready",
+                        "fields": {
+                            "Title": "Batch B",
+                            "Owner": "bob",
+                        },
+                        "sequence_nr": 3,
+                    }),
+                    indexed_fields: serde_json::json!({
+                        "Title": "Batch B",
+                        "Owner": "bob",
+                    }),
+                    sequence_nr: 3,
+                    known_new: false,
+                },
+            ],
+        )
+        .await
+        .expect("batch projection upsert");
+
+    let owner_matches = store
+        .query_field_index(
+            &tenant,
+            "Order",
+            "field_name = ?3 AND field_value = ?4",
+            vec!["Owner".to_string(), "alice".to_string()],
+        )
+        .await
+        .expect("query field index by owner");
+    assert_eq!(owner_matches, vec!["ord-batch-a".to_string()]);
+
+    let rows = store
+        .load_entity_catalog_rows(
+            &tenant,
+            "Order",
+            &["ord-batch-a".to_string(), "ord-batch-b".to_string()],
+        )
+        .await
+        .expect("load catalog rows");
+    assert_eq!(rows.len(), 2);
+    assert_eq!(rows[0].sequence_nr, 2);
+    assert_eq!(rows[1].sequence_nr, 3);
+}
+
+#[tokio::test]
+async fn query_projection_batch_can_store_fields_without_indexing_them() {
+    let store = make_store("query-projection-batch-index-subset").await;
+    let tenant = format!("tenant-{}", uuid::Uuid::new_v4());
+
+    store
+        .upsert_query_projections(
+            &tenant,
+            &[QueryProjectionUpsert {
+                entity_type: "Blob".to_string(),
+                entity_id: "blob-index-subset".to_string(),
+                status: "Durable".to_string(),
+                fields: serde_json::json!({
+                    "Id": "blob-index-subset",
+                    "RepositoryId": "repo-1",
+                    "CanonicalBytes": "full-canonical-payload",
+                }),
+                state: serde_json::json!({
+                    "entity_type": "Blob",
+                    "entity_id": "blob-index-subset",
+                    "status": "Durable",
+                    "fields": {
+                        "Id": "blob-index-subset",
+                        "RepositoryId": "repo-1",
+                        "CanonicalBytes": "full-canonical-payload",
+                    },
+                    "sequence_nr": 1,
+                }),
+                indexed_fields: serde_json::json!({
+                    "Id": "blob-index-subset",
+                    "RepositoryId": "repo-1",
+                }),
+                sequence_nr: 1,
+                known_new: true,
+            }],
+        )
+        .await
+        .expect("batch projection upsert");
+
+    let rows = store
+        .load_entity_catalog_rows(&tenant, "Blob", &["blob-index-subset".to_string()])
+        .await
+        .expect("load catalog row");
+    assert_eq!(
+        rows[0].fields["CanonicalBytes"],
+        serde_json::json!("full-canonical-payload")
+    );
+
+    let canonical_matches = store
+        .query_field_index(
+            &tenant,
+            "Blob",
+            "field_name = ?3 AND field_value = ?4",
+            vec![
+                "CanonicalBytes".to_string(),
+                "full-canonical-payload".to_string(),
+            ],
+        )
+        .await
+        .expect("query canonical field");
+    assert!(
+        canonical_matches.is_empty(),
+        "filtered fields should stay out of entity_field_index"
+    );
+}
+
+#[tokio::test]
 async fn unchanged_projection_updates_catalog_without_rebuilding_field_rows() {
     let store = make_store("query-projection-stable-hash").await;
     let tenant = format!("tenant-{}", uuid::Uuid::new_v4());
@@ -708,6 +904,69 @@ async fn unchanged_projection_updates_catalog_without_rebuilding_field_rows() {
         sequence_nr, 8,
         "entity catalog should still advance to the latest sequence number"
     );
+}
+
+#[tokio::test]
+async fn stale_projection_upsert_does_not_overwrite_newer_catalog_row() {
+    let store = make_store("query-projection-stale-sequence-skip").await;
+    let tenant = format!("tenant-{}", uuid::Uuid::new_v4());
+    let entity_type = "App";
+    let entity_id = "app-stale-projection";
+
+    store
+        .upsert_query_projection(
+            &tenant,
+            entity_type,
+            entity_id,
+            "Active",
+            &serde_json::json!({
+                "OwnerId": "owner-a",
+                "Name": "registered",
+                "LatestVersionHash": "newer",
+            }),
+            4,
+        )
+        .await
+        .expect("fresh projection upsert");
+
+    store
+        .upsert_query_projection(
+            &tenant,
+            entity_type,
+            entity_id,
+            "Active",
+            &serde_json::json!({
+                "Name": "registered",
+                "RepositoryId": "repo-a",
+            }),
+            2,
+        )
+        .await
+        .expect("stale projection upsert is ignored");
+
+    let conn = store.connection().expect("connection");
+    let mut rows = conn
+        .query(
+            "SELECT sequence_nr, fields FROM entity_catalog \
+             WHERE tenant = ?1 AND entity_type = ?2 AND entity_id = ?3",
+            params![tenant, entity_type, entity_id],
+        )
+        .await
+        .expect("query catalog row");
+    let row = rows
+        .next()
+        .await
+        .expect("read catalog row")
+        .expect("catalog row should exist");
+    let sequence_nr = row.get::<i64>(0).expect("catalog sequence_nr");
+    let fields_json = row.get::<String>(1).expect("catalog fields");
+    let fields: serde_json::Value =
+        serde_json::from_str(&fields_json).expect("catalog fields are json");
+
+    assert_eq!(sequence_nr, 4);
+    assert_eq!(fields["OwnerId"], "owner-a");
+    assert_eq!(fields["LatestVersionHash"], "newer");
+    assert!(fields.get("RepositoryId").is_none());
 }
 
 #[tokio::test]

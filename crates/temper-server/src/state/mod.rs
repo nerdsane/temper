@@ -1,6 +1,8 @@
 //! Server state shared across all request handlers.
 
+pub(crate) mod account_verification;
 pub mod admission;
+pub(crate) mod app_uniqueness;
 pub mod custom_effects;
 mod dispatch;
 mod entity_ops;
@@ -15,7 +17,9 @@ mod persistence;
 pub mod policy_suggestions;
 mod projection_backfill;
 mod published_artifacts;
+pub(crate) mod rate_limit;
 mod runtime_metrics;
+pub(crate) mod storage_caps;
 pub mod trajectory;
 pub mod wasm_invocation_log;
 
@@ -66,6 +70,27 @@ use crate::trigger::ReactionDispatcher;
 use crate::wasm_registry::WasmModuleRegistry;
 use crate::webhooks::WebhookDispatcher;
 use temper_wasm::{StreamRegistry, WasmEngine, WasmInvocationContext};
+
+/// Platform extension point invoked after a governed OData bound action
+/// succeeds. The hook is deliberately post-dispatch and action-scoped: specs
+/// still define the action, authorize it, and produce any declared writes.
+pub struct BoundActionHookContext<'a> {
+    pub state: &'a ServerState,
+    pub tenant: &'a TenantId,
+    pub entity_type: &'a str,
+    pub entity_id: &'a str,
+    pub action: &'a str,
+    pub params: &'a serde_json::Value,
+    pub state_json: &'a serde_json::Value,
+}
+
+#[async_trait::async_trait]
+pub trait BoundActionHook: Send + Sync {
+    async fn after_bound_action(
+        &self,
+        ctx: BoundActionHookContext<'_>,
+    ) -> Result<Option<serde_json::Value>, String>;
+}
 
 /// An agent progress event for remote observation via SSE.
 ///
@@ -409,6 +434,29 @@ pub struct ServerState {
     pub pending_decision_tx: Arc<tokio::sync::broadcast::Sender<PendingDecision>>,
     /// Per-tenant Cedar policy text (tenant -> policy text).
     pub tenant_policies: Arc<RwLock<BTreeMap<String, String>>>,
+    /// Tenants installed in commons mode. Collection creates for these tenants
+    /// must pass Cedar so commons guardrail forbids apply to direct OData
+    /// writes as well as bound actions and composite sub-writes.
+    pub commons_guardrail_tenants: Arc<RwLock<BTreeSet<String>>>,
+    /// In-process token buckets keyed by `(tenant, owner, action_class)`.
+    ///
+    /// Buckets hydrate from RateLimit entities on first use, then mirror token
+    /// consumption back to the entity log.
+    pub(crate) commons_rate_limit_buckets:
+        Arc<Mutex<BTreeMap<String, rate_limit::RuntimeRateLimitBucket>>>,
+    /// Cached per-owner storage projections keyed by `(tenant, owner)`.
+    ///
+    /// The cache is intentionally invalidated broadly on Owner/Repository/Blob
+    /// writes; storage cap enforcement prefers freshness over narrow retention.
+    pub(crate) commons_storage_projection_cache:
+        Arc<Mutex<BTreeMap<String, storage_caps::CommonsStorageProjection>>>,
+    /// Coarse commons-mode write guardrail lock.
+    ///
+    /// Held from preflight through persistence for commons writes so exact
+    /// guardrails such as storage caps and App name uniqueness cannot race
+    /// between "check" and "write" while cross-actor transactions are still
+    /// being built out.
+    pub(crate) commons_write_guardrail_lock: Arc<tokio::sync::Mutex<()>>,
     pub secrets_vault: Option<Arc<SecretsVault>>,
     /// Broadcast channel for agent progress events (SSE subscriptions).
     /// // determinism-ok: broadcast channel for external observation only
@@ -441,6 +489,9 @@ pub struct ServerState {
     /// point that `temper-platform` uses to wire `hooks.rs` into the
     /// dispatch pipeline.
     pub custom_effect_handler: Option<Arc<dyn custom_effects::CustomEffectHandler>>,
+    /// Optional hook for platform-owned post-action work such as installing a
+    /// Genesis app after the spec-owned `App.Install` action succeeds.
+    pub bound_action_hook: Option<Arc<dyn BoundActionHook>>,
     /// Per-tenant HttpEndpoint route tables (ADR-0069 Phase 2).
     /// Consulted by the router fallback to dispatch to WASM
     /// integrations registered via the HttpEndpoint entity.
@@ -473,6 +524,21 @@ fn install_liveness_metrics_reporter_once() {
 
 #[allow(deprecated)] // ADR-0025 Phase 4: RecordStore used until chain validation replaced
 impl ServerState {
+    /// Enable commons-mode write guardrails for a tenant.
+    pub fn enable_commons_guardrails(&self, tenant: &str) {
+        if let Ok(mut tenants) = self.commons_guardrail_tenants.write() {
+            tenants.insert(tenant.to_string());
+        }
+    }
+
+    /// Whether commons-mode write guardrails are active for a tenant.
+    pub fn commons_guardrails_enabled(&self, tenant: &TenantId) -> bool {
+        self.commons_guardrail_tenants
+            .read()
+            .map(|tenants| tenants.contains(tenant.as_str()))
+            .unwrap_or(false)
+    }
+
     /// Attach the composed runtime storage stack.
     pub fn set_storage_stack(&mut self, stack: StorageStack) {
         self.storage_stack = Some(Arc::new(stack));
@@ -582,6 +648,10 @@ impl ServerState {
             idempotency_cache: Arc::new(IdempotencyCache::new()),
             pending_decision_tx: Arc::new(pending_decision_tx),
             tenant_policies: Arc::new(RwLock::new(BTreeMap::new())),
+            commons_guardrail_tenants: Arc::new(RwLock::new(BTreeSet::new())),
+            commons_rate_limit_buckets: Arc::new(Mutex::new(BTreeMap::new())),
+            commons_storage_projection_cache: Arc::new(Mutex::new(BTreeMap::new())),
+            commons_write_guardrail_lock: Arc::new(tokio::sync::Mutex::new(())),
             secrets_vault: None,
             agent_progress_tx: Arc::new(agent_progress_tx), // determinism-ok: broadcast for external observation
             entity_event_sequences: Arc::new(Mutex::new(BTreeMap::new())),
@@ -592,6 +662,7 @@ impl ServerState {
             suggestion_engine: Arc::new(RwLock::new(PolicySuggestionEngine::new())),
             verify_subprocess_bin: None,
             custom_effect_handler: None,
+            bound_action_hook: None,
             http_endpoint_tables: Arc::new(crate::http_endpoint::HttpEndpointTables::new()),
             http_stream_registry: Arc::new(temper_wasm::http_stream::HttpStreamRegistry::new()),
             workflow_spans: Arc::new(crate::workflow_tracing::WorkflowSpanRegistry::default()),
@@ -819,6 +890,10 @@ impl ServerState {
             idempotency_cache: Arc::new(IdempotencyCache::new()),
             pending_decision_tx: Arc::new(pending_decision_tx),
             tenant_policies: Arc::new(RwLock::new(BTreeMap::new())),
+            commons_guardrail_tenants: Arc::new(RwLock::new(BTreeSet::new())),
+            commons_rate_limit_buckets: Arc::new(Mutex::new(BTreeMap::new())),
+            commons_storage_projection_cache: Arc::new(Mutex::new(BTreeMap::new())),
+            commons_write_guardrail_lock: Arc::new(tokio::sync::Mutex::new(())),
             secrets_vault: None,
             agent_progress_tx: Arc::new(agent_progress_tx), // determinism-ok: broadcast for external observation
             entity_event_sequences: Arc::new(Mutex::new(BTreeMap::new())),
@@ -829,6 +904,7 @@ impl ServerState {
             suggestion_engine: Arc::new(RwLock::new(PolicySuggestionEngine::new())),
             verify_subprocess_bin: None,
             custom_effect_handler: None,
+            bound_action_hook: None,
             http_endpoint_tables: Arc::new(crate::http_endpoint::HttpEndpointTables::new()),
             http_stream_registry: Arc::new(temper_wasm::http_stream::HttpStreamRegistry::new()),
             workflow_spans: Arc::new(crate::workflow_tracing::WorkflowSpanRegistry::default()),

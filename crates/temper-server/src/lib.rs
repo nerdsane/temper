@@ -38,6 +38,7 @@ pub mod secrets;
 #[cfg(feature = "observe")]
 pub mod sentinel;
 pub mod state;
+mod static_web;
 pub mod storage;
 pub(crate) mod trajectory_outbox;
 pub mod trigger;

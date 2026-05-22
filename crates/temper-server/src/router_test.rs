@@ -80,6 +80,341 @@ params = ["RepositoryId", "Size", "Content", "CanonicalBytes", "CreatedAt"]
     ServerState::with_specs(system, csdl, csdl_xml.to_string(), specs).unwrap()
 }
 
+fn test_state_with_rate_limit_ioa() -> ServerState {
+    let csdl_xml = r#"<?xml version="1.0" encoding="utf-8"?>
+<edmx:Edmx Version="4.0" xmlns:edmx="http://docs.oasis-open.org/odata/ns/edmx">
+  <edmx:DataServices>
+    <Schema Namespace="Temper.RateLimitTest" xmlns="http://docs.oasis-open.org/odata/ns/edm">
+      <EntityType Name="Widget">
+        <Key><PropertyRef Name="Id"/></Key>
+        <Property Name="Id" Type="Edm.String" Nullable="false"/>
+        <Property Name="OwnerId" Type="Edm.String" Nullable="false"/>
+        <Property Name="Name" Type="Edm.String"/>
+        <Property Name="Status" Type="Edm.String" Nullable="false"/>
+      </EntityType>
+      <EntityType Name="RateLimit">
+        <Key><PropertyRef Name="Id"/></Key>
+        <Property Name="Id" Type="Edm.String" Nullable="false"/>
+        <Property Name="OwnerId" Type="Edm.String" Nullable="false"/>
+        <Property Name="ActionClass" Type="Edm.String" Nullable="false"/>
+        <Property Name="Tokens" Type="Edm.Int64" Nullable="false"/>
+        <Property Name="Capacity" Type="Edm.Int64" Nullable="false"/>
+        <Property Name="RefillPerSecond" Type="Edm.Int64" Nullable="false"/>
+        <Property Name="LastRefillAt" Type="Edm.DateTimeOffset" Nullable="false"/>
+        <Property Name="Status" Type="Edm.String" Nullable="false"/>
+      </EntityType>
+      <EntityContainer Name="Container">
+        <EntitySet Name="Widgets" EntityType="Temper.RateLimitTest.Widget"/>
+        <EntitySet Name="RateLimits" EntityType="Temper.RateLimitTest.RateLimit"/>
+      </EntityContainer>
+    </Schema>
+  </edmx:DataServices>
+</edmx:Edmx>"#;
+    let widget_ioa = r#"
+[automaton]
+name = "Widget"
+states = ["Active"]
+initial = "Active"
+
+[[action]]
+name = "Create"
+kind = "input"
+from = ["Active"]
+to = "Active"
+params = ["OwnerId", "Name"]
+"#;
+    let rate_limit_ioa = r#"
+[automaton]
+name = "RateLimit"
+states = ["Active"]
+initial = "Active"
+
+[[action]]
+name = "Create"
+kind = "input"
+from = ["Active"]
+to = "Active"
+params = ["OwnerId", "ActionClass", "Tokens", "Capacity", "RefillPerSecond", "LastRefillAt"]
+
+[[action]]
+name = "Consume"
+kind = "input"
+from = ["Active"]
+to = "Active"
+params = ["Tokens", "LastRefillAt"]
+"#;
+    let csdl = parse_csdl(csdl_xml).unwrap();
+    let system = ActorSystem::new("test-rate-limit");
+    let mut specs = std::collections::BTreeMap::new();
+    specs.insert("Widget".to_string(), widget_ioa.to_string());
+    specs.insert("RateLimit".to_string(), rate_limit_ioa.to_string());
+    ServerState::with_specs(system, csdl, csdl_xml.to_string(), specs).unwrap()
+}
+
+fn test_state_with_storage_cap_ioa() -> ServerState {
+    let csdl_xml = r#"<?xml version="1.0" encoding="utf-8"?>
+<edmx:Edmx Version="4.0" xmlns:edmx="http://docs.oasis-open.org/odata/ns/edmx">
+  <edmx:DataServices>
+    <Schema Namespace="Temper.StorageCapTest" xmlns="http://docs.oasis-open.org/odata/ns/edm">
+      <EntityType Name="Owner">
+        <Key><PropertyRef Name="Id"/></Key>
+        <Property Name="Id" Type="Edm.String" Nullable="false"/>
+        <Property Name="AccountId" Type="Edm.String" Nullable="false"/>
+        <Property Name="DisplayName" Type="Edm.String" Nullable="false"/>
+        <Property Name="Contact" Type="Edm.String"/>
+        <Property Name="StorageCapBytes" Type="Edm.Int64" Nullable="false"/>
+        <Property Name="RateLimitTier" Type="Edm.String" Nullable="false"/>
+        <Property Name="PublicKey" Type="Edm.String"/>
+        <Property Name="Status" Type="Edm.String" Nullable="false"/>
+      </EntityType>
+      <EntityType Name="Repository">
+        <Key><PropertyRef Name="Id"/></Key>
+        <Property Name="Id" Type="Edm.String" Nullable="false"/>
+        <Property Name="OwnerAccountId" Type="Edm.String" Nullable="false"/>
+        <Property Name="Name" Type="Edm.String" Nullable="false"/>
+        <Property Name="Description" Type="Edm.String"/>
+        <Property Name="DefaultBranch" Type="Edm.String" Nullable="false"/>
+        <Property Name="Visibility" Type="Edm.String" Nullable="false"/>
+        <Property Name="Status" Type="Edm.String" Nullable="false"/>
+      </EntityType>
+      <EntityType Name="Blob">
+        <Key><PropertyRef Name="Id"/></Key>
+        <Property Name="Id" Type="Edm.String" Nullable="false"/>
+        <Property Name="RepositoryId" Type="Edm.String" Nullable="false"/>
+        <Property Name="Size" Type="Edm.Int64" Nullable="false"/>
+        <Property Name="Content" Type="Edm.Binary" Nullable="false"/>
+        <Property Name="CanonicalBytes" Type="Edm.Binary" Nullable="false"/>
+        <Property Name="Status" Type="Edm.String" Nullable="false"/>
+        <Property Name="CreatedAt" Type="Edm.DateTimeOffset" Nullable="false"/>
+      </EntityType>
+      <EntityContainer Name="Container">
+        <EntitySet Name="Owners" EntityType="Temper.StorageCapTest.Owner"/>
+        <EntitySet Name="Repositories" EntityType="Temper.StorageCapTest.Repository"/>
+        <EntitySet Name="Blobs" EntityType="Temper.StorageCapTest.Blob"/>
+      </EntityContainer>
+    </Schema>
+  </edmx:DataServices>
+</edmx:Edmx>"#;
+    let owner_ioa = r#"
+[automaton]
+name = "Owner"
+states = ["Active", "Suspended"]
+initial = "Active"
+
+[[action]]
+name = "Create"
+kind = "input"
+from = ["Active"]
+to = "Active"
+params = ["AccountId", "DisplayName", "Contact", "StorageCapBytes", "RateLimitTier", "PublicKey"]
+"#;
+    let repository_ioa = r#"
+[automaton]
+name = "Repository"
+states = ["Provisioning", "Active"]
+initial = "Provisioning"
+
+[[action]]
+name = "Create"
+kind = "input"
+from = ["Provisioning"]
+to = "Provisioning"
+params = ["OwnerAccountId", "Name", "Description", "DefaultBranch", "Visibility"]
+"#;
+    let blob_ioa = r#"
+[automaton]
+name = "Blob"
+states = ["Durable"]
+initial = "Durable"
+
+[[action]]
+name = "Create"
+kind = "input"
+from = ["Durable"]
+to = "Durable"
+params = ["RepositoryId", "Size", "Content", "CanonicalBytes", "CreatedAt"]
+"#;
+    let csdl = parse_csdl(csdl_xml).unwrap();
+    let system = ActorSystem::new("test-storage-cap");
+    let mut specs = std::collections::BTreeMap::new();
+    specs.insert("Owner".to_string(), owner_ioa.to_string());
+    specs.insert("Repository".to_string(), repository_ioa.to_string());
+    specs.insert("Blob".to_string(), blob_ioa.to_string());
+    ServerState::with_specs(system, csdl, csdl_xml.to_string(), specs).unwrap()
+}
+
+fn test_state_with_account_verification_ioa() -> ServerState {
+    let csdl_xml = r#"<?xml version="1.0" encoding="utf-8"?>
+<edmx:Edmx Version="4.0" xmlns:edmx="http://docs.oasis-open.org/odata/ns/edmx">
+  <edmx:DataServices>
+    <Schema Namespace="Temper.AccountVerificationTest" xmlns="http://docs.oasis-open.org/odata/ns/edm">
+      <EntityType Name="Owner">
+        <Key><PropertyRef Name="Id"/></Key>
+        <Property Name="Id" Type="Edm.String" Nullable="false"/>
+        <Property Name="AccountId" Type="Edm.String" Nullable="false"/>
+        <Property Name="DisplayName" Type="Edm.String" Nullable="false"/>
+        <Property Name="Contact" Type="Edm.String"/>
+        <Property Name="StorageCapBytes" Type="Edm.Int64" Nullable="false"/>
+        <Property Name="RateLimitTier" Type="Edm.String" Nullable="false"/>
+        <Property Name="VerificationProvider" Type="Edm.String"/>
+        <Property Name="VerificationSubject" Type="Edm.String"/>
+        <Property Name="VerifiedAt" Type="Edm.DateTimeOffset"/>
+        <Property Name="Status" Type="Edm.String" Nullable="false"/>
+      </EntityType>
+      <EntityType Name="Repository">
+        <Key><PropertyRef Name="Id"/></Key>
+        <Property Name="Id" Type="Edm.String" Nullable="false"/>
+        <Property Name="OwnerAccountId" Type="Edm.String" Nullable="false"/>
+        <Property Name="Name" Type="Edm.String" Nullable="false"/>
+        <Property Name="Description" Type="Edm.String"/>
+        <Property Name="DefaultBranch" Type="Edm.String" Nullable="false"/>
+        <Property Name="Visibility" Type="Edm.String" Nullable="false"/>
+        <Property Name="Status" Type="Edm.String" Nullable="false"/>
+      </EntityType>
+      <EntityContainer Name="Container">
+        <EntitySet Name="Owners" EntityType="Temper.AccountVerificationTest.Owner"/>
+        <EntitySet Name="Repositories" EntityType="Temper.AccountVerificationTest.Repository"/>
+      </EntityContainer>
+    </Schema>
+  </edmx:DataServices>
+</edmx:Edmx>"#;
+    let owner_ioa = r#"
+[automaton]
+name = "Owner"
+states = ["PendingVerification", "Verified", "Suspended"]
+initial = "PendingVerification"
+
+[[action]]
+name = "Create"
+kind = "input"
+from = ["PendingVerification"]
+to = "PendingVerification"
+params = ["AccountId", "DisplayName", "Contact", "StorageCapBytes", "RateLimitTier", "VerificationProvider", "VerificationSubject"]
+
+[[action]]
+name = "MarkVerified"
+kind = "input"
+from = ["PendingVerification", "Verified"]
+to = "Verified"
+params = ["VerificationProvider", "VerificationSubject", "VerifiedAt"]
+"#;
+    let repository_ioa = r#"
+[automaton]
+name = "Repository"
+states = ["Provisioning", "Active"]
+initial = "Provisioning"
+
+[[action]]
+name = "Create"
+kind = "input"
+from = ["Provisioning"]
+to = "Provisioning"
+params = ["OwnerAccountId", "Name", "Description", "DefaultBranch", "Visibility"]
+"#;
+    let csdl = parse_csdl(csdl_xml).unwrap();
+    let system = ActorSystem::new("test-account-verification");
+    let mut specs = std::collections::BTreeMap::new();
+    specs.insert("Owner".to_string(), owner_ioa.to_string());
+    specs.insert("Repository".to_string(), repository_ioa.to_string());
+    ServerState::with_specs(system, csdl, csdl_xml.to_string(), specs).unwrap()
+}
+
+fn test_state_with_owner_app_ioa() -> ServerState {
+    let csdl_xml = r#"<?xml version="1.0" encoding="utf-8"?>
+<edmx:Edmx Version="4.0" xmlns:edmx="http://docs.oasis-open.org/odata/ns/edmx">
+  <edmx:DataServices>
+    <Schema Namespace="Temper.AppNameTest" xmlns="http://docs.oasis-open.org/odata/ns/edm">
+      <EntityType Name="Owner">
+        <Key><PropertyRef Name="Id"/></Key>
+        <Property Name="Id" Type="Edm.String" Nullable="false"/>
+        <Property Name="AccountId" Type="Edm.String" Nullable="false"/>
+        <Property Name="DisplayName" Type="Edm.String" Nullable="false"/>
+        <Property Name="Contact" Type="Edm.String"/>
+        <Property Name="StorageCapBytes" Type="Edm.Int64" Nullable="false"/>
+        <Property Name="RateLimitTier" Type="Edm.String" Nullable="false"/>
+        <Property Name="VerifiedAt" Type="Edm.DateTimeOffset"/>
+        <Property Name="Status" Type="Edm.String" Nullable="false"/>
+      </EntityType>
+      <EntityType Name="App">
+        <Key><PropertyRef Name="Id"/></Key>
+        <Property Name="Id" Type="Edm.String" Nullable="false"/>
+        <Property Name="OwnerId" Type="Edm.String" Nullable="false"/>
+        <Property Name="Name" Type="Edm.String" Nullable="false"/>
+        <Property Name="RepositoryId" Type="Edm.String"/>
+        <Property Name="LatestVersionHash" Type="Edm.String"/>
+        <Property Name="Exports" Type="Edm.String"/>
+        <Property Name="Description" Type="Edm.String"/>
+        <Property Name="Visibility" Type="Edm.String"/>
+        <Property Name="Status" Type="Edm.String" Nullable="false"/>
+      </EntityType>
+      <EntityContainer Name="Container">
+        <EntitySet Name="Owners" EntityType="Temper.AppNameTest.Owner"/>
+        <EntitySet Name="Apps" EntityType="Temper.AppNameTest.App"/>
+      </EntityContainer>
+    </Schema>
+  </edmx:DataServices>
+</edmx:Edmx>"#;
+    let owner_ioa = r#"
+[automaton]
+name = "Owner"
+states = ["Verified"]
+initial = "Verified"
+
+[[action]]
+name = "Create"
+kind = "input"
+from = ["Verified"]
+to = "Verified"
+params = ["AccountId", "DisplayName", "Contact", "StorageCapBytes", "RateLimitTier", "VerifiedAt"]
+"#;
+    let app_ioa = r#"
+[automaton]
+name = "App"
+states = ["Active"]
+initial = "Active"
+
+[[action]]
+name = "Create"
+kind = "input"
+from = ["Active"]
+to = "Active"
+params = ["OwnerId", "Name", "RepositoryId", "LatestVersionHash", "Exports", "Description", "Visibility"]
+"#;
+    let csdl = parse_csdl(csdl_xml).unwrap();
+    let system = ActorSystem::new("test-owner-app-uniqueness");
+    let mut specs = std::collections::BTreeMap::new();
+    specs.insert("Owner".to_string(), owner_ioa.to_string());
+    specs.insert("App".to_string(), app_ioa.to_string());
+    ServerState::with_specs(system, csdl, csdl_xml.to_string(), specs).unwrap()
+}
+
+#[test]
+fn action_bridge_template_renders_route_params() {
+    let params = std::collections::BTreeMap::from([
+        ("owner".to_string(), "acme".to_string()),
+        ("repo".to_string(), "widgets".to_string()),
+    ]);
+
+    assert_eq!(
+        render_action_bridge_template("rp-{owner}-{repo}", &params).unwrap(),
+        "rp-acme-widgets"
+    );
+    assert!(render_action_bridge_template("rp-{missing}", &params).is_err());
+}
+
+#[tokio::test]
+async fn git_receive_pack_bridge_response_uses_pkt_line_report() {
+    let response = git_receive_pack_response(&["refs/heads/main".to_string()], false, None);
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(response.into_body(), 1024)
+        .await
+        .unwrap();
+    assert_eq!(
+        std::str::from_utf8(&body).unwrap(),
+        "000eunpack ok\n0017ok refs/heads/main\n0000"
+    );
+}
+
 async fn test_state_with_data_only_ioa_and_turso() -> ServerState {
     static COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
     let id = COUNTER.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
@@ -362,6 +697,204 @@ async fn test_data_only_create_fast_path_declines_action_bearing_entities() {
 }
 
 #[tokio::test]
+async fn commons_rate_limit_returns_429_per_owner_bucket() {
+    let state = test_state_with_rate_limit_ioa();
+    state.enable_commons_guardrails("default");
+    state.enable_commons_guardrails("beta");
+    let app = build_router(state.clone());
+
+    let alice_bucket = ServerState::commons_rate_limit_entity_id("alice", "write");
+    let response = app
+        .clone()
+        .oneshot(
+            Request::post("/tdata/RateLimits")
+                .header("Content-Type", "application/json")
+                .header("X-Temper-Principal-Id", "alice")
+                .header("X-Temper-Principal-Kind", "customer")
+                .body(Body::from(format!(
+                    r#"{{
+                        "Id":"{alice_bucket}",
+                        "OwnerId":"alice",
+                        "ActionClass":"write",
+                        "Tokens":1,
+                        "Capacity":1,
+                        "RefillPerSecond":0,
+                        "LastRefillAt":"2026-05-18T00:00:00Z"
+                    }}"#
+                )))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::CREATED);
+
+    let first = app
+        .clone()
+        .oneshot(
+            Request::post("/tdata/Widgets")
+                .header("Content-Type", "application/json")
+                .header("X-Temper-Principal-Id", "alice")
+                .header("X-Temper-Principal-Kind", "customer")
+                .body(Body::from(
+                    r#"{"Id":"wd-alice-1","OwnerId":"alice","Name":"first"}"#,
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(first.status(), StatusCode::CREATED);
+
+    let exhausted = app
+        .clone()
+        .oneshot(
+            Request::post("/tdata/Widgets")
+                .header("Content-Type", "application/json")
+                .header("X-Temper-Principal-Id", "alice")
+                .header("X-Temper-Principal-Kind", "customer")
+                .body(Body::from(
+                    r#"{"Id":"wd-alice-2","OwnerId":"alice","Name":"second"}"#,
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(exhausted.status(), StatusCode::TOO_MANY_REQUESTS);
+
+    let bob_bucket = ServerState::commons_rate_limit_entity_id("bob", "write");
+    let response = app
+        .clone()
+        .oneshot(
+            Request::post("/tdata/RateLimits")
+                .header("Content-Type", "application/json")
+                .header("X-Temper-Principal-Id", "bob")
+                .header("X-Temper-Principal-Kind", "customer")
+                .body(Body::from(format!(
+                    r#"{{
+                        "Id":"{bob_bucket}",
+                        "OwnerId":"bob",
+                        "ActionClass":"write",
+                        "Tokens":1,
+                        "Capacity":1,
+                        "RefillPerSecond":0,
+                        "LastRefillAt":"2026-05-18T00:00:00Z"
+                    }}"#
+                )))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::CREATED);
+
+    let bob_first = app
+        .clone()
+        .oneshot(
+            Request::post("/tdata/Widgets")
+                .header("Content-Type", "application/json")
+                .header("X-Temper-Principal-Id", "bob")
+                .header("X-Temper-Principal-Kind", "customer")
+                .body(Body::from(
+                    r#"{"Id":"wd-bob-1","OwnerId":"bob","Name":"first"}"#,
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(bob_first.status(), StatusCode::CREATED);
+
+    let bucket = state
+        .get_tenant_entity_state(&TenantId::default(), "RateLimit", &alice_bucket)
+        .await
+        .expect("alice bucket should be readable");
+    assert_eq!(
+        bucket.state.fields.get("Tokens"),
+        Some(&serde_json::json!(0))
+    );
+
+    let beta_bucket = ServerState::commons_rate_limit_entity_id("alice", "write");
+    let response = app
+        .clone()
+        .oneshot(
+            Request::post("/tdata/RateLimits")
+                .header("Content-Type", "application/json")
+                .header("X-Tenant-Id", "beta")
+                .header("X-Temper-Principal-Id", "alice")
+                .header("X-Temper-Principal-Kind", "customer")
+                .body(Body::from(format!(
+                    r#"{{
+                        "Id":"{beta_bucket}",
+                        "OwnerId":"alice",
+                        "ActionClass":"write",
+                        "Tokens":1,
+                        "Capacity":1,
+                        "RefillPerSecond":0,
+                        "LastRefillAt":"2026-05-18T00:00:00Z"
+                    }}"#
+                )))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::CREATED);
+
+    let beta_first = app
+        .clone()
+        .oneshot(
+            Request::post("/tdata/Widgets")
+                .header("Content-Type", "application/json")
+                .header("X-Tenant-Id", "beta")
+                .header("X-Temper-Principal-Id", "alice")
+                .header("X-Temper-Principal-Kind", "customer")
+                .body(Body::from(
+                    r#"{"Id":"wd-beta-alice-1","OwnerId":"alice","Name":"first"}"#,
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        beta_first.status(),
+        StatusCode::CREATED,
+        "default/alice exhaustion must not consume beta/alice's bucket"
+    );
+
+    let beta_exhausted = app
+        .clone()
+        .oneshot(
+            Request::post("/tdata/Widgets")
+                .header("Content-Type", "application/json")
+                .header("X-Tenant-Id", "beta")
+                .header("X-Temper-Principal-Id", "alice")
+                .header("X-Temper-Principal-Kind", "customer")
+                .body(Body::from(
+                    r#"{"Id":"wd-beta-alice-2","OwnerId":"alice","Name":"second"}"#,
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(beta_exhausted.status(), StatusCode::TOO_MANY_REQUESTS);
+
+    let beta_bucket_state = state
+        .get_tenant_entity_state(&TenantId::new("beta"), "RateLimit", &beta_bucket)
+        .await
+        .expect("beta alice bucket should be readable");
+    assert_eq!(
+        beta_bucket_state.state.fields.get("Tokens"),
+        Some(&serde_json::json!(0))
+    );
+
+    let beta_widget = state
+        .get_tenant_entity_state(&TenantId::new("beta"), "Widget", "wd-beta-alice-1")
+        .await
+        .expect("beta widget should be readable");
+    assert_eq!(
+        beta_widget.state.fields.get("OwnerId"),
+        Some(&serde_json::json!("alice"))
+    );
+    assert!(!state.entity_exists(&TenantId::default(), "Widget", "wd-beta-alice-1"));
+}
+
+#[tokio::test]
 async fn test_blob_ingest_raw_route_streams_body_without_path_param() {
     let app = build_router(test_state_with_blob_ioa());
     let response = app
@@ -387,6 +920,543 @@ async fn test_blob_ingest_raw_route_streams_body_without_path_param() {
     );
     assert_eq!(json["fields"]["RepositoryId"], "rp-acme-demo");
     assert_eq!(json["fields"]["Size"], 3);
+}
+
+#[tokio::test]
+async fn commons_storage_cap_blocks_raw_blob_ingest_per_owner() {
+    let state = test_state_with_storage_cap_ioa();
+    state.enable_commons_guardrails("default");
+    let app = build_router(state.clone());
+
+    let alice_owner = app
+        .clone()
+        .oneshot(
+            Request::post("/tdata/Owners")
+                .header("Content-Type", "application/json")
+                .header("X-Temper-Principal-Id", "alice")
+                .header("X-Temper-Principal-Kind", "customer")
+                .body(Body::from(
+                    r#"{"Id":"alice","AccountId":"alice","DisplayName":"Alice","Contact":"alice@example.test","StorageCapBytes":3,"RateLimitTier":"free","PublicKey":""}"#,
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(alice_owner.status(), StatusCode::CREATED);
+
+    let alice_repo = app
+        .clone()
+        .oneshot(
+            Request::post("/tdata/Repositories")
+                .header("Content-Type", "application/json")
+                .header("X-Temper-Principal-Id", "alice")
+                .header("X-Temper-Principal-Kind", "customer")
+                .body(Body::from(
+                    r#"{"Id":"rp-alice","OwnerAccountId":"alice","Name":"demo","Description":"","DefaultBranch":"refs/heads/main","Visibility":"public"}"#,
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(alice_repo.status(), StatusCode::CREATED);
+
+    let alice_first = app
+        .clone()
+        .oneshot(
+            Request::post("/tdata/Blobs/Temper.IngestRaw")
+                .header("Content-Type", "application/octet-stream")
+                .header("Content-Length", "3")
+                .header("X-Repository-Id", "rp-alice")
+                .header("X-Temper-Principal-Id", "alice")
+                .header("X-Temper-Principal-Kind", "customer")
+                .body(Body::from("abc"))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(alice_first.status(), StatusCode::CREATED);
+
+    let alice_exceeded = app
+        .clone()
+        .oneshot(
+            Request::post("/tdata/Blobs/Temper.IngestRaw")
+                .header("Content-Type", "application/octet-stream")
+                .header("Content-Length", "2")
+                .header("X-Repository-Id", "rp-alice")
+                .header("X-Temper-Principal-Id", "alice")
+                .header("X-Temper-Principal-Kind", "customer")
+                .body(Body::from("de"))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(alice_exceeded.status(), StatusCode::PAYLOAD_TOO_LARGE);
+
+    let bob_owner = app
+        .clone()
+        .oneshot(
+            Request::post("/tdata/Owners")
+                .header("Content-Type", "application/json")
+                .header("X-Temper-Principal-Id", "bob")
+                .header("X-Temper-Principal-Kind", "customer")
+                .body(Body::from(
+                    r#"{"Id":"bob","AccountId":"bob","DisplayName":"Bob","Contact":"bob@example.test","StorageCapBytes":2,"RateLimitTier":"free","PublicKey":""}"#,
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(bob_owner.status(), StatusCode::CREATED);
+
+    let bob_repo = app
+        .clone()
+        .oneshot(
+            Request::post("/tdata/Repositories")
+                .header("Content-Type", "application/json")
+                .header("X-Temper-Principal-Id", "bob")
+                .header("X-Temper-Principal-Kind", "customer")
+                .body(Body::from(
+                    r#"{"Id":"rp-bob","OwnerAccountId":"bob","Name":"demo","Description":"","DefaultBranch":"refs/heads/main","Visibility":"public"}"#,
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(bob_repo.status(), StatusCode::CREATED);
+
+    let bob_first = app
+        .clone()
+        .oneshot(
+            Request::post("/tdata/Blobs/Temper.IngestRaw")
+                .header("Content-Type", "application/octet-stream")
+                .header("Content-Length", "2")
+                .header("X-Repository-Id", "rp-bob")
+                .header("X-Temper-Principal-Id", "bob")
+                .header("X-Temper-Principal-Kind", "customer")
+                .body(Body::from("xy"))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(bob_first.status(), StatusCode::CREATED);
+
+    let tenant = temper_runtime::tenant::TenantId::default();
+    let alice_projection = state
+        .commons_storage_projection_for_owner(&tenant, "alice")
+        .await
+        .unwrap()
+        .expect("alice owner projection should exist");
+    assert_eq!(alice_projection.used_bytes, 3);
+    assert_eq!(alice_projection.cap_bytes, 3);
+
+    let bob_projection = state
+        .commons_storage_projection_for_owner(&tenant, "bob")
+        .await
+        .unwrap()
+        .expect("bob owner projection should exist");
+    assert_eq!(bob_projection.used_bytes, 2);
+    assert_eq!(bob_projection.cap_bytes, 2);
+    assert_eq!(state.list_entity_ids(&tenant, "Blob").len(), 2);
+}
+
+#[tokio::test]
+async fn commons_storage_projection_cache_invalidates_after_blob_write() {
+    let state = test_state_with_storage_cap_ioa();
+    state.enable_commons_guardrails("default");
+    let app = build_router(state.clone());
+
+    let owner = app
+        .clone()
+        .oneshot(
+            Request::post("/tdata/Owners")
+                .header("Content-Type", "application/json")
+                .header("X-Temper-Principal-Id", "carol")
+                .header("X-Temper-Principal-Kind", "customer")
+                .body(Body::from(
+                    r#"{"Id":"carol","AccountId":"carol","DisplayName":"Carol","Contact":"carol@example.test","StorageCapBytes":6,"RateLimitTier":"free","PublicKey":""}"#,
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(owner.status(), StatusCode::CREATED);
+
+    let repo = app
+        .clone()
+        .oneshot(
+            Request::post("/tdata/Repositories")
+                .header("Content-Type", "application/json")
+                .header("X-Temper-Principal-Id", "carol")
+                .header("X-Temper-Principal-Kind", "customer")
+                .body(Body::from(
+                    r#"{"Id":"rp-carol","OwnerAccountId":"carol","Name":"demo","Description":"","DefaultBranch":"refs/heads/main","Visibility":"public"}"#,
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(repo.status(), StatusCode::CREATED);
+
+    let tenant = temper_runtime::tenant::TenantId::default();
+    let first = app
+        .clone()
+        .oneshot(
+            Request::post("/tdata/Blobs/Temper.IngestRaw")
+                .header("Content-Type", "application/octet-stream")
+                .header("Content-Length", "2")
+                .header("X-Repository-Id", "rp-carol")
+                .header("X-Temper-Principal-Id", "carol")
+                .header("X-Temper-Principal-Kind", "customer")
+                .body(Body::from("aa"))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(first.status(), StatusCode::CREATED);
+
+    let cached_projection = state
+        .commons_storage_projection_for_owner(&tenant, "carol")
+        .await
+        .unwrap()
+        .expect("carol owner projection should exist");
+    assert_eq!(cached_projection.used_bytes, 2);
+
+    let second = app
+        .clone()
+        .oneshot(
+            Request::post("/tdata/Blobs/Temper.IngestRaw")
+                .header("Content-Type", "application/octet-stream")
+                .header("Content-Length", "2")
+                .header("X-Repository-Id", "rp-carol")
+                .header("X-Temper-Principal-Id", "carol")
+                .header("X-Temper-Principal-Kind", "customer")
+                .body(Body::from("bb"))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(second.status(), StatusCode::CREATED);
+
+    let refreshed_projection = state
+        .commons_storage_projection_for_owner(&tenant, "carol")
+        .await
+        .unwrap()
+        .expect("carol owner projection should still exist");
+    assert_eq!(refreshed_projection.used_bytes, 4);
+    assert_eq!(refreshed_projection.cap_bytes, 6);
+}
+
+#[tokio::test]
+async fn commons_storage_cap_serializes_concurrent_blob_writes_per_owner() {
+    let state = test_state_with_storage_cap_ioa();
+    state.enable_commons_guardrails("default");
+    let app = build_router(state.clone());
+
+    let owner = app
+        .clone()
+        .oneshot(
+            Request::post("/tdata/Owners")
+                .header("Content-Type", "application/json")
+                .header("X-Temper-Principal-Id", "dana")
+                .header("X-Temper-Principal-Kind", "customer")
+                .body(Body::from(
+                    r#"{"Id":"dana","AccountId":"dana","DisplayName":"Dana","Contact":"dana@example.test","StorageCapBytes":4,"RateLimitTier":"free","PublicKey":""}"#,
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(owner.status(), StatusCode::CREATED);
+
+    let repo = app
+        .clone()
+        .oneshot(
+            Request::post("/tdata/Repositories")
+                .header("Content-Type", "application/json")
+                .header("X-Temper-Principal-Id", "dana")
+                .header("X-Temper-Principal-Kind", "customer")
+                .body(Body::from(
+                    r#"{"Id":"rp-dana","OwnerAccountId":"dana","Name":"demo","Description":"","DefaultBranch":"refs/heads/main","Visibility":"public"}"#,
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(repo.status(), StatusCode::CREATED);
+
+    let first_app = app.clone();
+    let second_app = app.clone();
+    let (first, second) = tokio::join!(
+        async move {
+            first_app
+                .oneshot(
+                    Request::post("/tdata/Blobs/Temper.IngestRaw")
+                        .header("Content-Type", "application/octet-stream")
+                        .header("Content-Length", "4")
+                        .header("X-Repository-Id", "rp-dana")
+                        .header("X-Temper-Principal-Id", "dana")
+                        .header("X-Temper-Principal-Kind", "customer")
+                        .body(Body::from("abcd"))
+                        .unwrap(),
+                )
+                .await
+                .unwrap()
+        },
+        async move {
+            second_app
+                .oneshot(
+                    Request::post("/tdata/Blobs/Temper.IngestRaw")
+                        .header("Content-Type", "application/octet-stream")
+                        .header("Content-Length", "4")
+                        .header("X-Repository-Id", "rp-dana")
+                        .header("X-Temper-Principal-Id", "dana")
+                        .header("X-Temper-Principal-Kind", "customer")
+                        .body(Body::from("wxyz"))
+                        .unwrap(),
+                )
+                .await
+                .unwrap()
+        }
+    );
+
+    let mut statuses = vec![first.status(), second.status()];
+    statuses.sort();
+    assert_eq!(
+        statuses,
+        vec![StatusCode::CREATED, StatusCode::PAYLOAD_TOO_LARGE]
+    );
+
+    let tenant = temper_runtime::tenant::TenantId::default();
+    let projection = state
+        .commons_storage_projection_for_owner(&tenant, "dana")
+        .await
+        .unwrap()
+        .expect("dana owner projection should exist");
+    assert_eq!(projection.used_bytes, 4);
+    assert_eq!(projection.cap_bytes, 4);
+    assert_eq!(state.list_entity_ids(&tenant, "Blob").len(), 1);
+}
+
+#[tokio::test]
+async fn commons_account_verification_blocks_owner_scoped_writes_until_verified() {
+    let state = test_state_with_account_verification_ioa();
+    state.enable_commons_guardrails("default");
+    let app = build_router(state.clone());
+
+    let owner = app
+        .clone()
+        .oneshot(
+            Request::post("/tdata/Owners")
+                .header("Content-Type", "application/json")
+                .header("X-Temper-Principal-Id", "alice")
+                .header("X-Temper-Principal-Kind", "customer")
+                .body(Body::from(
+                    r#"{"Id":"alice","AccountId":"alice","DisplayName":"Alice","Contact":"alice@example.test","StorageCapBytes":1024,"RateLimitTier":"free","VerificationProvider":"email","VerificationSubject":"alice@example.test"}"#,
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(owner.status(), StatusCode::CREATED);
+
+    let unverified_repo = app
+        .clone()
+        .oneshot(
+            Request::post("/tdata/Repositories")
+                .header("Content-Type", "application/json")
+                .header("X-Temper-Principal-Id", "alice")
+                .header("X-Temper-Principal-Kind", "customer")
+                .body(Body::from(
+                    r#"{"Id":"rp-alice-blocked","OwnerAccountId":"alice","Name":"blocked","Description":"","DefaultBranch":"refs/heads/main","Visibility":"public"}"#,
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(unverified_repo.status(), StatusCode::FORBIDDEN);
+    let body = axum::body::to_bytes(unverified_repo.into_body(), 1024 * 1024)
+        .await
+        .unwrap();
+    let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(json["error"]["code"], "AccountVerificationRequired");
+
+    let verify = app
+        .clone()
+        .oneshot(
+            Request::post(
+                "/tdata/Owners('alice')/Temper.AccountVerificationTest.MarkVerified",
+            )
+            .header("Content-Type", "application/json")
+            .header("X-Temper-Principal-Id", "operator")
+            .header("X-Temper-Principal-Kind", "admin")
+            .body(Body::from(
+                r#"{"VerificationProvider":"email","VerificationSubject":"alice@example.test","VerifiedAt":"2026-05-19T00:00:00Z"}"#,
+            ))
+            .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(verify.status(), StatusCode::OK);
+
+    let verified_owner = state
+        .get_tenant_entity_state(
+            &temper_runtime::tenant::TenantId::default(),
+            "Owner",
+            "alice",
+        )
+        .await
+        .expect("verified owner should be readable");
+    assert_eq!(verified_owner.state.status, "Verified");
+    assert_eq!(
+        verified_owner.state.fields.get("VerificationProvider"),
+        Some(&serde_json::json!("email"))
+    );
+    assert_eq!(
+        verified_owner.state.fields.get("VerificationSubject"),
+        Some(&serde_json::json!("alice@example.test"))
+    );
+    assert_eq!(
+        verified_owner.state.fields.get("VerifiedAt"),
+        Some(&serde_json::json!("2026-05-19T00:00:00Z"))
+    );
+
+    let verified_repo = app
+        .clone()
+        .oneshot(
+            Request::post("/tdata/Repositories")
+                .header("Content-Type", "application/json")
+                .header("X-Temper-Principal-Id", "alice")
+                .header("X-Temper-Principal-Kind", "customer")
+                .body(Body::from(
+                    r#"{"Id":"rp-alice-allowed","OwnerAccountId":"alice","Name":"allowed","Description":"","DefaultBranch":"refs/heads/main","Visibility":"public"}"#,
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(verified_repo.status(), StatusCode::CREATED);
+}
+
+#[tokio::test]
+async fn commons_app_name_unique_per_owner_on_create_and_patch() {
+    let state = test_state_with_owner_app_ioa();
+    state.enable_commons_guardrails("default");
+    let app = build_router(state);
+
+    let owner = app
+        .clone()
+        .oneshot(
+            Request::post("/tdata/Owners")
+                .header("Content-Type", "application/json")
+                .header("X-Temper-Principal-Id", "alice")
+                .header("X-Temper-Principal-Kind", "customer")
+                .body(Body::from(
+                    r#"{"Id":"alice","AccountId":"alice","DisplayName":"Alice","Contact":"alice@example.test","StorageCapBytes":1024,"RateLimitTier":"free","VerifiedAt":"2026-05-19T00:00:00Z"}"#,
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(owner.status(), StatusCode::CREATED);
+
+    let first = app
+        .clone()
+        .oneshot(
+            Request::post("/tdata/Apps")
+                .header("Content-Type", "application/json")
+                .header("X-Temper-Principal-Id", "alice")
+                .header("X-Temper-Principal-Kind", "customer")
+                .body(Body::from(
+                    r#"{"Id":"app-alice-notes","OwnerId":"alice","Name":"notes","RepositoryId":"rp-a","LatestVersionHash":"h1","Exports":"[]","Description":"","Visibility":"public"}"#,
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(first.status(), StatusCode::CREATED);
+
+    let duplicate_create = app
+        .clone()
+        .oneshot(
+            Request::post("/tdata/Apps")
+                .header("Content-Type", "application/json")
+                .header("X-Temper-Principal-Id", "alice")
+                .header("X-Temper-Principal-Kind", "customer")
+                .body(Body::from(
+                    r#"{"Id":"app-alice-notes-copy","OwnerId":"alice","Name":"Notes","RepositoryId":"rp-b","LatestVersionHash":"h2","Exports":"[]","Description":"","Visibility":"public"}"#,
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(duplicate_create.status(), StatusCode::CONFLICT);
+    let body = axum::body::to_bytes(duplicate_create.into_body(), 1024 * 1024)
+        .await
+        .unwrap();
+    let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(json["error"]["code"], "AppNameAlreadyExists");
+
+    let second_owner = app
+        .clone()
+        .oneshot(
+            Request::post("/tdata/Owners")
+                .header("Content-Type", "application/json")
+                .header("X-Temper-Principal-Id", "bob")
+                .header("X-Temper-Principal-Kind", "customer")
+                .body(Body::from(
+                    r#"{"Id":"bob","AccountId":"bob","DisplayName":"Bob","Contact":"bob@example.test","StorageCapBytes":1024,"RateLimitTier":"free","VerifiedAt":"2026-05-19T00:00:00Z"}"#,
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(second_owner.status(), StatusCode::CREATED);
+
+    let same_name_other_owner = app
+        .clone()
+        .oneshot(
+            Request::post("/tdata/Apps")
+                .header("Content-Type", "application/json")
+                .header("X-Temper-Principal-Id", "bob")
+                .header("X-Temper-Principal-Kind", "customer")
+                .body(Body::from(
+                    r#"{"Id":"app-bob-notes","OwnerId":"bob","Name":"notes","RepositoryId":"rp-c","LatestVersionHash":"h3","Exports":"[]","Description":"","Visibility":"public"}"#,
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(same_name_other_owner.status(), StatusCode::CREATED);
+
+    let bob_other = app
+        .clone()
+        .oneshot(
+            Request::post("/tdata/Apps")
+                .header("Content-Type", "application/json")
+                .header("X-Temper-Principal-Id", "bob")
+                .header("X-Temper-Principal-Kind", "customer")
+                .body(Body::from(
+                    r#"{"Id":"app-bob-tasks","OwnerId":"bob","Name":"tasks","RepositoryId":"rp-d","LatestVersionHash":"h4","Exports":"[]","Description":"","Visibility":"public"}"#,
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(bob_other.status(), StatusCode::CREATED);
+
+    let duplicate_patch = app
+        .clone()
+        .oneshot(
+            Request::patch("/tdata/Apps('app-bob-tasks')")
+                .header("Content-Type", "application/json")
+                .header("X-Temper-Principal-Id", "bob")
+                .header("X-Temper-Principal-Kind", "customer")
+                .body(Body::from(r#"{"Name":"Notes"}"#))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(duplicate_patch.status(), StatusCode::CONFLICT);
 }
 
 #[tokio::test]

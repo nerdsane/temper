@@ -14,6 +14,7 @@ use crate::state::ServerState;
 use crate::webhooks::receiver as webhook_receiver;
 
 use axum::body::Body;
+use axum::extract::DefaultBodyLimit;
 use axum::extract::State;
 use axum::http::HeaderMap;
 use axum::http::Uri;
@@ -21,6 +22,7 @@ use axum::response::Response;
 use temper_runtime::tenant::TenantId;
 
 const TEMPER_CLIENT_JS: &str = include_str!("../static/temper-client.js");
+const INTERNAL_BLOB_BODY_LIMIT_BYTES: usize = 128 * 1024 * 1024;
 
 async fn serve_temper_client() -> (
     StatusCode,
@@ -78,13 +80,21 @@ pub fn build_router(state: ServerState) -> Router {
         .nest("/_admin", crate::admin::build_admin_router())
         .route("/temper-client.js", get(serve_temper_client))
         .route("/static/temper-client.js", get(serve_temper_client))
+        .route("/genesis", get(crate::static_web::serve_genesis_web))
+        .route("/genesis/", get(crate::static_web::serve_genesis_web))
+        .route(
+            "/genesis/{*path}",
+            get(crate::static_web::serve_genesis_web),
+        )
         .route(
             "/webhooks/{tenant}/{*path}",
             get(webhook_receiver::handle_webhook).post(webhook_receiver::handle_webhook),
         )
         .route(
             "/_internal/blobs/{*path}",
-            put(blobs::put_blob).get(blobs::get_blob),
+            put(blobs::put_blob)
+                .get(blobs::get_blob)
+                .layer(DefaultBodyLimit::max(INTERNAL_BLOB_BODY_LIMIT_BYTES)),
         )
         // ADR-0069 Phase 2 dispatcher fallback. Matched paths that
         // aren't served by any built-in route above fall through to
@@ -336,10 +346,19 @@ async fn dispatch_matched_route(
 
     // Spawn task B: invoke the WASM module. Runs to completion
     // (guest writes head + body via FFI; we drain on the axum side).
-    let limits = temper_wasm::types::WasmResourceLimits {
+    let mut limits = temper_wasm::types::WasmResourceLimits {
         max_duration: std::time::Duration::from_secs(route.route.timeout_secs as u64),
         ..Default::default()
     };
+    if let Some(max_fuel) = route.route.max_fuel {
+        limits.max_fuel = max_fuel;
+    }
+    if let Some(max_memory) = route.route.max_memory {
+        limits.max_memory = max_memory;
+    }
+    if let Some(max_response_bytes) = route.route.max_response_bytes {
+        limits.max_response_bytes = max_response_bytes;
+    }
     let engine = state.wasm_engine.clone();
     let invoke_streams = std::sync::Arc::new(std::sync::RwLock::new(
         temper_wasm::stream::StreamRegistry::default(),
@@ -354,6 +373,47 @@ async fn dispatch_matched_route(
         response_body_handle = guest_response_body.0,
         "HttpEndpoint dispatch → invoking WASM"
     );
+
+    if let Some(action_bridge) = route.route.action_bridge.clone() {
+        let result = match engine
+            .invoke_with_blobs(
+                &invoke_hash,
+                &ctx,
+                host,
+                &limits,
+                invoke_streams,
+                std::collections::BTreeMap::new(),
+            )
+            .await
+        {
+            Ok(result) => result,
+            Err(e) => {
+                tracing::warn!(
+                    integration = %invoke_integration,
+                    error = %e,
+                    "WASM adapter failed before action bridge dispatch"
+                );
+                return action_bridge_error_response(
+                    &action_bridge.response,
+                    &[],
+                    false,
+                    &format!("adapter failed: {e}"),
+                );
+            }
+        };
+
+        return dispatch_action_bridge_result(
+            state,
+            tenant_id,
+            headers,
+            route.params,
+            route.route.requires_auth,
+            action_bridge,
+            result,
+        )
+        .await;
+    }
+
     let invoke_task = tokio::spawn(async move {
         match engine
             .invoke_with_blobs(
@@ -439,6 +499,272 @@ async fn dispatch_matched_route(
     }
     resp.body(Body::from_stream(body_stream))
         .expect("response builder")
+}
+
+async fn dispatch_action_bridge_result(
+    state: ServerState,
+    tenant_id: TenantId,
+    headers: HeaderMap,
+    route_params: std::collections::BTreeMap<String, String>,
+    requires_auth: bool,
+    bridge: crate::http_endpoint::HttpActionBridge,
+    result: temper_wasm::types::WasmInvocationResult,
+) -> Response {
+    let callback_params = result.callback_params.clone();
+    let refs = bridge_git_receive_pack_refs(&callback_params);
+    let sideband = bridge_git_receive_pack_sideband(&callback_params);
+
+    if !result.success {
+        return action_bridge_error_response(
+            &bridge.response,
+            &refs,
+            sideband,
+            result
+                .error
+                .as_deref()
+                .unwrap_or("adapter returned unsuccessful result"),
+        );
+    }
+
+    let entity_id = match render_action_bridge_template(&bridge.entity_id_template, &route_params) {
+        Ok(id) => id,
+        Err(e) => {
+            return action_bridge_error_response(&bridge.response, &refs, sideband, &e);
+        }
+    };
+    let action_params = bridge_action_params(&callback_params);
+
+    let mut agent_ctx = crate::request_context::extract_agent_context(&headers);
+    let explicit_principal = headers.contains_key("x-temper-principal-kind")
+        || headers.contains_key("x-temper-principal-id")
+        || headers.contains_key("x-temper-principal-scopes");
+    agent_ctx.security_ctx = Some(if requires_auth || explicit_principal {
+        crate::authz::security_context_from_headers(
+            &headers,
+            agent_ctx.agent_id.as_deref(),
+            agent_ctx.session_id.as_deref(),
+            agent_ctx.agent_type.as_deref(),
+        )
+    } else {
+        temper_authz::SecurityContext::system()
+    });
+    if agent_ctx.idempotency_key.is_none() {
+        agent_ctx.idempotency_key = action_params
+            .get("ClientRequestId")
+            .or_else(|| action_params.get("client_request_id"))
+            .and_then(|v| v.as_str())
+            .filter(|s| !s.is_empty())
+            .map(str::to_string);
+    }
+
+    tracing::info!(
+        tenant = %tenant_id.as_str(),
+        entity_type = %bridge.entity_type,
+        entity_id = %entity_id,
+        action = %bridge.action,
+        response = %bridge.response,
+        "HttpEndpoint action bridge dispatching configured action"
+    );
+
+    let dispatch = state
+        .dispatch_tenant_action_ext_typed(
+            &tenant_id,
+            &bridge.entity_type,
+            &entity_id,
+            &bridge.action,
+            action_params,
+            crate::state::DispatchExtOptions {
+                agent_ctx: &agent_ctx,
+                await_integration: true,
+                await_reactions: false,
+            },
+        )
+        .await;
+
+    match dispatch {
+        Ok(response) if response.success => {
+            action_bridge_success_response(&bridge.response, &refs, sideband)
+        }
+        Ok(response) => action_bridge_error_response(
+            &bridge.response,
+            &refs,
+            sideband,
+            response
+                .error
+                .as_deref()
+                .unwrap_or("configured action failed"),
+        ),
+        Err(e) => action_bridge_error_response(&bridge.response, &refs, sideband, &e.to_string()),
+    }
+}
+
+fn bridge_action_params(callback_params: &serde_json::Value) -> serde_json::Value {
+    callback_params
+        .get("action_params")
+        .or_else(|| callback_params.get("ActionParams"))
+        .cloned()
+        .unwrap_or_else(|| callback_params.clone())
+}
+
+fn bridge_git_receive_pack_refs(callback_params: &serde_json::Value) -> Vec<String> {
+    callback_params
+        .get("git_receive_pack")
+        .or_else(|| callback_params.get("GitReceivePack"))
+        .and_then(|v| v.get("refs"))
+        .or_else(|| callback_params.get("refs"))
+        .and_then(|v| v.as_array())
+        .map(|items| {
+            items
+                .iter()
+                .filter_map(|v| v.as_str().map(str::to_string))
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+fn bridge_git_receive_pack_sideband(callback_params: &serde_json::Value) -> bool {
+    callback_params
+        .get("git_receive_pack")
+        .or_else(|| callback_params.get("GitReceivePack"))
+        .and_then(|v| v.get("sideband"))
+        .or_else(|| callback_params.get("sideband"))
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false)
+}
+
+fn render_action_bridge_template(
+    template: &str,
+    params: &std::collections::BTreeMap<String, String>,
+) -> Result<String, String> {
+    let mut out = String::with_capacity(template.len());
+    let mut rest = template;
+    while let Some(open) = rest.find('{') {
+        let (prefix, after_open) = rest.split_at(open);
+        out.push_str(prefix);
+        let after_open = &after_open[1..];
+        let Some(close) = after_open.find('}') else {
+            return Err(format!(
+                "unclosed action bridge placeholder in '{template}'"
+            ));
+        };
+        let key = &after_open[..close];
+        let value = params.get(key).ok_or_else(|| {
+            format!("action bridge placeholder '{key}' was not captured by the route")
+        })?;
+        out.push_str(value);
+        rest = &after_open[close + 1..];
+    }
+    out.push_str(rest);
+    Ok(out)
+}
+
+fn action_bridge_success_response(
+    response_kind: &str,
+    refs: &[String],
+    sideband: bool,
+) -> Response {
+    match response_kind {
+        "git-receive-pack" => git_receive_pack_response(refs, sideband, None),
+        _ => axum::http::Response::builder()
+            .status(axum::http::StatusCode::OK)
+            .header("content-type", "application/json")
+            .body(Body::from(r#"{"success":true}"#))
+            .expect("response builder"),
+    }
+}
+
+fn action_bridge_error_response(
+    response_kind: &str,
+    refs: &[String],
+    sideband: bool,
+    reason: &str,
+) -> Response {
+    match response_kind {
+        "git-receive-pack" => git_receive_pack_response(refs, sideband, Some(reason)),
+        _ => axum::http::Response::builder()
+            .status(axum::http::StatusCode::BAD_GATEWAY)
+            .header("content-type", "application/json")
+            .body(Body::from(
+                serde_json::json!({
+                    "success": false,
+                    "error": reason,
+                })
+                .to_string(),
+            ))
+            .expect("response builder"),
+    }
+}
+
+fn git_receive_pack_response(refs: &[String], sideband: bool, error: Option<&str>) -> Response {
+    let reason = error.map(sanitize_git_report_text);
+    let mut inner = Vec::new();
+    let unpack_line = match reason.as_deref() {
+        Some(reason) => format!("unpack {reason}\n"),
+        None => "unpack ok\n".to_string(),
+    };
+    write_pkt_line(&mut inner, unpack_line.as_bytes());
+    for refname in refs {
+        let line = match reason.as_deref() {
+            Some(reason) => format!("ng {refname} {reason}\n"),
+            None => format!("ok {refname}\n"),
+        };
+        write_pkt_line(&mut inner, line.as_bytes());
+    }
+    write_pkt_flush(&mut inner);
+
+    let body = if sideband {
+        sideband_channel_one(inner)
+    } else {
+        inner
+    };
+
+    axum::http::Response::builder()
+        .status(axum::http::StatusCode::OK)
+        .header("content-type", "application/x-git-receive-pack-result")
+        .header("cache-control", "no-cache")
+        .body(Body::from(body))
+        .expect("response builder")
+}
+
+fn sideband_channel_one(inner: Vec<u8>) -> Vec<u8> {
+    let mut response = Vec::new();
+    for chunk in inner.chunks(65_515) {
+        let mut payload = Vec::with_capacity(1 + chunk.len());
+        payload.push(0x01);
+        payload.extend_from_slice(chunk);
+        write_pkt_line(&mut response, &payload);
+    }
+    write_pkt_flush(&mut response);
+    response
+}
+
+fn write_pkt_line(out: &mut Vec<u8>, payload: &[u8]) {
+    let len = payload.len() + 4;
+    out.extend_from_slice(format!("{len:04x}").as_bytes());
+    out.extend_from_slice(payload);
+}
+
+fn write_pkt_flush(out: &mut Vec<u8>) {
+    out.extend_from_slice(b"0000");
+}
+
+fn sanitize_git_report_text(input: &str) -> String {
+    let mut out = input
+        .chars()
+        .map(|c| match c {
+            '\r' | '\n' | '\t' => ' ',
+            c if c.is_control() => ' ',
+            c => c,
+        })
+        .collect::<String>();
+    if out.len() > 240 {
+        out.truncate(240);
+    }
+    if out.trim().is_empty() {
+        "failed".to_string()
+    } else {
+        out
+    }
 }
 
 fn http_404_response(path: &str) -> Response {

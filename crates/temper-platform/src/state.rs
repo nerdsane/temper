@@ -92,7 +92,7 @@ impl PlatformState {
         }
         let (broadcast_tx, _) = broadcast::channel(BROADCAST_CAPACITY);
 
-        Self {
+        let mut state = Self {
             server,
             registry,
             broadcast_tx,
@@ -101,7 +101,11 @@ impl PlatformState {
             api_token: None,
             spec_store,
             identity_resolver: Arc::new(IdentityResolver::new()),
-        }
+        };
+        state.server.bound_action_hook = Some(Arc::new(
+            crate::genesis_install::GenesisInstallHook::new(state.clone()),
+        ));
+        state
     }
 
     /// Create a new platform state with a pre-loaded registry.
@@ -125,7 +129,7 @@ impl PlatformState {
         }
         let (broadcast_tx, _) = broadcast::channel(BROADCAST_CAPACITY);
 
-        Self {
+        let mut state = Self {
             server,
             registry,
             broadcast_tx,
@@ -134,7 +138,11 @@ impl PlatformState {
             api_token: None,
             spec_store,
             identity_resolver: Arc::new(IdentityResolver::new()),
-        }
+        };
+        state.server.bound_action_hook = Some(Arc::new(
+            crate::genesis_install::GenesisInstallHook::new(state.clone()),
+        ));
+        state
     }
 
     /// Subscribe to the broadcast channel for platform events.

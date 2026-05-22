@@ -87,6 +87,12 @@ impl SecurityContext {
                         .collect();
                     attributes.insert("scopes".to_string(), serde_json::Value::Array(scopes));
                 }
+                "x-temper-action-context" => {
+                    attributes.insert(
+                        "action_context".to_string(),
+                        serde_json::Value::String(value.clone()),
+                    );
+                }
                 "x-temper-correlation-id" => correlation_id = value.clone(),
                 k if k.starts_with("x-temper-attr-") => {
                     let attr_name = k.strip_prefix("x-temper-attr-").unwrap(); // ci-ok: guarded by starts_with
@@ -240,6 +246,18 @@ impl SecurityContext {
         self.context_attrs.insert(
             "agentTypeVerified".to_string(),
             serde_json::Value::Bool(false),
+        );
+        self
+    }
+
+    /// Attach ADR-0040 action-context provenance to the principal entity.
+    ///
+    /// Cedar policies can then match on `principal.action_context`, for
+    /// example `principal.action_context == "composite:Apps.Fork"`.
+    pub fn with_action_context(mut self, action_context: impl Into<String>) -> Self {
+        self.principal.attributes.insert(
+            "action_context".to_string(),
+            serde_json::Value::String(action_context.into()),
         );
         self
     }
@@ -420,6 +438,29 @@ mod tests {
         assert_eq!(
             ctx.principal.attributes.get("scopes"),
             Some(&serde_json::json!(["repo:read", "repo:write", "force"]))
+        );
+    }
+
+    #[test]
+    fn action_context_is_principal_attribute() {
+        let ctx = SecurityContext::from_headers(&[(
+            "x-temper-action-context".to_string(),
+            "composite:Apps.Fork".to_string(),
+        )]);
+
+        assert_eq!(
+            ctx.principal.attributes.get("action_context"),
+            Some(&serde_json::Value::String(
+                "composite:Apps.Fork".to_string()
+            ))
+        );
+
+        let ctx = SecurityContext::from_headers(&[]).with_action_context("composite:Repo.Write");
+        assert_eq!(
+            ctx.principal.attributes.get("action_context"),
+            Some(&serde_json::Value::String(
+                "composite:Repo.Write".to_string()
+            ))
         );
     }
 }

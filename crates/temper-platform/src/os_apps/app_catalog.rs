@@ -56,6 +56,19 @@ pub fn add_os_apps_dir(dir: PathBuf) {
     lock.merge_catalog(additional);
 }
 
+/// Add an app directory and prefer its bundles over existing catalog entries.
+///
+/// Genesis installs use this path because a pinned registry closure is the
+/// source of truth for the requested install. Development/local app catalogs may
+/// still be present for tests or helper tools, but they must not shadow the
+/// pinned Genesis bundle when both expose the same app name.
+pub fn add_os_apps_dir_preferred(dir: PathBuf) {
+    let additional = AppCatalog::from_dir(dir);
+    let cat = catalog();
+    let mut lock = cat.write().unwrap(); // ci-ok: infallible lock
+    lock.merge_catalog_preferred(additional);
+}
+
 /// Re-scan the OS apps directory and refresh the catalog.
 ///
 /// Call this after modifying app files on disk to pick up changes
@@ -75,16 +88,6 @@ pub fn reload_os_apps() {
         new.merge_dir(additional_dir);
     }
     *catalog().write().unwrap() = new; // ci-ok: infallible lock
-}
-
-/// Backward-compatible alias.
-pub fn set_skills_dir(dir: PathBuf) {
-    set_os_apps_dir(dir);
-}
-
-/// Backward-compatible alias.
-pub fn reload_skills() {
-    reload_os_apps();
 }
 
 /// List OS apps that belong to the default startup surface.
@@ -119,18 +122,6 @@ impl AppCatalog {
             }
         }
 
-        // Priority 1b: legacy TEMPER_SKILLS_DIR env var.
-        if let Ok(dir) = std::env::var("TEMPER_SKILLS_DIR") {
-            let path = PathBuf::from(dir);
-            if path.is_dir() {
-                tracing::info!(
-                    "Loading OS apps from legacy TEMPER_SKILLS_DIR: {}",
-                    path.display()
-                );
-                return Self::from_dir(path);
-            }
-        }
-
         // Priority 2: Relative to this crate's source (works in dev and cargo test).
         let compile_time_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
             .join("..")
@@ -152,22 +143,7 @@ impl AppCatalog {
             return Self::from_dir(canonical);
         }
 
-        // Priority 4: ./skills/ (legacy fallback).
-        let legacy_cwd_dir = PathBuf::from("skills");
-        if legacy_cwd_dir.is_dir() {
-            let canonical = legacy_cwd_dir
-                .canonicalize()
-                .unwrap_or(legacy_cwd_dir.clone());
-            tracing::info!(
-                "Loading OS apps from legacy CWD skills/: {}",
-                canonical.display()
-            );
-            return Self::from_dir(canonical);
-        }
-
-        tracing::warn!(
-            "No os-apps directory found. Set TEMPER_OS_APPS_DIR (or legacy TEMPER_SKILLS_DIR)."
-        );
+        tracing::warn!("No os-apps directory found. Set TEMPER_OS_APPS_DIR for dev/local apps.");
         Self {
             apps_dir: PathBuf::new(),
             additional_dirs: Vec::new(),
@@ -293,6 +269,26 @@ impl AppCatalog {
                 .iter()
                 .any(|existing| existing.name == entry.name)
             {
+                self.entries.push(entry);
+            }
+        }
+    }
+
+    fn merge_catalog_preferred(&mut self, additional: AppCatalog) {
+        if additional.apps_dir.is_dir() && !self.additional_dirs.contains(&additional.apps_dir) {
+            self.additional_dirs.push(additional.apps_dir.clone());
+        }
+        for (name, path) in additional.paths {
+            self.paths.insert(name, path);
+        }
+        for entry in additional.entries {
+            if let Some(existing) = self
+                .entries
+                .iter_mut()
+                .find(|existing| existing.name == entry.name)
+            {
+                *existing = entry;
+            } else {
                 self.entries.push(entry);
             }
         }

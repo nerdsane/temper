@@ -1,7 +1,7 @@
 //! Platform-level storage abstraction for DST (deterministic simulation testing).
 //!
 //! [`PlatformStore`] abstracts the ~12 platform storage methods used by
-//! `install_skill`, bootstrap, and the verification cascade. The production
+//! `install_os_app`, bootstrap, and the verification cascade. The production
 //! implementation delegates to [`TursoEventStore`]; the simulation implementation
 //! ([`SimPlatformStore`], behind `#[cfg(feature = "sim")]`) uses in-memory
 //! `BTreeMap` storage with fault injection for deterministic testing.
@@ -66,6 +66,12 @@ pub struct WasmModuleRow {
 pub struct InstalledAppRecord {
     pub tenant: String,
     pub app_name: String,
+    pub source_kind: String,
+    pub app_ref: String,
+    pub version_hash: String,
+    pub closure_id: String,
+    pub registry_url: String,
+    pub registry_tenant: String,
     pub app_version: String,
     pub bundle_digest: String,
     pub spec_digest: String,
@@ -106,7 +112,7 @@ pub trait PlatformStore: Send + Sync {
 
     /// Delete a spec for a given tenant/entity_type.
     ///
-    /// Used for cleanup when `install_skill` fails mid-write (atomicity)
+    /// Used for cleanup when `install_os_app` fails mid-write (atomicity)
     /// and for reconciliation during `restore_registry_from_platform_store`.
     async fn delete_spec(&self, tenant: &str, entity_type: &str) -> Result<(), String>;
 
@@ -326,6 +332,12 @@ impl PlatformStore for TursoEventStore {
         let row = TursoInstalledAppRow {
             tenant_id: record.tenant.clone(),
             app_name: record.app_name.clone(),
+            source_kind: record.source_kind.clone(),
+            app_ref: record.app_ref.clone(),
+            version_hash: record.version_hash.clone(),
+            closure_id: record.closure_id.clone(),
+            registry_url: record.registry_url.clone(),
+            registry_tenant: record.registry_tenant.clone(),
             app_version: record.app_version.clone(),
             bundle_digest: record.bundle_digest.clone(),
             spec_digest: record.spec_digest.clone(),
@@ -353,6 +365,12 @@ impl PlatformStore for TursoEventStore {
                 row.map(|row| InstalledAppRecord {
                     tenant: row.tenant_id,
                     app_name: row.app_name,
+                    source_kind: row.source_kind,
+                    app_ref: row.app_ref,
+                    version_hash: row.version_hash,
+                    closure_id: row.closure_id,
+                    registry_url: row.registry_url,
+                    registry_tenant: row.registry_tenant,
                     app_version: row.app_version,
                     bundle_digest: row.bundle_digest,
                     spec_digest: row.spec_digest,
@@ -555,6 +573,12 @@ impl PlatformStore for PostgresEventStore {
         let row = PostgresInstalledAppRow {
             tenant: record.tenant.clone(),
             app_name: record.app_name.clone(),
+            source_kind: record.source_kind.clone(),
+            app_ref: record.app_ref.clone(),
+            version_hash: record.version_hash.clone(),
+            closure_id: record.closure_id.clone(),
+            registry_url: record.registry_url.clone(),
+            registry_tenant: record.registry_tenant.clone(),
             app_version: record.app_version.clone(),
             bundle_digest: record.bundle_digest.clone(),
             spec_digest: record.spec_digest.clone(),
@@ -582,6 +606,12 @@ impl PlatformStore for PostgresEventStore {
                 row.map(|row| InstalledAppRecord {
                     tenant: row.tenant,
                     app_name: row.app_name,
+                    source_kind: row.source_kind,
+                    app_ref: row.app_ref,
+                    version_hash: row.version_hash,
+                    closure_id: row.closure_id,
+                    registry_url: row.registry_url,
+                    registry_tenant: row.registry_tenant,
                     app_version: row.app_version,
                     bundle_digest: row.bundle_digest,
                     spec_digest: row.spec_digest,

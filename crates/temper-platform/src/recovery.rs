@@ -233,16 +233,6 @@ pub async fn recover_installed_apps_runtime_state(
     summary
 }
 
-/// Backward-compatible alias.
-pub async fn restore_installed_skills(state: &PlatformState, ps: &dyn PlatformStore) {
-    restore_installed_apps(state, ps).await
-}
-
-/// Backward-compatible alias.
-pub async fn restore_installed_os_apps(state: &PlatformState, ps: &dyn PlatformStore) {
-    restore_installed_apps(state, ps).await
-}
-
 /// Check if all entity types for an app are already registered.
 fn tenant_has_ready_app_specs(state: &PlatformState, tenant: &str, app_name: &str) -> bool {
     let Some(bundle) = os_apps::get_os_app(app_name) else {

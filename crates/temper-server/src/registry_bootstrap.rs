@@ -266,7 +266,7 @@ pub async fn restore_registry_from_turso(
     registry: &mut SpecRegistry,
     turso: &TursoEventStore,
 ) -> Result<usize, String> {
-    // GC uncommitted specs left behind by interrupted install_skill writes.
+    // GC uncommitted specs left behind by interrupted install_os_app writes.
     match turso.delete_uncommitted_specs().await {
         Ok(0) => {}
         Ok(n) => tracing::info!("deleted {n} uncommitted specs during startup recovery"),

@@ -31,6 +31,7 @@ uuid = { workspace = true }
 test-helpers = []
 
 [dev-dependencies]
+base64 = "0.22"
 tokio-test = { workspace = true }
 opentelemetry_sdk = { workspace = true }
 tracing-subscriber = { workspace = true }

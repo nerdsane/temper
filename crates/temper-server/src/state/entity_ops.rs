@@ -594,6 +594,37 @@ impl ServerState {
         runtime_metrics::record_server_state_metrics(self);
     }
 
+    /// Stop and evict an entity actor plus its in-memory indexes.
+    ///
+    /// Used after an out-of-band durable append (for example, an atomic
+    /// Composite batch) so the next read hydrates from the authoritative event
+    /// journal instead of serving stale actor state.
+    #[instrument(skip_all, fields(otel.name = "entity.stop_and_remove_entity", tenant = %tenant, entity_type, entity_id))]
+    pub(crate) fn stop_and_remove_entity(
+        &self,
+        tenant: &TenantId,
+        entity_type: &str,
+        entity_id: &str,
+    ) {
+        let actor_key = format!("{tenant}:{entity_type}:{entity_id}");
+
+        if let Ok(mut registry) = self.actor_registry.write()
+            && let Some(actor_ref) = registry.remove(&actor_key)
+        {
+            let _ = actor_ref.stop();
+        }
+        if let Ok(mut last_accessed) = self.last_accessed.write() {
+            last_accessed.remove(&actor_key);
+        }
+        if let Ok(mut index) = self.entity_index.write() {
+            let index_key = format!("{tenant}:{entity_type}");
+            if let Some(ids) = index.get_mut(&index_key) {
+                ids.remove(entity_id);
+            }
+        }
+        runtime_metrics::record_server_state_metrics(self);
+    }
+
     /// List all entity IDs for a (tenant, entity_type) pair.
     #[instrument(skip_all, fields(otel.name = "entity.list_entity_ids", tenant = %tenant, entity_type))]
     pub fn list_entity_ids(&self, tenant: &TenantId, entity_type: &str) -> Vec<String> {
@@ -886,6 +917,7 @@ impl ServerState {
             events: std::collections::VecDeque::new(),
             total_event_count: 0,
             sequence_nr: 0,
+            processed_idempotency_keys: BTreeMap::new(),
         };
 
         let created = EntityEvent {
@@ -894,6 +926,7 @@ impl ServerState {
             to_status: state.status.clone(),
             timestamp: sim_now(),
             params: initial_fields,
+            idempotency_key: None,
         };
         let payload = serde_json::to_value(&created)
             .map_err(|e| format!("failed to serialize Created event: {e}"))?;

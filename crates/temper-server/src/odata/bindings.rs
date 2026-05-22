@@ -10,14 +10,16 @@ use tracing_opentelemetry::OpenTelemetrySpanExt;
 
 use temper_authz::SecurityContext;
 
+use super::account_verification::enforce_commons_account_verified_for_action;
 use super::common::run_write_prechecks;
+use super::rate_limit::{enforce_commons_write_rate_limit, owner_id_from_action};
 use super::response::annotate_entity;
 use crate::authz::{DenialInput, record_authz_denial, security_context_from_headers};
 use crate::blobs::hydrate_blob_refs_for_tenant;
 use crate::identity::ResolvedIdentity;
 use crate::request_context::AgentContext;
 use crate::response::{ODataResponse, odata_error};
-use crate::state::{DispatchError, DispatchExtOptions, ServerState};
+use crate::state::{BoundActionHookContext, DispatchError, DispatchExtOptions, ServerState};
 
 fn idempotency_actor_key(tenant: &TenantId, entity_type: &str, entity_id: &str) -> String {
     format!("{tenant}:{entity_type}:{entity_id}")
@@ -140,6 +142,40 @@ pub(super) async fn dispatch_bound_action(
     let current_state = authz_snapshot.current_state;
     let resource_attrs = authz_snapshot.resource_attrs;
 
+    if let Err(resp) = enforce_commons_account_verified_for_action(
+        state,
+        tenant,
+        entity_type,
+        &current_state.state.fields,
+        &body_json,
+    )
+    .await
+    {
+        http_span.set_status(Status::error("AccountVerificationRequired"));
+        http_span.set_attribute(OtelKeyValue::new("http.status_code", 403i64));
+        let end_time: std::time::SystemTime = sim_now().into();
+        http_span.end_with_timestamp(end_time);
+        return *resp;
+    }
+
+    if let Err(resp) = enforce_commons_write_rate_limit(
+        state,
+        tenant,
+        entity_type,
+        owner_id_from_action(&current_state.state.fields, &body_json),
+        headers,
+        agent_ctx,
+        resolved_identity,
+    )
+    .await
+    {
+        http_span.set_status(Status::error("RateLimitExceeded"));
+        http_span.set_attribute(OtelKeyValue::new("http.status_code", 429i64));
+        let end_time: std::time::SystemTime = sim_now().into();
+        http_span.end_with_timestamp(end_time);
+        return resp;
+    }
+
     let authz_result = state.authorize_with_context(
         &security_ctx,
         action,
@@ -227,7 +263,7 @@ pub(super) async fn dispatch_bound_action(
             entity_type,
             key_str,
             action,
-            body_json,
+            body_json.clone(),
             DispatchExtOptions {
                 agent_ctx: &dispatch_agent_ctx,
                 await_integration,
@@ -253,6 +289,42 @@ pub(super) async fn dispatch_bound_action(
                 http_span.set_attribute(OtelKeyValue::new("http.status_code", 200i64));
 
                 let mut state_json = serde_json::to_value(&response.state).unwrap_or_default();
+                if let Some(hook) = state.bound_action_hook.as_ref() {
+                    match hook
+                        .after_bound_action(BoundActionHookContext {
+                            state,
+                            tenant,
+                            entity_type,
+                            entity_id: key_str,
+                            action,
+                            params: &body_json,
+                            state_json: &state_json,
+                        })
+                        .await
+                    {
+                        Ok(Some(hook_json)) => {
+                            if let (Some(dst), Some(src)) =
+                                (state_json.as_object_mut(), hook_json.as_object())
+                            {
+                                dst.insert(
+                                    "postAction".to_string(),
+                                    serde_json::Value::Object(src.clone()),
+                                );
+                            }
+                        }
+                        Ok(None) => {}
+                        Err(error) => {
+                            http_span.set_status(Status::error(error.clone()));
+                            http_span.set_attribute(OtelKeyValue::new("http.status_code", 500i64));
+                            return odata_error(
+                                StatusCode::INTERNAL_SERVER_ERROR,
+                                "PostActionHookFailed",
+                                &error,
+                            )
+                            .into_response();
+                        }
+                    }
+                }
                 hydrate_blob_refs_for_tenant(state, tenant, &mut state_json).await;
                 let body =
                     annotate_entity(state_json, format!("$metadata#{set_name}/$entity"), None);
@@ -279,6 +351,22 @@ pub(super) async fn dispatch_bound_action(
             http_span.set_status(Status::error("EntityTypeNotGoverned"));
             http_span.set_attribute(OtelKeyValue::new("http.status_code", 404i64));
             odata_error(StatusCode::NOT_FOUND, "EntityTypeNotGoverned", &reason).into_response()
+        }
+        Err(DispatchError::AuthzDenied(reason)) => {
+            http_span.set_status(Status::error(reason.clone()));
+            http_span.set_attribute(OtelKeyValue::new("http.status_code", 403i64));
+            odata_error(StatusCode::FORBIDDEN, "AuthorizationDenied", &reason).into_response()
+        }
+        Err(DispatchError::QuotaExceeded(reason)) => {
+            http_span.set_status(Status::error(reason.clone()));
+            http_span.set_attribute(OtelKeyValue::new("http.status_code", 413i64));
+            odata_error(StatusCode::PAYLOAD_TOO_LARGE, "StorageCapExceeded", &reason)
+                .into_response()
+        }
+        Err(DispatchError::Conflict(reason)) => {
+            http_span.set_status(Status::error(reason.clone()));
+            http_span.set_attribute(OtelKeyValue::new("http.status_code", 409i64));
+            odata_error(StatusCode::CONFLICT, "Conflict", &reason).into_response()
         }
         // ADR-0048: transient exhaustion → 503 Retry-After so clients and
         // proxies back off instead of paging someone.

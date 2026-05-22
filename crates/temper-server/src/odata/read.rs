@@ -190,12 +190,13 @@ fn resource_not_found_response(set_name: &str, key: &str) -> Response {
 
 /// Load a single entity body for OData read handlers.
 ///
-/// Tries the durable `entity_catalog` projection first (gated by the
-/// `TEMPER_ODATA_CATALOG_FAST_READ` flag). On a hit, returns a body whose
-/// shape matches the actor's serialized `EntityState` — blob refs already
-/// hydrated. On miss (flag off, no catalog row, or backend error), falls
-/// back to the actor path: validate the entity exists in the in-memory
-/// index, then load via `get_tenant_entity_state`.
+/// Tries the durable `entity_catalog` projection first when a query-plane
+/// store is configured or the `TEMPER_ODATA_CATALOG_FAST_READ` flag is on. On
+/// a hit, returns a body whose shape matches the actor's serialized
+/// `EntityState` — blob refs already hydrated. On miss (no catalog row,
+/// catalog disabled, or backend error), falls back to the actor path: validate
+/// the entity exists in the in-memory index, then load via
+/// `get_tenant_entity_state`.
 ///
 /// The catalog-first path bypasses the in-memory index, so it survives
 /// cold starts and bulk-imported entities (data on disk but not yet
@@ -207,8 +208,10 @@ async fn load_existing_entity_body(
     set_name: &str,
     key: &str,
 ) -> Result<serde_json::Value, Response> {
+    let prefer_catalog = state.query_plane_store().is_some();
     if let Some(body) =
-        try_load_entity_body_from_catalog(state, tenant, entity_type, set_name, key).await
+        try_load_entity_body_from_catalog(state, tenant, entity_type, set_name, key, prefer_catalog)
+            .await
     {
         return Ok(body);
     }

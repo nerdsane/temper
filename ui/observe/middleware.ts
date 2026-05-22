@@ -56,7 +56,6 @@ export const config = {
     "/feature-requests/:path*",
     "/integrations/:path*",
     "/os-apps/:path*",
-    "/skills/:path*",
     "/specs/:path*",
     "/verify/:path*",
     "/workflows/:path*",

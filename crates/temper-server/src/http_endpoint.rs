@@ -6,7 +6,9 @@
 //! registered for the tenant, extracts templated path parameters,
 //! and returns the matched route. The dispatcher then opens an
 //! inbound exchange (ADR-0057 Phase 2) and invokes the bound WASM
-//! integration.
+//! integration. Some endpoints may also declare an action bridge:
+//! the WASM adapter returns typed parameters, and the kernel dispatches
+//! the statically configured Temper action.
 //!
 //! Discipline (per ADR-0069):
 //!   * Longest-prefix match wins; ties on length are rejected at
@@ -43,6 +45,32 @@ pub struct HttpEndpointRoute {
     pub requires_auth: bool,
     /// Hard cap on invocation wall time (seconds).
     pub timeout_secs: u32,
+    /// Optional instruction budget for the endpoint adapter.
+    pub max_fuel: Option<u64>,
+    /// Optional linear-memory budget for the endpoint adapter.
+    pub max_memory: Option<usize>,
+    /// Optional host HTTP response ceiling for the endpoint adapter.
+    pub max_response_bytes: Option<usize>,
+    /// Optional kernel-owned bridge from the adapter result to a
+    /// spec-defined action. The WASM module supplies parameters only;
+    /// the endpoint row supplies the target action and entity template.
+    pub action_bridge: Option<HttpActionBridge>,
+}
+
+/// Kernel-owned bridge from an HttpEndpoint adapter result to a
+/// spec-defined Temper action.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HttpActionBridge {
+    /// Entity type to dispatch on, e.g. `Repository`.
+    pub entity_type: String,
+    /// Entity id template, e.g. `rp-{owner}-{repo}`. Placeholders come
+    /// from the route's extracted path params.
+    pub entity_id_template: String,
+    /// Spec-defined action name, e.g. `IngestPack`.
+    pub action: String,
+    /// Response renderer for the foreign protocol. `git-receive-pack`
+    /// is the first supported renderer.
+    pub response: String,
 }
 
 /// Successful match: the route plus extracted path params.
@@ -314,6 +342,23 @@ pub fn route_from_entity_fields(id: &str, fields: &serde_json::Value) -> Option<
         .get("TimeoutSecs")
         .and_then(|v| v.as_u64())
         .unwrap_or(60);
+    let git_pack_defaults =
+        integration_module == "git_receive_pack" || integration_module == "git_upload_pack";
+    let max_fuel = obj
+        .get("MaxFuel")
+        .and_then(|v| v.as_u64())
+        .or_else(|| git_pack_defaults.then_some(20_000_000_000));
+    let max_memory = obj
+        .get("MaxMemory")
+        .and_then(|v| v.as_u64())
+        .and_then(|v| usize::try_from(v).ok())
+        .or_else(|| git_pack_defaults.then_some(512 * 1024 * 1024));
+    let max_response_bytes = obj
+        .get("MaxResponseBytes")
+        .and_then(|v| v.as_u64())
+        .and_then(|v| usize::try_from(v).ok())
+        .or_else(|| git_pack_defaults.then_some(128 * 1024 * 1024));
+    let action_bridge = optional_action_bridge(obj)?;
     Some(HttpEndpointRoute {
         id: id.to_string(),
         path_prefix,
@@ -321,7 +366,43 @@ pub fn route_from_entity_fields(id: &str, fields: &serde_json::Value) -> Option<
         integration_module,
         requires_auth,
         timeout_secs: timeout_secs.min(u32::MAX as u64) as u32,
+        max_fuel,
+        max_memory,
+        max_response_bytes,
+        action_bridge,
     })
+}
+
+fn optional_action_bridge(
+    obj: &serde_json::Map<String, serde_json::Value>,
+) -> Option<Option<HttpActionBridge>> {
+    let entity_type = optional_string(obj, "ActionBridgeEntityType");
+    let entity_id_template = optional_string(obj, "ActionBridgeEntityId");
+    let action = optional_string(obj, "ActionBridgeAction");
+    let response = optional_string(obj, "ActionBridgeResponse");
+
+    if entity_type.is_none()
+        && entity_id_template.is_none()
+        && action.is_none()
+        && response.is_none()
+    {
+        return Some(None);
+    }
+
+    Some(Some(HttpActionBridge {
+        entity_type: entity_type?,
+        entity_id_template: entity_id_template?,
+        action: action?,
+        response: response?,
+    }))
+}
+
+fn optional_string(obj: &serde_json::Map<String, serde_json::Value>, key: &str) -> Option<String> {
+    obj.get(key)
+        .and_then(|v| v.as_str())
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_string)
 }
 
 /// Match `path` against `template`. Template segments of the form
@@ -417,6 +498,10 @@ mod tests {
             integration_module: integration_module.to_string(),
             requires_auth: false,
             timeout_secs: 60,
+            max_fuel: None,
+            max_memory: None,
+            max_response_bytes: None,
+            action_bridge: None,
         }
     }
 
@@ -539,6 +624,9 @@ mod tests {
             "IntegrationModule": "git_upload_pack",
             "RequiresAuth": true,
             "TimeoutSecs": 120,
+            "MaxFuel": 20000000000u64,
+            "MaxMemory": 536870912u64,
+            "MaxResponseBytes": 134217728u64,
         });
         let r = route_from_entity_fields("he-abc", &fields).unwrap();
         assert_eq!(r.id, "he-abc");
@@ -546,6 +634,45 @@ mod tests {
         assert_eq!(r.integration_module, "git_upload_pack");
         assert!(r.requires_auth);
         assert_eq!(r.timeout_secs, 120);
+        assert_eq!(r.max_fuel, Some(20_000_000_000));
+        assert_eq!(r.max_memory, Some(536_870_912));
+        assert_eq!(r.max_response_bytes, Some(134_217_728));
+        assert!(r.action_bridge.is_none());
+    }
+
+    #[tokio::test]
+    async fn route_from_entity_fields_projects_action_bridge() {
+        let fields = serde_json::json!({
+            "PathPrefix": "/{owner}/{repo}.git/git-receive-pack",
+            "Methods": "POST",
+            "IntegrationModule": "git_receive_pack",
+            "RequiresAuth": false,
+            "TimeoutSecs": 300,
+            "ActionBridgeEntityType": "Repository",
+            "ActionBridgeEntityId": "rp-{owner}-{repo}",
+            "ActionBridgeAction": "IngestPack",
+            "ActionBridgeResponse": "git-receive-pack",
+        });
+        let r = route_from_entity_fields("he-receive", &fields).unwrap();
+        assert_eq!(r.max_fuel, Some(20_000_000_000));
+        assert_eq!(r.max_memory, Some(512 * 1024 * 1024));
+        assert_eq!(r.max_response_bytes, Some(128 * 1024 * 1024));
+        let bridge = r.action_bridge.unwrap();
+        assert_eq!(bridge.entity_type, "Repository");
+        assert_eq!(bridge.entity_id_template, "rp-{owner}-{repo}");
+        assert_eq!(bridge.action, "IngestPack");
+        assert_eq!(bridge.response, "git-receive-pack");
+    }
+
+    #[tokio::test]
+    async fn route_from_entity_fields_rejects_partial_action_bridge() {
+        let fields = serde_json::json!({
+            "PathPrefix": "/x",
+            "Methods": "POST",
+            "IntegrationModule": "handler",
+            "ActionBridgeEntityType": "Repository",
+        });
+        assert!(route_from_entity_fields("he-partial", &fields).is_none());
     }
 
     #[tokio::test]

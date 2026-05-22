@@ -5,6 +5,8 @@
 
 use std::sync::{Arc, RwLock};
 
+use base64::Engine;
+use sha2::{Digest, Sha256};
 use temper_wasm::{
     SimWasmHost, StreamRegistry, WasmEngine, WasmError, WasmInvocationContext, WasmResourceLimits,
 };
@@ -153,7 +155,7 @@ async fn invoke_sdk_module_with_large_context_succeeds() {
         .compile_and_cache(SDK_CONTEXT_READER_WASM)
         .expect("sdk context reader should compile");
 
-    let ctx = build_large_context(700_000);
+    let ctx = build_large_context(4_000_000);
     let host = Arc::new(SimWasmHost::new());
 
     let streams = Arc::new(RwLock::new(StreamRegistry::default()));
@@ -175,8 +177,95 @@ async fn invoke_sdk_module_with_large_context_succeeds() {
         result.callback_params["entity_state_len"]
             .as_u64()
             .unwrap_or_default()
-            > 700_000,
+            > 4_000_000,
         "entity state should include the large payload"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "debug helper for real Genesis pack ingestion"]
+async fn invoke_scm_ingest_pack_from_env() {
+    let wasm_path = std::env::var("SCM_INGEST_WASM").expect("SCM_INGEST_WASM must be set");
+    let pack_path = std::env::var("SCM_INGEST_PACK").expect("SCM_INGEST_PACK must be set");
+    let head_sha = std::env::var("SCM_INGEST_HEAD")
+        .unwrap_or_else(|_| "65fbd22270e4bf7304de2d9b6895a465c332d602".to_string());
+    let wasm = std::fs::read(&wasm_path).expect("read wasm");
+    let pack = std::fs::read(&pack_path).expect("read pack");
+
+    let engine = WasmEngine::new().expect("engine should create");
+    let hash = engine.compile_and_cache(&wasm).expect("compile scm ingest");
+    let encoded_pack = base64::engine::general_purpose::STANDARD.encode(&pack);
+    let serialized_pack =
+        serde_json::to_vec(&serde_json::Value::String(encoded_pack)).expect("serialize pack field");
+    let pack_blob_key = format!(
+        "field-overflow/sha256/{:x}.json",
+        Sha256::digest(&serialized_pack)
+    );
+    let mut integration_config = std::collections::BTreeMap::new();
+    integration_config.insert(
+        "temper_api_url".to_string(),
+        "http://127.0.0.1:3000".to_string(),
+    );
+    let ctx = WasmInvocationContext {
+        tenant: "default".to_string(),
+        entity_type: "Repository".to_string(),
+        entity_id: "rp-temperpaw-paw-agent".to_string(),
+        trigger_action: "IngestPack".to_string(),
+        wasm_module: Some("scm_ingest_pack".to_string()),
+        trigger_params: serde_json::json!({
+            "PackBytes": {
+                "__temper_blob_ref": pack_blob_key,
+                "__temper_blob_size": serialized_pack.len(),
+                "__temper_blob_encoding": "json"
+            },
+            "RefUpdates": [{
+                "Name": "refs/heads/main",
+                "PreviousCommitSha": "0000000000000000000000000000000000000000",
+                "NewCommitSha": head_sha
+            }],
+            "ClientRequestId": "debug-env"
+        }),
+        entity_state: serde_json::json!({"status": "Active"}),
+        agent_id: None,
+        session_id: None,
+        integration_config,
+        trace_id: String::new(),
+        workflow_root_entity_type: None,
+        workflow_root_entity_id: None,
+        workflow_run_id: None,
+        http_request: None,
+    };
+
+    let blob_url = format!("http://127.0.0.1:3000/_internal/blobs/{pack_blob_key}");
+    let host = Arc::new(
+        SimWasmHost::new()
+            .with_response(
+                &blob_url,
+                200,
+                std::str::from_utf8(&serialized_pack).expect("pack field utf8"),
+            )
+            .with_default_response(200, r#"{"value":[]}"#),
+    );
+    let streams = Arc::new(RwLock::new(StreamRegistry::default()));
+    let limits = WasmResourceLimits {
+        max_fuel: 20_000_000_000,
+        max_memory: 1024 * 1024 * 1024,
+        max_duration: std::time::Duration::from_secs(300),
+        max_response_bytes: 128 * 1024 * 1024,
+    };
+    let result = engine
+        .invoke(&hash, &ctx, host, &limits, streams)
+        .await
+        .expect("invoke should not trap");
+
+    assert!(
+        result.success,
+        "scm ingest should succeed: {:?}",
+        result.error
+    );
+    println!(
+        "{}",
+        serde_json::to_string_pretty(&result.callback_params).unwrap()
     );
 }
 

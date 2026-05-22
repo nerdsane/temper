@@ -209,7 +209,8 @@ impl ServerState {
         ttl: Option<Duration>,
     ) -> Result<(), String> {
         let store = self.blob_store_for_tenant(tenant)?;
-        store.put_if_absent(key, body, ttl).await
+        store.put_if_absent(key, body, ttl).await?;
+        self.put_metadata_blob_shadow(tenant, key, body, ttl).await
     }
 
     /// Write bytes to a tenant-scoped content-addressed blob key.
@@ -221,10 +222,11 @@ impl ServerState {
         ttl: Option<Duration>,
     ) -> Result<(), String> {
         let store = self.blob_store_for_tenant(tenant)?;
-        store.put_content_addressed(key, body, ttl).await
+        store.put_content_addressed(key, body, ttl).await?;
+        self.put_metadata_blob_shadow(tenant, key, body, ttl).await
     }
 
-    pub(crate) async fn get_blob_with_legacy_fallback(
+    pub async fn get_blob_with_legacy_fallback(
         &self,
         tenant: &TenantId,
         key: &str,
@@ -261,6 +263,22 @@ impl ServerState {
             return Some(BlobStore::local_fs(self.data_dir.join("blobs")));
         }
         None
+    }
+
+    async fn put_metadata_blob_shadow(
+        &self,
+        tenant: &TenantId,
+        key: &str,
+        body: &[u8],
+        ttl: Option<Duration>,
+    ) -> Result<(), String> {
+        let Some(store) = self.metadata_store_for_tenant(tenant.as_str()).await else {
+            return Ok(());
+        };
+        store
+            .put_blob_with_ttl(key, body, ttl)
+            .await
+            .map_err(|error| format!("metadata blob shadow write failed for '{key}': {error}"))
     }
 }
 

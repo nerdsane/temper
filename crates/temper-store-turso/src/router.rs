@@ -15,7 +15,8 @@ use tokio::sync::RwLock;
 use tracing::{info, instrument, warn};
 
 use temper_runtime::persistence::{
-    EventStore, PersistenceEnvelope, PersistenceError, storage_error,
+    EventStore, PersistenceAppend, PersistenceAppendResult, PersistenceEnvelope, PersistenceError,
+    storage_error,
 };
 use temper_runtime::tenant::parse_persistence_id_parts;
 
@@ -657,6 +658,29 @@ impl EventStore for TenantStoreRouter {
         store
             .append(persistence_id, expected_sequence, events)
             .await
+    }
+
+    #[instrument(skip_all, fields(otel.name = "router.append_batch"))]
+    async fn append_batch(
+        &self,
+        appends: &[PersistenceAppend],
+    ) -> Result<Vec<PersistenceAppendResult>, PersistenceError> {
+        let Some(first) = appends.first() else {
+            return Ok(Vec::new());
+        };
+        let (tenant, _, _) =
+            parse_persistence_id_parts(&first.persistence_id).map_err(PersistenceError::Storage)?;
+        for append in &appends[1..] {
+            let (next_tenant, _, _) = parse_persistence_id_parts(&append.persistence_id)
+                .map_err(PersistenceError::Storage)?;
+            if next_tenant != tenant {
+                return Err(PersistenceError::Storage(format!(
+                    "append_batch cannot span routed tenant databases: '{tenant}' and '{next_tenant}'"
+                )));
+            }
+        }
+        let store = self.store_for_tenant(tenant).await?;
+        store.append_batch(appends).await
     }
 
     #[instrument(skip_all, fields(persistence_id, otel.name = "router.read_events"))]

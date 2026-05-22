@@ -16,7 +16,8 @@ use fred::prelude::*;
 use fred::types::scripts::Script;
 use serde::{Deserialize, Serialize};
 use temper_runtime::persistence::{
-    EventStore, PersistenceEnvelope, PersistenceError, storage_error,
+    EventStore, PersistenceAppend, PersistenceAppendResult, PersistenceEnvelope, PersistenceError,
+    storage_error,
 };
 use temper_runtime::tenant::parse_persistence_id_parts;
 
@@ -209,6 +210,31 @@ impl EventStore for RedisEventStore {
             other => Err(PersistenceError::Storage(format!(
                 "unexpected Lua script result: {other:?}"
             ))),
+        }
+    }
+
+    async fn append_batch(
+        &self,
+        appends: &[PersistenceAppend],
+    ) -> Result<Vec<PersistenceAppendResult>, PersistenceError> {
+        match appends {
+            [] => Ok(Vec::new()),
+            [append] => {
+                let sequence_nr = self
+                    .append(
+                        &append.persistence_id,
+                        append.expected_sequence,
+                        &append.events,
+                    )
+                    .await?;
+                Ok(vec![PersistenceAppendResult {
+                    persistence_id: append.persistence_id.clone(),
+                    sequence_nr,
+                }])
+            }
+            _ => Err(PersistenceError::Storage(
+                "RedisEventStore does not support atomic multi-journal append_batch".to_string(),
+            )),
         }
     }
 

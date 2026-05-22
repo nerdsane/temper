@@ -179,6 +179,54 @@ fn guard_unsupported_syntax() {
     assert!(parse_guard_clause("two words bad").is_err());
 }
 
+#[test]
+fn parses_composite_action_metadata() {
+    let input = r#"
+[automaton]
+name = "Repository"
+states = ["Active"]
+initial = "Active"
+
+[[action]]
+name = "IngestPack"
+kind = "Composite"
+from = ["Active"]
+to = "Active"
+params = ["PackBytes"]
+
+[[action.cedar_gate]]
+principal = "request.principal"
+resource = "this"
+action = "Repository::IngestPack"
+
+[[action.sub_writes]]
+target_entity = "Blob"
+action = "Create"
+generated_from = "pack_bytes"
+
+[[action.sub_writes]]
+target_entity = "Ref"
+action = "Update"
+generated_from = "ref_updates"
+"#;
+
+    let parsed = parse_toml_to_automaton(input).unwrap();
+    let action = parsed
+        .actions
+        .iter()
+        .find(|action| action.name == "IngestPack")
+        .unwrap();
+
+    assert_eq!(action.kind, "Composite");
+    assert_eq!(
+        action.cedar_gate.as_ref().map(|gate| gate.action.as_str()),
+        Some("Repository::IngestPack")
+    );
+    assert_eq!(action.sub_writes.len(), 2);
+    assert_eq!(action.sub_writes[0].target_entity, "Blob");
+    assert_eq!(action.sub_writes[1].action, "Update");
+}
+
 // --- ADR-0049: [[state_timeout]] parsing --------------------------------
 
 const SESSION_SPEC_WITH_TIMEOUTS: &str = r#"

@@ -2,7 +2,8 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use temper_runtime::persistence::{
-    EventMetadata, EventStore, PersistenceEnvelope, PersistenceError,
+    EventMetadata, EventStore, PersistenceAppend, PersistenceAppendResult, PersistenceEnvelope,
+    PersistenceError,
 };
 use temper_server::state::TrajectoryEntry;
 use temper_server::storage::{
@@ -115,6 +116,19 @@ impl EventStore for RecordingEventStore {
         Ok(events.len() as u64)
     }
 
+    async fn append_batch(
+        &self,
+        appends: &[PersistenceAppend],
+    ) -> Result<Vec<PersistenceAppendResult>, PersistenceError> {
+        assert_eq!(appends.len(), 1);
+        assert_eq!(appends[0].persistence_id, "default:Ticket:t-1");
+        assert_eq!(appends[0].expected_sequence, 0);
+        Ok(vec![PersistenceAppendResult {
+            persistence_id: appends[0].persistence_id.clone(),
+            sequence_nr: appends[0].events.len() as u64,
+        }])
+    }
+
     async fn read_events(
         &self,
         persistence_id: &str,
@@ -175,6 +189,20 @@ async fn boxed_event_store_delegates_through_object_safe_adapter() {
             .await
             .expect("append through dyn adapter"),
         2
+    );
+    assert_eq!(
+        store
+            .append_batch(&[PersistenceAppend {
+                persistence_id: "default:Ticket:t-1".to_string(),
+                expected_sequence: 0,
+                events: events.clone(),
+            }])
+            .await
+            .expect("append batch through dyn adapter"),
+        vec![PersistenceAppendResult {
+            persistence_id: "default:Ticket:t-1".to_string(),
+            sequence_nr: 2,
+        }]
     );
     assert_eq!(
         store
