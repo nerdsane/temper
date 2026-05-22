@@ -144,17 +144,22 @@ pub(in crate::state) async fn verify_query_projection_replay_parity(
         return Err("query-plane store is not configured".to_string());
     };
 
-    let mut entities = store
-        .list_entity_ids(tenant.as_str())
-        .await
-        .map_err(|error| format!("list persisted entity ids failed: {error}"))?;
+    let mut entities = if let Some(entity_limit) = entity_limit {
+        store
+            .list_entity_ids_limited(tenant.as_str(), entity_type_filter, entity_limit)
+            .await
+            .map_err(|error| format!("list bounded persisted entity ids failed: {error}"))?
+    } else {
+        let mut entities = store
+            .list_entity_ids(tenant.as_str())
+            .await
+            .map_err(|error| format!("list persisted entity ids failed: {error}"))?;
+        if let Some(entity_type_filter) = entity_type_filter {
+            entities.retain(|(entity_type, _)| entity_type == entity_type_filter);
+        }
+        entities
+    };
     entities.sort();
-    if let Some(entity_type_filter) = entity_type_filter {
-        entities.retain(|(entity_type, _)| entity_type == entity_type_filter);
-    }
-    if let Some(entity_limit) = entity_limit {
-        entities.truncate(entity_limit);
-    }
     let mut by_type = BTreeMap::<String, Vec<String>>::new();
     for (entity_type, entity_id) in entities {
         by_type.entry(entity_type).or_default().push(entity_id);

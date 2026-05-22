@@ -2403,7 +2403,7 @@ pub(crate) fn scalar_index_fields(fields: &serde_json::Value) -> (ScalarFieldInd
     (indexed, indexed_fields, skipped_fields)
 }
 
-fn postgres_placeholders(sql: &str, max_index: usize) -> String {
+pub(crate) fn postgres_placeholders(sql: &str, max_index: usize) -> String {
     let mut out = sql.to_string();
     for index in (1..=max_index).rev() {
         out = out.replace(&format!("?{index}"), &format!("${index}"));
