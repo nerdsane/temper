@@ -164,32 +164,57 @@ pub(super) async fn missing_catalog_entity_ids(
         return Vec::new();
     };
 
-    match query_plane
-        .load_entity_catalog_rows(tenant.as_str(), entity_type, entity_ids)
+    let coverage_fields = [String::from("entity_id")];
+    let present_ids = match query_plane
+        .load_selected_entity_catalog_rows(
+            tenant.as_str(),
+            entity_type,
+            entity_ids,
+            &coverage_fields,
+        )
         .await
     {
-        Ok(Some(rows)) => {
-            let present = rows
-                .into_iter()
+        Ok(Some(rows)) => Some(
+            rows.into_iter()
                 .map(|row| row.entity_id)
-                .collect::<BTreeSet<_>>();
-            entity_ids
-                .iter()
-                .filter(|id| !present.contains(*id))
-                .cloned()
-                .collect()
-        }
-        Ok(None) => Vec::new(),
+                .collect::<Vec<_>>(),
+        ),
+        Ok(None) => match query_plane
+            .load_entity_catalog_rows(tenant.as_str(), entity_type, entity_ids)
+            .await
+        {
+            Ok(Some(rows)) => Some(rows.into_iter().map(|row| row.entity_id).collect()),
+            Ok(None) => None,
+            Err(error) => {
+                tracing::warn!(
+                    error = %error,
+                    tenant = %tenant,
+                    entity_type = %entity_type,
+                    "catalog coverage row check failed; trusting SQL filter push-down result"
+                );
+                None
+            }
+        },
         Err(error) => {
             tracing::warn!(
                 error = %error,
                 tenant = %tenant,
                 entity_type = %entity_type,
-                "catalog coverage check failed; trusting SQL filter push-down result"
+                "catalog coverage presence check failed; trusting SQL filter push-down result"
             );
-            Vec::new()
+            None
         }
-    }
+    };
+
+    let Some(present_ids) = present_ids else {
+        return Vec::new();
+    };
+    let present = present_ids.into_iter().collect::<BTreeSet<_>>();
+    entity_ids
+        .iter()
+        .filter(|id| !present.contains(*id))
+        .cloned()
+        .collect()
 }
 
 /// Try to load a single entity body from the durable `entity_catalog`.
