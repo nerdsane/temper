@@ -327,7 +327,7 @@ async fn timeout_enforced_by_epoch() {
 async fn host_call_respects_invocation_duration_budget() {
     let engine = WasmEngine::new().unwrap();
     let hash = engine
-        .compile_and_cache(WAT_HOST_CALL_THEN_RETURN.as_bytes())
+        .compile_and_cache(WAT_HOST_HTTP_THEN_RETURN.as_bytes())
         .unwrap();
 
     let limits = WasmResourceLimits {

@@ -539,15 +539,11 @@ pub(super) async fn bootstrap_installed_apps(
 
     let restored_genesis_caches =
         temper_platform::genesis_install::restore_genesis_app_cache_roots(state).await;
-    if restored_genesis_caches > 0 {
-        println!("  Restored {restored_genesis_caches} Genesis app cache roots");
-    }
     let restored_genesis_registry_caches =
         temper_platform::genesis_install::restore_genesis_registry_cache_roots(state).await;
-    if restored_genesis_registry_caches > 0 {
-        tracing::info!(
-            restored = restored_genesis_registry_caches,
-            "Restored Genesis registry app cache roots"
+    if restored_genesis_caches > 0 || restored_genesis_registry_caches > 0 {
+        println!(
+            "  Restored Genesis app cache roots: service={restored_genesis_caches}, registry={restored_genesis_registry_caches}"
         );
     }
 
