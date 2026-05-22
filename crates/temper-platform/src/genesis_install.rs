@@ -314,13 +314,15 @@ pub async fn install_genesis_app_from_registry(
             };
         record_genesis_install_metadata(
             &install_platform,
-            &request.tenant,
-            &materialized_ref.name,
-            &app_ref,
-            version_hash,
-            &closure_id,
-            &registry_url,
-            &registry_tenant,
+            GenesisInstallMetadata {
+                target_tenant: &request.tenant,
+                app_name: &materialized_ref.name,
+                app_ref: &app_ref,
+                version_hash,
+                closure_id: &closure_id,
+                registry_url: &registry_url,
+                registry_tenant: &registry_tenant,
+            },
         )
         .await;
     }
@@ -587,13 +589,15 @@ impl BoundActionHook for GenesisInstallHook {
                 );
                 record_genesis_install_metadata(
                     &platform,
-                    &target_tenant,
-                    &name,
-                    &app_ref,
-                    &version_hash,
-                    &closure_id,
-                    &registry_url,
-                    &registry_tenant,
+                    GenesisInstallMetadata {
+                        target_tenant: &target_tenant,
+                        app_name: &name,
+                        app_ref: &app_ref,
+                        version_hash: &version_hash,
+                        closure_id: &closure_id,
+                        registry_url: &registry_url,
+                        registry_tenant: &registry_tenant,
+                    },
                 )
                 .await;
                 mark_installation(
@@ -651,15 +655,19 @@ impl BoundActionHook for GenesisInstallHook {
     }
 }
 
+struct GenesisInstallMetadata<'a> {
+    target_tenant: &'a str,
+    app_name: &'a str,
+    app_ref: &'a str,
+    version_hash: &'a str,
+    closure_id: &'a str,
+    registry_url: &'a str,
+    registry_tenant: &'a str,
+}
+
 async fn record_genesis_install_metadata(
     platform: &PlatformState,
-    target_tenant: &str,
-    app_name: &str,
-    app_ref: &str,
-    version_hash: &str,
-    closure_id: &str,
-    registry_url: &str,
-    registry_tenant: &str,
+    metadata: GenesisInstallMetadata<'_>,
 ) {
     let Some(ps) = platform
         .server
@@ -669,25 +677,25 @@ async fn record_genesis_install_metadata(
     else {
         return;
     };
-    let Some(digest) = os_app_bundle_digest(app_name) else {
+    let Some(digest) = os_app_bundle_digest(metadata.app_name) else {
         tracing::warn!(
-            tenant = %target_tenant,
-            app = %app_name,
-            app_ref = %app_ref,
+            tenant = %metadata.target_tenant,
+            app = %metadata.app_name,
+            app_ref = %metadata.app_ref,
             "Installed Genesis app but could not compute bundle digest for durable provenance"
         );
         return;
     };
 
     let record = InstalledAppRecord {
-        tenant: target_tenant.to_string(),
+        tenant: metadata.target_tenant.to_string(),
         app_name: digest.app_name,
         source_kind: "genesis".to_string(),
-        app_ref: app_ref.to_string(),
-        version_hash: version_hash.trim_start_matches('@').to_string(),
-        closure_id: closure_id.to_string(),
-        registry_url: registry_url.to_string(),
-        registry_tenant: registry_tenant.to_string(),
+        app_ref: metadata.app_ref.to_string(),
+        version_hash: metadata.version_hash.trim_start_matches('@').to_string(),
+        closure_id: metadata.closure_id.to_string(),
+        registry_url: metadata.registry_url.to_string(),
+        registry_tenant: metadata.registry_tenant.to_string(),
         app_version: digest.app_version,
         bundle_digest: digest.bundle_digest,
         spec_digest: digest.spec_digest,
@@ -702,9 +710,9 @@ async fn record_genesis_install_metadata(
 
     if let Err(error) = ps.record_installed_app_metadata(&record).await {
         tracing::warn!(
-            tenant = %target_tenant,
-            app = %app_name,
-            app_ref = %app_ref,
+            tenant = %metadata.target_tenant,
+            app = %metadata.app_name,
+            app_ref = %metadata.app_ref,
             error = %error,
             "Failed to persist Genesis app provenance"
         );

@@ -98,11 +98,14 @@ pub(super) fn composite_sub_write_uses_parent_gate(
             return false;
         }
 
-        match (entity_type, action, spec.generated_from.as_deref()) {
-            ("Blob" | "Tree" | "Commit" | "Tag", "Create", Some("pack_bytes")) => true,
-            ("Ref", "Create" | "Update" | "Delete", Some("ref_updates")) => true,
-            _ => false,
-        }
+        matches!(
+            (entity_type, action, spec.generated_from.as_deref()),
+            (
+                "Blob" | "Tree" | "Commit" | "Tag",
+                "Create",
+                Some("pack_bytes")
+            ) | ("Ref", "Create" | "Update" | "Delete", Some("ref_updates"))
+        )
     })
 }
 
