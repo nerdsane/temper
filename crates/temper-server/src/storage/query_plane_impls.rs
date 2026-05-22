@@ -4,7 +4,10 @@ use temper_store_turso::{
     QueryProjectionUpsert as TursoQueryProjectionUpsert, TenantStoreRouter, TursoEventStore,
 };
 
-use super::{EntityCatalogRow, QueryPlaneStore, QueryProjectionFieldsRow, QueryProjectionUpsert};
+use super::{
+    EntityCatalogRow, QueryFieldIndexOrder, QueryFieldIndexOrderDirection, QueryFieldIndexPage,
+    QueryPlaneStore, QueryProjectionFieldsRow, QueryProjectionUpsert,
+};
 
 #[async_trait::async_trait]
 impl QueryPlaneStore for PostgresEventStore {
@@ -52,6 +55,44 @@ impl QueryPlaneStore for PostgresEventStore {
             .map(Some)
     }
 
+    async fn query_field_index_page(
+        &self,
+        tenant: &str,
+        entity_type: &str,
+        where_clause: &str,
+        params: Vec<String>,
+        order_by: &[QueryFieldIndexOrder],
+        skip: usize,
+        top: usize,
+        include_count: bool,
+    ) -> Result<Option<QueryFieldIndexPage>, PersistenceError> {
+        let order_by = order_by
+            .iter()
+            .map(|order| {
+                (
+                    order.field_name.clone(),
+                    order.direction == QueryFieldIndexOrderDirection::Desc,
+                )
+            })
+            .collect::<Vec<_>>();
+        let (entity_ids, total_count) = PostgresEventStore::query_field_index_page(
+            self,
+            tenant,
+            entity_type,
+            where_clause,
+            params,
+            &order_by,
+            skip,
+            top,
+            include_count,
+        )
+        .await?;
+        Ok(Some(QueryFieldIndexPage {
+            entity_ids,
+            total_count,
+        }))
+    }
+
     async fn load_projection_fields_many(
         &self,
         tenant: &str,
@@ -81,6 +122,30 @@ impl QueryPlaneStore for PostgresEventStore {
         entity_ids: &[String],
     ) -> Result<Option<Vec<EntityCatalogRow>>, PersistenceError> {
         self.load_entity_catalog_rows_pg(tenant, entity_type, entity_ids)
+            .await
+            .map(|rows| {
+                Some(
+                    rows.into_iter()
+                        .map(|row| EntityCatalogRow {
+                            entity_id: row.entity_id,
+                            status: row.status,
+                            fields: row.fields,
+                            state: row.state,
+                            sequence_nr: row.sequence_nr,
+                        })
+                        .collect(),
+                )
+            })
+    }
+
+    async fn load_selected_entity_catalog_rows(
+        &self,
+        tenant: &str,
+        entity_type: &str,
+        entity_ids: &[String],
+        selected_fields: &[String],
+    ) -> Result<Option<Vec<EntityCatalogRow>>, PersistenceError> {
+        self.load_selected_entity_catalog_rows_pg(tenant, entity_type, entity_ids, selected_fields)
             .await
             .map(|rows| {
                 Some(

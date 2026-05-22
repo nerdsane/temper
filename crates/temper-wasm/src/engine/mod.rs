@@ -13,7 +13,7 @@ use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, RwLock};
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use sha2::{Digest, Sha256};
 use wasmtime::{Config, Engine, Linker, Module, ProfilingStrategy, ResourceLimiter, Store};
@@ -173,6 +173,8 @@ pub(crate) struct HostState {
     pub(crate) result_json: Option<String>,
     /// Host capabilities (HTTP, secrets, logging).
     pub(crate) host: Arc<dyn WasmHost>,
+    /// Wall-clock deadline shared by async host calls for this invocation.
+    pub(crate) host_call_deadline: Instant,
     /// Memory limiter enforcing `max_memory` per invocation.
     limiter: MemoryLimiter,
     /// Stream registry for binary data transfer between host and WASM guest.
@@ -190,6 +192,20 @@ pub(crate) struct HostState {
     pub(crate) blob_cache: BTreeMap<String, Vec<u8>>,
     /// Guest-created observability spans scoped to this invocation.
     pub(crate) guest_spans: GuestSpanRegistry,
+}
+
+impl HostState {
+    /// Remaining wall-clock budget for an async host call.
+    pub(crate) fn remaining_host_call_timeout(&self) -> Duration {
+        let remaining = self
+            .host_call_deadline
+            .saturating_duration_since(Instant::now());
+        if remaining.is_zero() {
+            Duration::from_millis(1)
+        } else {
+            remaining
+        }
+    }
 }
 
 /// WASM engine: compile, cache, invoke modules.
@@ -469,6 +485,7 @@ impl WasmEngine {
                 context_json: context_json.clone(),
                 result_json: None,
                 host,
+                host_call_deadline: start.checked_add(limits.max_duration).unwrap_or(start),
                 limiter: MemoryLimiter {
                     max_memory: limits.max_memory,
                 },

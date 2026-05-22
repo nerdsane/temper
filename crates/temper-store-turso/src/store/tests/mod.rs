@@ -1111,6 +1111,54 @@ async fn load_entity_catalog_rows_returns_full_projected_fields() {
 }
 
 #[tokio::test]
+async fn query_projection_status_follows_projected_state_over_fallback_argument() {
+    let store = make_store("query-projection-status-state-parity").await;
+    let tenant = format!("tenant-{}", uuid::Uuid::new_v4());
+    let fields = serde_json::json!({
+        "Title": "Default lifecycle row",
+        "Status": "Draft",
+    });
+    let state = serde_json::json!({
+        "entity_type": "Order",
+        "entity_id": "ord-draft",
+        "status": "Draft",
+        "item_count": 0,
+        "counters": {},
+        "booleans": {},
+        "lists": {},
+        "fields": fields.clone(),
+        "events": [],
+        "total_event_count": 1,
+        "sequence_nr": 1,
+    });
+
+    store
+        .upsert_query_projection_with_state(
+            &tenant,
+            "Order",
+            "ord-draft",
+            "Published",
+            &fields,
+            &state,
+            1,
+        )
+        .await
+        .expect("upsert projection with stale fallback status");
+
+    let rows = store
+        .load_entity_catalog_rows(&tenant, "Order", &["ord-draft".to_string()])
+        .await
+        .expect("load catalog row");
+    assert_eq!(rows[0].status, "Draft");
+
+    let ids = store
+        .query_field_index(&tenant, "Order", "status = ?3", vec!["Draft".to_string()])
+        .await
+        .expect("query catalog status");
+    assert_eq!(ids, vec!["ord-draft".to_string()]);
+}
+
+#[tokio::test]
 async fn published_artifact_upsert_round_trips_and_updates_by_id() {
     let store = make_store("published-artifacts").await;
     let tenant = format!("tenant-{}", uuid::Uuid::new_v4());

@@ -43,6 +43,14 @@ fn projection_hash(status: &str, fields: &serde_json::Value) -> String {
     format!("{:x}", hasher.finalize())
 }
 
+fn canonical_projection_status<'a>(fallback: &'a str, state: &'a serde_json::Value) -> &'a str {
+    state
+        .get("status")
+        .and_then(|value| value.as_str())
+        .filter(|status| !status.is_empty())
+        .unwrap_or(fallback)
+}
+
 /// Sparse projected field values loaded from the durable query plane.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ProjectedEntityFieldsRow {
@@ -129,6 +137,7 @@ impl TursoEventStore {
         state: &serde_json::Value,
         sequence_nr: u64,
     ) -> Result<(), PersistenceError> {
+        let status = canonical_projection_status(status, state);
         let _write_permit = self
             .acquire_write_permit("turso.upsert_query_projection", WritePriority::Low)
             .await?;

@@ -395,7 +395,32 @@ impl ServerState {
         &self,
         tenant: &TenantId,
     ) -> Result<super::QueryProjectionReplayParityReport, String> {
-        projection_backfill::verify_query_projection_replay_parity(self, tenant).await
+        projection_backfill::verify_query_projection_replay_parity(
+            self,
+            tenant,
+            None,
+            None,
+            "manual_full",
+        )
+        .await
+    }
+
+    /// Compare a bounded projection scope with authoritative event replay.
+    pub async fn verify_query_projection_replay_parity_bounded(
+        &self,
+        tenant: &TenantId,
+        entity_type: Option<&str>,
+        entity_limit: Option<usize>,
+        source: &str,
+    ) -> Result<super::QueryProjectionReplayParityReport, String> {
+        projection_backfill::verify_query_projection_replay_parity(
+            self,
+            tenant,
+            entity_type,
+            entity_limit,
+            source,
+        )
+        .await
     }
 
     /// Hydrate actor state from the event store by spawning actors for all

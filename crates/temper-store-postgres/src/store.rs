@@ -500,6 +500,49 @@ impl EventStore for PostgresEventStore {
 
         Ok(rows)
     }
+
+    async fn list_entity_ids_limited(
+        &self,
+        tenant: &str,
+        entity_type: Option<&str>,
+        limit: usize,
+    ) -> Result<Vec<(String, String)>, PersistenceError> {
+        if limit == 0 {
+            return Ok(Vec::new());
+        }
+        let limit = limit.min(i64::MAX as usize) as i64;
+        if let Some(entity_type) = entity_type {
+            let rows: Vec<(String, String)> = crate::dbm::postgres_query_as!(
+                "SELECT DISTINCT entity_type, entity_id \
+                 FROM events \
+                 WHERE tenant = $1 AND entity_type = $2 \
+                 ORDER BY entity_type, entity_id \
+                 LIMIT $3",
+            )
+            .bind(tenant)
+            .bind(entity_type)
+            .bind(limit)
+            .fetch_all(&self.pool)
+            .await
+            .map_err(|e| PersistenceError::Storage(e.to_string()))?;
+            return Ok(rows);
+        }
+
+        let rows: Vec<(String, String)> = crate::dbm::postgres_query_as!(
+            "SELECT DISTINCT entity_type, entity_id \
+             FROM events \
+             WHERE tenant = $1 \
+             ORDER BY entity_type, entity_id \
+             LIMIT $2",
+        )
+        .bind(tenant)
+        .bind(limit)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(|e| PersistenceError::Storage(e.to_string()))?;
+
+        Ok(rows)
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -539,7 +582,8 @@ mod tests {
 
     #[test]
     fn parse_3_segment_persistence_id() {
-        let (tenant, entity_type, entity_id) = parse_pid("alpha:Order:abc-123").unwrap();
+        let (tenant, entity_type, entity_id) =
+            parse_pid("alpha:Order:abc-123").expect("valid three-segment persistence ID");
         assert_eq!(tenant, "alpha");
         assert_eq!(entity_type, "Order");
         assert_eq!(entity_id, "abc-123");
@@ -547,7 +591,8 @@ mod tests {
 
     #[test]
     fn parse_legacy_2_segment_persistence_id() {
-        let (tenant, entity_type, entity_id) = parse_pid("Order:abc-123").unwrap();
+        let (tenant, entity_type, entity_id) =
+            parse_pid("Order:abc-123").expect("valid legacy two-segment persistence ID");
         assert_eq!(tenant, "default");
         assert_eq!(entity_type, "Order");
         assert_eq!(entity_id, "abc-123");
@@ -556,7 +601,8 @@ mod tests {
     #[test]
     fn parse_3_segment_with_colons_in_id() {
         // splitn(3, ':') puts everything after the second colon into entity_id
-        let (tenant, entity_type, entity_id) = parse_pid("beta:Task:T-1:sub").unwrap();
+        let (tenant, entity_type, entity_id) =
+            parse_pid("beta:Task:T-1:sub").expect("valid persistence ID with colon in entity ID");
         assert_eq!(tenant, "beta");
         assert_eq!(entity_type, "Task");
         assert_eq!(entity_id, "T-1:sub");
@@ -591,8 +637,10 @@ mod tests {
         };
 
         sqlx::test_block_on(async {
-            let pool = PgPool::connect(&database_url).await.unwrap();
-            run_migrations(&pool).await.unwrap();
+            let pool = PgPool::connect(&database_url)
+                .await
+                .expect("connect to DATABASE_URL");
+            run_migrations(&pool).await.expect("run migrations");
             let store = PostgresEventStore::new(pool);
 
             let tenant_a = format!("tenant-a-{}", uuid::Uuid::new_v4());
@@ -613,7 +661,7 @@ mod tests {
                     )],
                 )
                 .await
-                .unwrap();
+                .expect("append first order event");
             store
                 .append(
                     &order_1,
@@ -624,7 +672,7 @@ mod tests {
                     )],
                 )
                 .await
-                .unwrap();
+                .expect("append order update event");
             store
                 .append(
                     &order_2,
@@ -635,7 +683,7 @@ mod tests {
                     )],
                 )
                 .await
-                .unwrap();
+                .expect("append second order event");
             store
                 .append(
                     &task_1,
@@ -646,7 +694,7 @@ mod tests {
                     )],
                 )
                 .await
-                .unwrap();
+                .expect("append task event");
             store
                 .append(
                     &other_tenant,
@@ -657,9 +705,12 @@ mod tests {
                     )],
                 )
                 .await
-                .unwrap();
+                .expect("append other tenant event");
 
-            let mut entities = store.list_entity_ids(&tenant_a).await.unwrap();
+            let mut entities = store
+                .list_entity_ids(&tenant_a)
+                .await
+                .expect("list tenant entity IDs");
             entities.sort();
 
             assert_eq!(
@@ -791,6 +842,7 @@ mod tests {
     #[test]
     fn postgres_query_projection_batch_method_is_part_of_the_store_surface() {
         let _ = PostgresEventStore::load_query_projection_fields_many;
+        let _ = PostgresEventStore::load_selected_entity_catalog_rows_pg;
     }
 
     #[test]
@@ -804,8 +856,10 @@ mod tests {
         };
 
         sqlx::test_block_on(async {
-            let pool = PgPool::connect(&database_url).await.unwrap();
-            run_migrations(&pool).await.unwrap();
+            let pool = PgPool::connect(&database_url)
+                .await
+                .expect("connect to DATABASE_URL");
+            run_migrations(&pool).await.expect("run migrations");
             let store = PostgresEventStore::new(pool.clone());
             let tenant = format!("tenant-projection-{}", uuid::Uuid::new_v4());
 
@@ -823,7 +877,7 @@ mod tests {
                     12,
                 )
                 .await
-                .unwrap();
+                .expect("upsert query projection row");
 
             let rows = store
                 .load_query_projection_fields_many(
@@ -833,7 +887,7 @@ mod tests {
                     &["content_hash", "has_content"],
                 )
                 .await
-                .unwrap();
+                .expect("load requested projection fields");
 
             assert_eq!(rows.len(), 1);
             assert_eq!(rows[0].entity_id, "file-a");
@@ -857,12 +911,12 @@ mod tests {
                 .bind(&tenant)
                 .execute(&pool)
                 .await
-                .unwrap();
+                .expect("delete test entity field index rows");
             crate::dbm::postgres_query!("DELETE FROM entity_catalog WHERE tenant = $1")
                 .bind(&tenant)
                 .execute(&pool)
                 .await
-                .unwrap();
+                .expect("delete test entity catalog rows");
         });
     }
 
@@ -874,8 +928,10 @@ mod tests {
         };
 
         sqlx::test_block_on(async {
-            let pool = PgPool::connect(&database_url).await.unwrap();
-            run_migrations(&pool).await.unwrap();
+            let pool = PgPool::connect(&database_url)
+                .await
+                .expect("connect to DATABASE_URL");
+            run_migrations(&pool).await.expect("run migrations");
             let store = PostgresEventStore::new(pool.clone());
             let tenant = format!("tenant-published-artifact-{}", uuid::Uuid::new_v4());
 
@@ -895,7 +951,10 @@ mod tests {
                 status: "published",
             };
 
-            let row = store.upsert_published_artifact(&artifact).await.unwrap();
+            let row = store
+                .upsert_published_artifact(&artifact)
+                .await
+                .expect("upsert published artifact");
             assert_eq!(row.tenant, tenant);
             assert_eq!(row.id, "part-test");
             assert_eq!(row.public_url, "https://assets.example/published/file-a.md");
@@ -906,12 +965,15 @@ mod tests {
                 byte_length: 43,
                 ..artifact
             };
-            store.upsert_published_artifact(&updated).await.unwrap();
+            store
+                .upsert_published_artifact(&updated)
+                .await
+                .expect("update published artifact");
 
             let loaded = store
                 .load_published_artifact(&tenant, "part-test")
                 .await
-                .unwrap()
+                .expect("load published artifact")
                 .expect("artifact should load after upsert");
 
             assert_eq!(
@@ -925,7 +987,7 @@ mod tests {
                 .bind(&tenant)
                 .execute(&pool)
                 .await
-                .unwrap();
+                .expect("delete test published artifact rows");
         });
     }
 }

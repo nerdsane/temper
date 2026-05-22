@@ -1,5 +1,5 @@
 use std::collections::BTreeMap;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use temper_runtime::tenant::TenantId;
 
@@ -79,21 +79,87 @@ fn push_replay_parity_example(
         });
 }
 
+#[expect(
+    clippy::too_many_arguments,
+    reason = "run-level projection parity metric mirrors the metric dimensions and counters"
+)]
+fn record_replay_parity_run_summary(
+    tenant: &TenantId,
+    entity_type_filter: Option<&str>,
+    source: &str,
+    result: &str,
+    checked: u64,
+    drifted: u64,
+    missing: u64,
+    errors: u64,
+    duration: Duration,
+) {
+    crate::query_projection_metrics::record_replay_parity_run(
+        tenant.as_str(),
+        entity_type_filter.unwrap_or("*"),
+        source,
+        result,
+        checked,
+        drifted,
+        missing,
+        errors,
+        duration,
+    );
+}
+
 pub(in crate::state) async fn verify_query_projection_replay_parity(
     state: &ServerState,
     tenant: &TenantId,
+    entity_type_filter: Option<&str>,
+    entity_limit: Option<usize>,
+    source: &str,
 ) -> Result<QueryProjectionReplayParityReport, String> {
+    let run_started_at = Instant::now(); // determinism-ok: production-only parity verifier duration metric
     let Some((store, backend)) = state.event_journal() else {
+        record_replay_parity_run_summary(
+            tenant,
+            entity_type_filter,
+            source,
+            "error",
+            0,
+            0,
+            0,
+            1,
+            run_started_at.elapsed(),
+        );
         return Err("event journal is not configured".to_string());
     };
     let Some(query_plane) = state.query_plane_store() else {
+        record_replay_parity_run_summary(
+            tenant,
+            entity_type_filter,
+            source,
+            "error",
+            0,
+            0,
+            0,
+            1,
+            run_started_at.elapsed(),
+        );
         return Err("query-plane store is not configured".to_string());
     };
 
-    let entities = store
-        .list_entity_ids(tenant.as_str())
-        .await
-        .map_err(|error| format!("list persisted entity ids failed: {error}"))?;
+    let mut entities = if let Some(entity_limit) = entity_limit {
+        store
+            .list_entity_ids_limited(tenant.as_str(), entity_type_filter, entity_limit)
+            .await
+            .map_err(|error| format!("list bounded persisted entity ids failed: {error}"))?
+    } else {
+        let mut entities = store
+            .list_entity_ids(tenant.as_str())
+            .await
+            .map_err(|error| format!("list persisted entity ids failed: {error}"))?;
+        if let Some(entity_type_filter) = entity_type_filter {
+            entities.retain(|(entity_type, _)| entity_type == entity_type_filter);
+        }
+        entities
+    };
+    entities.sort();
     let mut by_type = BTreeMap::<String, Vec<String>>::new();
     for (entity_type, entity_id) in entities {
         by_type.entry(entity_type).or_default().push(entity_id);
@@ -101,6 +167,8 @@ pub(in crate::state) async fn verify_query_projection_replay_parity(
 
     let mut report = QueryProjectionReplayParityReport {
         tenant: tenant.as_str().to_string(),
+        entity_type: entity_type_filter.map(str::to_string),
+        entity_limit: entity_limit.map(|limit| limit as u64),
         ..Default::default()
     };
 
@@ -348,6 +416,8 @@ pub(in crate::state) async fn verify_query_projection_replay_parity(
 
     tracing::info!(
         tenant = %tenant,
+        entity_type = entity_type_filter.unwrap_or("*"),
+        entity_limit = entity_limit.unwrap_or(usize::MAX),
         checked = report.checked,
         matched = report.matched,
         drifted = report.drifted,
@@ -355,6 +425,24 @@ pub(in crate::state) async fn verify_query_projection_replay_parity(
         deleted_absent = report.deleted_absent,
         errors = report.errors,
         "query projection replay parity verification complete"
+    );
+    let result = if report.errors > 0 {
+        "error"
+    } else if report.drifted > 0 || report.missing > 0 {
+        "drift"
+    } else {
+        "clean"
+    };
+    record_replay_parity_run_summary(
+        tenant,
+        entity_type_filter,
+        source,
+        result,
+        report.checked,
+        report.drifted,
+        report.missing,
+        report.errors,
+        run_started_at.elapsed(),
     );
     Ok(report)
 }

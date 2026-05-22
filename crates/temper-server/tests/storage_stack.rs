@@ -239,6 +239,13 @@ async fn boxed_event_store_delegates_through_object_safe_adapter() {
             .expect("list by type through dyn adapter"),
         vec!["t-1".to_string()]
     );
+    assert_eq!(
+        store
+            .list_entity_ids_limited("default", Some("Ticket"), 1)
+            .await
+            .expect("bounded list through dyn adapter"),
+        vec![("Ticket".to_string(), "t-1".to_string())]
+    );
 }
 
 #[test]

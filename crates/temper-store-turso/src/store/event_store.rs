@@ -335,6 +335,79 @@ impl EventStore for TursoEventStore {
         self.list_entity_ids_by_type_from_read_sources(tenant, entity_type)
             .await
     }
+
+    async fn list_entity_ids_limited(
+        &self,
+        tenant: &str,
+        entity_type: Option<&str>,
+        limit: usize,
+    ) -> Result<Vec<(String, String)>, PersistenceError> {
+        if limit == 0 {
+            return Ok(Vec::new());
+        }
+        let conn = self.configured_connection().await?;
+        let limit = limit.min(i64::MAX as usize) as i64;
+        let mut out = Vec::new();
+
+        if let Some(entity_type) = entity_type {
+            let mut rows = conn
+                .query(
+                    "SELECT DISTINCT e.entity_type, e.entity_id
+                     FROM events e
+                     WHERE e.tenant = ?1
+                       AND e.entity_type = ?2
+                       AND NOT EXISTS (
+                         SELECT 1
+                         FROM events d
+                         WHERE d.tenant = e.tenant
+                           AND d.entity_type = e.entity_type
+                           AND d.entity_id = e.entity_id
+                           AND d.event_type = 'Deleted'
+                       )
+                     ORDER BY e.entity_type, e.entity_id
+                     LIMIT ?3",
+                    params![tenant, entity_type, limit],
+                )
+                .await
+                .map_err(storage_error)?;
+
+            while let Some(row) = rows.next().await.map_err(storage_error)? {
+                out.push((
+                    row.get::<String>(0).map_err(storage_error)?,
+                    row.get::<String>(1).map_err(storage_error)?,
+                ));
+            }
+            return Ok(out);
+        }
+
+        let mut rows = conn
+            .query(
+                "SELECT DISTINCT e.entity_type, e.entity_id
+                 FROM events e
+                 WHERE e.tenant = ?1
+                   AND NOT EXISTS (
+                     SELECT 1
+                     FROM events d
+                     WHERE d.tenant = e.tenant
+                       AND d.entity_type = e.entity_type
+                       AND d.entity_id = e.entity_id
+                       AND d.event_type = 'Deleted'
+                   )
+                 ORDER BY e.entity_type, e.entity_id
+                 LIMIT ?2",
+                params![tenant, limit],
+            )
+            .await
+            .map_err(storage_error)?;
+
+        while let Some(row) = rows.next().await.map_err(storage_error)? {
+            out.push((
+                row.get::<String>(0).map_err(storage_error)?,
+                row.get::<String>(1).map_err(storage_error)?,
+            ));
+        }
+        Ok(out)
+    }
 }
 
 impl TursoEventStore {
