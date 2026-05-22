@@ -8,7 +8,7 @@ use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
 use temper_odata::path::{ODataPath, parse_path};
 use temper_odata::query::parse_query_options;
-use temper_odata::query::types::{ExpandItem, ExpandOptions, QueryOptions};
+use temper_odata::query::types::{ExpandItem, ExpandOptions, OrderDirection, QueryOptions};
 use temper_runtime::tenant::TenantId;
 use temper_wasm::{StreamRegistry, WasmInvocationContext};
 use tracing::instrument;
@@ -29,6 +29,7 @@ use crate::blobs::hydrate_blob_refs_for_tenant;
 use crate::query_eval::{apply_query_options, expand_entity, select_fields};
 use crate::response::{ODataResponse, ODataStreamResponse, ODataXmlResponse, odata_error};
 use crate::state::ServerState;
+use crate::storage::{QueryFieldIndexOrder, QueryFieldIndexOrderDirection, QueryFieldIndexPage};
 
 /// Recursively resolve an OData path to its parent entity's
 /// (entity_type, entity_id, entity_set_name).
@@ -470,6 +471,71 @@ fn filter_only_query_options(query_options: &QueryOptions) -> QueryOptions {
     }
 }
 
+#[expect(
+    clippy::too_many_arguments,
+    reason = "bounded SQL pushdown page selection boundary"
+)]
+async fn try_select_sql_paged_pushdown_entity_ids(
+    state: &ServerState,
+    tenant: &TenantId,
+    entity_type: &str,
+    where_clause: &str,
+    params: Vec<String>,
+    query_options: &QueryOptions,
+    default_page_size: usize,
+    max_entities: usize,
+) -> Result<Option<QueryFieldIndexPage>, String> {
+    let Some(query_plane) = state.query_plane_store() else {
+        return Ok(None);
+    };
+    if query_options.expand.is_some() {
+        return Ok(None);
+    }
+
+    let top = query_options
+        .top
+        .unwrap_or(default_page_size)
+        .min(max_entities);
+    if top == 0 {
+        return Ok(Some(QueryFieldIndexPage {
+            entity_ids: Vec::new(),
+            total_count: if query_options.count == Some(true) {
+                Some(0)
+            } else {
+                None
+            },
+        }));
+    }
+    let skip = query_options.skip.unwrap_or(0);
+    let order_by = query_options
+        .orderby
+        .as_deref()
+        .unwrap_or_default()
+        .iter()
+        .map(|clause| QueryFieldIndexOrder {
+            field_name: clause.property.clone(),
+            direction: match clause.direction {
+                OrderDirection::Asc => QueryFieldIndexOrderDirection::Asc,
+                OrderDirection::Desc => QueryFieldIndexOrderDirection::Desc,
+            },
+        })
+        .collect::<Vec<_>>();
+
+    query_plane
+        .query_field_index_page(
+            tenant.as_str(),
+            entity_type,
+            where_clause,
+            params,
+            &order_by,
+            skip,
+            top,
+            query_options.count == Some(true),
+        )
+        .await
+        .map_err(|error| error.to_string())
+}
+
 /// Handle `EntitySet` path: list all entities in a set with query options.
 #[instrument(skip_all, fields(
     otel.name = "odata.entity_set_read",
@@ -520,46 +586,97 @@ async fn handle_entity_set(
     );
 
     // ---- Filter push-down: try SQL-level filtering first ----
-    let sql_pushdown_ids = if let Some(filter) = &query_options.filter {
-        if let Some(translated) = super::filter_sql::try_translate_filter(filter) {
-            if let Some(query_plane) = state.query_plane_store() {
-                match query_plane
-                    .query_field_index(
-                        tenant.as_str(),
-                        &entity_type,
-                        &translated.where_clause,
-                        translated.params,
-                    )
-                    .await
-                {
-                    Ok(Some(ids)) => {
-                        tracing::debug!(
-                            entity_type = %entity_type,
-                            matched = ids.len(),
-                            "OData filter push-down succeeded"
-                        );
-                        Some(ids)
-                    }
-                    Ok(None) => None, // backend doesn't support field index
-                    Err(e) => {
-                        tracing::warn!(
-                            error = %e,
-                            "OData filter push-down query failed, falling back to in-memory"
-                        );
-                        None
+    let translated_filter = query_options
+        .filter
+        .as_ref()
+        .and_then(super::filter_sql::try_translate_filter);
+    let mut sql_paged_pushdown = None;
+    let sql_pushdown_ids = if let Some(translated) = translated_filter {
+        if let Some(query_plane) = state.query_plane_store() {
+            match try_select_sql_paged_pushdown_entity_ids(
+                state,
+                tenant,
+                &entity_type,
+                &translated.where_clause,
+                translated.params.clone(),
+                query_options,
+                default_page_size,
+                max_entities,
+            )
+            .await
+            {
+                Ok(Some(page)) => {
+                    tracing::debug!(
+                        entity_type = %entity_type,
+                        matched = page.total_count.unwrap_or(page.entity_ids.len()),
+                        returned = page.entity_ids.len(),
+                        "OData paged filter push-down succeeded"
+                    );
+                    sql_paged_pushdown = Some(page);
+                    None
+                }
+                Ok(None) => {
+                    match query_plane
+                        .query_field_index(
+                            tenant.as_str(),
+                            &entity_type,
+                            &translated.where_clause,
+                            translated.params,
+                        )
+                        .await
+                    {
+                        Ok(Some(ids)) => {
+                            tracing::debug!(
+                                entity_type = %entity_type,
+                                matched = ids.len(),
+                                "OData filter push-down succeeded"
+                            );
+                            Some(ids)
+                        }
+                        Ok(None) => None, // backend doesn't support field index
+                        Err(e) => {
+                            tracing::warn!(
+                                error = %e,
+                                "OData filter push-down query failed, falling back to in-memory"
+                            );
+                            None
+                        }
                     }
                 }
-            } else {
-                None
+                Err(e) => {
+                    tracing::warn!(
+                        error = %e,
+                        "OData paged filter push-down query failed, falling back to id push-down"
+                    );
+                    match query_plane
+                        .query_field_index(
+                            tenant.as_str(),
+                            &entity_type,
+                            &translated.where_clause,
+                            translated.params,
+                        )
+                        .await
+                    {
+                        Ok(Some(ids)) => Some(ids),
+                        Ok(None) => None,
+                        Err(e) => {
+                            tracing::warn!(
+                                error = %e,
+                                "OData filter push-down query failed, falling back to in-memory"
+                            );
+                            None
+                        }
+                    }
+                }
             }
         } else {
-            None // filter couldn't be translated
+            None
         }
     } else {
         None // no filter
     };
 
-    let filter_pushdown = sql_pushdown_ids.is_some();
+    let filter_pushdown = sql_paged_pushdown.is_some() || sql_pushdown_ids.is_some();
     let prefer_catalog_materialization = filter_pushdown || state.query_plane_store().is_some();
     let mut pushdown_coverage_entities = Vec::new();
     let mut final_selected_catalog_fields = selected_catalog_fields;
@@ -574,9 +691,52 @@ async fn handle_entity_set(
         "no_filter_pushdown"
     };
     let candidate_count_for_span;
-    let (entity_ids, apply_options, precomputed_count) = if let Some(pushed_ids) = sql_pushdown_ids
-    {
+    let (entity_ids, apply_options, precomputed_count) = if let Some(page) = sql_paged_pushdown {
+        candidate_count_for_span = page.total_count.unwrap_or(page.entity_ids.len());
+        pushdown_sparse_page = true;
+        pushdown_sparse_skip_reason = "sql_page";
+        pushdown_sparse_probe_count = page.entity_ids.len();
+        pushdown_page_count = page.entity_ids.len();
+
+        let mut opts = query_options.clone();
+        opts.filter = None;
+        opts.orderby = None;
+        opts.top = None;
+        opts.skip = None;
+        opts.count = None;
+        if query_options.select.is_some() && query_options.expand.is_none() {
+            final_selected_catalog_fields = query_options.select.as_deref();
+            opts.select = None;
+        }
+        (page.entity_ids, opts, page.total_count)
+    } else if let Some(pushed_ids) = sql_pushdown_ids {
         candidate_count_for_span = pushed_ids.len();
+        let fallback_candidate_budget = max_entities.saturating_mul(10).max(default_page_size);
+        if pushed_ids.len() > fallback_candidate_budget {
+            span.record("filter_pushdown", true);
+            span.record("catalog_materialization", prefer_catalog_materialization);
+            span.record("id_source", "filter_pushdown");
+            span.record("candidate_count", pushed_ids.len() as u64);
+            span.record("catalog_coverage_missing", 0_u64);
+            span.record("catalog_coverage_matched", 0_u64);
+            span.record("pushdown_sparse_page", false);
+            span.record("pushdown_sparse_probe_count", 0_u64);
+            span.record("pushdown_page_count", 0_u64);
+            span.record("pushdown_sparse_skip_reason", "fallback_candidate_budget");
+            tracing::warn!(
+                tenant = %tenant,
+                entity_type = %entity_type,
+                candidate_count = pushed_ids.len(),
+                fallback_candidate_budget,
+                "OData pushed-down candidate set requires native paged push-down"
+            );
+            return odata_error(
+                StatusCode::PAYLOAD_TOO_LARGE,
+                "QueryTooLarge",
+                "This filtered query matched more projected entities than the bounded fallback can materialize. Use a narrower filter or a storage backend with native paged push-down.",
+            )
+            .into_response();
+        }
         let all_entity_ids = state.list_entity_ids_lazy(tenant, &entity_type).await;
         let pushed_id_set = pushed_ids.iter().cloned().collect::<BTreeSet<_>>();
         let mut missing_ids =

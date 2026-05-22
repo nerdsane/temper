@@ -99,6 +99,37 @@ pub trait EventStore: Send + Sync + 'static {
         tenant: &str,
         entity_type: &str,
     ) -> impl std::future::Future<Output = Result<Vec<String>, PersistenceError>> + Send;
+
+    /// List at most `limit` authoritative `(entity_type, entity_id)` pairs for
+    /// a tenant, optionally scoped to one entity type.
+    ///
+    /// Storage backends should override this to apply the bound inside the
+    /// backing query. The default is intended for small in-memory/test stores.
+    fn list_entity_ids_limited(
+        &self,
+        tenant: &str,
+        entity_type: Option<&str>,
+        limit: usize,
+    ) -> impl std::future::Future<Output = Result<Vec<(String, String)>, PersistenceError>> + Send
+    {
+        async move {
+            if limit == 0 {
+                return Ok(Vec::new());
+            }
+            let mut entities = if let Some(entity_type) = entity_type {
+                self.list_entity_ids_by_type(tenant, entity_type)
+                    .await?
+                    .into_iter()
+                    .map(|entity_id| (entity_type.to_string(), entity_id))
+                    .collect::<Vec<_>>()
+            } else {
+                self.list_entity_ids(tenant).await?
+            };
+            entities.sort();
+            entities.truncate(limit);
+            Ok(entities)
+        }
+    }
 }
 
 /// A persisted event with metadata.

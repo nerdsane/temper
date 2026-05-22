@@ -36,6 +36,11 @@ mod published_artifacts;
 pub use published_artifacts::{
     PublishedArtifactStore, PublishedArtifactStoreRow, PublishedArtifactStoreUpsert,
 };
+mod query_plane;
+pub use query_plane::{
+    EntityCatalogRow, QueryFieldIndexOrder, QueryFieldIndexOrderDirection, QueryFieldIndexPage,
+    QueryPlaneStore, QueryProjectionFieldsRow,
+};
 
 pub type EventStoreFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
 
@@ -76,6 +81,13 @@ pub trait DynEventStore: Send + Sync {
         tenant: &'a str,
         entity_type: &'a str,
     ) -> EventStoreFuture<'a, Result<Vec<String>, PersistenceError>>;
+
+    fn list_entity_ids_limited<'a>(
+        &'a self,
+        tenant: &'a str,
+        entity_type: Option<&'a str>,
+        limit: usize,
+    ) -> EventStoreFuture<'a, Result<Vec<(String, String)>, PersistenceError>>;
 }
 
 impl<T> DynEventStore for T
@@ -141,6 +153,20 @@ where
             self,
             tenant,
             entity_type,
+        ))
+    }
+
+    fn list_entity_ids_limited<'a>(
+        &'a self,
+        tenant: &'a str,
+        entity_type: Option<&'a str>,
+        limit: usize,
+    ) -> EventStoreFuture<'a, Result<Vec<(String, String)>, PersistenceError>> {
+        Box::pin(EventStore::list_entity_ids_limited(
+            self,
+            tenant,
+            entity_type,
+            limit,
         ))
     }
 }
@@ -219,6 +245,17 @@ impl BoxedEventStore {
     ) -> Result<Vec<String>, PersistenceError> {
         self.0.list_entity_ids_by_type(tenant, entity_type).await
     }
+
+    pub async fn list_entity_ids_limited(
+        &self,
+        tenant: &str,
+        entity_type: Option<&str>,
+        limit: usize,
+    ) -> Result<Vec<(String, String)>, PersistenceError> {
+        self.0
+            .list_entity_ids_limited(tenant, entity_type, limit)
+            .await
+    }
 }
 
 /// Backend label used for metrics and operator-facing diagnostics only.
@@ -241,29 +278,6 @@ impl BackendLabel {
             Self::Sim => "sim",
         }
     }
-}
-
-/// Backend-neutral projection row returned by [`QueryPlaneStore`].
-#[derive(Clone, Debug, PartialEq)]
-pub struct QueryProjectionFieldsRow {
-    pub entity_id: String,
-    pub status: String,
-    pub fields: BTreeMap<String, Option<String>>,
-}
-
-/// Full entity row materialized from the durable query-plane catalog.
-///
-/// Returned by [`QueryPlaneStore::load_entity_catalog_rows`] and used by the
-/// OData read path to skip actor hydration on collection materialization.
-#[derive(Clone, Debug, PartialEq)]
-pub struct EntityCatalogRow {
-    pub entity_id: String,
-    pub status: String,
-    /// Raw JSONB fields object as written by the projection upsert.
-    pub fields: serde_json::Value,
-    /// Full projected entity response state, with unbounded event history removed.
-    pub state: Option<serde_json::Value>,
-    pub sequence_nr: u64,
 }
 
 /// Backend-neutral row for one granular Cedar policy entry.
@@ -304,82 +318,6 @@ impl From<PostgresPolicyRow> for PolicyStoreRow {
             enabled: row.enabled,
         }
     }
-}
-
-/// Durable query-plane capability.
-#[async_trait::async_trait]
-pub trait QueryPlaneStore: Send + Sync {
-    #[expect(clippy::too_many_arguments, reason = "projection upsert boundary")]
-    async fn upsert_projection(
-        &self,
-        tenant: &str,
-        entity_type: &str,
-        entity_id: &str,
-        status: &str,
-        fields: &serde_json::Value,
-        state: &serde_json::Value,
-        sequence_nr: u64,
-    ) -> Result<(), PersistenceError>;
-
-    async fn remove_projection(
-        &self,
-        tenant: &str,
-        entity_type: &str,
-        entity_id: &str,
-    ) -> Result<(), PersistenceError>;
-
-    async fn query_field_index(
-        &self,
-        tenant: &str,
-        entity_type: &str,
-        where_clause: &str,
-        params: Vec<String>,
-    ) -> Result<Option<Vec<String>>, PersistenceError>;
-
-    async fn load_projection_fields_many(
-        &self,
-        tenant: &str,
-        entity_type: &str,
-        entity_ids: &[String],
-        field_names: &[&str],
-    ) -> Result<Option<Vec<QueryProjectionFieldsRow>>, PersistenceError>;
-
-    /// Batch-fetch full entity rows from the projection catalog.
-    ///
-    /// Returns a partial result — only rows present in the catalog. IDs not
-    /// in the catalog (yet to be projected, or never written) are simply
-    /// absent from the response. Returns `None` if the backend cannot
-    /// service catalog reads at all (used by routers that fan out per
-    /// tenant; default impl returns `Some(vec![])`).
-    async fn load_entity_catalog_rows(
-        &self,
-        _tenant: &str,
-        _entity_type: &str,
-        _entity_ids: &[String],
-    ) -> Result<Option<Vec<EntityCatalogRow>>, PersistenceError> {
-        Ok(None)
-    }
-
-    /// Batch-fetch catalog rows with only the JSON properties required by a
-    /// safe `$select` collection read.
-    ///
-    /// The returned rows preserve `entity_id`, `status`, and `sequence_nr`,
-    /// but may set `state` to `None` and store the selected properties in
-    /// `fields`. Backends that cannot perform a sparse catalog load return
-    /// `None`, allowing callers to use [`QueryPlaneStore::load_entity_catalog_rows`].
-    async fn load_selected_entity_catalog_rows(
-        &self,
-        _tenant: &str,
-        _entity_type: &str,
-        _entity_ids: &[String],
-        _selected_fields: &[String],
-    ) -> Result<Option<Vec<EntityCatalogRow>>, PersistenceError> {
-        Ok(None)
-    }
-
-    async fn projected_entity_counts_by_tenant(
-        &self,
-    ) -> Result<Option<Vec<(String, u64)>>, PersistenceError>;
 }
 
 /// Inputs for a native brand-new data-only entity create.
@@ -2232,6 +2170,44 @@ impl QueryPlaneStore for PostgresEventStore {
         PostgresEventStore::query_field_index(self, tenant, entity_type, where_clause, params)
             .await
             .map(Some)
+    }
+
+    async fn query_field_index_page(
+        &self,
+        tenant: &str,
+        entity_type: &str,
+        where_clause: &str,
+        params: Vec<String>,
+        order_by: &[QueryFieldIndexOrder],
+        skip: usize,
+        top: usize,
+        include_count: bool,
+    ) -> Result<Option<QueryFieldIndexPage>, PersistenceError> {
+        let order_by = order_by
+            .iter()
+            .map(|order| {
+                (
+                    order.field_name.clone(),
+                    order.direction == QueryFieldIndexOrderDirection::Desc,
+                )
+            })
+            .collect::<Vec<_>>();
+        let (entity_ids, total_count) = PostgresEventStore::query_field_index_page(
+            self,
+            tenant,
+            entity_type,
+            where_clause,
+            params,
+            &order_by,
+            skip,
+            top,
+            include_count,
+        )
+        .await?;
+        Ok(Some(QueryFieldIndexPage {
+            entity_ids,
+            total_count,
+        }))
     }
 
     async fn load_projection_fields_many(
