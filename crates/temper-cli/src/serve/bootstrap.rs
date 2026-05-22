@@ -542,6 +542,11 @@ pub(super) async fn bootstrap_installed_apps(
     if restored_genesis_caches > 0 {
         println!("  Restored {restored_genesis_caches} Genesis app cache roots");
     }
+    let restored_genesis_registry_caches =
+        temper_platform::genesis_install::restore_genesis_registry_cache_roots(state).await;
+    if restored_genesis_registry_caches > 0 {
+        println!("  Restored {restored_genesis_registry_caches} Genesis registry app cache roots");
+    }
 
     for ((tenant, app_name), source) in requested {
         // Replay through the real installer every startup. Presence-only checks

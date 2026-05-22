@@ -56,6 +56,19 @@ pub fn add_os_apps_dir(dir: PathBuf) {
     lock.merge_catalog(additional);
 }
 
+/// Add an app directory and prefer its bundles over existing catalog entries.
+///
+/// Genesis installs use this path because a pinned registry closure is the
+/// source of truth for the requested install. Development/local app catalogs may
+/// still be present for tests or helper tools, but they must not shadow the
+/// pinned Genesis bundle when both expose the same app name.
+pub fn add_os_apps_dir_preferred(dir: PathBuf) {
+    let additional = AppCatalog::from_dir(dir);
+    let cat = catalog();
+    let mut lock = cat.write().unwrap(); // ci-ok: infallible lock
+    lock.merge_catalog_preferred(additional);
+}
+
 /// Re-scan the OS apps directory and refresh the catalog.
 ///
 /// Call this after modifying app files on disk to pick up changes
@@ -256,6 +269,26 @@ impl AppCatalog {
                 .iter()
                 .any(|existing| existing.name == entry.name)
             {
+                self.entries.push(entry);
+            }
+        }
+    }
+
+    fn merge_catalog_preferred(&mut self, additional: AppCatalog) {
+        if additional.apps_dir.is_dir() && !self.additional_dirs.contains(&additional.apps_dir) {
+            self.additional_dirs.push(additional.apps_dir.clone());
+        }
+        for (name, path) in additional.paths {
+            self.paths.insert(name, path);
+        }
+        for entry in additional.entries {
+            if let Some(existing) = self
+                .entries
+                .iter_mut()
+                .find(|existing| existing.name == entry.name)
+            {
+                *existing = entry;
+            } else {
                 self.entries.push(entry);
             }
         }

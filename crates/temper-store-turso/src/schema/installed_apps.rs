@@ -5,6 +5,9 @@
 pub const CREATE_TENANT_INSTALLED_APPS_TABLE: &str = "\
 CREATE TABLE IF NOT EXISTS tenant_installed_apps (
     tenant_id TEXT NOT NULL, app_name TEXT NOT NULL, app_version TEXT NOT NULL DEFAULT '',
+    source_kind TEXT NOT NULL DEFAULT 'local', app_ref TEXT NOT NULL DEFAULT '',
+    version_hash TEXT NOT NULL DEFAULT '', closure_id TEXT NOT NULL DEFAULT '',
+    registry_url TEXT NOT NULL DEFAULT '', registry_tenant TEXT NOT NULL DEFAULT '',
     bundle_digest TEXT NOT NULL DEFAULT '', spec_digest TEXT NOT NULL DEFAULT '',
     policy_digest TEXT NOT NULL DEFAULT '', wasm_digest TEXT NOT NULL DEFAULT '',
     content_digest TEXT NOT NULL DEFAULT '', seed_digest TEXT NOT NULL DEFAULT '',
@@ -15,6 +18,18 @@ CREATE TABLE IF NOT EXISTS tenant_installed_apps (
 
 pub const ALTER_INSTALLED_APPS_ADD_APP_VERSION: &str =
     "ALTER TABLE tenant_installed_apps ADD COLUMN app_version TEXT NOT NULL DEFAULT ''";
+pub const ALTER_INSTALLED_APPS_ADD_SOURCE_KIND: &str =
+    "ALTER TABLE tenant_installed_apps ADD COLUMN source_kind TEXT NOT NULL DEFAULT 'local'";
+pub const ALTER_INSTALLED_APPS_ADD_APP_REF: &str =
+    "ALTER TABLE tenant_installed_apps ADD COLUMN app_ref TEXT NOT NULL DEFAULT ''";
+pub const ALTER_INSTALLED_APPS_ADD_VERSION_HASH: &str =
+    "ALTER TABLE tenant_installed_apps ADD COLUMN version_hash TEXT NOT NULL DEFAULT ''";
+pub const ALTER_INSTALLED_APPS_ADD_CLOSURE_ID: &str =
+    "ALTER TABLE tenant_installed_apps ADD COLUMN closure_id TEXT NOT NULL DEFAULT ''";
+pub const ALTER_INSTALLED_APPS_ADD_REGISTRY_URL: &str =
+    "ALTER TABLE tenant_installed_apps ADD COLUMN registry_url TEXT NOT NULL DEFAULT ''";
+pub const ALTER_INSTALLED_APPS_ADD_REGISTRY_TENANT: &str =
+    "ALTER TABLE tenant_installed_apps ADD COLUMN registry_tenant TEXT NOT NULL DEFAULT ''";
 pub const ALTER_INSTALLED_APPS_ADD_BUNDLE_DIGEST: &str =
     "ALTER TABLE tenant_installed_apps ADD COLUMN bundle_digest TEXT NOT NULL DEFAULT ''";
 pub const ALTER_INSTALLED_APPS_ADD_SPEC_DIGEST: &str =

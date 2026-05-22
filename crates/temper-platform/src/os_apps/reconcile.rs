@@ -275,6 +275,12 @@ async fn record_app_install_metadata(
     let record = InstalledAppRecord {
         tenant: tenant.to_string(),
         app_name: digest.app_name.clone(),
+        source_kind: "local".to_string(),
+        app_ref: String::new(),
+        version_hash: String::new(),
+        closure_id: String::new(),
+        registry_url: String::new(),
+        registry_tenant: String::new(),
         app_version: digest.app_version.clone(),
         bundle_digest: digest.bundle_digest.clone(),
         spec_digest: digest.spec_digest.clone(),

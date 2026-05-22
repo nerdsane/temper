@@ -284,6 +284,12 @@ pub const CREATE_TENANT_INSTALLED_APPS_TABLE: &str = "\
 CREATE TABLE IF NOT EXISTS tenant_installed_apps (
     tenant              TEXT         NOT NULL,
     app_name            TEXT         NOT NULL,
+    source_kind         TEXT         NOT NULL DEFAULT 'local',
+    app_ref             TEXT         NOT NULL DEFAULT '',
+    version_hash        TEXT         NOT NULL DEFAULT '',
+    closure_id          TEXT         NOT NULL DEFAULT '',
+    registry_url        TEXT         NOT NULL DEFAULT '',
+    registry_tenant     TEXT         NOT NULL DEFAULT '',
     app_version         TEXT         NOT NULL DEFAULT '',
     bundle_digest       TEXT         NOT NULL DEFAULT '',
     spec_digest         TEXT         NOT NULL DEFAULT '',

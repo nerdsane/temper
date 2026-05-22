@@ -1,6 +1,6 @@
 # ADR-0027: OS App Catalog — Agent-Installable Pre-Built Apps
 
-- Status: Accepted
+- Status: Superseded for production app install by Genesis `App.Install`
 - Date: 2026-03-10
 - Deciders: Temper core maintainers
 - Related:
@@ -17,6 +17,11 @@ The gap between "specs ship with the binary" and "agents can use them" is missin
 
 ## Decision
 
+> 2026-05-22 update: the read-only local catalog can remain useful for
+> development and Observe visibility, but local name-based install is no longer
+> a normal agent-facing or production path. Pinned Genesis refs installed through
+> the spec-owned `App.Install` semantic replace `/api/os-apps/:name/install`.
+
 ### Sub-Decision 1: Embedded Catalog via `include_str!()`
 
 Specs are embedded in the binary at compile time using `include_str!()`, following the same pattern as system tenant specs in `bootstrap.rs`. This ensures OS apps work on deployed binaries without path resolution issues.
@@ -29,7 +34,7 @@ A static `OS_APP_CATALOG` array holds metadata for each app (name, description, 
 
 Two new endpoints under `/api`:
 - `GET /api/os-apps` — returns available apps with metadata
-- `POST /api/os-apps/:name/install` with `{ "tenant": "..." }` — installs into a tenant
+- `POST /api/os-apps/:name/install` with `{ "tenant": "..." }` — removed from the normal install surface; use Genesis pinned refs instead.
 
 **Why this approach**: Agents interact via HTTP through the sandbox dispatch layer. RESTful endpoints fit the existing pattern.
 
@@ -37,7 +42,7 @@ Two new endpoints under `/api`:
 
 Two new methods in `temper-sandbox/src/dispatch.rs`:
 - `list_apps()` — calls `GET /api/os-apps`
-- `install_app(tenant, app_name)` — calls `POST /api/os-apps/:name/install`
+- `install_app(tenant, app_name)` — removed from the normal install surface; use Genesis pinned refs instead.
 
 **Why this approach**: Follows the existing dispatch pattern where every agent method maps to an HTTP call.
 

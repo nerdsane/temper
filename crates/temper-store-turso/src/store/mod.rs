@@ -220,6 +220,12 @@ impl TursoEventStore {
             .map_err(storage_error)?;
         for stmt in [
             schema::ALTER_INSTALLED_APPS_ADD_APP_VERSION,
+            schema::ALTER_INSTALLED_APPS_ADD_SOURCE_KIND,
+            schema::ALTER_INSTALLED_APPS_ADD_APP_REF,
+            schema::ALTER_INSTALLED_APPS_ADD_VERSION_HASH,
+            schema::ALTER_INSTALLED_APPS_ADD_CLOSURE_ID,
+            schema::ALTER_INSTALLED_APPS_ADD_REGISTRY_URL,
+            schema::ALTER_INSTALLED_APPS_ADD_REGISTRY_TENANT,
             schema::ALTER_INSTALLED_APPS_ADD_BUNDLE_DIGEST,
             schema::ALTER_INSTALLED_APPS_ADD_SPEC_DIGEST,
             schema::ALTER_INSTALLED_APPS_ADD_POLICY_DIGEST,
@@ -459,6 +465,12 @@ pub struct TursoSpecRow {
 pub struct TursoInstalledAppRow {
     pub tenant_id: String,
     pub app_name: String,
+    pub source_kind: String,
+    pub app_ref: String,
+    pub version_hash: String,
+    pub closure_id: String,
+    pub registry_url: String,
+    pub registry_tenant: String,
     pub app_version: String,
     pub bundle_digest: String,
     pub spec_digest: String,

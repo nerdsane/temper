@@ -39,10 +39,6 @@ pub fn build_platform_router(state: PlatformState) -> Router {
             routing::get(crate::tenant_api::get_os_app_guide),
         )
         .route(
-            "/observe/os-apps/{name}/install",
-            routing::post(crate::tenant_api::install_os_app),
-        )
-        .route(
             "/observe/tenants/{id}",
             routing::delete(crate::tenant_api::delete_tenant),
         );
@@ -164,7 +160,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_install_os_app_project_management() {
+    async fn test_local_os_app_install_route_is_removed() {
         let app = build_platform_router(test_state());
         let response = app
             .oneshot(
@@ -176,18 +172,7 @@ mod tests {
             .await
             .unwrap();
 
-        assert_eq!(response.status(), StatusCode::OK);
-
-        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
-            .await
-            .unwrap();
-        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
-        assert_eq!(json["status"], "installed");
-        // Fresh install — all 5 PM specs should be added.
-        let added = json["added"].as_array().unwrap();
-        assert_eq!(added.len(), 5);
-        assert!(json["updated"].as_array().unwrap().is_empty());
-        assert!(json["skipped"].as_array().unwrap().is_empty());
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
     }
 
     #[tokio::test]
@@ -219,11 +204,11 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_install_os_app_nonexistent_returns_404() {
+    async fn test_observe_local_os_app_install_route_is_removed() {
         let app = build_platform_router(test_state());
         let response = app
             .oneshot(
-                Request::post("/api/os-apps/nonexistent/install")
+                Request::post("/observe/os-apps/project-management/install")
                     .header("content-type", "application/json")
                     .body(Body::from(r#"{"tenant":"test"}"#))
                     .unwrap(),

@@ -496,17 +496,6 @@ export async function fetchOsApps(): Promise<OsAppsResponse> {
   return res.json();
 }
 
-/** Install an OS app into a tenant */
-export async function installOsApp(name: string, tenant: string): Promise<Record<string, unknown>> {
-  const res = await fetchWithRetry(`${API_BASE}/observe/os-apps/${encodeURIComponent(name)}/install`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ tenant }),
-  });
-  if (!res.ok) throw new ApiError(`Failed to install os-app: ${res.status}`, res.status);
-  return res.json();
-}
-
 /** Delete a tenant */
 export async function deleteTenant(tenantId: string): Promise<Record<string, unknown>> {
   const res = await fetchWithRetry(`${API_BASE}/observe/tenants/${encodeURIComponent(tenantId)}`, {

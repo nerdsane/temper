@@ -162,6 +162,12 @@ pub struct PostgresSpecRow {
 pub struct PostgresInstalledAppRow {
     pub tenant: String,
     pub app_name: String,
+    pub source_kind: String,
+    pub app_ref: String,
+    pub version_hash: String,
+    pub closure_id: String,
+    pub registry_url: String,
+    pub registry_tenant: String,
     pub app_version: String,
     pub bundle_digest: String,
     pub spec_digest: String,
@@ -1318,6 +1324,12 @@ impl PostgresEventStore {
         let record = PostgresInstalledAppRow {
             tenant: tenant.to_string(),
             app_name: app_name.to_string(),
+            source_kind: "local".to_string(),
+            app_ref: String::new(),
+            version_hash: String::new(),
+            closure_id: String::new(),
+            registry_url: String::new(),
+            registry_tenant: String::new(),
             app_version: String::new(),
             bundle_digest: String::new(),
             spec_digest: String::new(),
@@ -1339,10 +1351,14 @@ impl PostgresEventStore {
         let last_reconciled_at = parse_optional_rfc3339(record.last_reconciled_at.as_deref())?;
         crate::dbm::postgres_query!(
             "INSERT INTO tenant_installed_apps \
-             (tenant, app_name, app_version, bundle_digest, spec_digest, policy_digest, wasm_digest, \
+             (tenant, app_name, source_kind, app_ref, version_hash, closure_id, registry_url, registry_tenant, \
+              app_version, bundle_digest, spec_digest, policy_digest, wasm_digest, \
               content_digest, seed_digest, installed_at, last_reconciled_at, status) \
-             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, now(), $10, $11) \
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, now(), $16, $17) \
              ON CONFLICT (tenant, app_name) DO UPDATE SET \
+                 source_kind = EXCLUDED.source_kind, app_ref = EXCLUDED.app_ref, \
+                 version_hash = EXCLUDED.version_hash, closure_id = EXCLUDED.closure_id, \
+                 registry_url = EXCLUDED.registry_url, registry_tenant = EXCLUDED.registry_tenant, \
                  app_version = EXCLUDED.app_version, bundle_digest = EXCLUDED.bundle_digest, \
                  spec_digest = EXCLUDED.spec_digest, policy_digest = EXCLUDED.policy_digest, \
                  wasm_digest = EXCLUDED.wasm_digest, content_digest = EXCLUDED.content_digest, \
@@ -1350,6 +1366,12 @@ impl PostgresEventStore {
         )
         .bind(&record.tenant)
         .bind(&record.app_name)
+        .bind(&record.source_kind)
+        .bind(&record.app_ref)
+        .bind(&record.version_hash)
+        .bind(&record.closure_id)
+        .bind(&record.registry_url)
+        .bind(&record.registry_tenant)
         .bind(&record.app_version)
         .bind(&record.bundle_digest)
         .bind(&record.spec_digest)
@@ -1371,7 +1393,8 @@ impl PostgresEventStore {
         app_name: &str,
     ) -> Result<Option<PostgresInstalledAppRow>, PersistenceError> {
         let row = crate::dbm::postgres_query!(
-            "SELECT tenant, app_name, app_version, bundle_digest, spec_digest, policy_digest, \
+            "SELECT tenant, app_name, source_kind, app_ref, version_hash, closure_id, registry_url, registry_tenant, \
+                    app_version, bundle_digest, spec_digest, policy_digest, \
                     wasm_digest, content_digest, seed_digest, installed_at, last_reconciled_at, status \
              FROM tenant_installed_apps WHERE tenant = $1 AND app_name = $2",
         )
@@ -2484,6 +2507,12 @@ fn row_to_installed_app(row: sqlx::postgres::PgRow) -> PostgresInstalledAppRow {
     PostgresInstalledAppRow {
         tenant: row.get("tenant"),
         app_name: row.get("app_name"),
+        source_kind: row.get("source_kind"),
+        app_ref: row.get("app_ref"),
+        version_hash: row.get("version_hash"),
+        closure_id: row.get("closure_id"),
+        registry_url: row.get("registry_url"),
+        registry_tenant: row.get("registry_tenant"),
         app_version: row.get("app_version"),
         bundle_digest: row.get("bundle_digest"),
         spec_digest: row.get("spec_digest"),

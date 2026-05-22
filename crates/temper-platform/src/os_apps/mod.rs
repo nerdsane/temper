@@ -26,7 +26,10 @@ mod runtime_heal;
 mod system_files;
 mod types;
 pub(super) use app_catalog::catalog;
-pub use app_catalog::{add_os_apps_dir, list_startup_os_apps, reload_os_apps, set_os_apps_dir};
+pub use app_catalog::{
+    add_os_apps_dir, add_os_apps_dir_preferred, list_startup_os_apps, reload_os_apps,
+    set_os_apps_dir,
+};
 pub use closure_bootstrap::{
     ClosureBootstrapResult, OS_APP_CLOSURE_RESOLVER_VERSION, OsAppClosure,
     bootstrap_closure_manifest, os_app_closure_for_roots, parse_bootstrap_manifest_str,
