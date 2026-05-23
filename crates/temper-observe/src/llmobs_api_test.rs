@@ -23,6 +23,29 @@ fn normalizes_hex_trace_and_span_ids() {
 }
 
 #[test]
+fn llmobs_endpoint_defaults_to_datadog_site_intake() {
+    assert_eq!(
+        llmobs_endpoint("datadoghq.com", None),
+        "https://api.datadoghq.com/api/intake/llm-obs/v1/trace/spans"
+    );
+    assert_eq!(
+        llmobs_endpoint("datadoghq.eu/", None),
+        "https://api.datadoghq.eu/api/intake/llm-obs/v1/trace/spans"
+    );
+}
+
+#[test]
+fn llmobs_endpoint_can_target_local_lapdog_intake() {
+    assert_eq!(
+        llmobs_endpoint(
+            "datadoghq.com",
+            Some("http://127.0.0.1:8126/evp_proxy/v2/api/v2/llmobs".to_string())
+        ),
+        "http://127.0.0.1:8126/evp_proxy/v2/api/v2/llmobs"
+    );
+}
+
+#[test]
 fn llm_span_payload_uses_span_name_and_supported_model_metadata() {
     let payload = build_llm_span_payload(&LlmSpanInput {
         service_name: "temperpaw",

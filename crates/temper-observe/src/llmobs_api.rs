@@ -1,18 +1,23 @@
-use std::sync::OnceLock;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::{
+    sync::OnceLock,
+    time::{Duration, SystemTime, UNIX_EPOCH},
+};
 
 use reqwest::Client;
 use serde_json::{Map, Value, json};
 use sha2::{Digest, Sha256};
+#[path = "llmobs_endpoint.rs"]
+mod llmobs_endpoint;
 #[path = "llmobs_format.rs"]
 mod llmobs_format;
+use llmobs_endpoint::llmobs_endpoint;
 pub use llmobs_format::parse_tool_span_inputs;
 use llmobs_format::{convert_otel_messages_to_llmobs, parent_io_value_from_messages};
 
 #[derive(Clone, Debug)]
 struct LlmObsConfig {
     api_key: String,
-    site: String,
+    endpoint: String,
 }
 
 #[derive(Clone, Debug)]
@@ -404,7 +409,8 @@ fn llmobs_config() -> &'static Option<LlmObsConfig> {
         }
 
         let site = read_non_empty_env("DD_SITE").unwrap_or_else(|| "datadoghq.com".to_string());
-        Some(LlmObsConfig { api_key, site })
+        let endpoint = llmobs_endpoint(&site, read_non_empty_env("DD_LLMOBS_ENDPOINT"));
+        Some(LlmObsConfig { api_key, endpoint })
     })
 }
 
@@ -418,12 +424,8 @@ fn llmobs_client() -> &'static Client {
 }
 
 async fn post_payload(config: &LlmObsConfig, payload: Value) -> Result<(), String> {
-    let endpoint = format!(
-        "https://api.{}/api/intake/llm-obs/v1/trace/spans",
-        config.site.trim().trim_end_matches('/')
-    );
     let response = llmobs_client()
-        .post(endpoint)
+        .post(config.endpoint.as_str())
         .header("DD-API-KEY", &config.api_key)
         .json(&payload)
         .send()
@@ -443,10 +445,8 @@ async fn post_payload(config: &LlmObsConfig, payload: Value) -> Result<(), Strin
 }
 
 fn read_non_empty_env(var_name: &str) -> Option<String> {
-    std::env::var(var_name)
-        .ok()
-        .map(|value| value.trim().to_string())
-        .filter(|value| !value.is_empty())
+    let value = std::env::var(var_name).ok()?.trim().to_string();
+    (!value.is_empty()).then_some(value)
 }
 
 fn approximate_start_ns(duration_ms: u64) -> u64 {
