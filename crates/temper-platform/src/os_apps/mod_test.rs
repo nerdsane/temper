@@ -176,6 +176,20 @@ fn test_resolve_os_app_install_order_dedupes_shared_dependencies() {
 }
 
 #[test]
+fn test_manifest_dependencies_accept_pinned_genesis_refs_for_local_install_order() {
+    assert_eq!(
+        local_os_app_dependency_name("temperpaw/paw-fs@65f3ee9659500d11a54c22b9e5519d52dd0db1d4")
+            .as_deref(),
+        Some("paw-fs")
+    );
+    assert_eq!(
+        local_os_app_dependency_name("katagami-commons").as_deref(),
+        Some("katagami-commons")
+    );
+    assert_eq!(local_os_app_dependency_name("  "), None);
+}
+
+#[test]
 fn test_reconcile_plan_for_wasm_only_digest_skips_unrelated_phases() {
     let current = OsAppBundleDigest {
         app_name: "paw-agent".to_string(),

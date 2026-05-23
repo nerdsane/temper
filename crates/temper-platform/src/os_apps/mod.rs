@@ -929,13 +929,33 @@ fn os_app_dependencies(name: &str) -> Vec<String> {
     if let Some(entry) = cat.entries.iter().find(|e| e.name == name)
         && !entry.dependencies.is_empty()
     {
-        return entry.dependencies.clone();
+        return entry
+            .dependencies
+            .iter()
+            .filter_map(|dependency| local_os_app_dependency_name(dependency))
+            .collect();
     }
     // Hardcoded fallback.
     match name {
         // TemperAgent persists conversation/files in TemperFS entities.
         "temper-agent" => vec!["temper-fs".to_string()],
         _ => vec![],
+    }
+}
+
+fn local_os_app_dependency_name(dependency: &str) -> Option<String> {
+    let unpinned = dependency
+        .trim()
+        .split_once('@')
+        .map_or(dependency.trim(), |(left, _)| left);
+    let name = unpinned
+        .rsplit_once('/')
+        .map_or(unpinned, |(_, name)| name)
+        .trim();
+    if name.is_empty() {
+        None
+    } else {
+        Some(name.to_string())
     }
 }
 
