@@ -38,7 +38,21 @@ struct WasmDispatchCtx<'a> {
     entity_ref: WasmEntityRef<'a>,
     action: &'a str,
     agent_ctx: &'a AgentContext,
+    dispatch_idempotency_key: Option<&'a str>,
     mode: WasmDispatchMode,
+}
+
+fn agent_ctx_for_composite_wasm_result(
+    agent_ctx: &AgentContext,
+    dispatch_idempotency_key: Option<&str>,
+) -> AgentContext {
+    let mut composite_agent_ctx = agent_ctx.clone();
+    if composite_agent_ctx.idempotency_key.is_none()
+        && let Some(idempotency_key) = dispatch_idempotency_key
+    {
+        composite_agent_ctx.idempotency_key = Some(idempotency_key.to_string());
+    }
+    composite_agent_ctx
 }
 
 const HTTP_CALL_AUTHZ_DENIED_PREFIX: &str = "authorization denied for http_call";
@@ -355,6 +369,7 @@ impl crate::state::ServerState {
             },
             action: req.action,
             agent_ctx: req.agent_ctx,
+            dispatch_idempotency_key: req.dispatch_idempotency_key,
             mode: req.mode,
         };
         let mut last_response: Option<EntityResponse> = None;
@@ -1121,6 +1136,10 @@ impl crate::state::ServerState {
                 .await;
 
                 let callback_params = strip_private_observability_params(result.callback_params);
+                let composite_agent_ctx = agent_ctx_for_composite_wasm_result(
+                    ctx.agent_ctx,
+                    ctx.dispatch_idempotency_key,
+                );
                 let composite_result_consumed = self
                     .apply_composite_integration_result(
                         ctx.entity_ref.tenant,
@@ -1128,7 +1147,7 @@ impl crate::state::ServerState {
                         ctx.entity_ref.entity_id,
                         ctx.action,
                         &callback_params,
-                        ctx.agent_ctx,
+                        &composite_agent_ctx,
                     )
                     .await
                     .map_err(|e| e.to_string())?;
@@ -2009,6 +2028,36 @@ mod tests {
     use super::*;
 
     #[test]
+    fn composite_wasm_result_inherits_generated_dispatch_idempotency() {
+        let agent = AgentContext::for_service("version-publisher");
+
+        let composite_agent = agent_ctx_for_composite_wasm_result(
+            &agent,
+            Some("dispatch:default:App:app:PublishNewVersion:one"),
+        );
+
+        assert_eq!(
+            composite_agent.idempotency_key.as_deref(),
+            Some("dispatch:default:App:app:PublishNewVersion:one"),
+            "composite sub-writes need the parent dispatch idempotency so repeated app version updates get distinct sub-write keys"
+        );
+    }
+
+    #[test]
+    fn composite_wasm_result_preserves_caller_supplied_idempotency() {
+        let mut agent = AgentContext::for_service("version-publisher");
+        agent.idempotency_key = Some("caller-key".to_string());
+
+        let composite_agent = agent_ctx_for_composite_wasm_result(&agent, Some("generated-key"));
+
+        assert_eq!(
+            composite_agent.idempotency_key.as_deref(),
+            Some("caller-key"),
+            "caller idempotency remains authoritative for retries"
+        );
+    }
+
+    #[test]
     fn strips_private_llm_observability_params_before_callback_dispatch() {
         let params = json!({
             "provider_response_file_id": "file-123",
@@ -2183,6 +2232,7 @@ mod tests {
                 },
                 action: "ContextReady",
                 agent_ctx: &agent_ctx,
+                dispatch_idempotency_key: None,
                 mode: WasmDispatchMode::Inline,
             };
             let span = build_llm_root_span(&ctx, &integration, &entity_state, "provider_caller");

@@ -24,6 +24,7 @@ pub(crate) struct PostDispatchContext<'a> {
     pub entity_id: &'a str,
     pub action: &'a str,
     pub agent_ctx: &'a AgentContext,
+    pub dispatch_idempotency_key: Option<&'a str>,
     pub action_params: &'a serde_json::Value,
     pub await_integration: bool,
 }
@@ -500,6 +501,7 @@ impl crate::state::ServerState {
                     custom_effects: &response.custom_effects,
                     entity_state: &response.state,
                     agent_ctx: ctx.agent_ctx,
+                    dispatch_idempotency_key: ctx.dispatch_idempotency_key,
                     action_params: ctx.action_params,
                     mode: super::WasmDispatchMode::Inline,
                 };
@@ -557,6 +559,7 @@ impl crate::state::ServerState {
                     custom_effects: &response.custom_effects,
                     entity_state: adapter_state,
                     agent_ctx: ctx.agent_ctx,
+                    dispatch_idempotency_key: None,
                     action_params: ctx.action_params,
                     mode: super::WasmDispatchMode::Inline,
                 };

@@ -73,6 +73,7 @@ impl crate::state::ServerState {
                     custom_effects: &custom_effects,
                     entity_state: &entity_state,
                     agent_ctx: &agent_ctx,
+                    dispatch_idempotency_key: None,
                     action_params: &action_params,
                     mode: WasmDispatchMode::Background,
                 };
