@@ -1,122 +1,69 @@
-<h1 align="center">
-  <picture>
-    <source media="(prefers-color-scheme: dark)" srcset="assets/mascot-vectorized-light.svg">
-    <source media="(prefers-color-scheme: light)" srcset="assets/mascot-vectorized.svg">
-    <img src="assets/mascot-vectorized.svg" width="140" alt="Temper">
-  </picture>
-  <br>
-  Temper
-</h1>
+<p align="center">
+  <img src="assets/readme-hero.jpg" alt="Temper tempering plant" width="1000">
+</p>
 
 <p align="center">
   <em>A verified, policy-driven runtime for agents that build their own tools.</em>
 </p>
 
 <p align="center">
-  <a href="https://github.com/nerdsane/temper/actions/workflows/ci.yml"><img src="https://github.com/nerdsane/temper/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
-  <a href="LICENSE-MIT"><img src="https://img.shields.io/badge/license-MIT%2FApache--2.0-blue" alt="License"></a>
-  <a href="https://www.rust-lang.org"><img src="https://img.shields.io/badge/rust-1.92%2B-orange" alt="Rust"></a>
-  <a href="#status"><img src="https://img.shields.io/badge/version-0.1.0-yellow" alt="Pre-release"></a>
+  <a href="https://github.com/nerdsane/temper/actions/workflows/ci.yml"><img src="https://img.shields.io/github/actions/workflow/status/nerdsane/temper/ci.yml?style=for-the-badge&label=CI" alt="CI"></a>
+  <a href="LICENSE-MIT"><img src="https://img.shields.io/badge/License-MIT%2FApache--2.0-blue?style=for-the-badge" alt="License"></a>
+  <a href="https://www.rust-lang.org"><img src="https://img.shields.io/badge/Rust-1.92%2B-orange?style=for-the-badge" alt="Rust"></a>
+  <a href="#status"><img src="https://img.shields.io/badge/Version-0.1.0-yellow?style=for-the-badge" alt="Pre-release"></a>
 </p>
 
 ---
 
-## Why this exists
+## Why Temper
 
-Agents can produce code faster than any team can review by hand. That would be acceptable if what they produced were reliably correct, but it is not, and the gap between what an agent generates and what would pass verification is where the failure modes accumulate — hallucinated dependencies in the obvious case, and in the less obvious cases, missing invariants and unseen race conditions that the agent cannot encounter because it never actually runs what it writes. Wrapping an agent around a traditional codebase converts this into a throughput problem without closing the verification gap itself.
+Temper is a machine tool for agents.
 
-Temper inverts the relationship. Agents do not produce application code; they produce specifications. The kernel reads each specification, verifies it through four layers of analysis, and deploys the running system the specification describes. Because the specification is both the artifact that gets proved and the artifact that gets executed, there is no drift between what was verified and what is running.
+Agents are fast at writing code, but the code drifts — invariants get missed, integrations break in ways no one anticipated. Temper inverts the path: agents describe what a system should do, and Temper builds the running version from the description.
 
-## The specification model
+The description hot-reloads. What an agent shipped keeps running while the agent revises it.
 
-A capability in Temper is described by three artifacts, each addressing a different concern.
+```text
+Agent
+  understands a need
+    |
+    | writes
+    v
+Spec
+  state machine + WASM modules + policies + data
+    |
+    | verifies
+    v
+Kernel
+  SMT + model checking + simulation + property tests
+    |
+    | deploys
+    v
+Runtime
+  live state machine + typed API + audit log
+    |
+    | used by
+    v
+Same or another agent
+  calls in, composes, writes the next spec
 
-**Behavior — what the system can do, and what it must never do.** The entity's states, the transitions between them, the preconditions on each transition, and the safety properties that must hold in every reachable state. This is declared as a state machine specification (see [*How it's implemented*](#how-its-implemented) for the formalism and file format).
-
-**Data contract — what the system exposes to callers.** The entity types, their properties and relationships, and the actions each type supports. A running Temper server publishes this contract in a machine-parseable form so that an agent can discover the full API surface without documentation or examples.
-
-**Authorization — who can invoke which action on which resource under what conditions.** The model is default-deny with scope-based approval. When an agent attempts an action the current policy set does not permit, the denial is recorded as a pending decision. A human approves at a chosen scope — narrow to this case, medium to this action and resource type, broad to the resource type — and the resulting rule is hot-loaded into the policy engine.
-
-The three artifacts together are what an agent submits. The kernel verifies that combination before anything runs.
-
-## The verification cascade
-
-Every spec passes four independent layers of analysis before the kernel will load it.
-
-1. **Symbolic reasoning** — proves that each guard is satisfiable (no dead transitions) and that each safety invariant is inductive (if it holds before any guard-satisfying transition, it holds after).
-2. **Exhaustive state exploration** — visits every reachable state of the specification and checks every invariant at every state. If a path exists from the initial state to a violation, the counterexample is printed.
-3. **Deterministic simulation** — runs the actual production code path against a simulated backend with seeded fault injection: message drops, delays, reordering, crashes. Failures reproduce exactly under the same seed, which makes them debuggable.
-4. **Randomized property testing** — a thousand pseudorandom action sequences of up to thirty steps, with invariants checked after every step. Any violation is automatically shrunk to a minimal counterexample.
-
-On a small spec the whole cascade runs in well under a second. It runs on every build, not as a gate applied before shipping.
-
-## A Label, end to end
-
-The smallest useful entity has two states, one transition, and one safety property. The behavioral spec:
-
-```toml
-# label.ioa.toml
-[automaton]
-name = "Label"
-states = ["Active", "Archived"]
-initial = "Active"
-
-[[action]]
-name = "Archive"
-kind = "input"
-from = ["Active"]
-to = "Archived"
-
-[[invariant]]
-name = "ArchivedIsFinal"
-when = ["Archived"]
-assert = "no_further_transitions"
+Tools build on tools.
 ```
 
-With a matching data contract and policy, verification runs:
-
-```bash
-$ temper verify --specs-dir ./specs
-L0 Symbolic:          PASSED  2 guards satisfiable, 1 invariant inductive
-L1 Model Check:       PASSED  All reachable states explored
-L2 Simulation:        PASSED  10 seeds, 47 transitions, 0 violations
-L3 Property Tests:    PASSED  1,000 cases, 30 max steps per case
-
-$ temper serve --specs-dir ./specs
-```
-
-The server now exposes the entity over HTTP. Calling the archive action a second time on an already-archived label returns a 409 Conflict in roughly 28 nanoseconds, because the runtime's transition table has no rule with `from = ["Archived"]`. The invariant that the symbolic layer proved inductively and the model checker explored exhaustively is the same artifact the runtime enforces at the guard check. There is no controller-level guard to write, and therefore no place for the implementation to drift from the specification.
-
-The workflow does not change as entities grow. A ten-state Issue with cross-entity relationships, role-separated policies for planners and reviewers, and sandboxed integrations for side effects uses the same three artifacts and the same cascade.
-
-## A real application: Katagami
-
-[@arni0x9053](https://x.com/arni0x9053) built [Katagami](https://x.com/arni0x9053/status/2045594733654020449) on Temper. It is a library of agent-researched design languages — each one a full specification of philosophy, tokens, compositional rules, layout principles, and usage guidance, paired with a rendered embodiment of roughly fifteen canonical UI elements in that style. The motivation is to eliminate the cold-start problem when asking an agent to style a project, by giving both parties a shared vocabulary drawn from named movements rather than improvised prose.
-
-A single research prompt fans out into parallel synthesize sessions. Each session writes its specification and generates a rendered embodiment inside a cloud sandbox, visually verified at three viewport sizes. The agent's calls into Temper are state machine transitions:
-
-```python
-lang = temper.create('DesignLanguages', {'Id': 'retro-futurism-crt'})
-eid = lang['entity_id']
-
-temper.action('DesignLanguages', eid, 'WritePhilosophy', {
-    'philosophy': json.dumps(philosophy)
-})
-# SetTokens, SetRules, SetLayout, SetGuidance, ...
-
-temper.action('DesignLanguages', eid, 'SubmitForReview', {})
-temper.action('DesignLanguages', eid, 'Publish', {})
-```
-
-The `SubmitForReview` transition has a guard that requires all five spec sections and the rendered embodiment to exist. An incomplete language cannot be submitted because the precondition is part of the verified specification, not a check an agent could forget to write into application code.
-
-Katagami is deployed in production on Railway, with observability piped out to Datadog and storage split between a transactional store and a blob store. When a batch of jobs started timing out with only "dispatch timeout" in the logs, the root cause turned out to be contention in the shared actor registry under concurrent load — retries exhausted their attempt budget before requests got through. The event stream, the trace, and the state of every entity were all queryable, which is the property that made the diagnosis possible from the agent's side rather than from a human reading dashboards.
-
-[Arun Parthiban](https://arunparthiban.substack.com/p/crucible-building-an-agentic-infrastructure) is building **Crucible** on the same foundation, using Temper as the control plane for agent sessions, environments, and delegation graphs — where Katagami uses Temper to govern what agents produce, Crucible uses it to govern the agents themselves. The writeup goes into the two-layer architecture in detail.
+---
 
 ## Quick start
 
-Temper runs as an MCP server. The agent gets a sandboxed Python REPL with a `temper.*` API that submits specs, creates entities, invokes actions, and inspects pending governance decisions.
+Temper is an HTTP server with an OData API. Agents talk to it directly, through one of the SDKs, or via the MCP bridge for stdio agent clients.
+
+**Start the kernel:**
+
+```bash
+temper serve --port 3000          # HTTP server, OData API, Observe UI
+temper decide --port 3000         # interactive review of pending governance decisions
+```
+
+**Connect an agent (via MCP):**
 
 ```json
 {
@@ -129,72 +76,155 @@ Temper runs as an MCP server. The agent gets a sandboxed Python REPL with a `tem
 }
 ```
 
-```bash
-temper serve --port 3000          # start the kernel and Observe UI
-temper decide --port 3000         # interactive review of pending decisions
+`temper mcp` is a stdio bridge that proxies to the running server and exposes a sandboxed Python REPL with a `temper.*` API for submitting specs, creating entities, and invoking actions.
+
+**Or call directly:** the Rust SDK (`temper-sdk`), the TypeScript SDK (`packages/temper-sdk-ts`), or any HTTP client against `/tdata`.
+
+When an agent invokes an action no policy permits, the request is denied and recorded as a pending decision. `temper decide` walks the queue and lets you approve at a chosen scope — narrow, medium, or broad. The new rule loads without restart.
+
+---
+
+## The shape of an app
+
+A description in Temper has four parts.
+
+- **Behavior** — what the system can do, and what it must never do. States, transitions, preconditions, and the safety properties that must hold in every reachable state.
+- **Data contract** — what the system exposes to callers. Entity types, properties, relationships, and the actions each type supports — published as a typed API.
+- **Authorization** — who can invoke which action on which resource under what conditions. Default-deny. Scope-based human approval, hot-loaded as the policy set grows.
+- **Application logic** — what runs inside the state machine. Sandboxed modules with per-call resource budgets, triggered inline by transitions.
+
+Each part is small enough for an agent to author and a human to read. The state machine is the contract; the application logic is what runs inside it.
+
+```text
+Description                          Runtime
++----------------------+             +----------------------+
+| Behavior             |             | Typed API            |
+| Data contract        |  verified   | Enforced state       |
+| Authorization        | --------->  | machine              |
+| Application logic    |  deployed   | Audit log            |
++----------------------+             +----------------------+
 ```
 
-When an attempted action has no permitting policy, the request is denied and recorded as a pending decision. `temper decide` opens an interactive prompt that walks through each pending decision and lets you approve at a scope — narrow to this case, medium to this action and resource type, broad to the resource type — or deny. The resulting rule is generated and hot-loaded, and subsequent attempts in that scope succeed. The policy set converges on what the agent actually needs over time rather than requiring you to anticipate every permission in advance.
+A heartbeat scheduler with one inline-triggered module — taken from `reference-apps/crucible`:
+
+```toml
+[automaton]
+name = "CrucibleScheduler"
+states = ["Idle", "Checking"]
+initial = "Idle"
+
+[[action]]
+name = "Start"
+kind = "input"
+from = ["Idle"]
+to = "Checking"
+effect = [{ type = "trigger", name = "crucible_check_schedules" }]
+
+[[action.triggers]]
+name = "crucible_check_schedules"
+kind = "wasm"
+module = "crucible_scheduler_check"
+on_success = "CheckComplete"
+on_failure = "CheckFailed"
+```
+
+`Start` moves the entity from `Idle` to `Checking` and dispatches the WASM module. On success the runtime fires `CheckComplete`; on failure, `CheckFailed`. Either path is a verified transition.
+
+---
+
+## Hot reload
+
+The kernel keeps running while specs and modules update. New revisions go live without a restart.
+
+---
+
+## Evolution
+
+The system is split into a behavioral contract (the state machine) and the application logic (sandboxed modules). The split enables a self-improvement loop on either side, independent of the other.
+
+---
+
+## What gets verified
+
+Every spec passes four layers before it is allowed to deploy.
+
+- **Symbolic** — every guard satisfiable, every invariant inductive.
+- **Model checking** — every reachable state visited; counterexamples printed on failure.
+- **Simulation** — the production code path runs against a fault-injected sandbox; failures reproduce under deterministic seeds.
+- **Property** — randomized action sequences with automatic counterexample shrinking.
+
+Runs on every build, in well under a second on a small spec.
+
+```bash
+$ temper verify --specs-dir ./specs
+L0 Symbolic:    PASSED  guards satisfiable, invariants inductive
+L1 Model Check: PASSED  reachable states explored
+L2 Simulation:  PASSED  fault-injected runs
+L3 Property:    PASSED  randomized cases
+```
+
+---
+
+## Built on Temper
+
+- **[Katagami](https://github.com/arni-labs/katagami)** by [@arni0x9053](https://x.com/arni0x9053) — a library of agent-researched design languages. Each language ships as a verified spec plus a rendered embodiment of canonical UI elements. [Writeup](https://x.com/arni0x9053/status/2045594733654020449).
+- **[Crucible](https://arunparthiban.substack.com/p/crucible-building-an-agentic-infrastructure)** by [Arun Parthiban](https://arunparthiban.substack.com/) — agentic infrastructure: agents, environments, sessions, governed lifecycle.
+
+---
+
+## Compatible agents
+
+Temper exposes an HTTP API and a stdio MCP bridge. Anything that speaks HTTP or MCP can drive it.
+
+Claude Code · OpenClaw · Pydantic AI · LangChain · custom HTTP / MCP clients
+
+---
 
 ## Architecture
 
 ```
 ┌─────────────────────────────────────────────────────┐
-│  Agent (Claude Code, OpenClaw, Pydantic AI, etc.)   │
+│  Agent  (Claude Code, OpenClaw, custom, ...)        │
 └────────────────────────┬────────────────────────────┘
-                         │  MCP (execute)
+                         │  MCP (optional)
                          ▼
 ┌─────────────────────────────────────────────────────┐
-│  Sandboxed REPL                                     │
-│  temper.submit_specs() · create() · action() · ...  │
+│  temper mcp  —  stdio bridge                        │
+│  sandboxed Python REPL, temper.* API                │
 └────────────────────────┬────────────────────────────┘
-                         │
+                         │  HTTP / OData
                          ▼
 ┌─────────────────────────────────────────────────────┐
-│  Temper Kernel                                      │
+│  Temper Kernel  (HTTP + OData server)               │
 │                                                     │
-│  ┌──────────┐  ┌──────────┐  ┌──────────┐          │
-│  │ Specs    │→ │ Verify   │→ │ Deploy   │          │
-│  └──────────┘  └──────────┘  └────┬─────┘          │
-│                                   │                 │
-│  ┌──────────┐  ┌──────────┐  ┌────▼─────┐          │
-│  │ AuthZ    │  │ Integr.  │  │ Query    │          │
-│  └──────────┘  └──────────┘  └──────────┘          │
-│                                                     │
-│  ┌──────────┐  ┌──────────┐  ┌──────────┐          │
-│  │ Events   │  │ Observe  │  │ Evolve   │          │
-│  └──────────┘  └──────────┘  └──────────┘          │
+│   Specs → Verify → Deploy                           │
+│   AuthZ · WASM Triggers · Query                     │
+│   Events · Observe · Evolve                         │
 └─────────────────────────────────────────────────────┘
 ```
 
-The kernel is static across deployments. It contains the spec interpreter, the verification cascade, the actor runtime with bounded mailboxes, the authorization engine, the event-sourced store, and the observability plane. Skills — the state machines, data models, policies, and integrations that make up an application — are what agents create and modify, and they hot-reload without the kernel coming down.
+The kernel is static across deployments. Specs, data models, policies, and application modules are what change — and they hot-reload.
+
+Full architecture in [docs/PAPER.md](docs/PAPER.md). Positioning in [docs/POSITIONING.md](docs/POSITIONING.md).
+
+---
 
 ## What Temper is and is not
 
-Temper is a verified state machine runtime that exposes a backend. Katagami uses it as a backend, so the honest characterization is that it is one — but the contract is the specification, and the runtime enforces a state machine rather than dispatching handlers attached to CRUD operations. A few distinctions worth making explicit:
+Temper is a verified runtime for the systems agents build.
 
 |                                              |                                                                                                                                                            |
 | -------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| **Not an agent framework.**                  | Temper does not build agents. You bring your own — Claude Code, OpenClaw, Pydantic AI, LangChain, or any client that speaks MCP.                           |
-| **Not a schema-first backend-as-a-service.** | Conventional BaaS generates CRUD from a schema. Temper generates a verified runtime from a specification that includes behavior, guards, and invariants. |
-| **Not a workflow builder.**                  | There is no imperative or visual flow editor. Capabilities are declared as verified state machines.                                                         |
-| **Not a prompt manager.**                    | Prompts, models, and agent runtimes stay with you. Temper governs what agents do to the world, not what they say.                                          |
+| **Not the runtime the agent runs in.**       | Hosted agent platforms and harness CLIs run the agent itself. Temper is what the agent reaches into from wherever it runs. *(You can also build a hosted agent runtime on Temper — Crucible does.)*                                                                                                                |
+| **Not a framework for the agent loop.**      | SDKs and harnesses handle prompts, tools, and conversation. Temper holds what the loop calls into: verified state, governed integrations, typed APIs. *(An agent's state can also live entirely on Temper — see TemperPaw.)*                                                                                       |
+| **Not a backend-as-a-service.**              | A BaaS gives you CRUD from a data schema; the rules of the system are implicit. Temper compiles a runtime from an explicit behavioral contract — legal transitions, required invariants — and verifies the contract before it runs.                                                                                |
+| **Not a workflow builder.**                  | No imperative or visual flow editor. Capabilities are declared as verified state machines that any caller can use.                                                                                                                                                                                                  |
+
+---
 
 ## Status
 
-Temper is at version 0.1.0. The architecture is stabilizing, the API surface is not frozen, and there are 1,300+ tests across 25 crates. The agent execution layer is deployed on Railway and Katagami runs on it in production.
-
-| Working | Next |
-|---|---|
-| Spec parser and four-layer verification cascade | Agents as entities with a background executor |
-| Authorization engine with default-deny and scoped approval flows | Streaming integrations |
-| API generation with schema discovery | Harness composition (agents designing harnesses as specs) |
-| Event sourcing on Postgres and Turso/libSQL | Distributed deployment |
-| MCP integration via sandboxed REPL | |
-| Sandboxed integrations with per-call resource budgets | |
-| Evolution engine — trajectory capture, failure clustering, spec proposals | |
-| Observe dashboard | |
-| Pre-built skills: project management, filesystem, agent orchestration | |
+Version 0.1.0. The architecture is stabilizing; the API surface is not frozen. Deployed on Railway; Katagami runs on it in production.
 
 ---
 
@@ -222,7 +252,7 @@ Temper is at version 0.1.0. The architecture is stabilizing, the API surface is 
 </details>
 
 <details>
-<summary>Crate overview (25 crates)</summary>
+<summary>Crate overview</summary>
 
 | Crate | Purpose |
 |-------|---------|
@@ -250,7 +280,6 @@ Temper is at version 0.1.0. The architecture is stabilizing, the API surface is 
 | **temper-wasm-sdk** | SDK for writing WASM integration modules |
 | **temper-macros** | Proc macros: `#[derive(Message)]`, `#[derive(DomainEvent)]` |
 | **temper-ots** | Open Trajectory Specification — DST-compatible trajectory capture for agent decisions |
-| **temper-transport** | Platform-agnostic channel transports (e.g., Discord) that bridge external messaging to Temper's Channel entities |
 
 </details>
 
@@ -258,7 +287,7 @@ Temper is at version 0.1.0. The architecture is stabilizing, the API surface is 
 
 ## Contributing
 
-Contributions are welcome. See [CONTRIBUTING.md](CONTRIBUTING.md).
+See [CONTRIBUTING.md](CONTRIBUTING.md).
 
 ## License
 
