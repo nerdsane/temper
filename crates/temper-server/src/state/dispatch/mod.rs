@@ -45,6 +45,7 @@ pub(crate) struct WasmDispatchRequest<'a> {
     pub custom_effects: &'a [String],
     pub entity_state: &'a EntityState,
     pub agent_ctx: &'a AgentContext,
+    pub dispatch_idempotency_key: Option<&'a str>,
     pub action_params: &'a serde_json::Value,
     pub mode: WasmDispatchMode,
 }
@@ -394,6 +395,7 @@ impl crate::state::ServerState {
                     custom_effects: &custom_effects,
                     entity_state: &entity_state,
                     agent_ctx: &agent_ctx,
+                    dispatch_idempotency_key: None,
                     action_params: &action_params,
                     mode: WasmDispatchMode::Background,
                 };

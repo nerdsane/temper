@@ -672,6 +672,7 @@ impl crate::state::ServerState {
             entity_id,
             action,
             agent_ctx,
+            dispatch_idempotency_key: idempotency_key.as_deref(),
             action_params: &action_params,
             await_integration,
         };
