@@ -1914,12 +1914,45 @@ fn test_find_wasm_modules_finds_sibling_artifact() {
     let artifact_bytes = b"sibling-artifact-binary";
     fs::write(module_dir.join("echo.wasm"), artifact_bytes).unwrap();
 
-    let modules = find_wasm_modules(&temp_dir, &BTreeMap::new());
+    let mut configs = BTreeMap::new();
+    configs.insert(
+        "echo".to_string(),
+        WasmModuleManifest {
+            name: "echo".to_string(),
+            target: None,
+            criticality: WasmModuleCriticality::default(),
+            startup_loading: WasmStartupLoading::default(),
+            provenance: None,
+            import_class: None,
+        },
+    );
+
+    let modules = find_wasm_modules(&temp_dir, &configs);
     assert!(
         modules.contains_key("echo"),
         "echo module should be found at sibling path"
     );
     assert_eq!(modules["echo"], artifact_bytes);
+
+    let _ = fs::remove_dir_all(&temp_dir);
+}
+
+#[test]
+fn test_find_wasm_modules_ignores_undeclared_artifact() {
+    let temp_dir = std::env::temp_dir().join(format!(
+        "temper-wasm-undeclared-test-{}",
+        uuid::Uuid::new_v4()
+    ));
+
+    let module_dir = temp_dir.join("wasm").join("echo");
+    fs::create_dir_all(&module_dir).unwrap();
+    fs::write(module_dir.join("echo.wasm"), b"undeclared").unwrap();
+
+    let modules = find_wasm_modules(&temp_dir, &BTreeMap::new());
+    assert!(
+        modules.is_empty(),
+        "WASM artifacts must be declared in app.toml before install"
+    );
 
     let _ = fs::remove_dir_all(&temp_dir);
 }
