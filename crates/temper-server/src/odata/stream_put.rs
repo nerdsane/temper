@@ -4,11 +4,13 @@ use std::sync::{Arc, RwLock};
 
 use axum::http::{HeaderMap, HeaderValue, StatusCode};
 use axum::response::IntoResponse;
+use temper_authz::SecurityContext;
 use temper_odata::path::ODataPath;
 use temper_runtime::tenant::TenantId;
 use temper_wasm::{StreamRegistry, WasmInvocationContext};
 use tracing::instrument;
 
+use super::authz::{UPDATE_ACTION, authorize_mutation};
 use super::common::{
     check_has_stream_or_400, resolve_entity_type, resolve_value_parent, verification_gate_response,
 };
@@ -67,6 +69,7 @@ pub(super) async fn handle_stream_put(
     headers: &HeaderMap,
     body: axum::body::Bytes,
     agent_ctx: &AgentContext,
+    security_ctx: &SecurityContext,
 ) -> axum::response::Response {
     let (set_name, key) = match resolve_value_parent(parent) {
         Ok(pair) => pair,
@@ -84,6 +87,30 @@ pub(super) async fn handle_stream_put(
 
     if let Err(resp) = check_verification_gate_or_423(state, tenant, &entity_type) {
         return *resp;
+    }
+
+    let snapshot = match state
+        .load_authz_resource_snapshot(tenant, &entity_type, &key)
+        .await
+    {
+        Ok(snapshot) => snapshot,
+        Err(error) => {
+            return odata_error(StatusCode::NOT_FOUND, "ResourceNotFound", &error).into_response();
+        }
+    };
+    if let Err(response) = authorize_mutation(
+        state,
+        tenant,
+        security_ctx,
+        agent_ctx,
+        UPDATE_ACTION,
+        &entity_type,
+        &key,
+        &snapshot.resource_attrs,
+    )
+    .await
+    {
+        return response;
     }
 
     let content_type = headers

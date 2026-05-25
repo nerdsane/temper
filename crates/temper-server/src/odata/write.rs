@@ -14,6 +14,10 @@ use axum::Extension;
 
 use super::account_verification::enforce_commons_account_verified_for_write;
 use super::app_uniqueness::enforce_commons_app_name_unique_for_write;
+use super::authz::{
+    CREATE_ACTION, DELETE_ACTION, UPDATE_ACTION, authorize_mutation, request_security_context,
+    resource_attrs_from_body,
+};
 use super::bindings::dispatch_bound_action;
 use super::common::{
     constraint_violation_response, extract_key, extract_tenant, load_entity_or_404,
@@ -24,7 +28,6 @@ use super::rate_limit::{enforce_commons_write_rate_limit, owner_id_from_fields};
 use super::response::annotate_entity;
 use super::storage_guardrails::enforce_commons_storage_cap;
 use super::stream_put::handle_stream_put;
-use crate::authz::{DenialInput, record_authz_denial, security_context_from_headers};
 use crate::blobs::hydrate_blob_refs_for_tenant;
 use crate::identity::ResolvedIdentity;
 use crate::request_context::{AgentContext, extract_agent_context, remote_parent_context};
@@ -136,7 +139,7 @@ fn check_verification_gate_or_423(
 }
 
 #[allow(clippy::too_many_arguments)]
-async fn authorize_commons_collection_create(
+async fn authorize_collection_create(
     state: &ServerState,
     tenant: &TenantId,
     entity_type: &str,
@@ -146,74 +149,20 @@ async fn authorize_commons_collection_create(
     agent_ctx: &AgentContext,
     resolved_identity: Option<&ResolvedIdentity>,
 ) -> Result<(), ODataWriteError> {
-    if !state.commons_guardrails_enabled(tenant) {
-        return Ok(());
-    }
-
-    let security_ctx = if let Some(identity) = resolved_identity {
-        temper_authz::SecurityContext::from_resolved_identity(
-            &identity.agent_instance_id,
-            &identity.agent_type_name,
-            agent_ctx.session_id.as_deref(),
-        )
-    } else {
-        security_context_from_headers(headers, None, agent_ctx.session_id.as_deref(), None)
-    };
-
-    let mut resource_attrs = std::collections::BTreeMap::new();
-    resource_attrs.insert(
-        "id".to_string(),
-        serde_json::Value::String(entity_id.to_string()),
-    );
-    resource_attrs.insert(
-        "status".to_string(),
-        fields
-            .get("Status")
-            .or_else(|| fields.get("status"))
-            .cloned()
-            .unwrap_or_else(|| serde_json::Value::String(String::new())),
-    );
-    if let serde_json::Value::Object(obj) = fields {
-        for (key, value) in obj {
-            resource_attrs.insert(key.clone(), value.clone());
-        }
-    }
-    let has_spec = state
-        .has_registered_spec(tenant, entity_type)
-        .unwrap_or(false);
-    resource_attrs.insert("has_spec".to_string(), serde_json::Value::Bool(has_spec));
-
-    if let Err(denial) = state.authorize_with_context(
+    let security_ctx = request_security_context(headers, agent_ctx, resolved_identity);
+    let resource_attrs = resource_attrs_from_body(state, tenant, entity_type, entity_id, fields);
+    authorize_mutation(
+        state,
+        tenant,
         &security_ctx,
-        "Create",
+        agent_ctx,
+        CREATE_ACTION,
         entity_type,
+        entity_id,
         &resource_attrs,
-        tenant.as_str(),
-    ) {
-        let reason = denial.to_string();
-        let _ = record_authz_denial(
-            state,
-            DenialInput {
-                tenant: tenant.as_str(),
-                security_ctx: &security_ctx,
-                agent_id_override: agent_ctx.agent_id.as_deref(),
-                action: "Create",
-                resource_type: entity_type,
-                resource_id: entity_id,
-                resource_attrs: serde_json::to_value(&resource_attrs).unwrap_or_default(),
-                reason: &reason,
-                module_name: None,
-                from_status: None,
-            },
-        )
-        .await;
-
-        return Err(Box::new(
-            odata_error(StatusCode::FORBIDDEN, "AuthorizationDenied", &reason).into_response(),
-        ));
-    }
-
-    Ok(())
+    )
+    .await
+    .map_err(Box::new)
 }
 
 fn ensure_entity_exists_or_404(
@@ -235,6 +184,40 @@ fn ensure_entity_exists_or_404(
             .into_response(),
         ))
     }
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn authorize_existing_mutation(
+    state: &ServerState,
+    tenant: &TenantId,
+    entity_type: &str,
+    entity_id: &str,
+    action: &str,
+    headers: &HeaderMap,
+    agent_ctx: &AgentContext,
+    resolved_identity: Option<&ResolvedIdentity>,
+) -> Result<(), ODataWriteError> {
+    let snapshot = state
+        .load_authz_resource_snapshot(tenant, entity_type, entity_id)
+        .await
+        .map_err(|error| {
+            Box::new(
+                odata_error(StatusCode::INTERNAL_SERVER_ERROR, "ReadError", &error).into_response(),
+            )
+        })?;
+    let security_ctx = request_security_context(headers, agent_ctx, resolved_identity);
+    authorize_mutation(
+        state,
+        tenant,
+        &security_ctx,
+        agent_ctx,
+        action,
+        entity_type,
+        entity_id,
+        &snapshot.resource_attrs,
+    )
+    .await
+    .map_err(Box::new)
 }
 
 /// Handle POST requests — entity creation and bound actions.
@@ -375,7 +358,7 @@ pub async fn handle_odata_post(
                 return resp;
             }
 
-            if let Err(resp) = authorize_commons_collection_create(
+            if let Err(resp) = authorize_collection_create(
                 &state,
                 &tenant,
                 &entity_type,
@@ -599,8 +582,53 @@ pub async fn handle_odata_post(
                 && let Some(actor_sys) = &state.pg_actor_system
             {
                 let namespace = format!("{tenant}/{key_str}");
-                let handle = temper_actor_runtime::ActorHandle::new(namespace, entity_type.clone());
+                let handle =
+                    temper_actor_runtime::ActorHandle::new(namespace.clone(), entity_type.clone());
                 let action_name = action.rsplit('.').next().unwrap_or(&action);
+                let state_bytes = match actor_sys.load_state(&namespace, &entity_type).await {
+                    Ok(Some(state_bytes)) => state_bytes,
+                    Ok(None) => {
+                        return odata_error(
+                            StatusCode::NOT_FOUND,
+                            "ResourceNotFound",
+                            &format!("Entity '{set_name}' with key '{key_str}' not found"),
+                        )
+                        .into_response();
+                    }
+                    Err(error) => {
+                        return odata_error(
+                            StatusCode::INTERNAL_SERVER_ERROR,
+                            "ActorReadError",
+                            &error.to_string(),
+                        )
+                        .into_response();
+                    }
+                };
+                let actor_state: temper_actor_runtime::spec_actor::SpecActorState =
+                    serde_json::from_slice(&state_bytes).unwrap_or_default();
+                let authz_body = serde_json::json!({
+                    "entity_id": key_str,
+                    "status": actor_state.status,
+                    "fields": actor_state.fields,
+                });
+                let attrs =
+                    resource_attrs_from_body(&state, &tenant, &entity_type, &key_str, &authz_body);
+                let security_ctx =
+                    request_security_context(&headers, &agent_ctx, resolved_identity.as_ref());
+                if let Err(response) = authorize_mutation(
+                    &state,
+                    &tenant,
+                    &security_ctx,
+                    &agent_ctx,
+                    &action,
+                    &entity_type,
+                    &key_str,
+                    &attrs,
+                )
+                .await
+                {
+                    return response;
+                }
                 match actor_sys
                     .tell(
                         None,
@@ -676,6 +704,7 @@ pub async fn handle_odata_post(
 #[instrument(skip_all, fields(otel.name = "PATCH /odata/{path}"))]
 pub async fn handle_odata_patch(
     State(state): State<ServerState>,
+    resolved_id: Option<Extension<ResolvedIdentity>>,
     headers: HeaderMap,
     axum::extract::Path(path): axum::extract::Path<String>,
     body: axum::body::Bytes,
@@ -688,7 +717,12 @@ pub async fn handle_odata_patch(
         Ok(p) => p,
         Err(resp) => return *resp,
     };
-    let agent_ctx = extract_agent_context(&headers);
+    let resolved_identity = resolved_id.map(|Extension(identity)| identity);
+    let mut agent_ctx = extract_agent_context(&headers);
+    if let Some(ref identity) = resolved_identity {
+        agent_ctx.agent_id = Some(identity.agent_instance_id.clone());
+        agent_ctx.agent_type = Some(identity.agent_type_name.clone());
+    }
 
     match odata_path {
         ODataPath::Entity(set_name, key) => {
@@ -703,6 +737,20 @@ pub async fn handle_odata_patch(
             }
             if let Err(resp) =
                 ensure_entity_exists_or_404(&state, &tenant, &entity_type, &set_name, &key_str)
+            {
+                return *resp;
+            }
+            if let Err(resp) = authorize_existing_mutation(
+                &state,
+                &tenant,
+                &entity_type,
+                &key_str,
+                UPDATE_ACTION,
+                &headers,
+                &agent_ctx,
+                resolved_identity.as_ref(),
+            )
+            .await
             {
                 return *resp;
             }
@@ -781,7 +829,7 @@ pub async fn handle_odata_patch(
                 owner_id_from_fields(&prospective_fields),
                 &headers,
                 &agent_ctx,
-                None,
+                resolved_identity.as_ref(),
             )
             .await
             {
@@ -827,6 +875,7 @@ pub async fn handle_odata_patch(
 #[instrument(skip_all, fields(otel.name = "PUT /odata/{path}"))]
 pub async fn handle_odata_put(
     State(state): State<ServerState>,
+    resolved_id: Option<Extension<ResolvedIdentity>>,
     headers: HeaderMap,
     axum::extract::Path(path): axum::extract::Path<String>,
     body: axum::body::Bytes,
@@ -839,7 +888,12 @@ pub async fn handle_odata_put(
         Ok(p) => p,
         Err(resp) => return *resp,
     };
-    let agent_ctx = extract_agent_context(&headers);
+    let resolved_identity = resolved_id.map(|Extension(identity)| identity);
+    let mut agent_ctx = extract_agent_context(&headers);
+    if let Some(ref identity) = resolved_identity {
+        agent_ctx.agent_id = Some(identity.agent_instance_id.clone());
+        agent_ctx.agent_type = Some(identity.agent_type_name.clone());
+    }
 
     match odata_path {
         ODataPath::Entity(set_name, key) => {
@@ -854,6 +908,20 @@ pub async fn handle_odata_put(
             }
             if let Err(resp) =
                 ensure_entity_exists_or_404(&state, &tenant, &entity_type, &set_name, &key_str)
+            {
+                return *resp;
+            }
+            if let Err(resp) = authorize_existing_mutation(
+                &state,
+                &tenant,
+                &entity_type,
+                &key_str,
+                UPDATE_ACTION,
+                &headers,
+                &agent_ctx,
+                resolved_identity.as_ref(),
+            )
+            .await
             {
                 return *resp;
             }
@@ -909,7 +977,7 @@ pub async fn handle_odata_put(
                 owner_id_from_fields(&body_json),
                 &headers,
                 &agent_ctx,
-                None,
+                resolved_identity.as_ref(),
             )
             .await
             {
@@ -943,10 +1011,19 @@ pub async fn handle_odata_put(
             }
         }
         ODataPath::Value { parent } => {
-            let agent_ctx = extract_agent_context(&headers);
-            handle_stream_put(&state, &tenant, &parent, &headers, body, &agent_ctx)
-                .await
-                .into_response()
+            let security_ctx =
+                request_security_context(&headers, &agent_ctx, resolved_identity.as_ref());
+            handle_stream_put(
+                &state,
+                &tenant,
+                &parent,
+                &headers,
+                body,
+                &agent_ctx,
+                &security_ctx,
+            )
+            .await
+            .into_response()
         }
         _ => odata_error(
             StatusCode::METHOD_NOT_ALLOWED,
@@ -961,6 +1038,7 @@ pub async fn handle_odata_put(
 #[instrument(skip_all, fields(otel.name = "DELETE /odata/{path}"))]
 pub async fn handle_odata_delete(
     State(state): State<ServerState>,
+    resolved_id: Option<Extension<ResolvedIdentity>>,
     headers: HeaderMap,
     axum::extract::Path(path): axum::extract::Path<String>,
 ) -> impl IntoResponse {
@@ -972,7 +1050,12 @@ pub async fn handle_odata_delete(
         Ok(p) => p,
         Err(resp) => return *resp,
     };
-    let agent_ctx = extract_agent_context(&headers);
+    let resolved_identity = resolved_id.map(|Extension(identity)| identity);
+    let mut agent_ctx = extract_agent_context(&headers);
+    if let Some(ref identity) = resolved_identity {
+        agent_ctx.agent_id = Some(identity.agent_instance_id.clone());
+        agent_ctx.agent_type = Some(identity.agent_type_name.clone());
+    }
 
     match odata_path {
         ODataPath::Entity(set_name, key) => {
@@ -987,6 +1070,20 @@ pub async fn handle_odata_delete(
             }
             if let Err(resp) =
                 ensure_entity_exists_or_404(&state, &tenant, &entity_type, &set_name, &key_str)
+            {
+                return *resp;
+            }
+            if let Err(resp) = authorize_existing_mutation(
+                &state,
+                &tenant,
+                &entity_type,
+                &key_str,
+                DELETE_ACTION,
+                &headers,
+                &agent_ctx,
+                resolved_identity.as_ref(),
+            )
+            .await
             {
                 return *resp;
             }
@@ -1039,7 +1136,7 @@ pub async fn handle_odata_delete(
                 owner_id_from_fields(&current_state.state.fields),
                 &headers,
                 &agent_ctx,
-                None,
+                resolved_identity.as_ref(),
             )
             .await
             {

@@ -2,6 +2,7 @@
 
 mod account_verification;
 mod app_uniqueness;
+pub(crate) mod authz;
 mod bindings;
 mod common;
 pub(crate) mod constraints;

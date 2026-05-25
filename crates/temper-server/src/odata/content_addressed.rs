@@ -20,16 +20,20 @@
 //! parameters of the handler.
 
 use axum::body::Body;
-use axum::extract::State;
+use axum::extract::{Extension, State};
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::IntoResponse;
 use sha1::Digest;
 use tokio_stream::StreamExt as _;
 
 use super::account_verification::enforce_commons_account_verified_for_write;
+use super::authz::{
+    CREATE_ACTION, authorize_mutation, request_security_context, resource_attrs_from_body,
+};
 use super::common::{extract_tenant, run_write_prechecks};
 use super::response::annotate_entity;
 use super::storage_guardrails::enforce_commons_storage_cap;
+use crate::identity::ResolvedIdentity;
 use crate::request_context::extract_agent_context;
 use crate::response::{ODataResponse, odata_error};
 use crate::state::ServerState;
@@ -50,14 +54,24 @@ const MAX_OBJECT_BYTES: usize = 2 * 1024 * 1024 * 1024;
 ///   * `X-Tenant-Id`, principal headers — same as any OData write.
 pub async fn handle_blob_ingest_raw(
     State(state): State<ServerState>,
+    resolved_id: Option<Extension<ResolvedIdentity>>,
     headers: HeaderMap,
     body: Body,
 ) -> impl IntoResponse {
-    ingest_raw_inner(state, headers, body, "Blob", "blob").await
+    ingest_raw_inner(
+        state,
+        resolved_id.map(|Extension(identity)| identity),
+        headers,
+        body,
+        "Blob",
+        "blob",
+    )
+    .await
 }
 
 async fn ingest_raw_inner(
     state: ServerState,
+    resolved_identity: Option<ResolvedIdentity>,
     headers: HeaderMap,
     body: Body,
     entity_type: &str,
@@ -67,7 +81,11 @@ async fn ingest_raw_inner(
         Ok(t) => t,
         Err(e) => return e.into_response(),
     };
-    let agent_ctx = extract_agent_context(&headers);
+    let mut agent_ctx = extract_agent_context(&headers);
+    if let Some(ref identity) = resolved_identity {
+        agent_ctx.agent_id = Some(identity.agent_instance_id.clone());
+        agent_ctx.agent_type = Some(identity.agent_type_name.clone());
+    }
 
     let repository_id = match headers
         .get("x-repository-id")
@@ -208,6 +226,23 @@ async fn ingest_raw_inner(
     .await
     {
         return resp;
+    }
+
+    let security_ctx = request_security_context(&headers, &agent_ctx, resolved_identity.as_ref());
+    let attrs = resource_attrs_from_body(&state, &tenant, entity_type, &sha, &initial_fields);
+    if let Err(response) = authorize_mutation(
+        &state,
+        &tenant,
+        &security_ctx,
+        &agent_ctx,
+        CREATE_ACTION,
+        entity_type,
+        &sha,
+        &attrs,
+    )
+    .await
+    {
+        return response;
     }
 
     match state

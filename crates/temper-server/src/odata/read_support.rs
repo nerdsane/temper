@@ -10,13 +10,13 @@ use crate::state::ServerState;
 use crate::storage::EntityCatalogRow;
 
 mod config;
+#[allow(dead_code)] // Retained for future authorization-aware paged selection.
 mod pushdown_page;
 mod select_projection;
 mod shadow;
 
 use config::{catalog_fast_read_enabled, entity_set_materialization_concurrency};
 pub(super) use config::{odata_default_page_size, odata_max_entities};
-pub(super) use pushdown_page::{PushdownPageRequest, try_select_paged_pushdown_entity_ids};
 use select_projection::catalog_row_to_selected_entity_body;
 pub(super) use select_projection::catalog_select_projection_fields;
 use shadow::{
@@ -389,12 +389,14 @@ pub(super) fn select_entity_ids_for_materialization(
     query_options: &temper_odata::query::types::QueryOptions,
     default_page_size: usize,
     max_entities: usize,
+    has_row_authorization: bool,
 ) -> (
     Vec<String>,
     temper_odata::query::types::QueryOptions,
     Option<usize>,
 ) {
-    let has_filter_or_order = query_options.filter.is_some() || query_options.orderby.is_some();
+    let has_filter_or_order =
+        query_options.filter.is_some() || query_options.orderby.is_some() || has_row_authorization;
     let mut precomputed_count = None;
 
     let apply_options = if !has_filter_or_order {

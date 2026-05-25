@@ -290,17 +290,19 @@ pub async fn expand_entity(
     entity_type: &str,
     state: &crate::state::ServerState,
     tenant: &temper_runtime::tenant::TenantId,
-) {
+    security_ctx: &temper_authz::SecurityContext,
+) -> Result<(), axum::response::Response> {
     expand_entity_recursive(
         entity,
         expand_items,
         entity_type,
         state,
         tenant,
+        security_ctx,
         0,
         &mut vec![],
     )
-    .await;
+    .await
 }
 
 /// Recursive implementation of $expand with depth and cycle guards.
@@ -310,14 +312,15 @@ async fn expand_entity_recursive(
     entity_type: &str,
     state: &crate::state::ServerState,
     tenant: &temper_runtime::tenant::TenantId,
+    security_ctx: &temper_authz::SecurityContext,
     depth: u8,
     visited: &mut Vec<String>,
-) {
+) -> Result<(), axum::response::Response> {
     if depth >= MAX_EXPAND_DEPTH {
-        return;
+        return Ok(());
     }
     if visited.contains(&entity_type.to_string()) {
-        return;
+        return Ok(());
     }
     visited.push(entity_type.to_string());
     // Resolve all navigation targets up front (while holding registry lock briefly)
@@ -372,6 +375,18 @@ async fn expand_entity_recursive(
     for (item, info) in &nav_infos {
         let Some(info) = info else { continue };
         let mut related_entities = Vec::new();
+
+        if info.is_collection {
+            crate::odata::authz::authorize_read(
+                state,
+                tenant,
+                security_ctx,
+                crate::odata::authz::LIST_ACTION,
+                &info.target_type,
+                "",
+                &serde_json::json!({}),
+            )?;
+        }
 
         if let Some(ref parent_id) = entity_id {
             match &info.fk_resolution {
@@ -445,6 +460,21 @@ async fn expand_entity_recursive(
             }
         }
 
+        related_entities.retain(|entity| {
+            crate::odata::authz::entity_id_from_body(entity).is_some_and(|entity_id| {
+                crate::odata::authz::authorize_read(
+                    state,
+                    tenant,
+                    security_ctx,
+                    crate::odata::authz::READ_ACTION,
+                    &info.target_type,
+                    entity_id,
+                    entity,
+                )
+                .is_ok()
+            })
+        });
+
         // Apply nested query options if present
         if let Some(ref nested_opts) = item.options {
             let nested_query = QueryOptions {
@@ -471,10 +501,11 @@ async fn expand_entity_recursive(
                     &info.target_type,
                     state,
                     tenant,
+                    security_ctx,
                     depth + 1,
                     visited,
                 ))
-                .await;
+                .await?;
             }
         }
 
@@ -493,6 +524,7 @@ async fn expand_entity_recursive(
         }
     }
     visited.pop();
+    Ok(())
 }
 
 /// Find the target entity type name for a navigation property.

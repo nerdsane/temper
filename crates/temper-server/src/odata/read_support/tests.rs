@@ -214,7 +214,7 @@ fn default_pagination_applies_when_top_missing_and_no_filter_orderby() {
     };
 
     let (selected, apply_opts, count) =
-        select_entity_ids_for_materialization(ids, &opts, 100, 1000);
+        select_entity_ids_for_materialization(ids, &opts, 100, 1000, false);
 
     assert_eq!(selected.len(), 100);
     assert_eq!(selected.first().unwrap(), "id-0");
@@ -236,7 +236,7 @@ fn explicit_skip_top_are_applied_before_materialization() {
     };
 
     let (selected, _apply_opts, count) =
-        select_entity_ids_for_materialization(ids, &opts, 100, 1000);
+        select_entity_ids_for_materialization(ids, &opts, 100, 1000, false);
 
     assert_eq!(selected.len(), 10);
     assert_eq!(selected.first().unwrap(), "id-5");
@@ -259,7 +259,7 @@ fn filtered_query_materialises_all_entities_under_safety_cap() {
     };
 
     let (selected, apply_opts, count) =
-        select_entity_ids_for_materialization(ids, &opts, 100, 1000);
+        select_entity_ids_for_materialization(ids, &opts, 100, 1000, false);
 
     assert_eq!(selected.len(), 2500);
     assert_eq!(count, None);
@@ -277,7 +277,7 @@ fn safety_cap_truncates_at_10x_max_entities() {
     };
 
     let (selected, apply_opts, count) =
-        select_entity_ids_for_materialization(ids, &opts, 100, 1000);
+        select_entity_ids_for_materialization(ids, &opts, 100, 1000, false);
 
     assert_eq!(selected.len(), 10_000);
     assert_eq!(count, None);
