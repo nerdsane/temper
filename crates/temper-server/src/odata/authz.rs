@@ -106,31 +106,41 @@ pub(crate) fn authorize_read(
     entity_type: &str,
     entity_id: &str,
     body: &serde_json::Value,
-) -> Result<(), Response> {
+) -> Result<(), Box<Response>> {
     let attrs = resource_attrs_from_body(state, tenant, entity_type, entity_id, body);
     state
         .authorize_with_context(security_ctx, action, entity_type, &attrs, tenant.as_str())
         .map_err(|denial| {
-            odata_error(
-                StatusCode::FORBIDDEN,
-                "AuthorizationDenied",
-                &denial.to_string(),
+            Box::new(
+                odata_error(
+                    StatusCode::FORBIDDEN,
+                    "AuthorizationDenied",
+                    &denial.to_string(),
+                )
+                .into_response(),
             )
-            .into_response()
         })
 }
 
-#[allow(clippy::too_many_arguments)]
+pub(super) struct MutationResource<'a> {
+    pub(super) entity_type: &'a str,
+    pub(super) entity_id: &'a str,
+    pub(super) attrs: &'a BTreeMap<String, serde_json::Value>,
+}
+
 pub(super) async fn authorize_mutation(
     state: &ServerState,
     tenant: &TenantId,
     security_ctx: &SecurityContext,
     agent_ctx: &AgentContext,
     action: &str,
-    entity_type: &str,
-    entity_id: &str,
-    attrs: &BTreeMap<String, serde_json::Value>,
+    resource: MutationResource<'_>,
 ) -> Result<(), Response> {
+    let MutationResource {
+        entity_type,
+        entity_id,
+        attrs,
+    } = resource;
     let Err(denial) =
         state.authorize_with_context(security_ctx, action, entity_type, attrs, tenant.as_str())
     else {

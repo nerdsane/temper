@@ -15,8 +15,8 @@ use axum::Extension;
 use super::account_verification::enforce_commons_account_verified_for_write;
 use super::app_uniqueness::enforce_commons_app_name_unique_for_write;
 use super::authz::{
-    CREATE_ACTION, DELETE_ACTION, UPDATE_ACTION, authorize_mutation, request_security_context,
-    resource_attrs_from_body,
+    CREATE_ACTION, DELETE_ACTION, MutationResource, UPDATE_ACTION, authorize_mutation,
+    request_security_context, resource_attrs_from_body,
 };
 use super::bindings::dispatch_bound_action;
 use super::common::{
@@ -138,28 +138,27 @@ fn check_verification_gate_or_423(
         .map_err(|e| Box::new(verification_gate_response(e)))
 }
 
-#[allow(clippy::too_many_arguments)]
 async fn authorize_collection_create(
     state: &ServerState,
     tenant: &TenantId,
     entity_type: &str,
     entity_id: &str,
     fields: &serde_json::Value,
-    headers: &HeaderMap,
+    security_ctx: &temper_authz::SecurityContext,
     agent_ctx: &AgentContext,
-    resolved_identity: Option<&ResolvedIdentity>,
 ) -> Result<(), ODataWriteError> {
-    let security_ctx = request_security_context(headers, agent_ctx, resolved_identity);
     let resource_attrs = resource_attrs_from_body(state, tenant, entity_type, entity_id, fields);
     authorize_mutation(
         state,
         tenant,
-        &security_ctx,
+        security_ctx,
         agent_ctx,
         CREATE_ACTION,
-        entity_type,
-        entity_id,
-        &resource_attrs,
+        MutationResource {
+            entity_type,
+            entity_id,
+            attrs: &resource_attrs,
+        },
     )
     .await
     .map_err(Box::new)
@@ -186,16 +185,14 @@ fn ensure_entity_exists_or_404(
     }
 }
 
-#[allow(clippy::too_many_arguments)]
 async fn authorize_existing_mutation(
     state: &ServerState,
     tenant: &TenantId,
     entity_type: &str,
     entity_id: &str,
     action: &str,
-    headers: &HeaderMap,
+    security_ctx: &temper_authz::SecurityContext,
     agent_ctx: &AgentContext,
-    resolved_identity: Option<&ResolvedIdentity>,
 ) -> Result<(), ODataWriteError> {
     let snapshot = state
         .load_authz_resource_snapshot(tenant, entity_type, entity_id)
@@ -205,16 +202,17 @@ async fn authorize_existing_mutation(
                 odata_error(StatusCode::INTERNAL_SERVER_ERROR, "ReadError", &error).into_response(),
             )
         })?;
-    let security_ctx = request_security_context(headers, agent_ctx, resolved_identity);
     authorize_mutation(
         state,
         tenant,
-        &security_ctx,
+        security_ctx,
         agent_ctx,
         action,
-        entity_type,
-        entity_id,
-        &snapshot.resource_attrs,
+        MutationResource {
+            entity_type,
+            entity_id,
+            attrs: &snapshot.resource_attrs,
+        },
     )
     .await
     .map_err(Box::new)
@@ -358,15 +356,16 @@ pub async fn handle_odata_post(
                 return resp;
             }
 
+            let security_ctx =
+                request_security_context(&headers, &agent_ctx, resolved_identity.as_ref());
             if let Err(resp) = authorize_collection_create(
                 &state,
                 &tenant,
                 &entity_type,
                 &entity_id,
                 &initial_fields,
-                &headers,
+                &security_ctx,
                 &agent_ctx,
-                resolved_identity.as_ref(),
             )
             .await
             {
@@ -621,9 +620,11 @@ pub async fn handle_odata_post(
                     &security_ctx,
                     &agent_ctx,
                     &action,
-                    &entity_type,
-                    &key_str,
-                    &attrs,
+                    MutationResource {
+                        entity_type: &entity_type,
+                        entity_id: &key_str,
+                        attrs: &attrs,
+                    },
                 )
                 .await
                 {
@@ -740,15 +741,16 @@ pub async fn handle_odata_patch(
             {
                 return *resp;
             }
+            let security_ctx =
+                request_security_context(&headers, &agent_ctx, resolved_identity.as_ref());
             if let Err(resp) = authorize_existing_mutation(
                 &state,
                 &tenant,
                 &entity_type,
                 &key_str,
                 UPDATE_ACTION,
-                &headers,
+                &security_ctx,
                 &agent_ctx,
-                resolved_identity.as_ref(),
             )
             .await
             {
@@ -911,15 +913,16 @@ pub async fn handle_odata_put(
             {
                 return *resp;
             }
+            let security_ctx =
+                request_security_context(&headers, &agent_ctx, resolved_identity.as_ref());
             if let Err(resp) = authorize_existing_mutation(
                 &state,
                 &tenant,
                 &entity_type,
                 &key_str,
                 UPDATE_ACTION,
-                &headers,
+                &security_ctx,
                 &agent_ctx,
-                resolved_identity.as_ref(),
             )
             .await
             {
@@ -1073,15 +1076,16 @@ pub async fn handle_odata_delete(
             {
                 return *resp;
             }
+            let security_ctx =
+                request_security_context(&headers, &agent_ctx, resolved_identity.as_ref());
             if let Err(resp) = authorize_existing_mutation(
                 &state,
                 &tenant,
                 &entity_type,
                 &key_str,
                 DELETE_ACTION,
-                &headers,
+                &security_ctx,
                 &agent_ctx,
-                resolved_identity.as_ref(),
             )
             .await
             {

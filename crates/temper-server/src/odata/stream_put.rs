@@ -10,7 +10,7 @@ use temper_runtime::tenant::TenantId;
 use temper_wasm::{StreamRegistry, WasmInvocationContext};
 use tracing::instrument;
 
-use super::authz::{UPDATE_ACTION, authorize_mutation};
+use super::authz::{MutationResource, UPDATE_ACTION, authorize_mutation};
 use super::common::{
     check_has_stream_or_400, resolve_entity_type, resolve_value_parent, verification_gate_response,
 };
@@ -104,9 +104,11 @@ pub(super) async fn handle_stream_put(
         security_ctx,
         agent_ctx,
         UPDATE_ACTION,
-        &entity_type,
-        &key,
-        &snapshot.resource_attrs,
+        MutationResource {
+            entity_type: &entity_type,
+            entity_id: &key,
+            attrs: &snapshot.resource_attrs,
+        },
     )
     .await
     {

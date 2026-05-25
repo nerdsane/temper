@@ -277,6 +277,12 @@ struct NavExpansionInfo {
     fk_resolution: Option<FkResolution>,
 }
 
+struct ExpansionContext<'a> {
+    state: &'a crate::state::ServerState,
+    tenant: &'a temper_runtime::tenant::TenantId,
+    security_ctx: &'a temper_authz::SecurityContext,
+}
+
 /// Resolve navigation properties for $expand on a single entity.
 ///
 /// For each expand item, looks up the navigation property in the CSDL
@@ -292,17 +298,12 @@ pub async fn expand_entity(
     tenant: &temper_runtime::tenant::TenantId,
     security_ctx: &temper_authz::SecurityContext,
 ) -> Result<(), axum::response::Response> {
-    expand_entity_recursive(
-        entity,
-        expand_items,
-        entity_type,
+    let context = ExpansionContext {
         state,
         tenant,
         security_ctx,
-        0,
-        &mut vec![],
-    )
-    .await
+    };
+    expand_entity_recursive(entity, expand_items, entity_type, &context, 0, &mut vec![]).await
 }
 
 /// Recursive implementation of $expand with depth and cycle guards.
@@ -310,12 +311,15 @@ async fn expand_entity_recursive(
     entity: &mut serde_json::Value,
     expand_items: &[temper_odata::query::types::ExpandItem],
     entity_type: &str,
-    state: &crate::state::ServerState,
-    tenant: &temper_runtime::tenant::TenantId,
-    security_ctx: &temper_authz::SecurityContext,
+    context: &ExpansionContext<'_>,
     depth: u8,
     visited: &mut Vec<String>,
 ) -> Result<(), axum::response::Response> {
+    let ExpansionContext {
+        state,
+        tenant,
+        security_ctx,
+    } = context;
     if depth >= MAX_EXPAND_DEPTH {
         return Ok(());
     }
@@ -376,8 +380,8 @@ async fn expand_entity_recursive(
         let Some(info) = info else { continue };
         let mut related_entities = Vec::new();
 
-        if info.is_collection {
-            crate::odata::authz::authorize_read(
+        if info.is_collection
+            && let Err(response) = crate::odata::authz::authorize_read(
                 state,
                 tenant,
                 security_ctx,
@@ -385,7 +389,9 @@ async fn expand_entity_recursive(
                 &info.target_type,
                 "",
                 &serde_json::json!({}),
-            )?;
+            )
+        {
+            return Err(*response);
         }
 
         if let Some(ref parent_id) = entity_id {
@@ -499,9 +505,7 @@ async fn expand_entity_recursive(
                     related,
                     nested_expand,
                     &info.target_type,
-                    state,
-                    tenant,
-                    security_ctx,
+                    context,
                     depth + 1,
                     visited,
                 ))

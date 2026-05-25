@@ -269,7 +269,8 @@ async fn load_authorized_entity_body(
         entity_type,
         key,
         &body,
-    )?;
+    )
+    .map_err(|response| *response)?;
     Ok(body)
 }
 
@@ -610,7 +611,7 @@ async fn handle_entity_set(
         "",
         &serde_json::json!({}),
     ) {
-        return response;
+        return *response;
     }
 
     let default_page_size = odata_default_page_size();
@@ -903,7 +904,7 @@ async fn handle_entity(
                     &key_str,
                     &body,
                 ) {
-                    return response;
+                    return *response;
                 }
                 ODataResponse {
                     status: StatusCode::OK,

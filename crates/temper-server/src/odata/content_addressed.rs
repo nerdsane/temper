@@ -28,7 +28,8 @@ use tokio_stream::StreamExt as _;
 
 use super::account_verification::enforce_commons_account_verified_for_write;
 use super::authz::{
-    CREATE_ACTION, authorize_mutation, request_security_context, resource_attrs_from_body,
+    CREATE_ACTION, MutationResource, authorize_mutation, request_security_context,
+    resource_attrs_from_body,
 };
 use super::common::{extract_tenant, run_write_prechecks};
 use super::response::annotate_entity;
@@ -236,9 +237,11 @@ async fn ingest_raw_inner(
         &security_ctx,
         &agent_ctx,
         CREATE_ACTION,
-        entity_type,
-        &sha,
-        &attrs,
+        MutationResource {
+            entity_type,
+            entity_id: &sha,
+            attrs: &attrs,
+        },
     )
     .await
     {

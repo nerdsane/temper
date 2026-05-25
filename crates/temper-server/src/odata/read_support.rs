@@ -10,8 +10,6 @@ use crate::state::ServerState;
 use crate::storage::EntityCatalogRow;
 
 mod config;
-#[allow(dead_code)] // Retained for future authorization-aware paged selection.
-mod pushdown_page;
 mod select_projection;
 mod shadow;
 
