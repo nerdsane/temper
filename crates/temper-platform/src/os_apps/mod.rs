@@ -8,6 +8,7 @@
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
+use std::time::Instant;
 
 use serde::Serialize;
 use sha2::{Digest, Sha256};
@@ -308,19 +309,16 @@ fn find_wasm_modules(
     if !wasm_dir.is_dir() {
         return modules;
     }
-    let Ok(entries) = std::fs::read_dir(&wasm_dir) else {
-        return modules;
-    };
-    let mut dirs: Vec<_> = entries
-        .filter_map(|e| e.ok())
-        .filter(|e| e.path().is_dir())
-        .collect();
-    dirs.sort_by_key(|e| e.file_name());
 
-    for entry in dirs {
-        let module_name = entry.file_name().to_string_lossy().to_string();
-        // Skip target directories that cargo creates.
-        if module_name == "target" {
+    let declared: Vec<_> = module_configs.keys().cloned().collect();
+    if declared.is_empty() {
+        warn_undeclared_wasm_artifacts(&wasm_dir, module_configs);
+        return modules;
+    }
+
+    for module_name in declared {
+        let module_dir = wasm_dir.join(&module_name);
+        if !module_dir.is_dir() {
             continue;
         }
 
@@ -333,29 +331,26 @@ fn find_wasm_modules(
             && let Some(ref target) = config.target
         {
             vec![
-                entry
-                    .path()
+                module_dir
                     .join("target")
                     .join(target)
                     .join("release")
                     .join(format!("{module_name}.wasm")),
-                entry.path().join(format!("{module_name}.wasm")),
+                module_dir.join(format!("{module_name}.wasm")),
             ]
         } else {
             vec![
-                entry
-                    .path()
+                module_dir
                     .join("target")
                     .join("wasm32-unknown-unknown")
                     .join("release")
                     .join(format!("{module_name}.wasm")),
-                entry
-                    .path()
+                module_dir
                     .join("target")
                     .join("wasm32-wasip1")
                     .join("release")
                     .join(format!("{module_name}.wasm")),
-                entry.path().join(format!("{module_name}.wasm")),
+                module_dir.join(format!("{module_name}.wasm")),
             ]
         };
 
@@ -385,7 +380,35 @@ fn find_wasm_modules(
             }
         }
     }
+
+    warn_undeclared_wasm_artifacts(&wasm_dir, module_configs);
     modules
+}
+
+fn warn_undeclared_wasm_artifacts(
+    wasm_dir: &Path,
+    module_configs: &BTreeMap<String, WasmModuleManifest>,
+) {
+    let Ok(entries) = std::fs::read_dir(wasm_dir) else {
+        return;
+    };
+    for entry in entries.filter_map(|entry| entry.ok()) {
+        if !entry.path().is_dir() {
+            continue;
+        }
+        let module_name = entry.file_name().to_string_lossy().to_string();
+        if module_name == "target" || module_configs.contains_key(&module_name) {
+            continue;
+        }
+        let sibling = entry.path().join(format!("{module_name}.wasm"));
+        if sibling.exists() {
+            tracing::warn!(
+                module = %module_name,
+                path = %sibling.display(),
+                "Ignoring undeclared bundled WASM artifact; declare it in app.toml [[wasm_modules]] to install it"
+            );
+        }
+    }
 }
 
 // ── Agent / Skill / Seed Data discovery ─────────────────────────────
@@ -1307,6 +1330,7 @@ pub(super) async fn install_os_app_with_plan(
         };
 
         for (module_name, wasm_bytes) in &bundle.wasm_modules {
+            let module_started = Instant::now();
             let module_config = bundle.wasm_module_configs.get(module_name);
             let hash = temper_wasm::WasmEngine::hash_module(wasm_bytes);
 
@@ -1383,6 +1407,7 @@ pub(super) async fn install_os_app_with_plan(
                 module = %module_name,
                 hash = %hash,
                 size = wasm_bytes.len(),
+                duration_ms = module_started.elapsed().as_millis() as u64,
                 startup_loading = ?module_config
                     .map(|config| config.startup_loading)
                     .unwrap_or_default(),

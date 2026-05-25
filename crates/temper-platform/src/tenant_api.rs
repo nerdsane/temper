@@ -8,7 +8,8 @@
 //! - `DELETE /api/tenants/:id/users/:user_id` — remove a user from a tenant
 //! - `GET    /api/tenants/:id/users`    — list users for a tenant
 
-use axum::extract::State;
+use axum::extract::{Path, State};
+use axum::http::HeaderMap;
 use axum::http::StatusCode;
 use axum::response::IntoResponse;
 use axum::{Json, Router, routing};
@@ -89,6 +90,10 @@ pub fn tenant_api_router() -> Router<PlatformState> {
         .route("/os-apps", routing::get(list_os_apps))
         .route("/os-apps/{name}", routing::get(get_os_app_guide))
         .route("/genesis/apps/install", routing::post(install_genesis_app))
+        .route(
+            "/genesis/apps/{owner}/{name}/versions/{hash}/bundle",
+            routing::get(get_genesis_app_bundle),
+        )
 }
 
 /// `POST /api/tenants` — provision a new tenant database.
@@ -348,6 +353,38 @@ pub(crate) async fn install_genesis_app(
 ) -> impl IntoResponse {
     match crate::genesis_install::install_genesis_app_from_registry(&state, req).await {
         Ok(result) => (StatusCode::OK, Json(serde_json::json!(result))),
+        Err(error) if error.contains("not found") => (
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({ "error": error })),
+        ),
+        Err(error) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({ "error": error })),
+        ),
+    }
+}
+
+/// `GET /api/genesis/apps/:owner/:name/versions/:hash/bundle` — export a pinned app closure.
+pub(crate) async fn get_genesis_app_bundle(
+    State(state): State<PlatformState>,
+    headers: HeaderMap,
+    Path((owner, name, hash)): Path<(String, String, String)>,
+) -> impl IntoResponse {
+    let registry_tenant = headers
+        .get("x-tenant-id")
+        .and_then(|value| value.to_str().ok())
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or("default");
+    match crate::genesis_install::export_genesis_registry_bundle(
+        &state,
+        registry_tenant,
+        &owner,
+        &name,
+        &hash,
+    )
+    .await
+    {
+        Ok(bundle) => (StatusCode::OK, Json(serde_json::json!(bundle))),
         Err(error) if error.contains("not found") => (
             StatusCode::NOT_FOUND,
             Json(serde_json::json!({ "error": error })),

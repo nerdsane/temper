@@ -5,7 +5,8 @@
 //! into the platform's app installer.
 
 use std::collections::BTreeSet;
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
+use std::time::Instant;
 
 use base64::Engine as _;
 use serde::{Deserialize, Serialize};
@@ -15,7 +16,8 @@ use temper_server::platform_store::InstalledAppRecord;
 use temper_server::state::{BoundActionHook, BoundActionHookContext, DispatchCommand, ServerState};
 
 use crate::os_apps::{
-    AppManifest, add_os_apps_dir_preferred, install_os_app, os_app_bundle_digest,
+    AppManifest, InstallResult, OsAppReconcileResult, add_os_apps_dir_preferred,
+    os_app_bundle_digest, reconcile_os_app, resolve_os_app_install_order,
 };
 use crate::state::PlatformState;
 
@@ -48,6 +50,27 @@ pub struct GenesisRegistryInstallResult {
     pub agent_skills: Vec<String>,
     pub adrs: Vec<String>,
     pub seed_instances: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GenesisRegistryBundleResponse {
+    pub app_ref: String,
+    pub registry_tenant: String,
+    pub apps: Vec<GenesisRegistryBundleApp>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GenesisRegistryBundleApp {
+    pub owner: String,
+    pub name: String,
+    pub version_hash: String,
+    pub files: Vec<GenesisRegistryBundleFile>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GenesisRegistryBundleFile {
+    pub path: String,
+    pub content_base64: String,
 }
 
 #[derive(Debug, Clone)]
@@ -218,7 +241,34 @@ pub async fn restore_genesis_registry_cache_roots(platform: &PlatformState) -> u
             }
         };
         let cache_root = genesis_cache_root(&platform.server, &record.app_ref);
-        match materialize_registry_app_closure(&record.registry_url, root_ref, &cache_root).await {
+        let registry_tenant = if record.registry_tenant.trim().is_empty() {
+            "default"
+        } else {
+            record.registry_tenant.trim()
+        };
+        let materialized = match materialize_registry_app_closure_via_bundle(
+            &record.registry_url,
+            registry_tenant,
+            root_ref.clone(),
+            &cache_root,
+        )
+        .await
+        {
+            Ok(materialized) => Ok(materialized),
+            Err(error) if genesis_git_fallback_enabled() => {
+                tracing::warn!(
+                    tenant = %tenant,
+                    app = %app_name,
+                    app_ref = %record.app_ref,
+                    registry_url = %record.registry_url,
+                    error = %error,
+                    "Genesis bundle cache recovery failed; falling back to git clone because TEMPER_GENESIS_INSTALL_GIT_FALLBACK is enabled"
+                );
+                materialize_registry_app_closure(&record.registry_url, root_ref, &cache_root).await
+            }
+            Err(error) => Err(error),
+        };
+        match materialized {
             Ok(_) => {
                 add_os_apps_dir_preferred(cache_root);
                 restored += 1;
@@ -249,6 +299,7 @@ pub async fn install_genesis_app_from_registry(
     platform: &PlatformState,
     request: GenesisRegistryInstallRequest,
 ) -> Result<GenesisRegistryInstallResult, String> {
+    let install_started = Instant::now();
     let registry_url = normalize_registry_url(&request.registry_url)?;
     let registry_tenant = if request.registry_tenant.trim().is_empty() {
         "default".to_string()
@@ -275,8 +326,52 @@ pub async fn install_genesis_app_from_registry(
         )
     })?;
 
-    let materialized_refs =
-        materialize_registry_app_closure(&registry_url, root_ref.clone(), &cache_root).await?;
+    let materialize_started = Instant::now();
+    let materialized_refs = match materialize_registry_app_closure_via_bundle(
+        &registry_url,
+        &registry_tenant,
+        root_ref.clone(),
+        &cache_root,
+    )
+    .await
+    {
+        Ok(refs) => {
+            log_genesis_install_phase(
+                &request.app_ref,
+                "materialize_bundle",
+                materialize_started,
+                refs.len(),
+                0,
+            );
+            refs
+        }
+        Err(error) if genesis_git_fallback_enabled() => {
+            tracing::warn!(
+                app_ref = %request.app_ref,
+                registry_url = %registry_url,
+                error = %error,
+                "Genesis bundle fetch failed; falling back to git clone because TEMPER_GENESIS_INSTALL_GIT_FALLBACK is enabled"
+            );
+            let git_started = Instant::now();
+            let refs =
+                materialize_registry_app_closure(&registry_url, root_ref.clone(), &cache_root)
+                    .await?;
+            log_genesis_install_phase(
+                &request.app_ref,
+                "materialize_git_fallback",
+                git_started,
+                refs.len(),
+                0,
+            );
+            refs
+        }
+        Err(error) => {
+            return Err(format!(
+                "Genesis bundle fetch failed for {} from {}: {error}. Git fallback is disabled; set TEMPER_GENESIS_INSTALL_GIT_FALLBACK=1 only for admin/debug recovery.",
+                request.app_ref, registry_url
+            ));
+        }
+    };
     let materialized: Vec<String> = materialized_refs
         .iter()
         .map(|app_ref| app_ref.name.clone())
@@ -285,7 +380,17 @@ pub async fn install_genesis_app_from_registry(
     add_os_apps_dir_preferred(cache_root.clone());
 
     let install_platform = platform.clone();
-    let install = install_os_app(&install_platform, &request.tenant, &root_ref.name).await?;
+    let reconcile_started = Instant::now();
+    let install =
+        reconcile_materialized_app_closure(&install_platform, &request.tenant, &root_ref.name)
+            .await?;
+    log_genesis_install_phase(
+        &request.app_ref,
+        "install_reconcile",
+        reconcile_started,
+        materialized.len(),
+        install.wasm_modules.len(),
+    );
     let root_closure_id = format!(
         "genesis:{}:{}",
         request.app_ref,
@@ -326,6 +431,13 @@ pub async fn install_genesis_app_from_registry(
         )
         .await;
     }
+    log_genesis_install_phase(
+        &request.app_ref,
+        "total",
+        install_started,
+        materialized.len(),
+        0,
+    );
 
     Ok(GenesisRegistryInstallResult {
         app_ref: request.app_ref,
@@ -344,6 +456,73 @@ pub async fn install_genesis_app_from_registry(
         adrs: install.adrs_bootstrapped,
         seed_instances: install.seed_instances,
     })
+}
+
+async fn reconcile_materialized_app_closure(
+    platform: &PlatformState,
+    tenant: &str,
+    root_app_name: &str,
+) -> Result<InstallResult, String> {
+    let order = resolve_os_app_install_order(&[root_app_name.to_string()])?;
+    let mut root_result = InstallResult::default();
+
+    for app_name in order {
+        let started = Instant::now();
+        match reconcile_os_app(platform, tenant, &app_name).await? {
+            OsAppReconcileResult::Skipped { bundle_digest, .. } => {
+                tracing::info!(
+                    tenant = %tenant,
+                    app = %app_name,
+                    bundle_digest = %bundle_digest,
+                    duration_ms = started.elapsed().as_millis() as u64,
+                    "Genesis materialized app unchanged; skipped reconcile"
+                );
+            }
+            OsAppReconcileResult::Installed { install, .. } => {
+                tracing::info!(
+                    tenant = %tenant,
+                    app = %app_name,
+                    duration_ms = started.elapsed().as_millis() as u64,
+                    wasm_modules = install.wasm_modules.len(),
+                    agents = install.agents.len(),
+                    skills = install.skills.len(),
+                    "Genesis materialized app reconciled"
+                );
+                if app_name == root_app_name {
+                    root_result = *install;
+                }
+            }
+        }
+    }
+
+    Ok(root_result)
+}
+
+fn log_genesis_install_phase(
+    app_ref: &str,
+    phase: &str,
+    started: Instant,
+    count: usize,
+    bytes: usize,
+) {
+    tracing::info!(
+        app_ref = %app_ref,
+        phase = %phase,
+        duration_ms = started.elapsed().as_millis() as u64,
+        count,
+        bytes,
+        "Genesis install phase complete"
+    );
+}
+
+fn genesis_git_fallback_enabled() -> bool {
+    matches!(
+        std::env::var("TEMPER_GENESIS_INSTALL_GIT_FALLBACK")
+            .unwrap_or_default()
+            .to_ascii_lowercase()
+            .as_str(),
+        "1" | "true" | "yes"
+    )
 }
 
 fn normalize_registry_url(raw: &str) -> Result<String, String> {
@@ -482,6 +661,124 @@ async fn materialize_registry_app_closure(
     Ok(materialized_refs)
 }
 
+async fn materialize_registry_app_closure_via_bundle(
+    registry_url: &str,
+    registry_tenant: &str,
+    root_ref: RegistryAppRef,
+    cache_root: &Path,
+) -> Result<Vec<RegistryAppRef>, String> {
+    let Some(version_hash) = root_ref.version_hash.as_deref() else {
+        return Err("bundle fetch requires a pinned root app ref".to_string());
+    };
+    let bundle_url = format!(
+        "{}/api/genesis/apps/{}/{}/versions/{}/bundle",
+        registry_url.trim_end_matches('/'),
+        root_ref.owner,
+        root_ref.name,
+        version_hash.trim_start_matches('@')
+    );
+    let response = reqwest::Client::new()
+        .get(&bundle_url)
+        .header("X-Tenant-Id", registry_tenant)
+        .send()
+        .await
+        .map_err(|error| format!("request Genesis bundle {bundle_url}: {error}"))?;
+    let status = response.status();
+    if !status.is_success() {
+        let body = response.text().await.unwrap_or_default();
+        return Err(format!(
+            "request Genesis bundle {bundle_url} returned {status}: {}",
+            body.trim()
+        ));
+    }
+    let bundle: GenesisRegistryBundleResponse = response
+        .json()
+        .await
+        .map_err(|error| format!("decode Genesis bundle {bundle_url}: {error}"))?;
+
+    if cache_root.exists() {
+        std::fs::remove_dir_all(cache_root).map_err(|error| {
+            format!(
+                "clear Genesis registry bundle cache '{}': {error}",
+                cache_root.display()
+            )
+        })?;
+    }
+    std::fs::create_dir_all(cache_root).map_err(|error| {
+        format!(
+            "create Genesis registry bundle cache '{}': {error}",
+            cache_root.display()
+        )
+    })?;
+
+    let mut refs = Vec::new();
+    for app in bundle.apps {
+        let app_dir = cache_root.join(&app.name);
+        write_bundle_app(&app_dir, &app)?;
+        refs.push(RegistryAppRef {
+            owner: app.owner,
+            name: app.name,
+            version_hash: Some(app.version_hash),
+        });
+    }
+    Ok(refs)
+}
+
+fn write_bundle_app(app_dir: &Path, app: &GenesisRegistryBundleApp) -> Result<(), String> {
+    if app_dir.exists() {
+        std::fs::remove_dir_all(app_dir).map_err(|error| {
+            format!("clear Genesis bundle app '{}': {error}", app_dir.display())
+        })?;
+    }
+    std::fs::create_dir_all(app_dir)
+        .map_err(|error| format!("create Genesis bundle app '{}': {error}", app_dir.display()))?;
+
+    for file in &app.files {
+        let rel = safe_bundle_relative_path(&file.path)?;
+        let path = app_dir.join(&rel);
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent).map_err(|error| {
+                format!("create bundle file parent '{}': {error}", parent.display())
+            })?;
+        }
+        let bytes = base64::engine::general_purpose::STANDARD
+            .decode(&file.content_base64)
+            .map_err(|error| format!("decode bundle file '{}': {error}", file.path))?;
+        std::fs::write(&path, bytes)
+            .map_err(|error| format!("write bundle file '{}': {error}", path.display()))?;
+    }
+    Ok(())
+}
+
+fn safe_bundle_relative_path(path: &str) -> Result<PathBuf, String> {
+    let rel = PathBuf::from(path);
+    if rel.as_os_str().is_empty() {
+        return Err("bundle file path must not be empty".to_string());
+    }
+    let mut safe = PathBuf::new();
+    for component in rel.components() {
+        match component {
+            Component::Normal(part) => {
+                if part == "target" || part == ".git" {
+                    return Err(format!(
+                        "bundle file path '{}' contains forbidden component '{}'",
+                        path,
+                        part.to_string_lossy()
+                    ));
+                }
+                safe.push(part);
+            }
+            _ => {
+                return Err(format!(
+                    "bundle file path '{}' must be relative and must not contain '..'",
+                    path
+                ));
+            }
+        }
+    }
+    Ok(safe)
+}
+
 fn registry_git_url(registry_url: &str, owner: &str, name: &str) -> String {
     format!(
         "{}/{}/{}.git",
@@ -580,7 +877,7 @@ impl BoundActionHook for GenesisInstallHook {
 
         let mut platform = self.platform.clone();
         platform.server = state.clone();
-        match install_os_app(&platform, &target_tenant, &name).await {
+        match reconcile_materialized_app_closure(&platform, &target_tenant, &name).await {
             Ok(result) => {
                 let closure_id = format!(
                     "genesis:{}:{}",
@@ -725,6 +1022,223 @@ struct GenesisAppBundle {
     name: String,
     repository_id: String,
     version_hash: String,
+}
+
+pub async fn export_genesis_registry_bundle(
+    platform: &PlatformState,
+    registry_tenant: &str,
+    owner: &str,
+    name: &str,
+    version_hash: &str,
+) -> Result<GenesisRegistryBundleResponse, String> {
+    let tenant = TenantId::new(registry_tenant);
+    let root = resolve_genesis_app_by_ref(
+        &platform.server,
+        &tenant,
+        owner,
+        name,
+        version_hash.trim_start_matches('@'),
+    )
+    .await?;
+    let app_ref = format!(
+        "{}/{}@{}",
+        root.owner,
+        root.name,
+        root.version_hash.trim_start_matches('@')
+    );
+    let cache_root = genesis_cache_root(&platform.server, &app_ref);
+    let closure = resolve_genesis_app_closure(&platform.server, &tenant, root).await?;
+    let mut apps = Vec::new();
+
+    for app in closure {
+        let app_dir = cache_root.join(&app.name);
+        let started = Instant::now();
+        materialize_commit_tree(
+            &platform.server,
+            &tenant,
+            &app.repository_id,
+            &app.version_hash,
+            &app_dir,
+        )
+        .await?;
+        let files = collect_bundle_files(&app_dir)?;
+        tracing::info!(
+            registry_tenant = %registry_tenant,
+            app = %app.name,
+            version_hash = %app.version_hash,
+            duration_ms = started.elapsed().as_millis() as u64,
+            files = files.len(),
+            "Exported Genesis app bundle files"
+        );
+        apps.push(GenesisRegistryBundleApp {
+            owner: app.owner,
+            name: app.name,
+            version_hash: app.version_hash.trim_start_matches('@').to_string(),
+            files,
+        });
+    }
+
+    Ok(GenesisRegistryBundleResponse {
+        app_ref,
+        registry_tenant: registry_tenant.to_string(),
+        apps,
+    })
+}
+
+async fn resolve_genesis_app_by_ref(
+    state: &ServerState,
+    tenant: &TenantId,
+    owner: &str,
+    name: &str,
+    version_hash: &str,
+) -> Result<GenesisAppBundle, String> {
+    let ids = state.list_entity_ids_lazy(tenant, "App").await;
+    for entity_id in ids {
+        let candidate = state
+            .get_tenant_entity_state(tenant, "App", &entity_id)
+            .await
+            .map_err(|error| format!("read Genesis App {entity_id}: {error}"))?;
+        if candidate.state.status != "Active" {
+            continue;
+        }
+        let fields = &candidate.state.fields;
+        let Some(candidate_name) = string_field(fields, "Name") else {
+            continue;
+        };
+        let Some(candidate_owner) = string_field(fields, "OwnerId") else {
+            continue;
+        };
+        if candidate_owner != owner || candidate_name != name {
+            continue;
+        }
+        let Some(repository_id) = string_field(fields, "RepositoryId") else {
+            continue;
+        };
+        let Some(latest_hash) = string_field(fields, "LatestVersionHash") else {
+            continue;
+        };
+        if latest_hash.trim_start_matches('@') != version_hash.trim_start_matches('@') {
+            continue;
+        }
+        return Ok(GenesisAppBundle {
+            owner: candidate_owner,
+            name: candidate_name,
+            repository_id,
+            version_hash: latest_hash.trim_start_matches('@').to_string(),
+        });
+    }
+
+    Err(format!(
+        "no active Genesis App found for {owner}/{name}@{}",
+        version_hash.trim_start_matches('@')
+    ))
+}
+
+async fn resolve_genesis_app_closure(
+    state: &ServerState,
+    tenant: &TenantId,
+    root: GenesisAppBundle,
+) -> Result<Vec<GenesisAppBundle>, String> {
+    let mut stack = vec![root];
+    let mut seen = BTreeSet::new();
+    let mut closure = Vec::new();
+
+    while let Some(app) = stack.pop() {
+        let key = format!("{}/{}", app.owner, app.name);
+        if !seen.insert(key) {
+            continue;
+        }
+        let cache_root = genesis_cache_root(
+            state,
+            &format!(
+                "{}-{}-dependency-read-{}",
+                app.owner,
+                app.name,
+                app.version_hash.trim_start_matches('@')
+            ),
+        );
+        let app_dir = cache_root.join(&app.name);
+        materialize_commit_tree(
+            state,
+            tenant,
+            &app.repository_id,
+            &app.version_hash,
+            &app_dir,
+        )
+        .await?;
+        for dependency in read_manifest_dependencies(&app_dir)?.into_iter().rev() {
+            let dependency = resolve_genesis_dependency(state, tenant, &app.owner, &dependency)
+                .await
+                .map_err(|error| {
+                    format!(
+                        "resolve dependency '{}' for Genesis app '{}': {error}",
+                        dependency, app.name
+                    )
+                })?;
+            if !seen.contains(&format!("{}/{}", dependency.owner, dependency.name)) {
+                stack.push(dependency);
+            }
+        }
+        closure.push(app);
+    }
+
+    Ok(closure)
+}
+
+fn collect_bundle_files(app_dir: &Path) -> Result<Vec<GenesisRegistryBundleFile>, String> {
+    let mut paths = Vec::new();
+    collect_bundle_file_paths(app_dir, app_dir, &mut paths)?;
+    paths.sort();
+    let mut files = Vec::new();
+    for path in paths {
+        let rel = path
+            .strip_prefix(app_dir)
+            .map_err(|error| format!("strip bundle path '{}': {error}", path.display()))?
+            .to_string_lossy()
+            .replace('\\', "/");
+        let bytes = std::fs::read(&path)
+            .map_err(|error| format!("read bundle file '{}': {error}", path.display()))?;
+        files.push(GenesisRegistryBundleFile {
+            path: rel,
+            content_base64: base64::engine::general_purpose::STANDARD.encode(bytes),
+        });
+    }
+    Ok(files)
+}
+
+fn collect_bundle_file_paths(
+    root: &Path,
+    dir: &Path,
+    paths: &mut Vec<PathBuf>,
+) -> Result<(), String> {
+    let mut entries: Vec<_> = std::fs::read_dir(dir)
+        .map_err(|error| format!("read bundle directory '{}': {error}", dir.display()))?
+        .filter_map(|entry| entry.ok())
+        .collect();
+    entries.sort_by_key(|entry| entry.file_name());
+    for entry in entries {
+        let path = entry.path();
+        let rel = path
+            .strip_prefix(root)
+            .map_err(|error| format!("strip bundle path '{}': {error}", path.display()))?;
+        if rel.components().any(|component| {
+            matches!(component, Component::Normal(part) if part == "target" || part == ".git")
+        }) {
+            if path.is_dir() {
+                tracing::warn!(
+                    path = %path.display(),
+                    "Skipping forbidden generated directory in Genesis bundle export"
+                );
+            }
+            continue;
+        }
+        if path.is_dir() {
+            collect_bundle_file_paths(root, &path, paths)?;
+        } else if path.is_file() {
+            paths.push(path);
+        }
+    }
+    Ok(())
 }
 
 async fn materialize_app_closure(
@@ -1207,6 +1721,8 @@ fn sanitize_fragment(input: &str) -> String {
 
 #[cfg(test)]
 mod tests {
+    use base64::Engine as _;
+
     use super::*;
 
     #[test]
@@ -1274,6 +1790,43 @@ mod tests {
             registry_git_url("https://genesis.example/", "temperpaw", "paw-agent"),
             "https://genesis.example/temperpaw/paw-agent.git"
         );
+    }
+
+    #[test]
+    fn bundle_paths_must_be_safe_package_files() {
+        assert_eq!(
+            safe_bundle_relative_path("wasm/echo/echo.wasm").unwrap(),
+            PathBuf::from("wasm").join("echo").join("echo.wasm")
+        );
+        assert!(safe_bundle_relative_path("../app.toml").is_err());
+        assert!(safe_bundle_relative_path("/tmp/app.toml").is_err());
+        assert!(safe_bundle_relative_path("wasm/echo/target/debug/echo.wasm").is_err());
+        assert!(safe_bundle_relative_path(".git/config").is_err());
+    }
+
+    #[test]
+    fn write_bundle_app_materializes_base64_files() {
+        let temp_dir = std::env::temp_dir().join(format!(
+            "temper-genesis-bundle-write-{}",
+            uuid::Uuid::new_v4()
+        ));
+        let app = GenesisRegistryBundleApp {
+            owner: "owner".to_string(),
+            name: "notes".to_string(),
+            version_hash: "abc123".to_string(),
+            files: vec![GenesisRegistryBundleFile {
+                path: "app.toml".to_string(),
+                content_base64: base64::engine::general_purpose::STANDARD
+                    .encode(b"name = \"notes\"\n"),
+            }],
+        };
+
+        write_bundle_app(&temp_dir, &app).expect("bundle should materialize");
+        assert_eq!(
+            std::fs::read_to_string(temp_dir.join("app.toml")).unwrap(),
+            "name = \"notes\"\n"
+        );
+        let _ = std::fs::remove_dir_all(&temp_dir);
     }
 
     #[test]
