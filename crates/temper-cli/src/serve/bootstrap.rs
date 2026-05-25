@@ -551,8 +551,12 @@ pub(super) async fn bootstrap_installed_apps(
         if matches!(source, AppBootstrapSource::Persisted)
             && temper_platform::os_apps::get_os_app(&app_name).is_none()
         {
-            eprint!(
-                "  Info: skipping persisted app '{app_name}' for '{tenant}': not present in configured app sources\n"
+            use std::io::Write as _;
+
+            let mut stderr = std::io::stderr();
+            let _ = writeln!(
+                stderr,
+                "  Info: skipping persisted app '{app_name}' for '{tenant}': not present in configured app sources"
             );
             continue;
         }
