@@ -548,6 +548,15 @@ pub(super) async fn bootstrap_installed_apps(
     }
 
     for ((tenant, app_name), source) in requested {
+        if matches!(source, AppBootstrapSource::Persisted)
+            && temper_platform::os_apps::get_os_app(&app_name).is_none()
+        {
+            println!(
+                "  Skipping persisted app '{app_name}' for '{tenant}': not present in configured app sources"
+            );
+            continue;
+        }
+
         // Replay through the real installer every startup. Presence-only checks
         // are not sufficient because an installed app's bundle can drift:
         // updated IOA/Cedar/WASM/ADR assets must refresh even when the tenant
