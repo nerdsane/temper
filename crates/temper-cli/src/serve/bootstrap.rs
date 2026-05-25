@@ -551,8 +551,8 @@ pub(super) async fn bootstrap_installed_apps(
         if matches!(source, AppBootstrapSource::Persisted)
             && temper_platform::os_apps::get_os_app(&app_name).is_none()
         {
-            println!(
-                "  Skipping persisted app '{app_name}' for '{tenant}': not present in configured app sources"
+            eprint!(
+                "  Info: skipping persisted app '{app_name}' for '{tenant}': not present in configured app sources\n"
             );
             continue;
         }
