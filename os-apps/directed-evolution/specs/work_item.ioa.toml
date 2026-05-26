@@ -1,0 +1,77 @@
+[automaton]
+name = "WorkItem"
+states = ["Queued", "Claimed", "Running", "Succeeded", "Failed", "Cancelled"]
+initial = "Queued"
+allow_indefinite_states = ["Queued", "Claimed", "Running"]
+
+[[state]]
+name = "claimed"
+type = "bool"
+initial = "false"
+
+[[action]]
+name = "QueueWorkItem"
+kind = "input"
+from = ["Queued"]
+params = ["Role", "TargetEntityType", "TargetEntityId", "PromptRef", "ContextRef", "OutputSchemaRef", "CorrelationJson"]
+hint = "Queue a runnable brain or tooling work item."
+
+[[action]]
+name = "ClaimWorkItem"
+kind = "input"
+from = ["Queued"]
+to = "Claimed"
+effect = "set claimed true"
+params = ["WorkerId", "ClaimedBy"]
+hint = "Claim a work item for local execution."
+
+[[action]]
+name = "StartWorkItem"
+kind = "input"
+from = ["Claimed"]
+to = "Running"
+guard = "is_true claimed"
+params = ["BrainRunId"]
+hint = "Start a claimed work item."
+
+[[action]]
+name = "SucceedWorkItem"
+kind = "input"
+from = ["Running"]
+to = "Succeeded"
+effect = [{ type = "trigger", name = "work_item_succeeded" }]
+params = ["ResultJson", "EvidenceArtifactId", "Summary"]
+hint = "Record successful work item completion."
+
+[[action.triggers]]
+name = "work_item_succeeded"
+kind = "wasm"
+module = "work_item_result_router"
+
+[action.triggers.config]
+temper_api_url = "{secret:temper_api_url}"
+
+[[action]]
+name = "FailWorkItem"
+kind = "input"
+from = ["Claimed", "Running"]
+to = "Failed"
+effect = [{ type = "trigger", name = "work_item_failed" }]
+params = ["FailureReason", "EvidenceArtifactId"]
+hint = "Record work item failure."
+
+[[action.triggers]]
+name = "work_item_failed"
+kind = "wasm"
+module = "work_item_result_router"
+
+[action.triggers.config]
+temper_api_url = "{secret:temper_api_url}"
+
+[[action]]
+name = "CancelWorkItem"
+kind = "input"
+from = ["Queued", "Claimed"]
+to = "Cancelled"
+params = ["Reason"]
+hint = "Cancel a work item before completion."

@@ -1,0 +1,48 @@
+[automaton]
+name = "Direction"
+states = ["Proposed", "Selected", "Dismissed", "Archived"]
+initial = "Proposed"
+allow_indefinite_states = ["Proposed", "Selected", "Dismissed"]
+
+[[state]]
+name = "has_provenance"
+type = "bool"
+initial = "false"
+
+[[action]]
+name = "ProposeDirection"
+kind = "input"
+from = ["Proposed"]
+effect = "set has_provenance true"
+params = ["OrganismId", "PressureIdsJson", "PressureClass", "Title", "Summary", "ProvenanceJson", "AutonomyLane", "ProposedAdaptationGoal", "ProposedViabilityConstraintsJson", "BrainRunId"]
+hint = "Create a direction with provenance and a recommended autonomy lane."
+
+[[action]]
+name = "SelectDirection"
+kind = "input"
+from = ["Proposed"]
+to = "Selected"
+guard = "is_true has_provenance"
+params = ["EpisodeId", "SelectedBy", "SelectionNotes"]
+hint = "Select this direction for an episode."
+
+[[action]]
+name = "DismissDirection"
+kind = "input"
+from = ["Proposed"]
+to = "Dismissed"
+params = ["Reason"]
+hint = "Dismiss a proposed direction."
+
+[[action]]
+name = "ArchiveDirection"
+kind = "input"
+from = ["Proposed", "Selected", "Dismissed"]
+to = "Archived"
+params = ["Reason"]
+hint = "Archive the direction."
+
+[[invariant]]
+name = "SelectedHasProvenance"
+when = ["Selected"]
+assert = "is_true has_provenance"

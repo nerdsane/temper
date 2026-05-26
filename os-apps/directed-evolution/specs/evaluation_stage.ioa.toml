@@ -1,0 +1,21 @@
+[automaton]
+name = "EvaluationStage"
+states = ["Draft", "Active", "Archived"]
+initial = "Draft"
+allow_indefinite_states = ["Draft", "Active"]
+
+[[action]]
+name = "ActivateEvaluationStage"
+kind = "input"
+from = ["Draft"]
+to = "Active"
+params = ["EpisodeId", "StageName", "StageKind", "SequenceIndex", "RequiredEvidenceJson", "ExecutorKind"]
+hint = "Activate a concrete evaluation stage."
+
+[[action]]
+name = "ArchiveEvaluationStage"
+kind = "input"
+from = ["Draft", "Active"]
+to = "Archived"
+params = ["Reason"]
+hint = "Archive an Evaluation Stage."

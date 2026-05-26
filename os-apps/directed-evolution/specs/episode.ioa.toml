@@ -1,0 +1,141 @@
+[automaton]
+name = "Episode"
+states = ["Draft", "Negotiating", "Running", "Paused", "Selecting", "Promoting", "Completed", "Stopped", "Failed"]
+initial = "Draft"
+allow_indefinite_states = ["Draft", "Negotiating", "Running", "Paused", "Selecting", "Promoting"]
+
+[[state]]
+name = "has_contract"
+type = "bool"
+initial = "false"
+
+[[state]]
+name = "generation_count"
+type = "counter"
+initial = "0"
+
+[[state]]
+name = "winner_selected"
+type = "bool"
+initial = "false"
+
+[[action]]
+name = "BeginEpisodeNegotiation"
+kind = "input"
+from = ["Draft"]
+to = "Negotiating"
+params = ["DirectionId", "OrganismId", "ParentVersionId", "AutonomyLane"]
+hint = "Begin human-brain negotiation for an episode."
+
+[[action]]
+name = "RecordEpisodeContract"
+kind = "input"
+from = ["Draft", "Negotiating"]
+effect = "set has_contract true"
+params = ["AdaptationGoalId", "SelectionPressureId", "ViabilityConstraintIdsJson", "EvaluationStageIdsJson", "EliminationRuleIdsJson", "ScoringRuleIdsJson"]
+hint = "Record the Adaptation Goal, Viability Constraints, Selection Pressure, and evaluation rules."
+
+[[action]]
+name = "StartEpisode"
+kind = "input"
+from = ["Draft", "Negotiating"]
+to = "Running"
+guard = "is_true has_contract"
+effect = [{ type = "trigger", name = "episode_started" }]
+params = ["StartedBy", "Reason"]
+hint = "Start the episode after a contract exists."
+
+[[action.triggers]]
+name = "episode_started"
+kind = "wasm"
+module = "episode_orchestrator"
+
+[action.triggers.config]
+temper_api_url = "{secret:temper_api_url}"
+variant_target_count = "3"
+
+[[action]]
+name = "AddGeneration"
+kind = "input"
+from = ["Running"]
+effect = "increment generation_count"
+params = ["GenerationId"]
+hint = "Attach a generation to this episode."
+
+[[action]]
+name = "PauseEpisode"
+kind = "input"
+from = ["Running", "Selecting"]
+to = "Paused"
+params = ["Reason"]
+hint = "Pause an episode."
+
+[[action]]
+name = "ResumeEpisode"
+kind = "input"
+from = ["Paused"]
+to = "Running"
+params = ["Reason"]
+hint = "Resume a paused episode."
+
+[[action]]
+name = "BeginEpisodeSelection"
+kind = "input"
+from = ["Running"]
+to = "Selecting"
+params = ["GenerationId", "Reason"]
+hint = "Begin winner selection from surviving variants."
+
+[[action]]
+name = "RecordEpisodeWinner"
+kind = "input"
+from = ["Selecting"]
+to = "Promoting"
+effect = "set winner_selected true"
+params = ["WinningVariantId", "SelectorBrainRunId", "SelectionExplanation", "EvidenceArtifactId"]
+hint = "Record the selected winning variant."
+
+[[action]]
+name = "CompleteEpisode"
+kind = "input"
+from = ["Promoting"]
+to = "Completed"
+guard = "is_true winner_selected"
+params = ["PromotionId", "OrganismVersionId", "Summary"]
+hint = "Complete the episode after promotion."
+
+[[action]]
+name = "StopEpisode"
+kind = "input"
+from = ["Draft", "Negotiating", "Running", "Paused", "Selecting", "Promoting"]
+to = "Stopped"
+params = ["Reason"]
+hint = "Stop an episode without promotion."
+
+[[action]]
+name = "FailEpisode"
+kind = "input"
+from = ["Draft", "Negotiating", "Running", "Paused", "Selecting", "Promoting"]
+to = "Failed"
+params = ["FailureReason"]
+hint = "Mark the episode failed."
+
+[[invariant]]
+name = "RunningHasContract"
+when = ["Running"]
+assert = "is_true has_contract"
+
+[[invariant]]
+name = "CompletedIsFinal"
+when = ["Completed"]
+assert = "no_further_transitions"
+
+[[invariant]]
+name = "StoppedIsFinal"
+when = ["Stopped"]
+assert = "no_further_transitions"
+
+[[invariant]]
+name = "FailedIsFinal"
+when = ["Failed"]
+assert = "no_further_transitions"

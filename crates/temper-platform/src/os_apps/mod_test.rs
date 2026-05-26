@@ -134,6 +134,10 @@ fn test_list_os_apps_returns_catalog() {
         names.contains(&"intent-discovery"),
         "missing intent-discovery: {names:?}"
     );
+    assert!(
+        names.contains(&"directed-evolution"),
+        "missing directed-evolution: {names:?}"
+    );
 
     let pm = apps
         .iter()
@@ -155,6 +159,20 @@ fn test_list_os_apps_returns_catalog() {
     assert!(
         evo.app_guide.is_some(),
         "evolution should have an app guide"
+    );
+    let directed = apps
+        .iter()
+        .find(|e| e.name == "directed-evolution")
+        .unwrap();
+    assert_eq!(
+        directed.entity_types.len(),
+        25,
+        "Directed Evolution entity types: {:?}",
+        directed.entity_types
+    );
+    assert!(
+        directed.app_guide.is_some(),
+        "directed-evolution should have an app guide"
     );
 }
 
@@ -611,6 +629,7 @@ fn test_intent_discovery_specs_verify() {
     }
 }
 
+mod directed_evolution;
 #[test]
 fn test_get_app_project_management() {
     let bundle = get_os_app("project-management");

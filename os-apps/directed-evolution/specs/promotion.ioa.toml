@@ -1,0 +1,40 @@
+[automaton]
+name = "Promotion"
+states = ["Pending", "Promoted", "RolledBack", "Failed"]
+initial = "Pending"
+allow_indefinite_states = ["Pending", "Promoted"]
+
+[[state]]
+name = "has_evidence"
+type = "bool"
+initial = "false"
+
+[[action]]
+name = "PromoteWinner"
+kind = "input"
+from = ["Pending"]
+to = "Promoted"
+effect = "set has_evidence true"
+params = ["EpisodeId", "WinningVariantId", "ParentVersionId", "NewOrganismVersionId", "SelectionExplanation", "EvidenceArtifactId", "AppRef"]
+hint = "Promote the winning variant as a new organism version."
+
+[[action]]
+name = "RollbackPromotion"
+kind = "input"
+from = ["Promoted"]
+to = "RolledBack"
+params = ["RollbackVersionId", "Reason", "EvidenceArtifactId"]
+hint = "Rollback a promotion."
+
+[[action]]
+name = "FailPromotion"
+kind = "input"
+from = ["Pending"]
+to = "Failed"
+params = ["FailureReason", "EvidenceArtifactId"]
+hint = "Fail a promotion."
+
+[[invariant]]
+name = "PromotedHasEvidence"
+when = ["Promoted"]
+assert = "is_true has_evidence"

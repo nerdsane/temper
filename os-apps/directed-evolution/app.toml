@@ -1,0 +1,28 @@
+name = "directed-evolution"
+description = "Directed Evolution control plane for organisms, episodes, variants, trials, evidence, and lineage"
+version = "0.1.0"
+dependencies = ["intent-discovery", "evolution"]
+
+[[wasm_modules]]
+name = "signal_observer"
+target = "wasm32-unknown-unknown"
+criticality = "app-required"
+startup_loading = "lazy"
+provenance = "bundled-artifact"
+import_class = "temper-host"
+
+[[wasm_modules]]
+name = "episode_orchestrator"
+target = "wasm32-unknown-unknown"
+criticality = "app-required"
+startup_loading = "lazy"
+provenance = "bundled-artifact"
+import_class = "temper-host"
+
+[[wasm_modules]]
+name = "work_item_result_router"
+target = "wasm32-unknown-unknown"
+criticality = "app-required"
+startup_loading = "lazy"
+provenance = "bundled-artifact"
+import_class = "temper-host"
