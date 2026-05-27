@@ -34,8 +34,10 @@ RUN apt-get update && apt-get install -y \
     && rm -rf /var/lib/apt/lists/*
 
 COPY --from=builder /app/target/release/temper /usr/local/bin/temper
+COPY --from=builder /app/os-apps /opt/temper-os-apps
 
 ENV RUST_LOG=info,temper=info
+ENV TEMPER_OS_APPS_DIR=/opt/temper-os-apps
 EXPOSE 3000
 
 # No ENTRYPOINT — Railway's startCommand provides the full command.
