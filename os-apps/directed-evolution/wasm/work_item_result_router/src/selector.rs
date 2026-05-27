@@ -116,6 +116,16 @@ fn route_selector(
         }
     }
 
+    eliminate_non_winning_survivors(
+        ctx,
+        base_url,
+        headers,
+        &outcomes,
+        &winner_variant_id,
+        &evidence_artifact_id,
+        &selection_explanation,
+    )?;
+
     let refreshed_generation = get_entity(ctx, base_url, headers, "Generations", generation_id)?;
     if entity_status(&refreshed_generation) == "Selecting" {
         post_directed_action(
@@ -232,6 +242,7 @@ fn route_selector(
         json!({
             "OrganismVersionId": new_organism_version_id,
             "PromotionId": promotion_id,
+            "AppRef": app_ref,
             "Summary": selection_explanation,
         }),
     )?;
@@ -267,33 +278,62 @@ fn route_selector(
         "Promotion",
         &promotion_id,
     )?;
-
-    let promoting_episode = get_entity(ctx, base_url, headers, "Episodes", &episode_id)?;
-    if entity_status(&promoting_episode) == "Promoting" {
-        post_directed_action(
-            ctx,
-            base_url,
-            headers,
-            "Episodes",
-            &episode_id,
-            "CompleteEpisode",
-            json!({
-                "PromotionId": promotion_id,
-                "OrganismVersionId": new_organism_version_id,
-                "Summary": selection_explanation,
-            }),
-        )?;
-    }
+    let promoter_work_item_id = queue_promotion_materialization_work_item(
+        ctx,
+        base_url,
+        headers,
+        &promotion_id,
+        &episode_id,
+        &winner_variant_id,
+        &organism_id,
+        &app_ref,
+        &winner.branch_ref,
+    )?;
 
     Ok(json!({
         "routed": "selector",
         "generation_id": generation_id,
         "winner_variant_id": winner_variant_id,
         "promotion_id": promotion_id,
+        "promoter_work_item_id": promoter_work_item_id,
         "organism_version_id": new_organism_version_id,
         "lineage_edge_id": lineage_edge_id,
         "evidence_artifact_id": evidence_artifact_id,
     }))
+}
+
+fn eliminate_non_winning_survivors(
+    ctx: &Context,
+    base_url: &str,
+    headers: &[(String, String)],
+    outcomes: &[VariantOutcome],
+    winner_variant_id: &str,
+    evidence_artifact_id: &str,
+    selection_explanation: &str,
+) -> Result<(), String> {
+    for outcome in outcomes {
+        if outcome.id == winner_variant_id || !outcome.survived || outcome.status != "Active" {
+            continue;
+        }
+
+        post_directed_action(
+            ctx,
+            base_url,
+            headers,
+            "Variants",
+            &outcome.id,
+            "EliminateVariant",
+            json!({
+                "EliminationRuleId": "selection-not-winner",
+                "StageResultId": "",
+                "EvidenceArtifactId": evidence_artifact_id,
+                "Reason": format!(
+                    "Selection completed with {winner_variant_id} as the winning variant. This survivor was eliminated at the selection boundary because it was not chosen: {selection_explanation}"
+                ),
+            }),
+        )?;
+    }
+    Ok(())
 }
 
 fn select_requested_winner(output: &Value, survivor_ids: &[String]) -> Result<String, String> {
@@ -316,4 +356,53 @@ fn select_requested_winner(output: &Value, survivor_ids: &[String]) -> Result<St
         ));
     }
     Ok(requested_winner)
+}
+
+fn queue_promotion_materialization_work_item(
+    ctx: &Context,
+    base_url: &str,
+    headers: &[(String, String)],
+    promotion_id: &str,
+    episode_id: &str,
+    winning_variant_id: &str,
+    organism_id: &str,
+    app_ref: &str,
+    branch_ref: &str,
+) -> Result<String, String> {
+    let work_item_id = create_entity(ctx, base_url, headers, "WorkItems")?;
+    post_directed_action(
+        ctx,
+        base_url,
+        headers,
+        "WorkItems",
+        &work_item_id,
+        "QueueWorkItem",
+        json!({
+            "Role": "promoter",
+            "TargetEntityType": "Promotion",
+            "TargetEntityId": promotion_id,
+            "PromptRef": format!(
+                "literal:{}",
+                promoter_prompt(
+                    promotion_id,
+                    episode_id,
+                    winning_variant_id,
+                    organism_id,
+                    app_ref,
+                    branch_ref,
+                )
+            ),
+            "ContextRef": format!("promotion:{promotion_id}"),
+            "OutputSchemaRef": "directed-evolution.promoter.v1",
+            "CorrelationJson": json!({
+                "promotion_id": promotion_id,
+                "episode_id": episode_id,
+                "winning_variant_id": winning_variant_id,
+                "organism_id": organism_id,
+                "app_ref": app_ref,
+                "branch_ref": branch_ref,
+            }).to_string(),
+        }),
+    )?;
+    Ok(work_item_id)
 }

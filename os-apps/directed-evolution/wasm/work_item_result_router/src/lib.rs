@@ -65,6 +65,14 @@ temper_side_effect_module! {
                 &fields,
                 &output,
             ),
+            ("promoter", "Promotion") => route_promoter(
+                &ctx,
+                &base_url,
+                &headers,
+                &target_entity_id,
+                &fields,
+                &output,
+            ),
             _ => Ok(json!({
                 "ignored": true,
                 "role": role,
@@ -76,10 +84,13 @@ temper_side_effect_module! {
 }
 
 include!("observer.rs");
+include!("observer_autostart.rs");
+include!("observer_autostart_helpers.rs");
 include!("variant_generator.rs");
 include!("stage_result.rs");
 include!("failure.rs");
 include!("selector.rs");
+include!("promoter.rs");
 include!("evaluation.rs");
 include!("selection.rs");
 include!("prompts.rs");

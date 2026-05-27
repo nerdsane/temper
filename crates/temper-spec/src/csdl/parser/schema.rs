@@ -30,9 +30,12 @@ pub(super) fn parse_schema(
     loop {
         match reader.read_event_into(&mut buf) {
             Ok(Event::Start(ref element)) => match local_name(element).as_str() {
-                "EntityType" => schema
-                    .entity_types
-                    .push(parse_entity_type(reader, element)?),
+                "EntityType" => {
+                    let parsed = parse_entity_type(reader, element)?;
+                    schema.entity_types.push(parsed.entity_type);
+                    schema.actions.extend(parsed.actions);
+                    schema.functions.extend(parsed.functions);
+                }
                 "EnumType" => schema.enum_types.push(parse_enum_type(reader, element)?),
                 "Action" => schema.actions.push(parse_action(reader, element)?),
                 "Function" => schema.functions.push(parse_function(reader, element)?),
@@ -55,10 +58,16 @@ pub(super) fn parse_schema(
     Ok(schema)
 }
 
+struct ParsedEntityType {
+    entity_type: EntityType,
+    actions: Vec<Action>,
+    functions: Vec<Function>,
+}
+
 fn parse_entity_type(
     reader: &mut Reader<&[u8]>,
     start: &BytesStart,
-) -> Result<EntityType, CsdlParseError> {
+) -> Result<ParsedEntityType, CsdlParseError> {
     let mut entity_type = EntityType {
         name: required_attr(start, "Name")?,
         key_properties: Vec::new(),
@@ -67,6 +76,8 @@ fn parse_entity_type(
         annotations: Vec::new(),
         has_stream: attr_str(start, "HasStream").is_some_and(|v| v == "true"),
     };
+    let mut actions = Vec::new();
+    let mut functions = Vec::new();
 
     let mut buf = Vec::new();
     loop {
@@ -79,6 +90,8 @@ fn parse_entity_type(
                     .annotations
                     .push(parse_annotation_children(reader, element)?),
                 "Key" => parse_key(reader, &mut entity_type.key_properties)?,
+                "Action" => actions.push(parse_action(reader, element)?),
+                "Function" => functions.push(parse_function(reader, element)?),
                 _ => skip_element(reader)?,
             },
             Ok(Event::Empty(ref element)) => match local_name(element).as_str() {
@@ -94,6 +107,8 @@ fn parse_entity_type(
                         entity_type.annotations.push(annotation);
                     }
                 }
+                "Action" => actions.push(parse_empty_action(element)?),
+                "Function" => functions.push(parse_empty_function(element)?),
                 _ => {}
             },
             Ok(Event::End(ref element)) if local_name_end(element) == "EntityType" => break,
@@ -104,7 +119,11 @@ fn parse_entity_type(
         buf.clear();
     }
 
-    Ok(entity_type)
+    Ok(ParsedEntityType {
+        entity_type,
+        actions,
+        functions,
+    })
 }
 
 fn parse_key(
@@ -177,6 +196,16 @@ fn parse_action(reader: &mut Reader<&[u8]>, start: &BytesStart) -> Result<Action
     )
 }
 
+fn parse_empty_action(start: &BytesStart) -> Result<Action, CsdlParseError> {
+    parse_empty_operation(start, |name, is_bound| Action {
+        name,
+        is_bound,
+        parameters: Vec::new(),
+        return_type: None,
+        annotations: Vec::new(),
+    })
+}
+
 fn parse_function(
     reader: &mut Reader<&[u8]>,
     start: &BytesStart,
@@ -192,6 +221,25 @@ fn parse_function(
             annotations,
         },
     )
+}
+
+fn parse_empty_function(start: &BytesStart) -> Result<Function, CsdlParseError> {
+    parse_empty_operation(start, |name, is_bound| Function {
+        name,
+        is_bound,
+        parameters: Vec::new(),
+        return_type: None,
+        annotations: Vec::new(),
+    })
+}
+
+fn parse_empty_operation<T, F>(start: &BytesStart, build: F) -> Result<T, CsdlParseError>
+where
+    F: FnOnce(String, bool) -> T,
+{
+    let name = required_attr(start, "Name")?;
+    let is_bound = attr_str(start, "IsBound").is_some_and(|v| v == "true");
+    Ok(build(name, is_bound))
 }
 
 fn parse_operation<T, F>(

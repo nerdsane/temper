@@ -138,11 +138,26 @@ fn route_observer(
         json!({ "DirectionId": direction_id }),
     )?;
 
+    let autostart = maybe_auto_start_repair_episode(
+        ctx,
+        base_url,
+        headers,
+        &direction_id,
+        &organism_id,
+        &pressure_class,
+        &autonomy_lane,
+        &proposed_adaptation_goal,
+        &proposed_constraints,
+        &brain_run_id,
+        output,
+    )?;
+
     Ok(json!({
         "routed": "observer",
         "signal_id": signal_id,
         "pressure_id": pressure_id,
         "direction_id": direction_id,
         "actionable": true,
+        "autostart": autostart,
     }))
 }

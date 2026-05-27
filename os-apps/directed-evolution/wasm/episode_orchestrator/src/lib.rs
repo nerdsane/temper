@@ -121,10 +121,59 @@ OrganismId: {organism_id}\n\
 DirectionId: {direction_id}\n\
 ParentVersionId: {parent_version_id}\n\n\
 {prompt_context}\n\n\
+Variant lane suggestion: {}\n\
 Work in the assigned organism repository and create one real candidate variant. \
+Keep the mutation bounded to the Agent Answers app bundle: prefer changing APP.md, \
+adrs/, specs/question.ioa.toml, specs/answer.ioa.toml, specs/model.csdl.xml, and \
+policies/agent_answers.cedar. Do not create unrelated entity families unless the \
+lane explicitly requires it. Preserve existing Question and Answer actions. \
+For repair episodes, repair the observed failure directly and do not add product-growth \
+features, intent-capture affordances, or optional metadata unless they are required by \
+the repair and automatically maintained by the existing lifecycle. \
 Return JSON with: summary, app_ref, branch_ref, runtime_ref, changed_files, diff_ref, \
-verification_notes, and next_actions. Do not change evaluation rules or viability constraints."
+verification_notes, and next_actions. Do not change evaluation rules or viability constraints.",
+        variant_lane_suggestion(variant_index, prompt_context),
     )
+}
+
+fn variant_lane_suggestion(variant_index: usize, prompt_context: &str) -> &'static str {
+    if prompt_context_is_repair(prompt_context) {
+        return match variant_index {
+            1 => {
+                "Repair the exact failing lifecycle path with the smallest state-machine change that makes submitted answers discoverable for acceptance. Prefer wiring existing RecordAnswer/Accept semantics over adding optional product-growth fields."
+            }
+            2 => {
+                "Repair answer visibility by adding or adjusting a bounded index or relationship only if it is maintained automatically by existing transitions. Do not require a human or simulated user to call a new action before acceptance can see submitted answers."
+            }
+            3 => {
+                "Repair by adding executable regression coverage and minimal spec/CSDL/Cedar updates that prove Configure -> Submit -> RecordAnswer -> Accept remains visible and actionable. Avoid new intent, evidence, uncertainty, or decision-frame product fields."
+            }
+            _ => {
+                "Make the smallest backward-compatible repair that resolves the observed failure while preserving the existing Question and Answer lifecycle."
+            }
+        };
+    }
+    match variant_index {
+        1 => {
+            "Improve Answer usefulness by adding a compact answer-quality or decision-frame field/action while preserving Submit and Accept."
+        }
+        2 => {
+            "Improve Question intent capture by adding a lightweight intent/context field/action while preserving Configure, RecordAnswer, and Accept."
+        }
+        3 => {
+            "Improve evidence and uncertainty handling by adding a bounded evidence/uncertainty field/action on Answer while preserving legacy behavior."
+        }
+        _ => {
+            "Make a small backward-compatible Question or Answer improvement that helps simulated users evaluate Q&A quality."
+        }
+    }
+}
+
+fn prompt_context_is_repair(prompt_context: &str) -> bool {
+    let normalized = prompt_context.to_ascii_lowercase();
+    normalized.contains("direction pressure class: repair")
+        || normalized.contains("repair-boundary")
+        || normalized.contains("bounded repair")
 }
 
 fn variant_generation_context(
@@ -274,6 +323,27 @@ mod tests {
         assert!(prompt.contains("GenerationId: gen-1"));
         assert!(prompt.contains("variant 2 of 3"));
         assert!(prompt.contains("Improve trust"));
+        assert!(prompt.contains("Improve Question intent capture"));
+        assert!(prompt.contains("Preserve existing Question and Answer actions"));
         assert!(prompt.contains("Do not change evaluation rules"));
+    }
+
+    #[test]
+    fn repair_variant_prompt_uses_repair_lanes() {
+        let prompt = variant_generator_prompt(
+            "ep-1",
+            "gen-1",
+            "org-1",
+            "dir-1",
+            "ov-1",
+            2,
+            3,
+            "Direction Pressure Class: repair\nViability Constraints:\n- Preserve lifecycle. (repair-boundary)",
+        );
+
+        assert!(prompt.contains("Repair answer visibility"));
+        assert!(prompt.contains("Do not require a human or simulated user to call a new action"));
+        assert!(prompt.contains("do not add product-growth"));
+        assert!(!prompt.contains("Improve Question intent capture"));
     }
 }

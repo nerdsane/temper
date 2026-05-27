@@ -50,6 +50,9 @@ module = "work_item_result_router"
 
 [action.triggers.config]
 temper_api_url = "{secret:temper_api_url}"
+temper_public_api_url = "{secret:temper_public_api_url}"
+max_generation_count = "2"
+variant_target_count = "3"
 
 [[action]]
 name = "FailWorkItem"
@@ -67,6 +70,9 @@ module = "work_item_result_router"
 
 [action.triggers.config]
 temper_api_url = "{secret:temper_api_url}"
+temper_public_api_url = "{secret:temper_public_api_url}"
+max_generation_count = "2"
+variant_target_count = "3"
 
 [[action]]
 name = "CancelWorkItem"

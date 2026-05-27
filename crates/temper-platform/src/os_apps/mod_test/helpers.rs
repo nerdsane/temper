@@ -308,7 +308,7 @@ pub(super) fn directed_evolution_register_wasm_modules_for_test(
     state: &PlatformState,
     tenant: &TenantId,
 ) {
-    let modules: [(&str, &[u8]); 3] = [
+    let modules: [(&str, &[u8]); 4] = [
         (
             "signal_observer",
             include_bytes!(
@@ -319,6 +319,12 @@ pub(super) fn directed_evolution_register_wasm_modules_for_test(
             "episode_orchestrator",
             include_bytes!(
                 "../../../../../os-apps/directed-evolution/wasm/episode_orchestrator/episode_orchestrator.wasm"
+            ),
+        ),
+        (
+            "episode_start_requestor",
+            include_bytes!(
+                "../../../../../os-apps/directed-evolution/wasm/episode_start_requestor/episode_start_requestor.wasm"
             ),
         ),
         (

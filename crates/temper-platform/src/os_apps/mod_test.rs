@@ -166,7 +166,7 @@ fn test_list_os_apps_returns_catalog() {
         .unwrap();
     assert_eq!(
         directed.entity_types.len(),
-        25,
+        26,
         "Directed Evolution entity types: {:?}",
         directed.entity_types
     );

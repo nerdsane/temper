@@ -103,6 +103,14 @@ fn resolve_api_url(ctx: &Context) -> String {
         .unwrap_or_else(|| "http://127.0.0.1:3000".to_string())
 }
 
+fn resolve_public_api_url(ctx: &Context) -> String {
+    ctx.config
+        .get("temper_public_api_url")
+        .filter(|value| !value.trim().is_empty() && !value.contains("{secret:"))
+        .cloned()
+        .unwrap_or_else(|| resolve_api_url(ctx))
+}
+
 fn odata_headers(ctx: &Context) -> Vec<(String, String)> {
     vec![
         ("content-type".to_string(), "application/json".to_string()),
@@ -273,10 +281,10 @@ fn parse_json_string_array(value: &str) -> Vec<String> {
 
 fn parse_work_item_output(raw: &str) -> Value {
     let parsed = serde_json::from_str::<Value>(raw).unwrap_or_else(|_| json!({ "raw": raw }));
-    if let Some(stdout) = parsed.get("stdout").and_then(Value::as_str) {
-        if let Some(value) = parse_jsonish(stdout) {
-            return value;
-        }
+    if let Some(stdout) = parsed.get("stdout").and_then(Value::as_str)
+        && let Some(value) = parse_jsonish(stdout)
+    {
+        return value;
     }
     parsed
 }
