@@ -40,6 +40,38 @@ fn test_parse_minimal_csdl() {
     assert_eq!(widget.properties.len(), 2);
 }
 
+#[test]
+fn test_parse_entity_nested_bound_actions_as_schema_actions() {
+    let xml = r#"<?xml version="1.0"?>
+    <edmx:Edmx Version="4.0" xmlns:edmx="http://docs.oasis-open.org/odata/ns/edmx">
+      <edmx:DataServices>
+        <Schema Namespace="Genesis.AgentAnswers" xmlns="http://docs.oasis-open.org/odata/ns/edm">
+          <EntityType Name="Answer">
+            <Key><PropertyRef Name="Id"/></Key>
+            <Property Name="Id" Type="Edm.String" Nullable="false"/>
+            <Action Name="Calibrate" IsBound="true">
+              <Parameter Name="bindingParameter" Type="Genesis.AgentAnswers.Answer"/>
+              <Parameter Name="confidence_level" Type="Edm.String"/>
+            </Action>
+          </EntityType>
+          <EntityContainer Name="AgentAnswersService">
+            <EntitySet Name="Answers" EntityType="Genesis.AgentAnswers.Answer"/>
+          </EntityContainer>
+        </Schema>
+      </edmx:DataServices>
+    </edmx:Edmx>"#;
+
+    let doc = parse_csdl(xml).unwrap();
+    let schema = &doc.schemas[0];
+    let calibrate = schema.action("Calibrate").unwrap();
+    assert!(calibrate.is_bound);
+    assert_eq!(calibrate.parameters.len(), 2);
+    assert_eq!(
+        calibrate.parameters[0].type_name,
+        "Genesis.AgentAnswers.Answer"
+    );
+}
+
 fn example_schema(doc: &CsdlDocument) -> &Schema {
     doc.schemas
         .iter()
