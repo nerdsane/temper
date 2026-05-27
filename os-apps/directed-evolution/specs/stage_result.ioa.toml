@@ -1,0 +1,55 @@
+[automaton]
+name = "StageResult"
+states = ["Pending", "Running", "Passed", "Failed", "Eliminated"]
+initial = "Pending"
+allow_indefinite_states = ["Pending", "Running", "Failed"]
+
+[[state]]
+name = "has_evidence"
+type = "bool"
+initial = "false"
+
+[[action]]
+name = "StartStageResult"
+kind = "input"
+from = ["Pending"]
+to = "Running"
+params = ["EpisodeId", "GenerationId", "VariantId", "EvaluationStageId", "WorkItemId"]
+hint = "Start running an Evaluation Stage for one variant."
+
+[[action]]
+name = "PassStageResult"
+kind = "input"
+from = ["Running"]
+to = "Passed"
+effect = "set has_evidence true"
+params = ["MetricsJson", "EvidenceArtifactId", "Summary"]
+hint = "Record a passing Stage Result with evidence."
+
+[[action]]
+name = "FailStageResult"
+kind = "input"
+from = ["Running"]
+to = "Failed"
+effect = "set has_evidence true"
+params = ["MetricsJson", "EvidenceArtifactId", "FailureReason"]
+hint = "Record a failing Stage Result with evidence."
+
+[[action]]
+name = "EliminateStageResult"
+kind = "input"
+from = ["Running", "Failed"]
+to = "Eliminated"
+effect = "set has_evidence true"
+params = ["EliminationRuleId", "EvidenceArtifactId", "Reason"]
+hint = "Record that this Stage Result eliminated the variant."
+
+[[invariant]]
+name = "PassedHasEvidence"
+when = ["Passed"]
+assert = "is_true has_evidence"
+
+[[invariant]]
+name = "FailedHasEvidence"
+when = ["Failed"]
+assert = "is_true has_evidence"

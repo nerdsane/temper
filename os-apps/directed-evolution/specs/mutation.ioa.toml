@@ -1,0 +1,20 @@
+[automaton]
+name = "Mutation"
+states = ["Recorded", "Archived"]
+initial = "Recorded"
+allow_indefinite_states = ["Recorded"]
+
+[[action]]
+name = "RecordMutation"
+kind = "input"
+from = ["Recorded"]
+params = ["VariantId", "Summary", "ChangedFilesJson", "DiffRef", "BrainRunId"]
+hint = "Record the concrete change introduced by a variant."
+
+[[action]]
+name = "ArchiveMutation"
+kind = "input"
+from = ["Recorded"]
+to = "Archived"
+params = ["Reason"]
+hint = "Archive a mutation record."

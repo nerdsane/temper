@@ -1,0 +1,21 @@
+[automaton]
+name = "SelectionPressure"
+states = ["Draft", "Active", "Archived"]
+initial = "Draft"
+allow_indefinite_states = ["Draft", "Active"]
+
+[[action]]
+name = "ActivateSelectionPressure"
+kind = "input"
+from = ["Draft"]
+to = "Active"
+params = ["EpisodeId", "SelectionStatement", "MetricIdsJson", "EliminationRuleIdsJson", "ScoringRuleIdsJson", "CreatedByBrainRunId"]
+hint = "Activate the episode-specific Selection Pressure."
+
+[[action]]
+name = "ArchiveSelectionPressure"
+kind = "input"
+from = ["Draft", "Active"]
+to = "Archived"
+params = ["Reason"]
+hint = "Archive a Selection Pressure."

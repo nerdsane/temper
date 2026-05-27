@@ -1,0 +1,28 @@
+[automaton]
+name = "AutonomyPolicy"
+states = ["Draft", "Active", "Retired"]
+initial = "Draft"
+allow_indefinite_states = ["Draft", "Active"]
+
+[[action]]
+name = "ActivateAutonomyPolicy"
+kind = "input"
+from = ["Draft"]
+to = "Active"
+params = ["OrganismId", "PolicyJson", "CreatedBy", "Summary"]
+hint = "Activate visible autonomy policy for Directed Evolution."
+
+[[action]]
+name = "UpdateAutonomyPolicy"
+kind = "input"
+from = ["Active"]
+params = ["PolicyJson", "UpdatedBy", "Summary"]
+hint = "Update what may proceed automatically."
+
+[[action]]
+name = "RetireAutonomyPolicy"
+kind = "input"
+from = ["Active"]
+to = "Retired"
+params = ["Reason"]
+hint = "Retire this autonomy policy."

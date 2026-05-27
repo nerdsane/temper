@@ -7,6 +7,8 @@
 //!
 //! Follows the FoundationDB DST principle: swap the I/O, keep the code.
 
+use std::collections::{BTreeMap, BTreeSet};
+
 use temper_runtime::tenant::TenantId;
 use temper_server::platform_store::PlatformStore;
 use temper_server::registry::VerificationStatus;
@@ -41,48 +43,124 @@ pub struct InstalledAppsRuntimeRecoverySummary {
 
 /// Recover Cedar policies from the platform store into memory.
 ///
-/// Loads all tenant policies from the durable store, validates each one
-/// individually (so one bad tenant doesn't block others), inserts them
-/// into the in-memory `tenant_policies` map, and rebuilds the authorization
-/// engine with all policies combined.
+/// Loads legacy tenant policy blobs and granular per-policy rows from durable
+/// storage, validates each tenant independently, and activates them in the
+/// per-tenant Cedar engine.
 ///
 /// This is the **production code path** — identical logic runs at CLI boot
 /// and during DST restart simulation.
 pub async fn recover_cedar_policies(state: &PlatformState, ps: &dyn PlatformStore) {
-    let all_policy_rows = match ps.load_tenant_policies().await {
-        Ok(rows) => rows,
-        Err(e) => {
-            tracing::warn!("Failed to load Cedar policies from platform store: {e}");
-            return;
-        }
-    };
+    let mut legacy_entries: BTreeMap<String, String> = BTreeMap::new();
+    let mut granular_entries: BTreeMap<String, Vec<(String, String)>> = BTreeMap::new();
 
-    if all_policy_rows.is_empty() {
+    match ps.load_tenant_policies().await {
+        Ok(rows) => {
+            for (tenant, policy_text) in rows {
+                if policy_text.trim().is_empty() {
+                    continue;
+                }
+                legacy_entries.insert(tenant, policy_text);
+            }
+        }
+        Err(e) => {
+            tracing::warn!("Failed to load legacy Cedar policies from platform store: {e}");
+        }
+    }
+
+    match ps.load_policy_entries().await {
+        Ok(rows) => {
+            for row in rows {
+                if !row.enabled || row.cedar_text.trim().is_empty() {
+                    continue;
+                }
+                granular_entries
+                    .entry(row.tenant)
+                    .or_default()
+                    .push((row.policy_id, row.cedar_text));
+            }
+        }
+        Err(e) => {
+            tracing::warn!("Failed to load granular Cedar policies from platform store: {e}");
+        }
+    }
+
+    if legacy_entries.is_empty() && granular_entries.is_empty() {
         return;
     }
 
-    let mut policies = state.server.tenant_policies.write().unwrap(); // ci-ok: infallible lock
+    let tenants: BTreeSet<String> = legacy_entries
+        .keys()
+        .chain(granular_entries.keys())
+        .cloned()
+        .collect();
     let mut loaded_count = 0usize;
-    for (tenant, policy_text) in &all_policy_rows {
-        // Validate each tenant's policies individually so one bad tenant
-        // doesn't prevent all others from loading.
-        if temper_authz::AuthzEngine::new(policy_text).is_err() {
-            tracing::warn!("Skipping invalid Cedar policies for tenant '{tenant}'");
+    let mut loaded_policy_count = 0usize;
+    let mut skipped_legacy_count = 0usize;
+    for tenant in tenants {
+        let entries = granular_entries.remove(&tenant).unwrap_or_default();
+        let has_primary_granular = entries.iter().any(|(policy_id, _)| policy_id == "primary");
+        let mut policy_text = String::new();
+        let mut entry_count = 0usize;
+
+        // `primary` is the durable aggregate policy row for newer installs. If
+        // it exists, prefer it over the legacy blob to avoid loading the same
+        // multi-megabyte generated policy twice.
+        if !has_primary_granular {
+            if let Some(legacy_text) = legacy_entries.get(&tenant) {
+                append_cedar_policy_text(&mut policy_text, legacy_text);
+                entry_count += 1;
+            }
+        } else if legacy_entries.contains_key(&tenant) {
+            skipped_legacy_count += 1;
+        }
+
+        for (_, cedar_text) in entries {
+            append_cedar_policy_text(&mut policy_text, &cedar_text);
+            entry_count += 1;
+        }
+
+        if policy_text.trim().is_empty() {
             continue;
         }
-        policies.insert(tenant.clone(), policy_text.clone());
+
+        // Use the raw policy reload path here instead of per-row PolicyId
+        // rewriting. Production primary policies can contain tens of thousands
+        // of generated statements; raw reload matches the pre-existing startup
+        // path and avoids deep Cedar policy cloning during restart recovery.
+        if let Err(e) = state
+            .server
+            .authz
+            .reload_tenant_policies(&tenant, &policy_text)
+        {
+            tracing::warn!(tenant, error = %e, "Skipping invalid Cedar policies for tenant");
+            continue;
+        }
+
+        if let Some(policy_text) = state.server.authz.get_tenant_policy_text(&tenant)
+            && let Ok(mut policies) = state.server.tenant_policies.write()
+        {
+            policies.insert(tenant.clone(), policy_text);
+        }
+
         loaded_count += 1;
+        loaded_policy_count += entry_count;
     }
-    let mut combined = String::new();
-    for text in policies.values() {
-        combined.push_str(text);
-        combined.push('\n');
+
+    if loaded_count > 0 {
+        tracing::info!(
+            tenants = loaded_count,
+            policies = loaded_policy_count,
+            skipped_legacy = skipped_legacy_count,
+            "Restored Cedar policies from durable storage."
+        );
     }
-    if let Err(e) = state.server.authz.reload_policies(&combined) {
-        tracing::warn!("Failed to reload Cedar policies: {e}");
-    } else if loaded_count > 0 {
-        tracing::info!("Restored Cedar policies for {loaded_count} tenants.");
+}
+
+fn append_cedar_policy_text(target: &mut String, cedar_text: &str) {
+    if !target.is_empty() {
+        target.push('\n');
     }
+    target.push_str(cedar_text);
 }
 
 /// Restore previously installed OS apps from the platform store.
@@ -250,4 +328,134 @@ fn tenant_has_ready_app_specs(state: &PlatformState, tenant: &str, app_name: &st
         );
         has_table && is_ready
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::HashMap;
+
+    use temper_authz::SecurityContext;
+    use temper_store_turso::TursoEventStore;
+
+    use super::*;
+
+    fn sqlite_test_url(test_name: &str) -> String {
+        let mut path = std::env::temp_dir();
+        path.push(format!(
+            "temper-recovery-{test_name}-{}.db",
+            uuid::Uuid::new_v4()
+        ));
+        format!("file:{}", path.display())
+    }
+
+    #[tokio::test]
+    async fn recover_cedar_policies_activates_granular_policy_rows() {
+        let store = TursoEventStore::new(&sqlite_test_url("granular-policies"), None)
+            .await
+            .expect("create test store");
+        let policy = r#"
+permit(
+  principal is Agent,
+  action == Action::"http_call",
+  resource is HttpEndpoint
+) when {
+  context.module == "build_session_message"
+};
+"#;
+        store
+            .save_policy("default", "katagami-curation-wasm", policy, "test")
+            .await
+            .expect("save granular policy");
+
+        let state = PlatformState::new(None);
+        recover_cedar_policies(&state, &store).await;
+
+        let mut resource_attrs = HashMap::new();
+        resource_attrs.insert(
+            "id".to_string(),
+            serde_json::json!("__trigger__:Submit:build_session_message"),
+        );
+        resource_attrs.insert(
+            "module".to_string(),
+            serde_json::json!("build_session_message"),
+        );
+
+        let decision = state.server.authz.authorize_for_tenant(
+            "default",
+            &SecurityContext::from_resolved_identity("wasm-module", "wasm_module", None),
+            "http_call",
+            "HttpEndpoint",
+            &resource_attrs,
+        );
+
+        assert!(
+            decision.is_allowed(),
+            "granular policy rows should be active after recovery, got {decision:?}"
+        );
+        assert!(
+            state
+                .server
+                .authz
+                .get_tenant_policy_text("default")
+                .expect("tenant policy text")
+                .contains("build_session_message")
+        );
+    }
+
+    #[tokio::test]
+    async fn recover_cedar_policies_prefers_primary_row_over_legacy_blob() {
+        let store = TursoEventStore::new(&sqlite_test_url("primary-policy-recovery"), None)
+            .await
+            .expect("create test store");
+        store
+            .upsert_tenant_policy(
+                "default",
+                r#"permit(principal, action == Action::"legacy_only", resource);"#,
+            )
+            .await
+            .expect("save legacy policy");
+        store
+            .save_policy(
+                "default",
+                "primary",
+                r#"permit(principal, action == Action::"read", resource);"#,
+                "test",
+            )
+            .await
+            .expect("save primary policy");
+        store
+            .save_policy(
+                "default",
+                "katagami-curation-wasm",
+                r#"
+permit(
+  principal is Agent,
+  action == Action::"http_call",
+  resource is HttpEndpoint
+) when {
+  context.module == "build_session_message"
+};
+"#,
+                "test",
+            )
+            .await
+            .expect("save granular policy");
+
+        let state = PlatformState::new(None);
+        recover_cedar_policies(&state, &store).await;
+
+        let tenant_text = state
+            .server
+            .authz
+            .get_tenant_policy_text("default")
+            .expect("tenant policy text");
+        assert!(
+            tenant_text.contains("build_session_message"),
+            "granular app policy should be appended to primary policy"
+        );
+        assert!(
+            !tenant_text.contains("legacy_only"),
+            "legacy blob should be skipped when durable primary policy row exists"
+        );
+    }
 }

@@ -5,7 +5,7 @@ use serde::Serialize;
 use super::{AdrEntry, AgentDefinition, AppSkillDefinition, SeedInstance, SystemFileEntry};
 
 /// Result of an app installation, categorising each spec by what happened.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Default, Serialize)]
 pub struct InstallResult {
     /// Entity types registered for the first time.
     pub added: Vec<String>,

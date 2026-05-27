@@ -112,7 +112,7 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::csdl::parse_csdl;
+    use crate::csdl::{emit_csdl_xml, parse_csdl};
 
     #[test]
     fn merge_adds_new_entity_type_to_existing_namespace() {
@@ -236,5 +236,61 @@ mod tests {
             .unwrap();
         // Incoming version has 2 properties (Id + Title), existing had 1 (Id).
         assert_eq!(order.properties.len(), 2);
+    }
+
+    #[test]
+    fn merge_preserves_entity_nested_bound_actions_from_incoming() {
+        let existing_xml = r#"<?xml version="1.0"?>
+        <edmx:Edmx Version="4.0" xmlns:edmx="http://docs.oasis-open.org/odata/ns/edmx">
+          <edmx:DataServices>
+            <Schema Namespace="Genesis.AgentAnswers" xmlns="http://docs.oasis-open.org/odata/ns/edm">
+              <EntityType Name="Answer">
+                <Key><PropertyRef Name="Id"/></Key>
+                <Property Name="Id" Type="Edm.String" Nullable="false"/>
+              </EntityType>
+              <EntityContainer Name="AgentAnswersService">
+                <EntitySet Name="Answers" EntityType="Genesis.AgentAnswers.Answer"/>
+              </EntityContainer>
+            </Schema>
+          </edmx:DataServices>
+        </edmx:Edmx>"#;
+
+        let incoming_xml = r#"<?xml version="1.0"?>
+        <edmx:Edmx Version="4.0" xmlns:edmx="http://docs.oasis-open.org/odata/ns/edmx">
+          <edmx:DataServices>
+            <Schema Namespace="Genesis.AgentAnswers" xmlns="http://docs.oasis-open.org/odata/ns/edm">
+              <EntityType Name="Answer">
+                <Key><PropertyRef Name="Id"/></Key>
+                <Property Name="Id" Type="Edm.String" Nullable="false"/>
+                <Property Name="ConfidenceLevel" Type="Edm.String"/>
+                <Action Name="Calibrate" IsBound="true">
+                  <Parameter Name="bindingParameter" Type="Genesis.AgentAnswers.Answer"/>
+                  <Parameter Name="confidence_level" Type="Edm.String"/>
+                </Action>
+              </EntityType>
+              <EntityContainer Name="AgentAnswersService">
+                <EntitySet Name="Answers" EntityType="Genesis.AgentAnswers.Answer"/>
+              </EntityContainer>
+            </Schema>
+          </edmx:DataServices>
+        </edmx:Edmx>"#;
+
+        let existing = parse_csdl(existing_xml).unwrap();
+        let incoming = parse_csdl(incoming_xml).unwrap();
+        let merged = merge_csdl(&existing, &incoming);
+        let schema = &merged.schemas[0];
+
+        assert!(schema.action("Calibrate").is_some());
+        assert!(
+            schema
+                .entity_type("Answer")
+                .unwrap()
+                .properties
+                .iter()
+                .any(|property| property.name == "ConfidenceLevel")
+        );
+
+        let emitted = emit_csdl_xml(&merged);
+        assert!(emitted.contains(r#"<Action Name="Calibrate" IsBound="true">"#));
     }
 }

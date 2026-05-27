@@ -134,6 +134,10 @@ fn test_list_os_apps_returns_catalog() {
         names.contains(&"intent-discovery"),
         "missing intent-discovery: {names:?}"
     );
+    assert!(
+        names.contains(&"directed-evolution"),
+        "missing directed-evolution: {names:?}"
+    );
 
     let pm = apps
         .iter()
@@ -155,6 +159,20 @@ fn test_list_os_apps_returns_catalog() {
     assert!(
         evo.app_guide.is_some(),
         "evolution should have an app guide"
+    );
+    let directed = apps
+        .iter()
+        .find(|e| e.name == "directed-evolution")
+        .unwrap();
+    assert_eq!(
+        directed.entity_types.len(),
+        26,
+        "Directed Evolution entity types: {:?}",
+        directed.entity_types
+    );
+    assert!(
+        directed.app_guide.is_some(),
+        "directed-evolution should have an app guide"
     );
 }
 
@@ -611,6 +629,7 @@ fn test_intent_discovery_specs_verify() {
     }
 }
 
+mod directed_evolution;
 #[test]
 fn test_get_app_project_management() {
     let bundle = get_os_app("project-management");
@@ -1914,12 +1933,45 @@ fn test_find_wasm_modules_finds_sibling_artifact() {
     let artifact_bytes = b"sibling-artifact-binary";
     fs::write(module_dir.join("echo.wasm"), artifact_bytes).unwrap();
 
-    let modules = find_wasm_modules(&temp_dir, &BTreeMap::new());
+    let mut configs = BTreeMap::new();
+    configs.insert(
+        "echo".to_string(),
+        WasmModuleManifest {
+            name: "echo".to_string(),
+            target: None,
+            criticality: WasmModuleCriticality::default(),
+            startup_loading: WasmStartupLoading::default(),
+            provenance: None,
+            import_class: None,
+        },
+    );
+
+    let modules = find_wasm_modules(&temp_dir, &configs);
     assert!(
         modules.contains_key("echo"),
         "echo module should be found at sibling path"
     );
     assert_eq!(modules["echo"], artifact_bytes);
+
+    let _ = fs::remove_dir_all(&temp_dir);
+}
+
+#[test]
+fn test_find_wasm_modules_ignores_undeclared_artifact() {
+    let temp_dir = std::env::temp_dir().join(format!(
+        "temper-wasm-undeclared-test-{}",
+        uuid::Uuid::new_v4()
+    ));
+
+    let module_dir = temp_dir.join("wasm").join("echo");
+    fs::create_dir_all(&module_dir).unwrap();
+    fs::write(module_dir.join("echo.wasm"), b"undeclared").unwrap();
+
+    let modules = find_wasm_modules(&temp_dir, &BTreeMap::new());
+    assert!(
+        modules.is_empty(),
+        "WASM artifacts must be declared in app.toml before install"
+    );
 
     let _ = fs::remove_dir_all(&temp_dir);
 }

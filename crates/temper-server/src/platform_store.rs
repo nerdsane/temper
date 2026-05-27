@@ -61,6 +61,15 @@ pub struct WasmModuleRow {
     pub source: String,
 }
 
+/// One granular Cedar policy row.
+#[derive(Debug, Clone)]
+pub struct PolicyEntryRow {
+    pub tenant: String,
+    pub policy_id: String,
+    pub cedar_text: String,
+    pub enabled: bool,
+}
+
 /// Durable metadata for an installed OS app bundle.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct InstalledAppRecord {
@@ -149,6 +158,9 @@ pub trait PlatformStore: Send + Sync {
 
     /// Load all tenant Cedar policies.
     async fn load_tenant_policies(&self) -> Result<Vec<(String, String)>, String>;
+
+    /// Load all granular Cedar policy rows.
+    async fn load_policy_entries(&self) -> Result<Vec<PolicyEntryRow>, String>;
 
     // ── Installed apps ───────────────────────────────────────────────
 
@@ -311,6 +323,19 @@ impl PlatformStore for TursoEventStore {
 
     async fn load_tenant_policies(&self) -> Result<Vec<(String, String)>, String> {
         self.load_tenant_policies().await.map_err(|e| e.to_string())
+    }
+
+    async fn load_policy_entries(&self) -> Result<Vec<PolicyEntryRow>, String> {
+        let rows = self.load_all_policies().await.map_err(|e| e.to_string())?;
+        Ok(rows
+            .into_iter()
+            .map(|row| PolicyEntryRow {
+                tenant: row.tenant,
+                policy_id: row.policy_id,
+                cedar_text: row.cedar_text,
+                enabled: row.enabled,
+            })
+            .collect())
     }
 
     async fn is_app_installed(&self, tenant: &str, app_name: &str) -> Result<bool, String> {
@@ -552,6 +577,19 @@ impl PlatformStore for PostgresEventStore {
 
     async fn load_tenant_policies(&self) -> Result<Vec<(String, String)>, String> {
         self.load_tenant_policies().await.map_err(|e| e.to_string())
+    }
+
+    async fn load_policy_entries(&self) -> Result<Vec<PolicyEntryRow>, String> {
+        let rows = self.load_all_policies().await.map_err(|e| e.to_string())?;
+        Ok(rows
+            .into_iter()
+            .map(|row| PolicyEntryRow {
+                tenant: row.tenant,
+                policy_id: row.policy_id,
+                cedar_text: row.cedar_text,
+                enabled: row.enabled,
+            })
+            .collect())
     }
 
     async fn is_app_installed(&self, tenant: &str, app_name: &str) -> Result<bool, String> {
@@ -804,6 +842,8 @@ mod sim_platform_store {
         verification_cache: BTreeMap<(String, String), (String, bool)>,
         /// Cedar policies keyed by tenant.
         policies: BTreeMap<String, String>,
+        /// Granular Cedar policy rows keyed by (tenant, policy_id).
+        policy_entries: BTreeMap<(String, String), PolicyEntryRow>,
         /// Cross-invariant definitions keyed by tenant.
         constraints: BTreeMap<String, String>,
         /// Installed apps: (tenant, app_name).
@@ -826,6 +866,7 @@ mod sim_platform_store {
                     specs: BTreeMap::new(),
                     verification_cache: BTreeMap::new(),
                     policies: BTreeMap::new(),
+                    policy_entries: BTreeMap::new(),
                     constraints: BTreeMap::new(),
                     installed_apps: BTreeSet::new(),
                     installed_app_records: BTreeMap::new(),
@@ -856,6 +897,26 @@ mod sim_platform_store {
             let mut inner = self.inner.lock().expect("SimPlatformStore lock poisoned"); // ci-ok: infallible lock
             inner.faults = faults;
         }
+
+        /// Seed a granular policy row for recovery tests.
+        pub fn insert_policy_entry_for_test(
+            &self,
+            tenant: &str,
+            policy_id: &str,
+            cedar_text: &str,
+            enabled: bool,
+        ) {
+            let mut inner = self.inner.lock().expect("SimPlatformStore lock poisoned"); // ci-ok: infallible lock
+            inner.policy_entries.insert(
+                (tenant.to_string(), policy_id.to_string()),
+                PolicyEntryRow {
+                    tenant: tenant.to_string(),
+                    policy_id: policy_id.to_string(),
+                    cedar_text: cedar_text.to_string(),
+                    enabled,
+                },
+            );
+        }
     }
 
     impl std::fmt::Debug for SimPlatformStore {
@@ -864,6 +925,7 @@ mod sim_platform_store {
             f.debug_struct("SimPlatformStore")
                 .field("specs", &inner.specs.len())
                 .field("policies", &inner.policies.len())
+                .field("policy_entries", &inner.policy_entries.len())
                 .field("installed_apps", &inner.installed_apps.len())
                 .field("wasm_modules", &inner.wasm_modules.len())
                 .finish()
@@ -1036,6 +1098,17 @@ mod sim_platform_store {
                 .iter()
                 .map(|(k, v)| (k.clone(), v.clone()))
                 .collect())
+        }
+
+        async fn load_policy_entries(&self) -> Result<Vec<PolicyEntryRow>, String> {
+            let mut inner = self.inner.lock().expect("SimPlatformStore lock poisoned"); // ci-ok: infallible lock
+
+            let prob = inner.faults.policy_read_failure_prob;
+            if inner.rng.chance(prob) {
+                return Err("SimPlatformStore: injected granular policy read failure".into());
+            }
+
+            Ok(inner.policy_entries.values().cloned().collect())
         }
 
         async fn is_app_installed(&self, tenant: &str, app_name: &str) -> Result<bool, String> {

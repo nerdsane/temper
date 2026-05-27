@@ -1,0 +1,20 @@
+[automaton]
+name = "Measurement"
+states = ["Recorded", "Archived"]
+initial = "Recorded"
+allow_indefinite_states = ["Recorded"]
+
+[[action]]
+name = "RecordMeasurement"
+kind = "input"
+from = ["Recorded"]
+params = ["MetricDefinitionId", "StageResultId", "TrialId", "VariantId", "Value", "Unit", "EvidenceArtifactId"]
+hint = "Record one observed metric value."
+
+[[action]]
+name = "ArchiveMeasurement"
+kind = "input"
+from = ["Recorded"]
+to = "Archived"
+params = ["Reason"]
+hint = "Archive a measurement."
