@@ -59,7 +59,9 @@ EpisodeContract:\n{contract_context}\n\n\
 Use the stage contract, Adaptation Goal, Viability Constraints, Selection Pressure, and real evidence. \
 If RuntimeRef is a temper://tenant/<tenant>/app/<app_ref> value, exercise that live tenant through \
 TemperApiBase /tdata OData calls with x-tenant-id set to the tenant from RuntimeRef. \
-Return JSON with: passed, status, summary, metrics, evidence_refs, failure_reason, and next_actions. \
+Inspect Datadog logs, traces, or metrics for errors and latency tied to the variant tenant when available. \
+Return JSON with: passed, status, summary, metrics, evidence_scope, evidence_refs, failure_reason, and next_actions. \
+Each evidence_scope entry should include surface, query, result_summary, and datadog_url when it came from Datadog. \
 Do not modify evaluators or selection rules.",
         field_str(&stage_fields, &["StageName"]),
         field_str(&stage_fields, &["StageKind"]),
@@ -265,5 +267,7 @@ mod prompt_tests {
         assert!(prompt.contains("TemperApiBase: https://genesis-production-164d.up.railway.app"));
         assert!(prompt.contains("x-tenant-id set to the tenant from RuntimeRef"));
         assert!(prompt.contains("AppRef: nerdsane/agent-answers@abc123"));
+        assert!(prompt.contains("evidence_scope"));
+        assert!(prompt.contains("datadog_url"));
     }
 }

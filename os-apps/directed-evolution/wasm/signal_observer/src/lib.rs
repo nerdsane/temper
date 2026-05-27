@@ -46,13 +46,14 @@ temper_side_effect_module! {
                 "PromptRef": format!("literal:{prompt}"),
                 "ContextRef": format!("signal:{signal_id}"),
                 "OutputSchemaRef": "directed-evolution.observer.v1",
-                "CorrelationJson": json!({
-                    "signal_id": signal_id,
-                    "organism_id": organism_id,
-                    "source": source,
-                    "signal_kind": signal_kind,
-                    "evidence_artifact_id": evidence_artifact_id,
-                }).to_string(),
+                "CorrelationJson": observer_work_item_correlation_json(
+                    &signal_id,
+                    &organism_id,
+                    &source,
+                    &signal_kind,
+                    &evidence_artifact_id,
+                    &correlation_json,
+                ),
             }),
         )?;
 
@@ -81,10 +82,33 @@ SignalKind: {signal_kind}\n\
 Summary: {summary}\n\
 EvidenceArtifactId: {evidence_artifact_id}\n\
 CorrelationJson: {correlation_json}\n\n\
+If Source or CorrelationJson mentions Datadog, use Datadog evidence rather than \
+treating this summary as proof. Inspect relevant logs, traces, metrics, monitors, \
+or dashboards through the available Datadog tooling and return concise evidence \
+scope entries with surface, query, result_summary, and datadog_url when available.\n\n\
 Return JSON with: actionable, pressure_class, pressure_summary, title, direction_summary, \
-autonomy_lane, proposed_adaptation_goal, proposed_viability_constraints, evidence_uri, and rationale. \
+autonomy_lane, proposed_adaptation_goal, proposed_viability_constraints, evidence_scope, evidence_uri, and rationale. \
 If the signal is user error or noise, set actionable=false and explain why."
     )
+}
+
+fn observer_work_item_correlation_json(
+    signal_id: &str,
+    organism_id: &str,
+    source: &str,
+    signal_kind: &str,
+    evidence_artifact_id: &str,
+    signal_correlation_json: &str,
+) -> String {
+    json!({
+        "signal_id": signal_id,
+        "organism_id": organism_id,
+        "source": source,
+        "signal_kind": signal_kind,
+        "evidence_artifact_id": evidence_artifact_id,
+        "signal_correlation_json": signal_correlation_json,
+    })
+    .to_string()
 }
 
 #[cfg(test)]
@@ -106,5 +130,43 @@ mod tests {
         assert!(prompt.contains("SignalId: sig-1"));
         assert!(prompt.contains("actionable=false"));
         assert!(prompt.contains("proposed_adaptation_goal"));
+    }
+
+    #[test]
+    fn observer_prompt_requires_datadog_evidence_scope() {
+        let prompt = observer_prompt(
+            "sig-1",
+            "org-1",
+            "datadog",
+            "latency_regression",
+            "p95 climbed",
+            "ev-1",
+            "{\"query\":\"service:temperpaw\"}",
+        );
+
+        assert!(prompt.contains("Datadog evidence"));
+        assert!(prompt.contains("logs, traces, metrics, monitors"));
+        assert!(prompt.contains("evidence_scope"));
+        assert!(prompt.contains("datadog_url"));
+    }
+
+    #[test]
+    fn observer_work_item_correlation_preserves_raw_signal_correlation() {
+        let correlation = observer_work_item_correlation_json(
+            "sig-1",
+            "org-1",
+            "datadog",
+            "latency_regression",
+            "ev-1",
+            "{\"query\":\"service:temperpaw\"}",
+        );
+        let value: Value = serde_json::from_str(&correlation).expect("valid correlation JSON");
+
+        assert_eq!(value["signal_id"], "sig-1");
+        assert_eq!(value["source"], "datadog");
+        assert_eq!(
+            value["signal_correlation_json"],
+            "{\"query\":\"service:temperpaw\"}"
+        );
     }
 }
