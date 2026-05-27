@@ -7,7 +7,9 @@ use temper_runtime::tenant::TenantId;
 
 use crate::blobs::hydrate_blob_refs_for_tenant;
 use crate::state::ServerState;
-use crate::storage::EntityCatalogRow;
+use crate::storage::{
+    CatalogRowsLoad, EntityCatalogRow, load_catalog_rows_by_id, load_selected_catalog_rows_by_id,
+};
 
 mod config;
 mod select_projection;
@@ -92,15 +94,9 @@ async fn try_load_catalog_rows(
     let Some(query_plane) = state.query_plane_store() else {
         return BTreeMap::new();
     };
-    match query_plane
-        .load_entity_catalog_rows(tenant.as_str(), entity_type, entity_ids)
-        .await
-    {
-        Ok(Some(rows)) => rows
-            .into_iter()
-            .map(|row| (row.entity_id.clone(), row))
-            .collect(),
-        Ok(None) => BTreeMap::new(),
+    match load_catalog_rows_by_id(&query_plane, tenant.as_str(), entity_type, entity_ids).await {
+        Ok(CatalogRowsLoad::Available(rows)) => rows,
+        Ok(CatalogRowsLoad::Unsupported) => BTreeMap::new(),
         Err(error) => {
             tracing::warn!(
                 error = %error,
@@ -123,20 +119,19 @@ async fn try_load_selected_catalog_rows(
     let Some(query_plane) = state.query_plane_store() else {
         return BTreeMap::new();
     };
-    match query_plane
-        .load_selected_entity_catalog_rows(
-            tenant.as_str(),
-            entity_type,
-            entity_ids,
-            selected_fields,
-        )
-        .await
+    match load_selected_catalog_rows_by_id(
+        &query_plane,
+        tenant.as_str(),
+        entity_type,
+        entity_ids,
+        selected_fields,
+    )
+    .await
     {
-        Ok(Some(rows)) => rows
-            .into_iter()
-            .map(|row| (row.entity_id.clone(), row))
-            .collect(),
-        Ok(None) => try_load_catalog_rows(state, tenant, entity_type, entity_ids).await,
+        Ok(CatalogRowsLoad::Available(rows)) => rows,
+        Ok(CatalogRowsLoad::Unsupported) => {
+            try_load_catalog_rows(state, tenant, entity_type, entity_ids).await
+        }
         Err(error) => {
             tracing::warn!(
                 error = %error,
@@ -163,36 +158,33 @@ pub(super) async fn missing_catalog_entity_ids(
     };
 
     let coverage_fields = [String::from("entity_id")];
-    let present_ids = match query_plane
-        .load_selected_entity_catalog_rows(
-            tenant.as_str(),
-            entity_type,
-            entity_ids,
-            &coverage_fields,
-        )
-        .await
+    let present_ids = match load_selected_catalog_rows_by_id(
+        &query_plane,
+        tenant.as_str(),
+        entity_type,
+        entity_ids,
+        &coverage_fields,
+    )
+    .await
     {
-        Ok(Some(rows)) => Some(
-            rows.into_iter()
-                .map(|row| row.entity_id)
-                .collect::<Vec<_>>(),
-        ),
-        Ok(None) => match query_plane
-            .load_entity_catalog_rows(tenant.as_str(), entity_type, entity_ids)
-            .await
-        {
-            Ok(Some(rows)) => Some(rows.into_iter().map(|row| row.entity_id).collect()),
-            Ok(None) => None,
-            Err(error) => {
-                tracing::warn!(
-                    error = %error,
-                    tenant = %tenant,
-                    entity_type = %entity_type,
-                    "catalog coverage row check failed; trusting SQL filter push-down result"
-                );
-                None
+        Ok(CatalogRowsLoad::Available(rows)) => Some(rows.into_keys().collect::<Vec<_>>()),
+        Ok(CatalogRowsLoad::Unsupported) => {
+            match load_catalog_rows_by_id(&query_plane, tenant.as_str(), entity_type, entity_ids)
+                .await
+            {
+                Ok(CatalogRowsLoad::Available(rows)) => Some(rows.into_keys().collect()),
+                Ok(CatalogRowsLoad::Unsupported) => None,
+                Err(error) => {
+                    tracing::warn!(
+                        error = %error,
+                        tenant = %tenant,
+                        entity_type = %entity_type,
+                        "catalog coverage row check failed; trusting SQL filter push-down result"
+                    );
+                    None
+                }
             }
-        },
+        }
         Err(error) => {
             tracing::warn!(
                 error = %error,

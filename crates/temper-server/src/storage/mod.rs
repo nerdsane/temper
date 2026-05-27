@@ -36,6 +36,7 @@ use crate::state::trajectory::{TrajectoryEntry, TrajectorySource};
 
 mod published_artifacts;
 mod query_plane_impls;
+mod query_plane_read;
 pub use published_artifacts::{
     PublishedArtifactStore, PublishedArtifactStoreRow, PublishedArtifactStoreUpsert,
 };
@@ -43,6 +44,9 @@ mod query_plane;
 pub use query_plane::{
     EntityCatalogRow, QueryFieldIndexOrder, QueryFieldIndexOrderDirection, QueryFieldIndexPage,
     QueryPlaneStore, QueryProjectionFieldsRow, QueryProjectionUpsert,
+};
+pub(crate) use query_plane_read::{
+    CatalogRowsLoad, load_catalog_rows_by_id, load_selected_catalog_rows_by_id,
 };
 
 pub type EventStoreFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;

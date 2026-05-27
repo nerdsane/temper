@@ -8,6 +8,7 @@ mod common;
 pub(crate) mod constraints;
 mod content_addressed;
 mod filter_sql;
+mod query_plane_read;
 mod rate_limit;
 mod read;
 mod read_support;

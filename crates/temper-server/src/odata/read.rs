@@ -1,6 +1,5 @@
 //! OData read handlers (`GET` and metadata/service endpoints).
 
-use std::collections::BTreeSet;
 use std::sync::{Arc, RwLock};
 
 use axum::extract::{Extension, Query, State};
@@ -14,24 +13,22 @@ use temper_runtime::tenant::TenantId;
 use temper_wasm::{StreamRegistry, WasmInvocationContext};
 use tracing::instrument;
 
-use super::authz::{
-    LIST_ACTION, READ_ACTION, authorize_read, entity_id_from_body, request_security_context,
-};
+use super::authz::{READ_ACTION, authorize_read, request_security_context};
 use super::common::{
     check_has_stream_or_400, extract_key, extract_tenant, has_expand_options, resolve_entity_type,
     resolve_value_parent, tenant_csdl_xml, tenant_entity_sets,
 };
+use super::query_plane_read::{
+    QueryPlaneReadBudget, QueryPlaneReadRequest, read_entity_set_from_query_plane,
+};
 use super::read_support::{
-    catalog_select_projection_fields, materialize_entity_set_entities, missing_catalog_entity_ids,
-    odata_default_page_size, odata_max_entities, record_entity_set_not_found,
-    resolve_entity_set_name, select_entity_ids_for_materialization,
-    try_load_entity_body_from_catalog,
+    record_entity_set_not_found, resolve_entity_set_name, try_load_entity_body_from_catalog,
 };
 use super::response::annotate_entity;
 use super::stream_fast_path::try_file_stream_fast_path;
 use crate::blobs::hydrate_blob_refs_for_tenant;
 use crate::identity::ResolvedIdentity;
-use crate::query_eval::{apply_query_options, expand_entity, select_fields};
+use crate::query_eval::{expand_entity, select_fields};
 use crate::request_context::extract_agent_context;
 use crate::response::{ODataResponse, ODataStreamResponse, ODataXmlResponse, odata_error};
 use crate::state::ServerState;
@@ -558,13 +555,6 @@ pub(super) async fn handle_odata_get_for_tenant(
     }
 }
 
-fn filter_only_query_options(query_options: &QueryOptions) -> QueryOptions {
-    QueryOptions {
-        filter: query_options.filter.clone(),
-        ..QueryOptions::default()
-    }
-}
-
 /// Handle `EntitySet` path: list all entities in a set with query options.
 #[instrument(skip_all, fields(
     otel.name = "odata.entity_set_read",
@@ -602,234 +592,26 @@ async fn handle_entity_set(
     };
     let span = tracing::Span::current();
     span.record("entity_type", entity_type.as_str());
-    if let Err(response) = authorize_read(
+    let read_result = match read_entity_set_from_query_plane(QueryPlaneReadRequest {
         state,
         tenant,
         security_ctx,
-        LIST_ACTION,
-        &entity_type,
-        "",
-        &serde_json::json!({}),
-    ) {
-        return *response;
-    }
-
-    let default_page_size = odata_default_page_size();
-    let max_entities = odata_max_entities();
-    let selected_catalog_fields = catalog_select_projection_fields(query_options);
-    span.record(
-        "catalog_select_projection",
-        selected_catalog_fields.is_some(),
-    );
-    span.record(
-        "select_count",
-        query_options.select.as_ref().map_or(0, Vec::len) as u64,
-    );
-
-    // ---- Filter push-down: try SQL-level filtering first ----
-    let translated_filter = query_options
-        .filter
-        .as_ref()
-        .and_then(super::filter_sql::try_translate_filter);
-    let sql_pushdown_ids = if let Some(translated) = translated_filter {
-        if let Some(query_plane) = state.query_plane_store() {
-            match query_plane
-                .query_field_index(
-                    tenant.as_str(),
-                    &entity_type,
-                    &translated.where_clause,
-                    translated.params,
-                )
-                .await
-            {
-                Ok(Some(ids)) => {
-                    tracing::debug!(
-                        entity_type = %entity_type,
-                        matched = ids.len(),
-                        "OData filter push-down succeeded"
-                    );
-                    Some(ids)
-                }
-                Ok(None) => None, // backend doesn't support field index
-                Err(e) => {
-                    tracing::warn!(
-                        error = %e,
-                        "OData filter push-down query failed, falling back to in-memory"
-                    );
-                    None
-                }
-            }
-        } else {
-            None
-        }
-    } else {
-        None // no filter
-    };
-
-    let filter_pushdown = sql_pushdown_ids.is_some();
-    let prefer_catalog_materialization = filter_pushdown || state.query_plane_store().is_some();
-    let mut pushdown_coverage_entities = Vec::new();
-    // Cedar policies may inspect fields omitted by `$select`; projection is
-    // applied only after each row has been authorized.
-    let final_selected_catalog_fields = None;
-    let mut catalog_coverage_missing = 0_usize;
-    let mut catalog_coverage_matched = 0_usize;
-    let pushdown_sparse_page = false;
-    let pushdown_sparse_probe_count = 0_usize;
-    let pushdown_page_count = 0_usize;
-    let pushdown_sparse_skip_reason = if filter_pushdown {
-        "cedar_row_authorization"
-    } else {
-        "no_filter_pushdown"
-    };
-    let candidate_count_for_span;
-    let (entity_ids, apply_options, precomputed_count) = if let Some(pushed_ids) = sql_pushdown_ids
+        entity_type: &entity_type,
+        entity_set_name: name,
+        query_options,
+        budget: QueryPlaneReadBudget::from_config(),
+    })
+    .await
     {
-        candidate_count_for_span = pushed_ids.len();
-        let fallback_candidate_budget = max_entities.saturating_mul(10).max(default_page_size);
-        if pushed_ids.len() > fallback_candidate_budget {
-            span.record("filter_pushdown", true);
-            span.record("catalog_materialization", prefer_catalog_materialization);
-            span.record("id_source", "filter_pushdown");
-            span.record("candidate_count", pushed_ids.len() as u64);
-            span.record("catalog_coverage_missing", 0_u64);
-            span.record("catalog_coverage_matched", 0_u64);
-            span.record("pushdown_sparse_page", false);
-            span.record("pushdown_sparse_probe_count", 0_u64);
-            span.record("pushdown_page_count", 0_u64);
-            span.record("pushdown_sparse_skip_reason", "fallback_candidate_budget");
-            tracing::warn!(
-                tenant = %tenant,
-                entity_type = %entity_type,
-                candidate_count = pushed_ids.len(),
-                fallback_candidate_budget,
-                "OData pushed-down candidate set requires native paged push-down"
-            );
-            return odata_error(
-                StatusCode::PAYLOAD_TOO_LARGE,
-                "QueryTooLarge",
-                "This filtered query matched more projected entities than the bounded fallback can materialize. Use a narrower filter or a storage backend with native paged push-down.",
-            )
-            .into_response();
+        Ok(result) => result,
+        Err(error) => {
+            error.record_telemetry(&span);
+            return error.into_response();
         }
-        let all_entity_ids = state.list_entity_ids_lazy(tenant, &entity_type).await;
-        let pushed_id_set = pushed_ids.iter().cloned().collect::<BTreeSet<_>>();
-        let mut missing_ids =
-            missing_catalog_entity_ids(state, tenant, &entity_type, &all_entity_ids).await;
-        missing_ids.retain(|id| !pushed_id_set.contains(id));
-        catalog_coverage_missing = missing_ids.len();
-        if !missing_ids.is_empty() {
-            let missing = materialize_entity_set_entities(
-                state,
-                tenant,
-                &entity_type,
-                name,
-                &missing_ids,
-                true,
-                None,
-            )
-            .await;
-            let filter_options = filter_only_query_options(query_options);
-            let (matching_missing, _) = apply_query_options(missing.entities, &filter_options);
-            let matched_count = matching_missing
-                .iter()
-                .filter_map(|entity| entity.get("entity_id").and_then(|id| id.as_str()))
-                .count();
-            catalog_coverage_matched = matched_count;
-            pushdown_coverage_entities = matching_missing;
-        }
-
-        // Cedar row authorization must run before paging and count. The
-        // storage page optimizations cannot know which entities the caller
-        // may read, so retain filter push-down only for candidate narrowing.
-        let mut opts = query_options.clone();
-        if opts.top.is_none() {
-            opts.top = Some(default_page_size);
-        } else if let Some(top) = opts.top {
-            opts.top = Some(top.min(max_entities));
-        }
-        (pushed_ids, opts, None)
-    } else {
-        // Authorization acts as a per-row filter, so materialize candidates
-        // before applying pagination and $count.
-        let selected = select_entity_ids_for_materialization(
-            state.list_entity_ids_lazy(tenant, &entity_type).await,
-            query_options,
-            default_page_size,
-            max_entities,
-            true,
-        );
-        candidate_count_for_span = selected.0.len();
-        selected
     };
-    span.record("filter_pushdown", filter_pushdown);
-    span.record("catalog_materialization", prefer_catalog_materialization);
-    span.record(
-        "id_source",
-        if filter_pushdown {
-            "filter_pushdown"
-        } else {
-            "read_source_union"
-        },
-    );
-    span.record(
-        "candidate_count",
-        (candidate_count_for_span + pushdown_coverage_entities.len()) as u64,
-    );
-    span.record("catalog_coverage_missing", catalog_coverage_missing as u64);
-    span.record("catalog_coverage_matched", catalog_coverage_matched as u64);
-    span.record("pushdown_sparse_page", pushdown_sparse_page);
-    span.record(
-        "pushdown_sparse_probe_count",
-        pushdown_sparse_probe_count as u64,
-    );
-    span.record("pushdown_page_count", pushdown_page_count as u64);
-    span.record("pushdown_sparse_skip_reason", pushdown_sparse_skip_reason);
+    read_result.telemetry.record(&span);
 
-    let materialized = materialize_entity_set_entities(
-        state,
-        tenant,
-        &entity_type,
-        name,
-        &entity_ids,
-        prefer_catalog_materialization,
-        final_selected_catalog_fields,
-    )
-    .await;
-    let total_materialized_count =
-        materialized.entities.len() as u64 + pushdown_coverage_entities.len() as u64;
-    span.record("materialized_count", total_materialized_count);
-    span.record(
-        "catalog_shadow_check_budget",
-        materialized.catalog_shadow_check_budget as u64,
-    );
-    span.record(
-        "catalog_shadow_check_scheduled",
-        materialized.catalog_shadow_check_scheduled as u64,
-    );
-
-    let mut entities = materialized.entities;
-    entities.extend(pushdown_coverage_entities);
-    entities.retain(|entity| {
-        entity_id_from_body(entity).is_some_and(|entity_id| {
-            authorize_read(
-                state,
-                tenant,
-                security_ctx,
-                READ_ACTION,
-                &entity_type,
-                entity_id,
-                entity,
-            )
-            .is_ok()
-        })
-    });
-    let (mut result, mut count) = apply_query_options(entities, &apply_options);
-    span.record("returned_count", result.len() as u64);
-    if count.is_none() {
-        count = precomputed_count;
-    }
-
+    let mut result = read_result.entities;
     if let Some(ref expand_items) = query_options.expand {
         for entity in &mut result {
             if let Err(response) = expand_entity(
@@ -847,6 +629,7 @@ async fn handle_entity_set(
         }
     }
 
+    let count = read_result.count;
     let mut body = serde_json::json!({
         "@odata.context": format!("$metadata#{name}"),
         "value": result,
