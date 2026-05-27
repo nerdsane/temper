@@ -21,6 +21,26 @@ fn test_directed_evolution_failed_variant_generation_closes_episode() {
     }
 }
 
+#[test]
+fn test_directed_evolution_failed_promotion_materialization_fails_episode() {
+    let handle = std::thread::Builder::new()
+        .name("directed-evolution-promoter-failure-spine".to_string())
+        .stack_size(16 * 1024 * 1024)
+        .spawn(|| {
+            tokio::runtime::Builder::new_multi_thread()
+                .worker_threads(2)
+                .thread_stack_size(16 * 1024 * 1024)
+                .enable_all()
+                .build()
+                .expect("build runtime")
+                .block_on(directed_evolution_failed_promotion_materialization_fails_episode_body());
+        })
+        .expect("spawn directed evolution promoter failure spine test");
+    if let Err(payload) = handle.join() {
+        std::panic::resume_unwind(payload);
+    }
+}
+
 async fn directed_evolution_failed_variant_generation_closes_episode_body() {
     let state = PlatformState::new(None);
     install_os_app(
@@ -170,5 +190,169 @@ async fn directed_evolution_failed_variant_generation_closes_episode_body() {
             .await
             .is_empty(),
         "failed generation must not queue a selector"
+    );
+}
+
+async fn directed_evolution_failed_promotion_materialization_fails_episode_body() {
+    let state = PlatformState::new(None);
+    install_os_app(
+        &state,
+        "test-directed-evolution-promoter-failure-spine",
+        "directed-evolution",
+    )
+    .await
+    .expect("install directed-evolution");
+    let tenant = TenantId::new("test-directed-evolution-promoter-failure-spine");
+    directed_evolution_register_wasm_modules_for_test(&state, &tenant);
+
+    let episode_id = "ep-promoter-failure";
+    let promotion_id = "promotion-promoter-failure";
+    let work_item_id = "work-promoter-failure";
+    directed_evolution_create(&state, &tenant, "Episode", episode_id).await;
+    directed_evolution_create(&state, &tenant, "Promotion", promotion_id).await;
+    directed_evolution_create(&state, &tenant, "WorkItem", work_item_id).await;
+
+    directed_evolution_dispatch(
+        &state,
+        &tenant,
+        "Episode",
+        episode_id,
+        "BeginEpisodeNegotiation",
+        serde_json::json!({
+            "DirectionId": "dir-promoter-failure",
+            "OrganismId": "org-agent-answers",
+            "ParentVersionId": "ov-parent",
+            "AutonomyLane": "repair-auto",
+        }),
+        false,
+    )
+    .await;
+    directed_evolution_dispatch(
+        &state,
+        &tenant,
+        "Episode",
+        episode_id,
+        "RecordEpisodeContract",
+        serde_json::json!({
+            "AdaptationGoalId": "",
+            "SelectionPressureId": "",
+            "ViabilityConstraintIdsJson": "[]",
+            "EvaluationStageIdsJson": "[]",
+            "EliminationRuleIdsJson": "[]",
+            "ScoringRuleIdsJson": "[]",
+        }),
+        false,
+    )
+    .await;
+    directed_evolution_dispatch(
+        &state,
+        &tenant,
+        "Episode",
+        episode_id,
+        "StartEpisode",
+        serde_json::json!({
+            "StartedBy": "codex",
+            "Reason": "Start materialization failure proof.",
+        }),
+        false,
+    )
+    .await;
+    directed_evolution_dispatch(
+        &state,
+        &tenant,
+        "Episode",
+        episode_id,
+        "BeginEpisodeSelection",
+        serde_json::json!({
+            "GenerationId": "gen-promoter-failure",
+            "Reason": "Selection finished in test setup.",
+        }),
+        false,
+    )
+    .await;
+    directed_evolution_dispatch(
+        &state,
+        &tenant,
+        "Episode",
+        episode_id,
+        "RecordEpisodeWinner",
+        serde_json::json!({
+            "WinningVariantId": "variant-promoter-failure",
+            "SelectorBrainRunId": "brain-selector",
+            "SelectionExplanation": "Winner selected, materialization still pending.",
+            "EvidenceArtifactId": "",
+        }),
+        false,
+    )
+    .await;
+    assert_eq!(
+        directed_evolution_entity(&state, &tenant, "Episode", episode_id)
+            .await
+            .state
+            .status,
+        "Promoting"
+    );
+
+    directed_evolution_dispatch(
+        &state,
+        &tenant,
+        "Promotion",
+        promotion_id,
+        "PromoteWinner",
+        serde_json::json!({
+            "EpisodeId": episode_id,
+            "WinningVariantId": "variant-promoter-failure",
+            "ParentVersionId": "ov-parent",
+            "NewOrganismVersionId": "ov-child",
+            "SelectionExplanation": "Winner selected, materialization still pending.",
+            "EvidenceArtifactId": "",
+            "AppRef": "agent-answers@winner",
+        }),
+        false,
+    )
+    .await;
+    directed_evolution_dispatch(
+        &state,
+        &tenant,
+        "WorkItem",
+        work_item_id,
+        "QueueWorkItem",
+        serde_json::json!({
+            "Role": "promoter",
+            "TargetEntityType": "Promotion",
+            "TargetEntityId": promotion_id,
+            "PromptRef": "literal:materialize promotion",
+            "ContextRef": format!("promotion:{promotion_id}"),
+            "OutputSchemaRef": "directed-evolution.promoter.v1",
+            "CorrelationJson": "{}",
+        }),
+        false,
+    )
+    .await;
+
+    directed_evolution_fail_work_item(
+        &state,
+        &tenant,
+        work_item_id,
+        "promoter",
+        "canonical Genesis install failed",
+    )
+    .await;
+
+    assert_eq!(
+        directed_evolution_entity(&state, &tenant, "Episode", episode_id)
+            .await
+            .state
+            .status,
+        "Failed"
+    );
+    let promotion = directed_evolution_entity(&state, &tenant, "Promotion", promotion_id).await;
+    assert_eq!(
+        promotion
+            .state
+            .booleans
+            .get("materialization_failed")
+            .copied(),
+        Some(true)
     );
 }

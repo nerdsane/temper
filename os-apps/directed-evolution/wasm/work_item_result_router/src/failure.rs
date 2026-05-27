@@ -395,6 +395,7 @@ fn route_failed_promoter(
     evidence_artifact_id: &str,
 ) -> Result<Value, String> {
     let promotion = get_entity(ctx, base_url, headers, "Promotions", promotion_id)?;
+    let promotion_fields = state_fields(&promotion);
     if entity_status(&promotion) == "Promoted" {
         post_directed_action(
             ctx,
@@ -409,6 +410,11 @@ fn route_failed_promoter(
             }),
         )?;
     }
+    let episode_id = field_str(&promotion_fields, &["EpisodeId"]);
+    if !episode_id.trim().is_empty() {
+        let episode = get_entity(ctx, base_url, headers, "Episodes", &episode_id)?;
+        maybe_fail_episode(ctx, base_url, headers, &episode, &episode_id, failure_reason)?;
+    }
     link_evidence_if_present(
         ctx,
         base_url,
@@ -421,6 +427,7 @@ fn route_failed_promoter(
     Ok(json!({
         "routed": "promoter_failure",
         "promotion_id": promotion_id,
+        "episode_id": episode_id,
         "failure_reason": failure_reason,
     }))
 }

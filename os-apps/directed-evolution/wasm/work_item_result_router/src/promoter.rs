@@ -68,6 +68,27 @@ fn route_promoter(
         promotion_id,
     )?;
 
+    let episode_id = field_str(&promotion_fields, &["EpisodeId"]);
+    let organism_version_id = field_str(&promotion_fields, &["NewOrganismVersionId"]);
+    if !episode_id.trim().is_empty() {
+        let episode = get_entity(ctx, base_url, headers, "Episodes", &episode_id)?;
+        if entity_status(&episode) == "Promoting" {
+            post_directed_action(
+                ctx,
+                base_url,
+                headers,
+                "Episodes",
+                &episode_id,
+                "CompleteEpisode",
+                json!({
+                    "PromotionId": promotion_id,
+                    "OrganismVersionId": organism_version_id,
+                    "Summary": record.summary.clone(),
+                }),
+            )?;
+        }
+    }
+
     Ok(json!({
         "routed": "promoter",
         "promotion_id": promotion_id,

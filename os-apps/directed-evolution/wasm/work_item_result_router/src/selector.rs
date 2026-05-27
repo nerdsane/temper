@@ -290,23 +290,6 @@ fn route_selector(
         &winner.branch_ref,
     )?;
 
-    let promoting_episode = get_entity(ctx, base_url, headers, "Episodes", &episode_id)?;
-    if entity_status(&promoting_episode) == "Promoting" {
-        post_directed_action(
-            ctx,
-            base_url,
-            headers,
-            "Episodes",
-            &episode_id,
-            "CompleteEpisode",
-            json!({
-                "PromotionId": promotion_id,
-                "OrganismVersionId": new_organism_version_id,
-                "Summary": selection_explanation,
-            }),
-        )?;
-    }
-
     Ok(json!({
         "routed": "selector",
         "generation_id": generation_id,

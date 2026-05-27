@@ -174,7 +174,7 @@ async fn directed_evolution_signal_to_promotion_wasm_spine_body() {
             .await
             .state
             .status,
-        "Completed"
+        "Promoting"
     );
     assert_eq!(
         directed_evolution_entity(&state, &tenant, "Generation", &generation_id)
@@ -280,6 +280,13 @@ async fn directed_evolution_signal_to_promotion_wasm_spine_body() {
         }),
     )
     .await;
+    assert_eq!(
+        directed_evolution_entity(&state, &tenant, "Episode", episode_id)
+            .await
+            .state
+            .status,
+        "Completed"
+    );
     let promotion = directed_evolution_entity(&state, &tenant, "Promotion", &promotion_id).await;
     assert_eq!(
         promotion.state.booleans.get("materialized").copied(),
