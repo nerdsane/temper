@@ -7,6 +7,7 @@
   - ADR-0027: OS App Catalog
   - ADR-0120: Directed Evolution Control Plane
   - `Dockerfile`
+  - `railway.toml`
   - `crates/temper-platform/src/os_apps/app_catalog.rs`
 
 ## Context
@@ -33,13 +34,18 @@ This keeps app discovery explicit and uses the existing first-priority app
 catalog path. The server remains responsible for deciding which apps to install
 per tenant; the image only makes the app bundles available.
 
+The production Railway start command will explicitly pass
+`--app directed-evolution`. This installs or reconciles the bundled Directed
+Evolution app for the `default` tenant on boot using the normal governed app
+installer, rather than requiring an ad-hoc post-deploy mutation endpoint.
+
 ## Rollout Plan
 
 1. **Phase 0 (Immediate)** - Copy `os-apps/` into the runtime image and set
    `TEMPER_OS_APPS_DIR`.
 2. **Phase 1 (Production deploy)** - Redeploy the Railway `temper-server`
-   service and verify the Directed Evolution entity sets can be installed or
-   recovered from the bundled source.
+   service with `--app directed-evolution` and verify the Directed Evolution
+   entity sets are installed or recovered from the bundled source.
 3. **Phase 2 (Follow-up)** - If image size becomes a problem, split runtime
    app packaging into a curated bundle manifest rather than copying every app.
 
@@ -47,6 +53,8 @@ per tenant; the image only makes the app bundles available.
 
 - Production logs show app catalog discovery from `/opt/temper-os-apps`.
 - Directed Evolution app sources are available to the deployed server.
+- `GET /tdata/Directions` for the production tenant no longer returns
+  `EntitySetNotFound`.
 - Existing tenant/app recovery still boots without requiring the working
   directory to contain source files.
 
@@ -56,12 +64,15 @@ per tenant; the image only makes the app bundles available.
 
 - New repository-bundled OS apps are deployable without a second artifact store.
 - Runtime behavior matches local development more closely.
-- Directed Evolution can be installed into a production tenant after merge.
+- Directed Evolution is installed into the production `default` tenant during
+  the normal boot sequence after merge.
 
 ### Negative
 
 - Runtime images are larger because all bundled OS app sources and WASM
   artifacts are copied.
+- The production boot surface now includes Directed Evolution by default for the
+  `default` tenant.
 
 ### Risks
 
@@ -77,6 +88,7 @@ simulation-visible runtime code changes.
 ## Non-Goals
 
 - Auto-installing all OS apps for all tenants.
+- Installing Directed Evolution into every tenant.
 - Changing app discovery precedence.
 - Replacing Genesis-published app bundles.
 
@@ -93,5 +105,6 @@ simulation-visible runtime code changes.
 ## Rollback Policy
 
 Remove the `TEMPER_OS_APPS_DIR` environment variable and the `COPY
---from=builder /app/os-apps /opt/temper-os-apps` line from the Dockerfile, then
-redeploy. Existing persisted app state remains in the platform store.
+--from=builder /app/os-apps /opt/temper-os-apps` line from the Dockerfile, drop
+the `--app directed-evolution` start-command argument, then redeploy. Existing
+persisted app state remains in the platform store.
