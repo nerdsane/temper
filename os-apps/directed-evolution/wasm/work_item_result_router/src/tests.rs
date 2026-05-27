@@ -29,12 +29,14 @@ mod tests {
                 "RequiredEvidenceJson": "{}",
             }),
             "AdaptationGoal goal-1: improve clarity",
+            "https://genesis-production-164d.up.railway.app",
             "var-1",
             "gen-1",
             "ep-1",
             "stage-1",
             "summary",
             "app@1",
+            "temper://tenant/de-variant/app/app@1",
         );
 
         assert!(prompt.contains("VariantId: var-1"));

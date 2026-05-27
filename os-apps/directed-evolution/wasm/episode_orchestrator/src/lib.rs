@@ -121,10 +121,33 @@ OrganismId: {organism_id}\n\
 DirectionId: {direction_id}\n\
 ParentVersionId: {parent_version_id}\n\n\
 {prompt_context}\n\n\
+Variant lane suggestion: {}\n\
 Work in the assigned organism repository and create one real candidate variant. \
+Keep the mutation bounded to the Agent Answers app bundle: prefer changing APP.md, \
+adrs/, specs/question.ioa.toml, specs/answer.ioa.toml, specs/model.csdl.xml, and \
+policies/agent_answers.cedar. Do not create unrelated entity families unless the \
+lane explicitly requires it. Preserve existing Question and Answer actions. \
 Return JSON with: summary, app_ref, branch_ref, runtime_ref, changed_files, diff_ref, \
-verification_notes, and next_actions. Do not change evaluation rules or viability constraints."
+verification_notes, and next_actions. Do not change evaluation rules or viability constraints.",
+        variant_lane_suggestion(variant_index),
     )
+}
+
+fn variant_lane_suggestion(variant_index: usize) -> &'static str {
+    match variant_index {
+        1 => {
+            "Improve Answer usefulness by adding a compact answer-quality or decision-frame field/action while preserving Submit and Accept."
+        }
+        2 => {
+            "Improve Question intent capture by adding a lightweight intent/context field/action while preserving Configure, RecordAnswer, and Accept."
+        }
+        3 => {
+            "Improve evidence and uncertainty handling by adding a bounded evidence/uncertainty field/action on Answer while preserving legacy behavior."
+        }
+        _ => {
+            "Make a small backward-compatible Question or Answer improvement that helps simulated users evaluate Q&A quality."
+        }
+    }
 }
 
 fn variant_generation_context(
@@ -274,6 +297,8 @@ mod tests {
         assert!(prompt.contains("GenerationId: gen-1"));
         assert!(prompt.contains("variant 2 of 3"));
         assert!(prompt.contains("Improve trust"));
+        assert!(prompt.contains("Improve Question intent capture"));
+        assert!(prompt.contains("Preserve existing Question and Answer actions"));
         assert!(prompt.contains("Do not change evaluation rules"));
     }
 }

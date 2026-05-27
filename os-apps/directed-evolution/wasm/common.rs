@@ -103,6 +103,14 @@ fn resolve_api_url(ctx: &Context) -> String {
         .unwrap_or_else(|| "http://127.0.0.1:3000".to_string())
 }
 
+fn resolve_public_api_url(ctx: &Context) -> String {
+    ctx.config
+        .get("temper_public_api_url")
+        .filter(|value| !value.trim().is_empty() && !value.contains("{secret:"))
+        .cloned()
+        .unwrap_or_else(|| resolve_api_url(ctx))
+}
+
 fn odata_headers(ctx: &Context) -> Vec<(String, String)> {
     vec![
         ("content-type".to_string(), "application/json".to_string()),

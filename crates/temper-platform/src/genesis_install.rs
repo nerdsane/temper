@@ -844,13 +844,19 @@ impl BoundActionHook for GenesisInstallHook {
             .ok_or_else(|| "App.Install requires App.Name".to_string())?;
         let repository_id = string_field(fields, "RepositoryId")
             .ok_or_else(|| "App.Install requires App.RepositoryId".to_string())?;
-        let version_hash = string_field(fields, "LatestVersionHash")
+        let latest_version_hash = string_field(fields, "LatestVersionHash")
             .ok_or_else(|| "App.Install requires App.LatestVersionHash".to_string())?;
         let target_tenant = string_field(params, "TargetTenant")
             .or_else(|| string_field(params, "tenant"))
             .unwrap_or_else(|| tenant.as_str().to_string());
-        let app_ref = string_field(params, "AppRef")
-            .unwrap_or_else(|| format!("{owner}/{name}@{}", version_hash.trim_start_matches('@')));
+        let install_ref = resolve_install_app_ref(
+            &owner,
+            &name,
+            &latest_version_hash,
+            string_field(params, "AppRef").as_deref(),
+        )?;
+        let app_ref = install_ref.app_ref;
+        let version_hash = install_ref.version_hash;
         let registry_url = string_field(params, "RegistryUrl")
             .or_else(|| string_field(params, "registry_url"))
             .unwrap_or_default();
@@ -960,6 +966,48 @@ struct GenesisInstallMetadata<'a> {
     closure_id: &'a str,
     registry_url: &'a str,
     registry_tenant: &'a str,
+}
+
+#[derive(Debug)]
+struct ResolvedInstallAppRef {
+    app_ref: String,
+    version_hash: String,
+}
+
+fn resolve_install_app_ref(
+    owner: &str,
+    name: &str,
+    latest_version_hash: &str,
+    requested_app_ref: Option<&str>,
+) -> Result<ResolvedInstallAppRef, String> {
+    let latest = latest_version_hash.trim_start_matches('@');
+    let Some(raw_app_ref) = requested_app_ref
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    else {
+        return Ok(ResolvedInstallAppRef {
+            app_ref: format!("{owner}/{name}@{latest}"),
+            version_hash: latest.to_string(),
+        });
+    };
+
+    let parsed = parse_registry_app_ref(raw_app_ref)?;
+    if parsed.owner != owner || parsed.name != name {
+        return Err(format!(
+            "App.Install AppRef '{}' does not match App row {}/{}",
+            raw_app_ref, owner, name
+        ));
+    }
+    let version_hash = parsed
+        .version_hash
+        .as_deref()
+        .unwrap_or(latest)
+        .trim_start_matches('@')
+        .to_string();
+    Ok(ResolvedInstallAppRef {
+        app_ref: format!("{owner}/{name}@{version_hash}"),
+        version_hash,
+    })
 }
 
 async fn record_genesis_install_metadata(
@@ -1114,17 +1162,11 @@ async fn resolve_genesis_app_by_ref(
         let Some(repository_id) = string_field(fields, "RepositoryId") else {
             continue;
         };
-        let Some(latest_hash) = string_field(fields, "LatestVersionHash") else {
-            continue;
-        };
-        if latest_hash.trim_start_matches('@') != version_hash.trim_start_matches('@') {
-            continue;
-        }
         return Ok(GenesisAppBundle {
             owner: candidate_owner,
             name: candidate_name,
             repository_id,
-            version_hash: latest_hash.trim_start_matches('@').to_string(),
+            version_hash: version_hash.trim_start_matches('@').to_string(),
         });
     }
 
@@ -1782,6 +1824,46 @@ mod tests {
         assert_eq!(parsed.version_hash.as_deref(), Some("abc123"));
         assert!(parse_registry_app_ref("paw-agent").is_err());
         assert!(parse_registry_app_ref("temperpaw/paw-agent@").is_err());
+    }
+
+    #[test]
+    fn install_ref_honors_pinned_app_ref_over_latest() {
+        let resolved = resolve_install_app_ref(
+            "nerdsane",
+            "agent-answers",
+            "latest123",
+            Some("nerdsane/agent-answers@variant456"),
+        )
+        .expect("pinned ref should resolve");
+
+        assert_eq!(resolved.app_ref, "nerdsane/agent-answers@variant456");
+        assert_eq!(resolved.version_hash, "variant456");
+    }
+
+    #[test]
+    fn install_ref_rejects_mismatched_app_ref() {
+        let error = resolve_install_app_ref(
+            "nerdsane",
+            "agent-answers",
+            "latest123",
+            Some("nerdsane/other-app@variant456"),
+        )
+        .expect_err("mismatched app ref should fail");
+
+        assert!(error.contains("does not match App row"));
+    }
+
+    #[test]
+    fn install_ref_defaults_to_latest_when_absent_or_unpinned() {
+        let absent = resolve_install_app_ref("owner", "app", "@latest123", None)
+            .expect("absent app ref should use latest");
+        assert_eq!(absent.app_ref, "owner/app@latest123");
+        assert_eq!(absent.version_hash, "latest123");
+
+        let unpinned = resolve_install_app_ref("owner", "app", "@latest123", Some("owner/app"))
+            .expect("unpinned app ref should use latest");
+        assert_eq!(unpinned.app_ref, "owner/app@latest123");
+        assert_eq!(unpinned.version_hash, "latest123");
     }
 
     #[test]
