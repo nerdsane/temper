@@ -116,6 +116,16 @@ fn route_selector(
         }
     }
 
+    eliminate_non_winning_survivors(
+        ctx,
+        base_url,
+        headers,
+        &outcomes,
+        &winner_variant_id,
+        &evidence_artifact_id,
+        &selection_explanation,
+    )?;
+
     let refreshed_generation = get_entity(ctx, base_url, headers, "Generations", generation_id)?;
     if entity_status(&refreshed_generation) == "Selecting" {
         post_directed_action(
@@ -306,6 +316,40 @@ fn route_selector(
         "lineage_edge_id": lineage_edge_id,
         "evidence_artifact_id": evidence_artifact_id,
     }))
+}
+
+fn eliminate_non_winning_survivors(
+    ctx: &Context,
+    base_url: &str,
+    headers: &[(String, String)],
+    outcomes: &[VariantOutcome],
+    winner_variant_id: &str,
+    evidence_artifact_id: &str,
+    selection_explanation: &str,
+) -> Result<(), String> {
+    for outcome in outcomes {
+        if outcome.id == winner_variant_id || !outcome.survived || outcome.status != "Active" {
+            continue;
+        }
+
+        post_directed_action(
+            ctx,
+            base_url,
+            headers,
+            "Variants",
+            &outcome.id,
+            "EliminateVariant",
+            json!({
+                "EliminationRuleId": "selection-not-winner",
+                "StageResultId": "",
+                "EvidenceArtifactId": evidence_artifact_id,
+                "Reason": format!(
+                    "Selection completed with {winner_variant_id} as the winning variant. This survivor was eliminated at the selection boundary because it was not chosen: {selection_explanation}"
+                ),
+            }),
+        )?;
+    }
+    Ok(())
 }
 
 fn select_requested_winner(output: &Value, survivor_ids: &[String]) -> Result<String, String> {
