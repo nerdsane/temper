@@ -261,6 +261,8 @@ permit(
   principal is Agent,
   action in [
     Action::"PromoteWinner",
+    Action::"RecordPromotionMaterialization",
+    Action::"RecordPromotionMaterializationFailure",
     Action::"RollbackPromotion",
     Action::"FailPromotion"
   ],

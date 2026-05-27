@@ -479,6 +479,32 @@ async fn directed_evolution_signal_to_promotion_wasm_spine_body() {
         .await,
         "Promotion"
     );
+    let promotion_id = state.server.list_entity_ids(&tenant, "Promotion")[0].clone();
+    directed_evolution_run_work_item(
+        &state,
+        &tenant,
+        &promoter_work_items[0],
+        "promoter",
+        serde_json::json!({
+            "status": "succeeded",
+            "canonical_app_ref": "agent-answers@variant-1",
+            "production_tenant": "default",
+            "runtime_ref": "temper://tenant/default/app/agent-answers@variant-1",
+            "summary": "Published and installed winner.",
+            "digest": "variant-1-digest",
+            "evidence_refs": ["temper://tenant/default/app/agent-answers@variant-1"],
+        }),
+    )
+    .await;
+    let promotion = directed_evolution_entity(&state, &tenant, "Promotion", &promotion_id).await;
+    assert_eq!(
+        promotion.state.booleans.get("materialized").copied(),
+        Some(true)
+    );
+    assert_eq!(
+        directed_evolution_field(&state, &tenant, "Promotion", &promotion_id, "RuntimeRef").await,
+        "temper://tenant/default/app/agent-answers@variant-1"
+    );
     assert_eq!(
         state.server.list_entity_ids(&tenant, "LineageEdge").len(),
         1
