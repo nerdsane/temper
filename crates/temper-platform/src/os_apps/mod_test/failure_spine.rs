@@ -2,7 +2,7 @@ use super::helpers::*;
 use super::*;
 
 #[test]
-fn test_directed_evolution_failed_variant_generation_closes_episode() {
+fn test_directed_evolution_failed_variant_generation_queues_followup_then_closes_episode() {
     let handle = std::thread::Builder::new()
         .name("directed-evolution-failure-spine".to_string())
         .stack_size(16 * 1024 * 1024)
@@ -13,7 +13,9 @@ fn test_directed_evolution_failed_variant_generation_closes_episode() {
                 .enable_all()
                 .build()
                 .expect("build runtime")
-                .block_on(directed_evolution_failed_variant_generation_closes_episode_body());
+                .block_on(
+                    directed_evolution_failed_variant_generation_queues_followup_then_closes_episode_body(),
+                );
         })
         .expect("spawn directed evolution failure spine test");
     if let Err(payload) = handle.join() {
@@ -41,7 +43,7 @@ fn test_directed_evolution_failed_promotion_materialization_fails_episode() {
     }
 }
 
-async fn directed_evolution_failed_variant_generation_closes_episode_body() {
+async fn directed_evolution_failed_variant_generation_queues_followup_then_closes_episode_body() {
     let state = PlatformState::new(None);
     install_os_app(
         &state,
@@ -155,6 +157,83 @@ async fn directed_evolution_failed_variant_generation_closes_episode_body() {
 
     assert_eq!(
         directed_evolution_entity(&state, &tenant, "Generation", generation_id)
+            .await
+            .state
+            .status,
+        "Failed"
+    );
+    assert_eq!(
+        directed_evolution_entity(&state, &tenant, "Episode", episode_id)
+            .await
+            .state
+            .status,
+        "Running"
+    );
+    let generation_ids = directed_evolution_wait_for_ids_with_field(
+        &state,
+        &tenant,
+        "Generation",
+        "EpisodeId",
+        episode_id,
+        2,
+    )
+    .await;
+    let followup_generation_id = generation_ids
+        .iter()
+        .find(|candidate| candidate.as_str() != generation_id)
+        .expect("follow-up generation created");
+    let followup_generation =
+        directed_evolution_entity(&state, &tenant, "Generation", followup_generation_id).await;
+    assert_eq!(followup_generation.state.status, "Generating");
+    assert_eq!(
+        followup_generation
+            .state
+            .fields
+            .get("GenerationIndex")
+            .and_then(|value| value.as_u64()),
+        Some(2)
+    );
+    let followup_work_items = directed_evolution_wait_for_ids_with_field(
+        &state,
+        &tenant,
+        "WorkItem",
+        "TargetEntityId",
+        followup_generation_id,
+        3,
+    )
+    .await;
+    for work_item_id in &followup_work_items {
+        let work_item = directed_evolution_entity(&state, &tenant, "WorkItem", work_item_id).await;
+        assert_eq!(
+            work_item
+                .state
+                .fields
+                .get("Role")
+                .and_then(|value| value.as_str()),
+            Some("variant_generator")
+        );
+        let prompt_ref = work_item
+            .state
+            .fields
+            .get("PromptRef")
+            .and_then(|value| value.as_str())
+            .unwrap_or_default();
+        assert!(prompt_ref.contains("PreviousGenerationId"));
+        assert!(prompt_ref.contains("codex worker failed"));
+    }
+
+    for work_item_id in &followup_work_items {
+        directed_evolution_fail_work_item(
+            &state,
+            &tenant,
+            work_item_id,
+            "variant_generator",
+            "follow-up variant still failed",
+        )
+        .await;
+    }
+    assert_eq!(
+        directed_evolution_entity(&state, &tenant, "Generation", followup_generation_id)
             .await
             .state
             .status,

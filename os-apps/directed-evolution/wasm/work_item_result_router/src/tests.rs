@@ -74,6 +74,39 @@ mod tests {
     }
 
     #[test]
+    fn followup_prompt_carries_prior_elimination_evidence() {
+        let outcomes = vec![VariantOutcome {
+            id: "variant-a".to_string(),
+            status: "Eliminated".to_string(),
+            app_ref: "owner/app@a".to_string(),
+            branch_ref: "variant-a".to_string(),
+            summary: "Changed only CSDL navigation.".to_string(),
+            evidence_summary:
+                "Eliminated: runtime stored question_id but CSDL expected QuestionId".to_string(),
+            complete: true,
+            survived: false,
+        }];
+        let context = eliminated_generation_evidence_context(&outcomes);
+        let prompt_context = format!("Previous Generation Evidence (gen-1):\n{context}");
+        let prompt = followup_variant_generator_prompt(FollowupPromptInput {
+            episode_id: "ep-1",
+            generation_id: "gen-2",
+            previous_generation_id: "gen-1",
+            organism_id: "org-agent-answers",
+            direction_id: "dir-1",
+            parent_version_id: "ov-1",
+            variant_index: 1,
+            variant_target_count: 3,
+            prompt_context: &prompt_context,
+        });
+
+        assert!(prompt.contains("PreviousGenerationId: gen-1"));
+        assert!(prompt.contains("runtime stored question_id"));
+        assert!(prompt.contains("aligning persisted IOA field names"));
+        assert!(prompt.contains("Do not change evaluation rules"));
+    }
+
+    #[test]
     fn promoter_prompt_names_canonical_materialization_target() {
         let prompt = promoter_prompt(
             "promotion-1",
