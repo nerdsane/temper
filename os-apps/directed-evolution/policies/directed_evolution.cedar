@@ -24,6 +24,7 @@ permit(
   action in [
     Action::"ActivateOrganism",
     Action::"RecordOrganismVersion",
+    Action::"SyncOrganismParentRef",
     Action::"ArchiveOrganism"
   ],
   resource is Organism

@@ -28,8 +28,15 @@ name = "RecordOrganismVersion"
 kind = "input"
 from = ["Active"]
 effect = "increment version_count"
-params = ["OrganismVersionId", "PromotionId", "Summary"]
+params = ["OrganismVersionId", "PromotionId", "AppRef", "Summary"]
 hint = "Record that a promoted organism version belongs to this organism."
+
+[[action]]
+name = "SyncOrganismParentRef"
+kind = "input"
+from = ["Active"]
+params = ["OrganismVersionId", "PromotionId", "AppRef", "Summary"]
+hint = "Synchronize current parent version fields without recording a new version."
 
 [[action]]
 name = "ArchiveOrganism"

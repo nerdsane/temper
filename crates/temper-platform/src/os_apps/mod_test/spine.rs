@@ -212,6 +212,41 @@ async fn directed_evolution_signal_to_promotion_wasm_spine_body() {
             .status,
         "Superseded"
     );
+    assert_eq!(
+        directed_evolution_field(&state, &tenant, "Organism", "org-agent-answers", "AppRef").await,
+        "agent-answers@variant-1"
+    );
+    let organism_before_sync =
+        directed_evolution_entity(&state, &tenant, "Organism", "org-agent-answers").await;
+    assert_eq!(
+        organism_before_sync.state.counters.get("version_count"),
+        Some(&2)
+    );
+    directed_evolution_dispatch(
+        &state,
+        &tenant,
+        "Organism",
+        "org-agent-answers",
+        "SyncOrganismParentRef",
+        serde_json::json!({
+            "OrganismVersionId": "ov-generated-1",
+            "PromotionId": "promotion-for-variant-1",
+            "AppRef": "agent-answers@variant-1",
+            "Summary": "Idempotent live parent ref sync.",
+        }),
+        false,
+    )
+    .await;
+    let organism_after_sync =
+        directed_evolution_entity(&state, &tenant, "Organism", "org-agent-answers").await;
+    assert_eq!(
+        organism_after_sync.state.counters.get("version_count"),
+        Some(&2)
+    );
+    assert_eq!(
+        directed_evolution_field(&state, &tenant, "Organism", "org-agent-answers", "Summary").await,
+        "Idempotent live parent ref sync."
+    );
     assert_eq!(state.server.list_entity_ids(&tenant, "Promotion").len(), 1);
     let promoter_work_items = directed_evolution_wait_for_ids_with_field(
         &state, &tenant, "WorkItem", "Role", "promoter", 1,

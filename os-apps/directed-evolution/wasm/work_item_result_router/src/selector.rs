@@ -242,6 +242,7 @@ fn route_selector(
         json!({
             "OrganismVersionId": new_organism_version_id,
             "PromotionId": promotion_id,
+            "AppRef": app_ref,
             "Summary": selection_explanation,
         }),
     )?;

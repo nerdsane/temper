@@ -773,6 +773,16 @@
         <Parameter Name="bindingParameter" Type="Temper.DirectedEvolution.Organism"/>
         <Parameter Name="OrganismVersionId" Type="Edm.String" Nullable="true"/>
         <Parameter Name="PromotionId" Type="Edm.String" Nullable="true"/>
+        <Parameter Name="AppRef" Type="Edm.String" Nullable="true"/>
+        <Parameter Name="Summary" Type="Edm.String" Nullable="true"/>
+        <ReturnType Type="Temper.DirectedEvolution.Organism"/>
+      </Action>
+
+      <Action Name="SyncOrganismParentRef" IsBound="true">
+        <Parameter Name="bindingParameter" Type="Temper.DirectedEvolution.Organism"/>
+        <Parameter Name="OrganismVersionId" Type="Edm.String" Nullable="true"/>
+        <Parameter Name="PromotionId" Type="Edm.String" Nullable="true"/>
+        <Parameter Name="AppRef" Type="Edm.String" Nullable="true"/>
         <Parameter Name="Summary" Type="Edm.String" Nullable="true"/>
         <ReturnType Type="Temper.DirectedEvolution.Organism"/>
       </Action>
