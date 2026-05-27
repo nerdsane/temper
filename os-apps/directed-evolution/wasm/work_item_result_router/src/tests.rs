@@ -111,4 +111,52 @@ mod tests {
         );
         assert_eq!(record.evidence_uri, "temper://promotion/proof");
     }
+
+    #[test]
+    fn repair_autostart_requires_repair_auto_lane() {
+        assert!(repair_autostart_lane_allowed("repair", "repair-auto"));
+        assert!(repair_autostart_lane_allowed(
+            "performance_regression",
+            "repair-automatic"
+        ));
+        assert!(!repair_autostart_lane_allowed(
+            "growth",
+            "growth-human-gated"
+        ));
+        assert!(!repair_autostart_lane_allowed(
+            "repair",
+            "growth-auto-feature"
+        ));
+    }
+
+    #[test]
+    fn repair_autostart_policy_honors_active_lane_text() {
+        assert!(policy_permits_repair_autostart(
+            r#"{"repair_lane":"automatic for failing checks after evidence"}"#
+        ));
+        assert!(!policy_permits_repair_autostart(
+            r#"{"repair_lane":"human approval required"}"#
+        ));
+        assert!(!policy_permits_repair_autostart(
+            r#"{"repair_lane":"blocked"}"#
+        ));
+    }
+
+    #[test]
+    fn repair_evaluation_stages_keep_review_and_simulated_user() {
+        let mut stages = evaluation_stages_from_output(&json!({
+            "evaluation_stages": [
+                { "stage_name": "Static repair review", "stage_kind": "reviewer" }
+            ]
+        }));
+
+        ensure_required_repair_stages(&mut stages);
+
+        assert!(stages.iter().any(|stage| stage.name == "Static repair review"));
+        assert!(
+            stages
+                .iter()
+                .any(|stage| stage.kind.contains("simulated_user"))
+        );
+    }
 }

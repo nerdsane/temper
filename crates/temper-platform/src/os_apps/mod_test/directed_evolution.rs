@@ -6,6 +6,8 @@ use temper_runtime::tenant::TenantId;
 use temper_server::request_context::AgentContext;
 use temper_verify::cascade::VerificationCascade;
 
+#[path = "auto_start.rs"]
+mod auto_start;
 #[path = "catalog.rs"]
 mod catalog;
 #[path = "failure_spine.rs"]

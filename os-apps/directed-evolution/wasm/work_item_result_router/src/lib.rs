@@ -84,6 +84,8 @@ temper_side_effect_module! {
 }
 
 include!("observer.rs");
+include!("observer_autostart.rs");
+include!("observer_autostart_helpers.rs");
 include!("variant_generator.rs");
 include!("stage_result.rs");
 include!("failure.rs");
