@@ -107,6 +107,33 @@
         <Property Name="FailureReason" Type="Edm.String"/>
       </EntityType>
 
+      <EntityType Name="EpisodeStartRequest">
+        <Key><PropertyRef Name="Id"/></Key>
+        <Property Name="Id" Type="Edm.String" Nullable="false"/>
+        <Property Name="Status" Type="Edm.String"/>
+        <Property Name="HasContract" Type="Edm.Boolean"/>
+        <Property Name="DirectionId" Type="Edm.String"/>
+        <Property Name="OrganismId" Type="Edm.String"/>
+        <Property Name="ParentVersionId" Type="Edm.String"/>
+        <Property Name="AutonomyLane" Type="Edm.String"/>
+        <Property Name="RequestedBy" Type="Edm.String"/>
+        <Property Name="AdaptationGoal" Type="Edm.String"/>
+        <Property Name="HumanNotes" Type="Edm.String"/>
+        <Property Name="ViabilityConstraintsJson" Type="Edm.String"/>
+        <Property Name="MetricsJson" Type="Edm.String"/>
+        <Property Name="EvaluationStagesJson" Type="Edm.String"/>
+        <Property Name="EliminationRulesJson" Type="Edm.String"/>
+        <Property Name="ScoringRulesJson" Type="Edm.String"/>
+        <Property Name="SelectionStatement" Type="Edm.String"/>
+        <Property Name="ContractJson" Type="Edm.String"/>
+        <Property Name="StartedBy" Type="Edm.String"/>
+        <Property Name="Reason" Type="Edm.String"/>
+        <Property Name="EpisodeId" Type="Edm.String"/>
+        <Property Name="Summary" Type="Edm.String"/>
+        <Property Name="EvidenceArtifactId" Type="Edm.String"/>
+        <Property Name="FailureReason" Type="Edm.String"/>
+      </EntityType>
+
       <EntityType Name="EvaluationStage">
         <Key><PropertyRef Name="Id"/></Key>
         <Property Name="Id" Type="Edm.String" Nullable="false"/>
@@ -610,6 +637,48 @@
         <Parameter Name="bindingParameter" Type="Temper.DirectedEvolution.Episode"/>
         <Parameter Name="FailureReason" Type="Edm.String" Nullable="true"/>
         <ReturnType Type="Temper.DirectedEvolution.Episode"/>
+      </Action>
+
+      <Action Name="SubmitEpisodeStartRequest" IsBound="true">
+        <Parameter Name="bindingParameter" Type="Temper.DirectedEvolution.EpisodeStartRequest"/>
+        <Parameter Name="DirectionId" Type="Edm.String" Nullable="true"/>
+        <Parameter Name="OrganismId" Type="Edm.String" Nullable="true"/>
+        <Parameter Name="ParentVersionId" Type="Edm.String" Nullable="true"/>
+        <Parameter Name="AutonomyLane" Type="Edm.String" Nullable="true"/>
+        <Parameter Name="RequestedBy" Type="Edm.String" Nullable="true"/>
+        <Parameter Name="AdaptationGoal" Type="Edm.String" Nullable="true"/>
+        <Parameter Name="HumanNotes" Type="Edm.String" Nullable="true"/>
+        <Parameter Name="ViabilityConstraintsJson" Type="Edm.String" Nullable="true"/>
+        <Parameter Name="MetricsJson" Type="Edm.String" Nullable="true"/>
+        <Parameter Name="EvaluationStagesJson" Type="Edm.String" Nullable="true"/>
+        <Parameter Name="EliminationRulesJson" Type="Edm.String" Nullable="true"/>
+        <Parameter Name="ScoringRulesJson" Type="Edm.String" Nullable="true"/>
+        <Parameter Name="SelectionStatement" Type="Edm.String" Nullable="true"/>
+        <Parameter Name="ContractJson" Type="Edm.String" Nullable="true"/>
+        <Parameter Name="StartedBy" Type="Edm.String" Nullable="true"/>
+        <Parameter Name="Reason" Type="Edm.String" Nullable="true"/>
+        <ReturnType Type="Temper.DirectedEvolution.EpisodeStartRequest"/>
+      </Action>
+
+      <Action Name="MarkEpisodeStartRequestStarted" IsBound="true">
+        <Parameter Name="bindingParameter" Type="Temper.DirectedEvolution.EpisodeStartRequest"/>
+        <Parameter Name="EpisodeId" Type="Edm.String" Nullable="true"/>
+        <Parameter Name="Summary" Type="Edm.String" Nullable="true"/>
+        <Parameter Name="EvidenceArtifactId" Type="Edm.String" Nullable="true"/>
+        <ReturnType Type="Temper.DirectedEvolution.EpisodeStartRequest"/>
+      </Action>
+
+      <Action Name="FailEpisodeStartRequest" IsBound="true">
+        <Parameter Name="bindingParameter" Type="Temper.DirectedEvolution.EpisodeStartRequest"/>
+        <Parameter Name="FailureReason" Type="Edm.String" Nullable="true"/>
+        <Parameter Name="EvidenceArtifactId" Type="Edm.String" Nullable="true"/>
+        <ReturnType Type="Temper.DirectedEvolution.EpisodeStartRequest"/>
+      </Action>
+
+      <Action Name="CancelEpisodeStartRequest" IsBound="true">
+        <Parameter Name="bindingParameter" Type="Temper.DirectedEvolution.EpisodeStartRequest"/>
+        <Parameter Name="Reason" Type="Edm.String" Nullable="true"/>
+        <ReturnType Type="Temper.DirectedEvolution.EpisodeStartRequest"/>
       </Action>
 
       <Action Name="ActivateEvaluationStage" IsBound="true">
@@ -1164,6 +1233,7 @@
         <EntitySet Name="Directions" EntityType="Temper.DirectedEvolution.Direction"/>
         <EntitySet Name="EliminationRules" EntityType="Temper.DirectedEvolution.EliminationRule"/>
         <EntitySet Name="Episodes" EntityType="Temper.DirectedEvolution.Episode"/>
+        <EntitySet Name="EpisodeStartRequests" EntityType="Temper.DirectedEvolution.EpisodeStartRequest"/>
         <EntitySet Name="EvaluationStages" EntityType="Temper.DirectedEvolution.EvaluationStage"/>
         <EntitySet Name="EvidenceArtifacts" EntityType="Temper.DirectedEvolution.EvidenceArtifact"/>
         <EntitySet Name="Generations" EntityType="Temper.DirectedEvolution.Generation"/>

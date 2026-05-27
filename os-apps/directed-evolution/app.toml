@@ -20,6 +20,14 @@ provenance = "bundled-artifact"
 import_class = "temper-host"
 
 [[wasm_modules]]
+name = "episode_start_requestor"
+target = "wasm32-unknown-unknown"
+criticality = "app-required"
+startup_loading = "lazy"
+provenance = "bundled-artifact"
+import_class = "temper-host"
+
+[[wasm_modules]]
 name = "work_item_result_router"
 target = "wasm32-unknown-unknown"
 criticality = "app-required"

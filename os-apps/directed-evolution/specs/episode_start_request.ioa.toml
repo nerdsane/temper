@@ -1,0 +1,91 @@
+[automaton]
+name = "EpisodeStartRequest"
+states = ["Draft", "Submitted", "Started", "Failed", "Cancelled"]
+initial = "Draft"
+allow_indefinite_states = ["Draft", "Submitted"]
+
+[[state]]
+name = "has_contract"
+type = "bool"
+initial = "false"
+
+[[action]]
+name = "SubmitEpisodeStartRequest"
+kind = "input"
+from = ["Draft"]
+to = "Submitted"
+effect = [
+  "set has_contract true",
+  { type = "trigger", name = "episode_start_requested" }
+]
+params = [
+  "DirectionId",
+  "OrganismId",
+  "ParentVersionId",
+  "AutonomyLane",
+  "RequestedBy",
+  "AdaptationGoal",
+  "HumanNotes",
+  "ViabilityConstraintsJson",
+  "MetricsJson",
+  "EvaluationStagesJson",
+  "EliminationRulesJson",
+  "ScoringRulesJson",
+  "SelectionStatement",
+  "ContractJson",
+  "StartedBy",
+  "Reason"
+]
+hint = "Submit a negotiated human/brain episode contract for app-owned materialization."
+
+[[action.triggers]]
+name = "episode_start_requested"
+kind = "wasm"
+module = "episode_start_requestor"
+
+[action.triggers.config]
+temper_api_url = "{secret:temper_api_url}"
+
+[[action]]
+name = "MarkEpisodeStartRequestStarted"
+kind = "input"
+from = ["Submitted"]
+to = "Started"
+params = ["EpisodeId", "Summary", "EvidenceArtifactId"]
+hint = "Record that the submitted contract materialized into a running episode."
+
+[[action]]
+name = "FailEpisodeStartRequest"
+kind = "input"
+from = ["Submitted"]
+to = "Failed"
+params = ["FailureReason", "EvidenceArtifactId"]
+hint = "Record that the submitted contract could not start an episode."
+
+[[action]]
+name = "CancelEpisodeStartRequest"
+kind = "input"
+from = ["Draft", "Submitted"]
+to = "Cancelled"
+params = ["Reason"]
+hint = "Cancel an episode start request before it has materialized."
+
+[[invariant]]
+name = "SubmittedHasContract"
+when = ["Submitted", "Started"]
+assert = "is_true has_contract"
+
+[[invariant]]
+name = "StartedIsFinal"
+when = ["Started"]
+assert = "no_further_transitions"
+
+[[invariant]]
+name = "FailedIsFinal"
+when = ["Failed"]
+assert = "no_further_transitions"
+
+[[invariant]]
+name = "CancelledIsFinal"
+when = ["Cancelled"]
+assert = "no_further_transitions"

@@ -115,6 +115,19 @@ permit(
 permit(
   principal is Agent,
   action in [
+    Action::"SubmitEpisodeStartRequest",
+    Action::"MarkEpisodeStartRequestStarted",
+    Action::"FailEpisodeStartRequest",
+    Action::"CancelEpisodeStartRequest"
+  ],
+  resource is EpisodeStartRequest
+) when {
+  ["system", "codex", "supervisor", "human"].contains(principal.agent_type)
+};
+
+permit(
+  principal is Agent,
+  action in [
     Action::"StartGeneration",
     Action::"RecordGeneratedVariant",
     Action::"RecordGenerationSurvivor",
@@ -328,6 +341,6 @@ permit(
   action == Action::"http_call",
   resource is HttpEndpoint
 ) when {
-  ["signal_observer", "episode_orchestrator", "work_item_result_router"].contains(context.module) &&
+  ["signal_observer", "episode_orchestrator", "episode_start_requestor", "work_item_result_router"].contains(context.module) &&
   ["127.0.0.1", "localhost"].contains(context.domain)
 };
