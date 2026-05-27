@@ -444,6 +444,7 @@ async fn e2e_http_project_lifecycle() {
         .clone()
         .oneshot(
             Request::get(format!("/tdata/Projects('{entity_id}')"))
+                .header("X-Temper-Principal-Kind", "admin")
                 .header("X-Tenant-Id", SYSTEM_TENANT)
                 .body(Body::empty())
                 .unwrap(),

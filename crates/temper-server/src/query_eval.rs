@@ -277,6 +277,12 @@ struct NavExpansionInfo {
     fk_resolution: Option<FkResolution>,
 }
 
+struct ExpansionContext<'a> {
+    state: &'a crate::state::ServerState,
+    tenant: &'a temper_runtime::tenant::TenantId,
+    security_ctx: &'a temper_authz::SecurityContext,
+}
+
 /// Resolve navigation properties for $expand on a single entity.
 ///
 /// For each expand item, looks up the navigation property in the CSDL
@@ -290,17 +296,14 @@ pub async fn expand_entity(
     entity_type: &str,
     state: &crate::state::ServerState,
     tenant: &temper_runtime::tenant::TenantId,
-) {
-    expand_entity_recursive(
-        entity,
-        expand_items,
-        entity_type,
+    security_ctx: &temper_authz::SecurityContext,
+) -> Result<(), axum::response::Response> {
+    let context = ExpansionContext {
         state,
         tenant,
-        0,
-        &mut vec![],
-    )
-    .await;
+        security_ctx,
+    };
+    expand_entity_recursive(entity, expand_items, entity_type, &context, 0, &mut vec![]).await
 }
 
 /// Recursive implementation of $expand with depth and cycle guards.
@@ -308,16 +311,20 @@ async fn expand_entity_recursive(
     entity: &mut serde_json::Value,
     expand_items: &[temper_odata::query::types::ExpandItem],
     entity_type: &str,
-    state: &crate::state::ServerState,
-    tenant: &temper_runtime::tenant::TenantId,
+    context: &ExpansionContext<'_>,
     depth: u8,
     visited: &mut Vec<String>,
-) {
+) -> Result<(), axum::response::Response> {
+    let ExpansionContext {
+        state,
+        tenant,
+        security_ctx,
+    } = context;
     if depth >= MAX_EXPAND_DEPTH {
-        return;
+        return Ok(());
     }
     if visited.contains(&entity_type.to_string()) {
-        return;
+        return Ok(());
     }
     visited.push(entity_type.to_string());
     // Resolve all navigation targets up front (while holding registry lock briefly)
@@ -372,6 +379,20 @@ async fn expand_entity_recursive(
     for (item, info) in &nav_infos {
         let Some(info) = info else { continue };
         let mut related_entities = Vec::new();
+
+        if info.is_collection
+            && let Err(response) = crate::odata::authz::authorize_read(
+                state,
+                tenant,
+                security_ctx,
+                crate::odata::authz::LIST_ACTION,
+                &info.target_type,
+                "",
+                &serde_json::json!({}),
+            )
+        {
+            return Err(*response);
+        }
 
         if let Some(ref parent_id) = entity_id {
             match &info.fk_resolution {
@@ -445,6 +466,21 @@ async fn expand_entity_recursive(
             }
         }
 
+        related_entities.retain(|entity| {
+            crate::odata::authz::entity_id_from_body(entity).is_some_and(|entity_id| {
+                crate::odata::authz::authorize_read(
+                    state,
+                    tenant,
+                    security_ctx,
+                    crate::odata::authz::READ_ACTION,
+                    &info.target_type,
+                    entity_id,
+                    entity,
+                )
+                .is_ok()
+            })
+        });
+
         // Apply nested query options if present
         if let Some(ref nested_opts) = item.options {
             let nested_query = QueryOptions {
@@ -469,12 +505,11 @@ async fn expand_entity_recursive(
                     related,
                     nested_expand,
                     &info.target_type,
-                    state,
-                    tenant,
+                    context,
                     depth + 1,
                     visited,
                 ))
-                .await;
+                .await?;
             }
         }
 
@@ -493,6 +528,7 @@ async fn expand_entity_recursive(
         }
     }
     visited.pop();
+    Ok(())
 }
 
 /// Find the target entity type name for a navigation property.

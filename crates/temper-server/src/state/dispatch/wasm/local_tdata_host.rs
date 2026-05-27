@@ -78,6 +78,7 @@ impl LocalTDataWasmHost {
             match method_upper.as_str() {
                 "GET" => crate::odata::handle_odata_get(
                     State(self.state.clone()),
+                    None,
                     headers,
                     Path(request.path),
                     Query(request.query),
