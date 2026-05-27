@@ -7,7 +7,7 @@ use crate::entity_actor::recover_entity_state_from_store;
 use crate::state::{
     QueryProjectionReplayParityDrift, QueryProjectionReplayParityReport, ServerState,
 };
-use crate::storage::EntityCatalogRow;
+use crate::storage::{CatalogRowsLoad, EntityCatalogRow, load_catalog_rows_by_id};
 
 const MAX_REPLAY_PARITY_DRIFT_EXAMPLES: usize = 25;
 
@@ -203,79 +203,76 @@ pub(in crate::state) async fn verify_query_projection_replay_parity(
             continue;
         };
 
-        let catalog_rows = match query_plane
-            .load_entity_catalog_rows(tenant.as_str(), &entity_type, &entity_ids)
-            .await
-        {
-            Ok(Some(rows)) => rows
-                .into_iter()
-                .map(|row| (row.entity_id.clone(), row))
-                .collect::<BTreeMap<_, _>>(),
-            Ok(None) => {
-                for entity_id in entity_ids {
-                    let started_at = Instant::now(); // determinism-ok: production-only parity verifier duration metric
-                    report.checked += 1;
-                    report.errors += 1;
-                    push_replay_parity_example(
-                        &mut report,
-                        ReplayParityExample {
-                            entity_type: &entity_type,
-                            entity_id: &entity_id,
-                            drift_kind: "catalog_unavailable",
-                            sequence_direction: "unknown",
-                            sequence_gap: 0,
-                            catalog_sequence: None,
-                            authoritative_sequence: 0,
-                        },
-                    );
-                    crate::query_projection_metrics::record_replay_parity_check(
-                        tenant.as_str(),
-                        &entity_type,
-                        "error",
-                        "catalog_unavailable",
-                        "unknown",
-                        0,
-                        started_at.elapsed(),
-                    );
+        let catalog_rows =
+            match load_catalog_rows_by_id(&query_plane, tenant.as_str(), &entity_type, &entity_ids)
+                .await
+            {
+                Ok(CatalogRowsLoad::Available(rows)) => rows,
+                Ok(CatalogRowsLoad::Unsupported) => {
+                    for entity_id in entity_ids {
+                        let started_at = Instant::now(); // determinism-ok: production-only parity verifier duration metric
+                        report.checked += 1;
+                        report.errors += 1;
+                        push_replay_parity_example(
+                            &mut report,
+                            ReplayParityExample {
+                                entity_type: &entity_type,
+                                entity_id: &entity_id,
+                                drift_kind: "catalog_unavailable",
+                                sequence_direction: "unknown",
+                                sequence_gap: 0,
+                                catalog_sequence: None,
+                                authoritative_sequence: 0,
+                            },
+                        );
+                        crate::query_projection_metrics::record_replay_parity_check(
+                            tenant.as_str(),
+                            &entity_type,
+                            "error",
+                            "catalog_unavailable",
+                            "unknown",
+                            0,
+                            started_at.elapsed(),
+                        );
+                    }
+                    continue;
                 }
-                continue;
-            }
-            Err(error) => {
-                for entity_id in entity_ids {
-                    let started_at = Instant::now(); // determinism-ok: production-only parity verifier duration metric
-                    report.checked += 1;
-                    report.errors += 1;
-                    push_replay_parity_example(
-                        &mut report,
-                        ReplayParityExample {
-                            entity_type: &entity_type,
-                            entity_id: &entity_id,
-                            drift_kind: "catalog_error",
-                            sequence_direction: "unknown",
-                            sequence_gap: 0,
-                            catalog_sequence: None,
-                            authoritative_sequence: 0,
-                        },
+                Err(error) => {
+                    for entity_id in entity_ids {
+                        let started_at = Instant::now(); // determinism-ok: production-only parity verifier duration metric
+                        report.checked += 1;
+                        report.errors += 1;
+                        push_replay_parity_example(
+                            &mut report,
+                            ReplayParityExample {
+                                entity_type: &entity_type,
+                                entity_id: &entity_id,
+                                drift_kind: "catalog_error",
+                                sequence_direction: "unknown",
+                                sequence_gap: 0,
+                                catalog_sequence: None,
+                                authoritative_sequence: 0,
+                            },
+                        );
+                        crate::query_projection_metrics::record_replay_parity_check(
+                            tenant.as_str(),
+                            &entity_type,
+                            "error",
+                            "catalog_error",
+                            "unknown",
+                            0,
+                            started_at.elapsed(),
+                        );
+                    }
+                    tracing::warn!(
+                        tenant = %tenant,
+                        entity_type = %entity_type,
+                        error = %error,
+                        "query projection replay parity could not load catalog rows"
                     );
-                    crate::query_projection_metrics::record_replay_parity_check(
-                        tenant.as_str(),
-                        &entity_type,
-                        "error",
-                        "catalog_error",
-                        "unknown",
-                        0,
-                        started_at.elapsed(),
-                    );
+                    continue;
                 }
-                tracing::warn!(
-                    tenant = %tenant,
-                    entity_type = %entity_type,
-                    error = %error,
-                    "query projection replay parity could not load catalog rows"
-                );
-                continue;
-            }
-        };
+            };
 
         for entity_id in entity_ids {
             let started_at = Instant::now(); // determinism-ok: production-only parity verifier duration metric
