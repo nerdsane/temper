@@ -13,7 +13,21 @@ fn route_stage_result(
     let _episode_id = field_str(&stage_result_fields, &["EpisodeId"]);
     let generation_id = field_str(&stage_result_fields, &["GenerationId"]);
     let variant_id = field_str(&stage_result_fields, &["VariantId"]);
-    let passed = stage_evaluation_passed(output);
+    let mut passed = stage_evaluation_passed(output);
+    let missing_datadog_evidence = if passed
+        && stage_result_requires_datadog_evidence(ctx, base_url, headers, &stage_result_fields)?
+        && !output_has_datadog_evidence_scope(output)
+    {
+        Some(
+            "EvaluationStage required datadog_evidence_scope, but the brain output did not include an evidence_scope item with a Datadog URL."
+                .to_string(),
+        )
+    } else {
+        None
+    };
+    if missing_datadog_evidence.is_some() {
+        passed = false;
+    }
     let metrics_json = lookup_value_deep(output, &["metrics", "Metrics", "metrics_json"])
         .unwrap_or_else(|| json!({}))
         .to_string();
@@ -22,10 +36,12 @@ fn route_stage_result(
         lookup_string_deep(output, &["summary", "reasoning_summary", "verdict"]),
         field_str(work_item_fields, &["Summary"]),
     );
-    let failure_reason = nonempty(
-        lookup_string_deep(output, &["failure_reason", "failureReason", "reason"]),
-        summary.clone(),
-    );
+    let failure_reason = missing_datadog_evidence.unwrap_or_else(|| {
+        nonempty(
+            lookup_string_deep(output, &["failure_reason", "failureReason", "reason"]),
+            summary.clone(),
+        )
+    });
     let evidence_artifact_id = field_str(work_item_fields, &["EvidenceArtifactId"]);
     let variant = get_entity(ctx, base_url, headers, "Variants", &variant_id)?;
     let variant_status = entity_status(&variant);
@@ -182,4 +198,82 @@ fn stage_evaluation_passed(output: &Value) -> bool {
         || status.contains("viable")
         || status.contains("approved")
         || status.contains("acceptable")
+}
+
+fn stage_result_requires_datadog_evidence(
+    ctx: &Context,
+    base_url: &str,
+    headers: &[(String, String)],
+    stage_result_fields: &Value,
+) -> Result<bool, String> {
+    let stage_id = field_str(stage_result_fields, &["EvaluationStageId"]);
+    if stage_id.trim().is_empty() {
+        return Ok(false);
+    }
+    let stage = get_entity(ctx, base_url, headers, "EvaluationStages", &stage_id)?;
+    let stage_fields = state_fields(&stage);
+    Ok(required_evidence_includes_datadog(&field_str(
+        &stage_fields,
+        &["RequiredEvidenceJson"],
+    )))
+}
+
+fn required_evidence_includes_datadog(raw: &str) -> bool {
+    if raw
+        .to_ascii_lowercase()
+        .contains("datadog_evidence_scope")
+    {
+        return true;
+    }
+    serde_json::from_str::<Value>(raw)
+        .map(|value| value_contains_datadog_requirement(&value))
+        .unwrap_or(false)
+}
+
+fn value_contains_datadog_requirement(value: &Value) -> bool {
+    match value {
+        Value::String(value) => value.eq_ignore_ascii_case("datadog_evidence_scope"),
+        Value::Array(items) => items.iter().any(value_contains_datadog_requirement),
+        Value::Object(object) => object.values().any(value_contains_datadog_requirement),
+        _ => false,
+    }
+}
+
+fn output_has_datadog_evidence_scope(output: &Value) -> bool {
+    for key in ["evidence_scope", "evidenceScope"] {
+        let Some(value) = lookup_value_deep(output, &[key]) else {
+            continue;
+        };
+        let Some(items) = value.as_array() else {
+            continue;
+        };
+        for item in items {
+            let url = lookup_string_deep(item, &["datadog_url", "datadogUrl"]);
+            let Some(url) = url
+                .split_whitespace()
+                .next()
+                .filter(|value| !value.is_empty())
+            else {
+                continue;
+            };
+            if is_datadog_app_url(url) {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+fn is_datadog_app_url(url: &str) -> bool {
+    [
+        "https://app.datadoghq.com",
+        "https://app.us3.datadoghq.com",
+        "https://app.us5.datadoghq.com",
+        "https://app.datadoghq.eu",
+        "https://app.ap1.datadoghq.com",
+        "https://app.ap2.datadoghq.com",
+        "https://app.ddog-gov.com",
+    ]
+    .iter()
+    .any(|prefix| url.starts_with(prefix))
 }

@@ -59,13 +59,14 @@ EpisodeContract:\n{contract_context}\n\n\
 Use the stage contract, Adaptation Goal, Viability Constraints, Selection Pressure, and real evidence. \
 If RuntimeRef is a temper://tenant/<tenant>/app/<app_ref> value, exercise that live tenant through \
 TemperApiBase /tdata OData calls with x-tenant-id set to the tenant from RuntimeRef. \
-Inspect Datadog logs, traces, or metrics for errors and latency tied to the variant tenant when available. \
+If RequiredEvidence includes datadog_evidence_scope, Datadog evidence is mandatory: use authenticated Datadog tools to inspect logs, traces, or metrics tied to the variant tenant/app, include a Datadog URL in evidence_scope, and return passed=false with a clear failure_reason if Datadog cannot be queried. \
+Otherwise inspect Datadog logs, traces, or metrics for errors and latency tied to the variant tenant when available. \
 Return JSON with: passed, status, summary, metrics, evidence_scope, evidence_refs, failure_reason, and next_actions. \
 Each evidence_scope entry should include surface, query, result_summary, and datadog_url when it came from Datadog. \
 Do not modify evaluators or selection rules.",
-        field_str(&stage_fields, &["StageName"]),
-        field_str(&stage_fields, &["StageKind"]),
-        compact(&field_str(&stage_fields, &["RequiredEvidenceJson"]), 1000),
+        field_str(stage_fields, &["StageName"]),
+        field_str(stage_fields, &["StageKind"]),
+        compact(&field_str(stage_fields, &["RequiredEvidenceJson"]), 1000),
     )
 }
 

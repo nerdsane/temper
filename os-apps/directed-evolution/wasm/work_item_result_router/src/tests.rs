@@ -58,6 +58,42 @@ mod tests {
     }
 
     #[test]
+    fn required_evidence_detects_datadog_requirement() {
+        assert!(required_evidence_includes_datadog(
+            r#"["simulated_user_trace","datadog_evidence_scope"]"#
+        ));
+        assert!(required_evidence_includes_datadog(
+            r#"[{"required":"datadog_evidence_scope"}]"#
+        ));
+        assert!(!required_evidence_includes_datadog(
+            r#"["simulated_user_trace"]"#
+        ));
+    }
+
+    #[test]
+    fn output_datadog_evidence_requires_datadog_url() {
+        assert!(output_has_datadog_evidence_scope(&json!({
+            "evidence_scope": [
+                {
+                    "surface": "logs",
+                    "query": "service:temperpaw",
+                    "result_summary": "No errors observed.",
+                    "datadog_url": "https://app.datadoghq.com/logs?query=service%3Atemperpaw"
+                }
+            ]
+        })));
+        assert!(!output_has_datadog_evidence_scope(&json!({
+            "evidence_scope": [
+                {
+                    "surface": "runtime",
+                    "query": "GET /tdata/Answers",
+                    "result_summary": "Runtime passed."
+                }
+            ]
+        })));
+    }
+
+    #[test]
     fn selector_requires_surviving_winner() {
         let survivor_ids = vec!["variant-a".to_string(), "variant-b".to_string()];
 
