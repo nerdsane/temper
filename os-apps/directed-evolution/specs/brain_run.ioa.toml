@@ -1,0 +1,43 @@
+[automaton]
+name = "BrainRun"
+states = ["Queued", "Running", "Succeeded", "Failed", "Cancelled"]
+initial = "Queued"
+allow_indefinite_states = ["Queued", "Running"]
+
+[[state]]
+name = "started"
+type = "bool"
+initial = "false"
+
+[[action]]
+name = "StartBrainRun"
+kind = "input"
+from = ["Queued"]
+to = "Running"
+effect = "set started true"
+params = ["Role", "WorkItemId", "AgentKind", "Model", "ParentSessionId", "CorrelationJson"]
+hint = "Start a bounded agent brain run."
+
+[[action]]
+name = "SucceedBrainRun"
+kind = "input"
+from = ["Running"]
+to = "Succeeded"
+params = ["OutputJson", "EvidenceArtifactId", "Summary"]
+hint = "Record a successful brain run."
+
+[[action]]
+name = "FailBrainRun"
+kind = "input"
+from = ["Running"]
+to = "Failed"
+params = ["FailureReason", "EvidenceArtifactId"]
+hint = "Record a failed brain run."
+
+[[action]]
+name = "CancelBrainRun"
+kind = "input"
+from = ["Queued", "Running"]
+to = "Cancelled"
+params = ["Reason"]
+hint = "Cancel a brain run."

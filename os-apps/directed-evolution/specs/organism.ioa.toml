@@ -1,0 +1,50 @@
+[automaton]
+name = "Organism"
+states = ["Draft", "Active", "Archived"]
+initial = "Draft"
+allow_indefinite_states = ["Draft", "Active"]
+
+[[state]]
+name = "has_parent_version"
+type = "bool"
+initial = "false"
+
+[[state]]
+name = "version_count"
+type = "counter"
+initial = "0"
+
+[[action]]
+name = "ActivateOrganism"
+kind = "input"
+from = ["Draft"]
+to = "Active"
+effect = [{ type = "set_bool", var = "has_parent_version", value = "true" }, { type = "increment", var = "version_count" }]
+params = ["Name", "AppRef", "ParentVersionId", "BaselineEvaluationJson"]
+hint = "Register the organism with its first parent version and baseline evaluation ladder."
+
+[[action]]
+name = "RecordOrganismVersion"
+kind = "input"
+from = ["Active"]
+effect = "increment version_count"
+params = ["OrganismVersionId", "PromotionId", "Summary"]
+hint = "Record that a promoted organism version belongs to this organism."
+
+[[action]]
+name = "ArchiveOrganism"
+kind = "input"
+from = ["Active"]
+to = "Archived"
+params = ["Reason"]
+hint = "Archive an organism."
+
+[[invariant]]
+name = "ActiveHasParentVersion"
+when = ["Active"]
+assert = "is_true has_parent_version"
+
+[[invariant]]
+name = "ArchivedIsFinal"
+when = ["Archived"]
+assert = "no_further_transitions"

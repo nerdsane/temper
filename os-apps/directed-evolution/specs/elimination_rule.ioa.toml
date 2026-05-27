@@ -1,0 +1,21 @@
+[automaton]
+name = "EliminationRule"
+states = ["Draft", "Active", "Archived"]
+initial = "Draft"
+allow_indefinite_states = ["Draft", "Active"]
+
+[[action]]
+name = "ActivateEliminationRule"
+kind = "input"
+from = ["Draft"]
+to = "Active"
+params = ["EpisodeId", "RuleStatement", "MetricIdsJson", "ThresholdJson", "CreatedByBrainRunId"]
+hint = "Activate a hard rule that can kill variants."
+
+[[action]]
+name = "ArchiveEliminationRule"
+kind = "input"
+from = ["Draft", "Active"]
+to = "Archived"
+params = ["Reason"]
+hint = "Archive an Elimination Rule."

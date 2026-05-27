@@ -1,0 +1,36 @@
+[automaton]
+name = "Pressure"
+states = ["Inferred", "Framed", "Dismissed", "Archived"]
+initial = "Inferred"
+allow_indefinite_states = ["Inferred", "Framed", "Dismissed"]
+
+[[action]]
+name = "InferPressure"
+kind = "input"
+from = ["Inferred"]
+params = ["OrganismId", "PressureClass", "Summary", "SignalIdsJson", "EvidenceArtifactId", "BrainRunId"]
+hint = "Record a brain-interpreted reason to evolve."
+
+[[action]]
+name = "FramePressureAsDirection"
+kind = "input"
+from = ["Inferred"]
+to = "Framed"
+params = ["DirectionId"]
+hint = "Link this pressure to a direction."
+
+[[action]]
+name = "DismissPressure"
+kind = "input"
+from = ["Inferred", "Framed"]
+to = "Dismissed"
+params = ["Reason"]
+hint = "Dismiss a pressure as not worth pursuing."
+
+[[action]]
+name = "ArchivePressure"
+kind = "input"
+from = ["Inferred", "Framed", "Dismissed"]
+to = "Archived"
+params = ["Reason"]
+hint = "Archive the pressure."
