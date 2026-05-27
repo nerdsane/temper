@@ -53,6 +53,14 @@ fn route_failed_work_item(
             &failure_reason,
             &evidence_artifact_id,
         ),
+        ("promoter", "Promotion") => route_failed_promoter(
+            ctx,
+            base_url,
+            headers,
+            target_entity_id,
+            &failure_reason,
+            &evidence_artifact_id,
+        ),
         _ => Ok(json!({
             "ignored": true,
             "reason": "failed work item has no router",
@@ -374,6 +382,45 @@ fn route_failed_selector(
         "routed": "selector_failure",
         "generation_id": generation_id,
         "episode_id": episode_id,
+        "failure_reason": failure_reason,
+    }))
+}
+
+fn route_failed_promoter(
+    ctx: &Context,
+    base_url: &str,
+    headers: &[(String, String)],
+    promotion_id: &str,
+    failure_reason: &str,
+    evidence_artifact_id: &str,
+) -> Result<Value, String> {
+    let promotion = get_entity(ctx, base_url, headers, "Promotions", promotion_id)?;
+    if entity_status(&promotion) == "Promoted" {
+        post_directed_action(
+            ctx,
+            base_url,
+            headers,
+            "Promotions",
+            promotion_id,
+            "RecordPromotionMaterializationFailure",
+            json!({
+                "FailureReason": failure_reason,
+                "EvidenceArtifactId": evidence_artifact_id,
+            }),
+        )?;
+    }
+    link_evidence_if_present(
+        ctx,
+        base_url,
+        headers,
+        evidence_artifact_id,
+        "Promotion",
+        promotion_id,
+    )?;
+
+    Ok(json!({
+        "routed": "promoter_failure",
+        "promotion_id": promotion_id,
         "failure_reason": failure_reason,
     }))
 }

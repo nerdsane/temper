@@ -72,4 +72,43 @@ mod tests {
                 .is_err()
         );
     }
+
+    #[test]
+    fn promoter_prompt_names_canonical_materialization_target() {
+        let prompt = promoter_prompt(
+            "promotion-1",
+            "episode-1",
+            "variant-1",
+            "org-agent-answers",
+            "nerdsane/agent-answers@abc123",
+            "directed-evolution/work-item-1",
+        );
+
+        assert!(prompt.contains("PromotionId: promotion-1"));
+        assert!(prompt.contains("WinningVariantId: variant-1"));
+        assert!(prompt.contains("AppRef: nerdsane/agent-answers@abc123"));
+        assert!(prompt.contains("push the winning commit to the canonical Genesis ref"));
+    }
+
+    #[test]
+    fn materialization_record_prefers_worker_runtime_ref() {
+        let record = promotion_materialization_record(
+            &json!({
+                "canonical_app_ref": "nerdsane/agent-answers@abc123",
+                "production_tenant": "default",
+                "runtime_ref": "temper://tenant/default/app/nerdsane/agent-answers@abc123",
+                "summary": "Published and installed winner",
+                "evidence_refs": ["temper://promotion/proof"]
+            }),
+            "nerdsane/agent-answers@fallback",
+        );
+
+        assert_eq!(record.canonical_app_ref, "nerdsane/agent-answers@abc123");
+        assert_eq!(record.production_tenant, "default");
+        assert_eq!(
+            record.runtime_ref,
+            "temper://tenant/default/app/nerdsane/agent-answers@abc123"
+        );
+        assert_eq!(record.evidence_uri, "temper://promotion/proof");
+    }
 }

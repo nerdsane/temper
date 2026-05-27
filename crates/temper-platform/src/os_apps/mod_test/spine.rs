@@ -464,6 +464,21 @@ async fn directed_evolution_signal_to_promotion_wasm_spine_body() {
         "Superseded"
     );
     assert_eq!(state.server.list_entity_ids(&tenant, "Promotion").len(), 1);
+    let promoter_work_items = directed_evolution_wait_for_ids_with_field(
+        &state, &tenant, "WorkItem", "Role", "promoter", 1,
+    )
+    .await;
+    assert_eq!(
+        directed_evolution_field(
+            &state,
+            &tenant,
+            "WorkItem",
+            &promoter_work_items[0],
+            "TargetEntityType"
+        )
+        .await,
+        "Promotion"
+    );
     assert_eq!(
         state.server.list_entity_ids(&tenant, "LineageEdge").len(),
         1

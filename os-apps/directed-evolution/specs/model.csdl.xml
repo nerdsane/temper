@@ -253,6 +253,8 @@
         <Property Name="Id" Type="Edm.String" Nullable="false"/>
         <Property Name="Status" Type="Edm.String"/>
         <Property Name="HasEvidence" Type="Edm.Boolean"/>
+        <Property Name="Materialized" Type="Edm.Boolean"/>
+        <Property Name="MaterializationFailed" Type="Edm.Boolean"/>
         <Property Name="EpisodeId" Type="Edm.String"/>
         <Property Name="WinningVariantId" Type="Edm.String"/>
         <Property Name="ParentVersionId" Type="Edm.String"/>
@@ -260,6 +262,10 @@
         <Property Name="SelectionExplanation" Type="Edm.String"/>
         <Property Name="EvidenceArtifactId" Type="Edm.String"/>
         <Property Name="AppRef" Type="Edm.String"/>
+        <Property Name="CanonicalAppRef" Type="Edm.String"/>
+        <Property Name="ProductionTenant" Type="Edm.String"/>
+        <Property Name="RuntimeRef" Type="Edm.String"/>
+        <Property Name="Summary" Type="Edm.String"/>
         <Property Name="RollbackVersionId" Type="Edm.String"/>
         <Property Name="Reason" Type="Edm.String"/>
         <Property Name="FailureReason" Type="Edm.String"/>
@@ -839,6 +845,23 @@
         <Parameter Name="SelectionExplanation" Type="Edm.String" Nullable="true"/>
         <Parameter Name="EvidenceArtifactId" Type="Edm.String" Nullable="true"/>
         <Parameter Name="AppRef" Type="Edm.String" Nullable="true"/>
+        <ReturnType Type="Temper.DirectedEvolution.Promotion"/>
+      </Action>
+
+      <Action Name="RecordPromotionMaterialization" IsBound="true">
+        <Parameter Name="bindingParameter" Type="Temper.DirectedEvolution.Promotion"/>
+        <Parameter Name="CanonicalAppRef" Type="Edm.String" Nullable="true"/>
+        <Parameter Name="ProductionTenant" Type="Edm.String" Nullable="true"/>
+        <Parameter Name="RuntimeRef" Type="Edm.String" Nullable="true"/>
+        <Parameter Name="EvidenceArtifactId" Type="Edm.String" Nullable="true"/>
+        <Parameter Name="Summary" Type="Edm.String" Nullable="true"/>
+        <ReturnType Type="Temper.DirectedEvolution.Promotion"/>
+      </Action>
+
+      <Action Name="RecordPromotionMaterializationFailure" IsBound="true">
+        <Parameter Name="bindingParameter" Type="Temper.DirectedEvolution.Promotion"/>
+        <Parameter Name="FailureReason" Type="Edm.String" Nullable="true"/>
+        <Parameter Name="EvidenceArtifactId" Type="Edm.String" Nullable="true"/>
         <ReturnType Type="Temper.DirectedEvolution.Promotion"/>
       </Action>
 
