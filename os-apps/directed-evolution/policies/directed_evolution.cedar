@@ -201,6 +201,17 @@ permit(
   ["system", "codex", "supervisor", "human"].contains(principal.agent_type)
 };
 
+// Workers may only eliminate stale StageResults after their variant has already
+// reached a terminal state. Pass/fail outcomes remain reserved for evaluator
+// brains and trusted operators.
+permit(
+  principal is Agent,
+  action in [Action::"EliminateStageResult"],
+  resource is StageResult
+) when {
+  principal.agent_type == "worker"
+};
+
 permit(
   principal is Agent,
   action in [Action::"ActivateMetricDefinition", Action::"ArchiveMetricDefinition"],
