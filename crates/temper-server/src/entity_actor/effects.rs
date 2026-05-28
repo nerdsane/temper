@@ -14,7 +14,7 @@ use serde::{Deserialize, Serialize};
 use temper_jit::table::{Effect, EvalContext, TransitionTable};
 use temper_runtime::scheduler::{sim_now, sim_uuid};
 
-use super::types::{EntityEvent, EntityState, MAX_EVENTS_PER_ENTITY};
+use super::types::{EntityEvent, EntityState, MAX_EVENTS_SINCE_SNAPSHOT};
 
 /// A scheduled action to fire after a delay.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -128,7 +128,7 @@ pub fn process_action_with_xref(
     params: &serde_json::Value,
     cross_entity_booleans: &std::collections::BTreeMap<String, bool>,
 ) -> ProcessResult {
-    if state.total_event_count >= MAX_EVENTS_PER_ENTITY {
+    if state.events_since_snapshot >= MAX_EVENTS_SINCE_SNAPSHOT {
         return ProcessResult {
             success: false,
             event: None,
@@ -136,7 +136,7 @@ pub fn process_action_with_xref(
             scheduled_actions: vec![],
             spawn_requests: vec![],
             error: Some(format!(
-                "Event budget exhausted ({MAX_EVENTS_PER_ENTITY} max)"
+                "Event budget exhausted ({MAX_EVENTS_SINCE_SNAPSHOT} max since snapshot)"
             )),
         };
     }
@@ -444,6 +444,8 @@ effect = [{ type = "schedule", action = "Refresh", delay_seconds = 2700 }]
             fields: serde_json::json!({}),
             events: std::collections::VecDeque::new(),
             total_event_count: 0,
+            events_since_snapshot: 0,
+            last_snapshot_sequence_nr: 0,
             sequence_nr: 0,
         };
 
@@ -477,6 +479,8 @@ effect = [{ type = "schedule", action = "Refresh", delay_seconds = 2700 }]
             fields: serde_json::json!({}),
             events: std::collections::VecDeque::new(),
             total_event_count: 0,
+            events_since_snapshot: 0,
+            last_snapshot_sequence_nr: 0,
             sequence_nr: 0,
         };
 
@@ -521,6 +525,8 @@ effect = [
             fields: serde_json::json!({}),
             events: std::collections::VecDeque::new(),
             total_event_count: 0,
+            events_since_snapshot: 0,
+            last_snapshot_sequence_nr: 0,
             sequence_nr: 0,
         };
 
@@ -577,6 +583,8 @@ guard = [
             fields: serde_json::json!({"test_wf_id": "wf-1"}),
             events: std::collections::VecDeque::new(),
             total_event_count: 0,
+            events_since_snapshot: 0,
+            last_snapshot_sequence_nr: 0,
             sequence_nr: 0,
         };
 

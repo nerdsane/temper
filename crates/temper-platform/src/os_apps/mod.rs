@@ -364,8 +364,9 @@ fn find_cedar_policies(skill_dir: &Path) -> Vec<PathBuf> {
 
 /// Find compiled WASM module binaries in a skill directory.
 ///
-/// Scans `wasm/*/target/wasm32-unknown-unknown/release/{module_name}.wasm`
-/// where `{module_name}` matches the directory name under `wasm/`.
+/// Scans cargo target outputs and packaged `wasm/<module>/<module>.wasm`
+/// files. The packaged-root form is required in Docker images that prune
+/// Cargo target directories after copying release artifacts.
 fn find_wasm_modules(skill_dir: &Path) -> BTreeMap<String, Vec<u8>> {
     let mut modules = BTreeMap::new();
     let wasm_dir = skill_dir.join("wasm");
@@ -387,17 +388,39 @@ fn find_wasm_modules(skill_dir: &Path) -> BTreeMap<String, Vec<u8>> {
         if module_name == "target" {
             continue;
         }
-        let wasm_path = entry
-            .path()
-            .join("target")
-            .join("wasm32-unknown-unknown")
-            .join("release")
-            .join(format!("{module_name}.wasm"));
-        if wasm_path.exists() {
-            match std::fs::read(&wasm_path) {
+        let module_path = entry.path();
+        let dashed_name = module_name.replace('_', "-");
+        let candidates = [
+            module_path
+                .join("target")
+                .join("wasm32-unknown-unknown")
+                .join("release")
+                .join(format!("{module_name}.wasm")),
+            module_path
+                .join("target")
+                .join("wasm32-wasip1")
+                .join("release")
+                .join(format!("{module_name}.wasm")),
+            module_path.join(format!("{module_name}.wasm")),
+            module_path
+                .join("target")
+                .join("wasm32-unknown-unknown")
+                .join("release")
+                .join(format!("{dashed_name}.wasm")),
+            module_path
+                .join("target")
+                .join("wasm32-wasip1")
+                .join("release")
+                .join(format!("{dashed_name}.wasm")),
+            module_path.join(format!("{dashed_name}.wasm")),
+        ];
+
+        if let Some(wasm_path) = candidates.iter().find(|path| path.exists()) {
+            match std::fs::read(wasm_path) {
                 Ok(bytes) => {
                     tracing::debug!(
                         module = %module_name,
+                        path = %wasm_path.display(),
                         size = bytes.len(),
                         "Found WASM module in OS app"
                     );

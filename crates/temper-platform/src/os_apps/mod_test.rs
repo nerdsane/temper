@@ -1,5 +1,6 @@
 use super::*;
 use std::collections::HashMap;
+use std::fs;
 
 use temper_authz::SecurityContext;
 use temper_runtime::tenant::TenantId;
@@ -287,6 +288,23 @@ fn test_get_skill_intent_discovery() {
 #[test]
 fn test_get_skill_nonexistent() {
     assert!(get_skill("nonexistent").is_none());
+}
+
+#[test]
+fn test_find_wasm_modules_discovers_packaged_root_wasm() {
+    let root =
+        std::env::temp_dir().join(format!("temper-os-app-wasm-test-{}", uuid::Uuid::new_v4()));
+    let module_dir = root.join("wasm").join("demo_module");
+    fs::create_dir_all(&module_dir).expect("create module dir");
+    fs::write(module_dir.join("demo_module.wasm"), b"\0asm-packaged").expect("write wasm");
+
+    let modules = find_wasm_modules(&root);
+    fs::remove_dir_all(&root).expect("remove temp app");
+
+    assert_eq!(
+        modules.get("demo_module").map(Vec::as_slice),
+        Some(&b"\0asm-packaged"[..])
+    );
 }
 
 #[tokio::test]

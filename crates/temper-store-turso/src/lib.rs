@@ -8,6 +8,7 @@
 mod metrics;
 pub mod router;
 pub mod schema;
+mod schema_event_history;
 pub mod store;
 
 /// Compute a SHA-256 hex digest of IOA spec content.

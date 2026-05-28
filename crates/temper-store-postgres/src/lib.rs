@@ -14,6 +14,7 @@
 
 pub mod migration;
 pub mod schema;
+mod segments;
 pub mod store;
 
 pub use store::PostgresEventStore;

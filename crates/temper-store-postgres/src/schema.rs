@@ -19,6 +19,7 @@ CREATE TABLE IF NOT EXISTS events (
     entity_type   TEXT         NOT NULL,
     entity_id     TEXT         NOT NULL,
     sequence_nr   BIGINT       NOT NULL,
+    segment_index BIGINT       NOT NULL DEFAULT 0,
     event_type    TEXT         NOT NULL,
     payload       JSONB        NOT NULL,
     metadata      JSONB        NOT NULL,
@@ -26,6 +27,56 @@ CREATE TABLE IF NOT EXISTS events (
     PRIMARY KEY (id),
     UNIQUE (tenant, entity_type, entity_id, sequence_nr)
 );";
+
+/// ALTER TABLE migration for existing event journals created before segment metadata.
+pub const ALTER_EVENTS_ADD_SEGMENT_INDEX: &str =
+    "ALTER TABLE events ADD COLUMN IF NOT EXISTS segment_index BIGINT NOT NULL DEFAULT 0";
+
+/// CREATE TABLE statement for event segment metadata.
+///
+/// A segment groups a bounded tail of lifetime event rows. Snapshot saves seal
+/// the current segment and open the next segment; event rows remain the
+/// authoritative audit history.
+pub const CREATE_EVENT_SEGMENTS_TABLE: &str = "\
+CREATE TABLE IF NOT EXISTS event_segments (
+    tenant            TEXT         NOT NULL DEFAULT 'default',
+    entity_type       TEXT         NOT NULL,
+    entity_id         TEXT         NOT NULL,
+    segment_index     BIGINT       NOT NULL,
+    start_sequence_nr BIGINT       NOT NULL,
+    end_sequence_nr   BIGINT,
+    snapshot_sequence BIGINT,
+    event_count       BIGINT       NOT NULL DEFAULT 0,
+    sealed_at         TIMESTAMPTZ,
+    created_at        TIMESTAMPTZ  NOT NULL DEFAULT now(),
+    PRIMARY KEY (tenant, entity_type, entity_id, segment_index)
+);";
+
+/// CREATE INDEX statement for finding the open segment for an entity.
+pub const CREATE_EVENT_SEGMENTS_OPEN_INDEX: &str = "\
+CREATE INDEX IF NOT EXISTS idx_event_segments_open
+    ON event_segments (tenant, entity_type, entity_id, segment_index DESC)
+    WHERE sealed_at IS NULL;";
+
+/// CREATE TABLE statement for immutable snapshot history.
+///
+/// The `snapshots` table remains the latest-snapshot fast path; this table
+/// keeps every durable snapshot boundary for audit and segment reconstruction.
+pub const CREATE_SNAPSHOT_HISTORY_TABLE: &str = "\
+CREATE TABLE IF NOT EXISTS snapshot_history (
+    tenant        TEXT         NOT NULL DEFAULT 'default',
+    entity_type   TEXT         NOT NULL,
+    entity_id     TEXT         NOT NULL,
+    sequence_nr   BIGINT       NOT NULL,
+    state         BYTEA        NOT NULL,
+    created_at    TIMESTAMPTZ  NOT NULL DEFAULT now(),
+    PRIMARY KEY (tenant, entity_type, entity_id, sequence_nr)
+);";
+
+/// CREATE INDEX statement for latest-first snapshot history scans.
+pub const CREATE_SNAPSHOT_HISTORY_ENTITY_INDEX: &str = "\
+CREATE INDEX IF NOT EXISTS idx_snapshot_history_entity
+    ON snapshot_history (tenant, entity_type, entity_id, sequence_nr DESC);";
 
 /// CREATE TABLE statement for the snapshots table.
 ///
@@ -219,11 +270,25 @@ pub const ENABLE_TENANT_RLS: &[&str] = &[
          EXECUTE 'CREATE POLICY tenant_isolation ON events USING (tenant = current_setting(''app.current_tenant'', true))'; \
        END IF; \
      END $$",
+    // -- event_segments --
+    "ALTER TABLE event_segments ENABLE ROW LEVEL SECURITY",
+    "DO $$ BEGIN \
+       IF NOT EXISTS (SELECT 1 FROM pg_policies WHERE tablename = 'event_segments' AND policyname = 'tenant_isolation') THEN \
+         EXECUTE 'CREATE POLICY tenant_isolation ON event_segments USING (tenant = current_setting(''app.current_tenant'', true))'; \
+       END IF; \
+     END $$",
     // -- snapshots --
     "ALTER TABLE snapshots ENABLE ROW LEVEL SECURITY",
     "DO $$ BEGIN \
        IF NOT EXISTS (SELECT 1 FROM pg_policies WHERE tablename = 'snapshots' AND policyname = 'tenant_isolation') THEN \
          EXECUTE 'CREATE POLICY tenant_isolation ON snapshots USING (tenant = current_setting(''app.current_tenant'', true))'; \
+       END IF; \
+     END $$",
+    // -- snapshot_history --
+    "ALTER TABLE snapshot_history ENABLE ROW LEVEL SECURITY",
+    "DO $$ BEGIN \
+       IF NOT EXISTS (SELECT 1 FROM pg_policies WHERE tablename = 'snapshot_history' AND policyname = 'tenant_isolation') THEN \
+         EXECUTE 'CREATE POLICY tenant_isolation ON snapshot_history USING (tenant = current_setting(''app.current_tenant'', true))'; \
        END IF; \
      END $$",
     // -- specs --

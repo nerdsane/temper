@@ -21,10 +21,47 @@ pub async fn run_migrations(pool: &PgPool) -> Result<(), PersistenceError> {
         .await
         .map_err(|e| PersistenceError::Storage(format!("failed to create events table: {e}")))?;
 
+    sqlx::query(schema::ALTER_EVENTS_ADD_SEGMENT_INDEX)
+        .execute(pool)
+        .await
+        .map_err(|e| {
+            PersistenceError::Storage(format!("failed to add events segment index: {e}"))
+        })?;
+
+    sqlx::query(schema::CREATE_EVENT_SEGMENTS_TABLE)
+        .execute(pool)
+        .await
+        .map_err(|e| {
+            PersistenceError::Storage(format!("failed to create event_segments table: {e}"))
+        })?;
+
+    sqlx::query(schema::CREATE_EVENT_SEGMENTS_OPEN_INDEX)
+        .execute(pool)
+        .await
+        .map_err(|e| {
+            PersistenceError::Storage(format!("failed to create event_segments open index: {e}"))
+        })?;
+
     sqlx::query(schema::CREATE_SNAPSHOTS_TABLE)
         .execute(pool)
         .await
         .map_err(|e| PersistenceError::Storage(format!("failed to create snapshots table: {e}")))?;
+
+    sqlx::query(schema::CREATE_SNAPSHOT_HISTORY_TABLE)
+        .execute(pool)
+        .await
+        .map_err(|e| {
+            PersistenceError::Storage(format!("failed to create snapshot_history table: {e}"))
+        })?;
+
+    sqlx::query(schema::CREATE_SNAPSHOT_HISTORY_ENTITY_INDEX)
+        .execute(pool)
+        .await
+        .map_err(|e| {
+            PersistenceError::Storage(format!(
+                "failed to create snapshot_history entity index: {e}"
+            ))
+        })?;
 
     sqlx::query(schema::CREATE_SPECS_TABLE)
         .execute(pool)
@@ -144,6 +181,22 @@ mod tests {
         assert!(
             schema::CREATE_EVENTS_TABLE.contains("IF NOT EXISTS"),
             "events DDL must be idempotent"
+        );
+        assert!(
+            schema::CREATE_EVENTS_TABLE.contains("segment_index"),
+            "events rows must carry segment metadata"
+        );
+        assert!(
+            schema::ALTER_EVENTS_ADD_SEGMENT_INDEX.contains("ADD COLUMN IF NOT EXISTS"),
+            "events segment migration must be idempotent"
+        );
+        assert!(
+            schema::CREATE_EVENT_SEGMENTS_TABLE.contains("IF NOT EXISTS"),
+            "event segment DDL must be idempotent"
+        );
+        assert!(
+            schema::CREATE_SNAPSHOT_HISTORY_TABLE.contains("IF NOT EXISTS"),
+            "snapshot history DDL must be idempotent"
         );
         assert!(
             schema::CREATE_SNAPSHOTS_TABLE.contains("IF NOT EXISTS"),

@@ -1,5 +1,10 @@
 //! SQLite-compatible schema for the Turso/libSQL event store.
 
+pub use crate::schema_event_history::{
+    ALTER_EVENTS_ADD_SEGMENT_INDEX, CREATE_EVENT_SEGMENTS_OPEN_INDEX, CREATE_EVENT_SEGMENTS_TABLE,
+    CREATE_SNAPSHOT_HISTORY_ENTITY_INDEX, CREATE_SNAPSHOT_HISTORY_TABLE,
+};
+
 pub const CREATE_EVENTS_TABLE: &str = "\
 CREATE TABLE IF NOT EXISTS events (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -7,6 +12,7 @@ CREATE TABLE IF NOT EXISTS events (
     entity_type TEXT NOT NULL,
     entity_id TEXT NOT NULL,
     sequence_nr INTEGER NOT NULL,
+    segment_index INTEGER NOT NULL DEFAULT 0,
     event_type TEXT NOT NULL,
     payload TEXT NOT NULL,
     metadata TEXT,
@@ -405,7 +411,11 @@ mod tests {
     fn schemas_are_idempotent() {
         assert!(CREATE_EVENTS_TABLE.contains("IF NOT EXISTS"));
         assert!(CREATE_EVENTS_ENTITY_INDEX.contains("IF NOT EXISTS"));
+        assert!(CREATE_EVENT_SEGMENTS_TABLE.contains("IF NOT EXISTS"));
+        assert!(CREATE_EVENT_SEGMENTS_OPEN_INDEX.contains("IF NOT EXISTS"));
         assert!(CREATE_SNAPSHOTS_TABLE.contains("IF NOT EXISTS"));
+        assert!(CREATE_SNAPSHOT_HISTORY_TABLE.contains("IF NOT EXISTS"));
+        assert!(CREATE_SNAPSHOT_HISTORY_ENTITY_INDEX.contains("IF NOT EXISTS"));
         assert!(CREATE_SPECS_TABLE.contains("IF NOT EXISTS"));
         assert!(CREATE_TRAJECTORIES_TABLE.contains("IF NOT EXISTS"));
         assert!(CREATE_TRAJECTORIES_SUCCESS_INDEX.contains("IF NOT EXISTS"));
@@ -431,6 +441,26 @@ mod tests {
         assert!(CREATE_OTS_TRAJECTORIES_AGENT_INDEX.contains("IF NOT EXISTS"));
         assert!(CREATE_OTS_TRAJECTORIES_TENANT_INDEX.contains("IF NOT EXISTS"));
         assert!(CREATE_OTS_TRAJECTORIES_OUTCOME_INDEX.contains("IF NOT EXISTS"));
+    }
+
+    #[test]
+    fn event_history_schema_declares_segments_and_snapshot_history() {
+        assert!(
+            CREATE_EVENTS_TABLE.contains("segment_index"),
+            "events rows must carry segment metadata"
+        );
+        assert!(
+            ALTER_EVENTS_ADD_SEGMENT_INDEX.contains("ADD COLUMN segment_index"),
+            "existing unsegmented event rows need an idempotent segment migration"
+        );
+        assert!(
+            CREATE_EVENT_SEGMENTS_TABLE.contains("CREATE TABLE IF NOT EXISTS event_segments"),
+            "event segment metadata table is required"
+        );
+        assert!(
+            CREATE_SNAPSHOT_HISTORY_TABLE.contains("CREATE TABLE IF NOT EXISTS snapshot_history"),
+            "immutable snapshot history table is required"
+        );
     }
 
     #[test]
