@@ -263,6 +263,50 @@ fn query_field_index_page_orders_and_limits_inside_postgres() {
         assert_eq!(ids, vec!["entry-10".to_string()]);
         assert_eq!(count, Some(3));
 
+        let missing_sequence_id = "entry-missing-sequence";
+        let missing_sequence_fields = serde_json::json!({
+            "SessionId": "ss-bounded",
+        });
+        let missing_sequence_state = serde_json::json!({
+            "entity_type": entity_type,
+            "entity_id": missing_sequence_id,
+            "status": "Active",
+            "fields": missing_sequence_fields,
+            "sequence_nr": 99,
+            "events": [],
+        });
+        store
+            .upsert_query_projection_with_state(
+                &tenant,
+                entity_type,
+                missing_sequence_id,
+                "Active",
+                missing_sequence_state.get("fields").unwrap(),
+                &missing_sequence_state,
+                99,
+            )
+            .await
+            .unwrap();
+
+        let (ids, count) = store
+            .query_field_index_page(
+                &tenant,
+                entity_type,
+                "entity_id IN (SELECT entity_id FROM entity_field_index \
+                 WHERE tenant = ?1 AND entity_type = ?2 \
+                 AND field_name = ?3 AND field_value = ?4)",
+                vec!["SessionId".to_string(), "ss-bounded".to_string()],
+                &[("Sequence".to_string(), true)],
+                0,
+                1,
+                true,
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(ids, vec![missing_sequence_id.to_string()]);
+        assert_eq!(count, Some(4));
+
         crate::dbm::postgres_query!("DELETE FROM entity_field_index WHERE tenant = $1")
             .bind(&tenant)
             .execute(&pool)

@@ -659,6 +659,104 @@ async fn query_projection_roundtrip_updates_catalog_and_field_index() {
 }
 
 #[tokio::test]
+async fn query_field_index_page_orders_and_limits_inside_turso() {
+    let store = make_store("query-field-index-page").await;
+    let tenant = format!("tenant-{}", uuid::Uuid::new_v4());
+    let entity_type = "SessionEntry";
+
+    for sequence in [1_u64, 10, 2] {
+        let entity_id = format!("entry-{sequence}");
+        let fields = serde_json::json!({
+            "SessionId": "ss-bounded",
+            "Sequence": sequence,
+        });
+        let state = serde_json::json!({
+            "entity_type": entity_type,
+            "entity_id": entity_id,
+            "status": "Active",
+            "fields": fields,
+            "sequence_nr": sequence,
+            "events": [],
+        });
+        store
+            .upsert_query_projection_with_state(
+                &tenant,
+                entity_type,
+                &entity_id,
+                "Active",
+                state.get("fields").unwrap(),
+                &state,
+                sequence,
+            )
+            .await
+            .unwrap();
+    }
+
+    let (ids, count) = store
+        .query_field_index_page(
+            &tenant,
+            entity_type,
+            "entity_id IN (SELECT entity_id FROM entity_field_index \
+             WHERE tenant = ?1 AND entity_type = ?2 \
+             AND field_name = ?3 AND field_value = ?4)",
+            vec!["SessionId".to_string(), "ss-bounded".to_string()],
+            &[("Sequence".to_string(), true)],
+            0,
+            1,
+            true,
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(ids, vec!["entry-10".to_string()]);
+    assert_eq!(count, Some(3));
+
+    let missing_sequence_id = "entry-missing-sequence";
+    let missing_sequence_fields = serde_json::json!({
+        "SessionId": "ss-bounded",
+    });
+    let missing_sequence_state = serde_json::json!({
+        "entity_type": entity_type,
+        "entity_id": missing_sequence_id,
+        "status": "Active",
+        "fields": missing_sequence_fields,
+        "sequence_nr": 99,
+        "events": [],
+    });
+    store
+        .upsert_query_projection_with_state(
+            &tenant,
+            entity_type,
+            missing_sequence_id,
+            "Active",
+            missing_sequence_state.get("fields").unwrap(),
+            &missing_sequence_state,
+            99,
+        )
+        .await
+        .unwrap();
+
+    let (ids, count) = store
+        .query_field_index_page(
+            &tenant,
+            entity_type,
+            "entity_id IN (SELECT entity_id FROM entity_field_index \
+             WHERE tenant = ?1 AND entity_type = ?2 \
+             AND field_name = ?3 AND field_value = ?4)",
+            vec!["SessionId".to_string(), "ss-bounded".to_string()],
+            &[("Sequence".to_string(), true)],
+            0,
+            1,
+            true,
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(ids, vec![missing_sequence_id.to_string()]);
+    assert_eq!(count, Some(4));
+}
+
+#[tokio::test]
 async fn query_projection_batch_updates_catalog_and_field_index() {
     let store = make_store("query-projection-batch").await;
     let tenant = format!("tenant-{}", uuid::Uuid::new_v4());
