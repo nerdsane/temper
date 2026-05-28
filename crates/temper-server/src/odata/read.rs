@@ -571,6 +571,7 @@ pub(super) async fn handle_odata_get_for_tenant(
     catalog_shadow_check_scheduled = tracing::field::Empty,
     catalog_coverage_missing = tracing::field::Empty,
     catalog_coverage_matched = tracing::field::Empty,
+    select_requested = tracing::field::Empty,
     catalog_select_projection = tracing::field::Empty,
     select_count = tracing::field::Empty,
     pushdown_sparse_page = tracing::field::Empty,
