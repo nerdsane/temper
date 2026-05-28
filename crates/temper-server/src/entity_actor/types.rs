@@ -9,8 +9,10 @@ use temper_runtime::actor::Message;
 // TigerStyle: Fixed resource budgets. No unbounded growth.
 // These are hard limits, not suggestions. Violations are assertion failures.
 
-/// Maximum events per entity before the actor refuses new transitions.
-pub const MAX_EVENTS_PER_ENTITY: usize = 10_000;
+/// Maximum unsnapshotted events an actor may replay/hot-hold before refusing new transitions.
+pub const MAX_EVENTS_SINCE_SNAPSHOT: usize = 10_000;
+/// Backward-compatible alias for older callers; budget enforcement is tail-based.
+pub const MAX_EVENTS_PER_ENTITY: usize = MAX_EVENTS_SINCE_SNAPSHOT;
 /// Default number of recent events retained in memory per entity.
 pub const RECENT_EVENTS_BUDGET_DEFAULT: usize = 50;
 /// Maximum items an entity can hold.
@@ -88,6 +90,12 @@ pub struct EntityState {
     /// Total event count ever applied to this entity.
     #[serde(default)]
     pub total_event_count: usize,
+    /// Number of events applied after the latest durable snapshot boundary.
+    #[serde(default)]
+    pub events_since_snapshot: usize,
+    /// Sequence number captured by the latest durable snapshot.
+    #[serde(default)]
+    pub last_snapshot_sequence_nr: u64,
     /// Current event sourcing sequence number (for persistence).
     #[serde(default)]
     pub sequence_nr: u64,
@@ -96,12 +104,13 @@ pub struct EntityState {
 impl EntityState {
     /// Return true if this entity can accept one more event under budget.
     pub fn can_accept_event(&self) -> bool {
-        self.total_event_count < MAX_EVENTS_PER_ENTITY
+        self.events_since_snapshot < MAX_EVENTS_SINCE_SNAPSHOT
     }
 
     /// Append an event to recent history while enforcing bounded memory.
     pub fn push_event_bounded(&mut self, event: EntityEvent) {
         self.total_event_count = self.total_event_count.saturating_add(1);
+        self.events_since_snapshot = self.events_since_snapshot.saturating_add(1);
         self.events.push_back(event);
 
         let budget = recent_events_budget();
@@ -176,6 +185,8 @@ mod tests {
             fields: json!({"title": "Test Order"}),
             events: VecDeque::new(),
             total_event_count: 0,
+            events_since_snapshot: 0,
+            last_snapshot_sequence_nr: 0,
             sequence_nr: 0,
         };
         let serialized = serde_json::to_string(&state).unwrap();
@@ -202,7 +213,51 @@ mod tests {
         assert!(state.booleans.is_empty());
         assert!(state.lists.is_empty());
         assert_eq!(state.total_event_count, 0);
+        assert_eq!(state.events_since_snapshot, 0);
+        assert_eq!(state.last_snapshot_sequence_nr, 0);
         assert_eq!(state.sequence_nr, 0);
+    }
+
+    #[test]
+    fn event_budget_is_based_on_snapshot_tail_not_lifetime_total() {
+        let state = EntityState {
+            entity_type: "Workspace".to_string(),
+            entity_id: "workspace-1".to_string(),
+            status: "Active".to_string(),
+            item_count: 0,
+            counters: BTreeMap::new(),
+            booleans: BTreeMap::new(),
+            lists: BTreeMap::new(),
+            fields: json!({}),
+            events: VecDeque::new(),
+            total_event_count: MAX_EVENTS_SINCE_SNAPSHOT + 50,
+            events_since_snapshot: 2,
+            last_snapshot_sequence_nr: MAX_EVENTS_SINCE_SNAPSHOT as u64 + 48,
+            sequence_nr: MAX_EVENTS_SINCE_SNAPSHOT as u64 + 50,
+        };
+
+        assert!(state.can_accept_event());
+    }
+
+    #[test]
+    fn event_budget_rejects_when_snapshot_tail_reaches_cap() {
+        let state = EntityState {
+            entity_type: "Workspace".to_string(),
+            entity_id: "workspace-1".to_string(),
+            status: "Active".to_string(),
+            item_count: 0,
+            counters: BTreeMap::new(),
+            booleans: BTreeMap::new(),
+            lists: BTreeMap::new(),
+            fields: json!({}),
+            events: VecDeque::new(),
+            total_event_count: MAX_EVENTS_SINCE_SNAPSHOT,
+            events_since_snapshot: MAX_EVENTS_SINCE_SNAPSHOT,
+            last_snapshot_sequence_nr: 0,
+            sequence_nr: MAX_EVENTS_SINCE_SNAPSHOT as u64,
+        };
+
+        assert!(!state.can_accept_event());
     }
 
     #[test]
@@ -236,6 +291,8 @@ mod tests {
             fields: json!({}),
             events: VecDeque::new(),
             total_event_count: 0,
+            events_since_snapshot: 0,
+            last_snapshot_sequence_nr: 0,
             sequence_nr: 0,
         };
         let resp = EntityResponse {

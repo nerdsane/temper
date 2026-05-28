@@ -65,6 +65,24 @@ struct SnapshotRecord {
 }
 
 #[derive(Debug, Serialize, Deserialize)]
+struct SnapshotHistoryRecord {
+    sequence_nr: u64,
+    snapshot: Vec<u8>,
+    created_at: chrono::DateTime<chrono::Utc>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct SegmentRecord {
+    segment_index: u64,
+    start_sequence_nr: u64,
+    end_sequence_nr: Option<u64>,
+    snapshot_sequence: Option<u64>,
+    event_count: u64,
+    sealed_at: Option<chrono::DateTime<chrono::Utc>>,
+    created_at: chrono::DateTime<chrono::Utc>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
 struct EntityRef {
     entity_type: String,
     entity_id: String,
@@ -106,6 +124,32 @@ impl RedisEventStore {
     fn snapshot_key(tenant: &str, entity_type: &str, entity_id: &str) -> String {
         format!(
             "{}:snapshot:{tenant}:{entity_type}:{entity_id}",
+            crate::keys::PREFIX
+        )
+    }
+
+    fn snapshot_history_key(
+        tenant: &str,
+        entity_type: &str,
+        entity_id: &str,
+        sequence_nr: u64,
+    ) -> String {
+        format!(
+            "{}:snapshot_history:{tenant}:{entity_type}:{entity_id}:{sequence_nr}",
+            crate::keys::PREFIX
+        )
+    }
+
+    fn current_segment_key(tenant: &str, entity_type: &str, entity_id: &str) -> String {
+        format!(
+            "{}:event_segment_current:{tenant}:{entity_type}:{entity_id}",
+            crate::keys::PREFIX
+        )
+    }
+
+    fn segment_key(tenant: &str, entity_type: &str, entity_id: &str, segment_index: u64) -> String {
+        format!(
+            "{}:event_segment:{tenant}:{entity_type}:{entity_id}:{segment_index}",
             crate::keys::PREFIX
         )
     }
@@ -201,7 +245,56 @@ impl EventStore for RedisEventStore {
             .map_err(storage_error)?;
 
         match result.as_slice() {
-            [1, new_seq] => Ok(*new_seq as u64),
+            [1, new_seq] => {
+                let new_seq = *new_seq as u64;
+                let current_segment_key = Self::current_segment_key(tenant, entity_type, entity_id);
+                let current_segment_raw: Option<String> = self
+                    .client
+                    .get(&current_segment_key)
+                    .await
+                    .map_err(storage_error)?;
+                let segment_index = current_segment_raw
+                    .and_then(|raw| raw.parse::<u64>().ok())
+                    .unwrap_or(0);
+                let segment_key = Self::segment_key(tenant, entity_type, entity_id, segment_index);
+                let existing: Option<String> =
+                    self.client.get(&segment_key).await.map_err(storage_error)?;
+                let mut record = existing
+                    .as_deref()
+                    .map(serde_json::from_str::<SegmentRecord>)
+                    .transpose()
+                    .map_err(|e| PersistenceError::Serialization(e.to_string()))?
+                    .unwrap_or_else(|| SegmentRecord {
+                        segment_index,
+                        start_sequence_nr: (expected_sequence + 1).max(1),
+                        end_sequence_nr: None,
+                        snapshot_sequence: None,
+                        event_count: 0,
+                        sealed_at: None,
+                        created_at: chrono::Utc::now(),
+                    });
+                record.end_sequence_nr = Some(new_seq);
+                record.event_count = new_seq.saturating_sub(record.start_sequence_nr) + 1;
+                let encoded = serde_json::to_string(&record)
+                    .map_err(|e| PersistenceError::Serialization(e.to_string()))?;
+                let _: () = self
+                    .client
+                    .set(&segment_key, encoded, None, None, false)
+                    .await
+                    .map_err(storage_error)?;
+                let _: () = self
+                    .client
+                    .set(
+                        &current_segment_key,
+                        segment_index.to_string(),
+                        None,
+                        None,
+                        false,
+                    )
+                    .await
+                    .map_err(storage_error)?;
+                Ok(new_seq)
+            }
             [0, actual] => Err(PersistenceError::ConcurrencyViolation {
                 expected: expected_sequence,
                 actual: *actual as u64,
@@ -259,6 +352,88 @@ impl EventStore for RedisEventStore {
         let _: () = self
             .client
             .set(&key, encoded, None, None, false)
+            .await
+            .map_err(storage_error)?;
+
+        let history_key = Self::snapshot_history_key(tenant, entity_type, entity_id, sequence_nr);
+        let history = SnapshotHistoryRecord {
+            sequence_nr,
+            snapshot: snapshot.to_vec(),
+            created_at: chrono::Utc::now(),
+        };
+        let encoded_history = serde_json::to_string(&history)
+            .map_err(|e| PersistenceError::Serialization(e.to_string()))?;
+        let _: () = self
+            .client
+            .set(&history_key, encoded_history, None, None, false)
+            .await
+            .map_err(storage_error)?;
+
+        let current_segment_key = Self::current_segment_key(tenant, entity_type, entity_id);
+        let current_segment_raw: Option<String> = self
+            .client
+            .get(&current_segment_key)
+            .await
+            .map_err(storage_error)?;
+        let current_segment = current_segment_raw
+            .and_then(|raw| raw.parse::<u64>().ok())
+            .unwrap_or(0);
+        let segment_key = Self::segment_key(tenant, entity_type, entity_id, current_segment);
+        let existing: Option<String> =
+            self.client.get(&segment_key).await.map_err(storage_error)?;
+        let mut segment = existing
+            .as_deref()
+            .map(serde_json::from_str::<SegmentRecord>)
+            .transpose()
+            .map_err(|e| PersistenceError::Serialization(e.to_string()))?
+            .unwrap_or_else(|| SegmentRecord {
+                segment_index: current_segment,
+                start_sequence_nr: 1,
+                end_sequence_nr: Some(sequence_nr),
+                snapshot_sequence: Some(sequence_nr),
+                event_count: sequence_nr,
+                sealed_at: None,
+                created_at: chrono::Utc::now(),
+            });
+        segment.end_sequence_nr = Some(sequence_nr);
+        segment.snapshot_sequence = Some(sequence_nr);
+        segment.event_count = sequence_nr.saturating_sub(segment.start_sequence_nr) + 1;
+        segment.sealed_at = Some(chrono::Utc::now());
+        let encoded_segment = serde_json::to_string(&segment)
+            .map_err(|e| PersistenceError::Serialization(e.to_string()))?;
+        let _: () = self
+            .client
+            .set(&segment_key, encoded_segment, None, None, false)
+            .await
+            .map_err(storage_error)?;
+
+        let next_segment = current_segment + 1;
+        let next_segment_key = Self::segment_key(tenant, entity_type, entity_id, next_segment);
+        let next = SegmentRecord {
+            segment_index: next_segment,
+            start_sequence_nr: sequence_nr + 1,
+            end_sequence_nr: None,
+            snapshot_sequence: None,
+            event_count: 0,
+            sealed_at: None,
+            created_at: chrono::Utc::now(),
+        };
+        let encoded_next = serde_json::to_string(&next)
+            .map_err(|e| PersistenceError::Serialization(e.to_string()))?;
+        let _: () = self
+            .client
+            .set(&next_segment_key, encoded_next, None, None, false)
+            .await
+            .map_err(storage_error)?;
+        let _: () = self
+            .client
+            .set(
+                &current_segment_key,
+                next_segment.to_string(),
+                None,
+                None,
+                false,
+            )
             .await
             .map_err(storage_error)?;
         Ok(())

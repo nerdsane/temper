@@ -16,6 +16,8 @@ pub mod dbm;
 pub mod migration;
 pub mod platform;
 pub mod schema;
+mod schema_event_history;
+mod segments;
 pub mod store;
 
 pub use platform::{

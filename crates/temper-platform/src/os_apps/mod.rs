@@ -256,9 +256,8 @@ fn find_cedar_policies(app_dir: &Path) -> Vec<PathBuf> {
 
 /// Find compiled WASM module binaries in an app directory.
 ///
-/// Scans both `wasm32-unknown-unknown` and `wasm32-wasip1` release outputs
-/// because some OS apps mix pure WASM modules with WASI modules such as
-/// sandboxed tool runners.
+/// Scans manifest-selected target outputs, common WASM release outputs, and
+/// packaged artifacts copied next to the module after Docker target pruning.
 fn find_wasm_modules(
     app_dir: &Path,
     module_configs: &BTreeMap<String, WasmModuleManifest>,
@@ -283,39 +282,58 @@ fn find_wasm_modules(
         if module_name == "target" {
             continue;
         }
-
         // When the manifest declares a specific compilation target, search
         // only that target's release directory — avoids picking up a stale
         // build from the wrong target (e.g. wasm32-unknown-unknown when the
-        // module requires wasm32-wasip1). Fall back to a sibling bundled
-        // artifact ({module_name}.wasm) which build.sh copies after compilation.
+        // module requires wasm32-wasip1). Fall back to bundled artifacts
+        // copied after compilation.
+        let module_path = entry.path();
+        let dashed_name = module_name.replace('_', "-");
         let candidates: Vec<PathBuf> = if let Some(config) = module_configs.get(&module_name)
             && let Some(ref target) = config.target
         {
             vec![
-                entry
-                    .path()
+                module_path
                     .join("target")
                     .join(target)
                     .join("release")
                     .join(format!("{module_name}.wasm")),
-                entry.path().join(format!("{module_name}.wasm")),
+                module_path
+                    .join("target")
+                    .join(target)
+                    .join("release")
+                    .join(format!("{dashed_name}.wasm")),
+                module_path.join(format!("{module_name}.wasm")),
+                module_path.join(format!("{dashed_name}.wasm")),
+                wasm_dir.join(format!("{module_name}.wasm")),
+                wasm_dir.join(format!("{dashed_name}.wasm")),
             ]
         } else {
             vec![
-                entry
-                    .path()
+                module_path
                     .join("target")
                     .join("wasm32-unknown-unknown")
                     .join("release")
                     .join(format!("{module_name}.wasm")),
-                entry
-                    .path()
+                module_path
                     .join("target")
                     .join("wasm32-wasip1")
                     .join("release")
                     .join(format!("{module_name}.wasm")),
-                entry.path().join(format!("{module_name}.wasm")),
+                module_path
+                    .join("target")
+                    .join("wasm32-unknown-unknown")
+                    .join("release")
+                    .join(format!("{dashed_name}.wasm")),
+                module_path
+                    .join("target")
+                    .join("wasm32-wasip1")
+                    .join("release")
+                    .join(format!("{dashed_name}.wasm")),
+                module_path.join(format!("{module_name}.wasm")),
+                module_path.join(format!("{dashed_name}.wasm")),
+                wasm_dir.join(format!("{module_name}.wasm")),
+                wasm_dir.join(format!("{dashed_name}.wasm")),
             ]
         };
 

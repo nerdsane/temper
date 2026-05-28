@@ -131,6 +131,19 @@ pub(super) async fn populate_field_index_from_snapshots(state: &ServerState, ten
             tenant_blob_store.as_ref(),
         )
         .await;
+        let replayed = match replayed {
+            Ok(state) => state,
+            Err(e) => {
+                tracing::debug!(
+                    error = %e,
+                    entity_type = %entity_type,
+                    entity_id = %entity_id,
+                    "field index backfill: persistence replay failed"
+                );
+                errors += 1;
+                continue;
+            }
+        };
 
         if replayed.total_event_count == 0 {
             tracing::debug!(

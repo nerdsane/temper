@@ -1802,6 +1802,8 @@ mod tests {
             fields: json!({"model": "claude-sonnet-4-6"}),
             events: std::collections::VecDeque::new(),
             total_event_count: 0,
+            events_since_snapshot: 0,
+            last_snapshot_sequence_nr: 0,
             sequence_nr: 0,
         };
         let callback_params = json!({
@@ -1858,6 +1860,8 @@ mod tests {
             fields: json!({"provider": "openai", "model": "gpt-5.4"}),
             events: std::collections::VecDeque::new(),
             total_event_count: 0,
+            events_since_snapshot: 0,
+            last_snapshot_sequence_nr: 0,
             sequence_nr: 0,
         };
         let integration = temper_spec::automaton::Integration {
@@ -1940,6 +1944,8 @@ mod tests {
             fields: json!({}),
             events: std::collections::VecDeque::new(),
             total_event_count: 0,
+            events_since_snapshot: 0,
+            last_snapshot_sequence_nr: 0,
             sequence_nr: 0,
         };
         let (llm_trace_id, llm_span_id) = dispatch_parent.in_scope(|| {
@@ -2034,6 +2040,8 @@ mod tests {
             }),
             events: std::collections::VecDeque::new(),
             total_event_count: 0,
+            events_since_snapshot: 0,
+            last_snapshot_sequence_nr: 0,
             sequence_nr: 0,
         };
 
@@ -2074,6 +2082,8 @@ mod tests {
             }),
             events: std::collections::VecDeque::new(),
             total_event_count: 0,
+            events_since_snapshot: 0,
+            last_snapshot_sequence_nr: 0,
             sequence_nr: 0,
         };
 

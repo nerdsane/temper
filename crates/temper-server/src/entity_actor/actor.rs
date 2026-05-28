@@ -35,7 +35,7 @@ use crate::storage::{BackendLabel, BoxedEventStore};
 
 use super::effects::{FieldSyncMode, process_action_with_xref_and_field_mode};
 use super::types::{
-    EntityEvent, EntityMsg, EntityResponse, EntityState, MAX_EVENTS_PER_ENTITY,
+    EntityEvent, EntityMsg, EntityResponse, EntityState, MAX_EVENTS_SINCE_SNAPSHOT,
     MAX_ITEMS_PER_ENTITY,
 };
 
@@ -91,6 +91,8 @@ impl EntityActor {
             fields,
             events: std::collections::VecDeque::new(),
             total_event_count: 0,
+            events_since_snapshot: 0,
+            last_snapshot_sequence_nr: 0,
             sequence_nr: 0,
         }
     }
@@ -110,11 +112,19 @@ impl EntityActor {
     }
 
     /// Serialize actor state for snapshot persistence, excluding recent event history.
+    ///
+    /// The stored snapshot is already a segment boundary, so its hot tail budget
+    /// is reset in the payload. Lifetime sequence/count fields remain intact.
     fn serialize_snapshot_state(state: &EntityState) -> Result<Vec<u8>, PersistenceError> {
         let mut value = serde_json::to_value(state)
             .map_err(|e| PersistenceError::Serialization(e.to_string()))?;
         if let Some(obj) = value.as_object_mut() {
             obj.remove("events");
+            obj.insert("events_since_snapshot".to_string(), serde_json::json!(0));
+            obj.insert(
+                "last_snapshot_sequence_nr".to_string(),
+                serde_json::json!(state.sequence_nr),
+            );
         }
         serde_json::to_vec(&value).map_err(|e| PersistenceError::Serialization(e.to_string()))
     }
@@ -137,10 +147,17 @@ impl EntityActor {
                 serde_json::json!(sequence_nr as usize),
             );
         }
+        obj.insert("events_since_snapshot".to_string(), serde_json::json!(0));
+        obj.insert(
+            "last_snapshot_sequence_nr".to_string(),
+            serde_json::json!(sequence_nr),
+        );
 
         match serde_json::from_value::<EntityState>(value) {
             Ok(mut restored) => {
                 restored.sequence_nr = sequence_nr;
+                restored.events_since_snapshot = 0;
+                restored.last_snapshot_sequence_nr = sequence_nr;
                 *state = restored;
                 true
             }
@@ -299,7 +316,7 @@ impl EntityActor {
     async fn maybe_save_snapshot(
         store: &BoxedEventStore,
         persistence_id: &str,
-        state: &EntityState,
+        state: &mut EntityState,
     ) -> Result<(), PersistenceError> {
         if state.sequence_nr == 0 {
             return Ok(());
@@ -312,7 +329,10 @@ impl EntityActor {
         let snapshot = Self::serialize_snapshot_state(state)?;
         store
             .save_snapshot(persistence_id, state.sequence_nr, &snapshot)
-            .await
+            .await?;
+        state.last_snapshot_sequence_nr = state.sequence_nr;
+        state.events_since_snapshot = 0;
+        Ok(())
     }
 
     /// Replay events from the configured store to rebuild state (called in pre_start).
@@ -329,7 +349,7 @@ impl EntityActor {
         state: &mut EntityState,
         tenant: &str,
         blob_store: Option<&crate::blob_store::BlobStore>,
-    ) {
+    ) -> Result<(), ActorError> {
         let replay_start = Instant::now(); // determinism-ok: wall-clock for production replay duration metric only
         let mut from_sequence = 0;
         let mut loaded_snapshot = false;
@@ -364,6 +384,15 @@ impl EntityActor {
 
         match store.read_events(persistence_id, from_sequence).await {
             Ok(envelopes) => {
+                if envelopes.len() > MAX_EVENTS_SINCE_SNAPSHOT {
+                    return Err(ActorError::custom(format!(
+                        "snapshot tail replay budget exceeded for {}:{} ({} > {} events since snapshot)",
+                        state.entity_type,
+                        state.entity_id,
+                        envelopes.len(),
+                        MAX_EVENTS_SINCE_SNAPSHOT
+                    )));
+                }
                 for env in &envelopes {
                     let parsed_event = serde_json::from_value::<EntityEvent>(env.payload.clone());
 
@@ -473,6 +502,18 @@ impl EntityActor {
                     state.sequence_nr = env.sequence_nr;
                 }
                 if !envelopes.is_empty() {
+                    let replayed_tail = state
+                        .sequence_nr
+                        .saturating_sub(state.last_snapshot_sequence_nr)
+                        as usize;
+                    if replayed_tail > MAX_EVENTS_SINCE_SNAPSHOT {
+                        tracing::error!(
+                            entity = %state.entity_id,
+                            replayed_tail,
+                            cap = MAX_EVENTS_SINCE_SNAPSHOT,
+                            "snapshot tail exceeds bounded replay cap"
+                        );
+                    }
                     tracing::info!(
                         entity = %state.entity_id,
                         snapshot_loaded = loaded_snapshot,
@@ -480,6 +521,7 @@ impl EntityActor {
                         status = %state.status,
                         seq = state.sequence_nr,
                         total_events = state.total_event_count,
+                        events_since_snapshot = state.events_since_snapshot,
                         recent_events = state.events.len(),
                         counters = ?state.counters,
                         booleans = ?state.booleans,
@@ -490,6 +532,7 @@ impl EntityActor {
                         entity = %state.entity_id,
                         seq = state.sequence_nr,
                         total_events = state.total_event_count,
+                        events_since_snapshot = state.events_since_snapshot,
                         "state restored from snapshot (no delta events)"
                     );
                 }
@@ -506,6 +549,7 @@ impl EntityActor {
             tenant,
             &state.entity_type,
         );
+        Ok(())
     }
 }
 
@@ -519,7 +563,7 @@ pub(crate) async fn recover_entity_state_from_store(
     backend: BackendLabel,
     initial_fields: &serde_json::Value,
     blob_store: Option<&crate::blob_store::BlobStore>,
-) -> EntityState {
+) -> Result<EntityState, ActorError> {
     let persistence_id = format!("{tenant}:{entity_type}:{entity_id}");
     let mut state = EntityActor::build_initial_state(entity_type, entity_id, table, initial_fields);
     EntityActor::replay_events(
@@ -531,8 +575,8 @@ pub(crate) async fn recover_entity_state_from_store(
         tenant,
         blob_store,
     )
-    .await;
-    state
+    .await?;
+    Ok(state)
 }
 
 impl Actor for EntityActor {
@@ -565,7 +609,7 @@ impl Actor for EntityActor {
                 &self.initial_fields,
                 self.blob_store.as_ref(),
             )
-            .await;
+            .await?;
         }
 
         // Persist a bootstrap Created event for first-time entities so initial
@@ -646,10 +690,10 @@ impl Actor for EntityActor {
                     table.states
                 );
                 debug_assert!(
-                    state.total_event_count < MAX_EVENTS_PER_ENTITY,
+                    state.events_since_snapshot < MAX_EVENTS_SINCE_SNAPSHOT,
                     "PRECONDITION: event budget exhausted ({} >= {})",
-                    state.total_event_count,
-                    MAX_EVENTS_PER_ENTITY
+                    state.events_since_snapshot,
+                    MAX_EVENTS_SINCE_SNAPSHOT
                 );
                 debug_assert!(
                     state.item_count <= MAX_ITEMS_PER_ENTITY,
@@ -659,12 +703,12 @@ impl Actor for EntityActor {
                 );
 
                 // TigerStyle: Budget enforcement (not just assertions -- hard limits)
-                if state.total_event_count >= MAX_EVENTS_PER_ENTITY {
+                if state.events_since_snapshot >= MAX_EVENTS_SINCE_SNAPSHOT {
                     ctx.reply(EntityResponse {
                         success: false,
                         state: state.clone(),
                         error: Some(format!(
-                            "Event budget exhausted ({MAX_EVENTS_PER_ENTITY} max)"
+                            "Event budget exhausted ({MAX_EVENTS_SINCE_SNAPSHOT} max since snapshot)"
                         )),
                         custom_effects: vec![],
                         scheduled_actions: vec![],
@@ -803,7 +847,7 @@ impl Actor for EntityActor {
                                         &self.tenant,
                                         self.blob_store.as_ref(),
                                     )
-                                    .await;
+                                    .await?;
 
                                     // ADR-0046 Sub-Decision 4: replay must at
                                     // minimum reach the sequence the store
@@ -1052,6 +1096,7 @@ impl Actor for EntityActor {
                         action = %name,
                         to = %state.status,
                         events_total = state.total_event_count,
+                        events_since_snapshot = state.events_since_snapshot,
                         events_recent = state.events.len(),
                         "transition applied"
                     );

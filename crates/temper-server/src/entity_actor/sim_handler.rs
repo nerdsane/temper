@@ -51,6 +51,8 @@ impl EntityActorHandler {
             fields: serde_json::json!({}),
             events: std::collections::VecDeque::new(),
             total_event_count: 0,
+            events_since_snapshot: 0,
+            last_snapshot_sequence_nr: 0,
             sequence_nr: 0,
         };
 
@@ -173,6 +175,8 @@ impl SimActorHandler for EntityActorHandler {
         self.state.lists.clear();
         self.state.events.clear();
         self.state.total_event_count = 0;
+        self.state.events_since_snapshot = 0;
+        self.state.last_snapshot_sequence_nr = 0;
         self.state.sequence_nr = 0;
         self.state.fields = serde_json::json!({
             "Id": self.state.entity_id,

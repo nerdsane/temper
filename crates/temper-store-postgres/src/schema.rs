@@ -3,6 +3,8 @@
 //! These constants define the DDL statements used to create the `events` and
 //! `snapshots` tables that back the event-sourced persistence layer.
 
+pub use crate::schema_event_history::*;
+
 /// CREATE TABLE statement for the events journal.
 ///
 /// Each row stores a single domain event for a particular entity. The
@@ -19,6 +21,7 @@ CREATE TABLE IF NOT EXISTS events (
     entity_type   TEXT         NOT NULL,
     entity_id     TEXT         NOT NULL,
     sequence_nr   BIGINT       NOT NULL,
+    segment_index BIGINT       NOT NULL DEFAULT 0,
     event_type    TEXT         NOT NULL,
     payload       JSONB        NOT NULL,
     metadata      JSONB        NOT NULL,
@@ -495,11 +498,25 @@ pub const ENABLE_TENANT_RLS: &[&str] = &[
          EXECUTE 'CREATE POLICY tenant_isolation ON events USING (tenant = current_setting(''app.current_tenant'', true))'; \
        END IF; \
      END $$",
+    // -- event_segments --
+    "ALTER TABLE event_segments ENABLE ROW LEVEL SECURITY",
+    "DO $$ BEGIN \
+       IF NOT EXISTS (SELECT 1 FROM pg_policies WHERE tablename = 'event_segments' AND policyname = 'tenant_isolation') THEN \
+         EXECUTE 'CREATE POLICY tenant_isolation ON event_segments USING (tenant = current_setting(''app.current_tenant'', true))'; \
+       END IF; \
+     END $$",
     // -- snapshots --
     "ALTER TABLE snapshots ENABLE ROW LEVEL SECURITY",
     "DO $$ BEGIN \
        IF NOT EXISTS (SELECT 1 FROM pg_policies WHERE tablename = 'snapshots' AND policyname = 'tenant_isolation') THEN \
          EXECUTE 'CREATE POLICY tenant_isolation ON snapshots USING (tenant = current_setting(''app.current_tenant'', true))'; \
+       END IF; \
+     END $$",
+    // -- snapshot_history --
+    "ALTER TABLE snapshot_history ENABLE ROW LEVEL SECURITY",
+    "DO $$ BEGIN \
+       IF NOT EXISTS (SELECT 1 FROM pg_policies WHERE tablename = 'snapshot_history' AND policyname = 'tenant_isolation') THEN \
+         EXECUTE 'CREATE POLICY tenant_isolation ON snapshot_history USING (tenant = current_setting(''app.current_tenant'', true))'; \
        END IF; \
      END $$",
     // -- specs --
