@@ -208,6 +208,15 @@ fn test_manifest_dependencies_accept_pinned_genesis_refs_for_local_install_order
 }
 
 #[test]
+fn test_os_app_document_bootstrap_does_not_charge_workspace_file_count() {
+    let source = include_str!("mod.rs");
+    assert!(
+        !source.contains("action: \"IncrementFileCount\""),
+        "OS app document bootstrap must not charge Workspace for each file materialized"
+    );
+}
+
+#[test]
 fn test_reconcile_plan_for_wasm_only_digest_skips_unrelated_phases() {
     let current = OsAppBundleDigest {
         app_name: "paw-agent".to_string(),
