@@ -30,6 +30,7 @@ mod instrumentation;
 pub mod ots;
 mod policy;
 mod published_artifacts;
+mod query_page;
 mod secrets;
 mod specs;
 #[cfg(test)]

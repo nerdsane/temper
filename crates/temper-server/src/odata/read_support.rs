@@ -18,6 +18,7 @@ mod shadow;
 use config::{catalog_fast_read_enabled, entity_set_materialization_concurrency};
 pub(super) use config::{odata_default_page_size, odata_max_entities};
 use select_projection::catalog_row_to_selected_entity_body;
+#[cfg(test)]
 pub(super) use select_projection::catalog_select_projection_fields;
 use shadow::{
     CatalogShadowReadBudget, maybe_spawn_catalog_shadow_check,
@@ -374,17 +375,29 @@ pub(super) struct MaterializedEntitySet {
     pub(super) catalog_shadow_check_scheduled: usize,
 }
 
+#[cfg(test)]
+#[derive(Debug)]
+pub(super) struct SelectedEntityIdsForMaterialization {
+    pub(super) entity_ids: Vec<String>,
+    pub(super) apply_options: temper_odata::query::types::QueryOptions,
+    pub(super) precomputed_count: Option<usize>,
+}
+
+#[cfg(test)]
+#[derive(Debug, Eq, PartialEq)]
+pub(super) struct EntitySelectionTooLarge {
+    pub(super) candidate_count: usize,
+    pub(super) candidate_budget: usize,
+}
+
+#[cfg(test)]
 pub(super) fn select_entity_ids_for_materialization(
     mut entity_ids: Vec<String>,
     query_options: &temper_odata::query::types::QueryOptions,
     default_page_size: usize,
     max_entities: usize,
     has_row_authorization: bool,
-) -> (
-    Vec<String>,
-    temper_odata::query::types::QueryOptions,
-    Option<usize>,
-) {
+) -> Result<SelectedEntityIdsForMaterialization, EntitySelectionTooLarge> {
     let has_filter_or_order =
         query_options.filter.is_some() || query_options.orderby.is_some() || has_row_authorization;
     let mut precomputed_count = None;
@@ -417,18 +430,14 @@ pub(super) fn select_entity_ids_for_materialization(
         // correctness bug that caused system skills to vanish from large File
         // collections (see ADR: skill-bootstrap-invisible-in-odata).
         //
-        // Safety cap: we still impose a hard ceiling (10× max_entities) to
-        // prevent unbounded materialisation in pathological cases, but log a
-        // warning so the operator knows results may be incomplete.
+        // Safety cap: impose a hard ceiling (10× max_entities) and reject
+        // reads that cannot be proven complete inside the candidate budget.
         let safety_cap = max_entities.saturating_mul(10);
         if entity_ids.len() > safety_cap {
-            tracing::warn!(
-                total = entity_ids.len(),
-                safety_cap,
-                "OData filtered query exceeds safety cap — results may be incomplete; \
-                 raise TEMPER_ODATA_MAX_ENTITIES to cover all entities"
-            );
-            entity_ids.truncate(safety_cap);
+            return Err(EntitySelectionTooLarge {
+                candidate_count: entity_ids.len(),
+                candidate_budget: safety_cap,
+            });
         }
 
         let mut adjusted = query_options.clone();
@@ -440,7 +449,11 @@ pub(super) fn select_entity_ids_for_materialization(
         adjusted
     };
 
-    (entity_ids, apply_options, precomputed_count)
+    Ok(SelectedEntityIdsForMaterialization {
+        entity_ids,
+        apply_options,
+        precomputed_count,
+    })
 }
 
 /// Resolve an entity set name from an entity type name.
