@@ -9,6 +9,10 @@ use crate::host_trait::{SimWasmHost, WasmHost};
 use crate::stream::StreamRegistry;
 use async_trait::async_trait;
 
+const _: () = {
+    assert!(WASM_INVOKE_THREAD_STACK_BYTES >= 16 * 1024 * 1024);
+};
+
 // Minimal WAT module: accepts (ptr, len), writes nothing, returns 0.
 const WAT_NOOP: &str = r#"
     (module
@@ -231,11 +235,6 @@ fn resource_limits_default() {
     // ADR-0045: raised from 30s to cover HTTP-fronted integrations under load.
     assert_eq!(limits.max_duration, std::time::Duration::from_secs(120));
     assert_eq!(limits.max_response_bytes, 1024 * 1024);
-}
-
-#[test]
-fn wasm_invoke_thread_stack_handles_sdk_backed_rust_guests() {
-    assert!(WASM_INVOKE_THREAD_STACK_BYTES >= 16 * 1024 * 1024);
 }
 
 #[tokio::test]
