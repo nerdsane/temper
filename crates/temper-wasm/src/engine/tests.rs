@@ -233,6 +233,11 @@ fn resource_limits_default() {
     assert_eq!(limits.max_response_bytes, 1024 * 1024);
 }
 
+#[test]
+fn wasm_invoke_thread_stack_handles_sdk_backed_rust_guests() {
+    assert!(WASM_INVOKE_THREAD_STACK_BYTES >= 16 * 1024 * 1024);
+}
+
 #[tokio::test]
 async fn wasm_guest_can_drive_structured_observability_span_lifecycle() {
     let engine = WasmEngine::new().unwrap();
