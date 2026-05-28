@@ -176,6 +176,15 @@ fn test_resolve_os_app_install_order_dedupes_shared_dependencies() {
 }
 
 #[test]
+fn test_os_app_document_bootstrap_does_not_charge_workspace_file_count() {
+    let source = include_str!("mod.rs");
+    assert!(
+        !source.contains("action: \"IncrementFileCount\""),
+        "OS app document bootstrap must not charge Workspace for each file materialized"
+    );
+}
+
+#[test]
 fn test_reconcile_plan_for_wasm_only_digest_skips_unrelated_phases() {
     let current = OsAppBundleDigest {
         app_name: "paw-agent".to_string(),

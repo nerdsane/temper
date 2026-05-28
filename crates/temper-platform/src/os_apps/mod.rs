@@ -2286,24 +2286,6 @@ pub(super) async fn ensure_markdown_file(
                     target.file_id
                 )
             })?;
-        state
-            .server
-            .dispatch(temper_server::state::DispatchCommand {
-                tenant: tenant_id,
-                entity_type: "Workspace",
-                entity_id: target.workspace_id,
-                action: "IncrementFileCount",
-                params: serde_json::json!({}),
-                agent_ctx,
-                await_integration: false,
-            })
-            .await
-            .map_err(|e| {
-                format!(
-                    "failed to increment file count for workspace '{}': {e}",
-                    target.workspace_id
-                )
-            })?;
     }
 
     let desired_hash = content_sha256(content);
