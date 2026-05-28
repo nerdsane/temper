@@ -20,6 +20,8 @@ pub mod platform;
 mod query_page;
 pub mod schema;
 mod selected_catalog;
+mod schema_event_history;
+mod segments;
 pub mod store;
 
 pub use metrics::init_metrics;
