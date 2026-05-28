@@ -271,6 +271,7 @@ mod tests {
             events_since_snapshot: 2,
             last_snapshot_sequence_nr: MAX_EVENTS_SINCE_SNAPSHOT as u64 + 48,
             sequence_nr: MAX_EVENTS_SINCE_SNAPSHOT as u64 + 50,
+            processed_idempotency_keys: std::collections::BTreeMap::new(),
         };
 
         assert!(state.can_accept_event());
@@ -292,6 +293,7 @@ mod tests {
             events_since_snapshot: MAX_EVENTS_SINCE_SNAPSHOT,
             last_snapshot_sequence_nr: 0,
             sequence_nr: MAX_EVENTS_SINCE_SNAPSHOT as u64,
+            processed_idempotency_keys: std::collections::BTreeMap::new(),
         };
 
         assert!(!state.can_accept_event());

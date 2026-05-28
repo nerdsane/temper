@@ -750,7 +750,20 @@ fn test_find_wasm_modules_discovers_packaged_root_wasm() {
     fs::create_dir_all(&module_dir).expect("create module dir");
     fs::write(module_dir.join("demo_module.wasm"), b"\0asm-packaged").expect("write wasm");
 
-    let modules = find_wasm_modules(&root, &BTreeMap::new());
+    let mut configs = BTreeMap::new();
+    configs.insert(
+        "demo_module".to_string(),
+        WasmModuleManifest {
+            name: "demo_module".to_string(),
+            target: None,
+            criticality: WasmModuleCriticality::default(),
+            startup_loading: WasmStartupLoading::default(),
+            provenance: None,
+            import_class: None,
+        },
+    );
+
+    let modules = find_wasm_modules(&root, &configs);
     fs::remove_dir_all(&root).expect("remove temp app");
 
     assert_eq!(
