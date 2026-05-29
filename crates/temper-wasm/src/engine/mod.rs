@@ -29,6 +29,7 @@ use crate::types::{
 pub(crate) use guest_spans::GuestSpanRegistry;
 
 const WASM_EPOCH_TICK_INTERVAL: Duration = Duration::from_millis(10);
+const WASM_INVOKE_THREAD_STACK_BYTES: usize = 16 * 1024 * 1024;
 
 /// Errors from the WASM engine.
 #[derive(Debug, thiserror::Error)]
@@ -186,7 +187,7 @@ pub(crate) struct HostState {
     pub(crate) wasi_ctx: Option<WasiP1Ctx>,
     /// Pre-fetched bytes for oversize blob-ref fields referenced by
     /// `context_json`. Populated by the dispatcher before the invocation
-    /// enters `spawn_blocking`, so `host_read_field_stream` can resolve
+    /// enters the blocking WASM thread, so `host_read_field_stream` can resolve
     /// blob refs synchronously. Keyed by blob key (e.g.
     /// `field-overflow/sha256/<hex>.json`). See ADR-0046.
     pub(crate) blob_cache: BTreeMap<String, Vec<u8>>,
@@ -406,21 +407,37 @@ impl WasmEngine {
         tracing::Span::current().record("blob_cache_entries", blob_cache_entries);
         tracing::Span::current().record("blob_cache_bytes", blob_cache_bytes);
         let span = tracing::Span::current();
+        let runtime_handle = tokio::runtime::Handle::current();
 
-        tokio::task::spawn_blocking(move || {
-            let _entered = span.enter();
-            Self::invoke_blocking(
-                engine,
-                cached,
-                context_owned,
-                host,
-                limits_owned,
-                streams,
-                blob_cache,
-            )
-        })
-        .await
-        .map_err(|e| WasmError::Invocation(format!("blocking wasm task failed: {e}")))?
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        let thread_name = format!(
+            "temper-wasm-invoke-{}",
+            module_hash.chars().take(12).collect::<String>()
+        );
+
+        thread::Builder::new()
+            .name(thread_name)
+            .stack_size(WASM_INVOKE_THREAD_STACK_BYTES)
+            .spawn(move || {
+                let result = {
+                    let _runtime_entered = runtime_handle.enter();
+                    let _entered = span.enter();
+                    Self::invoke_blocking(
+                        engine,
+                        cached,
+                        context_owned,
+                        host,
+                        limits_owned,
+                        streams,
+                        blob_cache,
+                    )
+                };
+                let _ = tx.send(result);
+            })
+            .map_err(|e| WasmError::Invocation(format!("failed to spawn WASM thread: {e}")))?;
+
+        rx.await
+            .map_err(|e| WasmError::Invocation(format!("WASM thread terminated: {e}")))?
     }
 
     fn invoke_blocking(

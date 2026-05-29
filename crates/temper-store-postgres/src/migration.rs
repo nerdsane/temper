@@ -34,6 +34,7 @@ mod tests {
             include_str!("../migrations/0003_published_artifacts.sql"),
             include_str!("../migrations/0004_entity_catalog_state.sql"),
             include_str!("../migrations/0005_installed_app_genesis_provenance.sql"),
+            include_str!("../migrations/0006_segmented_event_history.sql"),
         ]
         .join("\n")
         .to_lowercase();
@@ -47,6 +48,8 @@ mod tests {
             "tenant_secrets",
             "blobs",
             "published_artifacts",
+            "event_segments",
+            "snapshot_history",
         ] {
             assert!(
                 migration.contains(&format!("create table if not exists {table}")),
@@ -57,6 +60,10 @@ mod tests {
             migration.contains("enable row level security"),
             "versioned migration must carry tenant RLS setup"
         );
+        assert!(
+            migration.contains("segment_index"),
+            "versioned migration must add event segment metadata"
+        );
     }
 
     #[test]
@@ -65,6 +72,22 @@ mod tests {
         assert!(
             schema::CREATE_EVENTS_TABLE.contains("IF NOT EXISTS"),
             "events DDL must be idempotent"
+        );
+        assert!(
+            schema::CREATE_EVENTS_TABLE.contains("segment_index"),
+            "events rows must carry segment metadata"
+        );
+        assert!(
+            schema::ALTER_EVENTS_ADD_SEGMENT_INDEX.contains("ADD COLUMN IF NOT EXISTS"),
+            "events segment migration must be idempotent"
+        );
+        assert!(
+            schema::CREATE_EVENT_SEGMENTS_TABLE.contains("IF NOT EXISTS"),
+            "event segment DDL must be idempotent"
+        );
+        assert!(
+            schema::CREATE_SNAPSHOT_HISTORY_TABLE.contains("IF NOT EXISTS"),
+            "snapshot history DDL must be idempotent"
         );
         assert!(
             schema::CREATE_SNAPSHOTS_TABLE.contains("IF NOT EXISTS"),

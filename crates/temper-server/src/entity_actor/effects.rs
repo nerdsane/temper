@@ -17,7 +17,7 @@ use temper_runtime::scheduler::{sim_now, sim_uuid};
 
 use crate::blobs::{FIELD_OVERFLOW_BLOB_PREFIX, OverflowBlobWrite, blob_ref_value};
 
-use super::types::{EntityEvent, EntityState, MAX_EVENTS_PER_ENTITY};
+use super::types::{EntityEvent, EntityState, MAX_EVENTS_SINCE_SNAPSHOT};
 
 /// A scheduled action to fire after a delay.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -196,7 +196,7 @@ pub fn process_action_with_xref_and_field_mode(
     cross_entity_booleans: &std::collections::BTreeMap<String, bool>,
     field_sync_mode: FieldSyncMode,
 ) -> ProcessResult {
-    if state.total_event_count >= MAX_EVENTS_PER_ENTITY {
+    if state.events_since_snapshot >= MAX_EVENTS_SINCE_SNAPSHOT {
         return ProcessResult {
             success: false,
             event: None,
@@ -205,7 +205,7 @@ pub fn process_action_with_xref_and_field_mode(
             spawn_requests: vec![],
             overflow_blobs: vec![],
             error: Some(format!(
-                "Event budget exhausted ({MAX_EVENTS_PER_ENTITY} max)"
+                "Event budget exhausted ({MAX_EVENTS_SINCE_SNAPSHOT} max since snapshot)"
             )),
         };
     }
@@ -778,6 +778,8 @@ effect = [{ type = "schedule", action = "Refresh", delay_seconds = 2700 }]
             fields: serde_json::json!({}),
             events: std::collections::VecDeque::new(),
             total_event_count: 0,
+            events_since_snapshot: 0,
+            last_snapshot_sequence_nr: 0,
             sequence_nr: 0,
             processed_idempotency_keys: std::collections::BTreeMap::new(),
         };
@@ -812,6 +814,8 @@ effect = [{ type = "schedule", action = "Refresh", delay_seconds = 2700 }]
             fields: serde_json::json!({}),
             events: std::collections::VecDeque::new(),
             total_event_count: 0,
+            events_since_snapshot: 0,
+            last_snapshot_sequence_nr: 0,
             sequence_nr: 0,
             processed_idempotency_keys: std::collections::BTreeMap::new(),
         };
@@ -850,6 +854,8 @@ effect = [{ type = "schedule", action = "Refresh", delay_seconds = 2700 }]
             fields: serde_json::json!({}),
             events: std::collections::VecDeque::new(),
             total_event_count: 0,
+            events_since_snapshot: 0,
+            last_snapshot_sequence_nr: 0,
             sequence_nr: 0,
             processed_idempotency_keys: std::collections::BTreeMap::new(),
         };
@@ -897,6 +903,8 @@ effect = [
             fields: serde_json::json!({}),
             events: std::collections::VecDeque::new(),
             total_event_count: 0,
+            events_since_snapshot: 0,
+            last_snapshot_sequence_nr: 0,
             sequence_nr: 0,
             processed_idempotency_keys: std::collections::BTreeMap::new(),
         };
@@ -954,6 +962,8 @@ guard = [
             fields: serde_json::json!({"test_wf_id": "wf-1"}),
             events: std::collections::VecDeque::new(),
             total_event_count: 0,
+            events_since_snapshot: 0,
+            last_snapshot_sequence_nr: 0,
             sequence_nr: 0,
             processed_idempotency_keys: std::collections::BTreeMap::new(),
         };
@@ -1011,6 +1021,8 @@ effect = [{ type = "schedule_at", field = "next_run_at", action = "Trigger" }]
             fields: serde_json::json!({}),
             events: std::collections::VecDeque::new(),
             total_event_count: 0,
+            events_since_snapshot: 0,
+            last_snapshot_sequence_nr: 0,
             sequence_nr: 0,
             processed_idempotency_keys: std::collections::BTreeMap::new(),
         };
@@ -1067,6 +1079,8 @@ effect = [{ type = "schedule_at", field = "next_run_at", action = "Trigger" }]
             fields: serde_json::json!({}),
             events: std::collections::VecDeque::new(),
             total_event_count: 0,
+            events_since_snapshot: 0,
+            last_snapshot_sequence_nr: 0,
             sequence_nr: 0,
             processed_idempotency_keys: std::collections::BTreeMap::new(),
         };
@@ -1114,6 +1128,8 @@ effect = [{ type = "schedule_at", field = "next_run_at", action = "Trigger" }]
             fields: serde_json::json!({}),
             events: std::collections::VecDeque::new(),
             total_event_count: 0,
+            events_since_snapshot: 0,
+            last_snapshot_sequence_nr: 0,
             sequence_nr: 0,
             processed_idempotency_keys: std::collections::BTreeMap::new(),
         };
@@ -1160,6 +1176,8 @@ effect = [{ type = "set_counter_from_param", var = "size_bytes", param = "payloa
             fields: serde_json::json!({}),
             events: std::collections::VecDeque::new(),
             total_event_count: 0,
+            events_since_snapshot: 0,
+            last_snapshot_sequence_nr: 0,
             sequence_nr: 0,
             processed_idempotency_keys: std::collections::BTreeMap::new(),
         };
@@ -1224,6 +1242,8 @@ effect = [
             }),
             events: std::collections::VecDeque::new(),
             total_event_count: 0,
+            events_since_snapshot: 0,
+            last_snapshot_sequence_nr: 0,
             sequence_nr: 0,
             processed_idempotency_keys: std::collections::BTreeMap::new(),
         };
@@ -1261,6 +1281,8 @@ effect = [
             fields: serde_json::json!({}),
             events: std::collections::VecDeque::new(),
             total_event_count: 0,
+            events_since_snapshot: 0,
+            last_snapshot_sequence_nr: 0,
             sequence_nr: 0,
             processed_idempotency_keys: std::collections::BTreeMap::new(),
         }

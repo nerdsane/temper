@@ -53,6 +53,8 @@ fn event_budget_workspace_id_uses_workspace_entity_id_or_field() {
         fields: serde_json::json!({"WorkspaceId": "ignored"}),
         events: std::collections::VecDeque::new(),
         total_event_count: 0,
+        events_since_snapshot: 0,
+        last_snapshot_sequence_nr: 0,
         sequence_nr: 0,
         processed_idempotency_keys: BTreeMap::new(),
     };
@@ -69,6 +71,8 @@ fn event_budget_workspace_id_uses_workspace_entity_id_or_field() {
         fields: serde_json::json!({"workspace_id": "ws-2"}),
         events: std::collections::VecDeque::new(),
         total_event_count: 0,
+        events_since_snapshot: 0,
+        last_snapshot_sequence_nr: 0,
         sequence_nr: 0,
         processed_idempotency_keys: BTreeMap::new(),
     };

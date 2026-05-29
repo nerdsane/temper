@@ -297,9 +297,8 @@ fn effective_app_deployment_mode(manifest: &AppManifest) -> AppDeploymentMode {
 
 /// Find compiled WASM module binaries in an app directory.
 ///
-/// Scans both `wasm32-unknown-unknown` and `wasm32-wasip1` release outputs
-/// because some OS apps mix pure WASM modules with WASI modules such as
-/// sandboxed tool runners.
+/// Scans manifest-selected target outputs, common WASM release outputs, and
+/// packaged artifacts copied next to the module after Docker target pruning.
 fn find_wasm_modules(
     app_dir: &Path,
     module_configs: &BTreeMap<String, WasmModuleManifest>,
@@ -321,12 +320,12 @@ fn find_wasm_modules(
         if !module_dir.is_dir() {
             continue;
         }
-
         // When the manifest declares a specific compilation target, search
         // only that target's release directory — avoids picking up a stale
         // build from the wrong target (e.g. wasm32-unknown-unknown when the
-        // module requires wasm32-wasip1). Fall back to a sibling bundled
-        // artifact ({module_name}.wasm) which build.sh copies after compilation.
+        // module requires wasm32-wasip1). Fall back to bundled artifacts
+        // copied after compilation.
+        let dashed_name = module_name.replace('_', "-");
         let candidates: Vec<PathBuf> = if let Some(config) = module_configs.get(&module_name)
             && let Some(ref target) = config.target
         {
@@ -336,7 +335,15 @@ fn find_wasm_modules(
                     .join(target)
                     .join("release")
                     .join(format!("{module_name}.wasm")),
+                module_dir
+                    .join("target")
+                    .join(target)
+                    .join("release")
+                    .join(format!("{dashed_name}.wasm")),
                 module_dir.join(format!("{module_name}.wasm")),
+                module_dir.join(format!("{dashed_name}.wasm")),
+                wasm_dir.join(format!("{module_name}.wasm")),
+                wasm_dir.join(format!("{dashed_name}.wasm")),
             ]
         } else {
             vec![
@@ -350,7 +357,20 @@ fn find_wasm_modules(
                     .join("wasm32-wasip1")
                     .join("release")
                     .join(format!("{module_name}.wasm")),
+                module_dir
+                    .join("target")
+                    .join("wasm32-unknown-unknown")
+                    .join("release")
+                    .join(format!("{dashed_name}.wasm")),
+                module_dir
+                    .join("target")
+                    .join("wasm32-wasip1")
+                    .join("release")
+                    .join(format!("{dashed_name}.wasm")),
                 module_dir.join(format!("{module_name}.wasm")),
+                module_dir.join(format!("{dashed_name}.wasm")),
+                wasm_dir.join(format!("{module_name}.wasm")),
+                wasm_dir.join(format!("{dashed_name}.wasm")),
             ]
         };
 
@@ -2343,25 +2363,6 @@ pub(super) async fn ensure_markdown_file(
                 format!(
                     "failed to register file '{}' with parent directory: {e}",
                     target.file_id
-                )
-            })?;
-        state
-            .server
-            .dispatch(temper_server::state::DispatchCommand {
-                tenant: tenant_id,
-                entity_type: "Workspace",
-                entity_id: target.workspace_id,
-                action: "IncrementFileCount",
-                params: serde_json::json!({}),
-                agent_ctx,
-                await_integration: false,
-                await_reactions: true,
-            })
-            .await
-            .map_err(|e| {
-                format!(
-                    "failed to increment file count for workspace '{}': {e}",
-                    target.workspace_id
                 )
             })?;
     }

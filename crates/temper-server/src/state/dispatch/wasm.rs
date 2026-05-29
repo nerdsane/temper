@@ -2139,6 +2139,8 @@ mod tests {
             fields: json!({"model": "claude-sonnet-4-6"}),
             events: std::collections::VecDeque::new(),
             total_event_count: 0,
+            events_since_snapshot: 0,
+            last_snapshot_sequence_nr: 0,
             sequence_nr: 0,
             processed_idempotency_keys: std::collections::BTreeMap::new(),
         };
@@ -2196,6 +2198,8 @@ mod tests {
             fields: json!({"provider": "openai", "model": "gpt-5.4"}),
             events: std::collections::VecDeque::new(),
             total_event_count: 0,
+            events_since_snapshot: 0,
+            last_snapshot_sequence_nr: 0,
             sequence_nr: 0,
             processed_idempotency_keys: std::collections::BTreeMap::new(),
         };
@@ -2280,6 +2284,8 @@ mod tests {
             fields: json!({}),
             events: std::collections::VecDeque::new(),
             total_event_count: 0,
+            events_since_snapshot: 0,
+            last_snapshot_sequence_nr: 0,
             sequence_nr: 0,
             processed_idempotency_keys: std::collections::BTreeMap::new(),
         };
@@ -2375,6 +2381,8 @@ mod tests {
             }),
             events: std::collections::VecDeque::new(),
             total_event_count: 0,
+            events_since_snapshot: 0,
+            last_snapshot_sequence_nr: 0,
             sequence_nr: 0,
             processed_idempotency_keys: std::collections::BTreeMap::new(),
         };
@@ -2416,6 +2424,8 @@ mod tests {
             }),
             events: std::collections::VecDeque::new(),
             total_event_count: 0,
+            events_since_snapshot: 0,
+            last_snapshot_sequence_nr: 0,
             sequence_nr: 0,
             processed_idempotency_keys: std::collections::BTreeMap::new(),
         };

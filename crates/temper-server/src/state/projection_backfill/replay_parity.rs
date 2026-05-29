@@ -289,6 +289,43 @@ pub(in crate::state) async fn verify_query_projection_replay_parity(
                 tenant_blob_store.as_ref(),
             )
             .await;
+            let replayed = match replayed {
+                Ok(state) => state,
+                Err(error) => {
+                    report.errors += 1;
+                    push_replay_parity_example(
+                        &mut report,
+                        ReplayParityExample {
+                            entity_type: &entity_type,
+                            entity_id: &entity_id,
+                            drift_kind: "replay_error",
+                            sequence_direction: "unknown",
+                            sequence_gap: 0,
+                            catalog_sequence: catalog_rows
+                                .get(&entity_id)
+                                .map(|catalog| catalog.sequence_nr),
+                            authoritative_sequence: 0,
+                        },
+                    );
+                    crate::query_projection_metrics::record_replay_parity_check(
+                        tenant.as_str(),
+                        &entity_type,
+                        "error",
+                        "replay_error",
+                        "unknown",
+                        0,
+                        started_at.elapsed(),
+                    );
+                    tracing::warn!(
+                        tenant = %tenant,
+                        entity_type = %entity_type,
+                        entity_id = %entity_id,
+                        error = %error,
+                        "query projection replay parity could not replay entity"
+                    );
+                    continue;
+                }
+            };
             let catalog = catalog_rows.get(&entity_id);
 
             if replayed.status == "Deleted" {
