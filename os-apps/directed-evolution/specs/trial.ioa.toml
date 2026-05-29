@@ -15,7 +15,7 @@ kind = "input"
 from = ["Planned"]
 to = "Running"
 effect = "set has_agent true"
-params = ["EpisodeId", "VariantId", "SimulatedUserId", "Goal", "WorkItemId"]
+params = ["EpisodeId", "GenerationId", "VariantId", "EvaluationStageId", "StageResultId", "SimulatedUserPlanId", "SimulatedUserId", "PersonaJson", "RunIndex", "Goal", "WorkItemId"]
 hint = "Start an AI simulated user trial against a variant."
 
 [[action]]
@@ -23,7 +23,7 @@ name = "SucceedTrial"
 kind = "input"
 from = ["Running"]
 to = "Succeeded"
-params = ["Summary", "EvidenceArtifactId", "MeasurementsJson"]
+params = ["Summary", "EvidenceArtifactId", "MeasurementsJson", "JourneyJson", "ObservationJson", "IntentSatisfied", "FrictionJson", "Blocker", "BlockerKind"]
 hint = "Record a successful trial."
 
 [[action]]
@@ -31,7 +31,7 @@ name = "FailTrial"
 kind = "input"
 from = ["Running"]
 to = "Failed"
-params = ["FailureReason", "EvidenceArtifactId", "MeasurementsJson"]
+params = ["FailureReason", "EvidenceArtifactId", "MeasurementsJson", "JourneyJson", "ObservationJson", "IntentSatisfied", "FrictionJson", "Blocker", "BlockerKind"]
 hint = "Record a failed trial."
 
 [[action]]

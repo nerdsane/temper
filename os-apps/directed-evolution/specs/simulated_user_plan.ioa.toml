@@ -1,0 +1,29 @@
+[automaton]
+name = "SimulatedUserPlan"
+states = ["Draft", "Active", "Frozen", "Archived"]
+initial = "Draft"
+allow_indefinite_states = ["Draft", "Active", "Frozen"]
+
+[[action]]
+name = "ActivateSimulatedUserPlan"
+kind = "input"
+from = ["Draft"]
+to = "Active"
+params = ["EpisodeId", "UsersPerVariant", "RunsPerPersona", "PersonasJson", "GoalsJson", "CreatedBy", "HumanDecisionSummary"]
+hint = "Record the human-approved simulated-user plan for an episode."
+
+[[action]]
+name = "FreezeSimulatedUserPlan"
+kind = "input"
+from = ["Active"]
+to = "Frozen"
+params = ["FrozenBy", "Reason"]
+hint = "Freeze the simulated-user plan before variants run."
+
+[[action]]
+name = "ArchiveSimulatedUserPlan"
+kind = "input"
+from = ["Draft", "Active", "Frozen"]
+to = "Archived"
+params = ["Reason"]
+hint = "Archive a simulated-user plan."

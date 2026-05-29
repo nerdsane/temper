@@ -12,6 +12,13 @@ params = ["ArtifactKind", "Uri", "Summary", "CorrelationJson", "Digest"]
 hint = "Record trace, log, screenshot, report, diff, metric sample, or other evidence."
 
 [[action]]
+name = "RecordEvidenceSummary"
+kind = "input"
+from = ["Recorded"]
+params = ["ArtifactKind", "Uri", "Summary", "CorrelationJson", "Digest", "Query", "TimeWindow", "ResultCount", "Interpretation", "ZeroResultMeaning", "EvidenceProvenance"]
+hint = "Record evidence plus the structured query/result summary used by evaluators."
+
+[[action]]
 name = "LinkEvidenceArtifact"
 kind = "input"
 from = ["Recorded", "Linked"]

@@ -2,6 +2,9 @@
 
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::IntoResponse;
+use opentelemetry::KeyValue as OtelKeyValue;
+use opentelemetry::trace::{Span, Tracer};
+use std::collections::BTreeMap;
 use temper_odata::path::{KeyValue, ODataPath};
 use temper_runtime::tenant::TenantId;
 
@@ -39,6 +42,93 @@ pub(crate) fn extract_tenant(
     // Single-tenant compatibility: deterministic fallback to the well-known
     // default tenant rather than relying on registry registration order.
     Ok(TenantId::default())
+}
+
+pub(super) fn directed_evolution_header_fields(
+    headers: &HeaderMap,
+) -> BTreeMap<&'static str, String> {
+    let mut fields = BTreeMap::new();
+    for (header, field) in [
+        ("x-de-episode-id", "episode_id"),
+        ("x-de-direction-id", "direction_id"),
+        ("x-de-generation-id", "generation_id"),
+        ("x-de-variant-id", "variant_id"),
+        ("x-de-stage-id", "stage_id"),
+        ("x-de-stage-result-id", "stage_result_id"),
+        ("x-de-trial-id", "trial_id"),
+        ("x-de-persona-index", "persona_index"),
+        ("x-de-run-index", "run_index"),
+        ("x-de-simulated-user-id", "simulated_user_id"),
+        ("x-de-work-item-id", "work_item_id"),
+        ("x-de-runtime-ref", "runtime_ref"),
+        ("x-de-app-ref", "app_ref"),
+    ] {
+        if let Some(value) = headers
+            .get(header)
+            .and_then(|value| value.to_str().ok())
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+        {
+            fields.insert(field, value.to_string());
+        }
+    }
+    fields
+}
+
+pub(super) fn log_directed_evolution_odata_request(
+    headers: &HeaderMap,
+    tenant: &TenantId,
+    method: &str,
+    path: &str,
+) {
+    let fields = directed_evolution_header_fields(headers);
+    if fields.is_empty() {
+        return;
+    }
+    crate::runtime_metrics::record_directed_evolution_runtime_request(
+        tenant.as_str(),
+        method,
+        path,
+        &fields,
+    );
+    let mut otel_fields = vec![
+        OtelKeyValue::new("directed_evolution", true),
+        OtelKeyValue::new("tenant", tenant.as_str().to_string()),
+        OtelKeyValue::new("http.method", method.to_string()),
+        OtelKeyValue::new("odata.path", path.to_string()),
+    ];
+    for (field, value) in &fields {
+        otel_fields.push(OtelKeyValue::new(
+            format!("directed_evolution.{field}"),
+            value.clone(),
+        ));
+    }
+    let tracer = opentelemetry::global::tracer("temper");
+    let mut span = tracer
+        .span_builder("directed_evolution.runtime_request")
+        .with_attributes(otel_fields)
+        .start(&tracer);
+    span.end();
+    tracing::info!(
+        directed_evolution = true,
+        tenant = %tenant,
+        http.method = %method,
+        odata.path = %path,
+        directed_evolution.episode_id = %fields.get("episode_id").map(String::as_str).unwrap_or(""),
+        directed_evolution.direction_id = %fields.get("direction_id").map(String::as_str).unwrap_or(""),
+        directed_evolution.generation_id = %fields.get("generation_id").map(String::as_str).unwrap_or(""),
+        directed_evolution.variant_id = %fields.get("variant_id").map(String::as_str).unwrap_or(""),
+        directed_evolution.stage_id = %fields.get("stage_id").map(String::as_str).unwrap_or(""),
+        directed_evolution.stage_result_id = %fields.get("stage_result_id").map(String::as_str).unwrap_or(""),
+        directed_evolution.trial_id = %fields.get("trial_id").map(String::as_str).unwrap_or(""),
+        directed_evolution.persona_index = %fields.get("persona_index").map(String::as_str).unwrap_or(""),
+        directed_evolution.run_index = %fields.get("run_index").map(String::as_str).unwrap_or(""),
+        directed_evolution.simulated_user_id = %fields.get("simulated_user_id").map(String::as_str).unwrap_or(""),
+        directed_evolution.work_item_id = %fields.get("work_item_id").map(String::as_str).unwrap_or(""),
+        directed_evolution.runtime_ref = %fields.get("runtime_ref").map(String::as_str).unwrap_or(""),
+        directed_evolution.app_ref = %fields.get("app_ref").map(String::as_str).unwrap_or(""),
+        "directed evolution runtime request"
+    );
 }
 
 pub(super) fn extract_key(key: &KeyValue) -> String {

@@ -127,7 +127,7 @@ Keep the mutation bounded to the Agent Answers app bundle: prefer changing APP.m
 adrs/, specs/question.ioa.toml, specs/answer.ioa.toml, specs/model.csdl.xml, and \
 policies/agent_answers.cedar. Do not create unrelated entity families unless the \
 lane explicitly requires it. Preserve existing Question and Answer actions. \
-Return JSON with: summary, app_ref, branch_ref, runtime_ref, changed_files, diff_ref, \
+Return JSON with: summary, app_ref, branch_ref, runtime_ref, changed_files, diff_ref, diff_patch, \
 verification_notes, and next_actions. Do not change evaluation rules or viability constraints.",
         variant_lane_suggestion(variant_index),
     )

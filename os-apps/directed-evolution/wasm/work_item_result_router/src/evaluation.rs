@@ -27,7 +27,12 @@ fn record_measurements(
                 item.to_string(),
             );
             let unit = lookup_string_deep(item, &["unit", "Unit"]);
-            records.push((metric_name, value, unit));
+            let provenance = lookup_string_deep(
+                item,
+                &["provenance_kind", "provenanceKind", "ProvenanceKind"],
+            );
+            let interpretation = lookup_string_deep(item, &["interpretation", "Interpretation"]);
+            records.push((metric_name, value, unit, provenance, interpretation));
         }
     } else if let Some(object) = metrics.as_object() {
         for (metric_name, value) in object {
@@ -39,15 +44,23 @@ fn record_measurements(
                         value.to_string(),
                     ),
                     lookup_string_deep(value, &["unit", "Unit"]),
+                    lookup_string_deep(value, &["provenance_kind", "provenanceKind", "ProvenanceKind"]),
+                    lookup_string_deep(value, &["interpretation", "Interpretation"]),
                 ));
             } else {
-                records.push((metric_name.clone(), value.to_string(), String::new()));
+                records.push((
+                    metric_name.clone(),
+                    value.to_string(),
+                    String::new(),
+                    String::new(),
+                    String::new(),
+                ));
             }
         }
     }
 
     let mut measurement_ids = Vec::new();
-    for (metric_definition_id, value, unit) in records {
+    for (metric_definition_id, value, unit, provenance_kind, interpretation) in records {
         let measurement_id = create_entity(ctx, base_url, headers, "Measurements")?;
         post_directed_action(
             ctx,
@@ -64,6 +77,11 @@ fn record_measurements(
                 "Value": value,
                 "Unit": unit,
                 "EvidenceArtifactId": evidence_artifact_id,
+                "ProvenanceKind": provenance_kind,
+                "MeasurementKind": "",
+                "SourceRunId": "",
+                "ComputedByRef": "",
+                "Interpretation": interpretation,
             }),
         )?;
         measurement_ids.push(measurement_id);

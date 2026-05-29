@@ -247,6 +247,13 @@ fn entity_status(entity: &Value) -> String {
                 .and_then(Value::as_str)
                 .map(str::to_string)
         })
+        .or_else(|| {
+            entity
+                .get("fields")
+                .and_then(|fields| fields.get("Status").or_else(|| fields.get("status")))
+                .and_then(Value::as_str)
+                .map(str::to_string)
+        })
         .unwrap_or_default()
 }
 
@@ -277,6 +284,16 @@ fn parse_json_string_array(value: &str) -> Vec<String> {
                 .map(str::to_string)
                 .collect()
         })
+}
+
+fn parse_json_values(value: &str) -> Vec<Value> {
+    if value.trim().is_empty() {
+        return Vec::new();
+    }
+    serde_json::from_str::<Value>(value)
+        .ok()
+        .and_then(|parsed| parsed.as_array().cloned())
+        .unwrap_or_default()
 }
 
 fn parse_work_item_output(raw: &str) -> Value {

@@ -17,7 +17,8 @@ use super::app_uniqueness::enforce_commons_app_name_unique_for_write;
 use super::bindings::dispatch_bound_action;
 use super::common::{
     constraint_violation_response, extract_key, extract_tenant, load_entity_or_404,
-    resolve_entity_type, run_write_prechecks, verification_gate_response,
+    log_directed_evolution_odata_request, resolve_entity_type, run_write_prechecks,
+    verification_gate_response,
 };
 use super::constraints::pre_delete_relation_checks;
 use super::rate_limit::{enforce_commons_write_rate_limit, owner_id_from_fields};
@@ -251,6 +252,7 @@ pub async fn handle_odata_post(
         Ok(t) => t,
         Err(e) => return e.into_response(),
     };
+    log_directed_evolution_odata_request(&headers, &tenant, "POST", &path);
     let mut agent_ctx = extract_agent_context(&headers);
     if let Some(remote_parent) = remote_parent_context(&agent_ctx) {
         tracing::Span::current().set_parent(remote_parent);

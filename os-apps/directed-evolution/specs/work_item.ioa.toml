@@ -41,7 +41,7 @@ from = ["Running"]
 to = "Succeeded"
 effect = [{ type = "trigger", name = "work_item_succeeded" }]
 params = ["ResultJson", "EvidenceArtifactId", "Summary"]
-hint = "Record successful work item completion."
+hint = "Record successful work item completion and route role-specific outcomes, including promotion materialization."
 
 [[action.triggers]]
 name = "work_item_succeeded"

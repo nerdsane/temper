@@ -13,6 +13,14 @@ params = ["EpisodeId", "StageName", "StageKind", "SequenceIndex", "RequiredEvide
 hint = "Activate a concrete evaluation stage."
 
 [[action]]
+name = "ActivateEvaluationStageWithEvaluator"
+kind = "input"
+from = ["Draft"]
+to = "Active"
+params = ["EpisodeId", "StageName", "StageKind", "SequenceIndex", "RequiredEvidenceJson", "ExecutorKind", "MeasurementProvenance", "EvaluatorRef", "EvaluatorModule", "DecisionAuthority"]
+hint = "Activate a concrete evaluation stage with explicit executor and provenance metadata."
+
+[[action]]
 name = "ArchiveEvaluationStage"
 kind = "input"
 from = ["Draft", "Active"]

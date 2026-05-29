@@ -1,6 +1,6 @@
 [automaton]
 name = "Episode"
-states = ["Draft", "Negotiating", "Running", "Paused", "Selecting", "Promoting", "Completed", "Stopped", "Failed"]
+states = ["Draft", "Negotiating", "Planned", "Running", "Paused", "Selecting", "Promoting", "Completed", "Stopped", "Failed"]
 initial = "Draft"
 allow_indefinite_states = ["Draft", "Negotiating", "Running", "Paused", "Selecting", "Promoting"]
 
@@ -36,9 +36,18 @@ params = ["AdaptationGoalId", "SelectionPressureId", "ViabilityConstraintIdsJson
 hint = "Record the Adaptation Goal, Viability Constraints, Selection Pressure, and evaluation rules."
 
 [[action]]
-name = "StartEpisode"
+name = "PlanEpisode"
 kind = "input"
 from = ["Draft", "Negotiating"]
+to = "Planned"
+effect = "set has_contract true"
+params = ["DirectionId", "OrganismId", "ParentVersionId", "AutonomyLane", "AdaptationGoalId", "ViabilityConstraintIdsJson", "MetricDefinitionIdsJson", "EvaluationStageIdsJson", "EliminationRuleIdsJson", "ScoringRuleIdsJson", "SimulatedUserPlanId", "SelectionProtocolId", "EvaluatorRef", "OrganismParentRef", "PlannedBy", "PlanSummary"]
+hint = "Record the fully-authored protocol graph before starting runtime work."
+
+[[action]]
+name = "StartEpisode"
+kind = "input"
+from = ["Draft", "Negotiating", "Planned"]
 to = "Running"
 guard = "is_true has_contract"
 effect = [{ type = "trigger", name = "episode_started" }]

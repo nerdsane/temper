@@ -1,6 +1,6 @@
 [automaton]
 name = "Variant"
-states = ["Created", "Building", "Active", "Eliminated", "Selected", "Promoted", "Failed"]
+states = ["Created", "Building", "Active", "Eliminated", "Selected", "Promoted", "NotSelected", "Failed"]
 initial = "Created"
 allow_indefinite_states = ["Created", "Building", "Active", "Selected"]
 
@@ -19,7 +19,7 @@ name = "RecordVariantMutation"
 kind = "input"
 from = ["Created"]
 effect = "set has_mutation true"
-params = ["EpisodeId", "GenerationId", "MutationId", "AppRef", "BranchRef", "Summary", "BrainRunId"]
+params = ["EpisodeId", "GenerationId", "MutationId", "AppRef", "BranchRef", "Summary", "ChangedFilesJson", "DiffPatch", "BrainRunId"]
 hint = "Attach the generated mutation and runnable app ref to a variant."
 
 [[action]]
@@ -63,6 +63,14 @@ from = ["Active"]
 to = "Selected"
 params = ["SelectionPressureId", "SelectorBrainRunId", "EvidenceArtifactId", "Reason"]
 hint = "Select this variant as the winner."
+
+[[action]]
+name = "RecordVariantNotSelected"
+kind = "input"
+from = ["Active"]
+to = "NotSelected"
+params = ["SelectionPressureId", "SelectorBrainRunId", "EvidenceArtifactId", "Reason"]
+hint = "Record that a viable surviving variant was considered but not selected as the winner."
 
 [[action]]
 name = "PromoteVariant"

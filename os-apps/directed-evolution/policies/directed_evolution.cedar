@@ -96,6 +96,7 @@ permit(
   action in [
     Action::"BeginEpisodeNegotiation",
     Action::"RecordEpisodeContract",
+    Action::"PlanEpisode",
     Action::"StartEpisode",
     Action::"AddGeneration",
     Action::"PauseEpisode",
@@ -135,6 +136,7 @@ permit(
     Action::"RecordVariantStageResult",
     Action::"EliminateVariant",
     Action::"SelectVariant",
+    Action::"RecordVariantNotSelected",
     Action::"PromoteVariant",
     Action::"FailVariant"
   ],
@@ -145,7 +147,11 @@ permit(
 
 permit(
   principal is Agent,
-  action in [Action::"RecordMutation", Action::"ArchiveMutation"],
+  action in [
+    Action::"RecordMutation",
+    Action::"RecordMutationWithPatch",
+    Action::"ArchiveMutation"
+  ],
   resource is Mutation
 ) when {
   ["system", "codex", "supervisor", "human"].contains(principal.agent_type)
@@ -181,7 +187,11 @@ permit(
 
 permit(
   principal is Agent,
-  action in [Action::"ActivateEvaluationStage", Action::"ArchiveEvaluationStage"],
+  action in [
+    Action::"ActivateEvaluationStage",
+    Action::"ActivateEvaluationStageWithEvaluator",
+    Action::"ArchiveEvaluationStage"
+  ],
   resource is EvaluationStage
 ) when {
   ["system", "codex", "supervisor", "human"].contains(principal.agent_type)
@@ -190,6 +200,7 @@ permit(
 permit(
   principal is Agent,
   action in [
+    Action::"PlanStageResult",
     Action::"StartStageResult",
     Action::"PassStageResult",
     Action::"FailStageResult",
@@ -202,7 +213,11 @@ permit(
 
 permit(
   principal is Agent,
-  action in [Action::"ActivateMetricDefinition", Action::"ArchiveMetricDefinition"],
+  action in [
+    Action::"ActivateMetricDefinition",
+    Action::"ActivateMetricDefinitionWithProvenance",
+    Action::"ArchiveMetricDefinition"
+  ],
   resource is MetricDefinition
 ) when {
   ["system", "codex", "supervisor", "human"].contains(principal.agent_type)
@@ -236,12 +251,37 @@ permit(
   principal is Agent,
   action in [
     Action::"RecordEvidenceArtifact",
+    Action::"RecordEvidenceSummary",
     Action::"LinkEvidenceArtifact",
     Action::"ArchiveEvidenceArtifact"
   ],
   resource is EvidenceArtifact
 ) when {
   ["system", "worker", "codex", "supervisor", "human"].contains(principal.agent_type)
+};
+
+permit(
+  principal is Agent,
+  action in [
+    Action::"ActivateSelectionProtocol",
+    Action::"FreezeSelectionProtocol",
+    Action::"ArchiveSelectionProtocol"
+  ],
+  resource is SelectionProtocol
+) when {
+  ["system", "codex", "supervisor", "human"].contains(principal.agent_type)
+};
+
+permit(
+  principal is Agent,
+  action in [
+    Action::"ActivateSimulatedUserPlan",
+    Action::"FreezeSimulatedUserPlan",
+    Action::"ArchiveSimulatedUserPlan"
+  ],
+  resource is SimulatedUserPlan
+) when {
+  ["system", "codex", "supervisor", "human"].contains(principal.agent_type)
 };
 
 permit(
@@ -261,6 +301,8 @@ permit(
   principal is Agent,
   action in [
     Action::"PromoteWinner",
+    Action::"RecordPromotionMaterialization",
+    Action::"FailPromotionMaterialization",
     Action::"RollbackPromotion",
     Action::"FailPromotion"
   ],

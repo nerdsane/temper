@@ -41,6 +41,7 @@ struct RuntimeMetrics {
     state_timeout_armed_on_hydration_total: Counter<u64>,
     // ADR-0056 Sub-Decision 3: silent-exit regression guard.
     integration_silent_exit_total: Counter<u64>,
+    directed_evolution_runtime_requests_total: Counter<u64>,
     // --- ADR-0050: liveness coverage enforcement --------------------------
     spec_liveness_violations_total: Counter<u64>,
     spec_allow_indefinite_states: Gauge<u64>,
@@ -206,6 +207,12 @@ fn metrics() -> &'static RuntimeMetrics {
                      exit-dispatches-an-action invariant (openpaw ADR-0039 Sub-Decision 3a) \
                      or a transient persist failure that slipped past the retry layer \
                      (ADR-0056 Sub-Decision 2). Alerts on this counter are critical-severity.",
+                )
+                .build(),
+            directed_evolution_runtime_requests_total: meter
+                .u64_counter("temper_directed_evolution_runtime_requests_total")
+                .with_description(
+                    "OData runtime requests carrying Directed Evolution join headers, tagged so Datadog evaluators can query simulated-user and variant traffic by tenant, episode, direction, variant, trial, persona/run, stage, work item, and app/runtime refs.",
                 )
                 .build(),
             spec_liveness_violations_total: meter
@@ -499,6 +506,33 @@ pub fn record_entity_concurrency_retry(
     metrics()
         .entity_concurrency_retry_attempts
         .record(attempts, &attrs);
+}
+
+/// Record a Directed Evolution runtime OData request carrying join headers.
+///
+/// These attributes intentionally mirror the log/span fields so Datadog
+/// evaluators can join app traffic back to the Temper episode graph without
+/// scraping human-facing UI text.
+pub fn record_directed_evolution_runtime_request(
+    tenant: &str,
+    method: &str,
+    path: &str,
+    fields: &BTreeMap<&'static str, String>,
+) {
+    let mut attrs = vec![
+        KeyValue::new("tenant", tenant.to_string()),
+        KeyValue::new("http.method", method.to_string()),
+        KeyValue::new("odata.path", path.to_string()),
+    ];
+    for (field, value) in fields {
+        attrs.push(KeyValue::new(
+            format!("directed_evolution.{field}"),
+            value.clone(),
+        ));
+    }
+    metrics()
+        .directed_evolution_runtime_requests_total
+        .add(1, attrs.as_slice());
 }
 
 // ============================================================================

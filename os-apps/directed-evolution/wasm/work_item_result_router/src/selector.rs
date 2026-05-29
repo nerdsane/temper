@@ -1,3 +1,10 @@
+#[derive(Default)]
+struct MutationDetails {
+    summary: String,
+    changed_files_json: String,
+    diff_patch: String,
+}
+
 fn route_selector(
     ctx: &Context,
     base_url: &str,
@@ -69,6 +76,7 @@ fn route_selector(
         ),
         winner.branch_ref.clone(),
     );
+    let mutation = winner_mutation_details(ctx, base_url, headers, &winner_variant_id)?;
 
     let evidence_artifact_id = create_entity(ctx, base_url, headers, "EvidenceArtifacts")?;
     post_directed_action(
@@ -113,6 +121,30 @@ fn route_selector(
             return Err(format!(
                 "selector chose variant {winner_variant_id} in non-selectable state {status}"
             ));
+        }
+    }
+
+    for survivor_id in survivor_ids.iter().filter(|id| *id != &winner_variant_id) {
+        let survivor = get_entity(ctx, base_url, headers, "Variants", survivor_id)?;
+        if entity_status(&survivor) == "Active" {
+            post_directed_action(
+                ctx,
+                base_url,
+                headers,
+                "Variants",
+                survivor_id,
+                "RecordVariantNotSelected",
+                json!({
+                    "SelectionPressureId": selection_pressure_id,
+                    "SelectorBrainRunId": selector_brain_run_id,
+                    "EvidenceArtifactId": evidence_artifact_id,
+                    "Reason": format!(
+                        "Survived all declared evaluation stages, but was not selected because the winner {} had stronger evidence: {}",
+                        winner_variant_id,
+                        selection_explanation
+                    ),
+                }),
+            )?;
         }
     }
 
@@ -246,8 +278,12 @@ fn route_selector(
             "OrganismId": organism_id,
             "ParentVersionId": parent_version_id,
             "ChildVersionId": new_organism_version_id,
+            "EpisodeId": episode_id,
+            "VariantId": winner_variant_id,
             "PromotionId": promotion_id,
-            "MutationSummary": winner.summary,
+            "MutationSummary": nonempty(mutation.summary.clone(), winner.summary.clone()),
+            "ChangedFilesJson": mutation.changed_files_json,
+            "DiffPatch": mutation.diff_patch,
             "EvidenceArtifactId": evidence_artifact_id,
         }),
     )?;
@@ -285,6 +321,19 @@ fn route_selector(
         )?;
     }
 
+    let promoter_work_item_id = queue_promoter_if_absent(
+        ctx,
+        base_url,
+        headers,
+        &episode_id,
+        &promotion_id,
+        &winner_variant_id,
+        &app_ref,
+        &organism_id,
+        &parent_version_id,
+        &new_organism_version_id,
+    )?;
+
     Ok(json!({
         "routed": "selector",
         "generation_id": generation_id,
@@ -293,6 +342,7 @@ fn route_selector(
         "organism_version_id": new_organism_version_id,
         "lineage_edge_id": lineage_edge_id,
         "evidence_artifact_id": evidence_artifact_id,
+        "promoter_work_item_id": promoter_work_item_id,
     }))
 }
 
@@ -316,4 +366,173 @@ fn select_requested_winner(output: &Value, survivor_ids: &[String]) -> Result<St
         ));
     }
     Ok(requested_winner)
+}
+
+fn winner_mutation_details(
+    ctx: &Context,
+    base_url: &str,
+    headers: &[(String, String)],
+    variant_id: &str,
+) -> Result<MutationDetails, String> {
+    let filter = format!("VariantId%20eq%20'{}'", escape_odata_id(variant_id));
+    let mutations = list_entities(ctx, base_url, headers, "Mutations", &filter)?;
+    let Some(mutation) = mutations.first() else {
+        return Ok(MutationDetails::default());
+    };
+    let fields = state_fields(mutation);
+    Ok(MutationDetails {
+        summary: field_str(&fields, &["Summary"]),
+        changed_files_json: field_str(&fields, &["ChangedFilesJson"]),
+        diff_patch: field_str(&fields, &["DiffPatch"]),
+    })
+}
+
+fn queue_promoter_if_absent(
+    ctx: &Context,
+    base_url: &str,
+    headers: &[(String, String)],
+    episode_id: &str,
+    promotion_id: &str,
+    winner_variant_id: &str,
+    app_ref: &str,
+    organism_id: &str,
+    parent_version_id: &str,
+    new_organism_version_id: &str,
+) -> Result<Option<String>, String> {
+    let filter = format!(
+        "Role%20eq%20'promoter'%20and%20TargetEntityType%20eq%20'Promotion'%20and%20TargetEntityId%20eq%20'{}'",
+        escape_odata_id(promotion_id)
+    );
+    let existing = list_entities(ctx, base_url, headers, "WorkItems", &filter)?;
+    for work_item in existing {
+        let status = entity_status(&work_item);
+        if matches!(
+            status.as_str(),
+            "Queued" | "Claimed" | "Running" | "Succeeded"
+        ) {
+            return Ok(Some(entity_id_from_entity(&work_item)));
+        }
+    }
+
+    let work_item_id = create_entity(ctx, base_url, headers, "WorkItems")?;
+    let prompt = format!(
+        "Materialize Directed Evolution promotion {promotion_id}. Publish and hot-load the already-selected app ref {app_ref}; do not choose a winner or change repository files."
+    );
+    post_directed_action(
+        ctx,
+        base_url,
+        headers,
+        "WorkItems",
+        &work_item_id,
+        "QueueWorkItem",
+        json!({
+            "Role": "promoter",
+            "TargetEntityType": "Promotion",
+            "TargetEntityId": promotion_id,
+            "PromptRef": format!("literal:{prompt}"),
+            "ContextRef": format!("promotion:{promotion_id}"),
+            "OutputSchemaRef": "directed-evolution.promotion-materialization.v1",
+            "CorrelationJson": json!({
+                "episode_id": episode_id,
+                "promotion_id": promotion_id,
+                "winner_variant_id": winner_variant_id,
+                "app_ref": app_ref,
+                "organism_id": organism_id,
+                "parent_version_id": parent_version_id,
+                "new_organism_version_id": new_organism_version_id,
+            }).to_string(),
+        }),
+    )?;
+    Ok(Some(work_item_id))
+}
+
+fn route_promoter(
+    ctx: &Context,
+    base_url: &str,
+    headers: &[(String, String)],
+    promotion_id: &str,
+    work_item_fields: &Value,
+    output: &Value,
+) -> Result<Value, String> {
+    let promotion = get_entity(ctx, base_url, headers, "Promotions", promotion_id)?;
+    if entity_status(&promotion) != "Promoted" {
+        return Ok(json!({
+            "ignored": true,
+            "reason": "promotion not in Promoted state",
+            "promotion_id": promotion_id,
+            "status": entity_status(&promotion),
+        }));
+    }
+
+    let evidence_artifact_id = field_str(work_item_fields, &["EvidenceArtifactId"]);
+    let status = lookup_string_deep(output, &["status", "Status"]);
+    let succeeded = status.is_empty() || status.eq_ignore_ascii_case("succeeded");
+    if succeeded {
+        let canonical_app_ref = nonempty(
+            lookup_string_deep(
+                output,
+                &["canonical_app_ref", "CanonicalAppRef", "app_ref", "AppRef"],
+            ),
+            field_str(&state_fields(&promotion), &["AppRef"]),
+        );
+        let production_tenant =
+            lookup_string_deep(output, &["production_tenant", "ProductionTenant"]);
+        let runtime_ref = lookup_string_deep(output, &["runtime_ref", "RuntimeRef"]);
+        let summary = nonempty(
+            lookup_string_deep(output, &["summary", "Summary", "reasoning_summary"]),
+            format!("Materialized {canonical_app_ref} into {production_tenant}."),
+        );
+        post_directed_action(
+            ctx,
+            base_url,
+            headers,
+            "Promotions",
+            promotion_id,
+            "RecordPromotionMaterialization",
+            json!({
+                "CanonicalAppRef": canonical_app_ref,
+                "ProductionTenant": production_tenant,
+                "RuntimeRef": runtime_ref,
+                "Summary": summary,
+                "EvidenceArtifactId": evidence_artifact_id,
+            }),
+        )?;
+        if !evidence_artifact_id.is_empty() {
+            link_evidence(
+                ctx,
+                base_url,
+                headers,
+                &evidence_artifact_id,
+                "Promotion",
+                promotion_id,
+            )?;
+        }
+        return Ok(json!({
+            "routed": "promoter",
+            "promotion_id": promotion_id,
+            "materialized": true,
+        }));
+    }
+
+    let failure_reason = nonempty(
+        lookup_string_deep(output, &["failure_reason", "FailureReason", "error", "summary"]),
+        "Promotion materialization failed.".to_string(),
+    );
+    post_directed_action(
+        ctx,
+        base_url,
+        headers,
+        "Promotions",
+        promotion_id,
+        "FailPromotionMaterialization",
+        json!({
+            "FailureReason": failure_reason,
+            "EvidenceArtifactId": evidence_artifact_id,
+        }),
+    )?;
+    Ok(json!({
+        "routed": "promoter",
+        "promotion_id": promotion_id,
+        "materialized": false,
+    }))
 }

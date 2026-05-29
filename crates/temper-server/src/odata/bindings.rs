@@ -11,7 +11,7 @@ use tracing_opentelemetry::OpenTelemetrySpanExt;
 use temper_authz::SecurityContext;
 
 use super::account_verification::enforce_commons_account_verified_for_action;
-use super::common::run_write_prechecks;
+use super::common::{directed_evolution_header_fields, run_write_prechecks};
 use super::rate_limit::{enforce_commons_write_rate_limit, owner_id_from_action};
 use super::response::annotate_entity;
 use crate::authz::{DenialInput, record_authz_denial, security_context_from_headers};
@@ -61,6 +61,12 @@ pub(super) async fn dispatch_bound_action(
     }
     if let Some(ref sid) = agent_ctx.session_id {
         http_span.set_attribute(OtelKeyValue::new("session.id", sid.clone()));
+    }
+    for (field, value) in directed_evolution_header_fields(headers) {
+        http_span.set_attribute(OtelKeyValue::new(
+            format!("directed_evolution.{field}"),
+            value,
+        ));
     }
 
     // Build SecurityContext — credential-resolved identity (ADR-0033) or

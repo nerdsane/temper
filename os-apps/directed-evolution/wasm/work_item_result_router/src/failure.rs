@@ -33,7 +33,15 @@ fn route_failed_work_item(
             &failure_reason,
             &evidence_artifact_id,
         ),
-        ("reviewer", "StageResult") | ("simulated_user", "StageResult") => {
+        ("simulated_user", "Trial") => route_failed_simulated_user_trial(
+            ctx,
+            base_url,
+            headers,
+            target_entity_id,
+            &failure_reason,
+            &evidence_artifact_id,
+        ),
+        (role, "StageResult") if stage_evaluator_role(role) => {
             route_failed_stage_result(
                 ctx,
                 base_url,
@@ -62,6 +70,45 @@ fn route_failed_work_item(
             "failure_reason": failure_reason,
         })),
     }
+}
+
+fn route_failed_simulated_user_trial(
+    ctx: &Context,
+    base_url: &str,
+    headers: &[(String, String)],
+    trial_id: &str,
+    failure_reason: &str,
+    evidence_artifact_id: &str,
+) -> Result<Value, String> {
+    let trial = get_entity(ctx, base_url, headers, "Trials", trial_id)?;
+    if entity_status(&trial) == "Running" {
+        post_directed_action(
+            ctx,
+            base_url,
+            headers,
+            "Trials",
+            trial_id,
+            "FailTrial",
+            json!({
+                "FailureReason": failure_reason,
+                "EvidenceArtifactId": evidence_artifact_id,
+                "MeasurementsJson": "{}",
+                "JourneyJson": "[]",
+                "ObservationJson": "{}",
+                "IntentSatisfied": "blocked",
+                "FrictionJson": "[]",
+                "Blocker": failure_reason,
+            }),
+        )?;
+    }
+    let fields = state_fields(&trial);
+    let queued_evaluator = maybe_queue_viability_evaluator_after_trials(ctx, base_url, headers, &fields)?;
+    Ok(json!({
+        "routed": "simulated_user_trial_failure",
+        "trial_id": trial_id,
+        "queued_evaluator_work_item_id": queued_evaluator,
+        "failure_reason": failure_reason,
+    }))
 }
 
 fn route_failed_observer(

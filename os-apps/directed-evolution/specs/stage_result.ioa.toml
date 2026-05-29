@@ -10,6 +10,14 @@ type = "bool"
 initial = "false"
 
 [[action]]
+name = "PlanStageResult"
+kind = "input"
+from = ["Pending"]
+to = "Pending"
+params = ["EpisodeId", "GenerationId", "VariantId", "EvaluationStageId"]
+hint = "Attach an Evaluation Stage Result to a concrete episode, generation, variant, and stage before execution is queued."
+
+[[action]]
 name = "StartStageResult"
 kind = "input"
 from = ["Pending"]
@@ -23,7 +31,7 @@ kind = "input"
 from = ["Running"]
 to = "Passed"
 effect = "set has_evidence true"
-params = ["MetricsJson", "EvidenceArtifactId", "Summary"]
+params = ["MetricsJson", "EvidenceArtifactId", "Summary", "EvaluatorRole", "ProvenanceKind", "DecisionBasisJson", "InputsJson"]
 hint = "Record a passing Stage Result with evidence."
 
 [[action]]
@@ -32,17 +40,17 @@ kind = "input"
 from = ["Running"]
 to = "Failed"
 effect = "set has_evidence true"
-params = ["MetricsJson", "EvidenceArtifactId", "FailureReason"]
+params = ["MetricsJson", "EvidenceArtifactId", "FailureReason", "EvaluatorRole", "ProvenanceKind", "DecisionBasisJson", "InputsJson"]
 hint = "Record a failing Stage Result with evidence."
 
 [[action]]
 name = "EliminateStageResult"
 kind = "input"
-from = ["Running", "Failed"]
+from = ["Pending", "Running", "Failed"]
 to = "Eliminated"
 effect = "set has_evidence true"
 params = ["EliminationRuleId", "EvidenceArtifactId", "Reason"]
-hint = "Record that this Stage Result eliminated the variant."
+hint = "Record that this Stage Result eliminated the variant or was closed because the variant had already been eliminated."
 
 [[invariant]]
 name = "PassedHasEvidence"

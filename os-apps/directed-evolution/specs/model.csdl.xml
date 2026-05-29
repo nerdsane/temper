@@ -84,6 +84,7 @@
         <Property Name="HasContract" Type="Edm.Boolean"/>
         <Property Name="GenerationCount" Type="Edm.Int64"/>
         <Property Name="WinnerSelected" Type="Edm.Boolean"/>
+        <Property Name="HasSimulatedUserPlan" Type="Edm.Boolean"/>
         <Property Name="DirectionId" Type="Edm.String"/>
         <Property Name="OrganismId" Type="Edm.String"/>
         <Property Name="ParentVersionId" Type="Edm.String"/>
@@ -91,9 +92,16 @@
         <Property Name="AdaptationGoalId" Type="Edm.String"/>
         <Property Name="SelectionPressureId" Type="Edm.String"/>
         <Property Name="ViabilityConstraintIdsJson" Type="Edm.String"/>
+        <Property Name="MetricDefinitionIdsJson" Type="Edm.String"/>
         <Property Name="EvaluationStageIdsJson" Type="Edm.String"/>
         <Property Name="EliminationRuleIdsJson" Type="Edm.String"/>
         <Property Name="ScoringRuleIdsJson" Type="Edm.String"/>
+        <Property Name="SimulatedUserPlanId" Type="Edm.String"/>
+        <Property Name="SelectionProtocolId" Type="Edm.String"/>
+        <Property Name="EvaluatorRef" Type="Edm.String"/>
+        <Property Name="OrganismParentRef" Type="Edm.String"/>
+        <Property Name="PlannedBy" Type="Edm.String"/>
+        <Property Name="PlanSummary" Type="Edm.String"/>
         <Property Name="StartedBy" Type="Edm.String"/>
         <Property Name="Reason" Type="Edm.String"/>
         <Property Name="GenerationId" Type="Edm.String"/>
@@ -117,6 +125,10 @@
         <Property Name="SequenceIndex" Type="Edm.String"/>
         <Property Name="RequiredEvidenceJson" Type="Edm.String"/>
         <Property Name="ExecutorKind" Type="Edm.String"/>
+        <Property Name="MeasurementProvenance" Type="Edm.String"/>
+        <Property Name="EvaluatorRef" Type="Edm.String"/>
+        <Property Name="EvaluatorModule" Type="Edm.String"/>
+        <Property Name="DecisionAuthority" Type="Edm.String"/>
         <Property Name="Reason" Type="Edm.String"/>
       </EntityType>
 
@@ -131,6 +143,12 @@
         <Property Name="Digest" Type="Edm.String"/>
         <Property Name="TargetEntityType" Type="Edm.String"/>
         <Property Name="TargetEntityId" Type="Edm.String"/>
+        <Property Name="Query" Type="Edm.String"/>
+        <Property Name="TimeWindow" Type="Edm.String"/>
+        <Property Name="ResultCount" Type="Edm.String"/>
+        <Property Name="Interpretation" Type="Edm.String"/>
+        <Property Name="ZeroResultMeaning" Type="Edm.String"/>
+        <Property Name="EvidenceProvenance" Type="Edm.String"/>
         <Property Name="Reason" Type="Edm.String"/>
       </EntityType>
 
@@ -159,8 +177,12 @@
         <Property Name="OrganismId" Type="Edm.String"/>
         <Property Name="ParentVersionId" Type="Edm.String"/>
         <Property Name="ChildVersionId" Type="Edm.String"/>
+        <Property Name="EpisodeId" Type="Edm.String"/>
+        <Property Name="VariantId" Type="Edm.String"/>
         <Property Name="PromotionId" Type="Edm.String"/>
         <Property Name="MutationSummary" Type="Edm.String"/>
+        <Property Name="ChangedFilesJson" Type="Edm.String"/>
+        <Property Name="DiffPatch" Type="Edm.String"/>
         <Property Name="EvidenceArtifactId" Type="Edm.String"/>
         <Property Name="Reason" Type="Edm.String"/>
       </EntityType>
@@ -176,6 +198,11 @@
         <Property Name="Value" Type="Edm.String"/>
         <Property Name="Unit" Type="Edm.String"/>
         <Property Name="EvidenceArtifactId" Type="Edm.String"/>
+        <Property Name="ProvenanceKind" Type="Edm.String"/>
+        <Property Name="MeasurementKind" Type="Edm.String"/>
+        <Property Name="SourceRunId" Type="Edm.String"/>
+        <Property Name="ComputedByRef" Type="Edm.String"/>
+        <Property Name="Interpretation" Type="Edm.String"/>
         <Property Name="Reason" Type="Edm.String"/>
       </EntityType>
 
@@ -188,6 +215,12 @@
         <Property Name="Unit" Type="Edm.String"/>
         <Property Name="HigherIsBetter" Type="Edm.String"/>
         <Property Name="Description" Type="Edm.String"/>
+        <Property Name="EpisodeId" Type="Edm.String"/>
+        <Property Name="ProvenanceKind" Type="Edm.String"/>
+        <Property Name="EvaluatorRef" Type="Edm.String"/>
+        <Property Name="EvaluatorModule" Type="Edm.String"/>
+        <Property Name="Interpretation" Type="Edm.String"/>
+        <Property Name="HardConstraint" Type="Edm.String"/>
         <Property Name="Reason" Type="Edm.String"/>
       </EntityType>
 
@@ -199,6 +232,7 @@
         <Property Name="Summary" Type="Edm.String"/>
         <Property Name="ChangedFilesJson" Type="Edm.String"/>
         <Property Name="DiffRef" Type="Edm.String"/>
+        <Property Name="DiffPatch" Type="Edm.String"/>
         <Property Name="BrainRunId" Type="Edm.String"/>
         <Property Name="Reason" Type="Edm.String"/>
       </EntityType>
@@ -253,6 +287,8 @@
         <Property Name="Id" Type="Edm.String" Nullable="false"/>
         <Property Name="Status" Type="Edm.String"/>
         <Property Name="HasEvidence" Type="Edm.Boolean"/>
+        <Property Name="Materialized" Type="Edm.Boolean"/>
+        <Property Name="MaterializationFailed" Type="Edm.Boolean"/>
         <Property Name="EpisodeId" Type="Edm.String"/>
         <Property Name="WinningVariantId" Type="Edm.String"/>
         <Property Name="ParentVersionId" Type="Edm.String"/>
@@ -260,6 +296,10 @@
         <Property Name="SelectionExplanation" Type="Edm.String"/>
         <Property Name="EvidenceArtifactId" Type="Edm.String"/>
         <Property Name="AppRef" Type="Edm.String"/>
+        <Property Name="CanonicalAppRef" Type="Edm.String"/>
+        <Property Name="ProductionTenant" Type="Edm.String"/>
+        <Property Name="RuntimeRef" Type="Edm.String"/>
+        <Property Name="Summary" Type="Edm.String"/>
         <Property Name="RollbackVersionId" Type="Edm.String"/>
         <Property Name="Reason" Type="Edm.String"/>
         <Property Name="FailureReason" Type="Edm.String"/>
@@ -287,6 +327,37 @@
         <Property Name="EliminationRuleIdsJson" Type="Edm.String"/>
         <Property Name="ScoringRuleIdsJson" Type="Edm.String"/>
         <Property Name="CreatedByBrainRunId" Type="Edm.String"/>
+        <Property Name="Reason" Type="Edm.String"/>
+      </EntityType>
+
+      <EntityType Name="SelectionProtocol">
+        <Key><PropertyRef Name="Id"/></Key>
+        <Property Name="Id" Type="Edm.String" Nullable="false"/>
+        <Property Name="Status" Type="Edm.String"/>
+        <Property Name="EpisodeId" Type="Edm.String"/>
+        <Property Name="SelectionStatement" Type="Edm.String"/>
+        <Property Name="MetricIdsJson" Type="Edm.String"/>
+        <Property Name="EliminationRuleIdsJson" Type="Edm.String"/>
+        <Property Name="ScoringRuleIdsJson" Type="Edm.String"/>
+        <Property Name="EvaluatorRef" Type="Edm.String"/>
+        <Property Name="DecisionPolicy" Type="Edm.String"/>
+        <Property Name="CreatedByBrainRunId" Type="Edm.String"/>
+        <Property Name="FrozenBy" Type="Edm.String"/>
+        <Property Name="Reason" Type="Edm.String"/>
+      </EntityType>
+
+      <EntityType Name="SimulatedUserPlan">
+        <Key><PropertyRef Name="Id"/></Key>
+        <Property Name="Id" Type="Edm.String" Nullable="false"/>
+        <Property Name="Status" Type="Edm.String"/>
+        <Property Name="EpisodeId" Type="Edm.String"/>
+        <Property Name="UsersPerVariant" Type="Edm.String"/>
+        <Property Name="RunsPerPersona" Type="Edm.String"/>
+        <Property Name="PersonasJson" Type="Edm.String"/>
+        <Property Name="GoalsJson" Type="Edm.String"/>
+        <Property Name="CreatedBy" Type="Edm.String"/>
+        <Property Name="HumanDecisionSummary" Type="Edm.String"/>
+        <Property Name="FrozenBy" Type="Edm.String"/>
         <Property Name="Reason" Type="Edm.String"/>
       </EntityType>
 
@@ -323,6 +394,10 @@
         <Property Name="EvidenceArtifactId" Type="Edm.String"/>
         <Property Name="Summary" Type="Edm.String"/>
         <Property Name="FailureReason" Type="Edm.String"/>
+        <Property Name="EvaluatorRole" Type="Edm.String"/>
+        <Property Name="ProvenanceKind" Type="Edm.String"/>
+        <Property Name="DecisionBasisJson" Type="Edm.String"/>
+        <Property Name="InputsJson" Type="Edm.String"/>
         <Property Name="EliminationRuleId" Type="Edm.String"/>
         <Property Name="Reason" Type="Edm.String"/>
       </EntityType>
@@ -333,13 +408,25 @@
         <Property Name="Status" Type="Edm.String"/>
         <Property Name="HasAgent" Type="Edm.Boolean"/>
         <Property Name="EpisodeId" Type="Edm.String"/>
+        <Property Name="GenerationId" Type="Edm.String"/>
         <Property Name="VariantId" Type="Edm.String"/>
+        <Property Name="EvaluationStageId" Type="Edm.String"/>
+        <Property Name="StageResultId" Type="Edm.String"/>
+        <Property Name="SimulatedUserPlanId" Type="Edm.String"/>
         <Property Name="SimulatedUserId" Type="Edm.String"/>
+        <Property Name="PersonaJson" Type="Edm.String"/>
+        <Property Name="RunIndex" Type="Edm.String"/>
         <Property Name="Goal" Type="Edm.String"/>
         <Property Name="WorkItemId" Type="Edm.String"/>
         <Property Name="Summary" Type="Edm.String"/>
         <Property Name="EvidenceArtifactId" Type="Edm.String"/>
         <Property Name="MeasurementsJson" Type="Edm.String"/>
+        <Property Name="JourneyJson" Type="Edm.String"/>
+        <Property Name="ObservationJson" Type="Edm.String"/>
+        <Property Name="IntentSatisfied" Type="Edm.String"/>
+        <Property Name="FrictionJson" Type="Edm.String"/>
+        <Property Name="Blocker" Type="Edm.String"/>
+        <Property Name="BlockerKind" Type="Edm.String"/>
         <Property Name="FailureReason" Type="Edm.String"/>
         <Property Name="Reason" Type="Edm.String"/>
       </EntityType>
@@ -356,6 +443,8 @@
         <Property Name="AppRef" Type="Edm.String"/>
         <Property Name="BranchRef" Type="Edm.String"/>
         <Property Name="Summary" Type="Edm.String"/>
+        <Property Name="ChangedFilesJson" Type="Edm.String"/>
+        <Property Name="DiffPatch" Type="Edm.String"/>
         <Property Name="BrainRunId" Type="Edm.String"/>
         <Property Name="WorkItemId" Type="Edm.String"/>
         <Property Name="RuntimeRef" Type="Edm.String"/>
@@ -545,6 +634,27 @@
         <ReturnType Type="Temper.DirectedEvolution.Episode"/>
       </Action>
 
+      <Action Name="PlanEpisode" IsBound="true">
+        <Parameter Name="bindingParameter" Type="Temper.DirectedEvolution.Episode"/>
+        <Parameter Name="DirectionId" Type="Edm.String" Nullable="true"/>
+        <Parameter Name="OrganismId" Type="Edm.String" Nullable="true"/>
+        <Parameter Name="ParentVersionId" Type="Edm.String" Nullable="true"/>
+        <Parameter Name="AutonomyLane" Type="Edm.String" Nullable="true"/>
+        <Parameter Name="AdaptationGoalId" Type="Edm.String" Nullable="true"/>
+        <Parameter Name="ViabilityConstraintIdsJson" Type="Edm.String" Nullable="true"/>
+        <Parameter Name="MetricDefinitionIdsJson" Type="Edm.String" Nullable="true"/>
+        <Parameter Name="EvaluationStageIdsJson" Type="Edm.String" Nullable="true"/>
+        <Parameter Name="EliminationRuleIdsJson" Type="Edm.String" Nullable="true"/>
+        <Parameter Name="ScoringRuleIdsJson" Type="Edm.String" Nullable="true"/>
+        <Parameter Name="SimulatedUserPlanId" Type="Edm.String" Nullable="true"/>
+        <Parameter Name="SelectionProtocolId" Type="Edm.String" Nullable="true"/>
+        <Parameter Name="EvaluatorRef" Type="Edm.String" Nullable="true"/>
+        <Parameter Name="OrganismParentRef" Type="Edm.String" Nullable="true"/>
+        <Parameter Name="PlannedBy" Type="Edm.String" Nullable="true"/>
+        <Parameter Name="PlanSummary" Type="Edm.String" Nullable="true"/>
+        <ReturnType Type="Temper.DirectedEvolution.Episode"/>
+      </Action>
+
       <Action Name="StartEpisode" IsBound="true">
         <Parameter Name="bindingParameter" Type="Temper.DirectedEvolution.Episode"/>
         <Parameter Name="StartedBy" Type="Edm.String" Nullable="true"/>
@@ -617,6 +727,21 @@
         <ReturnType Type="Temper.DirectedEvolution.EvaluationStage"/>
       </Action>
 
+      <Action Name="ActivateEvaluationStageWithEvaluator" IsBound="true">
+        <Parameter Name="bindingParameter" Type="Temper.DirectedEvolution.EvaluationStage"/>
+        <Parameter Name="EpisodeId" Type="Edm.String" Nullable="true"/>
+        <Parameter Name="StageName" Type="Edm.String" Nullable="true"/>
+        <Parameter Name="StageKind" Type="Edm.String" Nullable="true"/>
+        <Parameter Name="SequenceIndex" Type="Edm.String" Nullable="true"/>
+        <Parameter Name="RequiredEvidenceJson" Type="Edm.String" Nullable="true"/>
+        <Parameter Name="ExecutorKind" Type="Edm.String" Nullable="true"/>
+        <Parameter Name="MeasurementProvenance" Type="Edm.String" Nullable="true"/>
+        <Parameter Name="EvaluatorRef" Type="Edm.String" Nullable="true"/>
+        <Parameter Name="EvaluatorModule" Type="Edm.String" Nullable="true"/>
+        <Parameter Name="DecisionAuthority" Type="Edm.String" Nullable="true"/>
+        <ReturnType Type="Temper.DirectedEvolution.EvaluationStage"/>
+      </Action>
+
       <Action Name="ArchiveEvaluationStage" IsBound="true">
         <Parameter Name="bindingParameter" Type="Temper.DirectedEvolution.EvaluationStage"/>
         <Parameter Name="Reason" Type="Edm.String" Nullable="true"/>
@@ -630,6 +755,22 @@
         <Parameter Name="Summary" Type="Edm.String" Nullable="true"/>
         <Parameter Name="CorrelationJson" Type="Edm.String" Nullable="true"/>
         <Parameter Name="Digest" Type="Edm.String" Nullable="true"/>
+        <ReturnType Type="Temper.DirectedEvolution.EvidenceArtifact"/>
+      </Action>
+
+      <Action Name="RecordEvidenceSummary" IsBound="true">
+        <Parameter Name="bindingParameter" Type="Temper.DirectedEvolution.EvidenceArtifact"/>
+        <Parameter Name="ArtifactKind" Type="Edm.String" Nullable="true"/>
+        <Parameter Name="Uri" Type="Edm.String" Nullable="true"/>
+        <Parameter Name="Summary" Type="Edm.String" Nullable="true"/>
+        <Parameter Name="CorrelationJson" Type="Edm.String" Nullable="true"/>
+        <Parameter Name="Digest" Type="Edm.String" Nullable="true"/>
+        <Parameter Name="Query" Type="Edm.String" Nullable="true"/>
+        <Parameter Name="TimeWindow" Type="Edm.String" Nullable="true"/>
+        <Parameter Name="ResultCount" Type="Edm.String" Nullable="true"/>
+        <Parameter Name="Interpretation" Type="Edm.String" Nullable="true"/>
+        <Parameter Name="ZeroResultMeaning" Type="Edm.String" Nullable="true"/>
+        <Parameter Name="EvidenceProvenance" Type="Edm.String" Nullable="true"/>
         <ReturnType Type="Temper.DirectedEvolution.EvidenceArtifact"/>
       </Action>
 
@@ -692,8 +833,12 @@
         <Parameter Name="OrganismId" Type="Edm.String" Nullable="true"/>
         <Parameter Name="ParentVersionId" Type="Edm.String" Nullable="true"/>
         <Parameter Name="ChildVersionId" Type="Edm.String" Nullable="true"/>
+        <Parameter Name="EpisodeId" Type="Edm.String" Nullable="true"/>
+        <Parameter Name="VariantId" Type="Edm.String" Nullable="true"/>
         <Parameter Name="PromotionId" Type="Edm.String" Nullable="true"/>
         <Parameter Name="MutationSummary" Type="Edm.String" Nullable="true"/>
+        <Parameter Name="ChangedFilesJson" Type="Edm.String" Nullable="true"/>
+        <Parameter Name="DiffPatch" Type="Edm.String" Nullable="true"/>
         <Parameter Name="EvidenceArtifactId" Type="Edm.String" Nullable="true"/>
         <ReturnType Type="Temper.DirectedEvolution.LineageEdge"/>
       </Action>
@@ -713,6 +858,11 @@
         <Parameter Name="Value" Type="Edm.String" Nullable="true"/>
         <Parameter Name="Unit" Type="Edm.String" Nullable="true"/>
         <Parameter Name="EvidenceArtifactId" Type="Edm.String" Nullable="true"/>
+        <Parameter Name="ProvenanceKind" Type="Edm.String" Nullable="true"/>
+        <Parameter Name="MeasurementKind" Type="Edm.String" Nullable="true"/>
+        <Parameter Name="SourceRunId" Type="Edm.String" Nullable="true"/>
+        <Parameter Name="ComputedByRef" Type="Edm.String" Nullable="true"/>
+        <Parameter Name="Interpretation" Type="Edm.String" Nullable="true"/>
         <ReturnType Type="Temper.DirectedEvolution.Measurement"/>
       </Action>
 
@@ -732,6 +882,22 @@
         <ReturnType Type="Temper.DirectedEvolution.MetricDefinition"/>
       </Action>
 
+      <Action Name="ActivateMetricDefinitionWithProvenance" IsBound="true">
+        <Parameter Name="bindingParameter" Type="Temper.DirectedEvolution.MetricDefinition"/>
+        <Parameter Name="EpisodeId" Type="Edm.String" Nullable="true"/>
+        <Parameter Name="MetricName" Type="Edm.String" Nullable="true"/>
+        <Parameter Name="MetricKind" Type="Edm.String" Nullable="true"/>
+        <Parameter Name="Unit" Type="Edm.String" Nullable="true"/>
+        <Parameter Name="HigherIsBetter" Type="Edm.String" Nullable="true"/>
+        <Parameter Name="Description" Type="Edm.String" Nullable="true"/>
+        <Parameter Name="ProvenanceKind" Type="Edm.String" Nullable="true"/>
+        <Parameter Name="EvaluatorRef" Type="Edm.String" Nullable="true"/>
+        <Parameter Name="EvaluatorModule" Type="Edm.String" Nullable="true"/>
+        <Parameter Name="Interpretation" Type="Edm.String" Nullable="true"/>
+        <Parameter Name="HardConstraint" Type="Edm.String" Nullable="true"/>
+        <ReturnType Type="Temper.DirectedEvolution.MetricDefinition"/>
+      </Action>
+
       <Action Name="ArchiveMetricDefinition" IsBound="true">
         <Parameter Name="bindingParameter" Type="Temper.DirectedEvolution.MetricDefinition"/>
         <Parameter Name="Reason" Type="Edm.String" Nullable="true"/>
@@ -744,6 +910,17 @@
         <Parameter Name="Summary" Type="Edm.String" Nullable="true"/>
         <Parameter Name="ChangedFilesJson" Type="Edm.String" Nullable="true"/>
         <Parameter Name="DiffRef" Type="Edm.String" Nullable="true"/>
+        <Parameter Name="BrainRunId" Type="Edm.String" Nullable="true"/>
+        <ReturnType Type="Temper.DirectedEvolution.Mutation"/>
+      </Action>
+
+      <Action Name="RecordMutationWithPatch" IsBound="true">
+        <Parameter Name="bindingParameter" Type="Temper.DirectedEvolution.Mutation"/>
+        <Parameter Name="VariantId" Type="Edm.String" Nullable="true"/>
+        <Parameter Name="Summary" Type="Edm.String" Nullable="true"/>
+        <Parameter Name="ChangedFilesJson" Type="Edm.String" Nullable="true"/>
+        <Parameter Name="DiffRef" Type="Edm.String" Nullable="true"/>
+        <Parameter Name="DiffPatch" Type="Edm.String" Nullable="true"/>
         <Parameter Name="BrainRunId" Type="Edm.String" Nullable="true"/>
         <ReturnType Type="Temper.DirectedEvolution.Mutation"/>
       </Action>
@@ -842,6 +1019,23 @@
         <ReturnType Type="Temper.DirectedEvolution.Promotion"/>
       </Action>
 
+      <Action Name="RecordPromotionMaterialization" IsBound="true">
+        <Parameter Name="bindingParameter" Type="Temper.DirectedEvolution.Promotion"/>
+        <Parameter Name="CanonicalAppRef" Type="Edm.String" Nullable="true"/>
+        <Parameter Name="ProductionTenant" Type="Edm.String" Nullable="true"/>
+        <Parameter Name="RuntimeRef" Type="Edm.String" Nullable="true"/>
+        <Parameter Name="Summary" Type="Edm.String" Nullable="true"/>
+        <Parameter Name="EvidenceArtifactId" Type="Edm.String" Nullable="true"/>
+        <ReturnType Type="Temper.DirectedEvolution.Promotion"/>
+      </Action>
+
+      <Action Name="FailPromotionMaterialization" IsBound="true">
+        <Parameter Name="bindingParameter" Type="Temper.DirectedEvolution.Promotion"/>
+        <Parameter Name="FailureReason" Type="Edm.String" Nullable="true"/>
+        <Parameter Name="EvidenceArtifactId" Type="Edm.String" Nullable="true"/>
+        <ReturnType Type="Temper.DirectedEvolution.Promotion"/>
+      </Action>
+
       <Action Name="RollbackPromotion" IsBound="true">
         <Parameter Name="bindingParameter" Type="Temper.DirectedEvolution.Promotion"/>
         <Parameter Name="RollbackVersionId" Type="Edm.String" Nullable="true"/>
@@ -890,6 +1084,57 @@
         <ReturnType Type="Temper.DirectedEvolution.SelectionPressure"/>
       </Action>
 
+      <Action Name="ActivateSelectionProtocol" IsBound="true">
+        <Parameter Name="bindingParameter" Type="Temper.DirectedEvolution.SelectionProtocol"/>
+        <Parameter Name="EpisodeId" Type="Edm.String" Nullable="true"/>
+        <Parameter Name="SelectionStatement" Type="Edm.String" Nullable="true"/>
+        <Parameter Name="MetricIdsJson" Type="Edm.String" Nullable="true"/>
+        <Parameter Name="EliminationRuleIdsJson" Type="Edm.String" Nullable="true"/>
+        <Parameter Name="ScoringRuleIdsJson" Type="Edm.String" Nullable="true"/>
+        <Parameter Name="EvaluatorRef" Type="Edm.String" Nullable="true"/>
+        <Parameter Name="DecisionPolicy" Type="Edm.String" Nullable="true"/>
+        <Parameter Name="CreatedByBrainRunId" Type="Edm.String" Nullable="true"/>
+        <ReturnType Type="Temper.DirectedEvolution.SelectionProtocol"/>
+      </Action>
+
+      <Action Name="FreezeSelectionProtocol" IsBound="true">
+        <Parameter Name="bindingParameter" Type="Temper.DirectedEvolution.SelectionProtocol"/>
+        <Parameter Name="FrozenBy" Type="Edm.String" Nullable="true"/>
+        <Parameter Name="Reason" Type="Edm.String" Nullable="true"/>
+        <ReturnType Type="Temper.DirectedEvolution.SelectionProtocol"/>
+      </Action>
+
+      <Action Name="ArchiveSelectionProtocol" IsBound="true">
+        <Parameter Name="bindingParameter" Type="Temper.DirectedEvolution.SelectionProtocol"/>
+        <Parameter Name="Reason" Type="Edm.String" Nullable="true"/>
+        <ReturnType Type="Temper.DirectedEvolution.SelectionProtocol"/>
+      </Action>
+
+      <Action Name="ActivateSimulatedUserPlan" IsBound="true">
+        <Parameter Name="bindingParameter" Type="Temper.DirectedEvolution.SimulatedUserPlan"/>
+        <Parameter Name="EpisodeId" Type="Edm.String" Nullable="true"/>
+        <Parameter Name="UsersPerVariant" Type="Edm.String" Nullable="true"/>
+        <Parameter Name="RunsPerPersona" Type="Edm.String" Nullable="true"/>
+        <Parameter Name="PersonasJson" Type="Edm.String" Nullable="true"/>
+        <Parameter Name="GoalsJson" Type="Edm.String" Nullable="true"/>
+        <Parameter Name="CreatedBy" Type="Edm.String" Nullable="true"/>
+        <Parameter Name="HumanDecisionSummary" Type="Edm.String" Nullable="true"/>
+        <ReturnType Type="Temper.DirectedEvolution.SimulatedUserPlan"/>
+      </Action>
+
+      <Action Name="FreezeSimulatedUserPlan" IsBound="true">
+        <Parameter Name="bindingParameter" Type="Temper.DirectedEvolution.SimulatedUserPlan"/>
+        <Parameter Name="FrozenBy" Type="Edm.String" Nullable="true"/>
+        <Parameter Name="Reason" Type="Edm.String" Nullable="true"/>
+        <ReturnType Type="Temper.DirectedEvolution.SimulatedUserPlan"/>
+      </Action>
+
+      <Action Name="ArchiveSimulatedUserPlan" IsBound="true">
+        <Parameter Name="bindingParameter" Type="Temper.DirectedEvolution.SimulatedUserPlan"/>
+        <Parameter Name="Reason" Type="Edm.String" Nullable="true"/>
+        <ReturnType Type="Temper.DirectedEvolution.SimulatedUserPlan"/>
+      </Action>
+
       <Action Name="RecordSignal" IsBound="true">
         <Parameter Name="bindingParameter" Type="Temper.DirectedEvolution.Signal"/>
         <Parameter Name="Source" Type="Edm.String" Nullable="true"/>
@@ -927,6 +1172,15 @@
         <ReturnType Type="Temper.DirectedEvolution.Signal"/>
       </Action>
 
+      <Action Name="PlanStageResult" IsBound="true">
+        <Parameter Name="bindingParameter" Type="Temper.DirectedEvolution.StageResult"/>
+        <Parameter Name="EpisodeId" Type="Edm.String" Nullable="true"/>
+        <Parameter Name="GenerationId" Type="Edm.String" Nullable="true"/>
+        <Parameter Name="VariantId" Type="Edm.String" Nullable="true"/>
+        <Parameter Name="EvaluationStageId" Type="Edm.String" Nullable="true"/>
+        <ReturnType Type="Temper.DirectedEvolution.StageResult"/>
+      </Action>
+
       <Action Name="StartStageResult" IsBound="true">
         <Parameter Name="bindingParameter" Type="Temper.DirectedEvolution.StageResult"/>
         <Parameter Name="EpisodeId" Type="Edm.String" Nullable="true"/>
@@ -942,6 +1196,10 @@
         <Parameter Name="MetricsJson" Type="Edm.String" Nullable="true"/>
         <Parameter Name="EvidenceArtifactId" Type="Edm.String" Nullable="true"/>
         <Parameter Name="Summary" Type="Edm.String" Nullable="true"/>
+        <Parameter Name="EvaluatorRole" Type="Edm.String" Nullable="true"/>
+        <Parameter Name="ProvenanceKind" Type="Edm.String" Nullable="true"/>
+        <Parameter Name="DecisionBasisJson" Type="Edm.String" Nullable="true"/>
+        <Parameter Name="InputsJson" Type="Edm.String" Nullable="true"/>
         <ReturnType Type="Temper.DirectedEvolution.StageResult"/>
       </Action>
 
@@ -950,6 +1208,10 @@
         <Parameter Name="MetricsJson" Type="Edm.String" Nullable="true"/>
         <Parameter Name="EvidenceArtifactId" Type="Edm.String" Nullable="true"/>
         <Parameter Name="FailureReason" Type="Edm.String" Nullable="true"/>
+        <Parameter Name="EvaluatorRole" Type="Edm.String" Nullable="true"/>
+        <Parameter Name="ProvenanceKind" Type="Edm.String" Nullable="true"/>
+        <Parameter Name="DecisionBasisJson" Type="Edm.String" Nullable="true"/>
+        <Parameter Name="InputsJson" Type="Edm.String" Nullable="true"/>
         <ReturnType Type="Temper.DirectedEvolution.StageResult"/>
       </Action>
 
@@ -964,8 +1226,14 @@
       <Action Name="StartTrial" IsBound="true">
         <Parameter Name="bindingParameter" Type="Temper.DirectedEvolution.Trial"/>
         <Parameter Name="EpisodeId" Type="Edm.String" Nullable="true"/>
+        <Parameter Name="GenerationId" Type="Edm.String" Nullable="true"/>
         <Parameter Name="VariantId" Type="Edm.String" Nullable="true"/>
+        <Parameter Name="EvaluationStageId" Type="Edm.String" Nullable="true"/>
+        <Parameter Name="StageResultId" Type="Edm.String" Nullable="true"/>
+        <Parameter Name="SimulatedUserPlanId" Type="Edm.String" Nullable="true"/>
         <Parameter Name="SimulatedUserId" Type="Edm.String" Nullable="true"/>
+        <Parameter Name="PersonaJson" Type="Edm.String" Nullable="true"/>
+        <Parameter Name="RunIndex" Type="Edm.String" Nullable="true"/>
         <Parameter Name="Goal" Type="Edm.String" Nullable="true"/>
         <Parameter Name="WorkItemId" Type="Edm.String" Nullable="true"/>
         <ReturnType Type="Temper.DirectedEvolution.Trial"/>
@@ -976,6 +1244,12 @@
         <Parameter Name="Summary" Type="Edm.String" Nullable="true"/>
         <Parameter Name="EvidenceArtifactId" Type="Edm.String" Nullable="true"/>
         <Parameter Name="MeasurementsJson" Type="Edm.String" Nullable="true"/>
+        <Parameter Name="JourneyJson" Type="Edm.String" Nullable="true"/>
+        <Parameter Name="ObservationJson" Type="Edm.String" Nullable="true"/>
+        <Parameter Name="IntentSatisfied" Type="Edm.String" Nullable="true"/>
+        <Parameter Name="FrictionJson" Type="Edm.String" Nullable="true"/>
+        <Parameter Name="Blocker" Type="Edm.String" Nullable="true"/>
+        <Parameter Name="BlockerKind" Type="Edm.String" Nullable="true"/>
         <ReturnType Type="Temper.DirectedEvolution.Trial"/>
       </Action>
 
@@ -984,6 +1258,12 @@
         <Parameter Name="FailureReason" Type="Edm.String" Nullable="true"/>
         <Parameter Name="EvidenceArtifactId" Type="Edm.String" Nullable="true"/>
         <Parameter Name="MeasurementsJson" Type="Edm.String" Nullable="true"/>
+        <Parameter Name="JourneyJson" Type="Edm.String" Nullable="true"/>
+        <Parameter Name="ObservationJson" Type="Edm.String" Nullable="true"/>
+        <Parameter Name="IntentSatisfied" Type="Edm.String" Nullable="true"/>
+        <Parameter Name="FrictionJson" Type="Edm.String" Nullable="true"/>
+        <Parameter Name="Blocker" Type="Edm.String" Nullable="true"/>
+        <Parameter Name="BlockerKind" Type="Edm.String" Nullable="true"/>
         <ReturnType Type="Temper.DirectedEvolution.Trial"/>
       </Action>
 
@@ -1001,6 +1281,8 @@
         <Parameter Name="AppRef" Type="Edm.String" Nullable="true"/>
         <Parameter Name="BranchRef" Type="Edm.String" Nullable="true"/>
         <Parameter Name="Summary" Type="Edm.String" Nullable="true"/>
+        <Parameter Name="ChangedFilesJson" Type="Edm.String" Nullable="true"/>
+        <Parameter Name="DiffPatch" Type="Edm.String" Nullable="true"/>
         <Parameter Name="BrainRunId" Type="Edm.String" Nullable="true"/>
         <ReturnType Type="Temper.DirectedEvolution.Variant"/>
       </Action>
@@ -1034,6 +1316,15 @@
       </Action>
 
       <Action Name="SelectVariant" IsBound="true">
+        <Parameter Name="bindingParameter" Type="Temper.DirectedEvolution.Variant"/>
+        <Parameter Name="SelectionPressureId" Type="Edm.String" Nullable="true"/>
+        <Parameter Name="SelectorBrainRunId" Type="Edm.String" Nullable="true"/>
+        <Parameter Name="EvidenceArtifactId" Type="Edm.String" Nullable="true"/>
+        <Parameter Name="Reason" Type="Edm.String" Nullable="true"/>
+        <ReturnType Type="Temper.DirectedEvolution.Variant"/>
+      </Action>
+
+      <Action Name="RecordVariantNotSelected" IsBound="true">
         <Parameter Name="bindingParameter" Type="Temper.DirectedEvolution.Variant"/>
         <Parameter Name="SelectionPressureId" Type="Edm.String" Nullable="true"/>
         <Parameter Name="SelectorBrainRunId" Type="Edm.String" Nullable="true"/>
@@ -1144,7 +1435,9 @@
         <EntitySet Name="Promotions" EntityType="Temper.DirectedEvolution.Promotion"/>
         <EntitySet Name="ScoringRules" EntityType="Temper.DirectedEvolution.ScoringRule"/>
         <EntitySet Name="SelectionPressures" EntityType="Temper.DirectedEvolution.SelectionPressure"/>
+        <EntitySet Name="SelectionProtocols" EntityType="Temper.DirectedEvolution.SelectionProtocol"/>
         <EntitySet Name="Signals" EntityType="Temper.DirectedEvolution.Signal"/>
+        <EntitySet Name="SimulatedUserPlans" EntityType="Temper.DirectedEvolution.SimulatedUserPlan"/>
         <EntitySet Name="StageResults" EntityType="Temper.DirectedEvolution.StageResult"/>
         <EntitySet Name="Trials" EntityType="Temper.DirectedEvolution.Trial"/>
         <EntitySet Name="Variants" EntityType="Temper.DirectedEvolution.Variant"/>

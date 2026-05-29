@@ -8,7 +8,7 @@ allow_indefinite_states = ["Recorded"]
 name = "RecordLineageEdge"
 kind = "input"
 from = ["Recorded"]
-params = ["OrganismId", "ParentVersionId", "ChildVersionId", "PromotionId", "MutationSummary", "EvidenceArtifactId"]
+params = ["OrganismId", "ParentVersionId", "ChildVersionId", "EpisodeId", "VariantId", "PromotionId", "MutationSummary", "ChangedFilesJson", "DiffPatch", "EvidenceArtifactId"]
 hint = "Record a lineage edge between an organism parent and promoted child version."
 
 [[action]]

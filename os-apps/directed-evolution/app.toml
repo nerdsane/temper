@@ -1,7 +1,7 @@
 name = "directed-evolution"
 description = "Directed Evolution control plane for organisms, episodes, variants, trials, evidence, and lineage"
 version = "0.1.0"
-dependencies = ["intent-discovery", "evolution"]
+dependencies = []
 
 [[wasm_modules]]
 name = "signal_observer"

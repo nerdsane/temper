@@ -12,6 +12,13 @@ params = ["VariantId", "Summary", "ChangedFilesJson", "DiffRef", "BrainRunId"]
 hint = "Record the concrete change introduced by a variant."
 
 [[action]]
+name = "RecordMutationWithPatch"
+kind = "input"
+from = ["Recorded"]
+params = ["VariantId", "Summary", "ChangedFilesJson", "DiffRef", "DiffPatch", "BrainRunId"]
+hint = "Record the concrete change introduced by a variant with a unified diff patch."
+
+[[action]]
 name = "ArchiveMutation"
 kind = "input"
 from = ["Recorded"]

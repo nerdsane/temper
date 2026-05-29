@@ -35,6 +35,7 @@ fn route_variant_generator(
             .unwrap_or_else(|| json!([]))
             .to_string();
     let diff_ref = lookup_string_deep(output, &["diff_ref", "diffRef", "DiffRef"]);
+    let diff_patch = lookup_string_deep(output, &["diff_patch", "diffPatch", "DiffPatch", "patch"]);
 
     let variant_id = create_entity(ctx, base_url, headers, "Variants")?;
     let mutation_id = create_entity(ctx, base_url, headers, "Mutations")?;
@@ -44,12 +45,13 @@ fn route_variant_generator(
         headers,
         "Mutations",
         &mutation_id,
-        "RecordMutation",
+        "RecordMutationWithPatch",
         json!({
             "VariantId": variant_id,
             "Summary": summary,
             "ChangedFilesJson": changed_files_json,
             "DiffRef": diff_ref,
+            "DiffPatch": diff_patch,
             "BrainRunId": brain_run_id,
         }),
     )?;
@@ -67,6 +69,8 @@ fn route_variant_generator(
             "AppRef": app_ref,
             "BranchRef": branch_ref,
             "Summary": summary,
+            "ChangedFilesJson": changed_files_json,
+            "DiffPatch": diff_patch,
             "BrainRunId": brain_run_id,
         }),
     )?;
@@ -103,71 +107,76 @@ fn route_variant_generator(
         let stage_fields = state_fields(&stage);
         let stage_kind = field_str(&stage_fields, &["StageKind"]);
         let stage_name = field_str(&stage_fields, &["StageName"]);
-        let role = if stage_kind.contains("simulated") {
-            "simulated_user"
-        } else {
-            "reviewer"
-        };
         let stage_result_id = create_entity(ctx, base_url, headers, "StageResults")?;
-        let evaluation_work_item_id = create_entity(ctx, base_url, headers, "WorkItems")?;
-        let mut trial_id = String::new();
-        if role == "simulated_user" {
-            trial_id = create_entity(ctx, base_url, headers, "Trials")?;
-            post_directed_action(
-                ctx,
-                base_url,
-                headers,
-                "Trials",
-                &trial_id,
-                "StartTrial",
-                json!({
-                    "EpisodeId": episode_id,
-                    "VariantId": variant_id,
-                    "SimulatedUserId": format!("codex-sim-user-{stage_id}"),
-                    "Goal": nonempty(stage_name.clone(), format!("Evaluate variant {variant_id}")),
-                    "WorkItemId": evaluation_work_item_id,
-                }),
-            )?;
-        }
-        post_directed_action(
-            ctx,
-            base_url,
-            headers,
-            "WorkItems",
-            &evaluation_work_item_id,
-            "QueueWorkItem",
-            json!({
-                "Role": role,
-                "TargetEntityType": "StageResult",
-                "TargetEntityId": stage_result_id,
-                "PromptRef": format!("literal:{}", evaluation_prompt(ctx, base_url, headers, &episode_fields, &stage, &variant_id, generation_id, &episode_id, &stage_id, &summary, &app_ref)?),
-                "ContextRef": format!("variant:{variant_id}"),
-                "OutputSchemaRef": "directed-evolution.stage-evaluation.v1",
-                "CorrelationJson": json!({
-                    "episode_id": episode_id,
-                    "generation_id": generation_id,
-                    "variant_id": variant_id,
-                    "evaluation_stage_id": stage_id,
-                    "parent_version_id": parent_version_id,
-                    "trial_id": trial_id,
-                }).to_string(),
-            }),
-        )?;
         post_directed_action(
             ctx,
             base_url,
             headers,
             "StageResults",
             &stage_result_id,
-            "StartStageResult",
+            "PlanStageResult",
             json!({
                 "EpisodeId": episode_id,
                 "GenerationId": generation_id,
                 "VariantId": variant_id,
                 "EvaluationStageId": stage_id,
-                "WorkItemId": evaluation_work_item_id,
             }),
         )?;
+        if stage_kind.to_ascii_lowercase().contains("simulated") {
+            queue_simulated_user_trials(
+                ctx,
+                base_url,
+                headers,
+                &episode_fields,
+                &stage_fields,
+                &episode_id,
+                generation_id,
+                &variant_id,
+                &stage_id,
+                &stage_result_id,
+                &stage_name,
+                &runtime_ref,
+                &app_ref,
+                &summary,
+            )?;
+        } else if defer_stage_until_simulated_users(&stage_fields) {
+            // Post-trial stages, especially Datadog telemetry, must wait until
+            // simulated users have actually exercised the variant runtime.
+        } else {
+            let role = evaluator_role_for_stage(&stage_fields);
+            let evaluation_work_item_id = queue_stage_evaluation_work_item(
+                ctx,
+                base_url,
+                headers,
+                &episode_fields,
+                &stage,
+                &variant_id,
+                generation_id,
+                &episode_id,
+                &stage_id,
+                &stage_result_id,
+                &summary,
+                &app_ref,
+                &runtime_ref,
+                &role,
+                &parent_version_id,
+            )?;
+            post_directed_action(
+                ctx,
+                base_url,
+                headers,
+                "StageResults",
+                &stage_result_id,
+                "StartStageResult",
+                json!({
+                    "EpisodeId": episode_id,
+                    "GenerationId": generation_id,
+                    "VariantId": variant_id,
+                    "EvaluationStageId": stage_id,
+                    "WorkItemId": evaluation_work_item_id,
+                }),
+            )?;
+        }
         queued_stage_result_ids.push(stage_result_id);
     }
 
@@ -177,4 +186,189 @@ fn route_variant_generator(
         "mutation_id": mutation_id,
         "queued_stage_result_ids": queued_stage_result_ids,
     }))
+}
+
+fn defer_stage_until_simulated_users(stage_fields: &Value) -> bool {
+    stage_requires_datadog(stage_fields) || evaluator_role_for_stage(stage_fields) == "telemetry_evaluator"
+}
+
+fn evaluator_role_for_stage(stage_fields: &Value) -> String {
+    let executor = field_str(stage_fields, &["ExecutorKind"]);
+    if stage_evaluator_role(&executor) {
+        return executor;
+    }
+    let kind = field_str(stage_fields, &["StageKind"]).to_ascii_lowercase();
+    if kind.contains("telemetry") || kind.contains("datadog") {
+        "telemetry_evaluator".to_string()
+    } else if kind.contains("state") || kind.contains("spec") {
+        "state_verifier".to_string()
+    } else if kind.contains("wasm") {
+        "wasm_evaluator".to_string()
+    } else {
+        "reviewer".to_string()
+    }
+}
+
+fn queue_stage_evaluation_work_item(
+    ctx: &Context,
+    base_url: &str,
+    headers: &[(String, String)],
+    episode_fields: &Value,
+    stage: &Value,
+    variant_id: &str,
+    generation_id: &str,
+    episode_id: &str,
+    stage_id: &str,
+    stage_result_id: &str,
+    summary: &str,
+    app_ref: &str,
+    runtime_ref: &str,
+    role: &str,
+    parent_version_id: &str,
+) -> Result<String, String> {
+    let work_item_id = create_entity(ctx, base_url, headers, "WorkItems")?;
+    post_directed_action(
+        ctx,
+        base_url,
+        headers,
+        "WorkItems",
+        &work_item_id,
+        "QueueWorkItem",
+        json!({
+            "Role": role,
+            "TargetEntityType": "StageResult",
+            "TargetEntityId": stage_result_id,
+            "PromptRef": format!("literal:{}", evaluation_prompt(ctx, base_url, headers, episode_fields, stage, variant_id, generation_id, episode_id, stage_id, stage_result_id, &work_item_id, summary, app_ref, runtime_ref)?),
+            "ContextRef": format!("variant:{variant_id}"),
+            "OutputSchemaRef": "directed-evolution.stage-evaluation.v1",
+            "CorrelationJson": json!({
+                "episode_id": episode_id,
+                "direction_id": field_str(episode_fields, &["DirectionId"]),
+                "generation_id": generation_id,
+                "variant_id": variant_id,
+                "evaluation_stage_id": stage_id,
+                "stage_result_id": stage_result_id,
+                "parent_version_id": parent_version_id,
+                "runtime_ref": runtime_ref,
+                "role": role,
+            }).to_string(),
+        }),
+    )?;
+    Ok(work_item_id)
+}
+
+fn queue_simulated_user_trials(
+    ctx: &Context,
+    base_url: &str,
+    headers: &[(String, String)],
+    episode_fields: &Value,
+    stage_fields: &Value,
+    episode_id: &str,
+    generation_id: &str,
+    variant_id: &str,
+    stage_id: &str,
+    stage_result_id: &str,
+    stage_name: &str,
+    runtime_ref: &str,
+    app_ref: &str,
+    variant_summary: &str,
+) -> Result<Vec<String>, String> {
+    let plan_id = field_str(episode_fields, &["SimulatedUserPlanId"]);
+    let plan_fields = entity_fields_or_empty(ctx, base_url, headers, "SimulatedUserPlans", &plan_id);
+    let direction_id = field_str(episode_fields, &["DirectionId"]);
+    let users_per_variant = field_u64(&plan_fields, &["UsersPerVariant"]).max(1) as usize;
+    let runs_per_persona = field_u64(&plan_fields, &["RunsPerPersona"]).max(1) as usize;
+    let personas = parse_json_values(&field_str(&plan_fields, &["PersonasJson"]));
+    let goals = parse_json_values(&field_str(&plan_fields, &["GoalsJson"]));
+    let mut trial_ids = Vec::new();
+
+    for persona_index in 0..users_per_variant {
+        let persona = personas
+            .get(persona_index)
+            .cloned()
+            .unwrap_or_else(|| json!({ "name": format!("codex-simulated-user-{}", persona_index + 1) }));
+        let goal = goals
+            .get(persona_index)
+            .and_then(Value::as_str)
+            .map(str::to_string)
+            .unwrap_or_else(|| nonempty(stage_name.to_string(), format!("Use variant {variant_id} and report observations.")));
+        for run_index in 1..=runs_per_persona {
+            let work_item_id = create_entity(ctx, base_url, headers, "WorkItems")?;
+            let trial_id = create_entity(ctx, base_url, headers, "Trials")?;
+            let simulated_user_id = format!("codex-sim-user-{}-run-{run_index}", persona_index + 1);
+            let prompt = simulated_user_prompt(
+                stage_fields,
+                episode_id,
+                &direction_id,
+                generation_id,
+                variant_id,
+                stage_id,
+                stage_result_id,
+                &trial_id,
+                &work_item_id,
+                &simulated_user_id,
+                persona_index + 1,
+                run_index,
+                &persona,
+                &goal,
+                runtime_ref,
+                app_ref,
+                variant_summary,
+                &resolve_public_api_url(ctx),
+            );
+            post_directed_action(
+                ctx,
+                base_url,
+                headers,
+                "WorkItems",
+                &work_item_id,
+                "QueueWorkItem",
+                json!({
+                    "Role": "simulated_user",
+                    "TargetEntityType": "Trial",
+                    "TargetEntityId": trial_id,
+                    "PromptRef": format!("literal:{prompt}"),
+                    "ContextRef": format!("trial:{trial_id}"),
+                    "OutputSchemaRef": "directed-evolution.simulated-user.v1",
+                    "CorrelationJson": json!({
+                        "episode_id": episode_id,
+                        "direction_id": field_str(episode_fields, &["DirectionId"]),
+                        "generation_id": generation_id,
+                        "variant_id": variant_id,
+                        "evaluation_stage_id": stage_id,
+                        "stage_result_id": stage_result_id,
+                        "trial_id": trial_id,
+                        "simulated_user_plan_id": plan_id,
+                        "persona_index": persona_index + 1,
+                        "run_index": run_index,
+                        "runtime_ref": runtime_ref,
+                        "app_ref": app_ref,
+                    }).to_string(),
+                }),
+            )?;
+            post_directed_action(
+                ctx,
+                base_url,
+                headers,
+                "Trials",
+                &trial_id,
+                "StartTrial",
+                json!({
+                    "EpisodeId": episode_id,
+                    "GenerationId": generation_id,
+                    "VariantId": variant_id,
+                    "EvaluationStageId": stage_id,
+                    "StageResultId": stage_result_id,
+                    "SimulatedUserPlanId": plan_id,
+                    "SimulatedUserId": simulated_user_id,
+                    "PersonaJson": persona.to_string(),
+                    "RunIndex": run_index.to_string(),
+                    "Goal": goal,
+                    "WorkItemId": work_item_id,
+                }),
+            )?;
+            trial_ids.push(trial_id);
+        }
+    }
+    Ok(trial_ids)
 }

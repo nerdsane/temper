@@ -47,17 +47,34 @@ temper_side_effect_module! {
                 &fields,
                 &output,
             ),
-            ("simulated_user", "StageResult") | ("reviewer", "StageResult") => route_stage_result(
+            ("simulated_user", "Trial") => route_simulated_user_trial(
                 &ctx,
                 &base_url,
                 &headers,
                 &work_item_id,
-                &role,
+                &target_entity_id,
+                &fields,
+                &output,
+            ),
+            (role, "StageResult") if stage_evaluator_role(role) => route_stage_result(
+                &ctx,
+                &base_url,
+                &headers,
+                &work_item_id,
+                role,
                 &target_entity_id,
                 &fields,
                 &output,
             ),
             ("selector", "Generation") => route_selector(
+                &ctx,
+                &base_url,
+                &headers,
+                &target_entity_id,
+                &fields,
+                &output,
+            ),
+            ("promoter", "Promotion") => route_promoter(
                 &ctx,
                 &base_url,
                 &headers,
@@ -77,6 +94,7 @@ temper_side_effect_module! {
 
 include!("observer.rs");
 include!("variant_generator.rs");
+include!("trial.rs");
 include!("stage_result.rs");
 include!("failure.rs");
 include!("selector.rs");
@@ -84,3 +102,14 @@ include!("evaluation.rs");
 include!("selection.rs");
 include!("prompts.rs");
 include!("tests.rs");
+
+fn stage_evaluator_role(role: &str) -> bool {
+    matches!(
+        role,
+        "reviewer"
+            | "viability_evaluator"
+            | "state_verifier"
+            | "telemetry_evaluator"
+            | "wasm_evaluator"
+    )
+}

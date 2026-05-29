@@ -8,7 +8,7 @@ allow_indefinite_states = ["Recorded"]
 name = "RecordMeasurement"
 kind = "input"
 from = ["Recorded"]
-params = ["MetricDefinitionId", "StageResultId", "TrialId", "VariantId", "Value", "Unit", "EvidenceArtifactId"]
+params = ["MetricDefinitionId", "StageResultId", "TrialId", "VariantId", "Value", "Unit", "EvidenceArtifactId", "ProvenanceKind", "MeasurementKind", "SourceRunId", "ComputedByRef", "Interpretation"]
 hint = "Record one observed metric value."
 
 [[action]]

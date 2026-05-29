@@ -14,8 +14,9 @@ use temper_wasm::{StreamRegistry, WasmInvocationContext};
 use tracing::instrument;
 
 use super::common::{
-    check_has_stream_or_400, extract_key, extract_tenant, has_expand_options, resolve_entity_type,
-    resolve_value_parent, tenant_csdl_xml, tenant_entity_sets,
+    check_has_stream_or_400, extract_key, extract_tenant, has_expand_options,
+    log_directed_evolution_odata_request, resolve_entity_type, resolve_value_parent,
+    tenant_csdl_xml, tenant_entity_sets,
 };
 use super::read_support::{
     PushdownPageRequest, catalog_select_projection_fields, materialize_entity_set_entities,
@@ -1213,6 +1214,7 @@ pub async fn handle_odata_get(
         Ok(t) => t,
         Err(e) => return e.into_response(),
     };
+    log_directed_evolution_odata_request(&headers, &tenant, "GET", &path);
     handle_odata_get_for_tenant(state, tenant, path, query_params).await
 }
 
