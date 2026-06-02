@@ -34,14 +34,22 @@ pub enum WorkloadOp {
 
 const TENANTS: &[&str] = &["t-alpha", "t-beta"];
 
-const APPS: &[&str] = &["project-management", "temper-fs", "agent-orchestration"];
+const APPS: &[&str] = &["project-management", "temper-fs", "paw-orchestration"];
 
 /// Entity types provided by each OS app.
 fn app_entity_types(app: &str) -> &'static [&'static str] {
     match app {
         "project-management" => &["Issue", "Project", "Cycle", "Comment", "Label"],
         "temper-fs" => &["File", "Directory", "FileVersion", "Workspace"],
-        "agent-orchestration" => &["HeartbeatRun", "Organization", "BudgetLedger"],
+        "paw-orchestration" => &[
+            "WorkerProvider",
+            "WorkerAgent",
+            "WorkItem",
+            "WorkerRun",
+            "HeartbeatRun",
+            "Organization",
+            "BudgetLedger",
+        ],
         _ => &[],
     }
 }
@@ -65,6 +73,28 @@ fn entity_actions(entity_type: &str) -> &'static [&'static str] {
         "Directory" => &["SetDescription", "Rename", "Archive"],
         "FileVersion" => &["SetDescription", "Promote"],
         "Workspace" => &["SetDescription", "Archive", "SetOwner"],
+        "WorkerProvider" => &["Register", "Activate", "Disable"],
+        "WorkerAgent" => &[
+            "Register",
+            "Activate",
+            "ReportHeartbeat",
+            "MarkUnhealthy",
+            "Disable",
+        ],
+        "WorkItem" => &[
+            "QueueWorkItem",
+            "ClaimWorkItem",
+            "StartWorkItem",
+            "SucceedWorkItem",
+            "FailWorkItem",
+            "CancelWorkItem",
+        ],
+        "WorkerRun" => &[
+            "StartWorkerRun",
+            "SucceedWorkerRun",
+            "FailWorkerRun",
+            "CancelWorkerRun",
+        ],
         "HeartbeatRun" => &["SetDescription", "Start", "Complete", "Fail"],
         "Organization" => &["SetDescription", "SetName", "Archive"],
         "BudgetLedger" => &["SetDescription", "Credit", "Debit", "Freeze"],

@@ -3,6 +3,9 @@ use super::*;
 
 #[test]
 fn test_directed_evolution_signal_to_promotion_wasm_spine() {
+    if skip_without_genesis_apps("test_directed_evolution_signal_to_promotion_wasm_spine") {
+        return;
+    }
     let handle = std::thread::Builder::new()
         .name("directed-evolution-spine".to_string())
         .stack_size(16 * 1024 * 1024)
@@ -118,6 +121,15 @@ async fn directed_evolution_signal_to_promotion_wasm_spine_body() {
                 "Do not regress existing answer creation.",
                 "Keep answer acceptance reversible."
             ],
+            "evidence_scope": [{
+                "surface": "logs",
+                "query": "service:temper-platform @directed_evolution.organism_id:org-agent-answers",
+                "time_window": "2026-06-01T21:00:00Z/2026-06-01T21:10:00Z",
+                "result_count": 3,
+                "interpretation": "Datadog contained correlated simulated-user runtime requests for the organism.",
+                "zero_result_meaning": "failure",
+                "datadog_url": "https://app.datadoghq.com/logs?query=service%3Atemper-platform"
+            }],
         }),
     )
     .await;
@@ -180,7 +192,7 @@ async fn directed_evolution_signal_to_promotion_wasm_spine_body() {
         serde_json::json!({
             "EpisodeId": episode_id,
             "GoalStatement": "Help users compare candidate answers and accept with confidence.",
-            "CreatedByBrainRunId": "chat-codex",
+            "CreatedByWorkerRunId": "chat-codex",
             "HumanNotes": "Human and brain agreed in chat.",
         }),
         false,
@@ -198,7 +210,7 @@ async fn directed_evolution_signal_to_promotion_wasm_spine_body() {
             "MetricIdsJson": "[]",
             "EliminationRuleIdsJson": "[]",
             "ScoringRuleIdsJson": "[]",
-            "CreatedByBrainRunId": "chat-codex",
+            "CreatedByWorkerRunId": "chat-codex",
         }),
         false,
     )
@@ -213,7 +225,7 @@ async fn directed_evolution_signal_to_promotion_wasm_spine_body() {
             "EpisodeId": episode_id,
             "ConstraintStatement": "Existing answer creation and acceptance still work.",
             "ConstraintKind": "regression",
-            "CreatedByBrainRunId": "chat-codex",
+            "CreatedByWorkerRunId": "chat-codex",
         }),
         false,
     )
@@ -366,6 +378,101 @@ async fn directed_evolution_signal_to_promotion_wasm_spine_body() {
     for work_item_id in evaluation_work_items {
         let role =
             directed_evolution_field(&state, &tenant, "WorkItem", &work_item_id, "Role").await;
+        let target_entity_id =
+            directed_evolution_field(&state, &tenant, "WorkItem", &work_item_id, "TargetEntityId")
+                .await;
+        let stage_result_id = if role == "simulated_user" {
+            directed_evolution_field(&state, &tenant, "Trial", &target_entity_id, "StageResultId")
+                .await
+        } else {
+            target_entity_id
+        };
+        let variant_id = directed_evolution_field(
+            &state,
+            &tenant,
+            "StageResult",
+            &stage_result_id,
+            "VariantId",
+        )
+        .await;
+        if variant_id == winner_variant_id {
+            if role == "simulated_user" {
+                directed_evolution_run_work_item(
+                    &state,
+                    &tenant,
+                    &work_item_id,
+                    &role,
+                    serde_json::json!({
+                        "status": "observed",
+                        "summary": "User could compare answers and complete acceptance.",
+                        "journey": [
+                            {"step": "Compare candidate answers", "result": "Comparison cues were visible."},
+                            {"step": "Accept best answer", "result": "Acceptance completed."}
+                        ],
+                        "observations": {
+                            "what_happened": "The variant supported the intended comparison journey.",
+                            "unmet_intents": []
+                        },
+                        "intent_satisfied": "yes",
+                        "friction": [],
+                        "metrics": {
+                            "observed_latency_ms": {"value": 120, "unit": "ms", "provenance_kind": "agent-observed"}
+                        },
+                        "evidence_scope": [
+                            {"surface": "runtime", "query": "/tdata", "result_summary": "OData runtime was reachable."}
+                        ],
+                    }),
+                )
+                .await;
+            } else {
+                directed_evolution_run_work_item(
+                    &state,
+                    &tenant,
+                    &work_item_id,
+                    &role,
+                    serde_json::json!({
+                        "passed": true,
+                        "status": "passed",
+                        "summary": "Variant keeps baseline behavior and improves comparison clarity.",
+                        "metrics": {
+                            "clarity_score": 0.91,
+                            "regression_count": 0
+                        },
+                    }),
+                )
+                .await;
+            }
+        } else if eliminated_variants.insert(variant_id.clone()) {
+            directed_evolution_run_work_item(
+                &state,
+                &tenant,
+                &work_item_id,
+                &role,
+                serde_json::json!({
+                    "passed": false,
+                    "status": "failed",
+                    "summary": "Variant regressed the baseline acceptance path.",
+                    "failure_reason": "baseline regression",
+                    "metrics": {
+                        "clarity_score": 0.52,
+                        "regression_count": 1
+                    },
+                }),
+            )
+            .await;
+        }
+    }
+
+    let viability_work_items = directed_evolution_wait_for_ids_with_field(
+        &state,
+        &tenant,
+        "WorkItem",
+        "Role",
+        "viability_evaluator",
+        1,
+    )
+    .await;
+    for work_item_id in viability_work_items {
         let stage_result_id =
             directed_evolution_field(&state, &tenant, "WorkItem", &work_item_id, "TargetEntityId")
                 .await;
@@ -382,33 +489,16 @@ async fn directed_evolution_signal_to_promotion_wasm_spine_body() {
                 &state,
                 &tenant,
                 &work_item_id,
-                &role,
+                "viability_evaluator",
                 serde_json::json!({
                     "passed": true,
                     "status": "passed",
-                    "summary": "Variant keeps baseline behavior and improves comparison clarity.",
+                    "summary": "Recorded simulated-user observations support the Adaptation Goal with no regression.",
                     "metrics": {
-                        "clarity_score": 0.91,
-                        "regression_count": 0
+                        "intent_satisfaction": {"value": 1.0, "unit": "ratio", "provenance_kind": "brain-judged"},
+                        "trial_blocker_count": {"value": 0, "unit": "count", "provenance_kind": "state-verified"}
                     },
-                }),
-            )
-            .await;
-        } else if eliminated_variants.insert(variant_id.clone()) {
-            directed_evolution_run_work_item(
-                &state,
-                &tenant,
-                &work_item_id,
-                &role,
-                serde_json::json!({
-                    "passed": false,
-                    "status": "failed",
-                    "summary": "Variant regressed the baseline acceptance path.",
-                    "failure_reason": "baseline regression",
-                    "metrics": {
-                        "clarity_score": 0.52,
-                        "regression_count": 1
-                    },
+                    "decision_basis": {"why": "The trial completed the intended journey and no blockers were recorded."},
                 }),
             )
             .await;

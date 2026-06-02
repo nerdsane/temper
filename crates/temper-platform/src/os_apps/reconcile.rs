@@ -229,15 +229,38 @@ pub(super) fn plan_reconcile_from_installed_record(
     record: &InstalledAppRecord,
     digest: &OsAppBundleDigest,
     specs_ready: bool,
+    policies_ready: bool,
     wasm_registered: bool,
 ) -> OsAppInstallPlan {
     OsAppInstallPlan {
         specs: record.spec_digest != digest.spec_digest || !specs_ready,
-        policies: record.policy_digest != digest.policy_digest,
+        policies: record.policy_digest != digest.policy_digest || !policies_ready,
         wasm: record.wasm_digest != digest.wasm_digest || !wasm_registered,
         content: record.content_digest != digest.content_digest,
         seed: record.seed_digest != digest.seed_digest,
     }
+}
+
+fn tenant_has_active_policies_for_bundle(
+    state: &PlatformState,
+    tenant: &str,
+    bundle: &AppBundle,
+) -> bool {
+    if bundle.cedar_policies.is_empty() {
+        return true;
+    }
+
+    let Ok(policies) = state.server.tenant_policies.read() else {
+        return false;
+    };
+    let Some(active_text) = policies.get(tenant) else {
+        return false;
+    };
+
+    bundle
+        .cedar_policies
+        .iter()
+        .all(|policy| active_text.contains(policy))
 }
 
 fn tenant_has_registered_wasm_for_bundle(
@@ -334,6 +357,7 @@ pub async fn reconcile_os_app(
         match ps.get_installed_app(tenant, app_name).await {
             Ok(Some(record)) => {
                 let mut specs_ready = tenant_has_ready_app_specs_for_bundle(state, tenant, &bundle);
+                let policies_ready = tenant_has_active_policies_for_bundle(state, tenant, &bundle);
                 let wasm_registered = tenant_has_registered_wasm_for_bundle(state, tenant, &bundle);
 
                 if record.bundle_digest == digest.bundle_digest && !specs_ready {
@@ -347,7 +371,11 @@ pub async fn reconcile_os_app(
                     .await;
                 }
 
-                if record.bundle_digest == digest.bundle_digest && specs_ready && wasm_registered {
+                if record.bundle_digest == digest.bundle_digest
+                    && specs_ready
+                    && policies_ready
+                    && wasm_registered
+                {
                     tracing::info!(
                         tenant,
                         app = %app_name,
@@ -374,6 +402,7 @@ pub async fn reconcile_os_app(
                     &record,
                     &digest,
                     specs_ready,
+                    policies_ready,
                     wasm_registered,
                 );
 

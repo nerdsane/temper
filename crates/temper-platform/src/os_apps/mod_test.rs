@@ -2,12 +2,15 @@ use super::agent_bootstrap::{
     AgentSoulRefreshDecision, bootstrapped_agent_soul_entity_id, decide_agent_soul_refresh,
 };
 use super::*;
+use axum::body::Body;
+use axum::http::{Request, StatusCode};
 use std::collections::HashMap;
 use std::fs;
 use std::time::Duration;
 
 use temper_authz::SecurityContext;
 use temper_runtime::tenant::TenantId;
+use temper_server::build_router;
 use temper_server::platform_store::InstalledAppRecord;
 use temper_server::registry::{EntityLevelSummary, EntityVerificationResult, VerificationStatus};
 use temper_server::request_context::AgentContext;
@@ -15,6 +18,21 @@ use temper_spec::automaton;
 use temper_spec::csdl::parse_csdl;
 use temper_store_turso::TursoSpecVerificationUpdate;
 use temper_verify::cascade::VerificationCascade;
+use tower::ServiceExt;
+
+fn genesis_apps_dir_if_available() -> Option<std::path::PathBuf> {
+    let temper_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let genesis_apps = temper_root.join("../apps");
+    genesis_apps.is_dir().then_some(genesis_apps)
+}
+
+fn skip_without_genesis_apps(test_name: &str) -> bool {
+    if genesis_apps_dir_if_available().is_some() {
+        return false;
+    }
+    eprintln!("{test_name}: skipping Genesis-authored app assertion outside a Genesis workspace");
+    true
+}
 
 #[test]
 fn test_pm_specs_parse() {
@@ -71,13 +89,16 @@ fn test_pm_specs_verify() {
 }
 
 #[test]
-fn test_agent_orchestration_specs_parse() {
-    let bundle = get_os_app("agent-orchestration").expect("AO app not found");
+fn test_paw_orchestration_specs_parse() {
+    if skip_without_genesis_apps("test_paw_orchestration_specs_parse") {
+        return;
+    }
+    let bundle = get_os_app("paw-orchestration").expect("Paw Orchestration app not found");
     for (entity_type, ioa_source) in &bundle.specs {
         let result = automaton::parse_automaton(ioa_source);
         assert!(
             result.is_ok(),
-            "Agent Orchestration spec {} failed to parse: {:?}",
+            "Paw Orchestration spec {} failed to parse: {:?}",
             entity_type,
             result.err()
         );
@@ -85,19 +106,30 @@ fn test_agent_orchestration_specs_parse() {
 }
 
 #[test]
-fn test_agent_orchestration_csdl_parses() {
-    let bundle = get_os_app("agent-orchestration").expect("AO app not found");
-    let result = parse_csdl(bundle.csdl.as_ref().expect("AO should have CSDL"));
+fn test_paw_orchestration_csdl_parses() {
+    if skip_without_genesis_apps("test_paw_orchestration_csdl_parses") {
+        return;
+    }
+    let bundle = get_os_app("paw-orchestration").expect("Paw Orchestration app not found");
+    let result = parse_csdl(
+        bundle
+            .csdl
+            .as_ref()
+            .expect("Paw Orchestration should have CSDL"),
+    );
     assert!(
         result.is_ok(),
-        "Agent Orchestration CSDL failed to parse: {:?}",
+        "Paw Orchestration CSDL failed to parse: {:?}",
         result.err()
     );
 }
 
 #[test]
-fn test_agent_orchestration_specs_verify() {
-    let bundle = get_os_app("agent-orchestration").expect("AO app not found");
+fn test_paw_orchestration_specs_verify() {
+    if skip_without_genesis_apps("test_paw_orchestration_specs_verify") {
+        return;
+    }
+    let bundle = get_os_app("paw-orchestration").expect("Paw Orchestration app not found");
     for (entity_type, ioa_source) in &bundle.specs {
         let cascade = VerificationCascade::from_ioa(ioa_source)
             .with_sim_seeds(3)
@@ -105,7 +137,7 @@ fn test_agent_orchestration_specs_verify() {
         let result = cascade.run();
         assert!(
             result.all_passed,
-            "Agent Orchestration spec {} failed verification",
+            "Paw Orchestration spec {} failed verification",
             entity_type
         );
     }
@@ -122,10 +154,6 @@ fn test_list_os_apps_returns_catalog() {
     );
     assert!(names.contains(&"temper-fs"), "missing temper-fs: {names:?}");
     assert!(
-        names.contains(&"agent-orchestration"),
-        "missing agent-orchestration: {names:?}"
-    );
-    assert!(
         names.contains(&"temper-agent"),
         "missing temper-agent: {names:?}"
     );
@@ -134,10 +162,17 @@ fn test_list_os_apps_returns_catalog() {
         names.contains(&"intent-discovery"),
         "missing intent-discovery: {names:?}"
     );
-    assert!(
-        names.contains(&"directed-evolution"),
-        "missing directed-evolution: {names:?}"
-    );
+    let has_genesis_apps = genesis_apps_dir_if_available().is_some();
+    if has_genesis_apps {
+        assert!(
+            names.contains(&"paw-orchestration"),
+            "missing paw-orchestration: {names:?}"
+        );
+        assert!(
+            names.contains(&"directed-evolution"),
+            "missing directed-evolution: {names:?}"
+        );
+    }
 
     let pm = apps
         .iter()
@@ -160,20 +195,94 @@ fn test_list_os_apps_returns_catalog() {
         evo.app_guide.is_some(),
         "evolution should have an app guide"
     );
-    let directed = apps
-        .iter()
-        .find(|e| e.name == "directed-evolution")
-        .unwrap();
-    assert_eq!(
-        directed.entity_types.len(),
-        25,
-        "Directed Evolution entity types: {:?}",
-        directed.entity_types
+    if has_genesis_apps {
+        let directed = apps
+            .iter()
+            .find(|e| e.name == "directed-evolution")
+            .unwrap();
+        assert_eq!(
+            directed.entity_types.len(),
+            26,
+            "Directed Evolution entity types: {:?}",
+            directed.entity_types
+        );
+        assert!(
+            directed.app_guide.is_some(),
+            "directed-evolution should have an app guide"
+        );
+    }
+}
+
+#[test]
+fn test_repo_os_apps_are_marked_bootstrap_not_canonical() {
+    let readme_path =
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../os-apps/README.md");
+    let readme = fs::read_to_string(&readme_path)
+        .unwrap_or_else(|err| panic!("failed to read {}: {err}", readme_path.display()));
+
+    assert!(
+        readme.contains("Genesis is the canonical source"),
+        "repo-local os-apps README must name Genesis as canonical"
     );
     assert!(
-        directed.app_guide.is_some(),
-        "directed-evolution should have an app guide"
+        readme.contains("bootstrap/dev/test surface"),
+        "repo-local os-apps README must mark local bundles as bootstrap/dev/test only"
     );
+    assert!(
+        readme.contains("not a production app catalog"),
+        "repo-local os-apps README must reject production catalog use"
+    );
+    assert!(
+        readme.contains("not an app-source mirror"),
+        "repo-local os-apps README must reject GitHub/repo mirror semantics"
+    );
+}
+
+#[test]
+fn test_directed_evolution_and_paw_orchestration_are_genesis_authored() {
+    let Some(genesis_apps) = genesis_apps_dir_if_available() else {
+        eprintln!(
+            "test_directed_evolution_and_paw_orchestration_are_genesis_authored: skipping Genesis path assertion outside a Genesis workspace"
+        );
+        let temper_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+        assert!(
+            !temper_root
+                .join("os-apps")
+                .join("directed-evolution")
+                .exists()
+        );
+        assert!(
+            !temper_root
+                .join("os-apps")
+                .join("paw-orchestration")
+                .exists()
+        );
+        return;
+    };
+    let temper_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+
+    for (app_name, genesis_path) in [
+        (
+            "directed-evolution",
+            genesis_apps.join("directed-evolution"),
+        ),
+        (
+            "paw-orchestration",
+            genesis_apps.join("temperpaw").join("paw-orchestration"),
+        ),
+    ] {
+        let genesis_manifest = genesis_path.join("app.toml");
+        assert!(
+            genesis_manifest.exists(),
+            "{app_name} must be authored in Genesis apps/"
+        );
+
+        let old_repo_path = temper_root.join("os-apps").join(app_name);
+        assert!(
+            !old_repo_path.exists(),
+            "{app_name} must not be mirrored back into Temper os-apps/"
+        );
+    }
 }
 
 #[test]
@@ -240,7 +349,8 @@ fn test_reconcile_plan_for_wasm_only_digest_skips_unrelated_phases() {
         status: "installed".to_string(),
     };
 
-    let plan = reconcile::plan_reconcile_from_installed_record(&installed, &current, true, true);
+    let plan =
+        reconcile::plan_reconcile_from_installed_record(&installed, &current, true, true, true);
 
     assert_eq!(
         plan,
@@ -278,6 +388,82 @@ async fn test_reconcile_os_app_skips_unchanged_bundle_digest() {
     assert!(
         matches!(result, OsAppReconcileResult::Skipped { .. }),
         "unchanged app should skip hot reinstall, got {result:?}"
+    );
+
+    let _ = std::fs::remove_file(&db_path);
+    let _ = std::fs::remove_file(format!("{db_path}-wal"));
+    let _ = std::fs::remove_file(format!("{db_path}-shm"));
+}
+
+#[tokio::test]
+async fn test_reconcile_os_app_reloads_unchanged_policies_after_restart() {
+    let db_path = format!(
+        "/tmp/temper-test-policy-reconcile-{}.db",
+        uuid::Uuid::new_v4()
+    );
+    let db_url = format!("file:{db_path}");
+
+    let turso = temper_store_turso::TursoEventStore::new(&db_url, None)
+        .await
+        .unwrap();
+    let mut state = PlatformState::new(None);
+    state
+        .server
+        .set_storage_stack(temper_server::StorageStack::from_turso(turso));
+
+    install_os_app(&state, "test-policy-reconcile", "project-management")
+        .await
+        .expect("initial install should succeed");
+
+    let policy_store = state
+        .server
+        .storage_stack
+        .as_ref()
+        .and_then(|stack| stack.policies.clone())
+        .expect("test should use granular policy storage");
+    let policy_row_id = policy_store
+        .load_policies_for_tenant("test-policy-reconcile")
+        .await
+        .expect("load granular policies after install")
+        .into_iter()
+        .find(|row| row.policy_id.starts_with("os-app:project-management:"))
+        .map(|row| row.policy_id)
+        .expect("project-management policy row should exist before restart");
+    assert!(
+        policy_store
+            .toggle_policy_enabled("test-policy-reconcile", &policy_row_id, false)
+            .await
+            .expect("disable project-management policy row"),
+        "project-management policy row should exist before restart"
+    );
+
+    let turso_after_restart = temper_store_turso::TursoEventStore::new(&db_url, None)
+        .await
+        .unwrap();
+    let mut restarted = PlatformState::new(None);
+    restarted
+        .server
+        .set_storage_stack(temper_server::StorageStack::from_turso(turso_after_restart));
+
+    let result = reconcile_os_app(&restarted, "test-policy-reconcile", "project-management")
+        .await
+        .expect("reconcile after restart should succeed");
+
+    assert!(
+        matches!(result, OsAppReconcileResult::Installed { .. }),
+        "unchanged app with missing active policies should run policy reconcile, got {result:?}"
+    );
+    let policy_text = restarted
+        .server
+        .tenant_policies
+        .read()
+        .unwrap()
+        .get("test-policy-reconcile")
+        .cloned()
+        .unwrap_or_default();
+    assert!(
+        policy_text.contains("MoveToTodo"),
+        "reconcile should reload project-management policies after restart: {policy_text}"
     );
 
     let _ = std::fs::remove_file(&db_path);
@@ -696,11 +882,14 @@ fn test_agent_specs_verify() {
 }
 
 #[test]
-fn test_get_app_agent_orchestration() {
-    let bundle = get_os_app("agent-orchestration");
+fn test_get_app_paw_orchestration() {
+    if skip_without_genesis_apps("test_get_app_paw_orchestration") {
+        return;
+    }
+    let bundle = get_os_app("paw-orchestration");
     assert!(bundle.is_some());
     let bundle = bundle.unwrap();
-    assert_eq!(bundle.specs.len(), 3);
+    assert_eq!(bundle.specs.len(), 7);
     assert!(bundle.csdl.is_some());
     assert!(!bundle.csdl.as_ref().unwrap().is_empty());
     assert!(!bundle.cedar_policies.is_empty());
@@ -765,25 +954,36 @@ async fn test_install_os_app_registers_entities() {
 }
 
 #[tokio::test]
-async fn test_install_os_app_agent_orchestration_registers_entities() {
+async fn test_install_os_app_paw_orchestration_registers_entities() {
+    if skip_without_genesis_apps("test_install_os_app_paw_orchestration_registers_entities") {
+        return;
+    }
     let state = PlatformState::new(None);
-    let result = install_os_app(&state, "test-ao", "agent-orchestration").await;
+    let result = install_os_app(&state, "test-ao", "paw-orchestration").await;
     assert!(result.is_ok());
     let result = result.unwrap();
     assert_eq!(
         result.added.len(),
-        3,
-        "expected 3 added: {:?}",
+        7,
+        "expected 7 added: {:?}",
         result.added
     );
     assert!(result.updated.is_empty());
     assert!(result.skipped.is_empty());
+    assert!(result.added.contains(&"WorkerProvider".to_string()));
+    assert!(result.added.contains(&"WorkerAgent".to_string()));
+    assert!(result.added.contains(&"WorkItem".to_string()));
+    assert!(result.added.contains(&"WorkerRun".to_string()));
     assert!(result.added.contains(&"HeartbeatRun".to_string()));
     assert!(result.added.contains(&"Organization".to_string()));
     assert!(result.added.contains(&"BudgetLedger".to_string()));
 
     let registry = state.registry.read().unwrap();
     let tenant = TenantId::new("test-ao");
+    assert!(registry.get_table(&tenant, "WorkerProvider").is_some());
+    assert!(registry.get_table(&tenant, "WorkerAgent").is_some());
+    assert!(registry.get_table(&tenant, "WorkItem").is_some());
+    assert!(registry.get_table(&tenant, "WorkerRun").is_some());
     assert!(registry.get_table(&tenant, "HeartbeatRun").is_some());
     assert!(registry.get_table(&tenant, "Organization").is_some());
     assert!(registry.get_table(&tenant, "BudgetLedger").is_some());
@@ -833,6 +1033,9 @@ async fn test_install_os_app_nonexistent_returns_error() {
 
 #[tokio::test]
 async fn test_install_multiple_apps_merges_and_is_idempotent() {
+    if skip_without_genesis_apps("test_install_multiple_apps_merges_and_is_idempotent") {
+        return;
+    }
     let state = PlatformState::new(None);
     let tenant = TenantId::new("test-merge");
 
@@ -840,9 +1043,9 @@ async fn test_install_multiple_apps_merges_and_is_idempotent() {
         .await
         .expect("install project-management");
 
-    install_os_app(&state, "test-merge", "agent-orchestration")
+    install_os_app(&state, "test-merge", "paw-orchestration")
         .await
-        .expect("install agent-orchestration");
+        .expect("install paw-orchestration");
 
     {
         let registry = state.registry.read().unwrap(); // ci-ok: infallible lock
@@ -852,6 +1055,10 @@ async fn test_install_multiple_apps_merges_and_is_idempotent() {
             "Cycle",
             "Comment",
             "Label",
+            "WorkerProvider",
+            "WorkerAgent",
+            "WorkItem",
+            "WorkerRun",
             "HeartbeatRun",
             "Organization",
             "BudgetLedger",
@@ -913,6 +1120,10 @@ async fn test_install_multiple_apps_merges_and_is_idempotent() {
             "Label".to_string(),
             "Organization".to_string(),
             "Project".to_string(),
+            "WorkItem".to_string(),
+            "WorkerAgent".to_string(),
+            "WorkerProvider".to_string(),
+            "WorkerRun".to_string(),
         ]
     );
 }
@@ -1057,6 +1268,528 @@ async fn test_install_os_app_activates_tenant_cedar_policies() {
     assert!(
         configure_decision.is_allowed(),
         "expected admin TemperAgent.Configure to be allowed after app install: {configure_decision:?}"
+    );
+}
+
+#[tokio::test]
+async fn test_install_os_app_accumulates_granular_cedar_policies() {
+    if skip_without_genesis_apps("test_install_os_app_accumulates_granular_cedar_policies") {
+        return;
+    }
+    let db_path = format!(
+        "/tmp/temper-test-os-app-policy-accumulation-{}.db",
+        uuid::Uuid::new_v4()
+    );
+    let db_url = format!("file:{db_path}");
+
+    let turso = temper_store_turso::TursoEventStore::new(&db_url, None)
+        .await
+        .unwrap();
+    let mut state = PlatformState::new(None);
+    state
+        .server
+        .set_storage_stack(temper_server::StorageStack::from_turso(turso));
+
+    let tenant = "test-policy-accumulation";
+    let legacy_only_policy = r#"permit(principal, action == Action::"legacy_only", resource);"#;
+    let old_directed_evolution_policy = get_os_app("directed-evolution")
+        .expect("directed-evolution app should be discoverable")
+        .cedar_policies
+        .join("\n");
+    let legacy_policy = format!("{legacy_only_policy}\n{old_directed_evolution_policy}");
+    state
+        .server
+        .authz
+        .reload_tenant_policies(tenant, &legacy_policy)
+        .expect("legacy policy should validate");
+    state
+        .server
+        .tenant_policies
+        .write()
+        .unwrap()
+        .insert(tenant.to_string(), legacy_policy.clone());
+    let platform_store = state
+        .server
+        .storage_stack
+        .as_ref()
+        .and_then(|stack| stack.platform.clone())
+        .expect("test should use a platform store");
+    platform_store
+        .upsert_tenant_policy(tenant, &legacy_policy)
+        .await
+        .expect("seed legacy aggregate policy");
+
+    install_os_app(&state, tenant, "directed-evolution")
+        .await
+        .expect("install directed-evolution");
+    install_os_app(&state, tenant, "agent-answers")
+        .await
+        .expect("install agent-answers");
+    install_os_app(&state, tenant, "agent-answers-evaluation")
+        .await
+        .expect("install agent-answers-evaluation");
+
+    let policy_text = state
+        .server
+        .tenant_policies
+        .read()
+        .unwrap()
+        .get(tenant)
+        .cloned()
+        .unwrap_or_default();
+    assert!(
+        policy_text.contains("MarkOrganismVersionParent"),
+        "directed-evolution policy must remain active after later app installs"
+    );
+    assert!(
+        policy_text.contains("legacy_only"),
+        "legacy aggregate policy must remain active after granular app installs"
+    );
+    assert!(
+        policy_text.contains("RecordAnswer"),
+        "agent-answers policy should also be active"
+    );
+    assert!(
+        policy_text.contains("ValidatorRun"),
+        "agent-answers-evaluation policy should also be active"
+    );
+    let legacy_policy_rows = platform_store
+        .load_tenant_policies()
+        .await
+        .expect("load durable legacy tenant policies");
+    let durable_legacy_policy_text = legacy_policy_rows
+        .iter()
+        .find(|(row_tenant, _)| row_tenant == tenant)
+        .map(|(_, policy_text)| policy_text.as_str())
+        .unwrap_or_default();
+    assert!(
+        durable_legacy_policy_text.contains("legacy_only"),
+        "true legacy policy should remain durable after granular migration"
+    );
+    assert!(
+        !durable_legacy_policy_text.contains("MarkOrganismVersionParent"),
+        "migrated OS-app policies must be scrubbed from the durable legacy policy blob"
+    );
+
+    let codex_ctx = SecurityContext::from_headers(&[
+        (
+            "X-Temper-Principal-Id".to_string(),
+            "codex-director".to_string(),
+        ),
+        ("X-Temper-Principal-Kind".to_string(), "agent".to_string()),
+        ("X-Temper-Agent-Type".to_string(), "codex".to_string()),
+    ]);
+    let mut organism_version_attrs = HashMap::new();
+    organism_version_attrs.insert(
+        "id".to_string(),
+        serde_json::json!("ov-agent-answers-seed-real-proof"),
+    );
+
+    let decision = state.server.authz.authorize_for_tenant(
+        tenant,
+        &codex_ctx,
+        "MarkOrganismVersionParent",
+        "OrganismVersion",
+        &organism_version_attrs,
+    );
+    assert!(
+        decision.is_allowed(),
+        "codex should still be authorized for Directed Evolution organism-version actions after later app installs: {decision:?}"
+    );
+
+    let _ = std::fs::remove_file(&db_path);
+    let _ = std::fs::remove_file(format!("{db_path}-wal"));
+    let _ = std::fs::remove_file(format!("{db_path}-shm"));
+}
+
+#[tokio::test]
+async fn test_reinstall_os_app_disables_removed_granular_cedar_policy() {
+    let db_path = format!(
+        "/tmp/temper-test-os-app-policy-stale-{}.db",
+        uuid::Uuid::new_v4()
+    );
+    let db_url = format!("file:{db_path}");
+    let turso = temper_store_turso::TursoEventStore::new(&db_url, None)
+        .await
+        .unwrap();
+    let mut state = PlatformState::new(None);
+    state
+        .server
+        .set_storage_stack(temper_server::StorageStack::from_turso(turso));
+
+    let app_root =
+        std::env::temp_dir().join(format!("temper-stale-policy-app-{}", uuid::Uuid::new_v4()));
+    let app_dir = app_root.join("stale-policy-app");
+    fs::create_dir_all(app_dir.join("policies")).unwrap();
+    fs::write(
+        app_dir.join("app.toml"),
+        r#"name = "stale-policy-app"
+description = "Stale policy test app"
+version = "1.0.0"
+"#,
+    )
+    .unwrap();
+    fs::write(
+        app_dir.join("APP.md"),
+        "# Stale Policy Test App\n\nFixture app for granular Cedar policy reconcile tests.\n",
+    )
+    .unwrap();
+    let keep_policy = r#"permit(principal, action == Action::"stable_keep", resource);"#;
+    let remove_policy = r#"permit(principal, action == Action::"removed_stale", resource);"#;
+    let introduced_policy = r#"permit(principal, action == Action::"introduced_first", resource);"#;
+    fs::write(app_dir.join("policies/001-keep.cedar"), keep_policy).unwrap();
+    fs::write(app_dir.join("policies/002-remove.cedar"), remove_policy).unwrap();
+    add_os_apps_dir(app_root.clone());
+
+    let tenant = "test-policy-stale";
+    install_os_app(&state, tenant, "stale-policy-app")
+        .await
+        .expect("install app with both policies");
+    let ctx = SecurityContext::from_headers(&[
+        ("X-Temper-Principal-Id".to_string(), "tester".to_string()),
+        (
+            "X-Temper-Principal-Kind".to_string(),
+            "customer".to_string(),
+        ),
+    ]);
+    let attrs = HashMap::from([("id".to_string(), serde_json::json!("resource-1"))]);
+    assert!(
+        state
+            .server
+            .authz
+            .authorize_for_tenant(tenant, &ctx, "removed_stale", "Thing", &attrs)
+            .is_allowed(),
+        "second policy should authorize before it is removed"
+    );
+
+    fs::write(
+        app_dir.join("policies/000-introduced.cedar"),
+        introduced_policy,
+    )
+    .unwrap();
+    fs::remove_file(app_dir.join("policies/002-remove.cedar")).unwrap();
+    add_os_apps_dir(app_root);
+    install_os_app(&state, tenant, "stale-policy-app")
+        .await
+        .expect("reinstall app after inserting and removing policies");
+
+    assert!(
+        state
+            .server
+            .authz
+            .authorize_for_tenant(tenant, &ctx, "stable_keep", "Thing", &attrs)
+            .is_allowed(),
+        "remaining app policy should stay active"
+    );
+    assert!(
+        state
+            .server
+            .authz
+            .authorize_for_tenant(tenant, &ctx, "introduced_first", "Thing", &attrs)
+            .is_allowed(),
+        "new policy inserted before the keeper should become active"
+    );
+    assert!(
+        !state
+            .server
+            .authz
+            .authorize_for_tenant(tenant, &ctx, "removed_stale", "Thing", &attrs)
+            .is_allowed(),
+        "removed app policy must be disabled and excluded from tenant Cedar"
+    );
+
+    let policy_store = state
+        .server
+        .storage_stack
+        .as_ref()
+        .and_then(|stack| stack.policies.clone())
+        .expect("test should use granular policy storage");
+    let rows = policy_store
+        .load_policies_for_tenant(tenant)
+        .await
+        .expect("load policies");
+    let keep_row_id = os_app_policy_id("stale-policy-app", keep_policy);
+    let removed_row_id = os_app_policy_id("stale-policy-app", remove_policy);
+    let stale_row = rows
+        .iter()
+        .find(|row| row.policy_id == removed_row_id)
+        .expect("stale policy row should remain for audit history");
+    assert!(
+        !stale_row.enabled,
+        "stale app policy row should be disabled rather than active"
+    );
+    let keep_row = rows
+        .iter()
+        .find(|row| row.policy_id == keep_row_id)
+        .expect("stable policy row should retain content-derived identity");
+    assert!(keep_row.enabled, "stable policy row should stay enabled");
+
+    let platform_store = state
+        .server
+        .storage_stack
+        .as_ref()
+        .and_then(|stack| stack.platform.clone())
+        .expect("test should use a platform store");
+
+    let stale_legacy_policy = format!(
+        "{}\n{}",
+        r#"permit(principal, action == Action::"durable_legacy_residue", resource);"#,
+        remove_policy
+    );
+    state
+        .server
+        .authz
+        .reload_tenant_policies(tenant, &stale_legacy_policy)
+        .expect("stale legacy policy should validate");
+    state
+        .server
+        .tenant_policies
+        .write()
+        .unwrap()
+        .insert(tenant.to_string(), stale_legacy_policy.clone());
+    platform_store
+        .upsert_tenant_policy(tenant, &stale_legacy_policy)
+        .await
+        .expect("seed stale legacy aggregate policy");
+    install_os_app(&state, tenant, "stale-policy-app")
+        .await
+        .expect("reinstall should scrub disabled app policy from legacy residue");
+    assert!(
+        !state
+            .server
+            .authz
+            .authorize_for_tenant(tenant, &ctx, "removed_stale", "Thing", &attrs)
+            .is_allowed(),
+        "disabled app policy from a stale legacy blob must not become active again"
+    );
+    assert!(
+        state
+            .server
+            .authz
+            .authorize_for_tenant(tenant, &ctx, "durable_legacy_residue", "Thing", &attrs)
+            .is_allowed(),
+        "true legacy policy residue should stay active"
+    );
+
+    let legacy_policy_rows = platform_store
+        .load_tenant_policies()
+        .await
+        .expect("load legacy tenant policies");
+    let legacy_policy_text = legacy_policy_rows
+        .iter()
+        .find(|(row_tenant, _)| row_tenant == tenant)
+        .map(|(_, policy_text)| policy_text.as_str())
+        .unwrap_or_default();
+    assert!(
+        !legacy_policy_text.contains("removed_stale"),
+        "removed granular policy must not survive in the durable legacy policy blob"
+    );
+    assert!(
+        !legacy_policy_text.contains("stable_keep"),
+        "granular app policies must not be duplicated into the durable legacy policy blob"
+    );
+    assert!(
+        legacy_policy_text.contains("durable_legacy_residue"),
+        "true legacy policy residue must survive durable legacy scrub"
+    );
+
+    let _ = std::fs::remove_dir_all(app_dir.parent().unwrap());
+    let _ = std::fs::remove_file(&db_path);
+    let _ = std::fs::remove_file(format!("{db_path}-wal"));
+    let _ = std::fs::remove_file(format!("{db_path}-shm"));
+}
+
+#[tokio::test]
+async fn test_alias_install_uses_canonical_app_name_for_granular_policy_ids() {
+    let db_path = format!(
+        "/tmp/temper-test-os-app-policy-alias-{}.db",
+        uuid::Uuid::new_v4()
+    );
+    let db_url = format!("file:{db_path}");
+    let turso = temper_store_turso::TursoEventStore::new(&db_url, None)
+        .await
+        .unwrap();
+    let mut state = PlatformState::new(None);
+    state
+        .server
+        .set_storage_stack(temper_server::StorageStack::from_turso(turso));
+
+    let app_root =
+        std::env::temp_dir().join(format!("temper-alias-policy-app-{}", uuid::Uuid::new_v4()));
+    let app_dir = app_root.join("temperpaw").join("alias-policy-app");
+    fs::create_dir_all(app_dir.join("policies")).unwrap();
+    fs::write(
+        app_dir.join("app.toml"),
+        r#"name = "alias-policy-app"
+description = "Alias policy test app"
+version = "1.0.0"
+"#,
+    )
+    .unwrap();
+    fs::write(
+        app_dir.join("APP.md"),
+        "# Alias Policy Test App\n\nFixture app for owner/app alias policy identity tests.\n",
+    )
+    .unwrap();
+    let keep_policy = r#"permit(principal, action == Action::"alias_keep", resource);"#;
+    let remove_policy = r#"permit(principal, action == Action::"alias_removed", resource);"#;
+    fs::write(app_dir.join("policies/001-keep.cedar"), keep_policy).unwrap();
+    fs::write(app_dir.join("policies/002-remove.cedar"), remove_policy).unwrap();
+    add_os_apps_dir(app_root.clone());
+
+    let tenant = "test-policy-alias";
+    install_os_app(&state, tenant, "temperpaw/alias-policy-app")
+        .await
+        .expect("install app through owner/app alias");
+
+    let policy_store = state
+        .server
+        .storage_stack
+        .as_ref()
+        .and_then(|stack| stack.policies.clone())
+        .expect("test should use granular policy storage");
+    let rows = policy_store
+        .load_policies_for_tenant(tenant)
+        .await
+        .expect("load policies");
+    let canonical_removed_row_id = os_app_policy_id("alias-policy-app", remove_policy);
+    let alias_removed_row_id = os_app_policy_id("temperpaw/alias-policy-app", remove_policy);
+    assert!(
+        rows.iter()
+            .any(|row| row.policy_id == canonical_removed_row_id && row.enabled),
+        "alias install must store policy rows under the canonical manifest app name"
+    );
+    assert!(
+        !rows.iter().any(|row| row.policy_id == alias_removed_row_id),
+        "alias install must not create a separate alias-scoped policy row"
+    );
+
+    let ctx = SecurityContext::from_headers(&[
+        ("X-Temper-Principal-Id".to_string(), "tester".to_string()),
+        (
+            "X-Temper-Principal-Kind".to_string(),
+            "customer".to_string(),
+        ),
+    ]);
+    let attrs = HashMap::from([("id".to_string(), serde_json::json!("resource-1"))]);
+    assert!(
+        state
+            .server
+            .authz
+            .authorize_for_tenant(tenant, &ctx, "alias_removed", "Thing", &attrs)
+            .is_allowed(),
+        "removed policy should authorize before it is removed"
+    );
+
+    fs::remove_file(app_dir.join("policies/002-remove.cedar")).unwrap();
+    install_os_app(&state, tenant, "alias-policy-app")
+        .await
+        .expect("reinstall app through canonical name");
+
+    assert!(
+        state
+            .server
+            .authz
+            .authorize_for_tenant(tenant, &ctx, "alias_keep", "Thing", &attrs)
+            .is_allowed(),
+        "remaining app policy should stay active"
+    );
+    assert!(
+        !state
+            .server
+            .authz
+            .authorize_for_tenant(tenant, &ctx, "alias_removed", "Thing", &attrs)
+            .is_allowed(),
+        "canonical reinstall must disable policies first installed through an owner/app alias"
+    );
+
+    let rows = policy_store
+        .load_policies_for_tenant(tenant)
+        .await
+        .expect("reload policies");
+    let removed_row = rows
+        .iter()
+        .find(|row| row.policy_id == canonical_removed_row_id)
+        .expect("canonical stale policy row should remain for audit history");
+    assert!(
+        !removed_row.enabled,
+        "canonical stale policy row should be disabled after canonical reinstall"
+    );
+
+    let _ = std::fs::remove_dir_all(app_root);
+    let _ = std::fs::remove_file(&db_path);
+    let _ = std::fs::remove_file(format!("{db_path}-wal"));
+    let _ = std::fs::remove_file(format!("{db_path}-shm"));
+}
+
+#[tokio::test]
+async fn test_namespaced_paw_orchestration_bound_action_authorizes_and_dispatches() {
+    if skip_without_genesis_apps(
+        "test_namespaced_paw_orchestration_bound_action_authorizes_and_dispatches",
+    ) {
+        return;
+    }
+    let state = PlatformState::new(None);
+    let tenant = TenantId::new("test-paw-namespaced-action");
+    let worker_id = "worker-ns-1";
+
+    install_os_app(&state, tenant.as_str(), "paw-orchestration")
+        .await
+        .expect("install paw-orchestration");
+    state
+        .server
+        .get_or_create_tenant_entity(&tenant, "WorkerAgent", worker_id, serde_json::json!({}))
+        .await
+        .expect("seed worker agent");
+
+    let router = build_router(state.server.clone());
+    let response = router
+        .oneshot(
+            Request::post(
+                "/tdata/WorkerAgents('worker-ns-1')/Temper.PawOrchestration.ReportHeartbeat",
+            )
+            .header("Content-Type", "application/json")
+            .header("X-Tenant-Id", tenant.as_str())
+            .header("X-Temper-Principal-Id", worker_id)
+            .header("X-Temper-Principal-Kind", "agent")
+            .header("X-Temper-Agent-Type", "worker")
+            .body(Body::from(
+                serde_json::json!({
+                    "last_seen_at": "2026-06-01T23:20:00Z",
+                    "status_summary": "namespace-normalization proof",
+                    "capabilities": "local_codex,datadog_query"
+                })
+                .to_string(),
+            ))
+            .expect("build request"),
+        )
+        .await
+        .expect("route request");
+
+    let status = response.status();
+    let body_bytes = axum::body::to_bytes(response.into_body(), 1024 * 1024)
+        .await
+        .expect("read response");
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "namespaced bound action should authorize and dispatch: {}",
+        String::from_utf8_lossy(&body_bytes)
+    );
+
+    let entity = state
+        .server
+        .get_tenant_entity_state(&tenant, "WorkerAgent", worker_id)
+        .await
+        .expect("worker agent after heartbeat");
+    assert_eq!(entity.state.status, "Active");
+    assert_eq!(
+        entity
+            .state
+            .fields
+            .get("last_seen_at")
+            .and_then(|value| value.as_str()),
+        Some("2026-06-01T23:20:00Z")
     );
 }
 

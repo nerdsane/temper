@@ -545,7 +545,7 @@ impl ServerState {
     }
 
     /// Return the durable query-plane capability for projection reads/writes.
-    pub(crate) fn query_plane_store(&self) -> Option<Arc<dyn QueryPlaneStore>> {
+    pub fn query_plane_store(&self) -> Option<Arc<dyn QueryPlaneStore>> {
         self.storage_stack
             .as_ref()
             .and_then(|stack| stack.query_plane.clone())

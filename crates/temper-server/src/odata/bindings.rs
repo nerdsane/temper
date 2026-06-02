@@ -41,9 +41,10 @@ pub(super) async fn dispatch_bound_action(
     resolved_identity: Option<&ResolvedIdentity>,
 ) -> axum::response::Response {
     let http_start = sim_now();
+    let action_name = action.rsplit('.').next().unwrap_or(action);
     let tracer = opentelemetry::global::tracer("temper");
     let http_start_time: std::time::SystemTime = http_start.into();
-    let span_name = format!("HTTP POST {set_name}.{action}");
+    let span_name = format!("HTTP POST {set_name}.{action_name}");
     let mut http_span = tracer
         .span_builder(span_name)
         .with_start_time(http_start_time)
@@ -51,7 +52,8 @@ pub(super) async fn dispatch_bound_action(
             OtelKeyValue::new("http.method", "POST"),
             OtelKeyValue::new("odata.entity_set", set_name.to_string()),
             OtelKeyValue::new("odata.entity_id", key_str.to_string()),
-            OtelKeyValue::new("odata.action", action.to_string()),
+            OtelKeyValue::new("odata.action", action_name.to_string()),
+            OtelKeyValue::new("odata.action.raw", action.to_string()),
             OtelKeyValue::new("tenant", tenant.as_str().to_string()),
         ])
         .start_with_context(&tracer, &tracing::Span::current().context());
@@ -184,7 +186,7 @@ pub(super) async fn dispatch_bound_action(
 
     let authz_result = state.authorize_with_context(
         &security_ctx,
-        action,
+        action_name,
         entity_type,
         &resource_attrs,
         tenant.as_str(),
@@ -197,7 +199,7 @@ pub(super) async fn dispatch_bound_action(
                 tenant: tenant.as_str(),
                 security_ctx: &security_ctx,
                 agent_id_override: agent_ctx.agent_id.as_deref(),
-                action,
+                action: action_name,
                 resource_type: entity_type,
                 resource_id: key_str,
                 resource_attrs: serde_json::to_value(&resource_attrs).unwrap_or_default(),
@@ -226,7 +228,7 @@ pub(super) async fn dispatch_bound_action(
         tenant,
         entity_type,
         key_str,
-        action,
+        action_name,
         "bound_action",
         &current_fields,
     )
@@ -268,7 +270,7 @@ pub(super) async fn dispatch_bound_action(
             tenant,
             entity_type,
             key_str,
-            action,
+            action_name,
             body_json.clone(),
             DispatchExtOptions {
                 agent_ctx: &dispatch_agent_ctx,
@@ -302,7 +304,7 @@ pub(super) async fn dispatch_bound_action(
                             tenant,
                             entity_type,
                             entity_id: key_str,
-                            action,
+                            action: action_name,
                             params: &body_json,
                             state_json: &state_json,
                         })

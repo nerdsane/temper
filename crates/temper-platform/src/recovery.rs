@@ -95,29 +95,37 @@ pub async fn recover_cedar_policies(state: &PlatformState, ps: &dyn PlatformStor
         .collect();
     let mut loaded_count = 0usize;
     let mut loaded_policy_count = 0usize;
-    let mut skipped_legacy_count = 0usize;
+    let mut merged_legacy_count = 0usize;
     for tenant in tenants {
         let entries = granular_entries.remove(&tenant).unwrap_or_default();
-        let has_primary_granular = entries.iter().any(|(policy_id, _)| policy_id == "primary");
-        let mut policy_text = String::new();
-        let mut entry_count = 0usize;
-
-        // `primary` is the durable aggregate policy row for newer installs. If
-        // it exists, prefer it over the legacy blob to avoid loading the same
-        // multi-megabyte generated policy twice.
-        if !has_primary_granular {
-            if let Some(legacy_text) = legacy_entries.get(&tenant) {
-                append_cedar_policy_text(&mut policy_text, legacy_text);
-                entry_count += 1;
-            }
-        } else if legacy_entries.contains_key(&tenant) {
-            skipped_legacy_count += 1;
-        }
-
+        let mut granular_text = String::new();
         for (_, cedar_text) in entries {
-            append_cedar_policy_text(&mut policy_text, &cedar_text);
-            entry_count += 1;
+            append_cedar_policy_text(&mut granular_text, &cedar_text);
         }
+        let mut entry_count = if granular_text.trim().is_empty() {
+            0
+        } else {
+            1
+        };
+
+        let policy_text = match legacy_entries.get(&tenant) {
+            Some(legacy_text) if granular_text.trim().is_empty() => {
+                entry_count += 1;
+                legacy_text.clone()
+            }
+            Some(legacy_text)
+                if granular_text.trim() == legacy_text.trim()
+                    || granular_text.contains(legacy_text.trim()) =>
+            {
+                granular_text
+            }
+            Some(legacy_text) => {
+                merged_legacy_count += 1;
+                entry_count += 1;
+                format!("{legacy_text}\n{granular_text}")
+            }
+            None => granular_text,
+        };
 
         if policy_text.trim().is_empty() {
             continue;
@@ -150,7 +158,7 @@ pub async fn recover_cedar_policies(state: &PlatformState, ps: &dyn PlatformStor
         tracing::info!(
             tenants = loaded_count,
             policies = loaded_policy_count,
-            skipped_legacy = skipped_legacy_count,
+            merged_legacy = merged_legacy_count,
             "Restored Cedar policies from durable storage."
         );
     }
@@ -403,10 +411,11 @@ permit(
     }
 
     #[tokio::test]
-    async fn recover_cedar_policies_prefers_primary_row_over_legacy_blob() {
+    async fn recover_cedar_policies_merges_legacy_and_granular_rows() {
         let store = TursoEventStore::new(&sqlite_test_url("primary-policy-recovery"), None)
             .await
             .expect("create test store");
+        let disabled_granular_tenant = "recovery-disabled-granular";
         store
             .upsert_tenant_policy(
                 "default",
@@ -440,6 +449,26 @@ permit(
             )
             .await
             .expect("save granular policy");
+        store
+            .upsert_tenant_policy(
+                disabled_granular_tenant,
+                r#"permit(principal, action == Action::"legacy_after_empty_rows", resource);"#,
+            )
+            .await
+            .expect("save disabled-granular tenant legacy policy");
+        store
+            .save_policy(
+                disabled_granular_tenant,
+                "disabled-granular",
+                r#"permit(principal, action == Action::"disabled_granular", resource);"#,
+                "test",
+            )
+            .await
+            .expect("save disabled granular policy");
+        store
+            .toggle_policy_enabled(disabled_granular_tenant, "disabled-granular", false)
+            .await
+            .expect("disable granular policy row");
 
         let state = PlatformState::new(None);
         recover_cedar_policies(&state, &store).await;
@@ -454,8 +483,21 @@ permit(
             "granular app policy should be appended to primary policy"
         );
         assert!(
-            !tenant_text.contains("legacy_only"),
-            "legacy blob should be skipped when durable primary policy row exists"
+            tenant_text.contains("legacy_only"),
+            "legacy policy text should survive granular recovery"
+        );
+        let disabled_granular_policy_text = state
+            .server
+            .authz
+            .get_tenant_policy_text(disabled_granular_tenant)
+            .expect("disabled-granular tenant policy text");
+        assert!(
+            disabled_granular_policy_text.contains("legacy_after_empty_rows"),
+            "legacy policy text should be restored when granular rows are all disabled"
+        );
+        assert!(
+            !disabled_granular_policy_text.contains("disabled_granular"),
+            "disabled granular policy rows must not become active during legacy restoration"
         );
     }
 }

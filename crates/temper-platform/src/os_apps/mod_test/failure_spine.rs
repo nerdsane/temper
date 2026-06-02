@@ -3,6 +3,10 @@ use super::*;
 
 #[test]
 fn test_directed_evolution_failed_variant_generation_closes_episode() {
+    if skip_without_genesis_apps("test_directed_evolution_failed_variant_generation_closes_episode")
+    {
+        return;
+    }
     let handle = std::thread::Builder::new()
         .name("directed-evolution-failure-spine".to_string())
         .stack_size(16 * 1024 * 1024)

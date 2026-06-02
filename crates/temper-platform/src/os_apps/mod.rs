@@ -1,12 +1,13 @@
-//! OS App Catalog — dev/local pre-built application specs.
+//! OS App Catalog — bootstrap/dev/test pre-built application specs.
 //!
-//! OS apps are spec bundles (IOA TOML + CSDL + Cedar policies) loaded from
-//! the `os-apps/` directory in local development and tests. Agents discover them via
-//! `list_os_apps()` / `install_os_app()`.
+//! Repo-local OS apps are spec bundles (IOA TOML + CSDL + Cedar policies) loaded
+//! from the `os-apps/` directory for first-boot recovery, local development, and
+//! tests. Genesis pinned app refs are the production source of truth; this module
+//! must not become a production app catalog or app-source mirror.
 //!
 //! Install reuses [`crate::bootstrap::bootstrap_tenant_specs`] so every app goes through the same verification cascade as system specs.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 use std::time::Instant;
 
@@ -1016,12 +1017,291 @@ async fn install_os_app_without_dependencies(
     install_os_app_with_plan(state, tenant, app_name, OsAppInstallPlan::all()).await
 }
 
+#[derive(Debug, Clone)]
+struct OsAppPolicyEntry {
+    policy_id: String,
+    cedar_text: String,
+}
+
+#[derive(Debug, Clone)]
+struct OsAppPolicyPlan {
+    entries: Vec<OsAppPolicyEntry>,
+    stale_policy_ids: Vec<String>,
+    combined_text: String,
+    legacy_policy_text: Option<String>,
+    uses_policy_store: bool,
+}
+
+fn os_app_policy_id(app_name: &str, cedar_text: &str) -> String {
+    let digest = Sha256::digest(cedar_text.as_bytes());
+    format!("os-app:{app_name}:sha256:{}", hex_lower(&digest))
+}
+
+fn hex_lower(bytes: &[u8]) -> String {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    let mut output = String::with_capacity(bytes.len() * 2);
+    for &byte in bytes {
+        output.push(HEX[(byte >> 4) as usize] as char);
+        output.push(HEX[(byte & 0x0f) as usize] as char);
+    }
+    output
+}
+
+fn os_app_policy_id_prefix(app_name: &str) -> String {
+    format!("os-app:{app_name}:")
+}
+
+fn legacy_os_app_policy_id() -> &'static str {
+    "legacy:tenant-policies"
+}
+
+fn residual_legacy_policy_text<'a>(
+    legacy_text: &str,
+    known_policy_texts: impl IntoIterator<Item = &'a str>,
+) -> Option<String> {
+    let mut residual = legacy_text.trim().to_string();
+    if residual.is_empty() {
+        return None;
+    }
+
+    for known in known_policy_texts {
+        let known = known.trim();
+        if known.is_empty() {
+            continue;
+        }
+        let replaced = residual.replace(known, "");
+        if replaced != residual {
+            residual = replaced;
+            continue;
+        }
+
+        let known_lines: BTreeSet<&str> = known
+            .lines()
+            .map(str::trim)
+            .filter(|line| !line.is_empty())
+            .collect();
+        if known_lines.is_empty() {
+            continue;
+        }
+        let residual_lines: BTreeSet<&str> = residual
+            .lines()
+            .map(str::trim)
+            .filter(|line| !line.is_empty())
+            .collect();
+        let matched_lines = known_lines
+            .iter()
+            .filter(|line| residual_lines.contains(**line))
+            .count();
+        if matched_lines * 4 < known_lines.len() * 3 {
+            continue;
+        }
+        residual = residual
+            .lines()
+            .filter(|line| !known_lines.contains(line.trim()))
+            .collect::<Vec<_>>()
+            .join("\n");
+    }
+
+    let residual = residual
+        .lines()
+        .map(str::trim_end)
+        .filter(|line| !line.trim().is_empty())
+        .collect::<Vec<_>>()
+        .join("\n");
+
+    (!residual.trim().is_empty()).then_some(residual)
+}
+
+async fn build_os_app_policy_plan(
+    state: &PlatformState,
+    tenant: &str,
+    app_name: &str,
+    bundle: &AppBundle,
+) -> Result<Option<OsAppPolicyPlan>, String> {
+    let entries: Vec<OsAppPolicyEntry> = bundle
+        .cedar_policies
+        .iter()
+        .map(|policy| OsAppPolicyEntry {
+            policy_id: os_app_policy_id(app_name, policy),
+            cedar_text: policy.clone(),
+        })
+        .collect();
+    let current_app_policy_ids: Vec<String> = entries
+        .iter()
+        .map(|entry| entry.policy_id.clone())
+        .collect();
+    let app_policy_prefix = os_app_policy_id_prefix(app_name);
+
+    let Some(policy_store) = state
+        .server
+        .storage_stack
+        .as_ref()
+        .and_then(|stack| stack.policies.clone())
+    else {
+        if bundle.cedar_policies.is_empty() {
+            return Ok(None);
+        }
+        let bundle_text = bundle.cedar_policies.join("\n");
+        let policies = state.server.tenant_policies.read().unwrap(); // ci-ok: infallible lock
+        let existing = policies.get(tenant).cloned().unwrap_or_default();
+        let combined_text = if existing.is_empty() {
+            bundle_text
+        } else {
+            format!("{existing}\n{bundle_text}")
+        };
+        let validator = temper_authz::AuthzEngine::empty();
+        validator
+            .reload_tenant_policies(tenant, &combined_text)
+            .map_err(|e| format!("Invalid Cedar policy for os-app '{app_name}': {e}"))?;
+        return Ok(Some(OsAppPolicyPlan {
+            entries,
+            stale_policy_ids: Vec::new(),
+            combined_text,
+            legacy_policy_text: None,
+            uses_policy_store: false,
+        }));
+    };
+
+    let mut named_by_id = BTreeMap::<String, String>::new();
+    let mut stored_policy_texts = Vec::<String>::new();
+    let mut stale_policy_ids = Vec::<String>::new();
+    for row in policy_store
+        .load_policies_for_tenant(tenant)
+        .await
+        .map_err(|e| format!("Failed to load Cedar policy entries for tenant '{tenant}': {e}"))?
+    {
+        let is_app_policy = row.policy_id.starts_with(&app_policy_prefix);
+        if row.enabled || is_app_policy {
+            stored_policy_texts.push(row.cedar_text.clone());
+        }
+        if row.enabled {
+            if row.policy_id == legacy_os_app_policy_id() {
+                stale_policy_ids.push(row.policy_id);
+                continue;
+            }
+            if is_app_policy && !current_app_policy_ids.contains(&row.policy_id) {
+                stale_policy_ids.push(row.policy_id);
+                continue;
+            }
+            named_by_id.insert(row.policy_id, row.cedar_text);
+        }
+    }
+
+    let legacy_text = state
+        .server
+        .tenant_policies
+        .read()
+        .unwrap() // ci-ok: infallible lock
+        .get(tenant)
+        .cloned()
+        .unwrap_or_default();
+    let known_policy_texts = stored_policy_texts
+        .iter()
+        .map(String::as_str)
+        .chain(entries.iter().map(|entry| entry.cedar_text.as_str()));
+    let residual_legacy_text = residual_legacy_policy_text(&legacy_text, known_policy_texts);
+    let legacy_policy_text =
+        (!legacy_text.trim().is_empty()).then(|| residual_legacy_text.clone().unwrap_or_default());
+
+    if entries.is_empty() && stale_policy_ids.is_empty() && legacy_policy_text.is_none() {
+        return Ok(None);
+    }
+
+    for entry in &entries {
+        named_by_id.insert(entry.policy_id.clone(), entry.cedar_text.clone());
+    }
+
+    let mut named_policies: Vec<(String, String)> = named_by_id.into_iter().collect();
+    if let Some(ref residual) = legacy_policy_text
+        && !residual.trim().is_empty()
+    {
+        named_policies.push((legacy_os_app_policy_id().to_string(), residual.clone()));
+    }
+    let combined_text = named_policies
+        .iter()
+        .map(|(_, cedar_text)| cedar_text.as_str())
+        .collect::<Vec<_>>()
+        .join("\n");
+
+    let validator = temper_authz::AuthzEngine::empty();
+    validator
+        .reload_tenant_policies_named(tenant, &named_policies)
+        .map_err(|e| format!("Invalid Cedar policy set after os-app '{app_name}' install: {e}"))?;
+
+    Ok(Some(OsAppPolicyPlan {
+        entries,
+        stale_policy_ids,
+        combined_text,
+        legacy_policy_text,
+        uses_policy_store: true,
+    }))
+}
+
+async fn activate_os_app_policy_plan(
+    state: &PlatformState,
+    tenant: &str,
+    policy_plan: &OsAppPolicyPlan,
+) -> Result<(), String> {
+    if policy_plan.uses_policy_store {
+        let policy_store = state
+            .server
+            .storage_stack
+            .as_ref()
+            .and_then(|stack| stack.policies.clone())
+            .ok_or_else(|| {
+                format!("Expected granular Cedar policy storage for tenant '{tenant}'")
+            })?;
+
+        let mut named_policies: Vec<(String, String)> = policy_store
+            .load_policies_for_tenant(tenant)
+            .await
+            .map_err(|e| {
+                format!("Failed to reload Cedar policy entries for tenant '{tenant}': {e}")
+            })?
+            .into_iter()
+            .filter(|row| row.enabled)
+            .map(|row| (row.policy_id, row.cedar_text))
+            .collect();
+        if let Some(ref residual) = policy_plan.legacy_policy_text
+            && !residual.trim().is_empty()
+        {
+            named_policies.push((legacy_os_app_policy_id().to_string(), residual.clone()));
+        }
+
+        state
+            .server
+            .authz
+            .reload_tenant_policies_named(tenant, &named_policies)
+            .map_err(|e| {
+                format!("Failed to reload tenant Cedar policy entries for '{tenant}': {e}")
+            })?;
+        let combined_text = state
+            .server
+            .authz
+            .get_tenant_policy_text(tenant)
+            .unwrap_or_else(|| policy_plan.combined_text.clone());
+        let mut policies = state.server.tenant_policies.write().unwrap(); // ci-ok: infallible lock
+        policies.insert(tenant.to_string(), combined_text);
+    } else {
+        state
+            .server
+            .authz
+            .reload_tenant_policies(tenant, &policy_plan.combined_text)
+            .map_err(|e| format!("Failed to reload tenant Cedar policies for '{tenant}': {e}"))?;
+        let mut policies = state.server.tenant_policies.write().unwrap(); // ci-ok: infallible lock
+        policies.insert(tenant.to_string(), policy_plan.combined_text.clone());
+    }
+
+    Ok(())
+}
+
 pub(super) async fn install_os_app_with_plan(
     state: &PlatformState,
     tenant: &str,
     app_name: &str,
     plan: OsAppInstallPlan,
 ) -> Result<InstallResult, String> {
+    let requested_app_name = app_name;
     let app_dir = {
         let cat = catalog().read().unwrap(); // ci-ok: infallible lock
         cat.paths.get(app_name).cloned().ok_or_else(|| {
@@ -1029,12 +1309,21 @@ pub(super) async fn install_os_app_with_plan(
             format!("OS app '{app_name}' not found in catalog (known path keys: {known:?})")
         })?
     };
+    let canonical_app_name = read_app_manifest(&app_dir)
+        .map(|manifest| manifest.name)
+        .ok_or_else(|| {
+            format!(
+                "OS app '{requested_app_name}' is registered at '{}' but its manifest failed to load",
+                app_dir.display()
+            )
+        })?;
     let bundle = load_app_bundle(&app_dir).ok_or_else(|| {
         format!(
-            "OS app '{app_name}' is registered at '{}' but its bundle failed to load",
+            "OS app '{requested_app_name}' is registered at '{}' but its bundle failed to load",
             app_dir.display()
         )
     })?;
+    let app_name = canonical_app_name.as_str();
     if bundle.deployment_mode == AppDeploymentMode::Commons {
         state.server.enable_commons_guardrails(tenant);
     }
@@ -1104,19 +1393,25 @@ pub(super) async fn install_os_app_with_plan(
     updated.sort();
     skipped.sort();
 
-    // Build the full Cedar policy text for this tenant (existing + new).
-    let combined_policy = if plan.policies && !bundle.cedar_policies.is_empty() {
-        let combined: String = bundle.cedar_policies.join("\n");
-        let policies = state.server.tenant_policies.read().unwrap(); // ci-ok: infallible lock
-        let existing = policies.get(tenant).cloned().unwrap_or_default();
-        let full_text = if existing.is_empty() {
-            combined
-        } else {
-            format!("{existing}\n{combined}")
-        };
-        Some(full_text)
+    let policy_plan = if plan.policies {
+        build_os_app_policy_plan(state, tenant, app_name, &bundle).await?
     } else {
         None
+    };
+    let legacy_combined_policy = policy_plan.as_ref().and_then(|policy| {
+        if policy.uses_policy_store {
+            policy.legacy_policy_text.clone()
+        } else {
+            Some(policy.combined_text.clone())
+        }
+    });
+    let uses_granular_policy_store = policy_plan
+        .as_ref()
+        .is_some_and(|policy| policy.uses_policy_store);
+    let install_commit_policy = if uses_granular_policy_store {
+        None
+    } else {
+        legacy_combined_policy.as_deref()
     };
 
     // ── Step 1: Persist to Turso FIRST (if available). ──────────────
@@ -1147,14 +1442,19 @@ pub(super) async fn install_os_app_with_plan(
                 .map(|(et, ioa, csdl, h)| (et.as_str(), ioa.as_str(), csdl.as_str(), h.as_str()))
                 .collect();
             turso
-                .upsert_specs_and_commit(tenant, &refs, combined_policy.as_deref(), app_name)
+                .upsert_specs_and_commit(tenant, &refs, install_commit_policy, app_name)
                 .await
                 .map_err(|e| format!("Failed to persist and commit specs: {e}"))?;
-        } else if let Some(ref policy_text) = combined_policy {
+        } else if let Some(policy_text) = install_commit_policy {
             turso
                 .upsert_tenant_policy(tenant, policy_text)
                 .await
                 .map_err(|e| format!("Failed to persist Cedar policy: {e}"))?;
+            turso
+                .record_installed_app(tenant, app_name)
+                .await
+                .map_err(|e| format!("Failed to record os-app installation: {e}"))?;
+        } else if uses_granular_policy_store {
             turso
                 .record_installed_app(tenant, app_name)
                 .await
@@ -1184,7 +1484,7 @@ pub(super) async fn install_os_app_with_plan(
                     .map_err(|e| format!("Failed to persist spec {entity_type}: {e}"))?;
             }
         }
-        if let Some(ref policy_text) = combined_policy {
+        if let Some(policy_text) = install_commit_policy {
             ps.upsert_tenant_policy(tenant, policy_text)
                 .await
                 .map_err(|e| format!("Failed to persist Cedar policy: {e}"))?;
@@ -1204,6 +1504,81 @@ pub(super) async fn install_os_app_with_plan(
             ps.commit_specs(tenant)
                 .await
                 .map_err(|e| format!("Failed to commit specs: {e}"))?;
+        }
+    }
+
+    if let Some(policy_plan) = &policy_plan
+        && policy_plan.uses_policy_store
+    {
+        let policy_store = state
+            .server
+            .storage_stack
+            .as_ref()
+            .and_then(|stack| stack.policies.clone())
+            .ok_or_else(|| {
+                format!(
+                    "OS app '{app_name}' expected granular policy storage for tenant '{tenant}'"
+                )
+            })?;
+
+        for entry in &policy_plan.entries {
+            policy_store
+                .save_policy(
+                    tenant,
+                    &entry.policy_id,
+                    &entry.cedar_text,
+                    "os-app-install",
+                )
+                .await
+                .map_err(|e| {
+                    format!(
+                        "Failed to persist Cedar policy entry {} for os-app '{app_name}': {e}",
+                        entry.policy_id
+                    )
+                })?;
+            policy_store
+                .toggle_policy_enabled(tenant, &entry.policy_id, true)
+                .await
+                .map_err(|e| {
+                    format!(
+                        "Failed to enable Cedar policy entry {} for os-app '{app_name}': {e}",
+                        entry.policy_id
+                    )
+                })?;
+        }
+        for policy_id in &policy_plan.stale_policy_ids {
+            policy_store
+                .toggle_policy_enabled(tenant, policy_id, false)
+                .await
+                .map_err(|e| {
+                    format!(
+                        "Failed to disable stale Cedar policy entry {policy_id} for os-app '{app_name}': {e}"
+                    )
+                })?;
+        }
+
+        if let Some(ref policy_text) = legacy_combined_policy {
+            if let Some(turso) = state
+                .server
+                .storage_stack
+                .as_ref()
+                .and_then(|stack| stack.turso.as_ref())
+                .and_then(|provider| provider.platform_store())
+            {
+                turso
+                    .upsert_tenant_policy(tenant, policy_text)
+                    .await
+                    .map_err(|e| format!("Failed to persist residual Cedar policy: {e}"))?;
+            } else if let Some(ps) = state
+                .server
+                .storage_stack
+                .as_ref()
+                .and_then(|stack| stack.platform.clone())
+            {
+                ps.upsert_tenant_policy(tenant, policy_text)
+                    .await
+                    .map_err(|e| format!("Failed to persist residual Cedar policy: {e}"))?;
+            }
         }
     }
 
@@ -1289,21 +1664,8 @@ pub(super) async fn install_os_app_with_plan(
     }
 
     // ── Step 3: Load Cedar policies into memory. ────────────────────
-    if let Some(ref policy_text) = combined_policy {
-        if let Err(e) = state
-            .server
-            .authz
-            .reload_tenant_policies(tenant, policy_text)
-        {
-            tracing::warn!(
-                tenant,
-                error = %e,
-                "Failed to reload tenant Cedar policies after os-app install"
-            );
-        } else {
-            let mut policies = state.server.tenant_policies.write().unwrap(); // ci-ok: infallible lock
-            policies.insert(tenant.to_string(), policy_text.clone());
-        }
+    if let Some(ref policy_plan) = policy_plan {
+        activate_os_app_policy_plan(state, tenant, policy_plan).await?;
     }
 
     // ── Step 4: Persist/register WASM modules, warming only eager modules. ──

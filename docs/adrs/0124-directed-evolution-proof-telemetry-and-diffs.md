@@ -8,7 +8,7 @@
   - ADR-0121: Directed Evolution runtime refs in evaluation
   - ADR-0122: Genesis pinned app install
   - ADR-0123: Hot-load CSDL action preservation
-  - `os-apps/directed-evolution`
+  - Genesis `apps/directed-evolution`
   - `crates/temper-server/src/runtime_metrics.rs`
   - `crates/temper-server/src/odata`
 

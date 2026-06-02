@@ -1539,17 +1539,79 @@ async fn load_genesis_object(
     repository_id: &str,
     git_sha: &str,
 ) -> Result<Option<temper_server::EntityResponse>, String> {
-    if state.entity_exists(tenant, entity_type, git_sha)
-        && let Ok(found) = state
-            .get_tenant_entity_state(tenant, entity_type, git_sha)
+    if let Some(query_plane) = state.query_plane_store() {
+        let entity_ids = query_plane
+            .query_field_index(
+                tenant.as_str(),
+                entity_type,
+                genesis_object_lookup_where_clause(),
+                genesis_object_lookup_params(repository_id, git_sha),
+            )
             .await
-    {
-        let fields = &found.state.fields;
-        let object_repo = string_field(fields, "RepositoryId").unwrap_or_default();
-        let object_sha = string_field(fields, "Id").unwrap_or_default();
-        if object_repo == repository_id && object_sha == git_sha {
-            return Ok(Some(found));
+            .map_err(|e| {
+                tracing::warn!(
+                    tenant = %tenant,
+                    entity_type,
+                    repository_id,
+                    git_sha,
+                    error = %e,
+                    "Genesis object query-plane lookup failed; falling back to entity-id scan"
+                );
+                e
+            })
+            .ok();
+
+        if let Some(Some(entity_ids)) = entity_ids {
+            for entity_id in entity_ids {
+                let Ok(candidate) = state
+                    .get_tenant_entity_state(tenant, entity_type, &entity_id)
+                    .await
+                else {
+                    tracing::warn!(
+                        tenant = %tenant,
+                        entity_type,
+                        entity_id,
+                        "Genesis object query-plane result could not be read; skipping stale index hit"
+                    );
+                    continue;
+                };
+                let fields = &candidate.state.fields;
+                let object_repo = string_field(fields, "RepositoryId").unwrap_or_default();
+                let object_sha = string_field(fields, "Id").unwrap_or_default();
+                if object_repo == repository_id && object_sha == git_sha {
+                    return Ok(Some(candidate));
+                }
+            }
         }
+    }
+
+    let composite_entity_id = format!("{repository_id}-{git_sha}");
+    if state.entity_exists(tenant, entity_type, &composite_entity_id)
+        && let Some(found) = load_matching_genesis_object_by_entity_id(
+            state,
+            tenant,
+            entity_type,
+            &composite_entity_id,
+            repository_id,
+            git_sha,
+        )
+        .await?
+    {
+        return Ok(Some(found));
+    }
+
+    if state.entity_exists(tenant, entity_type, git_sha)
+        && let Some(found) = load_matching_genesis_object_by_entity_id(
+            state,
+            tenant,
+            entity_type,
+            git_sha,
+            repository_id,
+            git_sha,
+        )
+        .await?
+    {
+        return Ok(Some(found));
     }
 
     let ids = state.list_entity_ids_lazy(tenant, entity_type).await;
@@ -1566,6 +1628,42 @@ async fn load_genesis_object(
         }
     }
     Ok(None)
+}
+
+async fn load_matching_genesis_object_by_entity_id(
+    state: &ServerState,
+    tenant: &TenantId,
+    entity_type: &str,
+    entity_id: &str,
+    repository_id: &str,
+    git_sha: &str,
+) -> Result<Option<temper_server::EntityResponse>, String> {
+    let Ok(found) = state
+        .get_tenant_entity_state(tenant, entity_type, entity_id)
+        .await
+    else {
+        return Ok(None);
+    };
+    let fields = &found.state.fields;
+    let object_repo = string_field(fields, "RepositoryId").unwrap_or_default();
+    let object_sha = string_field(fields, "Id").unwrap_or_default();
+    if object_repo == repository_id && object_sha == git_sha {
+        return Ok(Some(found));
+    }
+    Ok(None)
+}
+
+fn genesis_object_lookup_where_clause() -> &'static str {
+    "(entity_id IN (SELECT entity_id FROM entity_field_index WHERE tenant = ?1 AND entity_type = ?2 AND field_name = ?3 AND field_value = ?4) AND entity_id IN (SELECT entity_id FROM entity_field_index WHERE tenant = ?1 AND entity_type = ?2 AND field_name = ?5 AND field_value = ?6))"
+}
+
+fn genesis_object_lookup_params(repository_id: &str, git_sha: &str) -> Vec<String> {
+    vec![
+        "RepositoryId".to_string(),
+        repository_id.to_string(),
+        "Id".to_string(),
+        git_sha.to_string(),
+    ]
 }
 
 #[derive(Debug)]
@@ -1934,5 +2032,33 @@ mod tests {
     #[test]
     fn source_tenants_default_to_default() {
         assert!(genesis_source_tenants().contains(&"default".to_string()));
+    }
+
+    #[test]
+    fn genesis_object_lookup_uses_repository_and_sha_indexes() {
+        let where_clause = genesis_object_lookup_where_clause();
+        let params = genesis_object_lookup_params("repo-1", "abc123");
+
+        assert!(where_clause.contains("field_name = ?3"));
+        assert!(where_clause.contains("field_value = ?4"));
+        assert!(where_clause.contains("field_name = ?5"));
+        assert!(where_clause.contains("field_value = ?6"));
+        assert_eq!(
+            params,
+            vec![
+                "RepositoryId".to_string(),
+                "repo-1".to_string(),
+                "Id".to_string(),
+                "abc123".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn genesis_object_composite_entity_id_uses_repository_and_sha() {
+        assert_eq!(
+            format!("{}-{}", "rp-nerdsane-agent-answers", "abc123"),
+            "rp-nerdsane-agent-answers-abc123"
+        );
     }
 }

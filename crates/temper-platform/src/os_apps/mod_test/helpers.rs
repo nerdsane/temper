@@ -155,19 +155,22 @@ pub(super) async fn directed_evolution_run_work_item(
     role: &str,
     result_json: serde_json::Value,
 ) {
-    let brain_run_id = format!("brain-{work_item_id}");
-    directed_evolution_create(state, tenant, "BrainRun", &brain_run_id).await;
+    let worker_run_id = format!("worker-run-{work_item_id}");
+    directed_evolution_create(state, tenant, "WorkerRun", &worker_run_id).await;
     directed_evolution_dispatch(
         state,
         tenant,
-        "BrainRun",
-        &brain_run_id,
-        "StartBrainRun",
+        "WorkerRun",
+        &worker_run_id,
+        "StartWorkerRun",
         serde_json::json!({
             "Role": role,
             "WorkItemId": work_item_id,
+            "WorkerId": "test-codex-worker",
+            "ProviderId": "local-codex",
             "AgentKind": "codex",
             "Model": "codex-local-test",
+            "SessionId": "",
             "ParentSessionId": "directed-evolution-e2e",
             "CorrelationJson": "{}",
         }),
@@ -193,20 +196,20 @@ pub(super) async fn directed_evolution_run_work_item(
         "WorkItem",
         work_item_id,
         "StartWorkItem",
-        serde_json::json!({ "BrainRunId": brain_run_id }),
+        serde_json::json!({ "WorkerRunId": worker_run_id }),
         false,
     )
     .await;
     directed_evolution_dispatch(
         state,
         tenant,
-        "BrainRun",
-        &brain_run_id,
-        "SucceedBrainRun",
+        "WorkerRun",
+        &worker_run_id,
+        "SucceedWorkerRun",
         serde_json::json!({
             "OutputJson": result_json.to_string(),
             "EvidenceArtifactId": "",
-            "Summary": "test brain completed",
+            "Summary": "test worker completed",
         }),
         false,
     )
@@ -220,9 +223,18 @@ pub(super) async fn directed_evolution_run_work_item(
         serde_json::json!({
             "ResultJson": result_json.to_string(),
             "EvidenceArtifactId": "",
-            "Summary": "test brain completed",
+            "Summary": "test worker completed",
         }),
-        true,
+        false,
+    )
+    .await;
+    directed_evolution_route_work_item_success(
+        state,
+        tenant,
+        work_item_id,
+        role,
+        &worker_run_id,
+        result_json.to_string(),
     )
     .await;
 }
@@ -234,19 +246,22 @@ pub(super) async fn directed_evolution_fail_work_item(
     role: &str,
     failure_reason: &str,
 ) {
-    let brain_run_id = format!("brain-{work_item_id}");
-    directed_evolution_create(state, tenant, "BrainRun", &brain_run_id).await;
+    let worker_run_id = format!("worker-run-{work_item_id}");
+    directed_evolution_create(state, tenant, "WorkerRun", &worker_run_id).await;
     directed_evolution_dispatch(
         state,
         tenant,
-        "BrainRun",
-        &brain_run_id,
-        "StartBrainRun",
+        "WorkerRun",
+        &worker_run_id,
+        "StartWorkerRun",
         serde_json::json!({
             "Role": role,
             "WorkItemId": work_item_id,
+            "WorkerId": "test-codex-worker",
+            "ProviderId": "local-codex",
             "AgentKind": "codex",
             "Model": "codex-local-test",
+            "SessionId": "",
             "ParentSessionId": "directed-evolution-e2e",
             "CorrelationJson": "{}",
         }),
@@ -272,16 +287,16 @@ pub(super) async fn directed_evolution_fail_work_item(
         "WorkItem",
         work_item_id,
         "StartWorkItem",
-        serde_json::json!({ "BrainRunId": brain_run_id }),
+        serde_json::json!({ "WorkerRunId": worker_run_id }),
         false,
     )
     .await;
     directed_evolution_dispatch(
         state,
         tenant,
-        "BrainRun",
-        &brain_run_id,
-        "FailBrainRun",
+        "WorkerRun",
+        &worker_run_id,
+        "FailWorkerRun",
         serde_json::json!({
             "FailureReason": failure_reason,
             "EvidenceArtifactId": "",
@@ -299,6 +314,124 @@ pub(super) async fn directed_evolution_fail_work_item(
             "FailureReason": failure_reason,
             "EvidenceArtifactId": "",
         }),
+        false,
+    )
+    .await;
+    directed_evolution_route_work_item_failure(
+        state,
+        tenant,
+        work_item_id,
+        role,
+        &worker_run_id,
+        failure_reason,
+    )
+    .await;
+}
+
+async fn directed_evolution_route_work_item_success(
+    state: &PlatformState,
+    tenant: &TenantId,
+    work_item_id: &str,
+    role: &str,
+    worker_run_id: &str,
+    result_json: String,
+) {
+    let receipt_id = format!("work-item-receipt-{work_item_id}");
+    let work_item = directed_evolution_entity(state, tenant, "WorkItem", work_item_id).await;
+    let target_entity_type = work_item
+        .state
+        .fields
+        .get("TargetEntityType")
+        .and_then(|value| value.as_str())
+        .unwrap_or_default()
+        .to_string();
+    let target_entity_id = work_item
+        .state
+        .fields
+        .get("TargetEntityId")
+        .and_then(|value| value.as_str())
+        .unwrap_or_default()
+        .to_string();
+    let correlation_json = work_item
+        .state
+        .fields
+        .get("CorrelationJson")
+        .and_then(|value| value.as_str())
+        .unwrap_or("{}")
+        .to_string();
+
+    directed_evolution_create(state, tenant, "WorkItemReceipt", &receipt_id).await;
+    directed_evolution_dispatch(
+        state,
+        tenant,
+        "WorkItemReceipt",
+        &receipt_id,
+        "RouteSucceededWorkItem",
+        serde_json::json!({
+            "WorkItemId": work_item_id,
+            "Role": role,
+            "TargetEntityType": target_entity_type,
+            "TargetEntityId": target_entity_id,
+            "WorkerRunId": worker_run_id,
+            "ResultJson": result_json,
+            "EvidenceArtifactId": "",
+            "Summary": "test worker completed",
+            "CorrelationJson": correlation_json,
+        }),
+        true,
+    )
+    .await;
+}
+
+async fn directed_evolution_route_work_item_failure(
+    state: &PlatformState,
+    tenant: &TenantId,
+    work_item_id: &str,
+    role: &str,
+    worker_run_id: &str,
+    failure_reason: &str,
+) {
+    let receipt_id = format!("work-item-receipt-{work_item_id}");
+    let work_item = directed_evolution_entity(state, tenant, "WorkItem", work_item_id).await;
+    let target_entity_type = work_item
+        .state
+        .fields
+        .get("TargetEntityType")
+        .and_then(|value| value.as_str())
+        .unwrap_or_default()
+        .to_string();
+    let target_entity_id = work_item
+        .state
+        .fields
+        .get("TargetEntityId")
+        .and_then(|value| value.as_str())
+        .unwrap_or_default()
+        .to_string();
+    let correlation_json = work_item
+        .state
+        .fields
+        .get("CorrelationJson")
+        .and_then(|value| value.as_str())
+        .unwrap_or("{}")
+        .to_string();
+
+    directed_evolution_create(state, tenant, "WorkItemReceipt", &receipt_id).await;
+    directed_evolution_dispatch(
+        state,
+        tenant,
+        "WorkItemReceipt",
+        &receipt_id,
+        "RouteFailedWorkItem",
+        serde_json::json!({
+            "WorkItemId": work_item_id,
+            "Role": role,
+            "TargetEntityType": target_entity_type,
+            "TargetEntityId": target_entity_id,
+            "WorkerRunId": worker_run_id,
+            "FailureReason": failure_reason,
+            "EvidenceArtifactId": "",
+            "CorrelationJson": correlation_json,
+        }),
         true,
     )
     .await;
@@ -312,19 +445,19 @@ pub(super) fn directed_evolution_register_wasm_modules_for_test(
         (
             "signal_observer",
             include_bytes!(
-                "../../../../../os-apps/directed-evolution/wasm/signal_observer/signal_observer.wasm"
+                "../../../../../test-fixtures/directed-evolution-wasm/signal_observer.wasm"
             ),
         ),
         (
             "episode_orchestrator",
             include_bytes!(
-                "../../../../../os-apps/directed-evolution/wasm/episode_orchestrator/episode_orchestrator.wasm"
+                "../../../../../test-fixtures/directed-evolution-wasm/episode_orchestrator.wasm"
             ),
         ),
         (
             "work_item_result_router",
             include_bytes!(
-                "../../../../../os-apps/directed-evolution/wasm/work_item_result_router/work_item_result_router.wasm"
+                "../../../../../test-fixtures/directed-evolution-wasm/work_item_result_router.wasm"
             ),
         ),
     ];

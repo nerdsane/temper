@@ -3,7 +3,7 @@
 //! Each function represents an explicit phase of the startup pipeline.
 //! The `run` coordinator in `mod.rs` calls these in sequence.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::Path;
 use std::sync::Arc;
@@ -270,8 +270,12 @@ pub(super) async fn hydrate_entities(state: &PlatformState, apps: &[(String, Str
 /// 1. Legacy pass: reads from `tenant_policies` (flat blob per tenant) for
 ///    backward compatibility with data written before this migration.
 /// 2. New pass: reads from `policies` (per-entry rows with hash tracking) via
-///    [`load_and_activate_tenant_policies`].  The new table takes precedence for
-///    any tenant that has entries there, overwriting what the legacy pass loaded.
+///    [`load_and_activate_tenant_policies`].
+///
+/// When both stores contain policy text, boot keeps the legacy residual active
+/// alongside granular rows. OS-app startup replay later scrubs migrated app
+/// policies out of the legacy blob so restarts converge toward granular rows
+/// plus true legacy residue.
 pub(super) async fn recover_cedar_policies(state: &PlatformState) {
     let Some(stack) = state.server.storage_stack.as_ref() else {
         return;
@@ -299,10 +303,19 @@ pub(super) async fn recover_cedar_policies(state: &PlatformState) {
         }
     }
 
+    let mut legacy_policy_by_tenant = BTreeMap::<String, String>::new();
+    let mut seen_legacy_policy_rows = BTreeSet::<(String, String)>::new();
+
     // Legacy pass: populate from old `tenant_policies` table (per-tenant reload).
     if !all_policy_rows.is_empty() {
         let mut loaded_count = 0usize;
         for (tenant, policy_text) in &all_policy_rows {
+            if policy_text.trim().is_empty() {
+                continue;
+            }
+            if !seen_legacy_policy_rows.insert((tenant.clone(), policy_text.clone())) {
+                continue;
+            }
             // Validate each tenant's policies individually so one bad tenant
             // doesn't prevent all others from loading.
             if let Err(e) = state
@@ -317,6 +330,15 @@ pub(super) async fn recover_cedar_policies(state: &PlatformState) {
             if let Ok(mut policies) = state.server.tenant_policies.write() {
                 policies.insert(tenant.clone(), policy_text.clone());
             }
+            legacy_policy_by_tenant
+                .entry(tenant.clone())
+                .and_modify(|existing| {
+                    if !existing.trim().is_empty() {
+                        existing.push('\n');
+                    }
+                    existing.push_str(policy_text);
+                })
+                .or_insert_with(|| policy_text.clone());
             loaded_count += 1;
         }
         if loaded_count > 0 {
@@ -325,7 +347,8 @@ pub(super) async fn recover_cedar_policies(state: &PlatformState) {
     }
 
     // New pass: load from `policies` table (per-entry rows with hash tracking).
-    // Overwrites legacy data for any tenant that has entries in the new table.
+    // Merge any legacy residual loaded above so old tenant-specific rules are
+    // not dropped merely because the tenant also has granular policy rows.
     // `load_and_activate_tenant_policies` logs via tracing on success; no-ops silently.
     // Collect registered tenants; silently skip if registry lock is poisoned (unreachable in practice).
     let tenants: Vec<String> = state
@@ -342,6 +365,48 @@ pub(super) async fn recover_cedar_policies(state: &PlatformState) {
 
     for tenant in &tenants {
         load_and_activate_tenant_policies(&state.server, tenant).await;
+        let Some(legacy_text) = legacy_policy_by_tenant.get(tenant) else {
+            continue;
+        };
+        let current_text = state
+            .server
+            .authz
+            .get_tenant_policy_text(tenant)
+            .unwrap_or_default();
+        if current_text.trim().is_empty() {
+            if let Err(e) = state
+                .server
+                .authz
+                .reload_tenant_policies(tenant, legacy_text)
+            {
+                eprintln!(
+                    "  Warning: failed to restore legacy Cedar policies for tenant '{tenant}': {e}"
+                );
+                continue;
+            }
+            if let Ok(mut policies) = state.server.tenant_policies.write() {
+                policies.insert(tenant.clone(), legacy_text.clone());
+            }
+            continue;
+        }
+        if current_text.trim() == legacy_text.trim() || current_text.contains(legacy_text.trim()) {
+            continue;
+        }
+
+        let merged_text = format!("{legacy_text}\n{current_text}");
+        if let Err(e) = state
+            .server
+            .authz
+            .reload_tenant_policies(tenant, &merged_text)
+        {
+            eprintln!(
+                "  Warning: failed to merge legacy and granular Cedar policies for tenant '{tenant}': {e}"
+            );
+            continue;
+        }
+        if let Ok(mut policies) = state.server.tenant_policies.write() {
+            policies.insert(tenant.clone(), merged_text);
+        }
     }
 }
 
@@ -612,7 +677,120 @@ mod tests {
     use temper_spec::csdl::parse_csdl;
     use temper_store_turso::TursoEventStore;
 
-    use super::bootstrap_installed_apps;
+    use super::{bootstrap_installed_apps, recover_cedar_policies};
+
+    #[tokio::test]
+    async fn recover_cedar_policies_merges_legacy_and_granular_rows() {
+        let tenant = "bootstrap-policy-merge";
+        let disabled_granular_tenant = "bootstrap-policy-disabled-granular";
+        let bundle = get_os_app("temper-fs").expect("temper-fs app bundle should load");
+        let csdl_xml = bundle.csdl.clone().expect("temper-fs should have CSDL");
+        let csdl = parse_csdl(&csdl_xml).expect("temper-fs CSDL should parse");
+        let disabled_granular_csdl =
+            parse_csdl(&csdl_xml).expect("temper-fs CSDL should parse twice");
+        let refs: Vec<(&str, &str)> = bundle
+            .specs
+            .iter()
+            .map(|(entity_type, source)| (entity_type.as_str(), source.as_str()))
+            .collect();
+
+        let mut state = PlatformState::new(None);
+        {
+            let mut registry = state.registry.write().unwrap();
+            registry.register_tenant(tenant, csdl, csdl_xml.clone(), &refs);
+            registry.register_tenant(
+                disabled_granular_tenant,
+                disabled_granular_csdl,
+                csdl_xml,
+                &refs,
+            );
+        }
+
+        let db_path = std::env::temp_dir().join(format!(
+            "temper-bootstrap-policies-{}.db",
+            temper_runtime::scheduler::sim_uuid()
+        ));
+        let db_url = format!("file:{}", db_path.display());
+        let turso = TursoEventStore::new(&db_url, None)
+            .await
+            .expect("turso store should initialize");
+        turso
+            .upsert_tenant_policy(
+                tenant,
+                r#"permit(principal, action == Action::"legacy_only", resource);"#,
+            )
+            .await
+            .expect("legacy policy should persist");
+        turso
+            .save_policy(
+                tenant,
+                "granular-only",
+                r#"permit(principal, action == Action::"granular_only", resource);"#,
+                "test",
+            )
+            .await
+            .expect("granular policy should persist");
+        turso
+            .upsert_tenant_policy(
+                disabled_granular_tenant,
+                r#"permit(principal, action == Action::"legacy_after_empty_rows", resource);"#,
+            )
+            .await
+            .expect("disabled-granular tenant legacy policy should persist");
+        turso
+            .save_policy(
+                disabled_granular_tenant,
+                "disabled-granular",
+                r#"permit(principal, action == Action::"disabled_granular", resource);"#,
+                "test",
+            )
+            .await
+            .expect("disabled granular policy should persist");
+        turso
+            .toggle_policy_enabled(disabled_granular_tenant, "disabled-granular", false)
+            .await
+            .expect("disabled granular policy should be toggled off");
+        state
+            .server
+            .set_storage_stack(StorageStack::from_turso(turso));
+
+        recover_cedar_policies(&state).await;
+
+        let policy_text = state
+            .server
+            .tenant_policies
+            .read()
+            .unwrap()
+            .get(tenant)
+            .cloned()
+            .unwrap_or_default();
+        assert!(
+            policy_text.contains("legacy_only"),
+            "legacy policy text should survive granular recovery"
+        );
+        assert!(
+            policy_text.contains("granular_only"),
+            "granular policy text should also be active"
+        );
+        let disabled_granular_policy_text = state
+            .server
+            .tenant_policies
+            .read()
+            .unwrap()
+            .get(disabled_granular_tenant)
+            .cloned()
+            .unwrap_or_default();
+        assert!(
+            disabled_granular_policy_text.contains("legacy_after_empty_rows"),
+            "legacy policy text should be restored when granular rows are all disabled"
+        );
+        assert!(
+            !disabled_granular_policy_text.contains("disabled_granular"),
+            "disabled granular policy rows must not become active during legacy restoration"
+        );
+
+        let _ = std::fs::remove_file(&db_path);
+    }
 
     #[tokio::test]
     async fn bootstrap_installed_apps_replays_persisted_app_when_registry_specs_are_stale() {
