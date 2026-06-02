@@ -189,6 +189,8 @@ mod tests {
                 fields: serde_json::json!({}),
                 events: std::collections::VecDeque::new(),
                 total_event_count: 0,
+                events_since_snapshot: 0,
+                last_snapshot_sequence_nr: 0,
                 sequence_nr: 0,
                 processed_idempotency_keys: BTreeMap::new(),
             },

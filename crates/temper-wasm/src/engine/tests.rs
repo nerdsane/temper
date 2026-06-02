@@ -9,6 +9,10 @@ use crate::host_trait::{SimWasmHost, WasmHost};
 use crate::stream::StreamRegistry;
 use async_trait::async_trait;
 
+const _: () = {
+    assert!(WASM_INVOKE_THREAD_STACK_BYTES >= 16 * 1024 * 1024);
+};
+
 // Minimal WAT module: accepts (ptr, len), writes nothing, returns 0.
 const WAT_NOOP: &str = r#"
     (module

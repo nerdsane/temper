@@ -1,6 +1,8 @@
 use super::helpers::*;
 use super::*;
 
+include!("spine_setup.rs");
+
 #[test]
 fn test_directed_evolution_signal_to_promotion_wasm_spine() {
     if skip_without_genesis_apps("test_directed_evolution_signal_to_promotion_wasm_spine") {
@@ -25,300 +27,13 @@ fn test_directed_evolution_signal_to_promotion_wasm_spine() {
 }
 
 async fn directed_evolution_signal_to_promotion_wasm_spine_body() {
-    let state = PlatformState::new(None);
-    install_os_app(
-        &state,
-        "test-directed-evolution-spine",
-        "directed-evolution",
-    )
-    .await
-    .expect("install directed-evolution");
-    let tenant = TenantId::new("test-directed-evolution-spine");
-    directed_evolution_register_wasm_modules_for_test(&state, &tenant);
-
-    let organism_id = "org-agent-answers";
-    let parent_version_id = "ov-parent";
-    directed_evolution_create(&state, &tenant, "Organism", organism_id).await;
-    directed_evolution_create(&state, &tenant, "OrganismVersion", parent_version_id).await;
-    directed_evolution_dispatch(
-        &state,
-        &tenant,
-        "OrganismVersion",
+    let SpineSetup {
+        state,
+        tenant,
         parent_version_id,
-        "MarkOrganismVersionParent",
-        serde_json::json!({
-            "OrganismId": organism_id,
-            "AppRef": "agent-answers@baseline",
-            "CommitRef": "baseline",
-            "PromotionId": "",
-            "Summary": "Baseline Agent Answers organism.",
-        }),
-        false,
-    )
-    .await;
-    directed_evolution_dispatch(
-        &state,
-        &tenant,
-        "Organism",
-        organism_id,
-        "ActivateOrganism",
-        serde_json::json!({
-            "Name": "Agent Answers",
-            "AppRef": "agent-answers@baseline",
-            "ParentVersionId": parent_version_id,
-            "BaselineEvaluationJson": "{}",
-        }),
-        false,
-    )
-    .await;
-
-    directed_evolution_create(&state, &tenant, "Signal", "sig-growth").await;
-    let signal_response = directed_evolution_dispatch(
-        &state,
-        &tenant,
-        "Signal",
-        "sig-growth",
-        "RecordSignal",
-        serde_json::json!({
-            "Source": "datadog-and-simulated-users",
-            "SignalKind": "growth_pressure",
-            "OrganismId": organism_id,
-            "Summary": "Simulated users repeatedly compare answers before accepting one.",
-            "EvidenceArtifactId": "",
-            "CorrelationJson": "{\"sessions\":3}",
-        }),
-        true,
-    )
-    .await;
-    assert!(
-        signal_response
-            .custom_effects
-            .iter()
-            .any(|effect| effect.ends_with(":signal_recorded")),
-        "RecordSignal should emit signal_recorded, got {:?}; final signal state {:?}",
-        signal_response.custom_effects,
-        signal_response.state
-    );
-
-    let observer_work_items = directed_evolution_wait_for_ids_with_field(
-        &state, &tenant, "WorkItem", "Role", "observer", 1,
-    )
-    .await;
-    directed_evolution_run_work_item(
-        &state,
-        &tenant,
-        &observer_work_items[0],
-        "observer",
-        serde_json::json!({
-            "actionable": true,
-            "pressure_class": "growth",
-            "pressure_summary": "Users need clearer answer comparison before accepting.",
-            "title": "Grow accepted-answer comparison",
-            "direction_summary": "Add evidence-aware answer comparison before acceptance.",
-            "autonomy_lane": "human-approval",
-            "proposed_adaptation_goal": "Help users compare candidate answers and accept with confidence.",
-            "proposed_viability_constraints": [
-                "Do not regress existing answer creation.",
-                "Keep answer acceptance reversible."
-            ],
-            "evidence_scope": [{
-                "surface": "logs",
-                "query": "service:temper-platform @directed_evolution.organism_id:org-agent-answers",
-                "time_window": "2026-06-01T21:00:00Z/2026-06-01T21:10:00Z",
-                "result_count": 3,
-                "interpretation": "Datadog contained correlated simulated-user runtime requests for the organism.",
-                "zero_result_meaning": "failure",
-                "datadog_url": "https://app.datadoghq.com/logs?query=service%3Atemper-platform"
-            }],
-        }),
-    )
-    .await;
-
-    let direction_ids = directed_evolution_wait_for_ids_with_field(
-        &state,
-        &tenant,
-        "Direction",
-        "Title",
-        "Grow accepted-answer comparison",
-        1,
-    )
-    .await;
-    let direction_id = &direction_ids[0];
-    assert_eq!(
-        directed_evolution_entity(&state, &tenant, "Signal", "sig-growth")
-            .await
-            .state
-            .status,
-        "Linked"
-    );
-
-    let episode_id = "ep-growth";
-    let goal_id = "goal-growth";
-    let selection_pressure_id = "selection-growth";
-    let constraint_id = "constraint-no-regression";
-    let review_stage_id = "stage-review";
-    let sim_stage_id = "stage-simulated-user";
-    for (entity_type, entity_id) in [
-        ("Episode", episode_id),
-        ("AdaptationGoal", goal_id),
-        ("SelectionPressure", selection_pressure_id),
-        ("ViabilityConstraint", constraint_id),
-        ("EvaluationStage", review_stage_id),
-        ("EvaluationStage", sim_stage_id),
-    ] {
-        directed_evolution_create(&state, &tenant, entity_type, entity_id).await;
-    }
-    directed_evolution_dispatch(
-        &state,
-        &tenant,
-        "Episode",
         episode_id,
-        "BeginEpisodeNegotiation",
-        serde_json::json!({
-            "DirectionId": direction_id,
-            "OrganismId": organism_id,
-            "ParentVersionId": parent_version_id,
-            "AutonomyLane": "human-approval",
-        }),
-        false,
-    )
-    .await;
-    directed_evolution_dispatch(
-        &state,
-        &tenant,
-        "AdaptationGoal",
-        goal_id,
-        "ActivateAdaptationGoal",
-        serde_json::json!({
-            "EpisodeId": episode_id,
-            "GoalStatement": "Help users compare candidate answers and accept with confidence.",
-            "CreatedByWorkerRunId": "chat-codex",
-            "HumanNotes": "Human and brain agreed in chat.",
-        }),
-        false,
-    )
-    .await;
-    directed_evolution_dispatch(
-        &state,
-        &tenant,
-        "SelectionPressure",
-        selection_pressure_id,
-        "ActivateSelectionPressure",
-        serde_json::json!({
-            "EpisodeId": episode_id,
-            "SelectionStatement": "Prefer the variant with better evidence clarity and no baseline regression.",
-            "MetricIdsJson": "[]",
-            "EliminationRuleIdsJson": "[]",
-            "ScoringRuleIdsJson": "[]",
-            "CreatedByWorkerRunId": "chat-codex",
-        }),
-        false,
-    )
-    .await;
-    directed_evolution_dispatch(
-        &state,
-        &tenant,
-        "ViabilityConstraint",
-        constraint_id,
-        "ActivateViabilityConstraint",
-        serde_json::json!({
-            "EpisodeId": episode_id,
-            "ConstraintStatement": "Existing answer creation and acceptance still work.",
-            "ConstraintKind": "regression",
-            "CreatedByWorkerRunId": "chat-codex",
-        }),
-        false,
-    )
-    .await;
-    directed_evolution_dispatch(
-        &state,
-        &tenant,
-        "EvaluationStage",
-        review_stage_id,
-        "ActivateEvaluationStage",
-        serde_json::json!({
-            "EpisodeId": episode_id,
-            "StageName": "Code and spec review",
-            "StageKind": "reviewer",
-            "SequenceIndex": 1,
-            "RequiredEvidenceJson": "[]",
-            "ExecutorKind": "codex",
-        }),
-        false,
-    )
-    .await;
-    directed_evolution_dispatch(
-        &state,
-        &tenant,
-        "EvaluationStage",
-        sim_stage_id,
-        "ActivateEvaluationStage",
-        serde_json::json!({
-            "EpisodeId": episode_id,
-            "StageName": "AI simulated user trial",
-            "StageKind": "simulated_user",
-            "SequenceIndex": 2,
-            "RequiredEvidenceJson": "[]",
-            "ExecutorKind": "codex",
-        }),
-        false,
-    )
-    .await;
-    directed_evolution_dispatch(
-        &state,
-        &tenant,
-        "Episode",
-        episode_id,
-        "RecordEpisodeContract",
-        serde_json::json!({
-            "AdaptationGoalId": goal_id,
-            "SelectionPressureId": selection_pressure_id,
-            "ViabilityConstraintIdsJson": serde_json::json!([constraint_id]).to_string(),
-            "EvaluationStageIdsJson": serde_json::json!([review_stage_id, sim_stage_id]).to_string(),
-            "EliminationRuleIdsJson": "[]",
-            "ScoringRuleIdsJson": "[]",
-        }),
-        false,
-    )
-    .await;
-    directed_evolution_dispatch(
-        &state,
-        &tenant,
-        "Direction",
-        direction_id,
-        "SelectDirection",
-        serde_json::json!({
-            "EpisodeId": episode_id,
-            "SelectedBy": "human",
-            "SelectionNotes": "Selected through Codex chat.",
-        }),
-        false,
-    )
-    .await;
-    directed_evolution_dispatch(
-        &state,
-        &tenant,
-        "Episode",
-        episode_id,
-        "StartEpisode",
-        serde_json::json!({
-            "StartedBy": "codex",
-            "Reason": "Start the agreed directed evolution episode.",
-        }),
-        true,
-    )
-    .await;
-
-    let generation_ids = directed_evolution_wait_for_ids_with_field(
-        &state,
-        &tenant,
-        "Generation",
-        "EpisodeId",
-        episode_id,
-        1,
-    )
-    .await;
-    let generation_id = &generation_ids[0];
+        generation_id,
+    } = setup_directed_evolution_spine().await;
     let variant_work_items = directed_evolution_wait_for_ids_with_field(
         &state,
         &tenant,
@@ -356,92 +71,43 @@ async fn directed_evolution_signal_to_promotion_wasm_spine_body() {
     )
     .await;
     let winner_variant_id = winner_ids[0].clone();
-    let evaluation_work_items = {
-        let mut ids =
-            directed_evolution_ids_with_field(&state, &tenant, "WorkItem", "Role", "reviewer")
-                .await;
-        ids.extend(
-            directed_evolution_ids_with_field(
-                &state,
-                &tenant,
-                "WorkItem",
-                "Role",
-                "simulated_user",
-            )
-            .await,
-        );
-        ids
-    };
-    assert_eq!(evaluation_work_items.len(), 6);
-
+    let secondary_survivor_ids = directed_evolution_wait_for_ids_with_field(
+        &state,
+        &tenant,
+        "Variant",
+        "Summary",
+        "Variant 2",
+        1,
+    )
+    .await;
+    let secondary_survivor_variant_id = secondary_survivor_ids[0].clone();
     let mut eliminated_variants = BTreeSet::new();
-    for work_item_id in evaluation_work_items {
+    let reviewer_work_items = directed_evolution_wait_for_ids_with_field(
+        &state, &tenant, "WorkItem", "Role", "reviewer", 3,
+    )
+    .await;
+    for work_item_id in reviewer_work_items {
         let role =
             directed_evolution_field(&state, &tenant, "WorkItem", &work_item_id, "Role").await;
-        let target_entity_id =
-            directed_evolution_field(&state, &tenant, "WorkItem", &work_item_id, "TargetEntityId")
-                .await;
-        let stage_result_id = if role == "simulated_user" {
-            directed_evolution_field(&state, &tenant, "Trial", &target_entity_id, "StageResultId")
-                .await
-        } else {
-            target_entity_id
-        };
-        let variant_id = directed_evolution_field(
-            &state,
-            &tenant,
-            "StageResult",
-            &stage_result_id,
-            "VariantId",
-        )
-        .await;
-        if variant_id == winner_variant_id {
-            if role == "simulated_user" {
-                directed_evolution_run_work_item(
-                    &state,
-                    &tenant,
-                    &work_item_id,
-                    &role,
-                    serde_json::json!({
-                        "status": "observed",
-                        "summary": "User could compare answers and complete acceptance.",
-                        "journey": [
-                            {"step": "Compare candidate answers", "result": "Comparison cues were visible."},
-                            {"step": "Accept best answer", "result": "Acceptance completed."}
-                        ],
-                        "observations": {
-                            "what_happened": "The variant supported the intended comparison journey.",
-                            "unmet_intents": []
-                        },
-                        "intent_satisfied": "yes",
-                        "friction": [],
-                        "metrics": {
-                            "observed_latency_ms": {"value": 120, "unit": "ms", "provenance_kind": "agent-observed"}
-                        },
-                        "evidence_scope": [
-                            {"surface": "runtime", "query": "/tdata", "result_summary": "OData runtime was reachable."}
-                        ],
-                    }),
-                )
-                .await;
-            } else {
-                directed_evolution_run_work_item(
-                    &state,
-                    &tenant,
-                    &work_item_id,
-                    &role,
-                    serde_json::json!({
-                        "passed": true,
-                        "status": "passed",
-                        "summary": "Variant keeps baseline behavior and improves comparison clarity.",
-                        "metrics": {
-                            "clarity_score": 0.91,
-                            "regression_count": 0
-                        },
-                    }),
-                )
-                .await;
-            }
+        let variant_id =
+            directed_evolution_work_item_variant_id(&state, &tenant, &work_item_id).await;
+        if variant_id == winner_variant_id || variant_id == secondary_survivor_variant_id {
+            directed_evolution_run_work_item(
+                &state,
+                &tenant,
+                &work_item_id,
+                &role,
+                serde_json::json!({
+                    "passed": true,
+                    "status": "passed",
+                    "summary": "Variant keeps baseline behavior and improves comparison clarity.",
+                    "metrics": {
+                        "clarity_score": 0.91,
+                        "regression_count": 0
+                    },
+                }),
+            )
+            .await;
         } else if eliminated_variants.insert(variant_id.clone()) {
             directed_evolution_run_work_item(
                 &state,
@@ -463,28 +129,84 @@ async fn directed_evolution_signal_to_promotion_wasm_spine_body() {
         }
     }
 
+    let simulated_user_work_items = directed_evolution_wait_for_ids_with_field(
+        &state,
+        &tenant,
+        "WorkItem",
+        "Role",
+        "simulated_user",
+        3,
+    )
+    .await;
+    for work_item_id in simulated_user_work_items {
+        let variant_id =
+            directed_evolution_work_item_variant_id(&state, &tenant, &work_item_id).await;
+        if variant_id == winner_variant_id || variant_id == secondary_survivor_variant_id {
+            directed_evolution_run_work_item(
+                &state,
+                &tenant,
+                &work_item_id,
+                "simulated_user",
+                serde_json::json!({
+                    "status": "observed",
+                    "summary": "Simulated user completed the answer comparison journey.",
+                    "journey": ["opened question", "compared candidate answers", "accepted the clearer answer"],
+                    "observations": {
+                        "comparison_visible": true,
+                        "acceptance_completed": true
+                    },
+                    "intent_satisfied": "true",
+                    "friction": [],
+                    "metrics": {
+                        "simulated_user_confidence": 0.91,
+                        "runtime_probe_count": 3
+                    },
+                    "blocker": "",
+                    "blocker_kind": "none"
+                }),
+            )
+            .await;
+        } else {
+            directed_evolution_run_work_item(
+                &state,
+                &tenant,
+                &work_item_id,
+                "simulated_user",
+                serde_json::json!({
+                    "status": "blocked",
+                    "summary": "Simulated user could not complete answer acceptance.",
+                    "journey": ["opened question", "attempted answer acceptance"],
+                    "observations": {
+                        "comparison_visible": false,
+                        "acceptance_completed": false
+                    },
+                    "intent_satisfied": "false",
+                    "friction": ["acceptance path regressed"],
+                    "metrics": {
+                        "simulated_user_confidence": 0.2,
+                        "runtime_probe_count": 2
+                    },
+                    "blocker": "baseline acceptance path regressed",
+                    "blocker_kind": "app-behavior"
+                }),
+            )
+            .await;
+        }
+    }
+
     let viability_work_items = directed_evolution_wait_for_ids_with_field(
         &state,
         &tenant,
         "WorkItem",
         "Role",
         "viability_evaluator",
-        1,
+        3,
     )
     .await;
     for work_item_id in viability_work_items {
-        let stage_result_id =
-            directed_evolution_field(&state, &tenant, "WorkItem", &work_item_id, "TargetEntityId")
-                .await;
-        let variant_id = directed_evolution_field(
-            &state,
-            &tenant,
-            "StageResult",
-            &stage_result_id,
-            "VariantId",
-        )
-        .await;
-        if variant_id == winner_variant_id {
+        let variant_id =
+            directed_evolution_work_item_variant_id(&state, &tenant, &work_item_id).await;
+        if variant_id == winner_variant_id || variant_id == secondary_survivor_variant_id {
             directed_evolution_run_work_item(
                 &state,
                 &tenant,
@@ -493,12 +215,35 @@ async fn directed_evolution_signal_to_promotion_wasm_spine_body() {
                 serde_json::json!({
                     "passed": true,
                     "status": "passed",
-                    "summary": "Recorded simulated-user observations support the Adaptation Goal with no regression.",
+                    "summary": "Evaluator confirmed simulated-user observations satisfy the stage.",
                     "metrics": {
-                        "intent_satisfaction": {"value": 1.0, "unit": "ratio", "provenance_kind": "brain-judged"},
-                        "trial_blocker_count": {"value": 0, "unit": "count", "provenance_kind": "state-verified"}
+                        "simulated_user_confidence": 0.91,
+                        "blocked_trial_count": 0
                     },
-                    "decision_basis": {"why": "The trial completed the intended journey and no blockers were recorded."},
+                    "decision_basis": {
+                        "basis": "trial observations and state-verified trial counts"
+                    }
+                }),
+            )
+            .await;
+        } else {
+            directed_evolution_run_work_item(
+                &state,
+                &tenant,
+                &work_item_id,
+                "viability_evaluator",
+                serde_json::json!({
+                    "passed": false,
+                    "status": "failed",
+                    "summary": "Evaluator found blocked simulated-user trial evidence.",
+                    "failure_reason": "simulated-user trial was blocked by app behavior",
+                    "metrics": {
+                        "simulated_user_confidence": 0.2,
+                        "blocked_trial_count": 1
+                    },
+                    "decision_basis": {
+                        "basis": "trial observations and state-verified blocked trial count"
+                    }
                 }),
             )
             .await;
@@ -533,7 +278,7 @@ async fn directed_evolution_signal_to_promotion_wasm_spine_body() {
         "Completed"
     );
     assert_eq!(
-        directed_evolution_entity(&state, &tenant, "Generation", generation_id)
+        directed_evolution_entity(&state, &tenant, "Generation", &generation_id)
             .await
             .state
             .status,
@@ -546,6 +291,21 @@ async fn directed_evolution_signal_to_promotion_wasm_spine_body() {
             .status,
         "Promoted"
     );
+    let secondary_survivor =
+        directed_evolution_entity(&state, &tenant, "Variant", &secondary_survivor_variant_id).await;
+    assert_eq!(secondary_survivor.state.status, "NotSelected");
+    assert!(
+        directed_evolution_field(
+            &state,
+            &tenant,
+            "Variant",
+            &secondary_survivor_variant_id,
+            "Reason"
+        )
+        .await
+        .contains("not selected because the winner"),
+        "non-winning survivor should explain why it was not selected"
+    );
     assert_eq!(
         directed_evolution_entity(&state, &tenant, "OrganismVersion", parent_version_id)
             .await
@@ -553,7 +313,106 @@ async fn directed_evolution_signal_to_promotion_wasm_spine_body() {
             .status,
         "Superseded"
     );
+    assert_eq!(
+        directed_evolution_field(&state, &tenant, "Organism", "org-agent-answers", "AppRef").await,
+        "agent-answers@baseline"
+    );
+    let organism_before_sync =
+        directed_evolution_entity(&state, &tenant, "Organism", "org-agent-answers").await;
+    assert_eq!(
+        organism_before_sync.state.counters.get("version_count"),
+        Some(&2)
+    );
     assert_eq!(state.server.list_entity_ids(&tenant, "Promotion").len(), 1);
+    let promotion_id = state.server.list_entity_ids(&tenant, "Promotion")[0].clone();
+    let promoted_organism_version_id = directed_evolution_field(
+        &state,
+        &tenant,
+        "Promotion",
+        &promotion_id,
+        "NewOrganismVersionId",
+    )
+    .await;
+    directed_evolution_dispatch(
+        &state,
+        &tenant,
+        "Organism",
+        "org-agent-answers",
+        "SyncOrganismParentRef",
+        serde_json::json!({
+            "OrganismVersionId": promoted_organism_version_id,
+            "PromotionId": promotion_id,
+            "AppRef": "agent-answers@variant-1",
+            "Summary": "Idempotent live parent ref sync.",
+        }),
+        false,
+    )
+    .await;
+    let organism_after_sync =
+        directed_evolution_entity(&state, &tenant, "Organism", "org-agent-answers").await;
+    assert_eq!(
+        organism_after_sync.state.counters.get("version_count"),
+        Some(&2)
+    );
+    assert_eq!(
+        directed_evolution_field(&state, &tenant, "Organism", "org-agent-answers", "Summary").await,
+        "Idempotent live parent ref sync."
+    );
+    let promoter_work_items = directed_evolution_wait_for_ids_with_field(
+        &state, &tenant, "WorkItem", "Role", "promoter", 1,
+    )
+    .await;
+    assert_eq!(
+        directed_evolution_field(
+            &state,
+            &tenant,
+            "WorkItem",
+            &promoter_work_items[0],
+            "TargetEntityType"
+        )
+        .await,
+        "Promotion"
+    );
+    directed_evolution_run_work_item(
+        &state,
+        &tenant,
+        &promoter_work_items[0],
+        "promoter",
+        serde_json::json!({
+            "status": "succeeded",
+            "canonical_app_ref": "agent-answers@variant-1",
+            "production_tenant": "default",
+            "runtime_ref": "temper://tenant/default/app/agent-answers@variant-1",
+            "summary": "Published and installed winner.",
+            "digest": "variant-1-digest",
+            "evidence_refs": ["temper://tenant/default/app/agent-answers@variant-1"],
+        }),
+    )
+    .await;
+    assert_eq!(
+        directed_evolution_entity(&state, &tenant, "Episode", episode_id)
+            .await
+            .state
+            .status,
+        "Completed"
+    );
+    let promotion = directed_evolution_entity(&state, &tenant, "Promotion", &promotion_id).await;
+    assert_eq!(
+        promotion.state.booleans.get("materialized").copied(),
+        Some(true)
+    );
+    assert_eq!(
+        directed_evolution_field(&state, &tenant, "Promotion", &promotion_id, "RuntimeRef").await,
+        "temper://tenant/default/app/agent-answers@variant-1"
+    );
+    assert_eq!(
+        directed_evolution_field(&state, &tenant, "Organism", "org-agent-answers", "AppRef").await,
+        "agent-answers@variant-1"
+    );
+    assert_eq!(
+        directed_evolution_field(&state, &tenant, "Organism", "org-agent-answers", "Summary").await,
+        "Published and installed winner."
+    );
     assert_eq!(
         state.server.list_entity_ids(&tenant, "LineageEdge").len(),
         1
@@ -581,4 +440,25 @@ async fn directed_evolution_signal_to_promotion_wasm_spine_body() {
         succeeded_trial,
         "winner's simulated-user stage should complete a trial"
     );
+}
+
+async fn directed_evolution_work_item_variant_id(
+    state: &PlatformState,
+    tenant: &TenantId,
+    work_item_id: &str,
+) -> String {
+    let target_entity_type =
+        directed_evolution_field(state, tenant, "WorkItem", work_item_id, "TargetEntityType").await;
+    let target_entity_id =
+        directed_evolution_field(state, tenant, "WorkItem", work_item_id, "TargetEntityId").await;
+    match target_entity_type.as_str() {
+        "StageResult" => {
+            directed_evolution_field(state, tenant, "StageResult", &target_entity_id, "VariantId")
+                .await
+        }
+        "Trial" => {
+            directed_evolution_field(state, tenant, "Trial", &target_entity_id, "VariantId").await
+        }
+        _ => String::new(),
+    }
 }

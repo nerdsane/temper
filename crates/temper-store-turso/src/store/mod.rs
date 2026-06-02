@@ -30,6 +30,7 @@ mod instrumentation;
 pub mod ots;
 mod policy;
 mod published_artifacts;
+mod query_page;
 mod secrets;
 mod specs;
 #[cfg(test)]
@@ -127,10 +128,25 @@ impl TursoEventStore {
         conn.execute(schema::CREATE_EVENTS_TABLE, ())
             .await
             .map_err(storage_error)?;
+        let _ = conn
+            .execute(schema::ALTER_EVENTS_ADD_SEGMENT_INDEX, ())
+            .await;
         conn.execute(schema::CREATE_EVENTS_ENTITY_INDEX, ())
             .await
             .map_err(storage_error)?;
+        conn.execute(schema::CREATE_EVENT_SEGMENTS_TABLE, ())
+            .await
+            .map_err(storage_error)?;
+        conn.execute(schema::CREATE_EVENT_SEGMENTS_OPEN_INDEX, ())
+            .await
+            .map_err(storage_error)?;
         conn.execute(schema::CREATE_SNAPSHOTS_TABLE, ())
+            .await
+            .map_err(storage_error)?;
+        conn.execute(schema::CREATE_SNAPSHOT_HISTORY_TABLE, ())
+            .await
+            .map_err(storage_error)?;
+        conn.execute(schema::CREATE_SNAPSHOT_HISTORY_ENTITY_INDEX, ())
             .await
             .map_err(storage_error)?;
         conn.execute(schema::CREATE_SPECS_TABLE, ())

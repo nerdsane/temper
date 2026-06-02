@@ -39,6 +39,17 @@ fn test_state_with_order_and_payment_ioa() -> ServerState {
     ServerState::with_specs(system, csdl, csdl_xml.to_string(), specs).unwrap()
 }
 
+fn test_state_with_customer_and_order_ioa() -> ServerState {
+    let csdl_xml = include_str!("../../../test-fixtures/specs/model.csdl.xml");
+    let order_ioa = include_str!("../../../test-fixtures/specs/order.ioa.toml");
+    let csdl = parse_csdl(csdl_xml).unwrap();
+    let system = ActorSystem::new("test-ioa-customer-order");
+    let mut specs = std::collections::BTreeMap::new();
+    specs.insert("Customer".to_string(), order_ioa.to_string());
+    specs.insert("Order".to_string(), order_ioa.to_string());
+    ServerState::with_specs(system, csdl, csdl_xml.to_string(), specs).unwrap()
+}
+
 fn test_state_with_blob_ioa() -> ServerState {
     let csdl_xml = r#"<?xml version="1.0" encoding="utf-8"?>
 <edmx:Edmx Version="4.0" xmlns:edmx="http://docs.oasis-open.org/odata/ns/edmx">
@@ -923,6 +934,36 @@ async fn test_blob_ingest_raw_route_streams_body_without_path_param() {
 }
 
 #[tokio::test]
+async fn test_blob_ingest_raw_applies_cedar_create_policy() {
+    let state = test_state_with_blob_ioa();
+    let tenant = TenantId::default();
+    state
+        .authz
+        .reload_tenant_policies(
+            tenant.as_str(),
+            r#"permit(principal, action == Action::"read", resource is Blob);"#,
+        )
+        .expect("install Cedar policy");
+
+    let response = build_router(state.clone())
+        .oneshot(
+            Request::post("/tdata/Blobs/Temper.IngestRaw")
+                .header("Content-Type", "application/octet-stream")
+                .header("Content-Length", "3")
+                .header("X-Repository-Id", "rp-acme-demo")
+                .header("X-Temper-Principal-Id", "customer-1")
+                .header("X-Temper-Principal-Kind", "customer")
+                .body(Body::from("abc"))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::FORBIDDEN);
+    assert!(state.list_entity_ids(&tenant, "Blob").is_empty());
+}
+
+#[tokio::test]
 async fn commons_storage_cap_blocks_raw_blob_ingest_per_owner() {
     let state = test_state_with_storage_cap_ioa();
     state.enable_commons_guardrails("default");
@@ -1722,6 +1763,48 @@ async fn test_navigation_property_single_entity() {
     let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
     assert_eq!(json["entity_type"], "Payment");
     assert_eq!(json["fields"]["OrderId"], "ord-nav-1");
+}
+
+#[tokio::test]
+async fn test_collection_navigation_requires_cedar_list_policy() {
+    let state = test_state_with_customer_and_order_ioa();
+    let tenant = TenantId::default();
+    state
+        .get_or_create_tenant_entity(&tenant, "Customer", "cust-nav", serde_json::json!({}))
+        .await
+        .expect("create customer");
+    state
+        .get_or_create_tenant_entity(
+            &tenant,
+            "Order",
+            "ord-nav-child",
+            serde_json::json!({"CustomerId": "cust-nav"}),
+        )
+        .await
+        .expect("create order");
+    state
+        .authz
+        .reload_tenant_policies(
+            tenant.as_str(),
+            r#"
+                permit(principal, action == Action::"read", resource is Customer);
+                permit(principal, action == Action::"read", resource is Order);
+            "#,
+        )
+        .expect("install Cedar policy");
+
+    let response = build_router(state)
+        .oneshot(
+            Request::get("/tdata/Customers('cust-nav')?$expand=Orders")
+                .header("X-Temper-Principal-Id", "customer-1")
+                .header("X-Temper-Principal-Kind", "customer")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::FORBIDDEN);
 }
 
 #[tokio::test]

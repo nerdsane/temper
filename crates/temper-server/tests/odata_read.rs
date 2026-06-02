@@ -6,7 +6,7 @@
 mod common;
 
 use axum::body::Body;
-use axum::http::{Request, StatusCode};
+use axum::http::{Method, Request, StatusCode};
 use common::{build_default_state, dispatch};
 use temper_runtime::ActorSystem;
 use temper_runtime::tenant::TenantId;
@@ -68,6 +68,33 @@ async fn patch_json(
         .uri(path)
         .header("Content-Type", "application/json")
         .body(Body::from(body.to_string()))
+        .unwrap();
+    let resp = router.oneshot(req).await.unwrap();
+    let status = resp.status();
+    let bytes = axum::body::to_bytes(resp.into_body(), 1_000_000)
+        .await
+        .unwrap();
+    let body = serde_json::from_slice(&bytes).unwrap_or(serde_json::Value::Null);
+    (status, body)
+}
+
+async fn customer_json(
+    state: &ServerState,
+    method: Method,
+    path: &str,
+    body: Option<serde_json::Value>,
+) -> (StatusCode, serde_json::Value) {
+    let router = build_router(state.clone());
+    let mut request = Request::builder()
+        .method(method)
+        .uri(path)
+        .header("x-temper-principal-kind", "customer")
+        .header("x-temper-principal-id", "customer-1");
+    if body.is_some() {
+        request = request.header("Content-Type", "application/json");
+    }
+    let req = request
+        .body(body.map_or_else(Body::empty, |value| Body::from(value.to_string())))
         .unwrap();
     let resp = router.oneshot(req).await.unwrap();
     let status = resp.status();
@@ -171,6 +198,83 @@ async fn entity_get_returns_single_entity_with_actions() {
 }
 
 #[tokio::test]
+async fn entity_get_applies_cedar_read_policy() {
+    let (state, _sim) = build_default_state(430, "odata-read-cedar-entity");
+    let tenant = TenantId::default();
+
+    dispatch(
+        &state,
+        &tenant,
+        "Order",
+        "ord-private",
+        "Create",
+        serde_json::json!({}),
+    )
+    .await
+    .expect("create");
+
+    state
+        .authz
+        .reload_tenant_policies(
+            tenant.as_str(),
+            r#"permit(principal, action == Action::"list", resource is Order);"#,
+        )
+        .expect("install Cedar policy");
+
+    let (status, body) =
+        customer_json(&state, Method::GET, "/tdata/Orders('ord-private')", None).await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+    assert_eq!(body["error"]["code"].as_str(), Some("AuthorizationDenied"));
+}
+
+#[tokio::test]
+async fn entity_set_filters_rows_denied_by_cedar_read_policy() {
+    let (state, _sim) = build_default_state(431, "odata-read-cedar-list");
+    let tenant = TenantId::default();
+
+    for id in ["ord-visible", "ord-hidden"] {
+        dispatch(
+            &state,
+            &tenant,
+            "Order",
+            id,
+            "Create",
+            serde_json::json!({}),
+        )
+        .await
+        .expect("create");
+    }
+
+    state
+        .authz
+        .reload_tenant_policies(
+            tenant.as_str(),
+            r#"
+                permit(principal, action in [Action::"list", Action::"read"], resource is Order);
+                forbid(principal, action == Action::"read", resource == Order::"ord-hidden");
+            "#,
+        )
+        .expect("install Cedar policy");
+
+    let (status, body) = customer_json(
+        &state,
+        Method::GET,
+        "/tdata/Orders?$top=1&$count=true",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let values = body["value"].as_array().expect("value array");
+    assert_eq!(
+        values.len(),
+        1,
+        "denied rows must not be returned: {body:?}"
+    );
+    assert_eq!(values[0]["entity_id"].as_str(), Some("ord-visible"));
+    assert_eq!(body["@odata.count"].as_u64(), Some(1));
+}
+
+#[tokio::test]
 async fn entity_not_found_returns_404() {
     let (state, _sim) = build_default_state(44, "odata-read-404");
 
@@ -251,6 +355,60 @@ async fn filtered_entity_set_returns_entities_created_via_odata_post() {
         "filtered reads should include entities created via OData POST: {body:?}"
     );
     assert_eq!(values[0]["entity_id"].as_str(), Some("ord-created-filter"));
+
+    let _ = std::fs::remove_file(db_path);
+}
+
+#[tokio::test]
+async fn entity_set_authorizes_against_fields_omitted_by_select() {
+    let db_path = std::env::temp_dir().join(format!(
+        "temper-odata-read-cedar-select-{}.db",
+        uuid::Uuid::new_v4()
+    ));
+    let db_url = format!("file:{}", db_path.display());
+    let store = TursoEventStore::new(&db_url, None)
+        .await
+        .expect("create local turso db");
+    let state = build_turso_state("odata-read-cedar-select", store);
+
+    let (status, body) = post_json(
+        &state,
+        "/tdata/Orders",
+        serde_json::json!({
+            "id": "ord-select-authorized",
+            "Currency": "USD",
+            "Notes": "visible without exposing authorization input"
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "seed create failed: {body:?}");
+
+    state
+        .authz
+        .reload_tenant_policies(
+            TenantId::default().as_str(),
+            r#"
+                permit(principal, action == Action::"list", resource is Order);
+                permit(principal, action == Action::"read", resource is Order)
+                when { resource.Currency == "USD" };
+            "#,
+        )
+        .expect("install Cedar policy");
+
+    let (status, body) =
+        customer_json(&state, Method::GET, "/tdata/Orders?$select=Notes", None).await;
+    assert_eq!(status, StatusCode::OK);
+    let values = body["value"].as_array().expect("value array");
+    assert_eq!(
+        values.len(),
+        1,
+        "unprojected policy input must be available"
+    );
+    assert_eq!(
+        values[0]["Notes"].as_str(),
+        Some("visible without exposing authorization input")
+    );
+    assert!(values[0].get("Currency").is_none());
 
     let _ = std::fs::remove_file(db_path);
 }
@@ -355,6 +513,64 @@ async fn filtered_entity_set_reflects_odata_patch_updates() {
             .any(|value| value["entity_id"].as_str() == Some("ord-patched-filter")),
         "filtered reads should reflect OData PATCH updates: {body:?}"
     );
+
+    let _ = std::fs::remove_file(db_path);
+}
+
+#[tokio::test]
+async fn crud_routes_apply_cedar_mutation_policies() {
+    let db_path = std::env::temp_dir().join(format!(
+        "temper-odata-read-cedar-crud-{}.db",
+        uuid::Uuid::new_v4()
+    ));
+    let db_url = format!("file:{}", db_path.display());
+    let store = TursoEventStore::new(&db_url, None)
+        .await
+        .expect("create local turso db");
+    let state = build_turso_state("odata-read-cedar-crud", store);
+
+    let (status, body) = post_json(
+        &state,
+        "/tdata/Orders",
+        serde_json::json!({"id": "ord-existing", "Currency": "EUR"}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "seed create failed: {body:?}");
+
+    state
+        .authz
+        .reload_tenant_policies(
+            TenantId::default().as_str(),
+            r#"permit(principal, action in [Action::"list", Action::"read"], resource is Order);"#,
+        )
+        .expect("install Cedar policy");
+
+    for (method, path, request_body) in [
+        (
+            Method::POST,
+            "/tdata/Orders",
+            Some(serde_json::json!({"id": "ord-denied-create"})),
+        ),
+        (
+            Method::PATCH,
+            "/tdata/Orders('ord-existing')",
+            Some(serde_json::json!({"Currency": "USD"})),
+        ),
+        (
+            Method::PUT,
+            "/tdata/Orders('ord-existing')",
+            Some(serde_json::json!({"Currency": "GBP"})),
+        ),
+        (Method::DELETE, "/tdata/Orders('ord-existing')", None),
+    ] {
+        let (status, body) = customer_json(&state, method, path, request_body).await;
+        assert_eq!(status, StatusCode::FORBIDDEN, "unexpected body: {body:?}");
+        assert_eq!(body["error"]["code"].as_str(), Some("AuthorizationDenied"));
+    }
+
+    let (status, _) =
+        customer_json(&state, Method::GET, "/tdata/Orders('ord-existing')", None).await;
+    assert_eq!(status, StatusCode::OK, "denied mutation deleted the entity");
 
     let _ = std::fs::remove_file(db_path);
 }

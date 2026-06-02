@@ -1,5 +1,6 @@
 use crate::storage::EntityCatalogRow;
 
+#[cfg(test)]
 pub(in crate::odata) fn catalog_select_projection_fields(
     query_options: &temper_odata::query::types::QueryOptions,
 ) -> Option<&[String]> {

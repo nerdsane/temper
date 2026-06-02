@@ -5,7 +5,7 @@ fn test_directed_evolution_specs_parse() {
         return;
     }
     let bundle = get_os_app("directed-evolution").expect("directed-evolution app not found");
-    assert_eq!(bundle.specs.len(), 26);
+    assert_eq!(bundle.specs.len(), 27);
     for (entity_type, ioa_source) in &bundle.specs {
         let result = automaton::parse_automaton(ioa_source);
         assert!(
@@ -66,8 +66,8 @@ async fn test_install_os_app_directed_evolution_registers_entities() {
     let result = result.expect("directed evolution app installs");
     assert_eq!(
         result.added.len(),
-        26,
-        "expected 26 directed-evolution additions after dependencies: {:?}",
+        27,
+        "expected 27 directed-evolution additions after dependencies: {:?}",
         result.added
     );
     assert!(
@@ -79,6 +79,7 @@ async fn test_install_os_app_directed_evolution_registers_entities() {
     assert!(result.added.contains(&"Organism".to_string()));
     assert!(result.added.contains(&"Direction".to_string()));
     assert!(result.added.contains(&"Episode".to_string()));
+    assert!(result.added.contains(&"EpisodeStartRequest".to_string()));
     assert!(result.added.contains(&"Variant".to_string()));
     assert!(result.added.contains(&"StageResult".to_string()));
     assert!(result.added.contains(&"Trial".to_string()));
@@ -88,6 +89,7 @@ async fn test_install_os_app_directed_evolution_registers_entities() {
         result.wasm_modules,
         vec![
             "episode_orchestrator".to_string(),
+            "episode_start_requestor".to_string(),
             "signal_observer".to_string(),
             "work_item_result_router".to_string(),
         ]
@@ -101,6 +103,7 @@ async fn test_install_os_app_directed_evolution_registers_entities() {
     assert!(registry.get_table(&tenant, "Organism").is_some());
     assert!(registry.get_table(&tenant, "Direction").is_some());
     assert!(registry.get_table(&tenant, "Episode").is_some());
+    assert!(registry.get_table(&tenant, "EpisodeStartRequest").is_some());
     assert!(registry.get_table(&tenant, "Variant").is_some());
     assert!(registry.get_table(&tenant, "StageResult").is_some());
     assert!(registry.get_table(&tenant, "Trial").is_some());

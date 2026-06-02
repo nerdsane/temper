@@ -1,36 +1,38 @@
 //! OData read handlers (`GET` and metadata/service endpoints).
 
-use std::collections::BTreeSet;
 use std::sync::{Arc, RwLock};
 
-use axum::extract::{Query, State};
+use axum::extract::{Extension, Query, State};
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
+use temper_authz::SecurityContext;
 use temper_odata::path::{ODataPath, parse_path};
 use temper_odata::query::parse_query_options;
-use temper_odata::query::types::{ExpandItem, ExpandOptions, OrderDirection, QueryOptions};
+use temper_odata::query::types::{ExpandItem, ExpandOptions, QueryOptions};
 use temper_runtime::tenant::TenantId;
 use temper_wasm::{StreamRegistry, WasmInvocationContext};
 use tracing::instrument;
 
+use super::authz::{READ_ACTION, authorize_read, request_security_context};
 use super::common::{
     check_has_stream_or_400, extract_key, extract_tenant, has_expand_options,
     log_directed_evolution_odata_request, resolve_entity_type, resolve_value_parent,
     tenant_csdl_xml, tenant_entity_sets,
 };
+use super::query_plane_read::{
+    QueryPlaneReadBudget, QueryPlaneReadRequest, read_entity_set_from_query_plane,
+};
 use super::read_support::{
-    PushdownPageRequest, catalog_select_projection_fields, materialize_entity_set_entities,
-    missing_catalog_entity_ids, odata_default_page_size, odata_max_entities,
-    record_entity_set_not_found, resolve_entity_set_name, select_entity_ids_for_materialization,
-    try_load_entity_body_from_catalog, try_select_paged_pushdown_entity_ids,
+    record_entity_set_not_found, resolve_entity_set_name, try_load_entity_body_from_catalog,
 };
 use super::response::annotate_entity;
 use super::stream_fast_path::try_file_stream_fast_path;
 use crate::blobs::hydrate_blob_refs_for_tenant;
-use crate::query_eval::{apply_query_options, expand_entity, select_fields};
+use crate::identity::ResolvedIdentity;
+use crate::query_eval::{expand_entity, select_fields};
+use crate::request_context::extract_agent_context;
 use crate::response::{ODataResponse, ODataStreamResponse, ODataXmlResponse, odata_error};
 use crate::state::ServerState;
-use crate::storage::{QueryFieldIndexOrder, QueryFieldIndexOrderDirection, QueryFieldIndexPage};
 
 /// Recursively resolve an OData path to its parent entity's
 /// (entity_type, entity_id, entity_set_name).
@@ -41,6 +43,7 @@ async fn resolve_parent_entity(
     path: &ODataPath,
     state: &ServerState,
     tenant: &TenantId,
+    security_ctx: &SecurityContext,
 ) -> Result<(String, String, String), (StatusCode, String)> {
     match path {
         ODataPath::Entity(set_name, key) => {
@@ -55,21 +58,25 @@ async fn resolve_parent_entity(
         }
         ODataPath::NavigationProperty { parent, property } => {
             let (parent_type, parent_key, _parent_set) =
-                Box::pin(resolve_parent_entity(parent, state, tenant)).await?;
+                Box::pin(resolve_parent_entity(parent, state, tenant, security_ctx)).await?;
 
             // Use expand to resolve the nav property
-            let response = state
-                .get_tenant_entity_state(tenant, &parent_type, &parent_key)
-                .await
-                .map_err(|_| {
-                    (
-                        StatusCode::NOT_FOUND,
-                        format!("Parent entity '{parent_type}' with key '{parent_key}' not found"),
-                    )
-                })?;
-
-            let mut parent_body = serde_json::to_value(&response.state).unwrap_or_default();
-            hydrate_blob_refs_for_tenant(state, tenant, &mut parent_body).await;
+            let parent_set = resolve_entity_set_name(state, tenant, &parent_type);
+            let mut parent_body = load_authorized_entity_body(
+                state,
+                tenant,
+                &parent_type,
+                &parent_set,
+                &parent_key,
+                security_ctx,
+            )
+            .await
+            .map_err(|_| {
+                (
+                    StatusCode::FORBIDDEN,
+                    format!("Read access denied for parent entity '{parent_type}'"),
+                )
+            })?;
             let expand_item = ExpandItem {
                 property: property.clone(),
                 options: None,
@@ -80,8 +87,15 @@ async fn resolve_parent_entity(
                 &parent_type,
                 state,
                 tenant,
+                security_ctx,
             )
-            .await;
+            .await
+            .map_err(|_| {
+                (
+                    StatusCode::FORBIDDEN,
+                    format!("Read access denied for navigation property '{property}'"),
+                )
+            })?;
 
             let nav_value = parent_body.get(property).ok_or_else(|| {
                 (
@@ -121,7 +135,7 @@ async fn resolve_parent_entity(
         } => {
             // Resolve the parent, then the keyed entity in the nav collection
             let (parent_type, _parent_key, _parent_set) =
-                Box::pin(resolve_parent_entity(parent, state, tenant)).await?;
+                Box::pin(resolve_parent_entity(parent, state, tenant, security_ctx)).await?;
 
             let target_type =
                 resolve_navigation_target_type(state, tenant, &parent_type, property)?;
@@ -236,27 +250,58 @@ async fn load_existing_entity_body(
     Ok(body)
 }
 
+async fn load_authorized_entity_body(
+    state: &ServerState,
+    tenant: &TenantId,
+    entity_type: &str,
+    set_name: &str,
+    key: &str,
+    security_ctx: &SecurityContext,
+) -> Result<serde_json::Value, Response> {
+    let body = load_existing_entity_body(state, tenant, entity_type, set_name, key).await?;
+    authorize_read(
+        state,
+        tenant,
+        security_ctx,
+        READ_ACTION,
+        entity_type,
+        key,
+        &body,
+    )
+    .map_err(|response| *response)?;
+    Ok(body)
+}
+
 async fn apply_entity_query_options(
     mut body: serde_json::Value,
     entity_type: &str,
     state: &ServerState,
     tenant: &TenantId,
+    security_ctx: &SecurityContext,
     query_options: &QueryOptions,
     select_before_expand: bool,
-) -> serde_json::Value {
+) -> Result<serde_json::Value, Response> {
     if select_before_expand && let Some(ref select) = query_options.select {
         body = select_fields(vec![body], select).pop().unwrap_or_default();
     }
 
     if let Some(ref expand_items) = query_options.expand {
-        expand_entity(&mut body, expand_items, entity_type, state, tenant).await;
+        expand_entity(
+            &mut body,
+            expand_items,
+            entity_type,
+            state,
+            tenant,
+            security_ctx,
+        )
+        .await?;
     }
 
     if !select_before_expand && let Some(ref select) = query_options.select {
         body = select_fields(vec![body], select).pop().unwrap_or_default();
     }
 
-    body
+    Ok(body)
 }
 
 struct EntityBodyOptions<'a> {
@@ -274,10 +319,12 @@ async fn build_entity_body(
     entity_type: &str,
     set_name: &str,
     key: &str,
+    security_ctx: &SecurityContext,
     options: EntityBodyOptions<'_>,
 ) -> Result<serde_json::Value, Response> {
     let mut state_json =
-        load_existing_entity_body(state, tenant, entity_type, set_name, key).await?;
+        load_authorized_entity_body(state, tenant, entity_type, set_name, key, security_ctx)
+            .await?;
     if let Some(obj) = state_json.as_object_mut() {
         obj.remove("@odata.id");
     }
@@ -293,15 +340,16 @@ async fn build_entity_body(
         obj.insert("@odata.function".to_string(), serde_json::json!(name));
     }
 
-    Ok(apply_entity_query_options(
+    apply_entity_query_options(
         body,
         entity_type,
         state,
         tenant,
+        security_ctx,
         options.query_options,
         options.select_before_expand,
     )
-    .await)
+    .await
 }
 
 /// Enrich an entity response with `@odata.actions` and `@odata.children`.
@@ -398,6 +446,7 @@ fn enrich_entity_response(
 pub(super) async fn handle_odata_get_for_tenant(
     state: ServerState,
     tenant: TenantId,
+    security_ctx: SecurityContext,
     path: String,
     query_params: std::collections::BTreeMap<String, String>,
 ) -> axum::response::Response {
@@ -435,29 +484,68 @@ pub(super) async fn handle_odata_get_for_tenant(
         .into_response(),
 
         ODataPath::EntitySet(name) => {
-            handle_entity_set(&state, &tenant, &name, &query_options).await
+            handle_entity_set(&state, &tenant, &security_ctx, &name, &query_options).await
         }
 
         ODataPath::Entity(set_name, key) => {
-            handle_entity(&state, &tenant, &set_name, &key, &query_options).await
+            handle_entity(
+                &state,
+                &tenant,
+                &security_ctx,
+                &set_name,
+                &key,
+                &query_options,
+            )
+            .await
         }
 
         ODataPath::NavigationProperty {
             ref parent,
             ref property,
-        } => handle_navigation_property(&state, &tenant, parent, property, &query_options).await,
+        } => {
+            handle_navigation_property(
+                &state,
+                &tenant,
+                &security_ctx,
+                parent,
+                property,
+                &query_options,
+            )
+            .await
+        }
 
         ODataPath::NavigationEntity {
             ref parent,
             ref property,
             ref key,
-        } => handle_navigation_entity(&state, &tenant, parent, property, key, &query_options).await,
-
-        ODataPath::BoundFunction { parent, function } => {
-            handle_bound_function(&state, &tenant, &parent, &function, &query_options).await
+        } => {
+            handle_navigation_entity(
+                &state,
+                &tenant,
+                &security_ctx,
+                parent,
+                property,
+                key,
+                &query_options,
+            )
+            .await
         }
 
-        ODataPath::Value { ref parent } => handle_stream_get(&state, &tenant, parent).await,
+        ODataPath::BoundFunction { parent, function } => {
+            handle_bound_function(
+                &state,
+                &tenant,
+                &security_ctx,
+                &parent,
+                &function,
+                &query_options,
+            )
+            .await
+        }
+
+        ODataPath::Value { ref parent } => {
+            handle_stream_get(&state, &tenant, &security_ctx, parent).await
+        }
 
         _ => odata_error(
             StatusCode::NOT_IMPLEMENTED,
@@ -466,78 +554,6 @@ pub(super) async fn handle_odata_get_for_tenant(
         )
         .into_response(),
     }
-}
-
-fn filter_only_query_options(query_options: &QueryOptions) -> QueryOptions {
-    QueryOptions {
-        filter: query_options.filter.clone(),
-        ..QueryOptions::default()
-    }
-}
-
-#[expect(
-    clippy::too_many_arguments,
-    reason = "bounded SQL pushdown page selection boundary"
-)]
-async fn try_select_sql_paged_pushdown_entity_ids(
-    state: &ServerState,
-    tenant: &TenantId,
-    entity_type: &str,
-    where_clause: &str,
-    params: Vec<String>,
-    query_options: &QueryOptions,
-    default_page_size: usize,
-    max_entities: usize,
-) -> Result<Option<QueryFieldIndexPage>, String> {
-    let Some(query_plane) = state.query_plane_store() else {
-        return Ok(None);
-    };
-    if query_options.expand.is_some() {
-        return Ok(None);
-    }
-
-    let top = query_options
-        .top
-        .unwrap_or(default_page_size)
-        .min(max_entities);
-    if top == 0 {
-        return Ok(Some(QueryFieldIndexPage {
-            entity_ids: Vec::new(),
-            total_count: if query_options.count == Some(true) {
-                Some(0)
-            } else {
-                None
-            },
-        }));
-    }
-    let skip = query_options.skip.unwrap_or(0);
-    let order_by = query_options
-        .orderby
-        .as_deref()
-        .unwrap_or_default()
-        .iter()
-        .map(|clause| QueryFieldIndexOrder {
-            field_name: clause.property.clone(),
-            direction: match clause.direction {
-                OrderDirection::Asc => QueryFieldIndexOrderDirection::Asc,
-                OrderDirection::Desc => QueryFieldIndexOrderDirection::Desc,
-            },
-        })
-        .collect::<Vec<_>>();
-
-    query_plane
-        .query_field_index_page(
-            tenant.as_str(),
-            entity_type,
-            where_clause,
-            params,
-            &order_by,
-            skip,
-            top,
-            query_options.count == Some(true),
-        )
-        .await
-        .map_err(|error| error.to_string())
 }
 
 /// Handle `EntitySet` path: list all entities in a set with query options.
@@ -556,6 +572,7 @@ async fn try_select_sql_paged_pushdown_entity_ids(
     catalog_shadow_check_scheduled = tracing::field::Empty,
     catalog_coverage_missing = tracing::field::Empty,
     catalog_coverage_matched = tracing::field::Empty,
+    select_requested = tracing::field::Empty,
     catalog_select_projection = tracing::field::Empty,
     select_count = tracing::field::Empty,
     pushdown_sparse_page = tracing::field::Empty,
@@ -566,6 +583,7 @@ async fn try_select_sql_paged_pushdown_entity_ids(
 async fn handle_entity_set(
     state: &ServerState,
     tenant: &TenantId,
+    security_ctx: &SecurityContext,
     name: &str,
     query_options: &QueryOptions,
 ) -> axum::response::Response {
@@ -576,325 +594,44 @@ async fn handle_entity_set(
     };
     let span = tracing::Span::current();
     span.record("entity_type", entity_type.as_str());
-
-    let default_page_size = odata_default_page_size();
-    let max_entities = odata_max_entities();
-    let selected_catalog_fields = catalog_select_projection_fields(query_options);
-    span.record(
-        "catalog_select_projection",
-        selected_catalog_fields.is_some(),
-    );
-    span.record(
-        "select_count",
-        query_options.select.as_ref().map_or(0, Vec::len) as u64,
-    );
-
-    // ---- Filter push-down: try SQL-level filtering first ----
-    let translated_filter = query_options
-        .filter
-        .as_ref()
-        .and_then(super::filter_sql::try_translate_filter);
-    let mut sql_paged_pushdown = None;
-    let sql_pushdown_ids = if let Some(translated) = translated_filter {
-        if let Some(query_plane) = state.query_plane_store() {
-            match try_select_sql_paged_pushdown_entity_ids(
-                state,
-                tenant,
-                &entity_type,
-                &translated.where_clause,
-                translated.params.clone(),
-                query_options,
-                default_page_size,
-                max_entities,
-            )
-            .await
-            {
-                Ok(Some(page)) => {
-                    tracing::debug!(
-                        entity_type = %entity_type,
-                        matched = page.total_count.unwrap_or(page.entity_ids.len()),
-                        returned = page.entity_ids.len(),
-                        "OData paged filter push-down succeeded"
-                    );
-                    sql_paged_pushdown = Some(page);
-                    None
-                }
-                Ok(None) => {
-                    match query_plane
-                        .query_field_index(
-                            tenant.as_str(),
-                            &entity_type,
-                            &translated.where_clause,
-                            translated.params,
-                        )
-                        .await
-                    {
-                        Ok(Some(ids)) => {
-                            tracing::debug!(
-                                entity_type = %entity_type,
-                                matched = ids.len(),
-                                "OData filter push-down succeeded"
-                            );
-                            Some(ids)
-                        }
-                        Ok(None) => None, // backend doesn't support field index
-                        Err(e) => {
-                            tracing::warn!(
-                                error = %e,
-                                "OData filter push-down query failed, falling back to in-memory"
-                            );
-                            None
-                        }
-                    }
-                }
-                Err(e) => {
-                    tracing::warn!(
-                        error = %e,
-                        "OData paged filter push-down query failed, falling back to id push-down"
-                    );
-                    match query_plane
-                        .query_field_index(
-                            tenant.as_str(),
-                            &entity_type,
-                            &translated.where_clause,
-                            translated.params,
-                        )
-                        .await
-                    {
-                        Ok(Some(ids)) => Some(ids),
-                        Ok(None) => None,
-                        Err(e) => {
-                            tracing::warn!(
-                                error = %e,
-                                "OData filter push-down query failed, falling back to in-memory"
-                            );
-                            None
-                        }
-                    }
-                }
-            }
-        } else {
-            None
-        }
-    } else {
-        None // no filter
-    };
-
-    let filter_pushdown = sql_paged_pushdown.is_some() || sql_pushdown_ids.is_some();
-    let prefer_catalog_materialization = filter_pushdown || state.query_plane_store().is_some();
-    let mut pushdown_coverage_entities = Vec::new();
-    let mut final_selected_catalog_fields = selected_catalog_fields;
-    let mut catalog_coverage_missing = 0_usize;
-    let mut catalog_coverage_matched = 0_usize;
-    let mut pushdown_sparse_page = false;
-    let mut pushdown_sparse_probe_count = 0_usize;
-    let mut pushdown_page_count = 0_usize;
-    let mut pushdown_sparse_skip_reason = if filter_pushdown {
-        "not_checked"
-    } else {
-        "no_filter_pushdown"
-    };
-    let candidate_count_for_span;
-    let (entity_ids, apply_options, precomputed_count) = if let Some(page) = sql_paged_pushdown {
-        candidate_count_for_span = page.total_count.unwrap_or(page.entity_ids.len());
-        pushdown_sparse_page = true;
-        pushdown_sparse_skip_reason = "sql_page";
-        pushdown_sparse_probe_count = page.entity_ids.len();
-        pushdown_page_count = page.entity_ids.len();
-
-        let mut opts = query_options.clone();
-        opts.filter = None;
-        opts.orderby = None;
-        opts.top = None;
-        opts.skip = None;
-        opts.count = None;
-        if query_options.select.is_some() && query_options.expand.is_none() {
-            final_selected_catalog_fields = query_options.select.as_deref();
-            opts.select = None;
-        }
-        (page.entity_ids, opts, page.total_count)
-    } else if let Some(pushed_ids) = sql_pushdown_ids {
-        candidate_count_for_span = pushed_ids.len();
-        let fallback_candidate_budget = max_entities.saturating_mul(10).max(default_page_size);
-        if pushed_ids.len() > fallback_candidate_budget {
-            span.record("filter_pushdown", true);
-            span.record("catalog_materialization", prefer_catalog_materialization);
-            span.record("id_source", "filter_pushdown");
-            span.record("candidate_count", pushed_ids.len() as u64);
-            span.record("catalog_coverage_missing", 0_u64);
-            span.record("catalog_coverage_matched", 0_u64);
-            span.record("pushdown_sparse_page", false);
-            span.record("pushdown_sparse_probe_count", 0_u64);
-            span.record("pushdown_page_count", 0_u64);
-            span.record("pushdown_sparse_skip_reason", "fallback_candidate_budget");
-            tracing::warn!(
-                tenant = %tenant,
-                entity_type = %entity_type,
-                candidate_count = pushed_ids.len(),
-                fallback_candidate_budget,
-                "OData pushed-down candidate set requires native paged push-down"
-            );
-            return odata_error(
-                StatusCode::PAYLOAD_TOO_LARGE,
-                "QueryTooLarge",
-                "This filtered query matched more projected entities than the bounded fallback can materialize. Use a narrower filter or a storage backend with native paged push-down.",
-            )
-            .into_response();
-        }
-        let all_entity_ids = state.list_entity_ids_lazy(tenant, &entity_type).await;
-        let pushed_id_set = pushed_ids.iter().cloned().collect::<BTreeSet<_>>();
-        let mut missing_ids =
-            missing_catalog_entity_ids(state, tenant, &entity_type, &all_entity_ids).await;
-        missing_ids.retain(|id| !pushed_id_set.contains(id));
-        catalog_coverage_missing = missing_ids.len();
-        if !missing_ids.is_empty() {
-            let missing = materialize_entity_set_entities(
-                state,
-                tenant,
-                &entity_type,
-                name,
-                &missing_ids,
-                true,
-                None,
-            )
-            .await;
-            let filter_options = filter_only_query_options(query_options);
-            let (matching_missing, _) = apply_query_options(missing.entities, &filter_options);
-            let matched_count = matching_missing
-                .iter()
-                .filter_map(|entity| entity.get("entity_id").and_then(|id| id.as_str()))
-                .count();
-            catalog_coverage_matched = matched_count;
-            pushdown_coverage_entities = matching_missing;
-        }
-
-        let sparse_selection = if missing_ids.is_empty() {
-            match try_select_paged_pushdown_entity_ids(
-                state,
-                PushdownPageRequest {
-                    tenant,
-                    entity_type: &entity_type,
-                    entity_set_name: name,
-                    pushed_ids: &pushed_ids,
-                    query_options,
-                    default_page_size,
-                    max_entities,
-                },
-            )
-            .await
-            {
-                Ok(selection) => Some(selection),
-                Err(reason) => {
-                    pushdown_sparse_skip_reason = reason.as_str();
-                    None
-                }
-            }
-        } else {
-            pushdown_sparse_skip_reason = "catalog_coverage_missing";
-            None
-        };
-
-        if let Some(selection) = sparse_selection {
-            pushdown_sparse_page = true;
-            pushdown_sparse_skip_reason = "engaged";
-            pushdown_sparse_probe_count = selection.sparse_materialized_count;
-            pushdown_page_count = selection.entity_ids.len();
-
-            let mut opts = query_options.clone();
-            opts.filter = None;
-            opts.orderby = None;
-            opts.top = None;
-            opts.skip = None;
-            opts.count = None;
-            if query_options.select.is_some() && query_options.expand.is_none() {
-                final_selected_catalog_fields = query_options.select.as_deref();
-                opts.select = None;
-            }
-            (selection.entity_ids, opts, selection.count)
-        } else {
-            // SQL push-down already filtered — apply pagination only.
-            // The $filter is still in query_options for apply_query_options to
-            // re-verify in memory (belt-and-suspenders), but we've reduced the
-            // materialization set dramatically.
-            let mut opts = query_options.clone();
-            if opts.top.is_none() {
-                opts.top = Some(default_page_size);
-            } else if let Some(top) = opts.top {
-                opts.top = Some(top.min(max_entities));
-            }
-            (pushed_ids, opts, None)
-        }
-    } else {
-        // No push-down — use existing materialization path.
-        let selected = select_entity_ids_for_materialization(
-            state.list_entity_ids_lazy(tenant, &entity_type).await,
-            query_options,
-            default_page_size,
-            max_entities,
-        );
-        candidate_count_for_span = selected.0.len();
-        selected
-    };
-    span.record("filter_pushdown", filter_pushdown);
-    span.record("catalog_materialization", prefer_catalog_materialization);
-    span.record(
-        "id_source",
-        if filter_pushdown {
-            "filter_pushdown"
-        } else {
-            "read_source_union"
-        },
-    );
-    span.record(
-        "candidate_count",
-        (candidate_count_for_span + pushdown_coverage_entities.len()) as u64,
-    );
-    span.record("catalog_coverage_missing", catalog_coverage_missing as u64);
-    span.record("catalog_coverage_matched", catalog_coverage_matched as u64);
-    span.record("pushdown_sparse_page", pushdown_sparse_page);
-    span.record(
-        "pushdown_sparse_probe_count",
-        pushdown_sparse_probe_count as u64,
-    );
-    span.record("pushdown_page_count", pushdown_page_count as u64);
-    span.record("pushdown_sparse_skip_reason", pushdown_sparse_skip_reason);
-
-    let materialized = materialize_entity_set_entities(
+    let read_result = match read_entity_set_from_query_plane(QueryPlaneReadRequest {
         state,
         tenant,
-        &entity_type,
-        name,
-        &entity_ids,
-        prefer_catalog_materialization,
-        final_selected_catalog_fields,
-    )
-    .await;
-    let total_materialized_count =
-        materialized.entities.len() as u64 + pushdown_coverage_entities.len() as u64;
-    span.record("materialized_count", total_materialized_count);
-    span.record(
-        "catalog_shadow_check_budget",
-        materialized.catalog_shadow_check_budget as u64,
-    );
-    span.record(
-        "catalog_shadow_check_scheduled",
-        materialized.catalog_shadow_check_scheduled as u64,
-    );
+        security_ctx,
+        entity_type: &entity_type,
+        entity_set_name: name,
+        query_options,
+        budget: QueryPlaneReadBudget::from_config(),
+    })
+    .await
+    {
+        Ok(result) => result,
+        Err(error) => {
+            error.record_telemetry(&span);
+            return error.into_response();
+        }
+    };
+    read_result.telemetry.record(&span);
 
-    let mut entities = materialized.entities;
-    entities.extend(pushdown_coverage_entities);
-    let (mut result, mut count) = apply_query_options(entities, &apply_options);
-    span.record("returned_count", result.len() as u64);
-    if count.is_none() {
-        count = precomputed_count;
-    }
-
+    let mut result = read_result.entities;
     if let Some(ref expand_items) = query_options.expand {
         for entity in &mut result {
-            expand_entity(entity, expand_items, &entity_type, state, tenant).await;
+            if let Err(response) = expand_entity(
+                entity,
+                expand_items,
+                &entity_type,
+                state,
+                tenant,
+                security_ctx,
+            )
+            .await
+            {
+                return response;
+            }
         }
     }
 
+    let count = read_result.count;
     let mut body = serde_json::json!({
         "@odata.context": format!("$metadata#{name}"),
         "value": result,
@@ -913,6 +650,7 @@ async fn handle_entity_set(
 async fn handle_entity(
     state: &ServerState,
     tenant: &TenantId,
+    security_ctx: &SecurityContext,
     set_name: &str,
     key: &temper_odata::path::KeyValue,
     query_options: &QueryOptions,
@@ -942,6 +680,17 @@ async fn handle_entity(
                     "@odata.context": format!("$metadata#{set_name}/$entity"),
                     "@odata.id": format!("{set_name}('{key_str}')"),
                 });
+                if let Err(response) = authorize_read(
+                    state,
+                    tenant,
+                    security_ctx,
+                    READ_ACTION,
+                    &entity_type,
+                    &key_str,
+                    &body,
+                ) {
+                    return *response;
+                }
                 ODataResponse {
                     status: StatusCode::OK,
                     body,
@@ -969,6 +718,7 @@ async fn handle_entity(
         &entity_type,
         set_name,
         &key_str,
+        security_ctx,
         EntityBodyOptions {
             context: format!("$metadata#{set_name}/$entity"),
             odata_id: Some(format!("{set_name}('{key_str}')")),
@@ -993,24 +743,26 @@ async fn handle_entity(
 async fn handle_navigation_property(
     state: &ServerState,
     tenant: &TenantId,
+    security_ctx: &SecurityContext,
     parent: &ODataPath,
     property: &str,
     query_options: &QueryOptions,
 ) -> axum::response::Response {
     let (parent_type, parent_key, parent_set) =
-        match resolve_parent_entity(parent, state, tenant).await {
+        match resolve_parent_entity(parent, state, tenant, security_ctx).await {
             Ok(r) => r,
             Err((status, msg)) => {
                 return odata_error(status, "InvalidPath", &msg).into_response();
             }
         };
 
-    let parent_body = match load_existing_entity_body(
+    let parent_body = match load_authorized_entity_body(
         state,
         tenant,
         &parent_type,
         &parent_set,
         &parent_key,
+        security_ctx,
     )
     .await
     {
@@ -1036,14 +788,18 @@ async fn handle_navigation_property(
         },
     };
 
-    expand_entity(
+    if let Err(response) = expand_entity(
         &mut parent_body,
         &[expand_item],
         &parent_type,
         state,
         tenant,
+        security_ctx,
     )
-    .await;
+    .await
+    {
+        return response;
+    }
 
     let Some(nav_value) = parent_body.get(property).cloned() else {
         return odata_error(
@@ -1053,7 +809,6 @@ async fn handle_navigation_property(
         )
         .into_response();
     };
-
     match nav_value {
         serde_json::Value::Array(values) => {
             let count = values.len();
@@ -1092,18 +847,31 @@ async fn handle_navigation_property(
 async fn handle_navigation_entity(
     state: &ServerState,
     tenant: &TenantId,
+    security_ctx: &SecurityContext,
     parent: &ODataPath,
     property: &str,
     key: &temper_odata::path::KeyValue,
     query_options: &QueryOptions,
 ) -> axum::response::Response {
-    let (parent_type, _parent_key, _parent_set) =
-        match resolve_parent_entity(parent, state, tenant).await {
+    let (parent_type, parent_key, parent_set) =
+        match resolve_parent_entity(parent, state, tenant, security_ctx).await {
             Ok(r) => r,
             Err((status, msg)) => {
                 return odata_error(status, "InvalidPath", &msg).into_response();
             }
         };
+    if let Err(response) = load_authorized_entity_body(
+        state,
+        tenant,
+        &parent_type,
+        &parent_set,
+        &parent_key,
+        security_ctx,
+    )
+    .await
+    {
+        return response;
+    }
 
     let Ok(target_type) = resolve_navigation_target_type(state, tenant, &parent_type, property)
     else {
@@ -1124,6 +892,7 @@ async fn handle_navigation_entity(
         &target_type,
         &target_set,
         &key_str,
+        security_ctx,
         EntityBodyOptions {
             context: format!("$metadata#{target_set}/$entity"),
             odata_id: Some(format!("{target_set}('{key_str}')")),
@@ -1148,6 +917,7 @@ async fn handle_navigation_entity(
 async fn handle_bound_function(
     state: &ServerState,
     tenant: &TenantId,
+    security_ctx: &SecurityContext,
     parent: &ODataPath,
     function: &str,
     query_options: &QueryOptions,
@@ -1182,6 +952,7 @@ async fn handle_bound_function(
         &entity_type,
         &parent_set,
         &parent_key,
+        security_ctx,
         EntityBodyOptions {
             context: format!("$metadata#{entity_type}"),
             odata_id: None,
@@ -1206,6 +977,7 @@ async fn handle_bound_function(
 #[instrument(skip_all, fields(otel.name = "GET /odata/{path}"))]
 pub async fn handle_odata_get(
     State(state): State<ServerState>,
+    resolved_id: Option<Extension<ResolvedIdentity>>,
     headers: HeaderMap,
     axum::extract::Path(path): axum::extract::Path<String>,
     Query(query_params): Query<std::collections::BTreeMap<String, String>>,
@@ -1215,7 +987,10 @@ pub async fn handle_odata_get(
         Err(e) => return e.into_response(),
     };
     log_directed_evolution_odata_request(&headers, &tenant, "GET", &path);
-    handle_odata_get_for_tenant(state, tenant, path, query_params).await
+    let agent_ctx = extract_agent_context(&headers);
+    let resolved_identity = resolved_id.map(|Extension(identity)| identity);
+    let security_ctx = request_security_context(&headers, &agent_ctx, resolved_identity.as_ref());
+    handle_odata_get_for_tenant(state, tenant, security_ctx, path, query_params).await
 }
 
 #[instrument(skip_all, fields(otel.name = "GET /odata"))]
@@ -1275,6 +1050,7 @@ pub async fn handle_hints(State(state): State<ServerState>) -> impl IntoResponse
 async fn handle_stream_get(
     state: &ServerState,
     tenant: &TenantId,
+    security_ctx: &SecurityContext,
     parent: &ODataPath,
 ) -> axum::response::Response {
     // 1. Resolve parent to (set_name, entity_id)
@@ -1293,20 +1069,27 @@ async fn handle_stream_get(
         return resp;
     }
 
+    let entity_state = match load_authorized_entity_body(
+        state,
+        tenant,
+        &entity_type,
+        &set_name,
+        &key,
+        security_ctx,
+    )
+    .await
+    {
+        Ok(body) => body,
+        Err(resp) => return resp,
+    };
+
     if let Some(response) =
         try_file_stream_fast_path(state, tenant, &set_name, &entity_type, &key).await
     {
         return response;
     }
 
-    // 3. Get entity state (catalog-first; falls back to actor on miss).
-    let entity_state =
-        match load_existing_entity_body(state, tenant, &entity_type, &set_name, &key).await {
-            Ok(body) => body,
-            Err(resp) => return resp,
-        };
-
-    // 4. Check if entity has content (boolean may be in top-level `booleans` map or `fields`)
+    // 3. Check if entity has content (boolean may be in top-level `booleans` map or `fields`)
     let has_content = entity_state
         .get("booleans")
         .and_then(|b| b.get("has_content"))
@@ -1327,7 +1110,7 @@ async fn handle_stream_get(
         .into_response();
     }
 
-    // 5. Invoke WASM blob_adapter for download
+    // 4. Invoke WASM blob_adapter for download
     let response_stream_id = format!("download-{}", temper_runtime::scheduler::sim_uuid());
     let streams = Arc::new(RwLock::new(StreamRegistry::default()));
 
@@ -1380,7 +1163,7 @@ async fn handle_stream_get(
         .into_response();
     }
 
-    // 6. Read bytes from StreamRegistry
+    // 5. Read bytes from StreamRegistry
     let body_bytes = {
         let mut s = streams
             .write()

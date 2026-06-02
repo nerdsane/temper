@@ -17,6 +17,7 @@ use crate::metrics::{
     PostgresTransactionTimer, record_postgres_pool_acquire_duration,
     record_postgres_transaction_begin_duration, record_postgres_transaction_commit_duration,
 };
+use crate::segments;
 
 const EVENT_APPEND_OPERATION: &str = "event_append";
 
@@ -125,6 +126,10 @@ impl EventStore for PostgresEventStore {
             });
         }
 
+        let segment_index =
+            segments::open_segment_for_append(&mut tx, tenant, entity_type, entity_id, current_seq)
+                .await?;
+
         let mut new_seq = expected_sequence;
         for event in events {
             new_seq += 1;
@@ -132,13 +137,14 @@ impl EventStore for PostgresEventStore {
                 .map_err(|e| PersistenceError::Serialization(e.to_string()))?;
 
             if let Err(e) = crate::dbm::postgres_query!(
-                "INSERT INTO events (tenant, entity_type, entity_id, sequence_nr, event_type, payload, metadata) \
-                 VALUES ($1, $2, $3, $4, $5, $6, $7)",
+                "INSERT INTO events (tenant, entity_type, entity_id, sequence_nr, segment_index, event_type, payload, metadata) \
+                 VALUES ($1, $2, $3, $4, $5, $6, $7, $8)",
             )
             .bind(tenant)
             .bind(entity_type)
             .bind(entity_id)
             .bind(new_seq as i64)
+            .bind(segment_index)
             .bind(&event.event_type)
             .bind(&event.payload)
             .bind(metadata_json)
@@ -156,6 +162,18 @@ impl EventStore for PostgresEventStore {
                     return Err(PersistenceError::Storage(msg));
                 }
             }
+        }
+
+        if new_seq > expected_sequence {
+            segments::update_segment_after_append(
+                &mut tx,
+                tenant,
+                entity_type,
+                entity_id,
+                segment_index,
+                new_seq,
+            )
+            .await?;
         }
 
         let commit_started = Instant::now();
@@ -263,15 +281,26 @@ impl EventStore for PostgresEventStore {
                     actual: current_seq,
                 });
             }
+            let segment_index = segments::open_segment_for_append(
+                &mut tx,
+                tenant,
+                entity_type,
+                entity_id,
+                current_seq,
+            )
+            .await?;
             parsed.push((
                 tenant.to_string(),
                 entity_type.to_string(),
                 entity_id.to_string(),
+                segment_index,
             ));
         }
 
         let mut results = Vec::with_capacity(appends.len());
-        for (append, (tenant, entity_type, entity_id)) in appends.iter().zip(parsed.iter()) {
+        for (append, (tenant, entity_type, entity_id, segment_index)) in
+            appends.iter().zip(parsed.iter())
+        {
             let mut new_seq = append.expected_sequence;
             for event in &append.events {
                 new_seq += 1;
@@ -279,13 +308,14 @@ impl EventStore for PostgresEventStore {
                     .map_err(|e| PersistenceError::Serialization(e.to_string()))?;
 
                 if let Err(e) = crate::dbm::postgres_query!(
-                    "INSERT INTO events (tenant, entity_type, entity_id, sequence_nr, event_type, payload, metadata) \
-                     VALUES ($1, $2, $3, $4, $5, $6, $7)",
+                    "INSERT INTO events (tenant, entity_type, entity_id, sequence_nr, segment_index, event_type, payload, metadata) \
+                     VALUES ($1, $2, $3, $4, $5, $6, $7, $8)",
                 )
                 .bind(tenant)
                 .bind(entity_type)
                 .bind(entity_id)
                 .bind(new_seq as i64)
+                .bind(*segment_index)
                 .bind(&event.event_type)
                 .bind(&event.payload)
                 .bind(metadata_json)
@@ -302,6 +332,17 @@ impl EventStore for PostgresEventStore {
                     }
                     return Err(PersistenceError::Storage(msg));
                 }
+            }
+            if new_seq > append.expected_sequence {
+                segments::update_segment_after_append(
+                    &mut tx,
+                    tenant,
+                    entity_type,
+                    entity_id,
+                    *segment_index,
+                    new_seq,
+                )
+                .await?;
             }
             results.push(PersistenceAppendResult {
                 persistence_id: append.persistence_id.clone(),
@@ -381,6 +422,12 @@ impl EventStore for PostgresEventStore {
         let (tenant, entity_type, entity_id) =
             parse_persistence_id_parts(persistence_id).map_err(PersistenceError::Storage)?;
 
+        let mut tx = self
+            .pool
+            .begin()
+            .await
+            .map_err(|e| PersistenceError::Storage(e.to_string()))?;
+
         crate::dbm::postgres_query!(
             "INSERT INTO snapshots (tenant, entity_type, entity_id, sequence_nr, state) \
              VALUES ($1, $2, $3, $4, $5) \
@@ -392,9 +439,31 @@ impl EventStore for PostgresEventStore {
         .bind(entity_id)
         .bind(sequence_nr as i64)
         .bind(snapshot)
-        .execute(&self.pool)
+        .execute(&mut *tx)
         .await
         .map_err(|e| PersistenceError::Storage(e.to_string()))?;
+
+        crate::dbm::postgres_query!(
+            "INSERT INTO snapshot_history (tenant, entity_type, entity_id, sequence_nr, state) \
+             VALUES ($1, $2, $3, $4, $5) \
+             ON CONFLICT (tenant, entity_type, entity_id, sequence_nr) \
+             DO UPDATE SET state = $5, created_at = now()",
+        )
+        .bind(tenant)
+        .bind(entity_type)
+        .bind(entity_id)
+        .bind(sequence_nr as i64)
+        .bind(snapshot)
+        .execute(&mut *tx)
+        .await
+        .map_err(|e| PersistenceError::Storage(e.to_string()))?;
+
+        segments::rotate_after_snapshot(&mut tx, tenant, entity_type, entity_id, sequence_nr)
+            .await?;
+
+        tx.commit()
+            .await
+            .map_err(|e| PersistenceError::Storage(e.to_string()))?;
 
         Ok(())
     }

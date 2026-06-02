@@ -218,6 +218,89 @@ async fn odata_file_value_put_uses_native_path_without_blob_adapter() {
 }
 
 #[tokio::test]
+async fn odata_file_value_put_applies_cedar_update_policy() {
+    let (mut state, _store) = build_turso_file_state("odata-write-denied").await;
+    let tenant = TenantId::default();
+    let data_dir = tempfile::tempdir().expect("temp data dir");
+    state.data_dir = data_dir.path().to_path_buf();
+    mark_file_verified(&state);
+
+    state
+        .get_or_create_tenant_entity(&tenant, "File", "fl-write-denied", serde_json::json!({}))
+        .await
+        .expect("create File state");
+    state
+        .authz
+        .reload_tenant_policies(
+            tenant.as_str(),
+            r#"permit(principal, action == Action::"read", resource is File);"#,
+        )
+        .expect("install Cedar policy");
+
+    let response = build_router(state.clone())
+        .oneshot(
+            Request::put("/tdata/Files('fl-write-denied')/$value")
+                .header("content-type", "text/plain")
+                .header("x-temper-principal-kind", "customer")
+                .header("x-temper-principal-id", "customer-1")
+                .body(Body::from("must not be written"))
+                .expect("request"),
+        )
+        .await
+        .expect("route should respond");
+
+    assert_eq!(response.status(), StatusCode::FORBIDDEN);
+    let entity = state
+        .get_tenant_entity_state(&tenant, "File", "fl-write-denied")
+        .await
+        .expect("File state should remain readable");
+    assert!(entity.state.fields.get("content_hash").is_none());
+}
+
+#[tokio::test]
+async fn odata_file_value_get_applies_cedar_read_policy() {
+    let (mut state, _store) = build_turso_file_state("odata-read-denied").await;
+    let tenant = TenantId::default();
+    let data_dir = tempfile::tempdir().expect("temp data dir");
+    state.data_dir = data_dir.path().to_path_buf();
+
+    state
+        .get_or_create_tenant_entity(&tenant, "File", "fl-read-denied", serde_json::json!({}))
+        .await
+        .expect("create File state");
+    state
+        .put_file_stream_content(
+            &tenant,
+            "fl-read-denied",
+            b"private content",
+            "text/plain",
+            &AgentContext::for_service("test-writer"),
+        )
+        .await
+        .expect("seed stream content");
+    state
+        .authz
+        .reload_tenant_policies(
+            tenant.as_str(),
+            r#"permit(principal, action == Action::"update", resource is File);"#,
+        )
+        .expect("install Cedar policy");
+
+    let response = build_router(state)
+        .oneshot(
+            Request::get("/tdata/Files('fl-read-denied')/$value")
+                .header("x-temper-principal-kind", "customer")
+                .header("x-temper-principal-id", "customer-1")
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("route should respond");
+
+    assert_eq!(response.status(), StatusCode::FORBIDDEN);
+}
+
+#[tokio::test]
 async fn read_file_stream_indexed_returns_blob_without_actor_materialization() {
     let (state, store) = build_turso_state("content").await;
     let tenant = TenantId::default();

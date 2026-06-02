@@ -213,16 +213,15 @@ fn default_pagination_applies_when_top_missing_and_no_filter_orderby() {
         ..QueryOptions::default()
     };
 
-    let (selected, apply_opts, count) =
-        select_entity_ids_for_materialization(ids, &opts, 100, 1000);
+    let selected = select_entity_ids_for_materialization(ids, &opts, 100, 1000, false).unwrap();
 
-    assert_eq!(selected.len(), 100);
-    assert_eq!(selected.first().unwrap(), "id-0");
-    assert_eq!(selected.last().unwrap(), "id-99");
-    assert_eq!(count, Some(150));
-    assert_eq!(apply_opts.top, None);
-    assert_eq!(apply_opts.skip, None);
-    assert_eq!(apply_opts.count, None);
+    assert_eq!(selected.entity_ids.len(), 100);
+    assert_eq!(selected.entity_ids.first().unwrap(), "id-0");
+    assert_eq!(selected.entity_ids.last().unwrap(), "id-99");
+    assert_eq!(selected.precomputed_count, Some(150));
+    assert_eq!(selected.apply_options.top, None);
+    assert_eq!(selected.apply_options.skip, None);
+    assert_eq!(selected.apply_options.count, None);
 }
 
 #[test]
@@ -235,13 +234,12 @@ fn explicit_skip_top_are_applied_before_materialization() {
         ..QueryOptions::default()
     };
 
-    let (selected, _apply_opts, count) =
-        select_entity_ids_for_materialization(ids, &opts, 100, 1000);
+    let selected = select_entity_ids_for_materialization(ids, &opts, 100, 1000, false).unwrap();
 
-    assert_eq!(selected.len(), 10);
-    assert_eq!(selected.first().unwrap(), "id-5");
-    assert_eq!(selected.last().unwrap(), "id-14");
-    assert_eq!(count, Some(50));
+    assert_eq!(selected.entity_ids.len(), 10);
+    assert_eq!(selected.entity_ids.first().unwrap(), "id-5");
+    assert_eq!(selected.entity_ids.last().unwrap(), "id-14");
+    assert_eq!(selected.precomputed_count, Some(50));
 }
 
 #[test]
@@ -258,28 +256,36 @@ fn filtered_query_materialises_all_entities_under_safety_cap() {
         ..QueryOptions::default()
     };
 
-    let (selected, apply_opts, count) =
-        select_entity_ids_for_materialization(ids, &opts, 100, 1000);
+    let selected = select_entity_ids_for_materialization(ids, &opts, 100, 1000, false).unwrap();
 
-    assert_eq!(selected.len(), 2500);
-    assert_eq!(count, None);
-    assert_eq!(apply_opts.top, Some(100));
+    assert_eq!(selected.entity_ids.len(), 2500);
+    assert_eq!(selected.precomputed_count, None);
+    assert_eq!(selected.apply_options.top, Some(100));
 }
 
 #[test]
-fn safety_cap_truncates_at_10x_max_entities() {
+fn safety_cap_rejects_incomplete_filtered_reads() {
     // With max_entities=1000, the safety cap is 10_000.
-    // 15_000 entities should be truncated to 10_000.
+    // 15_000 entities must not be silently truncated.
     let ids: Vec<String> = (0..15_000).map(|i| format!("id-{i}")).collect();
     let opts = QueryOptions {
         filter: Some(FilterExpr::Literal(ODataValue::Boolean(true))),
         ..QueryOptions::default()
     };
 
-    let (selected, apply_opts, count) =
-        select_entity_ids_for_materialization(ids, &opts, 100, 1000);
+    let error = select_entity_ids_for_materialization(ids, &opts, 100, 1000, false).unwrap_err();
 
-    assert_eq!(selected.len(), 10_000);
-    assert_eq!(count, None);
-    assert_eq!(apply_opts.top, Some(100));
+    assert_eq!(error.candidate_count, 15_000);
+    assert_eq!(error.candidate_budget, 10_000);
+}
+
+#[test]
+fn safety_cap_rejects_incomplete_row_authorized_reads() {
+    let ids: Vec<String> = (0..15_000).map(|i| format!("id-{i}")).collect();
+    let opts = QueryOptions::default();
+
+    let error = select_entity_ids_for_materialization(ids, &opts, 100, 1000, true).unwrap_err();
+
+    assert_eq!(error.candidate_count, 15_000);
+    assert_eq!(error.candidate_budget, 10_000);
 }

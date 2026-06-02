@@ -84,6 +84,27 @@ pub(super) async fn directed_evolution_field(
         .to_string()
 }
 
+pub(super) async fn directed_evolution_wait_for_nonempty_field(
+    state: &PlatformState,
+    tenant: &TenantId,
+    entity_type: &str,
+    entity_id: &str,
+    field: &str,
+) -> String {
+    for _ in 0..200 {
+        let value = directed_evolution_field(state, tenant, entity_type, entity_id, field).await;
+        if !value.trim().is_empty() {
+            return value;
+        }
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+    let entity = directed_evolution_entity(state, tenant, entity_type, entity_id).await;
+    panic!(
+        "timed out waiting for non-empty {entity_type}/{entity_id}.{field}; final state {:?}",
+        entity.state
+    );
+}
+
 pub(super) async fn directed_evolution_ids_with_field(
     state: &PlatformState,
     tenant: &TenantId,
@@ -146,6 +167,28 @@ pub(super) fn directed_evolution_lower_first(value: &str) -> String {
         Some(first) => first.to_lowercase().collect::<String>() + chars.as_str(),
         None => String::new(),
     }
+}
+
+fn directed_evolution_json_field<'a>(
+    value: &'a serde_json::Value,
+    field: &str,
+) -> Option<&'a serde_json::Value> {
+    value
+        .get(field)
+        .or_else(|| value.get(directed_evolution_lower_first(field)))
+}
+
+pub(super) fn directed_evolution_datadog_evidence_scope() -> serde_json::Value {
+    serde_json::json!([
+        {
+            "query": "@directed_evolution.signal_id:sig-* service:temper-platform",
+            "time_window": "2026-06-01T23:00:00Z/2026-06-01T23:30:00Z",
+            "result_count": 3,
+            "interpretation": "Correlated simulated-user runtime evidence was observed for the signal.",
+            "zero_result_meaning": "failure",
+            "datadog_url": "https://app.datadoghq.com/logs?query=directed-evolution"
+        }
+    ])
 }
 
 pub(super) async fn directed_evolution_run_work_item(
@@ -342,6 +385,7 @@ async fn directed_evolution_route_work_item_success(
         .state
         .fields
         .get("TargetEntityType")
+        .or_else(|| directed_evolution_json_field(&work_item.state.fields, "TargetEntityType"))
         .and_then(|value| value.as_str())
         .unwrap_or_default()
         .to_string();
@@ -349,6 +393,7 @@ async fn directed_evolution_route_work_item_success(
         .state
         .fields
         .get("TargetEntityId")
+        .or_else(|| directed_evolution_json_field(&work_item.state.fields, "TargetEntityId"))
         .and_then(|value| value.as_str())
         .unwrap_or_default()
         .to_string();
@@ -356,6 +401,7 @@ async fn directed_evolution_route_work_item_success(
         .state
         .fields
         .get("CorrelationJson")
+        .or_else(|| directed_evolution_json_field(&work_item.state.fields, "CorrelationJson"))
         .and_then(|value| value.as_str())
         .unwrap_or("{}")
         .to_string();
@@ -397,6 +443,7 @@ async fn directed_evolution_route_work_item_failure(
         .state
         .fields
         .get("TargetEntityType")
+        .or_else(|| directed_evolution_json_field(&work_item.state.fields, "TargetEntityType"))
         .and_then(|value| value.as_str())
         .unwrap_or_default()
         .to_string();
@@ -404,6 +451,7 @@ async fn directed_evolution_route_work_item_failure(
         .state
         .fields
         .get("TargetEntityId")
+        .or_else(|| directed_evolution_json_field(&work_item.state.fields, "TargetEntityId"))
         .and_then(|value| value.as_str())
         .unwrap_or_default()
         .to_string();
@@ -411,6 +459,7 @@ async fn directed_evolution_route_work_item_failure(
         .state
         .fields
         .get("CorrelationJson")
+        .or_else(|| directed_evolution_json_field(&work_item.state.fields, "CorrelationJson"))
         .and_then(|value| value.as_str())
         .unwrap_or("{}")
         .to_string();
@@ -441,7 +490,7 @@ pub(super) fn directed_evolution_register_wasm_modules_for_test(
     state: &PlatformState,
     tenant: &TenantId,
 ) {
-    let modules: [(&str, &[u8]); 3] = [
+    let modules: [(&str, &[u8]); 4] = [
         (
             "signal_observer",
             include_bytes!(
@@ -452,6 +501,12 @@ pub(super) fn directed_evolution_register_wasm_modules_for_test(
             "episode_orchestrator",
             include_bytes!(
                 "../../../../../test-fixtures/directed-evolution-wasm/episode_orchestrator.wasm"
+            ),
+        ),
+        (
+            "episode_start_requestor",
+            include_bytes!(
+                "../../../../../test-fixtures/directed-evolution-wasm/episode_start_requestor.wasm"
             ),
         ),
         (

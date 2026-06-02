@@ -23,6 +23,7 @@ struct PreparedEventInsert {
     entity_type: String,
     entity_id: String,
     sequence_nr: u64,
+    segment_index: i64,
     event_type: String,
     payload_json: String,
     metadata_json: String,
@@ -242,8 +243,12 @@ impl EventStore for TursoEventStore {
             .acquire_write_permit("turso.save_snapshot", WritePriority::Low)
             .await?;
         let conn = self.configured_connection().await?;
+        let tx = conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .await
+            .map_err(storage_error)?;
 
-        conn.execute(
+        tx.execute(
             "INSERT INTO snapshots (tenant, entity_type, entity_id, sequence_nr, snapshot)
              VALUES (?1, ?2, ?3, ?4, ?5)
              ON CONFLICT (tenant, entity_type, entity_id)
@@ -261,6 +266,89 @@ impl EventStore for TursoEventStore {
         )
         .await
         .map_err(storage_error)?;
+
+        tx.execute(
+            "INSERT INTO snapshot_history (tenant, entity_type, entity_id, sequence_nr, snapshot)
+             VALUES (?1, ?2, ?3, ?4, ?5)
+             ON CONFLICT (tenant, entity_type, entity_id, sequence_nr)
+             DO UPDATE SET snapshot = excluded.snapshot, created_at = datetime('now')",
+            params![
+                tenant,
+                entity_type,
+                entity_id,
+                sequence_nr as i64,
+                snapshot.to_vec()
+            ],
+        )
+        .await
+        .map_err(storage_error)?;
+
+        let mut segment_rows = tx
+            .query(
+                "SELECT COALESCE(MAX(segment_index), 0)
+                 FROM events
+                 WHERE tenant = ?1 AND entity_type = ?2 AND entity_id = ?3 AND sequence_nr <= ?4",
+                params![tenant, entity_type, entity_id, sequence_nr as i64],
+            )
+            .await
+            .map_err(storage_error)?;
+        let current_segment = match segment_rows.next().await.map_err(storage_error)? {
+            Some(row) => row.get::<i64>(0).map_err(storage_error)?,
+            None => 0,
+        };
+        drop(segment_rows);
+
+        tx.execute(
+            "INSERT INTO event_segments
+             (tenant, entity_type, entity_id, segment_index, start_sequence_nr, end_sequence_nr, snapshot_sequence, event_count, sealed_at)
+             VALUES (?1, ?2, ?3, ?4, 1, ?5, ?5, ?5, datetime('now'))
+             ON CONFLICT(tenant, entity_type, entity_id, segment_index) DO NOTHING",
+            params![
+                tenant,
+                entity_type,
+                entity_id,
+                current_segment,
+                sequence_nr as i64
+            ],
+        )
+        .await
+        .map_err(storage_error)?;
+
+        tx.execute(
+            "UPDATE event_segments
+             SET end_sequence_nr = ?5,
+                 snapshot_sequence = ?5,
+                 sealed_at = datetime('now'),
+                 event_count = MAX(?5 - start_sequence_nr + 1, 0)
+             WHERE tenant = ?1 AND entity_type = ?2 AND entity_id = ?3 AND segment_index = ?4",
+            params![
+                tenant,
+                entity_type,
+                entity_id,
+                current_segment,
+                sequence_nr as i64
+            ],
+        )
+        .await
+        .map_err(storage_error)?;
+
+        tx.execute(
+            "INSERT INTO event_segments
+             (tenant, entity_type, entity_id, segment_index, start_sequence_nr)
+             VALUES (?1, ?2, ?3, ?4, ?5)
+             ON CONFLICT(tenant, entity_type, entity_id, segment_index) DO NOTHING",
+            params![
+                tenant,
+                entity_type,
+                entity_id,
+                current_segment + 1,
+                sequence_nr as i64 + 1
+            ],
+        )
+        .await
+        .map_err(storage_error)?;
+
+        tx.commit().await.map_err(storage_error)?;
 
         Ok(())
     }
@@ -434,6 +522,8 @@ impl TursoEventStore {
         let mut rows = conn
             .query(
                 "SELECT tenant FROM events \
+                 UNION SELECT tenant FROM event_segments \
+                 UNION SELECT tenant FROM snapshot_history \
                  UNION SELECT tenant FROM specs \
                  UNION SELECT tenant FROM trajectories \
                  UNION SELECT tenant FROM tenant_constraints \
@@ -535,6 +625,55 @@ impl TursoEventStore {
             });
         }
 
+        let segment_index = {
+            let mut segment_rows = tx
+                .query(
+                    "SELECT segment_index
+                     FROM event_segments
+                     WHERE tenant = ?1 AND entity_type = ?2 AND entity_id = ?3 AND sealed_at IS NULL
+                     ORDER BY segment_index DESC
+                     LIMIT 1",
+                    params![tenant, entity_type, entity_id],
+                )
+                .await
+                .map_err(storage_error)?;
+            if let Some(row) = segment_rows.next().await.map_err(storage_error)? {
+                row.get::<i64>(0).map_err(storage_error)?
+            } else {
+                drop(segment_rows);
+                let mut max_rows = tx
+                    .query(
+                        "SELECT COALESCE(MAX(segment_index), 0)
+                         FROM events
+                         WHERE tenant = ?1 AND entity_type = ?2 AND entity_id = ?3",
+                        params![tenant, entity_type, entity_id],
+                    )
+                    .await
+                    .map_err(storage_error)?;
+                let idx = match max_rows.next().await.map_err(storage_error)? {
+                    Some(row) => row.get::<i64>(0).map_err(storage_error)?,
+                    None => 0,
+                };
+                drop(max_rows);
+                tx.execute(
+                    "INSERT INTO event_segments
+                     (tenant, entity_type, entity_id, segment_index, start_sequence_nr)
+                     VALUES (?1, ?2, ?3, ?4, ?5)
+                     ON CONFLICT(tenant, entity_type, entity_id, segment_index) DO NOTHING",
+                    params![
+                        tenant,
+                        entity_type,
+                        entity_id,
+                        idx,
+                        ((current_seq + 1).max(1)) as i64
+                    ],
+                )
+                .await
+                .map_err(storage_error)?;
+                idx
+            }
+        };
+
         let mut new_seq = expected_sequence;
         for event in events {
             new_seq += 1;
@@ -551,13 +690,14 @@ impl TursoEventStore {
             let insert_result = tx
                 .execute(
                     "INSERT INTO events
-                     (tenant, entity_type, entity_id, sequence_nr, event_type, payload, metadata)
-                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+                     (tenant, entity_type, entity_id, sequence_nr, segment_index, event_type, payload, metadata)
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
                     params![
                         tenant,
                         entity_type,
                         entity_id,
                         new_seq as i64,
+                        segment_index,
                         event.event_type.as_str(),
                         payload_json,
                         metadata_json
@@ -583,6 +723,23 @@ impl TursoEventStore {
                 }
                 return Err(PersistenceError::Storage(msg));
             }
+        }
+
+        if new_seq > expected_sequence {
+            tx.execute(
+                "UPDATE event_segments
+                 SET end_sequence_nr = ?5, event_count = MAX(?5 - start_sequence_nr + 1, 0)
+                 WHERE tenant = ?1 AND entity_type = ?2 AND entity_id = ?3 AND segment_index = ?4",
+                params![
+                    tenant,
+                    entity_type,
+                    entity_id,
+                    segment_index,
+                    new_seq as i64
+                ],
+            )
+            .await
+            .map_err(storage_error)?;
         }
 
         tx.commit().await.map_err(storage_error)?;
@@ -614,15 +771,6 @@ impl TursoEventStore {
             let (tenant, entity_type, entity_id) =
                 parse_persistence_id_parts(&append.persistence_id)
                     .map_err(PersistenceError::Storage)?;
-
-            if append.expected_sequence == 0 && !append.events.is_empty() {
-                parsed.push((
-                    tenant.to_string(),
-                    entity_type.to_string(),
-                    entity_id.to_string(),
-                ));
-                continue;
-            }
 
             let select_start = std::time::Instant::now();
             let rows_result = tx
@@ -660,16 +808,67 @@ impl TursoEventStore {
                     actual: current_seq,
                 });
             }
+            let segment_index = {
+                let mut segment_rows = tx
+                    .query(
+                        "SELECT segment_index
+                         FROM event_segments
+                         WHERE tenant = ?1 AND entity_type = ?2 AND entity_id = ?3 AND sealed_at IS NULL
+                         ORDER BY segment_index DESC
+                         LIMIT 1",
+                        params![tenant, entity_type, entity_id],
+                    )
+                    .await
+                    .map_err(storage_error)?;
+                if let Some(row) = segment_rows.next().await.map_err(storage_error)? {
+                    row.get::<i64>(0).map_err(storage_error)?
+                } else {
+                    drop(segment_rows);
+                    let mut max_rows = tx
+                        .query(
+                            "SELECT COALESCE(MAX(segment_index), 0)
+                             FROM events
+                             WHERE tenant = ?1 AND entity_type = ?2 AND entity_id = ?3",
+                            params![tenant, entity_type, entity_id],
+                        )
+                        .await
+                        .map_err(storage_error)?;
+                    let idx = match max_rows.next().await.map_err(storage_error)? {
+                        Some(row) => row.get::<i64>(0).map_err(storage_error)?,
+                        None => 0,
+                    };
+                    drop(max_rows);
+                    tx.execute(
+                        "INSERT INTO event_segments
+                         (tenant, entity_type, entity_id, segment_index, start_sequence_nr)
+                         VALUES (?1, ?2, ?3, ?4, ?5)
+                         ON CONFLICT(tenant, entity_type, entity_id, segment_index) DO NOTHING",
+                        params![
+                            tenant,
+                            entity_type,
+                            entity_id,
+                            idx,
+                            ((append.expected_sequence + 1).max(1)) as i64
+                        ],
+                    )
+                    .await
+                    .map_err(storage_error)?;
+                    idx
+                }
+            };
             parsed.push((
                 tenant.to_string(),
                 entity_type.to_string(),
                 entity_id.to_string(),
+                segment_index,
             ));
         }
 
         let mut results = Vec::with_capacity(appends.len());
         let mut event_rows = Vec::new();
-        for (append, (tenant, entity_type, entity_id)) in appends.iter().zip(parsed.iter()) {
+        for (append, (tenant, entity_type, entity_id, segment_index)) in
+            appends.iter().zip(parsed.iter())
+        {
             let mut new_seq = append.expected_sequence;
             for event in &append.events {
                 new_seq += 1;
@@ -687,6 +886,7 @@ impl TursoEventStore {
                     entity_type: entity_type.clone(),
                     entity_id: entity_id.clone(),
                     sequence_nr: new_seq,
+                    segment_index: *segment_index,
                     event_type: event.event_type.clone(),
                     payload_json,
                     metadata_json,
@@ -706,19 +906,20 @@ impl TursoEventStore {
 
             let mut insert_sql = String::from(
                 "INSERT INTO events \
-                 (tenant, entity_type, entity_id, sequence_nr, event_type, payload, metadata) \
+                 (tenant, entity_type, entity_id, sequence_nr, segment_index, event_type, payload, metadata) \
                  VALUES ",
             );
-            let mut insert_values = Vec::with_capacity(chunk.len() * 7);
+            let mut insert_values = Vec::with_capacity(chunk.len() * 8);
             for (index, row) in chunk.iter().enumerate() {
                 if index > 0 {
                     insert_sql.push_str(", ");
                 }
-                insert_sql.push_str("(?, ?, ?, ?, ?, ?, ?)");
+                insert_sql.push_str("(?, ?, ?, ?, ?, ?, ?, ?)");
                 insert_values.push(Value::from(row.tenant.clone()));
                 insert_values.push(Value::from(row.entity_type.clone()));
                 insert_values.push(Value::from(row.entity_id.clone()));
                 insert_values.push(Value::from(row.sequence_nr as i64));
+                insert_values.push(Value::from(row.segment_index));
                 insert_values.push(Value::from(row.event_type.clone()));
                 insert_values.push(Value::from(row.payload_json.clone()));
                 insert_values.push(Value::from(row.metadata_json.clone()));
@@ -750,6 +951,29 @@ impl TursoEventStore {
             }
         }
 
+        for (append, (tenant, entity_type, entity_id, segment_index)) in
+            appends.iter().zip(parsed.iter())
+        {
+            if append.events.is_empty() {
+                continue;
+            }
+            let new_seq = append.expected_sequence + append.events.len() as u64;
+            tx.execute(
+                "UPDATE event_segments
+                 SET end_sequence_nr = ?5, event_count = MAX(?5 - start_sequence_nr + 1, 0)
+                WHERE tenant = ?1 AND entity_type = ?2 AND entity_id = ?3 AND segment_index = ?4",
+                params![
+                    tenant.as_str(),
+                    entity_type.as_str(),
+                    entity_id.as_str(),
+                    *segment_index,
+                    new_seq as i64
+                ],
+            )
+            .await
+            .map_err(storage_error)?;
+        }
+
         tx.commit().await.map_err(storage_error)?;
         Ok(results)
     }
@@ -776,21 +1000,70 @@ impl TursoEventStore {
         })?;
 
         let conn = self.configured_connection().await?;
+        let segment_index = {
+            let mut rows = conn
+                .query(
+                    "SELECT segment_index
+                     FROM event_segments
+                     WHERE tenant = ?1 AND entity_type = ?2 AND entity_id = ?3 AND sealed_at IS NULL
+                     ORDER BY segment_index DESC
+                     LIMIT 1",
+                    params![tenant, entity_type, entity_id],
+                )
+                .await
+                .map_err(storage_error)?;
+            if let Some(row) = rows.next().await.map_err(storage_error)? {
+                row.get::<i64>(0).map_err(storage_error)?
+            } else {
+                drop(rows);
+                let mut max_rows = conn
+                    .query(
+                        "SELECT COALESCE(MAX(segment_index), 0)
+                         FROM events
+                         WHERE tenant = ?1 AND entity_type = ?2 AND entity_id = ?3",
+                        params![tenant, entity_type, entity_id],
+                    )
+                    .await
+                    .map_err(storage_error)?;
+                let idx = match max_rows.next().await.map_err(storage_error)? {
+                    Some(row) => row.get::<i64>(0).map_err(storage_error)?,
+                    None => 0,
+                };
+                drop(max_rows);
+                conn.execute(
+                    "INSERT INTO event_segments
+                     (tenant, entity_type, entity_id, segment_index, start_sequence_nr)
+                     VALUES (?1, ?2, ?3, ?4, ?5)
+                     ON CONFLICT(tenant, entity_type, entity_id, segment_index) DO NOTHING",
+                    params![
+                        tenant,
+                        entity_type,
+                        entity_id,
+                        idx,
+                        ((expected_sequence + 1).max(1)) as i64
+                    ],
+                )
+                .await
+                .map_err(storage_error)?;
+                idx
+            }
+        };
         let insert_result = conn
             .execute(
                 "INSERT INTO events
-                 (tenant, entity_type, entity_id, sequence_nr, event_type, payload, metadata)
-                 SELECT ?1, ?2, ?3, ?4, ?5, ?6, ?7
+                 (tenant, entity_type, entity_id, sequence_nr, segment_index, event_type, payload, metadata)
+                 SELECT ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8
                  WHERE (
                      SELECT COALESCE(MAX(sequence_nr), 0)
                      FROM events
                      WHERE tenant = ?1 AND entity_type = ?2 AND entity_id = ?3
-                 ) = ?8",
+                 ) = ?9",
                 params![
                     tenant,
                     entity_type,
                     entity_id,
                     new_seq as i64,
+                    segment_index,
                     event.event_type.as_str(),
                     payload_json,
                     metadata_json,
@@ -816,6 +1089,20 @@ impl TursoEventStore {
         };
 
         if affected == 1 {
+            conn.execute(
+                "UPDATE event_segments
+                 SET end_sequence_nr = ?5, event_count = MAX(?5 - start_sequence_nr + 1, 0)
+                 WHERE tenant = ?1 AND entity_type = ?2 AND entity_id = ?3 AND segment_index = ?4",
+                params![
+                    tenant,
+                    entity_type,
+                    entity_id,
+                    segment_index,
+                    new_seq as i64
+                ],
+            )
+            .await
+            .map_err(storage_error)?;
             return Ok(new_seq);
         }
 

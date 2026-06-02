@@ -18,10 +18,30 @@
 mod common;
 
 use common::platform_harness::SimPlatformHarness;
+use std::future::Future;
 use std::path::PathBuf;
 use temper_runtime::scheduler::install_deterministic_context;
 
 const TENANT: &str = "gepa-test";
+const GEPA_E2E_TEST_WORKER_STACK_BYTES: usize = 16 * 1024 * 1024;
+
+const _: () = {
+    assert!(GEPA_E2E_TEST_WORKER_STACK_BYTES >= 16 * 1024 * 1024);
+};
+
+fn run_gepa_e2e_with_large_stack<F>(future: F)
+where
+    F: Future<Output = ()>,
+{
+    tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .worker_threads(2)
+        .thread_name("temper-gepa-e2e")
+        .thread_stack_size(GEPA_E2E_TEST_WORKER_STACK_BYTES)
+        .build()
+        .expect("GEPA E2E runtime should build")
+        .block_on(future);
+}
 
 fn repo_root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -1257,20 +1277,21 @@ hint = "Reassign the issue to a different implementer."
 /// `gepa-replay` which calls back `RecordEvaluation`.
 ///
 /// This is the true end-to-end proof that the WASM chain works.
-#[tokio::test(flavor = "multi_thread")]
-async fn e2e_gepa_wasm_integration_chain_fires() {
-    use std::time::Duration;
-    use temper_runtime::ActorSystem;
-    use temper_runtime::tenant::TenantId;
-    use temper_server::registry::SpecRegistry;
-    use temper_server::request_context::AgentContext;
-    use temper_spec::csdl::parse_csdl;
+#[test]
+fn e2e_gepa_wasm_integration_chain_fires() {
+    run_gepa_e2e_with_large_stack(async {
+        use std::time::Duration;
+        use temper_runtime::ActorSystem;
+        use temper_runtime::tenant::TenantId;
+        use temper_server::registry::SpecRegistry;
+        use temper_server::request_context::AgentContext;
+        use temper_spec::csdl::parse_csdl;
 
-    let (_guard, _clock, _id_gen) = install_deterministic_context(99);
+        let (_guard, _clock, _id_gen) = install_deterministic_context(99);
 
-    // --- Build ServerState with REAL EvolutionRun spec (WITH integrations) ---
-    let evo_ioa = include_str!("../../../os-apps/evolution/evolution_run.ioa.toml");
-    let csdl_xml = r#"<?xml version="1.0" encoding="utf-8"?>
+        // --- Build ServerState with REAL EvolutionRun spec (WITH integrations) ---
+        let evo_ioa = include_str!("../../../os-apps/evolution/evolution_run.ioa.toml");
+        let csdl_xml = r#"<?xml version="1.0" encoding="utf-8"?>
 <edmx:Edmx Version="4.0" xmlns:edmx="http://docs.oasis-open.org/odata/ns/edmx">
   <edmx:DataServices>
     <Schema Namespace="Temper.Evolution" xmlns="http://docs.oasis-open.org/odata/ns/edm">
@@ -1286,60 +1307,60 @@ async fn e2e_gepa_wasm_integration_chain_fires() {
   </edmx:DataServices>
 </edmx:Edmx>"#;
 
-    let mut registry = SpecRegistry::new();
-    let csdl = parse_csdl(csdl_xml).expect("CSDL should parse");
-    registry.register_tenant(
-        "wasm-test",
-        csdl,
-        csdl_xml.to_string(),
-        &[("EvolutionRun", evo_ioa)],
-    );
+        let mut registry = SpecRegistry::new();
+        let csdl = parse_csdl(csdl_xml).expect("CSDL should parse");
+        registry.register_tenant(
+            "wasm-test",
+            csdl,
+            csdl_xml.to_string(),
+            &[("EvolutionRun", evo_ioa)],
+        );
 
-    let system = ActorSystem::new("gepa-wasm-chain-test");
-    let state = temper_server::ServerState::from_registry(system, registry);
-    let tenant = TenantId::new("wasm-test");
+        let system = ActorSystem::new("gepa-wasm-chain-test");
+        let state = temper_server::ServerState::from_registry(system, registry);
+        let tenant = TenantId::new("wasm-test");
 
-    // --- Register the compiled GEPA WASM modules ---
-    let Some(gepa_modules) = load_gepa_wasm_modules() else {
-        return;
-    };
+        // --- Register the compiled GEPA WASM modules ---
+        let Some(gepa_modules) = load_gepa_wasm_modules() else {
+            return;
+        };
 
-    for (name, bytes) in &gepa_modules {
-        let hash = state
-            .wasm_engine
-            .compile_and_cache(bytes.as_slice())
-            .unwrap_or_else(|e| panic!("failed to compile {name}: {e}"));
-        let mut wasm_reg = state
-            .wasm_module_registry
-            .write()
-            .expect("wasm registry lock"); // ci-ok: infallible lock
-        wasm_reg.register(&tenant, name, &hash);
-    }
+        for (name, bytes) in &gepa_modules {
+            let hash = state
+                .wasm_engine
+                .compile_and_cache(bytes.as_slice())
+                .unwrap_or_else(|e| panic!("failed to compile {name}: {e}"));
+            let mut wasm_reg = state
+                .wasm_module_registry
+                .write()
+                .expect("wasm registry lock"); // ci-ok: infallible lock
+            wasm_reg.register(&tenant, name, &hash);
+        }
 
-    // --- Create entity and drive to Evaluating ---
-    let evo_id = "evo-wasm-1";
+        // --- Create entity and drive to Evaluating ---
+        let evo_id = "evo-wasm-1";
 
-    // Start
-    let r = state
-        .dispatch_tenant_action(
-            &tenant,
-            "EvolutionRun",
-            evo_id,
-            "Start",
-            serde_json::json!({
-                "SkillName": "project-management",
-                "TargetEntityType": "Issue",
-                "AutonomyLevel": "auto"
-            }),
-            &AgentContext::default(),
-        )
-        .await
-        .expect("Start should succeed");
-    assert!(r.success);
-    assert_eq!(r.state.status, "Selecting");
+        // Start
+        let r = state
+            .dispatch_tenant_action(
+                &tenant,
+                "EvolutionRun",
+                evo_id,
+                "Start",
+                serde_json::json!({
+                    "SkillName": "project-management",
+                    "TargetEntityType": "Issue",
+                    "AutonomyLevel": "auto"
+                }),
+                &AgentContext::default(),
+            )
+            .await
+            .expect("Start should succeed");
+        assert!(r.success);
+        assert_eq!(r.state.status, "Selecting");
 
-    // A simple IOA spec for the replay module to evaluate against
-    let test_spec = r#"
+        // A simple IOA spec for the replay module to evaluate against
+        let test_spec = r#"
 [automaton]
 name = "TestIssue"
 states = ["Backlog", "InProgress", "Done"]
@@ -1358,109 +1379,110 @@ from = ["InProgress"]
 to = "Done"
 "#;
 
-    // SelectCandidate — this triggers the evaluate_candidate WASM integration!
-    let trajectory_actions = serde_json::json!([
-        {"action": "StartWork", "params": {}},
-        {"action": "Complete", "params": {}},
-        {"action": "Reassign", "params": {"NewAssigneeId": "agent-x"}}
-    ]);
+        // SelectCandidate — this triggers the evaluate_candidate WASM integration!
+        let trajectory_actions = serde_json::json!([
+            {"action": "StartWork", "params": {}},
+            {"action": "Complete", "params": {}},
+            {"action": "Reassign", "params": {"NewAssigneeId": "agent-x"}}
+        ]);
 
-    let r = state
-        .dispatch_tenant_action(
-            &tenant,
-            "EvolutionRun",
-            evo_id,
-            "SelectCandidate",
-            serde_json::json!({
-                "CandidateId": "candidate-wasm-1",
-                "SpecSource": test_spec,
-                "TrajectoryActions": trajectory_actions,
-            }),
-            &AgentContext::default(),
-        )
-        .await
-        .expect("SelectCandidate should succeed");
-    assert!(r.success, "SelectCandidate failed: {:?}", r.error);
-    assert_eq!(r.state.status, "Evaluating");
-    println!("SelectCandidate custom_effects: {:?}", r.custom_effects);
+        let r = state
+            .dispatch_tenant_action(
+                &tenant,
+                "EvolutionRun",
+                evo_id,
+                "SelectCandidate",
+                serde_json::json!({
+                    "CandidateId": "candidate-wasm-1",
+                    "SpecSource": test_spec,
+                    "TrajectoryActions": trajectory_actions,
+                }),
+                &AgentContext::default(),
+            )
+            .await
+            .expect("SelectCandidate should succeed");
+        assert!(r.success, "SelectCandidate failed: {:?}", r.error);
+        assert_eq!(r.state.status, "Evaluating");
+        println!("SelectCandidate custom_effects: {:?}", r.custom_effects);
 
-    // The integration fires in background (tokio::spawn). Wait for it.
-    // The chain is: evaluate_candidate (gepa-replay) → RecordEvaluation
-    //            → build_reflective_dataset (gepa-reflective) → RecordDataset
-    //            → propose_mutation (gepa-proposer-agent, not registered in this test)
-    //
-    // We expect the entity to reach at least "Reflecting" or "Proposing" via WASM,
-    // then potentially "Failed" when propose_mutation cannot run.
+        // The integration fires in background (tokio::spawn). Wait for it.
+        // The chain is: evaluate_candidate (gepa-replay) → RecordEvaluation
+        //            → build_reflective_dataset (gepa-reflective) → RecordDataset
+        //            → propose_mutation (gepa-proposer-agent, not registered in this test)
+        //
+        // We expect the entity to reach at least "Reflecting" or "Proposing" via WASM,
+        // then potentially "Failed" when propose_mutation cannot run.
 
-    let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
-    let mut final_status = "Evaluating".to_string();
-    let mut reached_beyond_evaluating = false;
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
+        let mut final_status = "Evaluating".to_string();
+        let mut reached_beyond_evaluating = false;
 
-    loop {
-        if tokio::time::Instant::now() >= deadline {
-            break;
+        loop {
+            if tokio::time::Instant::now() >= deadline {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(200)).await;
+
+            let entity = state
+                .get_tenant_entity_state(&tenant, "EvolutionRun", evo_id)
+                .await
+                .expect("entity should exist");
+            final_status = entity.state.status.clone();
+
+            // If we've moved past Evaluating, the WASM module fired!
+            if final_status != "Evaluating" {
+                reached_beyond_evaluating = true;
+                // Keep polling until we hit a terminal or stable state
+                if matches!(
+                    final_status.as_str(),
+                    "Proposing" | "Failed" | "Completed" | "Verifying"
+                ) {
+                    break;
+                }
+            }
         }
-        tokio::time::sleep(Duration::from_millis(200)).await;
 
+        println!("Final entity status: {final_status}");
+
+        // The critical assertion: the entity moved PAST Evaluating.
+        // This proves the gepa-replay WASM module executed and dispatched RecordEvaluation.
+        assert!(
+            reached_beyond_evaluating,
+            "Entity should have moved past 'Evaluating' via WASM integration chain. \
+         Stuck at: {final_status}. This means the WASM module never fired its callback."
+        );
+
+        // Even better: if we reached Proposing or Failed, it means BOTH
+        // gepa-replay AND gepa-reflective WASM modules fired successfully,
+        // and the chain only stopped at propose_mutation (expected in this test).
+        let wasm_chain_completed = matches!(final_status.as_str(), "Proposing" | "Failed");
+        println!(
+            "WASM chain completed (replay + reflective): {wasm_chain_completed}, final: {final_status}"
+        );
+
+        // Verify the entity accumulated the right fields from WASM callbacks
         let entity = state
             .get_tenant_entity_state(&tenant, "EvolutionRun", evo_id)
             .await
             .expect("entity should exist");
-        final_status = entity.state.status.clone();
 
-        // If we've moved past Evaluating, the WASM module fired!
-        if final_status != "Evaluating" {
-            reached_beyond_evaluating = true;
-            // Keep polling until we hit a terminal or stable state
-            if matches!(
-                final_status.as_str(),
-                "Proposing" | "Failed" | "Completed" | "Verifying"
-            ) {
-                break;
-            }
-        }
-    }
+        // Check that events show the WASM callback actions were dispatched
+        let event_actions: Vec<&str> = entity
+            .state
+            .events
+            .iter()
+            .map(|e| e.action.as_str())
+            .collect();
+        println!("Entity event trail: {:?}", event_actions);
 
-    println!("Final entity status: {final_status}");
-
-    // The critical assertion: the entity moved PAST Evaluating.
-    // This proves the gepa-replay WASM module executed and dispatched RecordEvaluation.
-    assert!(
-        reached_beyond_evaluating,
-        "Entity should have moved past 'Evaluating' via WASM integration chain. \
-         Stuck at: {final_status}. This means the WASM module never fired its callback."
-    );
-
-    // Even better: if we reached Proposing or Failed, it means BOTH
-    // gepa-replay AND gepa-reflective WASM modules fired successfully,
-    // and the chain only stopped at propose_mutation (expected in this test).
-    let wasm_chain_completed = matches!(final_status.as_str(), "Proposing" | "Failed");
-    println!(
-        "WASM chain completed (replay + reflective): {wasm_chain_completed}, final: {final_status}"
-    );
-
-    // Verify the entity accumulated the right fields from WASM callbacks
-    let entity = state
-        .get_tenant_entity_state(&tenant, "EvolutionRun", evo_id)
-        .await
-        .expect("entity should exist");
-
-    // Check that events show the WASM callback actions were dispatched
-    let event_actions: Vec<&str> = entity
-        .state
-        .events
-        .iter()
-        .map(|e| e.action.as_str())
-        .collect();
-    println!("Entity event trail: {:?}", event_actions);
-
-    // We should see at least: Start, SelectCandidate, RecordEvaluation (from gepa-replay)
-    assert!(
-        event_actions.contains(&"RecordEvaluation"),
-        "RecordEvaluation should appear in event trail — proves gepa-replay WASM module executed. \
+        // We should see at least: Start, SelectCandidate, RecordEvaluation (from gepa-replay)
+        assert!(
+            event_actions.contains(&"RecordEvaluation"),
+            "RecordEvaluation should appear in event trail — proves gepa-replay WASM module executed. \
          Events: {:?}",
-        event_actions
-    );
+            event_actions
+        );
+    });
 }
 
 /// **Autonomous GEPA chain to approval gate (test override)** — proves the background
@@ -1476,31 +1498,32 @@ to = "Done"
 /// Production uses `gepa-proposer-agent` WASM + TemperAgent. This test
 /// overrides `propose_mutation` and `verify_candidate` to deterministic mock adapters
 /// so CI can run without LLM keys or a live verification HTTP server.
-#[tokio::test(flavor = "multi_thread")]
-async fn e2e_gepa_full_autonomous_loop_with_adapter() {
-    use std::io::Write;
-    use std::time::Duration;
-    use temper_runtime::ActorSystem;
-    use temper_runtime::tenant::TenantId;
-    use temper_server::registry::SpecRegistry;
-    use temper_server::request_context::AgentContext;
-    use temper_spec::csdl::parse_csdl;
+#[test]
+fn e2e_gepa_full_autonomous_loop_with_adapter() {
+    run_gepa_e2e_with_large_stack(async {
+        use std::io::Write;
+        use std::time::Duration;
+        use temper_runtime::ActorSystem;
+        use temper_runtime::tenant::TenantId;
+        use temper_server::registry::SpecRegistry;
+        use temper_server::request_context::AgentContext;
+        use temper_spec::csdl::parse_csdl;
 
-    let (_guard, _clock, _id_gen) = install_deterministic_context(42);
+        let (_guard, _clock, _id_gen) = install_deterministic_context(42);
 
-    // --- Create mock "claude" script that returns a mutated spec ---
-    let mock_dir = std::env::temp_dir().join("gepa-mock-adapter-test"); // determinism-ok: test harness
-    let mock_workdir = mock_dir.join("workspace");
-    std::fs::create_dir_all(&mock_dir).expect("create mock dir");
-    std::fs::create_dir_all(&mock_workdir).expect("create mock workdir");
-    let mock_script = mock_dir.join("mock-claude");
-    let verify_script = mock_dir.join("mock-verify");
-    {
-        let mut f = std::fs::File::create(&mock_script).expect("create mock script");
-        // The script outputs stream-JSON with MutatedSpecSource and MutationSummary.
-        // This is exactly what the real Claude Code would output when acting as
-        // the evolution agent — it reads the reflective dataset and proposes a fix.
-        write!(
+        // --- Create mock "claude" script that returns a mutated spec ---
+        let mock_dir = std::env::temp_dir().join("gepa-mock-adapter-test"); // determinism-ok: test harness
+        let mock_workdir = mock_dir.join("workspace");
+        std::fs::create_dir_all(&mock_dir).expect("create mock dir");
+        std::fs::create_dir_all(&mock_workdir).expect("create mock workdir");
+        let mock_script = mock_dir.join("mock-claude");
+        let verify_script = mock_dir.join("mock-verify");
+        {
+            let mut f = std::fs::File::create(&mock_script).expect("create mock script");
+            // The script outputs stream-JSON with MutatedSpecSource and MutationSummary.
+            // This is exactly what the real Claude Code would output when acting as
+            // the evolution agent — it reads the reflective dataset and proposes a fix.
+            write!(
             f,
             r#"#!/bin/bash
 # Mock evolution agent — simulates Claude Code proposing a spec mutation.
@@ -1512,41 +1535,41 @@ MOCK_OUTPUT
 "#
         )
         .expect("write mock script");
-        // Make executable
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            std::fs::set_permissions(&mock_script, std::fs::Permissions::from_mode(0o755))
-                .expect("chmod +x mock script");
+            // Make executable
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                std::fs::set_permissions(&mock_script, std::fs::Permissions::from_mode(0o755))
+                    .expect("chmod +x mock script");
+            }
         }
-    }
-    {
-        let mut f = std::fs::File::create(&verify_script).expect("create verify script");
-        write!(
-            f,
-            r#"#!/bin/bash
+        {
+            let mut f = std::fs::File::create(&verify_script).expect("create verify script");
+            write!(
+                f,
+                r#"#!/bin/bash
 cat <<'MOCK_OUTPUT'
 {{"VerificationReport": "L0-L3 cascade passed for TestIssue"}}
 MOCK_OUTPUT
 "#
-        )
-        .expect("write verify script");
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            std::fs::set_permissions(&verify_script, std::fs::Permissions::from_mode(0o755))
-                .expect("chmod +x verify script");
+            )
+            .expect("write verify script");
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                std::fs::set_permissions(&verify_script, std::fs::Permissions::from_mode(0o755))
+                    .expect("chmod +x verify script");
+            }
         }
-    }
 
-    // --- Build EvolutionRun spec with propose_mutation test override ---
-    let base_ioa = include_str!("../../../os-apps/evolution/evolution_run.ioa.toml");
-    // Replace proposer + verifier action triggers with deterministic adapters for test-only
-    // execution. Production keeps the WASM proposer/verifier modules.
-    let mock_path = mock_script.to_str().expect("mock path to str");
-    let verify_path = verify_script.to_str().expect("verify path to str");
-    let mock_workdir = mock_workdir.to_str().expect("mock workdir to str");
-    let modified_ioa = base_ioa
+        // --- Build EvolutionRun spec with propose_mutation test override ---
+        let base_ioa = include_str!("../../../os-apps/evolution/evolution_run.ioa.toml");
+        // Replace proposer + verifier action triggers with deterministic adapters for test-only
+        // execution. Production keeps the WASM proposer/verifier modules.
+        let mock_path = mock_script.to_str().expect("mock path to str");
+        let verify_path = verify_script.to_str().expect("verify path to str");
+        let mock_workdir = mock_workdir.to_str().expect("mock workdir to str");
+        let modified_ioa = base_ioa
         .replace(
             "kind = \"wasm\"\nmodule = \"gepa-proposer-agent\"",
             "kind = \"adapter\"\nadapter = \"claude_code\"",
@@ -1562,7 +1585,7 @@ MOCK_OUTPUT
             ),
         );
 
-    let csdl_xml = r#"<?xml version="1.0" encoding="utf-8"?>
+        let csdl_xml = r#"<?xml version="1.0" encoding="utf-8"?>
 <edmx:Edmx Version="4.0" xmlns:edmx="http://docs.oasis-open.org/odata/ns/edmx">
   <edmx:DataServices>
     <Schema Namespace="Temper.Evolution" xmlns="http://docs.oasis-open.org/odata/ns/edm">
@@ -1578,63 +1601,63 @@ MOCK_OUTPUT
   </edmx:DataServices>
 </edmx:Edmx>"#;
 
-    let mut registry = SpecRegistry::new();
-    let csdl = parse_csdl(csdl_xml).expect("CSDL should parse");
-    registry.register_tenant(
-        "auto-test",
-        csdl,
-        csdl_xml.to_string(),
-        &[("EvolutionRun", &modified_ioa)],
-    );
+        let mut registry = SpecRegistry::new();
+        let csdl = parse_csdl(csdl_xml).expect("CSDL should parse");
+        registry.register_tenant(
+            "auto-test",
+            csdl,
+            csdl_xml.to_string(),
+            &[("EvolutionRun", &modified_ioa)],
+        );
 
-    let system = ActorSystem::new("gepa-full-auto-test");
-    let state = temper_server::ServerState::from_registry(system, registry);
-    let tenant = TenantId::new("auto-test");
+        let system = ActorSystem::new("gepa-full-auto-test");
+        let state = temper_server::ServerState::from_registry(system, registry);
+        let tenant = TenantId::new("auto-test");
 
-    // --- Register WASM modules ---
-    let Some(gepa_modules) = load_gepa_wasm_modules() else {
-        return;
-    };
+        // --- Register WASM modules ---
+        let Some(gepa_modules) = load_gepa_wasm_modules() else {
+            return;
+        };
 
-    for (name, bytes) in &gepa_modules {
-        let hash = state
-            .wasm_engine
-            .compile_and_cache(bytes.as_slice())
-            .unwrap_or_else(|e| panic!("failed to compile {name}: {e}"));
-        let mut wasm_reg = state
-            .wasm_module_registry
-            .write()
-            .expect("wasm registry lock"); // ci-ok: infallible lock
-        wasm_reg.register(&tenant, name, &hash);
-    }
+        for (name, bytes) in &gepa_modules {
+            let hash = state
+                .wasm_engine
+                .compile_and_cache(bytes.as_slice())
+                .unwrap_or_else(|e| panic!("failed to compile {name}: {e}"));
+            let mut wasm_reg = state
+                .wasm_module_registry
+                .write()
+                .expect("wasm registry lock"); // ci-ok: infallible lock
+            wasm_reg.register(&tenant, name, &hash);
+        }
 
-    // --- Kick off the full autonomous loop ---
-    let evo_id = "evo-auto-1";
+        // --- Kick off the full autonomous loop ---
+        let evo_id = "evo-auto-1";
 
-    // Step 1: Start
-    let r = state
-        .dispatch_tenant_action(
-            &tenant,
-            "EvolutionRun",
-            evo_id,
-            "Start",
-            serde_json::json!({
-                "SkillName": "project-management",
-                "TargetEntityType": "Issue",
-                "AutonomyLevel": "auto"
-            }),
-            &AgentContext::default(),
-        )
-        .await
-        .expect("Start should succeed");
-    assert!(r.success);
-    assert_eq!(r.state.status, "Selecting");
+        // Step 1: Start
+        let r = state
+            .dispatch_tenant_action(
+                &tenant,
+                "EvolutionRun",
+                evo_id,
+                "Start",
+                serde_json::json!({
+                    "SkillName": "project-management",
+                    "TargetEntityType": "Issue",
+                    "AutonomyLevel": "auto"
+                }),
+                &AgentContext::default(),
+            )
+            .await
+            .expect("Start should succeed");
+        assert!(r.success);
+        assert_eq!(r.state.status, "Selecting");
 
-    // Step 2: SelectCandidate — triggers the FULL autonomous chain:
-    //   evaluate_candidate (WASM) → RecordEvaluation
-    //   → build_reflective_dataset (WASM) → RecordDataset
-    //   → propose_mutation (adapter/mock) → RecordMutation
-    let test_spec = r#"
+        // Step 2: SelectCandidate — triggers the FULL autonomous chain:
+        //   evaluate_candidate (WASM) → RecordEvaluation
+        //   → build_reflective_dataset (WASM) → RecordDataset
+        //   → propose_mutation (adapter/mock) → RecordMutation
+        let test_spec = r#"
 [automaton]
 name = "TestIssue"
 states = ["Backlog", "InProgress", "Done"]
@@ -1653,121 +1676,124 @@ from = ["InProgress"]
 to = "Done"
 "#;
 
-    let trajectory_actions = serde_json::json!([
-        {"action": "StartWork", "params": {}},
-        {"action": "Complete", "params": {}},
-        {"action": "Reassign", "params": {"NewAssigneeId": "agent-x"}}
-    ]);
+        let trajectory_actions = serde_json::json!([
+            {"action": "StartWork", "params": {}},
+            {"action": "Complete", "params": {}},
+            {"action": "Reassign", "params": {"NewAssigneeId": "agent-x"}}
+        ]);
 
-    let r = state
-        .dispatch_tenant_action(
-            &tenant,
-            "EvolutionRun",
-            evo_id,
-            "SelectCandidate",
-            serde_json::json!({
-                "CandidateId": "candidate-auto-1",
-                "SpecSource": test_spec,
-                "TrajectoryActions": trajectory_actions,
-            }),
-            &AgentContext::default(),
-        )
-        .await
-        .expect("SelectCandidate should succeed");
-    assert!(r.success);
-    println!(
-        "[AUTO] SelectCandidate → status: {}, effects: {:?}",
-        r.state.status, r.custom_effects
-    );
+        let r = state
+            .dispatch_tenant_action(
+                &tenant,
+                "EvolutionRun",
+                evo_id,
+                "SelectCandidate",
+                serde_json::json!({
+                    "CandidateId": "candidate-auto-1",
+                    "SpecSource": test_spec,
+                    "TrajectoryActions": trajectory_actions,
+                }),
+                &AgentContext::default(),
+            )
+            .await
+            .expect("SelectCandidate should succeed");
+        assert!(r.success);
+        println!(
+            "[AUTO] SelectCandidate → status: {}, effects: {:?}",
+            r.state.status, r.custom_effects
+        );
 
-    // Wait for the autonomous chain to progress through adapter + verification
-    // + scoring + frontier update. The current branch stops at manual approval.
-    let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
-    let mut final_status = "Evaluating".to_string();
-    let mut event_trail = Vec::new();
+        // Wait for the autonomous chain to progress through adapter + verification
+        // + scoring + frontier update. The current branch stops at manual approval.
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
+        let mut final_status = "Evaluating".to_string();
+        let mut event_trail = Vec::new();
 
-    loop {
-        if tokio::time::Instant::now() >= deadline {
-            break;
+        loop {
+            if tokio::time::Instant::now() >= deadline {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(200)).await;
+
+            let entity = state
+                .get_tenant_entity_state(&tenant, "EvolutionRun", evo_id)
+                .await
+                .expect("entity should exist");
+            final_status = entity.state.status.clone();
+            event_trail = entity
+                .state
+                .events
+                .iter()
+                .map(|e| e.action.clone())
+                .collect();
+
+            if matches!(final_status.as_str(), "AwaitingApproval" | "Failed") {
+                break;
+            }
         }
-        tokio::time::sleep(Duration::from_millis(200)).await;
 
+        println!(
+            "[AUTO] After autonomous GEPA chain: status={final_status}, events={event_trail:?}"
+        );
+
+        assert!(
+            event_trail.contains(&"RecordMutation".to_string()),
+            "RecordMutation must appear — proves the claude_code adapter (mock) executed and \
+         returned a mutated spec. Events: {event_trail:?}"
+        );
+        assert_eq!(
+            final_status, "AwaitingApproval",
+            "Entity should reach AwaitingApproval after replay, reflective, verify, score, and frontier callbacks. Got: {final_status}"
+        );
+
+        // Verify all WASM modules fired
+        assert!(
+            event_trail.contains(&"RecordVerificationPass".to_string()),
+            "RecordVerificationPass must appear — proves the verification adapter callback executed. Events: {event_trail:?}"
+        );
+        assert!(
+            event_trail.contains(&"RecordScore".to_string()),
+            "RecordScore must appear — proves gepa-score WASM module executed. Events: {event_trail:?}"
+        );
+        assert!(
+            event_trail.contains(&"RecordFrontier".to_string()),
+            "RecordFrontier must appear — proves gepa-pareto WASM module executed. Events: {event_trail:?}"
+        );
+
+        // Final event trail
         let entity = state
             .get_tenant_entity_state(&tenant, "EvolutionRun", evo_id)
             .await
             .expect("entity should exist");
-        final_status = entity.state.status.clone();
-        event_trail = entity
+        let final_events: Vec<&str> = entity
             .state
             .events
             .iter()
-            .map(|e| e.action.clone())
+            .map(|e| e.action.as_str())
             .collect();
 
-        if matches!(final_status.as_str(), "AwaitingApproval" | "Failed") {
-            break;
+        println!("\n=== AUTONOMOUS GEPA APPROVAL-GATE PROOF ===");
+        println!("Event trail: {:?}", final_events);
+        println!("Final status: {}", entity.state.status);
+
+        // The complete background chain on this branch:
+        let expected = [
+            "Start",
+            "SelectCandidate",
+            "RecordEvaluation",
+            "RecordDataset",
+            "RecordMutation",
+            "RecordVerificationPass",
+            "RecordScore",
+            "RecordFrontier",
+        ];
+        for step in &expected {
+            assert!(
+                final_events.contains(step),
+                "Missing step '{step}' in event trail. Full trail: {final_events:?}"
+            );
         }
-    }
-
-    println!("[AUTO] After autonomous GEPA chain: status={final_status}, events={event_trail:?}");
-
-    assert!(
-        event_trail.contains(&"RecordMutation".to_string()),
-        "RecordMutation must appear — proves the claude_code adapter (mock) executed and \
-         returned a mutated spec. Events: {event_trail:?}"
-    );
-    assert_eq!(
-        final_status, "AwaitingApproval",
-        "Entity should reach AwaitingApproval after replay, reflective, verify, score, and frontier callbacks. Got: {final_status}"
-    );
-
-    // Verify all WASM modules fired
-    assert!(
-        event_trail.contains(&"RecordVerificationPass".to_string()),
-        "RecordVerificationPass must appear — proves the verification adapter callback executed. Events: {event_trail:?}"
-    );
-    assert!(
-        event_trail.contains(&"RecordScore".to_string()),
-        "RecordScore must appear — proves gepa-score WASM module executed. Events: {event_trail:?}"
-    );
-    assert!(
-        event_trail.contains(&"RecordFrontier".to_string()),
-        "RecordFrontier must appear — proves gepa-pareto WASM module executed. Events: {event_trail:?}"
-    );
-
-    // Final event trail
-    let entity = state
-        .get_tenant_entity_state(&tenant, "EvolutionRun", evo_id)
-        .await
-        .expect("entity should exist");
-    let final_events: Vec<&str> = entity
-        .state
-        .events
-        .iter()
-        .map(|e| e.action.as_str())
-        .collect();
-
-    println!("\n=== AUTONOMOUS GEPA APPROVAL-GATE PROOF ===");
-    println!("Event trail: {:?}", final_events);
-    println!("Final status: {}", entity.state.status);
-
-    // The complete background chain on this branch:
-    let expected = [
-        "Start",
-        "SelectCandidate",
-        "RecordEvaluation",
-        "RecordDataset",
-        "RecordMutation",
-        "RecordVerificationPass",
-        "RecordScore",
-        "RecordFrontier",
-    ];
-    for step in &expected {
-        assert!(
-            final_events.contains(step),
-            "Missing step '{step}' in event trail. Full trail: {final_events:?}"
-        );
-    }
-    assert_eq!(entity.state.status, "AwaitingApproval");
-    println!("AUTONOMOUS GEPA CHAIN REACHED AWAITING APPROVAL. ✓");
+        assert_eq!(entity.state.status, "AwaitingApproval");
+        println!("AUTONOMOUS GEPA CHAIN REACHED AWAITING APPROVAL. ✓");
+    });
 }

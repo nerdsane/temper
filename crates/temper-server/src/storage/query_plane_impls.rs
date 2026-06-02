@@ -9,6 +9,18 @@ use super::{
     QueryPlaneStore, QueryProjectionFieldsRow, QueryProjectionUpsert,
 };
 
+fn storage_order_by(order_by: &[QueryFieldIndexOrder]) -> Vec<(String, bool)> {
+    order_by
+        .iter()
+        .map(|order| {
+            (
+                order.field_name.clone(),
+                order.direction == QueryFieldIndexOrderDirection::Desc,
+            )
+        })
+        .collect()
+}
+
 #[async_trait::async_trait]
 impl QueryPlaneStore for PostgresEventStore {
     async fn upsert_projection(
@@ -66,15 +78,7 @@ impl QueryPlaneStore for PostgresEventStore {
         top: usize,
         include_count: bool,
     ) -> Result<Option<QueryFieldIndexPage>, PersistenceError> {
-        let order_by = order_by
-            .iter()
-            .map(|order| {
-                (
-                    order.field_name.clone(),
-                    order.direction == QueryFieldIndexOrderDirection::Desc,
-                )
-            })
-            .collect::<Vec<_>>();
+        let order_by = storage_order_by(order_by);
         let (entity_ids, total_count) = PostgresEventStore::query_field_index_page(
             self,
             tenant,
@@ -230,6 +234,36 @@ impl QueryPlaneStore for TursoEventStore {
             .map(Some)
     }
 
+    async fn query_field_index_page(
+        &self,
+        tenant: &str,
+        entity_type: &str,
+        where_clause: &str,
+        params: Vec<String>,
+        order_by: &[QueryFieldIndexOrder],
+        skip: usize,
+        top: usize,
+        include_count: bool,
+    ) -> Result<Option<QueryFieldIndexPage>, PersistenceError> {
+        let order_by = storage_order_by(order_by);
+        let (entity_ids, total_count) = TursoEventStore::query_field_index_page(
+            self,
+            tenant,
+            entity_type,
+            where_clause,
+            params,
+            &order_by,
+            skip,
+            top,
+            include_count,
+        )
+        .await?;
+        Ok(Some(QueryFieldIndexPage {
+            entity_ids,
+            total_count,
+        }))
+    }
+
     async fn load_projection_fields_many(
         &self,
         tenant: &str,
@@ -348,6 +382,37 @@ impl QueryPlaneStore for TenantStoreRouter {
         TursoEventStore::query_field_index(&store, tenant, entity_type, where_clause, params)
             .await
             .map(Some)
+    }
+
+    async fn query_field_index_page(
+        &self,
+        tenant: &str,
+        entity_type: &str,
+        where_clause: &str,
+        params: Vec<String>,
+        order_by: &[QueryFieldIndexOrder],
+        skip: usize,
+        top: usize,
+        include_count: bool,
+    ) -> Result<Option<QueryFieldIndexPage>, PersistenceError> {
+        let store = self.store_for_tenant(tenant).await?;
+        let order_by = storage_order_by(order_by);
+        let (entity_ids, total_count) = store
+            .query_field_index_page(
+                tenant,
+                entity_type,
+                where_clause,
+                params,
+                &order_by,
+                skip,
+                top,
+                include_count,
+            )
+            .await?;
+        Ok(Some(QueryFieldIndexPage {
+            entity_ids,
+            total_count,
+        }))
     }
 
     async fn load_projection_fields_many(

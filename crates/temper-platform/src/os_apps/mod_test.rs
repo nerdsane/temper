@@ -202,7 +202,7 @@ fn test_list_os_apps_returns_catalog() {
             .unwrap();
         assert_eq!(
             directed.entity_types.len(),
-            26,
+            27,
             "Directed Evolution entity types: {:?}",
             directed.entity_types
         );
@@ -314,6 +314,15 @@ fn test_manifest_dependencies_accept_pinned_genesis_refs_for_local_install_order
         Some("katagami-commons")
     );
     assert_eq!(local_os_app_dependency_name("  "), None);
+}
+
+#[test]
+fn test_os_app_document_bootstrap_does_not_charge_workspace_file_count() {
+    let source = include_str!("mod.rs");
+    assert!(
+        !source.contains("action: \"IncrementFileCount\""),
+        "OS app document bootstrap must not charge Workspace for each file materialized"
+    );
 }
 
 #[test]
@@ -920,6 +929,36 @@ fn test_get_app_intent_discovery() {
 #[test]
 fn test_get_app_nonexistent() {
     assert!(get_os_app("nonexistent").is_none());
+}
+
+#[test]
+fn test_find_wasm_modules_discovers_packaged_root_wasm() {
+    let root =
+        std::env::temp_dir().join(format!("temper-os-app-wasm-test-{}", uuid::Uuid::new_v4()));
+    let module_dir = root.join("wasm").join("demo_module");
+    fs::create_dir_all(&module_dir).expect("create module dir");
+    fs::write(module_dir.join("demo_module.wasm"), b"\0asm-packaged").expect("write wasm");
+
+    let mut configs = BTreeMap::new();
+    configs.insert(
+        "demo_module".to_string(),
+        WasmModuleManifest {
+            name: "demo_module".to_string(),
+            target: None,
+            criticality: WasmModuleCriticality::default(),
+            startup_loading: WasmStartupLoading::default(),
+            provenance: None,
+            import_class: None,
+        },
+    );
+
+    let modules = find_wasm_modules(&root, &configs);
+    fs::remove_dir_all(&root).expect("remove temp app");
+
+    assert_eq!(
+        modules.get("demo_module").map(Vec::as_slice),
+        Some(&b"\0asm-packaged"[..])
+    );
 }
 
 #[tokio::test]

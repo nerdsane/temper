@@ -120,6 +120,10 @@ struct SimEventStoreInner {
     journals: BTreeMap<String, Vec<PersistenceEnvelope>>,
     /// Snapshots: persistence_id → (sequence_nr, snapshot_bytes)
     snapshots: BTreeMap<String, (u64, Vec<u8>)>,
+    /// Immutable snapshot history: persistence_id → sequence_nr → snapshot bytes.
+    snapshot_history: BTreeMap<String, BTreeMap<u64, Vec<u8>>>,
+    /// Event segment metadata: persistence_id → Vec<SimEventSegment>.
+    event_segments: BTreeMap<String, Vec<SimEventSegment>>,
     /// Fault injection RNG.
     rng: DeterministicRng,
     /// Fault injection configuration.
@@ -139,6 +143,57 @@ struct SimEventStoreInner {
     pending_append_delays: BTreeMap<String, VecDeque<Duration>>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SimEventSegment {
+    pub segment_index: u64,
+    pub start_sequence_nr: u64,
+    pub end_sequence_nr: Option<u64>,
+    pub snapshot_sequence: Option<u64>,
+    pub event_count: u64,
+    pub sealed: bool,
+}
+
+fn update_sim_event_segments(
+    event_segments: &mut BTreeMap<String, Vec<SimEventSegment>>,
+    persistence_id: &str,
+    expected_sequence: u64,
+    new_seq: u64,
+) {
+    if new_seq <= expected_sequence {
+        return;
+    }
+    let segments = event_segments
+        .entry(persistence_id.to_string())
+        .or_insert_with(|| {
+            vec![SimEventSegment {
+                segment_index: 0,
+                start_sequence_nr: (expected_sequence + 1).max(1),
+                end_sequence_nr: None,
+                snapshot_sequence: None,
+                event_count: 0,
+                sealed: false,
+            }]
+        });
+    if segments.last().map(|s| s.sealed).unwrap_or(true) {
+        let next_index = segments.last().map(|s| s.segment_index + 1).unwrap_or(0);
+        segments.push(SimEventSegment {
+            segment_index: next_index,
+            start_sequence_nr: (expected_sequence + 1).max(1),
+            end_sequence_nr: None,
+            snapshot_sequence: None,
+            event_count: 0,
+            sealed: false,
+        });
+    }
+    let active_segment = segments
+        .last_mut()
+        .expect("segments must contain an active segment");
+    active_segment.end_sequence_nr = Some(new_seq);
+    active_segment.event_count = new_seq
+        .saturating_sub(active_segment.start_sequence_nr)
+        .saturating_add(1);
+}
+
 impl SimEventStore {
     /// Create a new SimEventStore with the given seed and fault config.
     pub fn new(seed: u64, faults: SimFaultConfig) -> Self {
@@ -146,6 +201,8 @@ impl SimEventStore {
             inner: Arc::new(Mutex::new(SimEventStoreInner {
                 journals: BTreeMap::new(),
                 snapshots: BTreeMap::new(),
+                snapshot_history: BTreeMap::new(),
+                event_segments: BTreeMap::new(),
                 rng: DeterministicRng::new(seed),
                 faults,
                 pending_concurrency_violations: BTreeMap::new(),
@@ -252,6 +309,24 @@ impl SimEventStore {
             .cloned()
             .unwrap_or_default()
     }
+
+    pub fn snapshot_history_len(&self, persistence_id: &str) -> usize {
+        let inner = self.inner.lock().expect("SimEventStore lock poisoned"); // ci-ok: infallible lock
+        inner
+            .snapshot_history
+            .get(persistence_id)
+            .map(BTreeMap::len)
+            .unwrap_or(0)
+    }
+
+    pub fn dump_segments(&self, persistence_id: &str) -> Vec<SimEventSegment> {
+        let inner = self.inner.lock().expect("SimEventStore lock poisoned"); // ci-ok: infallible lock
+        inner
+            .event_segments
+            .get(persistence_id)
+            .cloned()
+            .unwrap_or_default()
+    }
 }
 
 impl std::fmt::Debug for SimEventStore {
@@ -341,13 +416,12 @@ impl EventStore for SimEventStore {
             ));
         }
 
-        let journal = inner
-            .journals
-            .entry(persistence_id.to_string())
-            .or_default();
-
         // Check optimistic concurrency.
-        let current_seq = journal.last().map(|e| e.sequence_nr).unwrap_or(0);
+        let current_seq = inner
+            .journals
+            .get(persistence_id)
+            .and_then(|journal| journal.last().map(|e| e.sequence_nr))
+            .unwrap_or(0);
         if current_seq != expected_sequence {
             return Err(PersistenceError::ConcurrencyViolation {
                 expected: expected_sequence,
@@ -356,13 +430,53 @@ impl EventStore for SimEventStore {
         }
 
         let mut new_seq = expected_sequence;
+        let mut stored_events = Vec::with_capacity(events.len());
         for event in events {
             new_seq += 1;
             // Store with correct sequence number (ignore the one in the envelope,
             // use monotonic counter like the real stores do).
             let mut stored = event.clone();
             stored.sequence_nr = new_seq;
-            journal.push(stored);
+            stored_events.push(stored);
+        }
+        inner
+            .journals
+            .entry(persistence_id.to_string())
+            .or_default()
+            .extend(stored_events);
+
+        let segments = inner
+            .event_segments
+            .entry(persistence_id.to_string())
+            .or_insert_with(|| {
+                vec![SimEventSegment {
+                    segment_index: 0,
+                    start_sequence_nr: (expected_sequence + 1).max(1),
+                    end_sequence_nr: None,
+                    snapshot_sequence: None,
+                    event_count: 0,
+                    sealed: false,
+                }]
+            });
+        if segments.last().map(|s| s.sealed).unwrap_or(true) {
+            let next_index = segments.last().map(|s| s.segment_index + 1).unwrap_or(0);
+            segments.push(SimEventSegment {
+                segment_index: next_index,
+                start_sequence_nr: (expected_sequence + 1).max(1),
+                end_sequence_nr: None,
+                snapshot_sequence: None,
+                event_count: 0,
+                sealed: false,
+            });
+        }
+        if new_seq > expected_sequence {
+            let active_segment = segments
+                .last_mut()
+                .expect("segments must contain an active segment");
+            active_segment.end_sequence_nr = Some(new_seq);
+            active_segment.event_count = new_seq
+                .saturating_sub(active_segment.start_sequence_nr)
+                .saturating_add(1);
         }
 
         Ok(new_seq)
@@ -445,17 +559,26 @@ impl EventStore for SimEventStore {
 
         let mut results = Vec::with_capacity(appends.len());
         for append in appends {
-            let journal = inner
-                .journals
-                .entry(append.persistence_id.clone())
-                .or_default();
-            let mut new_seq = append.expected_sequence;
-            for event in &append.events {
-                new_seq += 1;
-                let mut stored = event.clone();
-                stored.sequence_nr = new_seq;
-                journal.push(stored);
-            }
+            let new_seq = {
+                let journal = inner
+                    .journals
+                    .entry(append.persistence_id.clone())
+                    .or_default();
+                let mut new_seq = append.expected_sequence;
+                for event in &append.events {
+                    new_seq += 1;
+                    let mut stored = event.clone();
+                    stored.sequence_nr = new_seq;
+                    journal.push(stored);
+                }
+                new_seq
+            };
+            update_sim_event_segments(
+                &mut inner.event_segments,
+                &append.persistence_id,
+                append.expected_sequence,
+                new_seq,
+            );
             results.push(PersistenceAppendResult {
                 persistence_id: append.persistence_id.clone(),
                 sequence_nr: new_seq,
@@ -512,6 +635,53 @@ impl EventStore for SimEventStore {
         inner
             .snapshots
             .insert(persistence_id.to_string(), (sequence_nr, snapshot.to_vec()));
+        inner
+            .snapshot_history
+            .entry(persistence_id.to_string())
+            .or_default()
+            .insert(sequence_nr, snapshot.to_vec());
+        let segments = inner
+            .event_segments
+            .entry(persistence_id.to_string())
+            .or_insert_with(|| {
+                vec![SimEventSegment {
+                    segment_index: 0,
+                    start_sequence_nr: 1,
+                    end_sequence_nr: Some(sequence_nr),
+                    snapshot_sequence: None,
+                    event_count: sequence_nr,
+                    sealed: false,
+                }]
+            });
+        if segments.last().map(|s| s.sealed).unwrap_or(true) {
+            let idx = segments.last().map(|s| s.segment_index + 1).unwrap_or(0);
+            segments.push(SimEventSegment {
+                segment_index: idx,
+                start_sequence_nr: 1,
+                end_sequence_nr: Some(sequence_nr),
+                snapshot_sequence: None,
+                event_count: sequence_nr,
+                sealed: false,
+            });
+        }
+        let active = segments
+            .last_mut()
+            .expect("segments must contain an active segment");
+        active.end_sequence_nr = Some(sequence_nr);
+        active.snapshot_sequence = Some(sequence_nr);
+        active.event_count = sequence_nr
+            .saturating_sub(active.start_sequence_nr)
+            .saturating_add(1);
+        active.sealed = true;
+        let next_index = active.segment_index + 1;
+        segments.push(SimEventSegment {
+            segment_index: next_index,
+            start_sequence_nr: sequence_nr + 1,
+            end_sequence_nr: None,
+            snapshot_sequence: None,
+            event_count: 0,
+            sealed: false,
+        });
         Ok(())
     }
 
@@ -659,6 +829,28 @@ mod tests {
         );
         assert_eq!(store.dump_journal("default:Order:ord-a").len(), 1);
         assert_eq!(store.dump_journal("default:Order:ord-b").len(), 2);
+        assert_eq!(
+            store.dump_segments("default:Order:ord-a"),
+            vec![SimEventSegment {
+                segment_index: 0,
+                start_sequence_nr: 1,
+                end_sequence_nr: Some(1),
+                snapshot_sequence: None,
+                event_count: 1,
+                sealed: false,
+            }]
+        );
+        assert_eq!(
+            store.dump_segments("default:Order:ord-b"),
+            vec![SimEventSegment {
+                segment_index: 0,
+                start_sequence_nr: 1,
+                end_sequence_nr: Some(2),
+                snapshot_sequence: None,
+                event_count: 2,
+                sealed: false,
+            }]
+        );
     }
 
     #[tokio::test]
@@ -737,6 +929,37 @@ mod tests {
 
         let snap = store.load_snapshot(pid).await.unwrap();
         assert_eq!(snap, Some((5, b"state-data".to_vec())));
+    }
+
+    #[tokio::test]
+    async fn snapshot_save_records_history_and_rotates_segments() {
+        let store = SimEventStore::no_faults(42);
+        let pid = "default:Order:segmented";
+
+        store
+            .append(
+                pid,
+                0,
+                &[test_envelope(0, "Created"), test_envelope(0, "Updated")],
+            )
+            .await
+            .unwrap();
+        store.save_snapshot(pid, 2, b"snapshot-2").await.unwrap();
+        store
+            .append(pid, 2, &[test_envelope(0, "AfterSnapshot")])
+            .await
+            .unwrap();
+
+        assert_eq!(store.snapshot_history_len(pid), 1);
+        let segments = store.dump_segments(pid);
+        assert_eq!(segments.len(), 2);
+        assert_eq!(segments[0].segment_index, 0);
+        assert_eq!(segments[0].snapshot_sequence, Some(2));
+        assert!(segments[0].sealed);
+        assert_eq!(segments[1].segment_index, 1);
+        assert_eq!(segments[1].start_sequence_nr, 3);
+        assert_eq!(segments[1].end_sequence_nr, Some(3));
+        assert!(!segments[1].sealed);
     }
 
     #[tokio::test]
