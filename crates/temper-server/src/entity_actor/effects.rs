@@ -561,6 +561,62 @@ pub fn resolve_schedule_at_requests(
         .collect()
 }
 
+pub fn recover_schedule_at_actions_from_history(
+    state: &EntityState,
+    table: &TransitionTable,
+) -> Vec<ScheduledAction> {
+    if state.status == "Deleted" || state.events.is_empty() {
+        return Vec::new();
+    }
+
+    let epoch_start = state
+        .events
+        .iter()
+        .rposition(|event| event.to_status == state.status && event.from_status != state.status)
+        .unwrap_or(0);
+
+    for event in state.events.iter().skip(epoch_start).rev() {
+        let requests = schedule_at_requests_for_event(table, event);
+        if !requests.is_empty() {
+            return resolve_schedule_at_requests(state, &requests);
+        }
+    }
+
+    Vec::new()
+}
+
+fn schedule_at_requests_for_event(
+    table: &TransitionTable,
+    event: &EntityEvent,
+) -> Vec<ScheduleAtRequest> {
+    table
+        .rules
+        .iter()
+        .find(|rule| {
+            if rule.name != event.action {
+                return false;
+            }
+            rule.from_states.is_empty()
+                || rule
+                    .from_states
+                    .iter()
+                    .any(|from_state| from_state == &event.from_status)
+        })
+        .map(|rule| {
+            rule.effects
+                .iter()
+                .filter_map(|effect| match effect {
+                    Effect::ScheduleAtAction { action, field } => Some(ScheduleAtRequest {
+                        action: action.clone(),
+                        field: field.clone(),
+                    }),
+                    _ => None,
+                })
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
 /// Apply the `new_state` fallback from a TransitionResult.
 ///
 /// If no `Effect::SetState` was applied (status unchanged from `from_status`)
@@ -1140,6 +1196,147 @@ effect = [{ type = "schedule_at", field = "next_run_at", action = "Trigger" }]
         assert!(
             result.scheduled_actions.is_empty(),
             "missing field should produce no scheduled actions"
+        );
+    }
+
+    #[test]
+    fn test_schedule_at_recovery_resolves_from_last_scheduling_event() {
+        let _guard = temper_runtime::scheduler::install_deterministic_context(42);
+
+        let spec = r#"
+[automaton]
+name = "CronJob"
+states = ["Active"]
+initial = "Active"
+
+[[state]]
+name = "next_run_at"
+type = "string"
+initial = ""
+
+[[action]]
+name = "TriggerComplete"
+from = ["Active"]
+params = ["next_run_at"]
+effect = [{ type = "schedule_at", field = "next_run_at", action = "Trigger" }]
+"#;
+
+        let table = temper_jit::table::TransitionTable::from_ioa_source(spec);
+        let future_time = sim_now() + chrono::Duration::seconds(300);
+        let future_iso = future_time.to_rfc3339();
+        let mut state = EntityState {
+            entity_type: "CronJob".into(),
+            entity_id: "cron-1".into(),
+            status: "Active".into(),
+            item_count: 0,
+            counters: std::collections::BTreeMap::new(),
+            booleans: std::collections::BTreeMap::new(),
+            lists: std::collections::BTreeMap::new(),
+            fields: serde_json::json!({ "next_run_at": future_iso }),
+            events: std::collections::VecDeque::new(),
+            total_event_count: 1,
+            events_since_snapshot: 1,
+            last_snapshot_sequence_nr: 0,
+            sequence_nr: 1,
+            processed_idempotency_keys: std::collections::BTreeMap::new(),
+        };
+        state.events.push_back(EntityEvent {
+            action: "TriggerComplete".into(),
+            from_status: "Active".into(),
+            to_status: "Active".into(),
+            timestamp: sim_now(),
+            params: serde_json::json!({ "next_run_at": future_iso }),
+            idempotency_key: None,
+        });
+
+        let recovered = recover_schedule_at_actions_from_history(&state, &table);
+
+        assert_eq!(recovered.len(), 1, "hydration should re-arm schedule_at");
+        assert_eq!(recovered[0].action, "Trigger");
+        assert_eq!(recovered[0].delay_seconds, 300);
+    }
+
+    #[test]
+    fn test_schedule_at_recovery_ignores_prior_state_epoch() {
+        let _guard = temper_runtime::scheduler::install_deterministic_context(42);
+
+        let spec = r#"
+[automaton]
+name = "CronJob"
+states = ["Active", "Paused"]
+initial = "Active"
+
+[[state]]
+name = "next_run_at"
+type = "string"
+initial = ""
+
+[[action]]
+name = "TriggerComplete"
+from = ["Active"]
+params = ["next_run_at"]
+effect = [{ type = "schedule_at", field = "next_run_at", action = "Trigger" }]
+
+[[action]]
+name = "Pause"
+from = ["Active"]
+to = "Paused"
+
+[[action]]
+name = "Resume"
+from = ["Paused"]
+to = "Active"
+"#;
+
+        let table = temper_jit::table::TransitionTable::from_ioa_source(spec);
+        let future_time = sim_now() + chrono::Duration::seconds(300);
+        let future_iso = future_time.to_rfc3339();
+        let mut state = EntityState {
+            entity_type: "CronJob".into(),
+            entity_id: "cron-1".into(),
+            status: "Active".into(),
+            item_count: 0,
+            counters: std::collections::BTreeMap::new(),
+            booleans: std::collections::BTreeMap::new(),
+            lists: std::collections::BTreeMap::new(),
+            fields: serde_json::json!({ "next_run_at": future_iso }),
+            events: std::collections::VecDeque::new(),
+            total_event_count: 3,
+            events_since_snapshot: 3,
+            last_snapshot_sequence_nr: 0,
+            sequence_nr: 3,
+            processed_idempotency_keys: std::collections::BTreeMap::new(),
+        };
+        state.events.push_back(EntityEvent {
+            action: "TriggerComplete".into(),
+            from_status: "Active".into(),
+            to_status: "Active".into(),
+            timestamp: sim_now(),
+            params: serde_json::json!({ "next_run_at": future_iso }),
+            idempotency_key: None,
+        });
+        state.events.push_back(EntityEvent {
+            action: "Pause".into(),
+            from_status: "Active".into(),
+            to_status: "Paused".into(),
+            timestamp: sim_now(),
+            params: serde_json::json!({}),
+            idempotency_key: None,
+        });
+        state.events.push_back(EntityEvent {
+            action: "Resume".into(),
+            from_status: "Paused".into(),
+            to_status: "Active".into(),
+            timestamp: sim_now(),
+            params: serde_json::json!({}),
+            idempotency_key: None,
+        });
+
+        let recovered = recover_schedule_at_actions_from_history(&state, &table);
+
+        assert!(
+            recovered.is_empty(),
+            "hydration must not recover a schedule_at from a prior Active epoch"
         );
     }
 

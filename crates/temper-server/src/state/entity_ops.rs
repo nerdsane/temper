@@ -1356,7 +1356,15 @@ impl ServerState {
                 self.remove_entity(tenant, entity_type, entity_id);
                 false
             }
-            Ok(_) => true,
+            Ok(response) => {
+                self.arm_schedule_at_actions_from_hydrated_response(
+                    tenant,
+                    entity_type,
+                    entity_id,
+                    &response,
+                );
+                true
+            }
             Err(_) => {
                 self.remove_entity(tenant, entity_type, entity_id);
                 false

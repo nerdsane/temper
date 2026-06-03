@@ -10,7 +10,10 @@ use std::time::Instant;
 use tokio::spawn as spawn_post_dispatch_effect; // determinism-ok: post-dispatch side effects are outside transition semantics
 use tracing::Instrument;
 
-use crate::entity_actor::{EntityResponse, effects::ScheduledAction};
+use crate::entity_actor::{
+    EntityResponse,
+    effects::{ScheduledAction, recover_schedule_at_actions_from_history},
+};
 use crate::events::EntityStateChange;
 use crate::request_context::AgentContext;
 use crate::state::trajectory::{TrajectoryEntry, TrajectorySource};
@@ -451,6 +454,49 @@ impl crate::state::ServerState {
                 .instrument(span),
             );
         }
+    }
+
+    /// Re-arm `schedule_at` timers after an entity was rebuilt from the event
+    /// journal. The entity state remains authoritative; this only restores the
+    /// in-memory delivery task that was lost across process restart.
+    pub(crate) fn arm_schedule_at_actions_from_hydrated_response(
+        &self,
+        tenant: &TenantId,
+        entity_type: &str,
+        entity_id: &str,
+        response: &EntityResponse,
+    ) {
+        let table = {
+            let registry = match self.registry.read() {
+                Ok(g) => g,
+                Err(_) => return,
+            };
+            registry.get_table_live(tenant, entity_type).or_else(|| {
+                self.transition_tables
+                    .get(entity_type)
+                    .map(|table| Arc::new(std::sync::RwLock::new((**table).clone())))
+            })
+        };
+        let Some(table_ref) = table else {
+            return;
+        };
+        let table = match table_ref.read() {
+            Ok(table) => table.clone(),
+            Err(_) => return,
+        };
+        let scheduled_actions = recover_schedule_at_actions_from_history(&response.state, &table);
+        if scheduled_actions.is_empty() {
+            return;
+        }
+
+        let agent_ctx = AgentContext::for_service("schedule-at-hydration");
+        self.dispatch_scheduled_actions(
+            tenant,
+            entity_type,
+            entity_id,
+            &scheduled_actions,
+            &agent_ctx,
+        );
     }
 
     /// Run all post-dispatch effects for a successful action.
