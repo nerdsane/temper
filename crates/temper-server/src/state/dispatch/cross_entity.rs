@@ -242,23 +242,19 @@ impl crate::state::ServerState {
                     {
                         Ok(_) => {
                             tracing::info!(
-                                parent_type = %parent_t,
-                                parent_id = %parent_i,
-                                child_type = %child_type,
-                                child_id = %child_id,
-                                "spawned child entity"
+                                    parent_type = %parent_t,
+                                    parent_id = %parent_i,
+                                    child_type = %child_type,
+                                    child_id = %child_id,
+                                    "spawned child entity"
                             );
 
                             if let Some(action) = initial_action {
-                                let mut initial_action_params =
-                                    parent_params.as_object().cloned().unwrap_or_default();
-                                for (key, value) in parent_fields {
-                                    initial_action_params.insert(key, value);
-                                }
-                                // Merge copied field values (take precedence over parent params)
-                                for (key, value) in &copied_fields {
-                                    initial_action_params.insert(key.clone(), value.clone());
-                                }
+                                let initial_action_params = merge_spawn_initial_action_params(
+                                    &parent_params,
+                                    parent_fields,
+                                    &copied_fields,
+                                );
                                 if let Err(e) = state
                                     .dispatch_tenant_action(
                                         &t,
@@ -296,6 +292,27 @@ impl crate::state::ServerState {
     }
 }
 
+fn merge_spawn_initial_action_params(
+    parent_params: &serde_json::Value,
+    parent_fields: serde_json::Map<String, serde_json::Value>,
+    copied_fields: &serde_json::Map<String, serde_json::Value>,
+) -> serde_json::Map<String, serde_json::Value> {
+    let mut initial_action_params = copied_fields.clone();
+
+    if let Some(params) = parent_params.as_object() {
+        for (key, value) in params {
+            initial_action_params.insert(key.clone(), value.clone());
+        }
+    }
+
+    // Parent provenance is platform-owned and must not be spoofed by caller params.
+    for (key, value) in parent_fields {
+        initial_action_params.insert(key, value);
+    }
+
+    initial_action_params
+}
+
 fn to_snake_case(value: &str) -> String {
     let mut result = String::with_capacity(value.len());
     for (index, ch) in value.chars().enumerate() {
@@ -311,4 +328,64 @@ fn to_snake_case(value: &str) -> String {
         }
     }
     result
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn spawn_initial_params_keep_explicit_action_params_over_copied_fields() {
+        let parent_params = serde_json::json!({
+            "model": "gpt-5",
+            "provider": "openai_codex",
+            "user_message": "fresh trigger message",
+            "parent_id": "forged-parent"
+        });
+        let parent_fields = serde_json::Map::from_iter([
+            (
+                "parent_id".to_string(),
+                serde_json::Value::String("real-parent".to_string()),
+            ),
+            (
+                "cron_job_id".to_string(),
+                serde_json::Value::String("real-parent".to_string()),
+            ),
+        ]);
+        let copied_fields = serde_json::Map::from_iter([
+            (
+                "model".to_string(),
+                serde_json::Value::String(String::new()),
+            ),
+            (
+                "provider".to_string(),
+                serde_json::Value::String(String::new()),
+            ),
+            (
+                "system_prompt".to_string(),
+                serde_json::Value::String("copied prompt".to_string()),
+            ),
+        ]);
+
+        let merged =
+            merge_spawn_initial_action_params(&parent_params, parent_fields, &copied_fields);
+
+        assert_eq!(merged.get("model").and_then(|v| v.as_str()), Some("gpt-5"));
+        assert_eq!(
+            merged.get("provider").and_then(|v| v.as_str()),
+            Some("openai_codex")
+        );
+        assert_eq!(
+            merged.get("user_message").and_then(|v| v.as_str()),
+            Some("fresh trigger message")
+        );
+        assert_eq!(
+            merged.get("system_prompt").and_then(|v| v.as_str()),
+            Some("copied prompt")
+        );
+        assert_eq!(
+            merged.get("parent_id").and_then(|v| v.as_str()),
+            Some("real-parent")
+        );
+    }
 }
