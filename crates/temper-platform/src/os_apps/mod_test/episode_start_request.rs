@@ -3,6 +3,11 @@ use super::*;
 
 #[test]
 fn test_directed_evolution_episode_start_request_materializes_contract() {
+    if skip_without_genesis_apps(
+        "test_directed_evolution_episode_start_request_materializes_contract",
+    ) {
+        return;
+    }
     let handle = std::thread::Builder::new()
         .name("directed-evolution-episode-start-request".to_string())
         .stack_size(16 * 1024 * 1024)

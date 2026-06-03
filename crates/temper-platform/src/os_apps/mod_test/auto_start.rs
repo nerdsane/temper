@@ -3,6 +3,10 @@ use super::*;
 
 #[test]
 fn test_directed_evolution_repair_direction_autostarts_from_policy() {
+    if skip_without_genesis_apps("test_directed_evolution_repair_direction_autostarts_from_policy")
+    {
+        return;
+    }
     let handle = std::thread::Builder::new()
         .name("directed-evolution-repair-autostart".to_string())
         .stack_size(16 * 1024 * 1024)
