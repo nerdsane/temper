@@ -2179,19 +2179,52 @@ fn trajectory_source_label(source: &TrajectorySource) -> &'static str {
     }
 }
 
+const TRAJECTORY_REQUEST_BODY_JSON_MAX_BYTES: usize = 4096;
+
 fn trajectory_request_body_json(entry: &TrajectoryEntry) -> Option<String> {
     entry.request_body.as_ref().and_then(|value| {
         let serialized = serde_json::to_string(value).ok()?;
-        Some(if serialized.len() > 4096 {
-            let mut end = 4096;
-            while !serialized.is_char_boundary(end) {
-                end -= 1;
-            }
-            serialized[..end].to_string()
-        } else {
-            serialized
-        })
+        Some(
+            if serialized.len() > TRAJECTORY_REQUEST_BODY_JSON_MAX_BYTES {
+                truncated_trajectory_request_body_json(&serialized)
+            } else {
+                serialized
+            },
+        )
     })
+}
+
+fn truncated_trajectory_request_body_json(serialized: &str) -> String {
+    let mut preview_limit = serialized.len().min(
+        TRAJECTORY_REQUEST_BODY_JSON_MAX_BYTES
+            .saturating_sub(256)
+            .max(128),
+    );
+
+    loop {
+        let preview = utf8_prefix(serialized, preview_limit);
+        let envelope = serde_json::json!({
+            "_temper_truncated": true,
+            "original_bytes": serialized.len(),
+            "preview_json": preview,
+        })
+        .to_string();
+
+        if envelope.len() <= TRAJECTORY_REQUEST_BODY_JSON_MAX_BYTES || preview_limit == 0 {
+            return envelope;
+        }
+
+        let overage = envelope.len() - TRAJECTORY_REQUEST_BODY_JSON_MAX_BYTES;
+        preview_limit = preview_limit.saturating_sub(overage.max(64));
+    }
+}
+
+fn utf8_prefix(value: &str, max_bytes: usize) -> &str {
+    let mut end = value.len().min(max_bytes);
+    while !value.is_char_boundary(end) {
+        end -= 1;
+    }
+    &value[..end]
 }
 
 fn trajectory_matched_policy_ids_json(entry: &TrajectoryEntry) -> Option<String> {
@@ -2319,5 +2352,69 @@ impl TrajectorySink for TenantStoreRouter {
                     entry.tenant, entry.entity_type, entry.entity_id, entry.action
                 )
             })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    fn trajectory_entry_with_request_body(request_body: serde_json::Value) -> TrajectoryEntry {
+        TrajectoryEntry {
+            timestamp: "2026-06-03T16:00:00Z".to_string(),
+            tenant: "default".to_string(),
+            entity_type: "Session".to_string(),
+            entity_id: "session-1".to_string(),
+            action: "ContextReady".to_string(),
+            success: true,
+            from_status: Some("PreparingContext".to_string()),
+            to_status: Some("Provisioning".to_string()),
+            error: None,
+            agent_id: Some("Ren".to_string()),
+            session_id: Some("session-1".to_string()),
+            authz_denied: None,
+            denied_resource: None,
+            denied_module: None,
+            source: None,
+            spec_governed: Some(true),
+            agent_type: None,
+            request_body: Some(request_body),
+            intent: None,
+            matched_policy_ids: None,
+        }
+    }
+
+    #[test]
+    fn trajectory_request_body_truncation_preserves_valid_json() {
+        let entry = trajectory_entry_with_request_body(json!({
+            "prepared_context": "x".repeat(6_000),
+            "model": "gpt-5.5",
+        }));
+
+        let request_body = trajectory_request_body_json(&entry).expect("request body json");
+
+        assert!(request_body.len() <= 4096);
+        let parsed: serde_json::Value =
+            serde_json::from_str(&request_body).expect("truncated request body remains JSON");
+        assert_eq!(parsed["_temper_truncated"], true);
+        assert!(parsed["original_bytes"].as_u64().unwrap() > 4096);
+        assert!(parsed["preview_json"].as_str().unwrap().starts_with('{'));
+    }
+
+    #[test]
+    fn trajectory_request_body_keeps_small_json_unchanged() {
+        let entry = trajectory_entry_with_request_body(json!({
+            "model": "gpt-5.5",
+            "provider": "openai_codex",
+        }));
+
+        let request_body = trajectory_request_body_json(&entry).expect("request body json");
+        let parsed: serde_json::Value =
+            serde_json::from_str(&request_body).expect("small request body remains JSON");
+
+        assert_eq!(parsed["model"], "gpt-5.5");
+        assert_eq!(parsed["provider"], "openai_codex");
+        assert_eq!(parsed.get("_temper_truncated"), None);
     }
 }
