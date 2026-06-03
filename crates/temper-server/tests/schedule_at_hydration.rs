@@ -38,6 +38,25 @@ to = "Fired"
 effect = [{ type = "increment", var = "fires" }]
 "#;
 
+const COLD_NOTE_IOA: &str = r#"
+[automaton]
+name = "ColdNote"
+states = ["Open"]
+initial = "Open"
+allow_indefinite_states = ["Open"]
+
+[[state]]
+name = "title"
+type = "string"
+initial = ""
+
+[[action]]
+name = "Rename"
+kind = "input"
+from = ["Open"]
+params = ["title"]
+"#;
+
 async fn append_event(
     store: &SimEventStore,
     persistence_id: &str,
@@ -118,4 +137,95 @@ async fn hydrate_from_store_rearms_due_schedule_at_timer() {
 
     assert_eq!(hydrated.state.status, "Fired");
     assert_eq!(hydrated.state.counters.get("fires"), Some(&1));
+}
+
+#[tokio::test]
+async fn startup_schedule_at_recovery_rearms_timer_types_without_full_hydration() {
+    let (_guard, _clock, _ids) = install_deterministic_context(139);
+    let store = SimEventStore::no_faults(139);
+    let tenant = TenantId::default();
+    let cron_id = "cron-startup-due";
+    let note_id = "note-should-stay-cold";
+    let cron_persistence_id = format!("{tenant}:HydratedCron:{cron_id}");
+    let note_persistence_id = format!("{tenant}:ColdNote:{note_id}");
+    let due_at = (sim_now() - chrono::Duration::seconds(30)).to_rfc3339();
+
+    append_event(
+        &store,
+        &cron_persistence_id,
+        1,
+        EntityEvent {
+            action: "Created".into(),
+            from_status: String::new(),
+            to_status: "Active".into(),
+            timestamp: sim_now(),
+            params: json!({ "Id": cron_id }),
+            idempotency_key: None,
+        },
+    )
+    .await;
+    append_event(
+        &store,
+        &cron_persistence_id,
+        2,
+        EntityEvent {
+            action: "TriggerComplete".into(),
+            from_status: "Active".into(),
+            to_status: "Active".into(),
+            timestamp: sim_now(),
+            params: json!({ "next_run_at": due_at }),
+            idempotency_key: None,
+        },
+    )
+    .await;
+    append_event(
+        &store,
+        &note_persistence_id,
+        1,
+        EntityEvent {
+            action: "Created".into(),
+            from_status: String::new(),
+            to_status: "Open".into(),
+            timestamp: sim_now(),
+            params: json!({ "Id": note_id, "title": "keep me cold" }),
+            idempotency_key: None,
+        },
+    )
+    .await;
+
+    let state = common::build_single_tenant_state_with_store(
+        store,
+        "schedule-at-startup-recovery",
+        "default",
+        &[
+            ("HydratedCron", HYDRATED_CRON_IOA),
+            ("ColdNote", COLD_NOTE_IOA),
+        ],
+    );
+
+    state.populate_index_from_store(&tenant).await;
+    assert!(
+        state.actor_registry.read().unwrap().is_empty(),
+        "startup index population must remain a cold, actor-free path"
+    );
+
+    let recovered = state.recover_schedule_at_timers_from_store(&tenant).await;
+    assert_eq!(recovered, 1, "only the schedule_at entity should hydrate");
+    tokio::time::sleep(Duration::from_millis(100)).await;
+
+    let hydrated = state
+        .get_tenant_entity_state(&tenant, "HydratedCron", cron_id)
+        .await
+        .expect("scheduled entity should be queryable");
+
+    assert_eq!(hydrated.state.status, "Fired");
+    assert_eq!(hydrated.state.counters.get("fires"), Some(&1));
+    assert!(
+        !state
+            .actor_registry
+            .read()
+            .unwrap()
+            .contains_key(&format!("{tenant}:ColdNote:{note_id}")),
+        "startup schedule recovery must not hydrate unrelated entity types"
+    );
 }

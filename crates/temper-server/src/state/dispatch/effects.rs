@@ -465,11 +465,11 @@ impl crate::state::ServerState {
         entity_type: &str,
         entity_id: &str,
         response: &EntityResponse,
-    ) {
+    ) -> usize {
         let table = {
             let registry = match self.registry.read() {
                 Ok(g) => g,
-                Err(_) => return,
+                Err(_) => return 0,
             };
             registry.get_table_live(tenant, entity_type).or_else(|| {
                 self.transition_tables
@@ -478,16 +478,34 @@ impl crate::state::ServerState {
             })
         };
         let Some(table_ref) = table else {
-            return;
+            return 0;
         };
         let table = match table_ref.read() {
             Ok(table) => table.clone(),
-            Err(_) => return,
+            Err(_) => return 0,
         };
         let scheduled_actions = recover_schedule_at_actions_from_history(&response.state, &table);
         if scheduled_actions.is_empty() {
-            return;
+            return 0;
         }
+        let sequence_nr = response.state.sequence_nr;
+        let scheduled_actions: Vec<ScheduledAction> = scheduled_actions
+            .into_iter()
+            .filter(|sched| {
+                let key = format!(
+                    "{tenant}:{entity_type}:{entity_id}:{sequence_nr}:{}",
+                    sched.action
+                );
+                self.schedule_at_hydration_tracker
+                    .write()
+                    .map(|mut tracker| tracker.insert(key))
+                    .unwrap_or(false)
+            })
+            .collect();
+        if scheduled_actions.is_empty() {
+            return 0;
+        }
+        let armed = scheduled_actions.len();
 
         let agent_ctx = AgentContext::for_service("schedule-at-hydration");
         self.dispatch_scheduled_actions(
@@ -497,6 +515,15 @@ impl crate::state::ServerState {
             &scheduled_actions,
             &agent_ctx,
         );
+        tracing::info!(
+            tenant = %tenant,
+            entity_type,
+            entity_id,
+            sequence_nr,
+            armed,
+            "schedule_at timers re-armed from hydrated state"
+        );
+        armed
     }
 
     /// Run all post-dispatch effects for a successful action.

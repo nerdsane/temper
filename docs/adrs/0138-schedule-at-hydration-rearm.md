@@ -18,11 +18,12 @@ durable because they are represented by entity state and event history, but the
 Tokio task that delivers the action is process-local.
 
 After a server restart or deployment, persisted entities can hydrate back into a
-state whose latest transition already declared a `schedule_at` effect. Before
-this ADR, hydration rebuilt the entity state but did not restore the in-memory
-timer. A cron entity could therefore remain `Active` with a stale `next_run_at`
-until a human paused/resumed it or another action happened to schedule a new
-timer.
+state whose latest transition already declared a `schedule_at` effect. Startup
+query/index recovery deliberately avoids hydrating every actor, so an entity can
+also remain cold in the catalog while its timer is missing. Before this ADR,
+hydration rebuilt the entity state but did not restore the in-memory timer. A
+cron entity could therefore remain `Active` with a stale `next_run_at` until a
+human paused/resumed it or another action happened to schedule a new timer.
 
 This is the same class of durability gap addressed for `[[state_timeout]]` by
 ADR-0056, but `schedule_at` is transition-effect based rather than state based.
@@ -35,6 +36,12 @@ recent transition whose IOA rule declared one or more `schedule_at` effects,
 resolves the current entity field values into `ScheduledAction`s, and dispatches
 those runtime timers under the `schedule-at-hydration` service context.
 
+Temper also exposes a startup recovery pass that scans the registry for entity
+types whose transition tables contain `schedule_at`, lists only those persisted
+entity IDs, and force-hydrates those actors. This preserves the memory-safe
+startup invariant for unrelated entity types while making timers durable across
+deploys.
+
 The entity remains the source of truth:
 
 - no scheduler row or side table is introduced;
@@ -43,14 +50,15 @@ The entity remains the source of truth:
 - if the timestamp is already in the past, the scheduled action fires with zero
   delay, matching existing `schedule_at` semantics.
 
-Hydration only re-arms after an entity is newly loaded from durable events. If
-the entity is already present in memory, a second hydration pass does not create
-another timer.
+Recovered timers are keyed in memory by tenant, entity type, entity id, sequence
+number, and action. Re-running the recovery pass for the same replayed
+transition does not create a duplicate timer.
 
 ## Rollout Plan
 
 1. **Phase 0 (Immediate)** — Ship event-history recovery for `schedule_at`
-   timers and wire it into journal hydration.
+   timers, wire it into journal hydration, and expose a startup recovery pass
+   for registered timer entity types.
 2. **Phase 1 (Follow-up)** — Add production telemetry for recovered
    `schedule_at` timers if operational volume requires it.
 
@@ -62,6 +70,8 @@ another timer.
 - The fix stays inside Temper's declarative entity runtime and preserves the
   trigger boundary.
 - Past-due cron jobs catch up immediately on hydration.
+- Startup recovery hydrates only entity types that declare `schedule_at`, not
+  the whole tenant catalog.
 
 ### Negative
 
@@ -100,6 +110,7 @@ another timer.
 
 ## Rollback Policy
 
-Revert the hydration hook and recovery helper. Normal `schedule_at` timers
-created by live transitions continue to work, but timers for hydrated entities
-would again require a new state transition to be armed after restart.
+Revert the hydration hook, recovery helper, and startup recovery call. Normal
+`schedule_at` timers created by live transitions continue to work, but timers
+for hydrated entities would again require a new state transition to be armed
+after restart.

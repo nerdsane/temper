@@ -6,6 +6,7 @@ use std::time::Instant;
 
 use tracing::{Instrument, instrument};
 
+use temper_jit::table::Effect;
 use temper_observe::wide_event;
 use temper_runtime::persistence::{EventMetadata, PersistenceEnvelope, PersistenceError};
 use temper_runtime::scheduler::{sim_now, sim_uuid};
@@ -39,6 +40,14 @@ fn is_deleted_envelope(event: &PersistenceEnvelope) -> bool {
         .get("action")
         .and_then(serde_json::Value::as_str)
         == Some("Deleted")
+}
+
+fn transition_table_has_schedule_at(table: &temper_jit::table::TransitionTable) -> bool {
+    table.rules.iter().any(|rule| {
+        rule.effects
+            .iter()
+            .any(|effect| matches!(effect, Effect::ScheduleAtAction { .. }))
+    })
 }
 
 fn record_projection_update_started(
@@ -456,6 +465,151 @@ impl ServerState {
                 }
             }
         }
+    }
+
+    /// Re-arm persisted `schedule_at` timers for this tenant without hydrating
+    /// unrelated entity types.
+    ///
+    /// Startup index/projection recovery intentionally stays actor-free. Timers,
+    /// however, are in-memory delivery tasks, so entities whose specs declare
+    /// `schedule_at` must be rebuilt after a process restart. This method scans
+    /// only registered entity types that contain `schedule_at` effects and
+    /// force-hydrates those actors so their latest scheduling transition can
+    /// restore the delivery task.
+    #[instrument(skip_all, fields(
+        otel.name = "entity.recover_schedule_at_timers_from_store",
+        tenant = %tenant,
+    ))]
+    pub async fn recover_schedule_at_timers_from_store(&self, tenant: &TenantId) -> usize {
+        let entity_types = self.schedule_at_entity_types_for_tenant(tenant);
+        let mut recovered = 0usize;
+        for entity_type in entity_types {
+            recovered = recovered.saturating_add(
+                self.recover_schedule_at_timers_from_store_by_type(tenant, &entity_type)
+                    .await,
+            );
+        }
+        tracing::info!(
+            tenant = %tenant,
+            recovered,
+            "schedule_at timer recovery complete"
+        );
+        recovered
+    }
+
+    fn schedule_at_entity_types_for_tenant(&self, tenant: &TenantId) -> Vec<String> {
+        let mut entity_types = Vec::new();
+        if let Ok(registry) = self.registry.read() {
+            for entity_type in registry.entity_types(tenant) {
+                if registry
+                    .get_table(tenant, entity_type)
+                    .is_some_and(|table| transition_table_has_schedule_at(&table))
+                {
+                    entity_types.push(entity_type.to_string());
+                }
+            }
+        }
+
+        if tenant.as_str() == TenantId::default().as_str() {
+            for (entity_type, table) in self.transition_tables.iter() {
+                if transition_table_has_schedule_at(table)
+                    && !entity_types.iter().any(|known| known == entity_type)
+                {
+                    entity_types.push(entity_type.clone());
+                }
+            }
+        }
+
+        entity_types
+    }
+
+    async fn recover_schedule_at_timers_from_store_by_type(
+        &self,
+        tenant: &TenantId,
+        entity_type: &str,
+    ) -> usize {
+        let Some((store, _backend)) = self.event_journal() else {
+            return 0;
+        };
+
+        let entity_ids = match store
+            .list_entity_ids_by_type(tenant.as_str(), entity_type)
+            .await
+        {
+            Ok(ids) => ids,
+            Err(error) => {
+                tracing::warn!(
+                    tenant = %tenant,
+                    entity_type,
+                    error = %error,
+                    "failed to list schedule_at entity ids for recovery"
+                );
+                return 0;
+            }
+        };
+
+        let mut recovered = 0usize;
+        for entity_id in entity_ids {
+            let persistence_id = format!("{tenant}:{entity_type}:{entity_id}");
+            match store.read_events(&persistence_id, 0).await {
+                Ok(events) if events.last().is_some_and(is_deleted_envelope) => {
+                    self.remove_entity(tenant, entity_type, &entity_id);
+                    continue;
+                }
+                Ok(events) if events.is_empty() => continue,
+                Ok(_) => {}
+                Err(error) => {
+                    tracing::warn!(
+                        tenant = %tenant,
+                        entity_type,
+                        entity_id,
+                        error = %error,
+                        "failed to read schedule_at entity events for recovery"
+                    );
+                    continue;
+                }
+            }
+
+            let Some(actor_ref) = self.get_or_spawn_tenant_actor(tenant, entity_type, &entity_id)
+            else {
+                continue;
+            };
+            let policy = self.dispatch_retry_policy();
+            let outcome = retry::ask_with_backoff::<_, EntityResponse, _>(
+                &actor_ref,
+                || EntityMsg::GetState,
+                &policy,
+            )
+            .await;
+            match outcome.result {
+                Ok(response) if response.state.status == "Deleted" => {
+                    let _ = actor_ref.stop();
+                    self.remove_entity(tenant, entity_type, &entity_id);
+                }
+                Ok(response) => {
+                    if self.arm_schedule_at_actions_from_hydrated_response(
+                        tenant,
+                        entity_type,
+                        &entity_id,
+                        &response,
+                    ) > 0
+                    {
+                        recovered = recovered.saturating_add(1);
+                    }
+                }
+                Err(error) => {
+                    tracing::warn!(
+                        tenant = %tenant,
+                        entity_type,
+                        entity_id,
+                        error = %error,
+                        "failed to hydrate schedule_at entity for recovery"
+                    );
+                }
+            }
+        }
+
+        recovered
     }
 
     /// Get or spawn an entity actor (legacy single-tenant).

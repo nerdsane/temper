@@ -425,6 +425,10 @@ pub struct ServerState {
     /// counter used to cancel stale timers when the entity transitions out
     /// of a declared state or reset_on fires.
     pub state_timeout_tracker: Arc<StateTimeoutTracker>,
+    /// Recovered schedule_at timers keyed by tenant/entity/action/sequence.
+    /// Prevents startup/lazy hydration from arming duplicate timers for the
+    /// same replayed transition.
+    pub(crate) schedule_at_hydration_tracker: Arc<RwLock<BTreeSet<String>>>,
     /// Eventual invariant convergence tracker.
     pub eventual_tracker: Arc<RwLock<crate::eventual_invariants::EventualInvariantTracker>>,
     /// Idempotency cache for deduplicating agent retries.
@@ -642,6 +646,7 @@ impl ServerState {
             action_dispatch_timeout: env_timeout(),
             admission: Arc::new(AdmissionController::new()),
             state_timeout_tracker: Arc::new(StateTimeoutTracker::new()),
+            schedule_at_hydration_tracker: Arc::new(RwLock::new(BTreeSet::new())),
             eventual_tracker: Arc::new(RwLock::new(
                 crate::eventual_invariants::EventualInvariantTracker::new(),
             )),
@@ -884,6 +889,7 @@ impl ServerState {
             action_dispatch_timeout: env_timeout(),
             admission: Arc::new(AdmissionController::new()),
             state_timeout_tracker: Arc::new(StateTimeoutTracker::new()),
+            schedule_at_hydration_tracker: Arc::new(RwLock::new(BTreeSet::new())),
             eventual_tracker: Arc::new(RwLock::new(
                 crate::eventual_invariants::EventualInvariantTracker::new(),
             )),
