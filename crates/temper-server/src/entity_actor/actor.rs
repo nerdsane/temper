@@ -602,6 +602,7 @@ impl Actor for EntityActor {
                         .unwrap_or(0)
                         .max(0) as u64;
                     let wide = wide_event::from_transition(wide_event::TransitionInput {
+                        tenant: &self.tenant,
                         entity_type: &state.entity_type,
                         entity_id: &state.entity_id,
                         operation: &name,
@@ -680,6 +681,7 @@ impl Actor for EntityActor {
                         .unwrap_or(0)
                         .max(0) as u64;
                     let wide = wide_event::from_transition(wide_event::TransitionInput {
+                        tenant: &self.tenant,
                         entity_type: &state.entity_type,
                         entity_id: &state.entity_id,
                         operation: &name,

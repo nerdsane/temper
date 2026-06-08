@@ -602,12 +602,7 @@ impl DiscordTransport {
             },
         );
 
-        let agent_ctx = AgentContext {
-            agent_id: Some(format!("discord-transport:{user_id}")),
-            session_id: None,
-            agent_type: Some("system".to_string()),
-            intent: None,
-        };
+        let agent_ctx = AgentContext::system_with_agent_id(format!("discord-transport:{user_id}"));
 
         // Create the TemperAgent entity.
         let initial_fields = serde_json::json!({ "id": entity_id });
@@ -720,12 +715,7 @@ impl DiscordTransport {
             },
         );
 
-        let agent_ctx = AgentContext {
-            agent_id: Some(format!("discord-transport:{user_id}")),
-            session_id: None,
-            agent_type: Some("system".to_string()),
-            intent: None,
-        };
+        let agent_ctx = AgentContext::system_with_agent_id(format!("discord-transport:{user_id}"));
 
         // Create a new TemperAgent entity for this turn.
         let initial_fields = serde_json::json!({ "id": entity_id });
@@ -1550,8 +1540,7 @@ mod tests {
             action: "RecordResult".into(),
             status: "Completed".into(),
             tenant: "rita-agents".into(),
-            agent_id: None,
-            session_id: None,
+            ..EntityStateChange::default()
         };
         assert!(is_agent_terminal_event(&event, "rita-agents"));
     }
@@ -1565,8 +1554,7 @@ mod tests {
             action: "Fail".into(),
             status: "Failed".into(),
             tenant: "rita-agents".into(),
-            agent_id: None,
-            session_id: None,
+            ..EntityStateChange::default()
         };
         assert!(is_agent_terminal_event(&event, "rita-agents"));
     }
@@ -1580,8 +1568,7 @@ mod tests {
             action: "SandboxReady".into(),
             status: "Thinking".into(),
             tenant: "rita-agents".into(),
-            agent_id: None,
-            session_id: None,
+            ..EntityStateChange::default()
         };
         assert!(!is_agent_terminal_event(&event, "rita-agents"));
     }

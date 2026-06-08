@@ -54,6 +54,15 @@ pub(super) async fn dispatch_bound_action(
     if let Some(ref sid) = agent_ctx.session_id {
         http_span.set_attribute(OtelKeyValue::new("session.id", sid.clone()));
     }
+    if let Some(ref intent) = agent_ctx.intent {
+        http_span.set_attribute(OtelKeyValue::new("intent", intent.clone()));
+    }
+    for (key, value) in &agent_ctx.observation_metadata {
+        http_span.set_attribute(OtelKeyValue::new(
+            format!("temper.observation.{key}"),
+            value.clone(),
+        ));
+    }
 
     // Build SecurityContext — credential-resolved identity (ADR-0033) or
     // operator identity for global API key access.

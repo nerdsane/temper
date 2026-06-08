@@ -183,6 +183,9 @@ impl crate::state::ServerState {
         entity_type,
         entity_id,
         action_name = action,
+        session_id = tracing::field::Empty,
+        intent = tracing::field::Empty,
+        observation_metadata = tracing::field::Empty,
         success = tracing::field::Empty,
         error_msg = tracing::field::Empty,
     ))]
@@ -196,6 +199,16 @@ impl crate::state::ServerState {
         agent_ctx: &AgentContext,
         await_integration: bool,
     ) -> Result<EntityResponse, DispatchError> {
+        let current_span = tracing::Span::current();
+        current_span.record("session_id", agent_ctx.session_id.as_deref().unwrap_or(""));
+        current_span.record("intent", agent_ctx.intent.as_deref().unwrap_or(""));
+        current_span.record(
+            "observation_metadata",
+            agent_ctx
+                .observation_metadata_json()
+                .unwrap_or_default()
+                .as_str(),
+        );
         if !self
             .is_entity_type_governed(tenant, entity_type)
             .map_err(DispatchError::Internal)?
@@ -274,6 +287,10 @@ impl crate::state::ServerState {
                         s
                     }
                 };
+                let from_status = entry.from_status.as_deref().unwrap_or("unknown");
+                let to_status = entry.to_status.as_deref().unwrap_or("unknown");
+                let observation_metadata =
+                    agent_ctx.observation_metadata_json().unwrap_or_default();
                 tracing::info!(
                     tenant = %entry.tenant,
                     entity_type = %entry.entity_type,
@@ -287,7 +304,17 @@ impl crate::state::ServerState {
                     authz_denied = ?entry.authz_denied,
                     spec_governed = ?entry.spec_governed,
                     request_body = %request_body_str,
-                    "trajectory.entry"
+                    agent_id = entry.agent_id.as_deref().unwrap_or(""),
+                    session_id = entry.session_id.as_deref().unwrap_or(""),
+                    agent_type = entry.agent_type.as_deref().unwrap_or(""),
+                    intent = entry.intent.as_deref().unwrap_or(""),
+                    observation_metadata = %observation_metadata,
+                    "app usage: {}.{} {} -> {} on {} failed",
+                    entry.entity_type,
+                    entry.action,
+                    from_status,
+                    to_status,
+                    entry.entity_id
                 );
                 if !entry.success {
                     tracing::warn!(

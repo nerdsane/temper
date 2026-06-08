@@ -89,6 +89,7 @@ pub async fn handle_webhook(
         session_id: None,
         agent_type: None,
         intent: None,
+        ..AgentContext::default()
     };
 
     match state

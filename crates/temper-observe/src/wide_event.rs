@@ -105,6 +105,8 @@ pub enum FieldClass {
 
 /// Input for building a transition wide event.
 pub struct TransitionInput<'a> {
+    /// Tenant that owns the entity.
+    pub tenant: &'a str,
     /// Entity type (e.g., "Order").
     pub entity_type: &'a str,
     /// Entity ID.
@@ -132,6 +134,7 @@ pub fn from_transition(input: TransitionInput<'_>) -> WideEvent {
     let span_id = sim_uuid().to_string();
 
     let mut tags = BTreeMap::new();
+    tags.insert("tenant".into(), input.tenant.into());
     tags.insert("entity_type".into(), input.entity_type.into());
     tags.insert("operation".into(), input.operation.into());
     tags.insert("status".into(), input.to_status.into());
@@ -139,6 +142,7 @@ pub fn from_transition(input: TransitionInput<'_>) -> WideEvent {
 
     let mut attributes = BTreeMap::new();
     attributes.insert("entity_id".into(), serde_json::json!(input.entity_id));
+    attributes.insert("tenant".into(), serde_json::json!(input.tenant));
     attributes.insert("from_status".into(), serde_json::json!(input.from_status));
     attributes.insert("params".into(), input.params.clone());
     attributes.insert("item_count".into(), serde_json::json!(input.item_count));
@@ -403,6 +407,7 @@ mod tests {
 
     fn sample_event() -> WideEvent {
         from_transition(TransitionInput {
+            tenant: "default",
             entity_type: "Order",
             entity_id: "order-123",
             operation: "SubmitOrder",
@@ -450,6 +455,7 @@ mod tests {
     #[test]
     fn test_failed_transition_marks_error() {
         let event = from_transition(TransitionInput {
+            tenant: "default",
             entity_type: "Order",
             entity_id: "order-456",
             operation: "SubmitOrder",
