@@ -3,6 +3,7 @@
 //! Provides a `/tdata/$events` endpoint that streams real-time entity
 //! state transitions to connected clients via SSE.
 
+use std::collections::BTreeMap;
 use std::convert::Infallible;
 
 use axum::extract::State;
@@ -17,7 +18,7 @@ use crate::authz::{observe_tenant_scope, require_observe_auth};
 use crate::state::ServerState;
 
 /// A notification emitted when an entity transitions to a new state.
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
 pub struct EntityStateChange {
     /// Monotonic per-entity event sequence.
     #[serde(default)]
@@ -38,6 +39,12 @@ pub struct EntityStateChange {
     /// Session in which the action was performed (if known).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub session_id: Option<String>,
+    /// Caller intent for the action (if supplied).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub intent: Option<String>,
+    /// Generic metadata for correlating runtime events with producer-specific context.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub observation_metadata: Option<BTreeMap<String, String>>,
 }
 
 /// SSE endpoint handler: streams entity state changes to connected clients.
@@ -88,6 +95,8 @@ mod tests {
             tenant: "default".into(),
             agent_id: Some("agent-1".into()),
             session_id: None,
+            intent: None,
+            observation_metadata: None,
         };
         let json = serde_json::to_string(&change).unwrap();
         assert!(json.contains("\"entity_type\":\"Order\""));

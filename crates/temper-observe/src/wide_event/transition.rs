@@ -4,6 +4,8 @@ use crate::wide_event::{EventKind, WideEvent, duration_ms, event_timestamp, new_
 
 /// Input for building a transition wide event.
 pub struct TransitionInput<'a> {
+    /// Tenant that owns the entity.
+    pub tenant: &'a str,
     /// Entity type (e.g., "Order").
     pub entity_type: &'a str,
     /// Entity ID.
@@ -31,12 +33,14 @@ pub fn from_transition(input: TransitionInput<'_>) -> WideEvent {
     let span_id = new_span_id();
 
     let mut tags = BTreeMap::new();
+    tags.insert("tenant".into(), input.tenant.into());
     tags.insert("entity_type".into(), input.entity_type.into());
     tags.insert("operation".into(), input.operation.into());
     tags.insert("status".into(), input.to_status.into());
     tags.insert("success".into(), input.success.to_string());
 
     let mut attributes = BTreeMap::new();
+    attributes.insert("tenant".into(), serde_json::json!(input.tenant));
     attributes.insert("entity_id".into(), serde_json::json!(input.entity_id));
     attributes.insert("from_status".into(), serde_json::json!(input.from_status));
     attributes.insert("params".into(), input.params.clone());

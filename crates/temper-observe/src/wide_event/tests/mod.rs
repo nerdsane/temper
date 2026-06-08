@@ -3,6 +3,7 @@ use crate::wide_event::otel::event_error_message;
 
 fn sample_event() -> WideEvent {
     from_transition(TransitionInput {
+        tenant: "tenant-a",
         entity_type: "Order",
         entity_id: "order-123",
         operation: "SubmitOrder",
@@ -50,6 +51,7 @@ fn test_cost_decoupling() {
 #[test]
 fn test_failed_transition_marks_error() {
     let event = from_transition(TransitionInput {
+        tenant: "tenant-a",
         entity_type: "Order",
         entity_id: "order-456",
         operation: "SubmitOrder",

@@ -220,13 +220,16 @@ impl crate::state::ServerState {
             } else {
                 Some(ctx.action_params.clone())
             },
-            intent: if response.success {
-                None
-            } else {
-                ctx.agent_ctx.intent.clone()
-            },
+            intent: ctx.agent_ctx.intent.clone(),
             matched_policy_ids: None,
         };
+        let from_status = entry.from_status.as_deref().unwrap_or("unknown");
+        let to_status = entry.to_status.as_deref().unwrap_or("unknown");
+        let outcome = if entry.success { "succeeded" } else { "failed" };
+        let observation_metadata = ctx
+            .agent_ctx
+            .observation_metadata_json()
+            .unwrap_or_default();
         tracing::info!(
             tenant = %entry.tenant,
             entity_type = %entry.entity_type,
@@ -238,7 +241,18 @@ impl crate::state::ServerState {
             error = ?entry.error,
             source = ?entry.source,
             authz_denied = ?entry.authz_denied,
-            "trajectory.entry"
+            agent_id = entry.agent_id.as_deref().unwrap_or(""),
+            session_id = entry.session_id.as_deref().unwrap_or(""),
+            agent_type = entry.agent_type.as_deref().unwrap_or(""),
+            intent = entry.intent.as_deref().unwrap_or(""),
+            observation_metadata = %observation_metadata,
+            "app usage: {}.{} {} -> {} on {} {}",
+            entry.entity_type,
+            entry.action,
+            from_status,
+            to_status,
+            entry.entity_id,
+            outcome
         );
         if !entry.success {
             tracing::warn!(
@@ -272,6 +286,9 @@ impl crate::state::ServerState {
             tenant: ctx.tenant.to_string(),
             agent_id: ctx.agent_ctx.agent_id.clone(),
             session_id: ctx.agent_ctx.session_id.clone(),
+            intent: ctx.agent_ctx.intent.clone(),
+            observation_metadata: (!ctx.agent_ctx.observation_metadata.is_empty())
+                .then(|| ctx.agent_ctx.observation_metadata.clone()),
         };
         self.record_entity_observe_event_with_seq(
             ctx.tenant.as_str(),
@@ -318,6 +335,7 @@ impl crate::state::ServerState {
                     "error_message": error_message,
                     "agent_id": ctx.agent_ctx.agent_id,
                     "session_id": ctx.agent_ctx.session_id,
+                    "observation_metadata": ctx.agent_ctx.observation_metadata.clone(),
                 }),
             );
         }
@@ -357,9 +375,16 @@ impl crate::state::ServerState {
                 spec_governed: None,
                 agent_type: ctx.agent_ctx.agent_type.clone(),
                 request_body: None,
-                intent: None,
+                intent: ctx.agent_ctx.intent.clone(),
                 matched_policy_ids: None,
             };
+            let from_status = entry.from_status.as_deref().unwrap_or("unknown");
+            let to_status = entry.to_status.as_deref().unwrap_or("unknown");
+            let outcome = if entry.success { "succeeded" } else { "failed" };
+            let observation_metadata = ctx
+                .agent_ctx
+                .observation_metadata_json()
+                .unwrap_or_default();
             tracing::info!(
                 tenant = %entry.tenant,
                 entity_type = %entry.entity_type,
@@ -371,7 +396,18 @@ impl crate::state::ServerState {
                 error = ?entry.error,
                 source = ?entry.source,
                 authz_denied = ?entry.authz_denied,
-                "trajectory.entry"
+                agent_id = entry.agent_id.as_deref().unwrap_or(""),
+                session_id = entry.session_id.as_deref().unwrap_or(""),
+                agent_type = entry.agent_type.as_deref().unwrap_or(""),
+                intent = entry.intent.as_deref().unwrap_or(""),
+                observation_metadata = %observation_metadata,
+                "app usage: {}.{} {} -> {} on {} {}",
+                entry.entity_type,
+                entry.action,
+                from_status,
+                to_status,
+                entry.entity_id,
+                outcome
             );
             if !entry.success {
                 tracing::warn!(

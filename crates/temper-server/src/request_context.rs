@@ -4,10 +4,14 @@
 //! from HTTP headers. These types are used across OData dispatch, authz,
 //! observability, and reaction modules.
 
+use std::collections::BTreeMap;
+
 use axum::http::HeaderMap;
 use opentelemetry::trace::{SpanContext, SpanId, TraceContextExt, TraceFlags, TraceId, TraceState};
 use temper_authz::SecurityContext;
 use tracing_opentelemetry::OpenTelemetrySpanExt;
+
+mod observation_metadata;
 
 /// Agent identity context extracted from HTTP headers and credential resolution.
 ///
@@ -17,12 +21,13 @@ use tracing_opentelemetry::OpenTelemetrySpanExt;
 /// Identity fields (`agent_id`, `agent_type`) are populated from the
 /// credential-resolved `ResolvedIdentity` (ADR-0033), NOT from self-declared
 /// headers. Only observability headers are extracted from HTTP:
-/// - `X-Session-Id` — session grouping
-/// - `X-Intent` — caller-supplied description of what they were trying to do
+/// - `X-Session-Id` / `X-Temper-Observe-Session-Id` — session grouping
+/// - `X-Intent` / `X-Temper-Observe-Intent` — caller-supplied intent
+/// - `X-Temper-Observe-Metadata` or `X-Temper-Observe-Meta-*` — generic,
+///   namespaced observability metadata supplied by clients
 #[derive(Debug, Clone, Default)]
 pub struct AgentContext {
     /// Full Cedar security context when known at the request boundary.
-    ///
     /// External HTTP entrypoints populate this after credential resolution so
     /// downstream trigger dispatch can inherit the exact principal rather than
     /// approximating it from partial agent metadata.
@@ -36,7 +41,6 @@ pub struct AgentContext {
     /// when credential resolution succeeds.
     pub agent_type: Option<String>,
     /// Optional intent description (from `X-Intent` header).
-    ///
     /// Captured on failed requests so the Evolution Engine can surface
     /// exactly what the agent was trying to accomplish.
     pub intent: Option<String>,
@@ -46,7 +50,6 @@ pub struct AgentContext {
     /// Parent span ID from the `traceparent` header.
     pub parent_span_id: Option<String>,
     /// Root entity type for the logical workflow trace.
-    ///
     /// This is observability metadata carried in dispatch context. It is not
     /// persisted as entity business state.
     pub workflow_root_entity_type: Option<String>,
@@ -58,6 +61,12 @@ pub struct AgentContext {
     /// `Idempotency-Key` header. Threaded into `EntityMsg::Action` so the
     /// actor can dedupe duplicate asks produced by dispatch-layer retries.
     pub idempotency_key: Option<String>,
+    /// Generic, client-supplied observability metadata.
+    ///
+    /// Producers should namespace their keys, for example
+    /// `workflow.run_id`, `producer.work_item_id`, or `support.ticket_id`.
+    /// Temper core treats these keys as opaque correlation metadata.
+    pub observation_metadata: BTreeMap<String, String>,
 }
 
 impl AgentContext {
@@ -79,6 +88,7 @@ impl AgentContext {
             workflow_root_entity_id: None,
             workflow_run_id: None,
             idempotency_key: None,
+            observation_metadata: BTreeMap::new(),
         }
     }
 
@@ -119,7 +129,16 @@ impl AgentContext {
             workflow_root_entity_id: None,
             workflow_run_id: None,
             idempotency_key: None,
+            observation_metadata: BTreeMap::new(),
         }
+    }
+
+    /// Create a system-level context for a named internal transport or adapter.
+    pub fn system_with_agent_id(agent_id: impl Into<String>) -> Self {
+        let mut ctx = Self::system();
+        ctx.agent_id = Some(agent_id.into());
+        ctx.agent_type = Some("system".to_string());
+        ctx
     }
 
     /// Create a service identity while preserving caller observability context.
@@ -139,6 +158,7 @@ impl AgentContext {
         self.workflow_root_entity_type = parent.workflow_root_entity_type.clone();
         self.workflow_root_entity_id = parent.workflow_root_entity_id.clone();
         self.workflow_run_id = parent.workflow_run_id.clone();
+        self.observation_metadata = parent.observation_metadata.clone();
         self
     }
 
@@ -170,34 +190,33 @@ impl AgentContext {
         }
         self
     }
+
+    /// Serialize observation metadata for log fields.
+    pub fn observation_metadata_json(&self) -> Option<String> {
+        if self.observation_metadata.is_empty() {
+            return None;
+        }
+        serde_json::to_string(&self.observation_metadata).ok()
+    }
+}
+
+pub(super) fn header_string(headers: &HeaderMap, name: &str) -> Option<String> {
+    headers
+        .get(name)
+        .and_then(|v| v.to_str().ok())
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(String::from)
 }
 
 /// Extract observability context from request headers.
 ///
-/// Reads `X-Session-Id` and `X-Intent` for observability purposes.
+/// Reads generic session, intent, and observation metadata headers for
+/// observability purposes.
 /// Identity fields (`agent_id`, `agent_type`) are NOT extracted from
 /// self-declared headers — they come from credential resolution (ADR-0033)
 /// or are set to `None` for anonymous/operator access.
 pub(crate) fn extract_agent_context(headers: &HeaderMap) -> AgentContext {
-    fn header_string(headers: &HeaderMap, name: &str) -> Option<String> {
-        headers
-            .get(name)
-            .and_then(|v| v.to_str().ok())
-            .map(str::trim)
-            .filter(|s| !s.is_empty())
-            .map(String::from)
-    }
-
-    let session_id = headers
-        .get("x-session-id")
-        .and_then(|v| v.to_str().ok())
-        .filter(|s| !s.is_empty())
-        .map(String::from);
-    let intent = headers
-        .get("x-intent")
-        .and_then(|v| v.to_str().ok())
-        .filter(|s| !s.is_empty())
-        .map(String::from);
     // Extract W3C traceparent: "00-{trace_id}-{parent_span_id}-{flags}"
     let (trace_id, parent_span_id) = headers
         .get("traceparent")
@@ -225,15 +244,18 @@ pub(crate) fn extract_agent_context(headers: &HeaderMap) -> AgentContext {
     AgentContext {
         security_ctx: None,
         agent_id: None,
-        session_id,
+        session_id: header_string(headers, "x-temper-observe-session-id")
+            .or_else(|| header_string(headers, "x-session-id")),
         agent_type: None,
-        intent,
+        intent: header_string(headers, "x-temper-observe-intent")
+            .or_else(|| header_string(headers, "x-intent")),
         trace_id,
         parent_span_id,
         workflow_root_entity_type,
         workflow_root_entity_id,
         workflow_run_id,
         idempotency_key,
+        observation_metadata: observation_metadata::extract(headers),
     }
 }
 
@@ -272,13 +294,41 @@ mod tests {
     use opentelemetry::trace::TraceContextExt;
 
     #[test]
-    fn extract_agent_context_session_and_intent() {
+    fn extract_agent_context_session_intent_and_metadata() {
         let mut headers = HeaderMap::new();
         headers.insert("x-session-id", HeaderValue::from_static("sess-abc"));
         headers.insert("x-intent", HeaderValue::from_static("approve the invoice"));
+        headers.insert(
+            "x-temper-observe-metadata",
+            r#"{"workflow.run_id":"seed-usage:agent-answers-seed:sim-user-1","producer.user_id":"sim-user-1"}"#
+                .parse()
+                .unwrap(),
+        );
+        headers.insert(
+            "x-temper-observe-meta-producer.work_item_id",
+            "wi-123".parse().unwrap(),
+        );
         let ctx = extract_agent_context(&headers);
         assert_eq!(ctx.session_id.as_deref(), Some("sess-abc"));
         assert_eq!(ctx.intent.as_deref(), Some("approve the invoice"));
+        assert_eq!(
+            ctx.observation_metadata
+                .get("workflow.run_id")
+                .map(String::as_str),
+            Some("seed-usage:agent-answers-seed:sim-user-1")
+        );
+        assert_eq!(
+            ctx.observation_metadata
+                .get("producer.user_id")
+                .map(String::as_str),
+            Some("sim-user-1")
+        );
+        assert_eq!(
+            ctx.observation_metadata
+                .get("producer.work_item_id")
+                .map(String::as_str),
+            Some("wi-123")
+        );
         // Identity fields are never extracted from headers (ADR-0033).
         assert!(ctx.agent_id.is_none());
         assert!(ctx.agent_type.is_none());
@@ -344,6 +394,7 @@ mod tests {
         assert!(ctx.session_id.is_none());
         assert!(ctx.agent_type.is_none());
         assert!(ctx.intent.is_none());
+        assert!(ctx.observation_metadata.is_empty());
     }
 
     #[test]
