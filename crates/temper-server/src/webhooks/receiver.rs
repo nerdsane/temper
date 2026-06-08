@@ -95,12 +95,7 @@ pub async fn handle_webhook(
         session_id: None,
         agent_type: None,
         intent: None,
-        trace_id: None,
-        parent_span_id: None,
-        workflow_root_entity_type: None,
-        workflow_root_entity_id: None,
-        workflow_run_id: None,
-        idempotency_key: None,
+        ..AgentContext::default()
     };
 
     match state

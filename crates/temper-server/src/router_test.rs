@@ -1965,6 +1965,8 @@ async fn test_sse_events_endpoint_delivers_state_changes() {
         tenant: "default".into(),
         agent_id: Some("test-agent".into()),
         session_id: None,
+        intent: None,
+        observation_metadata: None,
     });
 
     // Read SSE frames until we see the event (stream never closes on its own).
@@ -1997,6 +1999,8 @@ async fn test_sse_events_lagged_receiver_continues() {
             tenant: "default".into(),
             agent_id: None,
             session_id: None,
+            intent: None,
+            observation_metadata: None,
         });
     }
 
@@ -2023,6 +2027,8 @@ async fn test_sse_events_lagged_receiver_continues() {
         tenant: "default".into(),
         agent_id: None,
         session_id: None,
+        intent: None,
+        observation_metadata: None,
     });
 
     // Read frames — the stream should recover and deliver the fresh event.
