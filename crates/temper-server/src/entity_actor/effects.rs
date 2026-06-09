@@ -218,6 +218,21 @@ pub fn process_action_with_xref_and_field_mode(
             let from_status = state.status.clone();
             let to_status = transition_result.new_state.clone();
 
+            if let Some(error) = validate_ref_action_contract(state, action, params) {
+                return ProcessResult {
+                    success: false,
+                    event: None,
+                    custom_effects: vec![],
+                    scheduled_actions: vec![],
+                    spawn_requests: vec![],
+                    overflow_blobs: vec![],
+                    error: Some(error),
+                };
+            }
+
+            let effective_params = normalize_ref_action_params(state, action, params);
+            let params = effective_params.as_ref();
+
             let (custom_effects, scheduled_actions, spawn_requests, schedule_at_requests) =
                 apply_effects(state, &transition_result.effects, params);
             apply_new_state_fallback(state, &from_status, &to_status);
@@ -273,6 +288,107 @@ pub fn process_action_with_xref_and_field_mode(
             error: Some(format!("Unknown action: {}", action)),
         },
     }
+}
+
+fn validate_ref_action_contract(
+    state: &EntityState,
+    action: &str,
+    params: &serde_json::Value,
+) -> Option<String> {
+    if state.entity_type != "Ref" {
+        return None;
+    }
+
+    match action {
+        "Update" => {
+            let Some(expected) =
+                json_string_param(params, "PreviousCommitSha").filter(|value| !value.is_empty())
+            else {
+                return Some("Ref.Update requires PreviousCommitSha".to_string());
+            };
+            if json_string_param(params, "NewCommitSha")
+                .filter(|value| !value.is_empty())
+                .is_none()
+            {
+                return Some("Ref.Update requires NewCommitSha".to_string());
+            }
+
+            let current = current_ref_target(state);
+            if ref_previous_matches_current(current, &expected) {
+                None
+            } else {
+                Some(format!(
+                    "stale ref {}: expected {}, found {}",
+                    state.entity_id,
+                    expected,
+                    current.unwrap_or("missing ref")
+                ))
+            }
+        }
+        "ForceUpdate" => {
+            if json_string_param(params, "NewCommitSha")
+                .filter(|value| !value.is_empty())
+                .is_none()
+            {
+                Some("Ref.ForceUpdate requires NewCommitSha".to_string())
+            } else {
+                None
+            }
+        }
+        _ => None,
+    }
+}
+
+fn normalize_ref_action_params<'a>(
+    state: &EntityState,
+    action: &str,
+    params: &'a serde_json::Value,
+) -> std::borrow::Cow<'a, serde_json::Value> {
+    if state.entity_type != "Ref" || !matches!(action, "Update" | "ForceUpdate") {
+        return std::borrow::Cow::Borrowed(params);
+    }
+
+    let Some(new_commit_sha) = json_string_param(params, "NewCommitSha") else {
+        return std::borrow::Cow::Borrowed(params);
+    };
+
+    let mut normalized = params.clone();
+    if let Some(obj) = normalized.as_object_mut() {
+        obj.insert(
+            "TargetCommitSha".to_string(),
+            serde_json::Value::String(new_commit_sha),
+        );
+        std::borrow::Cow::Owned(normalized)
+    } else {
+        std::borrow::Cow::Borrowed(params)
+    }
+}
+
+fn current_ref_target(state: &EntityState) -> Option<&str> {
+    state
+        .fields
+        .get("TargetCommitSha")
+        .and_then(serde_json::Value::as_str)
+        .filter(|sha| !sha.is_empty())
+}
+
+fn ref_previous_matches_current(current: Option<&str>, expected: &str) -> bool {
+    if is_zero_git_sha(expected) {
+        return current.is_none() || current.is_some_and(is_zero_git_sha);
+    }
+    current == Some(expected)
+}
+
+fn is_zero_git_sha(value: &str) -> bool {
+    value.len() == 40 && value.bytes().all(|byte| byte == b'0')
+}
+
+fn json_string_param(params: &serde_json::Value, field: &str) -> Option<String> {
+    params.get(field).and_then(|value| match value {
+        serde_json::Value::String(value) => Some(value.clone()),
+        serde_json::Value::Number(value) => Some(value.to_string()),
+        _ => None,
+    })
 }
 
 /// Apply a list of transition effects to entity state.
@@ -1286,6 +1402,126 @@ effect = [
             sequence_nr: 0,
             processed_idempotency_keys: std::collections::BTreeMap::new(),
         }
+    }
+
+    fn ref_transition_table() -> TransitionTable {
+        let spec = r#"
+[automaton]
+name = "Ref"
+states = ["Active", "Deleted"]
+initial = "Active"
+
+[[action]]
+name = "Update"
+kind = "input"
+from = ["Active"]
+to = "Active"
+params = ["PreviousCommitSha", "NewCommitSha"]
+
+[[action]]
+name = "ForceUpdate"
+kind = "input"
+from = ["Active"]
+to = "Active"
+params = ["NewCommitSha"]
+"#;
+
+        TransitionTable::from_ioa_source(spec)
+    }
+
+    fn active_ref_state(target: &str) -> EntityState {
+        let mut state = make_state("Ref", "rf-repo-refs-heads-main");
+        state.status = "Active".to_string();
+        state.fields = serde_json::json!({ "TargetCommitSha": target });
+        state
+    }
+
+    #[test]
+    fn ref_update_advances_target_commit_sha_after_matching_cas() {
+        let table = ref_transition_table();
+        let current = "1111111111111111111111111111111111111111";
+        let next = "2222222222222222222222222222222222222222";
+        let mut state = active_ref_state(current);
+
+        let result = process_action(
+            &mut state,
+            &table,
+            "Update",
+            &serde_json::json!({
+                "PreviousCommitSha": current,
+                "NewCommitSha": next
+            }),
+        );
+
+        assert!(result.success, "matching CAS update should succeed");
+        assert_eq!(
+            state.fields.get("TargetCommitSha").and_then(|v| v.as_str()),
+            Some(next)
+        );
+        assert_eq!(
+            result
+                .event
+                .as_ref()
+                .and_then(|event| event.params.get("TargetCommitSha"))
+                .and_then(|value| value.as_str()),
+            Some(next)
+        );
+    }
+
+    #[test]
+    fn ref_update_rejects_stale_previous_commit_sha() {
+        let table = ref_transition_table();
+        let current = "1111111111111111111111111111111111111111";
+        let stale = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+        let next = "2222222222222222222222222222222222222222";
+        let mut state = active_ref_state(current);
+
+        let result = process_action(
+            &mut state,
+            &table,
+            "Update",
+            &serde_json::json!({
+                "PreviousCommitSha": stale,
+                "NewCommitSha": next
+            }),
+        );
+
+        assert!(!result.success, "stale CAS update should fail");
+        assert!(
+            result
+                .error
+                .as_deref()
+                .is_some_and(|error| error.contains("stale ref")),
+            "unexpected error: {:?}",
+            result.error
+        );
+        assert_eq!(
+            state.fields.get("TargetCommitSha").and_then(|v| v.as_str()),
+            Some(current)
+        );
+    }
+
+    #[test]
+    fn ref_force_update_advances_target_commit_sha() {
+        let table = ref_transition_table();
+        let current = "1111111111111111111111111111111111111111";
+        let next = "2222222222222222222222222222222222222222";
+        let mut state = active_ref_state(current);
+
+        let result = process_action(
+            &mut state,
+            &table,
+            "ForceUpdate",
+            &serde_json::json!({
+                "NewCommitSha": next
+            }),
+        );
+
+        assert!(result.success, "force update should succeed");
+        assert_eq!(
+            state.fields.get("TargetCommitSha").and_then(|v| v.as_str()),
+            Some(next)
+        );
     }
 
     #[test]
