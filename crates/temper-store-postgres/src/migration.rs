@@ -35,6 +35,7 @@ mod tests {
             include_str!("../migrations/0004_entity_catalog_state.sql"),
             include_str!("../migrations/0005_installed_app_genesis_provenance.sql"),
             include_str!("../migrations/0006_segmented_event_history.sql"),
+            include_str!("../migrations/0007_installed_app_follow_policy.sql"),
         ]
         .join("\n")
         .to_lowercase();

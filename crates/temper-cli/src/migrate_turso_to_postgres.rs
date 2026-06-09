@@ -603,10 +603,15 @@ async fn migrate_installed_apps(
 async fn insert_installed_app(pool: &PgPool, row: &TursoInstalledAppRow) -> Result<()> {
     sqlx::query(
         "INSERT INTO tenant_installed_apps \
-         (tenant, app_name, app_version, bundle_digest, spec_digest, policy_digest, wasm_digest, \
+         (tenant, app_name, source_kind, app_ref, version_hash, pinned_version_hash, current_version_hash, follow_policy, \
+          closure_id, registry_url, registry_tenant, app_version, bundle_digest, spec_digest, policy_digest, wasm_digest, \
           content_digest, seed_digest, installed_at, last_reconciled_at, status) \
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12) \
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21) \
          ON CONFLICT (tenant, app_name) DO UPDATE SET \
+             source_kind = EXCLUDED.source_kind, app_ref = EXCLUDED.app_ref, version_hash = EXCLUDED.version_hash, \
+             pinned_version_hash = EXCLUDED.pinned_version_hash, current_version_hash = EXCLUDED.current_version_hash, \
+             follow_policy = EXCLUDED.follow_policy, closure_id = EXCLUDED.closure_id, \
+             registry_url = EXCLUDED.registry_url, registry_tenant = EXCLUDED.registry_tenant, \
              app_version = EXCLUDED.app_version, bundle_digest = EXCLUDED.bundle_digest, \
              spec_digest = EXCLUDED.spec_digest, policy_digest = EXCLUDED.policy_digest, \
              wasm_digest = EXCLUDED.wasm_digest, content_digest = EXCLUDED.content_digest, \
@@ -615,6 +620,15 @@ async fn insert_installed_app(pool: &PgPool, row: &TursoInstalledAppRow) -> Resu
     )
     .bind(&row.tenant_id)
     .bind(&row.app_name)
+    .bind(&row.source_kind)
+    .bind(&row.app_ref)
+    .bind(&row.version_hash)
+    .bind(&row.pinned_version_hash)
+    .bind(&row.current_version_hash)
+    .bind(&row.follow_policy)
+    .bind(&row.closure_id)
+    .bind(&row.registry_url)
+    .bind(&row.registry_tenant)
     .bind(&row.app_version)
     .bind(&row.bundle_digest)
     .bind(&row.spec_digest)
@@ -1414,7 +1428,8 @@ async fn target_tenant_constraints(pool: &PgPool, tenant: &str) -> Result<Vec<Va
 
 async fn target_installed_apps(pool: &PgPool, tenant: &str) -> Result<Vec<Value>> {
     let rows = sqlx::query(
-        "SELECT tenant, app_name, app_version, bundle_digest, spec_digest, policy_digest, wasm_digest, \
+        "SELECT tenant, app_name, source_kind, app_ref, version_hash, pinned_version_hash, current_version_hash, follow_policy, \
+                closure_id, registry_url, registry_tenant, app_version, bundle_digest, spec_digest, policy_digest, wasm_digest, \
                 content_digest, seed_digest, status \
          FROM tenant_installed_apps WHERE tenant = $1 ORDER BY app_name",
     )
@@ -1731,6 +1746,15 @@ fn installed_app_value(row: &TursoInstalledAppRow) -> Value {
     json!({
         "tenant": row.tenant_id,
         "app_name": row.app_name,
+        "source_kind": row.source_kind,
+        "app_ref": row.app_ref,
+        "version_hash": row.version_hash,
+        "pinned_version_hash": row.pinned_version_hash,
+        "current_version_hash": row.current_version_hash,
+        "follow_policy": row.follow_policy,
+        "closure_id": row.closure_id,
+        "registry_url": row.registry_url,
+        "registry_tenant": row.registry_tenant,
         "app_version": row.app_version,
         "bundle_digest": row.bundle_digest,
         "spec_digest": row.spec_digest,
@@ -1746,6 +1770,15 @@ fn installed_app_pg_value(row: sqlx::postgres::PgRow) -> Value {
     json!({
         "tenant": row.get::<String, _>("tenant"),
         "app_name": row.get::<String, _>("app_name"),
+        "source_kind": row.get::<String, _>("source_kind"),
+        "app_ref": row.get::<String, _>("app_ref"),
+        "version_hash": row.get::<String, _>("version_hash"),
+        "pinned_version_hash": row.get::<String, _>("pinned_version_hash"),
+        "current_version_hash": row.get::<String, _>("current_version_hash"),
+        "follow_policy": row.get::<String, _>("follow_policy"),
+        "closure_id": row.get::<String, _>("closure_id"),
+        "registry_url": row.get::<String, _>("registry_url"),
+        "registry_tenant": row.get::<String, _>("registry_tenant"),
         "app_version": row.get::<String, _>("app_version"),
         "bundle_digest": row.get::<String, _>("bundle_digest"),
         "spec_digest": row.get::<String, _>("spec_digest"),

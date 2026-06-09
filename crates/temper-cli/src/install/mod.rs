@@ -115,8 +115,10 @@ pub async fn run_genesis_app(
     target_tenant: &str,
     app_ref: &str,
     installer: &str,
+    follow_policy: &str,
 ) -> Result<()> {
     let (owner, name, _hash) = parse_app_ref(app_ref)?;
+    let follow_policy = normalize_follow_policy(follow_policy)?;
     let app_id = format!(
         "app-{}-{}",
         sanitize_id_component(owner),
@@ -134,6 +136,7 @@ pub async fn run_genesis_app(
             "TargetTenant": target_tenant,
             "AppRef": app_ref,
             "Installer": installer,
+            "FollowPolicy": follow_policy,
         }))
         .send()
         .await
@@ -148,6 +151,16 @@ pub async fn run_genesis_app(
         println!("{body}");
     }
     Ok(())
+}
+
+fn normalize_follow_policy(raw: &str) -> Result<&'static str> {
+    match raw.trim().to_ascii_lowercase().as_str() {
+        "" | "pinned" => Ok("pinned"),
+        "follow_latest" | "follow-latest" => Ok("follow_latest"),
+        other => {
+            anyhow::bail!("invalid --follow-policy '{other}', expected 'pinned' or 'follow_latest'")
+        }
+    }
 }
 
 fn parse_app_ref(app_ref: &str) -> Result<(&str, &str, &str)> {
@@ -326,5 +339,16 @@ mod tests {
     fn sanitizes_app_id_components() {
         assert_eq!(sanitize_id_component("Acme Labs"), "acme-labs");
         assert_eq!(sanitize_id_component("../"), "item");
+    }
+
+    #[test]
+    fn normalizes_follow_policy() {
+        assert_eq!(normalize_follow_policy("").unwrap(), "pinned");
+        assert_eq!(normalize_follow_policy("pinned").unwrap(), "pinned");
+        assert_eq!(
+            normalize_follow_policy("follow-latest").unwrap(),
+            "follow_latest"
+        );
+        assert!(normalize_follow_policy("auto").is_err());
     }
 }

@@ -31,6 +31,8 @@ pub struct GenesisRegistryInstallRequest {
     pub registry_url: String,
     #[serde(default)]
     pub registry_tenant: String,
+    #[serde(default)]
+    pub follow_policy: String,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -39,6 +41,7 @@ pub struct GenesisRegistryInstallResult {
     pub tenant: String,
     pub registry_url: String,
     pub registry_tenant: String,
+    pub follow_policy: String,
     pub closure_id: String,
     pub materialized_path: String,
     pub materialized_apps: Vec<String>,
@@ -71,6 +74,22 @@ pub struct GenesisRegistryBundleApp {
 pub struct GenesisRegistryBundleFile {
     pub path: String,
     pub content_base64: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct GenesisFollowLatestUpdate {
+    pub tenant: String,
+    pub app_name: String,
+    pub app_ref: String,
+    pub registry_url: String,
+    pub registry_tenant: String,
+    pub pinned_version_hash: String,
+    pub current_version_hash: String,
+    pub latest_version_hash: String,
+    pub latest_app_ref: String,
+    pub rollout_state: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -288,6 +307,110 @@ pub async fn restore_genesis_registry_cache_roots(platform: &PlatformState) -> u
     restored
 }
 
+/// Return read-only staged-follow status for Genesis installs.
+///
+/// This intentionally does not mutate running tenants. A caller that wants to
+/// roll forward can take `latest_app_ref` and call the normal install endpoint,
+/// preserving a visible promotion step.
+pub async fn list_genesis_follow_latest_updates(
+    platform: &PlatformState,
+) -> Vec<GenesisFollowLatestUpdate> {
+    let Some(ps) = platform
+        .server
+        .storage_stack
+        .as_ref()
+        .and_then(|stack| stack.platform.clone())
+    else {
+        return Vec::new();
+    };
+
+    let installed = match ps.list_all_installed_apps().await {
+        Ok(installed) => installed,
+        Err(error) => {
+            tracing::warn!(error = %error, "Failed to list installed apps for Genesis follow status");
+            return Vec::new();
+        }
+    };
+
+    let mut updates = Vec::new();
+    for (tenant, app_name) in installed {
+        let record = match ps.get_installed_app(&tenant, &app_name).await {
+            Ok(Some(record)) => record,
+            Ok(None) => continue,
+            Err(error) => {
+                tracing::warn!(
+                    tenant = %tenant,
+                    app = %app_name,
+                    error = %error,
+                    "Failed to read installed app metadata for Genesis follow status"
+                );
+                continue;
+            }
+        };
+        if record.source_kind != "genesis" || record.follow_policy != "follow_latest" {
+            continue;
+        }
+
+        let parsed = match parse_registry_app_ref(&record.app_ref) {
+            Ok(parsed) => parsed,
+            Err(error) => {
+                updates.push(follow_latest_error_update(record, error));
+                continue;
+            }
+        };
+        let registry_url = match normalize_registry_url(&record.registry_url) {
+            Ok(url) => url,
+            Err(error) => {
+                updates.push(follow_latest_error_update(record, error));
+                continue;
+            }
+        };
+        let registry_tenant = if record.registry_tenant.trim().is_empty() {
+            "default".to_string()
+        } else {
+            record.registry_tenant.trim().to_string()
+        };
+        let latest = match fetch_registry_latest_version_hash(
+            &registry_url,
+            &registry_tenant,
+            &parsed.owner,
+            &parsed.name,
+        )
+        .await
+        {
+            Ok(hash) => hash.trim_start_matches('@').to_string(),
+            Err(error) => {
+                updates.push(follow_latest_error_update(record, error));
+                continue;
+            }
+        };
+        let current = record
+            .current_version_hash
+            .trim_start_matches('@')
+            .to_string();
+        let latest_app_ref = format!("{}/{}@{}", parsed.owner, parsed.name, latest);
+        updates.push(GenesisFollowLatestUpdate {
+            tenant: record.tenant,
+            app_name: record.app_name,
+            app_ref: record.app_ref,
+            registry_url,
+            registry_tenant,
+            pinned_version_hash: record.pinned_version_hash,
+            current_version_hash: current.clone(),
+            latest_version_hash: latest.clone(),
+            latest_app_ref,
+            rollout_state: if latest == current {
+                "current".to_string()
+            } else {
+                "pending".to_string()
+            },
+            error: None,
+        });
+    }
+
+    updates
+}
+
 /// Install a pinned Genesis app ref into this Temper instance from a registry URL.
 ///
 /// This is the local-instance counterpart to spec-owned `App.Install`: agent,
@@ -306,6 +429,7 @@ pub async fn install_genesis_app_from_registry(
     } else {
         request.registry_tenant.trim().to_string()
     };
+    let follow_policy = normalize_follow_policy(&request.follow_policy)?;
     let root_ref = parse_registry_app_ref(&request.app_ref)?;
     let root_hash = root_ref
         .version_hash
@@ -427,6 +551,7 @@ pub async fn install_genesis_app_from_registry(
                 closure_id: &closure_id,
                 registry_url: &registry_url,
                 registry_tenant: &registry_tenant,
+                follow_policy: &follow_policy,
             },
         )
         .await;
@@ -444,6 +569,7 @@ pub async fn install_genesis_app_from_registry(
         tenant: request.tenant,
         registry_url,
         registry_tenant,
+        follow_policy,
         closure_id: root_closure_id,
         materialized_path: cache_root.display().to_string(),
         materialized_apps: materialized,
@@ -540,6 +666,88 @@ fn normalize_registry_url(raw: &str) -> Result<String, String> {
         return Err("registry_url must start with http:// or https://".to_string());
     }
     Ok(value.to_string())
+}
+
+fn follow_latest_error_update(
+    record: InstalledAppRecord,
+    error: String,
+) -> GenesisFollowLatestUpdate {
+    GenesisFollowLatestUpdate {
+        tenant: record.tenant,
+        app_name: record.app_name,
+        app_ref: record.app_ref,
+        registry_url: record.registry_url,
+        registry_tenant: if record.registry_tenant.trim().is_empty() {
+            "default".to_string()
+        } else {
+            record.registry_tenant
+        },
+        pinned_version_hash: record.pinned_version_hash,
+        current_version_hash: record.current_version_hash,
+        latest_version_hash: String::new(),
+        latest_app_ref: String::new(),
+        rollout_state: "error".to_string(),
+        error: Some(error),
+    }
+}
+
+async fn fetch_registry_latest_version_hash(
+    registry_url: &str,
+    registry_tenant: &str,
+    owner: &str,
+    name: &str,
+) -> Result<String, String> {
+    let app_id = format!(
+        "app-{}-{}",
+        sanitize_registry_id_component(owner),
+        sanitize_registry_id_component(name)
+    );
+    let url = format!(
+        "{}/tdata/Apps('{}')",
+        registry_url.trim_end_matches('/'),
+        app_id.replace('\'', "''")
+    );
+    let response = reqwest::Client::new()
+        .get(&url)
+        .header("X-Tenant-Id", registry_tenant)
+        .send()
+        .await
+        .map_err(|error| format!("request Genesis App row {url}: {error}"))?;
+    let status = response.status();
+    if !status.is_success() {
+        let body = response.text().await.unwrap_or_default();
+        return Err(format!(
+            "request Genesis App row {url} returned {status}: {}",
+            body.trim()
+        ));
+    }
+    let row: Value = response
+        .json()
+        .await
+        .map_err(|error| format!("decode Genesis App row {url}: {error}"))?;
+    string_field(row.get("fields").unwrap_or(&row), "LatestVersionHash")
+        .filter(|hash| !hash.trim().is_empty())
+        .ok_or_else(|| format!("Genesis App row {app_id} is missing LatestVersionHash"))
+}
+
+fn sanitize_registry_id_component(input: &str) -> String {
+    let mut out = String::new();
+    let mut last_dash = false;
+    for ch in input.chars().flat_map(char::to_lowercase) {
+        if ch.is_ascii_alphanumeric() {
+            out.push(ch);
+            last_dash = false;
+        } else if !last_dash {
+            out.push('-');
+            last_dash = true;
+        }
+    }
+    let trimmed = out.trim_matches('-').to_string();
+    if trimmed.is_empty() {
+        "item".to_string()
+    } else {
+        trimmed
+    }
 }
 
 fn parse_registry_app_ref(app_ref: &str) -> Result<RegistryAppRef, String> {
@@ -863,6 +1071,11 @@ impl BoundActionHook for GenesisInstallHook {
         let registry_tenant = string_field(params, "RegistryTenant")
             .or_else(|| string_field(params, "registry_tenant"))
             .unwrap_or_else(|| tenant.as_str().to_string());
+        let follow_policy = normalize_follow_policy(
+            &string_field(params, "FollowPolicy")
+                .or_else(|| string_field(params, "follow_policy"))
+                .unwrap_or_default(),
+        )?;
         let installation_id = installation_id(entity_id, &target_tenant, &version_hash);
 
         let cache_root = genesis_cache_root(state, &app_ref);
@@ -900,6 +1113,7 @@ impl BoundActionHook for GenesisInstallHook {
                         closure_id: &closure_id,
                         registry_url: &registry_url,
                         registry_tenant: &registry_tenant,
+                        follow_policy: &follow_policy,
                     },
                 )
                 .await;
@@ -926,6 +1140,7 @@ impl BoundActionHook for GenesisInstallHook {
                     "kind": "genesis_app_install",
                     "appRef": app_ref,
                     "targetTenant": target_tenant,
+                    "followPolicy": follow_policy,
                     "installationId": installation_id,
                     "materializedPath": app_dir,
                     "materializedApps": materialized_apps,
@@ -966,6 +1181,7 @@ struct GenesisInstallMetadata<'a> {
     closure_id: &'a str,
     registry_url: &'a str,
     registry_tenant: &'a str,
+    follow_policy: &'a str,
 }
 
 #[derive(Debug)]
@@ -1010,6 +1226,19 @@ fn resolve_install_app_ref(
     })
 }
 
+fn normalize_follow_policy(raw: &str) -> Result<String, String> {
+    let normalized = raw.trim().to_ascii_lowercase();
+    if normalized.is_empty() || normalized == "pinned" {
+        return Ok("pinned".to_string());
+    }
+    if normalized == "follow_latest" || normalized == "follow-latest" {
+        return Ok("follow_latest".to_string());
+    }
+    Err(format!(
+        "Genesis install follow_policy must be 'pinned' or 'follow_latest', got '{raw}'"
+    ))
+}
+
 async fn record_genesis_install_metadata(
     platform: &PlatformState,
     metadata: GenesisInstallMetadata<'_>,
@@ -1032,12 +1261,37 @@ async fn record_genesis_install_metadata(
         return;
     };
 
+    let existing_record = match ps
+        .get_installed_app(metadata.target_tenant, metadata.app_name)
+        .await
+    {
+        Ok(record) => record,
+        Err(error) => {
+            tracing::warn!(
+                tenant = %metadata.target_tenant,
+                app = %metadata.app_name,
+                app_ref = %metadata.app_ref,
+                error = %error,
+                "Failed to read existing Genesis app provenance before update"
+            );
+            None
+        }
+    };
+    let (pinned_version_hash, current_version_hash) = provenance_hashes_for_policy(
+        metadata.follow_policy,
+        metadata.version_hash,
+        existing_record.as_ref(),
+    );
+
     let record = InstalledAppRecord {
         tenant: metadata.target_tenant.to_string(),
         app_name: digest.app_name,
         source_kind: "genesis".to_string(),
         app_ref: metadata.app_ref.to_string(),
-        version_hash: metadata.version_hash.trim_start_matches('@').to_string(),
+        version_hash: current_version_hash.clone(),
+        pinned_version_hash,
+        current_version_hash,
+        follow_policy: metadata.follow_policy.to_string(),
         closure_id: metadata.closure_id.to_string(),
         registry_url: metadata.registry_url.to_string(),
         registry_tenant: metadata.registry_tenant.to_string(),
@@ -1062,6 +1316,25 @@ async fn record_genesis_install_metadata(
             "Failed to persist Genesis app provenance"
         );
     }
+}
+
+fn provenance_hashes_for_policy(
+    follow_policy: &str,
+    version_hash: &str,
+    existing: Option<&InstalledAppRecord>,
+) -> (String, String) {
+    let current = version_hash.trim_start_matches('@').to_string();
+    let pinned = if follow_policy == "follow_latest" {
+        existing
+            .filter(|record| record.source_kind == "genesis")
+            .map(|record| record.pinned_version_hash.trim_start_matches('@'))
+            .filter(|hash| !hash.is_empty())
+            .unwrap_or(current.as_str())
+            .to_string()
+    } else {
+        current.clone()
+    };
+    (pinned, current)
 }
 
 #[derive(Debug, Clone)]
@@ -1867,11 +2140,95 @@ mod tests {
     }
 
     #[test]
+    fn genesis_install_follow_policy_defaults_to_pinned() {
+        assert_eq!(normalize_follow_policy("").unwrap(), "pinned");
+        assert_eq!(normalize_follow_policy("pinned").unwrap(), "pinned");
+        assert_eq!(
+            normalize_follow_policy("follow-latest").unwrap(),
+            "follow_latest"
+        );
+        assert!(normalize_follow_policy("auto_everywhere").is_err());
+    }
+
+    #[test]
+    fn follow_latest_preserves_original_pinned_hash() {
+        let existing = InstalledAppRecord {
+            tenant: "tenant-a".to_string(),
+            app_name: "notes".to_string(),
+            source_kind: "genesis".to_string(),
+            app_ref: "acme/notes@1111".to_string(),
+            version_hash: "2222".to_string(),
+            pinned_version_hash: "1111".to_string(),
+            current_version_hash: "2222".to_string(),
+            follow_policy: "follow_latest".to_string(),
+            closure_id: "genesis:acme/notes@2222:2222".to_string(),
+            registry_url: "https://genesis.example".to_string(),
+            registry_tenant: "default".to_string(),
+            app_version: "0.1.0".to_string(),
+            bundle_digest: "sha256:bundle".to_string(),
+            spec_digest: "sha256:spec".to_string(),
+            policy_digest: "sha256:policy".to_string(),
+            wasm_digest: "sha256:wasm".to_string(),
+            content_digest: "sha256:content".to_string(),
+            seed_digest: "sha256:seed".to_string(),
+            installed_at: None,
+            last_reconciled_at: None,
+            status: "installed".to_string(),
+        };
+
+        let (pinned, current) =
+            provenance_hashes_for_policy("follow_latest", "@3333", Some(&existing));
+        assert_eq!(pinned, "1111");
+        assert_eq!(current, "3333");
+    }
+
+    #[test]
+    fn pinned_policy_resets_pinned_and_current_hashes() {
+        let existing = InstalledAppRecord {
+            tenant: "tenant-a".to_string(),
+            app_name: "notes".to_string(),
+            source_kind: "genesis".to_string(),
+            app_ref: "acme/notes@1111".to_string(),
+            version_hash: "2222".to_string(),
+            pinned_version_hash: "1111".to_string(),
+            current_version_hash: "2222".to_string(),
+            follow_policy: "follow_latest".to_string(),
+            closure_id: "genesis:acme/notes@2222:2222".to_string(),
+            registry_url: "https://genesis.example".to_string(),
+            registry_tenant: "default".to_string(),
+            app_version: "0.1.0".to_string(),
+            bundle_digest: "sha256:bundle".to_string(),
+            spec_digest: "sha256:spec".to_string(),
+            policy_digest: "sha256:policy".to_string(),
+            wasm_digest: "sha256:wasm".to_string(),
+            content_digest: "sha256:content".to_string(),
+            seed_digest: "sha256:seed".to_string(),
+            installed_at: None,
+            last_reconciled_at: None,
+            status: "installed".to_string(),
+        };
+
+        let (pinned, current) = provenance_hashes_for_policy("pinned", "4444", Some(&existing));
+        assert_eq!(pinned, "4444");
+        assert_eq!(current, "4444");
+    }
+
+    #[test]
     fn registry_git_urls_are_stable() {
         assert_eq!(
             registry_git_url("https://genesis.example/", "temperpaw", "paw-agent"),
             "https://genesis.example/temperpaw/paw-agent.git"
         );
+    }
+
+    #[test]
+    fn registry_app_id_components_match_genesis_convention() {
+        assert_eq!(sanitize_registry_id_component("Acme Labs"), "acme-labs");
+        assert_eq!(
+            sanitize_registry_id_component("katagami_commons"),
+            "katagami-commons"
+        );
+        assert_eq!(sanitize_registry_id_component("../"), "item");
     }
 
     #[test]
