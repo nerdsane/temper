@@ -119,6 +119,7 @@ pub(crate) fn datadog_visible_span_hint_field(attr_key: &str) -> Option<&'static
         "workflow_root_entity_type" => Some("workflow_root_entity_type"),
         "workflow_root_entity_id" => Some("workflow_root_entity_id"),
         "workflow_run_id" => Some("workflow_run_id"),
+        "dd_llmobs_enabled" => Some("dd_llmobs_enabled"),
         "tool.name" => Some("tool.name"),
         "tool.call_id" => Some("tool.call_id"),
         "gen_ai.operation.name" => Some("gen_ai.operation.name"),
