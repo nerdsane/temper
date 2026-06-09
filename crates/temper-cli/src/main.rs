@@ -80,6 +80,9 @@ enum Commands {
         /// Installer identity recorded on the AppInstallation row.
         #[arg(long, default_value = "temper-cli")]
         installer: String,
+        /// Genesis install follow policy: pinned or follow_latest.
+        #[arg(long, default_value = "pinned")]
+        follow_policy: String,
     },
     /// Approve or deny pending governance decisions from the terminal
     Decide {
@@ -290,10 +293,18 @@ async fn async_main() -> anyhow::Result<()> {
             registry_tenant,
             url,
             installer,
+            follow_policy,
         } => match app_ref {
             Some(app_ref) => {
-                install::run_genesis_app(&url, &registry_tenant, &tenant, &app_ref, &installer)
-                    .await?
+                install::run_genesis_app(
+                    &url,
+                    &registry_tenant,
+                    &tenant,
+                    &app_ref,
+                    &installer,
+                    &follow_policy,
+                )
+                .await?
             }
             None => install::run()?,
         },
@@ -494,6 +505,8 @@ mod tests {
             "https://genesis.example",
             "--installer",
             "temperpaw",
+            "--follow-policy",
+            "follow_latest",
         ]);
         match cli.command {
             Commands::Install {
@@ -502,12 +515,14 @@ mod tests {
                 registry_tenant,
                 url,
                 installer,
+                follow_policy,
             } => {
                 assert_eq!(app_ref.as_deref(), Some("acme/notes@abc123"));
                 assert_eq!(tenant, "tenant-a");
                 assert_eq!(registry_tenant, "genesis");
                 assert_eq!(url, "https://genesis.example");
                 assert_eq!(installer, "temperpaw");
+                assert_eq!(follow_policy, "follow_latest");
             }
             _ => panic!("expected Install command"),
         }

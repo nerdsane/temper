@@ -6,7 +6,9 @@ pub const CREATE_TENANT_INSTALLED_APPS_TABLE: &str = "\
 CREATE TABLE IF NOT EXISTS tenant_installed_apps (
     tenant_id TEXT NOT NULL, app_name TEXT NOT NULL, app_version TEXT NOT NULL DEFAULT '',
     source_kind TEXT NOT NULL DEFAULT 'local', app_ref TEXT NOT NULL DEFAULT '',
-    version_hash TEXT NOT NULL DEFAULT '', closure_id TEXT NOT NULL DEFAULT '',
+    version_hash TEXT NOT NULL DEFAULT '', pinned_version_hash TEXT NOT NULL DEFAULT '',
+    current_version_hash TEXT NOT NULL DEFAULT '', follow_policy TEXT NOT NULL DEFAULT 'pinned',
+    closure_id TEXT NOT NULL DEFAULT '',
     registry_url TEXT NOT NULL DEFAULT '', registry_tenant TEXT NOT NULL DEFAULT '',
     bundle_digest TEXT NOT NULL DEFAULT '', spec_digest TEXT NOT NULL DEFAULT '',
     policy_digest TEXT NOT NULL DEFAULT '', wasm_digest TEXT NOT NULL DEFAULT '',
@@ -24,6 +26,12 @@ pub const ALTER_INSTALLED_APPS_ADD_APP_REF: &str =
     "ALTER TABLE tenant_installed_apps ADD COLUMN app_ref TEXT NOT NULL DEFAULT ''";
 pub const ALTER_INSTALLED_APPS_ADD_VERSION_HASH: &str =
     "ALTER TABLE tenant_installed_apps ADD COLUMN version_hash TEXT NOT NULL DEFAULT ''";
+pub const ALTER_INSTALLED_APPS_ADD_PINNED_VERSION_HASH: &str =
+    "ALTER TABLE tenant_installed_apps ADD COLUMN pinned_version_hash TEXT NOT NULL DEFAULT ''";
+pub const ALTER_INSTALLED_APPS_ADD_CURRENT_VERSION_HASH: &str =
+    "ALTER TABLE tenant_installed_apps ADD COLUMN current_version_hash TEXT NOT NULL DEFAULT ''";
+pub const ALTER_INSTALLED_APPS_ADD_FOLLOW_POLICY: &str =
+    "ALTER TABLE tenant_installed_apps ADD COLUMN follow_policy TEXT NOT NULL DEFAULT 'pinned'";
 pub const ALTER_INSTALLED_APPS_ADD_CLOSURE_ID: &str =
     "ALTER TABLE tenant_installed_apps ADD COLUMN closure_id TEXT NOT NULL DEFAULT ''";
 pub const ALTER_INSTALLED_APPS_ADD_REGISTRY_URL: &str =

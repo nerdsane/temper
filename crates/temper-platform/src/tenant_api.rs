@@ -7,6 +7,7 @@
 //! - `POST   /api/tenants/:id/users`    — add a user to a tenant
 //! - `DELETE /api/tenants/:id/users/:user_id` — remove a user from a tenant
 //! - `GET    /api/tenants/:id/users`    — list users for a tenant
+//! - `GET    /api/genesis/apps/follow-updates` — list staged follow-latest rollout status
 
 use axum::extract::{Path, State};
 use axum::http::HeaderMap;
@@ -90,6 +91,10 @@ pub fn tenant_api_router() -> Router<PlatformState> {
         .route("/os-apps", routing::get(list_os_apps))
         .route("/os-apps/{name}", routing::get(get_os_app_guide))
         .route("/genesis/apps/install", routing::post(install_genesis_app))
+        .route(
+            "/genesis/apps/follow-updates",
+            routing::get(list_genesis_follow_updates),
+        )
         .route(
             "/genesis/apps/{owner}/{name}/versions/{hash}/bundle",
             routing::get(get_genesis_app_bundle),
@@ -344,6 +349,17 @@ pub(crate) async fn get_os_app_guide(
             })),
         ),
     }
+}
+
+/// `GET /api/genesis/apps/follow-updates` — read staged follow-latest status.
+pub(crate) async fn list_genesis_follow_updates(
+    State(state): State<PlatformState>,
+) -> impl IntoResponse {
+    let updates = crate::genesis_install::list_genesis_follow_latest_updates(&state).await;
+    (
+        StatusCode::OK,
+        Json(serde_json::json!({ "value": updates })),
+    )
 }
 
 /// `POST /api/genesis/apps/install` — install a pinned Genesis app into this instance.
