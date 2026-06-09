@@ -814,6 +814,7 @@ impl WasmHost for ProductionWasmHost {
             workflow_root_entity_type = tracing::field::Empty,
             workflow_root_entity_id = tracing::field::Empty,
             workflow_run_id = tracing::field::Empty,
+            dd_llmobs_enabled = tracing::field::Empty,
             tool.name = tracing::field::Empty,
             tool.call_id = tracing::field::Empty,
             gen_ai.operation.name = tracing::field::Empty,
@@ -1041,6 +1042,7 @@ impl WasmHost for ProductionWasmHost {
             workflow_root_entity_type = tracing::field::Empty,
             workflow_root_entity_id = tracing::field::Empty,
             workflow_run_id = tracing::field::Empty,
+            dd_llmobs_enabled = tracing::field::Empty,
             tool.name = tracing::field::Empty,
             tool.call_id = tracing::field::Empty,
             gen_ai.operation.name = tracing::field::Empty,
@@ -1239,6 +1241,7 @@ impl WasmHost for ProductionWasmHost {
             workflow_root_entity_type = tracing::field::Empty,
             workflow_root_entity_id = tracing::field::Empty,
             workflow_run_id = tracing::field::Empty,
+            dd_llmobs_enabled = tracing::field::Empty,
         );
         record_invocation_context_on_span(&span, self.invocation_context.as_ref(), "connect_call");
         apply_span_hints(&span, &span_hints);
@@ -1322,6 +1325,7 @@ impl WasmHost for ProductionWasmHost {
             workflow_root_entity_type = tracing::field::Empty,
             workflow_root_entity_id = tracing::field::Empty,
             workflow_run_id = tracing::field::Empty,
+            dd_llmobs_enabled = tracing::field::Empty,
             error.type = tracing::field::Empty,
             error.message = tracing::field::Empty,
         );
@@ -1379,6 +1383,7 @@ impl WasmHost for ProductionWasmHost {
             workflow_root_entity_type = tracing::field::Empty,
             workflow_root_entity_id = tracing::field::Empty,
             workflow_run_id = tracing::field::Empty,
+            dd_llmobs_enabled = tracing::field::Empty,
             error.type = tracing::field::Empty,
             error.message = tracing::field::Empty,
         );
@@ -1629,6 +1634,7 @@ impl WasmHost for ProductionWasmHost {
             workflow_root_entity_type = tracing::field::Empty,
             workflow_root_entity_id = tracing::field::Empty,
             workflow_run_id = tracing::field::Empty,
+            dd_llmobs_enabled = tracing::field::Empty,
             tool.name = tracing::field::Empty,
             tool.call_id = tracing::field::Empty,
             gen_ai.operation.name = tracing::field::Empty,

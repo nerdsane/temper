@@ -78,6 +78,7 @@ fn protects_reserved_observability_fields() {
     assert!(!guest_span_attribute_allowed("trace_id"));
     assert!(!guest_span_attribute_allowed("dd.span_id"));
     assert!(!guest_span_attribute_allowed("_otel.parent_trace_id"));
+    assert!(guest_span_attribute_allowed("dd_llmobs_enabled"));
     assert!(guest_span_attribute_allowed("tool.name"));
     assert!(guest_span_attribute_allowed("gen_ai.operation.name"));
 }

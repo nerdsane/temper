@@ -1773,6 +1773,7 @@ fn build_llm_root_span(
         wasm.module = %module_name,
         gen_ai.system = %provider,
         gen_ai.provider.name = %provider,
+        dd_llmobs_enabled = false,
         gen_ai.system_instructions = tracing::field::Empty,
         gen_ai.request.model = %model,
         gen_ai.operation.name = "chat",
@@ -2227,7 +2228,7 @@ mod tests {
                 .trace_id()
                 .to_string()
         });
-        let llm_trace_id = parent.in_scope(|| {
+        let (llm_trace_id, has_llmobs_auto_conversion_opt_out) = parent.in_scope(|| {
             let ctx = WasmDispatchCtx {
                 entity_ref: WasmEntityRef {
                     tenant: &tenant,
@@ -2240,10 +2241,26 @@ mod tests {
                 mode: WasmDispatchMode::Inline,
             };
             let span = build_llm_root_span(&ctx, &integration, &entity_state, "provider_caller");
-            span.context().span().span_context().trace_id().to_string()
+            let has_opt_out = span
+                .metadata()
+                .map(|metadata| {
+                    metadata
+                        .fields()
+                        .iter()
+                        .any(|field| field.name() == "dd_llmobs_enabled")
+                })
+                .unwrap_or(false);
+            (
+                span.context().span().span_context().trace_id().to_string(),
+                has_opt_out,
+            )
         });
 
         assert_eq!(llm_trace_id, expected_trace_id);
+        assert!(
+            has_llmobs_auto_conversion_opt_out,
+            "root LLM OTel span must opt out of Datadog auto LLMObs conversion"
+        );
     }
 
     #[test]

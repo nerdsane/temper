@@ -159,6 +159,7 @@ impl GuestSpanRegistry {
             workflow_run_id = self.context.workflow_run_id.as_deref().unwrap_or(""),
             observability_event = "wasm_guest.span",
             wasm_guest_span_id = id,
+            dd_llmobs_enabled = tracing::field::Empty,
             action_name = tracing::field::Empty,
             managed_session_id = tracing::field::Empty,
             inner_session_id = tracing::field::Empty,

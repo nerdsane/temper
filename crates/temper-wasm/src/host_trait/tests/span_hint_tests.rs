@@ -98,6 +98,7 @@ fn common_session_tool_and_llm_span_hints_are_datadog_visible_fields() {
         "workflow_root_entity_type",
         "workflow_root_entity_id",
         "workflow_run_id",
+        "dd_llmobs_enabled",
         "tool.name",
         "tool.call_id",
         "gen_ai.operation.name",
