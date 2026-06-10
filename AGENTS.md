@@ -1,6 +1,6 @@
-# Temper — Claude Code Project Guide
+# Temper — Codex Project Guide
 
-> Synchronized with `AGENTS.md` (Codex) — same rules, agent-specific paths. When you change one, mirror the other. Global rules live in `~/.claude/CLAUDE.md` / `~/AGENTS.md`; this file adds what is temper-specific.
+> Synchronized with `CLAUDE.md` (Claude Code) — same rules, agent-specific paths. When you change one, mirror the other. Global rules live in `~/AGENTS.md` / `~/.claude/CLAUDE.md`; this file adds what is temper-specific.
 
 ## Scope & Naming
 
@@ -85,7 +85,7 @@ Agent types are registered in the platform's identity registry. When an agent co
 - **`agentTypeVerified: true`** — the agent's claimed type matches a registered entry; Cedar policies can trust scope decisions based on `agent_type`
 - **`agentTypeVerified: false`** — self-asserted type with no registry match; Cedar policies should treat as untrusted
 
-Cedar policies reference this attribute to distinguish verified agents from unverified ones (e.g., only verified `claude-code` agents can approve plans).
+Cedar policies reference this attribute to distinguish verified agents from unverified ones (e.g., only verified agents can approve plans).
 
 ## Issue Pickup Before Work
 
@@ -150,7 +150,7 @@ cargo test -p temper-platform --test platform_e2e_dst  # E2E shared registry pro
 
 See `docs/HARNESS.md` for the full harness reference with diagrams.
 
-### Automated Enforcement (Claude Code Hooks)
+### Automated Enforcement (Codex Hooks)
 - **Plan Reminder** (advisory): Reminds to create a plan (Temper issue or `.progress/` fallback) before edits
 - **Issue Pickup** (advisory): Warns if no active Temper issue for the session before Write|Edit
 - **Spec Verification** (BLOCKING): L0-L3 cascade on every `.ioa.toml` edit
@@ -170,7 +170,7 @@ See `docs/HARNESS.md` for the full harness reference with diagrams.
    - Invoke the code-reviewer agent
    - Writes a marker file on PASS — the pre-commit gate checks for it
 
-The pre-commit gate BLOCKS `git commit` if either marker is missing. Markers are session-scoped (`/tmp/temper-harness/{project_hash}/{session_id}/`) so multiple Claude sessions don't conflict.
+The pre-commit gate BLOCKS `git commit` if either marker is missing. Markers are session-scoped (`/tmp/temper-harness/{project_hash}/{session_id}/`) so multiple agent sessions don't conflict.
 
 ### Git Hooks (installed via `scripts/setup-hooks.sh`)
 - **Pre-commit**: Integrity check (no TODO/unwrap), spec syntax, dep audit
