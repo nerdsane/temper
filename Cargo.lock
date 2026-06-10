@@ -6567,6 +6567,7 @@ dependencies = [
  "temper-runtime",
  "thiserror 2.0.18",
  "tokio",
+ "tracing",
 ]
 
 [[package]]
@@ -6821,6 +6822,7 @@ dependencies = [
  "serde",
  "serde_json",
  "stateright",
+ "temper-jit",
  "temper-runtime",
  "temper-spec",
  "z3",

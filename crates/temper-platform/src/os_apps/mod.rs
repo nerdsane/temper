@@ -489,11 +489,7 @@ fn scan_skill_dirs(
             Err(_) => continue, // Skip directories without SKILL.md
         };
 
-        // Extract frontmatter (YAML or TOML).
-        let frontmatter = extract_frontmatter(&content);
-
-        let description = frontmatter
-            .description
+        let description = extract_frontmatter_description(&content)
             .or_else(|| extract_description(&content))
             .unwrap_or_else(|| format!("Skill: {skill_name}"));
 
@@ -555,68 +551,35 @@ fn find_adrs(app_dir: &Path) -> Vec<AdrEntry> {
     results
 }
 
-/// Parsed frontmatter from a SKILL.md file.
-struct SkillFrontmatter {
-    #[allow(dead_code)]
-    name: Option<String>,
-    description: Option<String>,
-}
+/// Extract the `description` field from SKILL.md frontmatter.
+/// Supports YAML (`---`) and TOML (`+++`) frontmatter blocks.
+fn extract_frontmatter_description(content: &str) -> Option<String> {
+    let block = if let Some(rest) = content.strip_prefix("---") {
+        let end = rest.find("\n---")?;
+        &rest[..end]
+    } else if let Some(rest) = content.strip_prefix("+++") {
+        let end = rest.find("+++")?;
+        &rest[..end]
+    } else {
+        return None;
+    };
 
-/// Extract frontmatter from SKILL.md content. Supports YAML (`---`) and TOML (`+++`).
-fn extract_frontmatter(content: &str) -> SkillFrontmatter {
-    // Try YAML frontmatter (---)
-    if let Some(rest) = content.strip_prefix("---")
-        && let Some(end) = rest.find("\n---")
-    {
-        let fm = &rest[..end];
-        let mut name = None;
-        let mut description = None;
-        for line in fm.lines() {
-            let trimmed = line.trim();
-            if let Some(val) = trimmed.strip_prefix("name:") {
-                let val = val.trim().trim_matches('"').trim_matches('\'');
-                if !val.is_empty() {
-                    name = Some(val.to_string());
-                }
-            } else if let Some(val) = trimmed.strip_prefix("description:") {
-                let val = val.trim().trim_matches('"').trim_matches('\'');
-                if !val.is_empty() {
-                    description = Some(val.to_string());
-                }
+    for line in block.lines() {
+        let trimmed = line.trim();
+        // YAML `description: value` or TOML `description = "value"`.
+        let val = trimmed.strip_prefix("description:").or_else(|| {
+            trimmed
+                .strip_prefix("description")
+                .and_then(|r| r.trim_start().strip_prefix('='))
+        });
+        if let Some(val) = val {
+            let val = val.trim().trim_matches('"').trim_matches('\'');
+            if !val.is_empty() {
+                return Some(val.to_string());
             }
         }
-        return SkillFrontmatter { name, description };
     }
-
-    // Fall back to TOML frontmatter (+++)
-    if let Some(rest) = content.strip_prefix("+++")
-        && let Some(end) = rest.find("+++")
-    {
-        let fm = &rest[..end];
-        let mut name = None;
-        let mut description = None;
-        for line in fm.lines() {
-            let trimmed = line.trim();
-            if let Some((key, val)) = trimmed.split_once('=') {
-                let key = key.trim();
-                let val = val.trim().trim_matches('"');
-                if val.is_empty() {
-                    continue;
-                }
-                match key {
-                    "name" => name = Some(val.to_string()),
-                    "description" => description = Some(val.to_string()),
-                    _ => {}
-                }
-            }
-        }
-        return SkillFrontmatter { name, description };
-    }
-
-    SkillFrontmatter {
-        name: None,
-        description: None,
-    }
+    None
 }
 
 /// Recursively collect companion files from a skill directory (excluding SKILL.md).

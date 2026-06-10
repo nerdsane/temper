@@ -16,6 +16,9 @@ pub(crate) mod semantics;
 mod stateright_impl;
 pub mod types;
 
+#[cfg(test)]
+mod equivalence_test;
+
 pub use builder::{build_model_from_automaton, build_model_from_ioa};
 pub use types::{
     InvariantKind, LivenessKind, ModelEffect, ModelGuard, ResolvedInvariant, ResolvedLiveness,

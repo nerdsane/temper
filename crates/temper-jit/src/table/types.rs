@@ -103,8 +103,6 @@ pub enum Guard {
     Always,
     /// Current state must be in the given set.
     StateIn(Vec<String>),
-    /// `items.len() >= N` (legacy alias for `CounterMin { var: "items", min: N }`).
-    ItemCountMin(usize),
     /// A named counter must be >= N.
     CounterMin { var: String, min: usize },
     /// A named counter must be < N.
@@ -235,7 +233,6 @@ impl Guard {
         match self {
             Guard::Always => true,
             Guard::StateIn(states) => states.iter().any(|s| s == current_state),
-            Guard::ItemCountMin(n) => ctx.counters.get("items").copied().unwrap_or(0) >= *n,
             Guard::CounterMin { var, min } => ctx.counters.get(var).copied().unwrap_or(0) >= *min,
             Guard::CounterMax { var, max } => ctx.counters.get(var).copied().unwrap_or(0) < *max,
             Guard::BoolTrue(var) => ctx.booleans.get(var).copied().unwrap_or(false),
@@ -283,22 +280,6 @@ mod tests {
         let guard = Guard::StateIn(vec!["Draft".to_string()]);
         let ctx = EvalContext::default();
         assert!(!guard.check("Active", &ctx));
-    }
-
-    #[test]
-    fn guard_item_count_min_passes() {
-        let guard = Guard::ItemCountMin(2);
-        let mut ctx = EvalContext::default();
-        ctx.counters.insert("items".to_string(), 3);
-        assert!(guard.check("Draft", &ctx));
-    }
-
-    #[test]
-    fn guard_item_count_min_fails() {
-        let guard = Guard::ItemCountMin(2);
-        let mut ctx = EvalContext::default();
-        ctx.counters.insert("items".to_string(), 1);
-        assert!(!guard.check("Draft", &ctx));
     }
 
     #[test]

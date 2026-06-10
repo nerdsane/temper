@@ -70,6 +70,10 @@ impl RuntimeMetricInstruments {
         let indexed_by_tenant = state.active_entity_counts_by_tenant();
         let indexed_total: u64 = indexed_by_tenant.values().copied().sum();
         self.indexed_entities.record(indexed_total, &[]);
+        for (tenant, count) in &indexed_by_tenant {
+            self.indexed_entities
+                .record(*count, &[KeyValue::new("tenant", tenant.clone())]);
+        }
 
         if let Some(query_plane) = state.query_plane_store()
             && let Ok(Ok(Some(projected_by_tenant))) = tokio::time::timeout(
@@ -153,8 +157,7 @@ impl ServerState {
         let interval_secs = configured_u64("TEMPER_RUNTIME_METRICS_INTERVAL_SECS", 60, 1, 86_400);
 
         let state = self.clone();
-        tokio::spawn(async move {
-            // determinism-ok: background metrics export loop
+        let export_loop = async move {
             let instruments = RuntimeMetricInstruments::new();
             let mut ticker = tokio::time::interval(Duration::from_secs(interval_secs));
             ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
@@ -164,7 +167,8 @@ impl ServerState {
                 ticker.tick().await;
                 instruments.record(&state).await;
             }
-        });
+        };
+        tokio::spawn(export_loop); // determinism-ok: background metrics export loop
     }
 }
 

@@ -136,8 +136,11 @@ mod tests {
     }
 
     #[test]
-    fn guard_item_count_min() {
-        let guard = Guard::ItemCountMin(3);
+    fn guard_counter_min_via_evaluate() {
+        let guard = Guard::CounterMin {
+            var: "items".into(),
+            min: 3,
+        };
         assert!(!guard.evaluate("Draft", 0));
         assert!(!guard.evaluate("Draft", 2));
         assert!(guard.evaluate("Draft", 3));
@@ -161,7 +164,10 @@ mod tests {
     fn guard_and_combinator() {
         let guard = Guard::And(vec![
             Guard::StateIn(vec!["Draft".into()]),
-            Guard::ItemCountMin(1),
+            Guard::CounterMin {
+                var: "items".into(),
+                min: 1,
+            },
         ]);
 
         assert!(guard.evaluate("Draft", 2));

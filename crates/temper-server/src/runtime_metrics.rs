@@ -4,7 +4,7 @@
 //! (entity actor replay, entity ops).  The periodic canary loop and
 //! sampler live in `state::runtime_metrics` via `spawn_runtime_metrics_loop`.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
 use std::sync::OnceLock;
 use std::time::Duration;
 
@@ -16,9 +16,6 @@ use crate::state::ServerState;
 pub(crate) mod blob_transport;
 
 struct RuntimeMetrics {
-    process_resident_memory_bytes: Gauge<u64>,
-    active_actors: Gauge<u64>,
-    indexed_entities: Gauge<u64>,
     projection_backfill_snapshot_misses_total: Counter<u64>,
     event_replay_duration: Histogram<f64>,
     blob_io_wait_duration_ms: Histogram<f64>,
@@ -81,20 +78,6 @@ fn metrics() -> &'static RuntimeMetrics {
     METRICS.get_or_init(|| {
         let meter = global::meter("temper.runtime");
         RuntimeMetrics {
-            process_resident_memory_bytes: meter
-                .u64_gauge("process_resident_memory_bytes")
-                .with_description("Resident set size (RSS) memory usage in bytes.")
-                .build(),
-            active_actors: meter
-                .u64_gauge("temper_active_actors")
-                .with_description("Number of currently active spawned entity actors.")
-                .build(),
-            indexed_entities: meter
-                .u64_gauge("temper_indexed_entities")
-                .with_description(
-                    "Number of entities currently present in the in-memory query-plane index, reported globally and by tenant.",
-                )
-                .build(),
             projection_backfill_snapshot_misses_total: meter
                 .u64_counter("temper_projection_backfill_snapshot_misses_total")
                 .with_description(
@@ -343,14 +326,14 @@ fn metrics() -> &'static RuntimeMetrics {
     })
 }
 
-/// Record actor and entity counts from the current server state snapshot.
+/// Record per-actor mailbox telemetry from the current server state snapshot.
+///
+/// Gauge-style counts (active actors, indexed entities, RSS) are owned by the
+/// periodic sampler in `state::runtime_metrics` — emitting them here too would
+/// double-report the same series from a second meter.
 pub fn record_server_state_metrics(state: &ServerState) {
     if let Ok(registry) = state.actor_registry.read() {
-        record_active_actor_count(registry.len());
         record_actor_mailbox_metrics(&registry);
-    }
-    if let Ok(index) = state.entity_index.read() {
-        record_active_entity_counts(&index);
     }
 }
 
@@ -377,30 +360,6 @@ fn record_actor_mailbox_metrics(
         if count > 0 {
             record_actor_mailbox_utilization(&entity_type, sum_util / count as f64);
         }
-    }
-}
-
-/// Record current active actor count.
-pub fn record_active_actor_count(count: usize) {
-    metrics().active_actors.record(count as u64, &[]);
-}
-
-/// Record active entity counts by tenant and global total.
-pub fn record_active_entity_counts(index: &BTreeMap<String, BTreeSet<String>>) {
-    let mut by_tenant: BTreeMap<String, u64> = BTreeMap::new();
-    for (index_key, ids) in index {
-        if let Some((tenant, _entity_type)) = index_key.split_once(':') {
-            *by_tenant.entry(tenant.to_string()).or_insert(0) += ids.len() as u64;
-        }
-    }
-
-    let total: u64 = by_tenant.values().copied().sum();
-    metrics().indexed_entities.record(total, &[]);
-
-    for (tenant, count) in by_tenant {
-        metrics()
-            .indexed_entities
-            .record(count, &[KeyValue::new("tenant", tenant)]);
     }
 }
 
@@ -435,11 +394,6 @@ pub fn record_blob_local_fast_path_request(method: &str) {
     metrics()
         .blob_local_fast_path_requests_total
         .add(1, &[KeyValue::new("method", method.to_string())]);
-}
-
-/// Record process resident memory usage.
-pub fn record_process_resident_memory_bytes(bytes: u64) {
-    metrics().process_resident_memory_bytes.record(bytes, &[]);
 }
 
 /// Record a WASM integration dispatch that fell back to the default timeout
@@ -926,60 +880,4 @@ pub fn record_curation_job_outcome(job_type: &str, outcome: &'static str) {
             KeyValue::new("outcome", outcome),
         ],
     );
-}
-
-/// Read process resident memory (RSS) in bytes from Linux procfs.
-#[cfg(target_os = "linux")]
-pub fn read_process_resident_memory_bytes() -> Option<u64> {
-    let status = std::fs::read_to_string("/proc/self/status").ok()?; // determinism-ok: procfs RSS read for observability only
-    let vm_rss_line = status.lines().find(|line| line.starts_with("VmRSS:"))?;
-    let mut parts = vm_rss_line.split_whitespace();
-    let _label = parts.next()?;
-    let value_kb = parts.next()?.parse::<u64>().ok()?;
-    Some(value_kb.saturating_mul(1024))
-}
-
-/// Read process resident memory (RSS) in bytes from Linux procfs.
-#[cfg(target_os = "macos")]
-#[allow(deprecated)]
-pub fn read_process_resident_memory_bytes() -> Option<u64> {
-    use std::ptr;
-
-    let mut info = libc::mach_task_basic_info {
-        virtual_size: 0,
-        resident_size: 0,
-        resident_size_max: 0,
-        user_time: libc::time_value_t {
-            seconds: 0,
-            microseconds: 0,
-        },
-        system_time: libc::time_value_t {
-            seconds: 0,
-            microseconds: 0,
-        },
-        policy: 0,
-        suspend_count: 0,
-    };
-    let mut count = libc::MACH_TASK_BASIC_INFO_COUNT;
-
-    // determinism-ok: local task_info call for observability only
-    let status = unsafe {
-        libc::task_info(
-            libc::mach_task_self(),
-            libc::MACH_TASK_BASIC_INFO,
-            ptr::addr_of_mut!(info).cast::<libc::integer_t>(),
-            &mut count,
-        )
-    };
-
-    if status == libc::KERN_SUCCESS {
-        Some(info.resident_size)
-    } else {
-        None
-    }
-}
-
-#[cfg(not(any(target_os = "linux", target_os = "macos")))]
-pub fn read_process_resident_memory_bytes() -> Option<u64> {
-    None
 }

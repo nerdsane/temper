@@ -179,7 +179,9 @@ async fn http_endpoint_fallback(
     let tenant_id = match tenant_header {
         Some(t) if !t.is_empty() => TenantId::new(&t),
         _ => {
-            let registry = state.registry.read().unwrap();
+            let Ok(registry) = state.registry.read() else {
+                return http_404_response(uri.path());
+            };
             let first_non_system = registry
                 .tenant_ids()
                 .into_iter()
@@ -258,7 +260,7 @@ async fn dispatch_matched_route(
     // ADR-0057 inbound exchange end-to-end streaming — without it,
     // even SDK-streaming guests are bounded by the buffered limit.
     let pump_streams = streams.clone();
-    tokio::spawn(async move {
+    let body_pump = async move {
         use tokio_stream::StreamExt as _;
         let mut stream = body.into_data_stream();
         while let Some(chunk_result) = stream.next().await {
@@ -281,7 +283,8 @@ async fn dispatch_matched_route(
             }
         }
         let _ = pump_streams.close(kernel_request_body).await;
-    });
+    };
+    tokio::spawn(body_pump); // determinism-ok: production HTTP body pump, not on simulation path
 
     // Build the invocation context.
     let header_pairs: Vec<(String, String)> = headers
@@ -354,7 +357,7 @@ async fn dispatch_matched_route(
         response_body_handle = guest_response_body.0,
         "HttpEndpoint dispatch → invoking WASM"
     );
-    let invoke_task = tokio::spawn(async move {
+    let invoke_fut = async move {
         match engine
             .invoke_with_blobs(
                 &invoke_hash,
@@ -383,7 +386,8 @@ async fn dispatch_matched_route(
                 );
             }
         }
-    });
+    };
+    let invoke_task = tokio::spawn(invoke_fut); // determinism-ok: production HTTP WASM dispatch, not on simulation path
 
     // Await the guest's response head — bounded by the route's
     // configured timeout so a bad guest doesn't wedge the request.

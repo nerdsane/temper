@@ -14,3 +14,9 @@ proptest = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 z3 = { version = "0.19" }
+
+[dev-dependencies]
+# Production-interpreter counterpart for the guard-equivalence test
+# (model/equivalence_test.rs). Dev-only: production temper-jit must never
+# depend on temper-verify, and this direction keeps it that way.
+temper-jit = { workspace = true }

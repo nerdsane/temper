@@ -293,37 +293,31 @@ async fn create_issue_for_finding(
         )
         .await?;
 
+    // Walk the issue into Todo. The issue itself is already persisted, so a
+    // failed transition leaves it in an earlier state rather than failing
+    // materialization — but it must be visible, not silently swallowed.
     let system_ctx = AgentContext::for_service("evolution-engine");
-    let _ = state
-        .dispatch_tenant_action(
-            tenant,
-            "Issue",
-            &issue_id,
+    let setup_actions = [
+        (
             "SetPriority",
             serde_json::json!({ "level": issue_priority_level(finding.priority_score) }),
-            &system_ctx,
-        )
-        .await;
-    let _ = state
-        .dispatch_tenant_action(
-            tenant,
-            "Issue",
-            &issue_id,
-            "MoveToTriage",
-            serde_json::json!({}),
-            &system_ctx,
-        )
-        .await;
-    let _ = state
-        .dispatch_tenant_action(
-            tenant,
-            "Issue",
-            &issue_id,
-            "MoveToTodo",
-            serde_json::json!({}),
-            &system_ctx,
-        )
-        .await;
+        ),
+        ("MoveToTriage", serde_json::json!({})),
+        ("MoveToTodo", serde_json::json!({})),
+    ];
+    for (action, params) in setup_actions {
+        if let Err(e) = state
+            .dispatch_tenant_action(tenant, "Issue", &issue_id, action, params, &system_ctx)
+            .await
+        {
+            tracing::warn!(
+                issue_id = %issue_id,
+                action,
+                error = %e,
+                "issue setup transition failed; issue left in earlier state"
+            );
+        }
+    }
 
     Ok(issue_id)
 }

@@ -212,7 +212,13 @@ pub(super) async fn persist_insights(
             priority_score = insight.priority_score,
             "evolution.insight"
         );
-        let _ = persist_record(state, "Insight", &insight.header, insight).await;
+        if let Err(e) = persist_record(state, "Insight", &insight.header, insight).await {
+            tracing::warn!(
+                record_id = %insight.header.id,
+                error = %e,
+                "failed to persist insight record"
+            );
+        }
 
         let insight_id = next_system_entity_id("INS");
         create_system_entity_logged(

@@ -2497,7 +2497,7 @@ fn trajectory_matched_policy_ids_json(entry: &TrajectoryEntry) -> Option<String>
     entry
         .matched_policy_ids
         .as_ref()
-        .map(|ids| serde_json::to_string(ids).unwrap_or_default())
+        .and_then(|ids| serde_json::to_string(ids).ok())
 }
 
 #[async_trait::async_trait]

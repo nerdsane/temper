@@ -156,7 +156,10 @@ impl DiscordTransport {
         let body = resp.text().await.unwrap_or_default();
         let data: serde_json::Value = match serde_json::from_str(&body) {
             Ok(v) => v,
-            Err(_) => return,
+            Err(e) => {
+                tracing::warn!(error = %e, "discord: failed to parse sessions file query response");
+                return;
+            }
         };
 
         // Extract the first matching file entity.
@@ -186,7 +189,14 @@ impl DiscordTransport {
             .await
         {
             Ok(r) if r.status().is_success() => r,
-            _ => return,
+            Ok(r) => {
+                tracing::warn!(status = %r.status(), "discord: failed to read sessions file content");
+                return;
+            }
+            Err(e) => {
+                tracing::warn!(error = %e, "discord: failed to read sessions file content");
+                return;
+            }
         };
 
         let content = content_resp.text().await.unwrap_or_default();

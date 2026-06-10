@@ -205,6 +205,20 @@ pub struct WasmEngine {
     cache: RwLock<BTreeMap<String, Arc<CachedModule>>>,
 }
 
+/// Build a linker with all Temper host functions, plus the WASI preview1
+/// shims when the module imports `wasi_snapshot_preview1`.
+fn build_linker(engine: &Engine, needs_wasi: bool) -> Result<Linker<HostState>, WasmError> {
+    let mut linker = Linker::new(engine);
+    host_functions::link_host_functions(&mut linker)?;
+    if needs_wasi {
+        preview1::add_to_linker_sync(&mut linker, |state: &mut HostState| {
+            state.wasi_ctx.as_mut().expect("wasi_ctx must be Some")
+        })
+        .map_err(|e| WasmError::Compilation(format!("failed to link WASI: {e}")))?;
+    }
+    Ok(linker)
+}
+
 impl WasmEngine {
     /// Create a new WASM engine with fuel metering and epoch interruption enabled.
     pub fn new() -> Result<Self, WasmError> {
@@ -264,22 +278,12 @@ impl WasmEngine {
             .any(|imp| imp.module() == "wasi_snapshot_preview1");
 
         let (instance_pre, instance_pre_wasi) = if needs_wasi {
-            let mut linker = Linker::new(&self.engine);
-            host_functions::link_host_functions(&mut linker)
-                .map_err(|e| WasmError::Compilation(format!("pre-link host functions: {e}")))?;
-            preview1::add_to_linker_sync(&mut linker, |state: &mut HostState| {
-                state.wasi_ctx.as_mut().expect("wasi_ctx must be Some")
-            })
-            .map_err(|e| WasmError::Compilation(format!("pre-link WASI: {e}")))?;
-            let pre = linker
+            let pre = build_linker(&self.engine, true)?
                 .instantiate_pre(&module)
                 .map_err(|e| WasmError::Compilation(format!("pre-instantiate WASI: {e}")))?;
             (None, Some(pre))
         } else {
-            let mut linker = Linker::new(&self.engine);
-            host_functions::link_host_functions(&mut linker)
-                .map_err(|e| WasmError::Compilation(format!("pre-link host functions: {e}")))?;
-            let pre = linker
+            let pre = build_linker(&self.engine, false)?
                 .instantiate_pre(&module)
                 .map_err(|e| WasmError::Compilation(format!("pre-instantiate: {e}")))?;
             (Some(pre), None)
@@ -508,32 +512,21 @@ impl WasmEngine {
                 prelinked = true,
             );
             let _entered = phase.enter();
-            if needs_wasi {
-                if let Some(ref pre) = cached.instance_pre_wasi {
-                    pre.instantiate(&mut store)
-                        .map_err(|e| WasmError::Instantiation(e.to_string()))?
-                } else {
+            let prelinked = if needs_wasi {
+                cached.instance_pre_wasi.as_ref()
+            } else {
+                cached.instance_pre.as_ref()
+            };
+            match prelinked {
+                Some(pre) => pre
+                    .instantiate(&mut store)
+                    .map_err(|e| WasmError::Instantiation(e.to_string()))?,
+                None => {
                     phase.record("prelinked", false);
-                    let mut linker = Linker::new(&engine);
-                    host_functions::link_host_functions(&mut linker)?;
-                    preview1::add_to_linker_sync(&mut linker, |state: &mut HostState| {
-                        state.wasi_ctx.as_mut().expect("wasi_ctx must be Some")
-                    })
-                    .map_err(|e| WasmError::Compilation(format!("failed to link WASI: {e}")))?;
-                    linker
+                    build_linker(&engine, needs_wasi)?
                         .instantiate(&mut store, &cached.module)
                         .map_err(|e| WasmError::Instantiation(e.to_string()))?
                 }
-            } else if let Some(ref pre) = cached.instance_pre {
-                pre.instantiate(&mut store)
-                    .map_err(|e| WasmError::Instantiation(e.to_string()))?
-            } else {
-                phase.record("prelinked", false);
-                let mut linker = Linker::new(&engine);
-                host_functions::link_host_functions(&mut linker)?;
-                linker
-                    .instantiate(&mut store, &cached.module)
-                    .map_err(|e| WasmError::Instantiation(e.to_string()))?
             }
         };
 

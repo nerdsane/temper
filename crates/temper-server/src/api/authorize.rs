@@ -107,14 +107,6 @@ pub(crate) struct AuditRequest {
     request_body: Option<serde_json::Value>,
     #[serde(default)]
     intent: Option<String>,
-    /// Tool result summary (accepted for forward compatibility).
-    #[serde(default)]
-    #[allow(dead_code)]
-    result: Option<String>,
-    /// Execution duration in milliseconds (accepted for forward compatibility).
-    #[serde(default)]
-    #[allow(dead_code)]
-    duration_ms: Option<u64>,
 }
 
 /// POST /api/audit — record a tool invocation in the trajectory log.
