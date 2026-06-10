@@ -1,6 +1,11 @@
 //! Observability contract tests for WASM dispatch attribution.
 
-const WASM_DISPATCH_SOURCE: &str = include_str!("../src/state/dispatch/wasm.rs");
+/// The dispatch core plus its phases submodule, which owns the
+/// `WASM_DISPATCH_PHASE_*` constants the core instruments with.
+const WASM_DISPATCH_SOURCE: &str = concat!(
+    include_str!("../src/state/dispatch/wasm.rs"),
+    include_str!("../src/state/dispatch/wasm/phases.rs"),
+);
 
 #[test]
 fn wasm_dispatch_emits_integration_envelope_phase_spans() {
