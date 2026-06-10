@@ -292,9 +292,10 @@ impl Context {
             if len == -2 {
                 return Err("HTTP response too large for buffer".to_string());
             }
-            if len <= 0 {
-                return Err("HTTP call returned empty response".to_string());
+            if len < 0 {
+                return Err(format!("HTTP call failed with code {len}: {method} {url}"));
             }
+            // len == 0 is a legitimate empty payload, not an error.
             let slice = core::slice::from_raw_parts(ptr, len as usize);
             String::from_utf8_lossy(slice).to_string()
         };
@@ -339,8 +340,12 @@ impl Context {
             if len == -2 {
                 return Err("HTTP batch response too large for buffer".to_string());
             }
-            if len <= 0 {
-                return Err("HTTP batch call returned empty response".to_string());
+            if len < 0 {
+                return Err(format!("HTTP batch call failed with code {len}"));
+            }
+            if len == 0 {
+                // Legitimate empty payload (no responses), not an error.
+                return Ok(Vec::new());
             }
             let slice = core::slice::from_raw_parts(ptr, len as usize);
             String::from_utf8_lossy(slice).to_string()
@@ -385,7 +390,11 @@ impl Context {
             if len == -2 {
                 return Err("Connect response too large for buffer".to_string());
             }
-            if len <= 0 {
+            if len < 0 {
+                return Err(format!("Connect call failed with code {len}: {url}"));
+            }
+            if len == 0 {
+                // Legitimate empty payload (no frames), not an error.
                 return Ok(Vec::new());
             }
             let slice = core::slice::from_raw_parts(ptr, len as usize);
@@ -408,6 +417,15 @@ impl Context {
             );
             if len < 0 {
                 return Err(format!("failed to read secret '{key}'"));
+            }
+            // The host returns the secret's full length even when it exceeds
+            // the buffer (nothing was written in that case). Reading `len`
+            // bytes unconditionally would over-read the fixed SECRET_BUF.
+            if len as usize > host::SECRET_BUF_LEN {
+                return Err(format!(
+                    "secret '{key}' is {len} bytes, exceeds buffer of {}",
+                    host::SECRET_BUF_LEN
+                ));
             }
             let slice = core::slice::from_raw_parts(ptr, len as usize);
             Ok(String::from_utf8_lossy(slice).to_string())
@@ -541,7 +559,12 @@ impl Context {
             if len == -2 {
                 return Err("evaluate_spec response too large for buffer".to_string());
             }
-            if len <= 0 {
+            if len < 0 {
+                return Err(format!("evaluate_spec failed with code {len}"));
+            }
+            if len == 0 {
+                // The host always writes a JSON object on success, so an
+                // empty response is an error, not an empty success.
                 return Err("evaluate_spec returned empty response".to_string());
             }
             let slice = core::slice::from_raw_parts(ptr, len as usize);

@@ -112,6 +112,108 @@ fn read_guest_string(caller: &mut Caller<'_, HostState>, ptr: i32, len: i32) -> 
     String::from_utf8(buf).map_err(|_| ())
 }
 
+/// Read `len` bytes of guest memory at `ptr`.
+///
+/// On failure (negative pointer/length or out-of-bounds read) emits a
+/// `tracing::warn!` naming the host function and operand being read, and
+/// returns `Err(())` so the caller can return its ABI error sentinel
+/// instead of acting on uninitialized buffer contents.
+fn read_guest_bytes(
+    caller: &Caller<'_, HostState>,
+    memory: &wasmtime::Memory,
+    ptr: i32,
+    len: i32,
+    host_fn: &'static str,
+    what: &'static str,
+) -> Result<Vec<u8>, ()> {
+    if ptr < 0 || len < 0 {
+        tracing::warn!(
+            host_fn,
+            operand = what,
+            ptr,
+            len,
+            "guest passed negative pointer or length; returning error to guest"
+        );
+        return Err(());
+    }
+    let mut buf = vec![0u8; len as usize];
+    if let Err(error) = memory.read(caller, ptr as usize, &mut buf) {
+        tracing::warn!(
+            host_fn,
+            operand = what,
+            error = %error,
+            "guest memory read failed; returning error to guest"
+        );
+        return Err(());
+    }
+    Ok(buf)
+}
+
+/// Read `len` bytes of guest memory at `ptr` as a lossy UTF-8 string.
+/// Same warn-and-`Err(())` contract as [`read_guest_bytes`].
+fn read_guest_lossy(
+    caller: &Caller<'_, HostState>,
+    memory: &wasmtime::Memory,
+    ptr: i32,
+    len: i32,
+    host_fn: &'static str,
+    what: &'static str,
+) -> Result<String, ()> {
+    let buf = read_guest_bytes(caller, memory, ptr, len, host_fn, what)?;
+    Ok(String::from_utf8_lossy(&buf).to_string())
+}
+
+/// Write `bytes` into guest memory at `ptr`.
+///
+/// On failure emits a `tracing::warn!` naming the host function and operand
+/// being written, and returns `Err(())` so the caller can return its ABI
+/// error sentinel instead of reporting success for a write that never landed.
+fn write_guest_bytes(
+    caller: &mut Caller<'_, HostState>,
+    memory: &wasmtime::Memory,
+    ptr: i32,
+    bytes: &[u8],
+    host_fn: &'static str,
+    what: &'static str,
+) -> Result<(), ()> {
+    if ptr < 0 {
+        tracing::warn!(
+            host_fn,
+            operand = what,
+            ptr,
+            "guest passed negative pointer; returning error to guest"
+        );
+        return Err(());
+    }
+    if let Err(error) = memory.write(caller, ptr as usize, bytes) {
+        tracing::warn!(
+            host_fn,
+            operand = what,
+            error = %error,
+            "guest memory write failed; returning error to guest"
+        );
+        return Err(());
+    }
+    Ok(())
+}
+
+/// Parse a guest-supplied headers buffer (JSON array of `[key, value]`
+/// pairs). On parse failure emits a `tracing::warn!` and returns `Err(())`
+/// so the caller fails the call instead of silently sending empty headers.
+fn parse_guest_headers(hdr_buf: &[u8], host_fn: &'static str) -> Result<Vec<(String, String)>, ()> {
+    match serde_json::from_slice(hdr_buf) {
+        Ok(headers) => Ok(headers),
+        Err(error) => {
+            tracing::warn!(
+                host_fn,
+                error = %error,
+                "guest passed malformed headers JSON; failing the call"
+            );
+            Err(())
+        }
+    }
+}
+
 #[derive(Debug, serde::Deserialize)]
 struct HostHttpBatchRequest {
     method: String,
@@ -243,21 +345,26 @@ pub(super) fn link_host_functions(linker: &mut Linker<HostState>) -> Result<(), 
              msg_ptr: i32,
              msg_len: i32| {
                 let memory = caller.get_export("memory").and_then(|e| e.into_memory());
-                if let Some(memory) = memory {
-                    let mut level_buf = vec![0u8; level_len as usize];
-                    let mut msg_buf = vec![0u8; msg_len as usize];
-                    let _ = memory.read(&caller, level_ptr as usize, &mut level_buf);
-                    let _ = memory.read(&caller, msg_ptr as usize, &mut msg_buf);
-                    let level = String::from_utf8_lossy(&level_buf);
-                    let msg = String::from_utf8_lossy(&msg_buf);
-                    let _guest_span = caller.data().guest_spans.enter_active();
-                    caller.data().host.log(&level, &msg);
-                }
+                let Some(memory) = memory else {
+                    return;
+                };
+                let Ok(level) =
+                    read_guest_lossy(&caller, &memory, level_ptr, level_len, "host_log", "level")
+                else {
+                    return;
+                };
+                let Ok(msg) =
+                    read_guest_lossy(&caller, &memory, msg_ptr, msg_len, "host_log", "message")
+                else {
+                    return;
+                };
+                let _guest_span = caller.data().guest_spans.enter_active();
+                caller.data().host.log(&level, &msg);
             },
         )
         .map_err(|e| WasmError::Compilation(format!("failed to link host_log: {e}")))?;
 
-    // host_get_context(buf_ptr, buf_len) -> actual_len
+    // host_get_context(buf_ptr, buf_len) -> actual_len, or -1 on memory error
     linker
         .func_wrap(
             "env",
@@ -269,8 +376,20 @@ pub(super) fn link_host_functions(linker: &mut Linker<HostState>) -> Result<(), 
                     return ctx_bytes.len() as i32; // Return needed size
                 }
                 let memory = caller.get_export("memory").and_then(|e| e.into_memory());
-                if let Some(memory) = memory {
-                    let _ = memory.write(&mut caller, buf_ptr as usize, ctx_bytes);
+                let Some(memory) = memory else {
+                    return -1;
+                };
+                if write_guest_bytes(
+                    &mut caller,
+                    &memory,
+                    buf_ptr,
+                    ctx_bytes,
+                    "host_get_context",
+                    "context",
+                )
+                .is_err()
+                {
+                    return -1;
                 }
                 ctx_bytes.len() as i32
             },
@@ -284,12 +403,16 @@ pub(super) fn link_host_functions(linker: &mut Linker<HostState>) -> Result<(), 
             "host_set_result",
             |mut caller: Caller<'_, HostState>, ptr: i32, len: i32| {
                 let memory = caller.get_export("memory").and_then(|e| e.into_memory());
-                if let Some(memory) = memory {
-                    let mut buf = vec![0u8; len as usize];
-                    let _ = memory.read(&caller, ptr as usize, &mut buf);
-                    if let Ok(s) = String::from_utf8(buf) {
-                        caller.data_mut().result_json = Some(s);
-                    }
+                let Some(memory) = memory else {
+                    return;
+                };
+                let Ok(buf) =
+                    read_guest_bytes(&caller, &memory, ptr, len, "host_set_result", "result")
+                else {
+                    return;
+                };
+                if let Ok(s) = String::from_utf8(buf) {
+                    caller.data_mut().result_json = Some(s);
                 }
             },
         )
@@ -507,9 +630,11 @@ pub(super) fn link_host_functions(linker: &mut Linker<HostState>) -> Result<(), 
                 let memory = caller.get_export("memory").and_then(|e| e.into_memory());
                 let Some(memory) = memory else { return -1 };
 
-                let mut key_buf = vec![0u8; key_len as usize];
-                let _ = memory.read(&caller, key_ptr as usize, &mut key_buf);
-                let key = String::from_utf8_lossy(&key_buf);
+                let Ok(key) =
+                    read_guest_lossy(&caller, &memory, key_ptr, key_len, "host_get_secret", "key")
+                else {
+                    return -1;
+                };
 
                 let _guest_span = caller.data().guest_spans.enter_active();
                 match caller.data().host.get_secret(&key) {
@@ -518,7 +643,18 @@ pub(super) fn link_host_functions(linker: &mut Linker<HostState>) -> Result<(), 
                         if (buf_len as usize) < secret_bytes.len() {
                             return secret_bytes.len() as i32;
                         }
-                        let _ = memory.write(&mut caller, buf_ptr as usize, secret_bytes);
+                        if write_guest_bytes(
+                            &mut caller,
+                            &memory,
+                            buf_ptr,
+                            secret_bytes,
+                            "host_get_secret",
+                            "secret",
+                        )
+                        .is_err()
+                        {
+                            return -1;
+                        }
                         secret_bytes.len() as i32
                     }
                     Err(_) => -1,
@@ -553,29 +689,57 @@ pub(super) fn link_host_functions(linker: &mut Linker<HostState>) -> Result<(), 
                 };
 
                 // Read method
-                let mut method_buf = vec![0u8; method_len as usize];
-                let _ = memory.read(&caller, method_ptr as usize, &mut method_buf);
-                let method = String::from_utf8_lossy(&method_buf).to_string();
+                let Ok(method) = read_guest_lossy(
+                    &caller,
+                    &memory,
+                    method_ptr,
+                    method_len,
+                    "host_http_call",
+                    "method",
+                ) else {
+                    return -1;
+                };
 
                 // Read URL
-                let mut url_buf = vec![0u8; url_len as usize];
-                let _ = memory.read(&caller, url_ptr as usize, &mut url_buf);
-                let url = String::from_utf8_lossy(&url_buf).to_string();
+                let Ok(url) =
+                    read_guest_lossy(&caller, &memory, url_ptr, url_len, "host_http_call", "url")
+                else {
+                    return -1;
+                };
 
                 // Read headers (JSON array of [key, value] pairs)
                 let headers: Vec<(String, String)> = if headers_len > 0 {
-                    let mut hdr_buf = vec![0u8; headers_len as usize];
-                    let _ = memory.read(&caller, headers_ptr as usize, &mut hdr_buf);
-                    serde_json::from_slice(&hdr_buf).unwrap_or_default()
+                    let Ok(hdr_buf) = read_guest_bytes(
+                        &caller,
+                        &memory,
+                        headers_ptr,
+                        headers_len,
+                        "host_http_call",
+                        "headers",
+                    ) else {
+                        return -1;
+                    };
+                    let Ok(headers) = parse_guest_headers(&hdr_buf, "host_http_call") else {
+                        return -1;
+                    };
+                    headers
                 } else {
                     vec![]
                 };
 
                 // Read body
                 let body = if body_len > 0 {
-                    let mut body_buf = vec![0u8; body_len as usize];
-                    let _ = memory.read(&caller, body_ptr as usize, &mut body_buf);
-                    String::from_utf8_lossy(&body_buf).to_string()
+                    let Ok(body) = read_guest_lossy(
+                        &caller,
+                        &memory,
+                        body_ptr,
+                        body_len,
+                        "host_http_call",
+                        "body",
+                    ) else {
+                        return -1;
+                    };
+                    body
                 } else {
                     String::new()
                 };
@@ -597,7 +761,18 @@ pub(super) fn link_host_functions(linker: &mut Linker<HostState>) -> Result<(), 
                         if resp_bytes.len() > result_buf_len as usize {
                             return -2; // buffer too small
                         }
-                        let _ = memory.write(&mut caller, result_buf_ptr as usize, resp_bytes);
+                        if write_guest_bytes(
+                            &mut caller,
+                            &memory,
+                            result_buf_ptr,
+                            resp_bytes,
+                            "host_http_call",
+                            "response",
+                        )
+                        .is_err()
+                        {
+                            return -1;
+                        }
                         resp_bytes.len() as i32
                     }
                     Err(_) => -1,
@@ -625,8 +800,16 @@ pub(super) fn link_host_functions(linker: &mut Linker<HostState>) -> Result<(), 
                 };
 
                 let requests: Vec<HostHttpBatchRequest> = if requests_len > 0 {
-                    let mut requests_buf = vec![0u8; requests_len as usize];
-                    let _ = memory.read(&caller, requests_ptr as usize, &mut requests_buf);
+                    let Ok(requests_buf) = read_guest_bytes(
+                        &caller,
+                        &memory,
+                        requests_ptr,
+                        requests_len,
+                        "host_http_call_batch",
+                        "requests",
+                    ) else {
+                        return -1;
+                    };
                     match serde_json::from_slice(&requests_buf) {
                         Ok(parsed) => parsed,
                         Err(_) => return -1,
@@ -669,7 +852,18 @@ pub(super) fn link_host_functions(linker: &mut Linker<HostState>) -> Result<(), 
                         if response_bytes.len() > result_buf_len as usize {
                             return -2;
                         }
-                        let _ = memory.write(&mut caller, result_buf_ptr as usize, response_bytes);
+                        if write_guest_bytes(
+                            &mut caller,
+                            &memory,
+                            result_buf_ptr,
+                            response_bytes,
+                            "host_http_call_batch",
+                            "responses",
+                        )
+                        .is_err()
+                        {
+                            return -1;
+                        }
                         response_bytes.len() as i32
                     }
                     Err(_) => -1,
@@ -703,24 +897,50 @@ pub(super) fn link_host_functions(linker: &mut Linker<HostState>) -> Result<(), 
                 };
 
                 // Read URL
-                let mut url_buf = vec![0u8; url_len as usize];
-                let _ = memory.read(&caller, url_ptr as usize, &mut url_buf);
-                let url = String::from_utf8_lossy(&url_buf).to_string();
+                let Ok(url) = read_guest_lossy(
+                    &caller,
+                    &memory,
+                    url_ptr,
+                    url_len,
+                    "host_connect_call",
+                    "url",
+                ) else {
+                    return -1;
+                };
 
                 // Read headers (JSON array of [key, value] pairs)
                 let headers: Vec<(String, String)> = if headers_len > 0 {
-                    let mut hdr_buf = vec![0u8; headers_len as usize];
-                    let _ = memory.read(&caller, headers_ptr as usize, &mut hdr_buf);
-                    serde_json::from_slice(&hdr_buf).unwrap_or_default()
+                    let Ok(hdr_buf) = read_guest_bytes(
+                        &caller,
+                        &memory,
+                        headers_ptr,
+                        headers_len,
+                        "host_connect_call",
+                        "headers",
+                    ) else {
+                        return -1;
+                    };
+                    let Ok(headers) = parse_guest_headers(&hdr_buf, "host_connect_call") else {
+                        return -1;
+                    };
+                    headers
                 } else {
                     vec![]
                 };
 
                 // Read body
                 let body = if body_len > 0 {
-                    let mut body_buf = vec![0u8; body_len as usize];
-                    let _ = memory.read(&caller, body_ptr as usize, &mut body_buf);
-                    String::from_utf8_lossy(&body_buf).to_string()
+                    let Ok(body) = read_guest_lossy(
+                        &caller,
+                        &memory,
+                        body_ptr,
+                        body_len,
+                        "host_connect_call",
+                        "body",
+                    ) else {
+                        return -1;
+                    };
+                    body
                 } else {
                     String::new()
                 };
@@ -742,7 +962,18 @@ pub(super) fn link_host_functions(linker: &mut Linker<HostState>) -> Result<(), 
                         if json_bytes.len() > result_buf_len as usize {
                             return -2; // buffer too small
                         }
-                        let _ = memory.write(&mut caller, result_buf_ptr as usize, json_bytes);
+                        if write_guest_bytes(
+                            &mut caller,
+                            &memory,
+                            result_buf_ptr,
+                            json_bytes,
+                            "host_connect_call",
+                            "frames",
+                        )
+                        .is_err()
+                        {
+                            return -1;
+                        }
                         json_bytes.len() as i32
                     }
                     Err(_) => -1,
@@ -780,38 +1011,79 @@ pub(super) fn link_host_functions(linker: &mut Linker<HostState>) -> Result<(), 
                 };
 
                 // Read method
-                let mut method_buf = vec![0u8; method_len as usize];
-                let _ = memory.read(&caller, method_ptr as usize, &mut method_buf);
-                let method = String::from_utf8_lossy(&method_buf).to_string();
+                let Ok(method) = read_guest_lossy(
+                    &caller,
+                    &memory,
+                    method_ptr,
+                    method_len,
+                    "host_http_call_stream",
+                    "method",
+                ) else {
+                    return -1;
+                };
 
                 // Read URL
-                let mut url_buf = vec![0u8; url_len as usize];
-                let _ = memory.read(&caller, url_ptr as usize, &mut url_buf);
-                let url = String::from_utf8_lossy(&url_buf).to_string();
+                let Ok(url) = read_guest_lossy(
+                    &caller,
+                    &memory,
+                    url_ptr,
+                    url_len,
+                    "host_http_call_stream",
+                    "url",
+                ) else {
+                    return -1;
+                };
 
                 // Read headers (JSON array of [key, value] pairs)
                 let headers: Vec<(String, String)> = if headers_len > 0 {
-                    let mut hdr_buf = vec![0u8; headers_len as usize];
-                    let _ = memory.read(&caller, headers_ptr as usize, &mut hdr_buf);
-                    serde_json::from_slice(&hdr_buf).unwrap_or_default()
+                    let Ok(hdr_buf) = read_guest_bytes(
+                        &caller,
+                        &memory,
+                        headers_ptr,
+                        headers_len,
+                        "host_http_call_stream",
+                        "headers",
+                    ) else {
+                        return -1;
+                    };
+                    let Ok(headers) = parse_guest_headers(&hdr_buf, "host_http_call_stream") else {
+                        return -1;
+                    };
+                    headers
                 } else {
                     vec![]
                 };
 
                 // Read body stream ID
                 let body_stream_id = if body_stream_id_len > 0 {
-                    let mut id_buf = vec![0u8; body_stream_id_len as usize];
-                    let _ = memory.read(&caller, body_stream_id_ptr as usize, &mut id_buf);
-                    String::from_utf8_lossy(&id_buf).to_string()
+                    let Ok(id) = read_guest_lossy(
+                        &caller,
+                        &memory,
+                        body_stream_id_ptr,
+                        body_stream_id_len,
+                        "host_http_call_stream",
+                        "body_stream_id",
+                    ) else {
+                        return -1;
+                    };
+                    id
                 } else {
                     String::new()
                 };
 
                 // Read response stream ID
                 let response_stream_id = if response_stream_id_len > 0 {
-                    let mut id_buf = vec![0u8; response_stream_id_len as usize];
-                    let _ = memory.read(&caller, response_stream_id_ptr as usize, &mut id_buf);
-                    String::from_utf8_lossy(&id_buf).to_string()
+                    let Ok(id) = read_guest_lossy(
+                        &caller,
+                        &memory,
+                        response_stream_id_ptr,
+                        response_stream_id_len,
+                        "host_http_call_stream",
+                        "response_stream_id",
+                    ) else {
+                        return -1;
+                    };
+                    id
                 } else {
                     String::new()
                 };
@@ -871,9 +1143,19 @@ pub(super) fn link_host_functions(linker: &mut Linker<HostState>) -> Result<(), 
                     return 0;
                 };
 
-                let mut key_buf = vec![0u8; key_len as usize];
-                let _ = memory.read(&caller, key_ptr as usize, &mut key_buf);
-                let key = String::from_utf8_lossy(&key_buf);
+                let Ok(key) = read_guest_lossy(
+                    &caller,
+                    &memory,
+                    key_ptr,
+                    key_len,
+                    "host_cache_contains",
+                    "key",
+                ) else {
+                    // The ABI is boolean (1 = cached, 0 = not) with no error
+                    // sentinel; treat an unreadable key as a miss so the
+                    // guest falls back to fetching.
+                    return 0;
+                };
                 let started = Instant::now();
                 let _guest_span = caller.data().guest_spans.enter_active();
                 let span = tracing::info_span!(
@@ -925,13 +1207,27 @@ pub(super) fn link_host_functions(linker: &mut Linker<HostState>) -> Result<(), 
                     return -1;
                 };
 
-                let mut key_buf = vec![0u8; key_len as usize];
-                let _ = memory.read(&caller, key_ptr as usize, &mut key_buf);
-                let key = String::from_utf8_lossy(&key_buf).to_string();
+                let Ok(key) = read_guest_lossy(
+                    &caller,
+                    &memory,
+                    key_ptr,
+                    key_len,
+                    "host_cache_to_stream",
+                    "key",
+                ) else {
+                    return -1;
+                };
 
-                let mut id_buf = vec![0u8; stream_id_len as usize];
-                let _ = memory.read(&caller, stream_id_ptr as usize, &mut id_buf);
-                let stream_id = String::from_utf8_lossy(&id_buf).to_string();
+                let Ok(stream_id) = read_guest_lossy(
+                    &caller,
+                    &memory,
+                    stream_id_ptr,
+                    stream_id_len,
+                    "host_cache_to_stream",
+                    "stream_id",
+                ) else {
+                    return -1;
+                };
                 let started = Instant::now();
                 let _guest_span = caller.data().guest_spans.enter_active();
                 let span = tracing::info_span!(
@@ -1119,13 +1415,27 @@ pub(super) fn link_host_functions(linker: &mut Linker<HostState>) -> Result<(), 
                     return -1;
                 };
 
-                let mut key_buf = vec![0u8; key_len as usize];
-                let _ = memory.read(&caller, key_ptr as usize, &mut key_buf);
-                let key = String::from_utf8_lossy(&key_buf).to_string();
+                let Ok(key) = read_guest_lossy(
+                    &caller,
+                    &memory,
+                    key_ptr,
+                    key_len,
+                    "host_cache_from_stream",
+                    "key",
+                ) else {
+                    return -1;
+                };
 
-                let mut id_buf = vec![0u8; stream_id_len as usize];
-                let _ = memory.read(&caller, stream_id_ptr as usize, &mut id_buf);
-                let stream_id = String::from_utf8_lossy(&id_buf).to_string();
+                let Ok(stream_id) = read_guest_lossy(
+                    &caller,
+                    &memory,
+                    stream_id_ptr,
+                    stream_id_len,
+                    "host_cache_from_stream",
+                    "stream_id",
+                ) else {
+                    return -1;
+                };
                 let started = Instant::now();
                 let _guest_span = caller.data().guest_spans.enter_active();
                 let span = tracing::info_span!(
@@ -1207,14 +1517,28 @@ pub(super) fn link_host_functions(linker: &mut Linker<HostState>) -> Result<(), 
                 };
 
                 // Read stream ID
-                let mut id_buf = vec![0u8; stream_id_len as usize];
-                let _ = memory.read(&caller, stream_id_ptr as usize, &mut id_buf);
-                let stream_id = String::from_utf8_lossy(&id_buf).to_string();
+                let Ok(stream_id) = read_guest_lossy(
+                    &caller,
+                    &memory,
+                    stream_id_ptr,
+                    stream_id_len,
+                    "host_hash_stream",
+                    "stream_id",
+                ) else {
+                    return -1;
+                };
 
                 // Read algorithm
-                let mut algo_buf = vec![0u8; algorithm_len as usize];
-                let _ = memory.read(&caller, algorithm_ptr as usize, &mut algo_buf);
-                let algorithm = String::from_utf8_lossy(&algo_buf).to_string();
+                let Ok(algorithm) = read_guest_lossy(
+                    &caller,
+                    &memory,
+                    algorithm_ptr,
+                    algorithm_len,
+                    "host_hash_stream",
+                    "algorithm",
+                ) else {
+                    return -1;
+                };
                 let started = Instant::now();
                 let _guest_span = caller.data().guest_spans.enter_active();
                 let span = tracing::info_span!(
@@ -1274,7 +1598,21 @@ pub(super) fn link_host_functions(linker: &mut Linker<HostState>) -> Result<(), 
                         .record("duration_ms", started.elapsed().as_millis() as u64);
                     return -1; // buffer too small
                 }
-                let _ = memory.write(&mut caller, result_buf_ptr as usize, hash_bytes);
+                if write_guest_bytes(
+                    &mut caller,
+                    &memory,
+                    result_buf_ptr,
+                    hash_bytes,
+                    "host_hash_stream",
+                    "hash",
+                )
+                .is_err()
+                {
+                    tracing::Span::current().record("success", false);
+                    tracing::Span::current()
+                        .record("duration_ms", started.elapsed().as_millis() as u64);
+                    return -1;
+                }
                 tracing::Span::current().record("success", true);
                 tracing::Span::current()
                     .record("duration_ms", started.elapsed().as_millis() as u64);
@@ -1302,7 +1640,18 @@ pub(super) fn link_host_functions(linker: &mut Linker<HostState>) -> Result<(), 
                 if bytes.len() > buf_len as usize {
                     return -1;
                 }
-                let _ = memory.write(&mut caller, buf_ptr as usize, bytes);
+                if write_guest_bytes(
+                    &mut caller,
+                    &memory,
+                    buf_ptr,
+                    bytes,
+                    "host_get_time",
+                    "time",
+                )
+                .is_err()
+                {
+                    return -1;
+                }
                 bytes.len() as i32
             },
         )
@@ -1457,18 +1806,45 @@ pub(super) fn link_host_functions(linker: &mut Linker<HostState>) -> Result<(), 
                 let memory = caller.get_export("memory").and_then(|e| e.into_memory());
                 let Some(memory) = memory else { return -4 };
 
-                let mut method_buf = vec![0u8; method_len as usize];
-                let _ = memory.read(&caller, method_ptr as usize, &mut method_buf);
-                let method = String::from_utf8_lossy(&method_buf).to_string();
+                let Ok(method) = read_guest_lossy(
+                    &caller,
+                    &memory,
+                    method_ptr,
+                    method_len,
+                    "host_http_stream_begin_outbound",
+                    "method",
+                ) else {
+                    return -4;
+                };
 
-                let mut url_buf = vec![0u8; url_len as usize];
-                let _ = memory.read(&caller, url_ptr as usize, &mut url_buf);
-                let url = String::from_utf8_lossy(&url_buf).to_string();
+                let Ok(url) = read_guest_lossy(
+                    &caller,
+                    &memory,
+                    url_ptr,
+                    url_len,
+                    "host_http_stream_begin_outbound",
+                    "url",
+                ) else {
+                    return -4;
+                };
 
                 let headers: Vec<(String, String)> = if headers_len > 0 {
-                    let mut hdr_buf = vec![0u8; headers_len as usize];
-                    let _ = memory.read(&caller, headers_ptr as usize, &mut hdr_buf);
-                    serde_json::from_slice(&hdr_buf).unwrap_or_default()
+                    let Ok(hdr_buf) = read_guest_bytes(
+                        &caller,
+                        &memory,
+                        headers_ptr,
+                        headers_len,
+                        "host_http_stream_begin_outbound",
+                        "headers",
+                    ) else {
+                        return -4;
+                    };
+                    let Ok(headers) =
+                        parse_guest_headers(&hdr_buf, "host_http_stream_begin_outbound")
+                    else {
+                        return -4;
+                    };
+                    headers
                 } else {
                     Vec::new()
                 };
@@ -1581,8 +1957,16 @@ pub(super) fn link_host_functions(linker: &mut Linker<HostState>) -> Result<(), 
                 let memory = caller.get_export("memory").and_then(|e| e.into_memory());
                 let Some(memory) = memory else { return -4 };
 
-                let mut buf = vec![0u8; data_len as usize];
-                let _ = memory.read(&caller, data_ptr as usize, &mut buf);
+                let Ok(buf) = read_guest_bytes(
+                    &caller,
+                    &memory,
+                    data_ptr,
+                    data_len,
+                    "host_http_stream_try_write",
+                    "data",
+                ) else {
+                    return -4;
+                };
 
                 let _guest_span = caller.data().guest_spans.enter_active();
                 let host = caller.data().host.clone();

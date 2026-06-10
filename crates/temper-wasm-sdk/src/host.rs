@@ -39,7 +39,8 @@ unsafe extern "C" {
     pub fn host_log(level_ptr: i32, level_len: i32, msg_ptr: i32, msg_len: i32);
 
     /// Read the invocation context JSON into a buffer.
-    /// Returns the number of bytes written, or needed size if buffer too small.
+    /// Returns the number of bytes written, needed size if buffer too small,
+    /// or -1 on memory error.
     pub fn host_get_context(buf_ptr: i32, buf_len: i32) -> i32;
 
     /// Set the result JSON for this invocation.

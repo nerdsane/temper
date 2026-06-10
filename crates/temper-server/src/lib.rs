@@ -13,7 +13,6 @@ pub mod blob_store;
 pub mod blob_sweeper;
 mod blob_transport_observability;
 pub mod blobs;
-pub mod channels;
 pub mod entity_actor;
 pub mod event_budget_metrics;
 pub mod events;
