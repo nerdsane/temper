@@ -121,6 +121,70 @@ fn scan_candidate_budget_matches_existing_odata_cap() {
     assert_eq!(large_default.scan_candidate_budget(), 20_000);
 }
 
+#[test]
+fn native_catalog_coverage_short_circuit_requires_pushdown_without_count() {
+    let state = build_order_state("query-plane-native-coverage-short-circuit");
+    let tenant = TenantId::default();
+    let security_ctx = SecurityContext::system();
+    let filtered_options = QueryOptions {
+        filter: Some(FilterExpr::BinaryOp {
+            left: Box::new(FilterExpr::Property("Id".to_string())),
+            op: BinaryOperator::Eq,
+            right: Box::new(FilterExpr::Literal(ODataValue::String(
+                "ord-01".to_string(),
+            ))),
+        }),
+        top: Some(1),
+        ..QueryOptions::default()
+    };
+    let filtered_request = QueryPlaneReadRequest {
+        state: &state,
+        tenant: &tenant,
+        security_ctx: &security_ctx,
+        entity_type: "Order",
+        entity_set_name: "Orders",
+        query_options: &filtered_options,
+        budget: QueryPlaneReadBudget {
+            default_page_size: 1,
+            max_entities: 10,
+        },
+    };
+    let filtered_plan = native_candidate_page_plan(&filtered_request).expect("native plan");
+
+    assert!(should_try_native_before_catalog_coverage(
+        &filtered_request,
+        &filtered_plan
+    ));
+
+    let count_options = QueryOptions {
+        count: Some(true),
+        ..filtered_options.clone()
+    };
+    let count_request = QueryPlaneReadRequest {
+        query_options: &count_options,
+        ..filtered_request
+    };
+    let count_plan = native_candidate_page_plan(&count_request).expect("native count plan");
+    assert!(!should_try_native_before_catalog_coverage(
+        &count_request,
+        &count_plan
+    ));
+
+    let unfiltered_options = QueryOptions {
+        top: Some(1),
+        ..QueryOptions::default()
+    };
+    let unfiltered_request = QueryPlaneReadRequest {
+        query_options: &unfiltered_options,
+        ..count_request
+    };
+    let unfiltered_plan = native_candidate_page_plan(&unfiltered_request).expect("native plan");
+    assert!(!should_try_native_before_catalog_coverage(
+        &unfiltered_request,
+        &unfiltered_plan
+    ));
+}
+
 #[tokio::test]
 async fn row_authorized_count_over_budget_returns_413() {
     let state = build_order_state("query-plane-budget-count");
