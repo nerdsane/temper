@@ -32,11 +32,10 @@ mod tests {
             include_str!("../migrations/0001_initial.sql"),
             include_str!("../migrations/0002_wasm_modules_source.sql"),
             include_str!("../migrations/0003_published_artifacts.sql"),
-            include_str!("../migrations/0004_segmented_event_history.sql"),
+            include_str!("../migrations/0004_entity_catalog_state.sql"),
             include_str!("../migrations/0005_installed_app_genesis_provenance.sql"),
             include_str!("../migrations/0006_segmented_event_history.sql"),
             include_str!("../migrations/0007_installed_app_follow_policy.sql"),
-            include_str!("../migrations/0008_entity_catalog_state.sql"),
         ]
         .join("\n")
         .to_lowercase();
@@ -73,15 +72,28 @@ mod tests {
     }
 
     #[test]
-    fn migration_four_keeps_historical_segmented_event_history() {
-        let migration_four = include_str!("../migrations/0004_segmented_event_history.sql");
+    fn migration_four_keeps_historical_entity_catalog_state() {
+        let migration_four = include_str!("../migrations/0004_entity_catalog_state.sql");
         assert!(
-            migration_four.contains("CREATE TABLE IF NOT EXISTS event_segments"),
-            "migration 0004 is already applied in production and must stay segmented_event_history"
+            migration_four.contains("ADD COLUMN IF NOT EXISTS state JSONB"),
+            "migration 0004 is already applied in production and must stay entity_catalog_state"
         );
         assert!(
-            !migration_four.contains("entity_catalog"),
-            "entity_catalog state must not reuse migration version 0004"
+            !migration_four.contains("event_segments"),
+            "segmented event history must not reuse migration version 0004"
+        );
+    }
+
+    #[test]
+    fn migration_six_keeps_historical_segmented_event_history() {
+        let migration_six = include_str!("../migrations/0006_segmented_event_history.sql");
+        assert!(
+            migration_six.contains("CREATE TABLE IF NOT EXISTS event_segments"),
+            "migration 0006 is already applied in production and must stay segmented_event_history"
+        );
+        assert!(
+            !migration_six.contains("entity_catalog"),
+            "entity_catalog state must not reuse migration version 0006"
         );
     }
 
