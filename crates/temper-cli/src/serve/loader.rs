@@ -1,7 +1,6 @@
 //! Spec file loading, linting, and trajectory hydration.
 
 use std::collections::{BTreeSet, HashMap};
-use std::fs;
 use std::path::Path;
 
 use anyhow::{Context, Result};
@@ -9,12 +8,12 @@ use anyhow::{Context, Result};
 use crate::util::to_pascal_case;
 use temper_runtime::tenant::TenantId;
 use temper_server::registry::SpecRegistry;
-use temper_server::trigger::registry::parse_reactions;
 use temper_spec::automaton::{LintSeverity, lint_automata_bundle, lint_automaton, parse_automaton};
 use temper_spec::cross_invariant::{
     CrossInvariantLintSeverity, lint_cross_invariants, parse_cross_invariants,
 };
 use temper_spec::csdl::{CsdlDocument, parse_csdl};
+use temper_spec::loader::CedarPolicySource;
 
 use super::LoadedTenantSpecs;
 
@@ -119,29 +118,44 @@ pub(super) fn load_into_registry(
 ) -> Result<LoadedTenantSpecs> {
     let specs_path = Path::new(specs_dir);
 
-    if !specs_path.is_dir() {
-        anyhow::bail!("Specs directory not found: {}", specs_path.display());
-    }
-
-    // Read CSDL model
-    let csdl_path = specs_path.join("model.csdl.xml");
-    if !csdl_path.exists() {
+    // ADR-0046 hard cut: standalone reaction files are no longer supported
+    // (same migration error as the platform OS-app loader).
+    let legacy_reactions_path = specs_path.join("reactions.toml");
+    if legacy_reactions_path.exists() {
         anyhow::bail!(
-            "CSDL model not found at {}. Run `temper init` first.",
-            csdl_path.display()
+            "legacy reactions.toml is no longer supported; migrate this app to inline \
+             [[action.triggers]] (found {})",
+            legacy_reactions_path.display()
         );
     }
 
-    let csdl_xml = fs::read_to_string(&csdl_path)
-        .with_context(|| format!("Failed to read {}", csdl_path.display()))?;
-    let csdl = parse_csdl(&csdl_xml)
-        .with_context(|| format!("Failed to parse CSDL from {}", csdl_path.display()))?;
+    let bundle = temper_spec::loader::load_spec_dir(specs_path).map_err(|e| anyhow::anyhow!(e))?;
 
-    // Read IOA TOML specs
-    let ioa_sources = read_ioa_sources(specs_path)?;
-    let reactions = read_reactions(specs_path)?;
-    let cross_invariants_toml = read_cross_invariants_toml(specs_path)?;
-    let cedar_policy_text = build_tenant_cedar_policy(specs_path, ioa_sources.keys())?;
+    // CSDL model is mandatory for `temper serve` tenants.
+    let Some(csdl_source) = bundle.csdl else {
+        anyhow::bail!(
+            "CSDL model not found at {} (also checked specs/ and csdl/). Run `temper init` first.",
+            specs_path.join("model.csdl.xml").display()
+        );
+    };
+    let csdl_xml = csdl_source.content;
+    let csdl = parse_csdl(&csdl_xml)
+        .with_context(|| format!("Failed to parse CSDL from {}", csdl_source.path.display()))?;
+
+    // Entity types come from each automaton's `name` field, so two files can
+    // collide. Fail loudly instead of silently dropping one spec.
+    let mut ioa_sources: HashMap<String, String> = HashMap::new();
+    for (entity_type, source) in bundle.specs {
+        if ioa_sources.insert(entity_type.clone(), source).is_some() {
+            anyhow::bail!(
+                "duplicate entity type '{entity_type}' in {}: two .ioa.toml files declare the \
+                 same [automaton] name",
+                specs_path.display()
+            );
+        }
+    }
+    let cross_invariants_toml = bundle.cross_invariants_toml;
+    let cedar_policy_text = build_tenant_cedar_policy(&bundle.cedar_policies, ioa_sources.keys())?;
 
     let lint_findings = lint_tenant_specs(&csdl, &ioa_sources)?;
     let mut lint_errors = Vec::new();
@@ -202,7 +216,7 @@ pub(super) fn load_into_registry(
             csdl,
             csdl_xml,
             &ioa_pairs,
-            reactions,
+            Vec::new(),
             cross_invariants_toml.clone(),
             false,
         )
@@ -219,105 +233,27 @@ pub(super) fn load_into_registry(
     })
 }
 
-/// Read all `.ioa.toml` files from the specs directory.
-pub(super) fn read_ioa_sources(specs_dir: &Path) -> Result<HashMap<String, String>> {
-    let mut sources = HashMap::new();
-
-    for entry in fs::read_dir(specs_dir)
-        .with_context(|| format!("Failed to read specs directory: {}", specs_dir.display()))?
-    {
-        let entry = entry?;
-        let path = entry.path();
-
-        let file_name = path
-            .file_name()
-            .and_then(|n| n.to_str())
-            .unwrap_or_default();
-
-        if file_name.ends_with(".ioa.toml") {
-            let entity_name = file_name.strip_suffix(".ioa.toml").unwrap_or_default();
-            let entity_name = to_pascal_case(entity_name);
-
-            let source = fs::read_to_string(&path)
-                .with_context(|| format!("Failed to read IOA file: {}", path.display()))?;
-
-            sources.insert(entity_name, source);
-        }
-    }
-
-    Ok(sources)
-}
-
-/// Read optional `reactions.toml` and parse it into reaction rules.
-pub(super) fn read_reactions(
-    specs_dir: &Path,
-) -> Result<Vec<temper_server::trigger::ReactionRule>> {
-    let reactions_path = specs_dir.join("reactions.toml");
-    if !reactions_path.exists() {
-        return Ok(Vec::new());
-    }
-
-    let source = fs::read_to_string(&reactions_path)
-        .with_context(|| format!("Failed to read {}", reactions_path.display()))?;
-    parse_reactions(&source)
-        .map_err(|e| anyhow::anyhow!("Failed to parse {}: {e}", reactions_path.display()))
-}
-
-/// Read optional `cross-invariants.toml` source from a specs directory.
-pub(super) fn read_cross_invariants_toml(specs_dir: &Path) -> Result<Option<String>> {
-    let path = specs_dir.join("cross-invariants.toml");
-    if !path.exists() {
-        return Ok(None);
-    }
-    let source =
-        fs::read_to_string(&path).with_context(|| format!("Failed to read {}", path.display()))?;
-    Ok(Some(source))
-}
-
-/// Build tenant Cedar policy text from `specs/policies/*.cedar`.
+/// Build tenant Cedar policy text from discovered `policies/*.cedar` files.
 ///
 /// Behavior:
-/// - Concatenates all `.cedar` files in lexical filename order.
+/// - Concatenates all `.cedar` files in lexical filename order (the order
+///   `temper_spec::loader` discovered them in).
 /// - Tracks entity-scoped files by stem (e.g. `order.cedar` -> `Order`).
 /// - For each entity type without a corresponding `.cedar` file, appends a
 ///   generated permit-all fallback policy so legacy entities stay operable.
 /// - Leaves all other resource types at Cedar default-deny.
 pub(super) fn build_tenant_cedar_policy<'a>(
-    specs_dir: &Path,
+    cedar_policies: &[CedarPolicySource],
     entity_types: impl Iterator<Item = &'a String>,
 ) -> Result<Option<String>> {
-    let policies_dir = specs_dir.join("policies");
     let mut policy_chunks: Vec<String> = Vec::new();
     let mut covered_entities = BTreeSet::new();
 
-    if policies_dir.is_dir() {
-        let mut files = Vec::new();
-        for entry in fs::read_dir(&policies_dir)
-            .with_context(|| format!("Failed to read {}", policies_dir.display()))?
-        {
-            let entry = entry?;
-            let path = entry.path();
-            if path
-                .extension()
-                .and_then(|e| e.to_str())
-                .is_some_and(|ext| ext.eq_ignore_ascii_case("cedar"))
-            {
-                files.push(path);
-            }
+    for policy in cedar_policies {
+        if !policy.content.trim().is_empty() {
+            policy_chunks.push(policy.content.clone());
         }
-        files.sort();
-
-        for path in files {
-            let text = fs::read_to_string(&path)
-                .with_context(|| format!("Failed to read Cedar policy: {}", path.display()))?;
-            if !text.trim().is_empty() {
-                policy_chunks.push(text);
-            }
-
-            if let Some(stem) = path.file_stem().and_then(|s| s.to_str()) {
-                covered_entities.insert(to_pascal_case(stem));
-            }
-        }
+        covered_entities.insert(to_pascal_case(&policy.stem));
     }
 
     let mut entities: Vec<String> = entity_types.cloned().collect();
@@ -417,6 +353,61 @@ effect = "set phantom true"
     }
 
     #[test]
+    fn load_into_registry_rejects_legacy_reactions_toml() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        std::fs::write(tmp.path().join("model.csdl.xml"), TEST_CSDL).expect("write csdl"); // determinism-ok: test-only
+        std::fs::write(tmp.path().join("reactions.toml"), "[[reaction]]\n").expect("write legacy"); // determinism-ok: test-only
+
+        let mut registry = SpecRegistry::new();
+        let err = match load_into_registry(
+            &mut registry,
+            tmp.path().to_str().expect("utf8 path"),
+            "legacy-reactions-tenant",
+        ) {
+            Ok(_) => panic!("legacy reactions.toml should abort loading"),
+            Err(err) => err,
+        };
+        assert!(
+            err.to_string()
+                .contains("legacy reactions.toml is no longer supported"),
+            "got: {err}"
+        );
+    }
+
+    #[test]
+    fn load_into_registry_uses_automaton_name_not_filename() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        std::fs::write(tmp.path().join("model.csdl.xml"), TEST_CSDL).expect("write csdl"); // determinism-ok: test-only
+        // File name would PascalCase to "Mismatched"; the automaton declares "Order".
+        std::fs::write(
+            // determinism-ok: test-only
+            tmp.path().join("mismatched.ioa.toml"),
+            r#"
+[automaton]
+name = "Order"
+states = ["Draft", "Done"]
+initial = "Draft"
+
+[[action]]
+name = "Complete"
+from = ["Draft"]
+to = "Done"
+"#,
+        )
+        .expect("write ioa");
+
+        let mut registry = SpecRegistry::new();
+        let loaded = load_into_registry(
+            &mut registry,
+            tmp.path().to_str().expect("utf8 path"),
+            "naming-tenant",
+        )
+        .expect("load should succeed");
+        assert!(loaded.ioa_sources.contains_key("Order"));
+        assert!(!loaded.ioa_sources.contains_key("Mismatched"));
+    }
+
+    #[test]
     fn build_tenant_cedar_policy_adds_permit_fallback_for_missing_entity_files() {
         let tmp = tempfile::tempdir().expect("tempdir");
         let specs_dir = tmp.path();
@@ -428,7 +419,9 @@ effect = "set phantom true"
         .expect("write order policy");
 
         let entities = ["Order".to_string(), "Issue".to_string()];
-        let combined = build_tenant_cedar_policy(specs_dir, entities.iter())
+        let cedar_policies =
+            temper_spec::loader::load_cedar_policies(specs_dir).expect("load cedar policies");
+        let combined = build_tenant_cedar_policy(&cedar_policies, entities.iter())
             .expect("build policy")
             .expect("non-empty policy text");
 

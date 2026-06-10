@@ -1,7 +1,10 @@
 use super::agent_bootstrap::{
     AgentSoulRefreshDecision, bootstrapped_agent_soul_entity_id, decide_agent_soul_refresh,
 };
+use super::discovery::{find_adrs, find_wasm_modules};
 use super::*;
+use crate::state::PlatformState;
+use std::collections::BTreeMap;
 use std::collections::HashMap;
 use std::fs;
 use std::time::Duration;

@@ -31,8 +31,6 @@ use temper_verify::cascade::VerificationCascade;
 
 use crate::{ActorRuntimeBackend, StorageBackend};
 
-use loader::read_ioa_sources;
-
 /// Parsed specs loaded from disk for a tenant.
 struct LoadedTenantSpecs {
     pub csdl_xml: String,
@@ -611,13 +609,14 @@ fn emit_ephemeral_info(message: &str) {
 /// updates the registry while persisting workflow history/status to Postgres.
 async fn spawn_background_verification(state: &PlatformState, specs_dir: &str, tenant: &str) {
     let specs_path = Path::new(specs_dir);
-    let mut ioa_sources = match read_ioa_sources(specs_path) {
-        Ok(sources) => sources,
-        Err(e) => {
-            eprintln!("Warning: failed to read IOA sources for background verification: {e}");
-            return;
-        }
-    };
+    let mut ioa_sources: HashMap<String, String> =
+        match temper_spec::loader::load_ioa_specs(specs_path) {
+            Ok(sources) => sources.into_iter().collect(),
+            Err(e) => {
+                eprintln!("Warning: failed to read IOA sources for background verification: {e}");
+                return;
+            }
+        };
 
     let registry = state.registry.clone();
     let server = state.server.clone();

@@ -2,12 +2,7 @@ use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::sync::{OnceLock, RwLock};
 
-use temper_spec::automaton;
-
-use super::{
-    AppEntry, StartupInstallMode, extract_description, find_ioa_files, read_app_guide,
-    read_app_manifest,
-};
+use super::{AppEntry, StartupInstallMode, extract_description, read_app_guide, read_app_manifest};
 
 pub(crate) struct AppCatalog {
     /// Directory containing app bundles.
@@ -228,15 +223,14 @@ impl AppCatalog {
             };
 
             let app_name = manifest.name.clone();
-            let ioa_files = find_ioa_files(&app_dir);
-            let entity_types: Vec<String> = ioa_files
-                .iter()
-                .filter_map(|(_, ioa_path)| {
-                    let source = std::fs::read_to_string(ioa_path).ok()?;
-                    let parsed = automaton::parse_automaton(&source).ok()?;
-                    Some(parsed.automaton.name)
+            let entity_types: Vec<String> = temper_spec::loader::load_ioa_specs(&app_dir)
+                .map(|specs| {
+                    specs
+                        .into_iter()
+                        .map(|(entity_type, _source)| entity_type)
+                        .collect()
                 })
-                .collect();
+                .unwrap_or_default();
 
             let description = if !manifest.description.is_empty() {
                 manifest.description.clone()

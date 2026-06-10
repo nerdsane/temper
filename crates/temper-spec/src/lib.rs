@@ -11,6 +11,7 @@
 pub mod automaton;
 pub mod cross_invariant;
 pub mod csdl;
+pub mod loader;
 pub mod model;
 pub mod naming;
 
