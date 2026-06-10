@@ -32,6 +32,7 @@ mod tests {
             include_str!("../migrations/0001_initial.sql"),
             include_str!("../migrations/0002_wasm_modules_source.sql"),
             include_str!("../migrations/0003_published_artifacts.sql"),
+            include_str!("../migrations/0004_trajectories_agent_type.sql"),
         ]
         .join("\n")
         .to_lowercase();
@@ -75,6 +76,10 @@ mod tests {
         assert!(
             schema::CREATE_TRAJECTORIES_TABLE.contains("IF NOT EXISTS"),
             "trajectories DDL must be idempotent"
+        );
+        assert!(
+            schema::ALTER_TRAJECTORIES_ADD_AGENT_TYPE.contains("IF NOT EXISTS"),
+            "trajectories agent_type ALTER must be idempotent"
         );
         assert!(
             schema::CREATE_DESIGN_TIME_EVENTS_TABLE.contains("IF NOT EXISTS"),

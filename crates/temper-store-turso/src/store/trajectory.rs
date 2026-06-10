@@ -49,8 +49,8 @@ impl TursoEventStore {
                         .execute(
                         "INSERT INTO trajectories \
                          (tenant, entity_type, entity_id, action, success, from_status, to_status, error, \
-                          agent_id, session_id, authz_denied, denied_resource, denied_module, source, spec_governed, created_at, request_body, intent, matched_policy_ids) \
-                         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19)",
+                          agent_id, session_id, authz_denied, denied_resource, denied_module, source, spec_governed, created_at, request_body, intent, matched_policy_ids, agent_type) \
+                         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20)",
                         params![
                             entry.tenant,
                             entry.entity_type,
@@ -70,7 +70,8 @@ impl TursoEventStore {
                             entry.created_at,
                             entry.request_body,
                             entry.intent,
-                            entry.matched_policy_ids
+                            entry.matched_policy_ids,
+                            entry.agent_type
                         ],
                     )
                     .await

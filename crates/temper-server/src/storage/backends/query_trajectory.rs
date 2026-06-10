@@ -364,6 +364,7 @@ impl TrajectorySink for PostgresEventStore {
             request_body: request_body_json.as_deref(),
             intent: entry.intent.as_deref(),
             matched_policy_ids: matched_policy_ids_json.as_deref(),
+            agent_type: entry.agent_type.as_deref(),
         })
         .await
         .map_err(|e| {
@@ -402,6 +403,7 @@ impl TrajectorySink for TursoEventStore {
             request_body: request_body_json.as_deref(),
             intent: entry.intent.as_deref(),
             matched_policy_ids: matched_policy_ids_json.as_deref(),
+            agent_type: entry.agent_type.as_deref(),
         })
         .await
         .map_err(|e| {
@@ -447,6 +449,7 @@ impl TrajectorySink for TenantStoreRouter {
                 request_body: request_body_json.as_deref(),
                 intent: entry.intent.as_deref(),
                 matched_policy_ids: matched_policy_ids_json.as_deref(),
+                agent_type: entry.agent_type.as_deref(),
             })
             .await
             .map_err(|e| {

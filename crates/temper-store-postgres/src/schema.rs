@@ -114,6 +114,13 @@ CREATE INDEX IF NOT EXISTS idx_trajectories_success ON trajectories (success, cr
 pub const CREATE_TRAJECTORIES_ENTITY_INDEX: &str = "\
 CREATE INDEX IF NOT EXISTS idx_trajectories_entity ON trajectories (entity_type, action);";
 
+/// ALTER TABLE migration: add agent_type to trajectories for databases
+/// created by the pre-ADR-0065 bootstrap runner (whose CREATE TABLE predates
+/// the column). See `0004_trajectories_agent_type.sql` for the versioned
+/// migration.
+pub const ALTER_TRAJECTORIES_ADD_AGENT_TYPE: &str =
+    "ALTER TABLE trajectories ADD COLUMN IF NOT EXISTS agent_type TEXT;";
+
 /// CREATE TABLE statement for persisted design-time workflow events.
 pub const CREATE_DESIGN_TIME_EVENTS_TABLE: &str = "\
 CREATE TABLE IF NOT EXISTS design_time_events (

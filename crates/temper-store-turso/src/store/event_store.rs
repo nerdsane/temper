@@ -16,6 +16,19 @@ use crate::metrics::record_turso_write_retry;
 use crate::retry::{is_transient_write_error, retry_delay_ms};
 
 impl EventStore for TursoEventStore {
+    /// Append events with optimistic concurrency control.
+    ///
+    /// # Timeout semantics: the write's fate is UNKNOWN
+    ///
+    /// When an attempt times out (or the retry budget is exhausted on a
+    /// timeout), the returned error does NOT mean the write failed — the
+    /// INSERT may have committed on the server after the client gave up.
+    /// Callers must retry with the SAME `expected_sequence`. The
+    /// optimistic-concurrency UNIQUE constraint on
+    /// `(tenant, entity_type, entity_id, sequence_nr)` then converts a prior
+    /// attempt that actually landed into a `ConcurrencyViolation` instead of
+    /// writing a duplicate event; callers handle that violation through the
+    /// normal event-store contract (re-read state, re-derive the event).
     #[instrument(skip_all, fields(persistence_id, otel.name = "turso.append"))]
     async fn append(
         &self,

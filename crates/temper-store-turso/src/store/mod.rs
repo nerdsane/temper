@@ -275,6 +275,7 @@ impl TursoEventStore {
             schema::ALTER_TRAJECTORIES_ADD_REQUEST_BODY,
             schema::ALTER_TRAJECTORIES_ADD_INTENT,
             schema::ALTER_TRAJECTORIES_ADD_MATCHED_POLICY_IDS,
+            schema::ALTER_TRAJECTORIES_ADD_AGENT_TYPE,
         ] {
             let _ = conn.execute(stmt, ()).await; // ignore "duplicate column" errors
         }
