@@ -8,7 +8,7 @@
 
 use super::toml_parser;
 use super::types::*;
-use crate::tlaplus::{Invariant as TlaInvariant, StateMachine, Transition};
+use crate::state_machine::{Invariant as SmInvariant, StateMachine, Transition};
 
 /// Errors from parsing an automaton specification.
 #[derive(Debug, thiserror::Error)]
@@ -362,7 +362,7 @@ fn wire_state_timeout_from_states(automaton: &mut Automaton) {
     }
 }
 
-/// Convert an I/O Automaton to the legacy StateMachine format.
+/// Convert an I/O Automaton to the shared StateMachine IR.
 ///
 /// This allows the existing verification cascade (Stateright, DST, proptest)
 /// and the TransitionTable builder to work unchanged.
@@ -411,7 +411,7 @@ pub fn to_state_machine(automaton: &Automaton) -> StateMachine {
                     .join(", ");
                 format!("status \\in {{{states}}} => ")
             };
-            TlaInvariant {
+            SmInvariant {
                 name: inv.name.clone(),
                 expr: format!("{trigger}{}", inv.assert),
             }

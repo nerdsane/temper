@@ -1,6 +1,6 @@
-//! Generate state machine enums and transition tables from TLA+ specs.
+//! Generate state machine enums and transition tables from spec state machines.
 
-use temper_spec::tlaplus::StateMachine;
+use temper_spec::StateMachine;
 
 /// Generate the state enum and transition table for an entity.
 pub fn generate_state_machine(entity_name: &str, sm: &StateMachine) -> String {
@@ -8,7 +8,7 @@ pub fn generate_state_machine(entity_name: &str, sm: &StateMachine) -> String {
 
     // State enum
     out.push_str(&format!(
-        "/// State machine states for {} (generated from TLA+ spec: {}).\n",
+        "/// State machine states for {} (generated from spec: {}).\n",
         entity_name, sm.module_name
     ));
     out.push_str("#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]\n");
@@ -98,7 +98,7 @@ pub fn generate_state_machine(entity_name: &str, sm: &StateMachine) -> String {
     // Generate invariant check functions
     if !sm.invariants.is_empty() {
         out.push_str(&format!(
-            "/// Invariant checks for {} (from TLA+ spec).\n",
+            "/// Invariant checks for {} (from spec).\n",
             entity_name
         ));
         out.push_str(&format!("pub struct {}Invariants;\n\n", entity_name));
@@ -120,7 +120,7 @@ pub fn generate_state_machine(entity_name: &str, sm: &StateMachine) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use temper_spec::tlaplus::{Invariant, Transition};
+    use temper_spec::{Invariant, Transition};
 
     fn test_sm() -> StateMachine {
         StateMachine {

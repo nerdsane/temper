@@ -31,7 +31,7 @@ use support::{
 /// POST /api/evolution/sentinel/check -- trigger sentinel rule evaluation.
 ///
 /// Evaluates all default sentinel rules against current server state.
-/// Any triggered rules generate O-Records and store them in the RecordStore.
+/// Any triggered rules generate O-Records and store them in the evolution record store.
 /// Returns a list of alerts (may be empty if all is healthy).
 #[instrument(skip_all, fields(
     otel.name = "POST /api/evolution/sentinel/check",

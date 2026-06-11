@@ -13,7 +13,6 @@ pub mod gepa;
 pub mod insight;
 pub mod pg_store;
 pub mod records;
-pub mod store;
 
 // Re-export primary types at crate root.
 pub use insight::{classify_insight, compute_priority_score, generate_digest};

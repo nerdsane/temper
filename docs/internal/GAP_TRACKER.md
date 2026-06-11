@@ -13,7 +13,7 @@
 | 4 | No PATCH/PUT/DELETE handlers | temper-server | **RESOLVED** | `handle_odata_patch`, `handle_odata_put`, `handle_odata_delete` all registered in router. DELETE removes from actor registry + entity index. |
 | 5 | `_body_json` unused in entity creation | temper-server | **RESOLVED** | Body fields passed as `initial_fields` to entity actor on creation. |
 | 6 | Entity GET returns 200 on not-found | temper-server | **RESOLVED** | `dispatch.rs` checks `entity_exists()` and returns 404 with OData error body. |
-| 7 | No codegen from IOA specs | temper-codegen | **RESOLVED** | `build_spec_model_mixed()` handles IOA→StateMachine conversion; `generate_entity_module()` works transparently with both IOA and TLA+ specs. |
+| 7 | No codegen from IOA specs | temper-codegen | **RESOLVED** | `build_spec_model()` handles IOA→StateMachine conversion; `generate_entity_module()` consumes the resulting spec model. |
 
 **All 7 P0 items resolved.**
 
@@ -31,7 +31,7 @@
 | 15 | Liveness properties not verified | temper-verify | **RESOLVED** | `LivenessViolation` type added. `check_liveness_post_simulation()` checks NoDeadlock + ReachesState. Wired into L2 cascade. `check_reaches_state()` cleaned up in stateright_impl. |
 | 16 | No Cedar policy hot-reload | temper-authz | **RESOLVED** | `RwLock<PolicySet>` with atomic swap via `reload_policies()`. Invalid policies preserve existing set. `policy_count()` helper added. |
 | 17 | No entity state persistence wiring | temper-server, temper-store-postgres | **RESOLVED** | `EntityActorHandler::handle()` persists events after transitions via `event_store.append()`. Actor recovery replays events via `replay_events()`. Full Postgres EventStore implementation with schema/migrations. |
-| 18 | Claude API client has no mock | temper-platform | **RESOLVED** | `ChatClient` trait extracted. `MockClaudeClient` supports fixed and sequential canned responses. `ObservationAgent<C>` and `AnalysisAgent<C>` now generic with `with_client()` constructors. |
+| 18 | Claude API client has no mock | temper-platform | **RESOLVED** | Superseded: the platform Claude client (`ChatClient`/`MockClaudeClient`, `ObservationAgent`/`AnalysisAgent`) was removed with the unused evolution agents module; LLM access now flows through WASM integrations. |
 | 19 | Query options not applied | temper-server, temper-odata | **RESOLVED** | Same as #1 — `query_eval.rs` applies all parsed options to entity data. |
 
 **All 12 P1 items resolved.**

@@ -6597,7 +6597,6 @@ dependencies = [
  "sha2 0.10.9",
  "temper-authz",
  "temper-codegen",
- "temper-evolution",
  "temper-jit",
  "temper-observe",
  "temper-optimize",

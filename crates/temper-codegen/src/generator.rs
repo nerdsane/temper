@@ -70,7 +70,7 @@ pub fn generate_entity_module(
     source.push_str(&entity::generate_entity_default(entity));
     source.push('\n');
 
-    // State machine (if TLA+ spec is available)
+    // State machine (if a spec source is available)
     if let Some(sm) = spec.state_machines.get(entity_name) {
         source.push_str(&state_machine::generate_state_machine(entity_name, sm));
         source.push('\n');
@@ -139,13 +139,13 @@ mod tests {
 
     fn load_reference_spec() -> SpecModel {
         let csdl_xml = include_str!("../../../test-fixtures/specs/model.csdl.xml");
-        let order_tla = include_str!("../../../test-fixtures/specs/order.tla");
+        let order_ioa = include_str!("../../../test-fixtures/specs/order.ioa.toml");
 
         let csdl = parse_csdl(csdl_xml).unwrap();
-        let mut tla_sources = HashMap::new();
-        tla_sources.insert("Order".to_string(), order_tla.to_string());
+        let mut ioa_sources = HashMap::new();
+        ioa_sources.insert("Order".to_string(), order_ioa.to_string());
 
-        build_spec_model(csdl, tla_sources)
+        build_spec_model(csdl, ioa_sources)
     }
 
     #[test]
@@ -183,7 +183,7 @@ mod tests {
         assert!(module.source.contains("GetOrderTotal"));
 
         // Should have invariant names
-        assert!(module.source.contains("TypeInvariant"));
+        assert!(module.source.contains("SubmitRequiresItems"));
         assert!(module.source.contains("ShipRequiresPayment"));
     }
 

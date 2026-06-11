@@ -178,7 +178,7 @@ pub fn default_rules() -> Vec<SentinelRule> {
 /// Evaluate all sentinel rules against the current server state.
 ///
 /// Returns a list of alerts for rules whose thresholds were crossed.
-/// Each alert includes a fully-formed O-Record ready for insertion into the RecordStore.
+/// Each alert includes a fully-formed O-Record ready for insertion into the evolution record store.
 pub fn check_rules(
     rules: &[SentinelRule],
     state: &ServerState,

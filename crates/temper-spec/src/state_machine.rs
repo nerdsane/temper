@@ -1,11 +1,17 @@
+//! Shared state-machine intermediate representation.
+//!
+//! IOA specs compile to [`StateMachine`] via
+//! [`crate::automaton::to_state_machine`]; codegen and spec-model linking
+//! consume this IR.
+
 use serde::{Deserialize, Serialize};
 
-/// Extracted state machine structure from a TLA+ specification.
-/// This is NOT a full TLA+ parser — it extracts the structured elements
-/// that Temper's codegen needs: states, transitions, guards, invariants.
+/// State machine structure extracted from a specification: the structured
+/// elements that Temper's codegen needs — states, transitions, guards,
+/// invariants.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct StateMachine {
-    /// Module name from the TLA+ spec.
+    /// Name of the source module/automaton.
     pub module_name: String,
     /// All declared state values.
     pub states: Vec<String>,
@@ -30,7 +36,7 @@ pub struct Transition {
     pub from_states: Vec<String>,
     /// The target state after this transition (if deterministic).
     pub to_state: Option<String>,
-    /// Raw guard expression (the TLA+ precondition).
+    /// Raw guard expression (precondition).
     pub guard_expr: String,
     /// Whether this transition has parameters.
     pub has_parameters: bool,
@@ -43,7 +49,7 @@ pub struct Transition {
 pub struct Invariant {
     /// Invariant name (e.g., "ShipRequiresPayment").
     pub name: String,
-    /// Raw TLA+ expression.
+    /// Raw invariant expression.
     pub expr: String,
 }
 
@@ -52,7 +58,7 @@ pub struct Invariant {
 pub struct LivenessProperty {
     /// Property name.
     pub name: String,
-    /// Raw TLA+ expression.
+    /// Raw property expression.
     pub expr: String,
 }
 

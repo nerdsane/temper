@@ -12,7 +12,6 @@ temper-verify = { workspace = true }
 temper-jit = { workspace = true }
 temper-server = { workspace = true }
 temper-store-turso = { workspace = true }
-temper-evolution = { workspace = true }
 temper-observe = { workspace = true }
 temper-runtime = { workspace = true }
 temper-authz = { workspace = true }

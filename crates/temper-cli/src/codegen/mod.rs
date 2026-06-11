@@ -1,16 +1,16 @@
 //! Code generation command for `temper codegen`.
 //!
-//! Reads CSDL and TLA+ specifications from the specs directory,
+//! Reads CSDL and IOA specifications from the specs directory,
 //! builds a unified spec model, and generates Rust entity modules.
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::BTreeMap;
 use std::fs;
 use std::path::Path;
 
 use anyhow::{Context, Result};
 use temper_codegen::generate_entity_module;
 use temper_spec::csdl::parse_csdl;
-use temper_spec::model::{SpecSource, build_spec_model_mixed};
+use temper_spec::model::build_spec_model;
 
 use crate::util::to_snake_case;
 
@@ -43,33 +43,16 @@ pub fn run(specs_dir: &str, output_dir: &str) -> Result<()> {
         .with_context(|| format!("Failed to parse CSDL from {}", csdl_path.display()))?;
     println!("  Parsed {} schema(s) from CSDL", csdl.schemas.len());
 
-    // Read IOA spec files (primary format)
+    // Read IOA spec files
     let ioa_sources = read_ioa_sources(specs_path)?;
-    if !ioa_sources.is_empty() {
+    if ioa_sources.is_empty() {
+        println!("  No spec files found (state machines will be skipped)");
+    } else {
         println!("  Found {} IOA spec file(s)", ioa_sources.len());
     }
 
-    // Read TLA+ spec files (legacy format)
-    let tla_sources = read_tla_sources(specs_path)?;
-    if !tla_sources.is_empty() {
-        println!("  Found {} TLA+ spec file(s)", tla_sources.len());
-    }
-
-    if ioa_sources.is_empty() && tla_sources.is_empty() {
-        println!("  No spec files found (state machines will be skipped)");
-    }
-
-    // Merge sources: IOA takes precedence over TLA+ for the same entity name
-    let mut sources: HashMap<String, SpecSource> = tla_sources
-        .into_iter()
-        .map(|(k, v)| (k, SpecSource::Tla(v)))
-        .collect();
-    for (name, ioa_text) in ioa_sources {
-        sources.insert(name, SpecSource::Ioa(ioa_text));
-    }
-
     // Build the unified spec model
-    let spec = build_spec_model_mixed(csdl, sources);
+    let spec = build_spec_model(csdl, ioa_sources.into_iter().collect());
 
     // Report validation results
     if !spec.validation.errors.is_empty() {
@@ -189,9 +172,6 @@ fn read_ioa_sources(specs_dir: &Path) -> Result<BTreeMap<String, String>> {
 
     Ok(sources)
 }
-
-// read_tla_sources is shared via crate::util::read_tla_sources
-use crate::util::read_tla_sources;
 
 #[cfg(test)]
 mod tests {

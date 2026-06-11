@@ -1,7 +1,7 @@
 //! Verification cascade command for `temper verify`.
 //!
-//! Loads specifications and runs validation checks. Full model checking
-//! integration with temper-verify will be added in a future release.
+//! Loads IOA + CSDL specifications, lints them, runs the temper-verify
+//! cascade per entity, and reports CSDL cross-validation results.
 
 use std::collections::BTreeMap;
 use std::fs;
@@ -14,9 +14,8 @@ use temper_spec::model::build_spec_model;
 
 /// Run the `temper verify` command.
 ///
-/// Loads specs from the given directory, builds the spec model, and reports
-/// validation results. Full Stateright model checking will be integrated
-/// once temper-verify exposes its public API.
+/// Loads specs from the given directory, lints and verifies each IOA spec
+/// through the cascade, builds the spec model, and reports validation results.
 pub fn run(specs_dir: &str) -> Result<()> {
     let specs_path = Path::new(specs_dir);
 
@@ -37,9 +36,8 @@ pub fn run(specs_dir: &str) -> Result<()> {
     let csdl = parse_csdl(&csdl_xml)
         .with_context(|| format!("Failed to parse CSDL from {}", csdl_path.display()))?;
 
-    // Read IOA TOML specs (preferred) and TLA+ specs (legacy)
+    // Read IOA TOML specs
     let ioa_sources = read_ioa_sources(specs_path)?;
-    let tla_sources = read_tla_sources(specs_path)?;
 
     // Run IOA verification cascade if IOA files found
     if !ioa_sources.is_empty() {
@@ -123,8 +121,8 @@ pub fn run(specs_dir: &str) -> Result<()> {
         println!("\nIOA verification cascade: ALL PASSED");
     }
 
-    // Build spec model (which includes cross-validation)
-    let spec = build_spec_model(csdl, tla_sources);
+    // Build spec model (which includes CSDL cross-validation)
+    let spec = build_spec_model(csdl, ioa_sources.into_iter().collect());
 
     // Report results
     println!("\nVerification Report");
@@ -170,8 +168,6 @@ pub fn run(specs_dir: &str) -> Result<()> {
     println!("\n{}", "=".repeat(50));
     if spec.validation.is_valid() {
         println!("Result: PASS -- all cross-validation checks passed.");
-        println!("\nNote: Full model checking (Stateright) is not yet integrated.");
-        println!("      Run TLC separately for exhaustive state space exploration.");
     } else {
         println!(
             "Result: FAIL -- {} error(s) found.",
@@ -204,9 +200,6 @@ fn read_ioa_sources(specs_dir: &Path) -> Result<BTreeMap<String, String>> {
 
     Ok(sources)
 }
-
-// read_tla_sources is shared via crate::util::read_tla_sources
-use crate::util::read_tla_sources;
 
 #[cfg(test)]
 mod tests {
