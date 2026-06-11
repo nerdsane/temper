@@ -22,7 +22,9 @@ default = []
 cloud = ["reqwest"]
 
 [dev-dependencies]
-tokio = { workspace = true }
+# `test-util` enables `#[tokio::test(start_paused = true)]` so retry/backoff
+# tests run on a virtual clock instead of real sleeps.
+tokio = { workspace = true, features = ["test-util"] }
 uuid = { workspace = true }
 chrono = { workspace = true }
 tempfile = "3"

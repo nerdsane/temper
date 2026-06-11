@@ -9,7 +9,6 @@ use tracing::instrument;
 
 use super::super::specs_helpers::{
     build_ndjson_response, cross_lint_ndjson_line, lint_loaded_specs, lint_ndjson_line,
-    to_pascal_case,
 };
 use super::types::LoadDirRequest;
 use super::verification_stream::build_verification_stream_response;
@@ -42,13 +41,13 @@ pub(crate) async fn handle_load_dir(
         ));
     }
 
-    let csdl_xml = std::fs::read_to_string(&csdl_path).map_err(|e| {
-        // determinism-ok: HTTP handler reads spec files
-        (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            format!("Failed to read CSDL: {e}"),
-        )
-    })?;
+    let csdl_xml = std::fs::read_to_string(&csdl_path) // determinism-ok: HTTP handler reads spec files
+        .map_err(|e| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("Failed to read CSDL: {e}"),
+            )
+        })?;
     let csdl = temper_spec::csdl::parse_csdl(&csdl_xml).map_err(|e| {
         (
             StatusCode::BAD_REQUEST,
@@ -56,39 +55,19 @@ pub(crate) async fn handle_load_dir(
         )
     })?;
 
-    // Read all *.ioa.toml files
+    // Read all *.ioa.toml files via the shared spec-directory loader. Entity
+    // types come from each parsed automaton's `name` field (PascalCase file
+    // name only as a fallback label when a spec fails to parse).
+    let loaded_specs = temper_spec::loader::load_ioa_specs(specs_path)
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
     let mut ioa_sources: std::collections::BTreeMap<String, String> =
         std::collections::BTreeMap::new();
-    let entries = std::fs::read_dir(specs_path).map_err(|e| {
-        // determinism-ok: HTTP handler reads spec directory
-        (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            format!("Failed to read specs directory: {e}"),
-        )
-    })?;
-    for entry in entries {
-        let entry = entry.map_err(|e| {
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                format!("Failed to read directory entry: {e}"),
-            )
-        })?;
-        let path = entry.path();
-        let file_name = path
-            .file_name()
-            .and_then(|n| n.to_str())
-            .unwrap_or_default();
-        if file_name.ends_with(".ioa.toml") {
-            let entity_name = file_name.strip_suffix(".ioa.toml").unwrap_or_default();
-            let entity_name = to_pascal_case(entity_name);
-            let source = std::fs::read_to_string(&path).map_err(|e| {
-                // determinism-ok: HTTP handler reads spec files
-                (
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    format!("Failed to read {}: {e}", path.display()),
-                )
-            })?;
-            ioa_sources.insert(entity_name, source);
+    for (entity_type, source) in loaded_specs {
+        if ioa_sources.insert(entity_type.clone(), source).is_some() {
+            return Err((
+                StatusCode::BAD_REQUEST,
+                format!("Duplicate entity type '{entity_type}' in specs directory"),
+            ));
         }
     }
 
@@ -114,13 +93,14 @@ pub(crate) async fn handle_load_dir(
     let cross_invariants_toml = {
         let path = specs_path.join("cross-invariants.toml");
         if path.exists() {
-            Some(std::fs::read_to_string(&path).map_err(|e| {
-                // determinism-ok: HTTP handler reads cross-invariants
-                (
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    format!("Failed to read {}: {e}", path.display()),
-                )
-            })?)
+            let content = std::fs::read_to_string(&path) // determinism-ok: HTTP handler reads cross-invariants
+                .map_err(|e| {
+                    (
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        format!("Failed to read {}: {e}", path.display()),
+                    )
+                })?;
+            Some(content)
         } else {
             None
         }
@@ -228,8 +208,8 @@ pub(crate) async fn handle_load_dir(
         let registry_path = state.data_dir.join("specs-registry.json");
         let mut specs_registry = std::collections::BTreeMap::<String, String>::new();
 
-        if let Ok(content) = std::fs::read_to_string(&registry_path) {
-            // determinism-ok: HTTP handler reads specs registry
+        let existing = std::fs::read_to_string(&registry_path); // determinism-ok: HTTP handler reads specs registry
+        if let Ok(content) = existing {
             if let Ok(value) = serde_json::from_str::<serde_json::Value>(&content)
                 && let Some(obj) = value.as_object()
             {

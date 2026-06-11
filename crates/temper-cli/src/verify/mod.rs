@@ -3,7 +3,7 @@
 //! Loads specifications and runs validation checks. Full model checking
 //! integration with temper-verify will be added in a future release.
 
-use std::collections::HashMap;
+use std::collections::BTreeMap;
 use std::fs;
 use std::path::Path;
 
@@ -11,8 +11,6 @@ use anyhow::{Context, Result};
 use temper_spec::automaton::{LintSeverity, lint_automata_bundle, lint_automaton};
 use temper_spec::csdl::parse_csdl;
 use temper_spec::model::build_spec_model;
-
-use crate::util::to_pascal_case;
 
 /// Run the `temper verify` command.
 ///
@@ -185,33 +183,22 @@ pub fn run(specs_dir: &str) -> Result<()> {
     Ok(())
 }
 
-/// Read all `.ioa.toml` files from the specs directory.
-fn read_ioa_sources(specs_dir: &Path) -> Result<HashMap<String, String>> {
-    let mut sources = HashMap::new();
+/// Read all IOA specs via the shared `temper_spec::loader` discovery, keyed
+/// by entity type (the parsed automaton's `name`; PascalCase file name only
+/// as a fallback label when the spec fails to parse). Duplicate entity types
+/// are an error, mirroring registry registration.
+fn read_ioa_sources(specs_dir: &Path) -> Result<BTreeMap<String, String>> {
+    let mut sources = BTreeMap::new();
 
     if !specs_dir.is_dir() {
         return Ok(sources);
     }
 
-    for entry in fs::read_dir(specs_dir)
-        .with_context(|| format!("Failed to read specs directory: {}", specs_dir.display()))?
+    for (entity_type, source) in
+        temper_spec::loader::load_ioa_specs(specs_dir).map_err(anyhow::Error::msg)?
     {
-        let entry = entry?;
-        let path = entry.path();
-
-        let file_name = path
-            .file_name()
-            .and_then(|n| n.to_str())
-            .unwrap_or_default();
-
-        if file_name.ends_with(".ioa.toml") {
-            let entity_name = file_name.strip_suffix(".ioa.toml").unwrap_or_default();
-            let entity_name = to_pascal_case(entity_name);
-
-            let source = fs::read_to_string(&path)
-                .with_context(|| format!("Failed to read IOA file: {}", path.display()))?;
-
-            sources.insert(entity_name, source);
+        if sources.insert(entity_type.clone(), source).is_some() {
+            anyhow::bail!("Duplicate entity type '{entity_type}' in specs directory");
         }
     }
 

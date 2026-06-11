@@ -566,7 +566,6 @@ fn spawn_channel_transport_discord(
     port: u16,
     api_key: Option<String>,
 ) {
-    use temper_transport::TemperApiConfig;
     use temper_transport::discord::types::intents;
     use temper_transport::discord::{DiscordConfig, DiscordTransport};
 
@@ -575,11 +574,22 @@ fn spawn_channel_transport_discord(
     println!("  Discord channel transport (v2): connecting (tenant={tenant})...");
     tokio::spawn(async move {
         // determinism-ok: WebSocket for channel transport
-        let api = temper_transport::TemperApiClient::new(TemperApiConfig {
-            base_url: api_url,
-            tenant,
-            api_key,
-        });
+        let builder = temper_sdk::TemperClient::builder()
+            .base_url(&api_url)
+            .tenant(&tenant);
+        // Without an API key the transport authenticates as the local
+        // admin principal (matches server-side bearer-auth fallback).
+        let builder = match api_key.as_deref() {
+            Some(key) => builder.api_key(key),
+            None => builder.principal_kind("admin"),
+        };
+        let api = match builder.build() {
+            Ok(client) => client,
+            Err(e) => {
+                eprintln!("  [discord] Failed to build Temper API client: {e}");
+                return;
+            }
+        };
         let config = DiscordConfig {
             bot_token,
             intents: intents::DEFAULT,

@@ -205,7 +205,10 @@ mod tests {
         assert_eq!(calls.load(Ordering::SeqCst), 1);
     }
 
-    #[tokio::test]
+    // `start_paused` uses tokio's virtual clock: the backoff sleeps
+    // auto-advance instantly when the runtime is idle, so this test is
+    // deterministic and immune to CPU starvation under parallel test runs.
+    #[tokio::test(start_paused = true)]
     async fn retry_succeeds_on_third_attempt_after_two_transient_errors() {
         let calls = Arc::new(AtomicUsize::new(0));
         let calls_clone = calls.clone();
@@ -250,7 +253,9 @@ mod tests {
         );
     }
 
-    #[tokio::test]
+    // Paused clock: all four backoff delays (3.75 s wall time) auto-advance
+    // instantly, keeping the exhaustion path deterministic.
+    #[tokio::test(start_paused = true)]
     async fn retry_exhausts_after_all_delays_on_persistent_transient_error() {
         let calls = Arc::new(AtomicUsize::new(0));
         let calls_clone = calls.clone();

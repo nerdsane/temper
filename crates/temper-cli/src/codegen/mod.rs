@@ -3,7 +3,7 @@
 //! Reads CSDL and TLA+ specifications from the specs directory,
 //! builds a unified spec model, and generates Rust entity modules.
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::fs;
 use std::path::Path;
 
@@ -12,7 +12,7 @@ use temper_codegen::generate_entity_module;
 use temper_spec::csdl::parse_csdl;
 use temper_spec::model::{SpecSource, build_spec_model_mixed};
 
-use crate::util::{to_pascal_case, to_snake_case};
+use crate::util::to_snake_case;
 
 /// Run the `temper codegen` command.
 ///
@@ -159,36 +159,31 @@ pub fn run(specs_dir: &str, output_dir: &str) -> Result<()> {
     Ok(())
 }
 
-/// Read all `.ioa.toml` files from the specs directory and return a map of
-/// entity name (derived from file stem, PascalCase) to IOA TOML source text.
-fn read_ioa_sources(specs_dir: &Path) -> Result<HashMap<String, String>> {
-    let mut sources = HashMap::new();
+/// Read all IOA specs via the shared `temper_spec::loader` discovery, keyed
+/// by entity type (the parsed automaton's `name`; PascalCase file name only
+/// as a fallback label when the spec fails to parse). Duplicate entity types
+/// are an error, mirroring registry registration.
+fn read_ioa_sources(specs_dir: &Path) -> Result<BTreeMap<String, String>> {
+    let mut sources = BTreeMap::new();
 
     if !specs_dir.is_dir() {
         return Ok(sources);
     }
 
-    for entry in fs::read_dir(specs_dir)
-        .with_context(|| format!("Failed to read specs directory: {}", specs_dir.display()))?
-    {
-        let entry = entry?;
-        let path = entry.path();
-        let file_name = path
-            .file_name()
-            .and_then(|n| n.to_str())
-            .unwrap_or_default();
-
-        if let Some(stem) = file_name.strip_suffix(".ioa.toml") {
-            let entity_name = to_pascal_case(stem);
-            let source = fs::read_to_string(&path)
-                .with_context(|| format!("Failed to read IOA file: {}", path.display()))?;
-
-            println!(
-                "  Read IOA spec: {} -> entity '{}'",
-                path.display(),
-                entity_name
+    for spec in temper_spec::loader::load_ioa_spec_sources(specs_dir).map_err(anyhow::Error::msg)? {
+        println!(
+            "  Read IOA spec: {} -> entity '{}'",
+            spec.path.display(),
+            spec.entity_type
+        );
+        if sources
+            .insert(spec.entity_type.clone(), spec.source)
+            .is_some()
+        {
+            anyhow::bail!(
+                "Duplicate entity type '{}' in specs directory",
+                spec.entity_type
             );
-            sources.insert(entity_name, source);
         }
     }
 

@@ -107,6 +107,13 @@ async fn append_with_wrong_sequence_fails_with_concurrency_violation() {
 async fn single_event_append_bypasses_process_write_gate() {
     let mut store = make_store("single-append-bypasses-gate").await;
     store.write_gate = std::sync::Arc::new(tokio::sync::Semaphore::new(1));
+    // Hold the gate's only permit for the entire append. The permit itself is
+    // the synchronization: a bypassing append never touches the gate and
+    // completes normally, while a regressed implementation that routes through
+    // the gate cannot acquire it and fails deterministically with the gate's
+    // own bounded wait-timeout error. No wall-clock race is needed (a previous
+    // 2 s `tokio::time::timeout` around this call flaked under parallel
+    // `cargo test` when real sqlite I/O was CPU-starved).
     let held_gate = store
         .write_gate
         .clone()
@@ -114,23 +121,19 @@ async fn single_event_append_bypasses_process_write_gate() {
         .await
         .expect("hold gate");
 
-    let result = tokio::time::timeout(
-        std::time::Duration::from_secs(2),
-        store.append(
+    let result = store
+        .append(
             "tenant-a:Order:ord-bypass",
             0,
             &[test_envelope(
                 "OrderCreated",
                 serde_json::json!({ "id": "ord-bypass" }),
             )],
-        ),
-    )
-    .await;
+        )
+        .await;
     drop(held_gate);
 
-    let new_seq = result
-        .expect("single-event append should not wait for the process write gate")
-        .expect("append should succeed");
+    let new_seq = result.expect("single-event append should bypass the held write gate");
     assert_eq!(new_seq, 1);
 }
 
@@ -1092,6 +1095,11 @@ async fn upsert_specs_and_commit_bypasses_write_gate_for_identical_app_specs() {
         .expect("initial spec commit");
 
     store.write_gate = std::sync::Arc::new(tokio::sync::Semaphore::new(1));
+    // Hold the gate's only permit for the entire upsert (see
+    // single_event_append_bypasses_process_write_gate for why the held permit
+    // replaces a flaky wall-clock timeout race): an idempotent re-commit must
+    // bypass the gate and succeed; a regression that routes through the gate
+    // fails deterministically with the gate's bounded wait-timeout error.
     let held_gate = store
         .write_gate
         .clone()
@@ -1099,21 +1107,17 @@ async fn upsert_specs_and_commit_bypasses_write_gate_for_identical_app_specs() {
         .await
         .expect("hold gate");
 
-    let result = tokio::time::timeout(
-        std::time::Duration::from_secs(2),
-        store.upsert_specs_and_commit(
+    let result = store
+        .upsert_specs_and_commit(
             &tenant,
             &[("Issue", ioa_source, csdl_xml, content_hash)],
             Some(policy),
             "test-app",
-        ),
-    )
-    .await;
+        )
+        .await;
     drop(held_gate);
 
-    result
-        .expect("identical app spec commit should bypass the write gate")
-        .expect("identical app spec commit should succeed");
+    result.expect("identical app spec commit should bypass the held write gate");
 }
 
 #[tokio::test]

@@ -29,6 +29,18 @@ pub struct CsdlSource {
     pub content: String,
 }
 
+/// One IOA spec file discovered in a spec directory.
+#[derive(Debug, Clone)]
+pub struct IoaSpecSource {
+    /// Path the spec was discovered at (for caller error messages/logs).
+    pub path: PathBuf,
+    /// The parsed automaton's `name` field; PascalCase of the file name is
+    /// used as a fallback label when the spec fails to parse.
+    pub entity_type: String,
+    /// Raw IOA TOML source.
+    pub source: String,
+}
+
 /// One Cedar policy file discovered in `<dir>/policies/`.
 #[derive(Debug, Clone)]
 pub struct CedarPolicySource {
@@ -84,6 +96,15 @@ pub fn load_spec_dir(dir: &Path) -> Result<SpecDirBundle, String> {
 /// name (minus `.ioa.toml`) is used as a fallback label so the caller's
 /// error messages still carry a recognizable entity name.
 pub fn load_ioa_specs(dir: &Path) -> Result<Vec<(String, String)>, String> {
+    Ok(load_ioa_spec_sources(dir)?
+        .into_iter()
+        .map(|spec| (spec.entity_type, spec.source))
+        .collect())
+}
+
+/// Like [`load_ioa_specs`], but each entry also carries the path the spec was
+/// discovered at, for callers that log or report per-file diagnostics.
+pub fn load_ioa_spec_sources(dir: &Path) -> Result<Vec<IoaSpecSource>, String> {
     let mut paths: Vec<PathBuf> = Vec::new();
     let mut seen_names = std::collections::BTreeSet::new();
 
@@ -102,7 +123,11 @@ pub fn load_ioa_specs(dir: &Path) -> Result<Vec<(String, String)>, String> {
             Ok(automaton) => automaton.automaton.name,
             Err(_) => fallback_entity_type(&path),
         };
-        specs.push((entity_type, source));
+        specs.push(IoaSpecSource {
+            path,
+            entity_type,
+            source,
+        });
     }
     Ok(specs)
 }
@@ -292,6 +317,14 @@ to = "Done"
         let loaded = load_ioa_specs(&dir).expect("load");
         let names: Vec<&str> = loaded.iter().map(|(n, _)| n.as_str()).collect();
         assert_eq!(names, vec!["BrokenThing", "PurchaseOrder"]);
+
+        // The path-carrying variant reports the same entity types alongside
+        // the discovered file paths.
+        let with_paths = load_ioa_spec_sources(&dir).expect("load with paths");
+        assert_eq!(with_paths[0].entity_type, "BrokenThing");
+        assert_eq!(with_paths[0].path, dir.join("broken_thing.ioa.toml"));
+        assert_eq!(with_paths[1].entity_type, "PurchaseOrder");
+        assert_eq!(with_paths[1].path, dir.join("order.ioa.toml"));
 
         let _ = std::fs::remove_dir_all(&dir);
     }
