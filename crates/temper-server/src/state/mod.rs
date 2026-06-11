@@ -41,9 +41,6 @@ use std::time::Duration;
 use temper_actor_runtime::ActorSystem as PgActorSystem;
 use temper_authz::AuthzEngine;
 use temper_evolution::PostgresRecordStore;
-#[allow(deprecated)]
-// ADR-0025 Phase 4: remove after sentinel/insight dispatch migrated to IOA entities
-use temper_evolution::store::RecordStore;
 use temper_jit::table::TransitionTable;
 use temper_runtime::ActorSystem;
 use temper_runtime::actor::ActorRef;
@@ -310,7 +307,6 @@ pub struct QueryProjectionReplayParityDrift {
 
 /// Shared state for the Temper HTTP server.
 #[derive(Clone)]
-// ADR-0025 Phase 4: remove record_store field after IOA entity migration complete
 pub struct ServerState {
     /// The actor system for spawning and managing legacy in-memory entity actors.
     pub actor_system: Arc<ActorSystem>,
@@ -355,9 +351,6 @@ pub struct ServerState {
     pub start_time: chrono::DateTime<chrono::Utc>,
     /// Metrics collector for the /observe endpoints.
     pub metrics: Arc<MetricsCollector>,
-    /// In-memory evolution record store (O/P/A/D/I records).
-    #[allow(deprecated)] // ADR-0025 Phase 4: remove after chain validation replaced
-    pub record_store: Arc<RecordStore>,
     /// Optional Postgres evolution record store (source of truth when configured).
     pub pg_record_store: Option<Arc<PostgresRecordStore>>,
     /// Optional reaction dispatcher for cross-entity coordination.
@@ -465,7 +458,6 @@ fn install_liveness_metrics_reporter_once() {
     });
 }
 
-#[allow(deprecated)] // ADR-0025 Phase 4: RecordStore used until chain validation replaced
 impl ServerState {
     /// Attach the composed runtime storage stack.
     pub fn set_storage_stack(&mut self, stack: StorageStack) {
@@ -528,6 +520,33 @@ impl ServerState {
             }
         }
 
+        Self::base_state(
+            system,
+            csdl,
+            csdl_xml,
+            entity_set_map,
+            Arc::new(RwLock::new(SpecRegistry::new())),
+            true,
+        )
+    }
+
+    /// Construct a [`ServerState`] with every shared field initialized.
+    ///
+    /// This is the single initialization point behind both public
+    /// constructors ([`new`](Self::new) and
+    /// [`from_registry_shared`](Self::from_registry_shared)). A new field
+    /// added to `ServerState` must be initialized here, so it cannot be
+    /// initialized in one constructor and missed in the other. Only
+    /// genuinely caller-specific inputs (CSDL document, entity-set map,
+    /// spec registry, tenant mode) are parameters.
+    fn base_state(
+        system: ActorSystem,
+        csdl: CsdlDocument,
+        csdl_xml: String,
+        entity_set_map: BTreeMap<String, String>,
+        registry: Arc<RwLock<SpecRegistry>>,
+        single_tenant_mode: bool,
+    ) -> Self {
         let (event_tx, _) = tokio::sync::broadcast::channel(256); // determinism-ok: broadcast for external observation
         let (entity_observe_tx, _) = tokio::sync::broadcast::channel(512); // determinism-ok: broadcast for external observation
         let (design_time_tx, _) = tokio::sync::broadcast::channel(256); // determinism-ok: broadcast for external observation
@@ -548,13 +567,12 @@ impl ServerState {
             data_dir: std::path::PathBuf::new(),
             agent_hints: Arc::new(RwLock::new(BTreeMap::new())),
             authz: Arc::new(AuthzEngine::permissive()),
-            registry: Arc::new(RwLock::new(SpecRegistry::new())),
+            registry,
             entity_index: Arc::new(RwLock::new(BTreeMap::new())),
             event_tx: Arc::new(event_tx),
             entity_observe_tx: Arc::new(entity_observe_tx),
             start_time: sim_now(),
             metrics: Arc::new(MetricsCollector::new()),
-            record_store: Arc::new(RecordStore::new()),
             pg_record_store: None,
             reaction_dispatcher: Arc::new(RwLock::new(None)),
             webhook_dispatcher: None,
@@ -582,7 +600,7 @@ impl ServerState {
             entity_observe_log: Arc::new(Mutex::new(BTreeMap::new())),
             observe_refresh_tx: Arc::new(observe_refresh_tx), // determinism-ok: broadcast for external observation
             listen_port: Arc::new(std::sync::OnceLock::new()),
-            single_tenant_mode: true,
+            single_tenant_mode,
             suggestion_engine: Arc::new(RwLock::new(PolicySuggestionEngine::new())),
             verify_subprocess_bin: None,
             custom_effect_handler: None,
@@ -762,74 +780,17 @@ impl ServerState {
     /// Use this when the registry must be shared with another component
     /// (e.g. `PlatformState`) so that writes are visible to dispatch.
     pub fn from_registry_shared(system: ActorSystem, registry: Arc<RwLock<SpecRegistry>>) -> Self {
-        let (event_tx, _) = tokio::sync::broadcast::channel(256); // determinism-ok: broadcast for external observation
-        let (entity_observe_tx, _) = tokio::sync::broadcast::channel(512); // determinism-ok: broadcast for external observation
-        let (design_time_tx, _) = tokio::sync::broadcast::channel(256); // determinism-ok: broadcast for external observation
-        let (pending_decision_tx, _) = tokio::sync::broadcast::channel(256); // determinism-ok: broadcast for external observation
-        let (agent_progress_tx, _) = tokio::sync::broadcast::channel(256); // determinism-ok: broadcast for external observation
-        let (observe_refresh_tx, _) = tokio::sync::broadcast::channel(64); // determinism-ok: broadcast for external observation
-        let state = Self {
-            actor_system: Arc::new(system),
-            pg_actor_system: None,
-            actor_backed_types: BTreeSet::new(),
-            csdl: Arc::new(CsdlDocument {
+        Self::base_state(
+            system,
+            CsdlDocument {
                 version: "4.0".into(),
                 schemas: vec![],
-            }),
-            csdl_xml: Arc::new(String::new()),
-            entity_set_map: Arc::new(BTreeMap::new()),
-            transition_tables: Arc::new(BTreeMap::new()),
-            actor_registry: Arc::new(RwLock::new(BTreeMap::new())),
-            last_accessed: Arc::new(RwLock::new(BTreeMap::new())),
-            storage_stack: None,
-            data_dir: std::path::PathBuf::new(),
-            agent_hints: Arc::new(RwLock::new(BTreeMap::new())),
-            authz: Arc::new(AuthzEngine::permissive()),
+            },
+            String::new(),
+            BTreeMap::new(),
             registry,
-            entity_index: Arc::new(RwLock::new(BTreeMap::new())),
-            event_tx: Arc::new(event_tx),
-            entity_observe_tx: Arc::new(entity_observe_tx),
-            start_time: sim_now(),
-            metrics: Arc::new(MetricsCollector::new()),
-            record_store: Arc::new(RecordStore::new()),
-            pg_record_store: None,
-            reaction_dispatcher: Arc::new(RwLock::new(None)),
-            webhook_dispatcher: None,
-            adapter_registry: Arc::new(AdapterRegistry::with_builtins()),
-            wasm_module_registry: Arc::new(RwLock::new(WasmModuleRegistry::new())),
-            wasm_engine: Arc::new(WasmEngine::default()),
-            cross_invariant_enforce: env_bool("TEMPER_XINV_ENFORCE", true),
-            cross_invariant_eventual_enforce: env_bool("TEMPER_XINV_EVENTUAL_ENFORCE", true),
-            design_time_tx: Arc::new(design_time_tx),
-            entity_state_cache: Arc::new(Mutex::new(lru::LruCache::new(
-                NonZeroUsize::new(state_cache_budget()).expect("cache budget must be > 0"),
-            ))),
-            action_dispatch_timeout: env_timeout(),
-            admission: Arc::new(AdmissionController::new()),
-            state_timeout_tracker: Arc::new(StateTimeoutTracker::new()),
-            eventual_tracker: Arc::new(RwLock::new(
-                crate::eventual_invariants::EventualInvariantTracker::new(),
-            )),
-            idempotency_cache: Arc::new(IdempotencyCache::new()),
-            pending_decision_tx: Arc::new(pending_decision_tx),
-            tenant_policies: Arc::new(RwLock::new(BTreeMap::new())),
-            secrets_vault: None,
-            agent_progress_tx: Arc::new(agent_progress_tx), // determinism-ok: broadcast for external observation
-            entity_event_sequences: Arc::new(Mutex::new(BTreeMap::new())),
-            entity_observe_log: Arc::new(Mutex::new(BTreeMap::new())),
-            observe_refresh_tx: Arc::new(observe_refresh_tx), // determinism-ok: broadcast for external observation
-            listen_port: Arc::new(std::sync::OnceLock::new()),
-            single_tenant_mode: false,
-            suggestion_engine: Arc::new(RwLock::new(PolicySuggestionEngine::new())),
-            verify_subprocess_bin: None,
-            custom_effect_handler: None,
-            http_endpoint_tables: Arc::new(crate::http_endpoint::HttpEndpointTables::new()),
-            http_stream_registry: Arc::new(temper_wasm::http_stream::HttpStreamRegistry::new()),
-            workflow_spans: Arc::new(crate::workflow_tracing::WorkflowSpanRegistry::default()),
-            local_tdata_hosts: Arc::new(env_local_tdata_hosts()),
-        };
-        state.register_builtin_wasm_modules();
-        state
+            false,
+        )
     }
 
     /// Attach a reaction dispatcher for cross-entity coordination.

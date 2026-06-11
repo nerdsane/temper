@@ -63,7 +63,9 @@ pub(crate) async fn handle_sentinel_check(
             "evolution.sentinel"
         );
     }
-    let results = persist_alerts(&state, &alerts).await?;
+    // Log-and-continue: failed alert persists are counted in the response
+    // instead of aborting the batch with a 500.
+    let alert_report = persist_alerts(&state, &alerts).await;
 
     let analysis_tenant =
         extract_tenant(&headers, &state).unwrap_or_else(|_| TenantId::new("temper-system"));
@@ -105,7 +107,7 @@ pub(crate) async fn handle_sentinel_check(
     let insights = insight_generator::generate_insights(&trajectory_entries);
     tracing::Span::current().record("insights_count", insights.len());
     tracing::info!(insights_count = insights.len(), "evolution.insight");
-    let insight_results = persist_insights(&state, &insights).await;
+    let insight_report = persist_insights(&state, &insights).await;
 
     emit_refresh_hints(
         &state,
@@ -119,10 +121,14 @@ pub(crate) async fn handle_sentinel_check(
 
     Ok(Json(serde_json::json!({
         "alerts_count": alerts.len(),
-        "alerts": results,
+        "alerts": alert_report.items,
+        "alerts_persisted": alert_report.persisted,
+        "alerts_failed": alert_report.failed,
         "intent_discoveries": discovery_results,
         "insights_count": insights.len(),
-        "insights": insight_results,
+        "insights": insight_report.items,
+        "insights_persisted": insight_report.persisted,
+        "insights_failed": insight_report.failed,
     })))
 }
 

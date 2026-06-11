@@ -289,7 +289,7 @@ impl EntityActor {
 
         // W2 / temper#146: measure append wait — the hypothesis is that
         // writer-lock / fsync serialization is a cold-start bottleneck.
-        let append_start = Instant::now();
+        let append_start = Instant::now(); // determinism-ok: wall-clock for append-wait metric only
         let result = store
             .append(persistence_id, state.sequence_nr, &[envelope])
             .await;
@@ -429,9 +429,6 @@ impl EntityActor {
                                         state,
                                         &result.effects,
                                         &event.params,
-                                    );
-                                    super::effects::apply_new_state_fallback(
-                                        state,
                                         &from_status,
                                         &result.new_state,
                                     );
@@ -910,10 +907,8 @@ impl Actor for EntityActor {
 
                                     // Backoff: retry 1 → 10ms, retry 2 → 50ms.
                                     let backoff_ms = if retry_idx == 1 { 10 } else { 50 };
-                                    tokio::time::sleep(std::time::Duration::from_millis(
-                                        backoff_ms,
-                                    ))
-                                    .await; // determinism-ok: rare retry backoff (ADR-0046)
+                                    let backoff = std::time::Duration::from_millis(backoff_ms);
+                                    tokio::time::sleep(backoff).await; // determinism-ok: rare retry backoff (ADR-0046)
 
                                     match Self::persist_event(
                                         store,

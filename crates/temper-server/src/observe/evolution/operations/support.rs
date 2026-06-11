@@ -1,12 +1,24 @@
 use axum::http::StatusCode;
 use temper_evolution::InsightRecord;
 use temper_evolution::RecordHeader;
+use temper_evolution::RecordType;
 use temper_runtime::scheduler::sim_uuid;
 use temper_runtime::tenant::TenantId;
 
 use crate::request_context::AgentContext;
 use crate::sentinel;
 use crate::state::{DispatchExtOptions, ObserveRefreshHint, ServerState};
+
+/// Serialize a value to JSON, logging a warning and returning `"{}"` on failure.
+///
+/// Used for embedding sub-payloads in entity action params where a
+/// serialization failure must not abort the surrounding persistence flow.
+pub(super) fn serialize_or_empty<T: serde::Serialize>(value: &T) -> String {
+    serde_json::to_string(value).unwrap_or_else(|error| {
+        tracing::warn!(error = %error, "evolution.serialize_or_empty");
+        "{}".to_string()
+    })
+}
 
 pub(super) async fn persist_evolution_record(
     state: &ServerState,
@@ -136,24 +148,132 @@ pub(super) async fn create_system_entity_logged(
     entity_id: &str,
     action: &str,
     params: serde_json::Value,
-) {
-    if let Err(error) = dispatch_system_action(state, entity_type, entity_id, action, params).await
-    {
-        tracing::warn!(
-            error = %error,
-            entity_type,
-            entity_id,
-            action,
-            "failed to create system entity"
-        );
+) -> bool {
+    match dispatch_system_action(state, entity_type, entity_id, action, params).await {
+        Ok(_) => true,
+        Err(error) => {
+            tracing::warn!(
+                error = %error,
+                entity_type,
+                entity_id,
+                action,
+                "failed to create system entity"
+            );
+            false
+        }
     }
 }
 
+/// How a system-entity create dispatch failure is treated by
+/// [`persist_record_with_entity`].
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(super) enum EntityDispatchMode {
+    /// Dispatch failure fails the call with 500 — for chain entities that
+    /// later steps depend on (Problem, Analysis).
+    Required,
+    /// Dispatch failure is logged and reported via `entity_synced` only.
+    BestEffort,
+}
+
+/// Map a record type to its temper-system entity mirror:
+/// (entity type, entity-id prefix, create action).
+fn system_entity_parts(record_type: RecordType) -> (&'static str, &'static str, &'static str) {
+    match record_type {
+        RecordType::Observation => ("Observation", "OBS", "CreateObservation"),
+        RecordType::Problem => ("Problem", "PRB", "CreateProblem"),
+        RecordType::Analysis => ("Analysis", "ANL", "CreateAnalysis"),
+        RecordType::Insight => ("Insight", "INS", "CreateInsight"),
+        RecordType::Decision => ("EvolutionDecision", "ED", "CreateDecision"),
+        RecordType::FeatureRequest => ("FeatureRequest", "FR", "CreateFeatureRequest"),
+    }
+}
+
+/// Outcome of [`persist_record_with_entity`].
+pub(super) struct PersistedRecordEntity {
+    /// Minted system entity id (e.g. "OBS-<uuid>").
+    pub entity_id: String,
+    /// Whether the entity create action dispatched successfully.
+    #[allow(dead_code)] // surfaced for callers that report sync divergence
+    pub entity_synced: bool,
+}
+
+/// Persist an evolution record and mirror it as a temper-system entity.
+///
+/// This is the canonical `persist_record` → `next_system_entity_id` →
+/// create-entity sequence shared by sentinel alert persistence, insight
+/// persistence, and intent-discovery materialization. The entity type,
+/// entity-id prefix, and create action are derived from the record type.
+/// Returns `Err` when the durable record write fails, or — in
+/// [`EntityDispatchMode::Required`] — when the entity create dispatch fails.
+pub(super) async fn persist_record_with_entity<T: serde::Serialize>(
+    state: &ServerState,
+    header: &RecordHeader,
+    record: &T,
+    create_params: serde_json::Value,
+    mode: EntityDispatchMode,
+) -> Result<PersistedRecordEntity, StatusCode> {
+    let (entity_type, prefix, create_action) = system_entity_parts(header.record_type);
+    persist_record(state, entity_type, header, record).await?;
+
+    let entity_id = next_system_entity_id(prefix);
+    let entity_synced = match mode {
+        EntityDispatchMode::Required => {
+            dispatch_system_action_required(
+                state,
+                entity_type,
+                &entity_id,
+                create_action,
+                create_params,
+            )
+            .await?;
+            true
+        }
+        EntityDispatchMode::BestEffort => {
+            create_system_entity_logged(
+                state,
+                entity_type,
+                &entity_id,
+                create_action,
+                create_params,
+            )
+            .await
+        }
+    };
+
+    Ok(PersistedRecordEntity {
+        entity_id,
+        entity_synced,
+    })
+}
+
+/// Result of persisting a batch of evolution records.
+///
+/// Batch persistence is deliberately log-and-continue: one failed record
+/// must not abort the remaining items. Failures are logged by the persist
+/// path, counted here, and reported alongside the per-item payloads.
+pub(super) struct BatchPersistReport {
+    /// Per-item JSON payloads for successfully persisted records.
+    pub items: Vec<serde_json::Value>,
+    /// Number of records persisted successfully.
+    pub persisted: usize,
+    /// Number of records that failed to persist.
+    pub failed: usize,
+}
+
+/// Persist sentinel alert O-Records and mirror them as system entities.
+///
+/// Log-and-continue: a failed record is counted in the report instead of
+/// aborting the batch (previously the first failure aborted all remaining
+/// alerts with a 500).
 pub(super) async fn persist_alerts(
     state: &ServerState,
     alerts: &[sentinel::SentinelAlert],
-) -> Result<Vec<serde_json::Value>, StatusCode> {
-    let mut results = Vec::new();
+) -> BatchPersistReport {
+    let mut report = BatchPersistReport {
+        items: Vec::new(),
+        persisted: 0,
+        failed: 0,
+    };
     for alert in alerts {
         tracing::warn!(
             rule = %alert.rule_name,
@@ -165,43 +285,54 @@ pub(super) async fn persist_alerts(
             "evolution.sentinel"
         );
 
-        persist_record(state, "Observation", &alert.record.header, &alert.record).await?;
-
-        let observation_id = next_system_entity_id("OBS");
-        create_system_entity_logged(
+        let outcome = persist_record_with_entity(
             state,
-            "Observation",
-            &observation_id,
-            "CreateObservation",
+            &alert.record.header,
+            &alert.record,
             serde_json::json!({
                 "source": alert.record.source,
                 "classification": format!("{:?}", alert.record.classification),
                 "evidence_query": alert.record.evidence_query,
-                "context": serde_json::to_string(&alert.record.context).unwrap_or_default(),
+                "context": serialize_or_empty(&alert.record.context),
                 "tenant": "temper-system",
                 "legacy_record_id": alert.record.header.id,
             }),
+            EntityDispatchMode::BestEffort,
         )
         .await;
+        let Ok(entity) = outcome else {
+            report.failed += 1;
+            continue;
+        };
 
-        results.push(serde_json::json!({
+        report.persisted += 1;
+        report.items.push(serde_json::json!({
             "rule": alert.rule_name,
             "record_id": alert.record.header.id,
-            "entity_id": observation_id,
+            "entity_id": entity.entity_id,
             "source": alert.record.source,
             "classification": alert.record.classification,
             "threshold": alert.record.threshold_value,
             "observed": alert.record.observed_value,
         }));
     }
-    Ok(results)
+    report
 }
 
+/// Persist generated I-Records and mirror them as system entities.
+///
+/// Log-and-continue: a failed record is counted in the report instead of
+/// being silently reported as a success item (previously a failed persist
+/// still produced an entity and a result row).
 pub(super) async fn persist_insights(
     state: &ServerState,
     insights: &[InsightRecord],
-) -> Vec<serde_json::Value> {
-    let mut results = Vec::new();
+) -> BatchPersistReport {
+    let mut report = BatchPersistReport {
+        items: Vec::new(),
+        persisted: 0,
+        failed: 0,
+    };
     for insight in insights {
         tracing::info!(
             record_id = %insight.header.id,
@@ -212,20 +343,11 @@ pub(super) async fn persist_insights(
             priority_score = insight.priority_score,
             "evolution.insight"
         );
-        if let Err(e) = persist_record(state, "Insight", &insight.header, insight).await {
-            tracing::warn!(
-                record_id = %insight.header.id,
-                error = %e,
-                "failed to persist insight record"
-            );
-        }
 
-        let insight_id = next_system_entity_id("INS");
-        create_system_entity_logged(
+        let outcome = persist_record_with_entity(
             state,
-            "Insight",
-            &insight_id,
-            "CreateInsight",
+            &insight.header,
+            insight,
             serde_json::json!({
                 "observation_id": "",
                 "category": format!("{:?}", insight.category),
@@ -234,19 +356,25 @@ pub(super) async fn persist_insights(
                 "priority_score": format!("{:.4}", insight.priority_score),
                 "legacy_record_id": insight.header.id,
             }),
+            EntityDispatchMode::BestEffort,
         )
         .await;
+        let Ok(entity) = outcome else {
+            report.failed += 1;
+            continue;
+        };
 
-        results.push(serde_json::json!({
+        report.persisted += 1;
+        report.items.push(serde_json::json!({
             "record_id": insight.header.id,
-            "entity_id": insight_id,
+            "entity_id": entity.entity_id,
             "category": format!("{:?}", insight.category),
             "intent": insight.signal.intent,
             "priority_score": insight.priority_score,
             "recommendation": insight.recommendation,
         }));
     }
-    results
+    report
 }
 
 pub(super) async fn spawn_intent_discovery(

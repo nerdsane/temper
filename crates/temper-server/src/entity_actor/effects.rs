@@ -219,8 +219,13 @@ pub fn process_action_with_xref_and_field_mode(
             let to_status = transition_result.new_state.clone();
 
             let (custom_effects, scheduled_actions, spawn_requests, schedule_at_requests) =
-                apply_effects(state, &transition_result.effects, params);
-            apply_new_state_fallback(state, &from_status, &to_status);
+                apply_effects(
+                    state,
+                    &transition_result.effects,
+                    params,
+                    &from_status,
+                    &to_status,
+                );
             let overflow_blobs = sync_fields_with_metadata(
                 state,
                 params,
@@ -284,6 +289,20 @@ pub fn process_action_with_xref_and_field_mode(
 /// - `state` — The entity state to mutate.
 /// - `effects` — The effects returned by `TransitionTable::evaluate()`.
 /// - `params` — The action parameters (needed for `ListAppend` / `ListRemoveAt`).
+/// - `from_status` — The entity status the transition was evaluated from.
+/// - `new_state` — The target state computed by the `TransitionTable`
+///   (`TransitionResult::new_state`).
+///
+/// # Final step: applying the table's `new_state`
+///
+/// After all effects run, if none of them changed `state.status` (it still
+/// equals `from_status`) and `new_state` is non-empty, `new_state` is applied
+/// as the last step. A transition may legitimately omit `Effect::SetState`:
+/// the IOA builder only emits it when an action declares a `to` state, and
+/// hand-built or hot-swap/shadow tables may carry a `to_state` without a
+/// matching effect. The `TransitionTable`'s computed `to_state` is
+/// authoritative either way, so it is applied here instead of relying on
+/// every rule to emit `SetState`.
 ///
 /// # Returns
 /// A tuple of (custom effect names, scheduled actions, spawn requests, schedule-at requests).
@@ -291,6 +310,8 @@ pub fn apply_effects(
     state: &mut EntityState,
     effects: &[Effect],
     params: &serde_json::Value,
+    from_status: &str,
+    new_state: &str,
 ) -> (
     Vec<String>,
     Vec<ScheduledAction>,
@@ -497,6 +518,12 @@ pub fn apply_effects(
         }
     }
 
+    // Final step: the table's computed to_state is authoritative when no
+    // effect set the status (see the doc comment above).
+    if state.status == from_status && !new_state.is_empty() {
+        state.status = new_state.to_string();
+    }
+
     (
         custom_effects,
         scheduled_actions,
@@ -558,16 +585,6 @@ pub fn resolve_schedule_at_requests(
             })
         })
         .collect()
-}
-
-/// Apply the `new_state` fallback from a TransitionResult.
-///
-/// If no `Effect::SetState` was applied (status unchanged from `from_status`)
-/// and the transition result provides a `new_state`, apply it.
-pub fn apply_new_state_fallback(state: &mut EntityState, from_status: &str, new_state: &str) {
-    if state.status == from_status && !new_state.is_empty() {
-        state.status = new_state.to_string();
-    }
 }
 
 /// Default inline ceiling for a single field value projected into entity state.
@@ -786,8 +803,13 @@ effect = [{ type = "schedule", action = "Refresh", delay_seconds = 2700 }]
             sequence_nr: 0,
         };
 
-        let (custom, scheduled, _spawns, _schedule_at) =
-            apply_effects(&mut state, &effects, &serde_json::json!({}));
+        let (custom, scheduled, _spawns, _schedule_at) = apply_effects(
+            &mut state,
+            &effects,
+            &serde_json::json!({}),
+            "Idle",
+            "Active",
+        );
 
         assert!(custom.is_empty());
         assert_eq!(scheduled.len(), 1);
@@ -830,6 +852,8 @@ effect = [{ type = "schedule", action = "Refresh", delay_seconds = 2700 }]
                 "size_bytes": "30",
                 "released_bytes": 7,
             }),
+            "Active",
+            "Active",
         );
 
         assert_eq!(state.counters.get("used_bytes"), Some(&33));

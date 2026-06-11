@@ -177,8 +177,9 @@ pub(crate) async fn handle_decide(
     });
     // Note: EvolutionDecision.CreateDecision has a cross-entity guard on Analysis,
     // but the legacy record may not have a corresponding Analysis entity yet.
-    // We dispatch best-effort; failure is non-fatal.
-    if let Err(e) = state
+    // We dispatch best-effort; failure is non-fatal, but the divergence
+    // (record persisted, entity missing) is surfaced via `entity_synced`.
+    let entity_synced = match state
         .dispatch_tenant_action(
             &system_tenant,
             "EvolutionDecision",
@@ -189,8 +190,17 @@ pub(crate) async fn handle_decide(
         )
         .await
     {
-        tracing::warn!(error = %e, "failed to create EvolutionDecision entity (cross-entity guard may have blocked)");
-    }
+        Ok(_) => true,
+        Err(e) => {
+            tracing::warn!(
+                error = %e,
+                record_id = %record_id,
+                entity_id = %ed_id,
+                "failed to create EvolutionDecision entity (cross-entity guard may have blocked); decision record persisted without entity mirror"
+            );
+            false
+        }
+    };
 
     Ok(Json(serde_json::json!({
         "record_id": record_id,
@@ -198,6 +208,7 @@ pub(crate) async fn handle_decide(
         "decision": format!("{:?}", d_record.decision),
         "derived_from": id,
         "status": "Open",
+        "entity_synced": entity_synced,
     })))
 }
 
@@ -209,52 +220,29 @@ struct ChainValidationSummary {
     chain_length: usize,
 }
 
-fn record_type_from_id_prefix(id: &str) -> Option<RecordType> {
-    if id.starts_with("O-") {
-        Some(RecordType::Observation)
-    } else if id.starts_with("P-") {
-        Some(RecordType::Problem)
-    } else if id.starts_with("A-") {
-        Some(RecordType::Analysis)
-    } else if id.starts_with("D-") {
-        Some(RecordType::Decision)
-    } else if id.starts_with("I-") {
-        Some(RecordType::Insight)
-    } else if id.starts_with("FR-") {
-        Some(RecordType::FeatureRequest)
-    } else {
-        None
-    }
-}
-
 async fn validate_chain(state: &ServerState, leaf_id: &str) -> ChainValidationSummary {
     let mut errors = Vec::new();
     let mut chain_length = 0usize;
     let mut current_id = leaf_id.to_string();
-    let mut expected_types: Vec<RecordType> = Vec::new();
+    let mut expected_type: Option<RecordType> = None;
 
     loop {
         chain_length += 1;
-        let Some(record_type) = record_type_from_id_prefix(&current_id) else {
+        let Some(record_type) = RecordType::from_id_prefix(&current_id) else {
             errors.push(format!("unknown record type prefix in \'{current_id}\'"));
             break;
         };
 
-        if !expected_types.is_empty() && !expected_types.contains(&record_type) {
+        if let Some(expected) = expected_type
+            && record_type != expected
+        {
             errors.push(format!(
-                "record \'{current_id}\' is {:?} but expected one of {:?}",
-                record_type, expected_types
+                "record \'{current_id}\' is {:?} but expected {:?}",
+                record_type, expected
             ));
         }
 
-        expected_types = match record_type {
-            RecordType::Decision => vec![RecordType::Analysis],
-            RecordType::Analysis => vec![RecordType::Problem],
-            RecordType::Problem => vec![RecordType::Observation],
-            RecordType::Observation => vec![],
-            RecordType::Insight => vec![RecordType::Observation],
-            RecordType::FeatureRequest => vec![RecordType::Insight],
-        };
+        expected_type = record_type.expected_parent();
 
         let derived_from = match state.get_evolution_record(&current_id).await {
             Ok(Some(row)) => row.derived_from,

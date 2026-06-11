@@ -29,6 +29,18 @@ pub enum RecordType {
 }
 
 impl RecordType {
+    /// Every record type, in chain order. Kept in sync with the enum so
+    /// prefix parsing ([`from_id_prefix`](Self::from_id_prefix)) covers all
+    /// variants.
+    pub const ALL: [RecordType; 6] = [
+        RecordType::Observation,
+        RecordType::Problem,
+        RecordType::Analysis,
+        RecordType::Decision,
+        RecordType::Insight,
+        RecordType::FeatureRequest,
+    ];
+
     /// Return the single-character prefix for this record type (e.g., "O", "P", "A").
     pub fn prefix(&self) -> &'static str {
         match self {
@@ -38,6 +50,33 @@ impl RecordType {
             RecordType::Decision => "D",
             RecordType::Insight => "I",
             RecordType::FeatureRequest => "FR",
+        }
+    }
+
+    /// Parse a record type from a record id's prefix (e.g. `"O-2026-ab12cd"`
+    /// → [`RecordType::Observation`]).
+    ///
+    /// Record ids are minted as `{prefix}-{year}-{suffix}` (see
+    /// [`RecordHeader::new`]), so this is the inverse of
+    /// [`prefix`](Self::prefix). Returns `None` for ids without a known
+    /// prefix.
+    pub fn from_id_prefix(id: &str) -> Option<Self> {
+        let (prefix, _) = id.split_once('-')?;
+        Self::ALL
+            .into_iter()
+            .find(|record_type| record_type.prefix() == prefix)
+    }
+
+    /// Return the record type this type must derive from in a valid
+    /// O→P→A→D / O→I→FR chain, or `None` for chain roots (Observation).
+    pub fn expected_parent(&self) -> Option<RecordType> {
+        match self {
+            RecordType::Observation => None,
+            RecordType::Problem => Some(RecordType::Observation),
+            RecordType::Analysis => Some(RecordType::Problem),
+            RecordType::Decision => Some(RecordType::Analysis),
+            RecordType::Insight => Some(RecordType::Observation),
+            RecordType::FeatureRequest => Some(RecordType::Insight),
         }
     }
 }
@@ -594,6 +633,65 @@ mod tests {
         assert_eq!(RecordType::Decision.prefix(), "D");
         assert_eq!(RecordType::Insight.prefix(), "I");
         assert_eq!(RecordType::FeatureRequest.prefix(), "FR");
+    }
+
+    #[test]
+    fn test_prefix_and_parent_tables_stay_in_sync_with_enum() {
+        for record_type in RecordType::ALL {
+            // Round-trip: ids minted by RecordHeader::new parse back to the
+            // same record type via the prefix table.
+            let header = RecordHeader::new(record_type, "test");
+            assert_eq!(
+                RecordType::from_id_prefix(&header.id),
+                Some(record_type),
+                "minted id {} must round-trip through from_id_prefix",
+                header.id
+            );
+
+            // Every expected-parent chain terminates at the Observation root
+            // within the number of record types (no cycles, no dangling).
+            let mut current = record_type;
+            let mut hops = 0;
+            while let Some(parent) = current.expected_parent() {
+                current = parent;
+                hops += 1;
+                assert!(
+                    hops <= RecordType::ALL.len(),
+                    "expected_parent chain from {record_type:?} must not cycle"
+                );
+            }
+            assert_eq!(
+                current,
+                RecordType::Observation,
+                "expected_parent chain from {record_type:?} must root at Observation"
+            );
+        }
+
+        // Explicit parent table, mirroring the O→P→A→D and O→I→FR chains.
+        assert_eq!(RecordType::Observation.expected_parent(), None);
+        assert_eq!(
+            RecordType::Problem.expected_parent(),
+            Some(RecordType::Observation)
+        );
+        assert_eq!(
+            RecordType::Analysis.expected_parent(),
+            Some(RecordType::Problem)
+        );
+        assert_eq!(
+            RecordType::Decision.expected_parent(),
+            Some(RecordType::Analysis)
+        );
+        assert_eq!(
+            RecordType::Insight.expected_parent(),
+            Some(RecordType::Observation)
+        );
+        assert_eq!(
+            RecordType::FeatureRequest.expected_parent(),
+            Some(RecordType::Insight)
+        );
+
+        assert_eq!(RecordType::from_id_prefix("X-2026-abc"), None);
+        assert_eq!(RecordType::from_id_prefix("no-prefix"), None);
     }
 
     #[test]

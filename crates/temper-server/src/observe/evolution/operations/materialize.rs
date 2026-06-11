@@ -17,8 +17,8 @@ use crate::request_context::{AgentContext, extract_agent_context};
 use crate::state::{ObserveRefreshHint, ServerState};
 
 use super::support::{
-    create_system_entity_logged, dispatch_system_action_required, emit_refresh_hints,
-    next_system_entity_id, persist_record, spawn_intent_discovery,
+    EntityDispatchMode, dispatch_system_action_required, emit_refresh_hints,
+    persist_record_with_entity, serialize_or_empty, spawn_intent_discovery,
 };
 
 #[cfg(test)]
@@ -361,24 +361,22 @@ async fn materialize_spec_change_records(
             "finding": finding,
         }),
     };
-    persist_record(state, "Observation", &observation.header, &observation).await?;
-
-    let observation_entity_id = next_system_entity_id("OBS");
-    create_system_entity_logged(
+    let observation_entity_id = persist_record_with_entity(
         state,
-        "Observation",
-        &observation_entity_id,
-        "CreateObservation",
+        &observation.header,
+        &observation,
         serde_json::json!({
             "source": observation.source,
             "classification": format!("{:?}", observation.classification),
             "evidence_query": observation.evidence_query,
-            "context": serde_json::to_string(&observation.context).unwrap_or_default(),
+            "context": serialize_or_empty(&observation.context),
             "tenant": tenant.as_str(),
             "legacy_record_id": observation.header.id,
         }),
+        EntityDispatchMode::BestEffort,
     )
-    .await;
+    .await?
+    .entity_id;
 
     let problem = ProblemRecord {
         header: RecordHeader::new(RecordType::Problem, "intent-discovery")
@@ -403,22 +401,20 @@ async fn materialize_spec_change_records(
             trend: trend_from_str(&finding.trend),
         },
     };
-    persist_record(state, "Problem", &problem.header, &problem).await?;
-
-    let problem_entity_id = next_system_entity_id("PRB");
-    dispatch_system_action_required(
+    let problem_entity_id = persist_record_with_entity(
         state,
-        "Problem",
-        &problem_entity_id,
-        "CreateProblem",
+        &problem.header,
+        &problem,
         serde_json::json!({
             "observation_id": observation_entity_id,
             "problem_statement": problem.problem_statement,
             "severity": problem.impact.severity.to_string(),
-            "invariants": serde_json::to_string(&problem.invariants).unwrap_or_default(),
+            "invariants": serialize_or_empty(&problem.invariants),
         }),
+        EntityDispatchMode::Required,
     )
-    .await?;
+    .await?
+    .entity_id;
     dispatch_system_action_required(
         state,
         "Problem",
@@ -449,20 +445,17 @@ async fn materialize_spec_change_records(
         }],
         recommendation: Some(0),
     };
-    persist_record(state, "Analysis", &analysis.header, &analysis).await?;
-
-    let analysis_entity_id = next_system_entity_id("ANL");
-    dispatch_system_action_required(
+    persist_record_with_entity(
         state,
-        "Analysis",
-        &analysis_entity_id,
-        "CreateAnalysis",
+        &analysis.header,
+        &analysis,
         serde_json::json!({
             "problem_id": problem_entity_id,
             "root_cause": analysis.root_cause,
-            "options": serde_json::to_string(&analysis.options).unwrap_or_default(),
+            "options": serialize_or_empty(&analysis.options),
             "recommendation": analysis.recommendation.unwrap_or_default().to_string(),
         }),
+        EntityDispatchMode::Required,
     )
     .await?;
 
@@ -509,14 +502,10 @@ async fn materialize_finding(
         recommendation: finding.recommendation.clone(),
         priority_score: finding.priority_score,
     };
-    persist_record(state, "Insight", &insight.header, &insight).await?;
-    artifacts.record_ids.push(insight.header.id.clone());
-
-    create_system_entity_logged(
+    persist_record_with_entity(
         state,
-        "Insight",
-        &next_system_entity_id("INS"),
-        "CreateInsight",
+        &insight.header,
+        &insight,
         serde_json::json!({
             "observation_id": artifacts.observation_entity_id,
             "category": format!("{:?}", insight.category),
@@ -525,8 +514,10 @@ async fn materialize_finding(
             "priority_score": format!("{:.4}", insight.priority_score),
             "legacy_record_id": insight.header.id,
         }),
+        EntityDispatchMode::BestEffort,
     )
-    .await;
+    .await?;
+    artifacts.record_ids.push(insight.header.id.clone());
 
     let issue_id = create_issue_for_finding(state, tenant, summary, finding, &artifacts.record_ids)
         .await
@@ -626,9 +617,14 @@ pub(crate) async fn handle_evolution_materialize(
     let mut record_ids = Vec::<String>::new();
     let mut issue_ids = Vec::<String>::new();
     let mut findings_report = Vec::<serde_json::Value>::new();
+    let mut findings_succeeded = 0usize;
+    let mut findings_failed = 0usize;
 
+    // Log-and-continue: one failed finding must not abort the remaining
+    // findings (previously the first failure aborted the whole batch with
+    // a 500). Per-finding outcomes are counted in the response.
     for finding in &analysis.findings {
-        let materialized = materialize_finding(
+        match materialize_finding(
             &state,
             &tenant,
             &summary,
@@ -636,10 +632,28 @@ pub(crate) async fn handle_evolution_materialize(
             &signal_summary,
             finding,
         )
-        .await?;
-        record_ids.extend(materialized.record_ids);
-        issue_ids.push(materialized.issue_id);
-        findings_report.push(materialized.report);
+        .await
+        {
+            Ok(materialized) => {
+                record_ids.extend(materialized.record_ids);
+                issue_ids.push(materialized.issue_id);
+                findings_report.push(materialized.report);
+                findings_succeeded += 1;
+            }
+            Err(status) => {
+                tracing::warn!(
+                    status = %status,
+                    title = %finding_issue_title(finding),
+                    "evolution.materialize.finding_failed; continuing with remaining findings"
+                );
+                findings_report.push(serde_json::json!({
+                    "title": finding_issue_title(finding),
+                    "kind": finding.kind.clone(),
+                    "failed": true,
+                }));
+                findings_failed += 1;
+            }
+        }
     }
 
     emit_refresh_hints(
@@ -659,5 +673,7 @@ pub(crate) async fn handle_evolution_materialize(
         "record_ids": record_ids,
         "issue_ids": issue_ids,
         "findings": findings_report,
+        "findings_succeeded": findings_succeeded,
+        "findings_failed": findings_failed,
     })))
 }

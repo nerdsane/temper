@@ -2,8 +2,6 @@ use axum::http::StatusCode;
 use temper_spec::automaton::{LintSeverity, lint_automata_bundle, lint_automaton};
 use temper_spec::cross_invariant::{CrossInvariantLintFinding, CrossInvariantLintSeverity};
 
-pub(super) use temper_spec::naming::to_pascal_case;
-
 #[derive(Debug, Clone)]
 pub(super) struct EntityLintFinding {
     pub(super) entity: String,
