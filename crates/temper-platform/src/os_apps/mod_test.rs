@@ -377,6 +377,106 @@ async fn test_reconcile_os_app_repairs_missing_active_policies_for_unchanged_bun
 }
 
 #[tokio::test]
+async fn test_reconcile_os_app_repairs_missing_authz_engine_policies_despite_text_cache() {
+    let db_path = format!(
+        "/tmp/temper-test-policy-cache-reconcile-{}.db",
+        uuid::Uuid::new_v4()
+    );
+    let db_url = format!("file:{db_path}");
+    let tenant = "test-policy-cache-reconcile";
+
+    let turso = temper_store_turso::TursoEventStore::new(&db_url, None)
+        .await
+        .unwrap();
+    let mut state = PlatformState::new(None);
+    state
+        .server
+        .set_storage_stack(temper_server::StorageStack::from_turso(turso));
+
+    install_os_app(&state, tenant, "project-management")
+        .await
+        .expect("initial install should succeed");
+
+    let cached_policy_text = {
+        let policies = state.server.tenant_policies.read().unwrap(); // ci-ok: infallible lock
+        policies
+            .get(tenant)
+            .cloned()
+            .expect("initial install should cache app policies")
+    };
+    state
+        .server
+        .authz
+        .reload_tenant_policies(tenant, "")
+        .expect("empty tenant policy should load");
+    {
+        let policies = state.server.tenant_policies.read().unwrap(); // ci-ok: infallible lock
+        assert_eq!(
+            policies.get(tenant).map(String::as_str),
+            Some(cached_policy_text.as_str()),
+            "test setup should leave cached policy text intact"
+        );
+    }
+
+    let admin_ctx = SecurityContext::from_headers(&[
+        ("X-Temper-Principal-Id".to_string(), "admin-1".to_string()),
+        ("X-Temper-Principal-Kind".to_string(), "admin".to_string()),
+    ]);
+    let mut issue_attrs = HashMap::new();
+    issue_attrs.insert("id".to_string(), serde_json::json!("issue-1"));
+
+    let denied_before_reconcile = state.server.authz.authorize_for_tenant(
+        tenant,
+        &admin_ctx,
+        "MoveToTodo",
+        "Issue",
+        &issue_attrs,
+    );
+    assert!(
+        !denied_before_reconcile.is_allowed(),
+        "test setup should remove only the active Cedar authorizer policies"
+    );
+
+    let result = reconcile_os_app(&state, tenant, "project-management")
+        .await
+        .expect("unchanged reconcile should repair missing active authz policies");
+
+    let OsAppReconcileResult::Installed { install, .. } = result else {
+        panic!("missing authz policies should force a policies-only reconcile");
+    };
+    assert!(install.added.is_empty());
+    assert!(install.updated.is_empty());
+    assert!(install.skipped.is_empty());
+
+    let active_policy_text = state
+        .server
+        .authz
+        .get_tenant_policy_text(tenant)
+        .expect("reconcile should reload active app policies");
+    assert_eq!(
+        active_policy_text.trim(),
+        cached_policy_text.trim(),
+        "repair should reload cached app policies without duplicating them"
+    );
+
+    let allowed_after_reconcile = state.server.authz.authorize_for_tenant(
+        tenant,
+        &admin_ctx,
+        "MoveToTodo",
+        "Issue",
+        &issue_attrs,
+    );
+    assert!(
+        allowed_after_reconcile.is_allowed(),
+        "reconcile should reload cached app policies into the active Cedar authorizer: {allowed_after_reconcile:?}"
+    );
+
+    let _ = std::fs::remove_file(&db_path);
+    let _ = std::fs::remove_file(format!("{db_path}-wal"));
+    let _ = std::fs::remove_file(format!("{db_path}-shm"));
+}
+
+#[tokio::test]
 async fn test_install_plan_without_spec_phase_does_not_reclassify_specs() {
     let state = PlatformState::new(None);
     let tenant = "test-install-plan-skip-specs";

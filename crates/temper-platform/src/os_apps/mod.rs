@@ -48,6 +48,40 @@ fn read_app_manifest(app_dir: &Path) -> Option<AppManifest> {
     toml::from_str(&content).ok()
 }
 
+fn cached_or_active_tenant_policy_text(state: &PlatformState, tenant: &str) -> String {
+    if let Some(active_text) = state
+        .server
+        .authz
+        .get_tenant_policy_text(tenant)
+        .filter(|policy_text| !policy_text.trim().is_empty())
+    {
+        return active_text;
+    }
+
+    state
+        .server
+        .tenant_policies
+        .read()
+        .ok()
+        .and_then(|policies| policies.get(tenant).cloned())
+        .unwrap_or_default()
+}
+
+fn merge_bundle_policies(existing: &str, cedar_policies: &[String]) -> String {
+    let mut policy_text = existing.trim_end().to_string();
+    for policy in cedar_policies {
+        let policy = policy.trim();
+        if policy.is_empty() || policy_text.contains(policy) {
+            continue;
+        }
+        if !policy_text.is_empty() {
+            policy_text.push('\n');
+        }
+        policy_text.push_str(policy);
+    }
+    policy_text
+}
+
 // ── Agent / Skill / Seed Data types ─────────────────────────────────
 
 /// An agent definition discovered in the app's `agents/{name}/` directory.
@@ -1126,15 +1160,8 @@ pub(super) async fn install_os_app_with_plan(
 
     // Build the full Cedar policy text for this tenant (existing + new).
     let combined_policy = if plan.policies && !bundle.cedar_policies.is_empty() {
-        let combined: String = bundle.cedar_policies.join("\n");
-        let policies = state.server.tenant_policies.read().unwrap(); // ci-ok: infallible lock
-        let existing = policies.get(tenant).cloned().unwrap_or_default();
-        let full_text = if existing.is_empty() {
-            combined
-        } else {
-            format!("{existing}\n{combined}")
-        };
-        Some(full_text)
+        let existing = cached_or_active_tenant_policy_text(state, tenant);
+        Some(merge_bundle_policies(&existing, &bundle.cedar_policies))
     } else {
         None
     };
