@@ -209,14 +209,13 @@ pub(crate) async fn handle_load_dir(
         let mut specs_registry = std::collections::BTreeMap::<String, String>::new();
 
         let existing = std::fs::read_to_string(&registry_path); // determinism-ok: HTTP handler reads specs registry
-        if let Ok(content) = existing {
-            if let Ok(value) = serde_json::from_str::<serde_json::Value>(&content)
-                && let Some(obj) = value.as_object()
-            {
-                for (tenant, specs_dir) in obj {
-                    if let Some(specs_dir) = specs_dir.as_str() {
-                        specs_registry.insert(tenant.clone(), specs_dir.to_string());
-                    }
+        if let Ok(content) = existing
+            && let Ok(value) = serde_json::from_str::<serde_json::Value>(&content)
+            && let Some(obj) = value.as_object()
+        {
+            for (tenant, specs_dir) in obj {
+                if let Some(specs_dir) = specs_dir.as_str() {
+                    specs_registry.insert(tenant.clone(), specs_dir.to_string());
                 }
             }
         }
