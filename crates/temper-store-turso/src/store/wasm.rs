@@ -10,6 +10,7 @@ use super::{
 };
 use crate::TursoWasmInvocationInsert;
 use crate::metrics::TursoQueryTimer;
+use crate::row_struct::row_struct;
 
 const BUNDLED_REPLACE_UPLOAD_SOURCE: &str = "bundled-replace-upload";
 
@@ -259,18 +260,15 @@ impl TursoEventStore {
 
         let mut out = Vec::new();
         while let Some(row) = rows.next().await.map_err(storage_error)? {
-            out.push(TursoWasmInvocationRow {
-                tenant: row.get::<String>(0).map_err(storage_error)?,
-                entity_type: row.get::<String>(1).map_err(storage_error)?,
-                entity_id: row.get::<String>(2).map_err(storage_error)?,
-                module_name: row.get::<String>(3).map_err(storage_error)?,
-                trigger_action: row.get::<String>(4).map_err(storage_error)?,
-                callback_action: row.get::<Option<String>>(5).map_err(storage_error)?,
+            out.push(row_struct! { row, TursoWasmInvocationRow {
+                tenant: 0 as String, entity_type: 1 as String, entity_id: 2 as String,
+                module_name: 3 as String, trigger_action: 4 as String,
+                callback_action: 5 as Option<String>,
                 success: row.get::<i64>(6).map_err(storage_error)? != 0,
-                error: row.get::<Option<String>>(7).map_err(storage_error)?,
+                error: 7 as Option<String>,
                 duration_ms: row.get::<i64>(8).map_err(storage_error)? as u64,
-                created_at: row.get::<String>(9).map_err(storage_error)?,
-            });
+                created_at: 9 as String,
+            }});
         }
         Ok(out)
     }
@@ -296,30 +294,24 @@ impl TursoEventStore {
 
     /// Parse a WASM module row from a libsql Row (8 columns).
     fn row_to_wasm_module(row: &libsql::Row) -> Result<TursoWasmModuleRow, PersistenceError> {
-        Ok(TursoWasmModuleRow {
-            tenant: row.get::<String>(0).map_err(storage_error)?,
-            module_name: row.get::<String>(1).map_err(storage_error)?,
-            wasm_bytes: row.get::<Vec<u8>>(2).map_err(storage_error)?,
-            sha256_hash: row.get::<String>(3).map_err(storage_error)?,
+        Ok(row_struct! { row, TursoWasmModuleRow {
+            tenant: 0 as String, module_name: 1 as String, wasm_bytes: 2 as Vec<u8>,
+            sha256_hash: 3 as String,
             version: row.get::<i64>(4).map_err(storage_error)? as i32,
             size_bytes: row.get::<i64>(5).map_err(storage_error)? as i32,
-            updated_at: row.get::<String>(6).map_err(storage_error)?,
-            source: row
-                .get::<String>(7)
-                .unwrap_or_else(|_| "bundled".to_string()),
-        })
+            updated_at: 6 as String,
+            source: row.get::<String>(7).unwrap_or_else(|_| "bundled".to_string()),
+        }})
     }
 
     /// Parse a WASM module metadata row from a libsql Row (5 columns).
     fn row_to_wasm_module_metadata(
         row: &libsql::Row,
     ) -> Result<TursoWasmModuleMetadataRow, PersistenceError> {
-        Ok(TursoWasmModuleMetadataRow {
-            tenant: row.get::<String>(0).map_err(storage_error)?,
-            module_name: row.get::<String>(1).map_err(storage_error)?,
-            sha256_hash: row.get::<String>(2).map_err(storage_error)?,
+        Ok(row_struct! { row, TursoWasmModuleMetadataRow {
+            tenant: 0 as String, module_name: 1 as String, sha256_hash: 2 as String,
             size_bytes: row.get::<i64>(3).map_err(storage_error)? as i32,
-            updated_at: row.get::<String>(4).map_err(storage_error)?,
-        })
+            updated_at: 4 as String,
+        }})
     }
 }

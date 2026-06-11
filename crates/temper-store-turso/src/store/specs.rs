@@ -9,6 +9,7 @@ use tracing::instrument;
 use super::{TursoEventStore, TursoInstalledAppRow, TursoSpecRow, write_gate::WritePriority};
 use crate::TursoSpecVerificationUpdate;
 use crate::metrics::TursoQueryTimer;
+use crate::row_struct::row_struct;
 
 #[derive(Debug)]
 struct ExistingSpecFingerprint {
@@ -507,20 +508,13 @@ impl TursoEventStore {
             return Ok(None);
         };
 
-        Ok(Some(TursoInstalledAppRow {
-            tenant_id: row.get(0).map_err(storage_error)?,
-            app_name: row.get(1).map_err(storage_error)?,
-            app_version: row.get(2).map_err(storage_error)?,
-            bundle_digest: row.get(3).map_err(storage_error)?,
-            spec_digest: row.get(4).map_err(storage_error)?,
-            policy_digest: row.get(5).map_err(storage_error)?,
-            wasm_digest: row.get(6).map_err(storage_error)?,
-            content_digest: row.get(7).map_err(storage_error)?,
-            seed_digest: row.get(8).map_err(storage_error)?,
-            installed_at: row.get(9).map_err(storage_error)?,
-            last_reconciled_at: row.get(10).map_err(storage_error)?,
-            status: row.get(11).map_err(storage_error)?,
-        }))
+        Ok(Some(row_struct! { row, TursoInstalledAppRow {
+            tenant_id: 0 as String, app_name: 1 as String, app_version: 2 as String,
+            bundle_digest: 3 as String, spec_digest: 4 as String, policy_digest: 5 as String,
+            wasm_digest: 6 as String, content_digest: 7 as String, seed_digest: 8 as String,
+            installed_at: 9 as String, last_reconciled_at: 10 as Option<String>,
+            status: 11 as String,
+        }}))
     }
 
     /// List all installed apps across all tenants (for boot + UI).
@@ -580,30 +574,16 @@ impl TursoEventStore {
 
         let mut out = Vec::new();
         while let Some(row) = rows.next().await.map_err(storage_error)? {
-            out.push(TursoSpecRow {
-                tenant: row.get::<String>(0).map_err(storage_error)?,
-                entity_type: row.get::<String>(1).map_err(storage_error)?,
-                ioa_source: row.get::<String>(2).map_err(storage_error)?,
-                csdl_xml: row.get::<Option<String>>(3).map_err(storage_error)?,
-                verification_status: row.get::<String>(4).map_err(storage_error)?,
+            out.push(row_struct! { row, TursoSpecRow {
+                tenant: 0 as String, entity_type: 1 as String, ioa_source: 2 as String,
+                csdl_xml: 3 as Option<String>, verification_status: 4 as String,
                 verified: row.get::<i64>(5).map_err(storage_error)? != 0,
-                levels_passed: row
-                    .get::<Option<i64>>(6)
-                    .map_err(storage_error)?
-                    .map(|v| v as i32),
-                levels_total: row
-                    .get::<Option<i64>>(7)
-                    .map_err(storage_error)?
-                    .map(|v| v as i32),
-                verification_result: row.get::<Option<String>>(8).map_err(storage_error)?,
-                content_hash: row.get::<Option<String>>(9).map_err(storage_error)?,
-                updated_at: row.get::<String>(10).map_err(storage_error)?,
-                committed: row
-                    .get::<Option<i64>>(11)
-                    .map_err(storage_error)?
-                    .unwrap_or(1)
-                    != 0,
-            });
+                levels_passed: row.get::<Option<i64>>(6).map_err(storage_error)?.map(|v| v as i32),
+                levels_total: row.get::<Option<i64>>(7).map_err(storage_error)?.map(|v| v as i32),
+                verification_result: 8 as Option<String>, content_hash: 9 as Option<String>,
+                updated_at: 10 as String,
+                committed: row.get::<Option<i64>>(11).map_err(storage_error)?.unwrap_or(1) != 0,
+            }});
         }
         Ok(out)
     }

@@ -20,6 +20,7 @@ use temper_runtime::persistence::{
 use temper_runtime::tenant::parse_persistence_id_parts;
 
 use crate::TursoEventStore;
+use crate::row_struct::row_struct;
 use crate::schema;
 
 /// Routes storage operations to per-tenant Turso databases.
@@ -408,12 +409,11 @@ impl TenantStoreRouter {
 
         let mut out = Vec::new();
         while let Some(row) = rows.next().await.map_err(storage_error)? {
-            out.push(TenantRegistryRow {
-                tenant_id: row.get::<String>(0).map_err(storage_error)?,
-                turso_db_url: row.get::<String>(1).map_err(storage_error)?,
+            out.push(row_struct! { row, TenantRegistryRow {
+                tenant_id: 0 as String, turso_db_url: 1 as String,
                 turso_auth_token: row.get::<Option<String>>(2).ok().flatten(),
-                status: row.get::<String>(3).map_err(storage_error)?,
-            });
+                status: 3 as String,
+            }});
         }
         Ok(out)
     }

@@ -6,6 +6,7 @@ use tracing::instrument;
 
 use super::{TursoEventStore, TursoTenantConstraintRow};
 use crate::metrics::TursoQueryTimer;
+use crate::row_struct::row_struct;
 
 impl TursoEventStore {
     /// Upsert tenant-level cross-entity constraint definitions.
@@ -64,12 +65,11 @@ impl TursoEventStore {
 
         let mut out = Vec::new();
         while let Some(row) = rows.next().await.map_err(storage_error)? {
-            out.push(TursoTenantConstraintRow {
-                tenant: row.get::<String>(0).map_err(storage_error)?,
-                cross_invariants_toml: row.get::<String>(1).map_err(storage_error)?,
+            out.push(row_struct! { row, TursoTenantConstraintRow {
+                tenant: 0 as String, cross_invariants_toml: 1 as String,
                 version: row.get::<i64>(2).map_err(storage_error)? as i32,
-                updated_at: row.get::<String>(3).map_err(storage_error)?,
-            });
+                updated_at: 3 as String,
+            }});
         }
         Ok(out)
     }

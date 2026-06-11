@@ -8,6 +8,7 @@
 mod metrics;
 mod retry;
 pub mod router;
+mod row_struct;
 pub mod schema;
 pub mod store;
 

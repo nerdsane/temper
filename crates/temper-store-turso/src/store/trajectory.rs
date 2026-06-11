@@ -13,6 +13,7 @@ use super::{
 use crate::TursoTrajectoryInsert;
 use crate::metrics::TursoQueryTimer;
 use crate::retry::retry_persistence_with_max_attempts;
+use crate::row_struct::row_struct;
 
 impl TursoEventStore {
     /// Persist a trajectory entry (all columns including agent/authz fields).
@@ -194,14 +195,11 @@ impl TursoEventStore {
 
         let mut out = Vec::new();
         while let Some(row) = rows.next().await.map_err(storage_error)? {
-            out.push(UnmetIntentAggRow {
-                entity_type: row.get::<String>(0).map_err(storage_error)?,
-                action: row.get::<String>(1).map_err(storage_error)?,
-                error: row.get::<Option<String>>(2).map_err(storage_error)?,
+            out.push(row_struct! { row, UnmetIntentAggRow {
+                entity_type: 0 as String, action: 1 as String, error: 2 as Option<String>,
                 count: row.get::<i64>(3).map_err(storage_error)? as u64,
-                first_seen: row.get::<String>(4).map_err(storage_error)?,
-                last_seen: row.get::<String>(5).map_err(storage_error)?,
-            });
+                first_seen: 4 as String, last_seen: 5 as String,
+            }});
         }
         tracing::Span::current().record("row_count", out.len());
         tracing::debug!(count = out.len(), "turso.load_unmet_intent_rows");
@@ -265,38 +263,26 @@ impl TursoEventStore {
         Ok(out)
     }
 
-    /// Parse a trajectory row from a libsql Row (16 columns).
+    /// Parse a trajectory row from a libsql Row (19 columns).
     fn row_to_trajectory(row: &libsql::Row) -> Result<TursoTrajectoryRow, PersistenceError> {
-        Ok(TursoTrajectoryRow {
-            tenant: row.get::<String>(0).map_err(storage_error)?,
-            entity_type: row.get::<String>(1).map_err(storage_error)?,
-            entity_id: row.get::<String>(2).map_err(storage_error)?,
-            action: row.get::<String>(3).map_err(storage_error)?,
+        Ok(row_struct! { row, TursoTrajectoryRow {
+            tenant: 0 as String, entity_type: 1 as String, entity_id: 2 as String,
+            action: 3 as String,
             success: row.get::<i64>(4).map_err(storage_error)? != 0,
-            from_status: row.get::<Option<String>>(5).map_err(storage_error)?,
-            to_status: row.get::<Option<String>>(6).map_err(storage_error)?,
-            error: row.get::<Option<String>>(7).map_err(storage_error)?,
-            agent_id: row.get::<Option<String>>(8).map_err(storage_error)?,
-            session_id: row.get::<Option<String>>(9).map_err(storage_error)?,
-            authz_denied: row
-                .get::<Option<i64>>(10)
-                .map_err(storage_error)?
-                .map(|v| v != 0),
-            denied_resource: row.get::<Option<String>>(11).map_err(storage_error)?,
-            denied_module: row.get::<Option<String>>(12).map_err(storage_error)?,
-            source: row.get::<Option<String>>(13).map_err(storage_error)?,
-            spec_governed: row
-                .get::<Option<i64>>(14)
-                .map_err(storage_error)?
-                .map(|v| v != 0),
-            created_at: row.get::<String>(15).map_err(storage_error)?,
-            request_body: row.get::<Option<String>>(16).map_err(storage_error)?,
-            intent: row.get::<Option<String>>(17).map_err(storage_error)?,
+            from_status: 5 as Option<String>, to_status: 6 as Option<String>,
+            error: 7 as Option<String>, agent_id: 8 as Option<String>,
+            session_id: 9 as Option<String>,
+            authz_denied: row.get::<Option<i64>>(10).map_err(storage_error)?.map(|v| v != 0),
+            denied_resource: 11 as Option<String>, denied_module: 12 as Option<String>,
+            source: 13 as Option<String>,
+            spec_governed: row.get::<Option<i64>>(14).map_err(storage_error)?.map(|v| v != 0),
+            created_at: 15 as String, request_body: 16 as Option<String>,
+            intent: 17 as Option<String>,
             matched_policy_ids: row
                 .get::<Option<String>>(18)
                 .map_err(storage_error)?
                 .and_then(|s| serde_json::from_str(&s).ok()),
-        })
+        }})
     }
 
     /// Query trajectory statistics with optional filters.

@@ -117,26 +117,6 @@ async fn read_blob_ref_bytes(
     }
 }
 
-#[cfg(test)]
-pub(crate) async fn hydrate_blob_refs_in_value(store: &BlobStore, value: &mut Value) {
-    // OData callers want full inline hydration regardless of size.
-    let _deferred = hydrate_blob_refs_in_value_with_ceiling(store, value, usize::MAX).await;
-}
-
-/// Hydrate blob refs in `value` below `max_inline_bytes` in place; return a
-/// `BTreeMap` of blob keys to bytes for refs at or above the ceiling (the
-/// "deferred" set). Callers that hand `value` off to a WASM guest forward
-/// the deferred map as `blob_cache` so guests can resolve oversize fields
-/// via `host_read_field_stream`. See ADR-0046.
-#[cfg(test)]
-pub(crate) async fn hydrate_blob_refs_in_value_with_ceiling(
-    store: &BlobStore,
-    value: &mut Value,
-    max_inline_bytes: usize,
-) -> std::collections::BTreeMap<String, Vec<u8>> {
-    hydrate_blob_refs_with_source(&BlobReadSource::Store(store), value, max_inline_bytes).await
-}
-
 async fn hydrate_blob_refs_with_source(
     source: &BlobReadSource<'_>,
     value: &mut Value,
@@ -307,6 +287,24 @@ mod tests {
         let dir = tempfile::tempdir().expect("tempdir");
         let store = BlobStore::local_fs(dir.path().join("objects"));
         (store, dir)
+    }
+
+    async fn hydrate_blob_refs_in_value(store: &BlobStore, value: &mut Value) {
+        // OData callers want full inline hydration regardless of size.
+        let _deferred = hydrate_blob_refs_in_value_with_ceiling(store, value, usize::MAX).await;
+    }
+
+    /// Hydrate blob refs in `value` below `max_inline_bytes` in place; return a
+    /// `BTreeMap` of blob keys to bytes for refs at or above the ceiling (the
+    /// "deferred" set). Callers that hand `value` off to a WASM guest forward
+    /// the deferred map as `blob_cache` so guests can resolve oversize fields
+    /// via `host_read_field_stream`. See ADR-0046.
+    async fn hydrate_blob_refs_in_value_with_ceiling(
+        store: &BlobStore,
+        value: &mut Value,
+        max_inline_bytes: usize,
+    ) -> std::collections::BTreeMap<String, Vec<u8>> {
+        hydrate_blob_refs_with_source(&BlobReadSource::Store(store), value, max_inline_bytes).await
     }
 
     fn make_state(entity_type: &str, entity_id: &str) -> EntityState {

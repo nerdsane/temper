@@ -9,6 +9,7 @@ mod admin;
 #[cfg(feature = "observe")]
 mod api;
 pub mod authz;
+mod aws_sigv4;
 pub mod blob_store;
 pub mod blob_sweeper;
 mod blob_transport_observability;

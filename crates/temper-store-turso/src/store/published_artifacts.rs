@@ -3,6 +3,7 @@ use temper_runtime::persistence::{PersistenceError, storage_error};
 use tracing::instrument;
 
 use super::TursoEventStore;
+use crate::row_struct::row_struct;
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 pub struct PublishedArtifactRow {
@@ -126,20 +127,12 @@ impl TursoEventStore {
             return Ok(None);
         };
 
-        Ok(Some(PublishedArtifactRow {
-            id: row.get(0).map_err(storage_error)?,
-            tenant: row.get(1).map_err(storage_error)?,
-            source_file_id: row.get(2).map_err(storage_error)?,
-            source_file_version_id: row.get(3).map_err(storage_error)?,
-            content_hash: row.get(4).map_err(storage_error)?,
-            label: row.get(5).map_err(storage_error)?,
-            mime_type: row.get(6).map_err(storage_error)?,
-            byte_length: row.get(7).map_err(storage_error)?,
-            public_storage_key: row.get(8).map_err(storage_error)?,
-            public_url: row.get(9).map_err(storage_error)?,
-            owner_ref_type: row.get(10).map_err(storage_error)?,
-            owner_ref_id: row.get(11).map_err(storage_error)?,
-            status: row.get(12).map_err(storage_error)?,
-        }))
+        Ok(Some(row_struct! { row, PublishedArtifactRow {
+            id: 0 as String, tenant: 1 as String, source_file_id: 2 as String,
+            source_file_version_id: 3 as String, content_hash: 4 as String,
+            label: 5 as String, mime_type: 6 as String, byte_length: 7 as i64,
+            public_storage_key: 8 as String, public_url: 9 as String,
+            owner_ref_type: 10 as String, owner_ref_id: 11 as String, status: 12 as String,
+        }}))
     }
 }

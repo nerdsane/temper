@@ -12,6 +12,7 @@ use tracing::instrument;
 
 use super::{PolicyDenialPatternRow, TursoEventStore};
 use crate::metrics::TursoQueryTimer;
+use crate::row_struct::row_struct;
 
 const DISTINCT_RESOURCE_IDS_BUDGET: usize = 100;
 
@@ -136,15 +137,11 @@ impl TursoEventStore {
 
         let mut out = Vec::new();
         while let Some(row) = rows.next().await.map_err(storage_error)? {
-            out.push(PolicyRow {
-                tenant: row.get::<String>(0).map_err(storage_error)?,
-                policy_id: row.get::<String>(1).map_err(storage_error)?,
-                cedar_text: row.get::<String>(2).map_err(storage_error)?,
-                policy_hash: row.get::<String>(3).map_err(storage_error)?,
-                created_at: row.get::<String>(4).map_err(storage_error)?,
-                created_by: row.get::<String>(5).map_err(storage_error)?,
+            out.push(row_struct! { row, PolicyRow {
+                tenant: 0 as String, policy_id: 1 as String, cedar_text: 2 as String,
+                policy_hash: 3 as String, created_at: 4 as String, created_by: 5 as String,
                 enabled: row.get::<i32>(6).map_err(storage_error)? != 0,
-            });
+            }});
         }
         Ok(out)
     }
@@ -168,15 +165,11 @@ impl TursoEventStore {
 
         let mut out = Vec::new();
         while let Some(row) = rows.next().await.map_err(storage_error)? {
-            out.push(PolicyRow {
-                tenant: row.get::<String>(0).map_err(storage_error)?,
-                policy_id: row.get::<String>(1).map_err(storage_error)?,
-                cedar_text: row.get::<String>(2).map_err(storage_error)?,
-                policy_hash: row.get::<String>(3).map_err(storage_error)?,
-                created_at: row.get::<String>(4).map_err(storage_error)?,
-                created_by: row.get::<String>(5).map_err(storage_error)?,
+            out.push(row_struct! { row, PolicyRow {
+                tenant: 0 as String, policy_id: 1 as String, cedar_text: 2 as String,
+                policy_hash: 3 as String, created_at: 4 as String, created_by: 5 as String,
                 enabled: row.get::<i32>(6).map_err(storage_error)? != 0,
-            });
+            }});
         }
         Ok(out)
     }
@@ -297,20 +290,13 @@ impl TursoEventStore {
         let mut out = Vec::new();
         while let Some(row) = rows.next().await.map_err(storage_error)? {
             let agent_type_raw = row.get::<String>(1).map_err(storage_error)?;
-            out.push(PolicyDenialPatternRow {
-                tenant: row.get::<String>(0).map_err(storage_error)?,
-                agent_type: if agent_type_raw.is_empty() {
-                    None
-                } else {
-                    Some(agent_type_raw)
-                },
-                action: row.get::<String>(2).map_err(storage_error)?,
-                resource_type: row.get::<String>(3).map_err(storage_error)?,
-                count: row.get::<i64>(4).map_err(storage_error)?,
-                first_seen: row.get::<String>(5).map_err(storage_error)?,
-                last_seen: row.get::<String>(6).map_err(storage_error)?,
-                distinct_resource_ids_json: row.get::<String>(7).map_err(storage_error)?,
-            });
+            out.push(row_struct! { row, PolicyDenialPatternRow {
+                tenant: 0 as String,
+                agent_type: if agent_type_raw.is_empty() { None } else { Some(agent_type_raw) },
+                action: 2 as String, resource_type: 3 as String, count: 4 as i64,
+                first_seen: 5 as String, last_seen: 6 as String,
+                distinct_resource_ids_json: 7 as String,
+            }});
         }
         Ok(out)
     }

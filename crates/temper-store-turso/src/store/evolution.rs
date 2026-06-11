@@ -6,6 +6,7 @@ use tracing::instrument;
 
 use super::{DesignTimeEventRow, EvolutionRecordRow, FeatureRequestRow, TursoEventStore};
 use crate::metrics::TursoQueryTimer;
+use crate::row_struct::row_struct;
 
 // -----------------------------------------------------------------------
 // Feature request CRUD
@@ -61,17 +62,12 @@ impl TursoEventStore {
 
         let mut out = Vec::new();
         while let Some(row) = rows.next().await.map_err(storage_error)? {
-            out.push(FeatureRequestRow {
-                id: row.get::<String>(0).map_err(storage_error)?,
-                category: row.get::<String>(1).map_err(storage_error)?,
-                description: row.get::<String>(2).map_err(storage_error)?,
-                frequency: row.get::<i64>(3).map_err(storage_error)?,
-                trajectory_refs: row.get::<String>(4).map_err(storage_error)?,
-                disposition: row.get::<String>(5).map_err(storage_error)?,
-                developer_notes: row.get::<Option<String>>(6).map_err(storage_error)?,
-                created_at: row.get::<String>(7).map_err(storage_error)?,
-                updated_at: row.get::<String>(8).map_err(storage_error)?,
-            });
+            out.push(row_struct! { row, FeatureRequestRow {
+                id: 0 as String, category: 1 as String, description: 2 as String,
+                frequency: 3 as i64, trajectory_refs: 4 as String, disposition: 5 as String,
+                developer_notes: 6 as Option<String>, created_at: 7 as String,
+                updated_at: 8 as String,
+            }});
         }
         Ok(out)
     }
@@ -253,15 +249,11 @@ impl TursoEventStore {
     pub(super) fn row_to_evolution_record(
         row: &libsql::Row,
     ) -> Result<EvolutionRecordRow, PersistenceError> {
-        Ok(EvolutionRecordRow {
-            id: row.get::<String>(0).map_err(storage_error)?,
-            record_type: row.get::<String>(1).map_err(storage_error)?,
-            status: row.get::<String>(2).map_err(storage_error)?,
-            created_by: row.get::<String>(3).map_err(storage_error)?,
-            derived_from: row.get::<Option<String>>(4).map_err(storage_error)?,
-            data: row.get::<String>(5).map_err(storage_error)?,
-            timestamp: row.get::<String>(6).map_err(storage_error)?,
-        })
+        Ok(row_struct! { row, EvolutionRecordRow {
+            id: 0 as String, record_type: 1 as String, status: 2 as String,
+            created_by: 3 as String, derived_from: 4 as Option<String>, data: 5 as String,
+            timestamp: 6 as String,
+        }})
     }
 
     // -----------------------------------------------------------------------
@@ -317,21 +309,13 @@ impl TursoEventStore {
 
         let mut out = Vec::new();
         while let Some(row) = rows.next().await.map_err(storage_error)? {
-            out.push(DesignTimeEventRow {
-                id: row.get::<i64>(0).map_err(storage_error)?,
-                kind: row.get::<String>(1).map_err(storage_error)?,
-                entity_type: row.get::<String>(2).map_err(storage_error)?,
-                tenant: row.get::<String>(3).map_err(storage_error)?,
-                summary: row.get::<String>(4).map_err(storage_error)?,
-                level: row.get::<Option<String>>(5).map_err(storage_error)?,
-                passed: row
-                    .get::<Option<i64>>(6)
-                    .map_err(storage_error)?
-                    .map(|v| v != 0),
-                step_number: row.get::<Option<i64>>(7).map_err(storage_error)?,
-                total_steps: row.get::<Option<i64>>(8).map_err(storage_error)?,
-                created_at: row.get::<String>(9).map_err(storage_error)?,
-            });
+            out.push(row_struct! { row, DesignTimeEventRow {
+                id: 0 as i64, kind: 1 as String, entity_type: 2 as String,
+                tenant: 3 as String, summary: 4 as String, level: 5 as Option<String>,
+                passed: row.get::<Option<i64>>(6).map_err(storage_error)?.map(|v| v != 0),
+                step_number: 7 as Option<i64>, total_steps: 8 as Option<i64>,
+                created_at: 9 as String,
+            }});
         }
         Ok(out)
     }

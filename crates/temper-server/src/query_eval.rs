@@ -358,16 +358,7 @@ async fn expand_entity_recursive(
             .collect()
     }; // Registry lock dropped here
 
-    let entity_id = entity
-        .get("entity_id")
-        .and_then(|v| v.as_str())
-        .or_else(|| {
-            entity
-                .get("fields")
-                .and_then(|f| f.get("Id"))
-                .and_then(|v| v.as_str())
-        })
-        .map(String::from);
+    let entity_id = resolve_entity_id_with_fallback(entity);
 
     for (item, info) in &nav_infos {
         let Some(info) = info else { continue };
@@ -426,20 +417,20 @@ async fn expand_entity_recursive(
                             let mut json =
                                 serde_json::to_value(&response.state).unwrap_or_default();
                             hydrate_blob_refs_for_tenant(state, tenant, &mut json).await;
-                            let matches = json
-                                .get("fields")
-                                .and_then(|f| f.as_object())
-                                .is_some_and(|fields| {
-                                    let parent_id_field = format!("{}Id", entity_type);
-                                    fields.get("parentId").and_then(|v| v.as_str())
-                                        == Some(parent_id.as_str())
-                                        || fields.get(&parent_id_field).and_then(|v| v.as_str())
-                                            == Some(parent_id.as_str())
-                                });
-                            if matches {
+                            if matches_parent_reference(&json, entity_type, parent_id) {
                                 related_entities.push(json);
                             }
                         }
+                    }
+                    if related_entities.is_empty() {
+                        tracing::warn!(
+                            entity_type,
+                            nav_property = %item.property,
+                            target_type = %info.target_type,
+                            parent_id = %parent_id,
+                            scanned = related_ids.len(),
+                            "FK fallback scan found no related entities for $expand"
+                        );
                     }
                 }
             }
@@ -493,6 +484,38 @@ async fn expand_entity_recursive(
         }
     }
     visited.pop();
+}
+
+/// Resolve an entity's id from the top-level `entity_id` field, falling back
+/// to `fields.Id`.
+fn resolve_entity_id_with_fallback(entity: &serde_json::Value) -> Option<String> {
+    entity
+        .get("entity_id")
+        .and_then(|v| v.as_str())
+        .or_else(|| {
+            entity
+                .get("fields")
+                .and_then(|f| f.get("Id"))
+                .and_then(|v| v.as_str())
+        })
+        .map(String::from)
+}
+
+/// Convention-based parent match for the FK fallback scan: true when the
+/// candidate's `fields.parentId` or `fields.{EntityType}Id` equals `parent_id`.
+fn matches_parent_reference(
+    candidate: &serde_json::Value,
+    entity_type: &str,
+    parent_id: &str,
+) -> bool {
+    candidate
+        .get("fields")
+        .and_then(|f| f.as_object())
+        .is_some_and(|fields| {
+            let parent_id_field = format!("{}Id", entity_type);
+            fields.get("parentId").and_then(|v| v.as_str()) == Some(parent_id)
+                || fields.get(&parent_id_field).and_then(|v| v.as_str()) == Some(parent_id)
+        })
 }
 
 /// Find the target entity type name for a navigation property.
