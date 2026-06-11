@@ -9,6 +9,7 @@ use axum::http::{HeaderMap, StatusCode};
 use axum::response::IntoResponse;
 use tracing::instrument;
 
+use super::PolicyAuthed;
 use crate::authz::{load_and_activate_tenant_policies, persist_and_activate_policy};
 use crate::state::ServerState;
 use crate::storage::PolicyStoreRow;
@@ -51,11 +52,8 @@ fn policy_row_to_json(row: &PolicyStoreRow) -> serde_json::Value {
 pub(crate) async fn handle_get_policies(
     State(state): State<ServerState>,
     Path(tenant): Path<String>,
-    headers: HeaderMap,
+    _auth: PolicyAuthed,
 ) -> impl IntoResponse {
-    if let Some(resp) = super::require_policy_auth(&state, &headers, &tenant).await {
-        return resp;
-    }
     let policies = state.tenant_policies.read().unwrap(); // ci-ok: infallible lock
     let text = policies.get(&tenant).cloned().unwrap_or_default();
     (
@@ -72,13 +70,9 @@ pub(crate) async fn handle_get_policies(
 pub(crate) async fn handle_put_policies(
     State(state): State<ServerState>,
     Path(tenant): Path<String>,
-    headers: HeaderMap,
+    _auth: PolicyAuthed,
     body: axum::body::Bytes,
 ) -> impl IntoResponse {
-    if let Some(resp) = super::require_policy_auth(&state, &headers, &tenant).await {
-        return resp;
-    }
-
     let body_json: serde_json::Value = match serde_json::from_slice(&body) {
         Ok(v) => v,
         Err(e) => {
@@ -128,13 +122,9 @@ pub(crate) async fn handle_put_policies(
 pub(crate) async fn handle_add_policy_rule(
     State(state): State<ServerState>,
     Path(tenant): Path<String>,
-    headers: HeaderMap,
+    _auth: PolicyAuthed,
     body: axum::body::Bytes,
 ) -> impl IntoResponse {
-    if let Some(resp) = super::require_policy_auth(&state, &headers, &tenant).await {
-        return resp;
-    }
-
     let body_json: serde_json::Value = match serde_json::from_slice(&body) {
         Ok(v) => v,
         Err(e) => {
@@ -199,12 +189,8 @@ pub(crate) async fn handle_add_policy_rule(
 pub(crate) async fn handle_list_policies(
     State(state): State<ServerState>,
     Path(tenant): Path<String>,
-    headers: HeaderMap,
+    _auth: PolicyAuthed,
 ) -> impl IntoResponse {
-    if let Some(resp) = super::require_policy_auth(&state, &headers, &tenant).await {
-        return resp;
-    }
-
     let Some(store) = state.policy_store() else {
         return (
             StatusCode::SERVICE_UNAVAILABLE,
@@ -305,13 +291,9 @@ pub(crate) async fn handle_list_all_policies(
 pub(crate) async fn handle_create_policy(
     State(state): State<ServerState>,
     Path(tenant): Path<String>,
-    headers: HeaderMap,
+    _auth: PolicyAuthed,
     axum::Json(body): axum::Json<serde_json::Value>,
 ) -> impl IntoResponse {
-    if let Some(resp) = super::require_policy_auth(&state, &headers, &tenant).await {
-        return resp;
-    }
-
     let policy_id = match body.get("policy_id").and_then(|v| v.as_str()) {
         Some(v) if !v.is_empty() => v.to_string(),
         _ => {
@@ -377,13 +359,9 @@ pub(crate) async fn handle_create_policy(
 pub(crate) async fn handle_patch_policy(
     State(state): State<ServerState>,
     Path((tenant, policy_id)): Path<(String, String)>,
-    headers: HeaderMap,
+    _auth: PolicyAuthed,
     axum::Json(body): axum::Json<serde_json::Value>,
 ) -> impl IntoResponse {
-    if let Some(resp) = super::require_policy_auth(&state, &headers, &tenant).await {
-        return resp;
-    }
-
     let Some(store) = state.policy_store() else {
         return (
             StatusCode::SERVICE_UNAVAILABLE,
@@ -481,12 +459,8 @@ pub(crate) async fn handle_patch_policy(
 pub(crate) async fn handle_delete_policy_entry(
     State(state): State<ServerState>,
     Path((tenant, policy_id)): Path<(String, String)>,
-    headers: HeaderMap,
+    _auth: PolicyAuthed,
 ) -> impl IntoResponse {
-    if let Some(resp) = super::require_policy_auth(&state, &headers, &tenant).await {
-        return resp;
-    }
-
     let Some(store) = state.policy_store() else {
         return (
             StatusCode::SERVICE_UNAVAILABLE,

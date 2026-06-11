@@ -14,7 +14,8 @@ mod repl;
 mod secrets;
 
 use axum::Router;
-use axum::extract::{Path, State};
+use axum::extract::{FromRequestParts, Path, State};
+use axum::http::request::Parts;
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::IntoResponse;
 use axum::routing::{get, patch, post, put};
@@ -221,15 +222,44 @@ pub(crate) async fn require_policy_auth(
     None
 }
 
+/// Cedar policy-management gate as an axum extractor.
+///
+/// Runs [`require_policy_auth`] against the `{tenant}` path parameter before
+/// the handler body executes, rejecting with the exact response the helper
+/// produces (403 + `AuthorizationDenied` JSON including the decision id).
+/// The tenant is read from the request parts by name, so handlers keep their
+/// own `Path<String>` / `Path<(String, String)>` extractors untouched.
+pub(crate) struct PolicyAuthed;
+
+impl FromRequestParts<ServerState> for PolicyAuthed {
+    type Rejection = axum::response::Response;
+
+    async fn from_request_parts(
+        parts: &mut Parts,
+        state: &ServerState,
+    ) -> Result<Self, Self::Rejection> {
+        let Path(params) =
+            Path::<std::collections::BTreeMap<String, String>>::from_request_parts(parts, state)
+                .await
+                .map_err(IntoResponse::into_response)?;
+        let Some(tenant) = params.get("tenant") else {
+            // Fail closed: every route using PolicyAuthed must declare a
+            // {tenant} path parameter; reaching this branch is a routing bug.
+            return Err(StatusCode::INTERNAL_SERVER_ERROR.into_response());
+        };
+        match require_policy_auth(state, &parts.headers, tenant).await {
+            Some(resp) => Err(resp),
+            None => Ok(Self),
+        }
+    }
+}
+
 /// GET /api/tenants/{tenant}/policies/suggestions — suggested policies from denial patterns.
 async fn handle_policy_suggestions(
     State(state): State<ServerState>,
     Path(tenant): Path<String>,
-    headers: HeaderMap,
+    _auth: PolicyAuthed,
 ) -> impl IntoResponse {
-    if let Some(resp) = require_policy_auth(&state, &headers, &tenant).await {
-        return resp;
-    }
     let suggestions = if let Some(store) = state.metadata_store_for_tenant(&tenant).await {
         match store.load_policy_denial_patterns(&tenant).await {
             Ok(rows) if !rows.is_empty() => {

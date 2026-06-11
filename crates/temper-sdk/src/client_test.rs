@@ -2,8 +2,6 @@
 
 use super::*;
 
-use super::*;
-
 #[test]
 fn test_builder_defaults() {
     let client = TemperClient::builder()

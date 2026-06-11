@@ -18,7 +18,7 @@ use tracing::instrument;
 
 use temper_runtime::tenant::TenantId;
 
-use super::{decisions_access, empty_decision_list, format_decision_list, require_policy_auth};
+use super::{PolicyAuthed, decisions_access, empty_decision_list, format_decision_list};
 use crate::authz::{persist_and_activate_policy, require_observe_auth};
 use crate::request_context::AgentContext;
 use crate::state::{DecisionStatus, PendingDecision, ServerState};
@@ -72,13 +72,9 @@ pub(crate) async fn handle_list_decisions(
 pub(crate) async fn handle_approve_decision(
     State(state): State<ServerState>,
     Path((tenant, id)): Path<(String, String)>,
-    headers: HeaderMap,
+    _auth: PolicyAuthed,
     axum::Json(body): axum::Json<ApproveBody>,
 ) -> impl IntoResponse {
-    if let Some(resp) = require_policy_auth(&state, &headers, &tenant).await {
-        return resp;
-    }
-
     let scope = body.scope;
     if let Err(e) = temper_authz::validate_policy_scope_matrix(&scope) {
         return (
@@ -226,7 +222,7 @@ pub(crate) async fn handle_approve_decision(
         let gd_id = gd_id.clone();
         let decided_by = body.decided_by.clone().unwrap_or_else(|| "unknown".into());
         let generated_policy = generated_policy.clone();
-        tokio::spawn(async move {
+        let resolution_task = async move {
             // determinism-ok: async callback dispatch for governance decision resolution
             let system_tenant = TenantId::new("temper-system");
             if let Err(e) = state_c
@@ -248,7 +244,8 @@ pub(crate) async fn handle_approve_decision(
                     error = %e, gd_id, "failed to dispatch GovernanceDecision.Approve"
                 );
             }
-        });
+        };
+        tokio::spawn(resolution_task); // determinism-ok: async callback dispatch for governance decision resolution
     }
 
     (
@@ -267,13 +264,9 @@ pub(crate) async fn handle_approve_decision(
 pub(crate) async fn handle_deny_decision(
     State(state): State<ServerState>,
     Path((tenant, id)): Path<(String, String)>,
-    headers: HeaderMap,
+    _auth: PolicyAuthed,
     body: Option<axum::Json<serde_json::Value>>,
 ) -> impl IntoResponse {
-    if let Some(resp) = require_policy_auth(&state, &headers, &tenant).await {
-        return resp;
-    }
-
     let decided_by = body
         .as_ref()
         .and_then(|b| b.get("decided_by"))
@@ -344,7 +337,7 @@ pub(crate) async fn handle_deny_decision(
             .decided_by
             .clone()
             .unwrap_or_else(|| "unknown".into());
-        tokio::spawn(async move {
+        let resolution_task = async move {
             // determinism-ok: async callback dispatch for governance decision resolution
             let system_tenant = TenantId::new("temper-system");
             if let Err(e) = state_c
@@ -365,7 +358,8 @@ pub(crate) async fn handle_deny_decision(
                     error = %e, gd_id, "failed to dispatch GovernanceDecision.Deny"
                 );
             }
-        });
+        };
+        tokio::spawn(resolution_task); // determinism-ok: async callback dispatch for governance decision resolution
     }
 
     (
@@ -382,11 +376,8 @@ pub(crate) async fn handle_deny_decision(
 pub(crate) async fn handle_decision_stream(
     State(state): State<ServerState>,
     Path(tenant): Path<String>,
-    headers: HeaderMap,
+    _auth: PolicyAuthed,
 ) -> impl IntoResponse {
-    if let Some(resp) = require_policy_auth(&state, &headers, &tenant).await {
-        return resp;
-    }
     let rx = state.pending_decision_tx.subscribe();
     let stream = BroadcastStream::new(rx).filter_map(move |result| {
         match result {

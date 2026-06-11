@@ -2,7 +2,6 @@
 
 use super::*;
 
-use super::*;
 use std::collections::BTreeMap;
 
 fn state(status: &str) -> TemperModelState {
