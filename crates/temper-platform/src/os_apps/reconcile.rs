@@ -250,14 +250,15 @@ fn tenant_has_active_policies_for_bundle(
         return true;
     }
 
-    let Ok(policies) = state.server.tenant_policies.read() else {
-        return false;
-    };
-    let Some(active_text) = policies.get(tenant) else {
+    let Some(active_text) = state.server.authz.get_tenant_policy_text(tenant) else {
         return false;
     };
 
-    bundle.cedar_policies.iter().all(|policy| {
+    bundle_policies_present(&active_text, &bundle.cedar_policies)
+}
+
+fn bundle_policies_present(active_text: &str, cedar_policies: &[String]) -> bool {
+    cedar_policies.iter().all(|policy| {
         let policy = policy.trim();
         policy.is_empty() || active_text.contains(policy)
     })
