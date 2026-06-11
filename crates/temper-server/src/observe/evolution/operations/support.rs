@@ -193,7 +193,6 @@ pub(super) struct PersistedRecordEntity {
     /// Minted system entity id (e.g. "OBS-<uuid>").
     pub entity_id: String,
     /// Whether the entity create action dispatched successfully.
-    #[allow(dead_code)] // surfaced for callers that report sync divergence
     pub entity_synced: bool,
 }
 
@@ -310,6 +309,7 @@ pub(super) async fn persist_alerts(
             "rule": alert.rule_name,
             "record_id": alert.record.header.id,
             "entity_id": entity.entity_id,
+            "entity_synced": entity.entity_synced,
             "source": alert.record.source,
             "classification": alert.record.classification,
             "threshold": alert.record.threshold_value,
@@ -368,6 +368,7 @@ pub(super) async fn persist_insights(
         report.items.push(serde_json::json!({
             "record_id": insight.header.id,
             "entity_id": entity.entity_id,
+            "entity_synced": entity.entity_synced,
             "category": format!("{:?}", insight.category),
             "intent": insight.signal.intent,
             "priority_score": insight.priority_score,
