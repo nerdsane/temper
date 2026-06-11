@@ -12,6 +12,8 @@ pub struct ClientBuilder {
     base_url: String,
     tenant: String,
     principal: Option<String>,
+    principal_kind: Option<String>,
+    api_key: Option<String>,
 }
 
 impl ClientBuilder {
@@ -33,6 +35,21 @@ impl ClientBuilder {
         self
     }
 
+    /// Set the principal kind header (e.g., `"admin"`).
+    ///
+    /// Defaults to `"Agent"` when a principal ID is set, and is omitted
+    /// entirely when neither a principal ID nor a kind is configured.
+    pub fn principal_kind(mut self, kind: &str) -> Self {
+        self.principal_kind = Some(kind.to_string());
+        self
+    }
+
+    /// Set an API key sent as a `Bearer` token on every request.
+    pub fn api_key(mut self, key: &str) -> Self {
+        self.api_key = Some(key.to_string());
+        self
+    }
+
     /// Build the [`TemperClient`].
     pub fn build(self) -> Result<TemperClient> {
         anyhow::ensure!(!self.base_url.is_empty(), "base_url is required");
@@ -42,6 +59,8 @@ impl ClientBuilder {
             base_url: self.base_url,
             tenant: self.tenant,
             principal: self.principal,
+            principal_kind: self.principal_kind,
+            api_key: self.api_key,
             http: reqwest::Client::new(),
         })
     }
@@ -55,6 +74,8 @@ pub struct TemperClient {
     base_url: String,
     tenant: String,
     principal: Option<String>,
+    principal_kind: Option<String>,
+    api_key: Option<String>,
     http: reqwest::Client,
 }
 
@@ -65,6 +86,8 @@ impl TemperClient {
             base_url: String::new(),
             tenant: "default".to_string(),
             principal: None,
+            principal_kind: None,
+            api_key: None,
         }
     }
 
@@ -74,6 +97,8 @@ impl TemperClient {
             base_url: base_url.trim_end_matches('/').to_string(),
             tenant: tenant.to_string(),
             principal: None,
+            principal_kind: None,
+            api_key: None,
             http: reqwest::Client::new(),
         }
     }
@@ -93,108 +118,96 @@ impl TemperClient {
         self.principal.as_deref()
     }
 
+    /// Returns the configured principal kind override, if any.
+    pub fn principal_kind(&self) -> Option<&str> {
+        self.principal_kind.as_deref()
+    }
+
+    /// Returns the configured API key, if any.
+    pub fn api_key(&self) -> Option<&str> {
+        self.api_key.as_deref()
+    }
+
     // ── Entity CRUD ──────────────────────────────────────────────────
 
     /// List all entities of the given type.
     pub async fn list(&self, entity_type: &str) -> Result<Vec<Value>> {
-        let url = format!("{}/tdata/{entity_type}", self.base_url);
+        let url = self.entity_url(entity_type);
         let resp = self
-            .http
-            .get(&url)
-            .header("x-tenant-id", &self.tenant)
+            .request(reqwest::Method::GET, &url)
             .send()
             .await
             .with_context(|| format!("Failed to list {entity_type}"))?;
 
-        self.check_status(&resp, "list", entity_type)?;
+        let resp = ensure_success(resp, "list", entity_type).await?;
         let body: Value = resp.json().await.context("Failed to parse list response")?;
-        Ok(body
-            .get("value")
-            .and_then(|v| v.as_array())
-            .cloned()
-            .unwrap_or_default())
+        Ok(values_array(&body))
     }
 
     /// List entities with an OData `$filter` expression.
     pub async fn list_filtered(&self, entity_type: &str, filter: &str) -> Result<Vec<Value>> {
-        let url = format!("{}/tdata/{entity_type}", self.base_url);
+        let url = self.entity_url(entity_type);
         let resp = self
-            .http
-            .get(&url)
-            .header("x-tenant-id", &self.tenant)
+            .request(reqwest::Method::GET, &url)
             .query(&[("$filter", filter)])
             .send()
             .await
             .with_context(|| format!("Failed to list_filtered {entity_type}"))?;
 
-        self.check_status(&resp, "list_filtered", entity_type)?;
+        let resp = ensure_success(resp, "list_filtered", entity_type).await?;
         let body: Value = resp
             .json()
             .await
             .context("Failed to parse list_filtered response")?;
-        Ok(body
-            .get("value")
-            .and_then(|v| v.as_array())
-            .cloned()
-            .unwrap_or_default())
+        Ok(values_array(&body))
     }
 
     /// Get a single entity by type and ID.
     pub async fn get(&self, entity_type: &str, id: &str) -> Result<Value> {
-        let url = format!("{}/tdata/{entity_type}('{id}')", self.base_url);
+        let url = self.entity_instance_url(entity_type, id);
         let resp = self
-            .http
-            .get(&url)
-            .header("x-tenant-id", &self.tenant)
+            .request(reqwest::Method::GET, &url)
             .send()
             .await
             .with_context(|| format!("Failed to get {entity_type}('{id}')"))?;
 
-        self.check_status(&resp, "get", entity_type)?;
+        let resp = ensure_success(resp, "get", entity_type).await?;
         resp.json().await.context("Failed to parse get response")
     }
 
     /// Create a new entity.
     pub async fn create(&self, entity_type: &str, fields: Value) -> Result<Value> {
-        let url = format!("{}/tdata/{entity_type}", self.base_url);
-        let mut req = self
-            .http
-            .post(&url)
-            .header("x-tenant-id", &self.tenant)
-            .json(&fields);
-
-        if let Some(principal) = &self.principal {
-            req = req
-                .header("x-temper-principal-id", principal)
-                .header("x-temper-principal-kind", "Agent");
-        }
-
-        let resp = req
+        let url = self.entity_url(entity_type);
+        let resp = self
+            .request(reqwest::Method::POST, &url)
+            .json(&fields)
             .send()
             .await
             .with_context(|| format!("Failed to create {entity_type}"))?;
 
-        self.check_status(&resp, "create", entity_type)?;
+        let resp = ensure_success(resp, "create", entity_type).await?;
         resp.json().await.context("Failed to parse create response")
     }
 
     /// Patch (update) an existing entity's fields.
     pub async fn patch(&self, entity_type: &str, id: &str, fields: Value) -> Result<Value> {
-        let url = format!("{}/tdata/{entity_type}('{id}')", self.base_url);
+        let url = self.entity_instance_url(entity_type, id);
         let resp = self
-            .http
-            .patch(&url)
-            .header("x-tenant-id", &self.tenant)
+            .request(reqwest::Method::PATCH, &url)
             .json(&fields)
             .send()
             .await
             .with_context(|| format!("Failed to patch {entity_type}('{id}')"))?;
 
-        self.check_status(&resp, "patch", entity_type)?;
+        let resp = ensure_success(resp, "patch", entity_type).await?;
         resp.json().await.context("Failed to parse patch response")
     }
 
     /// Invoke an OData action on an entity.
+    ///
+    /// The `Temper.` namespace prefix is added automatically, so pass
+    /// `"Start"` for `Temper.Start` or `"Claw.Channel.Connect"` for
+    /// `Temper.Claw.Channel.Connect`.
     pub async fn action(
         &self,
         entity_type: &str,
@@ -202,23 +215,40 @@ impl TemperClient {
         action: &str,
         params: Value,
     ) -> Result<Value> {
-        let url = format!(
-            "{}/tdata/{entity_type}('{id}')/Temper.{action}",
-            self.base_url
-        );
+        let url = self.action_url(entity_type, id, action);
         let resp = self
-            .http
-            .post(&url)
-            .header("x-tenant-id", &self.tenant)
+            .request(reqwest::Method::POST, &url)
             .json(&params)
             .send()
             .await
             .with_context(|| format!("Failed to invoke {entity_type}.{action}"))?;
 
-        self.check_status(&resp, "action", &format!("{entity_type}.{action}"))?;
+        let resp = ensure_success(resp, "action", &format!("{entity_type}.{action}")).await?;
         resp.json()
             .await
             .with_context(|| format!("Failed to parse {entity_type}.{action} response"))
+    }
+
+    /// POST an arbitrary JSON body to a fully-qualified URL with the
+    /// client's standard tenant/auth/principal headers.
+    ///
+    /// Escape hatch for server endpoints not covered by a dedicated method.
+    pub async fn raw_post(&self, url: &str, body: Value) -> Result<Value> {
+        let resp = self
+            .request(reqwest::Method::POST, url)
+            .json(&body)
+            .send()
+            .await
+            .with_context(|| format!("Failed to POST {url}"))?;
+
+        let resp = ensure_success(resp, "POST", url).await?;
+        resp.json().await.context("Failed to parse POST response")
+    }
+
+    /// Install an OS app for the client's tenant (idempotent server-side).
+    pub async fn install_app(&self, app: &str) -> Result<Value> {
+        let url = format!("{}/tdata/_install_app", self.base_url);
+        self.raw_post(&url, serde_json::json!({ "app": app })).await
     }
 
     // ── Governance ───────────────────────────────────────────────────
@@ -240,9 +270,7 @@ impl TemperClient {
         });
 
         let resp = self
-            .http
-            .post(&url)
-            .header("x-tenant-id", &self.tenant)
+            .request_base(reqwest::Method::POST, &url)
             .header("x-temper-principal-id", agent_id)
             .header("x-temper-principal-kind", "Agent")
             .json(&body)
@@ -274,9 +302,7 @@ impl TemperClient {
     /// Submit an audit trail entry.
     pub async fn audit(&self, entry: AuditEntry) -> Result<()> {
         let url = format!("{}/api/audit", self.base_url);
-        self.http
-            .post(&url)
-            .header("x-tenant-id", &self.tenant)
+        self.request_base(reqwest::Method::POST, &url)
             .json(&entry)
             .send()
             .await
@@ -295,8 +321,7 @@ impl TemperClient {
         };
 
         let resp = self
-            .http
-            .get(&url)
+            .request_base(reqwest::Method::GET, &url)
             .header("Accept", "application/json")
             .send()
             .await
@@ -319,9 +344,7 @@ impl TemperClient {
     pub async fn submit_specs(&self, specs: Value) -> Result<Value> {
         let url = format!("{}/api/specs", self.base_url);
         let resp = self
-            .http
-            .post(&url)
-            .header("x-tenant-id", &self.tenant)
+            .request_base(reqwest::Method::POST, &url)
             .json(&specs)
             .send()
             .await
@@ -336,9 +359,7 @@ impl TemperClient {
     pub async fn events_stream(&self) -> Result<impl Stream<Item = Result<EntityEvent>>> {
         let url = format!("{}/api/events", self.base_url);
         let resp = self
-            .http
-            .get(&url)
-            .header("x-tenant-id", &self.tenant)
+            .request_base(reqwest::Method::GET, &url)
             .header("Accept", "text/event-stream")
             .send()
             .await
@@ -349,15 +370,30 @@ impl TemperClient {
 
     // ── Helpers ──────────────────────────────────────────────────────
 
-    /// Check HTTP response status code and return a descriptive error on failure.
-    ///
-    /// Note: consumes the response body on error, so this must be called before
-    /// reading the response body. We take `&Response` and only read body on error.
-    fn check_status(&self, resp: &reqwest::Response, operation: &str, context: &str) -> Result<()> {
-        if !resp.status().is_success() {
-            anyhow::bail!("{operation} {context} failed with status {}", resp.status());
+    /// Build a request with tenant and bearer-auth headers (no principal headers).
+    fn request_base(&self, method: reqwest::Method, url: &str) -> reqwest::RequestBuilder {
+        let mut req = self
+            .http
+            .request(method, url)
+            .header("x-tenant-id", &self.tenant);
+        if let Some(key) = &self.api_key {
+            req = req.header("authorization", format!("Bearer {key}"));
         }
-        Ok(())
+        req
+    }
+
+    /// Build a request with tenant, auth, and principal headers.
+    fn request(&self, method: reqwest::Method, url: &str) -> reqwest::RequestBuilder {
+        let mut req = self.request_base(method, url);
+        if let Some(principal) = &self.principal {
+            req = req.header("x-temper-principal-id", principal);
+        }
+        match (&self.principal_kind, &self.principal) {
+            (Some(kind), _) => req = req.header("x-temper-principal-kind", kind),
+            (None, Some(_)) => req = req.header("x-temper-principal-kind", "Agent"),
+            (None, None) => {}
+        }
+        req
     }
 
     /// Build the entity URL for a given entity type.
@@ -379,6 +415,29 @@ impl TemperClient {
     }
 }
 
+/// Check the HTTP status, returning a descriptive error (including the
+/// response body) on failure.
+async fn ensure_success(
+    resp: reqwest::Response,
+    operation: &str,
+    context: &str,
+) -> Result<reqwest::Response> {
+    let status = resp.status();
+    if status.is_success() {
+        return Ok(resp);
+    }
+    let body = resp.text().await.unwrap_or_default();
+    anyhow::bail!("{operation} {context} failed with status {status}: {body}")
+}
+
+/// Extract the OData `value` array from a collection response body.
+fn values_array(body: &Value) -> Vec<Value> {
+    body.get("value")
+        .and_then(|v| v.as_array())
+        .cloned()
+        .unwrap_or_default()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -392,6 +451,8 @@ mod tests {
         assert_eq!(client.base_url(), "http://localhost:4200");
         assert_eq!(client.tenant(), "default");
         assert!(client.principal().is_none());
+        assert!(client.principal_kind().is_none());
+        assert!(client.api_key().is_none());
     }
 
     #[test]
@@ -400,11 +461,15 @@ mod tests {
             .base_url("http://localhost:4200/")
             .tenant("acme")
             .principal("agent-1")
+            .principal_kind("admin")
+            .api_key("secret-key")
             .build()
             .unwrap();
         assert_eq!(client.base_url(), "http://localhost:4200");
         assert_eq!(client.tenant(), "acme");
         assert_eq!(client.principal(), Some("agent-1"));
+        assert_eq!(client.principal_kind(), Some("admin"));
+        assert_eq!(client.api_key(), Some("secret-key"));
     }
 
     #[test]

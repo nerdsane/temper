@@ -15,7 +15,7 @@ use tokio_tungstenite::tungstenite::Message;
 
 use super::gateway::*;
 use super::types::*;
-use crate::TemperApiClient;
+use temper_sdk::TemperClient;
 
 /// Configuration for the Discord transport.
 #[derive(Debug, Clone)]
@@ -35,7 +35,7 @@ pub struct DiscordConfig {
 /// via the OData API, and delivers replies via Discord REST API.
 pub struct DiscordTransport {
     config: DiscordConfig,
-    api: TemperApiClient,
+    api: TemperClient,
     http: reqwest::Client,
     gateway: GatewayState,
     /// Channel entity ID in Temper (populated on startup).
@@ -46,7 +46,7 @@ pub struct DiscordTransport {
 
 impl DiscordTransport {
     /// Create a new Discord transport.
-    pub fn new(config: DiscordConfig, api: TemperApiClient) -> Self {
+    pub fn new(config: DiscordConfig, api: TemperClient) -> Self {
         Self {
             config,
             api,
@@ -99,21 +99,14 @@ impl DiscordTransport {
     /// the Channel entity and a default AgentRoute.
     async fn bootstrap_channel(&self, webhook_url: &str) -> Result<(), String> {
         // Ensure temper-channels OS app is installed for the tenant.
-        let install_url = format!("{}/tdata/_install_app", self.api.config().base_url);
-        let _ = self
-            .api
-            .raw_post(
-                &install_url,
-                serde_json::json!({ "app": "temper-channels" }),
-            )
-            .await;
+        let _ = self.api.install_app("temper-channels").await;
 
         // Archive any stale Channel entities from previous runs.
         // The transport creates a fresh Channel each startup so the
         // webhook_url always matches the current listener port.
         let stale = self
             .api
-            .query_entities(
+            .list_filtered(
                 "Channels",
                 "ChannelType eq 'discord' and Status ne 'Archived'",
             )
@@ -127,10 +120,10 @@ impl DiscordTransport {
             {
                 let _ = self
                     .api
-                    .dispatch_action(
+                    .action(
                         "Channels",
                         old_id,
-                        "Temper.Claw.Channel.Archive",
+                        "Claw.Channel.Archive",
                         serde_json::json!({}),
                     )
                     .await;
@@ -141,13 +134,14 @@ impl DiscordTransport {
             // Create new Channel entity.
             let resp = self
                 .api
-                .create_entity(
+                .create(
                     "Channels",
                     serde_json::json!({
                         "ChannelType": "discord",
                     }),
                 )
-                .await?;
+                .await
+                .map_err(|e| format!("{e:#}"))?;
             let id = resp
                 .get("entity_id")
                 .and_then(|v| v.as_str())
@@ -158,10 +152,10 @@ impl DiscordTransport {
             // Configure the channel with webhook for reply delivery.
             let _ = self
                 .api
-                .dispatch_action(
+                .action(
                     "Channels",
                     &id,
-                    "Temper.Claw.Channel.Configure",
+                    "Claw.Channel.Configure",
                     serde_json::json!({
                         "channel_type": "discord",
                         "channel_id": "discord-gateway",
@@ -173,10 +167,10 @@ impl DiscordTransport {
             // Connect → Ready.
             let _ = self
                 .api
-                .dispatch_action(
+                .action(
                     "Channels",
                     &id,
-                    "Temper.Claw.Channel.Connect",
+                    "Claw.Channel.Connect",
                     serde_json::json!({}),
                 )
                 .await;
@@ -193,15 +187,12 @@ impl DiscordTransport {
         // Ensure at least one active AgentRoute exists.
         let routes = self
             .api
-            .query_entities("AgentRoutes", "Status eq 'Active'")
+            .list_filtered("AgentRoutes", "Status eq 'Active'")
             .await
             .unwrap_or_default();
 
         if routes.is_empty() {
-            let route_resp = self
-                .api
-                .create_entity("AgentRoutes", serde_json::json!({}))
-                .await;
+            let route_resp = self.api.create("AgentRoutes", serde_json::json!({})).await;
 
             if let Ok(route) = route_resp {
                 let route_id = route
@@ -210,10 +201,10 @@ impl DiscordTransport {
                     .unwrap_or("");
                 let _ = self
                     .api
-                    .dispatch_action(
+                    .action(
                         "AgentRoutes",
                         route_id,
-                        "Temper.Claw.AgentRoute.Register",
+                        "Claw.AgentRoute.Register",
                         serde_json::json!({
                             "binding_tier": "channel",
                             "channel_id": channel_id,
@@ -404,10 +395,10 @@ impl DiscordTransport {
 
         match self
             .api
-            .dispatch_action(
+            .action(
                 "Channels",
                 &channel_id,
-                "Temper.Claw.Channel.ReceiveMessage",
+                "Claw.Channel.ReceiveMessage",
                 params,
             )
             .await
@@ -419,7 +410,7 @@ impl DiscordTransport {
                 );
             }
             Err(e) => {
-                eprintln!("  [discord] ReceiveMessage failed: {e}");
+                eprintln!("  [discord] ReceiveMessage failed: {e:#}");
                 // Send error message to user.
                 let _ = send_discord_message(
                     &self.http,

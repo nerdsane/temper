@@ -406,6 +406,99 @@ fn internal_http_call_uses_configured_internal_api_base_url_without_secret() {
 }
 
 #[test]
+fn is_internal_temper_url_handles_trailing_slash_config() {
+    // internal_api_base_url configured with a trailing slash.
+    let host = ProductionWasmHost::new(BTreeMap::new())
+        .with_internal_api_base_url(Some("http://127.0.0.1:3467/".to_string()));
+    assert!(host.is_internal_temper_url("http://127.0.0.1:3467/tdata/Files"));
+    assert!(!host.is_internal_temper_url("http://other.example/tdata/Files"));
+
+    // temper_api_url secret configured with a trailing slash.
+    let mut secrets = BTreeMap::new();
+    secrets.insert(
+        "temper_api_url".to_string(),
+        "http://127.0.0.1:3467/".to_string(),
+    );
+    let host = ProductionWasmHost::new(secrets);
+    assert!(host.is_internal_temper_url("http://127.0.0.1:3467/tdata/Files"));
+    assert!(!host.is_internal_temper_url("http://other.example/tdata/Files"));
+}
+
+#[test]
+fn internal_http_call_binary_adds_internal_headers_with_trailing_slash_config() {
+    let listener = TcpListener::bind("127.0.0.1:0").expect("bind test listener");
+    let addr = listener.local_addr().expect("listener addr");
+    let captured = Arc::new(Mutex::new(String::new()));
+    let captured_clone = Arc::clone(&captured);
+
+    let server = std::thread::spawn(move || {
+        let (mut stream, _) = listener.accept().expect("accept request");
+        let mut buf = [0u8; 8192];
+        let len = stream.read(&mut buf).expect("read request");
+        *captured_clone.lock().expect("capture lock") =
+            String::from_utf8_lossy(&buf[..len]).into_owned();
+
+        let body = "{}";
+        write!(
+            stream,
+            "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+            body.len(),
+            body
+        )
+        .expect("write response");
+    });
+
+    let mut secrets = BTreeMap::new();
+    // Trailing slash: previously the binary path's inline internal-URL
+    // check (and its workflow-header injection) missed this config.
+    secrets.insert("temper_api_url".to_string(), format!("http://{addr}/"));
+    secrets.insert("temper_api_key".to_string(), "secret123".to_string());
+
+    let host = ProductionWasmHost::new(secrets).with_invocation_context(WasmInvocationContext {
+        tenant: "default".to_string(),
+        entity_type: "Workspace".to_string(),
+        entity_id: "ws-1".to_string(),
+        trigger_action: "ReadFile".to_string(),
+        wasm_module: Some("workspace_fs".to_string()),
+        trigger_params: Value::Null,
+        entity_state: Value::Null,
+        agent_id: Some("operator".to_string()),
+        session_id: None,
+        integration_config: BTreeMap::new(),
+        trace_id: String::new(),
+        workflow_root_entity_type: None,
+        workflow_root_entity_id: None,
+        workflow_run_id: Some("Workspace:ws-1".to_string()),
+        http_request: None,
+    });
+
+    let (status, _) = tokio_test::block_on(host.http_call_binary(
+        "GET",
+        &format!("http://{addr}/tdata/Files('file-1')/$value"),
+        &[("X-Tenant-Id".to_string(), "default".to_string())],
+        b"",
+    ))
+    .expect("internal binary call should succeed");
+
+    assert_eq!(status, 200);
+    server.join().expect("server thread");
+
+    let request = captured.lock().expect("capture lock").to_lowercase();
+    assert!(
+        request.contains("authorization: bearer secret123"),
+        "expected bearer token on internal binary call, got: {request}"
+    );
+    assert!(
+        request.contains("x-temper-principal-kind: agent"),
+        "expected principal headers on internal binary call, got: {request}"
+    );
+    assert!(
+        request.contains("x-temper-workflow-run-id: workspace:ws-1"),
+        "expected workflow run id header on internal binary call, got: {request}"
+    );
+}
+
+#[test]
 fn guest_log_span_attrs_include_message_and_invocation_context() {
     let context = WasmInvocationContext {
         tenant: "tenant-a".to_string(),

@@ -14,6 +14,7 @@
 //! the composite checker inherits that warning via the plan's
 //! warnings vector).
 
+use crate::model::semantics::{NoFurtherTransitionsMode, evaluate_invariant_kind};
 use crate::model::{InvariantKind, TemperModel, TemperModelState};
 
 /// Evaluate every invariant on `model` against `state` (a single
@@ -23,7 +24,7 @@ pub(super) fn all_local_invariants_hold(model: &TemperModel, state: &TemperModel
         if !triggers_on(&inv.trigger_states, &state.status) {
             continue;
         }
-        if !evaluate_one(&inv.kind, state) {
+        if !evaluate_one(&inv.kind, model, state) {
             return false;
         }
     }
@@ -34,8 +35,19 @@ fn triggers_on(trigger_states: &[String], current: &str) -> bool {
     trigger_states.is_empty() || trigger_states.iter().any(|s| s == current)
 }
 
-fn evaluate_one(kind: &InvariantKind, state: &TemperModelState) -> bool {
+/// Partial (projection) evaluation of one invariant kind.
+///
+/// The kinds the composite genuinely evaluates delegate to the crate's
+/// authoritative [`evaluate_invariant_kind`]; the rest are intentionally
+/// treated as holding (see the per-arm comments and module docs).
+fn evaluate_one(kind: &InvariantKind, model: &TemperModel, state: &TemperModelState) -> bool {
     match kind {
+        // Kinds the composite projection genuinely evaluates — delegate
+        // to the shared evaluator. (`required_states` and the NFT mode
+        // are irrelevant for these kinds.)
+        InvariantKind::NeverState { .. } | InvariantKind::BoolRequired { .. } => {
+            evaluate_invariant_kind(kind, &[], model, state, NoFurtherTransitionsMode::GuardOnly)
+        }
         InvariantKind::StatusInSet => {
             // Status validity is an inherent property of the per-entity
             // model (its transitions only produce declared statuses).
@@ -46,10 +58,6 @@ fn evaluate_one(kind: &InvariantKind, state: &TemperModelState) -> bool {
             // check but the type enforces it.
             let _ = state.counters.get(var);
             true
-        }
-        InvariantKind::NeverState { state: forbidden } => state.status != *forbidden,
-        InvariantKind::BoolRequired { var, expect } => {
-            state.booleans.get(var).copied().unwrap_or(false) == *expect
         }
         InvariantKind::NoFurtherTransitions => {
             // Structural — BFS naturally surfaces if a state has no
@@ -64,8 +72,11 @@ fn evaluate_one(kind: &InvariantKind, state: &TemperModelState) -> bool {
             // single-entity cascade was not asked to reject it).
             true
         }
-        InvariantKind::And(kinds) => kinds.iter().all(|k| evaluate_one(k, state)),
-        InvariantKind::Or(kinds) => kinds.iter().any(|k| evaluate_one(k, state)),
+        // Compound: recurse locally so nested leaves keep the
+        // composite's partial projection semantics, not the full
+        // evaluator's.
+        InvariantKind::And(kinds) => kinds.iter().all(|k| evaluate_one(k, model, state)),
+        InvariantKind::Or(kinds) => kinds.iter().any(|k| evaluate_one(k, model, state)),
         InvariantKind::Unverifiable { .. } => true, // warning issued elsewhere
     }
 }

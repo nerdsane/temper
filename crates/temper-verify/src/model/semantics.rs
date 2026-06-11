@@ -1,8 +1,12 @@
-//! Shared concrete guard/effect semantics for verification backends.
+//! Shared concrete guard/effect/invariant semantics for verification backends.
 
 use std::collections::BTreeSet;
 
-use super::types::{ModelEffect, ModelGuard, TemperModelState};
+use stateright::Model;
+
+use temper_spec::automaton::AssertCompareOp;
+
+use super::types::{InvariantKind, ModelEffect, ModelGuard, TemperModel, TemperModelState};
 
 /// Evaluate a model guard against a concrete model state.
 pub fn evaluate_guard(guard: &ModelGuard, state: &TemperModelState) -> bool {
@@ -58,6 +62,93 @@ pub fn apply_effects(effects: &[ModelEffect], state: &mut TemperModelState, acti
                 }
             }
         }
+    }
+}
+
+/// How [`evaluate_invariant_kind`] decides whether a transition counts as
+/// "enabled" when evaluating [`InvariantKind::NoFurtherTransitions`].
+///
+/// The two semantics genuinely differ at exploration boundaries: a
+/// transition whose `IncrementCounter`/`ListAppend` effect would exceed the
+/// bounded-exploration budget is excluded by `Model::actions` but still
+/// counts as enabled under a status+guard-only scan.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum NoFurtherTransitionsMode {
+    /// A transition is enabled iff `Model::actions` would emit it
+    /// (status precondition + guard + bounded-exploration counter/list
+    /// budgets). Used by the deterministic-simulation and property-test
+    /// invariant checkers.
+    EnabledActions,
+    /// A transition is enabled iff its status precondition and guard hold;
+    /// bounded-exploration budgets are ignored. Used by the Stateright
+    /// property functions, which replicate the status+guard scan without
+    /// the budget filter.
+    GuardOnly,
+}
+
+/// Evaluate a single [`InvariantKind`] against a concrete model state.
+/// Returns `true` when the invariant HOLDS.
+///
+/// This is the single authoritative invariant-kind evaluator shared by the
+/// Stateright compound-property checker, the deterministic-simulation
+/// checker, the property-test checker, and (for the kinds it projects) the
+/// composite verifier. Callers that need the "violated" form negate the
+/// result.
+///
+/// Pure recursion over compound variants; does not consult
+/// `trigger_states` — callers gate on triggers before calling this.
+pub fn evaluate_invariant_kind(
+    kind: &InvariantKind,
+    required_states: &[String],
+    model: &TemperModel,
+    state: &TemperModelState,
+    nft_mode: NoFurtherTransitionsMode,
+) -> bool {
+    match kind {
+        InvariantKind::StatusInSet => model.states.contains(&state.status),
+        InvariantKind::CounterPositive { var } => state.counters.get(var).copied().unwrap_or(0) > 0,
+        InvariantKind::BoolRequired { var, expect } => {
+            state.booleans.get(var).copied().unwrap_or(false) == *expect
+        }
+        InvariantKind::NoFurtherTransitions => match nft_mode {
+            NoFurtherTransitionsMode::EnabledActions => {
+                let mut actions = Vec::new();
+                model.actions(state, &mut actions);
+                actions.is_empty()
+            }
+            NoFurtherTransitionsMode::GuardOnly => !model.transitions.iter().any(|t| {
+                let status_ok =
+                    t.from_states.is_empty() || t.from_states.iter().any(|s| s == &state.status);
+                status_ok && evaluate_guard(&t.guard, state)
+            }),
+        },
+        InvariantKind::Implication => {
+            let valid_required: Vec<&String> = required_states
+                .iter()
+                .filter(|s| model.states.contains(s))
+                .collect();
+            // No valid required states: trivially true (the invariant
+            // constrains non-status variables).
+            valid_required.is_empty() || valid_required.contains(&&state.status)
+        }
+        InvariantKind::CounterCompare { var, op, value } => {
+            let val = state.counters.get(var).copied().unwrap_or(0);
+            match op {
+                AssertCompareOp::Gt => val > *value,
+                AssertCompareOp::Gte => val >= *value,
+                AssertCompareOp::Lt => val < *value,
+                AssertCompareOp::Lte => val <= *value,
+                AssertCompareOp::Eq => val == *value,
+            }
+        }
+        InvariantKind::NeverState { state: forbidden } => state.status != *forbidden,
+        InvariantKind::And(parts) => parts
+            .iter()
+            .all(|k| evaluate_invariant_kind(k, required_states, model, state, nft_mode)),
+        InvariantKind::Or(parts) => parts
+            .iter()
+            .any(|k| evaluate_invariant_kind(k, required_states, model, state, nft_mode)),
+        InvariantKind::Unverifiable { .. } => true,
     }
 }
 
@@ -256,6 +347,261 @@ mod tests {
         s.lists.insert("log".into(), vec![]);
         apply_effects(&[ModelEffect::ListRemoveAt("log".into())], &mut s, "Act");
         assert!(s.lists["log"].is_empty());
+    }
+
+    // -----------------------------------------------------------------------
+    // evaluate_invariant_kind — every InvariantKind arm
+    // -----------------------------------------------------------------------
+
+    use super::super::types::ResolvedTransition;
+
+    /// Build a minimal model with the given states and transitions.
+    fn model_with(states: &[&str], transitions: Vec<ResolvedTransition>) -> TemperModel {
+        TemperModel {
+            states: states.iter().map(|s| s.to_string()).collect(),
+            transitions,
+            invariants: vec![],
+            liveness: vec![],
+            initial_status: states.first().map(|s| s.to_string()).unwrap_or_default(),
+            initial_counters: BTreeMap::new(),
+            initial_booleans: BTreeMap::new(),
+            initial_lists: BTreeMap::new(),
+            counter_bounds: BTreeMap::new(),
+            default_max_counter: 2,
+        }
+    }
+
+    fn transition(name: &str, from: &str, effects: Vec<ModelEffect>) -> ResolvedTransition {
+        ResolvedTransition {
+            name: name.to_string(),
+            from_states: vec![from.to_string()],
+            to_state: None,
+            guard: ModelGuard::Always,
+            effects,
+        }
+    }
+
+    /// Evaluate with no required states, in EnabledActions mode.
+    fn holds(kind: &InvariantKind, model: &TemperModel, state: &TemperModelState) -> bool {
+        evaluate_invariant_kind(
+            kind,
+            &[],
+            model,
+            state,
+            NoFurtherTransitionsMode::EnabledActions,
+        )
+    }
+
+    #[test]
+    fn invariant_status_in_set() {
+        let model = model_with(&["A", "B"], vec![]);
+        assert!(holds(&InvariantKind::StatusInSet, &model, &state("A")));
+        assert!(holds(&InvariantKind::StatusInSet, &model, &state("B")));
+        assert!(!holds(&InvariantKind::StatusInSet, &model, &state("Zzz")));
+    }
+
+    #[test]
+    fn invariant_counter_positive() {
+        let model = model_with(&["A"], vec![]);
+        let kind = InvariantKind::CounterPositive { var: "n".into() };
+        let mut s = state("A");
+        assert!(!holds(&kind, &model, &s)); // missing defaults to 0
+        s.counters.insert("n".into(), 0);
+        assert!(!holds(&kind, &model, &s));
+        s.counters.insert("n".into(), 1);
+        assert!(holds(&kind, &model, &s));
+    }
+
+    #[test]
+    fn invariant_bool_required() {
+        let model = model_with(&["A"], vec![]);
+        let expect_true = InvariantKind::BoolRequired {
+            var: "ready".into(),
+            expect: true,
+        };
+        let expect_false = InvariantKind::BoolRequired {
+            var: "ready".into(),
+            expect: false,
+        };
+        let mut s = state("A");
+        assert!(!holds(&expect_true, &model, &s)); // missing defaults to false
+        assert!(holds(&expect_false, &model, &s));
+        s.booleans.insert("ready".into(), true);
+        assert!(holds(&expect_true, &model, &s));
+        assert!(!holds(&expect_false, &model, &s));
+    }
+
+    #[test]
+    fn invariant_no_further_transitions_both_modes_agree_without_budgets() {
+        let model = model_with(&["A", "B"], vec![transition("Go", "A", vec![])]);
+        let kind = InvariantKind::NoFurtherTransitions;
+        for mode in [
+            NoFurtherTransitionsMode::EnabledActions,
+            NoFurtherTransitionsMode::GuardOnly,
+        ] {
+            // "Go" is enabled from A: invariant violated.
+            assert!(!evaluate_invariant_kind(
+                &kind,
+                &[],
+                &model,
+                &state("A"),
+                mode
+            ));
+            // Nothing enabled from B: invariant holds.
+            assert!(evaluate_invariant_kind(
+                &kind,
+                &[],
+                &model,
+                &state("B"),
+                mode
+            ));
+        }
+    }
+
+    #[test]
+    fn invariant_no_further_transitions_modes_diverge_at_counter_bound() {
+        // "Add" increments counter "n"; default_max_counter is 2, so at
+        // n == 2, Model::actions suppresses it but the guard still holds.
+        let model = model_with(
+            &["A"],
+            vec![transition(
+                "Add",
+                "A",
+                vec![ModelEffect::IncrementCounter("n".into())],
+            )],
+        );
+        let kind = InvariantKind::NoFurtherTransitions;
+        let mut s = state("A");
+        s.counters.insert("n".into(), 2);
+        // EnabledActions: bound-blocked transition is not enabled — holds.
+        assert!(evaluate_invariant_kind(
+            &kind,
+            &[],
+            &model,
+            &s,
+            NoFurtherTransitionsMode::EnabledActions
+        ));
+        // GuardOnly: budgets ignored, transition counts as enabled — violated.
+        assert!(!evaluate_invariant_kind(
+            &kind,
+            &[],
+            &model,
+            &s,
+            NoFurtherTransitionsMode::GuardOnly
+        ));
+    }
+
+    #[test]
+    fn invariant_implication() {
+        let model = model_with(&["A", "B", "C"], vec![]);
+        let kind = InvariantKind::Implication;
+        let eval = |required: &[String], status: &str| {
+            evaluate_invariant_kind(
+                &kind,
+                required,
+                &model,
+                &state(status),
+                NoFurtherTransitionsMode::EnabledActions,
+            )
+        };
+        // No required states: trivially true.
+        assert!(eval(&[], "A"));
+        // Required states not in model.states are filtered out: trivially true.
+        assert!(eval(&["NotAState".to_string()], "A"));
+        // Status in valid required set: holds.
+        assert!(eval(&["A".to_string(), "B".to_string()], "B"));
+        // Status outside valid required set: violated.
+        assert!(!eval(&["A".to_string(), "B".to_string()], "C"));
+    }
+
+    #[test]
+    fn invariant_counter_compare_all_operators() {
+        let model = model_with(&["A"], vec![]);
+        let mut s = state("A");
+        s.counters.insert("n".into(), 3);
+        let eval = |op: AssertCompareOp, value: usize| {
+            holds(
+                &InvariantKind::CounterCompare {
+                    var: "n".into(),
+                    op,
+                    value,
+                },
+                &model,
+                &s,
+            )
+        };
+        assert!(eval(AssertCompareOp::Gt, 2));
+        assert!(!eval(AssertCompareOp::Gt, 3));
+        assert!(eval(AssertCompareOp::Gte, 3));
+        assert!(!eval(AssertCompareOp::Gte, 4));
+        assert!(eval(AssertCompareOp::Lt, 4));
+        assert!(!eval(AssertCompareOp::Lt, 3));
+        assert!(eval(AssertCompareOp::Lte, 3));
+        assert!(!eval(AssertCompareOp::Lte, 2));
+        assert!(eval(AssertCompareOp::Eq, 3));
+        assert!(!eval(AssertCompareOp::Eq, 2));
+    }
+
+    #[test]
+    fn invariant_counter_compare_missing_counter_defaults_to_zero() {
+        let model = model_with(&["A"], vec![]);
+        let kind = InvariantKind::CounterCompare {
+            var: "missing".into(),
+            op: AssertCompareOp::Eq,
+            value: 0,
+        };
+        assert!(holds(&kind, &model, &state("A")));
+    }
+
+    #[test]
+    fn invariant_never_state() {
+        let model = model_with(&["A", "Bad"], vec![]);
+        let kind = InvariantKind::NeverState {
+            state: "Bad".into(),
+        };
+        assert!(holds(&kind, &model, &state("A")));
+        assert!(!holds(&kind, &model, &state("Bad")));
+    }
+
+    #[test]
+    fn invariant_and_or_nesting() {
+        let model = model_with(&["A", "Bad"], vec![]);
+        let nested = InvariantKind::And(vec![
+            InvariantKind::NeverState {
+                state: "Bad".into(),
+            },
+            InvariantKind::Or(vec![
+                InvariantKind::CounterPositive { var: "n".into() },
+                InvariantKind::BoolRequired {
+                    var: "ready".into(),
+                    expect: true,
+                },
+            ]),
+        ]);
+
+        // Neither Or branch holds: And fails.
+        let mut s = state("A");
+        assert!(!holds(&nested, &model, &s));
+        // One Or branch holds (counter positive): And passes.
+        s.counters.insert("n".into(), 1);
+        assert!(holds(&nested, &model, &s));
+        // Other Or branch holds (bool set): still passes.
+        s.counters.insert("n".into(), 0);
+        s.booleans.insert("ready".into(), true);
+        assert!(holds(&nested, &model, &s));
+        // NeverState leaf fails: And fails regardless of Or.
+        s.status = "Bad".into();
+        assert!(!holds(&nested, &model, &s));
+    }
+
+    #[test]
+    fn invariant_unverifiable_always_holds() {
+        let model = model_with(&["A"], vec![]);
+        let kind = InvariantKind::Unverifiable {
+            expression: "len(items) == count".into(),
+        };
+        assert!(holds(&kind, &model, &state("A")));
+        assert!(holds(&kind, &model, &state("Anything")));
     }
 
     #[test]

@@ -654,6 +654,50 @@ impl ProductionWasmHost {
         add_workflow_observability_headers(builder, headers, inv_ctx)
     }
 
+    /// Build a reqwest request for an outbound host HTTP call: resolve the
+    /// method, apply the (hint-stripped) guest headers, inject internal
+    /// Temper auth/observability headers for internal URLs, and auto-inject
+    /// `traceparent` for cross-request trace correlation when the guest did
+    /// not set one.
+    ///
+    /// Shared by `http_call`, `http_call_binary`, and
+    /// `http_stream_begin_outbound` so internal-URL detection and header
+    /// injection cannot drift between transports.
+    fn build_request_builder(
+        &self,
+        method: &str,
+        url: &str,
+        filtered_headers: &[(String, String)],
+        span: &tracing::Span,
+    ) -> Result<reqwest::RequestBuilder, String> {
+        let mut builder = match method.to_uppercase().as_str() {
+            "GET" => self.client.get(url),
+            "POST" => self.client.post(url),
+            "PUT" => self.client.put(url),
+            "DELETE" => self.client.delete(url),
+            "PATCH" => self.client.patch(url),
+            other => return Err(format!("unsupported HTTP method: {other}")),
+        };
+
+        for (k, v) in filtered_headers {
+            builder = builder.header(k.as_str(), v.as_str());
+        }
+
+        builder = self.add_internal_temper_headers(builder, url, filtered_headers);
+        // determinism-ok: internal-URL check uses non-deterministic URL comparison,
+        // but this runs in WasmHost (not simulation), so wall-clock/network access is fine.
+
+        if !filtered_headers
+            .iter()
+            .any(|(k, _)| k.eq_ignore_ascii_case("traceparent"))
+            && let Some(traceparent) = current_traceparent_header(span, self.trace_id.as_deref())
+        {
+            builder = builder.header("traceparent", traceparent);
+        }
+
+        Ok(builder)
+    }
+
     fn build_guest_wide_event(&self, event_json: &str) -> Result<WideEvent, String> {
         let payload: GuestWideEventInput = serde_json::from_str(event_json)
             .map_err(|e| format!("invalid guest wide event payload: {e}"))?;
@@ -752,43 +796,32 @@ impl ProductionWasmHost {
     }
 }
 
-#[async_trait]
-impl WasmHost for ProductionWasmHost {
-    async fn http_call(
-        &self,
-        method: &str,
-        url: &str,
-        headers: &[(String, String)],
-        body: &str,
-    ) -> Result<(u16, String), String> {
-        let started = Instant::now();
-        if let Some(interceptor) = &self.text_http_interceptor
-            && let Some(result) = interceptor(
-                method.to_string(),
-                url.to_string(),
-                headers.to_vec(),
-                body.to_string(),
-            )
-            .await
-        {
-            return result;
-        }
-        // Strip Temper span hint headers (X-Temper-Span-*) before the request
-        // is built, and capture them for the local tracing span. See
-        // ADR-0037: WASM guests annotate outgoing calls with
-        // `X-Temper-Span-Name` / `X-Temper-Span-Attr-*` so the resulting
-        // span has a semantically meaningful name (e.g., `tool.llm_call`)
-        // and attributes (e.g., `gen_ai.request.model`).
-        let (filtered_headers, span_hints) = split_span_hint_headers(headers);
+/// Construct the standard `wasm.host.*` span for an outbound HTTP-style
+/// call with the full Datadog-visible field set (ADR-0037), record the
+/// invocation context, and apply guest span hints.
+///
+/// All four outbound paths (`http_call`, `http_call_binary`,
+/// `http_stream_begin_outbound`, `connect_call`) share this field set so
+/// spans stay facetable in Datadog regardless of transport. Fields only
+/// known later (`request_bytes`, `status_code`, `response_bytes`,
+/// `response_frames`, `duration_ms`, and the invocation-context fields)
+/// are declared `Empty` and recorded via [`tracing::Span::record`] when
+/// available.
+///
+/// This is a macro (not a fn) because `tracing::info_span!` requires the
+/// span name to be a literal at the callsite.
+macro_rules! host_http_span {
+    ($host:expr, $name:literal, $step:expr, $hints:expr, $method:expr, $url:expr, $header_count:expr $(,)?) => {{
         let span = tracing::info_span!(
-            "wasm.host.http_call",
-            otel.name = %span_hint_otel_name(&span_hints, "wasm.host.http_call"),
-            http.method = %method,
-            http.url = %telemetry_url(url),
-            request_bytes = body.len() as u64,
-            header_count = filtered_headers.len() as u64,
+            $name,
+            otel.name = %span_hint_otel_name($hints, $name),
+            http.method = %$method,
+            http.url = %telemetry_url($url),
+            request_bytes = tracing::field::Empty,
+            header_count = $header_count as u64,
             status_code = tracing::field::Empty,
             response_bytes = tracing::field::Empty,
+            response_frames = tracing::field::Empty,
             duration_ms = tracing::field::Empty,
             tenant = tracing::field::Empty,
             wasm_module = tracing::field::Empty,
@@ -813,37 +846,119 @@ impl WasmHost for ProductionWasmHost {
             gen_ai.provider.name = tracing::field::Empty,
             gen_ai.request.model = tracing::field::Empty,
         );
-        record_invocation_context_on_span(&span, self.invocation_context.as_ref(), "http_call");
-        apply_span_hints(&span, &span_hints);
+        record_invocation_context_on_span(&span, $host.invocation_context.as_ref(), $step);
+        apply_span_hints(&span, $hints);
+        span
+    }};
+}
+
+/// Record the response-side span fields (`status_code`, `response_bytes`,
+/// `duration_ms`) on the current span and emit the host HTTP call metric.
+///
+/// Shared tail of the text/binary call paths and their interceptor
+/// short-circuits.
+fn record_host_call_outcome(
+    method: &str,
+    transport: &str,
+    status: u16,
+    request_bytes: u64,
+    response_bytes: u64,
+    started: Instant,
+) {
+    let duration_ms = started.elapsed().as_millis() as u64;
+    let span = tracing::Span::current();
+    span.record("status_code", status);
+    span.record("response_bytes", response_bytes);
+    span.record("duration_ms", duration_ms);
+    metrics::record_host_http_call(
+        method,
+        transport,
+        status,
+        request_bytes,
+        response_bytes,
+        duration_ms as f64,
+    );
+}
+
+/// Handle an interceptor short-circuit result: record span fields and
+/// metrics on success, log a warning on failure, and pass the result
+/// through unchanged. Keeps the text and binary interceptor paths'
+/// telemetry identical.
+fn finish_interceptor_result<B: AsRef<[u8]>>(
+    transport: &str,
+    method: &str,
+    request_bytes: u64,
+    started: Instant,
+    result: Result<(u16, B), String>,
+) -> Result<(u16, B), String> {
+    match &result {
+        Ok((status, response)) => {
+            record_host_call_outcome(
+                method,
+                transport,
+                *status,
+                request_bytes,
+                response.as_ref().len() as u64,
+                started,
+            );
+        }
+        Err(error) => {
+            tracing::warn!(
+                error = %error,
+                transport,
+                duration_ms = started.elapsed().as_millis() as u64,
+                "WASM host interceptor failed"
+            );
+        }
+    }
+    result
+}
+
+#[async_trait]
+impl WasmHost for ProductionWasmHost {
+    async fn http_call(
+        &self,
+        method: &str,
+        url: &str,
+        headers: &[(String, String)],
+        body: &str,
+    ) -> Result<(u16, String), String> {
+        let started = Instant::now();
+        // Strip Temper span hint headers (X-Temper-Span-*) before the request
+        // is built, and capture them for the local tracing span. See
+        // ADR-0037: WASM guests annotate outgoing calls with
+        // `X-Temper-Span-Name` / `X-Temper-Span-Attr-*` so the resulting
+        // span has a semantically meaningful name (e.g., `tool.llm_call`)
+        // and attributes (e.g., `gen_ai.request.model`).
+        let (filtered_headers, span_hints) = split_span_hint_headers(headers);
+        let span = host_http_span!(
+            self,
+            "wasm.host.http_call",
+            "http_call",
+            &span_hints,
+            method,
+            url,
+            filtered_headers.len(),
+        );
+        span.record("request_bytes", body.len() as u64);
         let _guard = span.enter();
 
-        let mut builder = match method.to_uppercase().as_str() {
-            "GET" => self.client.get(url),
-            "POST" => self.client.post(url),
-            "PUT" => self.client.put(url),
-            "DELETE" => self.client.delete(url),
-            "PATCH" => self.client.patch(url),
-            other => return Err(format!("unsupported HTTP method: {other}")),
-        };
-
-        for (k, v) in &filtered_headers {
-            builder = builder.header(k.as_str(), v.as_str());
+        if let Some(interceptor) = &self.text_http_interceptor
+            && let Some(result) = interceptor(
+                method.to_string(),
+                url.to_string(),
+                filtered_headers.clone(),
+                body.to_string(),
+            )
+            .await
+        {
+            return finish_interceptor_result("text", method, body.len() as u64, started, result);
         }
 
         let is_internal = self.is_internal_temper_url(url);
-        builder = self.add_internal_temper_headers(builder, url, &filtered_headers);
         // determinism-ok: is_internal check uses non-deterministic URL comparison,
         // but this runs in WasmHost (not simulation), so wall-clock/network access is fine.
-
-        // Auto-inject traceparent for cross-request trace correlation.
-        if !filtered_headers
-            .iter()
-            .any(|(k, _)| k.eq_ignore_ascii_case("traceparent"))
-            && let Some(traceparent) =
-                current_traceparent_header(&tracing::Span::current(), self.trace_id.as_deref())
-        {
-            builder = builder.header("traceparent", traceparent);
-        }
+        let mut builder = self.build_request_builder(method, url, &filtered_headers, &span)?;
 
         if !body.is_empty() {
             builder = builder.body(body.to_string());
@@ -961,22 +1076,18 @@ impl WasmHost for ProductionWasmHost {
                 format!("failed to read response body: {e}")
             })?
         };
-        let duration_ms = started.elapsed().as_millis() as u64;
-        tracing::Span::current().record("status_code", status);
-        tracing::Span::current().record("response_bytes", resp_body.len() as u64);
-        tracing::Span::current().record("duration_ms", duration_ms);
-        apply_response_captures(
-            &tracing::Span::current(),
-            &resp_body,
-            &span_hints.response_captures,
-        );
-        metrics::record_host_http_call(
+        record_host_call_outcome(
             method,
             "text",
             status,
             body.len() as u64,
             resp_body.len() as u64,
-            duration_ms as f64,
+            started,
+        );
+        apply_response_captures(
+            &tracing::Span::current(),
+            &resp_body,
+            &span_hints.response_captures,
         );
         Ok((status, resp_body))
     }
@@ -991,45 +1102,16 @@ impl WasmHost for ProductionWasmHost {
         let started = Instant::now();
         // See http_call for the span-hint-header rationale (ADR-0037).
         let (filtered_headers, span_hints) = split_span_hint_headers(headers);
-        let span = tracing::info_span!(
+        let span = host_http_span!(
+            self,
             "wasm.host.http_call_binary",
-            otel.name = %span_hint_otel_name(&span_hints, "wasm.host.http_call_binary"),
-            http.method = %method,
-            http.url = %telemetry_url(url),
-            request_bytes = body.len() as u64,
-            header_count = filtered_headers.len() as u64,
-            status_code = tracing::field::Empty,
-            response_bytes = tracing::field::Empty,
-            duration_ms = tracing::field::Empty,
-            tenant = tracing::field::Empty,
-            wasm_module = tracing::field::Empty,
-            observability_event = tracing::field::Empty,
-            session_id = tracing::field::Empty,
-            managed_session_id = tracing::field::Empty,
-            inner_session_id = tracing::field::Empty,
-            parent_session_id = tracing::field::Empty,
-            agent_id = tracing::field::Empty,
-            environment_id = tracing::field::Empty,
-            entity_type = tracing::field::Empty,
-            entity_id = tracing::field::Empty,
-            trigger_action = tracing::field::Empty,
-            action_name = tracing::field::Empty,
-            workflow_step = tracing::field::Empty,
-            workflow_root_entity_type = tracing::field::Empty,
-            workflow_root_entity_id = tracing::field::Empty,
-            workflow_run_id = tracing::field::Empty,
-            tool.name = tracing::field::Empty,
-            tool.call_id = tracing::field::Empty,
-            gen_ai.operation.name = tracing::field::Empty,
-            gen_ai.provider.name = tracing::field::Empty,
-            gen_ai.request.model = tracing::field::Empty,
-        );
-        record_invocation_context_on_span(
-            &span,
-            self.invocation_context.as_ref(),
             "http_call_binary",
+            &span_hints,
+            method,
+            url,
+            filtered_headers.len(),
         );
-        apply_span_hints(&span, &span_hints);
+        span.record("request_bytes", body.len() as u64);
         let _guard = span.enter();
 
         if let Some(ref interceptor) = self.binary_http_interceptor
@@ -1041,31 +1123,7 @@ impl WasmHost for ProductionWasmHost {
             )
             .await
         {
-            let duration_ms = started.elapsed().as_millis() as u64;
-            match result {
-                Ok((status, resp_bytes)) => {
-                    tracing::Span::current().record("status_code", status);
-                    tracing::Span::current().record("response_bytes", resp_bytes.len() as u64);
-                    tracing::Span::current().record("duration_ms", duration_ms);
-                    metrics::record_host_http_call(
-                        method,
-                        "binary",
-                        status,
-                        body.len() as u64,
-                        resp_bytes.len() as u64,
-                        duration_ms as f64,
-                    );
-                    return Ok((status, resp_bytes));
-                }
-                Err(error) => {
-                    tracing::warn!(
-                        error = %error,
-                        duration_ms,
-                        "WASM host binary interceptor failed"
-                    );
-                    return Err(error);
-                }
-            }
+            return finish_interceptor_result("binary", method, body.len() as u64, started, result);
         }
 
         let _blob_transport_permit = if let Some(backend) = remote_blob_backend(&self.secrets, url)
@@ -1097,39 +1155,7 @@ impl WasmHost for ProductionWasmHost {
             None
         };
 
-        let mut builder = match method.to_uppercase().as_str() {
-            "GET" => self.client.get(url),
-            "POST" => self.client.post(url),
-            "PUT" => self.client.put(url),
-            "DELETE" => self.client.delete(url),
-            "PATCH" => self.client.patch(url),
-            other => return Err(format!("unsupported HTTP method: {other}")),
-        };
-
-        for (k, v) in &filtered_headers {
-            builder = builder.header(k.as_str(), v.as_str());
-        }
-
-        let is_internal = self
-            .internal_api_base_url
-            .as_ref()
-            .is_some_and(|api_url| url.starts_with(api_url))
-            || self
-                .secrets
-                .get("temper_api_url")
-                .is_some_and(|api_url| url.starts_with(api_url.trim_end_matches('/')));
-        if is_internal && let Some(ref inv_ctx) = self.invocation_context {
-            builder = add_workflow_observability_headers(builder, &filtered_headers, inv_ctx);
-        }
-
-        if !headers
-            .iter()
-            .any(|(k, _)| k.eq_ignore_ascii_case("traceparent"))
-            && let Some(traceparent) =
-                current_traceparent_header(&tracing::Span::current(), self.trace_id.as_deref())
-        {
-            builder = builder.header("traceparent", traceparent);
-        }
+        let mut builder = self.build_request_builder(method, url, &filtered_headers, &span)?;
 
         if !body.is_empty() {
             builder = builder.body(body.to_vec());
@@ -1154,17 +1180,13 @@ impl WasmHost for ProductionWasmHost {
             format!("failed to read binary response body: {e}")
         })?;
         let resp_bytes = resp_bytes.to_vec();
-        let duration_ms = started.elapsed().as_millis() as u64;
-        tracing::Span::current().record("status_code", status);
-        tracing::Span::current().record("response_bytes", resp_bytes.len() as u64);
-        tracing::Span::current().record("duration_ms", duration_ms);
-        metrics::record_host_http_call(
+        record_host_call_outcome(
             method,
             "binary",
             status,
             body.len() as u64,
             resp_bytes.len() as u64,
-            duration_ms as f64,
+            started,
         );
         Ok((status, resp_bytes))
     }
@@ -1177,32 +1199,16 @@ impl WasmHost for ProductionWasmHost {
     ) -> Result<Vec<String>, String> {
         let started = Instant::now();
         let (filtered_headers, span_hints) = split_span_hint_headers(headers);
-        let span = tracing::info_span!(
+        let span = host_http_span!(
+            self,
             "wasm.host.connect_call",
-            otel.name = %span_hint_otel_name(&span_hints, "wasm.host.connect_call"),
-            http.method = "POST",
-            http.url = %telemetry_url(url),
-            request_bytes = body.len() as u64,
-            header_count = filtered_headers.len() as u64,
-            status_code = tracing::field::Empty,
-            response_frames = tracing::field::Empty,
-            response_bytes = tracing::field::Empty,
-            duration_ms = tracing::field::Empty,
-            tenant = tracing::field::Empty,
-            wasm_module = tracing::field::Empty,
-            session_id = tracing::field::Empty,
-            agent_id = tracing::field::Empty,
-            entity_type = tracing::field::Empty,
-            entity_id = tracing::field::Empty,
-            trigger_action = tracing::field::Empty,
-            action_name = tracing::field::Empty,
-            workflow_step = tracing::field::Empty,
-            workflow_root_entity_type = tracing::field::Empty,
-            workflow_root_entity_id = tracing::field::Empty,
-            workflow_run_id = tracing::field::Empty,
+            "connect_call",
+            &span_hints,
+            "POST",
+            url,
+            filtered_headers.len(),
         );
-        record_invocation_context_on_span(&span, self.invocation_context.as_ref(), "connect_call");
-        apply_span_hints(&span, &span_hints);
+        span.record("request_bytes", body.len() as u64);
         let _guard = span.enter();
 
         let mut builder = self.client.post(url);
@@ -1562,65 +1568,21 @@ impl WasmHost for ProductionWasmHost {
         let bridge_resp = exchange.bridge_response_body;
         let head_tx = exchange.bridge_head_sender;
         let streams = self.http_streams.clone();
-        let client = self.client.clone();
         let (filtered_headers, span_hints) = split_span_hint_headers(&request.headers);
-        let span = tracing::info_span!(
+        let span = host_http_span!(
+            self,
             "wasm.host.http_stream",
-            otel.name = %span_hint_otel_name(&span_hints, "wasm.host.http_stream"),
-            http.method = %request.method,
-            http.url = %telemetry_url(&request.url),
-            header_count = filtered_headers.len() as u64,
-            status_code = tracing::field::Empty,
-            response_bytes = tracing::field::Empty,
-            duration_ms = tracing::field::Empty,
-            tenant = tracing::field::Empty,
-            wasm_module = tracing::field::Empty,
-            observability_event = tracing::field::Empty,
-            session_id = tracing::field::Empty,
-            managed_session_id = tracing::field::Empty,
-            inner_session_id = tracing::field::Empty,
-            parent_session_id = tracing::field::Empty,
-            agent_id = tracing::field::Empty,
-            environment_id = tracing::field::Empty,
-            entity_type = tracing::field::Empty,
-            entity_id = tracing::field::Empty,
-            trigger_action = tracing::field::Empty,
-            action_name = tracing::field::Empty,
-            workflow_step = tracing::field::Empty,
-            workflow_root_entity_type = tracing::field::Empty,
-            workflow_root_entity_id = tracing::field::Empty,
-            workflow_run_id = tracing::field::Empty,
-            tool.name = tracing::field::Empty,
-            tool.call_id = tracing::field::Empty,
-            gen_ai.operation.name = tracing::field::Empty,
-            gen_ai.provider.name = tracing::field::Empty,
-            gen_ai.request.model = tracing::field::Empty,
+            "http_stream",
+            &span_hints,
+            &request.method,
+            &request.url,
+            filtered_headers.len(),
         );
-        record_invocation_context_on_span(&span, self.invocation_context.as_ref(), "http_stream");
-        apply_span_hints(&span, &span_hints);
 
         // Build the request head before moving into the task so we
         // can surface malformed-method errors synchronously.
-        let builder = match request.method.to_uppercase().as_str() {
-            "GET" => client.get(&request.url),
-            "POST" => client.post(&request.url),
-            "PUT" => client.put(&request.url),
-            "DELETE" => client.delete(&request.url),
-            "PATCH" => client.patch(&request.url),
-            other => return Err(format!("unsupported HTTP method: {other}")),
-        };
-        let mut builder = builder;
-        for (k, v) in &filtered_headers {
-            builder = builder.header(k.as_str(), v.as_str());
-        }
-        builder = self.add_internal_temper_headers(builder, &request.url, &filtered_headers);
-        if !filtered_headers
-            .iter()
-            .any(|(k, _)| k.eq_ignore_ascii_case("traceparent"))
-            && let Some(traceparent) = current_traceparent_header(&span, self.trace_id.as_deref())
-        {
-            builder = builder.header("traceparent", traceparent);
-        }
+        let builder =
+            self.build_request_builder(&request.method, &request.url, &filtered_headers, &span)?;
 
         tokio::spawn(
             async move {

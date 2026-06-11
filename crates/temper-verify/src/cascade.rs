@@ -252,13 +252,7 @@ impl VerificationCascade {
         let l0_passed = l0.passed;
         levels.push(l0);
         if self.fail_fast && !l0_passed {
-            return CascadeResult {
-                all_passed: false,
-                levels,
-                warnings,
-                reachable_paths: None,
-                composite_report: None,
-            };
+            return fail_fast_result(levels, warnings, None);
         }
 
         // Level 1: Stateright model checking
@@ -266,13 +260,7 @@ impl VerificationCascade {
         let l1_passed = l1.passed;
         levels.push(l1);
         if self.fail_fast && !l1_passed {
-            return CascadeResult {
-                all_passed: false,
-                levels,
-                warnings,
-                reachable_paths: None,
-                composite_report: None,
-            };
+            return fail_fast_result(levels, warnings, None);
         }
 
         // Run path extraction after L1 passes (if configured).
@@ -289,13 +277,7 @@ impl VerificationCascade {
         let l2_passed = l2.passed;
         levels.push(l2);
         if self.fail_fast && !l2_passed {
-            return CascadeResult {
-                all_passed: false,
-                levels,
-                warnings,
-                reachable_paths,
-                composite_report: None,
-            };
+            return fail_fast_result(levels, warnings, reachable_paths);
         }
 
         // Level 2b: Actor simulation (real TransitionTable::evaluate())
@@ -304,13 +286,7 @@ impl VerificationCascade {
             let l2b_passed = l2b.passed;
             levels.push(l2b);
             if self.fail_fast && !l2b_passed {
-                return CascadeResult {
-                    all_passed: false,
-                    composite_report: None,
-                    levels,
-                    warnings,
-                    reachable_paths,
-                };
+                return fail_fast_result(levels, warnings, reachable_paths);
             }
         }
 
@@ -568,6 +544,27 @@ impl VerificationCascade {
             prop_test: None,
             smt: None,
         }
+    }
+}
+
+/// Build the early-return [`CascadeResult`] used by fail-fast mode.
+///
+/// Centralised so every fail-fast exit fills the same fields the same way:
+/// `all_passed` is `false` and `composite_report` is `None` (a fail-fast
+/// abort never reaches the composite reporting step). Adding a field to
+/// [`CascadeResult`] only requires updating this constructor and the final
+/// aggregation in [`VerificationCascade::run`].
+fn fail_fast_result(
+    levels: Vec<LevelResult>,
+    warnings: Vec<String>,
+    reachable_paths: Option<crate::paths::PathExtractionResult>,
+) -> CascadeResult {
+    CascadeResult {
+        all_passed: false,
+        levels,
+        warnings,
+        reachable_paths,
+        composite_report: None,
     }
 }
 

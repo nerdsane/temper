@@ -6808,6 +6808,7 @@ dependencies = [
  "reqwest",
  "serde",
  "serde_json",
+ "temper-sdk",
  "tokio",
  "tokio-stream",
  "tokio-tungstenite",

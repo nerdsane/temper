@@ -13,11 +13,9 @@ use temper_runtime::scheduler::{DeterministicRng, FaultConfig, SimActorState, Si
 
 use stateright::Model;
 
-use temper_spec::automaton::AssertCompareOp;
-
+use crate::model::semantics::{NoFurtherTransitionsMode, evaluate_invariant_kind};
 use crate::model::{
-    InvariantKind, LivenessKind, TemperModel, TemperModelAction, TemperModelState,
-    build_model_from_ioa,
+    LivenessKind, TemperModel, TemperModelAction, TemperModelState, build_model_from_ioa,
 };
 
 /// Configuration for a simulation run.
@@ -346,9 +344,15 @@ fn check_invariants_on_state(
             continue;
         }
 
-        let violated = sim_kind_violated(&inv.kind, &inv.required_states, model, state_after);
+        let holds = evaluate_invariant_kind(
+            &inv.kind,
+            &inv.required_states,
+            model,
+            state_after,
+            NoFurtherTransitionsMode::EnabledActions,
+        );
 
-        if violated {
+        if !holds {
             violations.push(InvariantViolation {
                 actor_id: actor_id.to_string(),
                 action: action_name.to_string(),
@@ -358,57 +362,6 @@ fn check_invariants_on_state(
                 tick,
             });
         }
-    }
-}
-
-/// Evaluate whether an [`InvariantKind`] is violated given model+state.
-///
-/// Pure recursion over compound variants; does not consult `trigger_states`.
-fn sim_kind_violated(
-    kind: &InvariantKind,
-    required_states: &[String],
-    model: &TemperModel,
-    state_after: &TemperModelState,
-) -> bool {
-    match kind {
-        InvariantKind::StatusInSet => !model.states.contains(&state_after.status),
-        InvariantKind::CounterPositive { var } => {
-            state_after.counters.get(var).copied().unwrap_or(0) == 0
-        }
-        InvariantKind::BoolRequired { var, expect } => {
-            state_after.booleans.get(var).copied().unwrap_or(false) != *expect
-        }
-        InvariantKind::NoFurtherTransitions => {
-            let mut actions = Vec::new();
-            model.actions(state_after, &mut actions);
-            !actions.is_empty()
-        }
-        InvariantKind::Implication => {
-            let valid: Vec<&String> = required_states
-                .iter()
-                .filter(|s| model.states.contains(s))
-                .collect();
-            !valid.is_empty() && !valid.contains(&&state_after.status)
-        }
-        InvariantKind::CounterCompare { var, op, value } => {
-            let val = state_after.counters.get(var).copied().unwrap_or(0);
-            let holds = match op {
-                AssertCompareOp::Gt => val > *value,
-                AssertCompareOp::Gte => val >= *value,
-                AssertCompareOp::Lt => val < *value,
-                AssertCompareOp::Lte => val <= *value,
-                AssertCompareOp::Eq => val == *value,
-            };
-            !holds
-        }
-        InvariantKind::NeverState { state } => state_after.status == *state,
-        InvariantKind::And(parts) => parts
-            .iter()
-            .any(|k| sim_kind_violated(k, required_states, model, state_after)),
-        InvariantKind::Or(parts) => parts
-            .iter()
-            .all(|k| sim_kind_violated(k, required_states, model, state_after)),
-        InvariantKind::Unverifiable { .. } => false,
     }
 }
 
