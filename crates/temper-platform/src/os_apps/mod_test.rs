@@ -252,7 +252,8 @@ fn test_reconcile_plan_for_wasm_only_digest_skips_unrelated_phases() {
         status: "installed".to_string(),
     };
 
-    let plan = reconcile::plan_reconcile_from_installed_record(&installed, &current, true, true);
+    let plan =
+        reconcile::plan_reconcile_from_installed_record(&installed, &current, true, true, true);
 
     assert_eq!(
         plan,
@@ -290,6 +291,84 @@ async fn test_reconcile_os_app_skips_unchanged_bundle_digest() {
     assert!(
         matches!(result, OsAppReconcileResult::Skipped { .. }),
         "unchanged app should skip hot reinstall, got {result:?}"
+    );
+
+    let _ = std::fs::remove_file(&db_path);
+    let _ = std::fs::remove_file(format!("{db_path}-wal"));
+    let _ = std::fs::remove_file(format!("{db_path}-shm"));
+}
+
+#[tokio::test]
+async fn test_reconcile_os_app_repairs_missing_active_policies_for_unchanged_bundle() {
+    let db_path = format!(
+        "/tmp/temper-test-policy-reconcile-{}.db",
+        uuid::Uuid::new_v4()
+    );
+    let db_url = format!("file:{db_path}");
+    let tenant = "test-policy-reconcile";
+
+    let turso = temper_store_turso::TursoEventStore::new(&db_url, None)
+        .await
+        .unwrap();
+    let mut state = PlatformState::new(None);
+    state
+        .server
+        .set_storage_stack(temper_server::StorageStack::from_turso(turso));
+
+    install_os_app(&state, tenant, "project-management")
+        .await
+        .expect("initial install should succeed");
+
+    {
+        let mut policies = state.server.tenant_policies.write().unwrap(); // ci-ok: infallible lock
+        policies.remove(tenant);
+    }
+    state
+        .server
+        .authz
+        .reload_tenant_policies(tenant, "")
+        .expect("empty tenant policy should load");
+
+    let admin_ctx = SecurityContext::from_headers(&[
+        ("X-Temper-Principal-Id".to_string(), "admin-1".to_string()),
+        ("X-Temper-Principal-Kind".to_string(), "admin".to_string()),
+    ]);
+    let mut issue_attrs = HashMap::new();
+    issue_attrs.insert("id".to_string(), serde_json::json!("issue-1"));
+
+    let denied_before_reconcile = state.server.authz.authorize_for_tenant(
+        tenant,
+        &admin_ctx,
+        "MoveToTodo",
+        "Issue",
+        &issue_attrs,
+    );
+    assert!(
+        !denied_before_reconcile.is_allowed(),
+        "test setup should remove active app policies before reconcile"
+    );
+
+    let result = reconcile_os_app(&state, tenant, "project-management")
+        .await
+        .expect("unchanged reconcile should repair missing active policies");
+
+    let OsAppReconcileResult::Installed { install, .. } = result else {
+        panic!("missing active policies should force a policies-only reconcile");
+    };
+    assert!(install.added.is_empty());
+    assert!(install.updated.is_empty());
+    assert!(install.skipped.is_empty());
+
+    let allowed_after_reconcile = state.server.authz.authorize_for_tenant(
+        tenant,
+        &admin_ctx,
+        "MoveToTodo",
+        "Issue",
+        &issue_attrs,
+    );
+    assert!(
+        allowed_after_reconcile.is_allowed(),
+        "reconcile should reload the app Cedar policies when active memory lost them: {allowed_after_reconcile:?}"
     );
 
     let _ = std::fs::remove_file(&db_path);
