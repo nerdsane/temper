@@ -566,7 +566,7 @@ impl ServerState {
     }
 
     /// Return the granular Cedar policy persistence capability.
-    pub(crate) fn policy_store(&self) -> Option<Arc<dyn PolicyStore>> {
+    pub fn policy_store(&self) -> Option<Arc<dyn PolicyStore>> {
         self.storage_stack
             .as_ref()
             .and_then(|stack| stack.policies.clone())

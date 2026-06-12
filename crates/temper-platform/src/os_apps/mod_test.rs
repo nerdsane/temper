@@ -252,7 +252,8 @@ fn test_reconcile_plan_for_wasm_only_digest_skips_unrelated_phases() {
         status: "installed".to_string(),
     };
 
-    let plan = reconcile::plan_reconcile_from_installed_record(&installed, &current, true, true);
+    let plan =
+        reconcile::plan_reconcile_from_installed_record(&installed, &current, true, true, true);
 
     assert_eq!(
         plan,
@@ -290,6 +291,249 @@ async fn test_reconcile_os_app_skips_unchanged_bundle_digest() {
     assert!(
         matches!(result, OsAppReconcileResult::Skipped { .. }),
         "unchanged app should skip hot reinstall, got {result:?}"
+    );
+
+    let _ = std::fs::remove_file(&db_path);
+    let _ = std::fs::remove_file(format!("{db_path}-wal"));
+    let _ = std::fs::remove_file(format!("{db_path}-shm"));
+}
+
+#[tokio::test]
+async fn test_reconcile_os_app_repairs_missing_active_policies_for_unchanged_bundle() {
+    let db_path = format!(
+        "/tmp/temper-test-policy-reconcile-{}.db",
+        uuid::Uuid::new_v4()
+    );
+    let db_url = format!("file:{db_path}");
+    let tenant = "test-policy-reconcile";
+
+    let turso = temper_store_turso::TursoEventStore::new(&db_url, None)
+        .await
+        .unwrap();
+    let mut state = PlatformState::new(None);
+    state
+        .server
+        .set_storage_stack(temper_server::StorageStack::from_turso(turso));
+
+    install_os_app(&state, tenant, "project-management")
+        .await
+        .expect("initial install should succeed");
+
+    {
+        let mut policies = state.server.tenant_policies.write().unwrap(); // ci-ok: infallible lock
+        policies.remove(tenant);
+    }
+    state
+        .server
+        .authz
+        .reload_tenant_policies(tenant, "")
+        .expect("empty tenant policy should load");
+
+    let admin_ctx = SecurityContext::from_headers(&[
+        ("X-Temper-Principal-Id".to_string(), "admin-1".to_string()),
+        ("X-Temper-Principal-Kind".to_string(), "admin".to_string()),
+    ]);
+    let mut issue_attrs = HashMap::new();
+    issue_attrs.insert("id".to_string(), serde_json::json!("issue-1"));
+
+    let denied_before_reconcile = state.server.authz.authorize_for_tenant(
+        tenant,
+        &admin_ctx,
+        "MoveToTodo",
+        "Issue",
+        &issue_attrs,
+    );
+    assert!(
+        !denied_before_reconcile.is_allowed(),
+        "test setup should remove active app policies before reconcile"
+    );
+
+    let result = reconcile_os_app(&state, tenant, "project-management")
+        .await
+        .expect("unchanged reconcile should repair missing active policies");
+
+    let OsAppReconcileResult::Installed { install, .. } = result else {
+        panic!("missing active policies should force a policies-only reconcile");
+    };
+    assert!(install.added.is_empty());
+    assert!(install.updated.is_empty());
+    assert!(install.skipped.is_empty());
+
+    let allowed_after_reconcile = state.server.authz.authorize_for_tenant(
+        tenant,
+        &admin_ctx,
+        "MoveToTodo",
+        "Issue",
+        &issue_attrs,
+    );
+    assert!(
+        allowed_after_reconcile.is_allowed(),
+        "reconcile should reload the app Cedar policies when active memory lost them: {allowed_after_reconcile:?}"
+    );
+
+    let _ = std::fs::remove_file(&db_path);
+    let _ = std::fs::remove_file(format!("{db_path}-wal"));
+    let _ = std::fs::remove_file(format!("{db_path}-shm"));
+}
+
+#[tokio::test]
+async fn test_reconcile_os_app_repairs_missing_authz_engine_policies_despite_text_cache() {
+    let db_path = format!(
+        "/tmp/temper-test-policy-cache-reconcile-{}.db",
+        uuid::Uuid::new_v4()
+    );
+    let db_url = format!("file:{db_path}");
+    let tenant = "test-policy-cache-reconcile";
+
+    let turso = temper_store_turso::TursoEventStore::new(&db_url, None)
+        .await
+        .unwrap();
+    let mut state = PlatformState::new(None);
+    state
+        .server
+        .set_storage_stack(temper_server::StorageStack::from_turso(turso));
+
+    install_os_app(&state, tenant, "project-management")
+        .await
+        .expect("initial install should succeed");
+
+    let cached_policy_text = {
+        let policies = state.server.tenant_policies.read().unwrap(); // ci-ok: infallible lock
+        policies
+            .get(tenant)
+            .cloned()
+            .expect("initial install should cache app policies")
+    };
+    state
+        .server
+        .authz
+        .reload_tenant_policies(tenant, "")
+        .expect("empty tenant policy should load");
+    {
+        let policies = state.server.tenant_policies.read().unwrap(); // ci-ok: infallible lock
+        assert_eq!(
+            policies.get(tenant).map(String::as_str),
+            Some(cached_policy_text.as_str()),
+            "test setup should leave cached policy text intact"
+        );
+    }
+
+    let admin_ctx = SecurityContext::from_headers(&[
+        ("X-Temper-Principal-Id".to_string(), "admin-1".to_string()),
+        ("X-Temper-Principal-Kind".to_string(), "admin".to_string()),
+    ]);
+    let mut issue_attrs = HashMap::new();
+    issue_attrs.insert("id".to_string(), serde_json::json!("issue-1"));
+
+    let denied_before_reconcile = state.server.authz.authorize_for_tenant(
+        tenant,
+        &admin_ctx,
+        "MoveToTodo",
+        "Issue",
+        &issue_attrs,
+    );
+    assert!(
+        !denied_before_reconcile.is_allowed(),
+        "test setup should remove only the active Cedar authorizer policies"
+    );
+
+    let result = reconcile_os_app(&state, tenant, "project-management")
+        .await
+        .expect("unchanged reconcile should repair missing active authz policies");
+
+    let OsAppReconcileResult::Installed { install, .. } = result else {
+        panic!("missing authz policies should force a policies-only reconcile");
+    };
+    assert!(install.added.is_empty());
+    assert!(install.updated.is_empty());
+    assert!(install.skipped.is_empty());
+
+    let active_policy_text = state
+        .server
+        .authz
+        .get_tenant_policy_text(tenant)
+        .expect("reconcile should reload active app policies");
+    assert_eq!(
+        active_policy_text.trim(),
+        cached_policy_text.trim(),
+        "repair should reload cached app policies without duplicating them"
+    );
+
+    let allowed_after_reconcile = state.server.authz.authorize_for_tenant(
+        tenant,
+        &admin_ctx,
+        "MoveToTodo",
+        "Issue",
+        &issue_attrs,
+    );
+    assert!(
+        allowed_after_reconcile.is_allowed(),
+        "reconcile should reload cached app policies into the active Cedar authorizer: {allowed_after_reconcile:?}"
+    );
+
+    let _ = std::fs::remove_file(&db_path);
+    let _ = std::fs::remove_file(format!("{db_path}-wal"));
+    let _ = std::fs::remove_file(format!("{db_path}-shm"));
+}
+
+#[tokio::test]
+async fn test_runtime_recovery_requires_active_policies_for_ready_outcome() {
+    let db_path = format!(
+        "/tmp/temper-test-runtime-policy-readiness-{}.db",
+        uuid::Uuid::new_v4()
+    );
+    let db_url = format!("file:{db_path}");
+    let tenant = "test-runtime-policy-readiness";
+
+    let turso = temper_store_turso::TursoEventStore::new(&db_url, None)
+        .await
+        .unwrap();
+    let mut state = PlatformState::new(None);
+    state
+        .server
+        .set_storage_stack(temper_server::StorageStack::from_turso(turso));
+
+    install_os_app(&state, tenant, "project-management")
+        .await
+        .expect("initial install should succeed");
+
+    let turso_ref = state.server.platform_turso_store().unwrap();
+    let cached_policy_text = {
+        let policies = state.server.tenant_policies.read().unwrap(); // ci-ok: infallible lock
+        policies
+            .get(tenant)
+            .cloned()
+            .expect("initial install should cache app policies")
+    };
+    state
+        .server
+        .authz
+        .reload_tenant_policies(tenant, "")
+        .expect("empty tenant policy should load");
+
+    let outcome = crate::recovery::recover_installed_app_runtime_state(
+        &state,
+        &turso_ref,
+        tenant,
+        "project-management",
+    )
+    .await;
+
+    assert_eq!(
+        outcome,
+        crate::recovery::InstalledAppRuntimeRecoveryOutcome::NeedsReconcile,
+        "runtime recovery must not mark an unchanged app ready when active Cedar policies are missing"
+    );
+    assert_eq!(
+        state
+            .server
+            .tenant_policies
+            .read()
+            .unwrap()
+            .get(tenant)
+            .map(String::as_str),
+        Some(cached_policy_text.as_str()),
+        "test setup should preserve cached policy text while active authz is empty"
     );
 
     let _ = std::fs::remove_file(&db_path);
@@ -1105,6 +1349,46 @@ async fn test_install_os_app_activates_tenant_cedar_policies() {
     );
 }
 
+#[tokio::test]
+async fn test_install_os_app_persists_granular_policy_rows() {
+    use temper_store_turso::TursoEventStore;
+
+    let db_path = format!("/tmp/temper-policy-rows-{}.db", uuid::Uuid::new_v4());
+    let db_url = format!("file:{db_path}");
+    let turso = TursoEventStore::new(&db_url, None).await.unwrap();
+    let mut state = PlatformState::new(None);
+    state
+        .server
+        .set_storage_stack(temper_server::StorageStack::from_turso(turso));
+
+    install_os_app(&state, "test-policy-rows", "project-management")
+        .await
+        .expect("install project-management");
+
+    let policy_store = state.server.policy_store().expect("policy store");
+    let rows = policy_store
+        .load_policies_for_tenant("test-policy-rows")
+        .await
+        .expect("load granular policies");
+    assert!(
+        rows.iter().any(|row| {
+            row.policy_id == "project-management-issue"
+                && row.enabled
+                && row.cedar_text.contains("resource is Issue")
+        }),
+        "project-management install should persist policies/issue.cedar as a granular row: {rows:?}"
+    );
+
+    let turso_ref = state.server.platform_turso_store().unwrap();
+    let legacy_rows = turso_ref.load_tenant_policies().await.unwrap();
+    assert!(
+        legacy_rows
+            .iter()
+            .any(|(tenant, text)| tenant == "test-policy-rows" && text.contains("Issue")),
+        "legacy aggregate policy should still be persisted for compatibility"
+    );
+}
+
 /// Proves the full install → persist → reboot → restore cycle.
 ///
 /// 1. Install OS app with a real Turso-backed SQLite DB.
@@ -1538,6 +1822,23 @@ mode = "commons"
     let bundle = load_app_bundle(&temp_dir).expect("bundle should load policies");
     assert_eq!(bundle.deployment_mode, AppDeploymentMode::Commons);
     assert_eq!(bundle.cedar_policies.len(), 2);
+    let source_paths: Vec<&str> = bundle
+        .cedar_policy_sources
+        .iter()
+        .map(|source| source.relative_path.as_str())
+        .collect();
+    assert_eq!(
+        source_paths,
+        vec!["policies/base.cedar", "policies/commons/guardrail.cedar"]
+    );
+    assert_eq!(
+        os_app_policy_row_id("katagami-commons", "policies/palette_system.cedar"),
+        "katagami-commons-palette_system"
+    );
+    assert_eq!(
+        os_app_policy_row_id("katagami-commons", "policies/commons/guardrail.cedar"),
+        "katagami-commons-commons-guardrail"
+    );
     assert!(
         bundle
             .cedar_policies

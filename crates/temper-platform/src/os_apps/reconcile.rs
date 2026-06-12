@@ -118,10 +118,14 @@ pub(super) fn digest_app_bundle(app_name: &str, bundle: &AppBundle) -> OsAppBund
     spec_parts.sort_by(|a, b| a.0.cmp(&b.0));
 
     let mut policy_parts: Vec<(String, Vec<u8>)> = bundle
-        .cedar_policies
+        .cedar_policy_sources
         .iter()
-        .enumerate()
-        .map(|(idx, policy)| (format!("policy:{idx}"), policy.as_bytes().to_vec()))
+        .map(|source| {
+            (
+                format!("policy:{}", source.relative_path),
+                source.text.as_bytes().to_vec(),
+            )
+        })
         .collect();
     policy_parts.sort_by(|a, b| a.0.cmp(&b.0));
 
@@ -230,17 +234,41 @@ pub(super) fn plan_reconcile_from_installed_record(
     digest: &OsAppBundleDigest,
     specs_ready: bool,
     wasm_registered: bool,
+    policies_active: bool,
 ) -> OsAppInstallPlan {
     OsAppInstallPlan {
         specs: record.spec_digest != digest.spec_digest || !specs_ready,
-        policies: record.policy_digest != digest.policy_digest,
+        policies: record.policy_digest != digest.policy_digest || !policies_active,
         wasm: record.wasm_digest != digest.wasm_digest || !wasm_registered,
         content: record.content_digest != digest.content_digest,
         seed: record.seed_digest != digest.seed_digest,
     }
 }
 
-fn tenant_has_registered_wasm_for_bundle(
+pub(crate) fn tenant_has_active_policies_for_bundle(
+    state: &PlatformState,
+    tenant: &str,
+    bundle: &AppBundle,
+) -> bool {
+    if bundle.cedar_policies.is_empty() {
+        return true;
+    }
+
+    let Some(active_text) = state.server.authz.get_tenant_policy_text(tenant) else {
+        return false;
+    };
+
+    bundle_policies_present(&active_text, &bundle.cedar_policies)
+}
+
+fn bundle_policies_present(active_text: &str, cedar_policies: &[String]) -> bool {
+    cedar_policies.iter().all(|policy| {
+        let policy = policy.trim();
+        policy.is_empty() || active_text.contains(policy)
+    })
+}
+
+pub(crate) fn tenant_has_registered_wasm_for_bundle(
     state: &PlatformState,
     tenant: &str,
     bundle: &AppBundle,
@@ -338,6 +366,7 @@ pub async fn reconcile_os_app(
             Ok(Some(record)) => {
                 let mut specs_ready = tenant_has_ready_app_specs_for_bundle(state, tenant, &bundle);
                 let wasm_registered = tenant_has_registered_wasm_for_bundle(state, tenant, &bundle);
+                let policies_active = tenant_has_active_policies_for_bundle(state, tenant, &bundle);
 
                 if record.bundle_digest == digest.bundle_digest && !specs_ready {
                     specs_ready = restore_app_specs_from_matching_digest(
@@ -350,7 +379,11 @@ pub async fn reconcile_os_app(
                     .await;
                 }
 
-                if record.bundle_digest == digest.bundle_digest && specs_ready && wasm_registered {
+                if record.bundle_digest == digest.bundle_digest
+                    && specs_ready
+                    && wasm_registered
+                    && policies_active
+                {
                     tracing::info!(
                         tenant,
                         app = %app_name,
@@ -378,6 +411,7 @@ pub async fn reconcile_os_app(
                     &digest,
                     specs_ready,
                     wasm_registered,
+                    policies_active,
                 );
 
                 tracing::info!(

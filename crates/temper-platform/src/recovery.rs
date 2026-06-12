@@ -250,7 +250,11 @@ pub async fn recover_installed_app_runtime_state(
         return InstalledAppRuntimeRecoveryOutcome::MissingBundle;
     };
 
-    if os_apps::tenant_has_ready_app_specs_for_bundle(state, tenant, &bundle) {
+    let specs_ready = os_apps::tenant_has_ready_app_specs_for_bundle(state, tenant, &bundle);
+    let policies_active = os_apps::tenant_has_active_policies_for_bundle(state, tenant, &bundle);
+    let wasm_registered = os_apps::tenant_has_registered_wasm_for_bundle(state, tenant, &bundle);
+
+    if specs_ready && policies_active && wasm_registered {
         return InstalledAppRuntimeRecoveryOutcome::Ready;
     }
 
@@ -260,9 +264,12 @@ pub async fn recover_installed_app_runtime_state(
 
     match ps.get_installed_app(tenant, app_name).await {
         Ok(Some(record)) if record.bundle_digest == digest.bundle_digest => {
-            if os_apps::restore_app_specs_from_matching_digest(state, ps, tenant, app_name, &bundle)
-                .await
-            {
+            let specs_ready = specs_ready
+                || os_apps::restore_app_specs_from_matching_digest(
+                    state, ps, tenant, app_name, &bundle,
+                )
+                .await;
+            if specs_ready && policies_active && wasm_registered {
                 InstalledAppRuntimeRecoveryOutcome::Healed
             } else {
                 InstalledAppRuntimeRecoveryOutcome::NeedsReconcile
