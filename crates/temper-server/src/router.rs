@@ -180,22 +180,22 @@ async fn http_endpoint_fallback(
 
     // Git clients (and GitHub-REST-compat clients) can't send
     // X-Tenant-Id; the whole point of the HttpEndpoint surface is
-    // to terminate foreign wire protocols. So unlike the OData
-    // router, the HttpEndpoint fallback always falls back to the
-    // first registered non-system tenant when the header is absent.
-    // Multi-tenant deployments that need strict tenant routing
-    // should encode the tenant in the path prefix of their
-    // HttpEndpoint rows (e.g. /{tenant}/{repo}.git/...).
+    // to terminate foreign wire protocols. When the header is absent
+    // the fallback prefers the registered `default` tenant — protocol
+    // endpoint rows live there on single-operator deployments — and
+    // only then any other non-system tenant. Picking "first
+    // registered" made resolution depend on registry iteration order:
+    // a production server whose extra tenants sort before "default"
+    // resolved header-less git/REST requests to a tenant with an
+    // empty route table and answered 404. Multi-tenant deployments
+    // that need strict tenant routing should encode the tenant in the
+    // path prefix of their HttpEndpoint rows
+    // (e.g. /{tenant}/{repo}.git/...).
     let tenant_id = match tenant_header {
         Some(t) if !t.is_empty() => TenantId::new(&t),
         _ => {
             let registry = state.registry.read().unwrap();
-            let first_non_system = registry
-                .tenant_ids()
-                .into_iter()
-                .find(|t| t.as_str() != "temper-system")
-                .or_else(|| registry.tenant_ids().into_iter().next());
-            match first_non_system {
+            match http_endpoint_fallback_tenant(&registry.tenant_ids()) {
                 Some(t) => t.clone(),
                 None => return http_404_response(uri.path()),
             }
@@ -210,6 +210,25 @@ async fn http_endpoint_fallback(
     };
 
     dispatch_matched_route(state, tenant_id, method, uri, headers, _body, route).await
+}
+
+/// Tenant for a header-less HttpEndpoint request: the registered
+/// `default` tenant when present (deterministic — protocol endpoint
+/// rows live there on single-operator deployments), else the first
+/// non-system tenant, else any tenant at all.
+fn http_endpoint_fallback_tenant<'a>(tenant_ids: &[&'a TenantId]) -> Option<&'a TenantId> {
+    let default_tenant = TenantId::default();
+    tenant_ids
+        .iter()
+        .copied()
+        .find(|t| **t == default_tenant)
+        .or_else(|| {
+            tenant_ids
+                .iter()
+                .copied()
+                .find(|t| t.as_str() != "temper-system")
+        })
+        .or_else(|| tenant_ids.first().copied())
 }
 
 /// End-to-end dispatch: open an InboundExchange on the shared
