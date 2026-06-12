@@ -31,7 +31,14 @@ pub(crate) struct PostDispatchContext<'a> {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum QueryProjectionUpdateMode {
-    Background,
+    /// The dispatch response is returned only after the query-plane
+    /// projection row reflects the dispatch (ADR-0142). An acknowledged
+    /// action is immediately readable: OData point-reads serve from the
+    /// projection, and callers — including WASM integrations that
+    /// read-after-write (e.g. a PR number assigned by one dispatch and
+    /// rendered by the next read) — must see their own writes. The
+    /// store's `sequence_nr <=` guard keeps concurrent writers safe.
+    Inline,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -40,7 +47,7 @@ enum DispatchTrajectoryPersistenceMode {
 }
 
 fn query_projection_update_mode() -> QueryProjectionUpdateMode {
-    QueryProjectionUpdateMode::Background
+    QueryProjectionUpdateMode::Inline
 }
 
 fn dispatch_trajectory_persistence_mode() -> DispatchTrajectoryPersistenceMode {
@@ -56,14 +63,14 @@ impl crate::state::ServerState {
         self.enqueue_trajectory_entry(entry);
     }
 
-    fn enqueue_query_projection_update(
+    async fn apply_query_projection_update(
         &self,
         ctx: &PostDispatchContext<'_>,
         response: &EntityResponse,
     ) {
         debug_assert_eq!(
             query_projection_update_mode(),
-            QueryProjectionUpdateMode::Background
+            QueryProjectionUpdateMode::Inline
         );
         let Some(query_plane) = self.query_plane_store() else {
             return;
@@ -83,7 +90,7 @@ impl crate::state::ServerState {
             "upsert"
         }
         .to_string();
-        let source = "background_dispatch".to_string();
+        let source = "inline_dispatch".to_string();
         let enqueued_at = Instant::now(); // determinism-ok: production-only projection queue metric
 
         crate::query_projection_metrics::record_update_enqueued(
@@ -102,7 +109,12 @@ impl crate::state::ServerState {
             operation = %operation,
         );
 
-        spawn_post_dispatch_effect(
+        // Boxed so the update does not inflate every dispatch future: the
+        // dispatch state machine nests through reactions and callbacks, and
+        // embedding this future inline overflowed the stack where the
+        // previous tokio::spawn had heap-allocated it. Box::pin keeps that
+        // heap allocation while preserving awaited-before-response order.
+        Box::pin(
             async move {
                 let started_at = Instant::now(); // determinism-ok: production-only projection duration metric
                 crate::query_projection_metrics::record_update_started(
@@ -160,13 +172,19 @@ impl crate::state::ServerState {
                         &operation,
                         &source,
                     );
-                    tracing::warn!(
+                    // The action is committed and non-idempotent, so the
+                    // dispatch is still acknowledged — but the projection now
+                    // serves a stale row until shadow/parity repair. Loud by
+                    // convention (entity_ops create/patch fail their request
+                    // on this same error); the ack-vs-fail tradeoff for
+                    // dispatch is recorded in ADR-0142.
+                    tracing::error!(
                         error = %e,
                         tenant = %tenant,
                         entity_type = %entity_type,
                         entity_id = %entity_id,
                         operation = %operation,
-                        "failed to update query projection"
+                        "failed to update query projection for an acknowledged dispatch"
                     );
                 } else {
                     crate::query_projection_metrics::record_update_applied_sequence(
@@ -179,7 +197,8 @@ impl crate::state::ServerState {
                 }
             }
             .instrument(span),
-        );
+        )
+        .await;
     }
 
     /// Record a trajectory entry for a completed dispatch (success or guard failure).
@@ -699,10 +718,15 @@ impl crate::state::ServerState {
         // cancellation ensures stale timers become no-ops.
         self.arm_state_timeouts_if_needed(ctx, &response);
 
-        // 8. Update the durable query plane for collection reads. This must not
-        // sit on the action-dispatch critical path; the entity transition is
-        // already durable, and projection lag is tracked by explicit metrics.
-        self.enqueue_query_projection_update(ctx, &response);
+        // 8. Update the durable query plane before acknowledging the
+        // dispatch (ADR-0142). The response is the caller's signal that the
+        // action happened; OData point-reads serve from the projection, so
+        // returning before the row lands lets an acknowledged write be read
+        // back stale (a PR number assigned by one dispatch and rendered as 0
+        // by the very next read — a ~40% race in the workflow round-trip).
+        // Cost is one sequence-guarded row upsert on the same store that
+        // already persisted the event; lag metrics remain in place.
+        self.apply_query_projection_update(ctx, &response).await;
 
         response
     }
@@ -713,10 +737,13 @@ mod tests {
     use super::*;
 
     #[test]
-    fn query_projection_updates_are_not_on_the_dispatch_critical_path() {
+    fn query_projection_updates_land_before_the_dispatch_response_is_returned() {
+        // ADR-0142: an acknowledged dispatch must be readable. The previous
+        // background mode let a caller read its own committed write back
+        // stale from the query plane.
         assert_eq!(
             query_projection_update_mode(),
-            QueryProjectionUpdateMode::Background
+            QueryProjectionUpdateMode::Inline
         );
     }
 
