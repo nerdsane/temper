@@ -118,10 +118,14 @@ pub(super) fn digest_app_bundle(app_name: &str, bundle: &AppBundle) -> OsAppBund
     spec_parts.sort_by(|a, b| a.0.cmp(&b.0));
 
     let mut policy_parts: Vec<(String, Vec<u8>)> = bundle
-        .cedar_policies
+        .cedar_policy_sources
         .iter()
-        .enumerate()
-        .map(|(idx, policy)| (format!("policy:{idx}"), policy.as_bytes().to_vec()))
+        .map(|source| {
+            (
+                format!("policy:{}", source.relative_path),
+                source.text.as_bytes().to_vec(),
+            )
+        })
         .collect();
     policy_parts.sort_by(|a, b| a.0.cmp(&b.0));
 

@@ -22,6 +22,7 @@ use crate::state::PlatformState;
 mod agent_bootstrap;
 mod app_catalog;
 mod closure_bootstrap;
+mod policy_rows;
 mod reconcile;
 mod runtime_heal;
 mod system_files;
@@ -36,6 +37,8 @@ pub use closure_bootstrap::{
     bootstrap_closure_manifest, os_app_closure_for_roots, parse_bootstrap_manifest_str,
     startup_os_app_closure,
 };
+#[cfg(test)]
+pub(super) use policy_rows::os_app_policy_row_id;
 pub use reconcile::{os_app_bundle_digest, reconcile_os_app, resolve_os_app_install_order};
 pub(crate) use reconcile::{
     tenant_has_active_policies_for_bundle, tenant_has_registered_wasm_for_bundle,
@@ -306,6 +309,13 @@ fn find_commons_cedar_policies(app_dir: &Path) -> Vec<PathBuf> {
         .collect();
     files.sort();
     files
+}
+
+fn app_relative_path(app_dir: &Path, path: &Path) -> String {
+    path.strip_prefix(app_dir)
+        .unwrap_or(path)
+        .to_string_lossy()
+        .replace('\\', "/")
 }
 
 fn effective_app_deployment_mode(manifest: &AppManifest) -> AppDeploymentMode {
@@ -945,9 +955,19 @@ fn load_app_bundle(app_dir: &Path) -> Option<AppBundle> {
     if deployment_mode == AppDeploymentMode::Commons {
         cedar_policy_files.extend(find_commons_cedar_policies(app_dir));
     }
-    let cedar_policies: Vec<String> = cedar_policy_files
+    let cedar_policy_sources: Vec<CedarPolicySource> = cedar_policy_files
         .into_iter()
-        .filter_map(|p| std::fs::read_to_string(&p).ok())
+        .filter_map(|path| {
+            let text = std::fs::read_to_string(&path).ok()?;
+            Some(CedarPolicySource {
+                relative_path: app_relative_path(app_dir, &path),
+                text,
+            })
+        })
+        .collect();
+    let cedar_policies: Vec<String> = cedar_policy_sources
+        .iter()
+        .map(|source| source.text.clone())
         .collect();
 
     // Build module configs first so find_wasm_modules can use declared targets.
@@ -993,6 +1013,7 @@ fn load_app_bundle(app_dir: &Path) -> Option<AppBundle> {
         csdl,
         cross_invariants_toml,
         cedar_policies,
+        cedar_policy_sources,
         wasm_modules,
         wasm_module_configs,
         agents,
@@ -1255,6 +1276,10 @@ pub(super) async fn install_os_app_with_plan(
                 .await
                 .map_err(|e| format!("Failed to commit specs: {e}"))?;
         }
+    }
+
+    if plan.policies {
+        policy_rows::persist_bundle_policy_rows(state, tenant, app_name, &bundle).await?;
     }
 
     // ── Step 2: Bootstrap into memory (verification + registry). ────
