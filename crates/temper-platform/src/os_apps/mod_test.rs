@@ -1349,6 +1349,46 @@ async fn test_install_os_app_activates_tenant_cedar_policies() {
     );
 }
 
+#[tokio::test]
+async fn test_install_os_app_persists_granular_policy_rows() {
+    use temper_store_turso::TursoEventStore;
+
+    let db_path = format!("/tmp/temper-policy-rows-{}.db", uuid::Uuid::new_v4());
+    let db_url = format!("file:{db_path}");
+    let turso = TursoEventStore::new(&db_url, None).await.unwrap();
+    let mut state = PlatformState::new(None);
+    state
+        .server
+        .set_storage_stack(temper_server::StorageStack::from_turso(turso));
+
+    install_os_app(&state, "test-policy-rows", "project-management")
+        .await
+        .expect("install project-management");
+
+    let policy_store = state.server.policy_store().expect("policy store");
+    let rows = policy_store
+        .load_policies_for_tenant("test-policy-rows")
+        .await
+        .expect("load granular policies");
+    assert!(
+        rows.iter().any(|row| {
+            row.policy_id == "project-management-issue"
+                && row.enabled
+                && row.cedar_text.contains("resource is Issue")
+        }),
+        "project-management install should persist policies/issue.cedar as a granular row: {rows:?}"
+    );
+
+    let turso_ref = state.server.platform_turso_store().unwrap();
+    let legacy_rows = turso_ref.load_tenant_policies().await.unwrap();
+    assert!(
+        legacy_rows
+            .iter()
+            .any(|(tenant, text)| tenant == "test-policy-rows" && text.contains("Issue")),
+        "legacy aggregate policy should still be persisted for compatibility"
+    );
+}
+
 /// Proves the full install → persist → reboot → restore cycle.
 ///
 /// 1. Install OS app with a real Turso-backed SQLite DB.
@@ -1782,6 +1822,23 @@ mode = "commons"
     let bundle = load_app_bundle(&temp_dir).expect("bundle should load policies");
     assert_eq!(bundle.deployment_mode, AppDeploymentMode::Commons);
     assert_eq!(bundle.cedar_policies.len(), 2);
+    let source_paths: Vec<&str> = bundle
+        .cedar_policy_sources
+        .iter()
+        .map(|source| source.relative_path.as_str())
+        .collect();
+    assert_eq!(
+        source_paths,
+        vec!["policies/base.cedar", "policies/commons/guardrail.cedar"]
+    );
+    assert_eq!(
+        os_app_policy_row_id("katagami-commons", "policies/palette_system.cedar"),
+        "katagami-commons-palette_system"
+    );
+    assert_eq!(
+        os_app_policy_row_id("katagami-commons", "policies/commons/guardrail.cedar"),
+        "katagami-commons-commons-guardrail"
+    );
     assert!(
         bundle
             .cedar_policies

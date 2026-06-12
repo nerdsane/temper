@@ -190,6 +190,15 @@ pub struct AppEntry {
     pub dependencies: Vec<String>,
 }
 
+/// Cedar policy source bundled with an OS app.
+#[derive(Debug, Clone)]
+pub struct CedarPolicySource {
+    /// App-relative source path, for example `policies/default.cedar`.
+    pub relative_path: String,
+    /// Raw Cedar policy text.
+    pub text: String,
+}
+
 /// Full spec bundle for an app (owned, loaded from disk).
 pub struct AppBundle {
     /// Effective deployment mode used while loading the bundle.
@@ -202,6 +211,8 @@ pub struct AppBundle {
     pub cross_invariants_toml: Option<String>,
     /// Cedar policy sources (may be empty).
     pub cedar_policies: Vec<String>,
+    /// Cedar policy sources with their app-relative paths for durable row IDs.
+    pub cedar_policy_sources: Vec<CedarPolicySource>,
     /// WASM module binaries as `(module_name, wasm_bytes)` pairs.
     pub wasm_modules: BTreeMap<String, Vec<u8>>,
     /// WASM module contracts declared in `app.toml`.
