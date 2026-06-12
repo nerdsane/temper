@@ -2190,3 +2190,28 @@ fn bridge_short_circuit_response_absent_is_none() {
     .expect("missing status still short-circuits");
     assert_eq!(response.status(), StatusCode::BAD_GATEWAY);
 }
+
+#[test]
+fn http_endpoint_fallback_tenant_prefers_default_over_sort_order() {
+    // Regression: tenants that sort before "default" (e.g. Directed
+    // Evolution control tenants on production) must not capture
+    // header-less protocol requests.
+    let de = TenantId::new("de-control-agent-answers");
+    let default = TenantId::new("default");
+    let other = TenantId::new("acme");
+    let ids = vec![&other, &de, &default];
+    assert_eq!(http_endpoint_fallback_tenant(&ids), Some(&default));
+}
+
+#[test]
+fn http_endpoint_fallback_tenant_skips_system_then_takes_first() {
+    let system = TenantId::new("temper-system");
+    let acme = TenantId::new("acme");
+    assert_eq!(
+        http_endpoint_fallback_tenant(&[&system, &acme]),
+        Some(&acme)
+    );
+    // Only the system tenant registered: still resolves rather than 404.
+    assert_eq!(http_endpoint_fallback_tenant(&[&system]), Some(&system));
+    assert_eq!(http_endpoint_fallback_tenant(&[]), None);
+}
