@@ -602,19 +602,7 @@ impl DiscordTransport {
             },
         );
 
-        let agent_ctx = AgentContext {
-            security_ctx: None,
-            agent_id: Some(format!("discord-transport:{user_id}")),
-            session_id: None,
-            agent_type: Some("system".to_string()),
-            intent: None,
-            trace_id: None,
-            parent_span_id: None,
-            workflow_root_entity_type: None,
-            workflow_root_entity_id: None,
-            workflow_run_id: None,
-            idempotency_key: None,
-        };
+        let agent_ctx = AgentContext::system_with_agent_id(format!("discord-transport:{user_id}"));
 
         // Create the TemperAgent entity.
         let initial_fields = serde_json::json!({ "id": entity_id });
@@ -727,19 +715,7 @@ impl DiscordTransport {
             },
         );
 
-        let agent_ctx = AgentContext {
-            security_ctx: None,
-            agent_id: Some(format!("discord-transport:{user_id}")),
-            session_id: None,
-            agent_type: Some("system".to_string()),
-            intent: None,
-            trace_id: None,
-            parent_span_id: None,
-            workflow_root_entity_type: None,
-            workflow_root_entity_id: None,
-            workflow_run_id: None,
-            idempotency_key: None,
-        };
+        let agent_ctx = AgentContext::system_with_agent_id(format!("discord-transport:{user_id}"));
 
         // Create a new TemperAgent entity for this turn.
         let initial_fields = serde_json::json!({ "id": entity_id });
@@ -1564,8 +1540,7 @@ mod tests {
             action: "RecordResult".into(),
             status: "Completed".into(),
             tenant: "test-tenant".into(),
-            agent_id: None,
-            session_id: None,
+            ..EntityStateChange::default()
         };
         assert!(is_agent_terminal_event(&event, "test-tenant"));
     }
@@ -1579,8 +1554,7 @@ mod tests {
             action: "Fail".into(),
             status: "Failed".into(),
             tenant: "test-tenant".into(),
-            agent_id: None,
-            session_id: None,
+            ..EntityStateChange::default()
         };
         assert!(is_agent_terminal_event(&event, "test-tenant"));
     }
@@ -1594,8 +1568,7 @@ mod tests {
             action: "SandboxReady".into(),
             status: "Thinking".into(),
             tenant: "test-tenant".into(),
-            agent_id: None,
-            session_id: None,
+            ..EntityStateChange::default()
         };
         assert!(!is_agent_terminal_event(&event, "test-tenant"));
     }

@@ -778,6 +778,8 @@ impl ServerState {
             tenant: tenant.to_string(),
             agent_id: None,
             session_id: None,
+            intent: None,
+            observation_metadata: None,
         };
         self.record_entity_observe_event_with_seq(
             tenant.as_str(),
@@ -1105,6 +1107,8 @@ impl ServerState {
             tenant: tenant.to_string(),
             agent_id: None,
             session_id: None,
+            intent: None,
+            observation_metadata: None,
         };
         self.record_entity_observe_event_with_seq(
             tenant.as_str(),

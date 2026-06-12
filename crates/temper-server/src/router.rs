@@ -526,6 +526,10 @@ async fn dispatch_action_bridge_result(
         );
     }
 
+    if let Some(short_circuit) = bridge_short_circuit_response(&callback_params) {
+        return short_circuit;
+    }
+
     let entity_id = match render_action_bridge_template(&bridge.entity_id_template, &route_params) {
         Ok(id) => id,
         Err(e) => {
@@ -538,16 +542,24 @@ async fn dispatch_action_bridge_result(
     let explicit_principal = headers.contains_key("x-temper-principal-kind")
         || headers.contains_key("x-temper-principal-id")
         || headers.contains_key("x-temper-principal-scopes");
-    agent_ctx.security_ctx = Some(if requires_auth || explicit_principal {
-        crate::authz::security_context_from_headers(
-            &headers,
-            agent_ctx.agent_id.as_deref(),
-            agent_ctx.session_id.as_deref(),
-            agent_ctx.agent_type.as_deref(),
-        )
-    } else {
-        temper_authz::SecurityContext::system()
-    });
+    // Protocol adapters (git wire, REST shims) authenticate callers whose
+    // credentials are not X-Temper-* headers; their resolved principal
+    // takes precedence over header context and the system fallback
+    // (ADR-0138).
+    agent_ctx.security_ctx = Some(
+        if let Some(adapter_principal) = bridge_resolved_principal(&callback_params) {
+            adapter_principal
+        } else if requires_auth || explicit_principal {
+            crate::authz::security_context_from_headers(
+                &headers,
+                agent_ctx.agent_id.as_deref(),
+                agent_ctx.session_id.as_deref(),
+                agent_ctx.agent_type.as_deref(),
+            )
+        } else {
+            temper_authz::SecurityContext::system()
+        },
+    );
     if agent_ctx.idempotency_key.is_none() {
         agent_ctx.idempotency_key = action_params
             .get("ClientRequestId")
@@ -576,7 +588,14 @@ async fn dispatch_action_bridge_result(
             crate::state::DispatchExtOptions {
                 agent_ctx: &agent_ctx,
                 await_integration: true,
-                await_reactions: false,
+                // Await reactions like the OData action path
+                // (dispatch_bound_action) does, so a composite action
+                // dispatched through the bridge — git wire IngestPack,
+                // PR merge — has its declared sub-write reactions applied
+                // before the protocol response is returned. Without this
+                // the reaction is spawned in the background and its
+                // sub_writes are silently dropped.
+                await_reactions: true,
             },
         )
         .await;
@@ -599,11 +618,141 @@ async fn dispatch_action_bridge_result(
 }
 
 fn bridge_action_params(callback_params: &serde_json::Value) -> serde_json::Value {
-    callback_params
+    if let Some(params) = callback_params
         .get("action_params")
         .or_else(|| callback_params.get("ActionParams"))
-        .cloned()
-        .unwrap_or_else(|| callback_params.clone())
+    {
+        return params.clone();
+    }
+    // Legacy passthrough adapters return params at the top level; the
+    // ADR-0138 control keys must never leak into a dispatched action.
+    let mut fallback = callback_params.clone();
+    if let Some(map) = fallback.as_object_mut() {
+        map.remove("bridge_principal");
+        map.remove("bridge_response");
+    }
+    fallback
+}
+
+/// Adapter short-circuit response for action-bridge routes (ADR-0138).
+///
+/// Protocol adapters that must refuse a request before any action
+/// dispatch — e.g. a 401 challenge on an unauthenticated push — return
+/// `bridge_response` with `status`, optional string `headers`, and an
+/// optional string `body`. Presence of the key always ends the request:
+/// a well-formed value is returned verbatim; a malformed one fails
+/// closed as 502 so an adapter's refusal can never decay into a
+/// dispatch (which would otherwise run as the system fallback).
+fn bridge_short_circuit_response(callback_params: &serde_json::Value) -> Option<Response> {
+    let resp = callback_params.get("bridge_response")?;
+    // Same passthrough guard as bridge_principal: control keys are
+    // honored only in the structured result shape, so a legacy adapter
+    // echoing client JSON as top-level params can never hand a caller
+    // response control on the kernel origin. Fail closed, not through.
+    if callback_params.get("action_params").is_none()
+        && callback_params.get("ActionParams").is_none()
+    {
+        tracing::warn!(
+            "bridge_response without explicit action_params fails closed (ADR-0138 structured shape required)"
+        );
+        return Some(
+            axum::http::Response::builder()
+                .status(axum::http::StatusCode::BAD_GATEWAY)
+                .body(Body::from(
+                    "adapter bridge_response requires the structured result shape",
+                ))
+                .expect("response builder"),
+        );
+    }
+    Some(match build_bridge_short_circuit(resp) {
+        Ok(response) => response,
+        Err(reason) => {
+            tracing::warn!(%reason, "malformed bridge_response from adapter; failing closed");
+            axum::http::Response::builder()
+                .status(axum::http::StatusCode::BAD_GATEWAY)
+                .body(Body::from("adapter returned a malformed bridge_response"))
+                .expect("response builder")
+        }
+    })
+}
+
+fn build_bridge_short_circuit(resp: &serde_json::Value) -> Result<Response, String> {
+    let status_code = resp
+        .get("status")
+        .and_then(|v| v.as_u64())
+        .ok_or("bridge_response.status must be a number")?;
+    let status = u16::try_from(status_code)
+        .ok()
+        .and_then(|code| axum::http::StatusCode::from_u16(code).ok())
+        .ok_or_else(|| format!("bridge_response.status {status_code} is not a valid status"))?;
+    let mut builder = axum::http::Response::builder().status(status);
+    if let Some(headers) = resp.get("headers").and_then(|v| v.as_object()) {
+        for (name, value) in headers {
+            let value = value
+                .as_str()
+                .ok_or_else(|| format!("bridge_response header {name} must be a string"))?;
+            builder = builder.header(name, value);
+        }
+    }
+    let body = resp
+        .get("body")
+        .and_then(|v| v.as_str())
+        .unwrap_or_default()
+        .to_string();
+    builder
+        .body(Body::from(body))
+        .map_err(|e| format!("bridge_response could not be built: {e}"))
+}
+
+/// Adapter-resolved principal for action-bridge dispatch (ADR-0138).
+///
+/// Adapters that authenticate protocol-native credentials (git Basic auth
+/// mapping to a domain token entity) return `bridge_principal` with `kind`,
+/// `id`, and optional `scopes`. Honored only alongside an explicit
+/// `action_params` key: a passthrough adapter that echoes request content
+/// into top-level params must never hand the caller an identity. Scopes are
+/// token-like (`repo:push`, `force`); values containing whitespace, commas,
+/// or semicolons would be split by the header-parsing path. The `system`
+/// kind cannot be smuggled — `SecurityContext::from_headers` maps unknown
+/// kinds to Customer.
+fn bridge_resolved_principal(
+    callback_params: &serde_json::Value,
+) -> Option<temper_authz::SecurityContext> {
+    let principal = callback_params.get("bridge_principal")?;
+    if callback_params.get("action_params").is_none()
+        && callback_params.get("ActionParams").is_none()
+    {
+        tracing::warn!(
+            "bridge_principal without explicit action_params is ignored (ADR-0138 structured shape required)"
+        );
+        return None;
+    }
+    let kind = principal.get("kind").and_then(|v| v.as_str())?.trim();
+    let id = principal.get("id").and_then(|v| v.as_str())?.trim();
+    if kind.is_empty() || id.is_empty() {
+        return None;
+    }
+    let mut header_pairs = vec![
+        ("x-temper-principal-kind".to_string(), kind.to_string()),
+        ("x-temper-principal-id".to_string(), id.to_string()),
+    ];
+    let scopes = principal
+        .get("scopes")
+        .and_then(|v| v.as_array())
+        .map(|items| {
+            items
+                .iter()
+                .filter_map(|s| s.as_str())
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .collect::<Vec<_>>()
+                .join(",")
+        })
+        .unwrap_or_default();
+    if !scopes.is_empty() {
+        header_pairs.push(("x-temper-principal-scopes".to_string(), scopes));
+    }
+    Some(temper_authz::SecurityContext::from_headers(&header_pairs))
 }
 
 fn bridge_git_receive_pack_refs(callback_params: &serde_json::Value) -> Vec<String> {

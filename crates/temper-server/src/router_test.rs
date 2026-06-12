@@ -1965,6 +1965,8 @@ async fn test_sse_events_endpoint_delivers_state_changes() {
         tenant: "default".into(),
         agent_id: Some("test-agent".into()),
         session_id: None,
+        intent: None,
+        observation_metadata: None,
     });
 
     // Read SSE frames until we see the event (stream never closes on its own).
@@ -1997,6 +1999,8 @@ async fn test_sse_events_lagged_receiver_continues() {
             tenant: "default".into(),
             agent_id: None,
             session_id: None,
+            intent: None,
+            observation_metadata: None,
         });
     }
 
@@ -2023,6 +2027,8 @@ async fn test_sse_events_lagged_receiver_continues() {
         tenant: "default".into(),
         agent_id: None,
         session_id: None,
+        intent: None,
+        observation_metadata: None,
     });
 
     // Read frames — the stream should recover and deliver the fresh event.
@@ -2032,4 +2038,155 @@ async fn test_sse_events_lagged_receiver_continues() {
         collected.contains("after-flood"),
         "SSE should recover after lag. Got: {collected}"
     );
+}
+
+#[test]
+fn bridge_resolved_principal_builds_security_context_with_scopes() {
+    let callback = serde_json::json!({
+        "action_params": {},
+        "bridge_principal": {
+            "kind": "customer",
+            "id": "user-rita",
+            "scopes": ["repo:push", "force", " ", ""]
+        }
+    });
+
+    let ctx = bridge_resolved_principal(&callback).expect("principal should resolve");
+
+    assert_eq!(ctx.principal.id, "user-rita");
+    assert!(matches!(
+        ctx.principal.kind,
+        temper_authz::PrincipalKind::Customer
+    ));
+    let scopes = ctx
+        .principal
+        .attributes
+        .get("scopes")
+        .and_then(|v| v.as_array())
+        .cloned()
+        .unwrap_or_default();
+    assert!(scopes.contains(&serde_json::Value::String("repo:push".to_string())));
+    assert!(scopes.contains(&serde_json::Value::String("force".to_string())));
+    assert_eq!(scopes.len(), 2);
+}
+
+#[test]
+fn bridge_resolved_principal_rejects_missing_or_empty_identity() {
+    assert!(bridge_resolved_principal(&serde_json::json!({ "action_params": {} })).is_none());
+    assert!(
+        bridge_resolved_principal(&serde_json::json!({
+            "action_params": {},
+            "bridge_principal": { "kind": "customer", "id": "  " }
+        }))
+        .is_none()
+    );
+    assert!(
+        bridge_resolved_principal(&serde_json::json!({
+            "action_params": {},
+            "bridge_principal": { "kind": "", "id": "user-1" }
+        }))
+        .is_none()
+    );
+}
+
+#[test]
+fn bridge_resolved_principal_requires_structured_action_params() {
+    // A passthrough adapter (top-level params, no action_params key)
+    // must never hand the caller an identity (ADR-0138).
+    assert!(
+        bridge_resolved_principal(&serde_json::json!({
+            "bridge_principal": { "kind": "customer", "id": "user-1" }
+        }))
+        .is_none()
+    );
+}
+
+#[test]
+fn bridge_resolved_principal_cannot_smuggle_system_kind() {
+    let ctx = bridge_resolved_principal(&serde_json::json!({
+        "action_params": {},
+        "bridge_principal": { "kind": "system", "id": "evil" }
+    }))
+    .expect("principal should resolve");
+    assert!(matches!(
+        ctx.principal.kind,
+        temper_authz::PrincipalKind::Customer
+    ));
+}
+
+#[test]
+fn bridge_action_params_fallback_strips_control_keys() {
+    let params = bridge_action_params(&serde_json::json!({
+        "Name": "refs/heads/main",
+        "bridge_principal": { "kind": "customer", "id": "user-1" },
+        "bridge_response": { "status": 401 }
+    }));
+    assert_eq!(params["Name"], "refs/heads/main");
+    assert!(params.get("bridge_principal").is_none());
+    assert!(params.get("bridge_response").is_none());
+}
+
+#[test]
+fn bridge_response_requires_structured_action_params() {
+    // Same passthrough guard as bridge_principal: never honored
+    // verbatim, never falls through to dispatch.
+    let response = bridge_short_circuit_response(&serde_json::json!({
+        "bridge_response": { "status": 200, "body": "client-controlled" }
+    }))
+    .expect("unstructured bridge_response still short-circuits");
+    assert_eq!(response.status(), StatusCode::BAD_GATEWAY);
+}
+
+#[test]
+fn malformed_bridge_response_fails_closed_as_bad_gateway() {
+    // Presence of the key must never decay into a dispatch.
+    let response = bridge_short_circuit_response(&serde_json::json!({
+        "action_params": {},
+        "bridge_response": { "status": "not-a-number" }
+    }))
+    .expect("malformed bridge_response still short-circuits");
+    assert_eq!(response.status(), StatusCode::BAD_GATEWAY);
+
+    let response = bridge_short_circuit_response(&serde_json::json!({
+        "action_params": {},
+        "bridge_response": { "status": 401, "headers": { "bad\nname": "x" } }
+    }))
+    .expect("invalid header still short-circuits");
+    assert_eq!(response.status(), StatusCode::BAD_GATEWAY);
+}
+
+#[test]
+fn bridge_short_circuit_response_returns_status_headers_body() {
+    let callback = serde_json::json!({
+        "action_params": {},
+        "bridge_response": {
+            "status": 401,
+            "headers": { "WWW-Authenticate": "Basic realm=\"Genesis\"" },
+            "body": "authentication required"
+        }
+    });
+
+    let response = bridge_short_circuit_response(&callback).expect("short circuit should build");
+
+    assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+    assert_eq!(
+        response
+            .headers()
+            .get("WWW-Authenticate")
+            .and_then(|v| v.to_str().ok()),
+        Some("Basic realm=\"Genesis\"")
+    );
+}
+
+#[test]
+fn bridge_short_circuit_response_absent_is_none() {
+    assert!(bridge_short_circuit_response(&serde_json::json!({ "action_params": {} })).is_none());
+    // Present-but-malformed never falls through to dispatch — it fails
+    // closed (covered by malformed_bridge_response_fails_closed_as_bad_gateway).
+    let response = bridge_short_circuit_response(&serde_json::json!({
+        "action_params": {},
+        "bridge_response": { "body": "x" }
+    }))
+    .expect("missing status still short-circuits");
+    assert_eq!(response.status(), StatusCode::BAD_GATEWAY);
 }
