@@ -477,6 +477,71 @@ async fn test_reconcile_os_app_repairs_missing_authz_engine_policies_despite_tex
 }
 
 #[tokio::test]
+async fn test_runtime_recovery_requires_active_policies_for_ready_outcome() {
+    let db_path = format!(
+        "/tmp/temper-test-runtime-policy-readiness-{}.db",
+        uuid::Uuid::new_v4()
+    );
+    let db_url = format!("file:{db_path}");
+    let tenant = "test-runtime-policy-readiness";
+
+    let turso = temper_store_turso::TursoEventStore::new(&db_url, None)
+        .await
+        .unwrap();
+    let mut state = PlatformState::new(None);
+    state
+        .server
+        .set_storage_stack(temper_server::StorageStack::from_turso(turso));
+
+    install_os_app(&state, tenant, "project-management")
+        .await
+        .expect("initial install should succeed");
+
+    let turso_ref = state.server.platform_turso_store().unwrap();
+    let cached_policy_text = {
+        let policies = state.server.tenant_policies.read().unwrap(); // ci-ok: infallible lock
+        policies
+            .get(tenant)
+            .cloned()
+            .expect("initial install should cache app policies")
+    };
+    state
+        .server
+        .authz
+        .reload_tenant_policies(tenant, "")
+        .expect("empty tenant policy should load");
+
+    let outcome = crate::recovery::recover_installed_app_runtime_state(
+        &state,
+        &turso_ref,
+        tenant,
+        "project-management",
+    )
+    .await;
+
+    assert_eq!(
+        outcome,
+        crate::recovery::InstalledAppRuntimeRecoveryOutcome::NeedsReconcile,
+        "runtime recovery must not mark an unchanged app ready when active Cedar policies are missing"
+    );
+    assert_eq!(
+        state
+            .server
+            .tenant_policies
+            .read()
+            .unwrap()
+            .get(tenant)
+            .map(String::as_str),
+        Some(cached_policy_text.as_str()),
+        "test setup should preserve cached policy text while active authz is empty"
+    );
+
+    let _ = std::fs::remove_file(&db_path);
+    let _ = std::fs::remove_file(format!("{db_path}-wal"));
+    let _ = std::fs::remove_file(format!("{db_path}-shm"));
+}
+
+#[tokio::test]
 async fn test_install_plan_without_spec_phase_does_not_reclassify_specs() {
     let state = PlatformState::new(None);
     let tenant = "test-install-plan-skip-specs";

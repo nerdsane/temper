@@ -37,6 +37,9 @@ pub use closure_bootstrap::{
     startup_os_app_closure,
 };
 pub use reconcile::{os_app_bundle_digest, reconcile_os_app, resolve_os_app_install_order};
+pub(crate) use reconcile::{
+    tenant_has_active_policies_for_bundle, tenant_has_registered_wasm_for_bundle,
+};
 pub(crate) use runtime_heal::{
     restore_app_specs_from_matching_digest, tenant_has_ready_app_specs_for_bundle,
 };
