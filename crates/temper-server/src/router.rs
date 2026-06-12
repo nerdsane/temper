@@ -588,7 +588,14 @@ async fn dispatch_action_bridge_result(
             crate::state::DispatchExtOptions {
                 agent_ctx: &agent_ctx,
                 await_integration: true,
-                await_reactions: false,
+                // Await reactions like the OData action path
+                // (dispatch_bound_action) does, so a composite action
+                // dispatched through the bridge — git wire IngestPack,
+                // PR merge — has its declared sub-write reactions applied
+                // before the protocol response is returned. Without this
+                // the reaction is spawned in the background and its
+                // sub_writes are silently dropped.
+                await_reactions: true,
             },
         )
         .await;

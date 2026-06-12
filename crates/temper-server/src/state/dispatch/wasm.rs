@@ -939,6 +939,45 @@ impl crate::state::ServerState {
         Ok(None)
     }
 
+    /// Whether a failed integration on this action must propagate as `Err`
+    /// instead of being absorbed by `handle_wasm_failure` (which returns
+    /// `Ok(None)`, treated as success by the dispatch loop).
+    ///
+    /// True for a Composite action with no `on_failure` recovery: the
+    /// integration's whole job is to produce the action's declared
+    /// sub-writes, so a failure means those sub-writes are absent and the
+    /// action did not achieve its effect. Swallowing it would let the
+    /// parent transition stand while the sub-writes are silently dropped
+    /// (a git push that writes no objects; a merge conflict reported as a
+    /// successful merge). The parent transition is already durable by this
+    /// point, so returning `Err` reports the action as failed to the caller
+    /// (the protocol handler maps it onto the right status, e.g. 409 for a
+    /// merge conflict) — it does not roll the transition back. A Composite
+    /// action's parent transition must therefore be a safe no-op on
+    /// integration failure (Repository.MergePullRequest is Active->Active
+    /// and the PullRequest.Merge transition rides in as a conditional
+    /// sub-write, so a conflict leaves the PR untouched).
+    ///
+    /// Fails closed: if compositeness cannot be determined (e.g. a poisoned
+    /// registry lock), assume propagation is required rather than risk
+    /// silently dropping sub-writes.
+    fn composite_failure_must_propagate(
+        &self,
+        ctx: &WasmDispatchCtx<'_>,
+        integration: &temper_spec::automaton::Integration,
+    ) -> bool {
+        if integration.on_failure.is_some() {
+            return false;
+        }
+        self.composite_metadata_for(
+            ctx.entity_ref.tenant,
+            ctx.entity_ref.entity_type,
+            ctx.action,
+        )
+        .map(|meta| meta.is_some())
+        .unwrap_or(true)
+    }
+
     /// Invoke the WASM module and handle success/failure/error results.
     #[allow(clippy::too_many_arguments)]
     async fn invoke_and_handle_result(
@@ -1230,6 +1269,14 @@ impl crate::state::ServerState {
                     error_str = http_call_authz_denied_error(&reason);
                 }
                 record_wasm_error_on_current_span(&error_str);
+                // A failed Composite integration means its declared
+                // sub-writes never landed; surface that as an action
+                // failure instead of letting the dispatch loop treat the
+                // unsuccessful result as success (see
+                // composite_failure_must_propagate).
+                if self.composite_failure_must_propagate(ctx, integration) {
+                    return Err(error_str);
+                }
                 self.handle_wasm_failure(
                     ctx,
                     &integration.name,
@@ -1277,6 +1324,13 @@ impl crate::state::ServerState {
                     error_str = http_call_authz_denied_error(&reason);
                 }
                 record_wasm_error_on_current_span(&error_str);
+                // Same as the unsuccessful-result arm above: a host trap,
+                // fuel exhaustion, or panic inside a Composite integration
+                // also leaves the declared sub-writes unwritten, so fail
+                // the action rather than swallow it.
+                if self.composite_failure_must_propagate(ctx, integration) {
+                    return Err(error_str);
+                }
                 self.handle_wasm_failure(
                     ctx,
                     &integration.name,
