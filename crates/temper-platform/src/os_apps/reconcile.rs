@@ -241,7 +241,7 @@ pub(super) fn plan_reconcile_from_installed_record(
     }
 }
 
-fn tenant_has_active_policies_for_bundle(
+pub(crate) fn tenant_has_active_policies_for_bundle(
     state: &PlatformState,
     tenant: &str,
     bundle: &AppBundle,
@@ -264,7 +264,7 @@ fn bundle_policies_present(active_text: &str, cedar_policies: &[String]) -> bool
     })
 }
 
-fn tenant_has_registered_wasm_for_bundle(
+pub(crate) fn tenant_has_registered_wasm_for_bundle(
     state: &PlatformState,
     tenant: &str,
     bundle: &AppBundle,
