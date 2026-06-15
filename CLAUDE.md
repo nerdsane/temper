@@ -10,7 +10,7 @@
 
 ## Working Discipline
 
-- **The primary checkout at `~/Development/temper` is bare on purpose** — you cannot and must not work there. Create a worktree branched from up-to-date `main` (`codex/<short-task-name>`), state which repo/worktree/branch you're on before mutating anything, open a **draft PR as soon as changes begin**, and keep it to **one PR per repo per effort**.
+- **The primary checkout at `~/Development/temper` is bare on purpose** — you cannot and must not work there. Create a worktree branched from up-to-date `main` (`<agent>/<short-task-name>` — prefix with the agent's short name, e.g. `claude`/`codex`, not a hardcoded `codex`), state which repo/worktree/branch you're on before mutating anything, open a **draft PR as soon as changes begin**, and keep it to **one PR per repo per effort**.
 - **DO NOT PUNT.** No "phase 0" that defers the hard part; no band-aid or local/temporary fixes; no backward compatibility for bad implementations (but never drop working capabilities). Address ALL review findings, then re-run review until clean.
 - **Definition of done**: implement fully → run live end-to-end locally → merge + deploy → verify live in the deployed system, using **Datadog** for verification and diagnosis → hand over PR links, merge commits, deployment links, live test results, residual risks. Tests passing alone is not done.
 - Brainstorm and align before implementing, even from a detailed handoff. Rita's handoffs follow: Objective / Why This Matters / Relevant PRs / Hot Files / Acceptance Criteria / Must Start With ADR / Suggested Validation / Copy-Paste Prompt — honor that structure, including the ADR-first step.
