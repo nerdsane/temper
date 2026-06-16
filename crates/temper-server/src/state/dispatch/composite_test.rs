@@ -1473,7 +1473,9 @@ async fn composite_ingest_pack_large_blob_sub_write_persists_overflow_fields() {
 
     let blob_journal = store.dump_journal("default:Blob:blob-large-1");
     assert!(
-        blob_journal.iter().any(|event| event.event_type == "Create"),
+        blob_journal
+            .iter()
+            .any(|event| event.event_type == "Create"),
         "atomic composite batch should persist the Blob.Create event"
     );
 }

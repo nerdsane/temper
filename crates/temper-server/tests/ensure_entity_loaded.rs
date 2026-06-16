@@ -385,12 +385,7 @@ async fn list_entity_ids_lazy_surfaces_durable_entities_missing_from_partial_ind
     let writer = build_state_with_turso("test-lazy-list-partial-writer", store.clone());
     for id in ["ord-1", "ord-2"] {
         writer
-            .get_or_create_tenant_entity(
-                &tenant,
-                "Order",
-                id,
-                serde_json::json!({"Title": id}),
-            )
+            .get_or_create_tenant_entity(&tenant, "Order", id, serde_json::json!({"Title": id}))
             .await
             .expect("create durable order");
     }

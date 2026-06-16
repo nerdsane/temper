@@ -1853,9 +1853,15 @@ async fn load_genesis_object(
     debug_assert!(!git_sha.is_empty(), "git object sha must not be empty");
 
     let composite_id = genesis_object_entity_id(repository_id, git_sha);
-    if let Some(found) =
-        load_genesis_object_by_key(state, tenant, entity_type, repository_id, git_sha, &composite_id)
-            .await?
+    if let Some(found) = load_genesis_object_by_key(
+        state,
+        tenant,
+        entity_type,
+        repository_id,
+        git_sha,
+        &composite_id,
+    )
+    .await?
     {
         return Ok(Some(found));
     }
@@ -1883,7 +1889,10 @@ async fn load_genesis_object_by_key(
     git_sha: &str,
     entity_id: &str,
 ) -> Result<Option<temper_server::EntityResponse>, String> {
-    if !state.ensure_entity_loaded(tenant, entity_type, entity_id).await {
+    if !state
+        .ensure_entity_loaded(tenant, entity_type, entity_id)
+        .await
+    {
         return Ok(None);
     }
     let found = state
