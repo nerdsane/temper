@@ -1413,6 +1413,73 @@ async fn composite_atomic_batch_allows_existing_sub_write_to_delete_target() {
 
 #[cfg(feature = "sim")]
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn composite_ingest_pack_large_blob_sub_write_persists_overflow_fields() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let store = SimEventStore::no_faults(44);
+    let mut state = composite_test_state_with_store(store.clone());
+    state.data_dir = dir.path().to_path_buf();
+    let tenant = TenantId::default();
+    let agent = AgentContext::for_service("composite-test");
+    let canonical_bytes = "W".repeat(512 * 1024);
+
+    let applied = state
+        .apply_composite_integration_result(
+            &tenant,
+            "Parent",
+            "repo-large-blob",
+            "IngestPack",
+            &json!({
+                "sub_writes": [{
+                    "entity_type": "Blob",
+                    "entity_id": "blob-large-1",
+                    "action": "Create",
+                    "params": {
+                        "RepositoryId": "repo-large-blob",
+                        "CanonicalBytes": canonical_bytes
+                    }
+                }]
+            }),
+            &agent,
+        )
+        .await
+        .expect("large Blob sub-write should persist through field-overflow");
+    assert!(applied);
+
+    let blob = state
+        .get_tenant_entity_state(&tenant, "Blob", "blob-large-1")
+        .await
+        .expect("large blob entity should be readable");
+    let canonical_field = blob
+        .state
+        .fields
+        .get("CanonicalBytes")
+        .expect("CanonicalBytes field should be present");
+    let blob_key = canonical_field
+        .get(crate::blobs::FIELD_OVERFLOW_REF_KEY)
+        .and_then(serde_json::Value::as_str)
+        .expect("large CanonicalBytes should be stored as a field-overflow blob ref");
+    let bytes = state
+        .get_blob_with_legacy_fallback(&tenant, blob_key)
+        .await
+        .expect("field-overflow blob read should succeed")
+        .expect("field-overflow blob should exist");
+    let restored: serde_json::Value =
+        serde_json::from_slice(&bytes).expect("field-overflow blob should contain JSON");
+    assert_eq!(
+        restored.as_str().map(str::len),
+        Some(512 * 1024),
+        "field-overflow blob should preserve the full large field"
+    );
+
+    let blob_journal = store.dump_journal("default:Blob:blob-large-1");
+    assert!(
+        blob_journal.iter().any(|event| event.event_type == "Create"),
+        "atomic composite batch should persist the Blob.Create event"
+    );
+}
+
+#[cfg(feature = "sim")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn composite_atomic_batch_handles_concurrent_multi_entity_results() {
     const COMPOSITES: usize = 12;
     const CHILDREN_PER_COMPOSITE: usize = 3;
