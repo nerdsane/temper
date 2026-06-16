@@ -185,6 +185,23 @@ fn native_catalog_coverage_short_circuit_requires_pushdown_without_count() {
     ));
 }
 
+#[test]
+fn source_cursor_catalog_coverage_is_skipped_when_candidate_set_exceeds_budget() {
+    let budget = QueryPlaneReadBudget {
+        default_page_size: 1,
+        max_entities: 1,
+    };
+
+    assert!(should_check_source_cursor_catalog_coverage(
+        budget.scan_candidate_budget(),
+        budget
+    ));
+    assert!(!should_check_source_cursor_catalog_coverage(
+        budget.scan_candidate_budget() + 1,
+        budget
+    ));
+}
+
 #[tokio::test]
 async fn row_authorized_count_over_budget_returns_413() {
     let state = build_order_state("query-plane-budget-count");
