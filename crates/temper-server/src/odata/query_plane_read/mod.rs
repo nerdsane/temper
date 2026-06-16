@@ -11,8 +11,11 @@ pub(in crate::odata) use types::{
 
 use super::authz::{LIST_ACTION, authorize_read};
 use super::read_support::missing_catalog_entity_ids;
-use scan::{native_candidate_page_plan, read_from_source_cursor, try_native_page_read};
-use types::{QueryPlaneCoverageReport, QueryPlaneFallbackReason};
+use scan::{
+    ScanCounters, budget_rejection, native_candidate_page_plan, read_from_source_cursor,
+    try_native_page_read,
+};
+use types::{QueryPlaneCoverageReport, QueryPlaneFallbackReason, QueryPlaneReadStrategy};
 
 fn should_try_native_before_catalog_coverage(
     request: &QueryPlaneReadRequest<'_>,
@@ -29,6 +32,13 @@ fn should_try_lazy_catalog_repair_after_native_result(
     indexed_entity_ids.is_empty()
         && result.entities.is_empty()
         && request.budget.requested_top(request.query_options) > 0
+}
+
+fn should_check_source_cursor_catalog_coverage(
+    candidate_count: usize,
+    budget: QueryPlaneReadBudget,
+) -> bool {
+    candidate_count <= budget.scan_candidate_budget()
 }
 
 async fn catalog_coverage_report(
@@ -124,6 +134,24 @@ pub(in crate::odata) async fn read_entity_set_from_query_plane(
         .state
         .list_entity_ids_lazy(request.tenant, request.entity_type)
         .await;
+    let needs_full_proof = request.query_options.filter.is_some()
+        || request.query_options.orderby.is_some()
+        || request.query_options.count == Some(true);
+    if needs_full_proof
+        && !should_check_source_cursor_catalog_coverage(all_entity_ids.len(), request.budget)
+    {
+        return Err(budget_rejection(
+            &request,
+            QueryPlaneReadStrategy::ReadSourceCursor,
+            false,
+            request.state.query_plane_store().is_some(),
+            QueryPlaneCoverageReport::default(),
+            ScanCounters {
+                candidate_count: all_entity_ids.len(),
+                ..ScanCounters::empty()
+            },
+        ));
+    }
     let (coverage, missing_ids) = catalog_coverage_report(&request, &all_entity_ids).await;
 
     if coverage.missing == 0
