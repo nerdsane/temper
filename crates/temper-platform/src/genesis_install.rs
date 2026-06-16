@@ -1805,6 +1805,44 @@ async fn materialize_tree(
     Ok(())
 }
 
+/// Recompute the durable entity id Genesis assigns to a git object.
+///
+/// Git objects are persisted keyed by `{sanitized_repository_id}-{git_sha}`.
+/// This MUST stay byte-identical to `object_entity_id`, the writer, in the
+/// genesis app bundle at `wasm/scm_ingest_pack/src/lib.rs` (arni-labs/genesis);
+/// any divergence makes the keyed lookup miss and reintroduces the bundle 404.
+/// The contract is exercised end-to-end by the genesis repo's
+/// `scripts/live-genesis-install-e2e-smoke.sh` push→bundle round-trip.
+fn genesis_object_entity_id(repository_id: &str, git_sha: &str) -> String {
+    let mut repo = String::with_capacity(repository_id.len());
+    let mut last_dash = false;
+    for ch in repository_id.chars() {
+        if ch.is_ascii_alphanumeric() {
+            repo.push(ch.to_ascii_lowercase());
+            last_dash = false;
+        } else if !last_dash {
+            repo.push('-');
+            last_dash = true;
+        }
+    }
+    let repo = repo.trim_matches('-');
+    if repo.is_empty() {
+        format!("obj-{git_sha}")
+    } else {
+        format!("{repo}-{git_sha}")
+    }
+}
+
+/// Resolve a git object (Commit/Tree/Blob) by its durable entity key.
+///
+/// Objects are content-addressed under `{repository_id}-{git_sha}`, so we load
+/// that key directly (hydrating from the event store when the actor is cold).
+/// A bare-sha fallback covers any legacy object stored before the composite-key
+/// scheme. The previous implementation looked up the bare sha — which is never
+/// the real key — and then scanned `list_entity_ids_lazy`, whose partially
+/// populated in-memory index could omit durable objects; that made the Genesis
+/// bundle export 404 with "blob not found" for objects that existed and cloned
+/// cleanly. Keyed lookup is both correct and O(1) instead of O(objects).
 async fn load_genesis_object(
     state: &ServerState,
     tenant: &TenantId,
@@ -1812,33 +1850,63 @@ async fn load_genesis_object(
     repository_id: &str,
     git_sha: &str,
 ) -> Result<Option<temper_server::EntityResponse>, String> {
-    if state.entity_exists(tenant, entity_type, git_sha)
-        && let Ok(found) = state
-            .get_tenant_entity_state(tenant, entity_type, git_sha)
-            .await
+    debug_assert!(!git_sha.is_empty(), "git object sha must not be empty");
+
+    let composite_id = genesis_object_entity_id(repository_id, git_sha);
+    if let Some(found) = load_genesis_object_by_key(
+        state,
+        tenant,
+        entity_type,
+        repository_id,
+        git_sha,
+        &composite_id,
+    )
+    .await?
     {
-        let fields = &found.state.fields;
-        let object_repo = string_field(fields, "RepositoryId").unwrap_or_default();
-        let object_sha = string_field(fields, "Id").unwrap_or_default();
-        if object_repo == repository_id && object_sha == git_sha {
-            return Ok(Some(found));
-        }
+        return Ok(Some(found));
     }
 
-    let ids = state.list_entity_ids_lazy(tenant, entity_type).await;
-    for entity_id in ids {
-        let candidate = state
-            .get_tenant_entity_state(tenant, entity_type, &entity_id)
-            .await
-            .map_err(|e| format!("read Genesis {entity_type} {entity_id}: {e}"))?;
-        let fields = &candidate.state.fields;
-        let object_repo = string_field(fields, "RepositoryId").unwrap_or_default();
-        let object_sha = string_field(fields, "Id").unwrap_or_default();
-        if object_repo == repository_id && object_sha == git_sha {
-            return Ok(Some(candidate));
-        }
+    // Legacy objects predating the composite-key scheme were keyed by bare sha.
+    // `composite_id` is `{repo}-{sha}` or `obj-{sha}`, so it never equals a
+    // non-empty bare sha; the guard only avoids a redundant duplicate lookup.
+    if composite_id != git_sha
+        && let Some(found) =
+            load_genesis_object_by_key(state, tenant, entity_type, repository_id, git_sha, git_sha)
+                .await?
+    {
+        return Ok(Some(found));
     }
+
     Ok(None)
+}
+
+/// Load one candidate entity id and confirm it is the requested git object.
+async fn load_genesis_object_by_key(
+    state: &ServerState,
+    tenant: &TenantId,
+    entity_type: &str,
+    repository_id: &str,
+    git_sha: &str,
+    entity_id: &str,
+) -> Result<Option<temper_server::EntityResponse>, String> {
+    if !state
+        .ensure_entity_loaded(tenant, entity_type, entity_id)
+        .await
+    {
+        return Ok(None);
+    }
+    let found = state
+        .get_tenant_entity_state(tenant, entity_type, entity_id)
+        .await
+        .map_err(|e| format!("read Genesis {entity_type} {entity_id}: {e}"))?;
+    let fields = &found.state.fields;
+    let object_repo = string_field(fields, "RepositoryId").unwrap_or_default();
+    let object_sha = string_field(fields, "Id").unwrap_or_default();
+    if object_repo == repository_id && object_sha == git_sha {
+        Ok(Some(found))
+    } else {
+        Ok(None)
+    }
 }
 
 #[derive(Debug)]
@@ -2039,6 +2107,33 @@ mod tests {
     use base64::Engine as _;
 
     use super::*;
+
+    #[test]
+    fn genesis_object_entity_id_matches_ingest_scheme() {
+        // Byte-identical to scm_ingest_pack::object_entity_id, the writer of
+        // these keys. Real durable ids observed in prod Genesis:
+        assert_eq!(
+            genesis_object_entity_id(
+                "rp-katagami-katagami-curation",
+                "5a7ae8c0224769fdfc27106329f21a8fcb7b8441"
+            ),
+            "rp-katagami-katagami-curation-5a7ae8c0224769fdfc27106329f21a8fcb7b8441"
+        );
+        // Already-canonical repository ids round-trip unchanged (idempotent).
+        assert_eq!(
+            genesis_object_entity_id("rp-temperpaw-paw-foresight", "013224e7"),
+            "rp-temperpaw-paw-foresight-013224e7"
+        );
+        // Non-canonical input is sanitized: lowercased, non-alphanumeric runs
+        // collapse to a single dash, leading/trailing dashes trimmed.
+        assert_eq!(
+            genesis_object_entity_id("Katagami/Katagami Curation", "abc"),
+            "katagami-katagami-curation-abc"
+        );
+        // Empty repository id falls back to the `obj-` prefix, never bare sha.
+        assert_eq!(genesis_object_entity_id("", "abc"), "obj-abc");
+        assert_ne!(genesis_object_entity_id("rp-x", "abc"), "abc");
+    }
 
     #[test]
     fn parses_git_tree_entries() {

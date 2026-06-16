@@ -362,3 +362,56 @@ async fn ensure_entity_loaded_returns_false_for_deleted_entity() {
 
     let _ = std::fs::remove_file(db_path);
 }
+
+/// Regression: a partially populated in-memory index (one resident actor) must
+/// not hide other durable entities of the same type from `list_entity_ids_lazy`.
+/// Previously a non-empty index short-circuited the store scan, so collection
+/// queries returned only the resident subset, reading present durable entities
+/// as "not found".
+#[tokio::test]
+async fn list_entity_ids_lazy_surfaces_durable_entities_missing_from_partial_index() {
+    let db_path = std::env::temp_dir().join(format!(
+        "temper-lazy-list-partial-{}.db",
+        uuid::Uuid::new_v4()
+    ));
+    let db_url = format!("file:{}", db_path.display());
+    let store = TursoEventStore::new(&db_url, None)
+        .await
+        .expect("create local turso db");
+
+    let tenant = TenantId::new("tenant-a");
+
+    // Persist two durable Order entities through the normal create path.
+    let writer = build_state_with_turso("test-lazy-list-partial-writer", store.clone());
+    for id in ["ord-1", "ord-2"] {
+        writer
+            .get_or_create_tenant_entity(&tenant, "Order", id, serde_json::json!({"Title": id}))
+            .await
+            .expect("create durable order");
+    }
+
+    // Fresh process: empty in-memory index (simulates a server restart).
+    let state = build_state_with_turso("test-lazy-list-partial-reader", store);
+
+    // Touch exactly one entity so the index holds ONLY ord-1 (partial index).
+    assert!(
+        state.ensure_entity_loaded(&tenant, "Order", "ord-1").await,
+        "ord-1 should hydrate from the durable store"
+    );
+    assert_eq!(
+        state.list_entity_ids(&tenant, "Order"),
+        vec!["ord-1".to_string()],
+        "precondition: in-memory index is partial (only the touched entity)"
+    );
+
+    // Lazy listing must reconcile against the store and return BOTH entities.
+    let mut ids = state.list_entity_ids_lazy(&tenant, "Order").await;
+    ids.sort();
+    assert_eq!(
+        ids,
+        vec!["ord-1".to_string(), "ord-2".to_string()],
+        "lazy listing must surface durable entities absent from the partial index"
+    );
+
+    let _ = std::fs::remove_file(db_path);
+}

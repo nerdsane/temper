@@ -282,6 +282,24 @@ impl ServerState {
         })
     }
 
+    /// Mark every entity type observed in `entities` as fully hydrated from the
+    /// durable store, so `list_entity_ids_lazy` serves it from the in-memory
+    /// index without a redundant store scan. Used by the paths that load the
+    /// authoritative set for a tenant (full and eager hydration).
+    fn mark_types_hydrated(&self, tenant: &TenantId, entities: &[(String, String)]) {
+        let keys: std::collections::BTreeSet<String> = entities
+            .iter()
+            .map(|(entity_type, _entity_id)| format!("{tenant}:{entity_type}"))
+            .collect();
+        if keys.is_empty() {
+            return;
+        }
+        self.entity_index_hydrated
+            .write()
+            .expect("entity index hydrated lock poisoned")
+            .extend(keys);
+    }
+
     /// Populate `entity_index` from the event store without spawning actors.
     ///
     /// This is the memory-safe startup/list path: we discover persisted
@@ -307,6 +325,8 @@ impl ServerState {
                             .insert(entity_id.clone());
                     }
                 } // write lock dropped before metrics call
+                // A full-store scan is authoritative for every type it observed.
+                self.mark_types_hydrated(tenant, &entities);
                 tracing::info!(
                     tenant = %tenant,
                     count = entities.len(),
@@ -356,6 +376,12 @@ impl ServerState {
                         ids.insert(entity_id);
                     }
                 }
+                // The store scan is authoritative for this type: mark it fully
+                // hydrated so `list_entity_ids_lazy` can serve from the index.
+                self.entity_index_hydrated
+                    .write()
+                    .expect("entity index hydrated lock poisoned")
+                    .insert(format!("{tenant}:{entity_type}"));
                 tracing::info!(
                     tenant = %tenant,
                     entity_type,
@@ -439,6 +465,10 @@ impl ServerState {
                             hydrated = hydrated.saturating_add(1);
                         }
                     }
+                    // Eager hydration loaded every durable entity, so each
+                    // observed type's index is complete — mark it hydrated so
+                    // the first lazy list does not re-scan the store.
+                    self.mark_types_hydrated(tenant, &entities);
                     tracing::info!(
                         tenant = %tenant,
                         count = hydrated,
@@ -1368,21 +1398,36 @@ impl ServerState {
         }
     }
 
-    /// List entity IDs from in-memory index, lazily hydrating from the event
-    /// store if the index is cold.
+    /// List entity IDs for a type, guaranteeing completeness against the
+    /// durable event store.
+    ///
+    /// The in-memory index is served only once the type has been fully
+    /// hydrated from the store. A non-empty index is NOT sufficient: lazily
+    /// spawning a single actor inserts just that id, so trusting "non-empty
+    /// means complete" lets a partial index hide durable entities, and a
+    /// collection query then silently returns a partial set. When the type is
+    /// not yet hydrated we scan the store once (which marks it complete) and
+    /// then serve from the index on subsequent calls.
     #[instrument(skip_all, fields(otel.name = "entity.list_entity_ids_lazy", tenant = %tenant, entity_type))]
     pub async fn list_entity_ids_lazy(&self, tenant: &TenantId, entity_type: &str) -> Vec<String> {
-        let ids = self.list_entity_ids(tenant, entity_type);
-        if !ids.is_empty() {
-            return ids;
+        let index_key = format!("{tenant}:{entity_type}");
+        let already_hydrated = self
+            .entity_index_hydrated
+            .read()
+            .expect("entity index hydrated lock poisoned")
+            .contains(&index_key);
+        if already_hydrated {
+            return self.list_entity_ids(tenant, entity_type);
         }
 
+        // No durable journal to reconcile against: the in-memory index is all
+        // there is, so return it as-is.
         if self.event_journal().is_none() {
-            return ids;
+            return self.list_entity_ids(tenant, entity_type);
         }
+
         self.populate_index_from_store_by_type(tenant, entity_type)
             .await;
-
         self.list_entity_ids(tenant, entity_type)
     }
 

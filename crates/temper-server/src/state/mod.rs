@@ -378,6 +378,13 @@ pub struct ServerState {
     pub registry: Arc<RwLock<SpecRegistry>>,
     /// Index of entity IDs per (tenant:entity_type) for collection queries.
     pub entity_index: Arc<RwLock<BTreeMap<String, BTreeSet<String>>>>,
+    /// `{tenant}:{entity_type}` keys whose `entity_index` entry has been fully
+    /// hydrated from the durable event store. A type is only complete once a
+    /// store scan has run for it; lazily spawning a single actor must NOT mark
+    /// it complete, or a partial index can hide durable entities from
+    /// collection queries (a consumer would read present, durable entities as
+    /// "not found").
+    pub entity_index_hydrated: Arc<RwLock<BTreeSet<String>>>,
     /// Broadcast channel for entity state change events (SSE subscriptions).
     pub event_tx: Arc<tokio::sync::broadcast::Sender<EntityStateChange>>,
     /// Broadcast channel for replayable per-entity lifecycle and progress events.
@@ -622,6 +629,7 @@ impl ServerState {
             authz: Arc::new(AuthzEngine::permissive()),
             registry: Arc::new(RwLock::new(SpecRegistry::new())),
             entity_index: Arc::new(RwLock::new(BTreeMap::new())),
+            entity_index_hydrated: Arc::new(RwLock::new(BTreeSet::new())),
             event_tx: Arc::new(event_tx),
             entity_observe_tx: Arc::new(entity_observe_tx),
             start_time: sim_now(),
@@ -864,6 +872,7 @@ impl ServerState {
             authz: Arc::new(AuthzEngine::permissive()),
             registry,
             entity_index: Arc::new(RwLock::new(BTreeMap::new())),
+            entity_index_hydrated: Arc::new(RwLock::new(BTreeSet::new())),
             event_tx: Arc::new(event_tx),
             entity_observe_tx: Arc::new(entity_observe_tx),
             start_time: sim_now(),
