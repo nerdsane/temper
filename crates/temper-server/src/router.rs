@@ -321,6 +321,11 @@ async fn dispatch_matched_route(
                 .map(|s| (k.as_str().to_string(), s.to_string()))
         })
         .collect();
+    let route_params = git_route_params_for_http_dispatch(
+        &route.route.integration_module,
+        uri.path(),
+        route.params.clone(),
+    );
     let ctx = WasmInvocationContext {
         tenant: tenant_id.as_str().to_string(),
         entity_type: "HttpEndpoint".to_string(),
@@ -344,7 +349,7 @@ async fn dispatch_matched_route(
                 Some(q) => format!("{}?{}", uri.path(), q),
                 None => uri.path().to_string(),
             },
-            params: route.params.clone(),
+            params: route_params.clone(),
             headers: header_pairs,
             principal_id: None,
             request_body_handle: guest_request_body.0,
@@ -425,7 +430,7 @@ async fn dispatch_matched_route(
             state,
             tenant_id,
             headers,
-            route.params,
+            route_params,
             route.route.requires_auth,
             action_bridge,
             result,
@@ -651,6 +656,47 @@ fn bridge_action_params(callback_params: &serde_json::Value) -> serde_json::Valu
         map.remove("bridge_response");
     }
     fallback
+}
+
+fn git_route_params_for_http_dispatch(
+    integration_module: &str,
+    request_path: &str,
+    mut params: std::collections::BTreeMap<String, String>,
+) -> std::collections::BTreeMap<String, String> {
+    if params.get("owner").is_some_and(|v| !v.is_empty())
+        && params.get("repo").is_some_and(|v| !v.is_empty())
+    {
+        return params;
+    }
+    if !matches!(
+        integration_module,
+        "git_refs_advertise" | "git_upload_pack" | "git_receive_pack"
+    ) {
+        return params;
+    }
+
+    let trimmed = request_path.trim_start_matches('/');
+    let Some((owner, rest)) = trimmed.split_once('/') else {
+        return params;
+    };
+    let repo = rest
+        .strip_suffix(".git/info/refs")
+        .or_else(|| rest.strip_suffix(".git/git-upload-pack"))
+        .or_else(|| rest.strip_suffix(".git/git-receive-pack"));
+    let Some(repo) = repo else {
+        return params;
+    };
+    if owner.is_empty() || repo.is_empty() {
+        return params;
+    }
+
+    params
+        .entry("owner".to_string())
+        .or_insert_with(|| owner.to_string());
+    params
+        .entry("repo".to_string())
+        .or_insert_with(|| repo.to_string());
+    params
 }
 
 /// Adapter short-circuit response for action-bridge routes (ADR-0138).

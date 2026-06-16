@@ -2127,6 +2127,45 @@ fn bridge_action_params_fallback_strips_control_keys() {
 }
 
 #[test]
+fn git_route_params_fall_back_to_smart_http_path_when_exact_endpoint_has_no_captures() {
+    let params = git_route_params_for_http_dispatch(
+        "git_refs_advertise",
+        "/temperpaw/paw-agent.git/info/refs",
+        std::collections::BTreeMap::new(),
+    );
+
+    assert_eq!(params.get("owner").map(String::as_str), Some("temperpaw"));
+    assert_eq!(params.get("repo").map(String::as_str), Some("paw-agent"));
+}
+
+#[test]
+fn git_route_params_keep_captured_values() {
+    let mut captured = std::collections::BTreeMap::new();
+    captured.insert("owner".to_string(), "captured".to_string());
+    captured.insert("repo".to_string(), "repo".to_string());
+
+    let params = git_route_params_for_http_dispatch(
+        "git_receive_pack",
+        "/temperpaw/paw-agent.git/git-receive-pack",
+        captured,
+    );
+
+    assert_eq!(params.get("owner").map(String::as_str), Some("captured"));
+    assert_eq!(params.get("repo").map(String::as_str), Some("repo"));
+}
+
+#[test]
+fn route_param_inference_ignores_non_git_modules() {
+    let params = git_route_params_for_http_dispatch(
+        "some_json_endpoint",
+        "/temperpaw/paw-agent.git/info/refs",
+        std::collections::BTreeMap::new(),
+    );
+
+    assert!(params.is_empty());
+}
+
+#[test]
 fn bridge_response_requires_structured_action_params() {
     // Same passthrough guard as bridge_principal: never honored
     // verbatim, never falls through to dispatch.
