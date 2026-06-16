@@ -252,10 +252,7 @@ pub(crate) async fn handle_load_inline(
             // Update the in-memory text cache.
             if let Ok(mut policies) = state.tenant_policies.write() {
                 let entry = policies.entry(tenant.clone()).or_default();
-                if !entry.is_empty() {
-                    entry.push('\n');
-                }
-                entry.push_str(cedar_text);
+                *entry = merge_inline_cedar_policy_text(entry, cedar_text);
             }
             // Reload the per-tenant Cedar policy set.
             let full_text = state
@@ -392,6 +389,19 @@ fn resolve_inline_specs_root(
     } else {
         tmp_dir.join(relative_root)
     })
+}
+
+fn merge_inline_cedar_policy_text(existing: &str, incoming: &str) -> String {
+    let mut policy_text = existing.trim_end().to_string();
+    let incoming = incoming.trim();
+    if incoming.is_empty() || policy_text.contains(incoming) {
+        return policy_text;
+    }
+    if !policy_text.is_empty() {
+        policy_text.push('\n');
+    }
+    policy_text.push_str(incoming);
+    policy_text
 }
 
 fn adr_candidate_paths(app_name: Option<&str>, namespaces: &[String]) -> Vec<String> {
@@ -537,7 +547,10 @@ async fn find_existing_adr_paths(
 
 #[cfg(test)]
 mod tests {
-    use super::{adr_candidate_paths, namespace_to_app_candidates, normalize_app_slug};
+    use super::{
+        adr_candidate_paths, merge_inline_cedar_policy_text, namespace_to_app_candidates,
+        normalize_app_slug,
+    };
 
     #[test]
     fn normalize_app_slug_kebab_cases_namespaces() {
@@ -567,5 +580,25 @@ mod tests {
             adr_candidate_paths(Some("llm-wiki"), &["Temper.ProjectManagement".to_string()]);
         assert!(paths.contains(&"/apps/llm-wiki/adrs/".to_string()));
         assert!(paths.contains(&"/apps/project-management/adrs/".to_string()));
+    }
+
+    #[test]
+    fn inline_cedar_policy_merge_deduplicates_repeated_bundle_text() {
+        let policy = "permit(principal, action, resource);";
+        let merged_once = merge_inline_cedar_policy_text("", policy);
+        let merged_twice = merge_inline_cedar_policy_text(&merged_once, policy);
+
+        assert_eq!(merged_twice, policy);
+    }
+
+    #[test]
+    fn inline_cedar_policy_merge_preserves_distinct_existing_policy() {
+        let existing = "permit(principal, action == Action::\"read\", resource);";
+        let incoming = "permit(principal, action == Action::\"write\", resource);";
+
+        assert_eq!(
+            merge_inline_cedar_policy_text(existing, incoming),
+            format!("{existing}\n{incoming}")
+        );
     }
 }
