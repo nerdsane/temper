@@ -2474,6 +2474,43 @@ startup_loading = "lazy"
 }
 
 #[test]
+fn test_required_wasm_config_without_artifact_is_not_registered_ready() {
+    let mut configs = BTreeMap::new();
+    configs.insert(
+        "echo".to_string(),
+        WasmModuleManifest {
+            name: "echo".to_string(),
+            target: None,
+            criticality: WasmModuleCriticality::AppRequired,
+            startup_loading: WasmStartupLoading::Lazy,
+            provenance: None,
+            import_class: None,
+        },
+    );
+    let bundle = AppBundle {
+        deployment_mode: AppDeploymentMode::Operator,
+        specs: Vec::new(),
+        csdl: None,
+        cross_invariants_toml: None,
+        cedar_policies: Vec::new(),
+        cedar_policy_sources: Vec::new(),
+        wasm_modules: BTreeMap::new(),
+        wasm_module_configs: configs,
+        agents: Vec::new(),
+        skills: Vec::new(),
+        adrs: Vec::new(),
+        system_files: Vec::new(),
+        seed_instances: Vec::new(),
+    };
+    let state = PlatformState::new(None);
+
+    assert!(
+        !tenant_has_registered_wasm_for_bundle(&state, "test-required-missing-artifact", &bundle),
+        "configured required WASM modules without bundled bytes must not be treated as ready"
+    );
+}
+
+#[test]
 fn test_load_app_bundle_rejects_legacy_reactions_file() {
     let temp_dir = std::env::temp_dir().join(format!(
         "temper-legacy-reactions-bundle-test-{}",
@@ -2564,6 +2601,49 @@ fn test_find_wasm_modules_respects_manifest_target() {
     assert_eq!(
         modules["echo"], correct_bytes,
         "should pick the wasip1 binary, not wasm32-unknown-unknown"
+    );
+
+    let _ = fs::remove_dir_all(&temp_dir);
+}
+
+#[test]
+fn test_find_wasm_modules_prefers_packaged_sibling_over_target_output() {
+    let temp_dir = std::env::temp_dir().join(format!(
+        "temper-wasm-packaged-test-{}",
+        uuid::Uuid::new_v4()
+    ));
+
+    let target_dir = temp_dir
+        .join("wasm")
+        .join("echo")
+        .join("target")
+        .join("wasm32-wasip1")
+        .join("release");
+    let module_dir = temp_dir.join("wasm").join("echo");
+    fs::create_dir_all(&target_dir).unwrap();
+
+    let stale_target_bytes = b"stale-target-output";
+    let packaged_bytes = b"packaged-sibling-artifact";
+    fs::write(target_dir.join("echo.wasm"), stale_target_bytes).unwrap();
+    fs::write(module_dir.join("echo.wasm"), packaged_bytes).unwrap();
+
+    let mut configs = BTreeMap::new();
+    configs.insert(
+        "echo".to_string(),
+        WasmModuleManifest {
+            name: "echo".to_string(),
+            target: Some("wasm32-wasip1".to_string()),
+            criticality: WasmModuleCriticality::AppRequired,
+            startup_loading: WasmStartupLoading::default(),
+            provenance: None,
+            import_class: None,
+        },
+    );
+
+    let modules = find_wasm_modules(&temp_dir, &configs);
+    assert_eq!(
+        modules["echo"], packaged_bytes,
+        "packaged sibling artifact should win over target output"
     );
 
     let _ = fs::remove_dir_all(&temp_dir);
