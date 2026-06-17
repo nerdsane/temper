@@ -268,11 +268,23 @@ fn bundle_policies_present(active_text: &str, cedar_policies: &[String]) -> bool
     })
 }
 
+fn bundle_required_wasm_artifacts_present(bundle: &AppBundle) -> bool {
+    bundle
+        .wasm_module_configs
+        .iter()
+        .all(|(module_name, config)| {
+            !config.is_required() || bundle.wasm_modules.contains_key(module_name)
+        })
+}
+
 pub(crate) fn tenant_has_registered_wasm_for_bundle(
     state: &PlatformState,
     tenant: &str,
     bundle: &AppBundle,
 ) -> bool {
+    if !bundle_required_wasm_artifacts_present(bundle) {
+        return false;
+    }
     let tenant_id = TenantId::new(tenant);
     let registry = state
         .server
@@ -290,6 +302,9 @@ pub(crate) async fn tenant_has_durable_wasm_for_bundle(
     tenant: &str,
     bundle: &AppBundle,
 ) -> bool {
+    if !bundle_required_wasm_artifacts_present(bundle) {
+        return false;
+    }
     if bundle.wasm_modules.is_empty() {
         return true;
     }
