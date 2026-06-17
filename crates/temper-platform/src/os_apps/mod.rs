@@ -10,9 +10,11 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::time::Instant;
 
+use chrono::{DateTime, NaiveDateTime, Utc};
 use serde::Serialize;
 use sha2::{Digest, Sha256};
 use temper_runtime::tenant::TenantId;
+use temper_server::state::WasmModuleSource;
 use temper_spec::automaton;
 use temper_spec::csdl::{emit_csdl_xml, merge_csdl, parse_csdl};
 
@@ -1117,10 +1119,10 @@ pub(super) async fn install_os_app_with_plan(
         state.server.enable_commons_guardrails(tenant);
     }
     let tenant_id = TenantId::new(tenant);
-    let replace_uploaded_wasm = if plan.wasm && !bundle.wasm_modules.is_empty() {
-        should_replace_uploaded_wasm_for_bundle_reconcile(state, tenant, app_name, &bundle).await
+    let upload_replacement = if plan.wasm && !bundle.wasm_modules.is_empty() {
+        uploaded_wasm_replacement_context(state, tenant, app_name, &bundle).await
     } else {
-        false
+        UploadedWasmReplacementContext::default()
     };
 
     if bundle.adrs.is_empty() {
@@ -1385,9 +1387,8 @@ pub(super) async fn install_os_app_with_plan(
     //
     // Source-aware preservation: if a (tenant, module) row in the durable store
     // has source='upload' (i.e., a hot upload from `POST /api/wasm/modules/{name}`),
-    // preserve it across same-bundle restarts. When the installed app metadata
-    // says the bundled WASM digest changed, the bundle is a newer deployment and
-    // must replace stale uploads so production executes the shipped module.
+    // preserve uploads newer than the installed app record. Replace uploads when
+    // the bundle digest changed or durable metadata predates the app record.
     let mut wasm_registered = Vec::new();
     let mut wasm_skipped = Vec::new();
     let mut wasm_failures = Vec::new();
@@ -1409,24 +1410,29 @@ pub(super) async fn install_os_app_with_plan(
             let module_config = bundle.wasm_module_configs.get(module_name);
             let hash = temper_wasm::WasmEngine::hash_module(wasm_bytes);
 
-            if let Some((existing_hash, existing_source)) = existing_sources.get(module_name)
-                && existing_source == "upload"
-                && existing_hash != &hash
+            let replace_uploaded_module = existing_sources
+                .get(module_name)
+                .map(|existing| upload_replacement.should_replace(existing))
+                .unwrap_or(false);
+
+            if let Some(existing) = existing_sources.get(module_name)
+                && existing.source == "upload"
+                && existing.sha256_hash != hash
             {
-                if replace_uploaded_wasm {
+                if replace_uploaded_module {
                     tracing::info!(
                         tenant,
                         module = %module_name,
                         bundled_hash = %hash,
-                        upload_hash = %existing_hash,
-                        "Replacing hot-uploaded WASM module: bundled app WASM digest changed"
+                        upload_hash = %existing.sha256_hash,
+                        "Replacing stale hot-uploaded WASM module during os-app reconcile"
                     );
                 } else {
                     tracing::info!(
                         tenant,
                         module = %module_name,
                         bundled_hash = %hash,
-                        upload_hash = %existing_hash,
+                        upload_hash = %existing.sha256_hash,
                         "Skipping bundled install: hot-uploaded module preserved"
                     );
                     wasm_skipped.push(module_name.clone());
@@ -1434,7 +1440,7 @@ pub(super) async fn install_os_app_with_plan(
                 }
             }
 
-            let upsert_result = if replace_uploaded_wasm {
+            let upsert_result = if replace_uploaded_module {
                 state
                     .server
                     .upsert_bundled_wasm_module_replacing_upload(
@@ -1579,24 +1585,68 @@ pub(super) async fn install_os_app_with_plan(
     })
 }
 
-async fn should_replace_uploaded_wasm_for_bundle_reconcile(
+#[derive(Debug, Clone, Default)]
+struct UploadedWasmReplacementContext {
+    bundle_wasm_digest_changed: bool,
+    app_recorded_at: Option<DateTime<Utc>>,
+}
+
+impl UploadedWasmReplacementContext {
+    fn should_replace(&self, existing: &WasmModuleSource) -> bool {
+        if existing.source != "upload" {
+            return false;
+        }
+        if self.bundle_wasm_digest_changed {
+            return true;
+        }
+        let Some(app_recorded_at) = self.app_recorded_at else {
+            return false;
+        };
+        let Some(updated_at) = existing
+            .updated_at
+            .as_deref()
+            .and_then(parse_persisted_timestamp)
+        else {
+            return false;
+        };
+        updated_at < app_recorded_at
+    }
+}
+
+fn parse_persisted_timestamp(value: &str) -> Option<DateTime<Utc>> {
+    DateTime::parse_from_rfc3339(value)
+        .map(|dt| dt.with_timezone(&Utc))
+        .or_else(|_| {
+            NaiveDateTime::parse_from_str(value, "%Y-%m-%d %H:%M:%S").map(|dt| dt.and_utc())
+        })
+        .ok()
+}
+
+async fn uploaded_wasm_replacement_context(
     state: &PlatformState,
     tenant: &str,
     app_name: &str,
     bundle: &AppBundle,
-) -> bool {
+) -> UploadedWasmReplacementContext {
     let Some(ps) = state
         .server
         .storage_stack
         .as_ref()
         .and_then(|stack| stack.platform.clone())
     else {
-        return false;
+        return UploadedWasmReplacementContext::default();
     };
     let digest = reconcile::digest_app_bundle(app_name, bundle);
     match ps.get_installed_app(tenant, app_name).await {
-        Ok(Some(record)) => record.wasm_digest != digest.wasm_digest,
-        Ok(None) => false,
+        Ok(Some(record)) => UploadedWasmReplacementContext {
+            bundle_wasm_digest_changed: record.wasm_digest != digest.wasm_digest,
+            app_recorded_at: record
+                .last_reconciled_at
+                .as_deref()
+                .or(record.installed_at.as_deref())
+                .and_then(parse_persisted_timestamp),
+        },
+        Ok(None) => UploadedWasmReplacementContext::default(),
         Err(error) => {
             tracing::warn!(
                 tenant,
@@ -1604,7 +1654,7 @@ async fn should_replace_uploaded_wasm_for_bundle_reconcile(
                 error = %error,
                 "Failed to read OS app metadata while deciding WASM hot-upload replacement"
             );
-            false
+            UploadedWasmReplacementContext::default()
         }
     }
 }

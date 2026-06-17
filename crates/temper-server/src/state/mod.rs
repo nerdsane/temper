@@ -33,6 +33,7 @@ pub use pending_decisions::{
     ActionScope, DecisionStatus, DurationScope, PendingDecision, PolicyScopeMatrix, PrincipalScope,
     ResourceScope,
 };
+pub use persistence::WasmModuleSource;
 pub use policy_suggestions::PolicySuggestionEngine;
 pub use published_artifacts::PublishFileArtifactRequest;
 pub use trajectory::{TrajectoryEntry, TrajectorySource};
