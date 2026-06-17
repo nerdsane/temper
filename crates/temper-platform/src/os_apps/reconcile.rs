@@ -285,6 +285,34 @@ pub(crate) fn tenant_has_registered_wasm_for_bundle(
     })
 }
 
+pub(crate) async fn tenant_has_durable_wasm_for_bundle(
+    state: &PlatformState,
+    tenant: &str,
+    bundle: &AppBundle,
+) -> bool {
+    if bundle.wasm_modules.is_empty() {
+        return true;
+    }
+    let sources = match state.server.load_wasm_module_sources(tenant).await {
+        Ok(sources) => sources,
+        Err(error) => {
+            tracing::warn!(
+                tenant,
+                error = %error,
+                "Failed to load durable WASM module metadata during os-app reconcile"
+            );
+            return false;
+        }
+    };
+    bundle.wasm_modules.iter().all(|(module_name, wasm_bytes)| {
+        let hash = temper_wasm::WasmEngine::hash_module(wasm_bytes);
+        sources
+            .get(module_name)
+            .map(|source| source.sha256_hash.as_str())
+            == Some(hash.as_str())
+    })
+}
+
 async fn record_app_install_metadata(
     state: &PlatformState,
     tenant: &str,
@@ -366,6 +394,9 @@ pub async fn reconcile_os_app(
             Ok(Some(record)) => {
                 let mut specs_ready = tenant_has_ready_app_specs_for_bundle(state, tenant, &bundle);
                 let wasm_registered = tenant_has_registered_wasm_for_bundle(state, tenant, &bundle);
+                let durable_wasm_ready =
+                    tenant_has_durable_wasm_for_bundle(state, tenant, &bundle).await;
+                let wasm_ready = wasm_registered && durable_wasm_ready;
                 let policies_active = tenant_has_active_policies_for_bundle(state, tenant, &bundle);
 
                 if record.bundle_digest == digest.bundle_digest && !specs_ready {
@@ -381,7 +412,7 @@ pub async fn reconcile_os_app(
 
                 if record.bundle_digest == digest.bundle_digest
                     && specs_ready
-                    && wasm_registered
+                    && wasm_ready
                     && policies_active
                 {
                     tracing::info!(
@@ -410,7 +441,7 @@ pub async fn reconcile_os_app(
                     &record,
                     &digest,
                     specs_ready,
-                    wasm_registered,
+                    wasm_ready,
                     policies_active,
                 );
 

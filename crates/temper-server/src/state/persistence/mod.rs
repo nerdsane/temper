@@ -23,6 +23,17 @@ mod spec_metadata;
 
 const BUNDLED_REPLACE_UPLOAD_SOURCE: &str = "bundled-replace-upload";
 
+/// Durable provenance for a persisted WASM module row.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WasmModuleSource {
+    /// SHA-256 hash of the persisted WASM bytes.
+    pub sha256_hash: String,
+    /// Provenance: `"bundled"` or `"upload"`.
+    pub source: String,
+    /// Backend timestamp for the last module byte/hash update.
+    pub updated_at: Option<String>,
+}
+
 impl ServerState {
     fn redis_ephemeral_error(operation: &str) -> String {
         format!(
@@ -154,29 +165,40 @@ impl ServerState {
         .await
     }
 
-    /// Return `(module_name -> (sha256_hash, source))` for every WASM module
-    /// currently persisted for `tenant`. Used by the os-apps install pipeline
-    /// to decide whether hot-uploaded modules should be preserved or replaced.
+    /// Return durable source metadata for every WASM module currently persisted
+    /// for `tenant`. Used by the os-apps install pipeline to decide whether
+    /// hot-uploaded modules should be preserved or replaced.
     pub async fn load_wasm_module_sources(
         &self,
         tenant: &str,
-    ) -> Result<std::collections::BTreeMap<String, (String, String)>, String> {
+    ) -> Result<std::collections::BTreeMap<String, WasmModuleSource>, String> {
         let Some(backend) = self.tenant_metadata_backend(tenant).await else {
             return Ok(std::collections::BTreeMap::new());
         };
 
         match backend {
             TenantMetadataBackend::Postgres(pool) => {
-                let rows = sqlx::query_as::<_, (String, String, String)>(
-                    "SELECT module_name, sha256_hash, source FROM wasm_modules WHERE tenant = $1",
-                )
-                .bind(tenant)
-                .fetch_all(&pool)
-                .await
-                .map_err(|e| format!("failed to load WASM module sources for {tenant}: {e}"))?;
+                let rows =
+                    sqlx::query_as::<_, (String, String, String, chrono::DateTime<chrono::Utc>)>(
+                        "SELECT module_name, sha256_hash, source, updated_at \
+                         FROM wasm_modules WHERE tenant = $1",
+                    )
+                    .bind(tenant)
+                    .fetch_all(&pool)
+                    .await
+                    .map_err(|e| format!("failed to load WASM module sources for {tenant}: {e}"))?;
                 Ok(rows
                     .into_iter()
-                    .map(|(name, hash, source)| (name, (hash, source)))
+                    .map(|(name, hash, source, updated_at)| {
+                        (
+                            name,
+                            WasmModuleSource {
+                                sha256_hash: hash,
+                                source,
+                                updated_at: Some(updated_at.to_rfc3339()),
+                            },
+                        )
+                    })
                     .collect())
             }
             TenantMetadataBackend::Turso(turso) => {
@@ -186,10 +208,19 @@ impl ServerState {
                     .map_err(|e| format!("failed to load WASM module sources for {tenant}: {e}"))?;
                 Ok(rows
                     .into_iter()
-                    .map(|r| (r.module_name, (r.sha256_hash, r.source)))
+                    .map(|r| {
+                        (
+                            r.module_name,
+                            WasmModuleSource {
+                                sha256_hash: r.sha256_hash,
+                                source: r.source,
+                                updated_at: Some(r.updated_at),
+                            },
+                        )
+                    })
                     .collect())
             }
-            TenantMetadataBackend::Redis => Ok(std::collections::BTreeMap::new()),
+            TenantMetadataBackend::Redis => Err(Self::redis_ephemeral_error("WASM module sources")),
         }
     }
 
