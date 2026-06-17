@@ -152,6 +152,12 @@ pub enum WasmModuleCriticality {
     Optional,
 }
 
+impl WasmModuleCriticality {
+    pub fn is_required(self) -> bool {
+        self != Self::Optional
+    }
+}
+
 /// Manifest-declared WASM module contract.
 #[derive(Debug, Clone, serde::Deserialize, serde::Serialize)]
 pub struct WasmModuleManifest {
@@ -166,6 +172,12 @@ pub struct WasmModuleManifest {
     pub provenance: Option<String>,
     #[serde(default)]
     pub import_class: Option<String>,
+}
+
+impl WasmModuleManifest {
+    pub fn is_required(&self) -> bool {
+        self.criticality.is_required()
+    }
 }
 
 /// Metadata for an app in the catalog.
