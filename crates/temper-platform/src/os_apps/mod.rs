@@ -1409,12 +1409,12 @@ pub(super) async fn install_os_app_with_plan(
             let module_started = Instant::now();
             let module_config = bundle.wasm_module_configs.get(module_name);
             let hash = temper_wasm::WasmEngine::hash_module(wasm_bytes);
-
-            let replace_uploaded_module = existing_sources
-                .get(module_name)
-                .map(|existing| upload_replacement.should_replace(existing))
-                .unwrap_or(false);
-
+            let required = module_config.is_some_and(WasmModuleManifest::is_required);
+            let replace_uploaded_module =
+                existing_sources.get(module_name).is_some_and(|existing| {
+                    upload_replacement.should_replace(existing)
+                        || (required && existing.source == "upload" && existing.sha256_hash != hash)
+                });
             if let Some(existing) = existing_sources.get(module_name)
                 && existing.source == "upload"
                 && existing.sha256_hash != hash

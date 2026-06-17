@@ -2052,7 +2052,7 @@ startup_loading = "lazy"
 }
 
 #[tokio::test]
-async fn test_reconcile_os_app_preserves_hot_upload_when_bundled_wasm_digest_unchanged() {
+async fn test_reconcile_os_app_preserves_optional_hot_upload_when_bundled_wasm_digest_unchanged() {
     use temper_store_turso::TursoEventStore;
 
     let app_root = std::env::temp_dir().join(format!(
@@ -2075,7 +2075,7 @@ version = "0.1.0"
 
 [[wasm_modules]]
 name = "echo"
-criticality = "app-required"
+criticality = "optional"
 startup_loading = "lazy"
 "#,
     )
@@ -2291,6 +2291,160 @@ startup_loading = "lazy"
         .expect("reconcile should succeed");
     let OsAppReconcileResult::Installed { install, .. } = result else {
         panic!("durable WASM drift should run delta install");
+    };
+    assert_eq!(install.wasm_modules, vec!["echo".to_string()]);
+    assert!(install.wasm_skipped.is_empty());
+
+    {
+        let registry = state.server.wasm_module_registry.read().unwrap();
+        assert_eq!(
+            registry.get_hash(&tenant, "echo"),
+            Some(expected_bundled_hash.as_str())
+        );
+    }
+
+    let module_sources = state
+        .server
+        .load_wasm_module_sources(tenant_name)
+        .await
+        .expect("load wasm module sources");
+    let echo_source = module_sources.get("echo").expect("echo module source");
+    assert_eq!(echo_source.sha256_hash.as_str(), expected_bundled_hash);
+    assert_eq!(echo_source.source.as_str(), "bundled");
+
+    let _ = fs::remove_dir_all(&app_root);
+    let _ = fs::remove_dir_all(&state.server.data_dir);
+    let _ = std::fs::remove_file(&db_path);
+    let _ = std::fs::remove_file(format!("{db_path}-wal"));
+    let _ = std::fs::remove_file(format!("{db_path}-shm"));
+}
+
+#[tokio::test]
+async fn test_reconcile_os_app_replaces_newer_upload_for_required_module() {
+    use temper_store_turso::TursoEventStore;
+
+    let app_root = std::env::temp_dir().join(format!(
+        "temper-os-apps-wasm-required-upload-{}",
+        uuid::Uuid::new_v4()
+    ));
+    let app_dir = app_root.join("wasm-required-upload-app");
+    let module_dir = app_dir
+        .join("wasm")
+        .join("echo")
+        .join("target")
+        .join("wasm32-unknown-unknown")
+        .join("release");
+    fs::create_dir_all(&module_dir).unwrap();
+    fs::write(
+        app_dir.join("app.toml"),
+        r#"name = "wasm-required-upload-app"
+description = "Temporary required WASM upload test app"
+version = "0.1.0"
+
+[[wasm_modules]]
+name = "echo"
+criticality = "app-required"
+startup_loading = "lazy"
+"#,
+    )
+    .unwrap();
+    fs::write(
+        app_dir.join("APP.md"),
+        "# Required WASM Upload App\n\nTemporary required WASM upload test app.\n",
+    )
+    .unwrap();
+
+    let echo_wasm = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../temper-wasm/tests/fixtures/echo_integration.wasm");
+    fs::copy(&echo_wasm, module_dir.join("echo.wasm")).unwrap();
+    add_os_apps_dir(app_root.clone());
+
+    let db_path = format!(
+        "/tmp/temper-wasm-required-upload-{}.db",
+        uuid::Uuid::new_v4()
+    );
+    let db_url = format!("file:{db_path}");
+    let turso = TursoEventStore::new(&db_url, None).await.unwrap();
+    let mut state = PlatformState::new(None);
+    state
+        .server
+        .set_storage_stack(temper_server::StorageStack::from_turso(turso));
+    state.server.data_dir = std::path::PathBuf::from(format!(
+        "/tmp/temper-wasm-required-upload-{}-data",
+        uuid::Uuid::new_v4()
+    ));
+    std::fs::create_dir_all(&state.server.data_dir).unwrap();
+    let tenant_name = "test-wasm-required-upload";
+    let tenant = TenantId::new(tenant_name);
+
+    add_os_apps_dir(app_root.clone());
+    install_os_app(&state, tenant_name, "wasm-required-upload-app")
+        .await
+        .expect("initial app install should succeed");
+
+    let expected_bundled_bytes = fs::read(module_dir.join("echo.wasm")).unwrap();
+    let expected_bundled_hash = temper_wasm::WasmEngine::hash_module(&expected_bundled_bytes);
+    let current =
+        os_app_bundle_digest("wasm-required-upload-app").expect("required upload app digest");
+    let ps = state
+        .server
+        .storage_stack
+        .as_ref()
+        .and_then(|stack| stack.platform.clone())
+        .expect("platform store");
+    ps.record_installed_app_metadata(&InstalledAppRecord {
+        tenant: tenant_name.to_string(),
+        app_name: current.app_name.clone(),
+        source_kind: "local".to_string(),
+        app_ref: String::new(),
+        version_hash: String::new(),
+        pinned_version_hash: String::new(),
+        current_version_hash: String::new(),
+        follow_policy: "pinned".to_string(),
+        closure_id: String::new(),
+        registry_url: String::new(),
+        registry_tenant: String::new(),
+        app_version: current.app_version.clone(),
+        bundle_digest: current.bundle_digest.clone(),
+        spec_digest: current.spec_digest.clone(),
+        policy_digest: current.policy_digest.clone(),
+        wasm_digest: current.wasm_digest.clone(),
+        content_digest: current.content_digest.clone(),
+        seed_digest: current.seed_digest.clone(),
+        installed_at: None,
+        last_reconciled_at: None,
+        status: "installed".to_string(),
+    })
+    .await
+    .expect("installed app metadata should match bundle");
+
+    tokio::time::sleep(Duration::from_secs(1)).await;
+    let uploaded_bytes = b"newer stale upload shadowing required module".to_vec();
+    let uploaded_hash = temper_wasm::WasmEngine::hash_module(&uploaded_bytes);
+    state
+        .server
+        .upsert_wasm_module(
+            tenant_name,
+            "echo",
+            &uploaded_bytes,
+            &uploaded_hash,
+            "upload",
+        )
+        .await
+        .expect("newer stale upload should persist");
+    state
+        .server
+        .wasm_module_registry
+        .write()
+        .unwrap()
+        .register(&tenant, "echo", &uploaded_hash);
+
+    add_os_apps_dir(app_root.clone());
+    let result = reconcile_os_app(&state, tenant_name, "wasm-required-upload-app")
+        .await
+        .expect("reconcile should succeed");
+    let OsAppReconcileResult::Installed { install, .. } = result else {
+        panic!("required WASM upload drift should run delta install");
     };
     assert_eq!(install.wasm_modules, vec!["echo".to_string()]);
     assert!(install.wasm_skipped.is_empty());
