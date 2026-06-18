@@ -21,11 +21,12 @@ use crate::request_context::AgentContext;
 use crate::state::account_verification::CommonsAccountVerificationError;
 use crate::state::app_uniqueness::CommonsAppUniquenessError;
 use crate::state::storage_caps::{CommonsStorageCapError, CommonsStorageWrite};
-use crate::storage::{BackendLabel, QueryProjectionUpsert};
+use crate::storage::BackendLabel;
 
 use super::DispatchError;
 
 mod helpers;
+mod projection;
 use helpers::*;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -394,59 +395,12 @@ impl crate::state::ServerState {
         let append_ms = append_started_at.map(|started| started.elapsed().as_millis() as u64);
 
         let projection_collect_started_at = timing_enabled.then(std::time::Instant::now);
-        let query_plane = self.query_plane_store();
-        let mut projection_upserts = Vec::new();
-        for stream in streams.values() {
-            if stream.events.is_empty() {
-                continue;
-            }
-            self.cache_entity_status(
-                format!("{tenant}:{}:{}", stream.entity_type, stream.entity_id),
-                stream.state.status.clone(),
-            );
-            {
-                let index_key = format!("{tenant}:{}", stream.entity_type);
-                let mut index = self.entity_index.write().map_err(|_| {
-                    DispatchError::Internal(
-                        "entity index lock poisoned after composite batch".to_string(),
-                    )
-                })?;
-                index
-                    .entry(index_key)
-                    .or_default()
-                    .insert(stream.entity_id.clone());
-            }
-            self.clear_commons_storage_projection_cache_for_entity(&stream.entity_type);
-            if query_plane.is_some() {
-                let fields = stream.state.fields.clone();
-                let indexed_fields =
-                    self.query_projection_fields(tenant, &stream.entity_type, &fields);
-                projection_upserts.push(QueryProjectionUpsert {
-                    entity_type: stream.entity_type.clone(),
-                    entity_id: stream.entity_id.clone(),
-                    status: stream.state.status.clone(),
-                    fields,
-                    state: self.query_projection_state(&stream.state),
-                    indexed_fields,
-                    sequence_nr: stream.state.sequence_nr,
-                    known_new: !stream.target_existed,
-                });
-            }
-        }
+        self.update_composite_query_projections(tenant, &streams)
+            .await?;
         let projection_collect_ms =
             projection_collect_started_at.map(|started| started.elapsed().as_millis() as u64);
 
         let projection_write_started_at = timing_enabled.then(std::time::Instant::now);
-        if let Some(query_plane) = query_plane {
-            query_plane
-                .upsert_projections(tenant.as_str(), &projection_upserts)
-                .await
-                .map_err(|e| {
-                    DispatchError::Internal(format!(
-                        "query projection write failed after composite batch: {e}"
-                    ))
-                })?;
-        }
         let projection_write_ms =
             projection_write_started_at.map(|started| started.elapsed().as_millis() as u64);
 

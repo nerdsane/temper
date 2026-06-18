@@ -17,6 +17,7 @@ mod persistence;
 pub mod policy_suggestions;
 mod projection_backfill;
 mod published_artifacts;
+mod query_projection_queue;
 pub(crate) mod rate_limit;
 mod runtime_metrics;
 pub(crate) mod storage_caps;
@@ -36,6 +37,7 @@ pub use pending_decisions::{
 pub use persistence::WasmModuleSource;
 pub use policy_suggestions::PolicySuggestionEngine;
 pub use published_artifacts::PublishFileArtifactRequest;
+pub(crate) use query_projection_queue::{ProjectionEnqueueOutcome, QueryProjectionWriteQueue};
 pub use trajectory::{TrajectoryEntry, TrajectorySource};
 pub use wasm_invocation_log::WasmInvocationEntry;
 
@@ -58,7 +60,7 @@ use temper_spec::csdl::CsdlDocument;
 use temper_store_postgres::PostgresEventStore;
 
 use crate::adapters::AdapterRegistry;
-use crate::entity_actor::EntityMsg;
+use crate::entity_actor::{EntityMsg, SnapshotWriteQueue};
 use crate::events::EntityStateChange;
 use crate::idempotency::IdempotencyCache;
 use crate::registry::SpecRegistry;
@@ -369,6 +371,10 @@ pub struct ServerState {
     pub last_accessed: Arc<RwLock<BTreeMap<String, chrono::DateTime<chrono::Utc>>>>,
     /// First-class storage capabilities selected for this runtime.
     pub storage_stack: Option<Arc<StorageStack>>,
+    /// Bounded background writer for derived query-plane projection rows.
+    pub(crate) query_projection_queue: Arc<Mutex<Option<Arc<QueryProjectionWriteQueue>>>>,
+    /// Bounded background writer for durable actor recovery snapshots.
+    pub(crate) snapshot_write_queue: Arc<Mutex<Option<Arc<SnapshotWriteQueue>>>>,
     /// Runtime data directory for persisted local metadata (e.g. specs registry).
     pub data_dir: std::path::PathBuf,
     /// Agent hints learned from trajectory analysis, keyed by action name.
@@ -549,7 +555,18 @@ impl ServerState {
 
     /// Attach the composed runtime storage stack.
     pub fn set_storage_stack(&mut self, stack: StorageStack) {
-        self.storage_stack = Some(Arc::new(stack));
+        let stack = Arc::new(stack);
+        let snapshot_queue = SnapshotWriteQueue::start(stack.events.clone());
+        if let Ok(mut slot) = self.snapshot_write_queue.lock() {
+            *slot = Some(snapshot_queue);
+        }
+        if let Some(query_plane) = stack.query_plane.clone() {
+            let queue = QueryProjectionWriteQueue::start(query_plane);
+            if let Ok(mut slot) = self.query_projection_queue.lock() {
+                *slot = Some(queue);
+            }
+        }
+        self.storage_stack = Some(stack);
     }
 
     /// Return the durable query-plane capability for projection reads/writes.
@@ -625,6 +642,8 @@ impl ServerState {
             actor_registry: Arc::new(RwLock::new(BTreeMap::new())),
             last_accessed: Arc::new(RwLock::new(BTreeMap::new())),
             storage_stack: None,
+            query_projection_queue: Arc::new(Mutex::new(None)),
+            snapshot_write_queue: Arc::new(Mutex::new(None)),
             data_dir: std::path::PathBuf::new(),
             agent_hints: Arc::new(RwLock::new(BTreeMap::new())),
             authz: Arc::new(AuthzEngine::permissive()),
@@ -868,6 +887,8 @@ impl ServerState {
             actor_registry: Arc::new(RwLock::new(BTreeMap::new())),
             last_accessed: Arc::new(RwLock::new(BTreeMap::new())),
             storage_stack: None,
+            query_projection_queue: Arc::new(Mutex::new(None)),
+            snapshot_write_queue: Arc::new(Mutex::new(None)),
             data_dir: std::path::PathBuf::new(),
             agent_hints: Arc::new(RwLock::new(BTreeMap::new())),
             authz: Arc::new(AuthzEngine::permissive()),

@@ -14,6 +14,10 @@ use opentelemetry::{KeyValue, global};
 use crate::state::ServerState;
 
 pub(crate) mod blob_transport;
+mod handler_deadlines;
+mod snapshot_writes;
+pub use handler_deadlines::*;
+pub use snapshot_writes::*;
 
 struct RuntimeMetrics {
     process_resident_memory_bytes: Gauge<u64>,
@@ -61,6 +65,16 @@ struct RuntimeMetrics {
     actor_registry_lock_wait_ms: Histogram<f64>,
     actor_cold_start_duration_ms: Histogram<f64>,
     event_store_append_wait_ms: Histogram<f64>,
+    snapshot_write_started_total: Counter<u64>,
+    snapshot_write_error_total: Counter<u64>,
+    snapshot_write_coalesced_total: Counter<u64>,
+    snapshot_write_stale_skipped_total: Counter<u64>,
+    snapshot_write_dropped_total: Counter<u64>,
+    snapshot_write_queue_depth: Gauge<u64>,
+    snapshot_write_queue_wait_ms: Histogram<f64>,
+    snapshot_write_duration_ms: Histogram<f64>,
+    snapshot_write_end_to_end_duration_ms: Histogram<f64>,
+    snapshot_write_applied_sequence: Gauge<u64>,
     // cedar_eval_duration is emitted from temper-authz (existing
     // temper_cedar_evaluation_duration histogram) — no duplicate here.
     // --- Handler-deadline primitive (W3 / temper#147 — reserved) ---------
@@ -294,6 +308,55 @@ fn metrics() -> &'static RuntimeMetrics {
                      writer-lock or fsync serialization. High p95 points at storage as a \
                      cold-start bottleneck. See temper#146.",
                 )
+                .build(),
+            snapshot_write_started_total: meter
+                .u64_counter("temper_snapshot_write_started_total")
+                .with_description("Queued snapshot writes started by the background worker.")
+                .build(),
+            snapshot_write_error_total: meter
+                .u64_counter("temper_snapshot_write_error_total")
+                .with_description("Queued snapshot writes that failed in the event store.")
+                .build(),
+            snapshot_write_coalesced_total: meter
+                .u64_counter("temper_snapshot_write_coalesced_total")
+                .with_description(
+                    "Snapshot enqueue attempts coalesced behind a newer pending write for the same stream.",
+                )
+                .build(),
+            snapshot_write_stale_skipped_total: meter
+                .u64_counter("temper_snapshot_write_stale_skipped_total")
+                .with_description(
+                    "Snapshot enqueue attempts skipped before storage because a same-stream newer sequence was already pending.",
+                )
+                .build(),
+            snapshot_write_dropped_total: meter
+                .u64_counter("temper_snapshot_write_dropped_total")
+                .with_description(
+                    "Snapshot enqueue attempts rejected because the bounded queue was full.",
+                )
+                .build(),
+            snapshot_write_queue_depth: meter
+                .u64_gauge("temper_snapshot_write_queue_depth")
+                .with_description("Pending queued snapshot writes after enqueue or drain.")
+                .build(),
+            snapshot_write_queue_wait_ms: meter
+                .f64_histogram("temper_snapshot_write_queue_wait_ms")
+                .with_unit("ms")
+                .with_description("Time a snapshot write spent queued before storage began.")
+                .build(),
+            snapshot_write_duration_ms: meter
+                .f64_histogram("temper_snapshot_write_duration_ms")
+                .with_unit("ms")
+                .with_description("Storage duration for a queued snapshot write.")
+                .build(),
+            snapshot_write_end_to_end_duration_ms: meter
+                .f64_histogram("temper_snapshot_write_end_to_end_duration_ms")
+                .with_unit("ms")
+                .with_description("End-to-end snapshot lag from enqueue to write completion.")
+                .build(),
+            snapshot_write_applied_sequence: meter
+                .u64_gauge("temper_snapshot_write_applied_sequence")
+                .with_description("Latest snapshot sequence successfully written by the queue.")
                 .build(),
             handler_deadline_remaining_ms: meter
                 .u64_gauge("temper_handler_deadline_remaining_ms")
@@ -854,58 +917,6 @@ pub fn record_event_store_append_wait(backend: &str, operation: &str, elapsed: D
 
 // Cedar evaluation duration is emitted from the temper-authz crate via the
 // existing `record_cedar_evaluation` helper. No duplicate metric here.
-
-// ============================================================================
-// W3 reserved (temper#147): handler-deadline primitive helpers.
-// ============================================================================
-//
-// These functions are the call-site surface the handler-deadline
-// implementation will use. They are public now so dashboards, monitors,
-// and tests can reference the metric names; the primitive wires them on
-// when epoch-interruption lands.
-
-/// Record the deadline headroom (budget remaining) at WASM dispatch start.
-pub fn record_handler_deadline_remaining(entity_type: &str, action: &str, remaining: Duration) {
-    metrics().handler_deadline_remaining_ms.record(
-        (remaining.as_secs_f64() * 1000.0).max(0.0) as u64,
-        &[
-            KeyValue::new("entity_type", entity_type.to_string()),
-            KeyValue::new("action", action.to_string()),
-        ],
-    );
-}
-
-/// Record a handler killed for exceeding its deadline.
-///
-/// `dying_span` identifies which host function was running when the guest
-/// was terminated (e.g. `wasm.web_search`, `wasm.provider_call`). It is
-/// mandatory: without it the metric cannot be used to identify hang
-/// sources.
-pub fn record_handler_deadline_exceeded(entity_type: &str, action: &str, dying_span: &'static str) {
-    metrics().handler_deadline_exceeded_total.add(
-        1,
-        &[
-            KeyValue::new("entity_type", entity_type.to_string()),
-            KeyValue::new("action", action.to_string()),
-            KeyValue::new("dying_span", dying_span),
-        ],
-    );
-}
-
-/// Record the observed interval between Wasmtime epoch ticks.
-pub fn record_wasm_epoch_tick_interval(elapsed: Duration) {
-    metrics()
-        .wasm_epoch_tick_interval_ms
-        .record(elapsed.as_secs_f64() * 1000.0, &[]);
-}
-
-/// Record the time from deadline breach to guest exit completion.
-pub fn record_handler_kill_latency(entity_type: &str, elapsed: Duration) {
-    metrics().handler_kill_latency_ms.record(
-        elapsed.as_secs_f64() * 1000.0,
-        &[KeyValue::new("entity_type", entity_type.to_string())],
-    );
-}
 
 // ============================================================================
 // Katagami.

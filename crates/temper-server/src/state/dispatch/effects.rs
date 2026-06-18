@@ -13,6 +13,7 @@ use tracing::Instrument;
 use crate::entity_actor::{EntityResponse, effects::ScheduledAction};
 use crate::events::EntityStateChange;
 use crate::request_context::AgentContext;
+use crate::state::ProjectionEnqueueOutcome;
 use crate::state::trajectory::{TrajectoryEntry, TrajectorySource};
 use temper_runtime::scheduler::sim_now;
 use temper_runtime::tenant::TenantId;
@@ -31,14 +32,11 @@ pub(crate) struct PostDispatchContext<'a> {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum QueryProjectionUpdateMode {
-    /// The dispatch response is returned only after the query-plane
-    /// projection row reflects the dispatch (ADR-0142). An acknowledged
-    /// action is immediately readable: OData point-reads serve from the
-    /// projection, and callers — including WASM integrations that
-    /// read-after-write (e.g. a PR number assigned by one dispatch and
-    /// rendered by the next read) — must see their own writes. The
-    /// store's `sequence_nr <=` guard keeps concurrent writers safe.
-    Inline,
+    /// The dispatch response is returned after the journal append and after a
+    /// bounded, coalescing projection update is accepted. The projection row
+    /// may lag the journal, but stale pending writes are skipped before DB
+    /// access and lag is observable (ADR-0148).
+    Queued,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -47,7 +45,7 @@ enum DispatchTrajectoryPersistenceMode {
 }
 
 fn query_projection_update_mode() -> QueryProjectionUpdateMode {
-    QueryProjectionUpdateMode::Inline
+    QueryProjectionUpdateMode::Queued
 }
 
 fn dispatch_trajectory_persistence_mode() -> DispatchTrajectoryPersistenceMode {
@@ -70,7 +68,7 @@ impl crate::state::ServerState {
     ) {
         debug_assert_eq!(
             query_projection_update_mode(),
-            QueryProjectionUpdateMode::Inline
+            QueryProjectionUpdateMode::Queued
         );
         let Some(query_plane) = self.query_plane_store() else {
             return;
@@ -90,15 +88,66 @@ impl crate::state::ServerState {
             "upsert"
         }
         .to_string();
-        let source = "inline_dispatch".to_string();
+        let source = "queued_dispatch".to_string();
         let enqueued_at = Instant::now(); // determinism-ok: production-only projection queue metric
-
-        crate::query_projection_metrics::record_update_enqueued(
-            &tenant,
-            &entity_type,
-            &operation,
-            &source,
-        );
+        let queue = self
+            .query_projection_queue
+            .lock()
+            .ok()
+            .and_then(|slot| slot.clone());
+        if let Some(queue) = queue {
+            let outcome = if status == "Deleted" {
+                queue.enqueue_remove(
+                    tenant.clone(),
+                    entity_type.clone(),
+                    entity_id.clone(),
+                    sequence_nr,
+                    "queued_dispatch",
+                )
+            } else {
+                queue.enqueue_upsert(
+                    tenant.clone(),
+                    entity_type.clone(),
+                    entity_id.clone(),
+                    status.clone(),
+                    fields,
+                    projected_state,
+                    sequence_nr,
+                    "queued_dispatch",
+                )
+            };
+            match outcome {
+                ProjectionEnqueueOutcome::Enqueued | ProjectionEnqueueOutcome::Coalesced => {
+                    crate::query_projection_metrics::record_update_enqueued(
+                        &tenant,
+                        &entity_type,
+                        &operation,
+                        &source,
+                    );
+                }
+                ProjectionEnqueueOutcome::StaleSkipped => {
+                    tracing::debug!(
+                        tenant = %tenant,
+                        entity_type = %entity_type,
+                        entity_id = %entity_id,
+                        sequence_nr,
+                        operation = %operation,
+                        "skipped stale queued query projection update"
+                    );
+                }
+                ProjectionEnqueueOutcome::Full => {
+                    tracing::error!(
+                        tenant = %tenant,
+                        entity_type = %entity_type,
+                        entity_id = %entity_id,
+                        sequence_nr,
+                        operation = %operation,
+                        "bounded query projection queue full; acknowledged dispatch will rely on repair/backfill"
+                    );
+                }
+            }
+            return;
+        }
 
         let span = tracing::info_span!(
             "dispatch.phase.query_projection",
@@ -117,17 +166,23 @@ impl crate::state::ServerState {
         Box::pin(
             async move {
                 let started_at = Instant::now(); // determinism-ok: production-only projection duration metric
+                crate::query_projection_metrics::record_update_enqueued(
+                    &tenant,
+                    &entity_type,
+                    &operation,
+                    "inline_dispatch_fallback",
+                );
                 crate::query_projection_metrics::record_update_started(
                     &tenant,
                     &entity_type,
                     &operation,
-                    &source,
+                    "inline_dispatch_fallback",
                 );
                 crate::query_projection_metrics::record_update_queue_wait(
                     &tenant,
                     &entity_type,
                     &operation,
-                    &source,
+                    "inline_dispatch_fallback",
                     started_at.duration_since(enqueued_at),
                 );
                 let result = if status == "Deleted" {
@@ -152,7 +207,7 @@ impl crate::state::ServerState {
                     &tenant,
                     &entity_type,
                     &operation,
-                    &source,
+                    "inline_dispatch_fallback",
                     result_label,
                     started_at.elapsed(),
                 );
@@ -160,7 +215,7 @@ impl crate::state::ServerState {
                     &tenant,
                     &entity_type,
                     &operation,
-                    &source,
+                    "inline_dispatch_fallback",
                     result_label,
                     enqueued_at.elapsed(),
                 );
@@ -170,7 +225,7 @@ impl crate::state::ServerState {
                         &tenant,
                         &entity_type,
                         &operation,
-                        &source,
+                        "inline_dispatch_fallback",
                     );
                     // The action is committed and non-idempotent, so the
                     // dispatch is still acknowledged — but the projection now
@@ -191,7 +246,7 @@ impl crate::state::ServerState {
                         &tenant,
                         &entity_type,
                         &operation,
-                        &source,
+                        "inline_dispatch_fallback",
                         sequence_nr,
                     );
                 }
@@ -718,14 +773,9 @@ impl crate::state::ServerState {
         // cancellation ensures stale timers become no-ops.
         self.arm_state_timeouts_if_needed(ctx, &response);
 
-        // 8. Update the durable query plane before acknowledging the
-        // dispatch (ADR-0142). The response is the caller's signal that the
-        // action happened; OData point-reads serve from the projection, so
-        // returning before the row lands lets an acknowledged write be read
-        // back stale (a PR number assigned by one dispatch and rendered as 0
-        // by the very next read — a ~40% race in the workflow round-trip).
-        // Cost is one sequence-guarded row upsert on the same store that
-        // already persisted the event; lag metrics remain in place.
+        // 8. Enqueue durable query-plane maintenance (ADR-0148). The journal
+        // append is already durable; projection writes are derived rows and
+        // are coalesced by entity/sequence before DB access.
         self.apply_query_projection_update(ctx, &response).await;
 
         response
@@ -737,13 +787,12 @@ mod tests {
     use super::*;
 
     #[test]
-    fn query_projection_updates_land_before_the_dispatch_response_is_returned() {
-        // ADR-0142: an acknowledged dispatch must be readable. The previous
-        // background mode let a caller read its own committed write back
-        // stale from the query plane.
+    fn query_projection_updates_are_queued_after_journal_commit() {
+        // ADR-0148: dispatch waits for the event journal, then accepts derived
+        // projection maintenance into a bounded coalescing queue.
         assert_eq!(
             query_projection_update_mode(),
-            QueryProjectionUpdateMode::Inline
+            QueryProjectionUpdateMode::Queued
         );
     }
 

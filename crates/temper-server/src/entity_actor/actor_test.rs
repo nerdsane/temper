@@ -79,6 +79,72 @@ fn event_budget_workspace_id_uses_workspace_entity_id_or_field() {
     assert_eq!(event_budget_workspace_id(&file_state), "ws-2");
 }
 
+#[cfg(feature = "sim")]
+#[tokio::test]
+async fn queued_snapshot_only_advances_replay_boundary_after_write_applies() {
+    use temper_store_sim::SimEventStore;
+
+    let store = Arc::new(SimEventStore::no_faults(43));
+    let boxed_store = crate::storage::BoxedEventStore::from_arc(store);
+    let snapshot_queue = SnapshotWriteQueue::start(boxed_store.clone());
+    let persistence_id = "default:Order:queued-snapshot-1";
+    let mut state = EntityState {
+        entity_type: "Order".to_string(),
+        entity_id: "queued-snapshot-1".to_string(),
+        status: "Draft".to_string(),
+        item_count: 0,
+        counters: BTreeMap::new(),
+        booleans: BTreeMap::new(),
+        lists: BTreeMap::new(),
+        fields: serde_json::json!({
+            "Id": "queued-snapshot-1",
+            "Status": "Draft"
+        }),
+        events: std::collections::VecDeque::new(),
+        total_event_count: 100,
+        events_since_snapshot: 100,
+        last_snapshot_sequence_nr: 0,
+        sequence_nr: 100,
+        processed_idempotency_keys: BTreeMap::new(),
+    };
+
+    EntityActor::maybe_save_snapshot(
+        &boxed_store,
+        Some(&snapshot_queue),
+        persistence_id,
+        &mut state,
+    )
+    .await
+    .expect("snapshot enqueue should succeed");
+
+    assert_eq!(snapshot_queue.pending_sequence(persistence_id), Some(100));
+    assert_eq!(state.last_snapshot_sequence_nr, 0);
+    assert_eq!(state.events_since_snapshot, 100);
+
+    for _ in 0..20 {
+        if snapshot_queue.applied_sequence(persistence_id) == Some(100) {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    assert_eq!(snapshot_queue.applied_sequence(persistence_id), Some(100));
+
+    state.sequence_nr = 101;
+    state.total_event_count = 101;
+    state.events_since_snapshot = 101;
+    EntityActor::maybe_save_snapshot(
+        &boxed_store,
+        Some(&snapshot_queue),
+        persistence_id,
+        &mut state,
+    )
+    .await
+    .expect("snapshot boundary observation should succeed");
+
+    assert_eq!(state.last_snapshot_sequence_nr, 100);
+    assert_eq!(state.events_since_snapshot, 1);
+}
+
 // =============================================
 // DST-FIRST: Test the actor through the runtime
 // =============================================
