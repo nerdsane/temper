@@ -63,6 +63,7 @@ use crate::adapters::AdapterRegistry;
 use crate::entity_actor::{EntityMsg, SnapshotWriteQueue};
 use crate::events::EntityStateChange;
 use crate::idempotency::IdempotencyCache;
+use crate::ots_trajectory_outbox::OtsTrajectoryOutbox;
 use crate::registry::SpecRegistry;
 use crate::secrets::vault::SecretsVault;
 use crate::storage::{
@@ -375,6 +376,8 @@ pub struct ServerState {
     pub(crate) query_projection_queue: Arc<Mutex<Option<Arc<QueryProjectionWriteQueue>>>>,
     /// Bounded background writer for durable actor recovery snapshots.
     pub(crate) snapshot_write_queue: Arc<Mutex<Option<Arc<SnapshotWriteQueue>>>>,
+    /// Bounded background writer for full OTS trajectory artifacts.
+    pub(crate) ots_trajectory_outbox: Arc<Mutex<Option<Arc<OtsTrajectoryOutbox>>>>,
     /// Runtime data directory for persisted local metadata (e.g. specs registry).
     pub data_dir: std::path::PathBuf,
     /// Agent hints learned from trajectory analysis, keyed by action name.
@@ -566,6 +569,12 @@ impl ServerState {
                 *slot = Some(queue);
             }
         }
+        if stack.metadata.is_some() {
+            let queue = OtsTrajectoryOutbox::start();
+            if let Ok(mut slot) = self.ots_trajectory_outbox.lock() {
+                *slot = Some(queue);
+            }
+        }
         self.storage_stack = Some(stack);
     }
 
@@ -608,6 +617,14 @@ impl ServerState {
         None
     }
 
+    /// Return the OTS trajectory artifact outbox plus backend label.
+    #[cfg_attr(not(feature = "observe"), allow(dead_code))]
+    pub(crate) fn ots_trajectory_outbox(&self) -> Option<(&'static str, Arc<OtsTrajectoryOutbox>)> {
+        let backend = self.storage_stack.as_ref()?.backend.as_str();
+        let queue = self.ots_trajectory_outbox.lock().ok()?.clone()?;
+        Some((backend, queue))
+    }
+
     /// Create ServerState from CSDL XML and optional specification sources.
     pub fn new(system: ActorSystem, csdl: CsdlDocument, csdl_xml: String) -> Self {
         install_liveness_metrics_reporter_once();
@@ -644,6 +661,7 @@ impl ServerState {
             storage_stack: None,
             query_projection_queue: Arc::new(Mutex::new(None)),
             snapshot_write_queue: Arc::new(Mutex::new(None)),
+            ots_trajectory_outbox: Arc::new(Mutex::new(None)),
             data_dir: std::path::PathBuf::new(),
             agent_hints: Arc::new(RwLock::new(BTreeMap::new())),
             authz: Arc::new(AuthzEngine::permissive()),
@@ -889,6 +907,7 @@ impl ServerState {
             storage_stack: None,
             query_projection_queue: Arc::new(Mutex::new(None)),
             snapshot_write_queue: Arc::new(Mutex::new(None)),
+            ots_trajectory_outbox: Arc::new(Mutex::new(None)),
             data_dir: std::path::PathBuf::new(),
             agent_hints: Arc::new(RwLock::new(BTreeMap::new())),
             authz: Arc::new(AuthzEngine::permissive()),

@@ -6,6 +6,7 @@ use temper_runtime::scheduler::{sim_now, sim_uuid};
 use tracing::instrument;
 
 use crate::authz::{observe_tenant_scope, require_observe_auth};
+use crate::ots_trajectory_outbox::{OtsTrajectoryEnqueueError, OtsTrajectoryWrite};
 use crate::state::{ServerState, TrajectoryEntry, TrajectorySource};
 
 /// Query parameters for the trajectory aggregation endpoint.
@@ -264,40 +265,57 @@ pub(crate) async fn handle_post_ots_trajectory(
         .and_then(|v| v.to_str().ok())
         .unwrap_or("default");
 
-    if let Some(store) = state.metadata_store_for_tenant(tenant).await {
-        store
-            .persist_ots_trajectory(&temper_store_turso::OtsTrajectoryParams {
-                trajectory_id: &trajectory_id,
-                tenant,
-                agent_id,
-                session_id,
-                outcome,
-                turn_count,
-                data: &body,
-            })
-            .await
-            .map_err(|e| {
-                (
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    format!("failed to persist OTS trajectory: {e}"),
-                )
-            })?;
-
-        tracing::info!(
-            trajectory_id = %trajectory_id,
-            agent_id = %agent_id,
-            turn_count = turn_count,
-            outcome = %outcome,
-            "ots.trajectory.persisted"
-        );
-    } else {
+    let Some(store) = state.metadata_store_for_tenant(tenant).await else {
         tracing::warn!(
             tenant = %tenant,
             "no persistent store — OTS trajectory not persisted"
         );
-    }
+        return Ok(StatusCode::CREATED);
+    };
 
-    Ok(StatusCode::CREATED)
+    let Some((backend, outbox)) = state.ots_trajectory_outbox() else {
+        tracing::error!(
+            tenant = %tenant,
+            trajectory_id = %trajectory_id,
+            "OTS trajectory outbox unavailable despite configured metadata store"
+        );
+        return Err((
+            StatusCode::SERVICE_UNAVAILABLE,
+            "OTS trajectory persistence queue unavailable; retry upload".to_string(),
+        ));
+    };
+
+    let write = OtsTrajectoryWrite {
+        trajectory_id,
+        tenant: tenant.to_string(),
+        agent_id: agent_id.to_string(),
+        session_id: session_id.to_string(),
+        outcome: outcome.to_string(),
+        turn_count,
+        data: body,
+    };
+
+    match outbox.try_enqueue_metadata_store(backend, store, write) {
+        Ok(()) => {
+            tracing::info!(
+                tenant = %tenant,
+                agent_id = %agent_id,
+                session_id = %session_id,
+                turn_count = turn_count,
+                outcome = %outcome,
+                "ots.trajectory.queued"
+            );
+            Ok(StatusCode::ACCEPTED)
+        }
+        Err(OtsTrajectoryEnqueueError::Full) => Err((
+            StatusCode::SERVICE_UNAVAILABLE,
+            "OTS trajectory persistence queue full; retry upload".to_string(),
+        )),
+        Err(OtsTrajectoryEnqueueError::Closed) => Err((
+            StatusCode::SERVICE_UNAVAILABLE,
+            "OTS trajectory persistence queue closed; retry upload".to_string(),
+        )),
+    }
 }
 
 /// GET /api/ots/trajectories — list OTS trajectories with optional filters.

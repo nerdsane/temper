@@ -24,6 +24,7 @@ pub mod identity;
 #[cfg(feature = "observe")]
 pub mod observe;
 pub mod odata;
+pub(crate) mod ots_trajectory_outbox;
 pub mod platform_store;
 pub mod profiling;
 mod query_eval;
