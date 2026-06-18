@@ -6,7 +6,7 @@
 
 use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use tokio::sync::Notify;
 use tracing::Instrument;
@@ -15,6 +15,8 @@ use crate::storage::QueryPlaneStore;
 
 const DEFAULT_PROJECTION_QUEUE_CAPACITY: usize = 20_000;
 const DEFAULT_PROJECTION_DRAIN_BATCH: usize = 256;
+const DEFAULT_PROJECTION_MAX_ATTEMPTS: u32 = 5;
+const DEFAULT_PROJECTION_RETRY_DELAY_MS: u64 = 100;
 
 #[derive(Clone, Debug, Eq, PartialEq, Ord, PartialOrd)]
 struct ProjectionKey {
@@ -62,6 +64,8 @@ pub(crate) struct QueryProjectionWriteQueue {
     notify: Arc<Notify>,
     capacity: usize,
     drain_batch: usize,
+    max_attempts: u32,
+    retry_delay: Duration,
 }
 
 impl QueryProjectionWriteQueue {
@@ -72,6 +76,8 @@ impl QueryProjectionWriteQueue {
             notify: Arc::new(Notify::new()),
             capacity: projection_queue_capacity(),
             drain_batch: projection_drain_batch(),
+            max_attempts: projection_max_attempts(),
+            retry_delay: projection_retry_delay(),
         });
         queue.spawn_worker();
         queue
@@ -85,6 +91,27 @@ impl QueryProjectionWriteQueue {
             notify: Arc::new(Notify::new()),
             capacity,
             drain_batch,
+            max_attempts: DEFAULT_PROJECTION_MAX_ATTEMPTS,
+            retry_delay: Duration::from_millis(1),
+        }
+    }
+
+    #[cfg(test)]
+    fn new_for_test_with_retry(
+        store: Arc<dyn QueryPlaneStore>,
+        capacity: usize,
+        drain_batch: usize,
+        max_attempts: u32,
+        retry_delay: Duration,
+    ) -> Self {
+        Self {
+            store,
+            pending: Arc::new(Mutex::new(PendingProjectionUpdates::default())),
+            notify: Arc::new(Notify::new()),
+            capacity,
+            drain_batch,
+            max_attempts,
+            retry_delay,
         }
     }
 
@@ -227,11 +254,19 @@ impl QueryProjectionWriteQueue {
         updates
     }
 
+    fn has_newer_pending(&self, update: &QueuedProjectionUpdate) -> bool {
+        let pending = self
+            .pending
+            .lock()
+            .expect("query projection queue mutex poisoned");
+        pending
+            .updates
+            .get(&update.key)
+            .is_some_and(|pending| pending.sequence_nr >= update.sequence_nr)
+    }
+
     async fn apply(&self, update: QueuedProjectionUpdate) {
-        let operation = match update.operation {
-            ProjectionOperation::Upsert { .. } => "upsert",
-            ProjectionOperation::Remove => "remove",
-        };
+        let operation = update.operation.label();
         let source = update.source;
         let span = tracing::info_span!(
             "dispatch.phase.query_projection.queued",
@@ -244,91 +279,128 @@ impl QueryProjectionWriteQueue {
         );
 
         async move {
-            let started_at = Instant::now();
-            crate::query_projection_metrics::record_update_started(
-                &update.key.tenant,
-                &update.key.entity_type,
-                operation,
-                source,
-            );
-            crate::query_projection_metrics::record_update_queue_wait(
-                &update.key.tenant,
-                &update.key.entity_type,
-                operation,
-                source,
-                started_at.duration_since(update.enqueued_at),
-            );
+            let mut attempt = 1;
+            loop {
+                let started_at = Instant::now();
+                crate::query_projection_metrics::record_update_started(
+                    &update.key.tenant,
+                    &update.key.entity_type,
+                    operation,
+                    source,
+                );
+                crate::query_projection_metrics::record_update_queue_wait(
+                    &update.key.tenant,
+                    &update.key.entity_type,
+                    operation,
+                    source,
+                    started_at.duration_since(update.enqueued_at),
+                );
 
-            let result = match update.operation {
-                ProjectionOperation::Upsert {
-                    status,
-                    fields,
-                    state,
-                } => {
-                    self.store
-                        .upsert_projection(
+                let result = match &update.operation {
+                    ProjectionOperation::Upsert {
+                        status,
+                        fields,
+                        state,
+                    } => {
+                        self.store
+                            .upsert_projection(
+                                &update.key.tenant,
+                                &update.key.entity_type,
+                                &update.key.entity_id,
+                                status,
+                                fields,
+                                state,
+                                update.sequence_nr,
+                            )
+                            .await
+                    }
+                    ProjectionOperation::Remove => {
+                        self.store
+                            .remove_projection(
+                                &update.key.tenant,
+                                &update.key.entity_type,
+                                &update.key.entity_id,
+                            )
+                            .await
+                    }
+                };
+                let result_label = if result.is_ok() { "ok" } else { "error" };
+                crate::query_projection_metrics::record_update_duration(
+                    &update.key.tenant,
+                    &update.key.entity_type,
+                    operation,
+                    source,
+                    result_label,
+                    started_at.elapsed(),
+                );
+                crate::query_projection_metrics::record_update_end_to_end_duration(
+                    &update.key.tenant,
+                    &update.key.entity_type,
+                    operation,
+                    source,
+                    result_label,
+                    update.enqueued_at.elapsed(),
+                );
+
+                match result {
+                    Ok(()) => {
+                        crate::query_projection_metrics::record_update_applied_sequence(
                             &update.key.tenant,
                             &update.key.entity_type,
-                            &update.key.entity_id,
-                            &status,
-                            &fields,
-                            &state,
+                            operation,
+                            source,
                             update.sequence_nr,
-                        )
-                        .await
-                }
-                ProjectionOperation::Remove => {
-                    self.store
-                        .remove_projection(
+                        );
+                        return;
+                    }
+                    Err(e) => {
+                        crate::query_projection_metrics::record_update_error(
                             &update.key.tenant,
                             &update.key.entity_type,
-                            &update.key.entity_id,
-                        )
-                        .await
+                            operation,
+                            source,
+                        );
+                        if self.has_newer_pending(&update) {
+                            tracing::warn!(
+                                error = %e,
+                                tenant = %update.key.tenant,
+                                entity_type = %update.key.entity_type,
+                                entity_id = %update.key.entity_id,
+                                operation,
+                                sequence_nr = update.sequence_nr,
+                                attempt,
+                                "skipping failed query projection retry because a newer update is queued"
+                            );
+                            return;
+                        }
+                        if attempt >= self.max_attempts {
+                            tracing::error!(
+                                error = %e,
+                                tenant = %update.key.tenant,
+                                entity_type = %update.key.entity_type,
+                                entity_id = %update.key.entity_id,
+                                operation,
+                                sequence_nr = update.sequence_nr,
+                                attempts = attempt,
+                                "failed to update queued query projection after retries"
+                            );
+                            return;
+                        }
+                        tracing::warn!(
+                            error = %e,
+                            tenant = %update.key.tenant,
+                            entity_type = %update.key.entity_type,
+                            entity_id = %update.key.entity_id,
+                            operation,
+                            sequence_nr = update.sequence_nr,
+                            attempt,
+                            max_attempts = self.max_attempts,
+                            "failed to update queued query projection; retrying"
+                        );
+                        attempt += 1;
+                        tokio::time::sleep(self.retry_delay).await; // determinism-ok: production side-effect retry backoff
+                    }
                 }
-            };
-            let result_label = if result.is_ok() { "ok" } else { "error" };
-            crate::query_projection_metrics::record_update_duration(
-                &update.key.tenant,
-                &update.key.entity_type,
-                operation,
-                source,
-                result_label,
-                started_at.elapsed(),
-            );
-            crate::query_projection_metrics::record_update_end_to_end_duration(
-                &update.key.tenant,
-                &update.key.entity_type,
-                operation,
-                source,
-                result_label,
-                update.enqueued_at.elapsed(),
-            );
-
-            if let Err(e) = result {
-                crate::query_projection_metrics::record_update_error(
-                    &update.key.tenant,
-                    &update.key.entity_type,
-                    operation,
-                    source,
-                );
-                tracing::error!(
-                    error = %e,
-                    tenant = %update.key.tenant,
-                    entity_type = %update.key.entity_type,
-                    entity_id = %update.key.entity_id,
-                    operation,
-                    sequence_nr = update.sequence_nr,
-                    "failed to update queued query projection"
-                );
-            } else {
-                crate::query_projection_metrics::record_update_applied_sequence(
-                    &update.key.tenant,
-                    &update.key.entity_type,
-                    operation,
-                    source,
-                    update.sequence_nr,
-                );
             }
         }
         .instrument(span)
@@ -359,6 +431,22 @@ fn projection_drain_batch() -> usize {
         .and_then(|value| value.trim().parse::<usize>().ok())
         .filter(|value| *value > 0)
         .unwrap_or(DEFAULT_PROJECTION_DRAIN_BATCH)
+}
+
+fn projection_max_attempts() -> u32 {
+    std::env::var("TEMPER_QUERY_PROJECTION_MAX_ATTEMPTS") // determinism-ok: production side-effect queue sizing
+        .ok()
+        .and_then(|value| value.trim().parse::<u32>().ok())
+        .filter(|value| *value > 0)
+        .unwrap_or(DEFAULT_PROJECTION_MAX_ATTEMPTS)
+}
+
+fn projection_retry_delay() -> Duration {
+    let millis = std::env::var("TEMPER_QUERY_PROJECTION_RETRY_DELAY_MS") // determinism-ok: production side-effect queue sizing
+        .ok()
+        .and_then(|value| value.trim().parse::<u64>().ok())
+        .unwrap_or(DEFAULT_PROJECTION_RETRY_DELAY_MS);
+    Duration::from_millis(millis)
 }
 
 #[cfg(test)]

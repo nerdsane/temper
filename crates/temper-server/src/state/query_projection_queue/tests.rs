@@ -4,11 +4,13 @@ use crate::storage::{
 };
 use async_trait::async_trait;
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::time::Duration;
 use temper_runtime::persistence::PersistenceError;
 
 #[derive(Default)]
 struct RecordingQueryPlane {
     upserts: AtomicUsize,
+    fail_upserts: AtomicUsize,
 }
 
 #[async_trait]
@@ -24,6 +26,12 @@ impl QueryPlaneStore for RecordingQueryPlane {
         _sequence_nr: u64,
     ) -> Result<(), PersistenceError> {
         self.upserts.fetch_add(1, Ordering::SeqCst);
+        if self.fail_upserts.load(Ordering::SeqCst) > 0 {
+            self.fail_upserts.fetch_sub(1, Ordering::SeqCst);
+            return Err(PersistenceError::Storage(
+                "transient projection failure".to_string(),
+            ));
+        }
         Ok(())
     }
 
@@ -185,4 +193,40 @@ fn enqueue_rejects_new_entity_when_capacity_is_exhausted() {
         ),
         ProjectionEnqueueOutcome::Full
     );
+}
+
+#[tokio::test]
+async fn failed_projection_write_is_retried_before_drop() {
+    let store = Arc::new(RecordingQueryPlane {
+        fail_upserts: AtomicUsize::new(1),
+        ..RecordingQueryPlane::default()
+    });
+    let queue = QueryProjectionWriteQueue::new_for_test_with_retry(
+        store.clone(),
+        10,
+        10,
+        2,
+        Duration::from_millis(1),
+    );
+
+    assert_eq!(
+        queue.enqueue_upsert(
+            "tenant".to_string(),
+            "Session".to_string(),
+            "s-1".to_string(),
+            "Idle".to_string(),
+            serde_json::json!({"Title": "retry"}),
+            serde_json::json!({"sequence_nr": 4}),
+            4,
+            "test",
+        ),
+        ProjectionEnqueueOutcome::Enqueued
+    );
+    let mut batch = queue.take_batch();
+    assert_eq!(batch.len(), 1);
+
+    queue.apply(batch.pop().expect("queued update")).await;
+
+    assert_eq!(store.upserts.load(Ordering::SeqCst), 2);
+    assert_eq!(store.fail_upserts.load(Ordering::SeqCst), 0);
 }

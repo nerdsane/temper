@@ -29,14 +29,29 @@ impl PostgresEventStore {
         let order_sql = postgres_query_field_order_sql(order_by);
         let limit_param = params.len() + 3;
         let offset_param = params.len() + 4;
-        let sql = format!(
-            "SELECT entity_id, COUNT(*) OVER() AS total_count \
-             FROM entity_catalog \
-             WHERE tenant = $1 AND entity_type = $2 AND ({clause}) \
-             ORDER BY {order_sql} \
-             LIMIT ${limit_param} OFFSET ${offset_param}"
+        let sql = postgres_query_field_page_sql(
+            &clause,
+            &order_sql,
+            limit_param,
+            offset_param,
+            include_count,
         );
         let tagged_sql = crate::dbm::tag_sql(&sql);
+        if !include_count {
+            let mut query = sqlx::query_scalar::<_, String>(tagged_sql.as_ref())
+                .bind(tenant)
+                .bind(entity_type);
+            for param in params.iter().cloned() {
+                query = query.bind(param);
+            }
+            query = query
+                .bind(top.min(i64::MAX as usize) as i64)
+                .bind(skip.min(i64::MAX as usize) as i64);
+
+            let entity_ids = query.fetch_all(self.pool()).await.map_err(storage_error)?;
+            return Ok((entity_ids, None));
+        }
+
         let mut query = sqlx::query_as::<_, (String, i64)>(tagged_sql.as_ref())
             .bind(tenant)
             .bind(entity_type);
@@ -91,6 +106,27 @@ impl PostgresEventStore {
     }
 }
 
+fn postgres_query_field_page_sql(
+    clause: &str,
+    order_sql: &str,
+    limit_param: usize,
+    offset_param: usize,
+    include_count: bool,
+) -> String {
+    let select = if include_count {
+        "entity_id, COUNT(*) OVER() AS total_count"
+    } else {
+        "entity_id"
+    };
+    format!(
+        "SELECT {select} \
+         FROM entity_catalog \
+         WHERE tenant = $1 AND entity_type = $2 AND ({clause}) \
+         ORDER BY {order_sql} \
+         LIMIT ${limit_param} OFFSET ${offset_param}"
+    )
+}
+
 fn postgres_query_field_order_sql(order_by: &[(String, bool)]) -> String {
     let mut clauses = Vec::new();
     for (field_name, descending) in order_by {
@@ -122,4 +158,24 @@ fn postgres_query_field_order_sql(order_by: &[(String, bool)]) -> String {
 
 fn postgres_string_literal(value: &str) -> String {
     format!("'{}'", value.replace('\'', "''"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn no_count_page_sql_does_not_compute_window_count() {
+        let sql = postgres_query_field_page_sql("entity_id = $3", "entity_id ASC", 4, 5, false);
+
+        assert!(sql.starts_with("SELECT entity_id FROM entity_catalog"));
+        assert!(!sql.contains("COUNT(*) OVER()"));
+    }
+
+    #[test]
+    fn count_page_sql_computes_count_only_when_requested() {
+        let sql = postgres_query_field_page_sql("entity_id = $3", "entity_id ASC", 4, 5, true);
+
+        assert!(sql.contains("COUNT(*) OVER() AS total_count"));
+    }
 }

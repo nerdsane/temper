@@ -94,11 +94,14 @@ Session row.
 Full OTS trajectory POST persistence and terminal Session trajectory emission
 effects are not dispatch-critical. The POST handler durably records the
 artifact by `trajectory_id` with a persistence status before acknowledging the
-upload. A bounded in-memory worker drains accepted work and advances the
-durable status from `queued` to `persisted` or `failed`; restart recovery can
-replay rows still marked `queued`. MCP clients treat `503` and transient
-transport errors as retryable with bounded backoff, including final trajectory
-uploads on session close.
+upload. This admission write includes the full trajectory JSON artifact, so the
+tradeoff is explicit: OTS POST latency pays one durable write to avoid lossy
+terminal artifacts, while Session dispatch does not wait for the POST handler.
+A bounded in-memory worker drains accepted work and advances the durable status
+from `queued` to `persisted` or `failed`; restart recovery can replay rows
+still marked `queued`. MCP clients treat `503` and transient transport errors
+as retryable with bounded backoff, including final trajectory uploads on
+session close.
 
 **Why this approach**: Foresight needs reliable trajectory artifacts, but the
 terminal Session transition should not be coupled to a best-effort in-memory
@@ -123,9 +126,14 @@ status transition and any retry/failure accounting happen outside dispatch.
 - Event journal append remains synchronous and optimistic-concurrency guarded.
 - Snapshot enqueue failure does not reset `events_since_snapshot`.
 - Projection updates skip stale sequences before opening a DB write.
+- Projection update failures are retried with bounded backoff, and stale
+  retries are skipped if a newer update for the same entity has already been
+  queued.
 - Composite dispatch does not synchronously wait for query projection writes
   after the atomic journal batch commits.
 - Supported Session OData queries are bounded in the backing store.
+- Supported bounded Session OData page reads do not compute storage counts
+  unless `$count=true` was requested.
 - OTS upload admission either returns success after a durable queued row exists
   or returns a retryable error to the caller.
 - MCP final trajectory upload retries `503` and transient transport failures
@@ -156,6 +164,9 @@ status transition and any retry/failure accounting happen outside dispatch.
   the journal remains authoritative.
 - OTS POST acknowledgements now mean durable admission, not necessarily that
   downstream status advancement has completed.
+- OTS POST latency still includes one full-artifact durable write; this is a
+  reliability tradeoff for terminal trajectory artifacts, not a dispatch-path
+  write reduction by itself.
 
 ### Risks
 
@@ -166,9 +177,9 @@ status transition and any retry/failure accounting happen outside dispatch.
   can observe stale data. Mitigation: add sequence-aware read tests for the
   Foresight/DSF2 Session paths touched by this work.
 - If the durable OTS admission write itself is slow, the POST caller still
-  pays that cost. Mitigation: keep the admission row keyed and compact, retry
-  transient failures at the MCP boundary, and measure the outbox status/latency
-  metrics separately from dispatch latency.
+  pays that cost. Mitigation: keep this out of the Session dispatch path,
+  retry transient failures at the MCP boundary, and measure OTS POST latency
+  and outbox status/latency metrics separately from dispatch latency.
 
 ### DST Compliance
 
