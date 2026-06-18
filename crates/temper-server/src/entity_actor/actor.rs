@@ -39,6 +39,7 @@ use super::effects::{
     FieldSyncMode, build_eval_context_with_xref, process_action_with_xref_and_field_mode,
     prune_transient_action_fields_from_state,
 };
+use super::snapshot_queue::{SnapshotEnqueueOutcome, SnapshotWriteQueue};
 use super::types::{
     EntityEvent, EntityMsg, EntityResponse, EntityState, MAX_EVENTS_SINCE_SNAPSHOT,
     MAX_ITEMS_PER_ENTITY,
@@ -104,6 +105,8 @@ pub struct EntityActor {
     initial_fields: serde_json::Value,
     /// Optional event journal for persistence. None = in-memory only.
     event_journal: Option<BoxedEventStore>,
+    /// Optional async snapshot writer. Event appends remain synchronous.
+    snapshot_queue: Option<Arc<SnapshotWriteQueue>>,
     /// Persistence backend label used for metrics and backend-specific field sync.
     event_backend: Option<BackendLabel>,
     /// Trace ID for correlating all events from this actor.
@@ -231,6 +234,7 @@ impl EntityActor {
             table,
             initial_fields,
             event_journal: None,
+            snapshot_queue: None,
             event_backend: None,
             trace_id: sim_uuid().to_string(),
             idempotency_cache: None,
@@ -254,6 +258,7 @@ impl EntityActor {
             table,
             initial_fields,
             event_journal: Some(store),
+            snapshot_queue: None,
             event_backend: Some(backend),
             trace_id: sim_uuid().to_string(),
             idempotency_cache: None,
@@ -264,6 +269,12 @@ impl EntityActor {
     /// Set the tenant for this actor (must be called before spawning).
     pub fn with_tenant(mut self, tenant: impl Into<String>) -> Self {
         self.tenant = tenant.into();
+        self
+    }
+
+    /// Attach the background snapshot writer for this actor's event journal.
+    pub(crate) fn with_snapshot_queue(mut self, queue: Option<Arc<SnapshotWriteQueue>>) -> Self {
+        self.snapshot_queue = queue;
         self
     }
 
@@ -367,18 +378,49 @@ impl EntityActor {
     /// Save a snapshot when the configured interval is reached.
     async fn maybe_save_snapshot(
         store: &BoxedEventStore,
+        snapshot_queue: Option<&Arc<SnapshotWriteQueue>>,
         persistence_id: &str,
         state: &mut EntityState,
     ) -> Result<(), PersistenceError> {
         if state.sequence_nr == 0 {
             return Ok(());
         }
+        if let Some(queue) = snapshot_queue
+            && let Some(applied_sequence) = queue.applied_sequence(persistence_id)
+            && applied_sequence > state.last_snapshot_sequence_nr
+        {
+            let applied_sequence = applied_sequence.min(state.sequence_nr);
+            state.last_snapshot_sequence_nr = applied_sequence;
+            state.events_since_snapshot =
+                state.sequence_nr.saturating_sub(applied_sequence) as usize;
+        }
+
         let interval = Self::snapshot_interval();
-        if !state.sequence_nr.is_multiple_of(interval) {
+        let pending_sequence = snapshot_queue
+            .and_then(|queue| queue.pending_sequence(persistence_id))
+            .unwrap_or(0);
+        let latest_snapshot_boundary = state.last_snapshot_sequence_nr.max(pending_sequence);
+        if state.sequence_nr.saturating_sub(latest_snapshot_boundary) < interval {
             return Ok(());
         }
 
         let snapshot = Self::serialize_snapshot_state(state)?;
+        if let Some(queue) = snapshot_queue {
+            match queue.enqueue(persistence_id.to_string(), state.sequence_nr, snapshot) {
+                SnapshotEnqueueOutcome::Enqueued
+                | SnapshotEnqueueOutcome::Coalesced
+                | SnapshotEnqueueOutcome::StaleSkipped => return Ok(()),
+                SnapshotEnqueueOutcome::Full => {
+                    tracing::warn!(
+                        entity = %state.entity_id,
+                        seq = state.sequence_nr,
+                        "snapshot write queue full; keeping replay tail open"
+                    );
+                    return Ok(());
+                }
+            }
+        }
+
         store
             .save_snapshot(persistence_id, state.sequence_nr, &snapshot)
             .await?;
@@ -1162,9 +1204,15 @@ impl Actor for EntityActor {
 
                     state.push_event_bounded(event);
 
+                    let persistence_id = self.persistence_id();
                     if let Some(ref store) = self.event_journal
-                        && let Err(e) =
-                            Self::maybe_save_snapshot(store, &self.persistence_id(), state).await
+                        && let Err(e) = Self::maybe_save_snapshot(
+                            store,
+                            self.snapshot_queue.as_ref(),
+                            &persistence_id,
+                            state,
+                        )
+                        .await
                     {
                         tracing::warn!(
                             entity = %state.entity_id,

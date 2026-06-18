@@ -455,8 +455,24 @@ CREATE TABLE IF NOT EXISTS ots_trajectories (
     entity_type TEXT,
     turn_count INTEGER NOT NULL DEFAULT 0,
     data TEXT NOT NULL,
-    created_at TEXT NOT NULL DEFAULT (datetime('now'))
+    persistence_status TEXT NOT NULL DEFAULT 'persisted',
+    persist_attempts INTEGER NOT NULL DEFAULT 0,
+    last_error TEXT,
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    updated_at TEXT NOT NULL DEFAULT (datetime('now'))
 );";
+
+pub const ALTER_OTS_TRAJECTORIES_ADD_PERSISTENCE_STATUS: &str = "\
+ALTER TABLE ots_trajectories ADD COLUMN persistence_status TEXT NOT NULL DEFAULT 'persisted';";
+
+pub const ALTER_OTS_TRAJECTORIES_ADD_PERSIST_ATTEMPTS: &str = "\
+ALTER TABLE ots_trajectories ADD COLUMN persist_attempts INTEGER NOT NULL DEFAULT 0;";
+
+pub const ALTER_OTS_TRAJECTORIES_ADD_LAST_ERROR: &str = "\
+ALTER TABLE ots_trajectories ADD COLUMN last_error TEXT;";
+
+pub const ALTER_OTS_TRAJECTORIES_ADD_UPDATED_AT: &str = "\
+ALTER TABLE ots_trajectories ADD COLUMN updated_at TEXT NOT NULL DEFAULT (datetime('now'));";
 
 pub const CREATE_OTS_TRAJECTORIES_AGENT_INDEX: &str = "\
 CREATE INDEX IF NOT EXISTS idx_ots_trajectories_agent
@@ -469,6 +485,10 @@ CREATE INDEX IF NOT EXISTS idx_ots_trajectories_tenant
 pub const CREATE_OTS_TRAJECTORIES_OUTCOME_INDEX: &str = "\
 CREATE INDEX IF NOT EXISTS idx_ots_trajectories_outcome
     ON ots_trajectories(outcome);";
+
+pub const CREATE_OTS_TRAJECTORIES_STATUS_INDEX: &str = "\
+CREATE INDEX IF NOT EXISTS idx_ots_trajectories_status
+    ON ots_trajectories(persistence_status, updated_at);";
 
 #[cfg(test)]
 #[path = "schema_test.rs"]

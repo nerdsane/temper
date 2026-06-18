@@ -312,6 +312,14 @@ impl TursoEventStore {
         conn.execute(schema::CREATE_OTS_TRAJECTORIES_TABLE, ())
             .await
             .map_err(storage_error)?;
+        for stmt in [
+            schema::ALTER_OTS_TRAJECTORIES_ADD_PERSISTENCE_STATUS,
+            schema::ALTER_OTS_TRAJECTORIES_ADD_PERSIST_ATTEMPTS,
+            schema::ALTER_OTS_TRAJECTORIES_ADD_LAST_ERROR,
+            schema::ALTER_OTS_TRAJECTORIES_ADD_UPDATED_AT,
+        ] {
+            let _ = conn.execute(stmt, ()).await;
+        }
         conn.execute(schema::CREATE_OTS_TRAJECTORIES_AGENT_INDEX, ())
             .await
             .map_err(storage_error)?;
@@ -319,6 +327,9 @@ impl TursoEventStore {
             .await
             .map_err(storage_error)?;
         conn.execute(schema::CREATE_OTS_TRAJECTORIES_OUTCOME_INDEX, ())
+            .await
+            .map_err(storage_error)?;
+        conn.execute(schema::CREATE_OTS_TRAJECTORIES_STATUS_INDEX, ())
             .await
             .map_err(storage_error)?;
 

@@ -157,6 +157,239 @@ async fn nullable_scalar_order_uses_read_source_full_proof() {
 }
 
 #[tokio::test]
+async fn context_prep_shaped_filter_with_huge_top_uses_bounded_native_page() {
+    let db_path = std::env::temp_dir().join(format!(
+        "temper-query-plane-session-filter-{}.db",
+        sim_uuid()
+    ));
+    let _ = std::fs::remove_file(&db_path);
+    let db_url = format!("file:{}", db_path.display());
+    let store = TursoEventStore::new(&db_url, None)
+        .await
+        .expect("create local turso db");
+    let mut state = build_order_state("query-plane-session-filter");
+    state.set_storage_stack(StorageStack::from_turso(store.clone()));
+    let tenant = TenantId::default();
+
+    for index in 0usize..1200 {
+        upsert_order_projection(
+            &store,
+            &tenant,
+            &format!("entry-{index:04}"),
+            serde_json::json!({
+                "SessionId": "session-hot",
+                "ParentEntryId": format!("entry-{:04}", index.saturating_sub(1)),
+            }),
+            index as u64 + 1,
+        )
+        .await;
+    }
+    upsert_order_projection(
+        &store,
+        &tenant,
+        "entry-other",
+        serde_json::json!({ "SessionId": "session-cold" }),
+        2000,
+    )
+    .await;
+
+    let security_ctx = SecurityContext::system();
+    let query_options = QueryOptions {
+        filter: Some(FilterExpr::BinaryOp {
+            left: Box::new(FilterExpr::Property("SessionId".to_string())),
+            op: BinaryOperator::Eq,
+            right: Box::new(FilterExpr::Literal(ODataValue::String(
+                "session-hot".to_string(),
+            ))),
+        }),
+        top: Some(10_000),
+        select: Some(vec!["Id".to_string(), "SessionId".to_string()]),
+        ..QueryOptions::default()
+    };
+
+    let result = match read_entity_set_from_query_plane(QueryPlaneReadRequest {
+        state: &state,
+        tenant: &tenant,
+        security_ctx: &security_ctx,
+        entity_type: "Order",
+        entity_set_name: "Orders",
+        query_options: &query_options,
+        budget: QueryPlaneReadBudget {
+            default_page_size: 100,
+            max_entities: 1000,
+        },
+    })
+    .await
+    {
+        Ok(result) => result,
+        Err(_) => panic!("context-prep shaped filtered read should use native page pushdown"),
+    };
+
+    assert_eq!(result.entities.len(), 1000);
+    assert_eq!(
+        result.telemetry.strategy,
+        QueryPlaneReadStrategy::NativePagePushdown
+    );
+    assert!(result.telemetry.filter_pushdown);
+    assert_eq!(result.telemetry.candidate_count, 1000);
+    assert_eq!(result.telemetry.materialized_count, 1000);
+    assert_eq!(result.telemetry.pushdown_page_count, 1000);
+    assert_eq!(result.telemetry.returned_count, 1000);
+
+    let _ = std::fs::remove_file(db_path);
+}
+
+#[tokio::test]
+async fn session_entry_chain_parent_lookup_uses_bounded_native_page() {
+    let db_dir = tempfile::tempdir().expect("create isolated query-plane db dir");
+    let db_path = db_dir.path().join("session-parent.db");
+    let db_url = format!("file:{}", db_path.display());
+    let store = TursoEventStore::new(&db_url, None)
+        .await
+        .expect("create local turso db");
+    let mut state = build_order_state("query-plane-session-parent");
+    state.set_storage_stack(StorageStack::from_turso(store.clone()));
+    let tenant = TenantId::default();
+
+    for index in 0usize..1200 {
+        upsert_order_projection(
+            &store,
+            &tenant,
+            &format!("entry-{index:04}"),
+            serde_json::json!({
+                "SessionId": "session-hot",
+                "ParentEntryId": format!("entry-{:04}", index.saturating_sub(1)),
+            }),
+            index as u64 + 1,
+        )
+        .await;
+    }
+
+    let security_ctx = SecurityContext::system();
+    let query_options = QueryOptions {
+        filter: Some(FilterExpr::BinaryOp {
+            left: Box::new(FilterExpr::Property("ParentEntryId".to_string())),
+            op: BinaryOperator::Eq,
+            right: Box::new(FilterExpr::Literal(ODataValue::String(
+                "entry-1198".to_string(),
+            ))),
+        }),
+        top: Some(1),
+        select: Some(vec![
+            "Id".to_string(),
+            "SessionId".to_string(),
+            "ParentEntryId".to_string(),
+        ]),
+        ..QueryOptions::default()
+    };
+
+    let result = match read_entity_set_from_query_plane(QueryPlaneReadRequest {
+        state: &state,
+        tenant: &tenant,
+        security_ctx: &security_ctx,
+        entity_type: "Order",
+        entity_set_name: "Orders",
+        query_options: &query_options,
+        budget: QueryPlaneReadBudget {
+            default_page_size: 100,
+            max_entities: 1000,
+        },
+    })
+    .await
+    {
+        Ok(result) => result,
+        Err(_) => panic!("SessionEntry parent lookup should use native page pushdown"),
+    };
+
+    assert_eq!(result.entities.len(), 1);
+    assert_eq!(result.entities[0]["Id"].as_str(), Some("entry-1199"));
+    assert_eq!(
+        result.entities[0]["ParentEntryId"].as_str(),
+        Some("entry-1198")
+    );
+    assert_eq!(
+        result.telemetry.strategy,
+        QueryPlaneReadStrategy::NativePagePushdown
+    );
+    assert!(result.telemetry.filter_pushdown);
+    assert_eq!(result.telemetry.candidate_count, 1);
+    assert_eq!(result.telemetry.pushdown_page_count, 1);
+}
+
+#[tokio::test]
+async fn session_entry_leaf_id_lookup_uses_bounded_native_page() {
+    let db_dir = tempfile::tempdir().expect("create isolated query-plane db dir");
+    let db_path = db_dir.path().join("session-leaf.db");
+    let db_url = format!("file:{}", db_path.display());
+    let store = TursoEventStore::new(&db_url, None)
+        .await
+        .expect("create local turso db");
+    let mut state = build_order_state("query-plane-session-leaf");
+    state.set_storage_stack(StorageStack::from_turso(store.clone()));
+    let tenant = TenantId::default();
+
+    for index in 0usize..1200 {
+        upsert_order_projection(
+            &store,
+            &tenant,
+            &format!("entry-{index:04}"),
+            serde_json::json!({
+                "SessionId": "session-hot",
+                "ParentEntryId": format!("entry-{:04}", index.saturating_sub(1)),
+            }),
+            index as u64 + 1,
+        )
+        .await;
+    }
+
+    let security_ctx = SecurityContext::system();
+    let query_options = QueryOptions {
+        filter: Some(FilterExpr::BinaryOp {
+            left: Box::new(FilterExpr::Property("Id".to_string())),
+            op: BinaryOperator::Eq,
+            right: Box::new(FilterExpr::Literal(ODataValue::String(
+                "entry-1199".to_string(),
+            ))),
+        }),
+        top: Some(1),
+        select: Some(vec![
+            "Id".to_string(),
+            "SessionId".to_string(),
+            "ParentEntryId".to_string(),
+        ]),
+        ..QueryOptions::default()
+    };
+
+    let result = match read_entity_set_from_query_plane(QueryPlaneReadRequest {
+        state: &state,
+        tenant: &tenant,
+        security_ctx: &security_ctx,
+        entity_type: "Order",
+        entity_set_name: "Orders",
+        query_options: &query_options,
+        budget: QueryPlaneReadBudget {
+            default_page_size: 100,
+            max_entities: 1000,
+        },
+    })
+    .await
+    {
+        Ok(result) => result,
+        Err(_) => panic!("SessionEntry leaf id lookup should use native page pushdown"),
+    };
+
+    assert_eq!(result.entities.len(), 1);
+    assert_eq!(result.entities[0]["Id"].as_str(), Some("entry-1199"));
+    assert_eq!(
+        result.telemetry.strategy,
+        QueryPlaneReadStrategy::NativePagePushdown
+    );
+    assert!(result.telemetry.filter_pushdown);
+    assert_eq!(result.telemetry.candidate_count, 1);
+    assert_eq!(result.telemetry.pushdown_page_count, 1);
+}
+
+#[tokio::test]
 async fn unsafe_order_uses_read_source_full_proof() {
     let db_path =
         std::env::temp_dir().join(format!("temper-query-plane-order-proof-{}.db", sim_uuid()));

@@ -263,6 +263,25 @@ fn query_field_index_page_orders_and_limits_inside_postgres() {
         assert_eq!(ids, vec!["entry-10".to_string()]);
         assert_eq!(count, Some(3));
 
+        let (ids, count) = store
+            .query_field_index_page(
+                &tenant,
+                entity_type,
+                "entity_id IN (SELECT entity_id FROM entity_field_index \
+                 WHERE tenant = ?1 AND entity_type = ?2 \
+                 AND field_name = ?3 AND field_value = ?4)",
+                vec!["SessionId".to_string(), "ss-bounded".to_string()],
+                &[("Sequence".to_string(), true)],
+                0,
+                1,
+                false,
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(ids, vec!["entry-10".to_string()]);
+        assert_eq!(count, None);
+
         let missing_sequence_id = "entry-missing-sequence";
         let missing_sequence_fields = serde_json::json!({
             "SessionId": "ss-bounded",

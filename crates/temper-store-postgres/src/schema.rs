@@ -415,8 +415,28 @@ CREATE TABLE IF NOT EXISTS ots_trajectories (
     entity_type   TEXT,
     turn_count    BIGINT       NOT NULL DEFAULT 0,
     data          JSONB        NOT NULL,
-    created_at    TIMESTAMPTZ  NOT NULL DEFAULT now()
+    persistence_status TEXT    NOT NULL DEFAULT 'persisted',
+    persist_attempts BIGINT    NOT NULL DEFAULT 0,
+    last_error    TEXT,
+    created_at    TIMESTAMPTZ  NOT NULL DEFAULT now(),
+    updated_at    TIMESTAMPTZ  NOT NULL DEFAULT now()
 );";
+
+/// Add durable outbox status to existing OTS trajectory tables.
+pub const ALTER_OTS_TRAJECTORIES_ADD_PERSISTENCE_STATUS: &str = "\
+ALTER TABLE ots_trajectories ADD COLUMN IF NOT EXISTS persistence_status TEXT NOT NULL DEFAULT 'persisted';";
+
+/// Add durable outbox attempt count to existing OTS trajectory tables.
+pub const ALTER_OTS_TRAJECTORIES_ADD_PERSIST_ATTEMPTS: &str = "\
+ALTER TABLE ots_trajectories ADD COLUMN IF NOT EXISTS persist_attempts BIGINT NOT NULL DEFAULT 0;";
+
+/// Add durable outbox error details to existing OTS trajectory tables.
+pub const ALTER_OTS_TRAJECTORIES_ADD_LAST_ERROR: &str = "\
+ALTER TABLE ots_trajectories ADD COLUMN IF NOT EXISTS last_error TEXT;";
+
+/// Add durable outbox update timestamp to existing OTS trajectory tables.
+pub const ALTER_OTS_TRAJECTORIES_ADD_UPDATED_AT: &str = "\
+ALTER TABLE ots_trajectories ADD COLUMN IF NOT EXISTS updated_at TIMESTAMPTZ NOT NULL DEFAULT now();";
 
 /// CREATE INDEX for OTS lookup by agent.
 pub const CREATE_OTS_TRAJECTORIES_AGENT_INDEX: &str = "\
@@ -432,6 +452,11 @@ CREATE INDEX IF NOT EXISTS idx_ots_trajectories_tenant
 pub const CREATE_OTS_TRAJECTORIES_OUTCOME_INDEX: &str = "\
 CREATE INDEX IF NOT EXISTS idx_ots_trajectories_outcome
     ON ots_trajectories (outcome);";
+
+/// CREATE INDEX for OTS durable outbox recovery.
+pub const CREATE_OTS_TRAJECTORIES_STATUS_INDEX: &str = "\
+CREATE INDEX IF NOT EXISTS idx_ots_trajectories_status
+    ON ots_trajectories (persistence_status, updated_at);";
 
 /// Content-addressed blob storage for development/local deployments.
 pub const CREATE_BLOBS_TABLE: &str = "\

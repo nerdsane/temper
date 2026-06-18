@@ -36,6 +36,7 @@ mod tests {
             include_str!("../migrations/0005_installed_app_genesis_provenance.sql"),
             include_str!("../migrations/0006_segmented_event_history.sql"),
             include_str!("../migrations/0007_installed_app_follow_policy.sql"),
+            include_str!("../migrations/0008_ots_trajectory_outbox_status.sql"),
         ]
         .join("\n")
         .to_lowercase();
@@ -51,6 +52,7 @@ mod tests {
             "published_artifacts",
             "event_segments",
             "snapshot_history",
+            "ots_trajectories",
         ] {
             assert!(
                 migration.contains(&format!("create table if not exists {table}")),
@@ -68,6 +70,10 @@ mod tests {
         assert!(
             migration.contains("add column if not exists state jsonb"),
             "versioned migration must add entity catalog state metadata"
+        );
+        assert!(
+            migration.contains("persistence_status"),
+            "versioned migration must add OTS outbox status metadata"
         );
     }
 

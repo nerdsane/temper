@@ -38,12 +38,12 @@ impl TursoEventStore {
         let order_sql = turso_query_field_order_sql(order_by);
         let limit_param = params.len() + 3;
         let offset_param = params.len() + 4;
-        let sql = format!(
-            "SELECT entity_id, COUNT(*) OVER() AS total_count \
-             FROM entity_catalog \
-             WHERE tenant = ?1 AND entity_type = ?2 AND ({where_clause}) \
-             ORDER BY {order_sql} \
-             LIMIT ?{limit_param} OFFSET ?{offset_param}"
+        let sql = turso_query_field_page_sql(
+            where_clause,
+            &order_sql,
+            limit_param,
+            offset_param,
+            include_count,
         );
 
         let mut all_params: Vec<libsql::Value> = vec![
@@ -111,6 +111,27 @@ impl TursoEventStore {
     }
 }
 
+fn turso_query_field_page_sql(
+    where_clause: &str,
+    order_sql: &str,
+    limit_param: usize,
+    offset_param: usize,
+    include_count: bool,
+) -> String {
+    let select = if include_count {
+        "entity_id, COUNT(*) OVER() AS total_count"
+    } else {
+        "entity_id"
+    };
+    format!(
+        "SELECT {select} \
+         FROM entity_catalog \
+         WHERE tenant = ?1 AND entity_type = ?2 AND ({where_clause}) \
+         ORDER BY {order_sql} \
+         LIMIT ?{limit_param} OFFSET ?{offset_param}"
+    )
+}
+
 fn turso_query_field_order_sql(order_by: &[(String, bool)]) -> String {
     let mut clauses = Vec::new();
     for (field_name, descending) in order_by {
@@ -154,4 +175,24 @@ fn turso_json_path_literal(field_name: &str) -> String {
         .replace('"', "\\\"")
         .replace('\'', "''");
     format!("'$.\"{escaped}\"'")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn no_count_page_sql_does_not_compute_window_count() {
+        let sql = turso_query_field_page_sql("entity_id = ?3", "entity_id ASC", 4, 5, false);
+
+        assert!(sql.starts_with("SELECT entity_id FROM entity_catalog"));
+        assert!(!sql.contains("COUNT(*) OVER()"));
+    }
+
+    #[test]
+    fn count_page_sql_computes_count_only_when_requested() {
+        let sql = turso_query_field_page_sql("entity_id = ?3", "entity_id ASC", 4, 5, true);
+
+        assert!(sql.contains("COUNT(*) OVER() AS total_count"));
+    }
 }

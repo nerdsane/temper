@@ -393,7 +393,23 @@ pub struct PostgresOtsTrajectoryRow {
     pub session_id: String,
     pub outcome: String,
     pub turn_count: i64,
+    pub persistence_status: String,
+    pub persist_attempts: i64,
+    pub last_error: Option<String>,
     pub created_at: String,
+    pub updated_at: String,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct PostgresQueuedOtsTrajectoryRow {
+    pub trajectory_id: String,
+    pub tenant: String,
+    pub agent_id: String,
+    pub session_id: String,
+    pub outcome: String,
+    pub turn_count: i64,
+    pub data: String,
+    pub persist_attempts: i64,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -1965,11 +1981,12 @@ impl PostgresEventStore {
         let data = parse_json(p.data)?;
         crate::dbm::postgres_query!(
             "INSERT INTO ots_trajectories \
-             (trajectory_id, tenant, agent_id, session_id, outcome, turn_count, data, created_at) \
-             VALUES ($1, $2, $3, $4, $5, $6, $7, now()) \
+             (trajectory_id, tenant, agent_id, session_id, outcome, turn_count, data, persistence_status, persist_attempts, last_error, created_at, updated_at) \
+             VALUES ($1, $2, $3, $4, $5, $6, $7, 'persisted', 0, NULL, now(), now()) \
              ON CONFLICT (trajectory_id) DO UPDATE SET \
                  tenant = EXCLUDED.tenant, agent_id = EXCLUDED.agent_id, session_id = EXCLUDED.session_id, \
-                 outcome = EXCLUDED.outcome, turn_count = EXCLUDED.turn_count, data = EXCLUDED.data, created_at = now()",
+                 outcome = EXCLUDED.outcome, turn_count = EXCLUDED.turn_count, data = EXCLUDED.data, \
+                 persistence_status = 'persisted', persist_attempts = 0, last_error = NULL, updated_at = now()",
         )
         .bind(p.trajectory_id)
         .bind(p.tenant)
@@ -1984,6 +2001,85 @@ impl PostgresEventStore {
         Ok(())
     }
 
+    pub async fn enqueue_ots_trajectory(
+        &self,
+        p: &PostgresOtsTrajectoryParams<'_>,
+    ) -> Result<(), PersistenceError> {
+        let data = parse_json(p.data)?;
+        crate::dbm::postgres_query!(
+            "INSERT INTO ots_trajectories \
+             (trajectory_id, tenant, agent_id, session_id, outcome, turn_count, data, persistence_status, persist_attempts, last_error, created_at, updated_at) \
+             VALUES ($1, $2, $3, $4, $5, $6, $7, 'queued', 0, NULL, now(), now()) \
+             ON CONFLICT (trajectory_id) DO UPDATE SET \
+                 tenant = EXCLUDED.tenant, agent_id = EXCLUDED.agent_id, session_id = EXCLUDED.session_id, \
+                 outcome = EXCLUDED.outcome, turn_count = EXCLUDED.turn_count, data = EXCLUDED.data, \
+                 persistence_status = 'queued', last_error = NULL, updated_at = now()",
+        )
+        .bind(p.trajectory_id)
+        .bind(p.tenant)
+        .bind(p.agent_id)
+        .bind(p.session_id)
+        .bind(p.outcome)
+        .bind(p.turn_count)
+        .bind(data)
+        .execute(self.pool())
+        .await
+        .map_err(storage_error)?;
+        Ok(())
+    }
+
+    pub async fn mark_ots_trajectory_persisted(
+        &self,
+        trajectory_id: &str,
+    ) -> Result<(), PersistenceError> {
+        crate::dbm::postgres_query!(
+            "UPDATE ots_trajectories \
+             SET persistence_status = 'persisted', last_error = NULL, updated_at = now() \
+             WHERE trajectory_id = $1",
+        )
+        .bind(trajectory_id)
+        .execute(self.pool())
+        .await
+        .map_err(storage_error)?;
+        Ok(())
+    }
+
+    pub async fn mark_ots_trajectory_failed(
+        &self,
+        trajectory_id: &str,
+        error: &str,
+    ) -> Result<(), PersistenceError> {
+        crate::dbm::postgres_query!(
+            "UPDATE ots_trajectories \
+             SET persistence_status = 'failed', persist_attempts = persist_attempts + 1, last_error = $2, updated_at = now() \
+             WHERE trajectory_id = $1",
+        )
+        .bind(trajectory_id)
+        .bind(error)
+        .execute(self.pool())
+        .await
+        .map_err(storage_error)?;
+        Ok(())
+    }
+
+    pub async fn list_queued_ots_trajectories(
+        &self,
+        limit: i64,
+    ) -> Result<Vec<PostgresQueuedOtsTrajectoryRow>, PersistenceError> {
+        let rows = crate::dbm::postgres_query!(
+            "SELECT trajectory_id, tenant, agent_id, COALESCE(session_id, '') AS session_id, outcome, turn_count, data, persist_attempts \
+             FROM ots_trajectories \
+             WHERE persistence_status = 'queued' \
+             ORDER BY updated_at ASC, created_at ASC \
+             LIMIT $1",
+        )
+        .bind(limit)
+        .fetch_all(self.pool())
+        .await
+        .map_err(storage_error)?;
+        Ok(rows.into_iter().map(row_to_queued_ots_trajectory).collect())
+    }
+
     pub async fn list_ots_trajectories(
         &self,
         tenant: &str,
@@ -1992,7 +2088,7 @@ impl PostgresEventStore {
         limit: i64,
     ) -> Result<Vec<PostgresOtsTrajectoryRow>, PersistenceError> {
         let rows = crate::dbm::postgres_query!(
-            "SELECT trajectory_id, tenant, agent_id, COALESCE(session_id, '') AS session_id, outcome, turn_count, created_at \
+            "SELECT trajectory_id, tenant, agent_id, COALESCE(session_id, '') AS session_id, outcome, turn_count, persistence_status, persist_attempts, last_error, created_at, updated_at \
              FROM ots_trajectories \
              WHERE tenant = $1 \
                AND ($2::text IS NULL OR agent_id = $2) \

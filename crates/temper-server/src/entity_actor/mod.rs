@@ -7,6 +7,7 @@
 mod actor;
 pub mod effects;
 pub mod sim_handler;
+mod snapshot_queue;
 pub mod types;
 
 pub use actor::EntityActor;
@@ -16,4 +17,5 @@ pub use effects::{
     process_action, sync_fields,
 };
 pub use sim_handler::EntityActorHandler;
+pub(crate) use snapshot_queue::SnapshotWriteQueue;
 pub use types::{EntityEvent, EntityMsg, EntityResponse, EntityState};

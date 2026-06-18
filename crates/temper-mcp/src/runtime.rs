@@ -4,6 +4,7 @@ use anyhow::{Result, bail};
 use monty::MontyObject;
 use serde_json::Value;
 use std::collections::BTreeMap;
+use std::time::Duration;
 use temper_ots::{
     DecisionType, MessageRole, OTSChoice, OTSConsequence, OTSContext, OTSDecision, OTSMessage,
     OTSMessageContent, OTSMetadata, OutcomeType, TrajectoryBuilder,
@@ -13,6 +14,9 @@ use tokio::io::{self, AsyncBufReadExt, AsyncWriteExt, BufReader};
 
 use super::McpConfig;
 use super::protocol::dispatch_json_line;
+
+const OTS_UPLOAD_MAX_ATTEMPTS: u32 = 3;
+const OTS_UPLOAD_RETRY_DELAY_MS: u64 = 100;
 
 /// Client identity received from the MCP `initialize` handshake.
 #[derive(Clone, Debug, Default)]
@@ -246,34 +250,9 @@ impl RuntimeContext {
         let trajectory_id = trajectory.trajectory_id.clone();
         let json = serde_json::to_string(&trajectory)?;
 
-        let url = format!("{}/api/ots/trajectories", self.base_url);
-        let mut request = self
-            .http
-            .post(&url)
-            .body(json)
-            .header("Content-Type", "application/json")
-            .header("X-Tenant-Id", self.primary_tenant());
-
-        if let Some(primary_entity_type) = self.primary_entity_type() {
-            request = request.header("X-Entity-Type", primary_entity_type);
-        }
-        if let Some(ref agent_id) = self.agent_id {
-            request = request.header("X-Agent-Id", agent_id);
-        }
-        if let Some(ref session_id) = self.session_id {
-            request = request.header("X-Session-Id", session_id);
-        }
-        if let Some(ref api_key) = self.api_key {
-            request = request.header("Authorization", format!("Bearer {api_key}"));
-        }
-
-        let resp = request.send().await?;
-        if resp.status().is_success() {
-            tracing::info!("ots.trajectory.flushed");
-            Ok(trajectory_id)
-        } else {
-            bail!("flush failed: HTTP {}", resp.status());
-        }
+        self.upload_trajectory_json(json).await?;
+        tracing::info!("ots.trajectory.flushed");
+        Ok(trajectory_id)
     }
 
     /// Finalize and POST the trajectory to the server.
@@ -291,6 +270,55 @@ impl RuntimeContext {
             }
         };
 
+        match self.upload_trajectory_json(json).await {
+            Ok(()) => {
+                tracing::info!("ots.trajectory.uploaded");
+            }
+            Err(e) => {
+                tracing::warn!(error = %e, "ots.trajectory.upload_failed");
+            }
+        }
+    }
+
+    async fn upload_trajectory_json(&self, json: String) -> Result<()> {
+        let max_attempts = std::env::var("TEMPER_MCP_OTS_UPLOAD_MAX_ATTEMPTS")
+            .ok()
+            .and_then(|value| value.trim().parse::<u32>().ok())
+            .filter(|attempts| *attempts > 0)
+            .unwrap_or(OTS_UPLOAD_MAX_ATTEMPTS); // determinism-ok: MCP client runtime config
+        let retry_delay = Duration::from_millis(
+            std::env::var("TEMPER_MCP_OTS_UPLOAD_RETRY_DELAY_MS")
+                .ok()
+                .and_then(|value| value.trim().parse::<u64>().ok())
+                .unwrap_or(OTS_UPLOAD_RETRY_DELAY_MS),
+        ); // determinism-ok: MCP client runtime config
+
+        let mut last_error = None;
+        for attempt in 1..=max_attempts {
+            match self.send_trajectory_json(json.clone()).await {
+                Ok(()) => return Ok(()),
+                Err(error) if attempt < max_attempts && error.retryable => {
+                    tracing::warn!(
+                        attempt,
+                        max_attempts,
+                        error = %error.message,
+                        "ots.trajectory.upload_retry"
+                    );
+                    last_error = Some(error.message);
+                    tokio::time::sleep(retry_delay).await;
+                }
+                Err(error) => {
+                    return Err(anyhow::anyhow!(error.message));
+                }
+            }
+        }
+
+        Err(anyhow::anyhow!(last_error.unwrap_or_else(|| {
+            "OTS trajectory upload failed".to_string()
+        })))
+    }
+
+    async fn send_trajectory_json(&self, json: String) -> Result<(), TrajectoryUploadError> {
         let url = format!("{}/api/ots/trajectories", self.base_url);
         let mut request = self
             .http
@@ -302,7 +330,6 @@ impl RuntimeContext {
         if let Some(primary_entity_type) = self.primary_entity_type() {
             request = request.header("X-Entity-Type", primary_entity_type);
         }
-
         if let Some(ref agent_id) = self.agent_id {
             request = request.header("X-Agent-Id", agent_id);
         }
@@ -314,18 +341,22 @@ impl RuntimeContext {
         }
 
         match request.send().await {
-            Ok(resp) if resp.status().is_success() => {
-                tracing::info!("ots.trajectory.uploaded");
-            }
+            Ok(resp) if resp.status().is_success() => Ok(()),
             Ok(resp) => {
-                tracing::warn!(
-                    status = resp.status().as_u16(),
-                    "ots.trajectory.upload_failed"
-                );
+                let status = resp.status();
+                Err(TrajectoryUploadError {
+                    message: format!("HTTP {status}"),
+                    retryable: status.as_u16() == 503
+                        || status.as_u16() == 408
+                        || status.as_u16() == 425
+                        || status.as_u16() == 429
+                        || status.is_server_error(),
+                })
             }
-            Err(e) => {
-                tracing::warn!(error = %e, "ots.trajectory.upload_failed");
-            }
+            Err(error) => Err(TrajectoryUploadError {
+                message: error.to_string(),
+                retryable: true,
+            }),
         }
     }
 
@@ -415,6 +446,11 @@ impl RuntimeContext {
             )
             .await
     }
+}
+
+struct TrajectoryUploadError {
+    message: String,
+    retryable: bool,
 }
 
 fn extract_trajectory_actions_from_code(code: &str) -> Vec<Value> {
@@ -837,6 +873,11 @@ pub async fn run_stdio_server(config: McpConfig) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use axum::{Router, extract::State, http::StatusCode, routing::post};
+    use std::sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
+    };
 
     #[test]
     fn extract_trajectory_actions_from_temper_action_calls() {
@@ -890,5 +931,48 @@ await temper.create("tenant-b", "Task", {"Title": "x"})
             }),
             "expected tenant-b/Task metadata"
         );
+    }
+
+    #[tokio::test]
+    async fn finalize_trajectory_retries_retryable_ots_upload_failure() {
+        async fn handler(State(attempts): State<Arc<AtomicUsize>>) -> StatusCode {
+            let attempt = attempts.fetch_add(1, Ordering::SeqCst);
+            if attempt == 0 {
+                StatusCode::SERVICE_UNAVAILABLE
+            } else {
+                StatusCode::ACCEPTED
+            }
+        }
+
+        let attempts = Arc::new(AtomicUsize::new(0));
+        let app = Router::new()
+            .route("/api/ots/trajectories", post(handler))
+            .with_state(attempts.clone());
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind test server");
+        let addr = listener.local_addr().expect("test server addr");
+        tokio::spawn(async move {
+            axum::serve(listener, app).await.expect("serve test server");
+        });
+
+        let mut ctx = RuntimeContext {
+            base_url: format!("http://{addr}"),
+            http: reqwest::Client::new(),
+            agent_id: Some("agent".to_string()),
+            agent_type: Some("test-agent".to_string()),
+            session_id: Some("session".to_string()),
+            api_key: None,
+            identity_tenant: "tenant".to_string(),
+            sandbox: temper_sandbox::runner::PersistentSandbox::new(&[("temper", "Temper", 1)]),
+            trajectory: None,
+            tenants_seen: BTreeMap::new(),
+            entity_types_seen: BTreeMap::new(),
+        };
+        ctx.init_trajectory();
+
+        ctx.finalize_trajectory().await;
+
+        assert_eq!(attempts.load(Ordering::SeqCst), 2);
     }
 }
