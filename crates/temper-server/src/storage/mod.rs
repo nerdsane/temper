@@ -23,10 +23,10 @@ use temper_runtime::persistence::{
 use temper_store_postgres::{PostgresEventStore, PostgresPolicyRow, PostgresTrajectoryInsert};
 use temper_store_turso::{
     ActionStats, AgentSummary, DesignTimeEventRow, EvolutionRecordRow, FeatureRequestRow,
-    OtsTrajectoryParams, OtsTrajectoryRow, PolicyDenialPatternRow, PolicyRow as TursoPolicyRow,
-    TenantStoreRouter, TenantUserRow, TursoEventStore, TursoTrajectoryInsert, TursoTrajectoryRow,
-    TursoWasmInvocationInsert, TursoWasmInvocationRow, TursoWasmModuleMetadataRow,
-    UnmetIntentAggRow, store::TrajectoryStats,
+    OtsQueuedTrajectoryRow, OtsTrajectoryParams, OtsTrajectoryRow, PolicyDenialPatternRow,
+    PolicyRow as TursoPolicyRow, TenantStoreRouter, TenantUserRow, TursoEventStore,
+    TursoTrajectoryInsert, TursoTrajectoryRow, TursoWasmInvocationInsert, TursoWasmInvocationRow,
+    TursoWasmModuleMetadataRow, UnmetIntentAggRow, store::TrajectoryStats,
 };
 
 use crate::platform_store::PlatformStore;
@@ -545,6 +545,27 @@ pub trait OtsStore: Send + Sync {
         &self,
         params: &OtsTrajectoryParams<'_>,
     ) -> Result<(), PersistenceError>;
+
+    async fn enqueue_ots_trajectory(
+        &self,
+        params: &OtsTrajectoryParams<'_>,
+    ) -> Result<(), PersistenceError>;
+
+    async fn mark_ots_trajectory_persisted(
+        &self,
+        trajectory_id: &str,
+    ) -> Result<(), PersistenceError>;
+
+    async fn mark_ots_trajectory_failed(
+        &self,
+        trajectory_id: &str,
+        error: &str,
+    ) -> Result<(), PersistenceError>;
+
+    async fn list_queued_ots_trajectories(
+        &self,
+        limit: i64,
+    ) -> Result<Vec<OtsQueuedTrajectoryRow>, PersistenceError>;
 
     async fn list_ots_trajectories(
         &self,
@@ -1688,6 +1709,46 @@ impl OtsStore for PostgresEventStore {
         .await
     }
 
+    async fn enqueue_ots_trajectory(
+        &self,
+        params: &OtsTrajectoryParams<'_>,
+    ) -> Result<(), PersistenceError> {
+        self.enqueue_ots_trajectory(&temper_store_postgres::PostgresOtsTrajectoryParams {
+            trajectory_id: params.trajectory_id,
+            tenant: params.tenant,
+            agent_id: params.agent_id,
+            session_id: params.session_id,
+            outcome: params.outcome,
+            turn_count: params.turn_count,
+            data: params.data,
+        })
+        .await
+    }
+
+    async fn mark_ots_trajectory_persisted(
+        &self,
+        trajectory_id: &str,
+    ) -> Result<(), PersistenceError> {
+        self.mark_ots_trajectory_persisted(trajectory_id).await
+    }
+
+    async fn mark_ots_trajectory_failed(
+        &self,
+        trajectory_id: &str,
+        error: &str,
+    ) -> Result<(), PersistenceError> {
+        self.mark_ots_trajectory_failed(trajectory_id, error).await
+    }
+
+    async fn list_queued_ots_trajectories(
+        &self,
+        limit: i64,
+    ) -> Result<Vec<OtsQueuedTrajectoryRow>, PersistenceError> {
+        self.list_queued_ots_trajectories(limit)
+            .await
+            .map(|rows| rows.into_iter().map(pg_queued_ots_to_turso).collect())
+    }
+
     async fn list_ots_trajectories(
         &self,
         tenant: &str,
@@ -1715,6 +1776,35 @@ impl OtsStore for TursoEventStore {
         params: &OtsTrajectoryParams<'_>,
     ) -> Result<(), PersistenceError> {
         self.persist_ots_trajectory(params).await
+    }
+
+    async fn enqueue_ots_trajectory(
+        &self,
+        params: &OtsTrajectoryParams<'_>,
+    ) -> Result<(), PersistenceError> {
+        self.enqueue_ots_trajectory(params).await
+    }
+
+    async fn mark_ots_trajectory_persisted(
+        &self,
+        trajectory_id: &str,
+    ) -> Result<(), PersistenceError> {
+        self.mark_ots_trajectory_persisted(trajectory_id).await
+    }
+
+    async fn mark_ots_trajectory_failed(
+        &self,
+        trajectory_id: &str,
+        error: &str,
+    ) -> Result<(), PersistenceError> {
+        self.mark_ots_trajectory_failed(trajectory_id, error).await
+    }
+
+    async fn list_queued_ots_trajectories(
+        &self,
+        limit: i64,
+    ) -> Result<Vec<OtsQueuedTrajectoryRow>, PersistenceError> {
+        self.list_queued_ots_trajectories(limit).await
     }
 
     async fn list_ots_trajectories(
@@ -2104,7 +2194,26 @@ fn pg_ots_to_turso(row: temper_store_postgres::PostgresOtsTrajectoryRow) -> OtsT
         session_id: row.session_id,
         outcome: row.outcome,
         turn_count: row.turn_count,
+        persistence_status: row.persistence_status,
+        persist_attempts: row.persist_attempts,
+        last_error: row.last_error,
         created_at: row.created_at,
+        updated_at: row.updated_at,
+    }
+}
+
+fn pg_queued_ots_to_turso(
+    row: temper_store_postgres::PostgresQueuedOtsTrajectoryRow,
+) -> OtsQueuedTrajectoryRow {
+    OtsQueuedTrajectoryRow {
+        trajectory_id: row.trajectory_id,
+        tenant: row.tenant,
+        agent_id: row.agent_id,
+        session_id: row.session_id,
+        outcome: row.outcome,
+        turn_count: row.turn_count,
+        data: row.data,
+        persist_attempts: row.persist_attempts,
     }
 }
 

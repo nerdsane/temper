@@ -2,168 +2,26 @@
 #![cfg_attr(not(feature = "observe"), allow(dead_code))]
 
 use std::sync::{
-    Arc, OnceLock,
+    Arc,
     atomic::{AtomicU64, AtomicUsize, Ordering},
 };
 use std::time::{Duration, Instant};
 
-use opentelemetry::{
-    KeyValue, global,
-    metrics::{Counter, Gauge, Histogram},
-};
 use temper_runtime::persistence::PersistenceError;
 use temper_store_turso::OtsTrajectoryParams;
 use tokio::sync::mpsc;
 use tracing::Instrument;
 
-use crate::storage::{MetadataStore, OtsStore};
+use crate::storage::{MetadataStore, MetadataStoreProvider, OtsStore};
 
-const DEFAULT_CAPACITY: usize = 512;
-const DEFAULT_DRAIN_BATCH: usize = 16;
-const DEFAULT_MAX_ATTEMPTS: u32 = 5;
-const DEFAULT_RETRY_DELAY_MS: u64 = 100;
+mod config;
+mod metrics;
 
-struct OtsOutboxMetrics {
-    depth: Gauge<u64>,
-    capacity: Gauge<u64>,
-    enqueued_total: Counter<u64>,
-    rejected_total: Counter<u64>,
-    retry_total: Counter<u64>,
-    persisted_total: Counter<u64>,
-    failed_total: Counter<u64>,
-    persist_latency_ms: Histogram<f64>,
-}
-
-fn metrics() -> &'static OtsOutboxMetrics {
-    static METRICS: OnceLock<OtsOutboxMetrics> = OnceLock::new();
-    METRICS.get_or_init(|| {
-        let meter = global::meter("temper.runtime");
-        OtsOutboxMetrics {
-            depth: meter
-                .u64_gauge("temper_ots_trajectory_outbox_depth")
-                .with_description("Current number of OTS trajectory artifacts pending persistence.")
-                .build(),
-            capacity: meter
-                .u64_gauge("temper_ots_trajectory_outbox_capacity")
-                .with_description("Configured OTS trajectory persistence outbox capacity.")
-                .build(),
-            enqueued_total: meter
-                .u64_counter("temper_ots_trajectory_outbox_enqueued_total")
-                .with_description("OTS trajectory artifacts accepted by the persistence outbox.")
-                .build(),
-            rejected_total: meter
-                .u64_counter("temper_ots_trajectory_outbox_rejected_total")
-                .with_description("OTS trajectory artifacts rejected because the outbox was full.")
-                .build(),
-            retry_total: meter
-                .u64_counter("temper_ots_trajectory_outbox_retry_total")
-                .with_description("OTS trajectory persistence attempts scheduled for retry.")
-                .build(),
-            persisted_total: meter
-                .u64_counter("temper_ots_trajectory_outbox_persisted_total")
-                .with_description("OTS trajectory artifacts persisted by the outbox.")
-                .build(),
-            failed_total: meter
-                .u64_counter("temper_ots_trajectory_outbox_failed_total")
-                .with_description("OTS trajectory artifacts that exhausted outbox retries.")
-                .build(),
-            persist_latency_ms: meter
-                .f64_histogram("temper_ots_trajectory_outbox_persist_latency_ms")
-                .with_unit("ms")
-                .with_description("Wall time for one OTS trajectory persistence attempt.")
-                .build(),
-        }
-    })
-}
-
-fn env_usize(name: &str, default: usize) -> usize {
-    std::env::var(name) // determinism-ok: observe persistence queue config read at startup
-        .ok()
-        .and_then(|value| value.trim().parse::<usize>().ok())
-        .filter(|value| *value > 0)
-        .unwrap_or(default)
-}
-
-fn env_u32(name: &str, default: u32) -> u32 {
-    std::env::var(name) // determinism-ok: observe persistence queue config read at startup
-        .ok()
-        .and_then(|value| value.trim().parse::<u32>().ok())
-        .filter(|value| *value > 0)
-        .unwrap_or(default)
-}
-
-fn env_u64(name: &str, default: u64) -> u64 {
-    std::env::var(name) // determinism-ok: observe persistence queue config read at startup
-        .ok()
-        .and_then(|value| value.trim().parse::<u64>().ok())
-        .filter(|value| *value > 0)
-        .unwrap_or(default)
-}
-
-fn outbox_config() -> OtsTrajectoryOutboxConfig {
-    OtsTrajectoryOutboxConfig {
-        capacity: env_usize("TEMPER_OTS_TRAJECTORY_OUTBOX_CAPACITY", DEFAULT_CAPACITY),
-        drain_batch: env_usize("TEMPER_OTS_TRAJECTORY_DRAIN_BATCH", DEFAULT_DRAIN_BATCH),
-        max_attempts: env_u32("TEMPER_OTS_TRAJECTORY_MAX_ATTEMPTS", DEFAULT_MAX_ATTEMPTS),
-        retry_delay: Duration::from_millis(env_u64(
-            "TEMPER_OTS_TRAJECTORY_RETRY_DELAY_MS",
-            DEFAULT_RETRY_DELAY_MS,
-        )),
-    }
-}
-
-fn attrs(item: &OtsTrajectoryWrite, backend: &'static str) -> [KeyValue; 3] {
-    [
-        KeyValue::new("tenant", item.tenant.clone()),
-        KeyValue::new("outcome", item.outcome.clone()),
-        KeyValue::new("backend", backend.to_string()),
-    ]
-}
-
-fn record_depth(depth: usize) {
-    metrics().depth.record(depth as u64, &[]);
-}
-
-fn record_capacity(capacity: usize) {
-    metrics().capacity.record(capacity as u64, &[]);
-}
-
-fn record_enqueue(item: &OtsTrajectoryWrite, backend: &'static str) {
-    metrics().enqueued_total.add(1, &attrs(item, backend));
-}
-
-fn record_rejected(item: &OtsTrajectoryWrite, backend: &'static str) {
-    metrics().rejected_total.add(1, &attrs(item, backend));
-}
-
-fn record_retry(item: &OtsTrajectoryWrite, backend: &'static str) {
-    metrics().retry_total.add(1, &attrs(item, backend));
-}
-
-fn record_persisted(item: &OtsTrajectoryWrite, backend: &'static str) {
-    metrics().persisted_total.add(1, &attrs(item, backend));
-}
-
-fn record_failed(item: &OtsTrajectoryWrite, backend: &'static str) {
-    metrics().failed_total.add(1, &attrs(item, backend));
-}
-
-fn record_persist_latency(
-    item: &OtsTrajectoryWrite,
-    backend: &'static str,
-    result: &str,
-    duration: Duration,
-) {
-    let attrs = [
-        KeyValue::new("tenant", item.tenant.clone()),
-        KeyValue::new("outcome", item.outcome.clone()),
-        KeyValue::new("backend", backend.to_string()),
-        KeyValue::new("result", result.to_string()),
-    ];
-    metrics()
-        .persist_latency_ms
-        .record(duration.as_secs_f64() * 1000.0, &attrs);
-}
+use config::outbox_config;
+use metrics::{
+    record_capacity, record_depth, record_enqueue, record_failed, record_persist_latency,
+    record_persisted, record_rejected, record_retry,
+};
 
 #[derive(Clone)]
 struct OtsTrajectoryOutboxConfig {
@@ -246,13 +104,85 @@ impl OtsTrajectoryOutbox {
         outbox
     }
 
-    pub(crate) fn try_enqueue_metadata_store(
+    pub(crate) async fn try_enqueue_metadata_store(
         &self,
         backend: &'static str,
         store: Arc<dyn MetadataStore>,
         item: OtsTrajectoryWrite,
     ) -> Result<(), OtsTrajectoryEnqueueError> {
-        self.try_enqueue(backend, Arc::new(MetadataOtsStore { inner: store }), item)
+        let store = Arc::new(MetadataOtsStore { inner: store });
+        store
+            .enqueue_ots_trajectory(&item.params())
+            .await
+            .map_err(|error| {
+                tracing::warn!(
+                    tenant = %item.tenant,
+                    trajectory_id = %item.trajectory_id,
+                    error = %error,
+                    "failed to durably enqueue OTS trajectory"
+                );
+                OtsTrajectoryEnqueueError::Closed
+            })?;
+        self.try_enqueue(backend, store, item)
+    }
+
+    pub(crate) fn recover_queued_metadata_stores(
+        self: &Arc<Self>,
+        backend: &'static str,
+        provider: Arc<dyn MetadataStoreProvider>,
+    ) {
+        let outbox = Arc::clone(self);
+        tokio::spawn(async move { outbox.recover_queued(backend, provider).await }); // determinism-ok: external observe persistence recovery
+    }
+
+    async fn recover_queued(
+        self: Arc<Self>,
+        backend: &'static str,
+        provider: Arc<dyn MetadataStoreProvider>,
+    ) {
+        let stores = provider.all_stores().await;
+        for store in stores {
+            let rows = match store.list_queued_ots_trajectories(1024).await {
+                Ok(rows) => rows,
+                Err(error) => {
+                    tracing::warn!(error = %error, "failed to load queued OTS trajectories for recovery");
+                    continue;
+                }
+            };
+            for row in rows {
+                let item = OtsTrajectoryWrite {
+                    trajectory_id: row.trajectory_id,
+                    tenant: row.tenant,
+                    agent_id: row.agent_id,
+                    session_id: row.session_id,
+                    outcome: row.outcome,
+                    turn_count: row.turn_count,
+                    data: row.data,
+                };
+                if let Err(error) = self.try_enqueue_recovered(
+                    backend,
+                    Arc::new(MetadataOtsStore {
+                        inner: store.clone(),
+                    }),
+                    item,
+                ) {
+                    tracing::warn!(
+                        ?error,
+                        "OTS trajectory recovery queue full or closed; row remains durable"
+                    );
+                    break;
+                }
+            }
+        }
+    }
+
+    fn try_enqueue_recovered(
+        &self,
+        backend: &'static str,
+        store: Arc<dyn OtsStore>,
+        item: OtsTrajectoryWrite,
+    ) -> Result<(), OtsTrajectoryEnqueueError> {
+        self.try_enqueue(backend, store, item)
     }
 
     fn try_enqueue(
@@ -343,6 +273,19 @@ impl OtsTrajectoryOutbox {
     ) -> Result<(), OtsTrajectoryEnqueueError> {
         self.try_enqueue("test", store, item)
     }
+
+    #[cfg(test)]
+    async fn try_enqueue_durable_for_tests(
+        &self,
+        store: Arc<dyn OtsStore>,
+        item: OtsTrajectoryWrite,
+    ) -> Result<(), OtsTrajectoryEnqueueError> {
+        store
+            .enqueue_ots_trajectory(&item.params())
+            .await
+            .map_err(|_| OtsTrajectoryEnqueueError::Closed)?;
+        self.try_enqueue("test", store, item)
+    }
 }
 
 async fn run_worker(
@@ -387,7 +330,7 @@ async fn persist_with_retries(
             let started_at = Instant::now();
             match queued
                 .store
-                .persist_ots_trajectory(&queued.item.params())
+                .mark_ots_trajectory_persisted(&queued.item.trajectory_id)
                 .await
             {
                 Ok(()) => {
@@ -434,6 +377,16 @@ async fn persist_with_retries(
                     );
                     record_failed(&queued.item, queued.backend);
                     failed_total.fetch_add(1, Ordering::Relaxed);
+                    if let Err(mark_error) = queued
+                        .store
+                        .mark_ots_trajectory_failed(&queued.item.trajectory_id, &error.to_string())
+                        .await
+                    {
+                        tracing::error!(
+                            error = %mark_error,
+                            "failed to mark OTS trajectory outbox row as failed"
+                        );
+                    }
                     tracing::error!(
                         error = %error,
                         attempts = attempt,
@@ -459,6 +412,39 @@ impl OtsStore for MetadataOtsStore {
         params: &OtsTrajectoryParams<'_>,
     ) -> Result<(), PersistenceError> {
         self.inner.persist_ots_trajectory(params).await
+    }
+
+    async fn enqueue_ots_trajectory(
+        &self,
+        params: &OtsTrajectoryParams<'_>,
+    ) -> Result<(), PersistenceError> {
+        self.inner.enqueue_ots_trajectory(params).await
+    }
+
+    async fn mark_ots_trajectory_persisted(
+        &self,
+        trajectory_id: &str,
+    ) -> Result<(), PersistenceError> {
+        self.inner
+            .mark_ots_trajectory_persisted(trajectory_id)
+            .await
+    }
+
+    async fn mark_ots_trajectory_failed(
+        &self,
+        trajectory_id: &str,
+        error: &str,
+    ) -> Result<(), PersistenceError> {
+        self.inner
+            .mark_ots_trajectory_failed(trajectory_id, error)
+            .await
+    }
+
+    async fn list_queued_ots_trajectories(
+        &self,
+        limit: i64,
+    ) -> Result<Vec<temper_store_turso::OtsQueuedTrajectoryRow>, PersistenceError> {
+        self.inner.list_queued_ots_trajectories(limit).await
     }
 
     async fn list_ots_trajectories(

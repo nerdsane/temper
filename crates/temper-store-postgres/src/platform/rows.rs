@@ -236,6 +236,7 @@ pub(super) fn row_to_design_time_event(row: sqlx::postgres::PgRow) -> PostgresDe
 
 pub(super) fn row_to_ots_trajectory(row: sqlx::postgres::PgRow) -> PostgresOtsTrajectoryRow {
     let created_at: chrono::DateTime<chrono::Utc> = row.get("created_at");
+    let updated_at: chrono::DateTime<chrono::Utc> = row.get("updated_at");
     PostgresOtsTrajectoryRow {
         trajectory_id: row.get("trajectory_id"),
         tenant: row.get("tenant"),
@@ -243,7 +244,27 @@ pub(super) fn row_to_ots_trajectory(row: sqlx::postgres::PgRow) -> PostgresOtsTr
         session_id: row.get("session_id"),
         outcome: row.get("outcome"),
         turn_count: row.get("turn_count"),
+        persistence_status: row.get("persistence_status"),
+        persist_attempts: row.get("persist_attempts"),
+        last_error: row.get("last_error"),
         created_at: created_at.to_rfc3339(),
+        updated_at: updated_at.to_rfc3339(),
+    }
+}
+
+pub(super) fn row_to_queued_ots_trajectory(
+    row: sqlx::postgres::PgRow,
+) -> PostgresQueuedOtsTrajectoryRow {
+    let data: serde_json::Value = row.get("data");
+    PostgresQueuedOtsTrajectoryRow {
+        trajectory_id: row.get("trajectory_id"),
+        tenant: row.get("tenant"),
+        agent_id: row.get("agent_id"),
+        session_id: row.get("session_id"),
+        outcome: row.get("outcome"),
+        turn_count: row.get("turn_count"),
+        data: data.to_string(),
+        persist_attempts: row.get("persist_attempts"),
     }
 }
 

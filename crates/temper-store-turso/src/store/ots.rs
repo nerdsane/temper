@@ -16,7 +16,24 @@ pub struct OtsTrajectoryRow {
     pub session_id: String,
     pub outcome: String,
     pub turn_count: i64,
+    pub persistence_status: String,
+    pub persist_attempts: i64,
+    pub last_error: Option<String>,
     pub created_at: String,
+    pub updated_at: String,
+}
+
+/// Durable queued OTS trajectory row ready for outbox replay.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct OtsQueuedTrajectoryRow {
+    pub trajectory_id: String,
+    pub tenant: String,
+    pub agent_id: String,
+    pub session_id: String,
+    pub outcome: String,
+    pub turn_count: i64,
+    pub data: String,
+    pub persist_attempts: i64,
 }
 
 /// Parameters for persisting an OTS trajectory.
@@ -44,7 +61,9 @@ impl TursoEventStore {
         let _timer = TursoQueryTimer::start("turso.persist_ots_trajectory");
         let conn = self.connection()?;
         conn.execute(
-            "INSERT OR REPLACE INTO ots_trajectories (trajectory_id, tenant, agent_id, session_id, outcome, turn_count, data, created_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, datetime('now'))",
+            "INSERT OR REPLACE INTO ots_trajectories \
+             (trajectory_id, tenant, agent_id, session_id, outcome, turn_count, data, persistence_status, persist_attempts, last_error, created_at, updated_at) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, 'persisted', 0, NULL, datetime('now'), datetime('now'))",
             params![
                 p.trajectory_id.to_string(),
                 p.tenant.to_string(),
@@ -58,6 +77,113 @@ impl TursoEventStore {
         .await
         .map_err(storage_error)?;
         Ok(())
+    }
+
+    /// Durably admit an OTS trajectory artifact for background status advancement.
+    #[instrument(skip_all, fields(
+        otel.name = "turso.enqueue_ots_trajectory",
+        trajectory_id = %p.trajectory_id,
+        agent_id = %p.agent_id,
+    ))]
+    pub async fn enqueue_ots_trajectory(
+        &self,
+        p: &OtsTrajectoryParams<'_>,
+    ) -> Result<(), PersistenceError> {
+        let _timer = TursoQueryTimer::start("turso.enqueue_ots_trajectory");
+        let conn = self.connection()?;
+        conn.execute(
+            "INSERT INTO ots_trajectories \
+             (trajectory_id, tenant, agent_id, session_id, outcome, turn_count, data, persistence_status, persist_attempts, last_error, created_at, updated_at) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, 'queued', 0, NULL, datetime('now'), datetime('now')) \
+             ON CONFLICT(trajectory_id) DO UPDATE SET \
+                tenant = excluded.tenant, agent_id = excluded.agent_id, session_id = excluded.session_id, \
+                outcome = excluded.outcome, turn_count = excluded.turn_count, data = excluded.data, \
+                persistence_status = 'queued', last_error = NULL, updated_at = datetime('now')",
+            params![
+                p.trajectory_id.to_string(),
+                p.tenant.to_string(),
+                p.agent_id.to_string(),
+                p.session_id.to_string(),
+                p.outcome.to_string(),
+                p.turn_count,
+                p.data.to_string(),
+            ],
+        )
+        .await
+        .map_err(storage_error)?;
+        Ok(())
+    }
+
+    /// Mark a queued OTS trajectory as persisted.
+    pub async fn mark_ots_trajectory_persisted(
+        &self,
+        trajectory_id: &str,
+    ) -> Result<(), PersistenceError> {
+        let _timer = TursoQueryTimer::start("turso.mark_ots_trajectory_persisted");
+        let conn = self.connection()?;
+        conn.execute(
+            "UPDATE ots_trajectories \
+             SET persistence_status = 'persisted', last_error = NULL, updated_at = datetime('now') \
+             WHERE trajectory_id = ?1",
+            params![trajectory_id.to_string()],
+        )
+        .await
+        .map_err(storage_error)?;
+        Ok(())
+    }
+
+    /// Mark a queued OTS trajectory as failed after retries exhaust.
+    pub async fn mark_ots_trajectory_failed(
+        &self,
+        trajectory_id: &str,
+        error: &str,
+    ) -> Result<(), PersistenceError> {
+        let _timer = TursoQueryTimer::start("turso.mark_ots_trajectory_failed");
+        let conn = self.connection()?;
+        conn.execute(
+            "UPDATE ots_trajectories \
+             SET persistence_status = 'failed', persist_attempts = persist_attempts + 1, last_error = ?2, updated_at = datetime('now') \
+             WHERE trajectory_id = ?1",
+            params![trajectory_id.to_string(), error.to_string()],
+        )
+        .await
+        .map_err(storage_error)?;
+        Ok(())
+    }
+
+    /// List queued OTS trajectory artifacts for startup replay.
+    pub async fn list_queued_ots_trajectories(
+        &self,
+        limit: i64,
+    ) -> Result<Vec<OtsQueuedTrajectoryRow>, PersistenceError> {
+        let _timer = TursoQueryTimer::start("turso.list_queued_ots_trajectories");
+        let conn = self.connection()?;
+        let mut rows = conn
+            .query(
+                "SELECT trajectory_id, tenant, agent_id, session_id, outcome, turn_count, data, persist_attempts \
+                 FROM ots_trajectories \
+                 WHERE persistence_status = 'queued' \
+                 ORDER BY updated_at ASC, created_at ASC \
+                 LIMIT ?1",
+                params![limit],
+            )
+            .await
+            .map_err(storage_error)?;
+
+        let mut result = Vec::new();
+        while let Some(row) = rows.next().await.map_err(storage_error)? {
+            result.push(OtsQueuedTrajectoryRow {
+                trajectory_id: row.get(0).unwrap_or_default(),
+                tenant: row.get(1).unwrap_or_default(),
+                agent_id: row.get(2).unwrap_or_default(),
+                session_id: row.get(3).unwrap_or_default(),
+                outcome: row.get(4).unwrap_or_default(),
+                turn_count: row.get(5).unwrap_or(0),
+                data: row.get(6).unwrap_or_default(),
+                persist_attempts: row.get(7).unwrap_or(0),
+            });
+        }
+        Ok(result)
     }
 
     /// List OTS trajectories (metadata only, without full data blob).
@@ -74,7 +200,7 @@ impl TursoEventStore {
 
         // Build query with optional filters.
         let mut sql = String::from(
-            "SELECT trajectory_id, tenant, agent_id, session_id, outcome, turn_count, created_at FROM ots_trajectories WHERE tenant = ?1",
+            "SELECT trajectory_id, tenant, agent_id, session_id, outcome, turn_count, persistence_status, persist_attempts, last_error, created_at, updated_at FROM ots_trajectories WHERE tenant = ?1",
         );
         let mut idx = 2;
         if agent_id.is_some() {
@@ -108,7 +234,11 @@ impl TursoEventStore {
                 session_id: row.get(3).unwrap_or_default(),
                 outcome: row.get(4).unwrap_or_default(),
                 turn_count: row.get(5).unwrap_or(0),
-                created_at: row.get(6).unwrap_or_default(),
+                persistence_status: row.get(6).unwrap_or_else(|_| "persisted".to_string()),
+                persist_attempts: row.get(7).unwrap_or(0),
+                last_error: row.get(8).ok(),
+                created_at: row.get(9).unwrap_or_default(),
+                updated_at: row.get(10).unwrap_or_default(),
             });
         }
 
@@ -137,5 +267,85 @@ impl TursoEventStore {
         } else {
             Ok(None)
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    async fn test_store() -> (TursoEventStore, tempfile::TempDir) {
+        let dir = tempfile::tempdir().expect("create temp dir");
+        let db_path = dir.path().join("ots-outbox.db");
+        let db_url = format!("file:{}", db_path.display());
+        let store = TursoEventStore::new(&db_url, None)
+            .await
+            .expect("create local turso store");
+        (store, dir)
+    }
+
+    fn params<'a>(trajectory_id: &'a str, data: &'a str) -> OtsTrajectoryParams<'a> {
+        OtsTrajectoryParams {
+            trajectory_id,
+            tenant: "tenant",
+            agent_id: "agent",
+            session_id: "session",
+            outcome: "success",
+            turn_count: 2,
+            data,
+        }
+    }
+
+    #[tokio::test]
+    async fn ots_outbox_status_lifecycle_is_durable() {
+        let (store, _dir) = test_store().await;
+        let data = r#"{"trajectory_id":"traj-durable","turns":[]}"#;
+
+        store
+            .enqueue_ots_trajectory(&params("traj-durable", data))
+            .await
+            .expect("enqueue trajectory");
+
+        let rows = store
+            .list_ots_trajectories("tenant", None, None, 10)
+            .await
+            .expect("list trajectories");
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].persistence_status, "queued");
+
+        let queued = store
+            .list_queued_ots_trajectories(10)
+            .await
+            .expect("list queued trajectories");
+        assert_eq!(queued.len(), 1);
+        assert_eq!(queued[0].trajectory_id, "traj-durable");
+        assert_eq!(queued[0].data, data);
+
+        store
+            .mark_ots_trajectory_persisted("traj-durable")
+            .await
+            .expect("mark persisted");
+        let rows = store
+            .list_ots_trajectories("tenant", None, None, 10)
+            .await
+            .expect("list persisted trajectory");
+        assert_eq!(rows[0].persistence_status, "persisted");
+        assert!(rows[0].last_error.is_none());
+
+        store
+            .enqueue_ots_trajectory(&params("traj-durable", data))
+            .await
+            .expect("requeue trajectory");
+        store
+            .mark_ots_trajectory_failed("traj-durable", "transient")
+            .await
+            .expect("mark failed");
+        let rows = store
+            .list_ots_trajectories("tenant", None, None, 10)
+            .await
+            .expect("list failed trajectory");
+        assert_eq!(rows[0].persistence_status, "failed");
+        assert_eq!(rows[0].persist_attempts, 1);
+        assert_eq!(rows[0].last_error.as_deref(), Some("transient"));
     }
 }

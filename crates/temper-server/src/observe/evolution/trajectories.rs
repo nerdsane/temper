@@ -295,7 +295,10 @@ pub(crate) async fn handle_post_ots_trajectory(
         data: body,
     };
 
-    match outbox.try_enqueue_metadata_store(backend, store, write) {
+    match outbox
+        .try_enqueue_metadata_store(backend, store, write)
+        .await
+    {
         Ok(()) => {
             tracing::info!(
                 tenant = %tenant,

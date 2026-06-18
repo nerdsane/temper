@@ -30,9 +30,10 @@ pub use platform::{
     PostgresEvolutionRecordRow, PostgresFeatureRequestRow, PostgresInstalledAppRow,
     PostgresOtsTrajectoryParams, PostgresOtsTrajectoryRow, PostgresPolicyDenialPatternRow,
     PostgresPolicyRow, PostgresProjectedEntityFieldsRow, PostgresPublishedArtifactRow,
-    PostgresPublishedArtifactUpsert, PostgresSecretRow, PostgresSpecRow,
-    PostgresSpecVerificationUpdate, PostgresTrajectoryInsert, PostgresTrajectoryRow,
-    PostgresTrajectoryStats, PostgresUnmetIntentAggRow, PostgresWasmInvocationInsert,
-    PostgresWasmInvocationRow, PostgresWasmModuleMetadataRow, PostgresWasmModuleRow,
+    PostgresPublishedArtifactUpsert, PostgresQueuedOtsTrajectoryRow, PostgresSecretRow,
+    PostgresSpecRow, PostgresSpecVerificationUpdate, PostgresTrajectoryInsert,
+    PostgresTrajectoryRow, PostgresTrajectoryStats, PostgresUnmetIntentAggRow,
+    PostgresWasmInvocationInsert, PostgresWasmInvocationRow, PostgresWasmModuleMetadataRow,
+    PostgresWasmModuleRow,
 };
 pub use store::PostgresEventStore;

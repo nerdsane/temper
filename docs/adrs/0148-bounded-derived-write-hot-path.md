@@ -89,16 +89,21 @@ bounded page, filtered lookup, or latest-session style query.
 follow-up read immediately asks Postgres and the actor layer to hydrate every
 Session row.
 
-### Sub-Decision 4: OTS And Terminal Session Emission Use Durable Outbox Semantics
+### Sub-Decision 4: OTS Uploads Use Durable Admission And Retryable Status
 
 Full OTS trajectory POST persistence and terminal Session trajectory emission
-effects are not dispatch-critical. They use a durable or replay-safe outbox
-with bounded in-memory admission, batched drains, and Session-visible emission
-status fields that distinguish `queued`, `persisted`, and `failed`.
+effects are not dispatch-critical. The POST handler durably records the
+artifact by `trajectory_id` with a persistence status before acknowledging the
+upload. A bounded in-memory worker drains accepted work and advances the
+durable status from `queued` to `persisted` or `failed`; restart recovery can
+replay rows still marked `queued`. MCP clients treat `503` and transient
+transport errors as retryable with bounded backoff, including final trajectory
+uploads on session close.
 
 **Why this approach**: Foresight needs reliable trajectory artifacts, but the
-large JSON artifact write should not decide the latency of the Session state
-transition that made it eligible for emission.
+terminal Session transition should not be coupled to a best-effort in-memory
+side effect. The durable admission write is the reliability boundary; the
+status transition and any retry/failure accounting happen outside dispatch.
 
 ## Rollout Plan
 
@@ -109,9 +114,9 @@ transition that made it eligible for emission.
 2. **Same effort** -- add Session query tests for the Foresight/DSF2 query
    shapes and make the query plane satisfy them without full table
    materialization.
-3. **Same effort or narrow follow-up PR** -- move the full OTS trajectory
-   persistence path behind the durable outbox when the touched code confirms
-   it is directly on the canonical run hot path.
+3. **Same effort** -- give OTS trajectory uploads durable admission,
+   retryable MCP finalization, and status telemetry so terminal artifacts are
+   not silently lost under transient saturation.
 
 ## Readiness Gates
 
@@ -121,8 +126,13 @@ transition that made it eligible for emission.
 - Composite dispatch does not synchronously wait for query projection writes
   after the atomic journal batch commits.
 - Supported Session OData queries are bounded in the backing store.
+- OTS upload admission either returns success after a durable queued row exists
+  or returns a retryable error to the caller.
+- MCP final trajectory upload retries `503` and transient transport failures
+  with a bounded backoff.
 - Datadog re-measurement uses `@version:<deployed-version>` and
-  `@peer.service:foresight-supabase`.
+  the active database peer/service tag for the deployed target (`Postgres-v79y`
+  currently reports as `foresight-railway-postgres`).
 
 ## Consequences
 
@@ -139,8 +149,13 @@ transition that made it eligible for emission.
 
 - Some reads must reason about projection freshness instead of assuming the
   projection is always current at dispatch acknowledgement time.
+- Keyed and bounded-candidate OData reads can fall back to actor materialization
+  and repair missing catalog rows; pure collection membership remains eventual
+  until the projection queue catches up.
 - A saturated derived-write queue can delay OData collection freshness, though
   the journal remains authoritative.
+- OTS POST acknowledgements now mean durable admission, not necessarily that
+  downstream status advancement has completed.
 
 ### Risks
 
@@ -150,6 +165,10 @@ transition that made it eligible for emission.
 - If a read path cannot tolerate projection lag and lacks actor fallback, it
   can observe stale data. Mitigation: add sequence-aware read tests for the
   Foresight/DSF2 Session paths touched by this work.
+- If the durable OTS admission write itself is slow, the POST caller still
+  pays that cost. Mitigation: keep the admission row keyed and compact, retry
+  transient failures at the MCP boundary, and measure the outbox status/latency
+  metrics separately from dispatch latency.
 
 ### DST Compliance
 

@@ -1,4 +1,6 @@
 use super::*;
+use std::collections::BTreeMap;
+use std::sync::Mutex;
 use std::sync::atomic::AtomicBool;
 use tokio::sync::Notify;
 
@@ -6,6 +8,10 @@ use tokio::sync::Notify;
 struct FakeOtsStore {
     attempts: AtomicU64,
     fail_attempts: AtomicU64,
+    enqueue_attempts: AtomicU64,
+    mark_persisted_attempts: AtomicU64,
+    mark_failed_attempts: AtomicU64,
+    status: Mutex<BTreeMap<String, String>>,
     persist_started: Notify,
     allow_persist: Notify,
     block_first_persist: AtomicBool,
@@ -31,6 +37,61 @@ impl OtsStore for FakeOtsStore {
         Ok(())
     }
 
+    async fn enqueue_ots_trajectory(
+        &self,
+        params: &OtsTrajectoryParams<'_>,
+    ) -> Result<(), PersistenceError> {
+        self.enqueue_attempts.fetch_add(1, Ordering::Relaxed);
+        self.status
+            .lock()
+            .expect("fake status mutex poisoned")
+            .insert(params.trajectory_id.to_string(), "queued".to_string());
+        Ok(())
+    }
+
+    async fn mark_ots_trajectory_persisted(
+        &self,
+        trajectory_id: &str,
+    ) -> Result<(), PersistenceError> {
+        self.attempts.fetch_add(1, Ordering::Relaxed);
+        self.mark_persisted_attempts.fetch_add(1, Ordering::Relaxed);
+        self.persist_started.notify_waiters();
+        if self.block_first_persist.swap(false, Ordering::Relaxed) {
+            self.allow_persist.notified().await;
+        }
+        if self.fail_attempts.load(Ordering::Relaxed) > 0 {
+            self.fail_attempts.fetch_sub(1, Ordering::Relaxed);
+            return Err(PersistenceError::Storage(
+                "temporary OTS failure".to_string(),
+            ));
+        }
+        self.status
+            .lock()
+            .expect("fake status mutex poisoned")
+            .insert(trajectory_id.to_string(), "persisted".to_string());
+        Ok(())
+    }
+
+    async fn mark_ots_trajectory_failed(
+        &self,
+        trajectory_id: &str,
+        _error: &str,
+    ) -> Result<(), PersistenceError> {
+        self.mark_failed_attempts.fetch_add(1, Ordering::Relaxed);
+        self.status
+            .lock()
+            .expect("fake status mutex poisoned")
+            .insert(trajectory_id.to_string(), "failed".to_string());
+        Ok(())
+    }
+
+    async fn list_queued_ots_trajectories(
+        &self,
+        _limit: i64,
+    ) -> Result<Vec<temper_store_turso::OtsQueuedTrajectoryRow>, PersistenceError> {
+        Ok(Vec::new())
+    }
+
     async fn list_ots_trajectories(
         &self,
         _tenant: &str,
@@ -47,6 +108,15 @@ impl OtsStore for FakeOtsStore {
     ) -> Result<Option<String>, PersistenceError> {
         Ok(None)
     }
+}
+
+fn status(store: &FakeOtsStore, id: &str) -> Option<String> {
+    store
+        .status
+        .lock()
+        .expect("fake status mutex poisoned")
+        .get(id)
+        .cloned()
 }
 
 fn item(id: &str) -> OtsTrajectoryWrite {
@@ -98,6 +168,24 @@ async fn enqueue_does_not_wait_for_slow_persistence() {
 }
 
 #[tokio::test]
+async fn durable_admission_records_queued_before_enqueue_ack() {
+    let store = Arc::new(FakeOtsStore {
+        block_first_persist: AtomicBool::new(true),
+        ..FakeOtsStore::default()
+    });
+    let outbox = OtsTrajectoryOutbox::start_for_tests(2, 1, 2, Duration::from_millis(1));
+
+    outbox
+        .try_enqueue_durable_for_tests(store.clone(), item("traj-durable"))
+        .await
+        .expect("durable enqueue should accept artifact");
+
+    assert_eq!(store.enqueue_attempts.load(Ordering::Relaxed), 1);
+    assert_eq!(status(&store, "traj-durable").as_deref(), Some("queued"));
+    store.allow_persist.notify_waiters();
+}
+
+#[tokio::test]
 async fn failed_persistence_is_retried() {
     let store = Arc::new(FakeOtsStore {
         fail_attempts: AtomicU64::new(1),
@@ -118,6 +206,7 @@ async fn failed_persistence_is_retried() {
     .expect("retry should eventually persist");
     assert_eq!(store.attempts.load(Ordering::Relaxed), 2);
     assert_eq!(outbox.failed_total(), 0);
+    assert_eq!(status(&store, "traj-retry").as_deref(), Some("persisted"));
 }
 
 #[tokio::test]
@@ -141,6 +230,8 @@ async fn exhausted_retries_are_visible() {
     .expect("terminal failure should release queue depth");
     assert_eq!(store.attempts.load(Ordering::Relaxed), 2);
     assert_eq!(outbox.failed_total(), 1);
+    assert_eq!(store.mark_failed_attempts.load(Ordering::Relaxed), 1);
+    assert_eq!(status(&store, "traj-fail").as_deref(), Some("failed"));
 }
 
 #[tokio::test]

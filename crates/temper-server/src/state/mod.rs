@@ -569,8 +569,9 @@ impl ServerState {
                 *slot = Some(queue);
             }
         }
-        if stack.metadata.is_some() {
+        if let Some(metadata) = stack.metadata.clone() {
             let queue = OtsTrajectoryOutbox::start();
+            queue.recover_queued_metadata_stores(stack.backend.as_str(), metadata);
             if let Ok(mut slot) = self.ots_trajectory_outbox.lock() {
                 *slot = Some(queue);
             }

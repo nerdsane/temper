@@ -5,6 +5,7 @@ use super::types::{
 use super::*;
 use crate::registry::SpecRegistry;
 use crate::request_context::AgentContext;
+use crate::storage::{CatalogRowsLoad, load_catalog_rows_by_id};
 use crate::{ServerState, StorageStack};
 use temper_authz::SecurityContext;
 use temper_odata::query::types::{
@@ -281,6 +282,79 @@ async fn row_authorized_first_page_can_stop_after_proof() {
         result.telemetry.strategy,
         QueryPlaneReadStrategy::ReadSourceCursor
     );
+}
+
+#[tokio::test]
+async fn projection_lagged_actor_write_repairs_missing_catalog_row() {
+    let db_path =
+        std::env::temp_dir().join(format!("temper-query-plane-lag-repair-{}.db", sim_uuid()));
+    let _ = std::fs::remove_file(&db_path);
+    let db_url = format!("file:{}", db_path.display());
+    let store = TursoEventStore::new(&db_url, None)
+        .await
+        .expect("create local turso db");
+    let mut state = build_order_state("query-plane-lag-repair");
+    create_orders(&state, 1).await;
+    state.set_storage_stack(StorageStack::from_turso(store.clone()));
+    let tenant = TenantId::default();
+
+    let security_ctx = SecurityContext::system();
+    let query_options = QueryOptions {
+        filter: Some(FilterExpr::BinaryOp {
+            left: Box::new(FilterExpr::Property("Id".to_string())),
+            op: BinaryOperator::Eq,
+            right: Box::new(FilterExpr::Literal(ODataValue::String(
+                "ord-00".to_string(),
+            ))),
+        }),
+        top: Some(1),
+        select: Some(vec!["Id".to_string(), "Status".to_string()]),
+        ..QueryOptions::default()
+    };
+
+    let result = match read_entity_set_from_query_plane(QueryPlaneReadRequest {
+        state: &state,
+        tenant: &tenant,
+        security_ctx: &security_ctx,
+        entity_type: "Order",
+        entity_set_name: "Orders",
+        query_options: &query_options,
+        budget: QueryPlaneReadBudget {
+            default_page_size: 1,
+            max_entities: 10,
+        },
+    })
+    .await
+    {
+        Ok(result) => result,
+        Err(_) => panic!("lagged projection should fall back to actor and repair"),
+    };
+
+    assert_eq!(result.entities.len(), 1);
+    assert_eq!(result.entities[0]["Id"].as_str(), Some("ord-00"));
+    assert_eq!(
+        result.telemetry.strategy,
+        QueryPlaneReadStrategy::ReadSourceCursor
+    );
+    assert_eq!(
+        result.telemetry.fallback_reason,
+        QueryPlaneFallbackReason::CatalogCoverageGap
+    );
+    assert_eq!(result.telemetry.coverage.missing, 1);
+
+    let ids = vec!["ord-00".to_string()];
+    let query_plane = state
+        .query_plane_store()
+        .expect("query-plane store should be configured");
+    let repaired = load_catalog_rows_by_id(&query_plane, tenant.as_str(), "Order", &ids)
+        .await
+        .expect("load repaired catalog row");
+    let CatalogRowsLoad::Available(rows) = repaired else {
+        panic!("turso catalog row load should be supported");
+    };
+    assert!(rows.contains_key("ord-00"));
+
+    let _ = std::fs::remove_file(db_path);
 }
 
 #[tokio::test]
