@@ -18,6 +18,7 @@ mod serve;
 mod util;
 mod verify;
 mod verify_ioa;
+mod verify_remote;
 
 use std::path::PathBuf;
 
@@ -63,6 +64,21 @@ enum Commands {
         /// Path to the specs directory
         #[arg(short, long, default_value = "specs")]
         specs_dir: String,
+    },
+    /// Lint specs locally, then run the verification cascade on a remote Temper server
+    VerifyRemote {
+        /// Path to the specs directory
+        #[arg(short, long, default_value = "specs")]
+        specs_dir: String,
+        /// Base URL for the Temper server.
+        #[arg(long, default_value = "http://127.0.0.1:3000")]
+        url: String,
+        /// Remote simulation seed budget.
+        #[arg(long, default_value_t = 5)]
+        sim_seeds: u64,
+        /// Remote property-test case budget.
+        #[arg(long, default_value_t = 100)]
+        prop_test_cases: u32,
     },
     /// Install Claude/Codex helper skills, or install a Genesis app ref into Temper
     Install {
@@ -314,6 +330,12 @@ async fn async_main() -> anyhow::Result<()> {
             output_dir,
         } => codegen::run(&specs_dir, &output_dir)?,
         Commands::Verify { specs_dir } => verify::run(&specs_dir)?,
+        Commands::VerifyRemote {
+            specs_dir,
+            url,
+            sim_seeds,
+            prop_test_cases,
+        } => verify_remote::run(&specs_dir, &url, sim_seeds, prop_test_cases).await?,
         Commands::VerifyIoa => verify_ioa::run()?,
         Commands::Serve {
             port,
@@ -479,6 +501,36 @@ mod tests {
         match cli.command {
             Commands::Verify { specs_dir } => assert_eq!(specs_dir, "custom-specs"),
             _ => panic!("expected Verify command"),
+        }
+    }
+
+    #[test]
+    fn test_cli_parse_verify_remote() {
+        let cli = Cli::parse_from([
+            "temper",
+            "verify-remote",
+            "--specs-dir",
+            "custom-specs",
+            "--url",
+            "https://temper.example",
+            "--sim-seeds",
+            "3",
+            "--prop-test-cases",
+            "25",
+        ]);
+        match cli.command {
+            Commands::VerifyRemote {
+                specs_dir,
+                url,
+                sim_seeds,
+                prop_test_cases,
+            } => {
+                assert_eq!(specs_dir, "custom-specs");
+                assert_eq!(url, "https://temper.example");
+                assert_eq!(sim_seeds, 3);
+                assert_eq!(prop_test_cases, 25);
+            }
+            _ => panic!("expected VerifyRemote command"),
         }
     }
 

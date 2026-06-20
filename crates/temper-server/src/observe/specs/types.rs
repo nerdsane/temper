@@ -31,3 +31,16 @@ pub(crate) struct LoadInlineRequest {
     #[serde(default)]
     pub(crate) cedar_policies: Option<String>,
 }
+
+/// Request body for POST /api/specs/validate-ioa.
+#[derive(Deserialize)]
+pub(crate) struct ValidateIoaRequest {
+    /// IOA TOML source to validate with the server's current verification engine.
+    pub(crate) ioa_source: String,
+    /// Optional simulation seed budget. Defaults to the server quick-check budget.
+    #[serde(default)]
+    pub(crate) sim_seeds: Option<u64>,
+    /// Optional property-test case budget. Defaults to the server quick-check budget.
+    #[serde(default)]
+    pub(crate) prop_test_cases: Option<u32>,
+}

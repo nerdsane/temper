@@ -13,10 +13,12 @@ use super::{ActionDetail, InvariantDetail, SpecDetail, SpecSummary, StateVarDeta
 mod load_dir;
 mod load_inline;
 mod types;
+mod validate_ioa;
 mod verification_stream;
 
 pub(crate) use load_dir::handle_load_dir;
 pub(crate) use load_inline::handle_load_inline;
+pub(crate) use validate_ioa::handle_validate_ioa;
 
 /// GET /observe/specs -- list all loaded specs across all tenants.
 pub(crate) async fn handle_list_specs(
