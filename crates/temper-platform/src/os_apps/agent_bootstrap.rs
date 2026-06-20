@@ -376,11 +376,31 @@ async fn ensure_inline_file_uploaded(
     file_name: &str,
     content: &[u8],
 ) -> Result<(), String> {
+    if !state
+        .server
+        .ensure_entity_loaded(tenant_id, "File", file_id)
+        .await
+    {
+        state
+            .server
+            .create_file_with_initial_stream_content(
+                tenant_id,
+                file_id,
+                json!({ "name": file_name, "path": "", "directory_id": "", "workspace_id": "", "mime_type": "text/markdown" }),
+                content,
+                "text/markdown",
+                agent_ctx,
+            )
+            .await
+            .map_err(|e| format!("failed to create File('{file_id}') with initial content: {e}"))?;
+        return Ok(());
+    }
+
     let response = state
         .server
-        .get_or_create_tenant_entity(tenant_id, "File", file_id, json!({}))
+        .get_tenant_entity_state(tenant_id, "File", file_id)
         .await
-        .map_err(|e| format!("failed to create File('{file_id}') actor: {e}"))?;
+        .map_err(|e| format!("failed to load File('{file_id}') actor: {e}"))?;
 
     if response.state.status == "Created" {
         state
