@@ -59,6 +59,36 @@ fn and_combinator() {
 }
 
 #[test]
+fn candidate_and_equality_filter_is_lossless_for_string_fields() {
+    let filter = FilterExpr::BinaryOp {
+        left: Box::new(FilterExpr::BinaryOp {
+            left: Box::new(FilterExpr::Property("SessionId".into())),
+            op: BinaryOperator::Eq,
+            right: Box::new(FilterExpr::Literal(ODataValue::String(
+                "session-hot".into(),
+            ))),
+        }),
+        op: BinaryOperator::And,
+        right: Box::new(FilterExpr::BinaryOp {
+            left: Box::new(FilterExpr::Property("EntryId".into())),
+            op: BinaryOperator::Eq,
+            right: Box::new(FilterExpr::Literal(ODataValue::String("entry-1199".into()))),
+        }),
+    };
+
+    let result = try_translate_candidate_filter(&filter).unwrap();
+    assert!(result.where_clause.contains("AND"));
+    assert!(result.where_clause.contains("field_name = ?3"));
+    assert!(result.where_clause.contains("field_value = ?4"));
+    assert!(result.where_clause.contains("field_name = ?5"));
+    assert!(result.where_clause.contains("field_value = ?6"));
+    assert_eq!(
+        result.params,
+        vec!["SessionId", "session-hot", "EntryId", "entry-1199"]
+    );
+}
+
+#[test]
 fn startswith_function() {
     let filter = FilterExpr::FunctionCall {
         name: "startswith".into(),

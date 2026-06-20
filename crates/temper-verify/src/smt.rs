@@ -24,7 +24,9 @@ use temper_spec::automaton::AssertCompareOp;
 
 use crate::model::builder::build_model_from_ioa;
 use crate::model::semantics::collect_list_contains_pairs;
-use crate::model::types::{InvariantKind, ModelEffect, ModelGuard, TemperModel};
+use crate::model::types::{
+    InvariantKind, ModelEffect, ModelGuard, ResolvedTransition, TemperModel,
+};
 
 /// Result of symbolic verification.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -52,7 +54,7 @@ pub struct SmtResult {
 pub fn verify_symbolic(ioa_toml: &str, max_counter: usize) -> SmtResult {
     let model = build_model_from_ioa(ioa_toml, max_counter)
         .expect("SMT: IOA spec should have been validated before symbolic verification");
-    let approximation_notes = approximation_notes();
+    let approximation_notes = approximation_notes(&model);
     let approximate = !approximation_notes.is_empty();
 
     let guard_sat = check_guard_satisfiability(&model, max_counter);
@@ -73,9 +75,26 @@ pub fn verify_symbolic(ioa_toml: &str, max_counter: usize) -> SmtResult {
     }
 }
 
-fn approximation_notes() -> Vec<String> {
-    // L0 SMT now uses exact bounded semantics for supported guard forms.
-    Vec::new()
+fn approximation_notes(model: &TemperModel) -> Vec<String> {
+    let cross_entity_guard_count = model
+        .transitions
+        .iter()
+        .filter(|transition| transition.guard.contains_cross_entity())
+        .count();
+    if cross_entity_guard_count == 0 {
+        return Vec::new();
+    }
+
+    vec![format!(
+        "{cross_entity_guard_count} transition(s) use abstract cross-entity guards; single-entity SMT excludes them from local induction and reachability"
+    )]
+}
+
+fn concrete_transitions(model: &TemperModel) -> impl Iterator<Item = &ResolvedTransition> {
+    model
+        .transitions
+        .iter()
+        .filter(|transition| !transition.guard.contains_cross_entity())
 }
 
 // ---------------------------------------------------------------------------
@@ -149,7 +168,7 @@ fn check_invariant_induction(model: &TemperModel, max_counter: usize) -> Vec<(St
                 InvariantKind::StatusInSet => {
                     // Structurally guaranteed by parser validation: every
                     // transition's to_state must be in model.states.
-                    model.transitions.iter().all(|t| {
+                    concrete_transitions(model).all(|t| {
                         t.to_state
                             .as_ref()
                             .map(|s| model.states.contains(s))
@@ -176,9 +195,7 @@ fn check_invariant_induction(model: &TemperModel, max_counter: usize) -> Vec<(St
                     // For each trigger state: no transitions should have it
                     // as a from_state.
                     inv.trigger_states.iter().all(|trigger| {
-                        !model
-                            .transitions
-                            .iter()
+                        !concrete_transitions(model)
                             .any(|t| t.from_states.contains(trigger) || t.from_states.is_empty())
                     })
                 }
@@ -186,7 +203,7 @@ fn check_invariant_induction(model: &TemperModel, max_counter: usize) -> Vec<(St
                     if inv.required_states.is_empty() {
                         true
                     } else {
-                        model.transitions.iter().all(|t| {
+                        concrete_transitions(model).all(|t| {
                             if let Some(to) = &t.to_state {
                                 if inv.trigger_states.contains(to) {
                                     let valid: Vec<&String> = inv
@@ -216,9 +233,7 @@ fn check_invariant_induction(model: &TemperModel, max_counter: usize) -> Vec<(St
                 }
                 InvariantKind::NeverState { state } => {
                     // Structural check: no transition has to_state == forbidden_state.
-                    !model
-                        .transitions
-                        .iter()
+                    !concrete_transitions(model)
                         .any(|t| t.to_state.as_ref().is_some_and(|to| to == state))
                 }
                 InvariantKind::And(parts) => {
@@ -256,7 +271,7 @@ fn kind_inductive_smt(
     max_counter: usize,
 ) -> bool {
     match kind {
-        InvariantKind::StatusInSet => model.transitions.iter().all(|t| {
+        InvariantKind::StatusInSet => concrete_transitions(model).all(|t| {
             t.to_state
                 .as_ref()
                 .map(|s| model.states.contains(s))
@@ -273,19 +288,16 @@ fn kind_inductive_smt(
             }
         }
         InvariantKind::NoFurtherTransitions => trigger_states.iter().all(|trigger| {
-            !model
-                .transitions
-                .iter()
+            !concrete_transitions(model)
                 .any(|t| t.from_states.contains(trigger) || t.from_states.is_empty())
         }),
         InvariantKind::Implication => true,
         InvariantKind::CounterCompare { var, op, value } => {
             check_counter_compare_induction_z3(model, trigger_states, var, op, *value, max_counter)
         }
-        InvariantKind::NeverState { state } => !model
-            .transitions
-            .iter()
-            .any(|t| t.to_state.as_ref().is_some_and(|to| to == state)),
+        InvariantKind::NeverState { state } => {
+            !concrete_transitions(model).any(|t| t.to_state.as_ref().is_some_and(|to| to == state))
+        }
         InvariantKind::And(parts) => parts
             .iter()
             .all(|p| kind_inductive_smt(model, trigger_states, p, max_counter)),
@@ -306,6 +318,9 @@ fn check_counter_positive_induction_z3(
     max_counter: usize,
 ) -> bool {
     for t in &model.transitions {
+        if t.guard.contains_cross_entity() {
+            continue;
+        }
         // Only check transitions that reach a trigger state
         let reaches_trigger = t
             .to_state
@@ -367,6 +382,9 @@ fn check_bool_required_induction_z3(
     var: &str,
 ) -> bool {
     for t in &model.transitions {
+        if t.guard.contains_cross_entity() {
+            continue;
+        }
         let reaches_trigger = t
             .to_state
             .as_ref()
@@ -417,6 +435,9 @@ fn check_counter_compare_induction_z3(
     max_counter: usize,
 ) -> bool {
     for t in &model.transitions {
+        if t.guard.contains_cross_entity() {
+            continue;
+        }
         let reaches_trigger = t
             .to_state
             .as_ref()
@@ -686,6 +707,16 @@ fn encode_guard(
                 Bool::from_bool(false)
             }
         }
+        ModelGuard::CrossEntityState {
+            entity_type,
+            entity_id_source,
+            required_status,
+        } => Bool::new_const(format!(
+            "cross_entity_guard:{}:{}:{}",
+            entity_type,
+            entity_id_source,
+            required_status.join("|")
+        )),
         ModelGuard::And(guards) => {
             let formulas: Vec<Bool> = guards
                 .iter()
@@ -710,6 +741,9 @@ fn check_unreachable_states(model: &TemperModel) -> Vec<String> {
             continue;
         }
         for t in &model.transitions {
+            if t.guard.contains_cross_entity() {
+                continue;
+            }
             let can_fire_from =
                 t.from_states.is_empty() || t.from_states.iter().any(|s| s == state);
             if can_fire_from
