@@ -24,6 +24,7 @@ pub fn evaluate_guard(guard: &ModelGuard, state: &TemperModelState) -> bool {
             .get(var)
             .is_some_and(|vals| vals.iter().any(|v| v == value)),
         ModelGuard::ListLengthMin { var, min } => state.lists.get(var).map_or(0, Vec::len) >= *min,
+        ModelGuard::CrossEntityState { .. } => false,
         ModelGuard::And(guards) => guards.iter().all(|g| evaluate_guard(g, state)),
     }
 }
@@ -72,6 +73,7 @@ pub fn collect_list_contains_pairs(guard: &ModelGuard, pairs: &mut BTreeSet<(Str
                 collect_list_contains_pairs(g, pairs);
             }
         }
+        ModelGuard::CrossEntityState { .. } => {}
         _ => {}
     }
 }
@@ -188,6 +190,22 @@ mod tests {
         assert!(evaluate_guard(&g, &s));
         s.status = "Active".into();
         assert!(!evaluate_guard(&g, &s)); // state fails
+    }
+
+    #[test]
+    fn cross_entity_guard_is_unresolved_in_single_entity_state() {
+        let g = ModelGuard::CrossEntityState {
+            entity_type: "Parent".into(),
+            entity_id_source: "parent_id".into(),
+            required_status: vec!["Ready".into()],
+        };
+
+        assert!(!evaluate_guard(&g, &state("Waiting")));
+        assert!(g.contains_cross_entity());
+        assert!(
+            ModelGuard::And(vec![ModelGuard::Always, g.clone()]).contains_cross_entity(),
+            "compound guards retain abstract cross-entity dependency"
+        );
     }
 
     #[test]

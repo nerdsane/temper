@@ -2,7 +2,8 @@
 //!
 //! Uses the shared translation layer in `temper-spec` for guard/effect translation,
 //! then converts to verification-specific types. Runtime-only effects (Emit, Trigger,
-//! Schedule, Spawn) are filtered out; CrossEntityState guards become Always (permissive).
+//! Schedule, Spawn) are filtered out; CrossEntityState guards are kept as abstract
+//! guards so single-entity checks do not silently treat them as locally enabled.
 
 use std::collections::BTreeMap;
 
@@ -99,8 +100,8 @@ fn resolve_transitions(automaton: &Automaton) -> Vec<ResolvedTransition> {
 
 /// Convert a shared [`ResolvedGuard`] to the verification [`ModelGuard`].
 ///
-/// `CrossEntityState` guards become `Always` (permissive) because cross-entity
-/// state is a runtime concern pre-resolved at dispatch time.
+/// `CrossEntityState` guards are preserved as abstract guards because
+/// cross-entity state cannot be resolved from a single local model state.
 fn convert_guard(guard: ResolvedGuard) -> ModelGuard {
     match guard {
         ResolvedGuard::Always => ModelGuard::Always,
@@ -111,11 +112,15 @@ fn convert_guard(guard: ResolvedGuard) -> ModelGuard {
         ResolvedGuard::BoolFalse(var) => ModelGuard::BoolFalse(var),
         ResolvedGuard::ListContains { var, value } => ModelGuard::ListContains { var, value },
         ResolvedGuard::ListLengthMin { var, min } => ModelGuard::ListLengthMin { var, min },
-        ResolvedGuard::CrossEntityState { .. } => {
-            // Cross-entity guards are runtime-only (pre-resolved at dispatch).
-            // For model checking, treat as always-true (permissive).
-            ModelGuard::Always
-        }
+        ResolvedGuard::CrossEntityState {
+            entity_type,
+            entity_id_source,
+            required_status,
+        } => ModelGuard::CrossEntityState {
+            entity_type,
+            entity_id_source,
+            required_status,
+        },
         ResolvedGuard::And(guards) => {
             ModelGuard::And(guards.into_iter().map(convert_guard).collect())
         }
@@ -411,6 +416,47 @@ mod tests {
             nft.is_some(),
             "Should have a NoFurtherTransitions invariant"
         );
+    }
+
+    #[test]
+    fn test_cross_entity_guard_is_preserved_as_abstract_guard() {
+        let spec = r#"
+[automaton]
+name = "Parent"
+states = ["Waiting", "Ready"]
+initial = "Waiting"
+
+[[action]]
+name = "Proceed"
+from = ["Waiting"]
+to = "Ready"
+guard = [{ type = "cross_entity_state", entity_type = "Child", entity_id_source = "child_id", required_status = ["Done"] }]
+"#;
+        let model = build_model_from_ioa(spec, 2).unwrap();
+        let guard = &model
+            .transitions
+            .iter()
+            .find(|transition| transition.name == "Proceed")
+            .expect("Proceed transition")
+            .guard;
+
+        assert!(
+            guard.contains_cross_entity(),
+            "cross-entity guard must not collapse to Always"
+        );
+        match guard {
+            ModelGuard::And(parts) => assert!(parts.iter().any(|part| matches!(
+                part,
+                ModelGuard::CrossEntityState {
+                    entity_type,
+                    entity_id_source,
+                    required_status,
+                } if entity_type == "Child"
+                    && entity_id_source == "child_id"
+                    && required_status == &vec!["Done".to_string()]
+            ))),
+            other => panic!("expected compound guard with CrossEntityState, got {other:?}"),
+        }
     }
 
     #[test]
