@@ -28,6 +28,7 @@ use crate::state::ServerState;
 /// Route structure:
 /// - POST   /api/specs/load-dir                        -> load specs from directory
 /// - POST   /api/specs/load-inline                     -> load specs from inline payload
+/// - POST   /api/specs/validate-ioa                    -> validate IOA source without loading it
 /// - POST   /api/wasm/modules/{module_name}            -> upload WASM module
 /// - DELETE /api/wasm/modules/{module_name}             -> delete WASM module
 /// - POST   /api/evolution/records/{id}/decide          -> developer decision on record
@@ -47,6 +48,10 @@ pub fn build_api_router() -> Router<ServerState> {
         .route(
             "/specs/load-inline",
             post(crate::observe::specs::handle_load_inline),
+        )
+        .route(
+            "/specs/validate-ioa",
+            post(crate::observe::specs::handle_validate_ioa),
         )
         .route(
             "/wasm/modules/{module_name}",
