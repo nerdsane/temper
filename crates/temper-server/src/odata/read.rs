@@ -6,9 +6,11 @@ use axum::extract::{Extension, Query, State};
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
 use temper_authz::SecurityContext;
-use temper_odata::path::{ODataPath, parse_path};
+use temper_odata::path::{KeyValue, ODataPath, parse_path};
 use temper_odata::query::parse_query_options;
-use temper_odata::query::types::{ExpandItem, ExpandOptions, QueryOptions};
+use temper_odata::query::types::{
+    BinaryOperator, ExpandItem, ExpandOptions, FilterExpr, ODataValue, QueryOptions,
+};
 use temper_runtime::tenant::TenantId;
 use temper_wasm::{StreamRegistry, WasmInvocationContext};
 use tracing::instrument;
@@ -18,6 +20,7 @@ use super::common::{
     check_has_stream_or_400, extract_key, extract_tenant, has_expand_options, resolve_entity_type,
     resolve_value_parent, tenant_csdl_xml, tenant_entity_sets,
 };
+use super::filter_sql;
 use super::query_plane_read::{
     QueryPlaneReadBudget, QueryPlaneReadRequest, read_entity_set_from_query_plane,
 };
@@ -32,6 +35,7 @@ use crate::query_eval::{expand_entity, select_fields};
 use crate::request_context::extract_agent_context;
 use crate::response::{ODataResponse, ODataStreamResponse, ODataXmlResponse, odata_error};
 use crate::state::ServerState;
+use crate::storage::{QueryFieldIndexOrder, QueryFieldIndexOrderDirection};
 
 /// Recursively resolve an OData path to its parent entity's
 /// (entity_type, entity_id, entity_set_name).
@@ -269,6 +273,99 @@ async fn load_authorized_entity_body(
     )
     .map_err(|response| *response)?;
     Ok(body)
+}
+
+fn composite_key_filter(key_pairs: &[(String, String)]) -> Option<FilterExpr> {
+    let mut pairs = key_pairs.iter().filter(|(name, _)| !name.trim().is_empty());
+    let (name, value) = pairs.next()?;
+    let mut expr = FilterExpr::BinaryOp {
+        left: Box::new(FilterExpr::Property(name.clone())),
+        op: BinaryOperator::Eq,
+        right: Box::new(FilterExpr::Literal(ODataValue::String(value.clone()))),
+    };
+
+    for (name, value) in pairs {
+        expr = FilterExpr::BinaryOp {
+            left: Box::new(expr),
+            op: BinaryOperator::And,
+            right: Box::new(FilterExpr::BinaryOp {
+                left: Box::new(FilterExpr::Property(name.clone())),
+                op: BinaryOperator::Eq,
+                right: Box::new(FilterExpr::Literal(ODataValue::String(value.clone()))),
+            }),
+        };
+    }
+    Some(expr)
+}
+
+async fn try_resolve_composite_entity_key(
+    state: &ServerState,
+    tenant: &TenantId,
+    entity_type: &str,
+    key_pairs: &[(String, String)],
+) -> Option<String> {
+    let query_plane = state.query_plane_store()?;
+    let filter = composite_key_filter(key_pairs)?;
+    let translated = filter_sql::try_translate_candidate_filter(&filter)?;
+    let order_by = [QueryFieldIndexOrder {
+        field_name: "entity_id".to_string(),
+        direction: QueryFieldIndexOrderDirection::Asc,
+    }];
+    let page = match query_plane
+        .query_field_index_page(
+            tenant.as_str(),
+            entity_type,
+            &translated.where_clause,
+            translated.params,
+            &order_by,
+            0,
+            2,
+            false,
+        )
+        .await
+    {
+        Ok(Some(page)) => page,
+        Ok(None) => return None,
+        Err(error) => {
+            tracing::warn!(
+                error = %error,
+                tenant = %tenant,
+                entity_type,
+                "composite OData key lookup failed; falling back to direct key"
+            );
+            return None;
+        }
+    };
+
+    match page.entity_ids.as_slice() {
+        [entity_id] => Some(entity_id.clone()),
+        [] => None,
+        _ => {
+            tracing::warn!(
+                tenant = %tenant,
+                entity_type,
+                match_count = page.entity_ids.len(),
+                "composite OData key lookup was ambiguous; falling back to direct key"
+            );
+            None
+        }
+    }
+}
+
+async fn resolve_entity_request_key(
+    state: &ServerState,
+    tenant: &TenantId,
+    entity_type: &str,
+    key: &KeyValue,
+) -> String {
+    match key {
+        KeyValue::Single(_) => extract_key(key),
+        KeyValue::Composite(pairs) => {
+            try_resolve_composite_entity_key(state, tenant, entity_type, pairs)
+                .await
+                .unwrap_or_else(|| extract_key(key))
+        }
+    }
 }
 
 async fn apply_entity_query_options(
@@ -658,7 +755,7 @@ async fn handle_entity(
         Some(t) => t,
         None => return entity_set_not_found_response(state, tenant, set_name).await,
     };
-    let key_str = extract_key(key);
+    let key_str = resolve_entity_request_key(state, tenant, &entity_type, key).await;
 
     if state.is_pg_actor_backed(tenant, &entity_type)
         && let Some(actor_sys) = &state.pg_actor_system
