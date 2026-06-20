@@ -102,7 +102,7 @@ fn find_dead_transitions(model: &TemperModel) -> Vec<String> {
         .iter()
         .enumerate()
         .filter_map(|(index, transition)| {
-            if covered[index] {
+            if covered[index] || transition.guard.contains_cross_entity() {
                 None
             } else {
                 Some(render_transition_label(transition))
@@ -235,6 +235,38 @@ guard = "task_count > 0"
                 .iter()
                 .any(|transition| transition.contains("Complete")),
             "expected dead transition for Complete, got {:?}",
+            result.dead_transitions
+        );
+    }
+
+    #[test]
+    fn test_cross_entity_guard_does_not_break_local_terminal_proof() {
+        let src = r#"
+[automaton]
+name = "Parent"
+states = ["Waiting", "Ready"]
+initial = "Waiting"
+
+[[action]]
+name = "ProceedWhenChildDone"
+from = ["Waiting"]
+to = "Ready"
+guard = [{ type = "cross_entity_state", entity_type = "Child", entity_id_source = "child_id", required_status = ["Done"] }]
+
+[[invariant]]
+name = "WaitingLocallyTerminal"
+when = ["Waiting"]
+assert = "no_further_transitions"
+"#;
+        let model = build_model_from_ioa(src, 2).unwrap();
+        let result = check_model(&model);
+        assert!(
+            result.all_properties_hold,
+            "abstract cross-entity guard must not be treated as a locally enabled transition: {result:?}"
+        );
+        assert!(
+            result.dead_transitions.is_empty(),
+            "abstract cross-entity transitions should not be reported as dead: {:?}",
             result.dead_transitions
         );
     }

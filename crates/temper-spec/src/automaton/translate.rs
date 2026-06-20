@@ -14,7 +14,7 @@ use super::types::{Automaton, Effect, Guard};
 /// Canonical guard produced by shared translation.
 ///
 /// Consumers map this to their domain-specific guard type. For example,
-/// `temper-verify` maps `CrossEntityState` → `Always` (permissive),
+/// `temper-verify` preserves `CrossEntityState` as an abstract guard,
 /// while `temper-jit` maps it to a runtime cross-entity check.
 #[derive(Debug, Clone, PartialEq)]
 pub enum ResolvedGuard {
