@@ -57,6 +57,36 @@ async fn post_json(
     (status, body)
 }
 
+async fn upsert_projected_order(
+    store: &TursoEventStore,
+    tenant: &TenantId,
+    entity_id: &str,
+    mut fields: serde_json::Value,
+    sequence_nr: u64,
+) {
+    fields["Id"] = serde_json::json!(entity_id);
+    let state_json = serde_json::json!({
+        "entity_type": "Order",
+        "entity_id": entity_id,
+        "status": "Created",
+        "fields": fields,
+        "sequence_nr": sequence_nr,
+        "events": [],
+    });
+    store
+        .upsert_query_projection_with_state(
+            tenant.as_str(),
+            "Order",
+            entity_id,
+            "Created",
+            state_json.get("fields").unwrap(),
+            &state_json,
+            sequence_nr,
+        )
+        .await
+        .expect("upsert projected order");
+}
+
 async fn patch_json(
     state: &ServerState,
     path: &str,
@@ -195,6 +225,54 @@ async fn entity_get_returns_single_entity_with_actions() {
     assert!(body["@odata.actions"].is_array());
     // Should have @odata.children enrichment
     assert!(body["@odata.children"].is_object());
+}
+
+#[tokio::test]
+async fn composite_entity_key_resolves_through_query_plane_index() {
+    let db_dir = tempfile::tempdir().expect("create isolated query-plane db dir");
+    let db_path = db_dir.path().join("composite-key.db");
+    let db_url = format!("file:{}", db_path.display());
+    let store = TursoEventStore::new(&db_url, None)
+        .await
+        .expect("create local turso db");
+    let state = build_turso_state("odata-read-composite-key", store.clone());
+    let tenant = TenantId::default();
+
+    for index in 0usize..1200 {
+        upsert_projected_order(
+            &store,
+            &tenant,
+            &format!("entry-{index:04}"),
+            serde_json::json!({
+                "SessionId": "session-hot",
+                "EntryId": format!("entry-{index:04}"),
+            }),
+            index as u64 + 1,
+        )
+        .await;
+    }
+    upsert_projected_order(
+        &store,
+        &tenant,
+        "entry-cold-1199",
+        serde_json::json!({
+            "SessionId": "session-cold",
+            "EntryId": "entry-1199",
+        }),
+        2000,
+    )
+    .await;
+
+    let (status, body) = get_json(
+        &state,
+        "/tdata/Orders(SessionId='session-hot',EntryId='entry-1199')",
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["entity_id"].as_str(), Some("entry-1199"));
+    assert_eq!(body["fields"]["SessionId"].as_str(), Some("session-hot"));
+    assert_eq!(body["fields"]["EntryId"].as_str(), Some("entry-1199"));
 }
 
 #[tokio::test]
