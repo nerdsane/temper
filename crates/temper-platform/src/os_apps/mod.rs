@@ -2426,29 +2426,27 @@ pub(super) async fn ensure_markdown_file(
     if !existed {
         state
             .server
-            .get_or_create_tenant_entity(tenant_id, "File", target.file_id, serde_json::json!({}))
-            .await
-            .map_err(|e| format!("failed to create File('{}') actor: {e}", target.file_id))?;
-        state
-            .server
-            .dispatch(temper_server::state::DispatchCommand {
-                tenant: tenant_id,
-                entity_type: "File",
-                entity_id: target.file_id,
-                action: "Create",
-                params: serde_json::json!({
+            .create_file_with_initial_stream_content(
+                tenant_id,
+                target.file_id,
+                serde_json::json!({
                     "name": target.name,
                     "path": target.path,
                     "directory_id": target.directory_id,
                     "workspace_id": target.workspace_id,
                     "mime_type": "text/markdown",
                 }),
+                content,
+                "text/markdown",
                 agent_ctx,
-                await_integration: false,
-                await_reactions: true,
-            })
+            )
             .await
-            .map_err(|e| format!("failed to initialize File('{}'): {e}", target.file_id))?;
+            .map_err(|e| {
+                format!(
+                    "failed to create File('{}') with initial content: {e}",
+                    target.file_id
+                )
+            })?;
         state
             .server
             .dispatch(temper_server::state::DispatchCommand {
@@ -2468,6 +2466,7 @@ pub(super) async fn ensure_markdown_file(
                     target.file_id
                 )
             })?;
+        return Ok(());
     }
 
     let desired_hash = content_sha256(content);
