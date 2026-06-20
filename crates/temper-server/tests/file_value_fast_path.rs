@@ -2,6 +2,7 @@ use axum::body::Body;
 use axum::http::{Request, StatusCode};
 use sha2::{Digest, Sha256};
 use temper_runtime::ActorSystem;
+use temper_runtime::persistence::EventStore;
 use temper_runtime::tenant::TenantId;
 use temper_server::registry::SpecRegistry;
 use temper_server::registry::{EntityLevelSummary, EntityVerificationResult, VerificationStatus};
@@ -36,8 +37,8 @@ const FILE_CSDL_XML: &str = r#"<?xml version="1.0" encoding="utf-8"?>
 const FILE_IOA: &str = r#"
 [automaton]
 name = "File"
-states = ["Ready"]
-initial = "Ready"
+states = ["Created", "Ready"]
+initial = "Created"
 
 [[state]]
 name = "content_hash"
@@ -65,9 +66,16 @@ type = "counter"
 initial = "0"
 
 [[action]]
+name = "Create"
+kind = "input"
+from = ["Created"]
+to = "Created"
+params = ["name", "path", "directory_id", "workspace_id", "mime_type"]
+
+[[action]]
 name = "StreamUpdated"
 kind = "input"
-from = ["Ready"]
+from = ["Created", "Ready"]
 to = "Ready"
 params = ["content_hash", "size_bytes", "mime_type", "version_number", "previous_version_id", "created_by"]
 effect = [
@@ -139,6 +147,65 @@ async fn assert_local_blob(data_dir: &std::path::Path, content_hash: &str, expec
         .await
         .unwrap_or_else(|error| panic!("read local blob '{}': {error}", blob_path.display()));
     assert_eq!(stored, expected);
+}
+
+#[tokio::test]
+async fn create_file_with_initial_stream_content_projects_only_ready_content() {
+    let (mut state, store) = build_turso_file_state("atomic-initial-content").await;
+    let tenant = TenantId::default();
+    let data_dir = tempfile::tempdir().expect("temp data dir");
+    state.data_dir = data_dir.path().to_path_buf();
+
+    let body = b"atomic initial File value";
+    let expected_hash = format!("sha256:{:x}", Sha256::digest(body));
+    let response = state
+        .create_file_with_initial_stream_content(
+            &tenant,
+            "fl-atomic-initial",
+            serde_json::json!({
+                "name": "atomic.md",
+                "path": "/atomic.md",
+                "directory_id": "dir-root",
+                "workspace_id": "ws-root",
+                "mime_type": "text/markdown",
+            }),
+            body,
+            "text/markdown",
+            &AgentContext::for_service("test-writer"),
+        )
+        .await
+        .expect("atomic initial File content write should succeed");
+
+    assert_eq!(response.state.status, "Ready");
+    assert_eq!(response.state.sequence_nr, 3);
+    assert_eq!(response.state.fields["name"], "atomic.md");
+    assert_eq!(response.state.fields["content_hash"], expected_hash);
+    assert_eq!(response.state.fields["has_content"], true);
+    assert_eq!(response.state.fields["size_bytes"], body.len() as i64);
+
+    let events = store
+        .read_events("default:File:fl-atomic-initial", 0)
+        .await
+        .expect("read File journal");
+    let actions = events
+        .iter()
+        .map(|event| event.event_type.as_str())
+        .collect::<Vec<_>>();
+    assert_eq!(actions, ["Created", "Create", "StreamUpdated"]);
+
+    let indexed = state
+        .read_file_stream_indexed(&tenant, "fl-atomic-initial")
+        .await
+        .expect("indexed read should see first bytes");
+    assert_eq!(
+        indexed,
+        IndexedFileStreamRead::Content {
+            content_hash: expected_hash.clone(),
+            mime_type: "text/markdown".to_string(),
+            bytes: body.to_vec(),
+        }
+    );
+    assert_local_blob(data_dir.path(), &expected_hash, body).await;
 }
 
 #[tokio::test]

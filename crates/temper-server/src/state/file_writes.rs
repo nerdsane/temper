@@ -109,10 +109,7 @@ impl ServerState {
         mime_type: &str,
         agent_ctx: &crate::request_context::AgentContext,
     ) -> Result<crate::entity_actor::EntityResponse, FileStreamContentError> {
-        let mut hasher = Sha256::new();
-        hasher.update(body);
-        let content_hash = format!("sha256:{:x}", hasher.finalize());
-        let blob_key = format!("temper-fs/{content_hash}");
+        let (content_hash, blob_key) = content_hash_and_native_blob_key(body);
 
         let state_read = self.get_tenant_entity_state(tenant, "File", file_id);
         let blob_write = self.put_content_addressed_blob(tenant, &blob_key, body, None);
@@ -263,4 +260,12 @@ impl ServerState {
         .await
         .map_err(FileStreamContentError::ActionRejected)
     }
+}
+
+pub(super) fn content_hash_and_native_blob_key(body: &[u8]) -> (String, String) {
+    let mut hasher = Sha256::new();
+    hasher.update(body);
+    let content_hash = format!("sha256:{:x}", hasher.finalize());
+    let blob_key = format!("temper-fs/{content_hash}");
+    (content_hash, blob_key)
 }
