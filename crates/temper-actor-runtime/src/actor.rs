@@ -17,7 +17,7 @@ pub struct ActorHandle {
 }
 
 impl ActorHandle {
-    // TODO: ActorHandle::new() does no validation — the actor may not exist.
+    // Note: ActorHandle::new() does no validation — the actor may not exist.
     // Messages sent to a nonexistent handle sit in actor_messages forever (dead letters).
     // Consider making this pub(crate) and forcing all external handle creation through
     // spawn() or lookup(), which validate against PG.

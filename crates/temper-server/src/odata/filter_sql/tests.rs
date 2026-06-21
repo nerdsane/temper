@@ -89,6 +89,66 @@ fn candidate_and_equality_filter_is_lossless_for_string_fields() {
 }
 
 #[test]
+fn candidate_and_filter_keeps_lossless_equalities_when_status_ne_is_present() {
+    let filter = FilterExpr::BinaryOp {
+        left: Box::new(FilterExpr::BinaryOp {
+            left: Box::new(FilterExpr::BinaryOp {
+                left: Box::new(FilterExpr::Property("Path".into())),
+                op: BinaryOperator::Eq,
+                right: Box::new(FilterExpr::Literal(ODataValue::String(
+                    "/proofs/live.txt".into(),
+                ))),
+            }),
+            op: BinaryOperator::And,
+            right: Box::new(FilterExpr::BinaryOp {
+                left: Box::new(FilterExpr::Property("WorkspaceId".into())),
+                op: BinaryOperator::Eq,
+                right: Box::new(FilterExpr::Literal(ODataValue::String("ws-1".into()))),
+            }),
+        }),
+        op: BinaryOperator::And,
+        right: Box::new(FilterExpr::BinaryOp {
+            left: Box::new(FilterExpr::Property("Status".into())),
+            op: BinaryOperator::Ne,
+            right: Box::new(FilterExpr::Literal(ODataValue::String("Archived".into()))),
+        }),
+    };
+
+    let result = try_translate_candidate_filter(&filter).unwrap();
+    assert!(result.where_clause.contains("AND"));
+    assert!(result.where_clause.contains("field_name = ?3"));
+    assert!(result.where_clause.contains("field_value = ?4"));
+    assert!(result.where_clause.contains("field_name = ?5"));
+    assert!(result.where_clause.contains("field_value = ?6"));
+    assert!(!result.where_clause.contains("status !="));
+    assert_eq!(
+        result.params,
+        vec!["Path", "/proofs/live.txt", "WorkspaceId", "ws-1"]
+    );
+}
+
+#[test]
+fn candidate_or_filter_does_not_drop_non_lossless_branch() {
+    let filter = FilterExpr::BinaryOp {
+        left: Box::new(FilterExpr::BinaryOp {
+            left: Box::new(FilterExpr::Property("Path".into())),
+            op: BinaryOperator::Eq,
+            right: Box::new(FilterExpr::Literal(ODataValue::String(
+                "/proofs/live.txt".into(),
+            ))),
+        }),
+        op: BinaryOperator::Or,
+        right: Box::new(FilterExpr::BinaryOp {
+            left: Box::new(FilterExpr::Property("Status".into())),
+            op: BinaryOperator::Ne,
+            right: Box::new(FilterExpr::Literal(ODataValue::String("Archived".into()))),
+        }),
+    };
+
+    assert!(try_translate_candidate_filter(&filter).is_none());
+}
+
+#[test]
 fn startswith_function() {
     let filter = FilterExpr::FunctionCall {
         name: "startswith".into(),

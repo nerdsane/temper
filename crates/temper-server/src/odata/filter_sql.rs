@@ -29,6 +29,7 @@ pub(super) struct TranslatedFilter {
 /// Returns `None` if the expression contains constructs that cannot be
 /// translated (cross-field comparisons, unsupported functions, etc.).
 /// The caller should fall back to in-memory filtering in that case.
+#[cfg(test)]
 pub(super) fn try_translate_filter(filter: &FilterExpr) -> Option<TranslatedFilter> {
     let mut ctx = TranslateCtx {
         params: Vec::new(),
@@ -49,10 +50,15 @@ pub(super) fn try_translate_filter(filter: &FilterExpr) -> Option<TranslatedFilt
 /// this predicate as a candidate narrowing step and still re-evaluate the
 /// original filter after materialization.
 pub(super) fn try_translate_candidate_filter(filter: &FilterExpr) -> Option<TranslatedFilter> {
-    if !candidate_filter_is_lossless(filter) {
-        return None;
-    }
-    try_translate_filter(filter)
+    let mut ctx = TranslateCtx {
+        params: Vec::new(),
+        next_param: 3, // ?1 = tenant, ?2 = entity_type (prepended by query_field_index)
+    };
+    let clause = translate_candidate_expr(filter, &mut ctx)?;
+    Some(TranslatedFilter {
+        where_clause: clause,
+        params: ctx.params,
+    })
 }
 
 struct TranslateCtx {
@@ -110,6 +116,61 @@ fn translate_expr(expr: &FilterExpr, ctx: &mut TranslateCtx) -> Option<String> {
 
         // Bare property or literal at top level — not a valid boolean filter
         FilterExpr::Property(_) | FilterExpr::Literal(_) => None,
+    }
+}
+
+/// Translate the lossless candidate portion of a filter.
+///
+/// The query-plane candidate SQL is a narrowing step, not the final OData
+/// filter. For `AND`, lossless conjuncts can be pushed independently while
+/// non-lossless conjuncts are still re-checked after materialization. For
+/// `OR`, dropping one side would change the candidate set, so the whole
+/// expression must be lossless or it is not pushed.
+fn translate_candidate_expr(expr: &FilterExpr, ctx: &mut TranslateCtx) -> Option<String> {
+    match expr {
+        FilterExpr::BinaryOp { left, op, right } => match op {
+            BinaryOperator::And => {
+                let left_clause = translate_candidate_expr(left, ctx);
+                let right_clause = translate_candidate_expr(right, ctx);
+                match (left_clause, right_clause) {
+                    (Some(left_clause), Some(right_clause)) => {
+                        Some(format!("({left_clause} AND {right_clause})"))
+                    }
+                    (Some(clause), None) | (None, Some(clause)) => Some(clause),
+                    (None, None) => None,
+                }
+            }
+            BinaryOperator::Or => {
+                if candidate_filter_is_lossless(expr) {
+                    translate_expr(expr, ctx)
+                } else {
+                    None
+                }
+            }
+            BinaryOperator::Eq
+            | BinaryOperator::Ne
+            | BinaryOperator::Gt
+            | BinaryOperator::Ge
+            | BinaryOperator::Lt
+            | BinaryOperator::Le
+            | BinaryOperator::Has => {
+                if candidate_filter_is_lossless(expr) {
+                    translate_expr(expr, ctx)
+                } else {
+                    None
+                }
+            }
+        },
+        FilterExpr::UnaryOp { .. }
+        | FilterExpr::FunctionCall { .. }
+        | FilterExpr::Property(_)
+        | FilterExpr::Literal(_) => {
+            if candidate_filter_is_lossless(expr) {
+                translate_expr(expr, ctx)
+            } else {
+                None
+            }
+        }
     }
 }
 

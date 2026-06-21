@@ -120,6 +120,35 @@ fn evaluate_value(entity: &serde_json::Value, expr: &FilterExpr) -> Option<serde
 /// Resolve a property name against an entity, checking top-level first,
 /// then falling back to the `fields` sub-object.
 fn resolve_property(entity: &serde_json::Value, prop: &str) -> Option<serde_json::Value> {
+    if prop == "Status" {
+        return entity
+            .get("Status")
+            .or_else(|| entity.get("status"))
+            .cloned()
+            .or_else(|| {
+                entity.get("fields").and_then(|fields| {
+                    fields
+                        .get("Status")
+                        .or_else(|| fields.get("status"))
+                        .cloned()
+                })
+            });
+    }
+    if prop == "status" {
+        return entity
+            .get("status")
+            .or_else(|| entity.get("Status"))
+            .cloned()
+            .or_else(|| {
+                entity.get("fields").and_then(|fields| {
+                    fields
+                        .get("status")
+                        .or_else(|| fields.get("Status"))
+                        .cloned()
+                })
+            });
+    }
+
     entity
         .get(prop)
         .cloned()
@@ -633,6 +662,25 @@ mod tests {
         assert_eq!(filtered.len(), 2);
         assert_eq!(filtered[0]["Name"], "Alice");
         assert_eq!(filtered[1]["Name"], "Charlie");
+    }
+
+    #[test]
+    fn status_filter_matches_catalog_status_aliases() {
+        let entities = vec![
+            serde_json::json!({"Id": "1", "status": "Created", "fields": {"Name": "Ready"}}),
+            serde_json::json!({"Id": "2", "status": "Archived", "fields": {"Name": "Old"}}),
+            serde_json::json!({"Id": "3", "fields": {"status": "Created", "Name": "Nested"}}),
+        ];
+        let filter = FilterExpr::BinaryOp {
+            left: Box::new(FilterExpr::Property("Status".into())),
+            op: BinaryOperator::Ne,
+            right: Box::new(FilterExpr::Literal(ODataValue::String("Archived".into()))),
+        };
+        let filtered = filter_entities(entities, &filter);
+
+        assert_eq!(filtered.len(), 2);
+        assert_eq!(filtered[0]["Id"], "1");
+        assert_eq!(filtered[1]["Id"], "3");
     }
 
     #[test]
