@@ -152,7 +152,7 @@ impl ServerState {
             DispatchExtOptions {
                 agent_ctx,
                 await_integration: false,
-                await_reactions: false,
+                await_reactions: true,
             },
         )
         .await

@@ -26,9 +26,21 @@ const FILE_CSDL_XML: &str = r#"<?xml version="1.0" encoding="utf-8"?>
         <Property Name="mime_type" Type="Edm.String"/>
         <Property Name="has_content" Type="Edm.Boolean"/>
         <Property Name="size_bytes" Type="Edm.Int64"/>
+        <Property Name="last_version_id" Type="Edm.String"/>
+      </EntityType>
+      <EntityType Name="FileVersion">
+        <Key><PropertyRef Name="Id"/></Key>
+        <Property Name="Id" Type="Edm.String" Nullable="false"/>
+        <Property Name="Status" Type="Edm.String"/>
+        <Property Name="file_id" Type="Edm.String"/>
+        <Property Name="content_hash" Type="Edm.String"/>
+        <Property Name="mime_type" Type="Edm.String"/>
+        <Property Name="size_bytes" Type="Edm.Int64"/>
+        <Property Name="version_number" Type="Edm.Int64"/>
       </EntityType>
       <EntityContainer Name="Container">
         <EntitySet Name="Files" EntityType="Temper.FileReadFastPathTest.File"/>
+        <EntitySet Name="FileVersions" EntityType="Temper.FileReadFastPathTest.FileVersion"/>
       </EntityContainer>
     </Schema>
   </edmx:DataServices>
@@ -65,6 +77,11 @@ name = "version_count"
 type = "counter"
 initial = "0"
 
+[[state]]
+name = "last_version_id"
+type = "string"
+initial = ""
+
 [[action]]
 name = "Create"
 kind = "input"
@@ -83,6 +100,72 @@ effect = [
   { type = "set_counter_from_param", var = "size_bytes", param = "size_bytes" },
   { type = "set_bool", var = "has_content", value = "true" },
 ]
+
+[[action.triggers]]
+name = "file_stream_updated_creates_version"
+kind = "entity"
+principal = "file-service"
+to_state = "Ready"
+target_entity = "FileVersion"
+target_action = "Create"
+
+[action.triggers.params_from]
+file_id = "Id"
+version_number = "version_count"
+content_hash = "content_hash"
+size_bytes = "size_bytes"
+mime_type = "mime_type"
+previous_version_id = "previous_version_id"
+created_by = "created_by"
+
+[action.triggers.resolve_target]
+type = "create"
+
+[[action]]
+name = "RecordVersion"
+kind = "internal"
+from = ["Ready"]
+to = "Ready"
+params = ["last_version_id"]
+	"#;
+
+const FILE_VERSION_IOA: &str = r#"
+[automaton]
+name = "FileVersion"
+states = ["Current", "Superseded"]
+initial = "Current"
+
+[[action]]
+name = "Create"
+kind = "input"
+from = ["Current"]
+to = "Current"
+params = ["file_id", "version_number", "content_hash", "mime_type", "size_bytes", "previous_version_id", "created_by"]
+effect = [
+  { type = "set_counter_from_param", var = "version_number", param = "version_number" },
+  { type = "set_counter_from_param", var = "size_bytes", param = "size_bytes" },
+]
+
+[[action.triggers]]
+name = "record_newest_version_on_file"
+kind = "entity"
+principal = "file-service"
+target_entity = "File"
+target_action = "RecordVersion"
+
+[action.triggers.params_from]
+last_version_id = "Id"
+
+[action.triggers.resolve_target]
+type = "field"
+field = "file_id"
+
+[[action]]
+name = "Supersede"
+kind = "internal"
+from = ["Current"]
+to = "Superseded"
+params = []
 "#;
 
 async fn build_turso_state(test_name: &str) -> (ServerState, TursoEventStore) {
@@ -116,9 +199,10 @@ async fn build_turso_file_state(test_name: &str) -> (ServerState, TursoEventStor
         "default",
         csdl,
         FILE_CSDL_XML.to_string(),
-        &[("File", FILE_IOA)],
+        &[("File", FILE_IOA), ("FileVersion", FILE_VERSION_IOA)],
     );
     let mut state = ServerState::from_registry(ActorSystem::new(test_name), registry);
+    state.rebuild_reaction_dispatcher();
     state.set_storage_stack(StorageStack::from_turso(store.clone()));
     (state, store)
 }
@@ -239,6 +323,24 @@ async fn put_file_stream_content_writes_native_blob_and_dispatches_update() {
     assert_eq!(response.state.fields["has_content"], true);
     assert_eq!(response.state.fields["size_bytes"], body.len() as i64);
     assert_local_blob(data_dir.path(), &expected_hash, body).await;
+
+    let file_after_write = state
+        .get_tenant_entity_state(&tenant, "File", "fl-native-write")
+        .await
+        .expect("native write should return only after FileVersion reaction records");
+    let last_version_id = file_after_write.state.fields["last_version_id"]
+        .as_str()
+        .expect("last_version_id should be a string");
+    assert!(
+        !last_version_id.is_empty(),
+        "File $value write must not return before RecordVersion settles"
+    );
+    let latest_version = state
+        .get_tenant_entity_state(&tenant, "FileVersion", last_version_id)
+        .await
+        .expect("latest FileVersion should be readable after File write returns");
+    assert_eq!(latest_version.state.status, "Current");
+    assert_eq!(latest_version.state.fields["content_hash"], expected_hash);
 }
 
 #[tokio::test]
@@ -281,6 +383,17 @@ async fn odata_file_value_put_uses_native_path_without_blob_adapter() {
     assert_eq!(entity.state.fields["content_hash"], expected_hash);
     assert_eq!(entity.state.fields["mime_type"], "text/plain");
     assert_eq!(entity.state.fields["has_content"], true);
+    let last_version_id = entity.state.fields["last_version_id"]
+        .as_str()
+        .expect("last_version_id should be a string");
+    assert!(
+        !last_version_id.is_empty(),
+        "OData File $value PUT must not return before RecordVersion settles"
+    );
+    state
+        .get_tenant_entity_state(&tenant, "FileVersion", last_version_id)
+        .await
+        .expect("OData File $value PUT should leave latest FileVersion readable");
     assert_local_blob(data_dir.path(), &expected_hash, body).await;
 }
 
