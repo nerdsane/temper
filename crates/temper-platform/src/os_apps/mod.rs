@@ -2336,6 +2336,19 @@ pub(super) async fn ensure_directory(
         .ensure_entity_loaded(tenant_id, "Directory", target.directory_id)
         .await
     {
+        ensure_entity_field_aliases(
+            state,
+            tenant_id,
+            "Directory",
+            target.directory_id,
+            serde_json::json!({
+                "Name": target.name,
+                "Path": target.path,
+                "ParentId": target.parent_id,
+                "WorkspaceId": target.workspace_id,
+            }),
+        )
+        .await?;
         return Ok(());
     }
 
@@ -2363,9 +2376,13 @@ pub(super) async fn ensure_directory(
             action: "Create",
             params: serde_json::json!({
                 "name": target.name,
+                "Name": target.name,
                 "path": target.path,
+                "Path": target.path,
                 "parent_id": target.parent_id,
+                "ParentId": target.parent_id,
                 "workspace_id": target.workspace_id,
+                "WorkspaceId": target.workspace_id,
             }),
             agent_ctx,
             await_integration: false,
@@ -2419,6 +2436,25 @@ pub(super) async fn ensure_markdown_file(
     target: MarkdownFileBootstrapTarget<'_>,
     content: &[u8],
 ) -> Result<(), String> {
+    let create_fields = serde_json::json!({
+        "name": target.name,
+        "Name": target.name,
+        "path": target.path,
+        "Path": target.path,
+        "directory_id": target.directory_id,
+        "DirectoryId": target.directory_id,
+        "workspace_id": target.workspace_id,
+        "WorkspaceId": target.workspace_id,
+        "mime_type": "text/markdown",
+        "MimeType": "text/markdown",
+    });
+    let canonical_fields = serde_json::json!({
+        "Name": target.name,
+        "Path": target.path,
+        "DirectoryId": target.directory_id,
+        "WorkspaceId": target.workspace_id,
+        "MimeType": "text/markdown",
+    });
     let existed = state
         .server
         .ensure_entity_loaded(tenant_id, "File", target.file_id)
@@ -2429,13 +2465,7 @@ pub(super) async fn ensure_markdown_file(
             .create_file_with_initial_stream_content(
                 tenant_id,
                 target.file_id,
-                serde_json::json!({
-                    "name": target.name,
-                    "path": target.path,
-                    "directory_id": target.directory_id,
-                    "workspace_id": target.workspace_id,
-                    "mime_type": "text/markdown",
-                }),
+                create_fields.clone(),
                 content,
                 "text/markdown",
                 agent_ctx,
@@ -2469,6 +2499,16 @@ pub(super) async fn ensure_markdown_file(
         return Ok(());
     }
 
+    ensure_created_file_initialized(
+        state,
+        tenant_id,
+        agent_ctx,
+        target.file_id,
+        create_fields.clone(),
+    )
+    .await?;
+    ensure_entity_field_aliases(state, tenant_id, "File", target.file_id, canonical_fields).await?;
+
     let desired_hash = content_sha256(content);
     if file_already_contains(state, tenant_id, target.file_id, &desired_hash).await? {
         return Ok(());
@@ -2487,6 +2527,79 @@ pub(super) async fn ensure_markdown_file(
         .map_err(|e| format!("failed to upload File('{}') content: {e}", target.file_id))?;
 
     Ok(())
+}
+
+async fn ensure_created_file_initialized(
+    state: &PlatformState,
+    tenant_id: &TenantId,
+    agent_ctx: &temper_server::request_context::AgentContext,
+    file_id: &str,
+    create_fields: serde_json::Value,
+) -> Result<(), String> {
+    let response = state
+        .server
+        .get_tenant_entity_state(tenant_id, "File", file_id)
+        .await
+        .map_err(|e| format!("failed to inspect File('{file_id}') status: {e}"))?;
+    if response.state.status != "Created" {
+        return Ok(());
+    }
+
+    state
+        .server
+        .dispatch(temper_server::state::DispatchCommand {
+            tenant: tenant_id,
+            entity_type: "File",
+            entity_id: file_id,
+            action: "Create",
+            params: create_fields,
+            agent_ctx,
+            await_integration: false,
+            await_reactions: true,
+        })
+        .await
+        .map(|_| ())
+        .map_err(|e| format!("failed to initialize File('{file_id}'): {e}"))
+}
+
+async fn ensure_entity_field_aliases(
+    state: &PlatformState,
+    tenant_id: &TenantId,
+    entity_type: &str,
+    entity_id: &str,
+    aliases: serde_json::Value,
+) -> Result<(), String> {
+    let current = state
+        .server
+        .get_tenant_entity_state(tenant_id, entity_type, entity_id)
+        .await
+        .map_err(|e| format!("failed to inspect {entity_type}('{entity_id}') aliases: {e}"))?;
+
+    let Some(alias_map) = aliases.as_object() else {
+        return Ok(());
+    };
+    let mut updates = serde_json::Map::new();
+    for (key, expected) in alias_map {
+        if current.state.fields.get(key) != Some(expected) {
+            updates.insert(key.clone(), expected.clone());
+        }
+    }
+    if updates.is_empty() {
+        return Ok(());
+    }
+
+    state
+        .server
+        .update_tenant_entity_fields(
+            tenant_id,
+            entity_type,
+            entity_id,
+            serde_json::Value::Object(updates),
+            false,
+        )
+        .await
+        .map(|_| ())
+        .map_err(|e| format!("failed to repair {entity_type}('{entity_id}') aliases: {e}"))
 }
 
 async fn file_already_contains(
