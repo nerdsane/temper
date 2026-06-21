@@ -2840,6 +2840,226 @@ async fn test_install_app_bootstraps_adrs_into_temper_fs() {
 }
 
 #[tokio::test]
+async fn test_install_app_skill_docs_are_query_readable_by_canonical_path_fields() {
+    use temper_store_turso::TursoEventStore;
+
+    let app_root =
+        std::env::temp_dir().join(format!("temper-skill-doc-app-{}", uuid::Uuid::new_v4()));
+    let app_dir = app_root.join("skill-doc-app");
+    fs::create_dir_all(app_dir.join("agents/curator/skills/research-direction")).unwrap();
+    fs::create_dir_all(app_dir.join("specs")).unwrap();
+    fs::write(
+        app_dir.join("app.toml"),
+        "name = \"skill-doc-app\"\ndescription = \"Temporary skill doc app\"\nversion = \"0.1.0\"\n",
+    )
+    .unwrap();
+    fs::write(
+        app_dir.join("APP.md"),
+        "# Skill Doc App\n\nTemporary skill doc app.\n",
+    )
+    .unwrap();
+    fs::write(app_dir.join("agents/curator/AGENT.md"), "# Curator\n").unwrap();
+    fs::write(
+        app_dir.join("agents/curator/skills/research-direction/SKILL.md"),
+        "# Research Direction\n\nFind useful source material.\n",
+    )
+    .unwrap();
+    fs::write(
+        app_dir.join("specs/soul.ioa.toml"),
+        r#"
+[automaton]
+name = "Soul"
+states = ["Created", "Published"]
+initial = "Created"
+
+[[action]]
+name = "Create"
+kind = "input"
+from = ["Created"]
+to = "Created"
+params = ["name", "description", "content_file_id"]
+
+[[action]]
+name = "Publish"
+kind = "input"
+from = ["Created", "Published"]
+to = "Published"
+"#,
+    )
+    .unwrap();
+
+    let db_path = format!("/tmp/temper-skill-doc-test-{}.db", uuid::Uuid::new_v4());
+    let db_url = format!("file:{db_path}");
+    let turso = TursoEventStore::new(&db_url, None).await.unwrap();
+    let mut state = PlatformState::new(None);
+    state
+        .server
+        .set_storage_stack(temper_server::StorageStack::from_turso(turso));
+    state.server.data_dir = std::path::PathBuf::from(format!(
+        "/tmp/temper-skill-doc-test-{}-data",
+        uuid::Uuid::new_v4()
+    ));
+    std::fs::create_dir_all(&state.server.data_dir).unwrap();
+
+    add_os_apps_dir(app_root.clone());
+    install_os_app(&state, "test-skill-doc-app", "temper-fs")
+        .await
+        .expect("install temper-fs");
+    add_os_apps_dir(app_root.clone());
+    install_os_app(&state, "test-skill-doc-app", "skill-doc-app")
+        .await
+        .expect("install skill-doc-app");
+
+    let tenant = TenantId::new("test-skill-doc-app");
+    let agent_id = bootstrapped_agent_soul_entity_id("curator");
+    let file_id = format!(
+        "os-agent-skill-file-{}-research-direction",
+        slug_fragment(&agent_id)
+    );
+    let expected_path = format!("/agents/{agent_id}/skills/research-direction/SKILL.md");
+    let file = state
+        .server
+        .get_tenant_entity_state(&tenant, "File", &file_id)
+        .await
+        .expect("skill file should exist");
+
+    assert_eq!(file.state.status, "Ready");
+    assert_eq!(
+        file.state
+            .fields
+            .get("path")
+            .and_then(|value| value.as_str()),
+        Some(expected_path.as_str())
+    );
+    assert_eq!(
+        file.state
+            .fields
+            .get("Path")
+            .and_then(|value| value.as_str()),
+        Some(expected_path.as_str())
+    );
+    assert_eq!(
+        file.state
+            .fields
+            .get("workspace_id")
+            .and_then(|value| value.as_str()),
+        Some(APP_DOCS_WORKSPACE_ID)
+    );
+    assert_eq!(
+        file.state
+            .fields
+            .get("WorkspaceId")
+            .and_then(|value| value.as_str()),
+        Some(APP_DOCS_WORKSPACE_ID)
+    );
+
+    let _ = fs::remove_dir_all(&app_root);
+    let _ = fs::remove_file(&db_path);
+    let _ = fs::remove_file(format!("{db_path}-wal"));
+    let _ = fs::remove_file(format!("{db_path}-shm"));
+}
+
+#[tokio::test]
+async fn test_ensure_markdown_file_repairs_existing_canonical_query_aliases() {
+    use temper_store_turso::TursoEventStore;
+
+    let db_path = format!(
+        "/tmp/temper-skill-doc-repair-test-{}.db",
+        uuid::Uuid::new_v4()
+    );
+    let db_url = format!("file:{db_path}");
+    let turso = TursoEventStore::new(&db_url, None).await.unwrap();
+    let mut state = PlatformState::new(None);
+    state
+        .server
+        .set_storage_stack(temper_server::StorageStack::from_turso(turso));
+    state.server.data_dir = std::path::PathBuf::from(format!(
+        "/tmp/temper-skill-doc-repair-test-{}-data",
+        uuid::Uuid::new_v4()
+    ));
+    std::fs::create_dir_all(&state.server.data_dir).unwrap();
+
+    install_os_app(&state, "test-skill-doc-repair", "temper-fs")
+        .await
+        .expect("install temper-fs");
+
+    let tenant = TenantId::new("test-skill-doc-repair");
+    let agent_ctx = AgentContext::for_service("test-bootstrap");
+    let path = "/agents/sl-bootstrap-agent-soul-curator/skills/research-direction/SKILL.md";
+    let file_id = "os-agent-skill-file-sl-bootstrap-agent-soul-curator-research-direction";
+    state
+        .server
+        .create_file_with_initial_stream_content(
+            &tenant,
+            file_id,
+            serde_json::json!({
+                "name": "SKILL.md",
+                "path": path,
+                "directory_id": "os-agent-skill-dir-sl-bootstrap-agent-soul-curator-research-direction",
+                "workspace_id": APP_DOCS_WORKSPACE_ID,
+                "mime_type": "text/markdown",
+            }),
+            b"# Research Direction\n",
+            "text/markdown",
+            &agent_ctx,
+        )
+        .await
+        .expect("create legacy lower-case-only skill file");
+
+    let before = state
+        .server
+        .get_tenant_entity_state(&tenant, "File", file_id)
+        .await
+        .expect("legacy file should exist");
+    assert!(
+        before.state.fields.get("Path").is_none(),
+        "test setup should match lower-case-only legacy projection"
+    );
+
+    ensure_markdown_file(
+        &state,
+        &tenant,
+        &agent_ctx,
+        MarkdownFileBootstrapTarget {
+            file_id,
+            name: "SKILL.md",
+            path,
+            directory_id: "os-agent-skill-dir-sl-bootstrap-agent-soul-curator-research-direction",
+            workspace_id: APP_DOCS_WORKSPACE_ID,
+        },
+        b"# Research Direction\n",
+    )
+    .await
+    .expect("repair skill file aliases");
+
+    let after = state
+        .server
+        .get_tenant_entity_state(&tenant, "File", file_id)
+        .await
+        .expect("repaired file should exist");
+    assert_eq!(
+        after
+            .state
+            .fields
+            .get("Path")
+            .and_then(|value| value.as_str()),
+        Some(path)
+    );
+    assert_eq!(
+        after
+            .state
+            .fields
+            .get("WorkspaceId")
+            .and_then(|value| value.as_str()),
+        Some(APP_DOCS_WORKSPACE_ID)
+    );
+
+    let _ = fs::remove_file(&db_path);
+    let _ = fs::remove_file(format!("{db_path}-wal"));
+    let _ = fs::remove_file(format!("{db_path}-shm"));
+}
+
+#[tokio::test]
 async fn test_install_os_app_rebuilds_reaction_dispatcher_for_inline_entity_triggers() {
     use serde_json::json;
     use temper_runtime::tenant::TenantId;

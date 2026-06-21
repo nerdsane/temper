@@ -60,8 +60,8 @@ pub struct ScheduleAtRequest {
 
 /// Maximum cross-entity lookups per transition (TigerStyle budget).
 ///
-/// Rich artifact contracts, such as Katagami's design-language review gate,
-/// legitimately verify several sibling File records in one guarded transition.
+/// Rich contracts may legitimately verify several sibling entities in one
+/// guarded transition.
 pub const MAX_CROSS_ENTITY_LOOKUPS: usize = 16;
 /// Maximum entity spawns per transition (TigerStyle budget).
 pub const MAX_SPAWNS_PER_TRANSITION: usize = 8;
@@ -1107,49 +1107,49 @@ guard = [
     }
 
     #[test]
-    fn cross_entity_budget_covers_artifact_review_contract() {
+    fn cross_entity_budget_covers_multi_entity_guard_contract() {
         let _guard = temper_runtime::scheduler::install_deterministic_context(42);
 
         let spec = r#"
 [automaton]
-name = "DesignLanguage"
-states = ["Draft", "UnderReview"]
+name = "ReviewPacket"
+states = ["Draft", "Submitted"]
 initial = "Draft"
 
 [[action]]
-name = "SubmitForReview"
+name = "Submit"
 from = ["Draft"]
-to = "UnderReview"
+to = "Submitted"
 guard = [
-    { type = "cross_entity_state", entity_type = "File", entity_id_source = "embodiment_file_id", required_status = ["Ready", "Locked"] },
-    { type = "cross_entity_state", entity_type = "File", entity_id_source = "landing_file_id", required_status = ["Ready", "Locked"] },
-    { type = "cross_entity_state", entity_type = "File", entity_id_source = "dashboard_file_id", required_status = ["Ready", "Locked"] },
-    { type = "cross_entity_state", entity_type = "File", entity_id_source = "thumbnail_file_id", required_status = ["Ready", "Locked"] },
-    { type = "cross_entity_state", entity_type = "File", entity_id_source = "design_md_file_id", required_status = ["Ready", "Locked"] },
-    { type = "cross_entity_state", entity_type = "File", entity_id_source = "shadcn_export_file_id", required_status = ["Ready", "Locked"] },
-    { type = "cross_entity_state", entity_type = "File", entity_id_source = "shadcn_component_spec_file_id", required_status = ["Ready", "Locked"] },
-    { type = "cross_entity_state", entity_type = "File", entity_id_source = "shadcn_preview_shots_file_id", required_status = ["Ready", "Locked"] }
+    { type = "cross_entity_state", entity_type = "Attachment", entity_id_source = "attachment_a_id", required_status = ["Ready", "Locked"] },
+    { type = "cross_entity_state", entity_type = "Attachment", entity_id_source = "attachment_b_id", required_status = ["Ready", "Locked"] },
+    { type = "cross_entity_state", entity_type = "Attachment", entity_id_source = "attachment_c_id", required_status = ["Ready", "Locked"] },
+    { type = "cross_entity_state", entity_type = "Attachment", entity_id_source = "attachment_d_id", required_status = ["Ready", "Locked"] },
+    { type = "cross_entity_state", entity_type = "Attachment", entity_id_source = "attachment_e_id", required_status = ["Ready", "Locked"] },
+    { type = "cross_entity_state", entity_type = "Attachment", entity_id_source = "attachment_f_id", required_status = ["Ready", "Locked"] },
+    { type = "cross_entity_state", entity_type = "Attachment", entity_id_source = "attachment_g_id", required_status = ["Ready", "Locked"] },
+    { type = "cross_entity_state", entity_type = "Attachment", entity_id_source = "attachment_h_id", required_status = ["Ready", "Locked"] }
 ]
 "#;
 
         let table = temper_jit::table::TransitionTable::from_ioa_source(spec);
         let mut state = EntityState {
-            entity_type: "DesignLanguage".into(),
-            entity_id: "dl-1".into(),
+            entity_type: "ReviewPacket".into(),
+            entity_id: "rp-1".into(),
             status: "Draft".into(),
             item_count: 0,
             counters: std::collections::BTreeMap::new(),
             booleans: std::collections::BTreeMap::new(),
             lists: std::collections::BTreeMap::new(),
             fields: serde_json::json!({
-                "embodiment_file_id": "fl-1",
-                "landing_file_id": "fl-2",
-                "dashboard_file_id": "fl-3",
-                "thumbnail_file_id": "fl-4",
-                "design_md_file_id": "fl-5",
-                "shadcn_export_file_id": "fl-6",
-                "shadcn_component_spec_file_id": "fl-7",
-                "shadcn_preview_shots_file_id": "fl-8"
+                "attachment_a_id": "att-1",
+                "attachment_b_id": "att-2",
+                "attachment_c_id": "att-3",
+                "attachment_d_id": "att-4",
+                "attachment_e_id": "att-5",
+                "attachment_f_id": "att-6",
+                "attachment_g_id": "att-7",
+                "attachment_h_id": "att-8"
             }),
             events: std::collections::VecDeque::new(),
             total_event_count: 0,
@@ -1159,37 +1159,29 @@ guard = [
             processed_idempotency_keys: std::collections::BTreeMap::new(),
         };
         let xref = std::collections::BTreeMap::from([
-            ("__xref:File:embodiment_file_id".to_string(), true),
-            ("__xref:File:landing_file_id".to_string(), true),
-            ("__xref:File:dashboard_file_id".to_string(), true),
-            ("__xref:File:thumbnail_file_id".to_string(), true),
-            ("__xref:File:design_md_file_id".to_string(), true),
-            ("__xref:File:shadcn_export_file_id".to_string(), true),
-            (
-                "__xref:File:shadcn_component_spec_file_id".to_string(),
-                true,
-            ),
-            ("__xref:File:shadcn_preview_shots_file_id".to_string(), true),
+            ("__xref:Attachment:attachment_a_id".to_string(), true),
+            ("__xref:Attachment:attachment_b_id".to_string(), true),
+            ("__xref:Attachment:attachment_c_id".to_string(), true),
+            ("__xref:Attachment:attachment_d_id".to_string(), true),
+            ("__xref:Attachment:attachment_e_id".to_string(), true),
+            ("__xref:Attachment:attachment_f_id".to_string(), true),
+            ("__xref:Attachment:attachment_g_id".to_string(), true),
+            ("__xref:Attachment:attachment_h_id".to_string(), true),
         ]);
-        let required_artifact_lookup_count = xref.len();
+        let required_guard_lookup_count = xref.len();
         assert!(
-            MAX_CROSS_ENTITY_LOOKUPS >= required_artifact_lookup_count,
-            "artifact review gates need at least {required_artifact_lookup_count} cross-entity File lookups"
+            MAX_CROSS_ENTITY_LOOKUPS >= required_guard_lookup_count,
+            "multi-entity guards need at least {required_guard_lookup_count} cross-entity lookups"
         );
 
-        let result = process_action_with_xref(
-            &mut state,
-            &table,
-            "SubmitForReview",
-            &serde_json::json!({}),
-            &xref,
-        );
+        let result =
+            process_action_with_xref(&mut state, &table, "Submit", &serde_json::json!({}), &xref);
 
         assert!(
             result.success,
-            "eight resolved artifact File guards should allow SubmitForReview"
+            "eight resolved cross-entity guards should allow Submit"
         );
-        assert_eq!(state.status, "UnderReview");
+        assert_eq!(state.status, "Submitted");
     }
 
     #[test]
