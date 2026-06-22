@@ -49,6 +49,13 @@ pub enum IndexedFileStreamRead {
     },
 }
 
+/// Which indexed stream entity a read targets, used to dispatch the
+/// authoritative actor-state fallback.
+enum StreamKind {
+    File,
+    Version,
+}
+
 impl ServerState {
     #[instrument(skip_all, fields(
         otel.name = "state.read_file_stream_indexed",
@@ -68,25 +75,9 @@ impl ServerState {
                 .read_file_stream_from_state_fallback(tenant, file_id)
                 .await;
         };
-        match self.read_indexed_stream_from_meta(tenant, meta).await? {
-            IndexedFileStreamRead::StaleIndex {
-                content_hash,
-                mime_type,
-            } => {
-                let fallback = self
-                    .read_file_stream_from_state_fallback(tenant, file_id)
-                    .await?;
-                if stream_read_content_hash(&fallback).is_some_and(|hash| hash != content_hash) {
-                    Ok(fallback)
-                } else {
-                    Ok(IndexedFileStreamRead::StaleIndex {
-                        content_hash,
-                        mime_type,
-                    })
-                }
-            }
-            read => Ok(read),
-        }
+        let read = self.read_indexed_stream_from_meta(tenant, meta).await?;
+        self.reconcile_indexed_stream_read(tenant, StreamKind::File, file_id, read)
+            .await
     }
 
     #[instrument(skip_all, fields(
@@ -110,14 +101,30 @@ impl ServerState {
                 .read_file_version_stream_from_state_fallback(tenant, file_version_id)
                 .await;
         };
-        match self.read_indexed_stream_from_meta(tenant, meta).await? {
+        let read = self.read_indexed_stream_from_meta(tenant, meta).await?;
+        self.reconcile_indexed_stream_read(tenant, StreamKind::Version, file_version_id, read)
+            .await
+    }
+
+    /// Reconcile an indexed file stream read against the authoritative actor
+    /// state. `StaleIndex` (projected blob missing) and `NoContent` (a version
+    /// is recorded but its content bytes are not projected yet — ARN-87) both
+    /// indicate a read racing ahead of the projection of a just-committed
+    /// cross-actor write, so fall back to the actor state, which holds the
+    /// committed content, for read-after-write consistency.
+    async fn reconcile_indexed_stream_read(
+        &self,
+        tenant: &TenantId,
+        kind: StreamKind,
+        id: &str,
+        read: IndexedFileStreamRead,
+    ) -> Result<IndexedFileStreamRead, String> {
+        match read {
             IndexedFileStreamRead::StaleIndex {
                 content_hash,
                 mime_type,
             } => {
-                let fallback = self
-                    .read_file_version_stream_from_state_fallback(tenant, file_version_id)
-                    .await?;
+                let fallback = self.read_stream_state_fallback(tenant, &kind, id).await?;
                 if stream_read_content_hash(&fallback).is_some_and(|hash| hash != content_hash) {
                     Ok(fallback)
                 } else {
@@ -127,7 +134,38 @@ impl ServerState {
                     })
                 }
             }
+            IndexedFileStreamRead::NoContent {
+                content_hash,
+                mime_type,
+            } => {
+                let fallback = self.read_stream_state_fallback(tenant, &kind, id).await?;
+                if matches!(fallback, IndexedFileStreamRead::Content { .. }) {
+                    Ok(fallback)
+                } else {
+                    Ok(IndexedFileStreamRead::NoContent {
+                        content_hash,
+                        mime_type,
+                    })
+                }
+            }
             read => Ok(read),
+        }
+    }
+
+    /// Read a file/file-version stream from the authoritative actor state for the
+    /// given stream kind.
+    async fn read_stream_state_fallback(
+        &self,
+        tenant: &TenantId,
+        kind: &StreamKind,
+        id: &str,
+    ) -> Result<IndexedFileStreamRead, String> {
+        match kind {
+            StreamKind::File => self.read_file_stream_from_state_fallback(tenant, id).await,
+            StreamKind::Version => {
+                self.read_file_version_stream_from_state_fallback(tenant, id)
+                    .await
+            }
         }
     }
 
