@@ -7,7 +7,7 @@ use std::collections::{HashSet, VecDeque};
 
 use stateright::{Checker, Model};
 
-use crate::model::semantics::{apply_effects, evaluate_guard};
+use crate::model::semantics::{apply_effects, guard_may_hold};
 use crate::model::{ModelEffect, ResolvedTransition};
 use crate::model::{TemperModel, TemperModelAction, TemperModelState};
 
@@ -102,7 +102,7 @@ fn find_dead_transitions(model: &TemperModel) -> Vec<String> {
         .iter()
         .enumerate()
         .filter_map(|(index, transition)| {
-            if covered[index] || transition.guard.contains_cross_entity() {
+            if covered[index] {
                 None
             } else {
                 Some(render_transition_label(transition))
@@ -121,7 +121,10 @@ fn is_transition_enabled(
             .from_states
             .iter()
             .any(|from| from == &state.status);
-    if !status_ok || !evaluate_guard(&transition.guard, state) {
+    // Use `guard_may_hold` (not `evaluate_guard`) so cross-entity gated edges
+    // are walked during reachability BFS: a cross-entity guard is a free
+    // boolean, so the gated target state is genuinely reachable in the model.
+    if !status_ok || !guard_may_hold(&transition.guard, state) {
         return false;
     }
 
@@ -267,6 +270,141 @@ assert = "no_further_transitions"
         assert!(
             result.dead_transitions.is_empty(),
             "abstract cross-entity transitions should not be reported as dead: {:?}",
+            result.dead_transitions
+        );
+        // The local-terminal proof still holds (no_further_transitions uses
+        // local enablement, where the gate is false), AND the gated edge is now
+        // genuinely explored: Ready is reachable, so the model is not silently
+        // pruning the state behind the gate.
+        assert!(
+            states_contains_status(&model, "Ready"),
+            "cross-entity gated target state must be reachable in the explored model"
+        );
+    }
+
+    /// Walk the model's reachable states (mirroring the checker BFS) and report
+    /// whether `status` is among them.
+    fn states_contains_status(model: &TemperModel, status: &str) -> bool {
+        let mut visited = HashSet::new();
+        let mut queue = VecDeque::new();
+        for init in model.init_states() {
+            if visited.insert(init.clone()) {
+                queue.push_back(init);
+            }
+        }
+        while let Some(state) = queue.pop_front() {
+            if state.status == status {
+                return true;
+            }
+            for transition in &model.transitions {
+                if !is_transition_enabled(model, transition, &state) {
+                    continue;
+                }
+                let next = apply_transition(&state, transition);
+                if visited.insert(next.clone()) {
+                    queue.push_back(next);
+                }
+            }
+        }
+        false
+    }
+
+    #[test]
+    fn test_cross_entity_gated_only_target_is_reachable_not_dead() {
+        // Published is reachable ONLY through a cross-entity file-ready gate
+        // (mirrors a publish transition gated on a related file entity). Before
+        // the free-boolean fix the gate lowered to constant-false, so this edge
+        // was vacuously dead and Published was never reached. It must now be
+        // both reachable and not reported dead.
+        let src = r#"
+[automaton]
+name = "DesignLanguage"
+states = ["Draft", "Published"]
+initial = "Draft"
+
+[[action]]
+name = "Publish"
+from = ["Draft"]
+to = "Published"
+guard = [{ type = "cross_entity_state", entity_type = "File", entity_id_source = "file_id", required_status = ["Ready"] }]
+"#;
+        let model = build_model_from_ioa(src, 2).unwrap();
+        let result = check_model(&model);
+
+        assert!(
+            result.dead_transitions.is_empty(),
+            "Publish gated by a cross-entity guard must not be dead: {:?}",
+            result.dead_transitions
+        );
+        assert!(
+            result.all_properties_hold,
+            "free-boolean cross-entity guard should keep L1 green: {result:?}"
+        );
+        assert!(
+            states_contains_status(&model, "Published"),
+            "Published must be reachable through the free-boolean cross-entity edge"
+        );
+    }
+
+    #[test]
+    fn test_liveness_reaches_state_through_cross_entity_gate() {
+        // A liveness "eventually reaches Published" property can only be proven
+        // if the gated edge is explored. With the free-boolean treatment the
+        // ReachesTerminal property holds.
+        let src = r#"
+[automaton]
+name = "DesignLanguage"
+states = ["Draft", "Published"]
+initial = "Draft"
+
+[[action]]
+name = "Publish"
+from = ["Draft"]
+to = "Published"
+guard = [{ type = "cross_entity_state", entity_type = "File", entity_id_source = "file_id", required_status = ["Ready"] }]
+
+[[liveness]]
+name = "EventuallyPublished"
+from = ["Draft"]
+reaches = ["Published"]
+"#;
+        let model = build_model_from_ioa(src, 2).unwrap();
+        let result = check_model(&model);
+        assert!(
+            result.all_properties_hold,
+            "liveness toward a cross-entity gated state must be provable: {result:?}"
+        );
+    }
+
+    #[test]
+    fn test_cross_entity_transition_dead_when_status_precondition_unreachable() {
+        // The free boolean only relaxes the cross-entity conjunct; a transition
+        // whose from-state is genuinely never reached is still (correctly) dead.
+        let src = r#"
+[automaton]
+name = "Orphan"
+states = ["Start", "Stranded", "End"]
+initial = "Start"
+
+[[action]]
+name = "Finish"
+from = ["Start"]
+to = "End"
+
+[[action]]
+name = "GatedFromStranded"
+from = ["Stranded"]
+to = "End"
+guard = [{ type = "cross_entity_state", entity_type = "Other", entity_id_source = "other_id", required_status = ["Ok"] }]
+"#;
+        let model = build_model_from_ioa(src, 2).unwrap();
+        let result = check_model(&model);
+        assert!(
+            result
+                .dead_transitions
+                .iter()
+                .any(|t| t.contains("GatedFromStranded")),
+            "a cross-entity transition out of an unreachable state must still be reported dead: {:?}",
             result.dead_transitions
         );
     }
