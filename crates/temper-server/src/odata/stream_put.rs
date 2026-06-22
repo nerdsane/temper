@@ -89,6 +89,64 @@ pub(super) async fn handle_stream_put(
         return *resp;
     }
 
+    let content_type = headers
+        .get("content-type")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("application/octet-stream")
+        .to_string();
+
+    // ARN-87 write-side: a brand-new File's first `$value` write must commit as
+    // ONE atomic create-with-content append. The default path below would
+    // instead spawn the actor (whose `pre_start` persists an empty bootstrap
+    // `Created`) and only then dispatch `StreamUpdated` as a second append —
+    // leaving the File durable and projection-visible with an empty `$value`
+    // between the two. The existence probe uses `ensure_entity_loaded`, which
+    // for a truly-new id returns false WITHOUT spawning, so it does not itself
+    // open that window; existing Files fall through to the unchanged path. The
+    // File spec has no Delete/tombstone action (states: Created/Ready/Locked/
+    // Archived), so a false probe always means a genuinely-new id — never a
+    // deleted one; an existing Archived File probes true and takes the
+    // unchanged path (where ArchivedIsFinal rejects the write).
+    if entity_type == "File" && !state.ensure_entity_loaded(tenant, "File", &key).await {
+        let new_file_attrs = match state.synthesize_new_file_resource_attrs(tenant, &key) {
+            Ok(attrs) => attrs,
+            Err(error) => {
+                return odata_error(StatusCode::INTERNAL_SERVER_ERROR, "StateError", &error)
+                    .into_response();
+            }
+        };
+        if let Err(response) = authorize_mutation(
+            state,
+            tenant,
+            security_ctx,
+            agent_ctx,
+            UPDATE_ACTION,
+            MutationResource {
+                entity_type: &entity_type,
+                entity_id: &key,
+                attrs: &new_file_attrs,
+            },
+        )
+        .await
+        {
+            return response;
+        }
+        return match state
+            .create_file_with_initial_stream_content_checked(
+                tenant,
+                &key,
+                serde_json::json!({}),
+                body.as_ref(),
+                &content_type,
+                agent_ctx,
+            )
+            .await
+        {
+            Ok(entity_resp) => stream_put_success_response(&entity_resp),
+            Err(error) => file_stream_content_error_response(error),
+        };
+    }
+
     let snapshot = match state
         .load_authz_resource_snapshot(tenant, &entity_type, &key)
         .await
@@ -114,12 +172,6 @@ pub(super) async fn handle_stream_put(
     {
         return response;
     }
-
-    let content_type = headers
-        .get("content-type")
-        .and_then(|v| v.to_str().ok())
-        .unwrap_or("application/octet-stream")
-        .to_string();
 
     if entity_type == "File" {
         return match state

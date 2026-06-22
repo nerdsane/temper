@@ -207,6 +207,46 @@ impl ServerState {
             .clone())
     }
 
+    /// Build the Cedar resource attributes for a not-yet-existing `File`
+    /// WITHOUT spawning its actor.
+    ///
+    /// Produces exactly what `load_authz_resource_snapshot` would for a
+    /// freshly-spawned File so Cedar cannot allow/deny differently between a
+    /// create-via-`$value` and an update on a fresh File:
+    /// - `id` / `status` (lowercase) — the explicit inserts
+    ///   `load_authz_resource_snapshot` adds from the entity id and the File
+    ///   spec's initial state;
+    /// - `Id` / `Status` (capitalized) — the fields `build_initial_state`
+    ///   seeds (actor.rs) and that the snapshot then copies out of
+    ///   `state.fields`;
+    /// - `has_spec=true`.
+    ///
+    /// A freshly-spawned File has no other persisted fields, so the maps match.
+    /// Avoiding the spawn is the point: it skips persisting the empty bootstrap
+    /// `Created` event the spawn path (actor `pre_start`) would write — the
+    /// ARN-87 write-side empty-`$value` window this closes.
+    pub(crate) fn synthesize_new_file_resource_attrs(
+        &self,
+        tenant: &temper_runtime::tenant::TenantId,
+        file_id: &str,
+    ) -> Result<std::collections::BTreeMap<String, serde_json::Value>, String> {
+        let table = self
+            .file_transition_table(tenant)
+            .map_err(|error| error.to_string())?;
+        let initial_state = serde_json::Value::String(table.initial_state.clone());
+        let file_id_value = serde_json::Value::String(file_id.to_string());
+        let mut attrs = std::collections::BTreeMap::new();
+        attrs.insert("id".to_string(), file_id_value.clone());
+        attrs.insert("status".to_string(), initial_state.clone());
+        attrs.insert("Id".to_string(), file_id_value);
+        attrs.insert("Status".to_string(), initial_state);
+        let has_spec = self
+            .has_registered_spec(tenant, "File")
+            .map_err(|error| error.to_string())?;
+        attrs.insert("has_spec".to_string(), serde_json::Value::Bool(has_spec));
+        Ok(attrs)
+    }
+
     fn broadcast_synthetic_file_stream_update(
         &self,
         tenant: &temper_runtime::tenant::TenantId,
