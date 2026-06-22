@@ -136,11 +136,33 @@ a warning, does not claim a pass, and surfaces that the proof is partial. An
 incomplete run never silently passes — it is honestly reported as not fully
 explored. Discovered violations from a partial run are still real and still gate.
 
+### Sub-Decision 6: `required` cross-entity ref — empty ref fails, not vacuous (ARN-92 #2)
+
+The runtime cross-entity guard resolver (`state/dispatch/cross_entity.rs`) treats
+an empty/missing scalar ref or an empty list relation as a **vacuous pass** —
+there is nothing to check, so the guard holds. That is correct for an *optional*
+relationship, but wrong for a *required* one: a `cross_entity_state` guard whose
+`entity_id_source` was never set should fail (the precondition cannot be
+satisfied by an absent target), not silently pass.
+
+Add an optional `required` attribute to the `cross_entity_state` guard
+(`#[serde(default)]`, defaults `false`, threaded parser → `ResolvedGuard` → JIT
+`Guard::CrossEntityStateIn` → `collect_cross_guards`). When `required = true`,
+the resolver inserts `(key, false)` for an empty scalar or empty list ref instead
+of `(key, true)`. Optional refs (the default) keep the vacuous-true behavior, so
+the existing blast radius — e.g. an optional list relation with no members — is
+unchanged. The L1 model is unaffected: the cross-entity status is already a free
+boolean there (ADR-0149), so the empty-ref distinction is purely a runtime
+resolution concern.
+
 ## Consequences
 
 - Multi-entity apps now get their cross-entity reaction ordering checked on every
   `temper verify`. The two temper-fs drops above (and the structural double-
   supersede) surface as gating failures.
+- A required cross-entity ref that was never set now fails its guard at runtime
+  instead of passing vacuously (ARN-92 #2), closing a hole where a missing
+  relationship silently satisfied a precondition.
 - Authors gain a precise vocabulary for intentional best-effort drops (`drop_ok`)
   and a verifier that holds them to it everywhere else.
 - The budget keeps verification bounded and honest: large products report

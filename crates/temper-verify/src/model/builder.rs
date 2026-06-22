@@ -116,6 +116,11 @@ fn convert_guard(guard: ResolvedGuard) -> ModelGuard {
             entity_type,
             entity_id_source,
             required_status,
+            // `required` does not affect L1 model checking: the cross-entity
+            // status is already a free boolean in the model (ADR-0149), so an
+            // empty-ref distinction is invisible at the single-entity level.
+            // It only changes runtime resolution (ARN-92 #2).
+            required: _,
         } => ModelGuard::CrossEntityState {
             entity_type,
             entity_id_source,
