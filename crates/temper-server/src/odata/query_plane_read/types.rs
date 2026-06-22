@@ -88,6 +88,10 @@ pub(in crate::odata::query_plane_read) enum QueryPlaneFallbackReason {
     CatalogCoverageGap,
     /// Candidate evaluation exceeded the bounded proof budget.
     FallbackCandidateBudget,
+    /// An exact-match resolution returned an empty native page that may be a
+    /// lagging projection of a just-committed entity, so the read was
+    /// reconciled against authoritative state (ARN-89).
+    ProjectionLagReconcile,
 }
 
 impl QueryPlaneFallbackReason {
@@ -100,6 +104,7 @@ impl QueryPlaneFallbackReason {
             Self::FilterPushdownUnavailable => "filter_pushdown_unavailable",
             Self::CatalogCoverageGap => "catalog_coverage_gap",
             Self::FallbackCandidateBudget => "fallback_candidate_budget",
+            Self::ProjectionLagReconcile => "projection_lag_reconcile",
         }
     }
 }

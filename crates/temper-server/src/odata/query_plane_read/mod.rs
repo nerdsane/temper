@@ -24,14 +24,38 @@ fn should_try_native_before_catalog_coverage(
     plan.filter_pushdown && request.query_options.count != Some(true)
 }
 
-fn should_try_lazy_catalog_repair_after_native_result(
+fn should_reconcile_empty_exact_match_against_authoritative(
     request: &QueryPlaneReadRequest<'_>,
     indexed_entity_ids: &[String],
     result: &scan::CandidateScanResult,
 ) -> bool {
-    indexed_entity_ids.is_empty()
-        && result.entities.is_empty()
-        && request.budget.requested_top(request.query_options) > 0
+    if !result.entities.is_empty() || request.budget.requested_top(request.query_options) == 0 {
+        return false;
+    }
+    // Original case: nothing in the in-memory index yet, so a lazy catalog
+    // repair may surface entities the native page could not see.
+    if indexed_entity_ids.is_empty() {
+        return true;
+    }
+    // ARN-89: an empty native page for a pure equality-conjunction resolution
+    // (e.g. `Path eq '..' and WorkspaceId eq '..'`) is not trustworthy under
+    // projection lag — a just-committed entity may not yet have its
+    // asynchronously-projected row. Reconcile against authoritative state even
+    // when the index already holds other entities of this type.
+    //
+    // Cost tradeoff: a genuinely-absent target then falls through to a bounded
+    // authoritative scan (capped by `scan_candidate_budget`) instead of a cheap
+    // empty native page. That is the read-path cost of read-after-write
+    // correctness; it never serializes the write hot path. The gate is tight —
+    // only pushdown-able equality conjunctions pay it; ranges/Or/Ne/contains/
+    // functions return `None` from `equality_field_predicates` and are
+    // unaffected.
+    request
+        .query_options
+        .filter
+        .as_ref()
+        .and_then(super::filter_sql::equality_field_predicates)
+        .is_some()
 }
 
 fn should_check_source_cursor_catalog_coverage(
@@ -78,6 +102,11 @@ pub(in crate::odata) async fn read_entity_set_from_query_plane(
     }
 
     let native_plan = native_candidate_page_plan(&request);
+    // Set when an empty native page for an exact-match resolution is treated as
+    // a possibly-lagging projection and we fall through to the authoritative
+    // path below (ARN-89). It suppresses the native retry on that path and
+    // selects the `ProjectionLagReconcile` telemetry reason.
+    let mut reconciling_exact_match_lag = false;
     if let Some(plan) = native_plan.clone()
         && should_try_native_before_catalog_coverage(&request, &plan)
     {
@@ -91,11 +120,20 @@ pub(in crate::odata) async fn read_entity_set_from_query_plane(
                 catalog_coverage_report(&request, &indexed_entity_ids).await;
             if coverage.missing == 0 {
                 if let Some(result) = try_native_page_read(&request, plan, coverage).await {
-                    return result.map(|result| QueryPlaneReadResult {
-                        entities: result.entities,
-                        count: result.count,
-                        telemetry: result.telemetry,
-                    });
+                    let result = result?;
+                    if should_reconcile_empty_exact_match_against_authoritative(
+                        &request,
+                        &indexed_entity_ids,
+                        &result,
+                    ) {
+                        reconciling_exact_match_lag = true;
+                    } else {
+                        return Ok(QueryPlaneReadResult {
+                            entities: result.entities,
+                            count: result.count,
+                            telemetry: result.telemetry,
+                        });
+                    }
                 }
             } else {
                 let result = read_from_source_cursor(
@@ -116,11 +154,13 @@ pub(in crate::odata) async fn read_entity_set_from_query_plane(
             try_native_page_read(&request, plan, QueryPlaneCoverageReport::default()).await
         {
             let result = result?;
-            if !should_try_lazy_catalog_repair_after_native_result(
+            if should_reconcile_empty_exact_match_against_authoritative(
                 &request,
                 &indexed_entity_ids,
                 &result,
             ) {
+                reconciling_exact_match_lag = true;
+            } else {
                 return Ok(QueryPlaneReadResult {
                     entities: result.entities,
                     count: result.count,
@@ -154,7 +194,8 @@ pub(in crate::odata) async fn read_entity_set_from_query_plane(
     }
     let (coverage, missing_ids) = catalog_coverage_report(&request, &all_entity_ids).await;
 
-    if coverage.missing == 0
+    if !reconciling_exact_match_lag
+        && coverage.missing == 0
         && let Some(plan) = native_plan.clone()
         && let Some(result) = try_native_page_read(&request, plan, coverage).await
     {
@@ -165,7 +206,9 @@ pub(in crate::odata) async fn read_entity_set_from_query_plane(
         });
     }
 
-    let fallback_reason = if coverage.missing > 0 {
+    let fallback_reason = if reconciling_exact_match_lag {
+        QueryPlaneFallbackReason::ProjectionLagReconcile
+    } else if coverage.missing > 0 {
         QueryPlaneFallbackReason::CatalogCoverageGap
     } else if request.query_options.filter.is_some() && native_plan.is_none() {
         QueryPlaneFallbackReason::FilterPushdownUnavailable

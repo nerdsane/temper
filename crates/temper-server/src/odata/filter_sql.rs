@@ -61,6 +61,58 @@ pub(super) fn try_translate_candidate_filter(filter: &FilterExpr) -> Option<Tran
     })
 }
 
+/// Detect whether `filter` is a pure conjunction (`AND`-tree) of
+/// `Property eq <scalar literal>` leaves — the shape of resolution lookups such
+/// as `Path eq '..' and WorkspaceId eq '..'` and the directory variant
+/// `Name eq '..' and WorkspaceId eq '..' and ParentId eq null`.
+///
+/// Returns the matched `(field, rendered_value)` pairs when the WHOLE
+/// expression has that shape, or `None` for anything else (`Or`, `Ne`, ranges,
+/// functions, unary, bare property/literal, or a non-scalar literal).
+///
+/// Used by the query plane to decide when an EMPTY native projection page for
+/// an exact-match resolution is untrustworthy and must be reconciled against
+/// authoritative state — a just-committed entity may not yet have its
+/// asynchronously-projected row (ARN-89). `null`-equality leaves count as
+/// equality here; the authoritative read re-evaluates the original filter, so
+/// null semantics stay correct.
+pub(super) fn equality_field_predicates(filter: &FilterExpr) -> Option<Vec<(String, String)>> {
+    let mut pairs = Vec::new();
+    collect_equality_field_predicates(filter, &mut pairs).then_some(pairs)
+}
+
+fn collect_equality_field_predicates(expr: &FilterExpr, out: &mut Vec<(String, String)>) -> bool {
+    match expr {
+        FilterExpr::BinaryOp {
+            left,
+            op: BinaryOperator::And,
+            right,
+        } => {
+            collect_equality_field_predicates(left, out)
+                && collect_equality_field_predicates(right, out)
+        }
+        FilterExpr::BinaryOp {
+            left,
+            op: BinaryOperator::Eq,
+            right,
+        } => {
+            let Some((field_name, value)) = property_literal_pair(left, right) else {
+                return false;
+            };
+            let rendered = match value {
+                ODataValue::Null => String::new(),
+                other => match odata_value_to_text(other) {
+                    Some(text) => text,
+                    None => return false,
+                },
+            };
+            out.push((field_name.to_string(), rendered));
+            true
+        }
+        _ => false,
+    }
+}
+
 struct TranslateCtx {
     params: Vec<String>,
     next_param: usize,
