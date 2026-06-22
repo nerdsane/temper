@@ -453,6 +453,7 @@ fn format_guards(guards: &[Guard]) -> String {
                 entity_type,
                 entity_id_source,
                 required_status,
+                ..
             } => {
                 format!(
                     "{entity_type}[{entity_id_source}].status \\in {{{}}}",

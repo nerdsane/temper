@@ -244,6 +244,15 @@ pub enum Guard {
         entity_id_source: String,
         /// Target must be in one of these statuses (any match passes).
         required_status: Vec<String>,
+        /// Whether the `entity_id_source` ref must be present (ARN-92 #2).
+        ///
+        /// When `false` (default), an empty/missing scalar ref or an empty list
+        /// relation passes the guard vacuously — the legacy blast radius. When
+        /// `true`, an empty/missing scalar or empty list ref *fails* the guard:
+        /// a required relationship that was never set cannot satisfy a
+        /// cross-entity status precondition.
+        #[serde(default)]
+        required: bool,
     },
 }
 

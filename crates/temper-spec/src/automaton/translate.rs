@@ -39,6 +39,9 @@ pub enum ResolvedGuard {
         entity_type: String,
         entity_id_source: String,
         required_status: Vec<String>,
+        /// Whether the ref must be present; an empty required ref fails the
+        /// guard rather than passing vacuously (ARN-92 #2).
+        required: bool,
     },
     /// All inner guards must pass.
     And(Vec<ResolvedGuard>),
@@ -212,10 +215,12 @@ fn translate_single_guard(guard: &Guard) -> ResolvedGuard {
             entity_type,
             entity_id_source,
             required_status,
+            required,
         } => ResolvedGuard::CrossEntityState {
             entity_type: entity_type.clone(),
             entity_id_source: entity_id_source.clone(),
             required_status: required_status.clone(),
+            required: *required,
         },
     }
 }

@@ -10,6 +10,7 @@ use tracing::Instrument;
 
 mod actions;
 mod adapter;
+mod compensation;
 mod composite;
 mod cross_entity;
 mod effects;
@@ -401,6 +402,19 @@ impl crate::state::ServerState {
                 };
                 if let Err(e) = state.dispatch_wasm_integrations_internal(&req).await {
                     tracing::error!(error = %e, "background WASM integration dispatch failed");
+                    // ADR-0152: the transition is durable, so dispatch a
+                    // compensating failure transition instead of dropping the
+                    // error. Never silent: falls back to a surfaced metric +
+                    // Observe event when no failure path is declared. This is a
+                    // sync method that spawns its own task (like
+                    // dispatch_spawn_requests), breaking async recursion.
+                    state.dispatch_integration_failure_compensation(
+                        &tenant,
+                        &entity_type,
+                        &entity_id,
+                        &action,
+                        &e,
+                    );
                 }
             }
             .instrument(span),

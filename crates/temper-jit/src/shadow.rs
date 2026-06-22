@@ -5,7 +5,7 @@
 //! differences in outcome. This gives operators confidence that a swap will not
 //! change observable behaviour (or surfaces the exact cases where it does).
 
-use crate::table::types::EvalContext;
+use crate::table::guard::EvalContext;
 use crate::table::{TransitionResult, TransitionTable};
 
 // ---------------------------------------------------------------------------

@@ -19,8 +19,9 @@ impl crate::state::ServerState {
 
         let mut result = std::collections::BTreeMap::new();
 
-        // Get the transition table to find cross-entity guards
-        let cross_guards: Vec<(String, String, Vec<String>)> = {
+        // Get the transition table to find cross-entity guards.
+        // Tuple: (target_type, id_source, required_statuses, required_ref).
+        let cross_guards: Vec<(String, String, Vec<String>, bool)> = {
             let registry = self.registry.read().unwrap(); // ci-ok: infallible lock
             let Some(spec) = registry.get_spec(tenant, entity_type) else {
                 return result;
@@ -52,7 +53,7 @@ impl crate::state::ServerState {
 
         // Resolve each cross-entity guard (budget-limited)
         let mut lookup_count = 0;
-        for (target_type, id_source, required_statuses) in &cross_guards {
+        for (target_type, id_source, required_statuses, required_ref) in &cross_guards {
             if lookup_count >= MAX_CROSS_ENTITY_LOOKUPS {
                 tracing::warn!(
                     entity_type,
@@ -69,8 +70,11 @@ impl crate::state::ServerState {
             // If the field is a list (e.g. child_agent_ids), resolve each element.
             if let Some(arr) = field_value.and_then(|v| v.as_array()) {
                 if arr.is_empty() {
-                    // Empty list: vacuous truth — guard passes.
-                    result.insert(key, true);
+                    // Empty list relation. A *required* relation cannot be
+                    // satisfied by an absent target, so it fails the guard
+                    // (ARN-92 #2). An optional list stays vacuous-true to
+                    // preserve the existing blast radius.
+                    result.insert(key, !*required_ref);
                     continue;
                 }
                 let mut all_matched = true;
@@ -111,8 +115,10 @@ impl crate::state::ServerState {
             let target_id = field_value.and_then(|v| v.as_str()).unwrap_or("");
 
             if target_id.is_empty() {
-                // Empty string: vacuous truth — guard passes.
-                result.insert(key, true);
+                // Empty/missing scalar ref. A *required* ref that was never set
+                // cannot satisfy a cross-entity status precondition, so it fails
+                // the guard (ARN-92 #2). An optional ref stays vacuous-true.
+                result.insert(key, !*required_ref);
                 continue;
             }
 
@@ -132,9 +138,13 @@ impl crate::state::ServerState {
     }
 
     /// Recursively collect CrossEntityStateIn guards from a guard tree.
+    ///
+    /// Each tuple is `(target_type, id_source, required_statuses, required_ref)`.
+    /// `required_ref` carries the IOA `required` attribute (ARN-92 #2) so the
+    /// resolver can fail an empty *required* ref instead of passing vacuously.
     pub(super) fn collect_cross_guards(
         guard: &temper_jit::table::Guard,
-        out: &mut Vec<(String, String, Vec<String>)>,
+        out: &mut Vec<(String, String, Vec<String>, bool)>,
     ) {
         use temper_jit::table::Guard;
         match guard {
@@ -142,11 +152,13 @@ impl crate::state::ServerState {
                 entity_type,
                 entity_id_source,
                 required_status,
+                required,
             } => {
                 out.push((
                     entity_type.clone(),
                     entity_id_source.clone(),
                     required_status.clone(),
+                    *required,
                 ));
             }
             Guard::And(guards) => {
@@ -312,3 +324,7 @@ fn to_snake_case(value: &str) -> String {
     }
     result
 }
+
+#[cfg(test)]
+#[path = "cross_entity_test.rs"]
+mod required_ref_tests;

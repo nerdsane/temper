@@ -2,10 +2,14 @@
 //!
 //! A [`TransitionTable`] encodes the complete set of transition rules for a single
 //! entity type as DATA, not code. It can be hot-swapped per-actor without restart.
+//!
+//! Guard conditions and their evaluation live in [`super::guard`].
 
 use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
+
+use super::guard::{Guard, GuardFailure};
 
 // ---------------------------------------------------------------------------
 // Core types
@@ -35,6 +39,8 @@ pub struct TransitionTable {
     ///
     /// Eliminates the O(N) linear scan + Vec allocation in [`evaluate_ctx()`].
     /// Rebuilt automatically during construction and deserialization.
+    ///
+    /// [`evaluate_ctx()`]: TransitionTable::evaluate_ctx
     #[serde(skip)]
     pub(crate) rule_index: BTreeMap<String, Vec<usize>>,
 }
@@ -48,8 +54,10 @@ pub struct TransitionTable {
 ///   behalf of this field. `None` = permanent (pre-ADR behavior).
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 pub struct StateVarMetadata {
+    /// Per-field inline byte ceiling for field overflow (ADR-0045).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub overflow_inline_max_bytes: Option<usize>,
+    /// Per-field TTL in seconds for overflow blobs (ADR-0047).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub overflow_ttl_seconds: Option<u64>,
 }
@@ -57,10 +65,13 @@ pub struct StateVarMetadata {
 /// Parsed metadata for a first-class Composite action.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct CompositeActionMetadata {
+    /// Cedar gate evaluated for the composite intent, if declared.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cedar_gate: Option<CompositeCedarGate>,
+    /// Whether the composite records an audit/idempotency event on the parent stream.
     #[serde(default = "default_record_parent_event")]
     pub record_parent_event: bool,
+    /// Declared sub-write contract for the composite action.
     #[serde(default)]
     pub sub_writes: Vec<SubWriteSpec>,
 }
@@ -79,17 +90,25 @@ fn default_record_parent_event() -> bool {
     true
 }
 
+/// The single Cedar gate evaluated for a Composite action.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct CompositeCedarGate {
+    /// Principal expression, usually `request.principal`.
     pub principal: String,
+    /// Resource expression, usually `this`.
     pub resource: String,
+    /// Cedar action identifier for the composite intent.
     pub action: String,
 }
 
+/// Declared write shape emitted by a Composite action.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct SubWriteSpec {
+    /// Target entity type receiving the write.
     pub target_entity: String,
+    /// Target action, e.g. `Create` or `Update`.
     pub action: String,
+    /// Handler input or source that generates this write.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub generated_from: Option<String>,
 }
@@ -140,37 +159,6 @@ pub struct TransitionRule {
     pub guard: Guard,
     /// Effects applied after the transition fires.
     pub effects: Vec<Effect>,
-}
-
-/// A guard condition (evaluated before a transition fires).
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-pub enum Guard {
-    /// No guard -- always passes.
-    Always,
-    /// Current state must be in the given set.
-    StateIn(Vec<String>),
-    /// `items.len() >= N` (legacy alias for `CounterMin { var: "items", min: N }`).
-    ItemCountMin(usize),
-    /// A named counter must be >= N.
-    CounterMin { var: String, min: usize },
-    /// A named counter must be < N.
-    CounterMax { var: String, max: usize },
-    /// A named boolean variable must be true.
-    BoolTrue(String),
-    /// A named boolean variable must be false.
-    BoolFalse(String),
-    /// A named list variable must contain a specific value.
-    ListContains { var: String, value: String },
-    /// A named list variable must have at least N elements.
-    ListLengthMin { var: String, min: usize },
-    /// Another entity must be in one of the required statuses (pre-resolved as boolean).
-    CrossEntityStateIn {
-        entity_type: String,
-        entity_id_source: String,
-        required_status: Vec<String>,
-    },
-    /// All inner guards must pass.
-    And(Vec<Guard>),
 }
 
 /// An effect applied after a transition fires.
@@ -229,20 +217,9 @@ pub struct TransitionResult {
     pub effects: Vec<Effect>,
     /// Whether the transition succeeded.
     pub success: bool,
-}
-
-/// Runtime context for guard evaluation.
-///
-/// Passed to [`Guard::check()`] to provide the full entity state. The legacy
-/// [`Guard::evaluate()`] method builds a minimal context from `item_count`.
-#[derive(Debug, Clone, Default)]
-pub struct EvalContext {
-    /// Named counter values (e.g., "items" -> 2, "review_cycles" -> 1).
-    pub counters: BTreeMap<String, usize>,
-    /// Named boolean values (e.g., "assignee_set" -> true).
-    pub booleans: BTreeMap<String, bool>,
-    /// Named list values (e.g., "tags" -> ["urgent", "review"]).
-    pub lists: BTreeMap<String, Vec<String>>,
+    /// Identity of the first failing sub-guard, populated only on guard
+    /// rejection (ADR-0151). `None` on success and on a from-state miss.
+    pub guard_failure: Option<GuardFailure>,
 }
 
 impl TransitionTable {
@@ -261,159 +238,11 @@ impl TransitionTable {
     }
 }
 
-// ---------------------------------------------------------------------------
-// Guard evaluation
-// ---------------------------------------------------------------------------
-
-impl Guard {
-    /// Evaluate this guard against the current runtime context (legacy API).
-    ///
-    /// Uses a single `item_count` mapped to the `"items"` counter. For
-    /// multi-counter or boolean guard support, use [`check()`](Self::check).
-    pub fn evaluate(&self, current_state: &str, item_count: usize) -> bool {
-        let mut ctx = EvalContext::default();
-        ctx.counters.insert("items".to_string(), item_count);
-        self.check(current_state, &ctx)
-    }
-
-    /// Evaluate this guard against a full evaluation context.
-    pub fn check(&self, current_state: &str, ctx: &EvalContext) -> bool {
-        match self {
-            Guard::Always => true,
-            Guard::StateIn(states) => states.iter().any(|s| s == current_state),
-            Guard::ItemCountMin(n) => ctx.counters.get("items").copied().unwrap_or(0) >= *n,
-            Guard::CounterMin { var, min } => ctx.counters.get(var).copied().unwrap_or(0) >= *min,
-            Guard::CounterMax { var, max } => ctx.counters.get(var).copied().unwrap_or(0) < *max,
-            Guard::BoolTrue(var) => ctx.booleans.get(var).copied().unwrap_or(false),
-            Guard::BoolFalse(var) => !ctx.booleans.get(var).copied().unwrap_or(false),
-            Guard::ListContains { var, value } => {
-                ctx.lists.get(var).is_some_and(|list| list.contains(value))
-            }
-            Guard::ListLengthMin { var, min } => {
-                ctx.lists.get(var).map_or(0, |list| list.len()) >= *min
-            }
-            Guard::CrossEntityStateIn {
-                entity_type,
-                entity_id_source,
-                ..
-            } => {
-                let key = format!("__xref:{}:{}", entity_type, entity_id_source);
-                ctx.booleans.get(&key).copied().unwrap_or(false)
-            }
-            Guard::And(guards) => guards.iter().all(|g| g.check(current_state, ctx)),
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
+    use super::super::guard::Guard;
     use super::*;
     use std::collections::BTreeMap;
-
-    #[test]
-    fn guard_always_passes() {
-        let guard = Guard::Always;
-        let ctx = EvalContext::default();
-        assert!(guard.check("Draft", &ctx));
-    }
-
-    #[test]
-    fn guard_state_in_matches() {
-        let guard = Guard::StateIn(vec!["Draft".to_string(), "Active".to_string()]);
-        let ctx = EvalContext::default();
-        assert!(guard.check("Draft", &ctx));
-    }
-
-    #[test]
-    fn guard_state_in_no_match() {
-        let guard = Guard::StateIn(vec!["Draft".to_string()]);
-        let ctx = EvalContext::default();
-        assert!(!guard.check("Active", &ctx));
-    }
-
-    #[test]
-    fn guard_item_count_min_passes() {
-        let guard = Guard::ItemCountMin(2);
-        let mut ctx = EvalContext::default();
-        ctx.counters.insert("items".to_string(), 3);
-        assert!(guard.check("Draft", &ctx));
-    }
-
-    #[test]
-    fn guard_item_count_min_fails() {
-        let guard = Guard::ItemCountMin(2);
-        let mut ctx = EvalContext::default();
-        ctx.counters.insert("items".to_string(), 1);
-        assert!(!guard.check("Draft", &ctx));
-    }
-
-    #[test]
-    fn guard_counter_min_passes() {
-        let guard = Guard::CounterMin {
-            var: "cycles".to_string(),
-            min: 2,
-        };
-        let mut ctx = EvalContext::default();
-        ctx.counters.insert("cycles".to_string(), 3);
-        assert!(guard.check("Draft", &ctx));
-    }
-
-    #[test]
-    fn guard_counter_max_passes() {
-        let guard = Guard::CounterMax {
-            var: "retries".to_string(),
-            max: 3,
-        };
-        let mut ctx = EvalContext::default();
-        ctx.counters.insert("retries".to_string(), 2);
-        assert!(guard.check("Draft", &ctx));
-    }
-
-    #[test]
-    fn guard_counter_max_fails() {
-        let guard = Guard::CounterMax {
-            var: "retries".to_string(),
-            max: 3,
-        };
-        let mut ctx = EvalContext::default();
-        ctx.counters.insert("retries".to_string(), 3);
-        assert!(!guard.check("Draft", &ctx));
-    }
-
-    #[test]
-    fn guard_bool_true_passes() {
-        let guard = Guard::BoolTrue("assigned".to_string());
-        let mut ctx = EvalContext::default();
-        ctx.booleans.insert("assigned".to_string(), true);
-        assert!(guard.check("Draft", &ctx));
-    }
-
-    #[test]
-    fn guard_bool_true_fails_missing() {
-        let guard = Guard::BoolTrue("assigned".to_string());
-        let ctx = EvalContext::default();
-        assert!(!guard.check("Draft", &ctx));
-    }
-
-    #[test]
-    fn guard_and_all_pass() {
-        let guard = Guard::And(vec![
-            Guard::Always,
-            Guard::StateIn(vec!["Draft".to_string()]),
-        ]);
-        let ctx = EvalContext::default();
-        assert!(guard.check("Draft", &ctx));
-    }
-
-    #[test]
-    fn guard_and_one_fails() {
-        let guard = Guard::And(vec![
-            Guard::Always,
-            Guard::StateIn(vec!["Active".to_string()]),
-        ]);
-        let ctx = EvalContext::default();
-        assert!(!guard.check("Draft", &ctx));
-    }
 
     #[test]
     fn rebuild_index_groups_by_name() {

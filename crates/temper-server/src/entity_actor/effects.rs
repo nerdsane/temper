@@ -12,7 +12,7 @@
 
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use temper_jit::table::{Effect, EvalContext, TransitionTable};
+use temper_jit::table::{Effect, EvalContext, GuardFailure, TransitionTable};
 use temper_runtime::scheduler::{sim_now, sim_uuid};
 
 use crate::blobs::{FIELD_OVERFLOW_BLOB_PREFIX, OverflowBlobWrite, blob_ref_value};
@@ -170,6 +170,30 @@ pub fn process_action(
     )
 }
 
+/// Render a [`GuardFailure`] into the agent-facing self-heal error string (ADR-0151).
+///
+/// Names the action, the from-state, the specific sub-guard that failed, the
+/// field/ref it read, and the required-vs-found values where the guard exposes
+/// them, e.g.:
+///
+/// `Action 'SubmitForReview' blocked from state 'Draft': guard cross_entity_state on 'landing_file_id' requires File status in [Ready,Locked], found <unsatisfied>`
+fn render_guard_failure(action: &str, from_state: &str, failure: &GuardFailure) -> String {
+    let mut msg = format!(
+        "Action '{action}' blocked from state '{from_state}': guard {}",
+        failure.kind.label()
+    );
+    if let Some(var) = &failure.var {
+        msg.push_str(&format!(" on '{var}'"));
+    }
+    if let Some(required) = &failure.required {
+        msg.push_str(&format!(" requires {required}"));
+    }
+    if let Some(found) = &failure.found {
+        msg.push_str(&format!(", found {found}"));
+    }
+    msg
+}
+
 /// Process an action with pre-resolved cross-entity booleans.
 ///
 /// Same as [`process_action`] but injects cross-entity state booleans
@@ -269,17 +293,25 @@ pub fn process_action_with_xref_and_field_mode(
                 error: None,
             }
         }
-        Some(_) => ProcessResult {
+        Some(rejected) => ProcessResult {
             success: false,
             event: None,
             custom_effects: vec![],
             scheduled_actions: vec![],
             spawn_requests: vec![],
             overflow_blobs: vec![],
-            error: Some(format!(
-                "Action '{}' not valid from state '{}'",
-                action, state.status
-            )),
+            // ADR-0151: when a sub-guard failed (rule matched by name and
+            // state, but a precondition did not hold) name the specific guard,
+            // field/ref, and required-vs-found so an in-session agent can
+            // self-heal. A from-state miss carries no guard failure and keeps
+            // the generic message.
+            error: Some(match &rejected.guard_failure {
+                Some(failure) => render_guard_failure(action, &state.status, failure),
+                None => format!(
+                    "Action '{}' not valid from state '{}'",
+                    action, state.status
+                ),
+            }),
         },
         None => ProcessResult {
             success: false,
@@ -910,6 +942,92 @@ effect = [{ type = "schedule", action = "Refresh", delay_seconds = 2700 }]
         assert_eq!(result.scheduled_actions.len(), 1);
         assert_eq!(result.scheduled_actions[0].action, "Refresh");
         assert_eq!(result.scheduled_actions[0].delay_seconds, 2700);
+    }
+
+    /// Build a minimal `EntityState` for guard-error rendering tests.
+    fn test_state(entity_type: &str, status: &str) -> EntityState {
+        EntityState {
+            entity_type: entity_type.into(),
+            entity_id: "e-1".into(),
+            status: status.into(),
+            item_count: 0,
+            counters: std::collections::BTreeMap::new(),
+            booleans: std::collections::BTreeMap::new(),
+            lists: std::collections::BTreeMap::new(),
+            fields: serde_json::json!({}),
+            events: std::collections::VecDeque::new(),
+            total_event_count: 0,
+            events_since_snapshot: 0,
+            last_snapshot_sequence_nr: 0,
+            sequence_nr: 0,
+            processed_idempotency_keys: std::collections::BTreeMap::new(),
+        }
+    }
+
+    #[test]
+    fn guard_failure_error_names_guard_and_field() {
+        let _guard = temper_runtime::scheduler::install_deterministic_context(7);
+        // Cross-entity guard on `landing_file_id`: the ref is unresolved, so the
+        // guard fails and the error must name the guard kind and the ref.
+        let spec = r#"
+[automaton]
+name = "Doc"
+states = ["Draft", "Submitted"]
+initial = "Draft"
+
+[[action]]
+name = "SubmitForReview"
+from = ["Draft"]
+to = "Submitted"
+guard = [{ type = "cross_entity_state", entity_type = "File", entity_id_source = "landing_file_id", required_status = ["Ready", "Locked"] }]
+"#;
+        let table = temper_jit::table::TransitionTable::from_ioa_source(spec);
+        let mut state = test_state("Doc", "Draft");
+
+        // No __xref boolean set -> guard fails.
+        let result = process_action_with_xref(
+            &mut state,
+            &table,
+            "SubmitForReview",
+            &serde_json::json!({}),
+            &std::collections::BTreeMap::new(),
+        );
+
+        assert!(!result.success);
+        let error = result.error.expect("guard rejection must carry an error");
+        assert!(
+            error.contains("SubmitForReview")
+                && error.contains("blocked from state 'Draft'")
+                && error.contains("cross_entity_state")
+                && error.contains("landing_file_id")
+                && error.contains("Ready,Locked"),
+            "expected specific guard error, got: {error}"
+        );
+    }
+
+    #[test]
+    fn from_state_miss_keeps_generic_error() {
+        let _guard = temper_runtime::scheduler::install_deterministic_context(7);
+        let spec = r#"
+[automaton]
+name = "Doc"
+states = ["Draft", "Submitted", "Closed"]
+initial = "Draft"
+
+[[action]]
+name = "Close"
+from = ["Submitted"]
+to = "Closed"
+"#;
+        let table = temper_jit::table::TransitionTable::from_ioa_source(spec);
+        let mut state = test_state("Doc", "Draft");
+
+        // Close only fires from Submitted; from Draft this is a from-state miss.
+        let result = process_action(&mut state, &table, "Close", &serde_json::json!({}));
+
+        assert!(!result.success);
+        let error = result.error.expect("rejection must carry an error");
+        assert_eq!(error, "Action 'Close' not valid from state 'Draft'");
     }
 
     #[test]

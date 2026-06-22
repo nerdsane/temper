@@ -135,7 +135,11 @@ impl crate::state::ServerState {
                 .await;
         }
 
-        Ok(None)
+        // No declared recovery: propagate the failure instead of swallowing it
+        // (ADR-0152). The invocation was already recorded above, so telemetry
+        // is preserved. Inline this surfaces as `success: false`; background
+        // the dispatcher drives a compensating transition.
+        Err(error_str)
     }
 
     #[instrument(skip_all, fields(otel.name = "dispatch.dispatch_wasm_callback", callback_action))]

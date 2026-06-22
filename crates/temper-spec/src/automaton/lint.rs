@@ -522,6 +522,7 @@ fn render_guard(guard: &Guard) -> String {
             entity_type,
             entity_id_source,
             required_status,
+            ..
         } => {
             format!(
                 "cross_entity_state {entity_type}.{entity_id_source} in {:?}",

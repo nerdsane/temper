@@ -4,7 +4,8 @@
 //! using the real Order I/O Automaton specification.
 
 use criterion::{Criterion, black_box, criterion_group, criterion_main};
-use temper_jit::table::types::{EvalContext, TransitionTable};
+use temper_jit::table::TransitionTable;
+use temper_jit::table::guard::EvalContext;
 
 const ORDER_IOA: &str = include_str!("../../../test-fixtures/specs/order.ioa.toml");
 
