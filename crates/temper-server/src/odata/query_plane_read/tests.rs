@@ -497,3 +497,326 @@ async fn native_pages_recheck_filter_before_counting_or_returning() {
 
     let _ = std::fs::remove_file(db_path);
 }
+
+// --- ARN-89: exact-match reads are consistent under projection lag ---
+
+fn build_order_state_with_store(system_name: &str, store: &TursoEventStore) -> ServerState {
+    let mut state = build_order_state(system_name);
+    state.set_storage_stack(StorageStack::from_turso(store.clone()));
+    state
+}
+
+fn id_eq_filter(entity_id: &str) -> FilterExpr {
+    FilterExpr::BinaryOp {
+        left: Box::new(FilterExpr::Property("Id".to_string())),
+        op: BinaryOperator::Eq,
+        right: Box::new(FilterExpr::Literal(ODataValue::String(
+            entity_id.to_string(),
+        ))),
+    }
+}
+
+/// ARN-89: an exact-match resolution must surface a just-committed entity even
+/// when its asynchronously-projected row has not yet landed.
+///
+/// Reproduces the NEW case the fix covers: another Order is present in BOTH the
+/// in-memory index and the turso projection (so catalog `coverage.missing == 0`),
+/// while the TARGET Order is durable in the journal — reachable only via
+/// `list_entity_ids_lazy` — and absent from the in-memory index AND the
+/// projection. The pre-fix code trusted the empty native page (since coverage
+/// looked complete for the indexed Order) and returned empty. The fix detects
+/// the pure equality conjunction, distrusts the empty page, and reconciles
+/// against authoritative state.
+#[tokio::test]
+async fn exact_match_read_is_consistent_when_projection_queued() {
+    let db_path =
+        std::env::temp_dir().join(format!("temper-query-plane-exact-lag-{}.db", sim_uuid()));
+    let _ = std::fs::remove_file(&db_path);
+    let db_url = format!("file:{}", db_path.display());
+    let store = TursoEventStore::new(&db_url, None)
+        .await
+        .expect("create local turso db");
+    let tenant = TenantId::default();
+    let agent_ctx = AgentContext::for_service("query-plane-exact-lag");
+
+    // Writer process: commit both Orders durably to the shared journal.
+    let writer = build_order_state_with_store("query-plane-exact-lag-writer", &store);
+    for entity_id in ["ord-present", "ord-target"] {
+        writer
+            .dispatch_tenant_action(
+                &tenant,
+                "Order",
+                entity_id,
+                "Create",
+                serde_json::json!({}),
+                &agent_ctx,
+            )
+            .await
+            .expect("create order");
+    }
+
+    // Make the durable catalog/projection state explicit and deterministic
+    // (independent of the writer's async projection queue):
+    //  - `ord-present` IS projected  -> coverage.missing == 0 for the index.
+    //  - `ord-target`  is NOT projected -> only reachable via the journal.
+    upsert_order_projection(
+        &store,
+        &tenant,
+        "ord-present",
+        serde_json::json!({ "Status": "Draft" }),
+        1,
+    )
+    .await;
+    store
+        .remove_query_projection(tenant.as_str(), "Order", "ord-target")
+        .await
+        .expect("evict target projection to simulate projection lag");
+
+    // Fresh reader process: empty in-memory index (a server restart). Touch only
+    // `ord-present` so the index holds exactly that one Order, while `ord-target`
+    // stays journal-only and out of the index.
+    let mut state = build_order_state("query-plane-exact-lag-reader");
+    state.set_storage_stack(StorageStack::from_turso(store.clone()));
+    assert!(
+        state
+            .ensure_entity_loaded(&tenant, "Order", "ord-present")
+            .await,
+        "ord-present should hydrate from the durable store"
+    );
+    assert_eq!(
+        state.list_entity_ids(&tenant, "Order"),
+        vec!["ord-present".to_string()],
+        "precondition: in-memory index holds only the projected Order, NOT the target"
+    );
+
+    let security_ctx = SecurityContext::system();
+    let query_options = QueryOptions {
+        filter: Some(id_eq_filter("ord-target")),
+        top: Some(1),
+        select: Some(vec!["Id".to_string(), "Status".to_string()]),
+        ..QueryOptions::default()
+    };
+
+    let result = match read_entity_set_from_query_plane(QueryPlaneReadRequest {
+        state: &state,
+        tenant: &tenant,
+        security_ctx: &security_ctx,
+        entity_type: "Order",
+        entity_set_name: "Orders",
+        query_options: &query_options,
+        budget: QueryPlaneReadBudget {
+            default_page_size: 1,
+            max_entities: 10,
+        },
+    })
+    .await
+    {
+        Ok(result) => result,
+        Err(_) => panic!("exact-match read should reconcile and find the target"),
+    };
+
+    assert_eq!(
+        result.entities.len(),
+        1,
+        "the durable-but-unprojected target must be returned, not an empty page"
+    );
+    assert_eq!(result.entities[0]["Id"].as_str(), Some("ord-target"));
+    assert_eq!(
+        result.telemetry.fallback_reason,
+        QueryPlaneFallbackReason::ProjectionLagReconcile
+    );
+    assert_eq!(
+        result.telemetry.strategy,
+        QueryPlaneReadStrategy::ReadSourceCursor
+    );
+
+    let _ = std::fs::remove_file(db_path);
+}
+
+/// ARN-89: when there is no matching entity at all, the reconcile must still
+/// terminate within the bounded scan budget — no unbounded scan, no error — and
+/// report the reconcile reason. This guards against the fallback turning a
+/// genuine "not found" into a runaway scan.
+#[tokio::test]
+async fn exact_match_absent_file_stays_bounded() {
+    let db_path =
+        std::env::temp_dir().join(format!("temper-query-plane-exact-absent-{}.db", sim_uuid()));
+    let _ = std::fs::remove_file(&db_path);
+    let db_url = format!("file:{}", db_path.display());
+    let store = TursoEventStore::new(&db_url, None)
+        .await
+        .expect("create local turso db");
+    let tenant = TenantId::default();
+    let agent_ctx = AgentContext::for_service("query-plane-exact-absent");
+
+    // One projected Order exists, but NOT the one we ask for.
+    let writer = build_order_state_with_store("query-plane-exact-absent-writer", &store);
+    writer
+        .dispatch_tenant_action(
+            &tenant,
+            "Order",
+            "ord-present",
+            "Create",
+            serde_json::json!({}),
+            &agent_ctx,
+        )
+        .await
+        .expect("create order");
+    upsert_order_projection(
+        &store,
+        &tenant,
+        "ord-present",
+        serde_json::json!({ "Status": "Draft" }),
+        1,
+    )
+    .await;
+
+    let mut state = build_order_state("query-plane-exact-absent-reader");
+    state.set_storage_stack(StorageStack::from_turso(store.clone()));
+    assert!(
+        state
+            .ensure_entity_loaded(&tenant, "Order", "ord-present")
+            .await,
+        "ord-present should hydrate from the durable store"
+    );
+    assert_eq!(
+        state.list_entity_ids(&tenant, "Order"),
+        vec!["ord-present".to_string()],
+        "precondition: index holds the projected Order, the queried id is absent everywhere"
+    );
+
+    let budget = QueryPlaneReadBudget {
+        default_page_size: 1,
+        max_entities: 10,
+    };
+    let security_ctx = SecurityContext::system();
+    let query_options = QueryOptions {
+        filter: Some(id_eq_filter("ord-missing")),
+        top: Some(1),
+        select: Some(vec!["Id".to_string(), "Status".to_string()]),
+        ..QueryOptions::default()
+    };
+
+    let result = match read_entity_set_from_query_plane(QueryPlaneReadRequest {
+        state: &state,
+        tenant: &tenant,
+        security_ctx: &security_ctx,
+        entity_type: "Order",
+        entity_set_name: "Orders",
+        query_options: &query_options,
+        budget,
+    })
+    .await
+    {
+        Ok(result) => result,
+        Err(_) => panic!("absent exact-match read should return cleanly, not error"),
+    };
+
+    assert!(
+        result.entities.is_empty(),
+        "no entity matches the filter, so the result must be empty"
+    );
+    assert_eq!(
+        result.telemetry.fallback_reason,
+        QueryPlaneFallbackReason::ProjectionLagReconcile
+    );
+    assert!(
+        result.telemetry.candidate_count <= budget.scan_candidate_budget(),
+        "reconcile must stay within the bounded scan budget (got {}, budget {})",
+        result.telemetry.candidate_count,
+        budget.scan_candidate_budget()
+    );
+
+    let _ = std::fs::remove_file(db_path);
+}
+
+/// Hot path is unaffected: a fully-projected, index-current exact-match read is
+/// served by native pushdown with no reconcile and no authoritative scan. This
+/// proves the ARN-89 fix only fires under projection lag, not on every read.
+#[tokio::test]
+async fn populated_current_projection_uses_native_no_reconcile() {
+    let db_path =
+        std::env::temp_dir().join(format!("temper-query-plane-native-hot-{}.db", sim_uuid()));
+    let _ = std::fs::remove_file(&db_path);
+    let db_url = format!("file:{}", db_path.display());
+    let store = TursoEventStore::new(&db_url, None)
+        .await
+        .expect("create local turso db");
+    let tenant = TenantId::default();
+    let agent_ctx = AgentContext::for_service("query-plane-native-hot");
+
+    // Two Orders, both indexed AND projected: the index is current and the
+    // native page can answer the query directly.
+    let mut state = build_order_state("query-plane-native-hot");
+    state.set_storage_stack(StorageStack::from_turso(store.clone()));
+    for entity_id in ["ord-aa", "ord-bb"] {
+        state
+            .dispatch_tenant_action(
+                &tenant,
+                "Order",
+                entity_id,
+                "Create",
+                serde_json::json!({}),
+                &agent_ctx,
+            )
+            .await
+            .expect("create order");
+        upsert_order_projection(
+            &store,
+            &tenant,
+            entity_id,
+            serde_json::json!({ "Status": "Draft" }),
+            1,
+        )
+        .await;
+    }
+
+    let mut ids = state.list_entity_ids(&tenant, "Order");
+    ids.sort();
+    assert_eq!(
+        ids,
+        vec!["ord-aa".to_string(), "ord-bb".to_string()],
+        "precondition: both Orders are in the in-memory index"
+    );
+
+    let security_ctx = SecurityContext::system();
+    let query_options = QueryOptions {
+        filter: Some(id_eq_filter("ord-aa")),
+        top: Some(1),
+        select: Some(vec!["Id".to_string(), "Status".to_string()]),
+        ..QueryOptions::default()
+    };
+
+    let result = match read_entity_set_from_query_plane(QueryPlaneReadRequest {
+        state: &state,
+        tenant: &tenant,
+        security_ctx: &security_ctx,
+        entity_type: "Order",
+        entity_set_name: "Orders",
+        query_options: &query_options,
+        budget: QueryPlaneReadBudget {
+            default_page_size: 1,
+            max_entities: 10,
+        },
+    })
+    .await
+    {
+        Ok(result) => result,
+        Err(_) => panic!("native pushdown read should succeed on the hot path"),
+    };
+
+    assert_eq!(result.entities.len(), 1);
+    assert_eq!(result.entities[0]["Id"].as_str(), Some("ord-aa"));
+    assert_eq!(
+        result.telemetry.strategy,
+        QueryPlaneReadStrategy::NativePagePushdown,
+        "a current projection must be answered natively, not via an authoritative scan"
+    );
+    assert_eq!(
+        result.telemetry.fallback_reason,
+        QueryPlaneFallbackReason::None,
+        "no reconcile should fire when the projection is current"
+    );
+
+    let _ = std::fs::remove_file(db_path);
+}
