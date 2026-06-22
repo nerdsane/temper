@@ -710,6 +710,16 @@ pub struct ActionTrigger {
     /// Liveness expectation (see `TriggerLiveness`).
     #[serde(default)]
     pub liveness: TriggerLiveness,
+    /// Marks this reaction as an intentional best-effort drop (ADR-0150).
+    ///
+    /// When `true`, the composite verifier's `no_dropped_reaction` property
+    /// does not flag this trigger as a violation if its target action is not
+    /// enabled from the target's current state. Use it for reactions that are
+    /// *meant* to be skipped when the target is not ready (e.g. a notification
+    /// that is meaningless once an entity is archived). Defaults to `false`:
+    /// a dropped reaction is treated as a bug unless explicitly opted out.
+    #[serde(default)]
+    pub drop_ok: bool,
     /// Marks this trigger as an LLM call for observability. The dispatcher
     /// promotes matching spans to LLM-kind root spans so `gen_ai.*` content
     /// surfaces correctly in observability backends (e.g., Datadog LLM Obs).

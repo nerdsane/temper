@@ -123,6 +123,16 @@ pub fn run(specs_dir: &str) -> Result<()> {
             }
         }
         println!("\nIOA verification cascade: ALL PASSED");
+
+        // ADR-0150: directory verification ALWAYS runs composite cross-entity
+        // verification as a first-class, gating step. It composes every
+        // entity's joint state machine and BFS-checks that no cross-entity
+        // reaction is dropped (target not in its required from-state). This is
+        // only meaningful with two or more entities — a single spec has nothing
+        // to compose (and stdin verification stays per-entity by design).
+        if parsed_automata.len() >= 2 {
+            run_composite_verification(&parsed_automata)?;
+        }
     }
 
     // Build spec model (which includes cross-validation)
@@ -180,6 +190,94 @@ pub fn run(specs_dir: &str) -> Result<()> {
             spec.validation.errors.len()
         );
         anyhow::bail!("Verification failed.");
+    }
+
+    Ok(())
+}
+
+/// Run always-on composite cross-entity verification over the parsed
+/// automata (ADR-0150).
+///
+/// Seeds the joint-state BFS from the root of each weakly-connected component
+/// of the entity trigger graph (so every entity is covered), checks the
+/// `no_dropped_reaction` property, and reports every dropped reaction with
+/// enough detail to name it. A dropped reaction GATES — it fails the command.
+/// An INCOMPLETE run (budget exhausted) is surfaced as a warning and does not
+/// claim a pass.
+fn run_composite_verification(
+    parsed_automata: &std::collections::BTreeMap<String, temper_spec::automaton::Automaton>,
+) -> Result<()> {
+    use temper_verify::composite::{CompositeOutcome, verify_all};
+
+    let automaton_refs: Vec<&temper_spec::automaton::Automaton> =
+        parsed_automata.values().collect();
+
+    println!("\nRunning composite cross-entity verification (ADR-0150)...");
+    let results = verify_all(&automaton_refs);
+
+    let mut any_violation = false;
+    let mut any_incomplete = false;
+    let mut dropped_lines: Vec<String> = Vec::new();
+
+    for result in &results {
+        let scope = result.scope.join(", ");
+        match result.outcome {
+            CompositeOutcome::Verified => {
+                println!(
+                    "    [PASS] seed={} scope=[{}] — {} joint states, no dropped reactions",
+                    result.seed, scope, result.states_explored,
+                );
+            }
+            CompositeOutcome::Violated => {
+                any_violation = true;
+                println!(
+                    "    [FAIL] seed={} scope=[{}] — {} joint states, {} dropped reaction(s)",
+                    result.seed,
+                    scope,
+                    result.states_explored,
+                    result.dropped_reactions.len(),
+                );
+                for drop in &result.dropped_reactions {
+                    let line = format!(
+                        "{}.{} fired trigger '{}' targeting {}.{}, but {} was in '{}' (action not enabled) — reaction DROPPED",
+                        drop.source_entity,
+                        drop.source_action,
+                        drop.trigger_name,
+                        drop.target_entity,
+                        drop.target_action,
+                        drop.target_entity,
+                        drop.target_state,
+                    );
+                    println!("           - {line}");
+                    dropped_lines.push(line);
+                }
+                for other in &result.other_violations {
+                    println!("           - other violated property: {other}");
+                }
+            }
+            CompositeOutcome::Incomplete => {
+                any_incomplete = true;
+                println!(
+                    "    [INCOMPLETE] seed={} scope=[{}] — explored {} joint states; BFS budget exhausted, proof is PARTIAL (not a pass)",
+                    result.seed, scope, result.states_explored,
+                );
+            }
+        }
+    }
+
+    if any_violation {
+        anyhow::bail!(
+            "composite cross-entity verification failed: {} dropped reaction(s):\n  - {}",
+            dropped_lines.len(),
+            dropped_lines.join("\n  - "),
+        );
+    }
+    if any_incomplete {
+        println!(
+            "\nWARNING: composite verification was INCOMPLETE for one or more seeds (budget exhausted). The cross-entity proof is partial — narrow the spec or raise the budget to fully verify."
+        );
+    } else {
+        println!("\nComposite cross-entity verification: ALL PASSED");
     }
 
     Ok(())
@@ -300,6 +398,95 @@ params = ["title", "description", "plan_id"]
         assert!(
             msg.contains("spawn_initial_action_params_unmapped"),
             "expected exact lint code in error, got: {msg}"
+        );
+    }
+
+    #[test]
+    fn test_multi_entity_dir_runs_composite_as_gating_step() {
+        // A two-entity directory whose cross-entity reaction can be dropped:
+        // Workspace.Freeze moves Workspace out of Active before File.Touch
+        // fires Workspace.IncrementUsage (enabled only from Active). The
+        // dropped reaction must FAIL the command (composite is gating).
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let specs_dir = tmp.path();
+
+        let csdl = r#"<?xml version="1.0" encoding="utf-8"?>
+<edmx:Edmx Version="4.0" xmlns:edmx="http://docs.oasis-open.org/odata/ns/edmx">
+  <edmx:DataServices>
+    <Schema Namespace="Temper.Fs" xmlns="http://docs.oasis-open.org/odata/ns/edm">
+      <EntityType Name="File">
+        <Key><PropertyRef Name="Id" /></Key>
+        <Property Name="Id" Type="Edm.Guid" Nullable="false" />
+        <Property Name="status" Type="Edm.String" />
+        <Property Name="workspace_id" Type="Edm.String" />
+      </EntityType>
+      <EntityType Name="Workspace">
+        <Key><PropertyRef Name="Id" /></Key>
+        <Property Name="Id" Type="Edm.Guid" Nullable="false" />
+        <Property Name="status" Type="Edm.String" />
+      </EntityType>
+      <EntityContainer Name="Service">
+        <EntitySet Name="Files" EntityType="Temper.Fs.File" />
+        <EntitySet Name="Workspaces" EntityType="Temper.Fs.Workspace" />
+      </EntityContainer>
+    </Schema>
+  </edmx:DataServices>
+</edmx:Edmx>"#;
+        let file = r#"
+[automaton]
+name = "File"
+states = ["New", "Updated"]
+initial = "New"
+
+[[action]]
+name = "Touch"
+kind = "input"
+from = ["New"]
+to = "Updated"
+
+[[action.triggers]]
+name = "touch_increments_usage"
+kind = "entity"
+target_entity = "Workspace"
+target_action = "IncrementUsage"
+
+[action.triggers.resolve_target]
+type = "field"
+field = "workspace_id"
+"#;
+        let workspace = r#"
+[automaton]
+name = "Workspace"
+states = ["Active", "Frozen"]
+initial = "Active"
+
+[[action]]
+name = "IncrementUsage"
+kind = "input"
+from = ["Active"]
+to = "Active"
+
+[[action]]
+name = "Freeze"
+kind = "internal"
+from = ["Active"]
+to = "Frozen"
+"#;
+
+        fs::write(specs_dir.join("model.csdl.xml"), csdl).expect("write csdl");
+        fs::write(specs_dir.join("file.ioa.toml"), file).expect("write file");
+        fs::write(specs_dir.join("workspace.ioa.toml"), workspace).expect("write workspace");
+
+        let result = run(specs_dir.to_str().expect("tmp path utf-8"));
+        let err = result.expect_err("composite gating step must fail on a dropped reaction");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("composite cross-entity verification failed"),
+            "expected composite gating failure, got: {msg}"
+        );
+        assert!(
+            msg.contains("IncrementUsage") && msg.contains("Frozen"),
+            "failure should name the dropped reaction + wrong state, got: {msg}"
         );
     }
 }
