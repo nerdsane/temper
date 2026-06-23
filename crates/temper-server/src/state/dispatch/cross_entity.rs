@@ -2,6 +2,14 @@ use crate::request_context::AgentContext;
 use temper_runtime::tenant::TenantId;
 use tracing::Instrument;
 
+/// A collected `cross_entity_state` guard, flattened for runtime resolution:
+/// `(target_type, id_source, required_statuses, forbidden_statuses, required_ref)`.
+///
+/// `required_statuses` is the allowlist (empty ⇒ unconstrained),
+/// `forbidden_statuses` the denylist (empty ⇒ unconstrained), and `required_ref`
+/// carries the IOA `required` attribute (ARN-92 #2).
+type CrossGuardSpec = (String, String, Vec<String>, Vec<String>, bool);
+
 impl crate::state::ServerState {
     /// Pre-resolve cross-entity state guards for an action.
     ///
@@ -20,8 +28,7 @@ impl crate::state::ServerState {
         let mut result = std::collections::BTreeMap::new();
 
         // Get the transition table to find cross-entity guards.
-        // Tuple: (target_type, id_source, required_statuses, required_ref).
-        let cross_guards: Vec<(String, String, Vec<String>, bool)> = {
+        let cross_guards: Vec<CrossGuardSpec> = {
             let registry = self.registry.read().unwrap(); // ci-ok: infallible lock
             let Some(spec) = registry.get_spec(tenant, entity_type) else {
                 return result;
@@ -51,9 +58,20 @@ impl crate::state::ServerState {
             Err(_) => return result,
         };
 
+        // A resolvable target status satisfies the guard iff it is allowed by
+        // the allowlist (empty allowlist ⇒ unconstrained) AND not in the
+        // denylist (empty denylist ⇒ unconstrained).
+        let status_ok = |status: &str, required: &[String], forbidden: &[String]| -> bool {
+            let allowed = required.is_empty() || required.iter().any(|s| s == status);
+            let not_forbidden = !forbidden.iter().any(|s| s == status);
+            allowed && not_forbidden
+        };
+
         // Resolve each cross-entity guard (budget-limited)
         let mut lookup_count = 0;
-        for (target_type, id_source, required_statuses, required_ref) in &cross_guards {
+        for (target_type, id_source, required_statuses, forbidden_statuses, required_ref) in
+            &cross_guards
+        {
             if lookup_count >= MAX_CROSS_ENTITY_LOOKUPS {
                 tracing::warn!(
                     entity_type,
@@ -98,13 +116,21 @@ impl crate::state::ServerState {
                         .resolve_entity_status(tenant, target_type, item_id)
                         .await
                     {
-                        if !required_statuses.iter().any(|s| s == &status) {
+                        if !status_ok(&status, required_statuses, forbidden_statuses) {
                             all_matched = false;
                             break;
                         }
                     } else {
-                        all_matched = false;
-                        break;
+                        // A non-empty list element pointing at a missing entity
+                        // cannot satisfy an allowlist; with a denylist-only
+                        // guard the absent target is treated as not-forbidden
+                        // (the container does not exist, so it cannot be in a
+                        // bad state). A *required* ref still fails (the relation
+                        // was declared mandatory).
+                        if *required_ref || !required_statuses.is_empty() {
+                            all_matched = false;
+                            break;
+                        }
                     }
                 }
                 result.insert(key, all_matched);
@@ -127,24 +153,32 @@ impl crate::state::ServerState {
                 .resolve_entity_status(tenant, target_type, target_id)
                 .await
             {
-                let matched = required_statuses.iter().any(|s| s == &status);
-                result.insert(key, matched);
+                result.insert(
+                    key,
+                    status_ok(&status, required_statuses, forbidden_statuses),
+                );
             } else {
-                result.insert(key, false);
+                // Non-empty scalar ref to a target that does not resolve. An
+                // allowlist cannot be satisfied by an absent target, so it
+                // fails; a *required* ref likewise fails (the relation was
+                // declared mandatory). A denylist-only, non-required guard is
+                // about a *specific bad state* the container can be in — an
+                // absent container is not in any state, so it does not forbid
+                // the action (matches the runtime write-gate's "unresolvable ⇒
+                // allow" semantics, and the list-element-missing branch above).
+                let allow = required_statuses.is_empty() && !*required_ref;
+                result.insert(key, allow);
             }
         }
 
         result
     }
 
-    /// Recursively collect CrossEntityStateIn guards from a guard tree.
-    ///
-    /// Each tuple is `(target_type, id_source, required_statuses, required_ref)`.
-    /// `required_ref` carries the IOA `required` attribute (ARN-92 #2) so the
-    /// resolver can fail an empty *required* ref instead of passing vacuously.
+    /// Recursively collect CrossEntityStateIn guards from a guard tree into
+    /// [`CrossGuardSpec`] tuples for runtime resolution.
     pub(super) fn collect_cross_guards(
         guard: &temper_jit::table::Guard,
-        out: &mut Vec<(String, String, Vec<String>, bool)>,
+        out: &mut Vec<CrossGuardSpec>,
     ) {
         use temper_jit::table::Guard;
         match guard {
@@ -152,12 +186,14 @@ impl crate::state::ServerState {
                 entity_type,
                 entity_id_source,
                 required_status,
+                forbidden_status,
                 required,
             } => {
                 out.push((
                     entity_type.clone(),
                     entity_id_source.clone(),
                     required_status.clone(),
+                    forbidden_status.clone(),
                     *required,
                 ));
             }

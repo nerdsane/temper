@@ -520,37 +520,40 @@ impl EntityActor {
 
                     match parsed_event {
                         Ok(event) => {
-                            // Re-evaluate through TransitionTable to get effects.
-                            // Build the same EvalContext the handler would have used.
-                            let eval_ctx = super::effects::build_eval_context(state);
-
-                            if let Some(result) =
-                                table.evaluate_ctx(&state.status, &eval_ctx, &event.action)
+                            // A persisted event is a historical fact: its guard
+                            // already passed at commit time and its `to_status`
+                            // is authoritative. Replay therefore re-derives the
+                            // transition's EFFECTS from the table but never
+                            // re-gates it — guards (especially cross-entity ones,
+                            // whose related-entity context is not reconstructed
+                            // here) must not silently drop committed history.
+                            // `replay_effects` returns the matching rule's
+                            // effects ignoring guards; `None` means the table no
+                            // longer knows this action/from-state, in which case
+                            // the stored `to_status` alone carries the state.
+                            let from_status = event.from_status.clone();
+                            if let Some(effects) =
+                                table.replay_effects(&state.status, &event.action)
                             {
-                                if result.success {
-                                    // Shared effect application — same code as handle() and simulation.
-                                    let from_status = event.from_status.clone();
-                                    let (
-                                        _custom_effects,
-                                        _scheduled_actions,
-                                        _spawn_requests,
-                                        _schedule_at_requests,
-                                    ) = super::effects::apply_effects(
-                                        state,
-                                        &result.effects,
-                                        &event.params,
-                                    );
-                                    super::effects::apply_new_state_fallback(
-                                        state,
-                                        &from_status,
-                                        &result.new_state,
-                                    );
-                                }
-                            } else {
-                                // TransitionTable doesn't know this action — fall back
-                                // to the stored to_status (safe: status is always stored).
-                                state.status = event.to_status.clone();
+                                let effects = effects.to_vec();
+                                // Shared effect application — same code as handle() and simulation.
+                                let (
+                                    _custom_effects,
+                                    _scheduled_actions,
+                                    _spawn_requests,
+                                    _schedule_at_requests,
+                                ) = super::effects::apply_effects(state, &effects, &event.params);
                             }
+                            // Always honor the durably-stored target status. This
+                            // is safe (status is always persisted on the event)
+                            // and is the single source of truth for the post-
+                            // transition state across both the known-action and
+                            // unknown-action cases.
+                            super::effects::apply_new_state_fallback(
+                                state,
+                                &from_status,
+                                &event.to_status,
+                            );
 
                             // Sync action params into fields — mirrors the live
                             // process_action() path (effects.rs:155) so data fields

@@ -711,11 +711,13 @@ fn encode_guard(
             entity_type,
             entity_id_source,
             required_status,
+            forbidden_status,
         } => Bool::new_const(format!(
-            "cross_entity_guard:{}:{}:{}",
+            "cross_entity_guard:{}:{}:{}:!{}",
             entity_type,
             entity_id_source,
-            required_status.join("|")
+            required_status.join("|"),
+            forbidden_status.join("|")
         )),
         ModelGuard::And(guards) => {
             let formulas: Vec<Bool> = guards

@@ -4,7 +4,7 @@
 //! and computes the resulting state.
 
 use super::guard::EvalContext;
-use super::types::{TransitionResult, TransitionTable};
+use super::types::{Effect, TransitionResult, TransitionTable};
 
 impl TransitionTable {
     /// Evaluate whether a transition can fire (legacy API with single item count).
@@ -86,6 +86,33 @@ impl TransitionTable {
             success: false,
             guard_failure: None,
         })
+    }
+
+    /// Effects to apply when **replaying** a durably-stored transition.
+    ///
+    /// A persisted event is a historical fact: its guard already passed at
+    /// commit time and the resulting `to_status` is authoritative. Replay must
+    /// therefore re-derive the transition's *effects* (counter/bool changes)
+    /// from the table **without re-evaluating guards** — in particular,
+    /// cross-entity guards cannot be re-evaluated during replay because the
+    /// related entity's state is not reconstructed into the eval context, and a
+    /// spurious guard "failure" must not silently drop committed history.
+    ///
+    /// Returns the effects of the first rule matching `action` whose
+    /// `from_states` admit `current_state` (the same rule the live dispatch
+    /// fired). Returns `None` when no such rule exists (unknown action / from
+    /// state) — the caller then relies solely on the stored `to_status`.
+    pub fn replay_effects(&self, current_state: &str, action: &str) -> Option<&[Effect]> {
+        let indices = self.rule_index.get(action)?;
+        for &i in indices {
+            let rule = &self.rules[i];
+            let state_ok =
+                rule.from_states.is_empty() || rule.from_states.iter().any(|s| s == current_state);
+            if state_ok {
+                return Some(&rule.effects);
+            }
+        }
+        None
     }
 }
 

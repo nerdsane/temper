@@ -254,6 +254,7 @@ mod tests {
             entity_type: "Parent".into(),
             entity_id_source: "parent_id".into(),
             required_status: vec!["Ready".into()],
+            forbidden_status: vec![],
         };
 
         // Local enablement: a cross-entity gate is never *guaranteed* enabled
@@ -272,6 +273,7 @@ mod tests {
             entity_type: "Parent".into(),
             entity_id_source: "parent_id".into(),
             required_status: vec!["Ready".into()],
+            forbidden_status: vec![],
         };
 
         // Exploration: the environment *may* satisfy the gate, so the
@@ -339,6 +341,7 @@ mod tests {
                 entity_type: "Child".into(),
                 entity_id_source: "child_id".into(),
                 required_status: vec!["Done".into()],
+                forbidden_status: vec![],
             },
         ]);
         assert!(
@@ -353,6 +356,7 @@ mod tests {
                 entity_type: "Child".into(),
                 entity_id_source: "child_id".into(),
                 required_status: vec!["Done".into()],
+                forbidden_status: vec![],
             },
         ]);
         assert!(guard_may_hold(&g_ok, &state("Waiting")));

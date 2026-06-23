@@ -164,6 +164,7 @@ fn check_detailed_cross_entity_names_entity_and_ref() {
         entity_type: "File".to_string(),
         entity_id_source: "landing_file_id".to_string(),
         required_status: vec!["Ready".to_string(), "Locked".to_string()],
+        forbidden_status: vec![],
         required: false,
     };
     let ctx = EvalContext::default();

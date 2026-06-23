@@ -296,10 +296,22 @@ impl CompositeTemperModel {
             ModelGuard::CrossEntityState {
                 entity_type,
                 required_status,
+                forbidden_status,
                 ..
             } => match state.entities.get(entity_type) {
-                // Target in scope: resolve concretely against its slice.
-                Some(target) => required_status.iter().any(|s| s == &target.status),
+                // Target in scope: resolve concretely against its slice. The
+                // action is enabled iff the target is allowed by the allowlist
+                // (empty ⇒ unconstrained) AND not in the denylist (empty ⇒
+                // unconstrained). A denylist of e.g. `["Frozen","Archived"]`
+                // disables the action exactly when the container is in one of
+                // those states — identical drop-suppression to an allowlist of
+                // the complementary states, but without enumerating them.
+                Some(target) => {
+                    let allowed = required_status.is_empty()
+                        || required_status.iter().any(|s| s == &target.status);
+                    let not_forbidden = !forbidden_status.iter().any(|s| s == &target.status);
+                    allowed && not_forbidden
+                }
                 // Target outside scope: cannot resolve — leave abstract.
                 None => true,
             },

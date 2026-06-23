@@ -34,14 +34,22 @@ pub enum Guard {
     ListContains { var: String, value: String },
     /// A named list variable must have at least N elements.
     ListLengthMin { var: String, min: usize },
-    /// Another entity must be in one of the required statuses (pre-resolved as boolean).
+    /// A cross-entity status precondition on a related entity (pre-resolved as
+    /// a boolean by the runtime resolver).
     CrossEntityStateIn {
         /// The target entity type (e.g. "File").
         entity_type: String,
         /// Field on the current entity holding the target entity ID.
         entity_id_source: String,
-        /// Target must be in one of these statuses (any match passes).
+        /// Allowlist: target must be in one of these statuses (any match
+        /// passes). Empty ⇒ no allowlist constraint.
         required_status: Vec<String>,
+        /// Denylist: target must NOT be in any of these statuses. Empty ⇒ no
+        /// denylist constraint. Lets a guard reject only when the container is
+        /// in a specific bad state (e.g. Workspace `Frozen`/`Archived`) while a
+        /// missing/unresolved target still passes.
+        #[serde(default)]
+        forbidden_status: Vec<String>,
         /// Whether the ref must be present (ARN-92 #2). Threaded to the
         /// runtime cross-entity resolver, which treats an empty *required*
         /// scalar/list ref as a failing guard rather than a vacuous pass. Guard
@@ -296,19 +304,34 @@ impl Guard {
                 entity_type,
                 entity_id_source,
                 required_status,
+                forbidden_status,
                 ..
             } => {
                 let key = format!("__xref:{}:{}", entity_type, entity_id_source);
                 if ctx.booleans.get(&key).copied().unwrap_or(false) {
                     None
                 } else {
+                    let required = match (required_status.is_empty(), forbidden_status.is_empty()) {
+                        (false, true) => {
+                            format!("{entity_type} status in [{}]", required_status.join(","))
+                        }
+                        (true, false) => {
+                            format!(
+                                "{entity_type} status not in [{}]",
+                                forbidden_status.join(",")
+                            )
+                        }
+                        (false, false) => format!(
+                            "{entity_type} status in [{}] and not in [{}]",
+                            required_status.join(","),
+                            forbidden_status.join(",")
+                        ),
+                        (true, true) => format!("{entity_type} status precondition"),
+                    };
                     Some(GuardFailure {
                         kind: GuardFailureKind::CrossEntityState,
                         var: Some(entity_id_source.clone()),
-                        required: Some(format!(
-                            "{entity_type} status in [{}]",
-                            required_status.join(",")
-                        )),
+                        required: Some(required),
                         // The runtime pre-resolves the cross-entity status into a
                         // boolean; the unresolved/missing target reads as false.
                         found: Some("<unsatisfied>".to_string()),

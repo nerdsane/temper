@@ -143,11 +143,13 @@ fn convert_guard(guard: ResolvedGuard) -> Guard {
             entity_type,
             entity_id_source,
             required_status,
+            forbidden_status,
             required,
         } => Guard::CrossEntityStateIn {
             entity_type,
             entity_id_source,
             required_status,
+            forbidden_status,
             required,
         },
         ResolvedGuard::And(guards) => Guard::And(guards.into_iter().map(convert_guard).collect()),
@@ -336,6 +338,7 @@ guard = [{ type = "cross_entity_state", entity_type = "Child", entity_id_source 
             entity_type: "Child".to_string(),
             entity_id_source: "child_id".to_string(),
             required_status: vec!["Done".to_string()],
+            forbidden_status: vec![],
             required: false,
         };
 

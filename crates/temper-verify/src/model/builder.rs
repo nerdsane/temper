@@ -116,6 +116,7 @@ fn convert_guard(guard: ResolvedGuard) -> ModelGuard {
             entity_type,
             entity_id_source,
             required_status,
+            forbidden_status,
             // `required` does not affect L1 model checking: the cross-entity
             // status is already a free boolean in the model (ADR-0149), so an
             // empty-ref distinction is invisible at the single-entity level.
@@ -125,6 +126,7 @@ fn convert_guard(guard: ResolvedGuard) -> ModelGuard {
             entity_type,
             entity_id_source,
             required_status,
+            forbidden_status,
         },
         ResolvedGuard::And(guards) => {
             ModelGuard::And(guards.into_iter().map(convert_guard).collect())
@@ -456,6 +458,7 @@ guard = [{ type = "cross_entity_state", entity_type = "Child", entity_id_source 
                     entity_type,
                     entity_id_source,
                     required_status,
+                    ..
                 } if entity_type == "Child"
                     && entity_id_source == "child_id"
                     && required_status == &vec!["Done".to_string()]

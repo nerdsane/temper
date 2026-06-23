@@ -58,14 +58,14 @@ from = ["Created", "Ready"]
 to = "Ready"
 params = ["content_hash", "size_bytes", "mime_type", "version_number", "previous_version_id", "created_by"]
 guard = [
-  { type = "cross_entity_state", entity_type = "Workspace", entity_id_source = "workspace_id", required_status = ["Active"] },
+  { type = "cross_entity_state", entity_type = "Workspace", entity_id_source = "workspace_id", forbidden_status = ["Frozen", "Archived"] },
 ]
 effect = [
   { type = "increment", var = "version_count" },
   { type = "set_counter_from_param", var = "size_bytes", param = "size_bytes" },
   { type = "set_bool", var = "has_content", value = "true" },
 ]
-hint = "Fired by $value PUT handler after WASM upload succeeds. Updates content metadata and advances to Ready. Not callable from Locked. Guarded: the owning Workspace must be Active — a Frozen/Archived workspace rejects new writes outright, so the usage-increment reaction never needs to fire on a non-Active workspace."
+hint = "Fired by $value PUT handler after WASM upload succeeds. Updates content metadata and advances to Ready. Not callable from Locked. Guarded: the owning Workspace must NOT be Frozen/Archived — such a workspace rejects new writes outright, so the usage-increment reaction never needs to fire on a non-Active workspace. A missing or not-yet-resolved Workspace (empty workspace_id, or a system/standalone File with no Workspace entity) is allowed: there is no frozen container to honour."
 
 # ADR-0046: inline triggers are the single source of truth for the
 # File -> FileVersion / Workspace cascade after StreamUpdated commits.

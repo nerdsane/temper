@@ -225,6 +225,56 @@ field = "workspace_id"
     );
 }
 
+/// The same drop-suppression must hold when the source guard is expressed as a
+/// *denylist* (`forbidden_status`) rather than an allowlist. Since the Workspace
+/// states are exactly `{Active, Frozen}`, "not in [Frozen]" is equivalent to
+/// "in [Active]" for the in-scope target — so `Touch` is again disabled while
+/// the Workspace is `Frozen` and the usage-increment reaction never drops. This
+/// is the kernel-floor shape: `File.StreamUpdated` is gated
+/// `forbidden_status = ["Frozen", "Archived"]`.
+#[test]
+fn forbidden_status_guard_on_source_suppresses_drop() {
+    let file = r#"
+[automaton]
+name = "File"
+states = ["New", "Updated"]
+initial = "New"
+allow_indefinite_states = ["New", "Updated"]
+
+[[action]]
+name = "Touch"
+from = ["New"]
+to = "Updated"
+guard = [
+  { type = "cross_entity_state", entity_type = "Workspace", entity_id_source = "workspace_id", forbidden_status = ["Frozen"] },
+]
+
+[[action.triggers]]
+name = "touch_increments_usage"
+kind = "entity"
+target_entity = "Workspace"
+target_action = "IncrementUsage"
+
+[action.triggers.resolve_target]
+type = "field"
+field = "workspace_id"
+"#;
+    let file = parse_automaton(file).unwrap();
+    let workspace = parse_automaton(freezable_workspace()).unwrap();
+    let result = verify_composite(&[&file, &workspace], "File").unwrap();
+    assert_eq!(
+        result.outcome,
+        CompositeOutcome::Verified,
+        "a denylist cross-entity guard on the source action must suppress the drop: {result:?}"
+    );
+    assert!(result.passed());
+    assert!(
+        result.dropped_reactions.is_empty(),
+        "no reaction should drop once Touch forbids Workspace=Frozen: {:?}",
+        result.dropped_reactions
+    );
+}
+
 #[test]
 fn create_resolver_reaction_is_exempt() {
     // Same shape but the reaction spawns a fresh target via a `create`

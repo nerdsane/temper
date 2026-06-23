@@ -453,16 +453,34 @@ fn format_guards(guards: &[Guard]) -> String {
                 entity_type,
                 entity_id_source,
                 required_status,
+                forbidden_status,
                 ..
             } => {
-                format!(
-                    "{entity_type}[{entity_id_source}].status \\in {{{}}}",
-                    required_status
+                let set = |statuses: &[String]| {
+                    statuses
                         .iter()
                         .map(|s| format!("\"{s}\""))
                         .collect::<Vec<_>>()
                         .join(", ")
-                )
+                };
+                let mut conjuncts = Vec::new();
+                if !required_status.is_empty() {
+                    conjuncts.push(format!(
+                        "{entity_type}[{entity_id_source}].status \\in {{{}}}",
+                        set(required_status)
+                    ));
+                }
+                if !forbidden_status.is_empty() {
+                    conjuncts.push(format!(
+                        "{entity_type}[{entity_id_source}].status \\notin {{{}}}",
+                        set(forbidden_status)
+                    ));
+                }
+                if conjuncts.is_empty() {
+                    "TRUE".to_string()
+                } else {
+                    conjuncts.join(" /\\ ")
+                }
             }
         })
         .collect::<Vec<_>>()

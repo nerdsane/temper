@@ -34,11 +34,14 @@ pub enum ResolvedGuard {
     ListContains { var: String, value: String },
     /// A list variable must have at least N elements.
     ListLengthMin { var: String, min: usize },
-    /// Another entity must be in one of the required statuses.
+    /// A cross-entity status precondition: the target must be in
+    /// `required_status` (allowlist; empty ⇒ unconstrained) and NOT in
+    /// `forbidden_status` (denylist; empty ⇒ unconstrained).
     CrossEntityState {
         entity_type: String,
         entity_id_source: String,
         required_status: Vec<String>,
+        forbidden_status: Vec<String>,
         /// Whether the ref must be present; an empty required ref fails the
         /// guard rather than passing vacuously (ARN-92 #2).
         required: bool,
@@ -215,11 +218,13 @@ fn translate_single_guard(guard: &Guard) -> ResolvedGuard {
             entity_type,
             entity_id_source,
             required_status,
+            forbidden_status,
             required,
         } => ResolvedGuard::CrossEntityState {
             entity_type: entity_type.clone(),
             entity_id_source: entity_id_source.clone(),
             required_status: required_status.clone(),
+            forbidden_status: forbidden_status.clone(),
             required: *required,
         },
     }
