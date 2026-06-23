@@ -21,7 +21,7 @@
 
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
-use super::types::{ActionTrigger, Automaton, TriggerKind};
+use super::types::{ActionTrigger, Automaton, TargetResolver, TriggerKind};
 
 /// Directed edge: `from` entity's `source_action` triggers `to` entity's
 /// `target_action` when it fires.
@@ -44,6 +44,15 @@ pub struct TriggerEdge {
     /// Whether the spec asks for the composite verifier to emit a
     /// `Property::eventually` for this chain.
     pub liveness_required: bool,
+    /// Whether the trigger resolves its target via `type = "create"`, which
+    /// spawns a fresh (always-enabled) target instance (ADR-0150). Such a
+    /// reaction can never be dropped, so the composite verifier's
+    /// `no_dropped_reaction` property exempts it.
+    pub creates_target: bool,
+    /// Whether the spec marked this reaction as an intentional best-effort
+    /// drop (`drop_ok = true`, ADR-0150). When `true`, the composite
+    /// verifier suppresses the `no_dropped_reaction` violation for this edge.
+    pub drop_ok: bool,
 }
 
 /// Graph of entity-kind triggers across a set of automatons.
@@ -168,6 +177,7 @@ fn edge_from_trigger(
     }
     let target_entity = trigger.target_entity.as_ref()?.clone();
     let target_action = trigger.target_action.as_ref()?.clone();
+    let creates_target = matches!(trigger.resolve_target, Some(TargetResolver::Create));
     Some(TriggerEdge {
         from: source_entity.to_string(),
         source_action: source_action.to_string(),
@@ -176,6 +186,8 @@ fn edge_from_trigger(
         target_action,
         to_state: trigger.to_state.clone(),
         liveness_required: matches!(trigger.liveness, super::types::TriggerLiveness::Required),
+        creates_target,
+        drop_ok: trigger.drop_ok,
     })
 }
 

@@ -29,8 +29,13 @@
 
 pub mod invariant_eval;
 pub mod model;
+pub mod verify;
 
-pub use model::{CompositeAction, CompositeState, CompositeTemperModel};
+pub use model::{CompositeAction, CompositeState, CompositeTemperModel, DroppedReaction};
+pub use verify::{
+    CompositeOutcome, CompositeVerifyResult, seed_cover, verify_all, verify_composite,
+    verify_composite_with_budget,
+};
 
 use std::collections::BTreeMap;
 use std::fmt;

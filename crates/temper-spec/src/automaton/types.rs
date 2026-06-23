@@ -235,15 +235,44 @@ pub enum Guard {
     /// A list variable must have at least N elements.
     #[serde(rename = "list_length_min")]
     ListLengthMin { var: String, min: usize },
-    /// Another entity must be in one of the required statuses.
+    /// A cross-entity status precondition on a *related* entity.
+    ///
+    /// Combines an allowlist (`required_status`) and a denylist
+    /// (`forbidden_status`). For a *present, resolvable* target the guard holds
+    /// iff the target's status is allowed AND not forbidden:
+    /// - `required_status` empty ⇒ no allowlist constraint (any status allowed);
+    ///   non-empty ⇒ the status must be one of them.
+    /// - `forbidden_status` empty ⇒ no denylist constraint; non-empty ⇒ the
+    ///   status must NOT be one of them.
+    ///
+    /// A denylist expresses "reject only when the container is in a *specific*
+    /// bad state" without having to enumerate every good state — e.g. a write
+    /// is refused only when its owning Workspace is `Frozen`/`Archived`, while a
+    /// missing or not-yet-resolved Workspace still allows the write (see
+    /// `required` for the empty/missing-ref semantics).
     #[serde(rename = "cross_entity_state")]
     CrossEntityState {
         /// The target entity type (e.g., "TestWorkflow").
         entity_type: String,
         /// Field name on the current entity holding the target entity ID.
         entity_id_source: String,
-        /// Target must be in one of these statuses (any match passes).
+        /// Allowlist: target must be in one of these statuses (any match
+        /// passes). Empty ⇒ no allowlist constraint.
+        #[serde(default)]
         required_status: Vec<String>,
+        /// Denylist: target must NOT be in any of these statuses. Empty ⇒ no
+        /// denylist constraint.
+        #[serde(default)]
+        forbidden_status: Vec<String>,
+        /// Whether the `entity_id_source` ref must be present (ARN-92 #2).
+        ///
+        /// When `false` (default), an empty/missing scalar ref or an empty list
+        /// relation passes the guard vacuously — the legacy blast radius. When
+        /// `true`, an empty/missing scalar or empty list ref *fails* the guard:
+        /// a required relationship that was never set cannot satisfy a
+        /// cross-entity status precondition.
+        #[serde(default)]
+        required: bool,
     },
 }
 
@@ -710,6 +739,16 @@ pub struct ActionTrigger {
     /// Liveness expectation (see `TriggerLiveness`).
     #[serde(default)]
     pub liveness: TriggerLiveness,
+    /// Marks this reaction as an intentional best-effort drop (ADR-0150).
+    ///
+    /// When `true`, the composite verifier's `no_dropped_reaction` property
+    /// does not flag this trigger as a violation if its target action is not
+    /// enabled from the target's current state. Use it for reactions that are
+    /// *meant* to be skipped when the target is not ready (e.g. a notification
+    /// that is meaningless once an entity is archived). Defaults to `false`:
+    /// a dropped reaction is treated as a bug unless explicitly opted out.
+    #[serde(default)]
+    pub drop_ok: bool,
     /// Marks this trigger as an LLM call for observability. The dispatcher
     /// promotes matching spans to LLM-kind root spans so `gen_ai.*` content
     /// surfaces correctly in observability backends (e.g., Datadog LLM Obs).

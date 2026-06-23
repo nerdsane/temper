@@ -60,6 +60,14 @@ fn parse_guard_fields(
                 .get("required_status")
                 .map(|s| parse_string_array(s))
                 .unwrap_or_default(),
+            forbidden_status: fields
+                .get("forbidden_status")
+                .map(|s| parse_string_array(s))
+                .unwrap_or_default(),
+            required: fields
+                .get("required")
+                .map(|s| s.eq_ignore_ascii_case("true"))
+                .unwrap_or(false),
         },
         "state_in" => Guard::StateIn {
             values: fields

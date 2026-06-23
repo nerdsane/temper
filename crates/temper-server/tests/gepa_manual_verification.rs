@@ -183,7 +183,7 @@ async fn manual_gepa_verification() {
     // ── 2. TransitionTable Evaluation ──────────────────────────────
     println!("\n## 2. TransitionTable Direct Evaluation\n");
 
-    let ctx = temper_jit::table::types::EvalContext::default();
+    let ctx = temper_jit::table::EvalContext::default();
 
     // Test EvolutionRun transitions
     let tests = vec![

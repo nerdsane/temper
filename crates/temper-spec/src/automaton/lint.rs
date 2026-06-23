@@ -522,11 +522,24 @@ fn render_guard(guard: &Guard) -> String {
             entity_type,
             entity_id_source,
             required_status,
+            forbidden_status,
+            ..
         } => {
-            format!(
-                "cross_entity_state {entity_type}.{entity_id_source} in {:?}",
-                required_status
-            )
+            if forbidden_status.is_empty() {
+                format!(
+                    "cross_entity_state {entity_type}.{entity_id_source} in {:?}",
+                    required_status
+                )
+            } else if required_status.is_empty() {
+                format!(
+                    "cross_entity_state {entity_type}.{entity_id_source} not in {:?}",
+                    forbidden_status
+                )
+            } else {
+                format!(
+                    "cross_entity_state {entity_type}.{entity_id_source} in {required_status:?} not in {forbidden_status:?}"
+                )
+            }
         }
     }
 }

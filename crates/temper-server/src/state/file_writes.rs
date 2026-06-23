@@ -33,6 +33,44 @@ impl std::fmt::Display for FileStreamContentError {
 }
 
 impl ServerState {
+    /// Reject a File `$value` write when its owning Workspace is not `Active`.
+    ///
+    /// The `File.StreamUpdated` spec guard
+    /// (`cross_entity_state` → `Workspace` in `["Active"]`) already aborts the
+    /// transition for a `Frozen`/`Archived` workspace. But both File write
+    /// paths persist the content blob BEFORE dispatching `StreamUpdated`, so a
+    /// guard rejection alone would leave an orphaned blob with no committed
+    /// state change. This pre-write check moves the rejection ahead of the
+    /// byte write so a non-`Active` workspace is refused atomically, with no
+    /// side effects.
+    ///
+    /// Vacuous when there is no `workspace_id` or the referenced Workspace
+    /// cannot be resolved (e.g. standalone-File deployments / tests with no
+    /// Workspace entity): there is no container whose freeze we can honour, so
+    /// the write proceeds — matching the spec guard's empty-id semantics.
+    pub(crate) async fn reject_write_if_workspace_not_active(
+        &self,
+        tenant: &temper_runtime::tenant::TenantId,
+        workspace_id: &str,
+    ) -> Result<(), FileStreamContentError> {
+        if workspace_id.is_empty() {
+            return Ok(());
+        }
+        match self
+            .resolve_entity_status(tenant, "Workspace", workspace_id)
+            .await
+        {
+            Some(status) if status != "Active" => {
+                Err(FileStreamContentError::ActionRejected(format!(
+                    "workspace '{workspace_id}' is '{status}', not 'Active'; \
+                     it does not accept new file content"
+                )))
+            }
+            // Active, or unresolvable (no Workspace entity) → allow.
+            _ => Ok(()),
+        }
+    }
+
     /// Upload stream content for a TemperFS `File` entity, then dispatch the
     /// verified `StreamUpdated` action.
     ///
@@ -111,16 +149,36 @@ impl ServerState {
     ) -> Result<crate::entity_actor::EntityResponse, FileStreamContentError> {
         let (content_hash, blob_key) = content_hash_and_native_blob_key(body);
 
-        let state_read = self.get_tenant_entity_state(tenant, "File", file_id);
-        let blob_write = self.put_content_addressed_blob(tenant, &blob_key, body, None);
-        let (file_state, blob_result) = tokio::join!(state_read, blob_write);
+        // Load File state first so we can read its `workspace_id` and reject a
+        // write into a non-Active workspace BEFORE persisting any bytes. The
+        // blob write is intentionally NOT joined concurrently here: it must not
+        // happen if the workspace refuses the write (otherwise an orphaned blob
+        // would be left behind on guard rejection).
+        let file_state = self
+            .get_tenant_entity_state(tenant, "File", file_id)
+            .await
+            .map_err(|e| {
+                FileStreamContentError::State(format!(
+                    "failed to load File('{file_id}') state: {e}"
+                ))
+            })?;
 
-        let file_state = file_state.map_err(|e| {
-            FileStreamContentError::State(format!("failed to load File('{file_id}') state: {e}"))
-        })?;
-        blob_result.map_err(|e| {
-            FileStreamContentError::BlobStore(format!("failed to persist blob '{blob_key}': {e}"))
-        })?;
+        let workspace_id = file_state
+            .state
+            .fields
+            .get("workspace_id")
+            .and_then(|value| value.as_str())
+            .unwrap_or_default();
+        self.reject_write_if_workspace_not_active(tenant, workspace_id)
+            .await?;
+
+        self.put_content_addressed_blob(tenant, &blob_key, body, None)
+            .await
+            .map_err(|e| {
+                FileStreamContentError::BlobStore(format!(
+                    "failed to persist blob '{blob_key}': {e}"
+                ))
+            })?;
 
         let version_number = file_state
             .state

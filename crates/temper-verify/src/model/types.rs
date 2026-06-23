@@ -100,14 +100,19 @@ pub enum ModelGuard {
     ListContains { var: String, value: String },
     /// A list variable must have at least N elements.
     ListLengthMin { var: String, min: usize },
-    /// A related entity must be in one of the required statuses.
+    /// A cross-entity status precondition: the related entity must be in
+    /// `required_status` (allowlist; empty ⇒ unconstrained) and NOT in
+    /// `forbidden_status` (denylist; empty ⇒ unconstrained).
     ///
     /// The single-entity verifier cannot resolve this guard from local state.
-    /// Backends treat it as an abstract guard rather than erasing it.
+    /// Backends treat it as an abstract guard rather than erasing it. The
+    /// composite verifier, where the target is in scope, resolves both lists
+    /// concretely against the target's slice.
     CrossEntityState {
         entity_type: String,
         entity_id_source: String,
         required_status: Vec<String>,
+        forbidden_status: Vec<String>,
     },
     /// All sub-guards must hold.
     And(Vec<ModelGuard>),

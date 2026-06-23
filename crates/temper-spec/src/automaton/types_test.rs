@@ -252,6 +252,8 @@ guard = [{ type = "cross_entity_state", entity_type = "Parent", entity_id_source
             entity_type,
             entity_id_source,
             required_status,
+            forbidden_status,
+            required,
         } => {
             assert_eq!(entity_type, "Parent");
             assert_eq!(entity_id_source, "parent_id");
@@ -259,6 +261,71 @@ guard = [{ type = "cross_entity_state", entity_type = "Parent", entity_id_source
                 required_status,
                 &vec!["Done".to_string(), "Approved".to_string()]
             );
+            // `forbidden_status` defaults to empty when omitted.
+            assert!(forbidden_status.is_empty());
+            // `required` defaults to false when omitted (ARN-92 #2).
+            assert!(!*required);
+        }
+        other => panic!("expected CrossEntityState, got {other:?}"),
+    }
+}
+
+#[test]
+fn parse_cross_entity_guard_required_attribute() {
+    let toml_src = r#"
+[automaton]
+name = "T"
+states = ["A", "B"]
+initial = "A"
+
+[[action]]
+name = "Act"
+from = ["A"]
+to = "B"
+guard = [{ type = "cross_entity_state", entity_type = "Parent", entity_id_source = "parent_id", required_status = ["Done"], required = true }]
+"#;
+    let automaton: Automaton = toml::from_str(toml_src).unwrap();
+    match &automaton.actions[0].guard[0] {
+        Guard::CrossEntityState { required, .. } => {
+            assert!(*required, "explicit required = true must parse as true");
+        }
+        other => panic!("expected CrossEntityState, got {other:?}"),
+    }
+}
+
+#[test]
+fn parse_cross_entity_guard_forbidden_status() {
+    let toml_src = r#"
+[automaton]
+name = "T"
+states = ["A", "B"]
+initial = "A"
+
+[[action]]
+name = "Act"
+from = ["A"]
+to = "B"
+guard = [{ type = "cross_entity_state", entity_type = "Workspace", entity_id_source = "workspace_id", forbidden_status = ["Frozen", "Archived"] }]
+"#;
+    let automaton: Automaton = toml::from_str(toml_src).unwrap();
+    match &automaton.actions[0].guard[0] {
+        Guard::CrossEntityState {
+            entity_type,
+            entity_id_source,
+            required_status,
+            forbidden_status,
+            required,
+        } => {
+            assert_eq!(entity_type, "Workspace");
+            assert_eq!(entity_id_source, "workspace_id");
+            // A denylist-only guard: no allowlist constraint.
+            assert!(required_status.is_empty());
+            assert_eq!(
+                forbidden_status,
+                &vec!["Frozen".to_string(), "Archived".to_string()]
+            );
+            // The ref is optional by default, so a missing Workspace passes.
+            assert!(!*required);
         }
         other => panic!("expected CrossEntityState, got {other:?}"),
     }

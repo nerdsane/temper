@@ -3,7 +3,7 @@ use std::sync::{Arc, RwLock};
 use temper_runtime::persistence::{EventMetadata, PersistenceEnvelope, PersistenceError};
 use temper_runtime::scheduler::{sim_now, sim_uuid};
 
-use crate::entity_actor::{EntityEvent, EntityResponse, EntityState, process_action};
+use crate::entity_actor::{EntityEvent, EntityResponse, EntityState, process_action_with_xref};
 use crate::events::EntityStateChange;
 
 use super::file_writes::content_hash_and_native_blob_key;
@@ -65,6 +65,17 @@ impl ServerState {
         };
         let table = self.file_transition_table(tenant)?;
 
+        // Reject a brand-new File whose target Workspace is not Active BEFORE
+        // persisting any bytes. `workspace_id` arrives in the create params on
+        // this path (the File has no persisted state yet).
+        let workspace_id = create_params
+            .get("workspace_id")
+            .and_then(|value| value.as_str())
+            .unwrap_or_default()
+            .to_string();
+        self.reject_write_if_workspace_not_active(tenant, &workspace_id)
+            .await?;
+
         let (content_hash, blob_key) = content_hash_and_native_blob_key(body);
         self.put_content_addressed_blob(tenant, &blob_key, body, None)
             .await
@@ -88,12 +99,13 @@ impl ServerState {
         };
         push_synthetic_event(&mut state, &mut events, created);
 
+        let no_xref = std::collections::BTreeMap::new();
         if create_params
             .as_object()
             .is_some_and(|params| !params.is_empty())
         {
             let create_event =
-                apply_synthetic_file_action(&mut state, &table, "Create", create_params)?;
+                apply_synthetic_file_action(&mut state, &table, "Create", create_params, &no_xref)?;
             push_synthetic_event(&mut state, &mut events, create_event);
         }
 
@@ -113,8 +125,21 @@ impl ServerState {
             "previous_version_id": previous_version_id,
             "created_by": created_by,
         });
-        let stream_event =
-            apply_synthetic_file_action(&mut state, &table, "StreamUpdated", stream_params)?;
+        // The `File.StreamUpdated` spec guard requires the owning Workspace to
+        // be Active. On the live dispatch path that boolean is resolved by
+        // `resolve_cross_entity_guards`; this atomic synthetic path bypasses
+        // that resolution, so supply the `__xref` boolean directly. We already
+        // confirmed the workspace is Active (or vacuous) above, so the guard
+        // holds — pass `true`.
+        let mut stream_xref = std::collections::BTreeMap::new();
+        stream_xref.insert("__xref:Workspace:workspace_id".to_string(), true);
+        let stream_event = apply_synthetic_file_action(
+            &mut state,
+            &table,
+            "StreamUpdated",
+            stream_params,
+            &stream_xref,
+        )?;
         push_synthetic_event(&mut state, &mut events, stream_event);
 
         let envelopes = events
@@ -350,8 +375,9 @@ fn apply_synthetic_file_action(
     table: &temper_jit::table::TransitionTable,
     action: &str,
     params: serde_json::Value,
+    cross_entity_booleans: &std::collections::BTreeMap<String, bool>,
 ) -> Result<EntityEvent, FileStreamContentError> {
-    let result = process_action(state, table, action, &params);
+    let result = process_action_with_xref(state, table, action, &params, cross_entity_booleans);
     if !result.overflow_blobs.is_empty() {
         return Err(FileStreamContentError::State(format!(
             "File.{action} produced field-overflow blobs on the atomic initial content path"

@@ -6,7 +6,7 @@
 
 use stateright::{Model, Property};
 
-use super::semantics::{apply_effects, evaluate_guard};
+use super::semantics::{apply_effects, evaluate_guard, guard_may_hold};
 use temper_spec::automaton::AssertCompareOp;
 
 use super::types::{
@@ -289,8 +289,11 @@ impl Model for TemperModel {
                 continue;
             }
 
-            // Check guard
-            if !evaluate_guard(&t.guard, state) {
+            // Check guard for *fireability*. A cross-entity guard is a free
+            // (nondeterministic) boolean: `guard_may_hold` returns true for it,
+            // so the gated edge is offered (guard-true branch). The guard-false
+            // branch is covered by BFS exploring states where it is not taken.
+            if !guard_may_hold(&t.guard, state) {
                 continue;
             }
 

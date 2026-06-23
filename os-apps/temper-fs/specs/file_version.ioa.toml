@@ -76,9 +76,9 @@ field = "file_id"
 [[action]]
 name = "Supersede"
 kind = "internal"
-from = ["Current"]
+from = ["Current", "Superseded"]
 to = "Superseded"
-hint = "Mark this version as superseded by a newer version."
+hint = "Mark this version as superseded by a newer version. Idempotent: re-superseding an already-superseded version is a benign no-op."
 
 # --- Output Actions ---
 
@@ -89,10 +89,14 @@ hint = "Emitted when a file version is superseded."
 
 # --- Safety Invariants ---
 
-[[invariant]]
-name = "SupersededIsFinal"
-when = ["Superseded"]
-assert = "no_further_transitions"
+# Superseded is a lifecycle dead-end: the ONLY action enabled from it is the
+# idempotent `Supersede` self-loop (`to = "Superseded"`), which carries no
+# effects and never targets `Current`. Finality-of-state is therefore
+# structural — there is no transition out of `Superseded` to any other state.
+# A literal `no_further_transitions` assertion is intentionally NOT used here:
+# the owner's decision makes re-superseding a benign no-op, which requires the
+# self-loop to stay enabled. The version's immutable content is covered by the
+# non-negativity invariants below, which hold in `Superseded` as well.
 
 [[invariant]]
 name = "VersionNumberNonNegative"

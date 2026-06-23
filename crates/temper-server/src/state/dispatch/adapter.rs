@@ -79,6 +79,16 @@ impl crate::state::ServerState {
                 };
                 if let Err(e) = state.dispatch_adapter_integrations_internal(&req).await {
                     tracing::error!(error = %e, "background adapter integration dispatch failed");
+                    // ADR-0152: compensate the durable transition with a
+                    // failure transition; never a silent drop. Sync method that
+                    // spawns its own task, breaking async recursion.
+                    state.dispatch_integration_failure_compensation(
+                        &tenant,
+                        &entity_type,
+                        &entity_id,
+                        &action,
+                        &e,
+                    );
                 }
             }
             .instrument(span),
@@ -281,7 +291,10 @@ impl crate::state::ServerState {
         );
 
         let Some(callback_action) = integration.on_failure.clone() else {
-            return Ok(None);
+            // No declared recovery: propagate the failure instead of swallowing
+            // it (ADR-0152). Inline this surfaces as `success: false`;
+            // background the dispatcher drives a compensating transition.
+            return Err(error);
         };
 
         let params = serde_json::json!({
