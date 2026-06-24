@@ -122,6 +122,23 @@ pub trait EventStore: Send + Sync + 'static {
         self.append(persistence_id, expected_sequence, events)
     }
 
+    /// Backfill declared key-index rows for an **existing** entity (ADR-0153),
+    /// without appending a journal event. Idempotent: re-running yields the same
+    /// rows. Used to populate `entity_key_index` for entities written before the
+    /// declared key existed, so a keyed read can authoritatively prove absence
+    /// (the per-tenant backfill watermark gates #324's retirement). The default
+    /// is a no-op (non-indexing backends); query-plane stores upsert the rows.
+    fn backfill_entity_keys(
+        &self,
+        tenant: &str,
+        entity_type: &str,
+        entity_id: &str,
+        key_rows: &[EntityKeyRow],
+    ) -> impl std::future::Future<Output = Result<(), PersistenceError>> + Send {
+        let _ = (tenant, entity_type, entity_id, key_rows);
+        async { Ok(()) }
+    }
+
     /// Resolve an entity by a declared key (ADR-0153): the `entity_id` currently
     /// holding `(key_name, key_hash)`, or `None` if absent. This is the
     /// negative-existence access path — present *and* absent in one `O(log n)`

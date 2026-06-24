@@ -512,6 +512,39 @@ impl EventStore for SimEventStore {
         Ok(new_seq)
     }
 
+    async fn backfill_entity_keys(
+        &self,
+        tenant: &str,
+        entity_type: &str,
+        entity_id: &str,
+        key_rows: &[temper_runtime::persistence::EntityKeyRow],
+    ) -> Result<(), PersistenceError> {
+        let mut inner = self.inner.lock().expect("SimEventStore lock poisoned"); // ci-ok: infallible lock
+        for row in key_rows {
+            let slot = (
+                tenant.to_string(),
+                entity_type.to_string(),
+                row.key_name.clone(),
+                row.key_hash.clone(),
+            );
+            match inner.key_index.get(&slot) {
+                // A different entity holds it — pre-existing conflict; skip (don't
+                // clobber, don't fail the backfill).
+                Some(existing) if existing.as_str() != entity_id => continue,
+                _ => {
+                    inner.key_index.retain(|(t, et, kn, _), eid| {
+                        !(t.as_str() == tenant
+                            && et.as_str() == entity_type
+                            && kn.as_str() == row.key_name.as_str()
+                            && eid.as_str() == entity_id)
+                    });
+                    inner.key_index.insert(slot, entity_id.to_string());
+                }
+            }
+        }
+        Ok(())
+    }
+
     async fn lookup_by_key(
         &self,
         tenant: &str,

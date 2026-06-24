@@ -87,6 +87,14 @@ pub trait DynEventStore: Send + Sync {
         key_hash: &'a str,
     ) -> EventStoreFuture<'a, Result<Option<String>, PersistenceError>>;
 
+    fn backfill_entity_keys<'a>(
+        &'a self,
+        tenant: &'a str,
+        entity_type: &'a str,
+        entity_id: &'a str,
+        key_rows: &'a [temper_runtime::persistence::EntityKeyRow],
+    ) -> EventStoreFuture<'a, Result<(), PersistenceError>>;
+
     fn save_snapshot<'a>(
         &'a self,
         persistence_id: &'a str,
@@ -180,6 +188,22 @@ where
             entity_type,
             key_name,
             key_hash,
+        ))
+    }
+
+    fn backfill_entity_keys<'a>(
+        &'a self,
+        tenant: &'a str,
+        entity_type: &'a str,
+        entity_id: &'a str,
+        key_rows: &'a [temper_runtime::persistence::EntityKeyRow],
+    ) -> EventStoreFuture<'a, Result<(), PersistenceError>> {
+        Box::pin(EventStore::backfill_entity_keys(
+            self,
+            tenant,
+            entity_type,
+            entity_id,
+            key_rows,
         ))
     }
 
@@ -308,6 +332,18 @@ impl BoxedEventStore {
     ) -> Result<Option<String>, PersistenceError> {
         self.0
             .lookup_by_key(tenant, entity_type, key_name, key_hash)
+            .await
+    }
+
+    pub async fn backfill_entity_keys(
+        &self,
+        tenant: &str,
+        entity_type: &str,
+        entity_id: &str,
+        key_rows: &[temper_runtime::persistence::EntityKeyRow],
+    ) -> Result<(), PersistenceError> {
+        self.0
+            .backfill_entity_keys(tenant, entity_type, entity_id, key_rows)
             .await
     }
 

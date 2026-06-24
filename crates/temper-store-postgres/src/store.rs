@@ -262,6 +262,79 @@ impl EventStore for PostgresEventStore {
         Ok(new_seq)
     }
 
+    async fn backfill_entity_keys(
+        &self,
+        tenant: &str,
+        entity_type: &str,
+        entity_id: &str,
+        key_rows: &[temper_runtime::persistence::EntityKeyRow],
+    ) -> Result<(), PersistenceError> {
+        if key_rows.is_empty() {
+            return Ok(());
+        }
+        let mut tx = self
+            .pool
+            .begin()
+            .await
+            .map_err(|e| PersistenceError::Storage(e.to_string()))?;
+        for key in key_rows {
+            // A different entity already holding this key is a pre-existing data
+            // conflict — log and skip (don't fail the whole backfill on one row;
+            // the conflict surfaces via the metric and a keyed read still resolves
+            // to whoever currently holds it).
+            let holder: Option<(String,)> = crate::dbm::postgres_query_as!(
+                "SELECT entity_id FROM entity_key_index \
+                 WHERE tenant = $1 AND entity_type = $2 AND key_name = $3 AND key_hash = $4",
+            )
+            .bind(tenant)
+            .bind(entity_type)
+            .bind(&key.key_name)
+            .bind(&key.key_hash)
+            .fetch_optional(&mut *tx)
+            .await
+            .map_err(|e| PersistenceError::Storage(e.to_string()))?;
+            if let Some((existing,)) = &holder
+                && existing != entity_id
+            {
+                tracing::warn!(
+                    tenant, entity_type, entity_id, existing,
+                    key_name = %key.key_name,
+                    "entity_key_index backfill: declared-key conflict; skipping"
+                );
+                continue;
+            }
+            crate::dbm::postgres_query!(
+                "DELETE FROM entity_key_index \
+                 WHERE tenant = $1 AND entity_type = $2 AND key_name = $3 AND entity_id = $4",
+            )
+            .bind(tenant)
+            .bind(entity_type)
+            .bind(&key.key_name)
+            .bind(entity_id)
+            .execute(&mut *tx)
+            .await
+            .map_err(|e| PersistenceError::Storage(e.to_string()))?;
+            crate::dbm::postgres_query!(
+                "INSERT INTO entity_key_index \
+                 (tenant, entity_type, key_name, key_hash, entity_id, sequence_nr) \
+                 VALUES ($1, $2, $3, $4, $5, 0) \
+                 ON CONFLICT (tenant, entity_type, key_name, key_hash) DO NOTHING",
+            )
+            .bind(tenant)
+            .bind(entity_type)
+            .bind(&key.key_name)
+            .bind(&key.key_hash)
+            .bind(entity_id)
+            .execute(&mut *tx)
+            .await
+            .map_err(|e| PersistenceError::Storage(e.to_string()))?;
+        }
+        tx.commit()
+            .await
+            .map_err(|e| PersistenceError::Storage(e.to_string()))?;
+        Ok(())
+    }
+
     async fn lookup_by_key(
         &self,
         tenant: &str,

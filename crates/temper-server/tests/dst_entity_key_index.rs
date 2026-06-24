@@ -112,6 +112,50 @@ async fn dst_keyed_read_is_present_iff_entity_exists() {
     }
 }
 
+/// Backfill (ADR-0153): an entity written BEFORE its key was declared has no key
+/// row, so a keyed read misses (would fall back to scan). After
+/// `backfill_entity_keys`, the keyed read resolves it — the path that lets a keyed
+/// miss become authoritative absence post-backfill. Idempotent. All seeds.
+#[tokio::test]
+async fn dst_backfill_makes_pre_existing_entity_keyed_findable() {
+    for seed in 0..NUM_SEEDS {
+        let (_guard, _clock, _id) = install_deterministic_context(seed);
+        let store = SimEventStore::no_faults(seed);
+
+        // Pre-existing entity: journal append WITHOUT keys (as if written before
+        // the [[key]] declaration existed).
+        let pid = format!("default:Doc:doc-pre-{seed}");
+        store.append(&pid, 0, &[test_envelope()]).await.unwrap();
+
+        let key_hash = doc_key_hash("ws1", "/pre.md");
+        // Before backfill: keyed miss.
+        assert_eq!(
+            store.lookup_by_key("default", "Doc", "path", &key_hash).await.unwrap(),
+            None,
+            "seed {seed}: pre-backfill entity has no key row (keyed miss)"
+        );
+
+        // Backfill the key row (no new journal event).
+        let rows = [EntityKeyRow { key_name: "path".to_string(), key_hash: key_hash.clone() }];
+        store
+            .backfill_entity_keys("default", "Doc", &format!("doc-pre-{seed}"), &rows)
+            .await
+            .unwrap();
+        // Idempotent: a second backfill is a no-op-equivalent.
+        store
+            .backfill_entity_keys("default", "Doc", &format!("doc-pre-{seed}"), &rows)
+            .await
+            .unwrap();
+
+        // After backfill: keyed read resolves it.
+        assert_eq!(
+            store.lookup_by_key("default", "Doc", "path", &key_hash).await.unwrap(),
+            Some(format!("doc-pre-{seed}")),
+            "seed {seed}: after backfill the entity is keyed-findable"
+        );
+    }
+}
+
 fn test_envelope() -> PersistenceEnvelope {
     PersistenceEnvelope {
         sequence_nr: 1,
