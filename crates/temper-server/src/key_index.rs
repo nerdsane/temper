@@ -45,12 +45,36 @@ pub fn canonical_key_hash(
     hasher.update(key_name.as_bytes());
     hasher.update([UNIT_SEP]);
     for prop in properties {
-        let (tag, canon) = canonical_value(fields.get(prop)?)?;
+        let (tag, canon) = canonical_value(lookup_field(fields, prop)?)?;
         hasher.update([tag]);
         hasher.update(canon.as_bytes());
         hasher.update([RECORD_SEP]);
     }
     Some(format!("{:x}", hasher.finalize()))
+}
+
+/// Look up a declared key property in the entity's fields, tolerant of the
+/// snake/Pascal case split between how params are stored and how OData filters
+/// name them. Entity writes store action params verbatim (often snake_case, e.g.
+/// `workspace_id`), while OData reads name properties in the CSDL's PascalCase
+/// (`WorkspaceId`) — and some callers write Pascal directly. The declared
+/// `[[key]]` uses one convention; this finds the field regardless. Exact match
+/// first (so existing same-case behavior is unchanged), then snake, then Pascal.
+/// The hash itself is over key values, not names, so a case-tolerant lookup makes
+/// the write-side and read-side hashes agree for the same entity.
+fn lookup_field<'a>(
+    fields: &'a serde_json::Map<String, serde_json::Value>,
+    prop: &str,
+) -> Option<&'a serde_json::Value> {
+    if let Some(v) = fields.get(prop) {
+        return Some(v);
+    }
+    let snake = temper_spec::to_snake_case(prop);
+    if let Some(v) = fields.get(&snake) {
+        return Some(v);
+    }
+    let pascal = temper_spec::to_pascal_case(prop);
+    fields.get(&pascal)
 }
 
 /// Encode one scalar value as `(type_tag, canonical_text)`. `None` for null or a
@@ -192,6 +216,42 @@ mod tests {
         )
         .unwrap();
         assert_eq!(hash, write_side, "read-side hash must equal write-side hash");
+    }
+
+    #[test]
+    fn write_snake_and_read_pascal_hash_agree() {
+        // The real-entity case: the write stores params snake_case (workspace_id,
+        // path), the OData read names them PascalCase (WorkspaceId, Path). The hash
+        // is over VALUES, and the lookup is case-tolerant, so both sides agree.
+        let key = vec!["WorkspaceId".to_string(), "Path".to_string()];
+        let write_fields = fields(&[
+            ("workspace_id", json!("ws-1")),
+            ("path", json!("/a.md")),
+            ("Status", json!("Ready")),
+        ]);
+        let write_hash = canonical_key_hash("ws_path", &key, &write_fields).expect("write hash");
+
+        // Read side: resolve a PascalCase $filter against the same declared key.
+        let read_pairs = vec![
+            ("WorkspaceId".to_string(), "ws-1".to_string()),
+            ("Path".to_string(), "/a.md".to_string()),
+        ];
+        let decl = vec![DeclaredKey {
+            name: "ws_path".to_string(),
+            properties: key.clone(),
+        }];
+        let (_, read_hash) = resolve_query_to_key(&decl, &read_pairs).expect("read resolves");
+        assert_eq!(
+            write_hash, read_hash,
+            "write (snake fields) and read (Pascal filter) must hash equal — else the keyed read always misses"
+        );
+
+        // And Pascal-stored writes (other callers) also agree.
+        let pascal_write = fields(&[("WorkspaceId", json!("ws-1")), ("Path", json!("/a.md"))]);
+        assert_eq!(
+            canonical_key_hash("ws_path", &key, &pascal_write).expect("pascal write hash"),
+            read_hash,
+        );
     }
 
     #[test]
