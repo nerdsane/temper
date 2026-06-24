@@ -86,6 +86,7 @@ mod tests {
             entity_name: name.to_string(),
             states: vec!["A".into(), "B".into()],
             initial_state: "A".into(),
+            keys: vec![],
             rules: vec![TransitionRule {
                 name: "GoB".into(),
                 from_states: vec!["A".into()],

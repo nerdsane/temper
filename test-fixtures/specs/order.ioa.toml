@@ -9,6 +9,15 @@ name = "Order"
 states = ["Draft", "Submitted", "Confirmed", "Processing", "Shipped", "Delivered", "Cancelled", "ReturnRequested", "Returned", "Refunded"]
 initial = "Draft"
 
+# --- Declared keys (ADR-0153) ---
+# A declared alternate key the kernel indexes for O(log n) present/absent reads.
+# Used by the query-plane keyed fast-path proof; harmless to entities that do not
+# populate these fields (a partial key simply yields no index row).
+
+[[key]]
+name = "ws_path"
+properties = ["WorkspaceId", "Path"]
+
 # --- State Variables ---
 
 [[state]]

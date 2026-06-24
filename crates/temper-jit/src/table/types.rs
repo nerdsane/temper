@@ -265,6 +265,7 @@ mod tests {
             entity_name: "TestEntity".to_string(),
             states: vec!["Draft".to_string(), "Active".to_string()],
             initial_state: "Draft".to_string(),
+            keys: vec![],
             rules: vec![
                 TransitionRule {
                     name: "Submit".to_string(),

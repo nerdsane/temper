@@ -1,5 +1,158 @@
 use super::*;
 
+/// ADR-0153 read-plane proof on real Postgres (the prod engine): a `$filter` that
+/// is exactly the declared `[[key]]` resolves to the single matching entity via
+/// `entity_key_index` — a bounded candidate (no full-type scan → the budget that
+/// raises the 413 can never trip). Gated on DATABASE_URL; unique tenant; cleans up.
+///
+/// Proves `keyed_candidate_ids` composes the verified pieces against a live DB:
+/// real `append_with_keys` co-commit → real `lookup_by_key` → bounded `[id]`.
+#[test]
+fn keyed_filter_resolves_to_bounded_candidate_on_postgres() {
+    use temper_runtime::persistence::{
+        EntityKeyRow, EventMetadata, EventStore, PersistenceEnvelope,
+    };
+    use temper_runtime::scheduler::{sim_now, sim_uuid as runtime_sim_uuid};
+
+    let database_url = match std::env::var("DATABASE_URL") {
+        Ok(url) => url,
+        Err(_) => return,
+    };
+
+    sqlx::test_block_on(async {
+        let pool = sqlx::PgPool::connect(&database_url).await.unwrap();
+        temper_store_postgres::migration::run_migrations(&pool)
+            .await
+            .unwrap();
+        let store = temper_store_postgres::PostgresEventStore::new(pool.clone());
+        let mut state = build_order_state("query-plane-keyed-pg");
+        state.set_storage_stack(StorageStack::from_postgres(store.clone()));
+        // from_registry leaves transition_tables empty; the keyed fast path reads
+        // the declared `[[key]]` from the Order table, so install it (with the
+        // ws_path key from order.ioa.toml).
+        state.transition_tables = std::sync::Arc::new(
+            [(
+                "Order".to_string(),
+                std::sync::Arc::new(temper_jit::table::TransitionTable::from_ioa_source(ORDER_IOA)),
+            )]
+            .into_iter()
+            .collect(),
+        );
+
+        // Unique tenant isolates this run on the shared DB. The Order table (with
+        // the declared `ws_path` key) is found by entity_type regardless of tenant.
+        let tenant_str = format!("tenant-keyed-pg-{}", runtime_sim_uuid());
+        let tenant = TenantId::from(tenant_str.clone());
+        let workspace_id = "ws-keyed";
+        let target_path = "/proofs/keyed-read.txt";
+        let target_id = "ord-keyed-target";
+
+        // Write the target's key row via the REAL co-commit (journal + entity_key_index).
+        let key_hash = crate::key_index::canonical_key_hash(
+            "ws_path",
+            &["WorkspaceId".to_string(), "Path".to_string()],
+            &serde_json::json!({ "WorkspaceId": workspace_id, "Path": target_path })
+                .as_object()
+                .unwrap()
+                .clone(),
+        )
+        .expect("complete key");
+        let envelope = PersistenceEnvelope {
+            sequence_nr: 1,
+            event_type: "Create".to_string(),
+            payload: serde_json::json!({ "WorkspaceId": workspace_id, "Path": target_path }),
+            metadata: EventMetadata {
+                event_id: runtime_sim_uuid(),
+                causation_id: runtime_sim_uuid(),
+                correlation_id: runtime_sim_uuid(),
+                timestamp: sim_now(),
+                actor_id: "keyed-pg-proof".to_string(),
+            },
+        };
+        store
+            .append_with_keys(
+                &format!("{tenant_str}:Order:{target_id}"),
+                0,
+                &[envelope],
+                &[EntityKeyRow {
+                    key_name: "ws_path".to_string(),
+                    key_hash,
+                }],
+            )
+            .await
+            .expect("co-commit key row");
+
+        let security_ctx = SecurityContext::system();
+        // PRESENT: $filter == the declared key -> bounded [target_id].
+        let keyed = QueryOptions {
+            filter: Some(FilterExpr::BinaryOp {
+                left: Box::new(FilterExpr::BinaryOp {
+                    left: Box::new(FilterExpr::Property("WorkspaceId".to_string())),
+                    op: BinaryOperator::Eq,
+                    right: Box::new(FilterExpr::Literal(ODataValue::String(
+                        workspace_id.to_string(),
+                    ))),
+                }),
+                op: BinaryOperator::And,
+                right: Box::new(FilterExpr::BinaryOp {
+                    left: Box::new(FilterExpr::Property("Path".to_string())),
+                    op: BinaryOperator::Eq,
+                    right: Box::new(FilterExpr::Literal(ODataValue::String(
+                        target_path.to_string(),
+                    ))),
+                }),
+            }),
+            ..QueryOptions::default()
+        };
+        let request = QueryPlaneReadRequest {
+            state: &state,
+            tenant: &tenant,
+            security_ctx: &security_ctx,
+            entity_type: "Order",
+            entity_set_name: "Orders",
+            query_options: &keyed,
+            budget: QueryPlaneReadBudget {
+                default_page_size: 10,
+                max_entities: 10,
+            },
+        };
+        assert_eq!(
+            keyed_candidate_ids(&request).await,
+            Some(vec![target_id.to_string()]),
+            "a $filter matching the declared key must resolve to the bounded single id via entity_key_index"
+        );
+
+        // CONTROL: a non-key filter does not resolve -> None (falls back to scan).
+        let non_key = QueryOptions {
+            filter: Some(FilterExpr::BinaryOp {
+                left: Box::new(FilterExpr::Property("Status".to_string())),
+                op: BinaryOperator::Eq,
+                right: Box::new(FilterExpr::Literal(ODataValue::String("Created".to_string()))),
+            }),
+            ..QueryOptions::default()
+        };
+        let control = QueryPlaneReadRequest {
+            query_options: &non_key,
+            ..request
+        };
+        assert_eq!(
+            keyed_candidate_ids(&control).await,
+            None,
+            "a non-key filter must decline the keyed fast path"
+        );
+
+        // Clean up this run's rows.
+        let _ = sqlx::query("DELETE FROM entity_key_index WHERE tenant = $1")
+            .bind(&tenant_str)
+            .execute(&pool)
+            .await;
+        let _ = sqlx::query("DELETE FROM events WHERE tenant = $1")
+            .bind(&tenant_str)
+            .execute(&pool)
+            .await;
+    });
+}
+
 async fn upsert_order_projection_with_status(
     store: &TursoEventStore,
     tenant: &TenantId,
