@@ -141,6 +141,37 @@ fn keyed_filter_resolves_to_bounded_candidate_on_postgres() {
             "a non-key filter must decline the keyed fast path"
         );
 
+        // ABSENT key: a declared-key filter for a key NO entity holds resolves to a
+        // keyed MISS. Pre-backfill that returns None (fall back to scan), NOT an
+        // authoritative empty — a missing key row may be a not-yet-backfilled entity.
+        let absent = QueryOptions {
+            filter: Some(FilterExpr::BinaryOp {
+                left: Box::new(FilterExpr::BinaryOp {
+                    left: Box::new(FilterExpr::Property("WorkspaceId".to_string())),
+                    op: BinaryOperator::Eq,
+                    right: Box::new(FilterExpr::Literal(ODataValue::String(workspace_id.into()))),
+                }),
+                op: BinaryOperator::And,
+                right: Box::new(FilterExpr::BinaryOp {
+                    left: Box::new(FilterExpr::Property("Path".to_string())),
+                    op: BinaryOperator::Eq,
+                    right: Box::new(FilterExpr::Literal(ODataValue::String(
+                        "/proofs/does-not-exist.txt".to_string(),
+                    ))),
+                }),
+            }),
+            ..QueryOptions::default()
+        };
+        let absent_req = QueryPlaneReadRequest {
+            query_options: &absent,
+            ..request
+        };
+        assert_eq!(
+            keyed_candidate_ids(&absent_req).await,
+            None,
+            "a keyed miss must decline to scan fallback pre-backfill (not authoritative-empty)"
+        );
+
         // Clean up this run's rows.
         let _ = sqlx::query("DELETE FROM entity_key_index WHERE tenant = $1")
             .bind(&tenant_str)
@@ -151,6 +182,119 @@ fn keyed_filter_resolves_to_bounded_candidate_on_postgres() {
             .execute(&pool)
             .await;
     });
+}
+
+/// ADR-0153 boundary: the keyed fast path engages ONLY for a pure-equality filter
+/// that is exactly a declared `[[key]]`. Every other shape must decline (return
+/// None) so the read falls back to the existing scan/pushdown path — no behavior
+/// change, no false hit. No DB needed: all these decline before any store call.
+#[tokio::test]
+async fn keyed_fast_path_declines_non_key_shapes() {
+    let mut state = build_order_state("query-plane-keyed-decline");
+    state.transition_tables = std::sync::Arc::new(
+        [(
+            "Order".to_string(),
+            std::sync::Arc::new(temper_jit::table::TransitionTable::from_ioa_source(ORDER_IOA)),
+        )]
+        .into_iter()
+        .collect(),
+    );
+    let tenant = TenantId::default();
+    let security_ctx = SecurityContext::system();
+    let budget = QueryPlaneReadBudget {
+        default_page_size: 10,
+        max_entities: 10,
+    };
+
+    let eq = |prop: &str, val: &str| FilterExpr::BinaryOp {
+        left: Box::new(FilterExpr::Property(prop.to_string())),
+        op: BinaryOperator::Eq,
+        right: Box::new(FilterExpr::Literal(ODataValue::String(val.to_string()))),
+    };
+    let and = |l: FilterExpr, r: FilterExpr| FilterExpr::BinaryOp {
+        left: Box::new(l),
+        op: BinaryOperator::And,
+        right: Box::new(r),
+    };
+
+    // The declared key is (WorkspaceId, Path). Each of these must decline:
+    let cases: Vec<(&str, QueryOptions)> = vec![
+        // non-lossless conjunct (the agents' original Status ne failure shape)
+        (
+            "status_ne",
+            QueryOptions {
+                filter: Some(and(
+                    and(eq("WorkspaceId", "ws"), eq("Path", "/a")),
+                    FilterExpr::BinaryOp {
+                        left: Box::new(FilterExpr::Property("Status".to_string())),
+                        op: BinaryOperator::Ne,
+                        right: Box::new(FilterExpr::Literal(ODataValue::String("Archived".into()))),
+                    },
+                )),
+                ..QueryOptions::default()
+            },
+        ),
+        // eq null (the Directories root lookup shape)
+        (
+            "eq_null",
+            QueryOptions {
+                filter: Some(and(
+                    eq("WorkspaceId", "ws"),
+                    FilterExpr::BinaryOp {
+                        left: Box::new(FilterExpr::Property("ParentId".to_string())),
+                        op: BinaryOperator::Eq,
+                        right: Box::new(FilterExpr::Literal(ODataValue::Null)),
+                    },
+                )),
+                ..QueryOptions::default()
+            },
+        ),
+        // partial key (only one of the two key properties)
+        (
+            "partial_key",
+            QueryOptions {
+                filter: Some(eq("WorkspaceId", "ws")),
+                ..QueryOptions::default()
+            },
+        ),
+        // non-key property
+        (
+            "non_key_prop",
+            QueryOptions {
+                filter: Some(eq("Notes", "hi")),
+                ..QueryOptions::default()
+            },
+        ),
+        // $orderby present (a point read has no ordering to honor)
+        (
+            "with_orderby",
+            QueryOptions {
+                filter: Some(and(eq("WorkspaceId", "ws"), eq("Path", "/a"))),
+                orderby: Some(vec![OrderByClause {
+                    property: "Path".to_string(),
+                    direction: OrderDirection::Asc,
+                }]),
+                ..QueryOptions::default()
+            },
+        ),
+    ];
+
+    for (name, query_options) in &cases {
+        let request = QueryPlaneReadRequest {
+            state: &state,
+            tenant: &tenant,
+            security_ctx: &security_ctx,
+            entity_type: "Order",
+            entity_set_name: "Orders",
+            query_options,
+            budget,
+        };
+        assert_eq!(
+            keyed_candidate_ids(&request).await,
+            None,
+            "keyed fast path must decline shape '{name}' (falls back to scan/pushdown)"
+        );
+    }
 }
 
 async fn upsert_order_projection_with_status(
