@@ -121,6 +121,14 @@ impl TransitionTable {
             states: automaton.automaton.states.clone(),
             initial_state: automaton.automaton.initial.clone(),
             rules,
+            keys: automaton
+                .keys
+                .iter()
+                .map(|k| super::types::DeclaredKey {
+                    name: k.name.clone(),
+                    properties: k.properties.clone(),
+                })
+                .collect(),
             state_var_metadata,
             composite_actions,
             rule_index,

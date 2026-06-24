@@ -141,6 +141,11 @@ struct SimEventStoreInner {
     /// persisted the transition, but the caller's ask timeout expired before
     /// the reply arrived".
     pending_append_delays: BTreeMap<String, VecDeque<Duration>>,
+    /// ADR-0153: declared key-index, co-committed with the journal under the same
+    /// lock. `(tenant, entity_type, key_name, key_hash) -> entity_id`. This is the
+    /// deterministic reference for the negative-existence access path the real
+    /// stores maintain in `entity_key_index`.
+    key_index: BTreeMap<(String, String, String, String), String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -166,6 +171,7 @@ impl SimEventStore {
                 faults,
                 pending_concurrency_violations: BTreeMap::new(),
                 pending_append_delays: BTreeMap::new(),
+                key_index: BTreeMap::new(),
             })),
         }
     }
@@ -305,6 +311,17 @@ impl EventStore for SimEventStore {
         expected_sequence: u64,
         events: &[PersistenceEnvelope],
     ) -> Result<u64, PersistenceError> {
+        self.append_with_keys(persistence_id, expected_sequence, events, &[])
+            .await
+    }
+
+    async fn append_with_keys(
+        &self,
+        persistence_id: &str,
+        expected_sequence: u64,
+        events: &[PersistenceEnvelope],
+        key_rows: &[temper_runtime::persistence::EntityKeyRow],
+    ) -> Result<u64, PersistenceError> {
         let append_delay = {
             let mut inner = self
                 .inner
@@ -438,7 +455,62 @@ impl EventStore for SimEventStore {
                 .saturating_add(1);
         }
 
+        // ADR-0153: co-commit the declared key-index rows under the SAME lock as
+        // the journal write above, so a keyed read is consistent with the journal
+        // (the negative-existence access path). Same semantics the real stores
+        // apply to entity_key_index.
+        if !key_rows.is_empty() {
+            let mut parts = persistence_id.splitn(3, ':');
+            let tenant = parts.next().unwrap_or("");
+            let entity_type = parts.next().unwrap_or("");
+            let entity_id = parts.next().unwrap_or("");
+            for row in key_rows {
+                // Drop the entity's prior row for this key_name (value may have
+                // changed), then claim the new (key_name, key_hash) -> entity_id.
+                inner.key_index.retain(|(t, et, kn, _), eid| {
+                    !(t.as_str() == tenant
+                        && et.as_str() == entity_type
+                        && kn.as_str() == row.key_name.as_str()
+                        && eid.as_str() == entity_id)
+                });
+                let slot = (
+                    tenant.to_string(),
+                    entity_type.to_string(),
+                    row.key_name.clone(),
+                    row.key_hash.clone(),
+                );
+                // Uniqueness: a different entity holding this key is a declared-key
+                // violation (reject + surface).
+                if let Some(existing) = inner.key_index.get(&slot)
+                    && existing.as_str() != entity_id
+                {
+                    return Err(PersistenceError::Storage(format!(
+                        "duplicate declared key '{}' for {entity_type}: held by {existing}",
+                        row.key_name
+                    )));
+                }
+                inner.key_index.insert(slot, entity_id.to_string());
+            }
+        }
+
         Ok(new_seq)
+    }
+
+    async fn lookup_by_key(
+        &self,
+        tenant: &str,
+        entity_type: &str,
+        key_name: &str,
+        key_hash: &str,
+    ) -> Result<Option<String>, PersistenceError> {
+        let inner = self.inner.lock().expect("SimEventStore lock poisoned"); // ci-ok: infallible lock
+        let slot = (
+            tenant.to_string(),
+            entity_type.to_string(),
+            key_name.to_string(),
+            key_hash.to_string(),
+        );
+        Ok(inner.key_index.get(&slot).cloned())
     }
 
     async fn append_batch(

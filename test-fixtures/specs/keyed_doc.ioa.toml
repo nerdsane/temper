@@ -1,0 +1,32 @@
+# Keyed Doc — minimal fixture for the ADR-0153 entity_key_index DST.
+#
+# A Doc has the surrogate `Id` and a declared alternate key `(WorkspaceId, Path)`.
+# The DST asserts the negative-existence invariant: a keyed read returns the Doc
+# iff it exists, under every seed.
+
+[automaton]
+name = "Doc"
+states = ["New", "Ready"]
+initial = "New"
+
+[[state]]
+name = "WorkspaceId"
+type = "string"
+initial = ""
+
+[[state]]
+name = "Path"
+type = "string"
+initial = ""
+
+[[key]]
+name = "path"
+properties = ["WorkspaceId", "Path"]
+
+[[action]]
+name = "Create"
+kind = "input"
+from = ["New"]
+to = "Ready"
+params = ["WorkspaceId", "Path"]
+hint = "Create the doc with its workspace + path (its declared key)."
