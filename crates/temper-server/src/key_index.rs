@@ -12,6 +12,7 @@
 //! simulation.
 
 use sha2::{Digest, Sha256};
+use temper_jit::table::types::DeclaredKey;
 
 /// Separates `key_name` from the value list.
 const UNIT_SEP: u8 = 0x1F;
@@ -63,6 +64,37 @@ fn canonical_value(value: &serde_json::Value) -> Option<(u8, String)> {
         Value::String(s) => Some((TAG_STRING, s.clone())),
         Value::Array(_) | Value::Object(_) => None,
     }
+}
+
+/// Resolve a read's equality predicates to a declared key + its `key_hash`, for
+/// the read-plane fast path (ADR-0153): if `equality_pairs` is exactly one
+/// declared key's property set, return `(key_name, key_hash)` so the caller can
+/// probe `entity_key_index` instead of scanning. `None` if no declared key
+/// matches.
+///
+/// Values are taken as strings (how the OData URL / `$filter` deliver them),
+/// which matches the write-side hash for string-typed key properties — the case
+/// for every declared business key today (File `WorkspaceId+Path`, etc.). A
+/// non-string key property would need the value coerced to its declared type
+/// before this matches; that is tracked as a follow-up and a mismatch only
+/// declines the fast path (the caller falls back to the scan), never a wrong hit.
+pub fn resolve_query_to_key(
+    keys: &[DeclaredKey],
+    equality_pairs: &[(String, String)],
+) -> Option<(String, String)> {
+    let mut fields = serde_json::Map::new();
+    for (prop, value) in equality_pairs {
+        fields.insert(prop.clone(), serde_json::Value::String(value.clone()));
+    }
+    for key in keys {
+        if key.properties.len() == equality_pairs.len()
+            && key.properties.iter().all(|p| fields.contains_key(p))
+        {
+            let hash = canonical_key_hash(&key.name, &key.properties, &fields)?;
+            return Some((key.name.clone(), hash));
+        }
+    }
+    None
 }
 
 #[cfg(test)]
@@ -134,5 +166,45 @@ mod tests {
         // no declared properties
         let f = fields(&[("WorkspaceId", json!("ws1"))]);
         assert!(canonical_key_hash("path", &[], &f).is_none());
+    }
+
+    fn path_key() -> Vec<DeclaredKey> {
+        vec![DeclaredKey {
+            name: "path".to_string(),
+            properties: vec!["WorkspaceId".to_string(), "Path".to_string()],
+        }]
+    }
+
+    #[test]
+    fn resolve_query_matches_declared_key_and_agrees_with_write_hash() {
+        let pairs = vec![
+            ("WorkspaceId".to_string(), "ws1".to_string()),
+            ("Path".to_string(), "/a.md".to_string()),
+        ];
+        let (name, hash) = resolve_query_to_key(&path_key(), &pairs).expect("matches declared key");
+        assert_eq!(name, "path");
+        // The read-side hash MUST equal the write-side hash for the same string
+        // values — that is why present/absent works.
+        let write_side = canonical_key_hash(
+            "path",
+            &["WorkspaceId".to_string(), "Path".to_string()],
+            &fields(&[("WorkspaceId", json!("ws1")), ("Path", json!("/a.md"))]),
+        )
+        .unwrap();
+        assert_eq!(hash, write_side, "read-side hash must equal write-side hash");
+    }
+
+    #[test]
+    fn resolve_query_declines_when_no_key_matches() {
+        // wrong arity, wrong property, and no declared keys -> decline (fall back to scan)
+        assert!(resolve_query_to_key(&path_key(), &[("WorkspaceId".into(), "ws1".into())]).is_none());
+        assert!(
+            resolve_query_to_key(
+                &path_key(),
+                &[("Other".into(), "x".into()), ("Path".into(), "/a.md".into())]
+            )
+            .is_none()
+        );
+        assert!(resolve_query_to_key(&[], &[("WorkspaceId".into(), "ws1".into())]).is_none());
     }
 }

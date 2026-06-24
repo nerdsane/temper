@@ -304,6 +304,26 @@ async fn try_resolve_composite_entity_key(
     entity_type: &str,
     key_pairs: &[(String, String)],
 ) -> Option<String> {
+    // ADR-0153 fast path: if the key is a declared `[[key]]`, probe
+    // `entity_key_index` (O(log n), present/absent) instead of the candidate
+    // scan. On a miss we fall through to the scan, which still covers
+    // pre-backfill entities — a safe additive fast path until #324's scan is
+    // retired behind the backfill gate.
+    if let Some(table) = state.transition_tables.get(entity_type) {
+        if let Some((key_name, key_hash)) =
+            crate::key_index::resolve_query_to_key(&table.keys, key_pairs)
+        {
+            if let Some((store, _)) = state.event_journal() {
+                if let Ok(Some(entity_id)) = store
+                    .lookup_by_key(tenant.as_str(), entity_type, &key_name, &key_hash)
+                    .await
+                {
+                    return Some(entity_id);
+                }
+            }
+        }
+    }
+
     let query_plane = state.query_plane_store()?;
     let filter = composite_key_filter(key_pairs)?;
     let translated = filter_sql::try_translate_candidate_filter(&filter)?;
