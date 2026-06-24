@@ -119,16 +119,22 @@ pub(crate) fn record_postgres_transaction_commit_duration(
 
 pub(crate) fn record_postgres_projection_index_fields(
     operation: &'static str,
+    entity_type: &str,
     indexed_fields: u64,
     skipped_fields: u64,
 ) {
-    metrics()
-        .projection_index_fields
-        .record(indexed_fields, &[KeyValue::new("operation", operation)]);
+    // entity_type is bounded (the set of declared entity types, ~dozens), so it is
+    // safe as a metric dimension and lets us attribute the index fan-out (S) per
+    // entity type — needed to size the declared key index (ADR-0153, ARN-68).
+    let attrs = [
+        KeyValue::new("operation", operation),
+        KeyValue::new("entity_type", entity_type.to_owned()),
+    ];
+    metrics().projection_index_fields.record(indexed_fields, &attrs);
     if skipped_fields > 0 {
         metrics()
             .projection_skipped_index_fields_total
-            .add(skipped_fields, &[KeyValue::new("operation", operation)]);
+            .add(skipped_fields, &attrs);
     }
 }
 
@@ -188,7 +194,7 @@ mod tests {
         record_postgres_pool_acquire_duration(Duration::from_millis(2), "event_append", "ok");
         record_postgres_transaction_begin_duration(Duration::from_millis(1), "event_append", "ok");
         record_postgres_transaction_commit_duration(Duration::from_millis(3), "event_append", "ok");
-        record_postgres_projection_index_fields("query_projection_upsert", 4, 1);
+        record_postgres_projection_index_fields("query_projection_upsert", "TestEntity", 4, 1);
         record_postgres_projection_index_reconciliation(
             "query_projection_upsert",
             "skipped_unchanged",
