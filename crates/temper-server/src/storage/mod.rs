@@ -71,6 +71,22 @@ pub trait DynEventStore: Send + Sync {
         from_sequence: u64,
     ) -> EventStoreFuture<'a, Result<Vec<PersistenceEnvelope>, PersistenceError>>;
 
+    fn append_with_keys<'a>(
+        &'a self,
+        persistence_id: &'a str,
+        expected_sequence: u64,
+        events: &'a [PersistenceEnvelope],
+        key_rows: &'a [temper_runtime::persistence::EntityKeyRow],
+    ) -> EventStoreFuture<'a, Result<u64, PersistenceError>>;
+
+    fn lookup_by_key<'a>(
+        &'a self,
+        tenant: &'a str,
+        entity_type: &'a str,
+        key_name: &'a str,
+        key_hash: &'a str,
+    ) -> EventStoreFuture<'a, Result<Option<String>, PersistenceError>>;
+
     fn save_snapshot<'a>(
         &'a self,
         persistence_id: &'a str,
@@ -133,6 +149,38 @@ where
         from_sequence: u64,
     ) -> EventStoreFuture<'a, Result<Vec<PersistenceEnvelope>, PersistenceError>> {
         Box::pin(EventStore::read_events(self, persistence_id, from_sequence))
+    }
+
+    fn append_with_keys<'a>(
+        &'a self,
+        persistence_id: &'a str,
+        expected_sequence: u64,
+        events: &'a [PersistenceEnvelope],
+        key_rows: &'a [temper_runtime::persistence::EntityKeyRow],
+    ) -> EventStoreFuture<'a, Result<u64, PersistenceError>> {
+        Box::pin(EventStore::append_with_keys(
+            self,
+            persistence_id,
+            expected_sequence,
+            events,
+            key_rows,
+        ))
+    }
+
+    fn lookup_by_key<'a>(
+        &'a self,
+        tenant: &'a str,
+        entity_type: &'a str,
+        key_name: &'a str,
+        key_hash: &'a str,
+    ) -> EventStoreFuture<'a, Result<Option<String>, PersistenceError>> {
+        Box::pin(EventStore::lookup_by_key(
+            self,
+            tenant,
+            entity_type,
+            key_name,
+            key_hash,
+        ))
     }
 
     fn save_snapshot<'a>(
@@ -237,6 +285,30 @@ impl BoxedEventStore {
         from_sequence: u64,
     ) -> Result<Vec<PersistenceEnvelope>, PersistenceError> {
         self.0.read_events(persistence_id, from_sequence).await
+    }
+
+    pub async fn append_with_keys(
+        &self,
+        persistence_id: &str,
+        expected_sequence: u64,
+        events: &[PersistenceEnvelope],
+        key_rows: &[temper_runtime::persistence::EntityKeyRow],
+    ) -> Result<u64, PersistenceError> {
+        self.0
+            .append_with_keys(persistence_id, expected_sequence, events, key_rows)
+            .await
+    }
+
+    pub async fn lookup_by_key(
+        &self,
+        tenant: &str,
+        entity_type: &str,
+        key_name: &str,
+        key_hash: &str,
+    ) -> Result<Option<String>, PersistenceError> {
+        self.0
+            .lookup_by_key(tenant, entity_type, key_name, key_hash)
+            .await
     }
 
     pub async fn save_snapshot(

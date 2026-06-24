@@ -122,6 +122,22 @@ pub trait EventStore: Send + Sync + 'static {
         self.append(persistence_id, expected_sequence, events)
     }
 
+    /// Resolve an entity by a declared key (ADR-0153): the `entity_id` currently
+    /// holding `(key_name, key_hash)`, or `None` if absent. This is the
+    /// negative-existence access path — present *and* absent in one `O(log n)`
+    /// probe, no scan. Default returns `None` (non-indexing backends); the
+    /// query-plane stores override it against `entity_key_index`.
+    fn lookup_by_key(
+        &self,
+        tenant: &str,
+        entity_type: &str,
+        key_name: &str,
+        key_hash: &str,
+    ) -> impl std::future::Future<Output = Result<Option<String>, PersistenceError>> + Send {
+        let _ = (tenant, entity_type, key_name, key_hash);
+        async { Ok(None) }
+    }
+
     /// Atomically append events to multiple journals.
     ///
     /// Backends must either commit every append in `appends`, or commit none.
