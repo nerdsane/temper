@@ -24,6 +24,35 @@ fn should_try_native_before_catalog_coverage(
     plan.filter_pushdown && request.query_options.count != Some(true)
 }
 
+/// ADR-0153: when the read's `$filter` is exactly a declared `[[key]]`, resolve
+/// it to the single matching `entity_id` via `entity_key_index` — a bounded
+/// candidate set (no full-type scan, so the budget cannot trip → no 413).
+///
+/// Returns `Some(vec![id])` on a keyed **hit**; `None` otherwise — including a
+/// keyed **miss**, which falls back to the full scan because (until the backfill
+/// gate lands) a missing key row may be a pre-backfill entity rather than a true
+/// absence. So hits are fast and correct now; authoritative absence follows the
+/// per-tenant backfill watermark. `$orderby`/`$count` also decline (a point read
+/// has neither to honor).
+async fn keyed_candidate_ids(request: &QueryPlaneReadRequest<'_>) -> Option<Vec<String>> {
+    if request.query_options.orderby.is_some() || request.query_options.count == Some(true) {
+        return None;
+    }
+    let filter = request.query_options.filter.as_ref()?;
+    let pairs = super::filter_sql::equality_field_predicates(filter)?;
+    let table = request.state.transition_tables.get(request.entity_type)?;
+    let (key_name, key_hash) = crate::key_index::resolve_query_to_key(&table.keys, &pairs)?;
+    let (store, _) = request.state.event_journal()?;
+    match store
+        .lookup_by_key(request.tenant.as_str(), request.entity_type, &key_name, &key_hash)
+        .await
+    {
+        Ok(Some(entity_id)) => Some(vec![entity_id]),
+        // Miss or error: fall back to the full path (safe pre-backfill).
+        Ok(None) | Err(_) => None,
+    }
+}
+
 fn should_reconcile_empty_exact_match_against_authoritative(
     request: &QueryPlaneReadRequest<'_>,
     indexed_entity_ids: &[String],
@@ -170,10 +199,22 @@ pub(in crate::odata) async fn read_entity_set_from_query_plane(
         }
     }
 
-    let all_entity_ids = request
-        .state
-        .list_entity_ids_lazy(request.tenant, request.entity_type)
-        .await;
+    // ADR-0153 fast path: if the filter is exactly a declared `[[key]]` (the
+    // shape behind the agents' 413 — `Files?$filter=WorkspaceId eq … and Path eq …`),
+    // probe `entity_key_index` for the one matching entity_id instead of listing the
+    // whole entity type. The candidate set becomes bounded (0 or 1), so the rest of
+    // the read (coverage, budget, materialization, row-auth) runs unchanged and the
+    // scan budget can never trip. On a miss we fall back to the full list, which still
+    // covers pre-backfill entities — a safe additive fast path until #324 is retired.
+    let all_entity_ids = match keyed_candidate_ids(&request).await {
+        Some(ids) => ids,
+        None => {
+            request
+                .state
+                .list_entity_ids_lazy(request.tenant, request.entity_type)
+                .await
+        }
+    };
     let needs_full_proof = request.query_options.filter.is_some()
         || request.query_options.orderby.is_some()
         || request.query_options.count == Some(true);
