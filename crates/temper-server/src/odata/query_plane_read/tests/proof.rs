@@ -82,6 +82,34 @@ fn keyed_filter_resolves_to_bounded_candidate_on_postgres() {
             .await
             .expect("co-commit key row");
 
+        // AMPLIFICATION BOUND (ADR-0148 not regressed): the synchronous co-commit
+        // wrote exactly K=1 key row and ZERO broad-index rows. The S-wide
+        // entity_field_index (the write we migrated to async) is NOT touched by the
+        // append path — it is still written only by the async projection. This is
+        // the empirical proof the fix does not bring back synchronous write
+        // amplification.
+        let key_rows: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM entity_key_index WHERE tenant = $1 AND entity_id = $2",
+        )
+        .bind(&tenant_str)
+        .bind(target_id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(key_rows, 1, "co-commit writes exactly K=1 declared-key row");
+        let broad_index_rows: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM entity_field_index WHERE tenant = $1 AND entity_id = $2",
+        )
+        .bind(&tenant_str)
+        .bind(target_id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(
+            broad_index_rows, 0,
+            "the synchronous append must NOT write the S-wide broad index (stays async — no amplification regression)"
+        );
+
         let security_ctx = SecurityContext::system();
         // PRESENT: $filter == the declared key -> bounded [target_id].
         let keyed = QueryOptions {
