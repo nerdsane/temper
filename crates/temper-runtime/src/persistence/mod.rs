@@ -83,6 +83,18 @@ pub trait PersistentActor: Send + 'static {
     }
 }
 
+/// A declared-key row to co-commit with an append (ADR-0153). The entity claims
+/// `key_hash` for `key_name`; the store writes it into `entity_key_index` in the
+/// same transaction as the journal append, giving the read plane an `O(log n)`
+/// present/absent probe (the negative-existence access path, ARN-68).
+#[derive(Debug, Clone)]
+pub struct EntityKeyRow {
+    /// The declared key's identifier (the `[[key]]` block's `name`).
+    pub key_name: String,
+    /// The canonical, type-tagged hash of the key's values.
+    pub key_hash: String,
+}
+
 /// Trait for the event store backend (implemented by temper-store-postgres).
 /// Uses desugared async-in-trait to enforce Send bounds on futures.
 pub trait EventStore: Send + Sync + 'static {
@@ -93,6 +105,22 @@ pub trait EventStore: Send + Sync + 'static {
         expected_sequence: u64,
         events: &[PersistenceEnvelope],
     ) -> impl std::future::Future<Output = Result<u64, PersistenceError>> + Send;
+
+    /// Append events and co-commit declared key-index rows (ADR-0153) in the
+    /// **same transaction** as the journal append. The default ignores
+    /// `key_rows` and delegates to [`EventStore::append`] — only stores with a
+    /// query plane (postgres, turso) maintain `entity_key_index`. The sequence
+    /// and atomicity contract is identical to `append`.
+    fn append_with_keys(
+        &self,
+        persistence_id: &str,
+        expected_sequence: u64,
+        events: &[PersistenceEnvelope],
+        key_rows: &[EntityKeyRow],
+    ) -> impl std::future::Future<Output = Result<u64, PersistenceError>> + Send {
+        let _ = key_rows;
+        self.append(persistence_id, expected_sequence, events)
+    }
 
     /// Atomically append events to multiple journals.
     ///
