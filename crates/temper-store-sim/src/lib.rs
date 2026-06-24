@@ -405,6 +405,30 @@ impl EventStore for SimEventStore {
             });
         }
 
+        // ADR-0153: validate declared-key uniqueness BEFORE writing the journal, so
+        // a reject is atomic — the journal must not advance on a rejected co-commit.
+        // A *different* entity already holding the key is the violation.
+        if !key_rows.is_empty() {
+            let mut parts = persistence_id.splitn(3, ':');
+            let tenant = parts.next().unwrap_or("");
+            let entity_type = parts.next().unwrap_or("");
+            let entity_id = parts.next().unwrap_or("");
+            for row in key_rows {
+                if let Some(existing) = inner.key_index.get(&(
+                    tenant.to_string(),
+                    entity_type.to_string(),
+                    row.key_name.clone(),
+                    row.key_hash.clone(),
+                )) && existing.as_str() != entity_id
+                {
+                    return Err(PersistenceError::Storage(format!(
+                        "duplicate declared key '{}' for {entity_type}: held by {existing}",
+                        row.key_name
+                    )));
+                }
+            }
+        }
+
         let mut new_seq = expected_sequence;
         let mut stored_events = Vec::with_capacity(events.len());
         for event in events {
@@ -456,16 +480,16 @@ impl EventStore for SimEventStore {
         }
 
         // ADR-0153: co-commit the declared key-index rows under the SAME lock as
-        // the journal write above, so a keyed read is consistent with the journal
-        // (the negative-existence access path). Same semantics the real stores
-        // apply to entity_key_index.
+        // the journal write above (uniqueness was validated before the journal, so
+        // this only mutates — never fails). A keyed read is therefore consistent
+        // with the journal: the negative-existence access path.
         if !key_rows.is_empty() {
             let mut parts = persistence_id.splitn(3, ':');
             let tenant = parts.next().unwrap_or("");
             let entity_type = parts.next().unwrap_or("");
             let entity_id = parts.next().unwrap_or("");
             for row in key_rows {
-                // Drop the entity's prior row for this key_name (value may have
+                // Drop the entity's prior row for this key_name (the value may have
                 // changed), then claim the new (key_name, key_hash) -> entity_id.
                 inner.key_index.retain(|(t, et, kn, _), eid| {
                     !(t.as_str() == tenant
@@ -473,23 +497,15 @@ impl EventStore for SimEventStore {
                         && kn.as_str() == row.key_name.as_str()
                         && eid.as_str() == entity_id)
                 });
-                let slot = (
-                    tenant.to_string(),
-                    entity_type.to_string(),
-                    row.key_name.clone(),
-                    row.key_hash.clone(),
+                inner.key_index.insert(
+                    (
+                        tenant.to_string(),
+                        entity_type.to_string(),
+                        row.key_name.clone(),
+                        row.key_hash.clone(),
+                    ),
+                    entity_id.to_string(),
                 );
-                // Uniqueness: a different entity holding this key is a declared-key
-                // violation (reject + surface).
-                if let Some(existing) = inner.key_index.get(&slot)
-                    && existing.as_str() != entity_id
-                {
-                    return Err(PersistenceError::Storage(format!(
-                        "duplicate declared key '{}' for {entity_type}: held by {existing}",
-                        row.key_name
-                    )));
-                }
-                inner.key_index.insert(slot, entity_id.to_string());
             }
         }
 
