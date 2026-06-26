@@ -309,19 +309,15 @@ async fn try_resolve_composite_entity_key(
     // scan. On a miss we fall through to the scan, which still covers
     // pre-backfill entities — a safe additive fast path until #324's scan is
     // retired behind the backfill gate.
-    if let Some(table) = state.transition_tables.get(entity_type) {
-        if let Some((key_name, key_hash)) =
+    if let Some(table) = state.transition_tables.get(entity_type)
+        && let Some((key_name, key_hash)) =
             crate::key_index::resolve_query_to_key(&table.keys, key_pairs)
-        {
-            if let Some((store, _)) = state.event_journal() {
-                if let Ok(Some(entity_id)) = store
-                    .lookup_by_key(tenant.as_str(), entity_type, &key_name, &key_hash)
-                    .await
-                {
-                    return Some(entity_id);
-                }
-            }
-        }
+        && let Some((store, _)) = state.event_journal()
+        && let Ok(Some(entity_id)) = store
+            .lookup_by_key(tenant.as_str(), entity_type, &key_name, &key_hash)
+            .await
+    {
+        return Some(entity_id);
     }
 
     let query_plane = state.query_plane_store()?;
