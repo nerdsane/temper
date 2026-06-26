@@ -944,14 +944,9 @@ impl Actor for EntityActor {
                     if let (Some(store), Some(backend)) =
                         (self.event_journal.as_ref(), self.event_backend)
                     {
-                        let first_persist = self.persist_event(
-                            store,
-                            backend,
-                            &self.persistence_id(),
-                            state,
-                            &event,
-                        )
-                        .await;
+                        let first_persist = self
+                            .persist_event(store, backend, &self.persistence_id(), state, &event)
+                            .await;
 
                         match first_persist {
                             Ok(_) => {
@@ -1092,14 +1087,15 @@ impl Actor for EntityActor {
                                     ))
                                     .await; // determinism-ok: rare retry backoff (ADR-0046)
 
-                                    match self.persist_event(
-                                        store,
-                                        backend,
-                                        &self.persistence_id(),
-                                        state,
-                                        &retry_event,
-                                    )
-                                    .await
+                                    match self
+                                        .persist_event(
+                                            store,
+                                            backend,
+                                            &self.persistence_id(),
+                                            state,
+                                            &retry_event,
+                                        )
+                                        .await
                                     {
                                         Ok(_) => {
                                             // Commit re-evaluated event + result into
@@ -1400,9 +1396,9 @@ impl Actor for EntityActor {
 
                 if let (Some(store), Some(backend)) =
                     (self.event_journal.as_ref(), self.event_backend)
-                    && let Err(e) =
-                        self.persist_event(store, backend, &self.persistence_id(), state, &deleted)
-                            .await
+                    && let Err(e) = self
+                        .persist_event(store, backend, &self.persistence_id(), state, &deleted)
+                        .await
                 {
                     ctx.reply(EntityResponse {
                         success: false,

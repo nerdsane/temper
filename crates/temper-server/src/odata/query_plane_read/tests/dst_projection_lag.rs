@@ -202,7 +202,9 @@ fn sim_state(seed: u64, qp: std::sync::Arc<SimQueryPlane>) -> (ServerState, Boxe
     state.transition_tables = std::sync::Arc::new(
         [(
             "Order".to_string(),
-            std::sync::Arc::new(temper_jit::table::TransitionTable::from_ioa_source(ORDER_IOA)),
+            std::sync::Arc::new(temper_jit::table::TransitionTable::from_ioa_source(
+                ORDER_IOA,
+            )),
         )]
         .into_iter()
         .collect(),

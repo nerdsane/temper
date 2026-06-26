@@ -127,7 +127,10 @@ mod tests {
     use serde_json::json;
 
     fn fields(pairs: &[(&str, serde_json::Value)]) -> serde_json::Map<String, serde_json::Value> {
-        pairs.iter().map(|(k, v)| (k.to_string(), v.clone())).collect()
+        pairs
+            .iter()
+            .map(|(k, v)| (k.to_string(), v.clone()))
+            .collect()
     }
 
     #[test]
@@ -215,7 +218,10 @@ mod tests {
             &fields(&[("WorkspaceId", json!("ws1")), ("Path", json!("/a.md"))]),
         )
         .unwrap();
-        assert_eq!(hash, write_side, "read-side hash must equal write-side hash");
+        assert_eq!(
+            hash, write_side,
+            "read-side hash must equal write-side hash"
+        );
     }
 
     #[test]
@@ -257,11 +263,16 @@ mod tests {
     #[test]
     fn resolve_query_declines_when_no_key_matches() {
         // wrong arity, wrong property, and no declared keys -> decline (fall back to scan)
-        assert!(resolve_query_to_key(&path_key(), &[("WorkspaceId".into(), "ws1".into())]).is_none());
+        assert!(
+            resolve_query_to_key(&path_key(), &[("WorkspaceId".into(), "ws1".into())]).is_none()
+        );
         assert!(
             resolve_query_to_key(
                 &path_key(),
-                &[("Other".into(), "x".into()), ("Path".into(), "/a.md".into())]
+                &[
+                    ("Other".into(), "x".into()),
+                    ("Path".into(), "/a.md".into())
+                ]
             )
             .is_none()
         );

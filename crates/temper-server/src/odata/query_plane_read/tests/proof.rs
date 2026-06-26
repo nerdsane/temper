@@ -33,7 +33,9 @@ fn keyed_filter_resolves_to_bounded_candidate_on_postgres() {
         state.transition_tables = std::sync::Arc::new(
             [(
                 "Order".to_string(),
-                std::sync::Arc::new(temper_jit::table::TransitionTable::from_ioa_source(ORDER_IOA)),
+                std::sync::Arc::new(temper_jit::table::TransitionTable::from_ioa_source(
+                    ORDER_IOA,
+                )),
             )]
             .into_iter()
             .collect(),
@@ -155,7 +157,9 @@ fn keyed_filter_resolves_to_bounded_candidate_on_postgres() {
             filter: Some(FilterExpr::BinaryOp {
                 left: Box::new(FilterExpr::Property("Status".to_string())),
                 op: BinaryOperator::Eq,
-                right: Box::new(FilterExpr::Literal(ODataValue::String("Created".to_string()))),
+                right: Box::new(FilterExpr::Literal(ODataValue::String(
+                    "Created".to_string(),
+                ))),
             }),
             ..QueryOptions::default()
         };
@@ -222,7 +226,9 @@ async fn keyed_fast_path_declines_non_key_shapes() {
     state.transition_tables = std::sync::Arc::new(
         [(
             "Order".to_string(),
-            std::sync::Arc::new(temper_jit::table::TransitionTable::from_ioa_source(ORDER_IOA)),
+            std::sync::Arc::new(temper_jit::table::TransitionTable::from_ioa_source(
+                ORDER_IOA,
+            )),
         )]
         .into_iter()
         .collect(),

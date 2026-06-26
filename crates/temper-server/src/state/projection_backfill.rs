@@ -66,8 +66,7 @@ pub(super) async fn populate_key_index_from_snapshots(state: &ServerState, tenan
         let Ok(Some((_seq, snapshot_bytes))) = store.load_snapshot(&persistence_id).await else {
             continue;
         };
-        let Ok(snap) =
-            serde_json::from_slice::<crate::entity_actor::EntityState>(&snapshot_bytes)
+        let Ok(snap) = serde_json::from_slice::<crate::entity_actor::EntityState>(&snapshot_bytes)
         else {
             continue;
         };

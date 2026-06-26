@@ -52,11 +52,17 @@ fn entity_key_index_present_absent_and_atomic_reject() {
 
         // PRESENT and ABSENT in one keyed probe.
         assert_eq!(
-            store.lookup_by_key(&tenant, "Doc", "path", &key.key_hash).await.unwrap(),
+            store
+                .lookup_by_key(&tenant, "Doc", "path", &key.key_hash)
+                .await
+                .unwrap(),
             Some("doc-a".to_string()),
         );
         assert_eq!(
-            store.lookup_by_key(&tenant, "Doc", "path", "no-such-hash").await.unwrap(),
+            store
+                .lookup_by_key(&tenant, "Doc", "path", "no-such-hash")
+                .await
+                .unwrap(),
             None,
         );
 
@@ -76,7 +82,10 @@ fn entity_key_index_present_absent_and_atomic_reject() {
             "a rejected co-commit must leave the journal unchanged (atomic)"
         );
         assert_eq!(
-            store.lookup_by_key(&tenant, "Doc", "path", &key.key_hash).await.unwrap(),
+            store
+                .lookup_by_key(&tenant, "Doc", "path", &key.key_hash)
+                .await
+                .unwrap(),
             Some("doc-a".to_string()),
         );
 

@@ -130,7 +130,9 @@ pub(crate) fn record_postgres_projection_index_fields(
         KeyValue::new("operation", operation),
         KeyValue::new("entity_type", entity_type.to_owned()),
     ];
-    metrics().projection_index_fields.record(indexed_fields, &attrs);
+    metrics()
+        .projection_index_fields
+        .record(indexed_fields, &attrs);
     if skipped_fields > 0 {
         metrics()
             .projection_skipped_index_fields_total

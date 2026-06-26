@@ -44,7 +44,12 @@ async fn keyed_candidate_ids(request: &QueryPlaneReadRequest<'_>) -> Option<Vec<
     let (key_name, key_hash) = crate::key_index::resolve_query_to_key(&table.keys, &pairs)?;
     let (store, _) = request.state.event_journal()?;
     match store
-        .lookup_by_key(request.tenant.as_str(), request.entity_type, &key_name, &key_hash)
+        .lookup_by_key(
+            request.tenant.as_str(),
+            request.entity_type,
+            &key_name,
+            &key_hash,
+        )
         .await
     {
         Ok(Some(entity_id)) => Some(vec![entity_id]),

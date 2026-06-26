@@ -130,13 +130,19 @@ async fn dst_backfill_makes_pre_existing_entity_keyed_findable() {
         let key_hash = doc_key_hash("ws1", "/pre.md");
         // Before backfill: keyed miss.
         assert_eq!(
-            store.lookup_by_key("default", "Doc", "path", &key_hash).await.unwrap(),
+            store
+                .lookup_by_key("default", "Doc", "path", &key_hash)
+                .await
+                .unwrap(),
             None,
             "seed {seed}: pre-backfill entity has no key row (keyed miss)"
         );
 
         // Backfill the key row (no new journal event).
-        let rows = [EntityKeyRow { key_name: "path".to_string(), key_hash: key_hash.clone() }];
+        let rows = [EntityKeyRow {
+            key_name: "path".to_string(),
+            key_hash: key_hash.clone(),
+        }];
         store
             .backfill_entity_keys("default", "Doc", &format!("doc-pre-{seed}"), &rows)
             .await
@@ -149,7 +155,10 @@ async fn dst_backfill_makes_pre_existing_entity_keyed_findable() {
 
         // After backfill: keyed read resolves it.
         assert_eq!(
-            store.lookup_by_key("default", "Doc", "path", &key_hash).await.unwrap(),
+            store
+                .lookup_by_key("default", "Doc", "path", &key_hash)
+                .await
+                .unwrap(),
             Some(format!("doc-pre-{seed}")),
             "seed {seed}: after backfill the entity is keyed-findable"
         );
