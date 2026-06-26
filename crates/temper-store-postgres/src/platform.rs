@@ -644,6 +644,7 @@ impl PostgresEventStore {
             );
             record_postgres_projection_index_fields(
                 QUERY_PROJECTION_UPSERT_OPERATION,
+                entity_type,
                 indexed_fields,
                 skipped_fields,
             );
@@ -725,6 +726,7 @@ impl PostgresEventStore {
                     );
                     record_postgres_projection_index_fields(
                         QUERY_PROJECTION_UPSERT_OPERATION,
+                        entity_type,
                         indexed_fields,
                         skipped_fields,
                     );
@@ -797,6 +799,7 @@ impl PostgresEventStore {
         );
         record_postgres_projection_index_fields(
             QUERY_PROJECTION_UPSERT_OPERATION,
+            entity_type,
             indexed_fields,
             skipped_fields,
         );

@@ -43,11 +43,31 @@ pub struct Automaton {
     /// unless the entity leaves the state or a `reset_on` action fires.
     #[serde(default, rename = "state_timeout")]
     pub state_timeouts: Vec<StateTimeout>,
+    /// ADR-0153: declared unique keys (alternate keys). Each names a property
+    /// set guaranteed unique across entities of this type; the kernel maintains
+    /// a keyed index (`entity_key_index`) over it for O(log n) present/absent
+    /// reads — the negative-existence access path. The OData alternate-key
+    /// annotation is derived from this declaration.
+    #[serde(default, rename = "key")]
+    pub keys: Vec<KeyDecl>,
     /// Admission control caps (ADR-0051). When present, the dispatch layer
     /// gates concurrent calls per `(tenant, entity_type, action)` before
     /// reaching the actor.
     #[serde(default)]
     pub admission: Option<Admission>,
+}
+
+/// ADR-0153: a declared unique key (alternate key) on an entity. `properties`
+/// is the set of state/field names whose combined values uniquely identify one
+/// entity. The kernel maintains `entity_key_index` over each declared key for
+/// O(log n) present/absent reads; the canonical key hash uses `properties` in
+/// declared order. Multiple keys on one entity are distinguished by `name`.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct KeyDecl {
+    /// Identifier for this key (the `key_name` in `entity_key_index`).
+    pub name: String,
+    /// The property set that is unique, in canonical (hash) order.
+    pub properties: Vec<String>,
 }
 
 /// Automaton metadata.

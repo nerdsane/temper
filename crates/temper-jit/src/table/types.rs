@@ -15,6 +15,15 @@ use super::guard::{Guard, GuardFailure};
 // Core types
 // ---------------------------------------------------------------------------
 
+/// A declared unique/alternate key carried on the table (ADR-0153). `name`
+/// identifies it; `properties` is the unique property set in canonical order.
+/// The actor hashes these on write to maintain the negative-existence access path.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DeclaredKey {
+    pub name: String,
+    pub properties: Vec<String>,
+}
+
 /// A transition table: state machine transitions as DATA, not code.
 /// Can be hot-swapped per-actor without restart.
 #[derive(Debug, Clone, Serialize)]
@@ -27,6 +36,9 @@ pub struct TransitionTable {
     pub initial_state: String,
     /// Ordered list of transition rules.
     pub rules: Vec<TransitionRule>,
+    /// ADR-0153: declared unique/alternate keys the kernel indexes for
+    /// negative-existence reads. Empty when the spec declared no `[[key]]`.
+    pub keys: Vec<DeclaredKey>,
     /// Per-state-variable metadata for platform primitives (ADR-0045, ADR-0047).
     /// Keyed by state-variable name. Empty map when the IOA spec did not
     /// declare any per-field overrides.
@@ -129,6 +141,8 @@ impl<'de> Deserialize<'de> for TransitionTable {
             state_var_metadata: BTreeMap<String, StateVarMetadata>,
             #[serde(default)]
             composite_actions: BTreeMap<String, CompositeActionMetadata>,
+            #[serde(default)]
+            keys: Vec<DeclaredKey>,
         }
 
         let raw = TransitionTableRaw::deserialize(deserializer)?;
@@ -137,6 +151,7 @@ impl<'de> Deserialize<'de> for TransitionTable {
             states: raw.states,
             initial_state: raw.initial_state,
             rules: raw.rules,
+            keys: raw.keys,
             state_var_metadata: raw.state_var_metadata,
             composite_actions: raw.composite_actions,
             rule_index: BTreeMap::new(),
@@ -250,6 +265,7 @@ mod tests {
             entity_name: "TestEntity".to_string(),
             states: vec!["Draft".to_string(), "Active".to_string()],
             initial_state: "Draft".to_string(),
+            keys: vec![],
             rules: vec![
                 TransitionRule {
                     name: "Submit".to_string(),

@@ -14,6 +14,37 @@ fn parse_kv_no_equals() {
 }
 
 #[test]
+fn extracts_declared_unique_keys() {
+    // ADR-0153: [[key]] declares an alternate (unique) key the kernel indexes.
+    let src = r#"
+[automaton]
+name = "File"
+states = ["Created", "Ready"]
+initial = "Created"
+
+[[key]]
+name = "path"
+properties = ["WorkspaceId", "Path"]
+
+[[key]]
+name = "id"
+properties = ["Id"]
+"#;
+    let keys = extract_keys(src).expect("extract keys");
+    assert_eq!(keys.len(), 2);
+    assert_eq!(keys[0].name, "path");
+    assert_eq!(keys[0].properties, vec!["WorkspaceId", "Path"]);
+    assert_eq!(keys[1].name, "id");
+    assert_eq!(keys[1].properties, vec!["Id"]);
+}
+
+#[test]
+fn extract_keys_empty_when_no_key_blocks() {
+    let src = "[automaton]\nname = \"File\"\nstates = [\"Created\"]\ninitial = \"Created\"\n";
+    assert!(extract_keys(src).expect("extract keys").is_empty());
+}
+
+#[test]
 fn parse_kv_trims_whitespace() {
     let (key, value) = parse_kv("  key  =  \"value\"  ").unwrap();
     assert_eq!(key, "key");

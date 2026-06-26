@@ -21,6 +21,8 @@ pub mod eventual_invariants;
 pub mod http_endpoint;
 pub mod idempotency;
 pub mod identity;
+/// ADR-0153: declared composite-key index hashing (the negative-existence access path).
+pub mod key_index;
 #[cfg(feature = "observe")]
 pub mod observe;
 pub mod odata;

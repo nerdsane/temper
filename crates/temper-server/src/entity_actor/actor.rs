@@ -327,6 +327,7 @@ impl EntityActor {
 
     /// Persist an event to the configured event store.
     async fn persist_event(
+        &self,
         store: &BoxedEventStore,
         backend: BackendLabel,
         persistence_id: &str,
@@ -350,9 +351,28 @@ impl EntityActor {
 
         // W2 / temper#146: measure append wait — the hypothesis is that
         // writer-lock / fsync serialization is a cold-start bottleneck.
+        // ADR-0153: derive the declared key rows from the new state and co-commit
+        // them with the journal append, so a keyed read is correct without a scan.
+        let key_rows = {
+            let table = self.table.read().expect("table lock poisoned");
+            let mut rows = Vec::new();
+            if let Some(field_map) = state.fields.as_object() {
+                for key in &table.keys {
+                    if let Some(hash) =
+                        crate::key_index::canonical_key_hash(&key.name, &key.properties, field_map)
+                    {
+                        rows.push(temper_runtime::persistence::EntityKeyRow {
+                            key_name: key.name.clone(),
+                            key_hash: hash,
+                        });
+                    }
+                }
+            }
+            rows
+        };
         let append_start = Instant::now();
         let result = store
-            .append(persistence_id, state.sequence_nr, &[envelope])
+            .append_with_keys(persistence_id, state.sequence_nr, &[envelope], &key_rows)
             .await;
         crate::runtime_metrics::record_event_store_append_wait(
             backend.as_str(),
@@ -729,7 +749,7 @@ impl Actor for EntityActor {
 
             if let (Some(store), Some(backend)) = (self.event_journal.as_ref(), self.event_backend)
             {
-                Self::persist_event(store, backend, &self.persistence_id(), &mut state, &created)
+                self.persist_event(store, backend, &self.persistence_id(), &mut state, &created)
                     .await
                     .map_err(|e| {
                         ActorError::custom(format!(
@@ -924,14 +944,9 @@ impl Actor for EntityActor {
                     if let (Some(store), Some(backend)) =
                         (self.event_journal.as_ref(), self.event_backend)
                     {
-                        let first_persist = Self::persist_event(
-                            store,
-                            backend,
-                            &self.persistence_id(),
-                            state,
-                            &event,
-                        )
-                        .await;
+                        let first_persist = self
+                            .persist_event(store, backend, &self.persistence_id(), state, &event)
+                            .await;
 
                         match first_persist {
                             Ok(_) => {
@@ -1072,14 +1087,15 @@ impl Actor for EntityActor {
                                     ))
                                     .await; // determinism-ok: rare retry backoff (ADR-0046)
 
-                                    match Self::persist_event(
-                                        store,
-                                        backend,
-                                        &self.persistence_id(),
-                                        state,
-                                        &retry_event,
-                                    )
-                                    .await
+                                    match self
+                                        .persist_event(
+                                            store,
+                                            backend,
+                                            &self.persistence_id(),
+                                            state,
+                                            &retry_event,
+                                        )
+                                        .await
                                     {
                                         Ok(_) => {
                                             // Commit re-evaluated event + result into
@@ -1380,9 +1396,9 @@ impl Actor for EntityActor {
 
                 if let (Some(store), Some(backend)) =
                     (self.event_journal.as_ref(), self.event_backend)
-                    && let Err(e) =
-                        Self::persist_event(store, backend, &self.persistence_id(), state, &deleted)
-                            .await
+                    && let Err(e) = self
+                        .persist_event(store, backend, &self.persistence_id(), state, &deleted)
+                        .await
                 {
                     ctx.reply(EntityResponse {
                         success: false,

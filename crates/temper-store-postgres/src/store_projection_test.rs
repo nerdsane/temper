@@ -1,6 +1,7 @@
 use super::*;
 use crate::migration::run_migrations;
 use sqlx::PgPool;
+use temper_runtime::persistence::{EntityKeyRow, EventStore};
 
 fn test_envelope(event_type: &str, payload: serde_json::Value) -> PersistenceEnvelope {
     PersistenceEnvelope {
@@ -15,6 +16,89 @@ fn test_envelope(event_type: &str, payload: serde_json::Value) -> PersistenceEnv
             actor_id: "store-projection-test".to_string(),
         },
     }
+}
+
+/// ADR-0153 live verification: the real postgres store honors the same
+/// negative-existence + atomicity invariants the DST proved in SimEventStore.
+/// Gated on DATABASE_URL (skips otherwise); isolated by a unique tenant.
+#[test]
+fn entity_key_index_present_absent_and_atomic_reject() {
+    let database_url = match std::env::var("DATABASE_URL") {
+        Ok(url) => url,
+        Err(_) => return,
+    };
+
+    sqlx::test_block_on(async {
+        let pool = PgPool::connect(&database_url).await.unwrap();
+        run_migrations(&pool).await.unwrap();
+        let store = PostgresEventStore::new(pool.clone());
+        let tenant = format!("tenant-keyindex-{}", uuid::Uuid::new_v4());
+        let key = EntityKeyRow {
+            key_name: "path".to_string(),
+            key_hash: format!("kh-{}", uuid::Uuid::new_v4()),
+        };
+
+        // A claims the key (co-committed with the journal append).
+        let pid_a = format!("{tenant}:Doc:doc-a");
+        store
+            .append_with_keys(
+                &pid_a,
+                0,
+                &[test_envelope("Create", serde_json::json!({}))],
+                std::slice::from_ref(&key),
+            )
+            .await
+            .unwrap();
+
+        // PRESENT and ABSENT in one keyed probe.
+        assert_eq!(
+            store
+                .lookup_by_key(&tenant, "Doc", "path", &key.key_hash)
+                .await
+                .unwrap(),
+            Some("doc-a".to_string()),
+        );
+        assert_eq!(
+            store
+                .lookup_by_key(&tenant, "Doc", "path", "no-such-hash")
+                .await
+                .unwrap(),
+            None,
+        );
+
+        // ATOMICITY: B claims the SAME key -> rejected, and B's journal is unchanged.
+        let pid_b = format!("{tenant}:Doc:doc-b");
+        let res = store
+            .append_with_keys(
+                &pid_b,
+                0,
+                &[test_envelope("Create", serde_json::json!({}))],
+                std::slice::from_ref(&key),
+            )
+            .await;
+        assert!(res.is_err(), "duplicate declared key must be rejected");
+        assert!(
+            store.read_events(&pid_b, 0).await.unwrap().is_empty(),
+            "a rejected co-commit must leave the journal unchanged (atomic)"
+        );
+        assert_eq!(
+            store
+                .lookup_by_key(&tenant, "Doc", "path", &key.key_hash)
+                .await
+                .unwrap(),
+            Some("doc-a".to_string()),
+        );
+
+        // Clean up this test tenant's rows.
+        let _ = crate::dbm::postgres_query!("DELETE FROM entity_key_index WHERE tenant = $1")
+            .bind(&tenant)
+            .execute(&pool)
+            .await;
+        let _ = crate::dbm::postgres_query!("DELETE FROM events WHERE tenant = $1")
+            .bind(&tenant)
+            .execute(&pool)
+            .await;
+    });
 }
 
 #[test]

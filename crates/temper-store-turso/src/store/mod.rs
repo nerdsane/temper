@@ -382,6 +382,15 @@ impl TursoEventStore {
             .await
             .map_err(storage_error)?;
 
+        // Entity key index (ADR-0153) — declared composite-key -> entity_id, the
+        // negative-existence access path co-committed with the journal append.
+        conn.execute(schema::CREATE_ENTITY_KEY_INDEX_TABLE, ())
+            .await
+            .map_err(storage_error)?;
+        conn.execute(schema::CREATE_ENTITY_KEY_INDEX_ENTITY, ())
+            .await
+            .map_err(storage_error)?;
+
         Ok(())
     }
 

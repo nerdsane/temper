@@ -63,6 +63,17 @@ impl EventStore for PostgresEventStore {
         expected_sequence: u64,
         events: &[PersistenceEnvelope],
     ) -> Result<u64, PersistenceError> {
+        self.append_with_keys(persistence_id, expected_sequence, events, &[])
+            .await
+    }
+
+    async fn append_with_keys(
+        &self,
+        persistence_id: &str,
+        expected_sequence: u64,
+        events: &[PersistenceEnvelope],
+        key_rows: &[temper_runtime::persistence::EntityKeyRow],
+    ) -> Result<u64, PersistenceError> {
         let (tenant, entity_type, entity_id) =
             parse_persistence_id_parts(persistence_id).map_err(PersistenceError::Storage)?;
 
@@ -126,6 +137,31 @@ impl EventStore for PostgresEventStore {
             });
         }
 
+        // ADR-0153: validate declared-key uniqueness BEFORE writing the journal so
+        // a reject is atomic (the journal does not advance). A different entity
+        // already holding the key is the violation (reject + surface).
+        for key in key_rows {
+            let holder: Option<(String,)> = crate::dbm::postgres_query_as!(
+                "SELECT entity_id FROM entity_key_index \
+                 WHERE tenant = $1 AND entity_type = $2 AND key_name = $3 AND key_hash = $4",
+            )
+            .bind(tenant)
+            .bind(entity_type)
+            .bind(&key.key_name)
+            .bind(&key.key_hash)
+            .fetch_optional(&mut *tx)
+            .await
+            .map_err(|e| PersistenceError::Storage(e.to_string()))?;
+            if let Some((existing,)) = holder
+                && existing != entity_id
+            {
+                return Err(PersistenceError::Storage(format!(
+                    "duplicate declared key '{}' for {entity_type}: held by {existing}",
+                    key.key_name
+                )));
+            }
+        }
+
         let segment_index =
             segments::open_segment_for_append(&mut tx, tenant, entity_type, entity_id, current_seq)
                 .await?;
@@ -176,6 +212,37 @@ impl EventStore for PostgresEventStore {
             .await?;
         }
 
+        // ADR-0153: co-commit the declared key-index rows in THIS transaction
+        // (uniqueness was validated above). Drop the entity's prior row for each
+        // key_name (the value may have changed), then claim the new key_hash.
+        for key in key_rows {
+            crate::dbm::postgres_query!(
+                "DELETE FROM entity_key_index \
+                 WHERE tenant = $1 AND entity_type = $2 AND key_name = $3 AND entity_id = $4",
+            )
+            .bind(tenant)
+            .bind(entity_type)
+            .bind(&key.key_name)
+            .bind(entity_id)
+            .execute(&mut *tx)
+            .await
+            .map_err(|e| PersistenceError::Storage(e.to_string()))?;
+            crate::dbm::postgres_query!(
+                "INSERT INTO entity_key_index \
+                 (tenant, entity_type, key_name, key_hash, entity_id, sequence_nr) \
+                 VALUES ($1, $2, $3, $4, $5, $6)",
+            )
+            .bind(tenant)
+            .bind(entity_type)
+            .bind(&key.key_name)
+            .bind(&key.key_hash)
+            .bind(entity_id)
+            .bind(new_seq as i64)
+            .execute(&mut *tx)
+            .await
+            .map_err(|e| PersistenceError::Storage(e.to_string()))?;
+        }
+
         let commit_started = Instant::now();
         tx.commit().await.map_err(|e| {
             record_postgres_transaction_commit_duration(
@@ -193,6 +260,105 @@ impl EventStore for PostgresEventStore {
         transaction_timer.set_outcome("ok");
 
         Ok(new_seq)
+    }
+
+    async fn backfill_entity_keys(
+        &self,
+        tenant: &str,
+        entity_type: &str,
+        entity_id: &str,
+        key_rows: &[temper_runtime::persistence::EntityKeyRow],
+    ) -> Result<(), PersistenceError> {
+        if key_rows.is_empty() {
+            return Ok(());
+        }
+        let mut tx = self
+            .pool
+            .begin()
+            .await
+            .map_err(|e| PersistenceError::Storage(e.to_string()))?;
+        for key in key_rows {
+            // A different entity already holding this key is a pre-existing data
+            // conflict — log and skip (don't fail the whole backfill on one row;
+            // the conflict surfaces via the metric and a keyed read still resolves
+            // to whoever currently holds it).
+            let holder: Option<(String,)> = crate::dbm::postgres_query_as!(
+                "SELECT entity_id FROM entity_key_index \
+                 WHERE tenant = $1 AND entity_type = $2 AND key_name = $3 AND key_hash = $4",
+            )
+            .bind(tenant)
+            .bind(entity_type)
+            .bind(&key.key_name)
+            .bind(&key.key_hash)
+            .fetch_optional(&mut *tx)
+            .await
+            .map_err(|e| PersistenceError::Storage(e.to_string()))?;
+            if let Some((existing,)) = &holder
+                && existing != entity_id
+            {
+                tracing::warn!(
+                    tenant, entity_type, entity_id, existing,
+                    key_name = %key.key_name,
+                    "entity_key_index backfill: declared-key conflict; skipping"
+                );
+                continue;
+            }
+            crate::dbm::postgres_query!(
+                "DELETE FROM entity_key_index \
+                 WHERE tenant = $1 AND entity_type = $2 AND key_name = $3 AND entity_id = $4",
+            )
+            .bind(tenant)
+            .bind(entity_type)
+            .bind(&key.key_name)
+            .bind(entity_id)
+            .execute(&mut *tx)
+            .await
+            .map_err(|e| PersistenceError::Storage(e.to_string()))?;
+            crate::dbm::postgres_query!(
+                "INSERT INTO entity_key_index \
+                 (tenant, entity_type, key_name, key_hash, entity_id, sequence_nr) \
+                 VALUES ($1, $2, $3, $4, $5, 0) \
+                 ON CONFLICT (tenant, entity_type, key_name, key_hash) DO NOTHING",
+            )
+            .bind(tenant)
+            .bind(entity_type)
+            .bind(&key.key_name)
+            .bind(&key.key_hash)
+            .bind(entity_id)
+            .execute(&mut *tx)
+            .await
+            .map_err(|e| PersistenceError::Storage(e.to_string()))?;
+        }
+        tx.commit()
+            .await
+            .map_err(|e| PersistenceError::Storage(e.to_string()))?;
+        Ok(())
+    }
+
+    async fn lookup_by_key(
+        &self,
+        tenant: &str,
+        entity_type: &str,
+        key_name: &str,
+        key_hash: &str,
+    ) -> Result<Option<String>, PersistenceError> {
+        let mut conn = self
+            .pool
+            .acquire()
+            .await
+            .map_err(|e| PersistenceError::Storage(e.to_string()))?;
+        let row: Option<(String,)> = crate::dbm::postgres_query_as!(
+            "SELECT entity_id FROM entity_key_index \
+             WHERE tenant = $1 AND entity_type = $2 AND key_name = $3 AND key_hash = $4",
+        )
+        .bind(tenant)
+        .bind(entity_type)
+        .bind(key_name)
+        .bind(key_hash)
+        .fetch_optional(&mut *conn)
+        .await
+        .map_err(|e| PersistenceError::Storage(e.to_string()))?;
+        Ok(row.map(|(id,)| id))
     }
 
     /// Atomically append to multiple entity journals in one PostgreSQL

@@ -1,5 +1,336 @@
 use super::*;
 
+/// ADR-0153 read-plane proof on real Postgres (the prod engine): a `$filter` that
+/// is exactly the declared `[[key]]` resolves to the single matching entity via
+/// `entity_key_index` — a bounded candidate (no full-type scan → the budget that
+/// raises the 413 can never trip). Gated on DATABASE_URL; unique tenant; cleans up.
+///
+/// Proves `keyed_candidate_ids` composes the verified pieces against a live DB:
+/// real `append_with_keys` co-commit → real `lookup_by_key` → bounded `[id]`.
+#[test]
+fn keyed_filter_resolves_to_bounded_candidate_on_postgres() {
+    use temper_runtime::persistence::{
+        EntityKeyRow, EventMetadata, EventStore, PersistenceEnvelope,
+    };
+    use temper_runtime::scheduler::{sim_now, sim_uuid as runtime_sim_uuid};
+
+    let database_url = match std::env::var("DATABASE_URL") {
+        Ok(url) => url,
+        Err(_) => return,
+    };
+
+    sqlx::test_block_on(async {
+        let pool = sqlx::PgPool::connect(&database_url).await.unwrap();
+        temper_store_postgres::migration::run_migrations(&pool)
+            .await
+            .unwrap();
+        let store = temper_store_postgres::PostgresEventStore::new(pool.clone());
+        let mut state = build_order_state("query-plane-keyed-pg");
+        state.set_storage_stack(StorageStack::from_postgres(store.clone()));
+        // from_registry leaves transition_tables empty; the keyed fast path reads
+        // the declared `[[key]]` from the Order table, so install it (with the
+        // ws_path key from order.ioa.toml).
+        state.transition_tables = std::sync::Arc::new(
+            [(
+                "Order".to_string(),
+                std::sync::Arc::new(temper_jit::table::TransitionTable::from_ioa_source(
+                    ORDER_IOA,
+                )),
+            )]
+            .into_iter()
+            .collect(),
+        );
+
+        // Unique tenant isolates this run on the shared DB. The Order table (with
+        // the declared `ws_path` key) is found by entity_type regardless of tenant.
+        let tenant_str = format!("tenant-keyed-pg-{}", runtime_sim_uuid());
+        let tenant = TenantId::from(tenant_str.clone());
+        let workspace_id = "ws-keyed";
+        let target_path = "/proofs/keyed-read.txt";
+        let target_id = "ord-keyed-target";
+
+        // Write the target's key row via the REAL co-commit (journal + entity_key_index).
+        let key_hash = crate::key_index::canonical_key_hash(
+            "ws_path",
+            &["WorkspaceId".to_string(), "Path".to_string()],
+            &serde_json::json!({ "WorkspaceId": workspace_id, "Path": target_path })
+                .as_object()
+                .unwrap()
+                .clone(),
+        )
+        .expect("complete key");
+        let envelope = PersistenceEnvelope {
+            sequence_nr: 1,
+            event_type: "Create".to_string(),
+            payload: serde_json::json!({ "WorkspaceId": workspace_id, "Path": target_path }),
+            metadata: EventMetadata {
+                event_id: runtime_sim_uuid(),
+                causation_id: runtime_sim_uuid(),
+                correlation_id: runtime_sim_uuid(),
+                timestamp: sim_now(),
+                actor_id: "keyed-pg-proof".to_string(),
+            },
+        };
+        store
+            .append_with_keys(
+                &format!("{tenant_str}:Order:{target_id}"),
+                0,
+                &[envelope],
+                &[EntityKeyRow {
+                    key_name: "ws_path".to_string(),
+                    key_hash,
+                }],
+            )
+            .await
+            .expect("co-commit key row");
+
+        // AMPLIFICATION BOUND (ADR-0148 not regressed): the synchronous co-commit
+        // wrote exactly K=1 key row and ZERO broad-index rows. The S-wide
+        // entity_field_index (the write we migrated to async) is NOT touched by the
+        // append path — it is still written only by the async projection. This is
+        // the empirical proof the fix does not bring back synchronous write
+        // amplification.
+        let key_rows: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM entity_key_index WHERE tenant = $1 AND entity_id = $2",
+        )
+        .bind(&tenant_str)
+        .bind(target_id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(key_rows, 1, "co-commit writes exactly K=1 declared-key row");
+        let broad_index_rows: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM entity_field_index WHERE tenant = $1 AND entity_id = $2",
+        )
+        .bind(&tenant_str)
+        .bind(target_id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(
+            broad_index_rows, 0,
+            "the synchronous append must NOT write the S-wide broad index (stays async — no amplification regression)"
+        );
+
+        let security_ctx = SecurityContext::system();
+        // PRESENT: $filter == the declared key -> bounded [target_id].
+        let keyed = QueryOptions {
+            filter: Some(FilterExpr::BinaryOp {
+                left: Box::new(FilterExpr::BinaryOp {
+                    left: Box::new(FilterExpr::Property("WorkspaceId".to_string())),
+                    op: BinaryOperator::Eq,
+                    right: Box::new(FilterExpr::Literal(ODataValue::String(
+                        workspace_id.to_string(),
+                    ))),
+                }),
+                op: BinaryOperator::And,
+                right: Box::new(FilterExpr::BinaryOp {
+                    left: Box::new(FilterExpr::Property("Path".to_string())),
+                    op: BinaryOperator::Eq,
+                    right: Box::new(FilterExpr::Literal(ODataValue::String(
+                        target_path.to_string(),
+                    ))),
+                }),
+            }),
+            ..QueryOptions::default()
+        };
+        let request = QueryPlaneReadRequest {
+            state: &state,
+            tenant: &tenant,
+            security_ctx: &security_ctx,
+            entity_type: "Order",
+            entity_set_name: "Orders",
+            query_options: &keyed,
+            budget: QueryPlaneReadBudget {
+                default_page_size: 10,
+                max_entities: 10,
+            },
+        };
+        assert_eq!(
+            keyed_candidate_ids(&request).await,
+            Some(vec![target_id.to_string()]),
+            "a $filter matching the declared key must resolve to the bounded single id via entity_key_index"
+        );
+
+        // CONTROL: a non-key filter does not resolve -> None (falls back to scan).
+        let non_key = QueryOptions {
+            filter: Some(FilterExpr::BinaryOp {
+                left: Box::new(FilterExpr::Property("Status".to_string())),
+                op: BinaryOperator::Eq,
+                right: Box::new(FilterExpr::Literal(ODataValue::String(
+                    "Created".to_string(),
+                ))),
+            }),
+            ..QueryOptions::default()
+        };
+        let control = QueryPlaneReadRequest {
+            query_options: &non_key,
+            ..request
+        };
+        assert_eq!(
+            keyed_candidate_ids(&control).await,
+            None,
+            "a non-key filter must decline the keyed fast path"
+        );
+
+        // ABSENT key: a declared-key filter for a key NO entity holds resolves to a
+        // keyed MISS. Pre-backfill that returns None (fall back to scan), NOT an
+        // authoritative empty — a missing key row may be a not-yet-backfilled entity.
+        let absent = QueryOptions {
+            filter: Some(FilterExpr::BinaryOp {
+                left: Box::new(FilterExpr::BinaryOp {
+                    left: Box::new(FilterExpr::Property("WorkspaceId".to_string())),
+                    op: BinaryOperator::Eq,
+                    right: Box::new(FilterExpr::Literal(ODataValue::String(workspace_id.into()))),
+                }),
+                op: BinaryOperator::And,
+                right: Box::new(FilterExpr::BinaryOp {
+                    left: Box::new(FilterExpr::Property("Path".to_string())),
+                    op: BinaryOperator::Eq,
+                    right: Box::new(FilterExpr::Literal(ODataValue::String(
+                        "/proofs/does-not-exist.txt".to_string(),
+                    ))),
+                }),
+            }),
+            ..QueryOptions::default()
+        };
+        let absent_req = QueryPlaneReadRequest {
+            query_options: &absent,
+            ..request
+        };
+        assert_eq!(
+            keyed_candidate_ids(&absent_req).await,
+            None,
+            "a keyed miss must decline to scan fallback pre-backfill (not authoritative-empty)"
+        );
+
+        // Clean up this run's rows.
+        let _ = sqlx::query("DELETE FROM entity_key_index WHERE tenant = $1")
+            .bind(&tenant_str)
+            .execute(&pool)
+            .await;
+        let _ = sqlx::query("DELETE FROM events WHERE tenant = $1")
+            .bind(&tenant_str)
+            .execute(&pool)
+            .await;
+    });
+}
+
+/// ADR-0153 boundary: the keyed fast path engages ONLY for a pure-equality filter
+/// that is exactly a declared `[[key]]`. Every other shape must decline (return
+/// None) so the read falls back to the existing scan/pushdown path — no behavior
+/// change, no false hit. No DB needed: all these decline before any store call.
+#[tokio::test]
+async fn keyed_fast_path_declines_non_key_shapes() {
+    let mut state = build_order_state("query-plane-keyed-decline");
+    state.transition_tables = std::sync::Arc::new(
+        [(
+            "Order".to_string(),
+            std::sync::Arc::new(temper_jit::table::TransitionTable::from_ioa_source(
+                ORDER_IOA,
+            )),
+        )]
+        .into_iter()
+        .collect(),
+    );
+    let tenant = TenantId::default();
+    let security_ctx = SecurityContext::system();
+    let budget = QueryPlaneReadBudget {
+        default_page_size: 10,
+        max_entities: 10,
+    };
+
+    let eq = |prop: &str, val: &str| FilterExpr::BinaryOp {
+        left: Box::new(FilterExpr::Property(prop.to_string())),
+        op: BinaryOperator::Eq,
+        right: Box::new(FilterExpr::Literal(ODataValue::String(val.to_string()))),
+    };
+    let and = |l: FilterExpr, r: FilterExpr| FilterExpr::BinaryOp {
+        left: Box::new(l),
+        op: BinaryOperator::And,
+        right: Box::new(r),
+    };
+
+    // The declared key is (WorkspaceId, Path). Each of these must decline:
+    let cases: Vec<(&str, QueryOptions)> = vec![
+        // non-lossless conjunct (the agents' original Status ne failure shape)
+        (
+            "status_ne",
+            QueryOptions {
+                filter: Some(and(
+                    and(eq("WorkspaceId", "ws"), eq("Path", "/a")),
+                    FilterExpr::BinaryOp {
+                        left: Box::new(FilterExpr::Property("Status".to_string())),
+                        op: BinaryOperator::Ne,
+                        right: Box::new(FilterExpr::Literal(ODataValue::String("Archived".into()))),
+                    },
+                )),
+                ..QueryOptions::default()
+            },
+        ),
+        // eq null (the Directories root lookup shape)
+        (
+            "eq_null",
+            QueryOptions {
+                filter: Some(and(
+                    eq("WorkspaceId", "ws"),
+                    FilterExpr::BinaryOp {
+                        left: Box::new(FilterExpr::Property("ParentId".to_string())),
+                        op: BinaryOperator::Eq,
+                        right: Box::new(FilterExpr::Literal(ODataValue::Null)),
+                    },
+                )),
+                ..QueryOptions::default()
+            },
+        ),
+        // partial key (only one of the two key properties)
+        (
+            "partial_key",
+            QueryOptions {
+                filter: Some(eq("WorkspaceId", "ws")),
+                ..QueryOptions::default()
+            },
+        ),
+        // non-key property
+        (
+            "non_key_prop",
+            QueryOptions {
+                filter: Some(eq("Notes", "hi")),
+                ..QueryOptions::default()
+            },
+        ),
+        // $orderby present (a point read has no ordering to honor)
+        (
+            "with_orderby",
+            QueryOptions {
+                filter: Some(and(eq("WorkspaceId", "ws"), eq("Path", "/a"))),
+                orderby: Some(vec![OrderByClause {
+                    property: "Path".to_string(),
+                    direction: OrderDirection::Asc,
+                }]),
+                ..QueryOptions::default()
+            },
+        ),
+    ];
+
+    for (name, query_options) in &cases {
+        let request = QueryPlaneReadRequest {
+            state: &state,
+            tenant: &tenant,
+            security_ctx: &security_ctx,
+            entity_type: "Order",
+            entity_set_name: "Orders",
+            query_options,
+            budget,
+        };
+        assert_eq!(
+            keyed_candidate_ids(&request).await,
+            None,
+            "keyed fast path must decline shape '{name}' (falls back to scan/pushdown)"
+        );
+    }
+}
+
 async fn upsert_order_projection_with_status(
     store: &TursoEventStore,
     tenant: &TenantId,

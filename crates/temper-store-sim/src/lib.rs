@@ -141,6 +141,11 @@ struct SimEventStoreInner {
     /// persisted the transition, but the caller's ask timeout expired before
     /// the reply arrived".
     pending_append_delays: BTreeMap<String, VecDeque<Duration>>,
+    /// ADR-0153: declared key-index, co-committed with the journal under the same
+    /// lock. `(tenant, entity_type, key_name, key_hash) -> entity_id`. This is the
+    /// deterministic reference for the negative-existence access path the real
+    /// stores maintain in `entity_key_index`.
+    key_index: BTreeMap<(String, String, String, String), String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -166,6 +171,7 @@ impl SimEventStore {
                 faults,
                 pending_concurrency_violations: BTreeMap::new(),
                 pending_append_delays: BTreeMap::new(),
+                key_index: BTreeMap::new(),
             })),
         }
     }
@@ -305,6 +311,17 @@ impl EventStore for SimEventStore {
         expected_sequence: u64,
         events: &[PersistenceEnvelope],
     ) -> Result<u64, PersistenceError> {
+        self.append_with_keys(persistence_id, expected_sequence, events, &[])
+            .await
+    }
+
+    async fn append_with_keys(
+        &self,
+        persistence_id: &str,
+        expected_sequence: u64,
+        events: &[PersistenceEnvelope],
+        key_rows: &[temper_runtime::persistence::EntityKeyRow],
+    ) -> Result<u64, PersistenceError> {
         let append_delay = {
             let mut inner = self
                 .inner
@@ -388,6 +405,30 @@ impl EventStore for SimEventStore {
             });
         }
 
+        // ADR-0153: validate declared-key uniqueness BEFORE writing the journal, so
+        // a reject is atomic — the journal must not advance on a rejected co-commit.
+        // A *different* entity already holding the key is the violation.
+        if !key_rows.is_empty() {
+            let mut parts = persistence_id.splitn(3, ':');
+            let tenant = parts.next().unwrap_or("");
+            let entity_type = parts.next().unwrap_or("");
+            let entity_id = parts.next().unwrap_or("");
+            for row in key_rows {
+                if let Some(existing) = inner.key_index.get(&(
+                    tenant.to_string(),
+                    entity_type.to_string(),
+                    row.key_name.clone(),
+                    row.key_hash.clone(),
+                )) && existing.as_str() != entity_id
+                {
+                    return Err(PersistenceError::Storage(format!(
+                        "duplicate declared key '{}' for {entity_type}: held by {existing}",
+                        row.key_name
+                    )));
+                }
+            }
+        }
+
         let mut new_seq = expected_sequence;
         let mut stored_events = Vec::with_capacity(events.len());
         for event in events {
@@ -438,7 +479,87 @@ impl EventStore for SimEventStore {
                 .saturating_add(1);
         }
 
+        // ADR-0153: co-commit the declared key-index rows under the SAME lock as
+        // the journal write above (uniqueness was validated before the journal, so
+        // this only mutates — never fails). A keyed read is therefore consistent
+        // with the journal: the negative-existence access path.
+        if !key_rows.is_empty() {
+            let mut parts = persistence_id.splitn(3, ':');
+            let tenant = parts.next().unwrap_or("");
+            let entity_type = parts.next().unwrap_or("");
+            let entity_id = parts.next().unwrap_or("");
+            for row in key_rows {
+                // Drop the entity's prior row for this key_name (the value may have
+                // changed), then claim the new (key_name, key_hash) -> entity_id.
+                inner.key_index.retain(|(t, et, kn, _), eid| {
+                    !(t.as_str() == tenant
+                        && et.as_str() == entity_type
+                        && kn.as_str() == row.key_name.as_str()
+                        && eid.as_str() == entity_id)
+                });
+                inner.key_index.insert(
+                    (
+                        tenant.to_string(),
+                        entity_type.to_string(),
+                        row.key_name.clone(),
+                        row.key_hash.clone(),
+                    ),
+                    entity_id.to_string(),
+                );
+            }
+        }
+
         Ok(new_seq)
+    }
+
+    async fn backfill_entity_keys(
+        &self,
+        tenant: &str,
+        entity_type: &str,
+        entity_id: &str,
+        key_rows: &[temper_runtime::persistence::EntityKeyRow],
+    ) -> Result<(), PersistenceError> {
+        let mut inner = self.inner.lock().expect("SimEventStore lock poisoned"); // ci-ok: infallible lock
+        for row in key_rows {
+            let slot = (
+                tenant.to_string(),
+                entity_type.to_string(),
+                row.key_name.clone(),
+                row.key_hash.clone(),
+            );
+            match inner.key_index.get(&slot) {
+                // A different entity holds it — pre-existing conflict; skip (don't
+                // clobber, don't fail the backfill).
+                Some(existing) if existing.as_str() != entity_id => continue,
+                _ => {
+                    inner.key_index.retain(|(t, et, kn, _), eid| {
+                        !(t.as_str() == tenant
+                            && et.as_str() == entity_type
+                            && kn.as_str() == row.key_name.as_str()
+                            && eid.as_str() == entity_id)
+                    });
+                    inner.key_index.insert(slot, entity_id.to_string());
+                }
+            }
+        }
+        Ok(())
+    }
+
+    async fn lookup_by_key(
+        &self,
+        tenant: &str,
+        entity_type: &str,
+        key_name: &str,
+        key_hash: &str,
+    ) -> Result<Option<String>, PersistenceError> {
+        let inner = self.inner.lock().expect("SimEventStore lock poisoned"); // ci-ok: infallible lock
+        let slot = (
+            tenant.to_string(),
+            entity_type.to_string(),
+            key_name.to_string(),
+            key_hash.to_string(),
+        );
+        Ok(inner.key_index.get(&slot).cloned())
     }
 
     async fn append_batch(
@@ -689,299 +810,4 @@ impl EventStore for SimEventStore {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use temper_runtime::persistence::EventMetadata;
-
-    fn test_envelope(seq: u64, event_type: &str) -> PersistenceEnvelope {
-        PersistenceEnvelope {
-            sequence_nr: seq,
-            event_type: event_type.to_string(),
-            payload: serde_json::json!({"test": true}),
-            metadata: EventMetadata {
-                event_id: uuid::Uuid::nil(),
-                causation_id: uuid::Uuid::nil(),
-                correlation_id: uuid::Uuid::nil(),
-                timestamp: chrono::DateTime::UNIX_EPOCH,
-                actor_id: "test".to_string(),
-            },
-        }
-    }
-
-    #[tokio::test]
-    async fn append_and_read_roundtrip() {
-        let store = SimEventStore::no_faults(42);
-        let pid = "default:Order:ord-1";
-
-        let new_seq = store
-            .append(pid, 0, &[test_envelope(0, "Created")])
-            .await
-            .unwrap();
-        assert_eq!(new_seq, 1);
-
-        let events = store.read_events(pid, 0).await.unwrap();
-        assert_eq!(events.len(), 1);
-        assert_eq!(events[0].sequence_nr, 1);
-        assert_eq!(events[0].event_type, "Created");
-    }
-
-    #[tokio::test]
-    async fn append_multiple_events() {
-        let store = SimEventStore::no_faults(42);
-        let pid = "default:Order:ord-2";
-
-        let seq = store
-            .append(
-                pid,
-                0,
-                &[test_envelope(0, "Created"), test_envelope(0, "Submitted")],
-            )
-            .await
-            .unwrap();
-        assert_eq!(seq, 2);
-
-        let events = store.read_events(pid, 0).await.unwrap();
-        assert_eq!(events.len(), 2);
-        assert_eq!(events[0].sequence_nr, 1);
-        assert_eq!(events[1].sequence_nr, 2);
-    }
-
-    #[tokio::test]
-    async fn append_batch_commits_multiple_journals_atomically() {
-        let store = SimEventStore::no_faults(42);
-        let appends = vec![
-            PersistenceAppend {
-                persistence_id: "default:Order:ord-a".to_string(),
-                expected_sequence: 0,
-                events: vec![test_envelope(0, "Created")],
-            },
-            PersistenceAppend {
-                persistence_id: "default:Order:ord-b".to_string(),
-                expected_sequence: 0,
-                events: vec![test_envelope(0, "Created"), test_envelope(0, "Submitted")],
-            },
-        ];
-
-        let results = store.append_batch(&appends).await.unwrap();
-
-        assert_eq!(
-            results,
-            vec![
-                PersistenceAppendResult {
-                    persistence_id: "default:Order:ord-a".to_string(),
-                    sequence_nr: 1,
-                },
-                PersistenceAppendResult {
-                    persistence_id: "default:Order:ord-b".to_string(),
-                    sequence_nr: 2,
-                },
-            ]
-        );
-        assert_eq!(store.dump_journal("default:Order:ord-a").len(), 1);
-        assert_eq!(store.dump_journal("default:Order:ord-b").len(), 2);
-    }
-
-    #[tokio::test]
-    async fn append_batch_conflict_leaves_all_journals_untouched() {
-        let store = SimEventStore::no_faults(42);
-        store
-            .append(
-                "default:Order:ord-existing",
-                0,
-                &[test_envelope(0, "Created")],
-            )
-            .await
-            .unwrap();
-
-        let err = store
-            .append_batch(&[
-                PersistenceAppend {
-                    persistence_id: "default:Order:ord-new".to_string(),
-                    expected_sequence: 0,
-                    events: vec![test_envelope(0, "Created")],
-                },
-                PersistenceAppend {
-                    persistence_id: "default:Order:ord-existing".to_string(),
-                    expected_sequence: 0,
-                    events: vec![test_envelope(0, "Submitted")],
-                },
-            ])
-            .await
-            .expect_err("second journal conflict should abort entire batch");
-
-        assert!(
-            matches!(err, PersistenceError::ConcurrencyViolation { .. }),
-            "unexpected error: {err}"
-        );
-        assert!(
-            store.dump_journal("default:Order:ord-new").is_empty(),
-            "first append must not be persisted when a later stream conflicts"
-        );
-        assert_eq!(
-            store.dump_journal("default:Order:ord-existing").len(),
-            1,
-            "conflicting stream must keep its original journal only"
-        );
-    }
-
-    #[tokio::test]
-    async fn concurrency_violation_on_wrong_sequence() {
-        let store = SimEventStore::no_faults(42);
-        let pid = "default:Order:ord-3";
-
-        store
-            .append(pid, 0, &[test_envelope(0, "Created")])
-            .await
-            .unwrap();
-
-        let err = store
-            .append(pid, 0, &[test_envelope(0, "Duplicate")])
-            .await
-            .unwrap_err();
-
-        assert!(matches!(
-            err,
-            PersistenceError::ConcurrencyViolation {
-                expected: 0,
-                actual: 1
-            }
-        ));
-    }
-
-    #[tokio::test]
-    async fn snapshot_save_and_load() {
-        let store = SimEventStore::no_faults(42);
-        let pid = "default:Order:ord-4";
-
-        store.save_snapshot(pid, 5, b"state-data").await.unwrap();
-
-        let snap = store.load_snapshot(pid).await.unwrap();
-        assert_eq!(snap, Some((5, b"state-data".to_vec())));
-    }
-
-    #[tokio::test]
-    async fn snapshot_save_records_history_and_rotates_segments() {
-        let store = SimEventStore::no_faults(42);
-        let pid = "default:Order:segmented";
-
-        store
-            .append(
-                pid,
-                0,
-                &[test_envelope(0, "Created"), test_envelope(0, "Updated")],
-            )
-            .await
-            .unwrap();
-        store.save_snapshot(pid, 2, b"snapshot-2").await.unwrap();
-        store
-            .append(pid, 2, &[test_envelope(0, "AfterSnapshot")])
-            .await
-            .unwrap();
-
-        assert_eq!(store.snapshot_history_len(pid), 1);
-        let segments = store.dump_segments(pid);
-        assert_eq!(segments.len(), 2);
-        assert_eq!(segments[0].segment_index, 0);
-        assert_eq!(segments[0].snapshot_sequence, Some(2));
-        assert!(segments[0].sealed);
-        assert_eq!(segments[1].segment_index, 1);
-        assert_eq!(segments[1].start_sequence_nr, 3);
-        assert_eq!(segments[1].end_sequence_nr, Some(3));
-        assert!(!segments[1].sealed);
-    }
-
-    #[tokio::test]
-    async fn load_snapshot_returns_none_when_empty() {
-        let store = SimEventStore::no_faults(42);
-        let snap = store
-            .load_snapshot("default:Order:nonexistent")
-            .await
-            .unwrap();
-        assert_eq!(snap, None);
-    }
-
-    #[tokio::test]
-    async fn list_entity_ids_filters_by_tenant() {
-        let store = SimEventStore::no_faults(42);
-
-        store
-            .append("alpha:Order:ord-1", 0, &[test_envelope(0, "Created")])
-            .await
-            .unwrap();
-        store
-            .append("alpha:Task:task-1", 0, &[test_envelope(0, "Created")])
-            .await
-            .unwrap();
-        store
-            .append("beta:Order:ord-9", 0, &[test_envelope(0, "Created")])
-            .await
-            .unwrap();
-
-        let mut alpha = store.list_entity_ids("alpha").await.unwrap();
-        alpha.sort();
-        assert_eq!(
-            alpha,
-            vec![
-                ("Order".to_string(), "ord-1".to_string()),
-                ("Task".to_string(), "task-1".to_string()),
-            ]
-        );
-
-        let beta = store.list_entity_ids("beta").await.unwrap();
-        assert_eq!(beta, vec![("Order".to_string(), "ord-9".to_string())]);
-    }
-
-    #[tokio::test]
-    async fn read_events_from_sequence() {
-        let store = SimEventStore::no_faults(42);
-        let pid = "default:Order:ord-5";
-
-        store
-            .append(pid, 0, &[test_envelope(0, "A"), test_envelope(0, "B")])
-            .await
-            .unwrap();
-        store
-            .append(pid, 2, &[test_envelope(0, "C")])
-            .await
-            .unwrap();
-
-        // Read from sequence 1 — should skip event at seq 1
-        let events = store.read_events(pid, 1).await.unwrap();
-        assert_eq!(events.len(), 2);
-        assert_eq!(events[0].sequence_nr, 2);
-        assert_eq!(events[1].sequence_nr, 3);
-    }
-
-    #[tokio::test]
-    async fn deterministic_across_seeds() {
-        // Same seed → same behavior (with no faults, behavior is trivially the same)
-        for seed in [42, 123, 999] {
-            let store = SimEventStore::no_faults(seed);
-            let pid = "default:Order:det-1";
-
-            let seq = store
-                .append(pid, 0, &[test_envelope(0, "Created")])
-                .await
-                .unwrap();
-            assert_eq!(seq, 1);
-
-            let events = store.read_events(pid, 0).await.unwrap();
-            assert_eq!(events.len(), 1);
-        }
-    }
-
-    #[tokio::test]
-    async fn fault_injection_produces_errors() {
-        let faults = SimFaultConfig {
-            write_failure_prob: 1.0, // always fail
-            concurrency_violation_prob: 0.0,
-            read_truncation_prob: 0.0,
-            snapshot_failure_prob: 0.0,
-        };
-        let store = SimEventStore::new(42, faults);
-        let pid = "default:Order:fault-1";
-
-        let err = store.append(pid, 0, &[test_envelope(0, "Created")]).await;
-        assert!(err.is_err());
-    }
-}
+mod tests;

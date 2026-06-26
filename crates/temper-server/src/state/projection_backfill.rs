@@ -31,6 +31,81 @@ fn transition_table_for(
     })
 }
 
+/// Backfill `entity_key_index` for existing entities (ADR-0153). For each entity
+/// of a type that declares `[[key]]`, derive the key rows from its current state
+/// and upsert them (no journal event). After this completes for a tenant, a keyed
+/// read can authoritatively prove absence (the gate for retiring #324's scan).
+/// Idempotent; entities written after the declaration already co-commit their keys.
+pub(super) async fn populate_key_index_from_snapshots(state: &ServerState, tenant: &TenantId) {
+    let Some((store, _backend)) = state.event_journal() else {
+        return;
+    };
+
+    let entities = {
+        let index = state.entity_index.read().unwrap();
+        let mut result = Vec::new();
+        for (index_key, ids) in index.iter() {
+            let prefix = format!("{tenant}:");
+            if let Some(entity_type) = index_key.strip_prefix(&prefix) {
+                for id in ids {
+                    result.push((entity_type.to_string(), id.clone()));
+                }
+            }
+        }
+        result
+    };
+
+    let mut indexed = 0usize;
+    for (entity_type, entity_id) in &entities {
+        // Only types that declare keys need backfilling.
+        let keys = match transition_table_for(state, tenant, entity_type) {
+            Some(table) if !table.keys.is_empty() => table.keys.clone(),
+            _ => continue,
+        };
+        let persistence_id = format!("{tenant}:{entity_type}:{entity_id}");
+        let Ok(Some((_seq, snapshot_bytes))) = store.load_snapshot(&persistence_id).await else {
+            continue;
+        };
+        let Ok(snap) = serde_json::from_slice::<crate::entity_actor::EntityState>(&snapshot_bytes)
+        else {
+            continue;
+        };
+        let Some(field_map) = snap.fields.as_object() else {
+            continue;
+        };
+        let mut key_rows = Vec::new();
+        for key in &keys {
+            if let Some(hash) =
+                crate::key_index::canonical_key_hash(&key.name, &key.properties, field_map)
+            {
+                key_rows.push(temper_runtime::persistence::EntityKeyRow {
+                    key_name: key.name.clone(),
+                    key_hash: hash,
+                });
+            }
+        }
+        if key_rows.is_empty() {
+            continue;
+        }
+        match store
+            .backfill_entity_keys(tenant.as_str(), entity_type, entity_id, &key_rows)
+            .await
+        {
+            Ok(()) => indexed += 1,
+            Err(e) => tracing::debug!(
+                error = %e, entity_type = %entity_type, entity_id = %entity_id,
+                "key index backfill: upsert failed"
+            ),
+        }
+    }
+    tracing::info!(
+        tenant = %tenant,
+        entities = entities.len(),
+        indexed,
+        "entity_key_index backfill complete"
+    );
+}
+
 pub(super) async fn populate_field_index_from_snapshots(state: &ServerState, tenant: &TenantId) {
     let overall_started_at = Instant::now(); // determinism-ok: production-only backfill duration metric
     let Some((store, backend)) = state.event_journal() else {

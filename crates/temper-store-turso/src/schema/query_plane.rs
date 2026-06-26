@@ -49,3 +49,28 @@ CREATE INDEX IF NOT EXISTS idx_efi_lookup
 pub const CREATE_ENTITY_FIELD_INDEX_STATUS: &str = "\
 CREATE INDEX IF NOT EXISTS idx_efi_status
     ON entity_field_index(tenant, entity_type, status);";
+
+/// ADR-0153: declared composite-key index — the negative-existence access path.
+///
+/// One row per (declared key, entity), co-committed with the journal append (unlike
+/// the eventually-consistent `entity_field_index`). A keyed read is a single
+/// O(log n) probe: hit -> entity_id, miss -> authoritatively absent — so the read
+/// plane no longer scans a whole entity type to prove absence (the 413, ARN-68).
+/// The PRIMARY KEY enforces declared-key uniqueness (reject-and-surface on conflict);
+/// `key_hash` is a canonical, type-tagged hash of the declared key's values.
+pub const CREATE_ENTITY_KEY_INDEX_TABLE: &str = "\
+CREATE TABLE IF NOT EXISTS entity_key_index (
+    tenant       TEXT NOT NULL,
+    entity_type  TEXT NOT NULL,
+    key_name     TEXT NOT NULL,
+    key_hash     TEXT NOT NULL,
+    entity_id    TEXT NOT NULL,
+    sequence_nr  INTEGER NOT NULL DEFAULT 0,
+    PRIMARY KEY (tenant, entity_type, key_name, key_hash)
+);";
+
+/// Reverse lookup: all key rows for an entity, so the write path can upsert/delete
+/// an entity's declared-key rows when it changes or is removed.
+pub const CREATE_ENTITY_KEY_INDEX_ENTITY: &str = "\
+CREATE INDEX IF NOT EXISTS idx_eki_entity
+    ON entity_key_index(tenant, entity_type, entity_id);";

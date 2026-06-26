@@ -207,6 +207,7 @@ impl PostgresEventStore {
         );
         record_postgres_projection_index_fields(
             DATA_ONLY_CREATE_OPERATION,
+            entity_type,
             indexed_fields,
             skipped_fields,
         );

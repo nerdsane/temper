@@ -28,6 +28,9 @@ enum Section {
     Integration,
     FieldInvariant,
     StateTimeout,
+    /// ADR-0153: `[[key]]` unique-key declarations. Passthrough; extracted via
+    /// serde in the second pass.
+    Key,
     Webhook,
     /// ADR-0046: nested `[[action.triggers]]` blocks. Hand-rolled parser
     /// skips the body; triggers are extracted via serde in the second pass
@@ -70,6 +73,9 @@ impl ParseState {
             // ADR-0049: state_timeouts use nested inline tables for params;
             // parse via serde in the second pass rather than field-by-field.
             "[[state_timeout]]" => self.start_passthrough_section(Section::StateTimeout),
+            // ADR-0153: [[key]] unique-key declarations — passthrough; serde
+            // extracts them in the second pass.
+            "[[key]]" => self.start_passthrough_section(Section::Key),
             "[[webhook]]" => self.start_webhook_section(),
             _ if line.starts_with("[webhook.") => self.start_webhook_section(),
             // ADR-0046: nested [[action.triggers]] — flush the action body so
@@ -99,6 +105,7 @@ impl ParseState {
             Section::Integration => self.apply_integration_field(key, &value),
             Section::FieldInvariant
             | Section::StateTimeout
+            | Section::Key
             | Section::Webhook
             | Section::ActionTrigger
             | Section::CompositeActionMetadata
@@ -149,6 +156,7 @@ impl ParseState {
             context_entities: Vec::new(),
             field_invariants: Vec::new(),
             state_timeouts: Vec::new(),
+            keys: Vec::new(),
             admission: None,
         })
     }
@@ -431,6 +439,9 @@ pub(super) fn parse_toml_to_automaton(input: &str) -> Result<Automaton, Automato
     // an isolated pass. Errors are propagated — a silently-dropped timeout
     // would mean a trap state at runtime.
     automaton.state_timeouts = extract_state_timeouts(input)?;
+    // ADR-0153: [[key]] unique-key declarations; serde-extracted like timeouts.
+    // A silently-dropped key would mean the declared access path is not indexed.
+    automaton.keys = extract_keys(input)?;
     // ADR-0051: optional [admission] block.
     automaton.admission = extract_admission(input)?;
     Ok(automaton)
@@ -694,6 +705,26 @@ fn extract_state_timeouts(
     toml::from_str::<StateTimeoutWrapper>(&slice)
         .map(|w| w.state_timeouts)
         .map_err(|e| AutomatonParseError::Toml(format!("state_timeout: {e}")))
+}
+
+/// Extract `[[key]]` unique-key declarations from TOML source via serde
+/// (ADR-0153). Same isolation pattern as `extract_state_timeouts`. Errors are
+/// propagated — a silently-dropped key would leave a declared access path
+/// unindexed, re-opening the negative-existence scan (the 413, ARN-68).
+fn extract_keys(source: &str) -> Result<Vec<super::types::KeyDecl>, AutomatonParseError> {
+    let slice = isolate_sections(source, "[[key]]");
+    if slice.trim().is_empty() {
+        return Ok(Vec::new());
+    }
+
+    #[derive(serde::Deserialize)]
+    struct KeyWrapper {
+        #[serde(default, rename = "key")]
+        keys: Vec<super::types::KeyDecl>,
+    }
+    toml::from_str::<KeyWrapper>(&slice)
+        .map(|w| w.keys)
+        .map_err(|e| AutomatonParseError::Toml(format!("key: {e}")))
 }
 
 /// Return a minimal TOML document containing only the `[[field_invariant]]`

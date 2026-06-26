@@ -110,6 +110,32 @@ impl EventStore for TursoEventStore {
         Err(last_err.expect("retry loop captured at least one error"))
     }
 
+    async fn lookup_by_key(
+        &self,
+        tenant: &str,
+        entity_type: &str,
+        key_name: &str,
+        key_hash: &str,
+    ) -> Result<Option<String>, PersistenceError> {
+        // ADR-0153: a single keyed probe of entity_key_index — present/absent in
+        // O(log n), no candidate scan (the negative-existence access path). Bounded
+        // regardless of how many entities the tenant/type holds, so it cannot trip
+        // the scan budget that produces the 413.
+        let conn = self.configured_connection().await?;
+        let mut rows = conn
+            .query(
+                "SELECT entity_id FROM entity_key_index \
+                 WHERE tenant = ?1 AND entity_type = ?2 AND key_name = ?3 AND key_hash = ?4",
+                params![tenant, entity_type, key_name, key_hash],
+            )
+            .await
+            .map_err(storage_error)?;
+        match rows.next().await.map_err(storage_error)? {
+            Some(row) => Ok(Some(row.get::<String>(0).map_err(storage_error)?)),
+            None => Ok(None),
+        }
+    }
+
     #[instrument(skip_all, fields(otel.name = "turso.append_batch"))]
     async fn append_batch(
         &self,
