@@ -309,9 +309,15 @@ async fn try_resolve_composite_entity_key(
     // scan. On a miss we fall through to the scan, which still covers
     // pre-backfill entities — a safe additive fast path until #324's scan is
     // retired behind the backfill gate.
+    // Composite-key URL addressing delivers string values; carry them typed so
+    // `resolve_query_to_key` hashes them the same way the write side does.
+    let typed_pairs: Vec<(String, serde_json::Value)> = key_pairs
+        .iter()
+        .map(|(k, v)| (k.clone(), serde_json::Value::String(v.clone())))
+        .collect();
     if let Some(table) = state.transition_tables.get(entity_type)
         && let Some((key_name, key_hash)) =
-            crate::key_index::resolve_query_to_key(&table.keys, key_pairs)
+            crate::key_index::resolve_query_to_key(&table.keys, &typed_pairs)
         && let Some((store, _)) = state.event_journal()
         && let Ok(Some(entity_id)) = store
             .lookup_by_key(tenant.as_str(), entity_type, &key_name, &key_hash)
