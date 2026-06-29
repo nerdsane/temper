@@ -309,8 +309,8 @@ fn equality_predicates_accepts_two_scalar_conjuncts() {
     assert_eq!(
         pairs,
         vec![
-            ("Path".to_string(), "/proofs/live.txt".to_string()),
-            ("WorkspaceId".to_string(), "ws-1".to_string()),
+            ("Path".to_string(), serde_json::json!("/proofs/live.txt")),
+            ("WorkspaceId".to_string(), serde_json::json!("ws-1")),
         ]
     );
 }
@@ -332,10 +332,11 @@ fn equality_predicates_accepts_null_leaf_in_directory_conjunction() {
     assert_eq!(
         pairs,
         vec![
-            ("Name".to_string(), "inbox".to_string()),
-            ("WorkspaceId".to_string(), "ws-1".to_string()),
-            // null renders as the empty string sentinel.
-            ("ParentId".to_string(), String::new()),
+            ("Name".to_string(), serde_json::json!("inbox")),
+            ("WorkspaceId".to_string(), serde_json::json!("ws-1")),
+            // null is carried as a typed null (a distinct, indexable key value),
+            // NOT conflated with the empty string.
+            ("ParentId".to_string(), serde_json::Value::Null),
         ]
     );
 }
