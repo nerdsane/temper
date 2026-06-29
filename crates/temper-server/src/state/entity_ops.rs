@@ -414,8 +414,18 @@ impl ServerState {
     #[instrument(skip_all, fields(otel.name = "entity.populate_field_index", tenant = %tenant))]
     pub async fn populate_field_index_from_snapshots(&self, tenant: &TenantId) {
         projection_backfill::populate_field_index_from_snapshots(self, tenant).await;
-        // ADR-0153: backfill entity_key_index for declared-key entity types in the
-        // same pass, so keyed reads can authoritatively prove absence post-backfill.
+    }
+
+    /// Backfill `entity_key_index` for declared-key entity types (ADR-0153), so a
+    /// keyed read can authoritatively prove absence for pre-existing entities.
+    ///
+    /// Independent of [`Self::populate_field_index_from_snapshots`]: the declared
+    /// key is `K` (1–3) tiny rows per entity, far cheaper than the broad `S`-wide
+    /// field-index re-scan, so it is gated and scheduled on its own rather than
+    /// riding the expensive projection backfill. Runs once as a background task;
+    /// entities written after boot are keyed inline at write time.
+    #[instrument(skip_all, fields(otel.name = "entity.populate_key_index", tenant = %tenant))]
+    pub async fn populate_key_index_from_snapshots(&self, tenant: &TenantId) {
         projection_backfill::populate_key_index_from_snapshots(self, tenant).await;
     }
 
