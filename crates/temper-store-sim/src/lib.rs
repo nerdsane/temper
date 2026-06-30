@@ -135,6 +135,12 @@ struct SimEventStoreInner {
     /// retry-path tests where probabilistic injection would be flaky. See
     /// `inject_concurrency_violations`.
     pending_concurrency_violations: BTreeMap<String, u64>,
+    /// Each entry makes `read_events` return a storage error on the next N calls for
+    /// that id, then behave normally. Deterministic analogue to
+    /// `pending_concurrency_violations`, for tests that need a journal-read failure
+    /// (e.g. proving the key-index backfill treats an unreadable entity as
+    /// `LoadFailed` and does not watermark its type). See `fail_next_reads`.
+    pending_read_failures: BTreeMap<String, usize>,
     /// One-shot append delays per `persistence_id`.
     ///
     /// Used by dispatch retry tests to deterministically model "the actor
@@ -174,6 +180,7 @@ impl SimEventStore {
                 rng: DeterministicRng::new(seed),
                 faults,
                 pending_concurrency_violations: BTreeMap::new(),
+                pending_read_failures: BTreeMap::new(),
                 pending_append_delays: BTreeMap::new(),
                 key_index: BTreeMap::new(),
                 key_index_watermark: BTreeSet::new(),
@@ -197,6 +204,22 @@ impl SimEventStore {
         } else {
             inner
                 .pending_concurrency_violations
+                .insert(persistence_id.to_string(), count);
+        }
+    }
+
+    /// Make the next `count` `read_events` calls for `persistence_id` fail with a
+    /// storage error, then behave normally. Deterministic (unlike
+    /// `read_truncation_prob`) so tests can prove read-failure handling — e.g. that
+    /// the key-index backfill classifies an unreadable entity as `LoadFailed` and
+    /// therefore does not watermark its type. `count == 0` clears the injection.
+    pub fn fail_next_reads(&self, persistence_id: &str, count: usize) {
+        let mut inner = self.inner.lock().expect("SimEventStore lock poisoned"); // ci-ok: infallible lock
+        if count == 0 {
+            inner.pending_read_failures.remove(persistence_id);
+        } else {
+            inner
+                .pending_read_failures
                 .insert(persistence_id.to_string(), count);
         }
     }
@@ -592,6 +615,21 @@ impl EventStore for SimEventStore {
             .collect())
     }
 
+    async fn keyed_entity_ids_for_type(
+        &self,
+        tenant: &str,
+        entity_type: &str,
+    ) -> Result<Vec<String>, PersistenceError> {
+        let inner = self.inner.lock().expect("SimEventStore lock poisoned"); // ci-ok: infallible lock
+        let mut ids: BTreeSet<String> = BTreeSet::new();
+        for ((t, et, _, _), entity_id) in inner.key_index.iter() {
+            if t.as_str() == tenant && et.as_str() == entity_type {
+                ids.insert(entity_id.clone());
+            }
+        }
+        Ok(ids.into_iter().collect())
+    }
+
     async fn append_batch(
         &self,
         appends: &[PersistenceAppend],
@@ -695,6 +733,18 @@ impl EventStore for SimEventStore {
         from_sequence: u64,
     ) -> Result<Vec<PersistenceEnvelope>, PersistenceError> {
         let mut inner = self.inner.lock().expect("SimEventStore lock poisoned"); // ci-ok: infallible lock
+
+        // Deterministic injected read failure (see `fail_next_reads`).
+        if let Some(remaining) = inner.pending_read_failures.get_mut(persistence_id) {
+            *remaining -= 1;
+            let cleared = *remaining == 0;
+            if cleared {
+                inner.pending_read_failures.remove(persistence_id);
+            }
+            return Err(PersistenceError::Storage(format!(
+                "injected read failure for {persistence_id}"
+            )));
+        }
 
         let journal = match inner.journals.get(persistence_id) {
             Some(j) => j,
