@@ -80,7 +80,8 @@ fn example_schema(doc: &CsdlDocument) -> &Schema {
 }
 
 fn assert_example_entities(schema: &Schema) {
-    assert_eq!(schema.entity_types.len(), 7);
+    // 8 = the 7 commerce types + `Directory` (added for the ARN-68 keyed-read tests).
+    assert_eq!(schema.entity_types.len(), 8);
     assert!(schema.entity_type("Customer").is_some());
     assert!(schema.entity_type("Order").is_some());
     assert!(schema.entity_type("Product").is_some());
@@ -88,6 +89,7 @@ fn assert_example_entities(schema: &Schema) {
     assert!(schema.entity_type("Shipment").is_some());
     assert!(schema.entity_type("OrderItem").is_some());
     assert!(schema.entity_type("Address").is_some());
+    assert!(schema.entity_type("Directory").is_some());
     assert_eq!(schema.enum_types.len(), 3);
 }
 
@@ -136,7 +138,8 @@ fn assert_example_operations(schema: &Schema) {
 fn assert_example_container(schema: &Schema) {
     let container = &schema.entity_containers[0];
     assert_eq!(container.name, "ExampleService");
-    assert_eq!(container.entity_sets.len(), 5);
+    // 6 = the 5 commerce sets + `Directories` (added for the ARN-68 keyed-read tests).
+    assert_eq!(container.entity_sets.len(), 6);
 
     let orders_set = container
         .entity_sets

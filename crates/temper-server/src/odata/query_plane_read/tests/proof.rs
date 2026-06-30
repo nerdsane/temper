@@ -489,10 +489,27 @@ async fn ordinary_null_filter_uses_lossless_candidate_scan() {
         Err(_) => panic!("null filter proof should succeed"),
     };
 
-    assert_eq!(result.count, Some(1));
-    assert_eq!(result.entities.len(), 1);
-    assert_eq!(result.entities[0]["Id"].as_str(), Some("ord-null-notes"));
-    assert!(result.entities[0]["Notes"].is_null());
+    // `prop eq null` is relational IS NULL: it matches both an explicit JSON `null`
+    // (`ord-null-notes`) AND a row that OMITS the property (`ord-missing-notes`) — a
+    // missing schema property IS NULL. (ARN-68: this is the same rule that lets a
+    // Directory root, which has no `ParentId` field, match `ParentId eq null`. The
+    // text-valued `ord-text-notes` is excluded.)
+    assert_eq!(result.count, Some(2));
+    assert_eq!(result.entities.len(), 2);
+    let ids: std::collections::BTreeSet<&str> = result
+        .entities
+        .iter()
+        .filter_map(|entity| entity["Id"].as_str())
+        .collect();
+    assert!(
+        ids.contains("ord-null-notes"),
+        "explicit null matches eq null"
+    );
+    assert!(
+        ids.contains("ord-missing-notes"),
+        "a missing property is NULL, so it matches eq null"
+    );
+    assert!(!ids.contains("ord-text-notes"));
     assert_eq!(
         result.telemetry.strategy,
         QueryPlaneReadStrategy::NativePagePushdown
