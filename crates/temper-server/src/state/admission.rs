@@ -24,7 +24,7 @@
 //! runtime so SRE can tune capacity without redeploy. Existing in-flight
 //! permits are not revoked — the new limit applies to future acquisitions.
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::BTreeMap;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
@@ -47,6 +47,23 @@ struct EntityCaps {
     max_concurrent_actions: BTreeMap<String, u32>,
     /// Queue wait before returning `Deferred`.
     queue_timeout: Duration,
+}
+
+/// Increments a queue-depth counter on creation, decrements on drop —
+/// including when the awaiting future is cancelled.
+struct PendingGuard(Arc<AtomicU64>);
+
+impl PendingGuard {
+    fn increment(counter: Arc<AtomicU64>) -> Self {
+        counter.fetch_add(1, Ordering::AcqRel);
+        Self(counter)
+    }
+}
+
+impl Drop for PendingGuard {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, Ordering::AcqRel);
+    }
 }
 
 impl EntityCaps {
@@ -91,7 +108,7 @@ impl From<Admission> for EntityCaps {
 }
 
 /// Identifier for a single semaphore slot.
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 struct SemaphoreKey {
     tenant: TenantId,
     entity_type: String,
@@ -102,11 +119,11 @@ struct SemaphoreKey {
 struct Inner {
     /// Caps keyed by entity type (kept for `try_acquire` without inline
     /// caps + inspection helpers).
-    caps: HashMap<String, EntityCaps>,
+    caps: BTreeMap<String, EntityCaps>,
     /// Semaphores, created lazily on first request for a key. Each entry
     /// remembers the permit count it was built for so a cap change rebuilds
     /// the semaphore instead of silently using a stale max.
-    semaphores: HashMap<SemaphoreKey, SemaphoreEntry>,
+    semaphores: BTreeMap<SemaphoreKey, SemaphoreEntry>,
 }
 
 struct SemaphoreEntry {
@@ -218,7 +235,7 @@ impl AdmissionController {
             return AdmissionOutcome::Passthrough;
         };
 
-        let start = Instant::now();
+        let start = Instant::now(); // determinism-ok: wall-clock latency metric only, not on simulation path
         let key = SemaphoreKey {
             tenant: tenant.clone(),
             entity_type: entity_type.to_string(),
@@ -263,9 +280,12 @@ impl AdmissionController {
         };
         let queue_timeout = caps.queue_timeout;
 
-        pending.fetch_add(1, Ordering::AcqRel);
+        // RAII so the queue-depth gauge also decrements when the caller's
+        // future is dropped mid-wait (e.g. client disconnect) — a bare
+        // fetch_sub after the await would leak the count on cancellation.
+        let pending_guard = PendingGuard::increment(pending);
         let outcome = tokio::time::timeout(queue_timeout, semaphore.clone().acquire_owned()).await;
-        pending.fetch_sub(1, Ordering::AcqRel);
+        drop(pending_guard);
 
         match outcome {
             Ok(Ok(permit)) => AdmissionOutcome::Granted(AdmissionPermit {
@@ -498,6 +518,7 @@ mod tests {
             let grant_order = grant_order.clone();
             let arrived = arrived.clone();
             let handle = tokio::spawn(async move {
+                // determinism-ok: test-only concurrency harness
                 // Stagger arrivals deterministically so arrival order
                 // matches spawn index, exercising the FIFO contract.
                 while arrived.load(Ordering::Acquire) < i {
@@ -510,7 +531,7 @@ mod tests {
                         grant_order.lock().await.push(i);
                         // Hold for a short tick so the next waiter is the
                         // one released in FIFO order.
-                        tokio::time::sleep(Duration::from_millis(2)).await;
+                        tokio::time::sleep(Duration::from_millis(2)).await; // determinism-ok: test-only FIFO pacing
                         drop(permit);
                     }
                     other => panic!("waiter {i} expected Granted, got {other:?}"),

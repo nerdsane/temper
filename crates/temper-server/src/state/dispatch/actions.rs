@@ -184,11 +184,13 @@ impl crate::state::ServerState {
 
         // Dispatch cross-entity reactions (fire-and-forget, depth 0 = top-level)
         if response.success {
+            // A poisoned lock must not silently disable reactions: the slot
+            // only holds an Arc, so the data can't be torn — recover it.
             let dispatcher = self
                 .reaction_dispatcher
                 .read()
-                .ok()
-                .and_then(|slot| slot.clone());
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .clone();
             if let Some(dispatcher) = dispatcher {
                 let to_state = response.state.status.clone();
                 let fields = serde_json::to_value(&response.state.fields).unwrap_or_default();
@@ -278,34 +280,32 @@ impl crate::state::ServerState {
             action_name = %action,
         );
 
-        tokio::spawn(
-            async move {
-                // determinism-ok: production-only post-commit reaction side effects
-                let _permit = permit;
-                let results = dispatcher
-                    .dispatch_reactions(
-                        &state,
-                        &tenant,
-                        &entity_type,
-                        &entity_id,
-                        &action,
-                        &to_state,
-                        &fields,
-                        0,
-                        &agent_ctx,
-                    )
-                    .await;
-                tracing::info!(
-                    tenant = %tenant,
-                    entity_type = %entity_type,
-                    entity_id = %entity_id,
-                    action_name = %action,
-                    reaction.result_count = results.len(),
-                    "background reactions completed"
-                );
-            }
-            .instrument(span),
-        );
+        let reaction_task = async move {
+            let _permit = permit;
+            let results = dispatcher
+                .dispatch_reactions(
+                    &state,
+                    &tenant,
+                    &entity_type,
+                    &entity_id,
+                    &action,
+                    &to_state,
+                    &fields,
+                    0,
+                    &agent_ctx,
+                )
+                .await;
+            tracing::info!(
+                tenant = %tenant,
+                entity_type = %entity_type,
+                entity_id = %entity_id,
+                action_name = %action,
+                reaction.result_count = results.len(),
+                "background reactions completed"
+            );
+        }
+        .instrument(span);
+        tokio::spawn(reaction_task); // determinism-ok: production-only post-commit reaction side effects
         None
     }
 
@@ -417,7 +417,7 @@ impl crate::state::ServerState {
                 entity_id,
             )
             .entered();
-            let registry_start = std::time::Instant::now();
+            let registry_start = std::time::Instant::now(); // determinism-ok: wall-clock latency metric only, not on simulation path
             let actor_key = format!("{tenant}:{entity_type}:{entity_id}");
             let existed = self
                 .actor_registry
@@ -437,7 +437,7 @@ impl crate::state::ServerState {
             (ar, existed)
         };
         let cold_start_outcome_start = if !actor_existed_before {
-            Some(std::time::Instant::now())
+            Some(std::time::Instant::now()) // determinism-ok: wall-clock latency metric only, not on simulation path
         } else {
             None
         };

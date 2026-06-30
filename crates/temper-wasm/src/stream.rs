@@ -90,8 +90,23 @@ impl StreamRegistry {
     // --- Cache methods (WASM-controlled via host functions) ---
 
     /// Store bytes in cache. Evicts LRU entries if over budget.
+    ///
+    /// Entries larger than `max_cache_bytes` can never fit the budget, so
+    /// they are rejected (skipped) with a warning instead of evicting the
+    /// entire cache and then violating the budget anyway. Any existing
+    /// entry under `key` is left untouched in that case.
     pub fn cache_put(&mut self, key: &str, bytes: Vec<u8>) {
         let new_size = bytes.len();
+
+        if new_size > self.max_cache_bytes {
+            tracing::warn!(
+                key,
+                entry_bytes = new_size as u64,
+                max_cache_bytes = self.max_cache_bytes as u64,
+                "cache_put rejected: entry larger than cache budget"
+            );
+            return;
+        }
 
         // Remove old entry if exists (to update LRU position)
         if let Some(old) = self.cache.remove(key) {
@@ -244,6 +259,44 @@ mod tests {
         assert!(reg.cache_contains("a")); // "a" was accessed, not LRU
         assert!(!reg.cache_contains("b")); // "b" was LRU
         assert!(reg.cache_contains("c"));
+    }
+
+    #[test]
+    fn cache_put_rejects_entry_larger_than_budget() {
+        let config = StreamRegistryConfig {
+            max_cache_bytes: 20,
+        };
+        let mut reg = StreamRegistry::with_config(config);
+
+        reg.cache_put("small", vec![0u8; 10]);
+        assert_eq!(reg.cached_bytes(), 10);
+
+        // Oversized entry is rejected outright: nothing evicted, nothing inserted.
+        reg.cache_put("huge", vec![1u8; 21]);
+        assert!(!reg.cache_contains("huge"));
+        assert!(
+            reg.cache_contains("small"),
+            "oversized put must not evict existing entries"
+        );
+        assert_eq!(reg.cached_bytes(), 10);
+        assert_eq!(reg.cache_count(), 1);
+    }
+
+    #[test]
+    fn cache_put_accepts_entry_exactly_at_budget() {
+        let config = StreamRegistryConfig {
+            max_cache_bytes: 20,
+        };
+        let mut reg = StreamRegistry::with_config(config);
+
+        reg.cache_put("small", vec![0u8; 10]);
+
+        // Exactly-max entry fits the budget; the existing entry is evicted
+        // to make room.
+        reg.cache_put("exact", vec![1u8; 20]);
+        assert!(reg.cache_contains("exact"));
+        assert!(!reg.cache_contains("small"));
+        assert_eq!(reg.cached_bytes(), 20);
     }
 
     #[test]

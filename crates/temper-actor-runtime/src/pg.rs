@@ -156,9 +156,20 @@ impl Mailbox for PgMailbox {
             if let Some(row) = rows.first() {
                 let msg = row_to_message(row);
                 // Delete the response so the scheduler doesn't re-deliver it.
-                let _ = poll_client
+                // The response is already in hand, so a failed delete doesn't
+                // fail the ask — but it must be visible: a leftover row gets
+                // re-delivered to the actor as a regular message.
+                if let Err(e) = poll_client
                     .execute(schema::DELETE_MESSAGE, &[&msg.id])
-                    .await;
+                    .await
+                {
+                    tracing::warn!(
+                        message_id = msg.id,
+                        correlation_id = %correlation_id,
+                        error = %e,
+                        "failed to delete ask response; scheduler may re-deliver it"
+                    );
+                }
                 return Ok(msg);
             }
 

@@ -1151,19 +1151,12 @@ impl WasmHost for ProductionWasmHost {
             builder = builder.header(k.as_str(), v.as_str());
         }
 
-        let is_internal = self
-            .internal_api_base_url
-            .as_ref()
-            .is_some_and(|api_url| url.starts_with(api_url))
-            || self
-                .secrets
-                .get("temper_api_url")
-                .is_some_and(|api_url| url.starts_with(api_url.trim_end_matches('/')));
+        let is_internal = self.is_internal_temper_url(url);
         if is_internal && let Some(ref inv_ctx) = self.invocation_context {
             builder = add_workflow_observability_headers(builder, &filtered_headers, inv_ctx);
         }
 
-        if !headers
+        if !filtered_headers
             .iter()
             .any(|(k, _)| k.eq_ignore_ascii_case("traceparent"))
             && let Some(traceparent) =

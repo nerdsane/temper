@@ -194,7 +194,9 @@ async fn http_endpoint_fallback(
     let tenant_id = match tenant_header {
         Some(t) if !t.is_empty() => TenantId::new(&t),
         _ => {
-            let registry = state.registry.read().unwrap();
+            let Ok(registry) = state.registry.read() else {
+                return http_404_response(uri.path());
+            };
             match http_endpoint_fallback_tenant(&registry.tenant_ids()) {
                 Some(t) => t.clone(),
                 None => return http_404_response(uri.path()),
