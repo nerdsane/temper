@@ -1,7 +1,9 @@
 //! ARN-68 / ADR-0153 — the declared-key existence oracle: registry-aware key
 //! resolution (A), authoritative backfill (B), and watermark-gated authoritative
 //! absence (C). Exercised against the sim store, the DST-canonical backend that
-//! co-commits key rows and maintains the watermark exactly like prod Postgres.
+//! co-commits key rows and maintains the watermark exactly like prod Postgres — and,
+//! for the full souls scenario, against **real Postgres** (the prod engine) via
+//! `directory_root_souls_scenario_on_postgres` (gated on `DATABASE_URL`).
 
 use super::*;
 use temper_runtime::persistence::EventStore;
@@ -50,6 +52,453 @@ fn build_order_state_with_sim(system_name: &str) -> (ServerState, SimEventStore)
     let mut state = build_order_state(system_name);
     state.set_storage_stack(StorageStack::from_sim(store.clone(), None));
     (state, store)
+}
+
+const DIRECTORY_IOA: &str =
+    include_str!("../../../../../../test-fixtures/specs/directory.ioa.toml");
+
+/// Sim-backed state with the REAL paw-fs Directory spec registered — the 3-part
+/// `name_parent` key `[Name, WorkspaceId, ParentId]`, where roots have NO `ParentId`
+/// field at all. This is the exact shape behind the soul-write 413; the earlier
+/// keyed tests used a 2-part all-present key and never exercised a 3-part key with an
+/// absent component through the backfill (the gap that misled the prod read).
+fn build_dir_state_with_sim(system_name: &str) -> (ServerState, SimEventStore) {
+    let store = SimEventStore::new(0, SimFaultConfig::none());
+    let csdl = parse_csdl(CSDL_XML).expect("CSDL parses");
+    let mut registry = SpecRegistry::new();
+    registry.register_tenant(
+        TenantId::default().as_str(),
+        csdl,
+        CSDL_XML.to_string(),
+        &[("Order", ORDER_IOA), ("Directory", DIRECTORY_IOA)],
+    );
+    let mut state = ServerState::from_registry(ActorSystem::new(system_name), registry);
+    state.set_storage_stack(StorageStack::from_sim(store.clone(), None));
+    (state, store)
+}
+
+/// The real `ensure_dirs` root lookup: `Name eq '/' and WorkspaceId eq <ws> and ParentId eq null`.
+fn dir_root_filter(ws: &str) -> FilterExpr {
+    let eq_s = |p: &str, v: &str| FilterExpr::BinaryOp {
+        left: Box::new(FilterExpr::Property(p.to_string())),
+        op: BinaryOperator::Eq,
+        right: Box::new(FilterExpr::Literal(ODataValue::String(v.to_string()))),
+    };
+    let parentid_eq_null = FilterExpr::BinaryOp {
+        left: Box::new(FilterExpr::Property("ParentId".to_string())),
+        op: BinaryOperator::Eq,
+        right: Box::new(FilterExpr::Literal(ODataValue::Null)),
+    };
+    FilterExpr::BinaryOp {
+        left: Box::new(FilterExpr::BinaryOp {
+            left: Box::new(eq_s("Name", "/")),
+            op: BinaryOperator::And,
+            right: Box::new(eq_s("WorkspaceId", ws)),
+        }),
+        op: BinaryOperator::And,
+        right: Box::new(parentid_eq_null),
+    }
+}
+
+/// `canonical_key_hash` of a Directory root (`Name`,`WorkspaceId` present, `ParentId` absent).
+fn dir_root_hash(ws: &str) -> String {
+    let mut fields = serde_json::Map::new();
+    fields.insert("Name".to_string(), serde_json::json!("/"));
+    fields.insert("WorkspaceId".to_string(), serde_json::json!(ws));
+    // ParentId absent on purpose — the root case.
+    crate::key_index::canonical_key_hash(
+        "name_parent",
+        &[
+            "Name".to_string(),
+            "WorkspaceId".to_string(),
+            "ParentId".to_string(),
+        ],
+        &fields,
+    )
+    .expect("a root (Name+WorkspaceId present, ParentId absent) must be keyable")
+}
+
+/// Create a Directory via a Create event that carries the real PascalCase fields paw-fs
+/// stores (`Name`/`Path`/`WorkspaceId`, and `ParentId` only for non-roots), so the
+/// entity is enumerable AND its fields are present on both replay and the live actor.
+async fn seed_dir(
+    state: &ServerState,
+    agent_ctx: &AgentContext,
+    eid: &str,
+    name: &str,
+    path: &str,
+    ws: &str,
+    parent: Option<&str>,
+) {
+    let tenant = TenantId::default();
+    // Create persists the supplied payload map verbatim into the entity's fields (the
+    // IOA's snake_case `params` list names the action's logical inputs but does not
+    // rename or gate them), so we send the PascalCase field names paw-fs stores in prod
+    // (`Name`/`Path`/`WorkspaceId`/`ParentId`). That way the fields are populated on
+    // replay AND in the live actor — the backfill (recover) and the read materialization
+    // (get_tenant_entity_state) see identical fields — and a root simply omits `ParentId`.
+    let mut params = serde_json::Map::new();
+    params.insert("Name".to_string(), serde_json::json!(name));
+    params.insert("Path".to_string(), serde_json::json!(path));
+    params.insert("WorkspaceId".to_string(), serde_json::json!(ws));
+    if let Some(p) = parent {
+        params.insert("ParentId".to_string(), serde_json::json!(p));
+    }
+    state
+        .dispatch_tenant_action(
+            &tenant,
+            "Directory",
+            eid,
+            "Create",
+            serde_json::Value::Object(params),
+            agent_ctx,
+        )
+        .await
+        .expect("create directory");
+}
+
+/// THE souls-scenario proof, with the REAL Directory spec/key and the duplicate-root
+/// case that misled the prod read. End-to-end through the real read path:
+///   1. > budget directories incl. a root (absent ParentId) + DUPLICATE roots (same
+///      key) + subdirs → a non-keyed root lookup scans > budget and 413s (the bug).
+///   2. The backfill keys the root (absent ParentId → null), correctly skips the
+///      duplicate roots as key-conflicts (not failures), and watermarks Directory.
+///   3. Post-backfill: a NEW workspace's root lookup resolves to authoritative-absent
+///      (empty, NO 413) — so `ensure_dirs` creates the root and the soul write
+///      proceeds; and the existing workspace's root lookup resolves (keyed hit).
+#[tokio::test]
+async fn directory_root_lookup_souls_scenario_with_real_key_and_duplicates() {
+    let (state, store) = build_dir_state_with_sim("dir-souls");
+    let tenant = TenantId::default();
+    let agent_ctx = AgentContext::for_service("dir-souls-test");
+    let security_ctx = SecurityContext::system();
+
+    // Workspace wsA: a real root (no ParentId), TWO duplicate roots (same key), and
+    // enough subdirs that the total Directory count exceeds the scan budget below.
+    seed_dir(&state, &agent_ctx, "wsA-root", "/", "/", "wsA", None).await;
+    seed_dir(&state, &agent_ctx, "wsA-root-dup1", "/", "/", "wsA", None).await;
+    seed_dir(&state, &agent_ctx, "wsA-root-dup2", "/", "/", "wsA", None).await;
+    for i in 0..12 {
+        seed_dir(
+            &state,
+            &agent_ctx,
+            &format!("wsA-sub-{i}"),
+            &format!("sub{i}"),
+            &format!("/sub{i}"),
+            "wsA",
+            Some("wsA-root"),
+        )
+        .await;
+    }
+
+    // Budget so the full-type scan (15 dirs) exceeds it (max_entities=1 → budget 10).
+    let budget = QueryPlaneReadBudget {
+        default_page_size: 1,
+        max_entities: 1,
+    };
+    let qo_b = QueryOptions {
+        filter: Some(dir_root_filter("wsB")),
+        ..QueryOptions::default()
+    };
+    let qo_a = QueryOptions {
+        filter: Some(dir_root_filter("wsA")),
+        ..QueryOptions::default()
+    };
+
+    // (1) Before the watermark: a NEW workspace's root lookup misses → scans 15 > budget → 413.
+    match read_entity_set_from_query_plane(QueryPlaneReadRequest {
+        state: &state,
+        tenant: &tenant,
+        security_ctx: &security_ctx,
+        entity_type: "Directory",
+        entity_set_name: "Directories",
+        query_options: &qo_b,
+        budget,
+    })
+    .await
+    {
+        Err(QueryPlaneReadError::QueryTooLarge { .. }) => {}
+        Ok(_) => panic!("expected 413 for a missing root before watermark, got Ok"),
+        Err(_) => panic!("expected QueryTooLarge before watermark, got another error"),
+    }
+
+    // (2) Backfill: clear the lazy index (fresh-boot), run it, confirm the real root
+    // is keyed, the duplicates collided (still watermarked), and the type is watermarked.
+    state.entity_index.write().unwrap().clear();
+    state.entity_index_hydrated.write().unwrap().clear();
+    state.populate_key_index_from_snapshots(&tenant).await;
+    assert!(
+        state
+            .key_index_backfill_complete(&tenant, "Directory")
+            .await,
+        "Directory must watermark — duplicate roots are key-conflict skips, not failures"
+    );
+    assert!(
+        store
+            .lookup_by_key(
+                tenant.as_str(),
+                "Directory",
+                "name_parent",
+                &dir_root_hash("wsA")
+            )
+            .await
+            .unwrap()
+            .is_some(),
+        "the wsA root (absent ParentId) must be keyed"
+    );
+
+    // (3a) The souls case: a NEW workspace (no root) → authoritative-absent → empty,
+    // NO 413. This is what lets ensure_dirs create the root and the soul write proceed.
+    let r = match read_entity_set_from_query_plane(QueryPlaneReadRequest {
+        state: &state,
+        tenant: &tenant,
+        security_ctx: &security_ctx,
+        entity_type: "Directory",
+        entity_set_name: "Directories",
+        query_options: &qo_b,
+        budget,
+    })
+    .await
+    {
+        Ok(r) => r,
+        Err(_) => panic!("no 413 once watermarked — keyed miss must be authoritative absence"),
+    };
+    assert!(
+        r.entities.is_empty(),
+        "a workspace with no root resolves to absent"
+    );
+    assert_eq!(
+        r.telemetry.fallback_reason,
+        QueryPlaneFallbackReason::KeyedAbsence
+    );
+
+    // (3b) An existing workspace's root lookup resolves (hits the one keyed root,
+    // despite the duplicates) — no 413, returns exactly one root.
+    let r = match read_entity_set_from_query_plane(QueryPlaneReadRequest {
+        state: &state,
+        tenant: &tenant,
+        security_ctx: &security_ctx,
+        entity_type: "Directory",
+        entity_set_name: "Directories",
+        query_options: &qo_a,
+        budget,
+    })
+    .await
+    {
+        Ok(r) => r,
+        Err(_) => panic!("existing root must resolve without 413"),
+    };
+    assert_eq!(
+        r.entities.len(),
+        1,
+        "wsA root lookup resolves to the keyed root"
+    );
+}
+
+/// Seed a Directory on a Postgres-backed state under an explicit tenant (the PG souls
+/// test uses a unique tenant for isolation). `spec` = `(name, path, ws, parent)`.
+async fn pg_seed_dir(
+    state: &ServerState,
+    tenant: &TenantId,
+    agent_ctx: &AgentContext,
+    eid: &str,
+    spec: (&str, &str, &str, Option<&str>),
+) {
+    let (name, path, ws, parent) = spec;
+    let mut params = serde_json::Map::new();
+    params.insert("Name".to_string(), serde_json::json!(name));
+    params.insert("Path".to_string(), serde_json::json!(path));
+    params.insert("WorkspaceId".to_string(), serde_json::json!(ws));
+    if let Some(p) = parent {
+        params.insert("ParentId".to_string(), serde_json::json!(p));
+    }
+    state
+        .dispatch_tenant_action(
+            tenant,
+            "Directory",
+            eid,
+            "Create",
+            serde_json::Value::Object(params),
+            agent_ctx,
+        )
+        .await
+        .expect("create directory");
+}
+
+/// THE souls scenario on **real Postgres** (the prod engine — `from_postgres` wires the
+/// event store AND the query-plane), gated on `DATABASE_URL`; unique tenant for
+/// isolation. Same shape as the sim proof, but against the actual backend so the keyed
+/// index, the `key_index_backfill_watermark` table, and the materialization run as they
+/// do in production: the 413 reproduces, the backfill watermarks despite duplicate
+/// roots, a NEW workspace's root lookup is authoritative-absent (empty, NO 413 — the
+/// soul write's exact path), and the existing absent-`ParentId` root resolves.
+#[test]
+fn directory_root_souls_scenario_on_postgres() {
+    use temper_runtime::scheduler::sim_uuid as runtime_sim_uuid;
+    let database_url = match std::env::var("DATABASE_URL") {
+        Ok(url) => url,
+        Err(_) => return,
+    };
+    sqlx::test_block_on(async {
+        let pool = sqlx::PgPool::connect(&database_url).await.unwrap();
+        temper_store_postgres::migration::run_migrations(&pool)
+            .await
+            .unwrap();
+        let store = temper_store_postgres::PostgresEventStore::new(pool.clone());
+
+        let tenant = TenantId::from(format!("souls-pg-{}", runtime_sim_uuid()));
+        let csdl = parse_csdl(CSDL_XML).expect("CSDL parses");
+        let mut registry = SpecRegistry::new();
+        registry.register_tenant(
+            tenant.as_str(),
+            csdl,
+            CSDL_XML.to_string(),
+            &[("Order", ORDER_IOA), ("Directory", DIRECTORY_IOA)],
+        );
+        let mut state = ServerState::from_registry(ActorSystem::new("dir-souls-pg"), registry);
+        state.set_storage_stack(StorageStack::from_postgres(store.clone()));
+        let agent_ctx = AgentContext::for_service("dir-souls-pg-test");
+        let security_ctx = SecurityContext::system();
+
+        // wsA: a real root (no ParentId), two duplicate roots (same key), 12 subdirs.
+        pg_seed_dir(
+            &state,
+            &tenant,
+            &agent_ctx,
+            "wsA-root",
+            ("/", "/", "wsA", None),
+        )
+        .await;
+        pg_seed_dir(
+            &state,
+            &tenant,
+            &agent_ctx,
+            "wsA-root-d1",
+            ("/", "/", "wsA", None),
+        )
+        .await;
+        pg_seed_dir(
+            &state,
+            &tenant,
+            &agent_ctx,
+            "wsA-root-d2",
+            ("/", "/", "wsA", None),
+        )
+        .await;
+        for i in 0..12 {
+            pg_seed_dir(
+                &state,
+                &tenant,
+                &agent_ctx,
+                &format!("wsA-sub-{i}"),
+                (
+                    &format!("sub{i}"),
+                    &format!("/sub{i}"),
+                    "wsA",
+                    Some("wsA-root"),
+                ),
+            )
+            .await;
+        }
+
+        let budget = QueryPlaneReadBudget {
+            default_page_size: 1,
+            max_entities: 1,
+        };
+        let qo_b = QueryOptions {
+            filter: Some(dir_root_filter("wsB")),
+            ..QueryOptions::default()
+        };
+        let qo_a = QueryOptions {
+            filter: Some(dir_root_filter("wsA")),
+            ..QueryOptions::default()
+        };
+        // (1) Pre-watermark: a NEW workspace's root lookup misses → scans 15 > budget → 413.
+        match read_entity_set_from_query_plane(QueryPlaneReadRequest {
+            state: &state,
+            tenant: &tenant,
+            security_ctx: &security_ctx,
+            entity_type: "Directory",
+            entity_set_name: "Directories",
+            query_options: &qo_b,
+            budget,
+        })
+        .await
+        {
+            Err(QueryPlaneReadError::QueryTooLarge { .. }) => {}
+            Ok(_) => panic!("expected 413 for a missing root before watermark, got Ok"),
+            Err(_) => panic!("expected QueryTooLarge before watermark, got another error"),
+        }
+
+        // (2) Backfill on real Postgres → Directory watermarked (duplicate roots are
+        // key-conflict skips, not failures), and the absent-ParentId root is keyed.
+        state.populate_key_index_from_snapshots(&tenant).await;
+        assert!(
+            state
+                .key_index_backfill_complete(&tenant, "Directory")
+                .await,
+            "Directory must watermark on Postgres despite duplicate roots"
+        );
+        assert!(
+            store
+                .lookup_by_key(
+                    tenant.as_str(),
+                    "Directory",
+                    "name_parent",
+                    &dir_root_hash("wsA")
+                )
+                .await
+                .unwrap()
+                .is_some(),
+            "the wsA root (absent ParentId) is keyed on Postgres"
+        );
+
+        // (3a) The soul-write path: a NEW workspace (no root) → authoritative-absent →
+        // empty, NO 413 → ensure_dirs creates the root and the soul write proceeds.
+        let r = match read_entity_set_from_query_plane(QueryPlaneReadRequest {
+            state: &state,
+            tenant: &tenant,
+            security_ctx: &security_ctx,
+            entity_type: "Directory",
+            entity_set_name: "Directories",
+            query_options: &qo_b,
+            budget,
+        })
+        .await
+        {
+            Ok(r) => r,
+            Err(_) => panic!("no 413 once watermarked — keyed miss is authoritative absence"),
+        };
+        assert!(
+            r.entities.is_empty(),
+            "a workspace with no root resolves to absent"
+        );
+        assert_eq!(
+            r.telemetry.fallback_reason,
+            QueryPlaneFallbackReason::KeyedAbsence
+        );
+
+        // (3b) The existing absent-ParentId root resolves (no 413, exactly one).
+        let r = match read_entity_set_from_query_plane(QueryPlaneReadRequest {
+            state: &state,
+            tenant: &tenant,
+            security_ctx: &security_ctx,
+            entity_type: "Directory",
+            entity_set_name: "Directories",
+            query_options: &qo_a,
+            budget,
+        })
+        .await
+        {
+            Ok(r) => r,
+            Err(_) => panic!("existing root must resolve without 413"),
+        };
+        assert_eq!(
+            r.entities.len(),
+            1,
+            "wsA root resolves to the keyed root on Postgres"
+        );
+    });
 }
 
 /// `WorkspaceId eq <ws> and Path eq <path>` — the shape that resolves to Order's

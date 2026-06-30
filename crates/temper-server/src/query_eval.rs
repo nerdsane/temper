@@ -88,10 +88,31 @@ fn evaluate_filter(entity: &serde_json::Value, expr: &FilterExpr) -> Option<bool
                     Some(l || r)
                 }
                 _ => {
-                    // Comparison operators
-                    let left_val = evaluate_value(entity, left)?;
-                    let right_val = evaluate_value(entity, right)?;
-                    Some(compare_values(&left_val, &right_val, op))
+                    // Comparison operators, with OData/SQL null semantics for the
+                    // operator→null mapping of the native pushdown (`filter_sql.rs`):
+                    // `prop eq null` → IS NULL, which MUST match a row that omits the
+                    // property (a Directory root has no `ParentId`); `prop ne null` → IS
+                    // NOT NULL; any other comparison touching null is UNKNOWN → excludes.
+                    //
+                    // Only a property (absent → NULL) or a literal is a valid comparison
+                    // operand. An operand that cannot be evaluated (e.g. an unsupported
+                    // function call) leaves the comparison undefined → exclude the row,
+                    // rather than mistaking it for NULL.
+                    //
+                    // ARN-68: previously an absent property made `evaluate_value` return
+                    // `None`, and the `?` collapsed the ENTIRE filter to `None` →
+                    // `unwrap_or(false)`. So a root lookup `Name eq '/' and WorkspaceId
+                    // eq '..' and ParentId eq null` dropped every root, and `ensure_dirs`
+                    // recreated the root on every write — the duplicate-root bug.
+                    match (
+                        comparison_operand(entity, left),
+                        comparison_operand(entity, right),
+                    ) {
+                        (Some(left_val), Some(right_val)) => {
+                            Some(compare_nullable(left_val.as_ref(), right_val.as_ref(), op))
+                        }
+                        _ => Some(false),
+                    }
                 }
             }
         }
@@ -197,6 +218,64 @@ fn json_eq(left: &serde_json::Value, right: &serde_json::Value) -> bool {
         (serde_json::Value::Bool(a), serde_json::Value::Bool(b)) => a == b,
         (serde_json::Value::Null, serde_json::Value::Null) => true,
         _ => left == right,
+    }
+}
+
+/// Resolve one comparison operand to its NULL-aware value:
+/// - `Some(Some(v))` — a present property value or a literal,
+/// - `Some(None)` — a property that is absent/omitted, which is SQL NULL,
+/// - `None` — not a comparison operand we can evaluate (e.g. an unsupported function
+///   call); the caller excludes the row instead of treating it as NULL.
+fn comparison_operand(
+    entity: &serde_json::Value,
+    expr: &FilterExpr,
+) -> Option<Option<serde_json::Value>> {
+    match expr {
+        FilterExpr::Property(prop) => Some(resolve_property(entity, prop)),
+        FilterExpr::Literal(val) => Some(Some(odata_value_to_json(val))),
+        _ => None,
+    }
+}
+
+/// Compare two operands with OData/SQL null semantics for the operator→null mapping of
+/// the native pushdown in `filter_sql.rs`. An absent property (`None`) or JSON `null`
+/// is treated as SQL NULL:
+/// - `eq`: NULL eq NULL → true (IS NULL); NULL eq value → false; else value equality.
+/// - `ne`: value ne NULL → true, NULL ne NULL → false (IS NOT NULL); NULL ne value →
+///   false (UNKNOWN → excluded); else value inequality.
+/// - ordering: any NULL operand → false (UNKNOWN → excluded).
+///
+/// Note this treats an *absent* property the same as an *explicit* JSON null, which is
+/// intentionally broader than the SQL field index: the index writes a row only for an
+/// explicit null (`filter_sql.rs` / turso `indexed_projection_fields`), so native
+/// `field_value IS NULL` matches explicit nulls but not absent properties. The two
+/// paths agree only because null-equality is non-lossless (`lossless_eq_comparison`
+/// returns false for null), so `prop eq null` is never SQL-pushed and this in-memory
+/// eval is authoritative. If null-eq is ever made lossless, the index must first index
+/// absent-as-null for the paths to stay consistent.
+fn compare_nullable(
+    left: Option<&serde_json::Value>,
+    right: Option<&serde_json::Value>,
+    op: &BinaryOperator,
+) -> bool {
+    // Normalize each operand: an absent operand (`None`) or a JSON `null` becomes SQL
+    // NULL (`None`); a real value stays `Some`. Matching on the normalized pair avoids
+    // any `unwrap`.
+    let left = left.filter(|value| !value.is_null());
+    let right = right.filter(|value| !value.is_null());
+    match (op, left, right) {
+        // `eq`: IS NULL when both are null; value equality when both present; else false.
+        (BinaryOperator::Eq, None, None) => true,
+        (BinaryOperator::Eq, Some(l), Some(r)) => json_eq(l, r),
+        (BinaryOperator::Eq, _, _) => false,
+        // `ne`: IS NOT NULL — `value ne null` → true, `null ne null` → false; value
+        // inequality when both present; `null ne value` is UNKNOWN → excluded.
+        (BinaryOperator::Ne, Some(l), Some(r)) => !json_eq(l, r),
+        (BinaryOperator::Ne, Some(_), None) => true,
+        (BinaryOperator::Ne, _, _) => false,
+        // ordering: both operands must be present (any NULL → UNKNOWN → excluded).
+        (_, Some(l), Some(r)) => compare_values(l, r, op),
+        (_, _, _) => false,
     }
 }
 
@@ -639,199 +718,5 @@ fn is_collection_nav(
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn sample_entities() -> Vec<serde_json::Value> {
-        vec![
-            serde_json::json!({"Id": "1", "Name": "Alice", "Age": 30, "Status": "Active"}),
-            serde_json::json!({"Id": "2", "Name": "Bob", "Age": 25, "Status": "Draft"}),
-            serde_json::json!({"Id": "3", "Name": "Charlie", "Age": 35, "Status": "Active"}),
-        ]
-    }
-
-    #[test]
-    fn test_filter_eq() {
-        let entities = sample_entities();
-        let filter = FilterExpr::BinaryOp {
-            left: Box::new(FilterExpr::Property("Status".into())),
-            op: BinaryOperator::Eq,
-            right: Box::new(FilterExpr::Literal(ODataValue::String("Active".into()))),
-        };
-        let filtered = filter_entities(entities, &filter);
-        assert_eq!(filtered.len(), 2);
-        assert_eq!(filtered[0]["Name"], "Alice");
-        assert_eq!(filtered[1]["Name"], "Charlie");
-    }
-
-    #[test]
-    fn status_filter_matches_catalog_status_aliases() {
-        let entities = vec![
-            serde_json::json!({"Id": "1", "status": "Created", "fields": {"Name": "Ready"}}),
-            serde_json::json!({"Id": "2", "status": "Archived", "fields": {"Name": "Old"}}),
-            serde_json::json!({"Id": "3", "fields": {"status": "Created", "Name": "Nested"}}),
-        ];
-        let filter = FilterExpr::BinaryOp {
-            left: Box::new(FilterExpr::Property("Status".into())),
-            op: BinaryOperator::Ne,
-            right: Box::new(FilterExpr::Literal(ODataValue::String("Archived".into()))),
-        };
-        let filtered = filter_entities(entities, &filter);
-
-        assert_eq!(filtered.len(), 2);
-        assert_eq!(filtered[0]["Id"], "1");
-        assert_eq!(filtered[1]["Id"], "3");
-    }
-
-    #[test]
-    fn test_filter_gt() {
-        let entities = sample_entities();
-        let filter = FilterExpr::BinaryOp {
-            left: Box::new(FilterExpr::Property("Age".into())),
-            op: BinaryOperator::Gt,
-            right: Box::new(FilterExpr::Literal(ODataValue::Int(28))),
-        };
-        let filtered = filter_entities(entities, &filter);
-        assert_eq!(filtered.len(), 2);
-    }
-
-    #[test]
-    fn test_orderby_asc() {
-        let mut entities = sample_entities();
-        let orderby = vec![OrderByClause {
-            property: "Age".into(),
-            direction: OrderDirection::Asc,
-        }];
-        sort_entities(&mut entities, &orderby);
-        assert_eq!(entities[0]["Name"], "Bob");
-        assert_eq!(entities[1]["Name"], "Alice");
-        assert_eq!(entities[2]["Name"], "Charlie");
-    }
-
-    #[test]
-    fn test_orderby_desc() {
-        let mut entities = sample_entities();
-        let orderby = vec![OrderByClause {
-            property: "Name".into(),
-            direction: OrderDirection::Desc,
-        }];
-        sort_entities(&mut entities, &orderby);
-        assert_eq!(entities[0]["Name"], "Charlie");
-        assert_eq!(entities[1]["Name"], "Bob");
-        assert_eq!(entities[2]["Name"], "Alice");
-    }
-
-    #[test]
-    fn test_select_fields() {
-        let entities = sample_entities();
-        let selected = select_fields(entities, &["Id".into(), "Name".into()]);
-        assert_eq!(selected[0].as_object().unwrap().len(), 2);
-        assert!(selected[0].get("Id").is_some());
-        assert!(selected[0].get("Name").is_some());
-        assert!(selected[0].get("Age").is_none());
-    }
-
-    #[test]
-    fn test_apply_query_options_combined() {
-        let entities = sample_entities();
-        let options = QueryOptions {
-            filter: Some(FilterExpr::BinaryOp {
-                left: Box::new(FilterExpr::Property("Status".into())),
-                op: BinaryOperator::Eq,
-                right: Box::new(FilterExpr::Literal(ODataValue::String("Active".into()))),
-            }),
-            orderby: Some(vec![OrderByClause {
-                property: "Name".into(),
-                direction: OrderDirection::Asc,
-            }]),
-            top: Some(1),
-            skip: None,
-            select: Some(vec!["Id".into(), "Name".into()]),
-            count: Some(true),
-            expand: None,
-        };
-
-        let (result, count) = apply_query_options(entities, &options);
-        assert_eq!(count, Some(2)); // 2 Active entities before pagination
-        assert_eq!(result.len(), 1); // $top=1
-        assert_eq!(result[0]["Name"], "Alice"); // First alphabetically among Active
-    }
-
-    #[test]
-    fn test_contains_function() {
-        let entities = sample_entities();
-        let filter = FilterExpr::FunctionCall {
-            name: "contains".into(),
-            args: vec![
-                FilterExpr::Property("Name".into()),
-                FilterExpr::Literal(ODataValue::String("li".into())),
-            ],
-        };
-        let filtered = filter_entities(entities, &filter);
-        assert_eq!(filtered.len(), 2); // Alice and Charlie
-    }
-
-    #[test]
-    fn test_find_fk_resolution_forward() {
-        // Simulate Order→Customer: Order has outgoing edge with source_field=CustomerId
-        let mut graph = crate::registry::RelationGraph::default();
-        graph.outgoing.insert(
-            "Order".to_string(),
-            vec![crate::registry::RelationEdge {
-                from_entity: "Order".to_string(),
-                navigation_property: "Customer".to_string(),
-                to_entity: "Customer".to_string(),
-                source_field: "CustomerId".to_string(),
-                target_field: "Id".to_string(),
-                nullable: false,
-                delete_policy: temper_spec::cross_invariant::DeletePolicy::Restrict,
-            }],
-        );
-
-        // Non-collection nav → Forward resolution
-        let result = find_fk_resolution(&graph, "Order", "Customer", "Customer", false);
-        assert!(result.is_some());
-        match result.unwrap() {
-            FkResolution::Forward { source_field } => {
-                assert_eq!(source_field, "CustomerId");
-            }
-            _ => panic!("Expected Forward resolution"),
-        }
-    }
-
-    #[test]
-    fn test_find_fk_resolution_reverse() {
-        // Simulate Customer→Orders: Order has outgoing edge back to Customer
-        let mut graph = crate::registry::RelationGraph::default();
-        graph.outgoing.insert(
-            "Order".to_string(),
-            vec![crate::registry::RelationEdge {
-                from_entity: "Order".to_string(),
-                navigation_property: "Customer".to_string(),
-                to_entity: "Customer".to_string(),
-                source_field: "CustomerId".to_string(),
-                target_field: "Id".to_string(),
-                nullable: false,
-                delete_policy: temper_spec::cross_invariant::DeletePolicy::Restrict,
-            }],
-        );
-
-        // Collection nav on Customer→Orders → Reverse resolution
-        let result = find_fk_resolution(&graph, "Customer", "Order", "Orders", true);
-        assert!(result.is_some());
-        match result.unwrap() {
-            FkResolution::Reverse { target_fk_field } => {
-                assert_eq!(target_fk_field, "CustomerId");
-            }
-            _ => panic!("Expected Reverse resolution"),
-        }
-    }
-
-    #[test]
-    fn test_find_fk_resolution_no_edge() {
-        let graph = crate::registry::RelationGraph::default();
-        // No edges → fallback
-        let result = find_fk_resolution(&graph, "Foo", "Bar", "Bars", true);
-        assert!(result.is_none());
-    }
-}
+#[path = "query_eval_test.rs"]
+mod tests;
