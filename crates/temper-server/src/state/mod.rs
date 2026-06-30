@@ -396,6 +396,17 @@ pub struct ServerState {
     /// collection queries (a consumer would read present, durable entities as
     /// "not found").
     pub entity_index_hydrated: Arc<RwLock<BTreeSet<String>>>,
+    /// `{tenant}:{entity_type}` keys whose `entity_key_index` backfill is complete
+    /// (ADR-0153 watermark cache). Once present, a keyed read MISS on that type is
+    /// authoritative absence — the read plane answers "not found" without the
+    /// full-type reconcile scan that produces the 413 (ARN-68). Loaded lazily from
+    /// the durable watermark (see [`key_index_watermarks_loaded`]); never causes a
+    /// present entity to read as absent, only turns a 413-scan into an O(log n)
+    /// answer.
+    pub key_index_backfilled: Arc<RwLock<BTreeSet<String>>>,
+    /// Tenants whose durable watermarks have been read into `key_index_backfilled`
+    /// at least once this run. Gates the one-time-per-tenant load on the read path.
+    pub key_index_watermarks_loaded: Arc<RwLock<BTreeSet<String>>>,
     /// Broadcast channel for entity state change events (SSE subscriptions).
     pub event_tx: Arc<tokio::sync::broadcast::Sender<EntityStateChange>>,
     /// Broadcast channel for replayable per-entity lifecycle and progress events.
@@ -670,6 +681,8 @@ impl ServerState {
             registry: Arc::new(RwLock::new(SpecRegistry::new())),
             entity_index: Arc::new(RwLock::new(BTreeMap::new())),
             entity_index_hydrated: Arc::new(RwLock::new(BTreeSet::new())),
+            key_index_backfilled: Arc::new(RwLock::new(BTreeSet::new())),
+            key_index_watermarks_loaded: Arc::new(RwLock::new(BTreeSet::new())),
             event_tx: Arc::new(event_tx),
             entity_observe_tx: Arc::new(entity_observe_tx),
             start_time: sim_now(),
@@ -916,6 +929,8 @@ impl ServerState {
             registry,
             entity_index: Arc::new(RwLock::new(BTreeMap::new())),
             entity_index_hydrated: Arc::new(RwLock::new(BTreeSet::new())),
+            key_index_backfilled: Arc::new(RwLock::new(BTreeSet::new())),
+            key_index_watermarks_loaded: Arc::new(RwLock::new(BTreeSet::new())),
             event_tx: Arc::new(event_tx),
             entity_observe_tx: Arc::new(entity_observe_tx),
             start_time: sim_now(),

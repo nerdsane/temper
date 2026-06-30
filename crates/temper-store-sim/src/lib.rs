@@ -8,7 +8,7 @@
 //! Server tests route this implementation through the `StorageStack`
 //! event-journal capability so production actor code runs unchanged.
 
-use std::collections::{BTreeMap, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -146,6 +146,10 @@ struct SimEventStoreInner {
     /// deterministic reference for the negative-existence access path the real
     /// stores maintain in `entity_key_index`.
     key_index: BTreeMap<(String, String, String, String), String>,
+    /// ADR-0153 backfill watermark: `(tenant, entity_type)` pairs whose key index is
+    /// complete. The deterministic reference for the real stores'
+    /// `key_index_backfill_watermark` table — gates authoritative keyed absence.
+    key_index_watermark: BTreeSet<(String, String)>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -172,6 +176,7 @@ impl SimEventStore {
                 pending_concurrency_violations: BTreeMap::new(),
                 pending_append_delays: BTreeMap::new(),
                 key_index: BTreeMap::new(),
+                key_index_watermark: BTreeSet::new(),
             })),
         }
     }
@@ -560,6 +565,31 @@ impl EventStore for SimEventStore {
             key_hash.to_string(),
         );
         Ok(inner.key_index.get(&slot).cloned())
+    }
+
+    async fn mark_key_index_backfilled(
+        &self,
+        tenant: &str,
+        entity_type: &str,
+    ) -> Result<(), PersistenceError> {
+        let mut inner = self.inner.lock().expect("SimEventStore lock poisoned"); // ci-ok: infallible lock
+        inner
+            .key_index_watermark
+            .insert((tenant.to_string(), entity_type.to_string()));
+        Ok(())
+    }
+
+    async fn key_index_backfilled_types(
+        &self,
+        tenant: &str,
+    ) -> Result<Vec<String>, PersistenceError> {
+        let inner = self.inner.lock().expect("SimEventStore lock poisoned"); // ci-ok: infallible lock
+        Ok(inner
+            .key_index_watermark
+            .iter()
+            .filter(|(t, _)| t.as_str() == tenant)
+            .map(|(_, et)| et.clone())
+            .collect())
     }
 
     async fn append_batch(

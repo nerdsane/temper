@@ -218,6 +218,36 @@ impl ServerState {
             || self.transition_tables.contains_key(entity_type))
     }
 
+    /// Declared `[[key]]` set for a `(tenant, entity_type)` (ADR-0153), resolved
+    /// from the SAME sources dispatch uses: the per-tenant registry first — where
+    /// runtime-installed os-app entities (File, Directory, SessionEntry, …) live —
+    /// then the legacy single-tenant transition tables.
+    ///
+    /// The keyed read fast path MUST resolve keys through here. Reading
+    /// `transition_tables` directly only sees the boot-time single-tenant set and
+    /// silently omits every registry-installed entity, disabling the keyed path so
+    /// point reads fall back to the budget-bounded scan and 413 at scale — the
+    /// TemperFS root-directory failure in ARN-68.
+    pub(crate) fn declared_keys_for(
+        &self,
+        tenant: &TenantId,
+        entity_type: &str,
+    ) -> Vec<temper_jit::table::types::DeclaredKey> {
+        // Fail fast on a poisoned registry lock rather than silently falling through
+        // to `transition_tables` — a silent fallback would re-introduce exactly the
+        // ARN-68 bug (registry-installed keys not found → keyed path disabled → scan).
+        {
+            let registry = self.registry.read().expect("registry lock poisoned");
+            if let Some(table) = registry.get_table(tenant, entity_type) {
+                return table.keys.clone();
+            }
+        }
+        self.transition_tables
+            .get(entity_type)
+            .map(|table| table.keys.clone())
+            .unwrap_or_default()
+    }
+
     /// Load the current entity state and derive the Cedar resource view used
     /// for action authorization.
     pub(crate) async fn load_authz_resource_snapshot(
@@ -427,6 +457,71 @@ impl ServerState {
     #[instrument(skip_all, fields(otel.name = "entity.populate_key_index", tenant = %tenant))]
     pub async fn populate_key_index_from_snapshots(&self, tenant: &TenantId) {
         projection_backfill::populate_key_index_from_snapshots(self, tenant).await;
+    }
+
+    /// Whether `entity_key_index` is complete for `(tenant, entity_type)` — the
+    /// ADR-0153 backfill watermark. Once true, a keyed read MISS is authoritative
+    /// absence (no full-type scan → no 413). Reads a cache hydrated once-per-tenant
+    /// from the durable watermark; conservative on any failure (returns false →
+    /// keyed miss falls back to the scan, never a wrong "absent").
+    pub(crate) async fn key_index_backfill_complete(
+        &self,
+        tenant: &TenantId,
+        entity_type: &str,
+    ) -> bool {
+        let already_loaded = self
+            .key_index_watermarks_loaded
+            .read()
+            .expect("key index watermarks-loaded lock poisoned")
+            .contains(tenant.as_str());
+        if !already_loaded {
+            if let Some((store, _)) = self.event_journal() {
+                if let Ok(types) = store.key_index_backfilled_types(tenant.as_str()).await {
+                    let mut cache = self
+                        .key_index_backfilled
+                        .write()
+                        .expect("key index backfilled lock poisoned");
+                    for et in types {
+                        cache.insert(format!("{tenant}:{et}"));
+                    }
+                }
+                // Mark loaded even if the query errored: an error means "no authority
+                // yet", which is the safe scan-fallback state, and a completing
+                // backfill sets the cache entry directly via `mark_key_index_backfilled`.
+                self.key_index_watermarks_loaded
+                    .write()
+                    .expect("key index watermarks-loaded lock poisoned")
+                    .insert(tenant.to_string());
+            } else {
+                return false;
+            }
+        }
+        self.key_index_backfilled
+            .read()
+            .expect("key index backfilled lock poisoned")
+            .contains(&format!("{tenant}:{entity_type}"))
+    }
+
+    /// Record (durably + in the read-path cache) that `entity_key_index` is complete
+    /// for `(tenant, entity_type)`. Called by the backfill once it has keyed every
+    /// existing entity of the type, so subsequent keyed misses resolve to absence
+    /// without scanning (ADR-0153).
+    pub(crate) async fn mark_key_index_backfilled(&self, tenant: &TenantId, entity_type: &str) {
+        if let Some((store, _)) = self.event_journal()
+            && let Err(e) = store
+                .mark_key_index_backfilled(tenant.as_str(), entity_type)
+                .await
+        {
+            tracing::error!(
+                tenant = %tenant, entity_type, error = %e,
+                "failed to persist key-index backfill watermark"
+            );
+            return;
+        }
+        self.key_index_backfilled
+            .write()
+            .expect("key index backfilled lock poisoned")
+            .insert(format!("{tenant}:{entity_type}"));
     }
 
     /// Compare durable projection rows with authoritative state rebuilt by event replay.
