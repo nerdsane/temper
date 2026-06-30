@@ -95,6 +95,17 @@ pub trait DynEventStore: Send + Sync {
         key_rows: &'a [temper_runtime::persistence::EntityKeyRow],
     ) -> EventStoreFuture<'a, Result<(), PersistenceError>>;
 
+    fn mark_key_index_backfilled<'a>(
+        &'a self,
+        tenant: &'a str,
+        entity_type: &'a str,
+    ) -> EventStoreFuture<'a, Result<(), PersistenceError>>;
+
+    fn key_index_backfilled_types<'a>(
+        &'a self,
+        tenant: &'a str,
+    ) -> EventStoreFuture<'a, Result<Vec<String>, PersistenceError>>;
+
     fn save_snapshot<'a>(
         &'a self,
         persistence_id: &'a str,
@@ -205,6 +216,25 @@ where
             entity_id,
             key_rows,
         ))
+    }
+
+    fn mark_key_index_backfilled<'a>(
+        &'a self,
+        tenant: &'a str,
+        entity_type: &'a str,
+    ) -> EventStoreFuture<'a, Result<(), PersistenceError>> {
+        Box::pin(EventStore::mark_key_index_backfilled(
+            self,
+            tenant,
+            entity_type,
+        ))
+    }
+
+    fn key_index_backfilled_types<'a>(
+        &'a self,
+        tenant: &'a str,
+    ) -> EventStoreFuture<'a, Result<Vec<String>, PersistenceError>> {
+        Box::pin(EventStore::key_index_backfilled_types(self, tenant))
     }
 
     fn save_snapshot<'a>(
@@ -345,6 +375,21 @@ impl BoxedEventStore {
         self.0
             .backfill_entity_keys(tenant, entity_type, entity_id, key_rows)
             .await
+    }
+
+    pub async fn mark_key_index_backfilled(
+        &self,
+        tenant: &str,
+        entity_type: &str,
+    ) -> Result<(), PersistenceError> {
+        self.0.mark_key_index_backfilled(tenant, entity_type).await
+    }
+
+    pub async fn key_index_backfilled_types(
+        &self,
+        tenant: &str,
+    ) -> Result<Vec<String>, PersistenceError> {
+        self.0.key_index_backfilled_types(tenant).await
     }
 
     pub async fn save_snapshot(

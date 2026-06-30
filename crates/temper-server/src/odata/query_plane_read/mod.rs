@@ -40,8 +40,14 @@ async fn keyed_candidate_ids(request: &QueryPlaneReadRequest<'_>) -> Option<Vec<
     }
     let filter = request.query_options.filter.as_ref()?;
     let pairs = super::filter_sql::equality_field_predicates(filter)?;
-    let table = request.state.transition_tables.get(request.entity_type)?;
-    let (key_name, key_hash) = crate::key_index::resolve_query_to_key(&table.keys, &pairs)?;
+    // Resolve declared keys via the registry-aware path: runtime-installed os-app
+    // entities (File, Directory, …) live in the per-tenant registry, NOT in
+    // `transition_tables`. Reading `transition_tables` here would return `None` for
+    // them, disabling the keyed path so every point read scans and 413s (ARN-68).
+    let keys = request
+        .state
+        .declared_keys_for(request.tenant, request.entity_type);
+    let (key_name, key_hash) = crate::key_index::resolve_query_to_key(&keys, &pairs)?;
     let (store, _) = request.state.event_journal()?;
     match store
         .lookup_by_key(
@@ -53,8 +59,25 @@ async fn keyed_candidate_ids(request: &QueryPlaneReadRequest<'_>) -> Option<Vec<
         .await
     {
         Ok(Some(entity_id)) => Some(vec![entity_id]),
-        // Miss or error: fall back to the full path (safe pre-backfill).
-        Ok(None) | Err(_) => None,
+        Ok(None) => {
+            // A miss is authoritative absence ONLY once the backfill watermark says
+            // `entity_key_index` is complete for this (tenant, type) — then we can
+            // answer "not found" with an empty candidate set (no full-type scan, no
+            // 413). Before the watermark, a missing row may be a pre-backfill entity,
+            // so we fall back to the scan (correct, just not bounded). This is the
+            // retirement of #324's reconcile scan, gated per ADR-0153.
+            if request
+                .state
+                .key_index_backfill_complete(request.tenant, request.entity_type)
+                .await
+            {
+                Some(Vec::new())
+            } else {
+                None
+            }
+        }
+        // Error: fall back to the full path (never trust a transient failure as absence).
+        Err(_) => None,
     }
 }
 
@@ -211,7 +234,14 @@ pub(in crate::odata) async fn read_entity_set_from_query_plane(
     // the read (coverage, budget, materialization, row-auth) runs unchanged and the
     // scan budget can never trip. On a miss we fall back to the full list, which still
     // covers pre-backfill entities — a safe additive fast path until #324 is retired.
-    let all_entity_ids = match keyed_candidate_ids(&request).await {
+    let keyed = keyed_candidate_ids(&request).await;
+    // A keyed result of `Some([])` is authoritative absence (the watermark is set):
+    // the co-committed `entity_key_index` has no such entity. We must NOT then run a
+    // native page read — the eventually-consistent field index could still surface a
+    // lagging or just-deleted row and contradict the authoritative answer. Fall
+    // straight through to materialize the empty candidate set.
+    let keyed_authoritative_absent = matches!(&keyed, Some(ids) if ids.is_empty());
+    let all_entity_ids = match keyed {
         Some(ids) => ids,
         None => {
             request
@@ -241,6 +271,7 @@ pub(in crate::odata) async fn read_entity_set_from_query_plane(
     let (coverage, missing_ids) = catalog_coverage_report(&request, &all_entity_ids).await;
 
     if !reconciling_exact_match_lag
+        && !keyed_authoritative_absent
         && coverage.missing == 0
         && let Some(plan) = native_plan.clone()
         && let Some(result) = try_native_page_read(&request, plan, coverage).await
@@ -252,7 +283,9 @@ pub(in crate::odata) async fn read_entity_set_from_query_plane(
         });
     }
 
-    let fallback_reason = if reconciling_exact_match_lag {
+    let fallback_reason = if keyed_authoritative_absent {
+        QueryPlaneFallbackReason::KeyedAbsence
+    } else if reconciling_exact_match_lag {
         QueryPlaneFallbackReason::ProjectionLagReconcile
     } else if coverage.missing > 0 {
         QueryPlaneFallbackReason::CatalogCoverageGap

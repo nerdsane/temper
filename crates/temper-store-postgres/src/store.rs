@@ -335,6 +335,48 @@ impl EventStore for PostgresEventStore {
         Ok(())
     }
 
+    async fn mark_key_index_backfilled(
+        &self,
+        tenant: &str,
+        entity_type: &str,
+    ) -> Result<(), PersistenceError> {
+        let mut conn = self
+            .pool
+            .acquire()
+            .await
+            .map_err(|e| PersistenceError::Storage(e.to_string()))?;
+        crate::dbm::postgres_query!(
+            "INSERT INTO key_index_backfill_watermark (tenant, entity_type) \
+             VALUES ($1, $2) \
+             ON CONFLICT (tenant, entity_type) DO NOTHING",
+        )
+        .bind(tenant)
+        .bind(entity_type)
+        .execute(&mut *conn)
+        .await
+        .map_err(|e| PersistenceError::Storage(e.to_string()))?;
+        Ok(())
+    }
+
+    async fn key_index_backfilled_types(
+        &self,
+        tenant: &str,
+    ) -> Result<Vec<String>, PersistenceError> {
+        let mut conn = self
+            .pool
+            .acquire()
+            .await
+            .map_err(|e| PersistenceError::Storage(e.to_string()))?;
+        let rows: Vec<(String,)> = crate::dbm::postgres_query_as!(
+            "SELECT entity_type FROM key_index_backfill_watermark WHERE tenant = $1",
+        )
+        .bind(tenant)
+        .fetch_all(&mut *conn)
+        .await
+        .map_err(|e| PersistenceError::Storage(e.to_string()))?;
+        Ok(rows.into_iter().map(|(entity_type,)| entity_type).collect())
+    }
+
     async fn lookup_by_key(
         &self,
         tenant: &str,

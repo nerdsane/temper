@@ -18,6 +18,7 @@ use temper_spec::csdl::parse_csdl;
 use temper_store_turso::TursoEventStore;
 
 mod dst_projection_lag;
+mod keyed_existence;
 mod proof;
 
 const CSDL_XML: &str = include_str!("../../../../../test-fixtures/specs/model.csdl.xml");

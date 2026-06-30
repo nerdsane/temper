@@ -136,6 +136,17 @@ impl EventStore for TursoEventStore {
         }
     }
 
+    // NOTE (ADR-0153): Turso intentionally does NOT implement `backfill_entity_keys`,
+    // `mark_key_index_backfilled`, or `key_index_backfilled_types` — it keeps the
+    // no-op/empty trait defaults. Turso never co-commits key rows (it does not override
+    // `append_with_keys`), so its `entity_key_index` is never maintained on write. A
+    // store that does not maintain the index live must NEVER become authoritative for
+    // absence: backfilling or watermarking it would let a keyed miss wrongly read a
+    // present entity as absent (or serve a stale keyed hit). Postgres (the current
+    // query-plane backend) co-commits and is authoritative; the sim store does too for
+    // DST. Giving Turso the keyed oracle requires first implementing live co-commit
+    // (completing ADR-0153 phase 2 for Turso) — tracked separately.
+
     #[instrument(skip_all, fields(otel.name = "turso.append_batch"))]
     async fn append_batch(
         &self,

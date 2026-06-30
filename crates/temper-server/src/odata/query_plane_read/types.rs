@@ -92,6 +92,10 @@ pub(in crate::odata::query_plane_read) enum QueryPlaneFallbackReason {
     /// lagging projection of a just-committed entity, so the read was
     /// reconciled against authoritative state (ARN-89).
     ProjectionLagReconcile,
+    /// A declared-key probe missed and the backfill watermark is set, so the
+    /// `entity_key_index` authoritatively proves absence — the read returns empty
+    /// without any full-type scan or native re-query (ADR-0153, ARN-68).
+    KeyedAbsence,
 }
 
 impl QueryPlaneFallbackReason {
@@ -105,6 +109,7 @@ impl QueryPlaneFallbackReason {
             Self::CatalogCoverageGap => "catalog_coverage_gap",
             Self::FallbackCandidateBudget => "fallback_candidate_budget",
             Self::ProjectionLagReconcile => "projection_lag_reconcile",
+            Self::KeyedAbsence => "keyed_absence",
         }
     }
 }

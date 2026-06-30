@@ -155,6 +155,44 @@ pub trait EventStore: Send + Sync + 'static {
         async { Ok(None) }
     }
 
+    /// Record that `entity_key_index` is **complete** for `(tenant, entity_type)`
+    /// — every existing entity of that type has been keyed by the backfill
+    /// (ADR-0153 watermark). Once set, a keyed read MISS is authoritative absence,
+    /// which retires the full-type reconcile scan (#324) for that type: the read
+    /// plane can answer "not found" without scanning. Idempotent.
+    ///
+    /// **Soundness invariant — only override this on a backend that co-commits key
+    /// rows on EVERY write** (i.e. overrides [`EventStore::append_with_keys`]). The
+    /// watermark asserts the index is complete *and stays complete*; a backend that
+    /// backfills but does not maintain keys live (e.g. Turso, which does not
+    /// co-commit) would let a later write go unkeyed, and a keyed miss for that
+    /// present entity would then read as authoritative absence — a silent
+    /// correctness bug. Such backends MUST keep the default no-op so they never
+    /// become authoritative (their keyed misses fall back to the scan — correct,
+    /// just not bounded). Postgres co-commits and overrides this; the sim store does
+    /// too for DST. The default is a no-op.
+    fn mark_key_index_backfilled(
+        &self,
+        tenant: &str,
+        entity_type: &str,
+    ) -> impl std::future::Future<Output = Result<(), PersistenceError>> + Send {
+        let _ = (tenant, entity_type);
+        async { Ok(()) }
+    }
+
+    /// List the entity types whose `entity_key_index` backfill is complete for
+    /// `tenant` (the watermarks set by [`EventStore::mark_key_index_backfilled`]).
+    /// The read plane loads these into a cache so a keyed miss on a watermarked
+    /// type resolves to authoritative absence instead of a scan. Default empty
+    /// (no backend authority → every keyed miss stays scan-safe).
+    fn key_index_backfilled_types(
+        &self,
+        tenant: &str,
+    ) -> impl std::future::Future<Output = Result<Vec<String>, PersistenceError>> + Send {
+        let _ = tenant;
+        async { Ok(Vec::new()) }
+    }
+
     /// Atomically append events to multiple journals.
     ///
     /// Backends must either commit every append in `appends`, or commit none.

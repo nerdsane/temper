@@ -253,11 +253,21 @@ pub(super) async fn hydrate_entities(state: &PlatformState, apps: &[(String, Str
         }
     }
 
-    // Background task: populate the field index from snapshots for OData
-    // filter push-down. This runs after the entity index is populated so
-    // pre-existing entities are queryable via SQL-level filters.
+    // Background task: backfill the declared-key index, then the broad field index,
+    // from snapshots — after the entity index is populated so pre-existing entities
+    // are covered.
     let server = state.server.clone();
     tokio::spawn(async move {
+        // ADR-0153: the cheap declared-key backfill first (K = 1-3 rows per entity).
+        // It keys pre-existing entities and sets the per-(tenant,type) watermark, so
+        // their point reads resolve present/absent in O(log n) instead of the
+        // full-type scan that 413s at tenant scale — independent of the heavy
+        // field-index re-scan. No-op on backends that don't co-commit keys (those
+        // never become authoritative, so a keyed miss stays scan-safe).
+        for tenant_id in &all_tenants {
+            server.populate_key_index_from_snapshots(tenant_id).await;
+        }
+        // Then the broad field index for OData filter push-down.
         for tenant_id in all_tenants {
             server.populate_field_index_from_snapshots(&tenant_id).await;
         }
