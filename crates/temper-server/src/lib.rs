@@ -9,11 +9,11 @@ mod admin;
 #[cfg(feature = "observe")]
 mod api;
 pub mod authz;
+mod aws_sigv4;
 pub mod blob_store;
 pub mod blob_sweeper;
 mod blob_transport_observability;
 pub mod blobs;
-pub mod channels;
 pub mod entity_actor;
 pub mod event_budget_metrics;
 pub mod events;
