@@ -35,8 +35,10 @@ const TAG_NULL: u8 = b'0';
 /// scalar value is encoded as `(type_tag, canonical_text)`. A `null` value — or a
 /// property **absent** from `fields` (e.g. a filesystem root has no `ParentId`
 /// field at all) — is a valid, indexable key component encoded under `TAG_NULL`,
-/// matching OData's `prop eq null` semantics. Returns `None` only if the key has
-/// no properties, or if a **present** property is non-scalar (array/object).
+/// matching OData's `prop eq null` semantics. Returns `None` if the key has no
+/// properties, if a **present** property is non-scalar (array/object), or if
+/// **every** component is null/absent (an all-null key has no distinguishing value
+/// and would collide for every such entity).
 pub fn canonical_key_hash(
     key_name: &str,
     properties: &[String],
@@ -52,15 +54,30 @@ pub fn canonical_key_hash(
     // as null — consistent with OData, where `prop eq null` matches a missing
     // field. This is what keys a filesystem root directory: it is created with no
     // `ParentId` field at all (Directory has no ParentId state var), and the read
-    // looks it up by `ParentId eq null`. Absent and explicit-null therefore both
-    // index under TAG_NULL so the keyed read resolves the root instead of scanning.
+    // looks it up by `ParentId eq null`. Absent and explicit-null both index under
+    // TAG_NULL so the keyed read resolves the root instead of scanning.
+    //
+    // But an entity with EVERY key component null/absent has no distinguishing key
+    // value, so it is NOT indexed — otherwise all such entities would collide on a
+    // single all-null hash and trip the uniqueness constraint. The root is safe: it
+    // has `Name`/`WorkspaceId` present, only `ParentId` is null.
     let null = serde_json::Value::Null;
+    let mut any_present = false;
     for prop in properties {
-        let value = lookup_field(fields, prop).unwrap_or(&null);
+        let value = match lookup_field(fields, prop) {
+            Some(v) if !v.is_null() => {
+                any_present = true;
+                v
+            }
+            other => other.unwrap_or(&null),
+        };
         let (tag, canon) = canonical_value(value)?;
         hasher.update([tag]);
         hasher.update(canon.as_bytes());
         hasher.update([RECORD_SEP]);
+    }
+    if !any_present {
+        return None;
     }
     Some(format!("{:x}", hasher.finalize()))
 }
@@ -218,6 +235,20 @@ mod tests {
         // no declared properties -> nothing to index.
         let f = fields(&[("WorkspaceId", json!("ws1"))]);
         assert!(canonical_key_hash("path", &[], &f).is_none());
+    }
+
+    #[test]
+    fn all_null_or_absent_key_is_not_indexed() {
+        // An entity with NO key values set (e.g. an Order created with `{}`) must
+        // not be keyed — else every such entity collides on a single all-null hash
+        // and the second co-commit trips the uniqueness constraint.
+        let props = vec!["WorkspaceId".to_string(), "Path".to_string()];
+        assert!(canonical_key_hash("path", &props, &fields(&[])).is_none());
+        let all_null = fields(&[("WorkspaceId", json!(null)), ("Path", json!(null))]);
+        assert!(canonical_key_hash("path", &props, &all_null).is_none());
+        // But one present component is enough to key it (the root's case).
+        let one_present = fields(&[("WorkspaceId", json!("ws1"))]);
+        assert!(canonical_key_hash("path", &props, &one_present).is_some());
     }
 
     #[test]
