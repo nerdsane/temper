@@ -4,10 +4,11 @@
 //! Secrets are encrypted at rest using the configured vault key.
 
 use axum::extract::{Path, State};
-use axum::http::{HeaderMap, StatusCode};
+use axum::http::StatusCode;
 use axum::response::IntoResponse;
 use tracing::instrument;
 
+use super::PolicyAuthed;
 use crate::state::ServerState;
 
 /// Check if an error message indicates that the backend is not supported.
@@ -20,12 +21,9 @@ fn is_backend_not_supported_error(err: &str) -> bool {
 pub(crate) async fn handle_put_secret(
     State(state): State<ServerState>,
     Path((tenant, key_name)): Path<(String, String)>,
-    headers: HeaderMap,
+    _auth: PolicyAuthed,
     body: axum::body::Bytes,
 ) -> impl IntoResponse {
-    if let Some(resp) = super::require_policy_auth(&state, &headers, &tenant).await {
-        return resp;
-    }
     let Some(vault) = state.secrets_vault.as_ref() else {
         tracing::warn!("secrets vault not configured");
         return (
@@ -113,11 +111,8 @@ pub(crate) async fn handle_put_secret(
 pub(crate) async fn handle_delete_secret(
     State(state): State<ServerState>,
     Path((tenant, key_name)): Path<(String, String)>,
-    headers: HeaderMap,
+    _auth: PolicyAuthed,
 ) -> impl IntoResponse {
-    if let Some(resp) = super::require_policy_auth(&state, &headers, &tenant).await {
-        return resp;
-    }
     let Some(vault) = state.secrets_vault.as_ref() else {
         tracing::warn!("secrets vault not configured");
         return (
@@ -154,11 +149,8 @@ pub(crate) async fn handle_delete_secret(
 pub(crate) async fn handle_list_secrets(
     State(state): State<ServerState>,
     Path(tenant): Path<String>,
-    headers: HeaderMap,
+    _auth: PolicyAuthed,
 ) -> impl IntoResponse {
-    if let Some(resp) = super::require_policy_auth(&state, &headers, &tenant).await {
-        return resp;
-    }
     let Some(vault) = state.secrets_vault.as_ref() else {
         tracing::warn!("secrets vault not configured");
         return (
