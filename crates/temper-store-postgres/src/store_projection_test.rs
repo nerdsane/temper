@@ -101,6 +101,91 @@ fn entity_key_index_present_absent_and_atomic_reject() {
     });
 }
 
+/// ADR-0153 backfill robustness: the real postgres store honors the backfill
+/// primitives the resumable, watermark-gated backfill relies on —
+/// `backfill_entity_keys` (no journal event), `keyed_entity_ids_for_type` (resume:
+/// which entities are already keyed), and the watermark round-trip
+/// (`mark_key_index_backfilled` / `key_index_backfilled_types`, table from migration
+/// 0010). Gated on DATABASE_URL; isolated by a unique tenant.
+#[test]
+fn key_index_backfill_and_watermark_methods_round_trip_on_postgres() {
+    let database_url = match std::env::var("DATABASE_URL") {
+        Ok(url) => url,
+        Err(_) => return,
+    };
+
+    sqlx::test_block_on(async {
+        let pool = PgPool::connect(&database_url).await.unwrap();
+        run_migrations(&pool).await.unwrap();
+        let store = PostgresEventStore::new(pool.clone());
+        let tenant = format!("tenant-backfill-{}", uuid::Uuid::new_v4());
+        let key = EntityKeyRow {
+            key_name: "name_parent".to_string(),
+            key_hash: format!("root-{}", uuid::Uuid::new_v4()),
+        };
+
+        // Backfill (no journal event) keys a pre-existing entity — the root case.
+        store
+            .backfill_entity_keys(&tenant, "Directory", "dir-root", std::slice::from_ref(&key))
+            .await
+            .unwrap();
+
+        // Resumability source: the entity now shows as already-keyed for the type.
+        assert_eq!(
+            store
+                .keyed_entity_ids_for_type(&tenant, "Directory")
+                .await
+                .unwrap(),
+            vec!["dir-root".to_string()],
+        );
+        // And it resolves by the declared key.
+        assert_eq!(
+            store
+                .lookup_by_key(&tenant, "Directory", "name_parent", &key.key_hash)
+                .await
+                .unwrap(),
+            Some("dir-root".to_string()),
+        );
+
+        // Watermark round-trip: not set until marked, then present for that type only.
+        assert!(
+            store
+                .key_index_backfilled_types(&tenant)
+                .await
+                .unwrap()
+                .is_empty()
+        );
+        store
+            .mark_key_index_backfilled(&tenant, "Directory")
+            .await
+            .unwrap();
+        assert_eq!(
+            store.key_index_backfilled_types(&tenant).await.unwrap(),
+            vec!["Directory".to_string()],
+        );
+        // Idempotent.
+        store
+            .mark_key_index_backfilled(&tenant, "Directory")
+            .await
+            .unwrap();
+        assert_eq!(
+            store.key_index_backfilled_types(&tenant).await.unwrap(),
+            vec!["Directory".to_string()],
+        );
+
+        let _ = crate::dbm::postgres_query!("DELETE FROM entity_key_index WHERE tenant = $1")
+            .bind(&tenant)
+            .execute(&pool)
+            .await;
+        let _ = crate::dbm::postgres_query!(
+            "DELETE FROM key_index_backfill_watermark WHERE tenant = $1"
+        )
+        .bind(&tenant)
+        .execute(&pool)
+        .await;
+    });
+}
+
 #[test]
 fn list_entity_ids_by_type_unions_catalog_field_index_and_events() {
     let database_url = match std::env::var("DATABASE_URL") {

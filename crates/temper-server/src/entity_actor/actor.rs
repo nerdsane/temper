@@ -459,12 +459,19 @@ impl EntityActor {
         table: &TransitionTable,
         store: &BoxedEventStore,
         backend: BackendLabel,
-        persistence_id: &str,
         state: &mut EntityState,
         tenant: &str,
         blob_store: Option<&crate::blob_store::BlobStore>,
+        // When true, a journal read failure PROPAGATES as an error instead of being
+        // swallowed ("start fresh"). The key-index backfill needs this: it must
+        // distinguish "entity genuinely has no events" from "could not read the
+        // journal", or it would watermark a type while a present entity is unkeyed
+        // (a wrong-absent bug). Actor hydration keeps the lenient default (false).
+        strict_journal_read: bool,
     ) -> Result<(), ActorError> {
         let replay_start = Instant::now(); // determinism-ok: wall-clock for production replay duration metric only
+        let persistence_id = format!("{tenant}:{}:{}", state.entity_type, state.entity_id);
+        let persistence_id = persistence_id.as_str();
         let mut from_sequence = 0;
         let mut loaded_snapshot = false;
 
@@ -661,6 +668,12 @@ impl EntityActor {
                 }
             }
             Err(e) => {
+                if strict_journal_read {
+                    return Err(ActorError::custom(format!(
+                        "failed to read events for replay of {}:{}: {e}",
+                        state.entity_type, state.entity_id
+                    )));
+                }
                 tracing::error!(
                     entity = %state.entity_id, error = %e,
                     "failed to read events for replay — starting fresh"
@@ -676,6 +689,13 @@ impl EntityActor {
     }
 }
 
+/// Rebuild an entity's current state from its snapshot + event tail.
+///
+/// `strict_journal_read`: when true, a journal read failure PROPAGATES as an error
+/// instead of being swallowed into a "start fresh"/stale state. The key-index backfill
+/// passes `true` so it can tell "no events" apart from "could not read the journal" —
+/// keying decisions and the per-type watermark depend on that distinction (ADR-0153
+/// soundness gate). Actor hydration passes `false` (keep serving on a transient read).
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn recover_entity_state_from_store(
     tenant: &str,
@@ -686,17 +706,17 @@ pub(crate) async fn recover_entity_state_from_store(
     backend: BackendLabel,
     initial_fields: &serde_json::Value,
     blob_store: Option<&crate::blob_store::BlobStore>,
+    strict_journal_read: bool,
 ) -> Result<EntityState, ActorError> {
-    let persistence_id = format!("{tenant}:{entity_type}:{entity_id}");
     let mut state = EntityActor::build_initial_state(entity_type, entity_id, table, initial_fields);
     EntityActor::replay_events(
         table,
         store,
         backend,
-        &persistence_id,
         &mut state,
         tenant,
         blob_store,
+        strict_journal_read,
     )
     .await?;
     Ok(state)
@@ -731,6 +751,7 @@ impl Actor for EntityActor {
                 backend,
                 &self.initial_fields,
                 self.blob_store.as_ref(),
+                false, // hydration: keep serving on a transient journal read failure
             )
             .await?;
         }
@@ -1005,10 +1026,12 @@ impl Actor for EntityActor {
                                         &table,
                                         store,
                                         backend,
-                                        &self.persistence_id(),
                                         state,
                                         &self.tenant,
                                         self.blob_store.as_ref(),
+                                        // Actor hydration keeps the lenient "start
+                                        // fresh on read error" behavior (unchanged).
+                                        false,
                                     )
                                     .await?;
 

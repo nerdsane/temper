@@ -377,6 +377,28 @@ impl EventStore for PostgresEventStore {
         Ok(rows.into_iter().map(|(entity_type,)| entity_type).collect())
     }
 
+    async fn keyed_entity_ids_for_type(
+        &self,
+        tenant: &str,
+        entity_type: &str,
+    ) -> Result<Vec<String>, PersistenceError> {
+        let mut conn = self
+            .pool
+            .acquire()
+            .await
+            .map_err(|e| PersistenceError::Storage(e.to_string()))?;
+        let rows: Vec<(String,)> = crate::dbm::postgres_query_as!(
+            "SELECT DISTINCT entity_id FROM entity_key_index \
+             WHERE tenant = $1 AND entity_type = $2",
+        )
+        .bind(tenant)
+        .bind(entity_type)
+        .fetch_all(&mut *conn)
+        .await
+        .map_err(|e| PersistenceError::Storage(e.to_string()))?;
+        Ok(rows.into_iter().map(|(entity_id,)| entity_id).collect())
+    }
+
     async fn lookup_by_key(
         &self,
         tenant: &str,

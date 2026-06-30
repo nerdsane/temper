@@ -193,6 +193,21 @@ pub trait EventStore: Send + Sync + 'static {
         async { Ok(Vec::new()) }
     }
 
+    /// The `entity_id`s that already have at least one `entity_key_index` row for
+    /// `(tenant, entity_type)`. Lets the backfill **resume** cheaply: it skips
+    /// already-keyed entities (the expensive part is loading each entity's state),
+    /// so a re-run after a partial pass only processes the remainder instead of
+    /// re-loading all N. Default empty (no resumption — a backend without the index
+    /// re-processes everything, which is correct, just not incremental).
+    fn keyed_entity_ids_for_type(
+        &self,
+        tenant: &str,
+        entity_type: &str,
+    ) -> impl std::future::Future<Output = Result<Vec<String>, PersistenceError>> + Send {
+        let _ = (tenant, entity_type);
+        async { Ok(Vec::new()) }
+    }
+
     /// Atomically append events to multiple journals.
     ///
     /// Backends must either commit every append in `appends`, or commit none.

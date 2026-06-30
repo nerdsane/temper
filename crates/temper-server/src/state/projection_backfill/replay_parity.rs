@@ -287,6 +287,7 @@ pub(in crate::state) async fn verify_query_projection_replay_parity(
                 backend,
                 &serde_json::json!({}),
                 tenant_blob_store.as_ref(),
+                false, // replay-parity check: lenient (unchanged behavior)
             )
             .await;
             let replayed = match replayed {

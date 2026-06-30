@@ -202,6 +202,7 @@ pub(super) async fn populate_field_index_from_snapshots(state: &ServerState, ten
             backend,
             &serde_json::json!({}),
             tenant_blob_store.as_ref(),
+            false, // field-index backfill: lenient (unchanged behavior)
         )
         .await;
         let replayed = match replayed {

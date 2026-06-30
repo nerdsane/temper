@@ -106,6 +106,12 @@ pub trait DynEventStore: Send + Sync {
         tenant: &'a str,
     ) -> EventStoreFuture<'a, Result<Vec<String>, PersistenceError>>;
 
+    fn keyed_entity_ids_for_type<'a>(
+        &'a self,
+        tenant: &'a str,
+        entity_type: &'a str,
+    ) -> EventStoreFuture<'a, Result<Vec<String>, PersistenceError>>;
+
     fn save_snapshot<'a>(
         &'a self,
         persistence_id: &'a str,
@@ -235,6 +241,18 @@ where
         tenant: &'a str,
     ) -> EventStoreFuture<'a, Result<Vec<String>, PersistenceError>> {
         Box::pin(EventStore::key_index_backfilled_types(self, tenant))
+    }
+
+    fn keyed_entity_ids_for_type<'a>(
+        &'a self,
+        tenant: &'a str,
+        entity_type: &'a str,
+    ) -> EventStoreFuture<'a, Result<Vec<String>, PersistenceError>> {
+        Box::pin(EventStore::keyed_entity_ids_for_type(
+            self,
+            tenant,
+            entity_type,
+        ))
     }
 
     fn save_snapshot<'a>(
@@ -390,6 +408,14 @@ impl BoxedEventStore {
         tenant: &str,
     ) -> Result<Vec<String>, PersistenceError> {
         self.0.key_index_backfilled_types(tenant).await
+    }
+
+    pub async fn keyed_entity_ids_for_type(
+        &self,
+        tenant: &str,
+        entity_type: &str,
+    ) -> Result<Vec<String>, PersistenceError> {
+        self.0.keyed_entity_ids_for_type(tenant, entity_type).await
     }
 
     pub async fn save_snapshot(

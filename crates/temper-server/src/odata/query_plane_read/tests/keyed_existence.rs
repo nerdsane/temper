@@ -164,6 +164,217 @@ async fn key_index_backfill_keys_store_entities_absent_from_the_lazy_index() {
     }
 }
 
+/// Robustness (ADR-0153): the backfill is RESUMABLE — already-keyed entities are
+/// skipped (not re-loaded), so a re-run after a partial pass only processes the
+/// remainder instead of re-loading all N. Pre-key one entity directly, then run the
+/// backfill, and confirm it completes + watermarks with both entities keyed.
+#[tokio::test]
+async fn key_index_backfill_skips_already_keyed_entities_and_still_watermarks() {
+    let (state, store) = build_order_state_with_sim("key-backfill-resume");
+    let tenant = TenantId::default();
+    let agent_ctx = AgentContext::for_service("resume-test");
+    for (eid, ws, path) in [("ord-a", "ws1", "/a"), ("ord-b", "ws1", "/b")] {
+        state
+            .dispatch_tenant_action(
+                &tenant,
+                "Order",
+                eid,
+                "Create",
+                serde_json::json!({}),
+                &agent_ctx,
+            )
+            .await
+            .expect("create");
+        let snap = serde_json::json!({
+            "entity_type": "Order", "entity_id": eid, "status": "Draft", "item_count": 0,
+            "fields": { "Id": eid, "WorkspaceId": ws, "Path": path },
+        });
+        store
+            .save_snapshot(
+                &format!("{tenant}:Order:{eid}"),
+                1,
+                &serde_json::to_vec(&snap).unwrap(),
+            )
+            .await
+            .expect("snap");
+    }
+    // Pre-key ord-a directly (a prior partial pass / co-commit already keyed it).
+    store
+        .backfill_entity_keys(
+            tenant.as_str(),
+            "Order",
+            "ord-a",
+            &[temper_runtime::persistence::EntityKeyRow {
+                key_name: "ws_path".to_string(),
+                key_hash: ws_path_hash("ws1", "/a"),
+            }],
+        )
+        .await
+        .expect("pre-key");
+
+    state.populate_key_index_from_snapshots(&tenant).await;
+
+    // ord-a was skipped via the already-keyed set; ord-b keyed fresh; type watermarked.
+    assert!(state.key_index_backfill_complete(&tenant, "Order").await);
+    for (ws, path) in [("ws1", "/a"), ("ws1", "/b")] {
+        assert!(
+            store
+                .lookup_by_key(tenant.as_str(), "Order", "ws_path", &ws_path_hash(ws, path))
+                .await
+                .unwrap()
+                .is_some()
+        );
+    }
+}
+
+/// Soundness (ADR-0153): a DELETED entity is correctly skipped (not keyed) and does
+/// NOT block the watermark — only entities that exist-but-cannot-load do. A deleted
+/// entity alongside a live one: the type still watermarks, the live one is keyed, the
+/// deleted one is not.
+#[tokio::test]
+async fn key_index_backfill_skips_deleted_entities_without_blocking_watermark() {
+    let (state, store) = build_order_state_with_sim("key-backfill-deleted");
+    let tenant = TenantId::default();
+    let agent_ctx = AgentContext::for_service("deleted-test");
+    for (eid, status, path) in [
+        ("ord-live", "Draft", "/live"),
+        ("ord-del", "Deleted", "/del"),
+    ] {
+        state
+            .dispatch_tenant_action(
+                &tenant,
+                "Order",
+                eid,
+                "Create",
+                serde_json::json!({}),
+                &agent_ctx,
+            )
+            .await
+            .expect("create");
+        let snap = serde_json::json!({
+            "entity_type": "Order", "entity_id": eid, "status": status, "item_count": 0,
+            "fields": { "Id": eid, "WorkspaceId": "ws1", "Path": path },
+        });
+        store
+            .save_snapshot(
+                &format!("{tenant}:Order:{eid}"),
+                1,
+                &serde_json::to_vec(&snap).unwrap(),
+            )
+            .await
+            .expect("snap");
+    }
+
+    state.populate_key_index_from_snapshots(&tenant).await;
+
+    assert!(
+        state.key_index_backfill_complete(&tenant, "Order").await,
+        "a deleted entity must not block the watermark"
+    );
+    assert!(
+        store
+            .lookup_by_key(
+                tenant.as_str(),
+                "Order",
+                "ws_path",
+                &ws_path_hash("ws1", "/live")
+            )
+            .await
+            .unwrap()
+            .is_some(),
+        "live entity is keyed"
+    );
+    assert!(
+        store
+            .lookup_by_key(
+                tenant.as_str(),
+                "Order",
+                "ws_path",
+                &ws_path_hash("ws1", "/del")
+            )
+            .await
+            .unwrap()
+            .is_none(),
+        "deleted entity is not keyed"
+    );
+}
+
+/// Soundness gate (ADR-0153): an entity that EXISTS but whose journal cannot be read
+/// is classified `LoadFailed` — it must NOT be keyed AND must block the watermark
+/// (otherwise a keyed miss for it would wrongly read as authoritative absence). The
+/// backfill then resumes on a later run once the read succeeds. Without this, a
+/// transient journal-read error during backfill would silently produce a permanent
+/// wrong-absent.
+#[tokio::test]
+async fn key_index_backfill_loadfailed_entity_blocks_watermark_then_resumes() {
+    let (state, store) = build_order_state_with_sim("key-backfill-loadfail");
+    let tenant = TenantId::default();
+    let agent_ctx = AgentContext::for_service("loadfail-test");
+    let pid = format!("{tenant}:Order:ord-x");
+    state
+        .dispatch_tenant_action(
+            &tenant,
+            "Order",
+            "ord-x",
+            "Create",
+            serde_json::json!({}),
+            &agent_ctx,
+        )
+        .await
+        .expect("create");
+    let snap = serde_json::json!({
+        "entity_type": "Order", "entity_id": "ord-x", "status": "Draft", "item_count": 0,
+        "total_event_count": 1,
+        "fields": { "Id": "ord-x", "WorkspaceId": "ws1", "Path": "/x" },
+    });
+    store
+        .save_snapshot(&pid, 1, &serde_json::to_vec(&snap).unwrap())
+        .await
+        .expect("snap");
+
+    // Run 1: the entity's journal read fails → LoadFailed → type NOT watermarked,
+    // entity NOT keyed.
+    store.fail_next_reads(&pid, 1);
+    state.populate_key_index_from_snapshots(&tenant).await;
+    assert!(
+        !state.key_index_backfill_complete(&tenant, "Order").await,
+        "an unloadable entity must block the watermark"
+    );
+    assert!(
+        store
+            .lookup_by_key(
+                tenant.as_str(),
+                "Order",
+                "ws_path",
+                &ws_path_hash("ws1", "/x")
+            )
+            .await
+            .unwrap()
+            .is_none(),
+        "the unloadable entity must not be keyed"
+    );
+
+    // Run 2 (resume): the read now succeeds → entity keyed → type watermarked.
+    state.populate_key_index_from_snapshots(&tenant).await;
+    assert!(
+        state.key_index_backfill_complete(&tenant, "Order").await,
+        "backfill must resume and watermark once the read succeeds"
+    );
+    assert!(
+        store
+            .lookup_by_key(
+                tenant.as_str(),
+                "Order",
+                "ws_path",
+                &ws_path_hash("ws1", "/x")
+            )
+            .await
+            .unwrap()
+            .is_some(),
+        "the entity is keyed on resume"
+    );
+}
+
 /// C (ADR-0153): once the backfill watermark is set, a keyed read MISS is
 /// authoritative absence — the read returns empty WITHOUT the full-type scan that
 /// otherwise 413s at scale (ARN-68). Before the watermark, the same miss falls back
