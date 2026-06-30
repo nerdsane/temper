@@ -32,11 +32,11 @@ const TAG_NULL: u8 = b'0';
 ///
 /// `properties` is the declared key's property set **in declared order** (the
 /// order is part of the canonical form). For each property the entity's current
-/// scalar value is encoded as `(type_tag, canonical_text)`. A `null` value is a
-/// valid, indexable key component (e.g. a filesystem root's null `ParentId`).
-/// Returns `None` only if the key has no properties, or if any property is
-/// **absent** from `fields` or non-scalar — a partial key is not indexable, so the
-/// entity simply has no `entity_key_index` row for that key (still reachable by `Id`).
+/// scalar value is encoded as `(type_tag, canonical_text)`. A `null` value — or a
+/// property **absent** from `fields` (e.g. a filesystem root has no `ParentId`
+/// field at all) — is a valid, indexable key component encoded under `TAG_NULL`,
+/// matching OData's `prop eq null` semantics. Returns `None` only if the key has
+/// no properties, or if a **present** property is non-scalar (array/object).
 pub fn canonical_key_hash(
     key_name: &str,
     properties: &[String],
@@ -48,8 +48,16 @@ pub fn canonical_key_hash(
     let mut hasher = Sha256::new();
     hasher.update(key_name.as_bytes());
     hasher.update([UNIT_SEP]);
+    // A declared-key property that is ABSENT from the entity's fields is treated
+    // as null — consistent with OData, where `prop eq null` matches a missing
+    // field. This is what keys a filesystem root directory: it is created with no
+    // `ParentId` field at all (Directory has no ParentId state var), and the read
+    // looks it up by `ParentId eq null`. Absent and explicit-null therefore both
+    // index under TAG_NULL so the keyed read resolves the root instead of scanning.
+    let null = serde_json::Value::Null;
     for prop in properties {
-        let (tag, canon) = canonical_value(lookup_field(fields, prop)?)?;
+        let value = lookup_field(fields, prop).unwrap_or(&null);
+        let (tag, canon) = canonical_value(value)?;
         hasher.update([tag]);
         hasher.update(canon.as_bytes());
         hasher.update([RECORD_SEP]);
@@ -189,17 +197,60 @@ mod tests {
     }
 
     #[test]
-    fn absent_or_empty_key_yields_none_but_null_is_indexable() {
+    fn absent_and_null_key_components_are_indexable_as_null() {
         let props = vec!["WorkspaceId".to_string(), "Path".to_string()];
-        // ABSENT property (not in fields at all) -> not indexable.
+        // ABSENT property (not in fields at all) -> indexed as null...
         let missing = fields(&[("WorkspaceId", json!("ws1"))]);
-        assert!(canonical_key_hash("path", &props, &missing).is_none());
-        // NULL value present -> now a valid, indexable key component.
+        // ...and equal to an explicit-null value for the same property.
         let null_path = fields(&[("WorkspaceId", json!("ws1")), ("Path", json!(null))]);
-        assert!(canonical_key_hash("path", &props, &null_path).is_some());
+        assert_eq!(
+            canonical_key_hash("path", &props, &missing),
+            canonical_key_hash("path", &props, &null_path),
+            "absent and explicit-null must hash identically (OData eq-null semantics)"
+        );
+        assert!(canonical_key_hash("path", &props, &missing).is_some());
+        // A present non-empty value must differ from null/absent.
+        let present = fields(&[("WorkspaceId", json!("ws1")), ("Path", json!("/a.md"))]);
+        assert_ne!(
+            canonical_key_hash("path", &props, &present),
+            canonical_key_hash("path", &props, &missing)
+        );
         // no declared properties -> nothing to index.
         let f = fields(&[("WorkspaceId", json!("ws1"))]);
         assert!(canonical_key_hash("path", &[], &f).is_none());
+    }
+
+    #[test]
+    fn root_directory_absent_parentid_keys_and_matches_eq_null_read() {
+        // The real bug (ARN-68): the FS root Directory is created with no ParentId
+        // field at all (Directory has no ParentId state var). The WRITE/backfill
+        // hashes its actual fields {Name, WorkspaceId} (ParentId absent); the READ
+        // looks it up by `... and ParentId eq null`. Both must agree.
+        let key = vec![
+            "Name".to_string(),
+            "WorkspaceId".to_string(),
+            "ParentId".to_string(),
+        ];
+        // Write side: root entity fields — ParentId genuinely absent.
+        let root_fields = fields(&[("Name", json!("/")), ("WorkspaceId", json!("katagami"))]);
+        let write_hash =
+            canonical_key_hash("name_parent", &key, &root_fields).expect("absent ParentId indexes");
+
+        // Read side: `Name eq '/' and WorkspaceId eq 'katagami' and ParentId eq null`.
+        let decl = vec![DeclaredKey {
+            name: "name_parent".to_string(),
+            properties: key.clone(),
+        }];
+        let read_pairs = vec![
+            ("Name".to_string(), json!("/")),
+            ("WorkspaceId".to_string(), json!("katagami")),
+            ("ParentId".to_string(), serde_json::Value::Null),
+        ];
+        let (_, read_hash) = resolve_query_to_key(&decl, &read_pairs).expect("root read resolves");
+        assert_eq!(
+            write_hash, read_hash,
+            "absent-ParentId write must equal eq-null read — else the root lookup scans (413)"
+        );
     }
 
     fn path_key() -> Vec<DeclaredKey> {
