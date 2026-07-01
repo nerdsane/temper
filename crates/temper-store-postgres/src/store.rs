@@ -339,19 +339,24 @@ impl EventStore for PostgresEventStore {
         &self,
         tenant: &str,
         entity_type: &str,
+        key_set: &str,
     ) -> Result<(), PersistenceError> {
         let mut conn = self
             .pool
             .acquire()
             .await
             .map_err(|e| PersistenceError::Storage(e.to_string()))?;
+        // Upsert the covered key-set: a re-key after a key-set change must OVERWRITE the
+        // stale set (not DO NOTHING) so `complete` reflects the keys actually assigned.
         crate::dbm::postgres_query!(
-            "INSERT INTO key_index_backfill_watermark (tenant, entity_type) \
-             VALUES ($1, $2) \
-             ON CONFLICT (tenant, entity_type) DO NOTHING",
+            "INSERT INTO key_index_backfill_watermark (tenant, entity_type, key_set) \
+             VALUES ($1, $2, $3) \
+             ON CONFLICT (tenant, entity_type) \
+             DO UPDATE SET key_set = EXCLUDED.key_set, completed_at = now()",
         )
         .bind(tenant)
         .bind(entity_type)
+        .bind(key_set)
         .execute(&mut *conn)
         .await
         .map_err(|e| PersistenceError::Storage(e.to_string()))?;
@@ -361,20 +366,20 @@ impl EventStore for PostgresEventStore {
     async fn key_index_backfilled_types(
         &self,
         tenant: &str,
-    ) -> Result<Vec<String>, PersistenceError> {
+    ) -> Result<Vec<(String, String)>, PersistenceError> {
         let mut conn = self
             .pool
             .acquire()
             .await
             .map_err(|e| PersistenceError::Storage(e.to_string()))?;
-        let rows: Vec<(String,)> = crate::dbm::postgres_query_as!(
-            "SELECT entity_type FROM key_index_backfill_watermark WHERE tenant = $1",
+        let rows: Vec<(String, String)> = crate::dbm::postgres_query_as!(
+            "SELECT entity_type, key_set FROM key_index_backfill_watermark WHERE tenant = $1",
         )
         .bind(tenant)
         .fetch_all(&mut *conn)
         .await
         .map_err(|e| PersistenceError::Storage(e.to_string()))?;
-        Ok(rows.into_iter().map(|(entity_type,)| entity_type).collect())
+        Ok(rows.into_iter().collect())
     }
 
     async fn keyed_entity_ids_for_type(

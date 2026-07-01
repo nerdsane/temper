@@ -397,13 +397,14 @@ pub struct ServerState {
     /// "not found").
     pub entity_index_hydrated: Arc<RwLock<BTreeSet<String>>>,
     /// `{tenant}:{entity_type}` keys whose `entity_key_index` backfill is complete
-    /// (ADR-0153 watermark cache). Once present, a keyed read MISS on that type is
-    /// authoritative absence — the read plane answers "not found" without the
-    /// full-type reconcile scan that produces the 413 (ARN-68). Loaded lazily from
-    /// the durable watermark (see [`key_index_watermarks_loaded`]); never causes a
-    /// present entity to read as absent, only turns a 413-scan into an O(log n)
-    /// answer.
-    pub key_index_backfilled: Arc<RwLock<BTreeSet<String>>>,
+    /// `"tenant:entity_type" -> covered key-set` (ADR-0153 watermark cache). The value
+    /// is the sorted comma-joined declared key names the backfill covered. A keyed read
+    /// MISS on that type is authoritative absence ONLY when the covered key-set still
+    /// equals the currently-declared one — so a newly-declared, not-yet-backfilled key
+    /// never reads a present entity as absent (it falls back to the scan). This turns a
+    /// 413-scan into an O(log n) answer once the type is fully keyed (ARN-68). Loaded
+    /// lazily from the durable watermark (see [`key_index_watermarks_loaded`]).
+    pub key_index_backfilled: Arc<RwLock<BTreeMap<String, String>>>,
     /// Tenants whose durable watermarks have been read into `key_index_backfilled`
     /// at least once this run. Gates the one-time-per-tenant load on the read path.
     pub key_index_watermarks_loaded: Arc<RwLock<BTreeSet<String>>>,
@@ -681,7 +682,7 @@ impl ServerState {
             registry: Arc::new(RwLock::new(SpecRegistry::new())),
             entity_index: Arc::new(RwLock::new(BTreeMap::new())),
             entity_index_hydrated: Arc::new(RwLock::new(BTreeSet::new())),
-            key_index_backfilled: Arc::new(RwLock::new(BTreeSet::new())),
+            key_index_backfilled: Arc::new(RwLock::new(BTreeMap::new())),
             key_index_watermarks_loaded: Arc::new(RwLock::new(BTreeSet::new())),
             event_tx: Arc::new(event_tx),
             entity_observe_tx: Arc::new(entity_observe_tx),
@@ -929,7 +930,7 @@ impl ServerState {
             registry,
             entity_index: Arc::new(RwLock::new(BTreeMap::new())),
             entity_index_hydrated: Arc::new(RwLock::new(BTreeSet::new())),
-            key_index_backfilled: Arc::new(RwLock::new(BTreeSet::new())),
+            key_index_backfilled: Arc::new(RwLock::new(BTreeMap::new())),
             key_index_watermarks_loaded: Arc::new(RwLock::new(BTreeSet::new())),
             event_tx: Arc::new(event_tx),
             entity_observe_tx: Arc::new(entity_observe_tx),

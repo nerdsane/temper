@@ -99,12 +99,13 @@ pub trait DynEventStore: Send + Sync {
         &'a self,
         tenant: &'a str,
         entity_type: &'a str,
+        key_set: &'a str,
     ) -> EventStoreFuture<'a, Result<(), PersistenceError>>;
 
     fn key_index_backfilled_types<'a>(
         &'a self,
         tenant: &'a str,
-    ) -> EventStoreFuture<'a, Result<Vec<String>, PersistenceError>>;
+    ) -> EventStoreFuture<'a, Result<Vec<(String, String)>, PersistenceError>>;
 
     fn keyed_entity_ids_for_type<'a>(
         &'a self,
@@ -228,18 +229,20 @@ where
         &'a self,
         tenant: &'a str,
         entity_type: &'a str,
+        key_set: &'a str,
     ) -> EventStoreFuture<'a, Result<(), PersistenceError>> {
         Box::pin(EventStore::mark_key_index_backfilled(
             self,
             tenant,
             entity_type,
+            key_set,
         ))
     }
 
     fn key_index_backfilled_types<'a>(
         &'a self,
         tenant: &'a str,
-    ) -> EventStoreFuture<'a, Result<Vec<String>, PersistenceError>> {
+    ) -> EventStoreFuture<'a, Result<Vec<(String, String)>, PersistenceError>> {
         Box::pin(EventStore::key_index_backfilled_types(self, tenant))
     }
 
@@ -399,14 +402,17 @@ impl BoxedEventStore {
         &self,
         tenant: &str,
         entity_type: &str,
+        key_set: &str,
     ) -> Result<(), PersistenceError> {
-        self.0.mark_key_index_backfilled(tenant, entity_type).await
+        self.0
+            .mark_key_index_backfilled(tenant, entity_type, key_set)
+            .await
     }
 
     pub async fn key_index_backfilled_types(
         &self,
         tenant: &str,
-    ) -> Result<Vec<String>, PersistenceError> {
+    ) -> Result<Vec<(String, String)>, PersistenceError> {
         self.0.key_index_backfilled_types(tenant).await
     }
 

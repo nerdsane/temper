@@ -171,24 +171,31 @@ pub trait EventStore: Send + Sync + 'static {
     /// become authoritative (their keyed misses fall back to the scan — correct,
     /// just not bounded). Postgres co-commits and overrides this; the sim store does
     /// too for DST. The default is a no-op.
+    ///
+    /// `key_set` is the sorted, comma-joined declared key NAMES the backfill just
+    /// covered. It is recorded so a later declaration of an ADDITIONAL key is detected
+    /// as a key-set change (the recorded set no longer equals the current one) and the
+    /// type is re-keyed, instead of being wrongly treated as already complete.
     fn mark_key_index_backfilled(
         &self,
         tenant: &str,
         entity_type: &str,
+        key_set: &str,
     ) -> impl std::future::Future<Output = Result<(), PersistenceError>> + Send {
-        let _ = (tenant, entity_type);
+        let _ = (tenant, entity_type, key_set);
         async { Ok(()) }
     }
 
-    /// List the entity types whose `entity_key_index` backfill is complete for
-    /// `tenant` (the watermarks set by [`EventStore::mark_key_index_backfilled`]).
-    /// The read plane loads these into a cache so a keyed miss on a watermarked
-    /// type resolves to authoritative absence instead of a scan. Default empty
-    /// (no backend authority → every keyed miss stays scan-safe).
+    /// The `(entity_type, key_set)` watermarks for `tenant` — each type whose
+    /// `entity_key_index` backfill is complete, paired with the sorted comma-joined
+    /// declared key names it covered. The read plane caches these so a keyed miss on a
+    /// type resolves to authoritative absence ONLY when the covered key-set still equals
+    /// the currently-declared one. Default empty (no backend authority → scan-safe).
     fn key_index_backfilled_types(
         &self,
         tenant: &str,
-    ) -> impl std::future::Future<Output = Result<Vec<String>, PersistenceError>> + Send {
+    ) -> impl std::future::Future<Output = Result<Vec<(String, String)>, PersistenceError>> + Send
+    {
         let _ = tenant;
         async { Ok(Vec::new()) }
     }

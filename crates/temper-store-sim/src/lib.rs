@@ -152,10 +152,12 @@ struct SimEventStoreInner {
     /// deterministic reference for the negative-existence access path the real
     /// stores maintain in `entity_key_index`.
     key_index: BTreeMap<(String, String, String, String), String>,
-    /// ADR-0153 backfill watermark: `(tenant, entity_type)` pairs whose key index is
-    /// complete. The deterministic reference for the real stores'
-    /// `key_index_backfill_watermark` table — gates authoritative keyed absence.
-    key_index_watermark: BTreeSet<(String, String)>,
+    /// ADR-0153 backfill watermark: `(tenant, entity_type) -> key_set` — each completed
+    /// type mapped to the sorted comma-joined declared key names the backfill covered.
+    /// The deterministic reference for the real stores' `key_index_backfill_watermark`
+    /// table — gates authoritative keyed absence, and detects a key-set change so a
+    /// newly-declared key re-keys instead of being treated as already complete.
+    key_index_watermark: BTreeMap<(String, String), String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -183,7 +185,7 @@ impl SimEventStore {
                 pending_read_failures: BTreeMap::new(),
                 pending_append_delays: BTreeMap::new(),
                 key_index: BTreeMap::new(),
-                key_index_watermark: BTreeSet::new(),
+                key_index_watermark: BTreeMap::new(),
             })),
         }
     }
@@ -594,24 +596,28 @@ impl EventStore for SimEventStore {
         &self,
         tenant: &str,
         entity_type: &str,
+        key_set: &str,
     ) -> Result<(), PersistenceError> {
         let mut inner = self.inner.lock().expect("SimEventStore lock poisoned"); // ci-ok: infallible lock
-        inner
-            .key_index_watermark
-            .insert((tenant.to_string(), entity_type.to_string()));
+        // Overwrite the covered key-set (a re-key after a key-set change replaces the
+        // stale set), mirroring the Postgres upsert.
+        inner.key_index_watermark.insert(
+            (tenant.to_string(), entity_type.to_string()),
+            key_set.to_string(),
+        );
         Ok(())
     }
 
     async fn key_index_backfilled_types(
         &self,
         tenant: &str,
-    ) -> Result<Vec<String>, PersistenceError> {
+    ) -> Result<Vec<(String, String)>, PersistenceError> {
         let inner = self.inner.lock().expect("SimEventStore lock poisoned"); // ci-ok: infallible lock
         Ok(inner
             .key_index_watermark
             .iter()
-            .filter(|(t, _)| t.as_str() == tenant)
-            .map(|(_, et)| et.clone())
+            .filter(|((t, _), _)| t.as_str() == tenant)
+            .map(|((_, et), key_set)| (et.clone(), key_set.clone()))
             .collect())
     }
 

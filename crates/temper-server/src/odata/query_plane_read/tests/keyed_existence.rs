@@ -229,7 +229,7 @@ async fn directory_root_lookup_souls_scenario_with_real_key_and_duplicates() {
     state.populate_key_index_from_snapshots(&tenant).await;
     assert!(
         state
-            .key_index_backfill_complete(&tenant, "Directory")
+            .key_index_backfill_complete(&tenant, "Directory", "name_parent")
             .await,
         "Directory must watermark — duplicate roots are key-conflict skips, not failures"
     );
@@ -435,7 +435,7 @@ fn directory_root_souls_scenario_on_postgres() {
         state.populate_key_index_from_snapshots(&tenant).await;
         assert!(
             state
-                .key_index_backfill_complete(&tenant, "Directory")
+                .key_index_backfill_complete(&tenant, "Directory", "name_parent")
                 .await,
             "Directory must watermark on Postgres despite duplicate roots"
         );
@@ -748,7 +748,9 @@ async fn key_index_backfill_keys_store_entities_absent_from_the_lazy_index() {
 
     // Enumerated from the store and keyed both entities, and watermarked the type.
     assert!(
-        state.key_index_backfill_complete(&tenant, "Order").await,
+        state
+            .key_index_backfill_complete(&tenant, "Order", "ws_path")
+            .await,
         "Order must be watermarked after a clean backfill"
     );
     for (ws, path) in [("ws1", "/a"), ("ws1", "/b")] {
@@ -814,7 +816,11 @@ async fn key_index_backfill_skips_already_keyed_entities_and_still_watermarks() 
     state.populate_key_index_from_snapshots(&tenant).await;
 
     // ord-a was skipped via the already-keyed set; ord-b keyed fresh; type watermarked.
-    assert!(state.key_index_backfill_complete(&tenant, "Order").await);
+    assert!(
+        state
+            .key_index_backfill_complete(&tenant, "Order", "ws_path")
+            .await
+    );
     for (ws, path) in [("ws1", "/a"), ("ws1", "/b")] {
         assert!(
             store
@@ -867,7 +873,9 @@ async fn key_index_backfill_skips_deleted_entities_without_blocking_watermark() 
     state.populate_key_index_from_snapshots(&tenant).await;
 
     assert!(
-        state.key_index_backfill_complete(&tenant, "Order").await,
+        state
+            .key_index_backfill_complete(&tenant, "Order", "ws_path")
+            .await,
         "a deleted entity must not block the watermark"
     );
     assert!(
@@ -936,7 +944,9 @@ async fn key_index_backfill_loadfailed_entity_blocks_watermark_then_resumes() {
     store.fail_next_reads(&pid, 1);
     state.populate_key_index_from_snapshots(&tenant).await;
     assert!(
-        !state.key_index_backfill_complete(&tenant, "Order").await,
+        !state
+            .key_index_backfill_complete(&tenant, "Order", "ws_path")
+            .await,
         "an unloadable entity must block the watermark"
     );
     assert!(
@@ -956,7 +966,9 @@ async fn key_index_backfill_loadfailed_entity_blocks_watermark_then_resumes() {
     // Run 2 (resume): the read now succeeds → entity keyed → type watermarked.
     state.populate_key_index_from_snapshots(&tenant).await;
     assert!(
-        state.key_index_backfill_complete(&tenant, "Order").await,
+        state
+            .key_index_backfill_complete(&tenant, "Order", "ws_path")
+            .await,
         "backfill must resume and watermark once the read succeeds"
     );
     assert!(
@@ -1015,7 +1027,9 @@ async fn keyed_miss_returns_empty_without_scan_413_once_watermarked() {
     }
 
     // Watermark Order → a keyed miss is now authoritative absence.
-    state.mark_key_index_backfilled(&tenant, "Order").await;
+    state
+        .mark_key_index_backfilled(&tenant, "Order", "ws_path")
+        .await;
 
     let result = match read_entity_set_from_query_plane(QueryPlaneReadRequest {
         state: &state,
@@ -1036,5 +1050,144 @@ async fn keyed_miss_returns_empty_without_scan_413_once_watermarked() {
         result.telemetry.fallback_reason,
         QueryPlaneFallbackReason::KeyedAbsence,
         "the read must resolve via keyed absence, not a scan"
+    );
+}
+
+/// ARN-68: declaring an ADDITIONAL key on a type that was already backfilled must re-key
+/// the existing entities. The watermark is key-set aware, so a watermark that covered an
+/// EARLIER declaration is NOT treated as complete for the newly-declared key — the
+/// backfill force-re-keys every existing entity, and until it does the read must NOT
+/// claim authoritative absence for the new key (that would read a present entity as "not
+/// found", a silent wrong answer). Simulates the prod case behind ARN-68's second 413:
+/// directories keyed under `name_parent`, then `ws_path` added — next boot re-keys.
+#[tokio::test]
+async fn key_index_backfill_rekeys_existing_entities_when_a_key_is_added() {
+    let (state, store) = build_order_state_with_sim("key-rekey");
+    let tenant = TenantId::default();
+    let agent_ctx = AgentContext::for_service("key-rekey-test");
+
+    // Two orders that ALREADY have a key row under an OLDER key name, and whose
+    // ws_path-valued fields live in the snapshot — the exact prod shape: entities keyed
+    // under an earlier declaration (here `old_key`), the new key (`ws_path`) not yet
+    // assigned. The old-key rows put them in `keyed_entity_ids_for_type`, so the
+    // per-entity resumability skip WOULD skip them — this is what `force_full_rekey`
+    // must bypass. Without the bypass this test fails (ws_path never gets assigned).
+    for (eid, ws, path) in [("ord-rk-0", "ws1", "/a"), ("ord-rk-1", "ws1", "/b")] {
+        state
+            .dispatch_tenant_action(
+                &tenant,
+                "Order",
+                eid,
+                "Create",
+                serde_json::json!({}),
+                &agent_ctx,
+            )
+            .await
+            .expect("create order");
+        let snapshot = serde_json::json!({
+            "entity_type": "Order", "entity_id": eid, "status": "Draft", "item_count": 0,
+            "fields": { "Id": eid, "Status": "Draft", "WorkspaceId": ws, "Path": path },
+        });
+        store
+            .save_snapshot(
+                &format!("{tenant}:Order:{eid}"),
+                1,
+                &serde_json::to_vec(&snapshot).unwrap(),
+            )
+            .await
+            .expect("seed snapshot");
+        // Key it under the OLD key only (so it appears already-keyed for resumability).
+        store
+            .backfill_entity_keys(
+                tenant.as_str(),
+                "Order",
+                eid,
+                &[temper_runtime::persistence::EntityKeyRow {
+                    key_name: "old_key".to_string(),
+                    key_hash: format!("old-hash-{eid}"),
+                }],
+            )
+            .await
+            .expect("pre-key under the old key");
+    }
+    state.entity_index.write().unwrap().clear();
+    state.entity_index_hydrated.write().unwrap().clear();
+
+    // Watermarked under the earlier declaration (`old_key`), which did NOT cover ws_path.
+    state
+        .mark_key_index_backfilled(&tenant, "Order", "old_key")
+        .await;
+
+    // Read gate: covered ("old_key") != current ("ws_path"), so the type reads as
+    // INCOMPLETE for ws_path — a ws_path miss falls back to the scan, never a wrong absent.
+    assert!(
+        !state
+            .key_index_backfill_complete(&tenant, "Order", "ws_path")
+            .await,
+        "a stale watermark covering a different key-set must read as incomplete for the new key"
+    );
+    // The entities ARE already-keyed (under old_key) — so the resumability skip would
+    // exclude them; only force_full_rekey re-processes them.
+    assert!(
+        !store
+            .keyed_entity_ids_for_type(tenant.as_str(), "Order")
+            .await
+            .unwrap()
+            .is_empty(),
+        "precondition: entities appear already-keyed (old_key), so the resume-skip would skip them"
+    );
+    assert!(
+        store
+            .lookup_by_key(
+                tenant.as_str(),
+                "Order",
+                "ws_path",
+                &ws_path_hash("ws1", "/a")
+            )
+            .await
+            .unwrap()
+            .is_none(),
+        "precondition: not yet keyed for the newly-added ws_path key"
+    );
+
+    // Re-run the backfill: covered != current declared → force-full re-key of every
+    // existing entity, then re-watermark with the current key-set.
+    state.populate_key_index_from_snapshots(&tenant).await;
+
+    assert!(
+        state
+            .key_index_backfill_complete(&tenant, "Order", "ws_path")
+            .await,
+        "after the re-key the type is complete for the current declared key-set"
+    );
+    for (eid, ws, path) in [("ord-rk-0", "ws1", "/a"), ("ord-rk-1", "ws1", "/b")] {
+        assert_eq!(
+            store
+                .lookup_by_key(tenant.as_str(), "Order", "ws_path", &ws_path_hash(ws, path))
+                .await
+                .unwrap()
+                .as_deref(),
+            Some(eid),
+            "the added key resolves the pre-existing entity after the re-key"
+        );
+    }
+}
+
+#[test]
+fn declared_key_set_signature_is_sorted_and_joined() {
+    use temper_jit::table::types::DeclaredKey;
+    let key = |name: &str| DeclaredKey {
+        name: name.to_string(),
+        properties: vec!["WorkspaceId".to_string(), "Path".to_string()],
+    };
+    // Order-independent, comma-joined, sorted by name.
+    assert_eq!(
+        crate::key_index::declared_key_set_signature(&[key("ws_path"), key("name_parent")]),
+        "name_parent,ws_path"
+    );
+    assert_eq!(crate::key_index::declared_key_set_signature(&[]), "");
+    assert_eq!(
+        crate::key_index::declared_key_set_signature(&[key("only")]),
+        "only"
     );
 }
