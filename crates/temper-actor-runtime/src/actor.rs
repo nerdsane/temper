@@ -99,12 +99,6 @@ pub enum ActorError {
     Internal(String),
 }
 
-/// Budget for outbound tells buffered during a single activation.
-///
-/// Generously above any legitimate fan-out; hitting it means a runaway
-/// tell() loop, which fails fast instead of growing without bound.
-const MAX_PENDING_TELLS_PER_ACTIVATION: usize = 10_000;
-
 /// The actor's interface to the system. Passed to `handle()`.
 ///
 /// Provides identity, spawning, lookup, and messaging (tell/ask).
@@ -192,35 +186,18 @@ impl ActorContext {
     /// activation transaction succeeds. If handle() fails, tells are discarded.
     /// Message type is auto-derived from the proto type name.
     pub async fn tell<M: prost::Message>(&self, to: &ActorHandle, msg: M) {
-        self.push_pending_tell(BufferedTell {
+        self.pending_tells.lock().await.push(BufferedTell {
             to: to.clone(),
             message_type: type_name_of::<M>(),
             payload: msg.encode_to_vec(),
             correlation_id: None,
-        })
-        .await;
-    }
-
-    /// Buffer an outbound tell, enforcing the per-activation budget.
-    ///
-    /// TigerStyle: all mailboxes are bounded. The buffer lives for a single
-    /// activation, so exhausting the budget means a runaway tell() loop —
-    /// fail fast so the activation transaction rolls back instead of OOMing.
-    async fn push_pending_tell(&self, tell: BufferedTell) {
-        let mut tells = self.pending_tells.lock().await;
-        assert!(
-            tells.len() < MAX_PENDING_TELLS_PER_ACTIVATION,
-            "pending_tells budget ({MAX_PENDING_TELLS_PER_ACTIVATION}) exhausted in actor {}/{}: runaway tell() loop",
-            self.self_handle.namespace,
-            self.self_handle.actor_type,
-        );
-        tells.push(tell);
+        });
     }
 
     /// Reply to an ask() message. Convenience for tell() with correlation_id set.
     pub async fn reply<M: prost::Message>(&self, original: &Message, msg: M) {
         if let Some(cid) = original.correlation_id {
-            self.push_pending_tell(BufferedTell {
+            self.pending_tells.lock().await.push(BufferedTell {
                 to: original
                     .from
                     .clone()
@@ -228,8 +205,7 @@ impl ActorContext {
                 message_type: type_name_of::<M>(),
                 payload: msg.encode_to_vec(),
                 correlation_id: Some(cid),
-            })
-            .await;
+            });
         }
     }
 
