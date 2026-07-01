@@ -33,6 +33,15 @@ pub(super) fn transition_table_for(
     })
 }
 
+/// Backfill the broad `entity_field_index` (every field of every entity) so the native
+/// AND-equality candidate pushdown can bound any non-keyed point lookup (e.g. `Path eq
+/// '/souls' and WorkspaceId eq …`) instead of full-scanning and 413ing at tenant scale
+/// (ARN-68). Enumerates authoritatively (registry types + `store.list_entity_ids_by_type`),
+/// loads each entity's current state from its snapshot (or event replay), and upserts the
+/// query projection. Idempotent (re-runs converge; it re-processes every entity — there
+/// is no watermark/skip like the key-index backfill has); runs as a background task off
+/// the boot path. This is the generic counterpart to the declared-key backfill — covers ALL
+/// types, where the key backfill covers only declared-key shapes (incl. null components).
 pub(super) async fn populate_field_index_from_snapshots(state: &ServerState, tenant: &TenantId) {
     let overall_started_at = Instant::now(); // determinism-ok: production-only backfill duration metric
     let Some((store, backend)) = state.event_journal() else {
@@ -42,14 +51,39 @@ pub(super) async fn populate_field_index_from_snapshots(state: &ServerState, ten
         return;
     };
 
+    // Enumerate authoritatively: every entity type from the registry, and its entity
+    // ids from `store.list_entity_ids_by_type`. It must NOT read `state.entity_index`,
+    // which is populated only when an actor spawns (lazy) and is therefore near-empty at
+    // boot — the original bug that left pre-existing entities out of the field index, so
+    // their non-keyed equality lookups (e.g. `Path eq '/souls' and WorkspaceId eq …`)
+    // fell back to the full-type scan and 413'd at tenant scale (ARN-68). This mirrors
+    // the authoritative enumeration the declared-key backfill already uses; the field
+    // index covers ALL types (not just keyed ones), so no key filter is applied.
     let entities = {
-        let index = state.entity_index.read().unwrap();
+        let entity_types: Vec<String> = {
+            let registry = state.registry.read().unwrap();
+            registry
+                .entity_types(tenant)
+                .into_iter()
+                .map(ToString::to_string)
+                .collect()
+        };
         let mut result = Vec::new();
-        for (index_key, ids) in index.iter() {
-            let prefix = format!("{tenant}:");
-            if let Some(entity_type) = index_key.strip_prefix(&prefix) {
-                for id in ids {
-                    result.push((entity_type.to_string(), id.clone()));
+        for entity_type in &entity_types {
+            match store
+                .list_entity_ids_by_type(tenant.as_str(), entity_type)
+                .await
+            {
+                Ok(ids) => {
+                    for id in ids {
+                        result.push((entity_type.clone(), id));
+                    }
+                }
+                Err(e) => {
+                    tracing::error!(
+                        tenant = %tenant, entity_type = %entity_type, error = %e,
+                        "field index backfill: failed to enumerate entities; type skipped"
+                    );
                 }
             }
         }
@@ -158,6 +192,10 @@ pub(super) async fn populate_field_index_from_snapshots(state: &ServerState, ten
                 );
             }
         }
+        // Phase 1 now iterates EVERY entity (not the near-empty lazy index), so yield
+        // between entities for cooperative back-pressure on large tenants — mirroring
+        // phase 2 and the key-index backfill.
+        tokio::task::yield_now().await;
     }
 
     tracing::info!(

@@ -501,6 +501,156 @@ fn directory_root_souls_scenario_on_postgres() {
     });
 }
 
+/// ARN-68 (generic bound): the FIELD-index backfill must enumerate authoritatively
+/// (registry + `store.list_entity_ids_by_type`), not the lazy `entity_index`. The flow
+/// looks up directories by `Path` (e.g. `Path eq '/souls' and WorkspaceId eq …`), which
+/// is NOT a declared key — so it relies on the field index. If the backfill reads the
+/// lazy index (near-empty at boot), pre-existing dirs stay unindexed and that lookup
+/// falls back to the full scan → 413 at scale. Proven on real Postgres: with the field
+/// index empty the Path lookup 413s, and after the (authoritative) backfill it binds via
+/// the native page. Gated on DATABASE_URL; unique tenant.
+#[test]
+fn field_index_backfill_bounds_non_keyed_path_lookup_on_postgres() {
+    use temper_runtime::scheduler::sim_uuid as runtime_sim_uuid;
+    let database_url = match std::env::var("DATABASE_URL") {
+        Ok(url) => url,
+        Err(_) => return,
+    };
+    sqlx::test_block_on(async {
+        let pool = sqlx::PgPool::connect(&database_url).await.unwrap();
+        temper_store_postgres::migration::run_migrations(&pool)
+            .await
+            .unwrap();
+        let store = temper_store_postgres::PostgresEventStore::new(pool.clone());
+        let tenant = TenantId::from(format!("fieldidx-pg-{}", runtime_sim_uuid()));
+        let csdl = parse_csdl(CSDL_XML).expect("CSDL parses");
+        let mut registry = SpecRegistry::new();
+        registry.register_tenant(
+            tenant.as_str(),
+            csdl,
+            CSDL_XML.to_string(),
+            &[("Order", ORDER_IOA), ("Directory", DIRECTORY_IOA)],
+        );
+        let mut state = ServerState::from_registry(ActorSystem::new("fieldidx-pg"), registry);
+        state.set_storage_stack(StorageStack::from_postgres(store.clone()));
+        let agent_ctx = AgentContext::for_service("fieldidx-pg-test");
+        let security_ctx = SecurityContext::system();
+
+        // root + /souls + padding (> budget). `/souls` is looked up by Path (non-keyed).
+        pg_seed_dir(
+            &state,
+            &tenant,
+            &agent_ctx,
+            "fx-root",
+            ("/", "/", "wsA", None),
+        )
+        .await;
+        pg_seed_dir(
+            &state,
+            &tenant,
+            &agent_ctx,
+            "fx-souls",
+            ("souls", "/souls", "wsA", Some("fx-root")),
+        )
+        .await;
+        for i in 0..13 {
+            pg_seed_dir(
+                &state,
+                &tenant,
+                &agent_ctx,
+                &format!("fx-sub-{i}"),
+                (
+                    &format!("sub{i}"),
+                    &format!("/sub{i}"),
+                    "wsA",
+                    Some("fx-root"),
+                ),
+            )
+            .await;
+        }
+
+        // Fresh-boot, pre-existing-data state: the lazy index is empty (what the pre-fix
+        // backfill read), and the field index has no rows for these dirs (as it would for
+        // entities written before the projection existed). Clearing both is the exact
+        // "old dirs the backfill must reach" condition.
+        state.entity_index.write().unwrap().clear();
+        state.entity_index_hydrated.write().unwrap().clear();
+        sqlx::query("DELETE FROM entity_field_index WHERE tenant = $1")
+            .bind(tenant.as_str())
+            .execute(&pool)
+            .await
+            .unwrap();
+
+        let budget = QueryPlaneReadBudget {
+            default_page_size: 1,
+            max_entities: 1,
+        };
+        // `Path eq '/souls' and WorkspaceId eq 'wsA'` — non-keyed; needs the field index.
+        let eq = |p: &str, v: &str| FilterExpr::BinaryOp {
+            left: Box::new(FilterExpr::Property(p.to_string())),
+            op: BinaryOperator::Eq,
+            right: Box::new(FilterExpr::Literal(ODataValue::String(v.to_string()))),
+        };
+        let qo = QueryOptions {
+            filter: Some(FilterExpr::BinaryOp {
+                left: Box::new(eq("Path", "/souls")),
+                op: BinaryOperator::And,
+                right: Box::new(eq("WorkspaceId", "wsA")),
+            }),
+            ..QueryOptions::default()
+        };
+
+        // (1) Field index empty (pre-existing dirs unindexed): the non-keyed Path lookup
+        // enumerates the full type from the store (> budget) with nothing to narrow it →
+        // 413 QueryTooLarge — exactly the prod failure.
+        match read_entity_set_from_query_plane(QueryPlaneReadRequest {
+            state: &state,
+            tenant: &tenant,
+            security_ctx: &security_ctx,
+            entity_type: "Directory",
+            entity_set_name: "Directories",
+            query_options: &qo,
+            budget,
+        })
+        .await
+        {
+            Err(QueryPlaneReadError::QueryTooLarge { .. }) => {}
+            Ok(_) => panic!("expected 413 for the Path lookup before the field-index backfill"),
+            Err(_) => panic!("expected QueryTooLarge before the field-index backfill"),
+        }
+
+        // (2) The FIXED field-index backfill enumerates authoritatively (registry +
+        // store), NOT the cleared lazy index, and indexes the pre-existing dirs. The OLD
+        // lazy-index enumeration would index nothing here and /souls would stay invisible.
+        // The enumeration has NO declared-key branch (unlike the key-index backfill), so
+        // it covers every registered type identically — keyed or not; this case exercises
+        // a non-key FIELD (`Path`) on a keyed type, which is the field index's job.
+        state.populate_field_index_from_snapshots(&tenant).await;
+
+        // (3) The same Path lookup now binds via the native page and finds /souls — proof
+        // the backfill populated the field index for entities absent from the lazy index.
+        let r = match read_entity_set_from_query_plane(QueryPlaneReadRequest {
+            state: &state,
+            tenant: &tenant,
+            security_ctx: &security_ctx,
+            entity_type: "Directory",
+            entity_set_name: "Directories",
+            query_options: &qo,
+            budget,
+        })
+        .await
+        {
+            Ok(r) => r,
+            Err(_) => panic!("Path lookup must bind via the field index after the backfill"),
+        };
+        assert_eq!(
+            r.entities.len(),
+            1,
+            "the authoritative field-index backfill makes the non-keyed Path lookup resolve /souls"
+        );
+    });
+}
+
 /// `WorkspaceId eq <ws> and Path eq <path>` — the shape that resolves to Order's
 /// declared `ws_path` key.
 fn ws_path_filter(ws: &str, path: &str) -> FilterExpr {
