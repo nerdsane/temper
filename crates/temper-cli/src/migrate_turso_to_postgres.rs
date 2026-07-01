@@ -16,7 +16,31 @@ use temper_store_turso::{
 };
 
 const GLOBAL_TENANT: &str = "*";
-const MAX_ROWS: i64 = i64::MAX;
+
+/// Bound on rows fetched from any single Turso source table.
+///
+/// The Turso list APIs used here (`load_recent_trajectories`,
+/// `load_recent_wasm_invocations`, `list_design_time_events`,
+/// `list_ots_trajectories`, `list_blobs`) are LIMIT-only — they expose no
+/// offset/keyset pagination — so every fetched row is held in memory at once.
+/// This bound keeps the tool from OOMing on large tenants. Hitting the bound
+/// aborts the migration loudly (see [`ensure_row_bound`]) instead of silently
+/// truncating, which would break the manifest checksum guarantees.
+const MAX_ROWS: i64 = 100_000;
+
+/// Fail loudly when a table load fills the entire [`MAX_ROWS`] budget: the
+/// result may be truncated, and migrating it would silently drop source rows.
+fn ensure_row_bound(table: &str, fetched: usize) -> Result<()> {
+    if fetched as i64 >= MAX_ROWS {
+        return Err(anyhow!(
+            "source table {table} returned {fetched} rows, filling the migration row bound of \
+             {MAX_ROWS}; aborting instead of migrating a possibly-truncated result. The Turso \
+             list APIs do not paginate, so raise MAX_ROWS (and provision memory accordingly) or \
+             migrate this table out-of-band"
+        ));
+    }
+    Ok(())
+}
 
 pub(crate) struct MigrationOptions {
     pub tenant: String,
@@ -653,9 +677,9 @@ async fn migrate_trajectories(
     dry_run: bool,
     builder: &mut ManifestBuilder,
 ) -> Result<()> {
-    let rows = source
-        .load_recent_trajectories(MAX_ROWS)
-        .await?
+    let all_rows = source.load_recent_trajectories(MAX_ROWS).await?;
+    ensure_row_bound("trajectories", all_rows.len())?;
+    let rows = all_rows
         .into_iter()
         .filter(|row| row.tenant == tenant)
         .collect::<Vec<_>>();
@@ -811,9 +835,9 @@ async fn migrate_wasm_invocations(
     dry_run: bool,
     builder: &mut ManifestBuilder,
 ) -> Result<()> {
-    let rows = source
-        .load_recent_wasm_invocations(MAX_ROWS)
-        .await?
+    let all_rows = source.load_recent_wasm_invocations(MAX_ROWS).await?;
+    ensure_row_bound("wasm_invocation_logs", all_rows.len())?;
+    let rows = all_rows
         .into_iter()
         .filter(|row| row.tenant == tenant)
         .collect::<Vec<_>>();
@@ -878,6 +902,7 @@ async fn migrate_design_time_events(
     let rows = source
         .list_design_time_events(Some(tenant), MAX_ROWS)
         .await?;
+    ensure_row_bound("design_time_events", rows.len())?;
     builder.record_source(
         tenant,
         "design_time_events",
@@ -936,6 +961,7 @@ async fn migrate_ots_trajectories(
     let rows = source
         .list_ots_trajectories(tenant, None, None, MAX_ROWS)
         .await?;
+    ensure_row_bound("ots_trajectories", rows.len())?;
     let mut values = Vec::new();
     let mut rows_with_data = Vec::new();
     for row in rows {
@@ -1075,6 +1101,14 @@ async fn migrate_policy_denial_patterns(
     Ok(())
 }
 
+/// Migrate `entity_catalog` rows via `upsert_query_projection`.
+///
+/// `entity_field_index` is intentionally NOT migrated as a table: it is
+/// derived data. The Postgres `upsert_query_projection` rebuilds the per-field
+/// index rows from the projected `fields` JSON inside the same transaction
+/// (see `reconcile_query_projection_field_index` in
+/// `temper-store-postgres/src/platform/projection.rs`), so migrating the
+/// catalog repopulates the field index as a side effect.
 async fn migrate_query_projections(
     source: &TursoEventStore,
     target: &PostgresEventStore,
@@ -1217,6 +1251,7 @@ async fn migrate_blobs(
         .list_blobs(MAX_ROWS)
         .await
         .map_err(|err| anyhow!(err))?;
+    ensure_row_bound("blobs", rows.len())?;
     builder.record_source(
         GLOBAL_TENANT,
         "blobs",
@@ -2114,6 +2149,10 @@ mod tests {
             "ots_trajectories",
             "tenant_secrets",
             "policy_denial_patterns",
+            // entity_field_index has no migrate_* function (it is derived:
+            // upsert_query_projection rebuilds it from entity_catalog.fields),
+            // but the smoke migration populates it as a side effect, so the
+            // cleanup must still delete the derived rows.
             "entity_field_index",
             "entity_catalog",
         ] {

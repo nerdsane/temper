@@ -264,8 +264,8 @@ fn parse_key_value(key_str: &str) -> Result<KeyValue, ODataError> {
             if let Some(eq_pos) = part.find('=') {
                 let name = part[..eq_pos].trim().to_string();
                 let value = part[eq_pos + 1..].trim().to_string();
-                // Strip quotes from value if present
-                let value = strip_quotes(&value);
+                // Unquote the value if present (collapses '' escapes).
+                let value = parse_key_literal(&value)?;
                 pairs.push((name, value));
             } else {
                 return Err(ODataError::InvalidPath {
@@ -275,8 +275,8 @@ fn parse_key_value(key_str: &str) -> Result<KeyValue, ODataError> {
         }
         Ok(KeyValue::Composite(pairs))
     } else {
-        // Single key value — strip surrounding quotes if present
-        let value = strip_quotes(key_str);
+        // Single key value — unquote if present (collapses '' escapes).
+        let value = parse_key_literal(key_str)?;
         Ok(KeyValue::Single(value))
     }
 }
@@ -328,13 +328,52 @@ fn split_composite_key(s: &str) -> Result<Vec<String>, ODataError> {
     Ok(parts)
 }
 
-/// Strip surrounding single quotes from a string.
-fn strip_quotes(s: &str) -> String {
-    if s.len() >= 2 && s.starts_with('\'') && s.ends_with('\'') {
-        s[1..s.len() - 1].to_string()
-    } else {
-        s.to_string()
+/// Parse an OData key literal, unquoting single-quoted strings.
+///
+/// Per OData v4 (ABNF `string` rule), a single quote inside a quoted
+/// literal is escaped by doubling it: `'abc''123'` denotes the value
+/// `abc'123`. A bare (un-doubled) quote inside the literal, trailing
+/// text after the closing quote, and an unterminated literal are all
+/// parse errors. Unquoted literals (integers, GUIDs) are returned
+/// unchanged but must not contain quote characters.
+fn parse_key_literal(s: &str) -> Result<String, ODataError> {
+    let Some(interior) = s.strip_prefix('\'') else {
+        // Unquoted literal (integer, GUID, …) — quotes are not allowed.
+        if s.contains('\'') {
+            return Err(ODataError::InvalidPath {
+                message: format!("unquoted key literal '{s}' contains a single quote"),
+            });
+        }
+        return Ok(s.to_string());
+    };
+
+    let mut value = String::with_capacity(interior.len());
+    let mut chars = interior.chars().peekable();
+    while let Some(ch) = chars.next() {
+        if ch != '\'' {
+            value.push(ch);
+            continue;
+        }
+        // Doubled quote — an escaped literal quote.
+        if chars.peek() == Some(&'\'') {
+            chars.next();
+            value.push('\'');
+            continue;
+        }
+        // Lone quote — closes the literal; it must be the final character.
+        if chars.next().is_some() {
+            return Err(ODataError::InvalidPath {
+                message: format!(
+                    "invalid key literal {s}: quotes inside a key must be escaped as ''"
+                ),
+            });
+        }
+        return Ok(value);
     }
+
+    Err(ODataError::InvalidPath {
+        message: format!("unterminated quote in key literal {s}"),
+    })
 }
 
 /// Validate that a string is a valid OData identifier.
@@ -544,6 +583,84 @@ mod tests {
                     key: KeyValue::Single("i-1".into()),
                 }),
                 action: "RemoveItem".into(),
+            }
+        );
+    }
+
+    #[test]
+    fn parse_entity_key_with_escaped_quote() {
+        // OData escapes a quote inside a key literal by doubling it.
+        assert_eq!(
+            parse_path("/Orders('abc''123')").unwrap(),
+            ODataPath::Entity("Orders".into(), KeyValue::Single("abc'123".into()))
+        );
+    }
+
+    #[test]
+    fn parse_entity_key_only_escaped_quote() {
+        // '''' is a quoted literal containing exactly one quote.
+        assert_eq!(
+            parse_path("/Orders('''')").unwrap(),
+            ODataPath::Entity("Orders".into(), KeyValue::Single("'".into()))
+        );
+    }
+
+    #[test]
+    fn parse_entity_key_empty_quoted_string() {
+        assert_eq!(
+            parse_path("/Orders('')").unwrap(),
+            ODataPath::Entity("Orders".into(), KeyValue::Single(String::new()))
+        );
+    }
+
+    #[test]
+    fn parse_entity_key_bare_interior_quote_rejected() {
+        // A lone quote inside the literal must be escaped as ''.
+        assert!(parse_path("/Orders('abc'123')").is_err());
+    }
+
+    #[test]
+    fn parse_entity_key_unterminated_quote_rejected() {
+        assert!(parse_path("/Orders('abc)").is_err());
+    }
+
+    #[test]
+    fn parse_entity_key_unquoted_with_quote_rejected() {
+        assert!(parse_path("/Orders(abc'def)").is_err());
+    }
+
+    #[test]
+    fn parse_composite_key_with_escaped_quotes() {
+        let result = parse_path("/OrderItems(OrderId='a''b',LineNo='2''')").unwrap();
+        assert_eq!(
+            result,
+            ODataPath::Entity(
+                "OrderItems".into(),
+                KeyValue::Composite(vec![
+                    ("OrderId".into(), "a'b".into()),
+                    ("LineNo".into(), "2'".into()),
+                ])
+            )
+        );
+    }
+
+    #[test]
+    fn parse_composite_key_bare_quote_rejected() {
+        assert!(parse_path("/OrderItems(OrderId='a'b',LineNo=1)").is_err());
+    }
+
+    #[test]
+    fn parse_navigation_entity_key_with_escaped_quote() {
+        let result = parse_path("/Orders('o''1')/Items('i''2')").unwrap();
+        assert_eq!(
+            result,
+            ODataPath::NavigationEntity {
+                parent: Box::new(ODataPath::Entity(
+                    "Orders".into(),
+                    KeyValue::Single("o'1".into())
+                )),
+                property: "Items".into(),
+                key: KeyValue::Single("i'2".into()),
             }
         );
     }

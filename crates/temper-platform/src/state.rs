@@ -1,16 +1,12 @@
 //! Platform state shared across all handlers.
 //!
 //! [`PlatformState`] extends `ServerState` with the broadcast channel
-//! for internal event propagation, evolution record storage, and the
-//! Claude API key for agentic evolution.
+//! for internal event propagation and the Claude API key.
 
 use std::sync::{Arc, RwLock};
 
 use tokio::sync::broadcast;
 
-#[allow(deprecated)]
-// ADR-0025 Phase 4: remove after feedback.rs migrated to IOA entity dispatch
-use temper_evolution::store::RecordStore;
 use temper_runtime::ActorSystem;
 use temper_server::ServerState;
 use temper_server::registry::SpecRegistry;
@@ -23,10 +19,9 @@ use crate::spec_store::SpecStore;
 /// Shared state for the Temper hosting platform.
 ///
 /// Wraps `ServerState` and adds platform-specific facilities:
-/// broadcast channel for internal event propagation, evolution records,
-/// and the Claude API key for agentic evolution agents.
+/// broadcast channel for internal event propagation and the
+/// Claude API key.
 #[derive(Clone)]
-// ADR-0025 Phase 4: remove record_store field after IOA entity migration complete
 pub struct PlatformState {
     /// The underlying server state (OData routing, actor dispatch).
     pub server: ServerState,
@@ -34,10 +29,7 @@ pub struct PlatformState {
     pub registry: Arc<RwLock<SpecRegistry>>,
     /// Broadcast sender for platform events (deploy, verify, evolution, etc.).
     pub broadcast_tx: broadcast::Sender<PlatformEvent>,
-    /// Evolution record store.
-    #[allow(deprecated)] // ADR-0025 Phase 4
-    pub record_store: RecordStore,
-    /// Anthropic API key for Claude-powered evolution agents.
+    /// Anthropic API key for Claude-powered agents.
     pub api_key: Option<String>,
     /// Bearer token for API authentication (`TEMPER_API_KEY`).
     pub api_token: Option<String>,
@@ -69,7 +61,6 @@ permit(
 );
 "#;
 
-#[allow(deprecated)] // RecordStore retained during migration to IOA entities (ADR-0025)
 impl PlatformState {
     /// Create a new platform state with an empty registry.
     pub fn new(api_key: Option<String>) -> Self {
@@ -96,7 +87,6 @@ impl PlatformState {
             server,
             registry,
             broadcast_tx,
-            record_store: RecordStore::new(),
             api_key,
             api_token: None,
             spec_store,
@@ -133,7 +123,6 @@ impl PlatformState {
             server,
             registry,
             broadcast_tx,
-            record_store: RecordStore::new(),
             api_key,
             api_token: None,
             spec_store,

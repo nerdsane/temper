@@ -6567,6 +6567,7 @@ dependencies = [
  "temper-runtime",
  "thiserror 2.0.18",
  "tokio",
+ "tracing",
 ]
 
 [[package]]
@@ -6598,7 +6599,6 @@ dependencies = [
  "sha2 0.10.9",
  "temper-authz",
  "temper-codegen",
- "temper-evolution",
  "temper-jit",
  "temper-observe",
  "temper-optimize",

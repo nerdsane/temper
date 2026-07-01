@@ -57,7 +57,10 @@ impl QueryOptimizer {
 
         let result_set = match result {
             Ok(rs) => rs,
-            Err(_) => return,
+            Err(e) => {
+                tracing::warn!(error = %e, "N+1 detection skipped: span query failed");
+                return;
+            }
         };
 
         // Group operations by trace_id to find repeated patterns.
@@ -128,7 +131,10 @@ impl QueryOptimizer {
 
         let result_set = match result {
             Ok(rs) => rs,
-            Err(_) => return,
+            Err(e) => {
+                tracing::warn!(error = %e, "slow-query detection skipped: span query failed");
+                return;
+            }
         };
 
         let slow_threshold_ns: f64 = 50_000_000.0; // 50ms

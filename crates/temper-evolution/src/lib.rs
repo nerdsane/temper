@@ -13,6 +13,7 @@ pub mod chain;
 pub mod gepa;
 pub mod insight;
 pub mod pg_store;
+pub mod prompts;
 pub mod records;
 pub mod store;
 
