@@ -27,6 +27,17 @@ const TAG_BOOL: u8 = b'B';
 /// `ParentId`), tagged so it can never collide with the empty string.
 const TAG_NULL: u8 = b'0';
 
+/// The stable signature of a type's declared key-set: the sorted, comma-joined key
+/// NAMES. Recorded in the key-index backfill watermark and compared on read, so that
+/// declaring an ADDITIONAL key (a changed signature) re-keys the type instead of being
+/// treated as already complete, and a keyed read only trusts absence once the full
+/// current key-set is backfilled (ARN-68). Deterministic (sorted, no map iteration).
+pub fn declared_key_set_signature(keys: &[DeclaredKey]) -> String {
+    let mut names: Vec<&str> = keys.iter().map(|key| key.name.as_str()).collect();
+    names.sort();
+    names.join(",")
+}
+
 /// Canonical `key_hash` for a declared key's values, or `None` when the key is
 /// not fully present.
 ///

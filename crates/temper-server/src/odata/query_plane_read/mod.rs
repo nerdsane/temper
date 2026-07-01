@@ -66,9 +66,13 @@ async fn keyed_candidate_ids(request: &QueryPlaneReadRequest<'_>) -> Option<Vec<
             // 413). Before the watermark, a missing row may be a pre-backfill entity,
             // so we fall back to the scan (correct, just not bounded). This is the
             // retirement of #324's reconcile scan, gated per ADR-0153.
+            // Authoritative absence requires the CURRENT declared key-set to be fully
+            // backfilled — otherwise a just-declared key (e.g. a newly-added `ws_path`)
+            // whose rows are not yet assigned would make a present entity read as absent.
+            let current_key_set = crate::key_index::declared_key_set_signature(&keys);
             if request
                 .state
-                .key_index_backfill_complete(request.tenant, request.entity_type)
+                .key_index_backfill_complete(request.tenant, request.entity_type, &current_key_set)
                 .await
             {
                 Some(Vec::new())

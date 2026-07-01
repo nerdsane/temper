@@ -156,21 +156,31 @@ fn key_index_backfill_and_watermark_methods_round_trip_on_postgres() {
                 .is_empty()
         );
         store
-            .mark_key_index_backfilled(&tenant, "Directory")
+            .mark_key_index_backfilled(&tenant, "Directory", "name_parent")
             .await
             .unwrap();
         assert_eq!(
             store.key_index_backfilled_types(&tenant).await.unwrap(),
-            vec!["Directory".to_string()],
+            vec![("Directory".to_string(), "name_parent".to_string())],
         );
-        // Idempotent.
+        // Idempotent for the same key-set.
         store
-            .mark_key_index_backfilled(&tenant, "Directory")
+            .mark_key_index_backfilled(&tenant, "Directory", "name_parent")
             .await
             .unwrap();
         assert_eq!(
             store.key_index_backfilled_types(&tenant).await.unwrap(),
-            vec!["Directory".to_string()],
+            vec![("Directory".to_string(), "name_parent".to_string())],
+        );
+        // A re-mark with a CHANGED key-set OVERWRITES the recorded set (ARN-68: adding a
+        // key must move the watermark to the new declaration, not DO NOTHING).
+        store
+            .mark_key_index_backfilled(&tenant, "Directory", "name_parent,ws_path")
+            .await
+            .unwrap();
+        assert_eq!(
+            store.key_index_backfilled_types(&tenant).await.unwrap(),
+            vec![("Directory".to_string(), "name_parent,ws_path".to_string())],
         );
 
         let _ = crate::dbm::postgres_query!("DELETE FROM entity_key_index WHERE tenant = $1")

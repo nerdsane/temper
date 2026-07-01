@@ -75,10 +75,33 @@ pub(in crate::state) async fn populate_key_index_from_snapshots(
     };
 
     for (entity_type, keys) in &keyed_types {
-        // Already complete: the co-committed write path keeps the index whole, so
-        // skip the re-scan.
-        if state.key_index_backfill_complete(tenant, entity_type).await {
+        let current_key_set = crate::key_index::declared_key_set_signature(keys);
+        let covered = state
+            .key_index_backfill_covered_key_set(tenant, entity_type)
+            .await;
+        // Already complete for the CURRENT declared key-set: the co-committed write path
+        // keeps the index whole, so skip the re-scan.
+        if covered.as_deref() == Some(current_key_set.as_str()) {
             continue;
+        }
+        // A watermark that covered a DIFFERENT key-set means a key was declared after
+        // the first backfill (e.g. Directory `ws_path` added after `name_parent`):
+        // existing entities are keyed for the old keys but NOT the new one. Since
+        // `keyed_entity_ids_for_type` is per-entity (any key), the resumability skip
+        // would wrongly skip them, so force a full re-key that re-loads and re-keys
+        // every entity under all currently-declared keys (idempotent upsert).
+        let force_full_rekey = covered.is_some();
+        if force_full_rekey {
+            // One-time on the boot that first sees a changed key-set (incl. the 0011
+            // migration, which stamps every existing watermark's key_set to ''). Logged
+            // so this expected full-reload of the type is distinguishable in Datadog from
+            // a pathology.
+            tracing::info!(
+                tenant = %tenant, entity_type = %entity_type,
+                covered_key_set = covered.as_deref().unwrap_or(""),
+                current_key_set = %current_key_set,
+                "key index backfill: declared key-set changed — re-keying every existing entity of this type (one-time)"
+            );
         }
 
         let entity_ids = match store
@@ -95,13 +118,19 @@ pub(in crate::state) async fn populate_key_index_from_snapshots(
             }
         };
 
-        // Resumability: skip entities already keyed (avoids re-loading their state).
-        let already_keyed: BTreeSet<String> = match store
-            .keyed_entity_ids_for_type(tenant.as_str(), entity_type)
-            .await
-        {
-            Ok(ids) => ids.into_iter().collect(),
-            Err(_) => BTreeSet::new(), // cannot resume → process all (correct, slower)
+        // Resumability: on a FIRST-TIME backfill, skip entities already keyed (avoids
+        // re-loading their state). On a key-set change we must re-key already-keyed
+        // entities with the new key, so process all.
+        let already_keyed: BTreeSet<String> = if force_full_rekey {
+            BTreeSet::new()
+        } else {
+            match store
+                .keyed_entity_ids_for_type(tenant.as_str(), entity_type)
+                .await
+            {
+                Ok(ids) => ids.into_iter().collect(),
+                Err(_) => BTreeSet::new(), // cannot resume → process all (correct, slower)
+            }
         };
 
         let table = transition_table_for(state, tenant, entity_type);
@@ -182,9 +211,11 @@ pub(in crate::state) async fn populate_key_index_from_snapshots(
         // definitively skippable. Otherwise keyed misses keep scanning (sound), and a
         // later boot resumes from the remainder.
         if failed == 0 {
-            state.mark_key_index_backfilled(tenant, entity_type).await;
+            state
+                .mark_key_index_backfilled(tenant, entity_type, &current_key_set)
+                .await;
             tracing::info!(
-                tenant = %tenant, entity_type = %entity_type,
+                tenant = %tenant, entity_type = %entity_type, key_set = %current_key_set,
                 total, newly_keyed, already, skipped,
                 "entity_key_index backfill complete; type watermarked"
             );

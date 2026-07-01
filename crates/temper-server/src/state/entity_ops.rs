@@ -459,57 +459,87 @@ impl ServerState {
         projection_backfill::populate_key_index_from_snapshots(self, tenant).await;
     }
 
-    /// Whether `entity_key_index` is complete for `(tenant, entity_type)` — the
-    /// ADR-0153 backfill watermark. Once true, a keyed read MISS is authoritative
-    /// absence (no full-type scan → no 413). Reads a cache hydrated once-per-tenant
-    /// from the durable watermark; conservative on any failure (returns false →
-    /// keyed miss falls back to the scan, never a wrong "absent").
-    pub(crate) async fn key_index_backfill_complete(
-        &self,
-        tenant: &TenantId,
-        entity_type: &str,
-    ) -> bool {
+    /// Hydrate the per-tenant `entity_key_index` watermark cache once from the durable
+    /// watermark (ADR-0153). Safe to call repeatedly; conservative on any failure (leaves
+    /// the type uncovered → a keyed miss falls back to the scan, never a wrong "absent").
+    async fn ensure_key_index_watermarks_loaded(&self, tenant: &TenantId) {
         let already_loaded = self
             .key_index_watermarks_loaded
             .read()
             .expect("key index watermarks-loaded lock poisoned")
             .contains(tenant.as_str());
-        if !already_loaded {
-            if let Some((store, _)) = self.event_journal() {
-                if let Ok(types) = store.key_index_backfilled_types(tenant.as_str()).await {
-                    let mut cache = self
-                        .key_index_backfilled
-                        .write()
-                        .expect("key index backfilled lock poisoned");
-                    for et in types {
-                        cache.insert(format!("{tenant}:{et}"));
-                    }
-                }
-                // Mark loaded even if the query errored: an error means "no authority
-                // yet", which is the safe scan-fallback state, and a completing
-                // backfill sets the cache entry directly via `mark_key_index_backfilled`.
-                self.key_index_watermarks_loaded
-                    .write()
-                    .expect("key index watermarks-loaded lock poisoned")
-                    .insert(tenant.to_string());
-            } else {
-                return false;
-            }
+        if already_loaded {
+            return;
         }
+        if let Some((store, _)) = self.event_journal() {
+            if let Ok(types) = store.key_index_backfilled_types(tenant.as_str()).await {
+                let mut cache = self
+                    .key_index_backfilled
+                    .write()
+                    .expect("key index backfilled lock poisoned");
+                for (et, key_set) in types {
+                    cache.insert(format!("{tenant}:{et}"), key_set);
+                }
+            }
+            // Mark loaded even if the query errored: an error means "no authority
+            // yet", which is the safe scan-fallback state, and a completing
+            // backfill sets the cache entry directly via `mark_key_index_backfilled`.
+            self.key_index_watermarks_loaded
+                .write()
+                .expect("key index watermarks-loaded lock poisoned")
+                .insert(tenant.to_string());
+        }
+    }
+
+    /// The declared key-set the `entity_key_index` backfill covered for `(tenant,
+    /// entity_type)`, or `None` if the type was never backfilled. The value is the
+    /// sorted comma-joined declared key names (see [`declared_key_set_signature`]).
+    pub(crate) async fn key_index_backfill_covered_key_set(
+        &self,
+        tenant: &TenantId,
+        entity_type: &str,
+    ) -> Option<String> {
+        self.ensure_key_index_watermarks_loaded(tenant).await;
         self.key_index_backfilled
             .read()
             .expect("key index backfilled lock poisoned")
-            .contains(&format!("{tenant}:{entity_type}"))
+            .get(&format!("{tenant}:{entity_type}"))
+            .cloned()
+    }
+
+    /// Whether `entity_key_index` is complete for `(tenant, entity_type)` under the
+    /// CURRENT declared key-set — the ADR-0153 backfill watermark, made key-set aware
+    /// (ARN-68). True only when the covered key-set equals `current_key_set`, so a
+    /// keyed read MISS is authoritative absence only once EVERY currently-declared key
+    /// is backfilled; a newly-declared key reads as incomplete (scan-safe) until it is
+    /// re-keyed. Conservative on any failure (returns false → keyed miss falls back to
+    /// the scan, never a wrong "absent").
+    pub(crate) async fn key_index_backfill_complete(
+        &self,
+        tenant: &TenantId,
+        entity_type: &str,
+        current_key_set: &str,
+    ) -> bool {
+        self.key_index_backfill_covered_key_set(tenant, entity_type)
+            .await
+            .as_deref()
+            == Some(current_key_set)
     }
 
     /// Record (durably + in the read-path cache) that `entity_key_index` is complete
-    /// for `(tenant, entity_type)`. Called by the backfill once it has keyed every
-    /// existing entity of the type, so subsequent keyed misses resolve to absence
-    /// without scanning (ADR-0153).
-    pub(crate) async fn mark_key_index_backfilled(&self, tenant: &TenantId, entity_type: &str) {
+    /// for `(tenant, entity_type)` covering exactly `key_set` (the sorted comma-joined
+    /// declared key names). Called by the backfill once it has keyed every existing
+    /// entity of the type, so subsequent keyed misses resolve to absence without
+    /// scanning (ADR-0153). Overwrites any stale key-set from an earlier declaration.
+    pub(crate) async fn mark_key_index_backfilled(
+        &self,
+        tenant: &TenantId,
+        entity_type: &str,
+        key_set: &str,
+    ) {
         if let Some((store, _)) = self.event_journal()
             && let Err(e) = store
-                .mark_key_index_backfilled(tenant.as_str(), entity_type)
+                .mark_key_index_backfilled(tenant.as_str(), entity_type, key_set)
                 .await
         {
             tracing::error!(
@@ -521,7 +551,7 @@ impl ServerState {
         self.key_index_backfilled
             .write()
             .expect("key index backfilled lock poisoned")
-            .insert(format!("{tenant}:{entity_type}"));
+            .insert(format!("{tenant}:{entity_type}"), key_set.to_string());
     }
 
     /// Compare durable projection rows with authoritative state rebuilt by event replay.
