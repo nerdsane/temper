@@ -498,3 +498,20 @@ pub async fn reconcile_os_app(
         install: Box::new(install),
     })
 }
+
+/// ARN-68: after a reconcile registers changed specs, re-key any type whose declared
+/// key-set changed (a newly-declared `[[key]]` on an already-installed type, e.g.
+/// Directory `ws_path` added after `name_parent`). The once-per-boot startup key-index
+/// backfill can fire BEFORE this (late — post-boot in prod) reconcile registers the key,
+/// see only the old key-set, and skip — so the added key would never backfill for
+/// existing entities and reads scan → 413. Running the key-set-aware re-key here, after
+/// registration, closes that race; it only re-scans types whose key-set actually changed
+/// (unchanged types skip via the watermark) and is spawned so a large re-key never blocks
+/// the reconcile. See ADR-0153.
+pub(super) fn spawn_key_index_rekey_after_spec_change(state: &PlatformState, tenant_id: &TenantId) {
+    let server = state.server.clone();
+    let tenant = tenant_id.clone();
+    tokio::spawn(async move {
+        server.populate_key_index_from_snapshots(&tenant).await;
+    });
+}

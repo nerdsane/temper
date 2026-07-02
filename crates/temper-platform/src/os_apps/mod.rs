@@ -1526,13 +1526,13 @@ pub(super) async fn install_os_app_with_plan(
     }
 
     tracing::info!(
-        "Installed os-app '{app_name}' for tenant '{tenant}': \
-         added={:?} updated={:?} skipped={:?} wasm={:?}",
-        added,
-        updated,
-        skipped,
-        wasm_registered,
+        "Installed os-app '{app_name}' for tenant '{tenant}': added={added:?} updated={updated:?} skipped={skipped:?} wasm={wasm_registered:?}"
     );
+
+    // ARN-68: re-key changed-key-set types after registration (boot-race fix; see the helper + ADR-0153).
+    if plan.specs && (!added.is_empty() || !updated.is_empty()) {
+        reconcile::spawn_key_index_rekey_after_spec_change(state, &tenant_id);
+    }
 
     // ── Step 5: Bootstrap App entity + APP.md. ──────────────────────────
     let (agents_bootstrapped, skills_bootstrapped, adrs_bootstrapped) = if plan.content {
