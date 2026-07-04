@@ -177,6 +177,10 @@ impl QueryPlaneReadTelemetry {
 }
 
 /// Request for one OData query-plane read.
+///
+/// `Copy` (all fields are shared references or the `Copy` budget) so the paging
+/// layer can derive a rewritten page/probe request without consuming the caller's.
+#[derive(Clone, Copy)]
 pub(in crate::odata) struct QueryPlaneReadRequest<'a> {
     pub(in crate::odata) state: &'a ServerState,
     pub(in crate::odata) tenant: &'a TenantId,
@@ -195,6 +199,10 @@ pub(in crate::odata) struct QueryPlaneReadResult {
     pub(in crate::odata) count: Option<usize>,
     /// Strategy and fallback telemetry for the read.
     pub(in crate::odata) telemetry: QueryPlaneReadTelemetry,
+    /// Continuation token for the next page when this response was truncated by
+    /// the page size, else `None`. The caller renders it into an
+    /// `@odata.nextLink` (ARN-160).
+    pub(in crate::odata) next_skiptoken: Option<String>,
 }
 
 /// Error returned by the OData query-plane read contract.
@@ -203,6 +211,9 @@ pub(in crate::odata) enum QueryPlaneReadError {
     AuthorizationDenied(Box<Response>),
     /// The read would exceed the bounded candidate proof budget.
     QueryTooLarge { telemetry: QueryPlaneReadTelemetry },
+    /// The `$skiptoken` continuation could not be decoded for this request —
+    /// malformed, or its key count does not match the request's ordering.
+    InvalidContinuation,
 }
 
 impl QueryPlaneReadError {
@@ -210,6 +221,7 @@ impl QueryPlaneReadError {
         match self {
             Self::AuthorizationDenied(_) => {}
             Self::QueryTooLarge { telemetry, .. } => telemetry.record(span),
+            Self::InvalidContinuation => {}
         }
     }
 
@@ -220,6 +232,12 @@ impl QueryPlaneReadError {
                 StatusCode::PAYLOAD_TOO_LARGE,
                 "QueryTooLarge",
                 "This query requires evaluating more candidate entities than the bounded OData read budget permits. Use a narrower filter or a smaller page/count request.",
+            )
+            .into_response(),
+            Self::InvalidContinuation => odata_error(
+                StatusCode::BAD_REQUEST,
+                "InvalidSkipToken",
+                "The $skiptoken continuation is malformed. Follow the @odata.nextLink verbatim; do not construct or edit a skiptoken.",
             )
             .into_response(),
         }

@@ -1,5 +1,6 @@
 //! OData entity-set reads through the query-plane contract.
 
+mod pagination;
 mod scan;
 #[cfg(test)]
 mod tests;
@@ -8,6 +9,8 @@ mod types;
 pub(in crate::odata) use types::{
     QueryPlaneReadBudget, QueryPlaneReadError, QueryPlaneReadRequest, QueryPlaneReadResult,
 };
+
+use temper_odata::query::types::QueryOptions;
 
 use super::authz::{LIST_ACTION, authorize_read};
 use super::read_support::missing_catalog_entity_ids;
@@ -146,8 +149,10 @@ async fn catalog_coverage_report(
     )
 }
 
-/// Execute one OData entity-set read through the query-plane contract.
-pub(in crate::odata) async fn read_entity_set_from_query_plane(
+/// Execute one page of an OData entity-set read through the query-plane
+/// contract. Pagination (server-driven `@odata.nextLink` continuation) is
+/// layered on top by [`read_entity_set_from_query_plane`].
+pub(in crate::odata) async fn read_entity_set_page(
     request: QueryPlaneReadRequest<'_>,
 ) -> Result<QueryPlaneReadResult, QueryPlaneReadError> {
     if let Err(response) = authorize_read(
@@ -193,6 +198,7 @@ pub(in crate::odata) async fn read_entity_set_from_query_plane(
                             entities: result.entities,
                             count: result.count,
                             telemetry: result.telemetry,
+                            next_skiptoken: None,
                         });
                     }
                 }
@@ -209,6 +215,7 @@ pub(in crate::odata) async fn read_entity_set_from_query_plane(
                     entities: result.entities,
                     count: result.count,
                     telemetry: result.telemetry,
+                    next_skiptoken: None,
                 });
             }
         } else if let Some(result) =
@@ -226,6 +233,7 @@ pub(in crate::odata) async fn read_entity_set_from_query_plane(
                     entities: result.entities,
                     count: result.count,
                     telemetry: result.telemetry,
+                    next_skiptoken: None,
                 });
             }
         }
@@ -284,6 +292,7 @@ pub(in crate::odata) async fn read_entity_set_from_query_plane(
             entities: result.entities,
             count: result.count,
             telemetry: result.telemetry,
+            next_skiptoken: None,
         });
     }
 
@@ -312,5 +321,107 @@ pub(in crate::odata) async fn read_entity_set_from_query_plane(
         entities: result.entities,
         count: result.count,
         telemetry: result.telemetry,
+        next_skiptoken: None,
+    })
+}
+
+/// Execute one OData entity-set read with server-driven paging.
+///
+/// Wraps [`read_entity_set_page`] with a keyset continuation (ARN-160): a read
+/// truncated by the page size returns a `next_skiptoken` the caller renders into
+/// an `@odata.nextLink`, and an incoming `$skiptoken` is honored by folding a
+/// keyset `$filter` predicate + canonical `$orderby` into the read so the
+/// existing plan (native narrowing + in-memory re-check) resumes exactly after
+/// the previous page. `$select` is applied here, after the continuation cursor is
+/// taken, so a projected read returns the same entity set as the canonical read —
+/// only the field shape differs (ARN-97).
+pub(in crate::odata) async fn read_entity_set_from_query_plane(
+    request: QueryPlaneReadRequest<'_>,
+) -> Result<QueryPlaneReadResult, QueryPlaneReadError> {
+    let query_options = request.query_options;
+    let page_size = request.budget.requested_top(query_options);
+    let order = pagination::canonical_pagination_order(query_options.orderby.as_deref());
+
+    // Decode an incoming continuation, if any, into the keyset predicate that
+    // resumes after the previous page's last row.
+    let resume_predicate = match query_options.skiptoken.as_deref() {
+        Some(token) => {
+            let cursor =
+                pagination::decode_cursor(token).ok_or(QueryPlaneReadError::InvalidContinuation)?;
+            Some(
+                pagination::keyset_after_predicate(&cursor, &order)
+                    .ok_or(QueryPlaneReadError::InvalidContinuation)?,
+            )
+        }
+        None => None,
+    };
+
+    // The `$select` set is applied by this layer (after the cursor is taken), so
+    // the underlying page read always materializes full bodies — the cursor can
+    // read the ordering properties, and projection can never change membership.
+    let select = query_options.select.clone();
+    let base_filter = match resume_predicate {
+        Some(keyset) => Some(pagination::and_filter(query_options.filter.clone(), keyset)),
+        None => query_options.filter.clone(),
+    };
+    // A page order is only forced when the caller sorts (append the id tiebreaker
+    // for a total order). Without `$orderby`, every backend already returns
+    // entity_id-ascending, so leaving it unset keeps the cheap unsorted paths.
+    let effective_orderby = query_options.orderby.as_ref().map(|_| order.clone());
+    // Fetch one row past the page to detect truncation. The read budget is given
+    // one row of headroom so this probe row can never itself trip a `413` at the
+    // page boundary; the client's page size (`page_size`) is unchanged.
+    let fetch_top = page_size.saturating_add(1);
+    let page_budget = QueryPlaneReadBudget {
+        default_page_size: request.budget.default_page_size,
+        max_entities: request.budget.max_entities.saturating_add(1),
+    };
+
+    let page_options = QueryOptions {
+        filter: base_filter,
+        select: None,
+        expand: None,
+        orderby: effective_orderby,
+        top: Some(fetch_top),
+        // `$skip` composes with page one only; a continuation replaces it.
+        skip: if query_options.skiptoken.is_some() {
+            None
+        } else {
+            query_options.skip
+        },
+        count: query_options.count,
+        skiptoken: None,
+    };
+    let page_request = QueryPlaneReadRequest {
+        query_options: &page_options,
+        budget: page_budget,
+        ..request
+    };
+    let mut result = read_entity_set_page(page_request).await?;
+
+    // Telemetry is recorded against the original request shape, not the rewritten
+    // page read (which strips `$select` and adds the keyset filter).
+    result.telemetry.select_requested = scan::select_requested(query_options);
+    result.telemetry.select_count = select.as_ref().map_or(0, Vec::len);
+
+    let truncated = result.entities.len() > page_size;
+    result.entities.truncate(page_size);
+
+    let next_skiptoken = if truncated {
+        result
+            .entities
+            .last()
+            .map(|last| pagination::encode_cursor(&pagination::cursor_for_row(last, &order)))
+    } else {
+        None
+    };
+
+    if let Some(select) = select.as_deref() {
+        result.entities = crate::query_eval::select_fields(result.entities, select);
+    }
+
+    Ok(QueryPlaneReadResult {
+        next_skiptoken,
+        ..result
     })
 }

@@ -2,7 +2,7 @@
 //! (ADR-0153, ARN-68).
 //!
 //! This is a TRUE DST, not a unit/integration/e2e test: it runs the **real**
-//! read planner (`read_entity_set_from_query_plane`) under
+//! read planner (`read_entity_set_page`) under
 //! `install_deterministic_context(seed)` across many seeds, against deterministic
 //! in-memory backends (`SimEventStore` for the journal + key index, `SimQueryPlane`
 //! for the catalog), with a **fault injected** — the async query projection lags,
@@ -292,7 +292,7 @@ async fn dst_projection_lag_413_eliminated_by_keyed_index() {
             }),
             ..QueryOptions::default()
         };
-        let red = read_entity_set_from_query_plane(QueryPlaneReadRequest {
+        let red = read_entity_set_page(QueryPlaneReadRequest {
             state: &state,
             tenant: &tenant,
             security_ctx: &security_ctx,
@@ -315,7 +315,7 @@ async fn dst_projection_lag_413_eliminated_by_keyed_index() {
             filter: Some(eq_filter(ws, "/no-such-path.txt")),
             ..QueryOptions::default()
         };
-        let red_absent = read_entity_set_from_query_plane(QueryPlaneReadRequest {
+        let red_absent = read_entity_set_page(QueryPlaneReadRequest {
             state: &state,
             tenant: &tenant,
             security_ctx: &security_ctx,
@@ -337,7 +337,7 @@ async fn dst_projection_lag_413_eliminated_by_keyed_index() {
             filter: Some(eq_filter(ws, target_path)),
             ..QueryOptions::default()
         };
-        let green = read_entity_set_from_query_plane(QueryPlaneReadRequest {
+        let green = read_entity_set_page(QueryPlaneReadRequest {
             state: &state,
             tenant: &tenant,
             security_ctx: &security_ctx,

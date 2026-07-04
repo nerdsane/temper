@@ -603,7 +603,15 @@ pub(super) async fn handle_odata_get_for_tenant(
         .into_response(),
 
         ODataPath::EntitySet(name) => {
-            handle_entity_set(&state, &tenant, &security_ctx, &name, &query_options).await
+            handle_entity_set(
+                &state,
+                &tenant,
+                &security_ctx,
+                &name,
+                &query_options,
+                &query_params,
+            )
+            .await
         }
 
         ODataPath::Entity(set_name, key) => {
@@ -705,6 +713,7 @@ async fn handle_entity_set(
     security_ctx: &SecurityContext,
     name: &str,
     query_options: &QueryOptions,
+    query_params: &std::collections::BTreeMap<String, String>,
 ) -> axum::response::Response {
     tracing::debug!(name = %name, tenant = %tenant, "handle_entity_set");
     let entity_type = match resolve_entity_type(state, tenant, name) {
@@ -758,11 +767,55 @@ async fn handle_entity_set(
     if let Some(c) = count {
         body["@odata.count"] = serde_json::json!(c);
     }
+    if let Some(token) = read_result.next_skiptoken {
+        body["@odata.nextLink"] = serde_json::json!(next_link(name, query_params, &token));
+    }
     ODataResponse {
         status: StatusCode::OK,
         body,
     }
     .into_response()
+}
+
+/// Build the `@odata.nextLink` for a truncated list read: the request's own
+/// query options with `$skip`/`$skiptoken` replaced by the continuation token.
+///
+/// Values are percent-encoded so the link round-trips through the client and the
+/// `Query` extractor back to the original options; the base64url token is already
+/// URL-safe.
+fn next_link(
+    set_name: &str,
+    query_params: &std::collections::BTreeMap<String, String>,
+    token: &str,
+) -> String {
+    let mut pairs: Vec<String> = query_params
+        .iter()
+        .filter(|(key, _)| key.as_str() != "$skip" && key.as_str() != "$skiptoken")
+        .map(|(key, value)| {
+            format!(
+                "{}={}",
+                encode_query_component(key),
+                encode_query_component(value)
+            )
+        })
+        .collect();
+    pairs.push(format!("$skiptoken={token}"));
+    format!("{set_name}?{}", pairs.join("&"))
+}
+
+/// Percent-encode a query-string key or value, leaving the RFC 3986 unreserved
+/// set (`A-Za-z0-9-._~`) intact. Over-encoding is safe; the server decodes it.
+fn encode_query_component(value: &str) -> String {
+    let mut out = String::with_capacity(value.len());
+    for byte in value.bytes() {
+        if byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'.' | b'_' | b'~') {
+            out.push(byte as char);
+        } else {
+            out.push('%');
+            out.push_str(&format!("{byte:02X}"));
+        }
+    }
+    out
 }
 
 /// Handle `Entity` path: fetch a single entity by key.

@@ -27,6 +27,12 @@ pub struct QueryOptions {
     pub skip: Option<usize>,
     /// The `$count` flag, if present.
     pub count: Option<bool>,
+    /// The `$skiptoken` server-driven-paging continuation token, if present.
+    ///
+    /// Opaque to clients: the server issues it inside an `@odata.nextLink` and
+    /// interprets it as a keyset cursor over the response's ordering. Clients
+    /// echo it back verbatim; they never construct one.
+    pub skiptoken: Option<String>,
 }
 
 /// An item in a `$expand` clause, optionally with nested query options.
@@ -182,6 +188,12 @@ pub fn parse_query_options(query_string: &str) -> Result<QueryOptions, ODataErro
             }
             "$count" => {
                 opts.count = Some(parse_bool("$count", &value)?);
+            }
+            "$skiptoken" => {
+                let token = value.trim();
+                if !token.is_empty() {
+                    opts.skiptoken = Some(token.to_string());
+                }
             }
             other => {
                 // Ignore non-system query options (custom options, $format, etc.)
@@ -589,6 +601,16 @@ mod tests {
     fn empty_query_string() {
         let opts = parse_query_options("").unwrap();
         assert_eq!(opts, QueryOptions::default());
+    }
+
+    #[test]
+    fn skiptoken_is_parsed_and_blank_is_ignored() {
+        let opts =
+            parse_query_options("$filter=Status eq 'Published'&$skiptoken=Zm9vLTAx").unwrap();
+        assert_eq!(opts.skiptoken.as_deref(), Some("Zm9vLTAx"));
+
+        let blank = parse_query_options("$skiptoken=").unwrap();
+        assert_eq!(blank.skiptoken, None);
     }
 
     #[test]
