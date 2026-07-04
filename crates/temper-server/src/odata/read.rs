@@ -1362,3 +1362,30 @@ async fn handle_stream_get(
     }
     .into_response()
 }
+
+#[cfg(test)]
+mod next_link_tests {
+    use super::{encode_query_component, next_link};
+    use std::collections::BTreeMap;
+
+    #[test]
+    fn query_component_encodes_reserved_but_not_unreserved() {
+        assert_eq!(encode_query_component("Status eq 'Published'"), "Status%20eq%20%27Published%27");
+        assert_eq!(encode_query_component("Id-9._~"), "Id-9._~");
+    }
+
+    #[test]
+    fn next_link_carries_options_and_replaces_paging() {
+        let mut params = BTreeMap::new();
+        params.insert("$filter".to_string(), "Status eq 'Published'".to_string());
+        params.insert("$skip".to_string(), "100".to_string());
+        params.insert("$skiptoken".to_string(), "STALE".to_string());
+        let link = next_link("DesignLanguages", &params, "TOKEN-9");
+        // $filter is preserved (percent-encoded); $skip and the old $skiptoken are dropped.
+        assert!(link.starts_with("DesignLanguages?"));
+        assert!(link.contains("%24filter=Status%20eq%20%27Published%27"));
+        assert!(!link.contains("%24skip="));
+        assert!(link.contains("$skiptoken=TOKEN-9"));
+        assert_eq!(link.matches("skiptoken").count(), 1);
+    }
+}
