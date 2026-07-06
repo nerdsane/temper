@@ -112,6 +112,30 @@ pub struct EntityVectorRow {
     pub vector: Vec<f32>,
 }
 
+/// Pack an `f32` slice to little-endian bytes — the `entity_vector_index` blob
+/// encoding shared by every backend (ADR-0155). Kept here beside [`EntityVectorRow`]
+/// so the stores and the kernel ranking agree on the byte layout.
+pub fn pack_f32_le(vector: &[f32]) -> Vec<u8> {
+    let mut bytes = Vec::with_capacity(vector.len() * 4);
+    for value in vector {
+        bytes.extend_from_slice(&value.to_le_bytes());
+    }
+    bytes
+}
+
+/// Unpack little-endian bytes back to `f32`. `None` if the byte length is not a
+/// multiple of 4 (a corrupt blob), so a bad row is skipped rather than panicking.
+pub fn unpack_f32_le(bytes: &[u8]) -> Option<Vec<f32>> {
+    if !bytes.len().is_multiple_of(4) {
+        return None;
+    }
+    let mut out = Vec::with_capacity(bytes.len() / 4);
+    for chunk in bytes.chunks_exact(4) {
+        out.push(f32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]));
+    }
+    Some(out)
+}
+
 /// One candidate row returned from the vector index for a kNN read (ADR-0155):
 /// an entity and its packed vector for one `(tenant, type, decl, model_tag)`
 /// partition. The kernel — not the store — computes the metric over these in the

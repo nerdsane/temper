@@ -12,6 +12,10 @@
 //! simulation where app-side similarity never was.
 
 use temper_runtime::persistence::EntityVectorCandidate;
+// The blob encoders live beside `EntityVectorRow` in temper-runtime so every store
+// and the kernel ranking share one byte layout; re-exported here for callers that
+// reach for them through the vector-index module.
+pub use temper_runtime::persistence::{pack_f32_le, unpack_f32_le};
 
 /// The similarity metric declared on a `[[vector]]` path.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -36,29 +40,6 @@ impl VectorMetric {
             _ => None,
         }
     }
-}
-
-/// Pack an `f32` slice to little-endian bytes — the on-disk `entity_vector_index`
-/// blob encoding.
-pub fn pack_f32_le(vector: &[f32]) -> Vec<u8> {
-    let mut bytes = Vec::with_capacity(vector.len() * 4);
-    for value in vector {
-        bytes.extend_from_slice(&value.to_le_bytes());
-    }
-    bytes
-}
-
-/// Unpack little-endian bytes back to `f32`. `None` if the byte length is not a
-/// multiple of 4 (a corrupt blob), so a bad row is skipped rather than panicking.
-pub fn unpack_f32_le(bytes: &[u8]) -> Option<Vec<f32>> {
-    if !bytes.len().is_multiple_of(4) {
-        return None;
-    }
-    let mut out = Vec::with_capacity(bytes.len() / 4);
-    for chunk in bytes.chunks_exact(4) {
-        out.push(f32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]));
-    }
-    Some(out)
 }
 
 /// Parse an entity's vector property into exactly `dims` `f32`s.
