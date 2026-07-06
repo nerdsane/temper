@@ -3,8 +3,9 @@
 use libsql::{TransactionBehavior, Value, params, params_from_iter};
 use std::time::Duration;
 use temper_runtime::persistence::{
-    EventMetadata, EventStore, PersistenceAppend, PersistenceAppendResult, PersistenceEnvelope,
-    PersistenceError, storage_error,
+    EntityVectorCandidate, EntityVectorRow, EventMetadata, EventStore, PersistenceAppend,
+    PersistenceAppendResult, PersistenceEnvelope, PersistenceError, pack_f32_le, storage_error,
+    unpack_f32_le,
 };
 use temper_runtime::tenant::parse_persistence_id_parts;
 use tracing::{instrument, warn};
@@ -146,6 +147,184 @@ impl EventStore for TursoEventStore {
     // query-plane backend) co-commits and is authoritative; the sim store does too for
     // DST. Giving Turso the keyed oracle requires first implementing live co-commit
     // (completing ADR-0153 phase 2 for Turso) — tracked separately.
+
+    // ADR-0155: Turso maintains `entity_vector_index` **write-behind** — the event is
+    // appended first (with retries), then the derived vector rows follow in a separate
+    // write. This is safe for vectors (unlike keys) because a vector row carries no
+    // uniqueness constraint and a lagging/failed index write only makes a ranking
+    // temporarily incomplete, which the backfill watermark accounts for; it can never
+    // corrupt a keyed absence. So Turso implements the full vector surface below.
+    async fn append_with_index_rows(
+        &self,
+        persistence_id: &str,
+        expected_sequence: u64,
+        events: &[PersistenceEnvelope],
+        _key_rows: &[temper_runtime::persistence::EntityKeyRow],
+        vector_rows: &[EntityVectorRow],
+    ) -> Result<u64, PersistenceError> {
+        // The journal append is the durable event (keys are not maintained on Turso,
+        // per the note above).
+        let new_seq = self
+            .append(persistence_id, expected_sequence, events)
+            .await?;
+        // Write-behind: the event is durable; the derived vector index follows. A
+        // failure here is logged, not fatal — the backfill reconciles the partition.
+        if !vector_rows.is_empty()
+            && let Ok((tenant, entity_type, entity_id)) = parse_persistence_id_parts(persistence_id)
+            && let Err(error) = self
+                .backfill_entity_vectors(tenant, entity_type, entity_id, vector_rows)
+                .await
+        {
+            warn!(
+                persistence_id,
+                error = %error,
+                "turso vector-index write-behind failed; backfill will reconcile the partition"
+            );
+        }
+        Ok(new_seq)
+    }
+
+    async fn backfill_entity_vectors(
+        &self,
+        tenant: &str,
+        entity_type: &str,
+        entity_id: &str,
+        vector_rows: &[EntityVectorRow],
+    ) -> Result<(), PersistenceError> {
+        if vector_rows.is_empty() {
+            return Ok(());
+        }
+        let _write_permit = self
+            .acquire_write_permit("turso.backfill_entity_vectors", WritePriority::Low)
+            .await?;
+        let conn = self.configured_connection().await?;
+        let tx = conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .await
+            .map_err(storage_error)?;
+        for row in vector_rows {
+            // Upsert: drop the entity's prior rows for this decl (its vector or model
+            // tag may have changed), then insert the current row.
+            tx.execute(
+                "DELETE FROM entity_vector_index \
+                 WHERE tenant = ?1 AND entity_type = ?2 AND decl_name = ?3 AND entity_id = ?4",
+                params![tenant, entity_type, row.decl_name.as_str(), entity_id],
+            )
+            .await
+            .map_err(storage_error)?;
+            tx.execute(
+                "INSERT INTO entity_vector_index \
+                 (tenant, entity_type, decl_name, model_tag, entity_id, vector, sequence_nr) \
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, 0)",
+                params![
+                    tenant,
+                    entity_type,
+                    row.decl_name.as_str(),
+                    row.model_tag.as_str(),
+                    entity_id,
+                    Value::Blob(pack_f32_le(&row.vector)),
+                ],
+            )
+            .await
+            .map_err(storage_error)?;
+        }
+        tx.commit().await.map_err(storage_error)?;
+        Ok(())
+    }
+
+    async fn vector_candidates(
+        &self,
+        tenant: &str,
+        entity_type: &str,
+        decl_name: &str,
+        model_tag: &str,
+    ) -> Result<Vec<EntityVectorCandidate>, PersistenceError> {
+        let conn = self.configured_connection().await?;
+        let mut rows = conn
+            .query(
+                "SELECT entity_id, vector FROM entity_vector_index \
+                 WHERE tenant = ?1 AND entity_type = ?2 AND decl_name = ?3 AND model_tag = ?4 \
+                 ORDER BY entity_id",
+                params![tenant, entity_type, decl_name, model_tag],
+            )
+            .await
+            .map_err(storage_error)?;
+        let mut out = Vec::new();
+        while let Some(row) = rows.next().await.map_err(storage_error)? {
+            let entity_id: String = row.get(0).map_err(storage_error)?;
+            let bytes: Vec<u8> = row.get(1).map_err(storage_error)?;
+            if let Some(vector) = unpack_f32_le(&bytes) {
+                out.push(EntityVectorCandidate { entity_id, vector });
+            }
+        }
+        Ok(out)
+    }
+
+    async fn mark_vector_index_backfilled(
+        &self,
+        tenant: &str,
+        entity_type: &str,
+        vector_set: &str,
+    ) -> Result<(), PersistenceError> {
+        let _write_permit = self
+            .acquire_write_permit("turso.mark_vector_index_backfilled", WritePriority::Low)
+            .await?;
+        let conn = self.configured_connection().await?;
+        let completed_at = temper_runtime::scheduler::sim_now().to_rfc3339();
+        conn.execute(
+            "INSERT INTO vector_index_backfill_watermark (tenant, entity_type, vector_set, completed_at) \
+             VALUES (?1, ?2, ?3, ?4) \
+             ON CONFLICT(tenant, entity_type) \
+             DO UPDATE SET vector_set = excluded.vector_set, completed_at = excluded.completed_at",
+            params![tenant, entity_type, vector_set, completed_at.as_str()],
+        )
+        .await
+        .map_err(storage_error)?;
+        Ok(())
+    }
+
+    async fn vector_index_backfilled_types(
+        &self,
+        tenant: &str,
+    ) -> Result<Vec<(String, String)>, PersistenceError> {
+        let conn = self.configured_connection().await?;
+        let mut rows = conn
+            .query(
+                "SELECT entity_type, vector_set FROM vector_index_backfill_watermark \
+                 WHERE tenant = ?1",
+                params![tenant],
+            )
+            .await
+            .map_err(storage_error)?;
+        let mut out = Vec::new();
+        while let Some(row) = rows.next().await.map_err(storage_error)? {
+            let entity_type: String = row.get(0).map_err(storage_error)?;
+            let vector_set: String = row.get(1).map_err(storage_error)?;
+            out.push((entity_type, vector_set));
+        }
+        Ok(out)
+    }
+
+    async fn vectored_entity_ids_for_type(
+        &self,
+        tenant: &str,
+        entity_type: &str,
+    ) -> Result<Vec<String>, PersistenceError> {
+        let conn = self.configured_connection().await?;
+        let mut rows = conn
+            .query(
+                "SELECT DISTINCT entity_id FROM entity_vector_index \
+                 WHERE tenant = ?1 AND entity_type = ?2",
+                params![tenant, entity_type],
+            )
+            .await
+            .map_err(storage_error)?;
+        let mut out = Vec::new();
+        while let Some(row) = rows.next().await.map_err(storage_error)? {
+            out.push(row.get::<String>(0).map_err(storage_error)?);
+        }
+        Ok(out)
+    }
 
     #[instrument(skip_all, fields(otel.name = "turso.append_batch"))]
     async fn append_batch(
