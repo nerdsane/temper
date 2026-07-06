@@ -79,7 +79,6 @@ pub trait DynEventStore: Send + Sync {
         key_rows: &'a [temper_runtime::persistence::EntityKeyRow],
     ) -> EventStoreFuture<'a, Result<u64, PersistenceError>>;
 
-    #[allow(clippy::too_many_arguments)]
     fn append_with_index_rows<'a>(
         &'a self,
         persistence_id: &'a str,
