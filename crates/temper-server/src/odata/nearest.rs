@@ -36,6 +36,28 @@ fn arg<'a>(params: &'a [(String, String)], name: &str) -> Option<&'a str> {
         .map(|(_, value)| value.as_str())
 }
 
+/// Read a property off a materialized entity body. The temper OData body nests state
+/// properties under a `"fields"` object (`body["fields"]["Embedding"]`); some catalog
+/// shapes also flatten them to the top level. Check `fields` first, then top level,
+/// each tolerant of the snake/Pascal field-name split the rest of the read plane
+/// accommodates.
+fn entity_field<'a>(body: &'a serde_json::Value, name: &str) -> Option<&'a serde_json::Value> {
+    let snake = temper_spec::to_snake_case(name);
+    let pascal = temper_spec::to_pascal_case(name);
+    if let Some(fields) = body.get("fields").and_then(|f| f.as_object())
+        && let Some(value) = fields
+            .get(name)
+            .or_else(|| fields.get(&snake))
+            .or_else(|| fields.get(&pascal))
+    {
+        return Some(value);
+    }
+    let obj = body.as_object()?;
+    obj.get(name)
+        .or_else(|| obj.get(&snake))
+        .or_else(|| obj.get(&pascal))
+}
+
 fn bad_request(message: &str) -> Response {
     odata_error(StatusCode::BAD_REQUEST, "InvalidNearestQuery", message).into_response()
 }
@@ -145,8 +167,7 @@ pub(super) async fn handle_nearest(
                 )
                 .into_response();
             };
-            let Some(vector) = body
-                .get(&decl.property)
+            let Some(vector) = entity_field(&body, &decl.property)
                 .and_then(|v| parse_vector_property(v, decl.dims))
             else {
                 return bad_request(&format!(
@@ -156,8 +177,7 @@ pub(super) async fn handle_nearest(
             };
             let model_tag = match model_arg {
                 Some(tag) => tag.to_string(),
-                None => match body
-                    .get(&decl.model_property)
+                None => match entity_field(&body, &decl.model_property)
                     .and_then(|v| v.as_str())
                     .filter(|tag| !tag.is_empty())
                 {
@@ -308,20 +328,13 @@ pub(super) async fn handle_nearest(
 
 /// Whether a materialized entity body satisfies every equality predicate. A
 /// missing field matches only `field eq null`. Values compare structurally (the
-/// filter literals are already JSON), tolerant of the snake/Pascal field-name
-/// split the rest of the read plane accommodates.
+/// filter literals are already JSON). Field lookup is `fields`-nesting aware and
+/// tolerant of the snake/Pascal split, via [`entity_field`].
 fn body_matches_equality(body: &serde_json::Value, pairs: &[(String, serde_json::Value)]) -> bool {
-    let Some(obj) = body.as_object() else {
-        return false;
-    };
-    pairs.iter().all(|(field, expected)| {
-        let actual = obj
-            .get(field)
-            .or_else(|| obj.get(&temper_spec::to_snake_case(field)))
-            .or_else(|| obj.get(&temper_spec::to_pascal_case(field)));
-        match actual {
+    pairs
+        .iter()
+        .all(|(field, expected)| match entity_field(body, field) {
             Some(value) => value == expected,
             None => expected.is_null(),
-        }
-    })
+        })
 }

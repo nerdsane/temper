@@ -17,6 +17,20 @@ use temper_runtime::persistence::EntityVectorCandidate;
 // reach for them through the vector-index module.
 pub use temper_runtime::persistence::{pack_f32_le, unpack_f32_le};
 
+/// The stable signature of a type's declared vector-path set: the sorted,
+/// comma-joined path NAMES (ADR-0155). Recorded in the vector-index backfill
+/// watermark and compared on the next backfill, so declaring an ADDITIONAL vector
+/// path (a changed signature) re-indexes the type instead of being treated as
+/// already complete. Deterministic (sorted, no map iteration). Mirrors
+/// `declared_key_set_signature`.
+pub fn declared_vector_set_signature(
+    vectors: &[temper_jit::table::types::DeclaredVector],
+) -> String {
+    let mut names: Vec<&str> = vectors.iter().map(|v| v.name.as_str()).collect();
+    names.sort();
+    names.join(",")
+}
+
 /// The similarity metric declared on a `[[vector]]` path.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum VectorMetric {

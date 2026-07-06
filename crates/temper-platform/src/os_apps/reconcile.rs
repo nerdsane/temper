@@ -513,5 +513,9 @@ pub(super) fn spawn_key_index_rekey_after_spec_change(state: &PlatformState, ten
     let tenant = tenant_id.clone();
     tokio::spawn(async move {
         server.populate_key_index_from_snapshots(&tenant).await;
+        // ADR-0155: same race for a newly declared [[vector]] path — a late reconcile
+        // registers it after boot, so re-index existing entities here (watermark-gated,
+        // unchanged types skip) so they are immediately rankable by Temper.Nearest.
+        server.populate_vector_index_from_snapshots(&tenant).await;
     });
 }

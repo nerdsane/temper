@@ -481,6 +481,14 @@ impl ServerState {
         projection_backfill::populate_key_index_from_snapshots(self, tenant).await;
     }
 
+    /// ADR-0155: backfill `entity_vector_index` for pre-existing entities of every
+    /// vector-declaring type and record the watermark. Idempotent; entities written
+    /// after boot maintain their vectors inline (co-commit) or write-behind.
+    #[instrument(skip_all, fields(otel.name = "entity.populate_vector_index", tenant = %tenant))]
+    pub async fn populate_vector_index_from_snapshots(&self, tenant: &TenantId) {
+        projection_backfill::populate_vector_index_from_snapshots(self, tenant).await;
+    }
+
     /// Hydrate the per-tenant `entity_key_index` watermark cache once from the durable
     /// watermark (ADR-0153). Safe to call repeatedly; conservative on any failure (leaves
     /// the type uncovered → a keyed miss falls back to the scan, never a wrong "absent").
