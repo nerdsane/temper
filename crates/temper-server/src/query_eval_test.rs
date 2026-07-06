@@ -190,6 +190,7 @@ fn test_apply_query_options_combined() {
         select: Some(vec!["Id".into(), "Name".into()]),
         count: Some(true),
         expand: None,
+        skiptoken: None,
     };
 
     let (result, count) = apply_query_options(entities, &options);

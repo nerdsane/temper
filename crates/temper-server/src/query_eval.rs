@@ -140,7 +140,14 @@ fn evaluate_value(entity: &serde_json::Value, expr: &FilterExpr) -> Option<serde
 
 /// Resolve a property name against an entity, checking top-level first,
 /// then falling back to the `fields` sub-object.
-fn resolve_property(entity: &serde_json::Value, prop: &str) -> Option<serde_json::Value> {
+///
+/// `pub(crate)` so server-driven paging builds a keyset cursor from the same
+/// property values the `$orderby` sort compares — the cursor and the sort must
+/// resolve a property identically or a continuation could skip or repeat rows.
+pub(crate) fn resolve_property(
+    entity: &serde_json::Value,
+    prop: &str,
+) -> Option<serde_json::Value> {
     if prop == "Status" {
         return entity
             .get("Status")
@@ -590,6 +597,7 @@ async fn expand_entity_recursive(
                 top: nested_opts.top,
                 skip: nested_opts.skip,
                 count: None,
+                skiptoken: None,
             };
             let (filtered, _) = apply_query_options(related_entities, &nested_query);
             related_entities = filtered;

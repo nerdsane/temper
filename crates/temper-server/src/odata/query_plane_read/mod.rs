@@ -1,10 +1,12 @@
 //! OData entity-set reads through the query-plane contract.
 
+mod pagination;
 mod scan;
 #[cfg(test)]
 mod tests;
 mod types;
 
+pub(in crate::odata) use pagination::read_entity_set_from_query_plane;
 pub(in crate::odata) use types::{
     QueryPlaneReadBudget, QueryPlaneReadError, QueryPlaneReadRequest, QueryPlaneReadResult,
 };
@@ -148,8 +150,10 @@ async fn catalog_coverage_report(
     )
 }
 
-/// Execute one OData entity-set read through the query-plane contract.
-pub(in crate::odata) async fn read_entity_set_from_query_plane(
+/// Execute one page of an OData entity-set read through the query-plane
+/// contract. Pagination (server-driven `@odata.nextLink` continuation) is
+/// layered on top by [`read_entity_set_from_query_plane`].
+pub(in crate::odata) async fn read_entity_set_page(
     request: QueryPlaneReadRequest<'_>,
 ) -> Result<QueryPlaneReadResult, QueryPlaneReadError> {
     if let Err(response) = authorize_read(
@@ -197,6 +201,7 @@ pub(in crate::odata) async fn read_entity_set_from_query_plane(
                             entities: result.entities,
                             count: result.count,
                             telemetry: result.telemetry,
+                            next_skiptoken: None,
                         });
                     }
                 }
@@ -213,6 +218,7 @@ pub(in crate::odata) async fn read_entity_set_from_query_plane(
                     entities: result.entities,
                     count: result.count,
                     telemetry: result.telemetry,
+                    next_skiptoken: None,
                 });
             }
         } else if let Some(result) =
@@ -230,6 +236,7 @@ pub(in crate::odata) async fn read_entity_set_from_query_plane(
                     entities: result.entities,
                     count: result.count,
                     telemetry: result.telemetry,
+                    next_skiptoken: None,
                 });
             }
         }
@@ -378,6 +385,7 @@ pub(in crate::odata) async fn read_entity_set_from_query_plane(
                         entities: result.entities,
                         count: result.count,
                         telemetry: result.telemetry,
+                        next_skiptoken: None,
                     });
                 }
             }
@@ -406,6 +414,7 @@ pub(in crate::odata) async fn read_entity_set_from_query_plane(
             entities: result.entities,
             count: result.count,
             telemetry: result.telemetry,
+            next_skiptoken: None,
         });
     }
 
@@ -434,5 +443,10 @@ pub(in crate::odata) async fn read_entity_set_from_query_plane(
         entities: result.entities,
         count: result.count,
         telemetry: result.telemetry,
+        next_skiptoken: None,
     })
 }
+
+// The server-driven paging wrapper (`read_entity_set_from_query_plane`) lives in
+// `pagination` and is re-exported above; it layers a keyset `$skiptoken`
+// continuation over this core planner.

@@ -19,6 +19,7 @@ use temper_store_turso::TursoEventStore;
 
 mod dst_projection_lag;
 mod keyed_existence;
+mod paging;
 mod proof;
 
 const CSDL_XML: &str = include_str!("../../../../../test-fixtures/specs/model.csdl.xml");
@@ -216,7 +217,7 @@ async fn row_authorized_count_over_budget_returns_413() {
         ..QueryOptions::default()
     };
 
-    let error = match read_entity_set_from_query_plane(QueryPlaneReadRequest {
+    let error = match read_entity_set_page(QueryPlaneReadRequest {
         state: &state,
         tenant: &tenant,
         security_ctx: &security_ctx,
@@ -245,6 +246,9 @@ async fn row_authorized_count_over_budget_returns_413() {
         QueryPlaneReadError::AuthorizationDenied(_) => {
             panic!("test state should allow collection reads")
         }
+        QueryPlaneReadError::InvalidContinuation => {
+            panic!("no $skiptoken was supplied")
+        }
     }
 }
 
@@ -259,7 +263,7 @@ async fn row_authorized_first_page_can_stop_after_proof() {
         ..QueryOptions::default()
     };
 
-    let result = match read_entity_set_from_query_plane(QueryPlaneReadRequest {
+    let result = match read_entity_set_page(QueryPlaneReadRequest {
         state: &state,
         tenant: &tenant,
         security_ctx: &security_ctx,
@@ -314,7 +318,7 @@ async fn projection_lagged_actor_write_repairs_missing_catalog_row() {
         ..QueryOptions::default()
     };
 
-    let result = match read_entity_set_from_query_plane(QueryPlaneReadRequest {
+    let result = match read_entity_set_page(QueryPlaneReadRequest {
         state: &state,
         tenant: &tenant,
         security_ctx: &security_ctx,
@@ -399,7 +403,7 @@ async fn turso_native_pages_order_and_count_inside_query_plane() {
         ..QueryOptions::default()
     };
 
-    let result = match read_entity_set_from_query_plane(QueryPlaneReadRequest {
+    let result = match read_entity_set_page(QueryPlaneReadRequest {
         state: &state,
         tenant: &tenant,
         security_ctx: &security_ctx,
@@ -469,7 +473,7 @@ async fn native_pages_recheck_filter_before_counting_or_returning() {
         ..QueryOptions::default()
     };
 
-    let result = match read_entity_set_from_query_plane(QueryPlaneReadRequest {
+    let result = match read_entity_set_page(QueryPlaneReadRequest {
         state: &state,
         tenant: &tenant,
         security_ctx: &security_ctx,
@@ -599,7 +603,7 @@ async fn exact_match_read_is_consistent_when_projection_queued() {
         ..QueryOptions::default()
     };
 
-    let result = match read_entity_set_from_query_plane(QueryPlaneReadRequest {
+    let result = match read_entity_set_page(QueryPlaneReadRequest {
         state: &state,
         tenant: &tenant,
         security_ctx: &security_ctx,
@@ -699,7 +703,7 @@ async fn exact_match_absent_file_stays_bounded() {
         ..QueryOptions::default()
     };
 
-    let result = match read_entity_set_from_query_plane(QueryPlaneReadRequest {
+    let result = match read_entity_set_page(QueryPlaneReadRequest {
         state: &state,
         tenant: &tenant,
         security_ctx: &security_ctx,
@@ -789,7 +793,7 @@ async fn populated_current_projection_uses_native_no_reconcile() {
         ..QueryOptions::default()
     };
 
-    let result = match read_entity_set_from_query_plane(QueryPlaneReadRequest {
+    let result = match read_entity_set_page(QueryPlaneReadRequest {
         state: &state,
         tenant: &tenant,
         security_ctx: &security_ctx,

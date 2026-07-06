@@ -206,7 +206,7 @@ async fn directory_root_lookup_souls_scenario_with_real_key_and_duplicates() {
     };
 
     // (1) Before the watermark: a NEW workspace's root lookup misses → scans 15 > budget → 413.
-    match read_entity_set_from_query_plane(QueryPlaneReadRequest {
+    match read_entity_set_page(QueryPlaneReadRequest {
         state: &state,
         tenant: &tenant,
         security_ctx: &security_ctx,
@@ -249,7 +249,7 @@ async fn directory_root_lookup_souls_scenario_with_real_key_and_duplicates() {
 
     // (3a) The souls case: a NEW workspace (no root) → authoritative-absent → empty,
     // NO 413. This is what lets ensure_dirs create the root and the soul write proceed.
-    let r = match read_entity_set_from_query_plane(QueryPlaneReadRequest {
+    let r = match read_entity_set_page(QueryPlaneReadRequest {
         state: &state,
         tenant: &tenant,
         security_ctx: &security_ctx,
@@ -274,7 +274,7 @@ async fn directory_root_lookup_souls_scenario_with_real_key_and_duplicates() {
 
     // (3b) An existing workspace's root lookup resolves (hits the one keyed root,
     // despite the duplicates) — no 413, returns exactly one root.
-    let r = match read_entity_set_from_query_plane(QueryPlaneReadRequest {
+    let r = match read_entity_set_page(QueryPlaneReadRequest {
         state: &state,
         tenant: &tenant,
         security_ctx: &security_ctx,
@@ -420,7 +420,7 @@ fn directory_root_souls_scenario_on_postgres() {
         // matches none for wsB → a bounded EMPTY answer instead of the 413. Were the
         // gap larger than the budget (prod's 1688 duplicate roots), the 413 would
         // remain — the keyed path below stays the authoritative fix for roots.
-        match read_entity_set_from_query_plane(QueryPlaneReadRequest {
+        match read_entity_set_page(QueryPlaneReadRequest {
             state: &state,
             tenant: &tenant,
             security_ctx: &security_ctx,
@@ -463,7 +463,7 @@ fn directory_root_souls_scenario_on_postgres() {
 
         // (3a) The soul-write path: a NEW workspace (no root) → authoritative-absent →
         // empty, NO 413 → ensure_dirs creates the root and the soul write proceeds.
-        let r = match read_entity_set_from_query_plane(QueryPlaneReadRequest {
+        let r = match read_entity_set_page(QueryPlaneReadRequest {
             state: &state,
             tenant: &tenant,
             security_ctx: &security_ctx,
@@ -487,7 +487,7 @@ fn directory_root_souls_scenario_on_postgres() {
         );
 
         // (3b) The existing absent-ParentId root resolves (no 413, exactly one).
-        let r = match read_entity_set_from_query_plane(QueryPlaneReadRequest {
+        let r = match read_entity_set_page(QueryPlaneReadRequest {
             state: &state,
             tenant: &tenant,
             security_ctx: &security_ctx,
@@ -611,7 +611,7 @@ fn field_index_backfill_bounds_non_keyed_path_lookup_on_postgres() {
         // (1) Field index empty (pre-existing dirs unindexed): the non-keyed Path lookup
         // enumerates the full type from the store (> budget) with nothing to narrow it →
         // 413 QueryTooLarge — exactly the prod failure.
-        match read_entity_set_from_query_plane(QueryPlaneReadRequest {
+        match read_entity_set_page(QueryPlaneReadRequest {
             state: &state,
             tenant: &tenant,
             security_ctx: &security_ctx,
@@ -637,7 +637,7 @@ fn field_index_backfill_bounds_non_keyed_path_lookup_on_postgres() {
 
         // (3) The same Path lookup now binds via the native page and finds /souls — proof
         // the backfill populated the field index for entities absent from the lazy index.
-        let r = match read_entity_set_from_query_plane(QueryPlaneReadRequest {
+        let r = match read_entity_set_page(QueryPlaneReadRequest {
             state: &state,
             tenant: &tenant,
             security_ctx: &security_ctx,
@@ -1018,7 +1018,7 @@ async fn keyed_miss_returns_empty_without_scan_413_once_watermarked() {
     };
 
     // Before the watermark: keyed miss → scan fallback → 413.
-    match read_entity_set_from_query_plane(QueryPlaneReadRequest {
+    match read_entity_set_page(QueryPlaneReadRequest {
         state: &state,
         tenant: &tenant,
         security_ctx: &security_ctx,
@@ -1039,7 +1039,7 @@ async fn keyed_miss_returns_empty_without_scan_413_once_watermarked() {
         .mark_key_index_backfilled(&tenant, "Order", "ws_path")
         .await;
 
-    let result = match read_entity_set_from_query_plane(QueryPlaneReadRequest {
+    let result = match read_entity_set_page(QueryPlaneReadRequest {
         state: &state,
         tenant: &tenant,
         security_ctx: &security_ctx,

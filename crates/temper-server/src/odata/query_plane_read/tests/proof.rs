@@ -471,7 +471,7 @@ async fn ordinary_null_filter_uses_lossless_candidate_scan() {
         ..QueryOptions::default()
     };
 
-    let result = match read_entity_set_from_query_plane(QueryPlaneReadRequest {
+    let result = match read_entity_set_page(QueryPlaneReadRequest {
         state: &state,
         tenant: &tenant,
         security_ctx: &security_ctx,
@@ -561,7 +561,7 @@ async fn nullable_scalar_order_uses_read_source_full_proof() {
         ..QueryOptions::default()
     };
 
-    let result = match read_entity_set_from_query_plane(QueryPlaneReadRequest {
+    let result = match read_entity_set_page(QueryPlaneReadRequest {
         state: &state,
         tenant: &tenant,
         security_ctx: &security_ctx,
@@ -645,7 +645,7 @@ async fn context_prep_shaped_filter_with_huge_top_uses_bounded_native_page() {
         ..QueryOptions::default()
     };
 
-    let result = match read_entity_set_from_query_plane(QueryPlaneReadRequest {
+    let result = match read_entity_set_page(QueryPlaneReadRequest {
         state: &state,
         tenant: &tenant,
         security_ctx: &security_ctx,
@@ -805,7 +805,7 @@ async fn file_point_lookup_with_status_ne_uses_lossless_equality_candidates() {
         ]
     );
 
-    let result = match read_entity_set_from_query_plane(request).await {
+    let result = match read_entity_set_page(request).await {
         Ok(result) => result,
         Err(QueryPlaneReadError::QueryTooLarge { telemetry }) => panic!(
             "file point lookup should push down equality candidates: QueryTooLarge filter_pushdown={} fallback={:?} candidates={} pushed={}",
@@ -816,6 +816,9 @@ async fn file_point_lookup_with_status_ne_uses_lossless_equality_candidates() {
         ),
         Err(QueryPlaneReadError::AuthorizationDenied(_)) => {
             panic!("file point lookup should not be denied by read authorization")
+        }
+        Err(QueryPlaneReadError::InvalidContinuation) => {
+            panic!("no $skiptoken was supplied")
         }
     };
 
@@ -883,7 +886,7 @@ async fn session_entry_chain_parent_lookup_uses_bounded_native_page() {
         ..QueryOptions::default()
     };
 
-    let result = match read_entity_set_from_query_plane(QueryPlaneReadRequest {
+    let result = match read_entity_set_page(QueryPlaneReadRequest {
         state: &state,
         tenant: &tenant,
         security_ctx: &security_ctx,
@@ -960,7 +963,7 @@ async fn session_entry_leaf_id_lookup_uses_bounded_native_page() {
         ..QueryOptions::default()
     };
 
-    let result = match read_entity_set_from_query_plane(QueryPlaneReadRequest {
+    let result = match read_entity_set_page(QueryPlaneReadRequest {
         state: &state,
         tenant: &tenant,
         security_ctx: &security_ctx,
@@ -1030,7 +1033,7 @@ async fn unsafe_order_uses_read_source_full_proof() {
         ..QueryOptions::default()
     };
 
-    let result = match read_entity_set_from_query_plane(QueryPlaneReadRequest {
+    let result = match read_entity_set_page(QueryPlaneReadRequest {
         state: &state,
         tenant: &tenant,
         security_ctx: &security_ctx,
@@ -1132,7 +1135,7 @@ async fn empty_equality_list_on_large_type_is_authoritative_absent_without_scan(
 
     let security_ctx = SecurityContext::system();
     let query_options = session_filter_options("session-brand-new");
-    let result = match read_entity_set_from_query_plane(QueryPlaneReadRequest {
+    let result = match read_entity_set_page(QueryPlaneReadRequest {
         state: &state,
         tenant: &tenant,
         security_ctx: &security_ctx,
@@ -1221,7 +1224,7 @@ async fn equality_list_on_large_type_repairs_unprojected_match_boundedly() {
 
     // The unprojected match is repaired and returned — not a 413, not a wrong empty.
     let query_options = session_filter_options("session-brand-new");
-    let result = match read_entity_set_from_query_plane(QueryPlaneReadRequest {
+    let result = match read_entity_set_page(QueryPlaneReadRequest {
         state: &state,
         tenant: &tenant,
         security_ctx: &security_ctx,
@@ -1243,7 +1246,7 @@ async fn equality_list_on_large_type_repairs_unprojected_match_boundedly() {
 
     // A session matching nothing (projected or gap) stays a bounded empty answer.
     let query_options = session_filter_options("session-nowhere");
-    let result = match read_entity_set_from_query_plane(QueryPlaneReadRequest {
+    let result = match read_entity_set_page(QueryPlaneReadRequest {
         state: &state,
         tenant: &tenant,
         security_ctx: &security_ctx,
@@ -1300,7 +1303,7 @@ async fn equality_list_rescue_honors_skip_and_select() {
     query_options.skip = Some(1);
     query_options.select = Some(vec!["Id".to_string()]);
 
-    let result = match read_entity_set_from_query_plane(QueryPlaneReadRequest {
+    let result = match read_entity_set_page(QueryPlaneReadRequest {
         state: &state,
         tenant: &tenant,
         security_ctx: &security_ctx,
