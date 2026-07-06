@@ -57,6 +57,8 @@ base64 = "0.22"
 lru = { workspace = true }
 sha2 = { workspace = true }
 hmac = "0.12"
+hex = "0.4"
+subtle = "2"
 libc = { workspace = true }
 # ADR-0055: CPU profile capture. pprof-rs is used because crates.io
 # `datadog-profiling` is currently an empty placeholder (see ADR for

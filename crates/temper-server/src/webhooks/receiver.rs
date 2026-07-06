@@ -7,24 +7,42 @@
 
 use std::collections::BTreeMap;
 
+use axum::body::Bytes;
 use axum::extract::{Path, Query, State};
-use axum::http::{Method, StatusCode};
+use axum::http::{HeaderMap, Method, StatusCode};
 use axum::response::IntoResponse;
 
 use tracing::instrument;
 
-use crate::request_context::AgentContext;
-use crate::state::ServerState;
+use temper_authz::{PrincipalKind, SecurityContext};
 use temper_runtime::tenant::TenantId;
 use temper_spec::automaton::Webhook;
+
+use crate::authz::{DenialInput, record_authz_denial};
+use crate::request_context::AgentContext;
+use crate::secrets::resolve_secret_templates;
+use crate::state::ServerState;
+
+/// Default header carrying the webhook HMAC signature when the spec's
+/// `hmac_header` is unset.
+const DEFAULT_SIGNATURE_HEADER: &str = "X-Temper-Signature";
 
 /// Handle an inbound webhook request.
 ///
 /// Route: `GET|POST /webhooks/{tenant}/{*path}`
 ///
 /// The handler looks up the webhook configuration from the tenant's spec
-/// registry, validates the HTTP method, extracts the entity ID and action
-/// parameters, then dispatches the configured action to the target entity.
+/// registry, validates the HTTP method, then applies the two gates that guard
+/// every other write path (ADR-0156):
+///
+/// 1. **Authenticity** — when the webhook declares `hmac_secret`, the request
+///    must carry a valid `HMAC-SHA256(secret, raw_body)` signature or it is
+///    rejected `401`.
+/// 2. **Authorization** — a restricted `webhook:{name}` principal is built and
+///    the configured action is authorized through the same Cedar gate as the
+///    OData write path; a denied request is rejected `403`.
+///
+/// Only after both gates pass is the action dispatched.
 #[instrument(skip_all, fields(
     otel.name = %format_args!("{} /webhooks/{}/{}", method, tenant_str, webhook_path),
     tenant = %tenant_str,
@@ -36,6 +54,8 @@ pub async fn handle_webhook(
     State(state): State<ServerState>,
     Path((tenant_str, webhook_path)): Path<(String, String)>,
     Query(query): Query<BTreeMap<String, String>>,
+    headers: HeaderMap,
+    body: Bytes,
 ) -> impl IntoResponse {
     let tenant = TenantId::new(&tenant_str);
 
@@ -65,6 +85,17 @@ pub async fn handle_webhook(
         );
     }
 
+    // Gate 1 — authenticity (ADR-0156). Verify the HMAC signature over the raw
+    // body before touching entity state. `authenticated` records whether a
+    // declared secret verified the request; Cedar policies can require it.
+    let authenticated = match verify_webhook_signature(&state, &tenant, &webhook, &headers, &body) {
+        Ok(authenticated) => authenticated,
+        Err((status, message)) => {
+            tracing::warn!(webhook = %webhook.name, %status, "webhook signature rejected: {message}");
+            return (status, message);
+        }
+    };
+
     // Extract entity ID from the configured source.
     let entity_id = {
         let param_name = webhook.entity_param.as_deref().unwrap_or("entity_id");
@@ -89,11 +120,68 @@ pub async fn handle_webhook(
     }
 
     let action = &webhook.action;
+    let webhook_agent_id = format!("webhook:{}", webhook.name);
+    let security_ctx = webhook_security_context(&webhook.name, authenticated);
+
+    // Gate 2 — authorization (ADR-0156). Authorize the action through the same
+    // Cedar path as the OData write binding, using the current entity view as
+    // the resource. A tenant with policies loaded is default-deny, so an
+    // unpermitted webhook principal is rejected here.
+    let resource_attrs = match state
+        .load_authz_resource_snapshot(&tenant, &entity_type, &entity_id)
+        .await
+    {
+        Ok(snapshot) => snapshot.resource_attrs,
+        Err(_) => minimal_resource_attrs(&entity_id),
+    };
+
+    if let Err(denial) = state.authorize_with_context(
+        &security_ctx,
+        action,
+        &entity_type,
+        &resource_attrs,
+        tenant.as_str(),
+    ) {
+        let reason = denial.to_string();
+        tracing::warn!(webhook = %webhook.name, action = %action, "webhook authorization denied: {reason}");
+        // Only surface a governance pending-decision for a caller that proved
+        // it holds the signing secret. An unauthenticated caller (a webhook
+        // with no declared secret) must not be able to amplify pending-decision
+        // records by spamming the public route; it gets a plain 403.
+        if !authenticated {
+            return (StatusCode::FORBIDDEN, reason);
+        }
+        let from_status = resource_attrs
+            .get("status")
+            .and_then(serde_json::Value::as_str)
+            .map(str::to_string);
+        let decision = record_authz_denial(
+            &state,
+            DenialInput {
+                tenant: tenant.as_str(),
+                security_ctx: &security_ctx,
+                agent_id_override: Some(webhook_agent_id.as_str()),
+                action,
+                resource_type: &entity_type,
+                resource_id: &entity_id,
+                resource_attrs: serde_json::to_value(&resource_attrs).unwrap_or_default(),
+                reason: &reason,
+                module_name: None,
+                from_status,
+            },
+        )
+        .await;
+        return (
+            StatusCode::FORBIDDEN,
+            format!("{reason} (decision: {})", decision.id),
+        );
+    }
+
     let agent_ctx = AgentContext {
-        security_ctx: None,
-        agent_id: Some(format!("webhook:{}", webhook.name)),
+        security_ctx: Some(security_ctx),
+        agent_id: Some(webhook_agent_id),
         session_id: None,
-        agent_type: None,
+        agent_type: Some("webhook".to_string()),
         intent: None,
         ..AgentContext::default()
     };
@@ -121,6 +209,153 @@ pub async fn handle_webhook(
             )
         }
     }
+}
+
+/// Verify the webhook's HMAC-SHA256 signature over the raw request body.
+///
+/// Returns:
+/// - `Ok(true)` — a declared secret verified the request signature.
+/// - `Ok(false)` — the webhook declares no `hmac_secret`; authenticity is left
+///   to the Cedar gate (default-deny in production unless explicitly permitted).
+/// - `Err((status, message))` — a secret is declared but the request is
+///   unsigned, mis-signed, or the secret cannot be resolved. Fail closed: an
+///   unverifiable signed webhook must not dispatch.
+fn verify_webhook_signature(
+    state: &ServerState,
+    tenant: &TenantId,
+    webhook: &Webhook,
+    headers: &HeaderMap,
+    body: &[u8],
+) -> Result<bool, (StatusCode, String)> {
+    let Some(secret_template) = webhook.hmac_secret.as_deref() else {
+        return Ok(false);
+    };
+
+    let secret = resolve_webhook_secret(state, tenant, secret_template).ok_or_else(|| {
+        (
+            StatusCode::UNAUTHORIZED,
+            "Webhook signing secret is not configured".to_string(),
+        )
+    })?;
+
+    let header_name = webhook
+        .hmac_header
+        .as_deref()
+        .unwrap_or(DEFAULT_SIGNATURE_HEADER);
+    let provided = headers
+        .get(header_name)
+        .and_then(|value| value.to_str().ok())
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| {
+            (
+                StatusCode::UNAUTHORIZED,
+                format!("Missing webhook signature header '{header_name}'"),
+            )
+        })?;
+
+    if signature_matches(&secret, body, provided) {
+        Ok(true)
+    } else {
+        Err((
+            StatusCode::UNAUTHORIZED,
+            "Webhook signature verification failed".to_string(),
+        ))
+    }
+}
+
+/// Resolve the webhook signing secret from the tenant secret store.
+///
+/// Supports `{secret:KEY}` templates and literal secrets. Returns `None` (fail
+/// closed) when no vault is configured, the template is unresolved, or the
+/// resolved value is empty.
+fn resolve_webhook_secret(
+    state: &ServerState,
+    tenant: &TenantId,
+    template: &str,
+) -> Option<String> {
+    let vault = state.secrets_vault.as_ref()?;
+    let mut one = BTreeMap::new();
+    one.insert("secret".to_string(), template.to_string());
+    let resolved = resolve_secret_templates(&one, vault, tenant.as_str());
+    let value = resolved.get("secret")?.clone();
+    if value.is_empty() || value.contains("{secret:") {
+        return None;
+    }
+    Some(value)
+}
+
+/// Constant-time comparison of a provided webhook signature against the
+/// expected `HMAC-SHA256(secret, body)`.
+///
+/// Accepts an optional `sha256=` prefix and is case-insensitive over the hex
+/// digest. Uses [`subtle::ConstantTimeEq`] rather than `==` to avoid a timing
+/// side channel on the digest.
+fn signature_matches(secret: &str, body: &[u8], provided: &str) -> bool {
+    use hmac::{Hmac, Mac};
+    use sha2::Sha256;
+    use subtle::ConstantTimeEq;
+
+    let Ok(mut mac) = Hmac::<Sha256>::new_from_slice(secret.as_bytes()) else {
+        return false;
+    };
+    mac.update(body);
+    let expected_hex = hex::encode(mac.finalize().into_bytes());
+    debug_assert_eq!(
+        expected_hex.len(),
+        64,
+        "HMAC-SHA256 hex digest must be 64 characters"
+    );
+
+    // Normalize first (lowercase) so the `sha256=` prefix is matched
+    // case-insensitively, then strip it.
+    let normalized = provided.trim().to_ascii_lowercase();
+    let provided_hex = normalized
+        .strip_prefix("sha256=")
+        .unwrap_or(normalized.as_str())
+        .trim();
+
+    provided_hex
+        .as_bytes()
+        .ct_eq(expected_hex.as_bytes())
+        .into()
+}
+
+/// Build the restricted Cedar principal for a webhook caller.
+///
+/// The principal is an `Agent` named `webhook:{name}` with role/agent_type
+/// `webhook`; the `authenticated` attribute records whether an HMAC signature
+/// was verified. It is never `System`, so the same tenant Cedar policies that
+/// gate the OData write path also gate this route.
+fn webhook_security_context(webhook_name: &str, authenticated: bool) -> SecurityContext {
+    let mut ctx = SecurityContext::from_headers(&[]);
+    ctx.principal.id = format!("webhook:{webhook_name}");
+    ctx.principal.kind = PrincipalKind::Agent;
+    ctx.principal.role = Some("webhook".to_string());
+    ctx.principal.agent_type = Some("webhook".to_string());
+    ctx.principal.attributes.insert(
+        "authenticated".to_string(),
+        serde_json::Value::Bool(authenticated),
+    );
+    ctx.context_attrs.insert(
+        "authenticated".to_string(),
+        serde_json::Value::Bool(authenticated),
+    );
+    ctx.with_action_context(format!("webhook:{webhook_name}"))
+}
+
+/// Minimal Cedar resource view for a webhook target that does not yet exist.
+fn minimal_resource_attrs(entity_id: &str) -> BTreeMap<String, serde_json::Value> {
+    let mut attrs = BTreeMap::new();
+    attrs.insert(
+        "id".to_string(),
+        serde_json::Value::String(entity_id.to_string()),
+    );
+    attrs.insert(
+        "status".to_string(),
+        serde_json::Value::String(String::new()),
+    );
+    attrs
 }
 
 /// Find a webhook matching (tenant, path) in the registry.
@@ -158,193 +393,5 @@ fn extract_param(source: &str, query: &BTreeMap<String, String>) -> Option<Strin
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use axum::body::Body;
-    use axum::http::Request;
-    use temper_runtime::ActorSystem;
-    use temper_spec::csdl::parse_csdl;
-    use tower::ServiceExt;
-
-    const CSDL_XML: &str = include_str!("../../../../test-fixtures/specs/model.csdl.xml");
-
-    /// IOA spec with a webhook declaration for OAuth callback.
-    const ORDER_IOA_WITH_WEBHOOK: &str = r#"
-[automaton]
-name = "Order"
-states = ["Draft", "Submitted", "Confirmed", "Cancelled", "Authorized"]
-initial = "Draft"
-
-[[action]]
-name = "SubmitOrder"
-kind = "input"
-from = ["Draft"]
-to = "Submitted"
-
-[[action]]
-name = "ConfirmOrder"
-kind = "input"
-from = ["Submitted"]
-to = "Confirmed"
-
-[[action]]
-name = "CancelOrder"
-kind = "input"
-from = ["Draft", "Submitted"]
-to = "Cancelled"
-
-[[action]]
-name = "HandleOAuthCallback"
-kind = "input"
-from = ["Submitted"]
-to = "Authorized"
-params = ["code"]
-
-[[webhook]]
-name = "oauth_callback"
-path = "oauth/callback"
-method = "GET"
-action = "HandleOAuthCallback"
-entity_lookup = "query_param"
-entity_param = "state"
-
-[webhook.extract]
-code = "query.code"
-"#;
-
-    fn build_test_state() -> ServerState {
-        let csdl = parse_csdl(CSDL_XML).unwrap();
-        let system = ActorSystem::new("webhook-test");
-        let state = ServerState::new(system, csdl, CSDL_XML.to_string());
-
-        // Register tenant with webhook-enabled spec.
-        {
-            let mut registry = state.registry.write().unwrap();
-            let csdl2 = parse_csdl(CSDL_XML).unwrap();
-            registry.register_tenant(
-                "test-tenant",
-                csdl2,
-                CSDL_XML.to_string(),
-                &[("Order", ORDER_IOA_WITH_WEBHOOK)],
-            );
-        }
-
-        state
-    }
-
-    fn build_test_router() -> axum::Router {
-        crate::router::build_router(build_test_state())
-    }
-
-    #[tokio::test]
-    async fn webhook_dispatches_action() {
-        let state = build_test_state();
-        let tenant = TenantId::new("test-tenant");
-
-        // Create entity directly via dispatch.
-        let _create = state
-            .get_or_create_tenant_entity(
-                &tenant,
-                "Order",
-                "ent-1",
-                serde_json::json!({"id": "ent-1"}),
-            )
-            .await
-            .expect("entity creation should succeed");
-
-        // Submit to move to "Submitted".
-        let submit = state
-            .dispatch_tenant_action(
-                &tenant,
-                "Order",
-                "ent-1",
-                "SubmitOrder",
-                serde_json::json!({}),
-                &AgentContext::default(),
-            )
-            .await
-            .expect("SubmitOrder should succeed");
-        assert!(submit.success, "SubmitOrder should succeed");
-        assert_eq!(submit.state.status, "Submitted");
-
-        // Build router and call webhook.
-        let app = crate::router::build_router(state);
-        let response = app
-            .oneshot(
-                Request::builder()
-                    .method("GET")
-                    .uri("/webhooks/test-tenant/oauth/callback?state=ent-1&code=abc123")
-                    .body(Body::empty())
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-
-        assert_eq!(response.status(), StatusCode::OK);
-        let body = axum::body::to_bytes(response.into_body(), 1024 * 1024)
-            .await
-            .unwrap();
-        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
-        assert!(
-            json["success"].as_bool().unwrap_or(false),
-            "HandleOAuthCallback should succeed"
-        );
-        assert_eq!(json["state"]["status"], "Authorized");
-    }
-
-    #[tokio::test]
-    async fn webhook_missing_entity_id_returns_400() {
-        let app = build_test_router();
-
-        let response = app
-            .oneshot(
-                Request::builder()
-                    .method("GET")
-                    .uri("/webhooks/test-tenant/oauth/callback?code=abc123")
-                    .body(Body::empty())
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-
-        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
-    }
-
-    #[tokio::test]
-    async fn webhook_unknown_path_returns_404() {
-        let app = build_test_router();
-
-        let response = app
-            .oneshot(
-                Request::builder()
-                    .method("GET")
-                    .uri("/webhooks/test-tenant/nonexistent/path?entity_id=ent-1")
-                    .body(Body::empty())
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-
-        assert_eq!(response.status(), StatusCode::NOT_FOUND);
-    }
-
-    #[tokio::test]
-    async fn webhook_extracts_query_params() {
-        let query: BTreeMap<String, String> = [
-            ("code".to_string(), "auth-code-123".to_string()),
-            ("state".to_string(), "entity-id".to_string()),
-        ]
-        .into_iter()
-        .collect();
-
-        assert_eq!(
-            extract_param("query.code", &query),
-            Some("auth-code-123".to_string())
-        );
-        assert_eq!(
-            extract_param("query.state", &query),
-            Some("entity-id".to_string())
-        );
-        assert_eq!(extract_param("query.missing", &query), None);
-    }
-}
+#[path = "receiver_test.rs"]
+mod receiver_test;
