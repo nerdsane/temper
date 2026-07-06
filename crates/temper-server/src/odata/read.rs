@@ -658,16 +658,33 @@ pub(super) async fn handle_odata_get_for_tenant(
             .await
         }
 
-        ODataPath::BoundFunction { parent, function } => {
-            handle_bound_function(
-                &state,
-                &tenant,
-                &security_ctx,
-                &parent,
-                &function,
-                &query_options,
-            )
-            .await
+        ODataPath::BoundFunction {
+            parent,
+            function,
+            params,
+        } => {
+            if function == "Nearest" {
+                // ADR-0155: the collection-bound exact-scan kNN function.
+                super::nearest::handle_nearest(
+                    &state,
+                    &tenant,
+                    &security_ctx,
+                    &parent,
+                    &params,
+                    &query_options,
+                )
+                .await
+            } else {
+                handle_bound_function(
+                    &state,
+                    &tenant,
+                    &security_ctx,
+                    &parent,
+                    &function,
+                    &query_options,
+                )
+                .await
+            }
         }
 
         ODataPath::Value { ref parent } => {

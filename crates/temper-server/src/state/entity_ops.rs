@@ -248,6 +248,28 @@ impl ServerState {
             .unwrap_or_default()
     }
 
+    /// The declared `[[vector]]` access paths for `(tenant, entity_type)` — the
+    /// registry table first (covers os-app entities), the boot-time
+    /// `transition_tables` as fallback (ADR-0155). Same registry-lock discipline as
+    /// [`Self::declared_keys_for`]: fail fast on a poisoned lock rather than silently
+    /// falling through. Empty when the type declares no vector path.
+    pub(crate) fn declared_vectors_for(
+        &self,
+        tenant: &TenantId,
+        entity_type: &str,
+    ) -> Vec<temper_jit::table::types::DeclaredVector> {
+        {
+            let registry = self.registry.read().expect("registry lock poisoned");
+            if let Some(table) = registry.get_table(tenant, entity_type) {
+                return table.vectors.clone();
+            }
+        }
+        self.transition_tables
+            .get(entity_type)
+            .map(|table| table.vectors.clone())
+            .unwrap_or_default()
+    }
+
     /// Load the current entity state and derive the Cedar resource view used
     /// for action authorization.
     pub(crate) async fn load_authz_resource_snapshot(

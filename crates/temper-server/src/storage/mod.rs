@@ -79,6 +79,53 @@ pub trait DynEventStore: Send + Sync {
         key_rows: &'a [temper_runtime::persistence::EntityKeyRow],
     ) -> EventStoreFuture<'a, Result<u64, PersistenceError>>;
 
+    #[allow(clippy::too_many_arguments)]
+    fn append_with_index_rows<'a>(
+        &'a self,
+        persistence_id: &'a str,
+        expected_sequence: u64,
+        events: &'a [PersistenceEnvelope],
+        key_rows: &'a [temper_runtime::persistence::EntityKeyRow],
+        vector_rows: &'a [temper_runtime::persistence::EntityVectorRow],
+    ) -> EventStoreFuture<'a, Result<u64, PersistenceError>>;
+
+    fn backfill_entity_vectors<'a>(
+        &'a self,
+        tenant: &'a str,
+        entity_type: &'a str,
+        entity_id: &'a str,
+        vector_rows: &'a [temper_runtime::persistence::EntityVectorRow],
+    ) -> EventStoreFuture<'a, Result<(), PersistenceError>>;
+
+    fn vector_candidates<'a>(
+        &'a self,
+        tenant: &'a str,
+        entity_type: &'a str,
+        decl_name: &'a str,
+        model_tag: &'a str,
+    ) -> EventStoreFuture<
+        'a,
+        Result<Vec<temper_runtime::persistence::EntityVectorCandidate>, PersistenceError>,
+    >;
+
+    fn mark_vector_index_backfilled<'a>(
+        &'a self,
+        tenant: &'a str,
+        entity_type: &'a str,
+        vector_set: &'a str,
+    ) -> EventStoreFuture<'a, Result<(), PersistenceError>>;
+
+    fn vector_index_backfilled_types<'a>(
+        &'a self,
+        tenant: &'a str,
+    ) -> EventStoreFuture<'a, Result<Vec<(String, String)>, PersistenceError>>;
+
+    fn vectored_entity_ids_for_type<'a>(
+        &'a self,
+        tenant: &'a str,
+        entity_type: &'a str,
+    ) -> EventStoreFuture<'a, Result<Vec<String>, PersistenceError>>;
+
     fn lookup_by_key<'a>(
         &'a self,
         tenant: &'a str,
@@ -190,6 +237,92 @@ where
             expected_sequence,
             events,
             key_rows,
+        ))
+    }
+
+    fn append_with_index_rows<'a>(
+        &'a self,
+        persistence_id: &'a str,
+        expected_sequence: u64,
+        events: &'a [PersistenceEnvelope],
+        key_rows: &'a [temper_runtime::persistence::EntityKeyRow],
+        vector_rows: &'a [temper_runtime::persistence::EntityVectorRow],
+    ) -> EventStoreFuture<'a, Result<u64, PersistenceError>> {
+        Box::pin(EventStore::append_with_index_rows(
+            self,
+            persistence_id,
+            expected_sequence,
+            events,
+            key_rows,
+            vector_rows,
+        ))
+    }
+
+    fn backfill_entity_vectors<'a>(
+        &'a self,
+        tenant: &'a str,
+        entity_type: &'a str,
+        entity_id: &'a str,
+        vector_rows: &'a [temper_runtime::persistence::EntityVectorRow],
+    ) -> EventStoreFuture<'a, Result<(), PersistenceError>> {
+        Box::pin(EventStore::backfill_entity_vectors(
+            self,
+            tenant,
+            entity_type,
+            entity_id,
+            vector_rows,
+        ))
+    }
+
+    fn vector_candidates<'a>(
+        &'a self,
+        tenant: &'a str,
+        entity_type: &'a str,
+        decl_name: &'a str,
+        model_tag: &'a str,
+    ) -> EventStoreFuture<
+        'a,
+        Result<Vec<temper_runtime::persistence::EntityVectorCandidate>, PersistenceError>,
+    > {
+        Box::pin(EventStore::vector_candidates(
+            self,
+            tenant,
+            entity_type,
+            decl_name,
+            model_tag,
+        ))
+    }
+
+    fn mark_vector_index_backfilled<'a>(
+        &'a self,
+        tenant: &'a str,
+        entity_type: &'a str,
+        vector_set: &'a str,
+    ) -> EventStoreFuture<'a, Result<(), PersistenceError>> {
+        Box::pin(EventStore::mark_vector_index_backfilled(
+            self,
+            tenant,
+            entity_type,
+            vector_set,
+        ))
+    }
+
+    fn vector_index_backfilled_types<'a>(
+        &'a self,
+        tenant: &'a str,
+    ) -> EventStoreFuture<'a, Result<Vec<(String, String)>, PersistenceError>> {
+        Box::pin(EventStore::vector_index_backfilled_types(self, tenant))
+    }
+
+    fn vectored_entity_ids_for_type<'a>(
+        &'a self,
+        tenant: &'a str,
+        entity_type: &'a str,
+    ) -> EventStoreFuture<'a, Result<Vec<String>, PersistenceError>> {
+        Box::pin(EventStore::vectored_entity_ids_for_type(
+            self,
+            tenant,
+            entity_type,
         ))
     }
 
@@ -371,6 +504,77 @@ impl BoxedEventStore {
     ) -> Result<u64, PersistenceError> {
         self.0
             .append_with_keys(persistence_id, expected_sequence, events, key_rows)
+            .await
+    }
+
+    pub async fn append_with_index_rows(
+        &self,
+        persistence_id: &str,
+        expected_sequence: u64,
+        events: &[PersistenceEnvelope],
+        key_rows: &[temper_runtime::persistence::EntityKeyRow],
+        vector_rows: &[temper_runtime::persistence::EntityVectorRow],
+    ) -> Result<u64, PersistenceError> {
+        self.0
+            .append_with_index_rows(
+                persistence_id,
+                expected_sequence,
+                events,
+                key_rows,
+                vector_rows,
+            )
+            .await
+    }
+
+    pub async fn backfill_entity_vectors(
+        &self,
+        tenant: &str,
+        entity_type: &str,
+        entity_id: &str,
+        vector_rows: &[temper_runtime::persistence::EntityVectorRow],
+    ) -> Result<(), PersistenceError> {
+        self.0
+            .backfill_entity_vectors(tenant, entity_type, entity_id, vector_rows)
+            .await
+    }
+
+    pub async fn vector_candidates(
+        &self,
+        tenant: &str,
+        entity_type: &str,
+        decl_name: &str,
+        model_tag: &str,
+    ) -> Result<Vec<temper_runtime::persistence::EntityVectorCandidate>, PersistenceError> {
+        self.0
+            .vector_candidates(tenant, entity_type, decl_name, model_tag)
+            .await
+    }
+
+    pub async fn mark_vector_index_backfilled(
+        &self,
+        tenant: &str,
+        entity_type: &str,
+        vector_set: &str,
+    ) -> Result<(), PersistenceError> {
+        self.0
+            .mark_vector_index_backfilled(tenant, entity_type, vector_set)
+            .await
+    }
+
+    pub async fn vector_index_backfilled_types(
+        &self,
+        tenant: &str,
+    ) -> Result<Vec<(String, String)>, PersistenceError> {
+        self.0.vector_index_backfilled_types(tenant).await
+    }
+
+    pub async fn vectored_entity_ids_for_type(
+        &self,
+        tenant: &str,
+        entity_type: &str,
+    ) -> Result<Vec<String>, PersistenceError> {
+        self.0
+            .vectored_entity_ids_for_type(tenant, entity_type)
             .await
     }
 

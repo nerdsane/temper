@@ -1,0 +1,37 @@
+# Vectored Item — minimal fixture for the ADR-0155 entity_vector_index DST.
+#
+# An Item carries an `Embedding` (a JSON-string float vector) and an
+# `EmbeddingModel` tag, and declares a `[[vector]]` access path over them. The DST
+# asserts that seeded writes + `Temper.Nearest` ranking reproduce across every seed:
+# the kernel ranks a store-supplied, id-ordered candidate list, so the order is
+# seed-independent.
+
+[automaton]
+name = "Item"
+states = ["New", "Ready"]
+initial = "New"
+
+[[state]]
+name = "Embedding"
+type = "string"
+initial = ""
+
+[[state]]
+name = "EmbeddingModel"
+type = "string"
+initial = ""
+
+[[vector]]
+name = "embed"
+property = "Embedding"
+model_property = "EmbeddingModel"
+dims = 4
+metric = "cosine"
+
+[[action]]
+name = "Create"
+kind = "input"
+from = ["New"]
+to = "Ready"
+params = ["Embedding", "EmbeddingModel"]
+hint = "Create the item with its embedding vector (JSON string) and model tag."

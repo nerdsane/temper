@@ -351,28 +351,59 @@ impl EntityActor {
 
         // W2 / temper#146: measure append wait — the hypothesis is that
         // writer-lock / fsync serialization is a cold-start bottleneck.
-        // ADR-0153: derive the declared key rows from the new state and co-commit
-        // them with the journal append, so a keyed read is correct without a scan.
-        let key_rows = {
+        // ADR-0153/0155: derive the declared key rows AND the vector-index rows from
+        // the new state and co-commit them with the journal append, so a keyed read
+        // is correct without a scan and a kNN read reflects the write deterministically.
+        let (key_rows, vector_rows) = {
             let table = self.table.read().expect("table lock poisoned");
-            let mut rows = Vec::new();
+            let mut key_rows = Vec::new();
+            let mut vector_rows = Vec::new();
             if let Some(field_map) = state.fields.as_object() {
                 for key in &table.keys {
                     if let Some(hash) =
                         crate::key_index::canonical_key_hash(&key.name, &key.properties, field_map)
                     {
-                        rows.push(temper_runtime::persistence::EntityKeyRow {
+                        key_rows.push(temper_runtime::persistence::EntityKeyRow {
                             key_name: key.name.clone(),
                             key_hash: hash,
                         });
                     }
                 }
+                for decl in &table.vectors {
+                    // A vector is indexed only when its property parses to `dims`
+                    // floats AND its model tag is a non-empty string — otherwise the
+                    // path indexes nothing for this entity (like an incomplete key).
+                    let Some(vector) = field_map
+                        .get(&decl.property)
+                        .and_then(|v| crate::vector_index::parse_vector_property(v, decl.dims))
+                    else {
+                        continue;
+                    };
+                    let Some(model_tag) = field_map
+                        .get(&decl.model_property)
+                        .and_then(|v| v.as_str())
+                        .filter(|tag| !tag.is_empty())
+                    else {
+                        continue;
+                    };
+                    vector_rows.push(temper_runtime::persistence::EntityVectorRow {
+                        decl_name: decl.name.clone(),
+                        model_tag: model_tag.to_string(),
+                        vector,
+                    });
+                }
             }
-            rows
+            (key_rows, vector_rows)
         };
         let append_start = Instant::now();
         let result = store
-            .append_with_keys(persistence_id, state.sequence_nr, &[envelope], &key_rows)
+            .append_with_index_rows(
+                persistence_id,
+                state.sequence_nr,
+                &[envelope],
+                &key_rows,
+                &vector_rows,
+            )
             .await;
         crate::runtime_metrics::record_event_store_append_wait(
             backend.as_str(),
