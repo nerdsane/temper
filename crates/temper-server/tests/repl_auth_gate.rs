@@ -43,7 +43,12 @@ const AGENT_REPL: &str =
 fn state_with_policy(policy: &str) -> ServerState {
     let csdl = parse_csdl(CSDL_XML).expect("CSDL should parse");
     let mut registry = SpecRegistry::new();
-    registry.register_tenant("default", csdl, CSDL_XML.to_string(), &[("Order", ORDER_IOA)]);
+    registry.register_tenant(
+        "default",
+        csdl,
+        CSDL_XML.to_string(),
+        &[("Order", ORDER_IOA)],
+    );
     let state = ServerState::from_registry(ActorSystem::new("repl-auth-gate-test"), registry);
     state
         .authz
