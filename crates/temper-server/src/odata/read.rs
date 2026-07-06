@@ -1370,7 +1370,10 @@ mod next_link_tests {
 
     #[test]
     fn query_component_encodes_reserved_but_not_unreserved() {
-        assert_eq!(encode_query_component("Status eq 'Published'"), "Status%20eq%20%27Published%27");
+        assert_eq!(
+            encode_query_component("Status eq 'Published'"),
+            "Status%20eq%20%27Published%27"
+        );
         assert_eq!(encode_query_component("Id-9._~"), "Id-9._~");
     }
 

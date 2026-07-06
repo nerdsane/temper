@@ -413,7 +413,13 @@ fn directory_root_souls_scenario_on_postgres() {
             filter: Some(dir_root_filter("wsA")),
             ..QueryOptions::default()
         };
-        // (1) Pre-watermark: a NEW workspace's root lookup misses → scans 15 > budget → 413.
+        // (1) Pre-watermark: a NEW workspace's root lookup misses. Historically this
+        // scanned 15 > budget → 413 (the original prod failure). The ARN-68 empty-list
+        // gap reconcile now bounds it: roots have NO ParentId field-index row, so they
+        // form the (small) coverage gap, get materialized, and `ParentId eq null`
+        // matches none for wsB → a bounded EMPTY answer instead of the 413. Were the
+        // gap larger than the budget (prod's 1688 duplicate roots), the 413 would
+        // remain — the keyed path below stays the authoritative fix for roots.
         match read_entity_set_page(QueryPlaneReadRequest {
             state: &state,
             tenant: &tenant,
@@ -425,9 +431,11 @@ fn directory_root_souls_scenario_on_postgres() {
         })
         .await
         {
-            Err(QueryPlaneReadError::QueryTooLarge { .. }) => {}
-            Ok(_) => panic!("expected 413 for a missing root before watermark, got Ok"),
-            Err(_) => panic!("expected QueryTooLarge before watermark, got another error"),
+            Ok(result) => assert!(
+                result.entities.is_empty(),
+                "wsB has no root; the bounded gap reconcile must return empty"
+            ),
+            Err(_) => panic!("the gap reconcile must bound the pre-watermark root miss"),
         }
 
         // (2) Backfill on real Postgres → Directory watermarked (duplicate roots are

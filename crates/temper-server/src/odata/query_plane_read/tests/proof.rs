@@ -1064,3 +1064,265 @@ async fn unsafe_order_uses_read_source_full_proof() {
 
     let _ = std::fs::remove_file(db_path);
 }
+
+/// ARN-68 (the SessionEntries-list flavor) shared harness: `count` journal-durable
+/// Orders (dispatched, so they enumerate from the journal) that are ALSO projected with
+/// `SessionId: "session-hot"` — the prod shape of a type whose cardinality exceeds the
+/// scan budget. Returns the state wired to the shared store.
+async fn build_large_projected_type(
+    store: &TursoEventStore,
+    tenant: &TenantId,
+    system_name: &str,
+    count: usize,
+) -> ServerState {
+    let mut state = build_order_state(system_name);
+    state.set_storage_stack(StorageStack::from_turso(store.clone()));
+    let agent_ctx = AgentContext::for_service(system_name);
+    for index in 0..count {
+        let entity_id = format!("entry-{index:04}");
+        state
+            .dispatch_tenant_action(
+                tenant,
+                "Order",
+                &entity_id,
+                "Create",
+                serde_json::json!({}),
+                &agent_ctx,
+            )
+            .await
+            .expect("create order");
+        // Deterministic projected fields (high sequence wins over the async queue).
+        upsert_order_projection(
+            store,
+            tenant,
+            &entity_id,
+            serde_json::json!({ "SessionId": "session-hot" }),
+            1_000 + index as u64,
+        )
+        .await;
+    }
+    state
+}
+
+fn session_filter_options(session: &str) -> QueryOptions {
+    QueryOptions {
+        filter: Some(FilterExpr::BinaryOp {
+            left: Box::new(FilterExpr::Property("SessionId".to_string())),
+            op: BinaryOperator::Eq,
+            right: Box::new(FilterExpr::Literal(ODataValue::String(session.to_string()))),
+        }),
+        top: Some(200),
+        ..QueryOptions::default()
+    }
+}
+
+/// ARN-68: an EMPTY bounded native page for an equality-conjunction list on a type
+/// LARGER than the scan budget is served bounded when the projection has no gaps —
+/// no full-type scan, no 413. This is the prod session-bootstrap shape:
+/// `SessionEntries?$filter=SessionId eq '<new>'` against 95k fully-projected entries.
+/// Before the fix this was an unconditional budget rejection.
+#[tokio::test]
+async fn empty_equality_list_on_large_type_is_authoritative_absent_without_scan() {
+    let db_path = std::env::temp_dir().join(format!("temper-arn68-empty-list-{}.db", sim_uuid()));
+    let _ = std::fs::remove_file(&db_path);
+    let db_url = format!("file:{}", db_path.display());
+    let store = TursoEventStore::new(&db_url, None)
+        .await
+        .expect("create local turso db");
+    let tenant = TenantId::default();
+    // 15 journal-durable + projected entities; scan budget is 10.
+    let state = build_large_projected_type(&store, &tenant, "arn68-empty-list", 15).await;
+
+    let security_ctx = SecurityContext::system();
+    let query_options = session_filter_options("session-brand-new");
+    let result = match read_entity_set_page(QueryPlaneReadRequest {
+        state: &state,
+        tenant: &tenant,
+        security_ctx: &security_ctx,
+        entity_type: "Order",
+        entity_set_name: "Orders",
+        query_options: &query_options,
+        budget: QueryPlaneReadBudget {
+            default_page_size: 1,
+            max_entities: 1,
+        },
+    })
+    .await
+    {
+        Ok(result) => result,
+        Err(_) => panic!("empty equality list on a fully-projected large type must not 413"),
+    };
+    assert!(result.entities.is_empty());
+
+    let _ = std::fs::remove_file(db_path);
+}
+
+/// ARN-68 + ARN-89 at scale: a journal-durable entity whose projected row is MISSING
+/// (never projected here; a crash-lost projection in prod) must be FOUND by an equality list
+/// even when the type exceeds the scan budget — the gap reconcile materializes only the
+/// unprojected entities. A filter matching neither the projected majority nor the gap
+/// stays a bounded empty answer. Before the fix both were budget rejections.
+#[tokio::test]
+async fn equality_list_on_large_type_repairs_unprojected_match_boundedly() {
+    let db_path = std::env::temp_dir().join(format!("temper-arn68-gap-list-{}.db", sim_uuid()));
+    let _ = std::fs::remove_file(&db_path);
+    let db_url = format!("file:{}", db_path.display());
+    let store = TursoEventStore::new(&db_url, None)
+        .await
+        .expect("create local turso db");
+    let tenant = TenantId::default();
+    let state = build_large_projected_type(&store, &tenant, "arn68-gap-list", 15).await;
+
+    // The lagging entity: journal-durable via DIRECT append — its projection was never
+    // enqueued (the crash-lost shape, deterministic: no async worker to race). The
+    // snapshot carries the queried SessionId for materialization.
+    use temper_runtime::persistence::{EventMetadata, EventStore as _, PersistenceEnvelope};
+    use temper_runtime::scheduler::{sim_now, sim_uuid as runtime_sim_uuid};
+    store
+        .append(
+            &format!("{tenant}:Order:entry-lagging"),
+            0,
+            &[PersistenceEnvelope {
+                sequence_nr: 1,
+                event_type: "Create".to_string(),
+                payload: serde_json::json!({
+                    "action": "Create",
+                    "params": { "SessionId": "session-brand-new" },
+                }),
+                metadata: EventMetadata {
+                    event_id: runtime_sim_uuid(),
+                    causation_id: runtime_sim_uuid(),
+                    correlation_id: runtime_sim_uuid(),
+                    timestamp: sim_now(),
+                    actor_id: "arn68-gap-list".to_string(),
+                },
+            }],
+        )
+        .await
+        .expect("append lagging order");
+    let snapshot = serde_json::json!({
+        "entity_type": "Order",
+        "entity_id": "entry-lagging",
+        "status": "Draft",
+        "item_count": 0,
+        "fields": { "Id": "entry-lagging", "Status": "Draft", "SessionId": "session-brand-new" },
+    });
+    store
+        .save_snapshot(
+            &format!("{tenant}:Order:entry-lagging"),
+            1,
+            &serde_json::to_vec(&snapshot).unwrap(),
+        )
+        .await
+        .expect("seed snapshot");
+
+    let security_ctx = SecurityContext::system();
+    let budget = QueryPlaneReadBudget {
+        default_page_size: 1,
+        max_entities: 1,
+    };
+
+    // The unprojected match is repaired and returned — not a 413, not a wrong empty.
+    let query_options = session_filter_options("session-brand-new");
+    let result = match read_entity_set_page(QueryPlaneReadRequest {
+        state: &state,
+        tenant: &tenant,
+        security_ctx: &security_ctx,
+        entity_type: "Order",
+        entity_set_name: "Orders",
+        query_options: &query_options,
+        budget,
+    })
+    .await
+    {
+        Ok(result) => result,
+        Err(_) => panic!("gap reconcile must repair the unprojected match, not reject"),
+    };
+    assert_eq!(result.entities.len(), 1, "the unprojected entity is found");
+    assert_eq!(
+        result.telemetry.fallback_reason,
+        QueryPlaneFallbackReason::ProjectionLagReconcile
+    );
+
+    // A session matching nothing (projected or gap) stays a bounded empty answer.
+    let query_options = session_filter_options("session-nowhere");
+    let result = match read_entity_set_page(QueryPlaneReadRequest {
+        state: &state,
+        tenant: &tenant,
+        security_ctx: &security_ctx,
+        entity_type: "Order",
+        entity_set_name: "Orders",
+        query_options: &query_options,
+        budget,
+    })
+    .await
+    {
+        Ok(result) => result,
+        Err(_) => panic!("a genuine miss with a bounded gap must not 413"),
+    };
+    assert!(result.entities.is_empty());
+
+    let _ = std::fs::remove_file(db_path);
+}
+
+/// ARN-68 rescue with `$skip`/`$select`: the covered prefix must not be double-skipped
+/// (page re-runs with skip folded into top; the cursor applies `$skip` once) and
+/// `$select` must not strip the union's `entity_id` key.
+#[tokio::test]
+async fn equality_list_rescue_honors_skip_and_select() {
+    let db_path = std::env::temp_dir().join(format!("temper-arn68-skip-list-{}.db", sim_uuid()));
+    let _ = std::fs::remove_file(&db_path);
+    let db_url = format!("file:{}", db_path.display());
+    let store = TursoEventStore::new(&db_url, None)
+        .await
+        .expect("create local turso db");
+    let tenant = TenantId::default();
+    let state = build_large_projected_type(&store, &tenant, "arn68-skip-list", 15).await;
+
+    // Two PROJECTED matches for the queried session (visible only to the page)...
+    for (id, seq) in [("paged-c1", 5001u64), ("paged-c2", 5002)] {
+        upsert_order_projection(
+            &store,
+            &tenant,
+            id,
+            serde_json::json!({ "SessionId": "session-paged" }),
+            seq,
+        )
+        .await;
+    }
+    // ...and they must also be journal-durable so enumeration sees the type as-is.
+    // (The 15 harness entities already push the type over budget.)
+
+    let security_ctx = SecurityContext::system();
+    let budget = QueryPlaneReadBudget {
+        default_page_size: 1,
+        max_entities: 1,
+    };
+    let mut query_options = session_filter_options("session-paged");
+    query_options.top = Some(2);
+    query_options.skip = Some(1);
+    query_options.select = Some(vec!["Id".to_string()]);
+
+    let result = match read_entity_set_page(QueryPlaneReadRequest {
+        state: &state,
+        tenant: &tenant,
+        security_ctx: &security_ctx,
+        entity_type: "Order",
+        entity_set_name: "Orders",
+        query_options: &query_options,
+        budget,
+    })
+    .await
+    {
+        Ok(result) => result,
+        Err(_) => panic!("rescue must serve the skip/select page, not reject"),
+    };
+    // 2 matches, skip 1 → exactly 1 row survives; double-skip would return 0.
+    assert_eq!(
+        result.entities.len(),
+        1,
+        "skip must apply exactly once across the union"
+    );
+
+    let _ = std::fs::remove_file(db_path);
+}
