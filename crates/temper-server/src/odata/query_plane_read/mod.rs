@@ -110,7 +110,9 @@ fn should_reconcile_empty_exact_match_against_authoritative(
     // correctness; it never serializes the write hot path. The gate is tight —
     // only pushdown-able equality conjunctions pay it; ranges/Or/Ne/contains/
     // functions return `None` from `equality_field_predicates` and are
-    // unaffected.
+    // unaffected. When the type is too large for that scan, the budget gate
+    // bounds the reconcile to the field-index coverage gap (ARN-68) —
+    // see `read_entity_set_from_query_plane`.
     request
         .query_options
         .filter
@@ -166,7 +168,9 @@ pub(in crate::odata) async fn read_entity_set_from_query_plane(
     // Set when an empty native page for an exact-match resolution is treated as
     // a possibly-lagging projection and we fall through to the authoritative
     // path below (ARN-89). It suppresses the native retry on that path and
-    // selects the `ProjectionLagReconcile` telemetry reason.
+    // selects the `ProjectionLagReconcile` telemetry reason. If the type then
+    // turns out to be too large for the reconcile scan, the budget gate bounds
+    // the reconcile to the field-index coverage gap instead of rejecting (ARN-68).
     let mut reconciling_exact_match_lag = false;
     if let Some(plan) = native_plan.clone()
         && should_try_native_before_catalog_coverage(&request, &plan)
@@ -260,6 +264,124 @@ pub(in crate::odata) async fn read_entity_set_from_query_plane(
     if needs_full_proof
         && !should_check_source_cursor_catalog_coverage(all_entity_ids.len(), request.budget)
     {
+        // ARN-68 (the SessionEntries-list flavor): the reconcile scan is over budget,
+        // which used to be an unconditional 413 — so EVERY empty equality-conjunction
+        // list on a high-cardinality type failed (e.g. a session bootstrap listing
+        // `SessionId eq '<new>'` against 95k entries). The full scan is only needed for
+        // entities the native page cannot see: the ones with NO `entity_field_index`
+        // row for a filtered field (a just-committed entity whose async projection has
+        // not landed, a crash-lost projection, or a pre-projection-era entity). That
+        // gap is enumerable per field and normally tiny, so reconcile the GAP instead
+        // of the type: union a RE-RUN native page (probe-then-page ordering makes the
+        // union complete — anything covered at probe time is visible to the later
+        // page, anything uncovered is in the gap, so a projection landing between the
+        // first page and the probe is not dropped) with the materialized gap, in one
+        // source-cursor pass. A committed-but-unprojected match is FOUND
+        // (read-after-write repaired, not rejected); a genuine miss returns bounded
+        // empty. If the union exceeds the scan budget, or the backend has no
+        // field-index coverage probe, keep the honest rejection. Entities whose field
+        // row exists with a STALE value stay invisible — the same trust every
+        // non-empty native page already gets at any type size (the small-type ARN-89
+        // reconcile is stronger; this gate trades that for boundedness).
+        // Reconcile-affordable types never reach this gate, so their ARN-89 repair
+        // semantics are unchanged.
+        if reconciling_exact_match_lag
+            && let Some(pairs) = request
+                .query_options
+                .filter
+                .as_ref()
+                .and_then(super::filter_sql::equality_field_predicates)
+            && let Some(query_plane) = request.state.query_plane_store()
+        {
+            let field_names: std::collections::BTreeSet<String> =
+                pairs.into_iter().map(|(name, _)| name).collect();
+            let mut gap_ids: Option<std::collections::BTreeSet<String>> =
+                Some(std::collections::BTreeSet::new());
+            for field_name in field_names {
+                let covered = query_plane
+                    .query_field_index(
+                        request.tenant.as_str(),
+                        request.entity_type,
+                        "entity_id IN (SELECT entity_id FROM entity_field_index \
+                         WHERE tenant = ?1 AND entity_type = ?2 AND field_name = ?3)",
+                        vec![field_name],
+                    )
+                    .await;
+                match covered {
+                    Ok(Some(covered_ids)) => {
+                        let covered: std::collections::BTreeSet<&String> =
+                            covered_ids.iter().collect();
+                        if let Some(gap) = gap_ids.as_mut() {
+                            gap.extend(
+                                all_entity_ids
+                                    .iter()
+                                    .filter(|id| !covered.contains(id))
+                                    .cloned(),
+                            );
+                        }
+                    }
+                    // Unsupported backend or probe failure: never trust the empty
+                    // page without coverage proof — fall through to the rejection.
+                    Ok(None) | Err(_) => {
+                        gap_ids = None;
+                        break;
+                    }
+                }
+            }
+            // Re-run the page with `$select` stripped (the union needs `entity_id`,
+            // which selection would drop) and `$skip` folded into `$top` (the union
+            // must carry the FULL covered prefix; the final cursor pass applies the
+            // real `$skip`/`$top`/`$select` exactly once).
+            let rescue_options = temper_odata::query::types::QueryOptions {
+                select: None,
+                skip: None,
+                top: Some(
+                    request.query_options.skip.unwrap_or(0)
+                        + request.budget.requested_top(request.query_options),
+                ),
+                ..request.query_options.clone()
+            };
+            let rescue_request = QueryPlaneReadRequest {
+                query_options: &rescue_options,
+                ..request
+            };
+            if let Some(gap_ids) = gap_ids
+                && let Some(plan) = native_plan.clone()
+                && let Some(page) =
+                    try_native_page_read(&rescue_request, plan, QueryPlaneCoverageReport::default())
+                        .await
+            {
+                let page = page?;
+                let gap_len = gap_ids.len();
+                let missing_ids: Vec<String> = gap_ids.iter().cloned().collect();
+                let mut candidate_ids = gap_ids;
+                for entity in &page.entities {
+                    if let Some(id) = entity.get("entity_id").and_then(|v| v.as_str()) {
+                        candidate_ids.insert(id.to_string());
+                    }
+                }
+                if candidate_ids.len() <= request.budget.scan_candidate_budget() {
+                    let ids: Vec<String> = candidate_ids.into_iter().collect();
+                    let coverage = QueryPlaneCoverageReport {
+                        missing: gap_len,
+                        matched: 0,
+                    };
+                    let result = read_from_source_cursor(
+                        &request,
+                        &ids,
+                        coverage,
+                        &missing_ids,
+                        QueryPlaneFallbackReason::ProjectionLagReconcile,
+                    )
+                    .await?;
+                    return Ok(QueryPlaneReadResult {
+                        entities: result.entities,
+                        count: result.count,
+                        telemetry: result.telemetry,
+                    });
+                }
+            }
+        }
         return Err(budget_rejection(
             &request,
             QueryPlaneReadStrategy::ReadSourceCursor,
