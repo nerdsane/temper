@@ -186,7 +186,8 @@ to = "Published"
         );
         let err = parse_automaton(&spec).expect_err("undeclared property must reject");
         assert!(
-            err.to_string().contains("undeclared property state variable 'missing_vec'"),
+            err.to_string()
+                .contains("undeclared property state variable 'missing_vec'"),
             "got: {err}"
         );
     }
@@ -198,7 +199,8 @@ to = "Published"
         );
         let err = parse_automaton(&spec).expect_err("undeclared model_property must reject");
         assert!(
-            err.to_string().contains("undeclared model_property state variable 'missing_model'"),
+            err.to_string()
+                .contains("undeclared model_property state variable 'missing_model'"),
             "got: {err}"
         );
     }
@@ -209,7 +211,10 @@ to = "Published"
             "{BASE_SPEC}\n[[vector]]\nname = \"taste\"\nproperty = \"taste_vector\"\nmodel_property = \"taste_vector_model\"\ndims = 0\nmetric = \"cosine\"\n"
         );
         let err = parse_automaton(&spec).expect_err("dims=0 must reject");
-        assert!(err.to_string().contains("must declare dims > 0"), "got: {err}");
+        assert!(
+            err.to_string().contains("must declare dims > 0"),
+            "got: {err}"
+        );
     }
 
     #[test]
@@ -218,7 +223,10 @@ to = "Published"
             "{BASE_SPEC}\n[[vector]]\nname = \"taste\"\nproperty = \"taste_vector\"\nmodel_property = \"taste_vector_model\"\ndims = 384\nmetric = \"manhattan\"\n"
         );
         let err = parse_automaton(&spec).expect_err("unknown metric must reject");
-        assert!(err.to_string().contains("unknown metric 'manhattan'"), "got: {err}");
+        assert!(
+            err.to_string().contains("unknown metric 'manhattan'"),
+            "got: {err}"
+        );
     }
 
     #[test]
