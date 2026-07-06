@@ -38,6 +38,14 @@ pub struct DispatchContext<'a> {
     pub binary_path: Option<&'a std::path::Path>,
     /// Optional API key for authentication.
     pub api_key: Option<&'a str>,
+    /// Whether this dispatch context may perform host-process operations —
+    /// local filesystem reads and spawning `cargo` (`upload_wasm`,
+    /// `compile_wasm`). True only for a runner whose host process is the
+    /// developer's own machine (the local stdio MCP server). The
+    /// server-hosted REPL sets this false: its host process is the Temper
+    /// server, so host ops there read the server's filesystem and run code
+    /// as the server user — a host-compromise vector, not a developer op.
+    pub allow_host_ops: bool,
 }
 
 impl<'a> DispatchContext<'a> {
@@ -87,6 +95,16 @@ pub async fn dispatch_temper_method(
             dispatch_governance(ctx, method, args).await
         }
         // --- WASM ---
+        // Host ops (local file read, `cargo build`) are rejected before
+        // touching the filesystem unless this context is host-trusted. The
+        // server-hosted REPL is not: running these in the server process is a
+        // host-compromise vector (arbitrary file read + RCE as the server user).
+        "upload_wasm" | "compile_wasm" if !ctx.allow_host_ops => Err(format!(
+            "temper.{method}() is not available in this context. Host operations \
+             (local file read, cargo build) run only on the developer's own \
+             machine via the local MCP server, never inside the Temper server \
+             process."
+        )),
         "upload_wasm" | "compile_wasm" => dispatch_wasm(ctx, method, args).await,
         // --- Evolution / Observe ---
         "get_trajectories" | "get_insights" | "get_evolution_records" | "check_sentinel" => {
@@ -735,4 +753,95 @@ fn resolve_sdk_path(binary_path: Option<&std::path::Path>) -> Result<String, Str
         "cannot find temper-wasm-sdk crate. Ensure you are running from the temper workspace."
             .to_string(),
     )
+}
+
+#[cfg(test)]
+mod host_op_gate_tests {
+    use super::*;
+
+    /// Build a dispatch context with a given host-op capability. `base_url`
+    /// points at a port nothing listens on, so any accidental loopback call
+    /// fails fast rather than reaching a real server.
+    fn ctx(client: &reqwest::Client, allow_host_ops: bool) -> DispatchContext<'_> {
+        DispatchContext {
+            http: client,
+            base_url: "http://127.0.0.1:1",
+            tenant: "default",
+            agent_id: None,
+            agent_type: None,
+            session_id: None,
+            principal_id: None,
+            principal_kind: None,
+            agent_role: None,
+            entity_set_resolver: None,
+            binary_path: None,
+            api_key: None,
+            allow_host_ops,
+        }
+    }
+
+    fn str_args(values: &[&str]) -> Vec<MontyObject> {
+        values
+            .iter()
+            .map(|v| MontyObject::String((*v).to_string()))
+            .collect()
+    }
+
+    /// When the context is not host-trusted, `upload_wasm` is rejected before
+    /// the filesystem is touched. We pass a path that exists and is readable
+    /// (`/etc/hosts`): if the gate failed to fire, dispatch would read it and
+    /// then fail on the loopback POST — a different error. Getting the
+    /// "not available in this context" message proves the read never happened.
+    #[tokio::test]
+    async fn upload_wasm_rejected_without_host_ops() {
+        let client = reqwest::Client::new();
+        let args = str_args(&["mod", "/etc/hosts"]);
+        let err = dispatch_temper_method(&ctx(&client, false), "upload_wasm", &args, &[])
+            .await
+            .expect_err("upload_wasm must be rejected without host ops");
+        assert!(
+            err.contains("not available in this context"),
+            "expected host-op rejection, got: {err}"
+        );
+        assert!(
+            !err.contains("failed to read"),
+            "gate must fire before any filesystem read, got: {err}"
+        );
+    }
+
+    /// `compile_wasm` is gated the same way and must be rejected before it
+    /// spawns `rustup`/`cargo`.
+    #[tokio::test]
+    async fn compile_wasm_rejected_without_host_ops() {
+        let client = reqwest::Client::new();
+        let args = str_args(&["mod", "pub fn main() {}"]);
+        let err = dispatch_temper_method(&ctx(&client, false), "compile_wasm", &args, &[])
+            .await
+            .expect_err("compile_wasm must be rejected without host ops");
+        assert!(
+            err.contains("not available in this context"),
+            "expected host-op rejection, got: {err}"
+        );
+    }
+
+    /// With host ops allowed (the local stdio MCP context), the gate does not
+    /// fire: dispatch proceeds into `upload_wasm` and fails at the filesystem
+    /// read of a nonexistent path — proving the capability flag, not a hardcoded
+    /// block, is what governs the two host methods.
+    #[tokio::test]
+    async fn upload_wasm_allowed_with_host_ops_reaches_filesystem() {
+        let client = reqwest::Client::new();
+        let args = str_args(&["mod", "/nonexistent/temper-arn166-does-not-exist"]);
+        let err = dispatch_temper_method(&ctx(&client, true), "upload_wasm", &args, &[])
+            .await
+            .expect_err("read of a nonexistent path must fail");
+        assert!(
+            err.contains("failed to read"),
+            "gate must allow the read attempt when host ops are permitted, got: {err}"
+        );
+        assert!(
+            !err.contains("not available in this context"),
+            "host-trusted context must not reject host ops, got: {err}"
+        );
+    }
 }

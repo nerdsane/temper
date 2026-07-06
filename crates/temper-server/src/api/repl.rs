@@ -21,12 +21,17 @@ pub(crate) struct ReplRequest {
 /// POST /api/repl — execute Python code in the Temper Monty sandbox.
 ///
 /// The sandbox provides `temper.*` methods (create, action, submit_specs, etc.)
-/// that loop back to this server via HTTP. Agent identity is extracted from
+/// that loop back to this server over HTTP; each loopback call is subject to the
+/// server's normal Cedar authorization. Agent identity is taken from
 /// `X-Temper-Principal-Id` / `X-Temper-Principal-Kind` / `X-Temper-Agent-Role`
-/// headers and forwarded on internal requests.
+/// headers and forwarded on those internal requests.
 ///
-/// Security: 180s timeout, 64MB memory, method allowlisting, no filesystem or
-/// network access. External APIs go through `[[integration]]` in IOA specs.
+/// Executing the REPL requires Cedar authorization (`execute_repl` on
+/// `Sandbox`). Host operations — local filesystem reads and `cargo build`
+/// (`upload_wasm`/`compile_wasm`) — are NOT available here: this dispatch
+/// context is not host-trusted, so those methods are rejected before touching
+/// the host. They run only on the developer's own machine via the local MCP
+/// server. Resource bounds: 180s timeout, 64MB memory.
 #[instrument(skip_all, fields(otel.name = "POST /api/repl"))]
 pub(crate) async fn handle_repl(
     State(state): State<ServerState>,
@@ -58,6 +63,13 @@ pub(crate) async fn handle_repl(
         Ok(t) => t.as_str().to_string(),
         Err(e) => return e.into_response(),
     };
+
+    // Executing the REPL is a privileged capability (arbitrary agent code that
+    // can drive every non-host temper.* method). Gate it behind Cedar before
+    // running anything.
+    if let Some(resp) = super::require_repl_auth(&state, &headers, &tenant).await {
+        return resp;
+    }
 
     let agent_id = principal_id.clone();
     let port = state.listen_port.get().copied().unwrap_or(4200);

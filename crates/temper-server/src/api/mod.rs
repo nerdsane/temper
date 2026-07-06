@@ -227,6 +227,70 @@ pub(crate) async fn require_policy_auth(
     None
 }
 
+/// Authorize a REPL sandbox execution request against Cedar policies.
+///
+/// `POST /api/repl` runs agent-supplied code that can invoke every non-host
+/// `temper.*` method, so executing the REPL at all is a privileged capability
+/// and must be authorized — not open to any caller who can reach the port.
+///
+/// Returns `Some(response)` (403 + `AuthorizationDenied`, with the recorded
+/// decision id) if denied, `None` if allowed. Admin principals bypass, matching
+/// [`require_policy_auth`].
+///
+/// Enforcement strength is bounded by the identity source: until the principal
+/// is a resolved credential rather than a self-asserted `x-temper-*` header
+/// (ARN-167), this gate trusts the claimed principal kind. The host-op
+/// isolation in `temper-sandbox` — not this gate — is the unconditional stop
+/// for the arbitrary file-read / RCE the endpoint otherwise exposed.
+pub(crate) async fn require_repl_auth(
+    state: &ServerState,
+    headers: &HeaderMap,
+    tenant: &str,
+) -> Option<axum::response::Response> {
+    let security_ctx = security_context_from_headers(headers, None, None, None);
+    if matches!(security_ctx.principal.kind, PrincipalKind::Admin) {
+        return None;
+    }
+    if let Err(denial) = state.authorize_with_context(
+        &security_ctx,
+        "execute_repl",
+        "Sandbox",
+        &std::collections::BTreeMap::new(),
+        tenant,
+    ) {
+        let reason = denial.to_string();
+        let pd = record_authz_denial(
+            state,
+            DenialInput {
+                tenant,
+                security_ctx: &security_ctx,
+                agent_id_override: None,
+                action: "execute_repl",
+                resource_type: "Sandbox",
+                resource_id: tenant,
+                resource_attrs: serde_json::json!({"tenant": tenant}),
+                reason: &reason,
+                module_name: None,
+                from_status: None,
+            },
+        )
+        .await;
+        return Some(
+            (
+                StatusCode::FORBIDDEN,
+                axum::Json(serde_json::json!({
+                    "error": {
+                        "code": "AuthorizationDenied",
+                        "message": format!("{reason} Decision {}", pd.id),
+                    }
+                })),
+            )
+                .into_response(),
+        );
+    }
+    None
+}
+
 /// Cedar policy-management gate as an axum extractor.
 ///
 /// Runs [`require_policy_auth`] against the `{tenant}` path parameter before

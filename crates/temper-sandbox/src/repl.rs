@@ -80,6 +80,10 @@ pub async fn run_repl(config: &ReplConfig, code: &str) -> Result<String> {
                     entity_set_resolver: None,
                     binary_path: None,
                     api_key: None,
+                    // Server-hosted REPL: the host process is the Temper
+                    // server, so host ops (local file read, cargo build) are a
+                    // host-compromise vector and are disallowed here.
+                    allow_host_ops: false,
                 };
                 dispatch_temper_method(&ctx, &function_name, args, &kwargs).await
             }

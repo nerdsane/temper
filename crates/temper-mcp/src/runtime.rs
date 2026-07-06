@@ -433,6 +433,11 @@ impl RuntimeContext {
                             entity_set_resolver: None,
                             binary_path: None,
                             api_key: api_key.as_deref(),
+                            // Local stdio MCP server: the host process is the
+                            // developer's own machine, so host ops (local file
+                            // read, cargo build) act on the developer's checkout
+                            // and are legitimately allowed.
+                            allow_host_ops: true,
                         };
                         temper_sandbox::dispatch::dispatch_temper_method(
                             &ctx,
