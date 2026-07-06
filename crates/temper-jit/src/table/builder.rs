@@ -129,6 +129,17 @@ impl TransitionTable {
                     properties: k.properties.clone(),
                 })
                 .collect(),
+            vectors: automaton
+                .vectors
+                .iter()
+                .map(|v| super::types::DeclaredVector {
+                    name: v.name.clone(),
+                    property: v.property.clone(),
+                    model_property: v.model_property.clone(),
+                    dims: v.dims,
+                    metric: v.metric.clone(),
+                })
+                .collect(),
             state_var_metadata,
             composite_actions,
             rule_index,

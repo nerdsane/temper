@@ -45,6 +45,37 @@ fn extract_keys_empty_when_no_key_blocks() {
 }
 
 #[test]
+fn extracts_declared_vector_paths() {
+    // ADR-0155: [[vector]] declares a vector access path the kernel indexes.
+    let src = r#"
+[automaton]
+name = "DesignLanguage"
+states = ["Draft", "Published"]
+initial = "Draft"
+
+[[vector]]
+name = "taste"
+property = "taste_vector"
+model_property = "taste_vector_model"
+dims = 384
+metric = "cosine"
+"#;
+    let vectors = extract_vectors(src).expect("extract vectors");
+    assert_eq!(vectors.len(), 1);
+    assert_eq!(vectors[0].name, "taste");
+    assert_eq!(vectors[0].property, "taste_vector");
+    assert_eq!(vectors[0].model_property, "taste_vector_model");
+    assert_eq!(vectors[0].dims, 384);
+    assert_eq!(vectors[0].metric, "cosine");
+}
+
+#[test]
+fn extract_vectors_empty_when_no_vector_blocks() {
+    let src = "[automaton]\nname = \"File\"\nstates = [\"Created\"]\ninitial = \"Created\"\n";
+    assert!(extract_vectors(src).expect("extract vectors").is_empty());
+}
+
+#[test]
 fn parse_kv_trims_whitespace() {
     let (key, value) = parse_kv("  key  =  \"value\"  ").unwrap();
     assert_eq!(key, "key");
