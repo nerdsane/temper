@@ -253,14 +253,27 @@ impl PolicySuggestionEngine {
                     role_value: None,
                     session_id: None,
                 };
-                let preview = temper_authz::generate_cedar_from_matrix(
+                let preview = match temper_authz::generate_cedar_from_matrix(
                     grouped.agent_type.as_deref().unwrap_or("*"),
                     "Agent",
                     "*",
                     &grouped.resource_type,
                     "*",
                     &matrix,
-                );
+                ) {
+                    Ok(preview) => preview,
+                    Err(e) => {
+                        // A non-identifier resource type can't yield a valid
+                        // policy; skip the suggestion rather than surface a
+                        // broken preview (ARN-172).
+                        tracing::warn!(
+                            error = %e,
+                            resource_type = %grouped.resource_type,
+                            "skipping grouped policy suggestion: invalid type name"
+                        );
+                        continue;
+                    }
+                };
                 suggestions.push(PolicySuggestion {
                     description: format!(
                         "{} actions on {} denied {} times for {}",
@@ -299,14 +312,27 @@ impl PolicySuggestionEngine {
                 role_value: None,
                 session_id: None,
             };
-            let preview = temper_authz::generate_cedar_from_matrix(
+            let preview = match temper_authz::generate_cedar_from_matrix(
                 pattern.agent_type.as_deref().unwrap_or("*"),
                 "Agent",
                 &pattern.action,
                 &pattern.resource_type,
                 "*",
                 &matrix,
-            );
+            ) {
+                Ok(preview) => preview,
+                Err(e) => {
+                    // A non-identifier resource type can't yield a valid
+                    // policy; skip the suggestion rather than surface a broken
+                    // preview (ARN-172).
+                    tracing::warn!(
+                        error = %e,
+                        resource_type = %pattern.resource_type,
+                        "skipping per-action policy suggestion: invalid type name"
+                    );
+                    continue;
+                }
+            };
             suggestions.push(PolicySuggestion {
                 description: format!(
                     "{} denied {} times on {} for {}",

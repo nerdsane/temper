@@ -42,7 +42,16 @@ impl ClickHouseStore {
     fn interpolate_params(sql: &str, params: &[SqlParam]) -> String {
         let render = |param: &SqlParam| -> String {
             match param {
-                SqlParam::String(s) => format!("'{}'", s.replace('\'', "''")),
+                // ClickHouse string literals honor C-style backslash escapes
+                // as well as SQL quote-doubling, so both must be escaped.
+                // Escape `\` first (so the `\` we do NOT introduce for `'` is
+                // left alone), then double `'`. A value ending in `\` now
+                // renders as a terminated literal (`'...\\'`) instead of
+                // escaping the closing quote and letting the next param break
+                // out into live SQL. See ADR-0158 / ARN-174.
+                SqlParam::String(s) => {
+                    format!("'{}'", s.replace('\\', "\\\\").replace('\'', "''"))
+                }
                 SqlParam::Int(i) => i.to_string(),
                 SqlParam::Float(f) => f.to_string(),
                 SqlParam::Bool(b) => if *b { "1" } else { "0" }.to_string(),
@@ -267,5 +276,35 @@ mod tests {
         let body = "{\"a\":1}\n{\"a\":2}";
         let rs = parse_json_each_row(body).unwrap();
         assert_eq!(rs.len(), 2);
+    }
+
+    // ARN-174: ClickHouse honors C-style backslash escapes inside string
+    // literals, so doubling only single quotes is not enough. A value ending
+    // in `\` escapes the closing quote and lets the next param break out.
+
+    #[test]
+    fn interpolate_escapes_trailing_backslash_so_next_param_stays_quoted() {
+        // Exploit shape: param 1 ends in a backslash; param 2 is live SQL.
+        let sql = "SELECT * FROM spans WHERE a = $1 AND b = $2";
+        let params = vec![
+            SqlParam::String("x\\".into()),
+            SqlParam::String(" OR 1=1 --".into()),
+        ];
+        let result = ClickHouseStore::interpolate_params(sql, &params);
+        // The backslash must be doubled so the literal terminates, keeping
+        // param 2 inside its own quotes rather than executing as SQL.
+        assert_eq!(
+            result,
+            "SELECT * FROM spans WHERE a = 'x\\\\' AND b = ' OR 1=1 --'"
+        );
+    }
+
+    #[test]
+    fn interpolate_escapes_backslash_before_quote() {
+        let sql = "WHERE a = $1";
+        let params = vec![SqlParam::String("x\\'y".into())];
+        let result = ClickHouseStore::interpolate_params(sql, &params);
+        // `\` doubled to `\\`, then `'` doubled to `''`.
+        assert_eq!(result, "WHERE a = 'x\\\\''y'");
     }
 }

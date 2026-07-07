@@ -215,7 +215,8 @@ fn handle_generate_cedar_policy(
         resource_type,
         resource_id,
         &matrix,
-    );
+    )
+    .map_err(|e| format!("GenerateCedarPolicy: failed to generate policy: {e}"))?;
 
     tracing::info!(
         entity_id = entity_id,

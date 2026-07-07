@@ -136,7 +136,14 @@ impl PendingDecision {
     }
 
     /// Generate Cedar policy text from a scope matrix.
-    pub fn generate_policy_from_matrix(&self, matrix: &PolicyScopeMatrix) -> String {
+    ///
+    /// Fails closed (`Err`) if a type-name position (`principal_kind`,
+    /// `resource_type`) is not a valid Cedar identifier, rather than emitting a
+    /// broken or wider-than-approved policy (ARN-172).
+    pub fn generate_policy_from_matrix(
+        &self,
+        matrix: &PolicyScopeMatrix,
+    ) -> Result<String, String> {
         let kind = self.principal_kind.as_deref().unwrap_or("Agent");
         temper_authz::generate_cedar_from_matrix(
             &self.agent_id,

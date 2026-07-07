@@ -126,7 +126,16 @@ pub(crate) async fn handle_approve_decision(
             .into_response();
     }
 
-    let generated_policy = decision.generate_policy_from_matrix(&scope);
+    let generated_policy = match decision.generate_policy_from_matrix(&scope) {
+        Ok(policy) => policy,
+        // Fail closed: a crafted/invalid type name must not produce a broken or
+        // wider-than-approved policy (ARN-172).
+        Err(e) => {
+            tracing::error!(error = %e, "failed to generate policy from scope matrix");
+            let msg = format!("Failed to generate policy: {e}");
+            return (StatusCode::BAD_REQUEST, msg).into_response();
+        }
+    };
     let evolution_record_id = decision.evolution_record_id.clone();
 
     // Validate the generated policy combined with existing enabled policies.

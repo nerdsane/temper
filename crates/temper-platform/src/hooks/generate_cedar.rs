@@ -79,7 +79,8 @@ pub(super) fn handle_generate_cedar_from_fields(
         resource_type,
         resource_id,
         &matrix,
-    );
+    )
+    .map_err(|e| format!("GenerateCedarPolicy: failed to generate policy: {e}"))?;
 
     tracing::info!(
         entity_id,
