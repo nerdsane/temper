@@ -216,6 +216,10 @@ pub(crate) struct OtsTrajectoryQueryParams {
     pub limit: Option<i64>,
 }
 
+fn tenant_scoped_ots_trajectory_id(tenant: &str, trajectory_id: &str) -> String {
+    format!("{tenant}::{trajectory_id}")
+}
+
 /// POST /api/ots/trajectories — receive a full OTS trajectory from an MCP session.
 #[instrument(skip_all, fields(otel.name = "POST /api/ots/trajectories"))]
 pub(crate) async fn handle_post_ots_trajectory(
@@ -232,7 +236,7 @@ pub(crate) async fn handle_post_ots_trajectory(
     let trajectory: serde_json::Value = serde_json::from_str(&body)
         .map_err(|e| (StatusCode::BAD_REQUEST, format!("invalid JSON: {e}")))?;
 
-    let trajectory_id = trajectory
+    let raw_trajectory_id = trajectory
         .get("metadata")
         .and_then(|m| m.get("trajectory_id"))
         .and_then(|v| v.as_str())
@@ -259,6 +263,7 @@ pub(crate) async fn handle_post_ots_trajectory(
         .unwrap_or(0);
 
     let tenant = authenticated.tenant().as_str();
+    let trajectory_id = tenant_scoped_ots_trajectory_id(tenant, &raw_trajectory_id);
 
     let Some(store) = state.metadata_store_for_tenant(tenant).await else {
         tracing::warn!(
@@ -326,7 +331,10 @@ pub(crate) async fn handle_get_ots_trajectories(
     let authenticated = require_authenticated_context(authenticated.as_deref())?;
     require_observe_auth(&state, authenticated, "read_trajectories", "OtsTrajectory")?;
     let tenant = authenticated.tenant().as_str();
-    let limit = params.limit.unwrap_or(50).min(500);
+    let limit = params.limit.unwrap_or(50);
+    if !(1..=500).contains(&limit) {
+        return Err(StatusCode::BAD_REQUEST);
+    }
 
     let Some(store) = state.metadata_store_for_tenant(tenant).await else {
         return Ok(Json(serde_json::json!({
