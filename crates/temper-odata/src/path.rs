@@ -209,13 +209,16 @@ fn parse_continuation_segment(segment: &str, parent: ODataPath) -> Result<ODataP
                     message: format!("bound function '{segment}' has unmatched parenthesis"),
                 });
             }
+            // Keep the FULL qualified name (e.g. `Temper.Nearest`), unlike a bound
+            // action (which resolves to a short spec action name). A kernel function
+            // like `Temper.Nearest` is dispatched by its namespaced name, so a
+            // same-named function in another namespace does not collide with it.
             let qualified_name = &segment[..paren_start];
-            let function_name = qualified_name.rsplit('.').next().unwrap_or(qualified_name);
             let args_str = &segment[paren_start + 1..segment.len() - 1];
             let params = parse_function_params(args_str)?;
             return Ok(ODataPath::BoundFunction {
                 parent: Box::new(parent),
-                function: function_name.to_string(),
+                function: qualified_name.to_string(),
                 params,
             });
         }
@@ -304,7 +307,7 @@ fn parse_function_params(args_str: &str) -> Result<Vec<(String, String)>, ODataE
     if args_str.trim().is_empty() {
         return Ok(Vec::new());
     }
-    let mut params = Vec::new();
+    let mut params: Vec<(String, String)> = Vec::new();
     for part in split_composite_key(args_str)? {
         let part = part.trim();
         let Some(eq_pos) = part.find('=') else {
@@ -316,6 +319,13 @@ fn parse_function_params(args_str: &str) -> Result<Vec<(String, String)>, ODataE
         if name.is_empty() {
             return Err(ODataError::InvalidPath {
                 message: format!("bound function argument '{part}' has an empty name"),
+            });
+        }
+        // Reject a repeated argument name rather than silently taking the first (or
+        // last) — a caller who wrote `k=5,k=10` gets a clear error, not a guess.
+        if params.iter().any(|(existing, _)| existing == &name) {
+            return Err(ODataError::InvalidPath {
+                message: format!("bound function argument '{name}' is given more than once"),
             });
         }
         let value = parse_key_literal(part[eq_pos + 1..].trim())?;
@@ -530,7 +540,7 @@ mod tests {
                     "Orders".into(),
                     KeyValue::Single("abc-123".into())
                 )),
-                function: "GetOrderTotal".into(),
+                function: "Temper.Example.GetOrderTotal".into(),
                 params: vec![],
             }
         );
@@ -545,7 +555,7 @@ mod tests {
             result,
             ODataPath::BoundFunction {
                 parent: Box::new(ODataPath::EntitySet("DesignLanguages".into())),
-                function: "Nearest".into(),
+                function: "Temper.Nearest".into(),
                 params: vec![
                     ("decl".into(), "taste".into()),
                     ("to".into(), "en-1".into()),

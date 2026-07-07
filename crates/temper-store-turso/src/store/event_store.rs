@@ -8,7 +8,7 @@ use temper_runtime::persistence::{
     unpack_f32_le,
 };
 use temper_runtime::tenant::parse_persistence_id_parts;
-use tracing::{instrument, warn};
+use tracing::{error, instrument, warn};
 
 use super::TursoEventStore;
 use super::append_config::{append_attempt_timeout, append_max_attempts};
@@ -149,11 +149,11 @@ impl EventStore for TursoEventStore {
     // (completing ADR-0153 phase 2 for Turso) — tracked separately.
 
     // ADR-0155: Turso maintains `entity_vector_index` **write-behind** — the event is
-    // appended first (with retries), then the derived vector rows follow in a separate
-    // write. This is safe for vectors (unlike keys) because a vector row carries no
-    // uniqueness constraint and a lagging/failed index write only makes a ranking
-    // temporarily incomplete, which the backfill watermark accounts for; it can never
-    // corrupt a keyed absence. So Turso implements the full vector surface below.
+    // appended first (with retries), then the derived vector rows follow in a separate,
+    // also-retried write. This is safe for vectors (unlike keys) because a vector row
+    // carries no uniqueness constraint and a lagging index write only makes a ranking
+    // temporarily incomplete; it can never corrupt a keyed absence. So Turso implements
+    // the full vector surface below.
     async fn append_with_index_rows(
         &self,
         persistence_id: &str,
@@ -161,25 +161,52 @@ impl EventStore for TursoEventStore {
         events: &[PersistenceEnvelope],
         _key_rows: &[temper_runtime::persistence::EntityKeyRow],
         vector_rows: &[EntityVectorRow],
+        reconcile_vectors: bool,
     ) -> Result<u64, PersistenceError> {
         // The journal append is the durable event (keys are not maintained on Turso,
         // per the note above).
         let new_seq = self
             .append(persistence_id, expected_sequence, events)
             .await?;
-        // Write-behind: the event is durable; the derived vector index follows. A
-        // failure here is logged, not fatal — the backfill reconciles the partition.
-        if !vector_rows.is_empty()
+        // Write-behind vector maintenance: reconcile the entity's rows (delete stale,
+        // insert current — an empty `vector_rows` purges a deleted/cleared entity),
+        // RETRIED like the event append rather than a warn-once one-shot, so a
+        // transient failure does not silently drop the write. On final exhaustion the
+        // error is logged loudly; the partition then lags until the next backfill
+        // reconcile runs. Only runs when the type declares vector paths.
+        if reconcile_vectors
             && let Ok((tenant, entity_type, entity_id)) = parse_persistence_id_parts(persistence_id)
-            && let Err(error) = self
-                .backfill_entity_vectors(tenant, entity_type, entity_id, vector_rows)
-                .await
         {
-            warn!(
-                persistence_id,
-                error = %error,
-                "turso vector-index write-behind failed; backfill will reconcile the partition"
-            );
+            let total_attempts = append_max_attempts();
+            let mut last_err: Option<PersistenceError> = None;
+            for attempt in 0..total_attempts {
+                if attempt > 0 {
+                    tokio::time::sleep(Duration::from_millis(retry_delay_ms(attempt - 1))).await;
+                }
+                match self
+                    .backfill_entity_vectors(tenant, entity_type, entity_id, vector_rows)
+                    .await
+                {
+                    Ok(()) => {
+                        last_err = None;
+                        break;
+                    }
+                    Err(err) => {
+                        let transient = matches!(&err, PersistenceError::Storage(msg) if is_transient_write_error(msg));
+                        last_err = Some(err);
+                        if !transient {
+                            break;
+                        }
+                    }
+                }
+            }
+            if let Some(error) = last_err {
+                error!(
+                    persistence_id,
+                    error = %error,
+                    "turso vector-index write-behind failed after retries; partition lags until the next backfill reconcile"
+                );
+            }
         }
         Ok(new_seq)
     }
@@ -191,9 +218,9 @@ impl EventStore for TursoEventStore {
         entity_id: &str,
         vector_rows: &[EntityVectorRow],
     ) -> Result<(), PersistenceError> {
-        if vector_rows.is_empty() {
-            return Ok(());
-        }
+        // Reconcile: DELETE all of the entity's rows, then insert the current ones.
+        // Empty `vector_rows` purges the entity (deleted / un-embedded). Always runs
+        // the delete so a purge is honored.
         let _write_permit = self
             .acquire_write_permit("turso.backfill_entity_vectors", WritePriority::Low)
             .await?;
@@ -202,16 +229,14 @@ impl EventStore for TursoEventStore {
             .transaction_with_behavior(TransactionBehavior::Immediate)
             .await
             .map_err(storage_error)?;
+        tx.execute(
+            "DELETE FROM entity_vector_index \
+             WHERE tenant = ?1 AND entity_type = ?2 AND entity_id = ?3",
+            params![tenant, entity_type, entity_id],
+        )
+        .await
+        .map_err(storage_error)?;
         for row in vector_rows {
-            // Upsert: drop the entity's prior rows for this decl (its vector or model
-            // tag may have changed), then insert the current row.
-            tx.execute(
-                "DELETE FROM entity_vector_index \
-                 WHERE tenant = ?1 AND entity_type = ?2 AND decl_name = ?3 AND entity_id = ?4",
-                params![tenant, entity_type, row.decl_name.as_str(), entity_id],
-            )
-            .await
-            .map_err(storage_error)?;
             tx.execute(
                 "INSERT INTO entity_vector_index \
                  (tenant, entity_type, decl_name, model_tag, entity_id, vector, sequence_nr) \
@@ -238,14 +263,15 @@ impl EventStore for TursoEventStore {
         entity_type: &str,
         decl_name: &str,
         model_tag: &str,
+        limit: usize,
     ) -> Result<Vec<EntityVectorCandidate>, PersistenceError> {
         let conn = self.configured_connection().await?;
         let mut rows = conn
             .query(
                 "SELECT entity_id, vector FROM entity_vector_index \
                  WHERE tenant = ?1 AND entity_type = ?2 AND decl_name = ?3 AND model_tag = ?4 \
-                 ORDER BY entity_id",
-                params![tenant, entity_type, decl_name, model_tag],
+                 ORDER BY entity_id LIMIT ?5",
+                params![tenant, entity_type, decl_name, model_tag, limit as i64],
             )
             .await
             .map_err(storage_error)?;

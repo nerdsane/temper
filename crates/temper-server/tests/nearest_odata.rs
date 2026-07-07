@@ -19,7 +19,7 @@ use tower::ServiceExt;
 const VEC_ITEM_IOA: &str = r#"
 [automaton]
 name = "VecItem"
-states = ["New", "Ready"]
+states = ["New", "Ready", "Deleted"]
 initial = "New"
 
 [[state]]
@@ -29,6 +29,11 @@ initial = ""
 
 [[state]]
 name = "EmbeddingModel"
+type = "string"
+initial = ""
+
+[[state]]
+name = "Category"
 type = "string"
 initial = ""
 
@@ -44,7 +49,13 @@ name = "Create"
 kind = "input"
 from = ["New"]
 to = "Ready"
-params = ["Embedding", "EmbeddingModel"]
+params = ["Embedding", "EmbeddingModel", "Category"]
+
+[[action]]
+name = "Delete"
+kind = "input"
+from = ["Ready"]
+to = "Deleted"
 "#;
 
 const CSDL_XML: &str = r#"<?xml version="1.0" encoding="utf-8"?>
@@ -58,6 +69,7 @@ const CSDL_XML: &str = r#"<?xml version="1.0" encoding="utf-8"?>
         <Property Name="Id" Type="Edm.String" Nullable="false"/>
         <Property Name="Embedding" Type="Edm.String"/>
         <Property Name="EmbeddingModel" Type="Edm.String"/>
+        <Property Name="Category" Type="Edm.String"/>
         <Property Name="Status" Type="Edm.String"/>
       </EntityType>
       <EntityContainer Name="TestService">
@@ -90,6 +102,17 @@ async fn create_item(
     embedding: &[f32],
     model: &str,
 ) {
+    create_item_cat(state, tenant, id, embedding, model, "std").await;
+}
+
+async fn create_item_cat(
+    state: &ServerState,
+    tenant: &TenantId,
+    id: &str,
+    embedding: &[f32],
+    model: &str,
+    category: &str,
+) {
     let embedding_json = serde_json::to_string(embedding).unwrap();
     let response = state
         .dispatch_tenant_action(
@@ -97,12 +120,27 @@ async fn create_item(
             "VecItem",
             id,
             "Create",
-            serde_json::json!({ "Embedding": embedding_json, "EmbeddingModel": model }),
+            serde_json::json!({ "Embedding": embedding_json, "EmbeddingModel": model, "Category": category }),
             &AgentContext::default(),
         )
         .await
         .expect("dispatch Create");
     assert!(response.success, "Create {id} failed: {:?}", response.error);
+}
+
+async fn delete_item(state: &ServerState, tenant: &TenantId, id: &str) {
+    let response = state
+        .dispatch_tenant_action(
+            tenant,
+            "VecItem",
+            id,
+            "Delete",
+            serde_json::json!({}),
+            &AgentContext::default(),
+        )
+        .await
+        .expect("dispatch Delete");
+    assert!(response.success, "Delete {id} failed: {:?}", response.error);
 }
 
 async fn get_json(state: &ServerState, path: &str) -> (StatusCode, serde_json::Value) {
@@ -188,4 +226,171 @@ async fn nearest_rejects_unknown_decl() {
     )
     .await;
     assert_eq!(status, StatusCode::BAD_REQUEST, "body: {body}");
+}
+
+#[tokio::test]
+async fn nearest_excludes_deleted_and_404s_on_deleted_reference() {
+    let state = build_state();
+    let tenant = TenantId::from("default");
+    create_item(&state, &tenant, "item-a", &[1.0, 0.0, 0.0, 0.0], "m1").await;
+    create_item(&state, &tenant, "item-b", &[0.9, 0.1, 0.0, 0.0], "m1").await;
+    create_item(&state, &tenant, "item-c", &[0.0, 1.0, 0.0, 0.0], "m1").await;
+    // Soft-delete item-b — its vector row is purged at write time (the actor emits no
+    // row for a Deleted status), and the read-side status filter is the backstop.
+    delete_item(&state, &tenant, "item-b").await;
+
+    let (status, body) = get_json(
+        &state,
+        "/tdata/VecItems/Temper.Nearest(decl='embed',to='item-a',k=10)",
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "body: {body}");
+    let ids: Vec<&str> = body["value"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|e| e["entity_id"].as_str().unwrap_or(""))
+        .collect();
+    assert!(
+        !ids.contains(&"item-b"),
+        "a deleted entity must never be ranked; got {ids:?}"
+    );
+    assert_eq!(ids, vec!["item-c"], "only the live neighbour remains");
+
+    // A deleted reference is treated as absent.
+    let (status, _body) = get_json(
+        &state,
+        "/tdata/VecItems/Temper.Nearest(decl='embed',to='item-b',k=5)",
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "to='<deleted>' must 404");
+}
+
+#[tokio::test]
+async fn nearest_applies_equality_filter_before_top_k() {
+    let state = build_state();
+    let tenant = TenantId::from("default");
+    // Two "red" and one "blue" — all near the query vector, so without the filter the
+    // blue one would rank; the filter must exclude it before top-k.
+    create_item_cat(&state, &tenant, "red-1", &[1.0, 0.0, 0.0, 0.0], "m1", "red").await;
+    create_item_cat(
+        &state,
+        &tenant,
+        "blue-1",
+        &[0.99, 0.01, 0.0, 0.0],
+        "m1",
+        "blue",
+    )
+    .await;
+    create_item_cat(&state, &tenant, "red-2", &[0.9, 0.1, 0.0, 0.0], "m1", "red").await;
+
+    let (status, body) = get_json(
+        &state,
+        "/tdata/VecItems/Temper.Nearest(decl='embed',vector='%5B1,0,0,0%5D',k=10,model='m1',filter='Category%20eq%20''red''')",
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "body: {body}");
+    let ids: Vec<&str> = body["value"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|e| e["entity_id"].as_str().unwrap_or(""))
+        .collect();
+    assert_eq!(
+        ids,
+        vec!["red-1", "red-2"],
+        "only red items, ranked; blue filtered out"
+    );
+}
+
+#[tokio::test]
+async fn nearest_authorizes_reference_and_walk_rows() {
+    let state = build_state();
+    let tenant = TenantId::from("default");
+    create_item(&state, &tenant, "item-a", &[1.0, 0.0, 0.0, 0.0], "m1").await;
+    create_item(
+        &state,
+        &tenant,
+        "item-secret",
+        &[0.95, 0.05, 0.0, 0.0],
+        "m1",
+    )
+    .await;
+    create_item(&state, &tenant, "item-c", &[0.0, 1.0, 0.0, 0.0], "m1").await;
+
+    // Permit list + read, but forbid read on item-secret specifically.
+    state
+        .authz
+        .reload_tenant_policies(
+            tenant.as_str(),
+            r#"
+                permit(principal, action in [Action::"list", Action::"read"], resource is VecItem);
+                forbid(principal, action == Action::"read", resource == VecItem::"item-secret");
+            "#,
+        )
+        .expect("install Cedar policy");
+
+    // Walk: a row the caller may not read is skipped, not leaked, in the ranking.
+    let (status, body) = get_json(
+        &state,
+        "/tdata/VecItems/Temper.Nearest(decl='embed',to='item-a',k=10)",
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "body: {body}");
+    let ids: Vec<&str> = body["value"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|e| e["entity_id"].as_str().unwrap_or(""))
+        .collect();
+    assert!(
+        !ids.contains(&"item-secret"),
+        "a read-denied row must not be served by Nearest; got {ids:?}"
+    );
+    assert_eq!(ids, vec!["item-c"]);
+
+    // Reference: reading a forbidden entity as the query seed is denied, not disclosed.
+    let (status, _body) = get_json(
+        &state,
+        "/tdata/VecItems/Temper.Nearest(decl='embed',to='item-secret',k=5)",
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::FORBIDDEN,
+        "reading a forbidden reference entity must be denied"
+    );
+}
+
+#[tokio::test]
+async fn nearest_rejects_system_query_options() {
+    let state = build_state();
+    let tenant = TenantId::from("default");
+    create_item(&state, &tenant, "item-a", &[1.0, 0.0, 0.0, 0.0], "m1").await;
+
+    // $top is not layered over the ranked result — reject it, don't silently ignore.
+    let (status, body) = get_json(
+        &state,
+        "/tdata/VecItems/Temper.Nearest(decl='embed',to='item-a',k=5)?$top=1",
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "body: {body}");
+}
+
+#[tokio::test]
+async fn nearest_rejects_duplicate_named_argument() {
+    let state = build_state();
+    let tenant = TenantId::from("default");
+    create_item(&state, &tenant, "item-a", &[1.0, 0.0, 0.0, 0.0], "m1").await;
+
+    let (status, _body) = get_json(
+        &state,
+        "/tdata/VecItems/Temper.Nearest(decl='embed',to='item-a',k=5,k=10)",
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::BAD_REQUEST,
+        "duplicate 'k' must be rejected"
+    );
 }

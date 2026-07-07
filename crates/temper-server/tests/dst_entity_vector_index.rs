@@ -108,7 +108,7 @@ async fn dst_nearest_ranking_is_reproducible_across_seeds() {
         // Co-commit: the m1 partition holds exactly the four m1 items right after
         // the writes (no async projection lag on the co-committing sim store).
         let candidates = store
-            .vector_candidates("default", "Item", "embed", "m1")
+            .vector_candidates("default", "Item", "embed", "m1", 1000)
             .await
             .expect("vector candidates");
         assert_eq!(
@@ -161,7 +161,7 @@ async fn dst_nearest_by_reference_excludes_self() {
         // Rank against item-a's own vector, excluding item-a (the "related to X"
         // shape) — its nearest neighbour is item-b, and item-a is absent.
         let candidates = store
-            .vector_candidates("default", "Item", "embed", "m1")
+            .vector_candidates("default", "Item", "embed", "m1", 1000)
             .await
             .expect("vector candidates");
         let a_vector = candidates

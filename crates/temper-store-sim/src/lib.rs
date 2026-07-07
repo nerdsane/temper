@@ -354,7 +354,7 @@ impl EventStore for SimEventStore {
         expected_sequence: u64,
         events: &[PersistenceEnvelope],
     ) -> Result<u64, PersistenceError> {
-        self.append_with_index_rows(persistence_id, expected_sequence, events, &[], &[])
+        self.append_with_index_rows(persistence_id, expected_sequence, events, &[], &[], false)
             .await
     }
 
@@ -365,6 +365,7 @@ impl EventStore for SimEventStore {
         events: &[PersistenceEnvelope],
         key_rows: &[temper_runtime::persistence::EntityKeyRow],
         vector_rows: &[EntityVectorRow],
+        reconcile_vectors: bool,
     ) -> Result<u64, PersistenceError> {
         let append_delay = {
             let mut inner = self
@@ -554,21 +555,20 @@ impl EventStore for SimEventStore {
         }
 
         // ADR-0155: co-commit the derived vector-index rows under the SAME lock as
-        // the journal write. No uniqueness constraint — vectors are derived ranking
-        // state. Drop the entity's prior rows for each decl (its model_tag or vector
-        // may have changed), then claim the current (decl, model_tag) -> vector.
-        if !vector_rows.is_empty() {
+        // the journal write. When the entity's type declares vector paths
+        // (`reconcile_vectors`), DELETE all of the entity's rows first, then insert
+        // the current ones — so a delete transition or a cleared vector/model
+        // property (empty `vector_rows`) purges the stale rows instead of leaving
+        // them to rank forever. No uniqueness constraint — vectors are derived state.
+        if reconcile_vectors {
             let mut parts = persistence_id.splitn(3, ':');
             let tenant = parts.next().unwrap_or("");
             let entity_type = parts.next().unwrap_or("");
             let entity_id = parts.next().unwrap_or("");
+            inner.vector_index.retain(|(t, et, _, _, eid), _| {
+                !(t.as_str() == tenant && et.as_str() == entity_type && eid.as_str() == entity_id)
+            });
             for row in vector_rows {
-                inner.vector_index.retain(|(t, et, decl, _, eid), _| {
-                    !(t.as_str() == tenant
-                        && et.as_str() == entity_type
-                        && decl.as_str() == row.decl_name.as_str()
-                        && eid.as_str() == entity_id)
-                });
                 inner.vector_index.insert(
                     (
                         tenant.to_string(),
@@ -687,15 +687,12 @@ impl EventStore for SimEventStore {
         vector_rows: &[EntityVectorRow],
     ) -> Result<(), PersistenceError> {
         let mut inner = self.inner.lock().expect("SimEventStore lock poisoned"); // ci-ok: infallible lock
+        // Reconcile: drop ALL of the entity's rows, then insert the current ones.
+        // Empty `vector_rows` purges the entity (deleted / un-embedded). Idempotent.
+        inner.vector_index.retain(|(t, et, _, _, eid), _| {
+            !(t.as_str() == tenant && et.as_str() == entity_type && eid == entity_id)
+        });
         for row in vector_rows {
-            // Upsert: drop the entity's prior rows for this decl, then claim the
-            // current (decl, model_tag) -> vector. Idempotent.
-            inner.vector_index.retain(|(t, et, decl, _, eid), _| {
-                !(t.as_str() == tenant
-                    && et.as_str() == entity_type
-                    && decl.as_str() == row.decl_name.as_str()
-                    && eid == entity_id)
-            });
             inner.vector_index.insert(
                 (
                     tenant.to_string(),
@@ -716,10 +713,12 @@ impl EventStore for SimEventStore {
         entity_type: &str,
         decl_name: &str,
         model_tag: &str,
+        limit: usize,
     ) -> Result<Vec<EntityVectorCandidate>, PersistenceError> {
         let inner = self.inner.lock().expect("SimEventStore lock poisoned"); // ci-ok: infallible lock
         // BTreeMap iteration is ordered by key, so `entity_id` (the last key
         // component within a fixed partition) yields deterministic candidate order.
+        // Cap at `limit` so an over-budget partition is detected without copying it all.
         let mut out = Vec::new();
         for ((t, et, decl, tag, entity_id), vector) in inner.vector_index.iter() {
             if t.as_str() == tenant
@@ -727,6 +726,9 @@ impl EventStore for SimEventStore {
                 && decl.as_str() == decl_name
                 && tag.as_str() == model_tag
             {
+                if out.len() >= limit {
+                    break;
+                }
                 out.push(EntityVectorCandidate {
                     entity_id: entity_id.clone(),
                     vector: vector.clone(),

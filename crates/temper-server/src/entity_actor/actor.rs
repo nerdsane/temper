@@ -354,8 +354,13 @@ impl EntityActor {
         // ADR-0153/0155: derive the declared key rows AND the vector-index rows from
         // the new state and co-commit them with the journal append, so a keyed read
         // is correct without a scan and a kNN read reflects the write deterministically.
-        let (key_rows, vector_rows) = {
+        let (key_rows, vector_rows, reconcile_vectors) = {
             let table = self.table.read().expect("table lock poisoned");
+            // The type declares vector paths → the store reconciles this entity's
+            // vector rows (delete stale + insert current) even when no row is emitted
+            // this write (a delete transition or a cleared property), so stale rows are
+            // purged instead of being ranked forever (ADR-0155).
+            let reconcile_vectors = !table.vectors.is_empty();
             let mut key_rows = Vec::new();
             let mut vector_rows = Vec::new();
             if let Some(field_map) = state.fields.as_object() {
@@ -369,7 +374,12 @@ impl EntityActor {
                         });
                     }
                 }
-                for decl in &table.vectors {
+                // A soft-deleted (tombstone) entity is never indexed — it emits no
+                // vector rows, so the reconcile below PURGES any it had, even though
+                // its embedding field may still be present. Mirrors how the field-index
+                // projection removes a deleted entity.
+                let index_vectors = state.status != "Deleted";
+                for decl in table.vectors.iter().filter(|_| index_vectors) {
                     // A vector is indexed only when its property parses to `dims`
                     // floats AND its model tag is a non-empty string — otherwise the
                     // path indexes nothing for this entity (like an incomplete key).
@@ -393,7 +403,7 @@ impl EntityActor {
                     });
                 }
             }
-            (key_rows, vector_rows)
+            (key_rows, vector_rows, reconcile_vectors)
         };
         let append_start = Instant::now();
         let result = store
@@ -403,6 +413,7 @@ impl EntityActor {
                 &[envelope],
                 &key_rows,
                 &vector_rows,
+                reconcile_vectors,
             )
             .await;
         crate::runtime_metrics::record_event_store_append_wait(

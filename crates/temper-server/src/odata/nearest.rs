@@ -62,6 +62,37 @@ fn bad_request(message: &str) -> Response {
     odata_error(StatusCode::BAD_REQUEST, "InvalidNearestQuery", message).into_response()
 }
 
+/// The name of the first OData system query option that is set on the request, or
+/// `None` if none are. `Temper.Nearest` supports none of them in v1.
+fn unsupported_query_option(options: &QueryOptions) -> Option<&'static str> {
+    if options.filter.is_some() {
+        Some("$filter")
+    } else if options.select.is_some() {
+        Some("$select")
+    } else if options.expand.is_some() {
+        Some("$expand")
+    } else if options.orderby.is_some() {
+        Some("$orderby")
+    } else if options.top.is_some() {
+        Some("$top")
+    } else if options.skip.is_some() {
+        Some("$skip")
+    } else if options.count.is_some() {
+        Some("$count")
+    } else if options.skiptoken.is_some() {
+        Some("$skiptoken")
+    } else {
+        None
+    }
+}
+
+/// Whether a materialized entity body is a tombstone (soft-deleted) — such rows must
+/// never be served by `Temper.Nearest` even if their vector index row has not yet
+/// been purged (defense in depth alongside the write-path reconcile, ADR-0155).
+fn is_deleted(body: &serde_json::Value) -> bool {
+    body.get("status").and_then(|s| s.as_str()) == Some("Deleted")
+}
+
 /// Handle `GET /<Set>/Temper.Nearest(...)`.
 pub(super) async fn handle_nearest(
     state: &ServerState,
@@ -69,7 +100,7 @@ pub(super) async fn handle_nearest(
     security_ctx: &SecurityContext,
     parent: &ODataPath,
     params: &[(String, String)],
-    _query_options: &QueryOptions,
+    query_options: &QueryOptions,
 ) -> Response {
     // Temper.Nearest is collection-bound: the parent must be an entity set.
     let set_name = match parent {
@@ -80,6 +111,16 @@ pub(super) async fn handle_nearest(
             );
         }
     };
+
+    // v1 does not layer OData system query options over the ranked result — `k`
+    // already bounds the output and the function args are the whole interface.
+    // Reject them explicitly rather than silently ignoring (ADR-0155): a caller who
+    // wrote `$filter`/`$top`/`$select` would otherwise get a wrong, unfiltered answer.
+    if let Some(unsupported) = unsupported_query_option(query_options) {
+        return bad_request(&format!(
+            "Temper.Nearest does not accept the OData system query option '{unsupported}'; use the function arguments (decl, to/vector, k, model, filter)"
+        ));
+    }
     let entity_type = match resolve_entity_type(state, tenant, &set_name) {
         Some(et) => et,
         None => {
@@ -167,6 +208,31 @@ pub(super) async fn handle_nearest(
                 )
                 .into_response();
             };
+            // A soft-deleted reference is treated as absent — a tombstone must not
+            // seed a query, and `to='<deleted-id>'` returns 404.
+            if is_deleted(&body) {
+                return odata_error(
+                    StatusCode::NOT_FOUND,
+                    "ResourceNotFound",
+                    &format!("reference entity '{reference_id}' not found"),
+                )
+                .into_response();
+            }
+            // Read-authorize the reference entity with the same gate a normal single
+            // read uses, BEFORE disclosing anything about it (existence, embedding, or
+            // — via the ranking it seeds — a similarity oracle). Deny → the Cedar
+            // denial response.
+            if let Err(response) = authorize_read(
+                state,
+                tenant,
+                security_ctx,
+                READ_ACTION,
+                &entity_type,
+                reference_id,
+                &body,
+            ) {
+                return *response;
+            }
             let Some(vector) = entity_field(&body, &decl.property)
                 .and_then(|v| parse_vector_property(v, decl.dims))
             else {
@@ -234,8 +300,17 @@ pub(super) async fn handle_nearest(
         )
         .into_response();
     };
+    // Cap the scan at `budget + 1` rows in the store (a LIMIT), so an over-budget
+    // partition is detected without loading the whole thing into memory (ADR-0155).
+    let candidate_budget = budget.candidate_budget();
     let candidates = match store
-        .vector_candidates(tenant.as_str(), &entity_type, decl_name, &model_tag)
+        .vector_candidates(
+            tenant.as_str(),
+            &entity_type,
+            decl_name,
+            &model_tag,
+            candidate_budget.saturating_add(1),
+        )
         .await
     {
         Ok(candidates) => candidates,
@@ -248,7 +323,7 @@ pub(super) async fn handle_nearest(
             .into_response();
         }
     };
-    if candidates.len() > budget.candidate_budget() {
+    if candidates.len() > candidate_budget {
         return odata_error(
             StatusCode::PAYLOAD_TOO_LARGE,
             "QueryTooLarge",
@@ -287,6 +362,11 @@ pub(super) async fn handle_nearest(
         let Some(mut body) = materialized.entities.into_iter().next() else {
             continue;
         };
+        // Defense in depth: never serve a soft-deleted entity, even if its vector row
+        // has not yet been purged by the write-path reconcile / backfill.
+        if is_deleted(&body) {
+            continue;
+        }
         if let Some(pairs) = &equality_filter
             && !body_matches_equality(&body, pairs)
         {

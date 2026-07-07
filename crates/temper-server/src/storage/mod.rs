@@ -86,6 +86,7 @@ pub trait DynEventStore: Send + Sync {
         events: &'a [PersistenceEnvelope],
         key_rows: &'a [temper_runtime::persistence::EntityKeyRow],
         vector_rows: &'a [temper_runtime::persistence::EntityVectorRow],
+        reconcile_vectors: bool,
     ) -> EventStoreFuture<'a, Result<u64, PersistenceError>>;
 
     fn backfill_entity_vectors<'a>(
@@ -102,6 +103,7 @@ pub trait DynEventStore: Send + Sync {
         entity_type: &'a str,
         decl_name: &'a str,
         model_tag: &'a str,
+        limit: usize,
     ) -> EventStoreFuture<
         'a,
         Result<Vec<temper_runtime::persistence::EntityVectorCandidate>, PersistenceError>,
@@ -246,6 +248,7 @@ where
         events: &'a [PersistenceEnvelope],
         key_rows: &'a [temper_runtime::persistence::EntityKeyRow],
         vector_rows: &'a [temper_runtime::persistence::EntityVectorRow],
+        reconcile_vectors: bool,
     ) -> EventStoreFuture<'a, Result<u64, PersistenceError>> {
         Box::pin(EventStore::append_with_index_rows(
             self,
@@ -254,6 +257,7 @@ where
             events,
             key_rows,
             vector_rows,
+            reconcile_vectors,
         ))
     }
 
@@ -279,6 +283,7 @@ where
         entity_type: &'a str,
         decl_name: &'a str,
         model_tag: &'a str,
+        limit: usize,
     ) -> EventStoreFuture<
         'a,
         Result<Vec<temper_runtime::persistence::EntityVectorCandidate>, PersistenceError>,
@@ -289,6 +294,7 @@ where
             entity_type,
             decl_name,
             model_tag,
+            limit,
         ))
     }
 
@@ -513,6 +519,7 @@ impl BoxedEventStore {
         events: &[PersistenceEnvelope],
         key_rows: &[temper_runtime::persistence::EntityKeyRow],
         vector_rows: &[temper_runtime::persistence::EntityVectorRow],
+        reconcile_vectors: bool,
     ) -> Result<u64, PersistenceError> {
         self.0
             .append_with_index_rows(
@@ -521,6 +528,7 @@ impl BoxedEventStore {
                 events,
                 key_rows,
                 vector_rows,
+                reconcile_vectors,
             )
             .await
     }
@@ -543,9 +551,10 @@ impl BoxedEventStore {
         entity_type: &str,
         decl_name: &str,
         model_tag: &str,
+        limit: usize,
     ) -> Result<Vec<temper_runtime::persistence::EntityVectorCandidate>, PersistenceError> {
         self.0
-            .vector_candidates(tenant, entity_type, decl_name, model_tag)
+            .vector_candidates(tenant, entity_type, decl_name, model_tag, limit)
             .await
     }
 

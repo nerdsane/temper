@@ -17,18 +17,29 @@ use temper_runtime::persistence::EntityVectorCandidate;
 // reach for them through the vector-index module.
 pub use temper_runtime::persistence::{pack_f32_le, unpack_f32_le};
 
-/// The stable signature of a type's declared vector-path set: the sorted,
-/// comma-joined path NAMES (ADR-0155). Recorded in the vector-index backfill
-/// watermark and compared on the next backfill, so declaring an ADDITIONAL vector
-/// path (a changed signature) re-indexes the type instead of being treated as
-/// already complete. Deterministic (sorted, no map iteration). Mirrors
-/// `declared_key_set_signature`.
+/// The stable signature of a type's declared vector-path set (ADR-0155): each path
+/// rendered as `name:property:model_property:dims:metric`, sorted by name and
+/// semicolon-joined. Recorded in the vector-index backfill watermark and compared
+/// on the next backfill, so ANY change — a new path, or an in-place edit to a
+/// path's property/model_property/dims/metric — changes the signature and re-indexes
+/// the type instead of being treated as already complete. Including `dims` matters:
+/// an edited `dims` makes every existing row the wrong length (they would be dropped
+/// at read time as corrupt), so the type must be re-embedded/reconciled. Deterministic
+/// (sorted, no map iteration). Mirrors `declared_key_set_signature`.
 pub fn declared_vector_set_signature(
     vectors: &[temper_jit::table::types::DeclaredVector],
 ) -> String {
-    let mut names: Vec<&str> = vectors.iter().map(|v| v.name.as_str()).collect();
-    names.sort();
-    names.join(",")
+    let mut entries: Vec<String> = vectors
+        .iter()
+        .map(|v| {
+            format!(
+                "{}:{}:{}:{}:{}",
+                v.name, v.property, v.model_property, v.dims, v.metric
+            )
+        })
+        .collect();
+    entries.sort();
+    entries.join(";")
 }
 
 /// The similarity metric declared on a `[[vector]]` path.
@@ -97,46 +108,60 @@ pub struct ScoredEntity {
 
 /// The closeness score for `query` vs `candidate` under `metric` — higher is
 /// nearer for every metric: cosine similarity, dot product, and **negated** L2
-/// distance. f32 accumulation proceeds in index order. `None` if the lengths
-/// differ (a corrupt row); a zero-magnitude vector scores 0 under cosine rather
-/// than producing a `NaN`.
+/// distance.
+///
+/// Accumulation is in **f64** in fixed index order, then narrowed to f32. f64 has
+/// the range to hold the sums of squares/products of finite f32 inputs without
+/// overflowing to `inf` — an f32 accumulator can overflow, and the resulting
+/// `inf/inf = NaN` sorts ABOVE every real score (`total_cmp`), so a pair of large
+/// but finite vectors would rank first. Doing the math in f64 keeps the order
+/// still deterministic (fixed order, f64 is exact enough and identical across
+/// backends). Returns `None` if the lengths differ (a corrupt row) or the score is
+/// not finite; a zero-magnitude vector scores 0 under cosine rather than `NaN`.
 fn closeness(metric: VectorMetric, query: &[f32], candidate: &[f32]) -> Option<f32> {
     if query.len() != candidate.len() {
         return None;
     }
-    match metric {
+    let score: f64 = match metric {
         VectorMetric::Dot => {
-            let mut dot = 0.0f32;
+            let mut dot = 0.0f64;
             for (q, c) in query.iter().zip(candidate.iter()) {
-                dot += q * c;
+                dot += f64::from(*q) * f64::from(*c);
             }
-            Some(dot)
+            dot
         }
         VectorMetric::Cosine => {
-            let mut dot = 0.0f32;
-            let mut q_norm = 0.0f32;
-            let mut c_norm = 0.0f32;
+            let mut dot = 0.0f64;
+            let mut q_norm = 0.0f64;
+            let mut c_norm = 0.0f64;
             for (q, c) in query.iter().zip(candidate.iter()) {
+                let (q, c) = (f64::from(*q), f64::from(*c));
                 dot += q * c;
                 q_norm += q * q;
                 c_norm += c * c;
             }
             let denom = q_norm.sqrt() * c_norm.sqrt();
-            if denom == 0.0 {
-                Some(0.0)
-            } else {
-                Some(dot / denom)
-            }
+            if denom == 0.0 { 0.0 } else { dot / denom }
         }
         VectorMetric::L2 => {
-            let mut sum_sq = 0.0f32;
+            let mut sum_sq = 0.0f64;
             for (q, c) in query.iter().zip(candidate.iter()) {
-                let d = q - c;
+                let d = f64::from(*q) - f64::from(*c);
                 sum_sq += d * d;
             }
             // Negated so nearest (smallest distance) is the largest score.
-            Some(-sum_sq.sqrt())
+            -sum_sq.sqrt()
         }
+    };
+    // Narrow to f32, then require the NARROWED value to be finite — this catches
+    // both a NaN/inf f64 and an f64 that is finite but outside f32 range (which
+    // narrows to inf). Either way a non-finite score declines the row, so NaN/inf
+    // can never rank (a NaN sorts ahead of every real score under total_cmp).
+    let narrowed = score as f32;
+    if narrowed.is_finite() {
+        Some(narrowed)
+    } else {
+        None
     }
 }
 
@@ -145,7 +170,8 @@ fn closeness(metric: VectorMetric, query: &[f32], candidate: &[f32]) -> Option<f
 /// Order is (score descending, then entity id ascending) — a total, deterministic
 /// order under every seed. `exclude` drops one entity id (the reference entity when
 /// the query came from `to=<id>`, so it is never its own top result). Candidates
-/// whose length does not match `query` are skipped (corrupt rows never rank).
+/// whose length does not match `query`, or whose score is not finite, are skipped —
+/// a corrupt or overflowing row never ranks (a NaN would otherwise sort first).
 pub fn rank_nearest(
     metric: VectorMetric,
     query: &[f32],
@@ -273,5 +299,55 @@ mod tests {
         let candidates = vec![candidate("x", vec![1.0, 1.0])];
         let ranked = rank_nearest(VectorMetric::Cosine, &query, &candidates, 1, None);
         assert_eq!(ranked[0].score, 0.0);
+    }
+
+    #[test]
+    fn large_finite_vectors_do_not_overflow_to_nan_or_rank_first() {
+        // Under cosine (bounded [-1,1]) even huge-magnitude vectors rank by direction,
+        // never producing a NaN that would sort ahead of a genuinely-similar row.
+        let query = vec![1.0f32, 0.0];
+        let candidates = vec![
+            candidate("huge_same_dir", vec![f32::MAX, 0.0]),
+            candidate("near", vec![1.0, 0.01]),
+            candidate("huge_orthogonal", vec![0.0, f32::MAX]),
+        ];
+        let ranked = rank_nearest(VectorMetric::Cosine, &query, &candidates, 3, None);
+        assert!(
+            ranked.iter().all(|r| r.score.is_finite()),
+            "no NaN/inf scores"
+        );
+        // The huge same-direction vector (cosine 1.0) is nearest; the huge orthogonal
+        // one (cosine 0) is last — magnitude does not let a row jump the ranking.
+        assert_eq!(ranked[0].entity_id, "huge_same_dir");
+        assert_eq!(ranked.last().unwrap().entity_id, "huge_orthogonal");
+    }
+
+    #[test]
+    fn dot_overflow_declines_row_rather_than_ranking_inf_first() {
+        // A dot product that overflows f32 range narrows to inf and is dropped, so it
+        // cannot sort ahead of a finite, genuinely-scored row. The query is moderate
+        // so only the pathological candidate overflows (its dot ~2e60 exceeds f32
+        // range), while the finite one (dot ~2e30) is well within range.
+        let query = vec![1e30f32, 1e30];
+        let candidates = vec![
+            candidate("overflows", vec![1e30, 1e30]),
+            candidate("finite", vec![1.0, 1.0]),
+        ];
+        let ranked = rank_nearest(VectorMetric::Dot, &query, &candidates, 5, None);
+        assert!(ranked.iter().all(|r| r.score.is_finite()));
+        assert!(
+            ranked.iter().all(|r| r.entity_id != "overflows"),
+            "an overflowing (non-finite) score must be dropped, not ranked first"
+        );
+        assert_eq!(ranked.len(), 1);
+        assert_eq!(ranked[0].entity_id, "finite");
+    }
+
+    #[test]
+    fn unpack_rejects_nonfinite_components() {
+        use temper_runtime::persistence::{pack_f32_le, unpack_f32_le};
+        assert!(unpack_f32_le(&pack_f32_le(&[1.0, 2.0])).is_some());
+        assert!(unpack_f32_le(&pack_f32_le(&[1.0, f32::NAN])).is_none());
+        assert!(unpack_f32_le(&pack_f32_le(&[f32::INFINITY, 0.0])).is_none());
     }
 }

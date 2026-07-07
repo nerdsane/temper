@@ -663,8 +663,10 @@ pub(super) async fn handle_odata_get_for_tenant(
             function,
             params,
         } => {
-            if function == "Nearest" {
-                // ADR-0155: the collection-bound exact-scan kNN function.
+            if function == "Temper.Nearest" {
+                // ADR-0155: the collection-bound exact-scan kNN function, dispatched by
+                // its fully-qualified name so a same-named function in another
+                // namespace never routes here.
                 super::nearest::handle_nearest(
                     &state,
                     &tenant,

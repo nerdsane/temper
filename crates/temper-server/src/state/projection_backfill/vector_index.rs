@@ -179,7 +179,24 @@ pub(in crate::state) async fn populate_vector_index_from_snapshots(
                         }
                     }
                 }
-                EntityLoadOutcome::Skip => skipped += 1,
+                EntityLoadOutcome::Skip => {
+                    // A deleted (or phantom) entity must hold no vector rows — purge
+                    // any it still has so a soft-deleted entity is never ranked
+                    // (reconcile with an empty row set). Harmless when there is nothing
+                    // to purge.
+                    if let Err(e) = store
+                        .backfill_entity_vectors(tenant.as_str(), entity_type, entity_id, &[])
+                        .await
+                    {
+                        failed += 1;
+                        tracing::warn!(
+                            error = %e, entity_type = %entity_type, entity_id = %entity_id,
+                            "vector index backfill: purge of deleted/phantom entity failed"
+                        );
+                    } else {
+                        skipped += 1;
+                    }
+                }
                 EntityLoadOutcome::LoadFailed => {
                     failed += 1;
                     tracing::warn!(

@@ -135,6 +135,46 @@ is the entire point of doing this in the kernel.
   reflects the journal deterministically. A DST drives seeded writes + `Nearest` reads
   and asserts identical ordering across all seeds.
 
+## Correctness details (review hardening)
+
+- **Deletion and cleared vectors.** A write for a vector-declaring type *reconciles*
+  the entity's index rows: the store deletes all of the entity's rows, then inserts
+  the current ones. A soft-deleted (`status = "Deleted"`) entity emits no rows, so it
+  is purged even though its embedding field persists; a cleared vector/model property
+  drops that path's rows. As defense in depth the `Temper.Nearest` walk also skips
+  any `Deleted` body and `to='<deleted-id>'` returns 404, so a stale row (e.g. one
+  written by a Turso write-behind that has not yet caught up) is never *served*.
+- **Reference-entity authorization.** `to='<id>'` read-authorizes the reference with
+  the same Cedar `read` gate a normal single read uses, before disclosing its
+  existence, embedding, or the similarity ranking it seeds. Every ranked row is
+  `read`-gated during materialization, so a denied row is skipped, never leaked.
+- **Numeric safety.** Metric accumulation is done in f64 and the score is dropped if
+  the narrowed f32 is not finite; the blob decoder rejects non-finite components. An
+  overflowing or corrupt vector therefore declines rather than producing a `NaN`,
+  which would otherwise sort ahead of every real score.
+- **Budget.** `vector_candidates` applies `LIMIT budget+1` in the store, so an
+  over-budget partition returns 413 without loading the whole partition. The ranked
+  walk then materializes candidates one at a time until `k` are accepted; at the ≤1k
+  target scale this N-at-most walk is microseconds, and a bounded batch materialization
+  is the optimization if a partition ever approaches the budget.
+- **Turso durability.** Turso maintains the index write-behind (event first, index
+  follows), and that follow-up write is *retried* (same retry primitives as the event
+  append) rather than a warn-once one-shot; on exhaustion it logs loudly and the
+  partition lags until the next backfill reconcile. This is kept in the EventStore
+  layer (where co-commit lives on Postgres) rather than routed through the
+  field-index projection queue, because the queue is spec-agnostic (`QueryPlaneStore`)
+  while vector parsing needs the spec, and routing it there would double-maintain on
+  Postgres; the retry/remove substance is delivered in-layer.
+- **Signature includes shape.** The backfill watermark records each path as
+  `name:property:model_property:dims:metric`, so an in-place edit to `dims` (which
+  makes every existing row the wrong length) — or to any other field — changes the
+  signature and re-indexes the type, rather than silently leaving mismatched rows.
+- **Surface.** `Temper.Nearest` is dispatched by its fully-qualified name, rejects
+  unknown/duplicate arguments and any OData system query option (`$top`/`$select`/…),
+  and is a kernel bound function discoverable via this ADR; it is **not** advertised in
+  per-tenant `$metadata` (that is the producer's CSDL — kernel-side augmentation of the
+  metadata pipeline is deferred).
+
 ## Non-Goals
 - Embedding generation (stays in post-transition integrations/WASM).
 - ANN / approximate indexes (a later declared `index = "hnsw"` opt-in).

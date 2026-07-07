@@ -63,7 +63,7 @@ impl EventStore for PostgresEventStore {
         expected_sequence: u64,
         events: &[PersistenceEnvelope],
     ) -> Result<u64, PersistenceError> {
-        self.append_with_index_rows(persistence_id, expected_sequence, events, &[], &[])
+        self.append_with_index_rows(persistence_id, expected_sequence, events, &[], &[], false)
             .await
     }
 
@@ -74,6 +74,7 @@ impl EventStore for PostgresEventStore {
         events: &[PersistenceEnvelope],
         key_rows: &[temper_runtime::persistence::EntityKeyRow],
         vector_rows: &[EntityVectorRow],
+        reconcile_vectors: bool,
     ) -> Result<u64, PersistenceError> {
         let (tenant, entity_type, entity_id) =
             parse_persistence_id_parts(persistence_id).map_err(PersistenceError::Storage)?;
@@ -245,35 +246,39 @@ impl EventStore for PostgresEventStore {
         }
 
         // ADR-0155: co-commit the derived vector-index rows in THIS transaction.
-        // No uniqueness constraint — drop the entity's prior rows for each decl (its
-        // vector or model tag may have changed), then insert the current row.
-        for row in vector_rows {
+        // When the entity's type declares vector paths (`reconcile_vectors`), DELETE
+        // all of the entity's rows first, then insert the current ones — so a delete
+        // transition or a cleared vector/model property (empty `vector_rows`) purges
+        // the stale rows instead of leaving them to rank forever. No uniqueness
+        // constraint; vectors are derived ranking state.
+        if reconcile_vectors {
             crate::dbm::postgres_query!(
                 "DELETE FROM entity_vector_index \
-                 WHERE tenant = $1 AND entity_type = $2 AND decl_name = $3 AND entity_id = $4",
+                 WHERE tenant = $1 AND entity_type = $2 AND entity_id = $3",
             )
             .bind(tenant)
             .bind(entity_type)
-            .bind(&row.decl_name)
             .bind(entity_id)
             .execute(&mut *tx)
             .await
             .map_err(|e| PersistenceError::Storage(e.to_string()))?;
-            crate::dbm::postgres_query!(
-                "INSERT INTO entity_vector_index \
-                 (tenant, entity_type, decl_name, model_tag, entity_id, vector, sequence_nr) \
-                 VALUES ($1, $2, $3, $4, $5, $6, $7)",
-            )
-            .bind(tenant)
-            .bind(entity_type)
-            .bind(&row.decl_name)
-            .bind(&row.model_tag)
-            .bind(entity_id)
-            .bind(pack_f32_le(&row.vector))
-            .bind(new_seq as i64)
-            .execute(&mut *tx)
-            .await
-            .map_err(|e| PersistenceError::Storage(e.to_string()))?;
+            for row in vector_rows {
+                crate::dbm::postgres_query!(
+                    "INSERT INTO entity_vector_index \
+                     (tenant, entity_type, decl_name, model_tag, entity_id, vector, sequence_nr) \
+                     VALUES ($1, $2, $3, $4, $5, $6, $7)",
+                )
+                .bind(tenant)
+                .bind(entity_type)
+                .bind(&row.decl_name)
+                .bind(&row.model_tag)
+                .bind(entity_id)
+                .bind(pack_f32_le(&row.vector))
+                .bind(new_seq as i64)
+                .execute(&mut *tx)
+                .await
+                .map_err(|e| PersistenceError::Storage(e.to_string()))?;
+            }
         }
 
         let commit_started = Instant::now();
@@ -470,26 +475,25 @@ impl EventStore for PostgresEventStore {
         entity_id: &str,
         vector_rows: &[EntityVectorRow],
     ) -> Result<(), PersistenceError> {
-        if vector_rows.is_empty() {
-            return Ok(());
-        }
+        // Reconcile: DELETE all of the entity's rows, then insert the current ones.
+        // Empty `vector_rows` purges the entity (deleted / un-embedded). Always runs
+        // the delete (even for empty rows) so a purge is honored.
         let mut tx = self
             .pool
             .begin()
             .await
             .map_err(|e| PersistenceError::Storage(e.to_string()))?;
+        crate::dbm::postgres_query!(
+            "DELETE FROM entity_vector_index \
+             WHERE tenant = $1 AND entity_type = $2 AND entity_id = $3",
+        )
+        .bind(tenant)
+        .bind(entity_type)
+        .bind(entity_id)
+        .execute(&mut *tx)
+        .await
+        .map_err(|e| PersistenceError::Storage(e.to_string()))?;
         for row in vector_rows {
-            crate::dbm::postgres_query!(
-                "DELETE FROM entity_vector_index \
-                 WHERE tenant = $1 AND entity_type = $2 AND decl_name = $3 AND entity_id = $4",
-            )
-            .bind(tenant)
-            .bind(entity_type)
-            .bind(&row.decl_name)
-            .bind(entity_id)
-            .execute(&mut *tx)
-            .await
-            .map_err(|e| PersistenceError::Storage(e.to_string()))?;
             crate::dbm::postgres_query!(
                 "INSERT INTO entity_vector_index \
                  (tenant, entity_type, decl_name, model_tag, entity_id, vector, sequence_nr) \
@@ -517,6 +521,7 @@ impl EventStore for PostgresEventStore {
         entity_type: &str,
         decl_name: &str,
         model_tag: &str,
+        limit: usize,
     ) -> Result<Vec<EntityVectorCandidate>, PersistenceError> {
         let mut conn = self
             .pool
@@ -526,12 +531,13 @@ impl EventStore for PostgresEventStore {
         let rows: Vec<(String, Vec<u8>)> = crate::dbm::postgres_query_as!(
             "SELECT entity_id, vector FROM entity_vector_index \
              WHERE tenant = $1 AND entity_type = $2 AND decl_name = $3 AND model_tag = $4 \
-             ORDER BY entity_id",
+             ORDER BY entity_id LIMIT $5",
         )
         .bind(tenant)
         .bind(entity_type)
         .bind(decl_name)
         .bind(model_tag)
+        .bind(limit as i64)
         .fetch_all(&mut *conn)
         .await
         .map_err(|e| PersistenceError::Storage(e.to_string()))?;
