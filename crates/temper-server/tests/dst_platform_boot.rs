@@ -445,3 +445,88 @@ async fn dst_boot_cycle_combined_faults() {
         harness.sim_platform_store.restore_faults(prev_plat);
     }
 }
+
+// =========================================================================
+// Test 8: One corrupt tenant CSDL is quarantined — healthy tenants still boot
+//         (ARN-190). Drives the production restore path via `restart()`, which
+//         funnels through the same `restore_grouped_specs` core the live
+//         Postgres/Turso boot uses.
+// =========================================================================
+
+#[tokio::test]
+async fn dst_boot_isolates_corrupt_tenant_csdl() {
+    use temper_server::platform_store::PlatformStore;
+
+    for seed in 0..5 {
+        let (_guard, _clock, _id_gen) = install_deterministic_context(seed);
+        let mut harness = SimPlatformHarness::no_faults(seed);
+
+        let healthy_tenant = "healthy-tenant";
+        let corrupt_tenant = "corrupt-tenant";
+
+        // Healthy tenant: install a real app so its specs persist and commit.
+        let healthy_types = harness
+            .install_app(healthy_tenant, "project-management")
+            .await
+            .unwrap_or_else(|e| panic!("seed {seed}: install for healthy tenant failed: {e}"));
+        assert!(
+            !healthy_types.is_empty(),
+            "seed {seed}: no entity types installed"
+        );
+
+        // Corrupt tenant: persist a committed spec whose CSDL is malformed XML.
+        // This mimics a partial write or a spec-format change landing a bad row.
+        harness
+            .sim_platform_store
+            .upsert_spec(
+                corrupt_tenant,
+                "Order",
+                "[automaton]\nname = \"Order\"\n",
+                "<a><b", // malformed XML → parse_csdl errors
+                "corrupt-hash",
+            )
+            .await
+            .unwrap_or_else(|e| panic!("seed {seed}: upsert corrupt spec failed: {e}"));
+        harness
+            .sim_platform_store
+            .commit_specs(corrupt_tenant)
+            .await
+            .unwrap_or_else(|e| panic!("seed {seed}: commit corrupt spec failed: {e}"));
+
+        // Restart runs the PRODUCTION restore path
+        // (restore_registry_from_platform_store → restore_grouped_specs).
+        harness.restart().await;
+
+        {
+            let registry = harness.registry().read().unwrap(); // ci-ok: infallible lock
+            // Healthy tenant boots and serves its entity types.
+            let healthy_id = temper_runtime::tenant::TenantId::new(healthy_tenant);
+            assert!(
+                !registry.entity_types(&healthy_id).is_empty(),
+                "seed {seed}: healthy tenant must still boot despite a corrupt sibling"
+            );
+            // Corrupt tenant is quarantined — never registered.
+            let corrupt_id = temper_runtime::tenant::TenantId::new(corrupt_tenant);
+            assert!(
+                registry.get_table(&corrupt_id, "Order").is_none(),
+                "seed {seed}: corrupt tenant must be quarantined"
+            );
+        }
+
+        // The corrupt spec is reconciled out of the store (P1).
+        let remaining = harness
+            .sim_platform_store
+            .load_specs()
+            .await
+            .unwrap_or_else(|e| panic!("seed {seed}: load specs failed: {e}"));
+        assert!(
+            !remaining.iter().any(|s| s.tenant == corrupt_tenant),
+            "seed {seed}: corrupt spec must be reconciled out of the store"
+        );
+
+        // Full boot invariants still hold after the quarantine + reconcile.
+        assert_boot_invariants(&harness)
+            .await
+            .unwrap_or_else(|e| panic!("seed {seed}: boot invariants failed: {e}"));
+    }
+}

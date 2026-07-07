@@ -133,7 +133,11 @@ fn row_to_registry_status(row: &impl SpecRowLike) -> VerificationStatus {
     }
 }
 
-/// Helper: populate registry from grouped spec rows.
+/// Parse and merge every distinct CSDL fragment persisted for one tenant.
+///
+/// Returns the merged document plus its re-emitted XML, or `Ok(None)` when the
+/// tenant has no non-empty CSDL. An unparsable fragment is an `Err` the caller
+/// turns into a per-tenant quarantine.
 fn restored_csdl_for_rows<R>(
     tenant: &str,
     rows: &[R],
@@ -162,19 +166,58 @@ fn restored_csdl_for_rows<R>(
     }))
 }
 
-fn populate_registry<R: SpecRowLike>(
+/// Outcome of a fault-isolating registry restore.
+struct RestoreOutcome {
+    /// Number of specs successfully re-registered into the registry.
+    restored_specs: usize,
+    /// `(tenant, entity_type)` pairs whose tenant was quarantined and skipped.
+    ///
+    /// The caller reconciles these against its backing store as appropriate: the
+    /// platform-store path deletes them (P1 — every stored spec has a registry
+    /// entry); the live Postgres/Turso paths keep them for human inspection.
+    orphaned_specs: Vec<(String, String)>,
+}
+
+/// Fault-isolating per-tenant restore core shared by every backend.
+///
+/// For each tenant this parses+merges the persisted CSDL and registers the
+/// tenant. A single tenant failing for any reason — missing CSDL, a CSDL parse
+/// error, or a registration error — is logged and **quarantined**; the loop
+/// continues so the remaining tenants still restore. One corrupt persisted row
+/// can therefore never abort boot for the healthy tenants.
+///
+/// Every restore path funnels through this one function, so the DST harness
+/// exercises exactly the per-tenant isolation logic the live server ships.
+fn restore_grouped_specs<R>(
     registry: &mut SpecRegistry,
     grouped: BTreeMap<String, Vec<R>>,
     constraints_by_tenant: &mut BTreeMap<String, String>,
     get_csdl: impl Fn(&R) -> Option<String>,
     get_ioa: impl Fn(&R) -> (String, String),
-) -> Result<usize, String> {
+    mut on_registered: impl FnMut(&mut SpecRegistry, &TenantId, &R, &str),
+) -> RestoreOutcome {
     let mut restored_specs = 0usize;
+    let mut orphaned_specs: Vec<(String, String)> = Vec::new();
+
     for (tenant, tenant_rows) in grouped {
-        let Some((csdl, csdl_xml)) = restored_csdl_for_rows(&tenant, &tenant_rows, &get_csdl)?
-        else {
-            tracing::warn!(tenant = %tenant, "skipping restored tenant due to missing CSDL");
-            continue;
+        // Parse + merge this tenant's CSDL. A missing or unparsable CSDL
+        // quarantines only this tenant — the rest still restore.
+        let (csdl, csdl_xml) = match restored_csdl_for_rows(&tenant, &tenant_rows, &get_csdl) {
+            Ok(Some(restored)) => restored,
+            Ok(None) => {
+                tracing::warn!(tenant = %tenant, "quarantining tenant during restore: missing CSDL");
+                for row in &tenant_rows {
+                    orphaned_specs.push((tenant.clone(), get_ioa(row).0));
+                }
+                continue;
+            }
+            Err(e) => {
+                tracing::warn!(tenant = %tenant, error = %e, "quarantining tenant during restore: invalid CSDL");
+                for row in &tenant_rows {
+                    orphaned_specs.push((tenant.clone(), get_ioa(row).0));
+                }
+                continue;
+            }
         };
 
         let ioa_owned: Vec<(String, String)> = tenant_rows.iter().map(&get_ioa).collect();
@@ -184,28 +227,57 @@ fn populate_registry<R: SpecRowLike>(
             .collect();
 
         let cross_invariants_toml = constraints_by_tenant.remove(&tenant);
-        registry
-            .try_register_tenant_with_reactions_and_constraints(
-                tenant.as_str(),
-                csdl,
-                csdl_xml,
-                &ioa_pairs,
-                Vec::new(),
-                cross_invariants_toml,
-                false,
-            )
-            .map_err(|e| format!("Failed to restore tenant '{tenant}' into registry: {e}"))?;
-        let tenant_id = TenantId::new(&tenant);
-        for row in &tenant_rows {
-            registry.set_verification_status(
-                &tenant_id,
-                &get_ioa(row).0,
-                row_to_registry_status(row),
-            );
-            restored_specs += 1;
+        match registry.try_register_tenant_with_reactions_and_constraints(
+            tenant.as_str(),
+            csdl,
+            csdl_xml,
+            &ioa_pairs,
+            Vec::new(),
+            cross_invariants_toml,
+            false,
+        ) {
+            Ok(()) => {
+                let tenant_id = TenantId::new(&tenant);
+                for (row, (entity_type, _ioa)) in tenant_rows.iter().zip(ioa_owned.iter()) {
+                    on_registered(registry, &tenant_id, row, entity_type);
+                    restored_specs += 1;
+                }
+            }
+            Err(e) => {
+                tracing::warn!(tenant = %tenant, error = %e, "quarantining tenant during restore: registration failed");
+                for (entity_type, _ioa) in &ioa_owned {
+                    orphaned_specs.push((tenant.clone(), entity_type.clone()));
+                }
+            }
         }
     }
-    Ok(restored_specs)
+
+    RestoreOutcome {
+        restored_specs,
+        orphaned_specs,
+    }
+}
+
+/// Restore the Postgres/Turso row types, which additionally carry persisted
+/// verification status. Delegates the per-tenant isolation to
+/// [`restore_grouped_specs`] and layers verification-status restoration on top.
+fn populate_registry<R: SpecRowLike>(
+    registry: &mut SpecRegistry,
+    grouped: BTreeMap<String, Vec<R>>,
+    constraints_by_tenant: &mut BTreeMap<String, String>,
+    get_csdl: impl Fn(&R) -> Option<String>,
+    get_ioa: impl Fn(&R) -> (String, String),
+) -> RestoreOutcome {
+    restore_grouped_specs(
+        registry,
+        grouped,
+        constraints_by_tenant,
+        get_csdl,
+        get_ioa,
+        |registry, tenant_id, row, entity_type| {
+            registry.set_verification_status(tenant_id, entity_type, row_to_registry_status(row));
+        },
+    )
 }
 
 /// Restore a [`SpecRegistry`] from Postgres.
@@ -252,13 +324,20 @@ pub async fn restore_registry_from_postgres(
         grouped.entry(row.tenant.clone()).or_default().push(row);
     }
 
-    populate_registry(
+    let outcome = populate_registry(
         registry,
         grouped,
         &mut constraints_by_tenant,
-        |rows| rows.csdl_xml.clone(),
+        |row| row.csdl_xml.clone(),
         |row| (row.entity_type.clone(), row.ioa_source.clone()),
-    )
+    );
+    if !outcome.orphaned_specs.is_empty() {
+        tracing::warn!(
+            quarantined = outcome.orphaned_specs.len(),
+            "quarantined specs with corrupt CSDL during Postgres restore; kept in store for inspection"
+        );
+    }
+    Ok(outcome.restored_specs)
 }
 
 /// Restore a [`SpecRegistry`] from Turso.
@@ -295,24 +374,35 @@ pub async fn restore_registry_from_turso(
         grouped.entry(row.tenant.clone()).or_default().push(row);
     }
 
-    populate_registry(
+    let outcome = populate_registry(
         registry,
         grouped,
         &mut constraints_by_tenant,
-        |rows| rows.csdl_xml.clone(),
+        |row| row.csdl_xml.clone(),
         |row| (row.entity_type.clone(), row.ioa_source.clone()),
-    )
+    );
+    if !outcome.orphaned_specs.is_empty() {
+        tracing::warn!(
+            quarantined = outcome.orphaned_specs.len(),
+            "quarantined specs with corrupt CSDL during Turso restore; kept in store for inspection"
+        );
+    }
+    Ok(outcome.restored_specs)
 }
 
 /// Restore a [`SpecRegistry`] from a [`PlatformStore`] (trait-based).
 ///
-/// This is the production code path for restoring specs from any platform
-/// store backend (Turso, Sim, etc.). Used by both the CLI bootstrap and
-/// the DST harness — ensuring simulation runs identical code.
+/// Used by the DST harness (`SimPlatformHarness::restart`) to restore specs from
+/// a simulated store. The live server restores through
+/// [`restore_registry_from_postgres`] / [`restore_registry_from_turso`], but
+/// every path — this one included — funnels through the same fault-isolating
+/// [`restore_grouped_specs`] core, so the simulation exercises the exact
+/// per-tenant isolation logic the CLI ships.
 ///
-/// Unlike [`restore_registry_from_turso`], this does not restore verification
-/// status or cross-entity constraints (the `PlatformStore` trait returns simpler
-/// `SpecRow` types). Specs are registered with `Pending` verification status.
+/// Unlike the Postgres/Turso paths, the `PlatformStore` trait returns simpler
+/// `SpecRow`s without verification metadata or cross-entity constraints, so
+/// specs are registered with `Pending` verification status. Quarantined tenants
+/// are reconciled out of the store (P1 — every stored spec has a registry entry).
 pub async fn restore_registry_from_platform_store(
     registry: &mut SpecRegistry,
     store: &dyn crate::platform_store::PlatformStore,
@@ -337,60 +427,21 @@ pub async fn restore_registry_from_platform_store(
         grouped.entry(row.tenant.clone()).or_default().push(row);
     }
 
-    let mut restored_specs = 0usize;
-    // Track specs that failed to register — these are orphans to reconcile.
-    let mut orphaned_specs: Vec<(String, String)> = Vec::new();
+    // The `PlatformStore` trait exposes no persisted cross-entity constraints or
+    // verification metadata, so those restore as defaults (`Pending` status).
+    let mut constraints_by_tenant: BTreeMap<String, String> = BTreeMap::new();
+    let outcome = restore_grouped_specs(
+        registry,
+        grouped,
+        &mut constraints_by_tenant,
+        |row| row.csdl_xml.clone(),
+        |row| (row.entity_type.clone(), row.ioa_source.clone()),
+        |_registry, _tenant_id, _row, _entity_type| {},
+    );
 
-    for (tenant, tenant_rows) in &grouped {
-        let (csdl, csdl_xml) = match restored_csdl_for_rows(tenant, tenant_rows, &|r| {
-            r.csdl_xml.clone()
-        }) {
-            Ok(Some(restored)) => restored,
-            Ok(None) => {
-                tracing::warn!(tenant = %tenant, "reconciling orphaned specs for tenant with missing CSDL");
-                for row in tenant_rows {
-                    orphaned_specs.push((row.tenant.clone(), row.entity_type.clone()));
-                }
-                continue;
-            }
-            Err(e) => {
-                tracing::warn!(tenant = %tenant, "reconciling orphaned specs for tenant with invalid CSDL: {e}");
-                for row in tenant_rows {
-                    orphaned_specs.push((row.tenant.clone(), row.entity_type.clone()));
-                }
-                continue;
-            }
-        };
-
-        let ioa_pairs: Vec<(&str, &str)> = tenant_rows
-            .iter()
-            .map(|r| (r.entity_type.as_str(), r.ioa_source.as_str()))
-            .collect();
-
-        match registry.try_register_tenant_with_reactions_and_constraints(
-            tenant.as_str(),
-            csdl,
-            csdl_xml,
-            &ioa_pairs,
-            Vec::new(),
-            None,
-            false,
-        ) {
-            Ok(()) => {
-                restored_specs += tenant_rows.len();
-            }
-            Err(e) => {
-                tracing::warn!(tenant = %tenant, "reconciling orphaned specs for tenant that failed registration: {e}");
-                for row in tenant_rows {
-                    orphaned_specs.push((row.tenant.clone(), row.entity_type.clone()));
-                }
-            }
-        }
-    }
-
-    // Reconciliation: delete orphaned specs from the store so P1 holds
+    // Reconciliation: delete quarantined specs from the store so P1 holds
     // (every spec in store has a matching registry entry).
-    for (tenant, entity_type) in &orphaned_specs {
+    for (tenant, entity_type) in &outcome.orphaned_specs {
         if let Err(e) = store.delete_spec(tenant, entity_type).await {
             tracing::warn!(
                 tenant = %tenant,
@@ -400,7 +451,7 @@ pub async fn restore_registry_from_platform_store(
         }
     }
 
-    Ok(restored_specs)
+    Ok(outcome.restored_specs)
 }
 
 #[cfg(test)]

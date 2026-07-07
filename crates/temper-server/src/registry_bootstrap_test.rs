@@ -106,14 +106,19 @@ fn populate_registry_merges_csdl_fragments_from_all_restored_rows() {
     let mut constraints = BTreeMap::new();
     let mut registry = SpecRegistry::new();
 
-    populate_registry(
+    let outcome = populate_registry(
         &mut registry,
         grouped,
         &mut constraints,
         |row| Some(row.csdl_xml.clone()),
         |row| (row.entity_type.clone(), row.ioa_source.clone()),
-    )
-    .expect("restore should register tenant");
+    );
+    assert!(
+        outcome.orphaned_specs.is_empty(),
+        "no tenant should be quarantined: {:?}",
+        outcome.orphaned_specs
+    );
+    assert_eq!(outcome.restored_specs, 2);
 
     let tenant = TenantId::new("default");
     assert!(registry.get_table(&tenant, "Order").is_some());
@@ -126,6 +131,66 @@ fn populate_registry_merges_csdl_fragments_from_all_restored_rows() {
         registry.resolve_entity_type(&tenant, "Tasks").as_deref(),
         Some("Task"),
         "restore must preserve every app's OData entity-set mapping"
+    );
+}
+
+#[test]
+fn populate_registry_isolates_corrupt_tenant() {
+    let order_ioa = include_str!("../../../test-fixtures/specs/order.ioa.toml").to_string();
+
+    let healthy_rows = vec![MockSpecRow {
+        entity_type: "Order".to_string(),
+        ioa_source: order_ioa.clone(),
+        csdl_xml: csdl_xml_for("Order", "Orders"),
+        status: "passed".to_string(),
+        verified: true,
+    }];
+    // Corrupt CSDL: malformed XML (EOF inside an open tag) → parse_csdl errors.
+    let corrupt_rows = vec![MockSpecRow {
+        entity_type: "Order".to_string(),
+        ioa_source: order_ioa,
+        csdl_xml: "<a><b".to_string(),
+        status: "passed".to_string(),
+        verified: true,
+    }];
+
+    // BTreeMap orders "corrupt" before "healthy", so the bad tenant is
+    // processed first — proving it cannot abort the healthy one.
+    let mut grouped = BTreeMap::new();
+    grouped.insert("corrupt".to_string(), corrupt_rows);
+    grouped.insert("healthy".to_string(), healthy_rows);
+    let mut constraints = BTreeMap::new();
+    let mut registry = SpecRegistry::new();
+
+    // The production Postgres/Turso restore path. One corrupt tenant must NOT
+    // abort the whole restore — it is logged, quarantined, and skipped.
+    let outcome = populate_registry(
+        &mut registry,
+        grouped,
+        &mut constraints,
+        |row| Some(row.csdl_xml.clone()),
+        |row| (row.entity_type.clone(), row.ioa_source.clone()),
+    );
+
+    // Healthy tenant still boots.
+    let healthy = TenantId::new("healthy");
+    assert!(
+        registry.get_table(&healthy, "Order").is_some(),
+        "healthy tenant must still boot after a corrupt tenant"
+    );
+    // Corrupt tenant is quarantined, not registered.
+    let corrupt = TenantId::new("corrupt");
+    assert!(
+        registry.get_table(&corrupt, "Order").is_none(),
+        "corrupt tenant must be quarantined"
+    );
+
+    // Exactly the healthy tenant's spec restored; the corrupt one is reported
+    // as an orphan for the caller to reconcile.
+    assert_eq!(outcome.restored_specs, 1);
+    assert_eq!(
+        outcome.orphaned_specs,
+        vec![("corrupt".to_string(), "Order".to_string())]
     );
 }
 
