@@ -48,10 +48,14 @@ pub enum ODataPath {
         action: String,
     },
 
-    /// A bound function on an entity, e.g. `/Orders('abc-123')/Namespace.GetTotal()`.
+    /// A bound function on an entity or collection, e.g.
+    /// `/Orders('abc-123')/Namespace.GetTotal()` or, with named arguments,
+    /// `/Orders/Temper.Nearest(decl='taste',to='x',k=10)`. `params` holds the
+    /// parsed `name=value` argument list in declared order (empty for `()`).
     BoundFunction {
         parent: Box<ODataPath>,
         function: String,
+        params: Vec<(String, String)>,
     },
 
     /// The `$value` media stream of an entity, e.g. `/Files('f-1')/$value`.
@@ -197,17 +201,29 @@ fn parse_continuation_segment(segment: &str, parent: ODataPath) -> Result<ODataP
 
     // Check if this is a qualified name (contains dot) — bound operation
     if segment.contains('.') {
-        // Bound function: ends with ()
-        if let Some(qualified_name) = segment.strip_suffix("()") {
-            // Extract just the operation name (last part after final dot)
-            let function_name = qualified_name.rsplit('.').next().unwrap_or(qualified_name);
+        // Bound function: a qualified name with a parenthesized argument list,
+        // e.g. `Namespace.GetTotal()` or `Temper.Nearest(decl='taste',to='x',k=10)`.
+        if let Some(paren_start) = segment.find('(') {
+            if !segment.ends_with(')') {
+                return Err(ODataError::InvalidPath {
+                    message: format!("bound function '{segment}' has unmatched parenthesis"),
+                });
+            }
+            // Keep the FULL qualified name (e.g. `Temper.Nearest`), unlike a bound
+            // action (which resolves to a short spec action name). A kernel function
+            // like `Temper.Nearest` is dispatched by its namespaced name, so a
+            // same-named function in another namespace does not collide with it.
+            let qualified_name = &segment[..paren_start];
+            let args_str = &segment[paren_start + 1..segment.len() - 1];
+            let params = parse_function_params(args_str)?;
             return Ok(ODataPath::BoundFunction {
                 parent: Box::new(parent),
-                function: function_name.to_string(),
+                function: qualified_name.to_string(),
+                params,
             });
         }
 
-        // Bound action: qualified name without trailing ()
+        // Bound action: qualified name without parentheses.
         let action_name = segment.rsplit('.').next().unwrap_or(segment);
         return Ok(ODataPath::BoundAction {
             parent: Box::new(parent),
@@ -279,6 +295,43 @@ fn parse_key_value(key_str: &str) -> Result<KeyValue, ODataError> {
         let value = parse_key_literal(key_str)?;
         Ok(KeyValue::Single(value))
     }
+}
+
+/// Parse a bound-function argument list like `decl='taste',to='x',k=10` into an
+/// ordered list of `(name, value)` pairs. Empty input yields an empty list (the
+/// `Function()` case). Quoted values are unquoted (with `''` escapes collapsed) via
+/// [`parse_key_literal`], and commas inside quotes do not split, so a raw-vector
+/// argument such as `vector='[0.1, 0.2]'` parses as one value. Reuses the composite
+/// key splitting/unquoting rules so URL argument syntax stays consistent.
+fn parse_function_params(args_str: &str) -> Result<Vec<(String, String)>, ODataError> {
+    if args_str.trim().is_empty() {
+        return Ok(Vec::new());
+    }
+    let mut params: Vec<(String, String)> = Vec::new();
+    for part in split_composite_key(args_str)? {
+        let part = part.trim();
+        let Some(eq_pos) = part.find('=') else {
+            return Err(ODataError::InvalidPath {
+                message: format!("bound function argument '{part}' is missing '='"),
+            });
+        };
+        let name = part[..eq_pos].trim().to_string();
+        if name.is_empty() {
+            return Err(ODataError::InvalidPath {
+                message: format!("bound function argument '{part}' has an empty name"),
+            });
+        }
+        // Reject a repeated argument name rather than silently taking the first (or
+        // last) — a caller who wrote `k=5,k=10` gets a clear error, not a guess.
+        if params.iter().any(|(existing, _)| existing == &name) {
+            return Err(ODataError::InvalidPath {
+                message: format!("bound function argument '{name}' is given more than once"),
+            });
+        }
+        let value = parse_key_literal(part[eq_pos + 1..].trim())?;
+        params.push((name, value));
+    }
+    Ok(params)
 }
 
 /// Check if a key expression is a composite key (has `=` outside quotes).
@@ -487,9 +540,43 @@ mod tests {
                     "Orders".into(),
                     KeyValue::Single("abc-123".into())
                 )),
-                function: "GetOrderTotal".into(),
+                function: "Temper.Example.GetOrderTotal".into(),
+                params: vec![],
             }
         );
+    }
+
+    #[test]
+    fn parse_collection_bound_function_with_named_params() {
+        // ADR-0155: Temper.Nearest is a collection-bound function with named args.
+        let result =
+            parse_path("/DesignLanguages/Temper.Nearest(decl='taste',to='en-1',k=10)").unwrap();
+        assert_eq!(
+            result,
+            ODataPath::BoundFunction {
+                parent: Box::new(ODataPath::EntitySet("DesignLanguages".into())),
+                function: "Temper.Nearest".into(),
+                params: vec![
+                    ("decl".into(), "taste".into()),
+                    ("to".into(), "en-1".into()),
+                    ("k".into(), "10".into()),
+                ],
+            }
+        );
+    }
+
+    #[test]
+    fn parse_bound_function_arg_value_may_contain_commas_in_quotes() {
+        // A raw-vector argument is a quoted list; commas inside quotes do not split.
+        let result = parse_path(
+            "/DesignLanguages/Temper.Nearest(decl='taste',vector='[0.1, 0.2]',model='m')",
+        )
+        .unwrap();
+        let ODataPath::BoundFunction { params, .. } = result else {
+            panic!("expected bound function");
+        };
+        assert_eq!(params[1], ("vector".into(), "[0.1, 0.2]".into()));
+        assert_eq!(params[2], ("model".into(), "m".into()));
     }
 
     #[test]

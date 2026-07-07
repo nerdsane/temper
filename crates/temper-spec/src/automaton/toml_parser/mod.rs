@@ -31,6 +31,9 @@ enum Section {
     /// ADR-0153: `[[key]]` unique-key declarations. Passthrough; extracted via
     /// serde in the second pass.
     Key,
+    /// ADR-0155: `[[vector]]` vector access-path declarations. Passthrough;
+    /// extracted via serde in the second pass.
+    Vector,
     Webhook,
     /// ADR-0046: nested `[[action.triggers]]` blocks. Hand-rolled parser
     /// skips the body; triggers are extracted via serde in the second pass
@@ -76,6 +79,9 @@ impl ParseState {
             // ADR-0153: [[key]] unique-key declarations — passthrough; serde
             // extracts them in the second pass.
             "[[key]]" => self.start_passthrough_section(Section::Key),
+            // ADR-0155: [[vector]] access-path declarations — passthrough; serde
+            // extracts them in the second pass.
+            "[[vector]]" => self.start_passthrough_section(Section::Vector),
             "[[webhook]]" => self.start_webhook_section(),
             _ if line.starts_with("[webhook.") => self.start_webhook_section(),
             // ADR-0046: nested [[action.triggers]] — flush the action body so
@@ -106,6 +112,7 @@ impl ParseState {
             Section::FieldInvariant
             | Section::StateTimeout
             | Section::Key
+            | Section::Vector
             | Section::Webhook
             | Section::ActionTrigger
             | Section::CompositeActionMetadata
@@ -157,6 +164,7 @@ impl ParseState {
             field_invariants: Vec::new(),
             state_timeouts: Vec::new(),
             keys: Vec::new(),
+            vectors: Vec::new(),
             admission: None,
         })
     }
@@ -442,6 +450,9 @@ pub(super) fn parse_toml_to_automaton(input: &str) -> Result<Automaton, Automato
     // ADR-0153: [[key]] unique-key declarations; serde-extracted like timeouts.
     // A silently-dropped key would mean the declared access path is not indexed.
     automaton.keys = extract_keys(input)?;
+    // ADR-0155: [[vector]] access-path declarations; serde-extracted like keys.
+    // A silently-dropped vector path would leave similarity unindexed.
+    automaton.vectors = extract_vectors(input)?;
     // ADR-0051: optional [admission] block.
     automaton.admission = extract_admission(input)?;
     Ok(automaton)
@@ -725,6 +736,26 @@ fn extract_keys(source: &str) -> Result<Vec<super::types::KeyDecl>, AutomatonPar
     toml::from_str::<KeyWrapper>(&slice)
         .map(|w| w.keys)
         .map_err(|e| AutomatonParseError::Toml(format!("key: {e}")))
+}
+
+/// Extract `[[vector]]` access-path declarations from TOML source via serde
+/// (ADR-0155). Same isolation pattern as `extract_keys`. Errors are propagated —
+/// a silently-dropped vector path would leave similarity unindexed while the spec
+/// author believes `Temper.Nearest` will work.
+fn extract_vectors(source: &str) -> Result<Vec<super::types::VectorDecl>, AutomatonParseError> {
+    let slice = isolate_sections(source, "[[vector]]");
+    if slice.trim().is_empty() {
+        return Ok(Vec::new());
+    }
+
+    #[derive(serde::Deserialize)]
+    struct VectorWrapper {
+        #[serde(default, rename = "vector")]
+        vectors: Vec<super::types::VectorDecl>,
+    }
+    toml::from_str::<VectorWrapper>(&slice)
+        .map(|w| w.vectors)
+        .map_err(|e| AutomatonParseError::Toml(format!("vector: {e}")))
 }
 
 /// Return a minimal TOML document containing only the `[[field_invariant]]`

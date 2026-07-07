@@ -8,8 +8,8 @@ use std::time::Instant;
 
 use sqlx::{Acquire, PgPool};
 use temper_runtime::persistence::{
-    EventMetadata, EventStore, PersistenceAppend, PersistenceAppendResult, PersistenceEnvelope,
-    PersistenceError,
+    EntityVectorCandidate, EntityVectorRow, EventMetadata, EventStore, PersistenceAppend,
+    PersistenceAppendResult, PersistenceEnvelope, PersistenceError, pack_f32_le, unpack_f32_le,
 };
 use temper_runtime::tenant::parse_persistence_id_parts;
 
@@ -63,16 +63,18 @@ impl EventStore for PostgresEventStore {
         expected_sequence: u64,
         events: &[PersistenceEnvelope],
     ) -> Result<u64, PersistenceError> {
-        self.append_with_keys(persistence_id, expected_sequence, events, &[])
+        self.append_with_index_rows(persistence_id, expected_sequence, events, &[], &[], false)
             .await
     }
 
-    async fn append_with_keys(
+    async fn append_with_index_rows(
         &self,
         persistence_id: &str,
         expected_sequence: u64,
         events: &[PersistenceEnvelope],
         key_rows: &[temper_runtime::persistence::EntityKeyRow],
+        vector_rows: &[EntityVectorRow],
+        reconcile_vectors: bool,
     ) -> Result<u64, PersistenceError> {
         let (tenant, entity_type, entity_id) =
             parse_persistence_id_parts(persistence_id).map_err(PersistenceError::Storage)?;
@@ -241,6 +243,42 @@ impl EventStore for PostgresEventStore {
             .execute(&mut *tx)
             .await
             .map_err(|e| PersistenceError::Storage(e.to_string()))?;
+        }
+
+        // ADR-0155: co-commit the derived vector-index rows in THIS transaction.
+        // When the entity's type declares vector paths (`reconcile_vectors`), DELETE
+        // all of the entity's rows first, then insert the current ones — so a delete
+        // transition or a cleared vector/model property (empty `vector_rows`) purges
+        // the stale rows instead of leaving them to rank forever. No uniqueness
+        // constraint; vectors are derived ranking state.
+        if reconcile_vectors {
+            crate::dbm::postgres_query!(
+                "DELETE FROM entity_vector_index \
+                 WHERE tenant = $1 AND entity_type = $2 AND entity_id = $3",
+            )
+            .bind(tenant)
+            .bind(entity_type)
+            .bind(entity_id)
+            .execute(&mut *tx)
+            .await
+            .map_err(|e| PersistenceError::Storage(e.to_string()))?;
+            for row in vector_rows {
+                crate::dbm::postgres_query!(
+                    "INSERT INTO entity_vector_index \
+                     (tenant, entity_type, decl_name, model_tag, entity_id, vector, sequence_nr) \
+                     VALUES ($1, $2, $3, $4, $5, $6, $7)",
+                )
+                .bind(tenant)
+                .bind(entity_type)
+                .bind(&row.decl_name)
+                .bind(&row.model_tag)
+                .bind(entity_id)
+                .bind(pack_f32_le(&row.vector))
+                .bind(new_seq as i64)
+                .execute(&mut *tx)
+                .await
+                .map_err(|e| PersistenceError::Storage(e.to_string()))?;
+            }
         }
 
         let commit_started = Instant::now();
@@ -428,6 +466,154 @@ impl EventStore for PostgresEventStore {
         .await
         .map_err(|e| PersistenceError::Storage(e.to_string()))?;
         Ok(row.map(|(id,)| id))
+    }
+
+    async fn backfill_entity_vectors(
+        &self,
+        tenant: &str,
+        entity_type: &str,
+        entity_id: &str,
+        vector_rows: &[EntityVectorRow],
+    ) -> Result<(), PersistenceError> {
+        // Reconcile: DELETE all of the entity's rows, then insert the current ones.
+        // Empty `vector_rows` purges the entity (deleted / un-embedded). Always runs
+        // the delete (even for empty rows) so a purge is honored.
+        let mut tx = self
+            .pool
+            .begin()
+            .await
+            .map_err(|e| PersistenceError::Storage(e.to_string()))?;
+        crate::dbm::postgres_query!(
+            "DELETE FROM entity_vector_index \
+             WHERE tenant = $1 AND entity_type = $2 AND entity_id = $3",
+        )
+        .bind(tenant)
+        .bind(entity_type)
+        .bind(entity_id)
+        .execute(&mut *tx)
+        .await
+        .map_err(|e| PersistenceError::Storage(e.to_string()))?;
+        for row in vector_rows {
+            crate::dbm::postgres_query!(
+                "INSERT INTO entity_vector_index \
+                 (tenant, entity_type, decl_name, model_tag, entity_id, vector, sequence_nr) \
+                 VALUES ($1, $2, $3, $4, $5, $6, 0)",
+            )
+            .bind(tenant)
+            .bind(entity_type)
+            .bind(&row.decl_name)
+            .bind(&row.model_tag)
+            .bind(entity_id)
+            .bind(pack_f32_le(&row.vector))
+            .execute(&mut *tx)
+            .await
+            .map_err(|e| PersistenceError::Storage(e.to_string()))?;
+        }
+        tx.commit()
+            .await
+            .map_err(|e| PersistenceError::Storage(e.to_string()))?;
+        Ok(())
+    }
+
+    async fn vector_candidates(
+        &self,
+        tenant: &str,
+        entity_type: &str,
+        decl_name: &str,
+        model_tag: &str,
+        limit: usize,
+    ) -> Result<Vec<EntityVectorCandidate>, PersistenceError> {
+        let mut conn = self
+            .pool
+            .acquire()
+            .await
+            .map_err(|e| PersistenceError::Storage(e.to_string()))?;
+        let rows: Vec<(String, Vec<u8>)> = crate::dbm::postgres_query_as!(
+            "SELECT entity_id, vector FROM entity_vector_index \
+             WHERE tenant = $1 AND entity_type = $2 AND decl_name = $3 AND model_tag = $4 \
+             ORDER BY entity_id LIMIT $5",
+        )
+        .bind(tenant)
+        .bind(entity_type)
+        .bind(decl_name)
+        .bind(model_tag)
+        .bind(limit as i64)
+        .fetch_all(&mut *conn)
+        .await
+        .map_err(|e| PersistenceError::Storage(e.to_string()))?;
+        Ok(rows
+            .into_iter()
+            .filter_map(|(entity_id, bytes)| {
+                unpack_f32_le(&bytes).map(|vector| EntityVectorCandidate { entity_id, vector })
+            })
+            .collect())
+    }
+
+    async fn mark_vector_index_backfilled(
+        &self,
+        tenant: &str,
+        entity_type: &str,
+        vector_set: &str,
+    ) -> Result<(), PersistenceError> {
+        let mut conn = self
+            .pool
+            .acquire()
+            .await
+            .map_err(|e| PersistenceError::Storage(e.to_string()))?;
+        crate::dbm::postgres_query!(
+            "INSERT INTO vector_index_backfill_watermark (tenant, entity_type, vector_set) \
+             VALUES ($1, $2, $3) \
+             ON CONFLICT (tenant, entity_type) \
+             DO UPDATE SET vector_set = EXCLUDED.vector_set, completed_at = now()",
+        )
+        .bind(tenant)
+        .bind(entity_type)
+        .bind(vector_set)
+        .execute(&mut *conn)
+        .await
+        .map_err(|e| PersistenceError::Storage(e.to_string()))?;
+        Ok(())
+    }
+
+    async fn vector_index_backfilled_types(
+        &self,
+        tenant: &str,
+    ) -> Result<Vec<(String, String)>, PersistenceError> {
+        let mut conn = self
+            .pool
+            .acquire()
+            .await
+            .map_err(|e| PersistenceError::Storage(e.to_string()))?;
+        let rows: Vec<(String, String)> = crate::dbm::postgres_query_as!(
+            "SELECT entity_type, vector_set FROM vector_index_backfill_watermark WHERE tenant = $1",
+        )
+        .bind(tenant)
+        .fetch_all(&mut *conn)
+        .await
+        .map_err(|e| PersistenceError::Storage(e.to_string()))?;
+        Ok(rows.into_iter().collect())
+    }
+
+    async fn vectored_entity_ids_for_type(
+        &self,
+        tenant: &str,
+        entity_type: &str,
+    ) -> Result<Vec<String>, PersistenceError> {
+        let mut conn = self
+            .pool
+            .acquire()
+            .await
+            .map_err(|e| PersistenceError::Storage(e.to_string()))?;
+        let rows: Vec<(String,)> = crate::dbm::postgres_query_as!(
+            "SELECT DISTINCT entity_id FROM entity_vector_index \
+             WHERE tenant = $1 AND entity_type = $2",
+        )
+        .bind(tenant)
+        .bind(entity_type)
+        .fetch_all(&mut *conn)
+        .await
+        .map_err(|e| PersistenceError::Storage(e.to_string()))?;
+        Ok(rows.into_iter().map(|(entity_id,)| entity_id).collect())
     }
 
     /// Atomically append to multiple entity journals in one PostgreSQL

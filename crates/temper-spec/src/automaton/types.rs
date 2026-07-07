@@ -50,6 +50,12 @@ pub struct Automaton {
     /// annotation is derived from this declaration.
     #[serde(default, rename = "key")]
     pub keys: Vec<KeyDecl>,
+    /// ADR-0155: declared vector access paths. Each names a float-vector property
+    /// (and the model-tag property that partitions its space) that the kernel
+    /// indexes in `entity_vector_index` for exact-scan kNN reads (`Temper.Nearest`).
+    /// Empty when the spec declared no `[[vector]]`.
+    #[serde(default, rename = "vector")]
+    pub vectors: Vec<VectorDecl>,
     /// Admission control caps (ADR-0051). When present, the dispatch layer
     /// gates concurrent calls per `(tenant, entity_type, action)` before
     /// reaching the actor.
@@ -68,6 +74,29 @@ pub struct KeyDecl {
     pub name: String,
     /// The property set that is unique, in canonical (hash) order.
     pub properties: Vec<String>,
+}
+
+/// ADR-0155: a declared vector access path on an entity. `property` names the
+/// float-vector state variable (a JSON array, or a JSON-encoded string, of
+/// `dims` floats); `model_property` names the state variable holding the model
+/// tag that partitions the space (only vectors sharing a tag are ever compared).
+/// The kernel maintains `entity_vector_index` over each declared path and serves
+/// exact-scan kNN through `Temper.Nearest`. `metric` is one of `cosine`, `dot`,
+/// `l2`. Multiple vector paths on one entity are distinguished by `name`.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct VectorDecl {
+    /// Identifier for this path (the `decl_name` in `entity_vector_index` and the
+    /// `decl=` argument to `Temper.Nearest`).
+    pub name: String,
+    /// The state variable holding the float vector to index.
+    pub property: String,
+    /// The state variable holding the model tag that partitions the vector space.
+    pub model_property: String,
+    /// Vector dimensionality. Must be > 0; a row whose parsed vector length differs
+    /// is not indexed (same posture as an incomplete declared key).
+    pub dims: usize,
+    /// Similarity metric: `cosine`, `dot`, or `l2`.
+    pub metric: String,
 }
 
 /// Automaton metadata.

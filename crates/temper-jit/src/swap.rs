@@ -87,6 +87,7 @@ mod tests {
             states: vec!["A".into(), "B".into()],
             initial_state: "A".into(),
             keys: vec![],
+            vectors: vec![],
             rules: vec![TransitionRule {
                 name: "GoB".into(),
                 from_states: vec!["A".into()],

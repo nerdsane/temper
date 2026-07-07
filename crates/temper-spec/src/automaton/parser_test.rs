@@ -139,6 +139,106 @@ from = []
     }
 }
 
+// --- ADR-0155: [[vector]] access-path validation -----------------------
+
+#[cfg(test)]
+mod vector_validation {
+    use super::super::parse_automaton;
+
+    const BASE_SPEC: &str = r#"
+[automaton]
+name = "DesignLanguage"
+states = ["Draft", "Published"]
+initial = "Draft"
+
+[[state]]
+name = "taste_vector"
+type = "string"
+initial = ""
+
+[[state]]
+name = "taste_vector_model"
+type = "string"
+initial = ""
+
+[[action]]
+name = "Publish"
+from = ["Draft"]
+to = "Published"
+"#;
+
+    #[test]
+    fn valid_vector_path_parses() {
+        let spec = format!(
+            "{BASE_SPEC}\n[[vector]]\nname = \"taste\"\nproperty = \"taste_vector\"\nmodel_property = \"taste_vector_model\"\ndims = 384\nmetric = \"cosine\"\n"
+        );
+        let auto = parse_automaton(&spec).expect("valid vector path parses");
+        assert_eq!(auto.vectors.len(), 1);
+        assert_eq!(auto.vectors[0].name, "taste");
+        assert_eq!(auto.vectors[0].dims, 384);
+        assert_eq!(auto.vectors[0].metric, "cosine");
+    }
+
+    #[test]
+    fn rejects_undeclared_property() {
+        let spec = format!(
+            "{BASE_SPEC}\n[[vector]]\nname = \"taste\"\nproperty = \"missing_vec\"\nmodel_property = \"taste_vector_model\"\ndims = 384\nmetric = \"cosine\"\n"
+        );
+        let err = parse_automaton(&spec).expect_err("undeclared property must reject");
+        assert!(
+            err.to_string()
+                .contains("undeclared property state variable 'missing_vec'"),
+            "got: {err}"
+        );
+    }
+
+    #[test]
+    fn rejects_undeclared_model_property() {
+        let spec = format!(
+            "{BASE_SPEC}\n[[vector]]\nname = \"taste\"\nproperty = \"taste_vector\"\nmodel_property = \"missing_model\"\ndims = 384\nmetric = \"cosine\"\n"
+        );
+        let err = parse_automaton(&spec).expect_err("undeclared model_property must reject");
+        assert!(
+            err.to_string()
+                .contains("undeclared model_property state variable 'missing_model'"),
+            "got: {err}"
+        );
+    }
+
+    #[test]
+    fn rejects_zero_dims() {
+        let spec = format!(
+            "{BASE_SPEC}\n[[vector]]\nname = \"taste\"\nproperty = \"taste_vector\"\nmodel_property = \"taste_vector_model\"\ndims = 0\nmetric = \"cosine\"\n"
+        );
+        let err = parse_automaton(&spec).expect_err("dims=0 must reject");
+        assert!(
+            err.to_string().contains("must declare dims > 0"),
+            "got: {err}"
+        );
+    }
+
+    #[test]
+    fn rejects_unknown_metric() {
+        let spec = format!(
+            "{BASE_SPEC}\n[[vector]]\nname = \"taste\"\nproperty = \"taste_vector\"\nmodel_property = \"taste_vector_model\"\ndims = 384\nmetric = \"manhattan\"\n"
+        );
+        let err = parse_automaton(&spec).expect_err("unknown metric must reject");
+        assert!(
+            err.to_string().contains("unknown metric 'manhattan'"),
+            "got: {err}"
+        );
+    }
+
+    #[test]
+    fn rejects_duplicate_vector_name() {
+        let spec = format!(
+            "{BASE_SPEC}\n[[vector]]\nname = \"taste\"\nproperty = \"taste_vector\"\nmodel_property = \"taste_vector_model\"\ndims = 384\nmetric = \"cosine\"\n[[vector]]\nname = \"taste\"\nproperty = \"taste_vector\"\nmodel_property = \"taste_vector_model\"\ndims = 8\nmetric = \"dot\"\n"
+        );
+        let err = parse_automaton(&spec).expect_err("duplicate name must reject");
+        assert!(err.to_string().contains("declared twice"), "got: {err}");
+    }
+}
+
 // --- ADR-0050: liveness coverage rule ----------------------------------
 
 #[cfg(test)]

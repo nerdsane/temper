@@ -2,7 +2,8 @@
 
 use libsql::params;
 use temper_runtime::persistence::{
-    EventMetadata, EventStore, PersistenceAppend, PersistenceEnvelope, PersistenceError,
+    EntityVectorRow, EventMetadata, EventStore, PersistenceAppend, PersistenceEnvelope,
+    PersistenceError,
 };
 
 use super::{PublishedArtifactUpsert, QueryProjectionUpsert, TursoEventStore};
@@ -63,6 +64,159 @@ async fn append_and_read_events_roundtrip() {
     assert_eq!(events[1].sequence_nr, 2);
     assert_eq!(events[0].event_type, "OrderCreated");
     assert_eq!(events[1].event_type, "OrderApproved");
+}
+
+#[tokio::test]
+async fn vector_index_write_behind_candidates_and_partitioning() {
+    // ADR-0155: Turso maintains entity_vector_index write-behind (event first, index
+    // follows). A candidate scan returns the partition's vectors in entity_id order,
+    // partitioned by model tag; a raw kNN read never sees another model's vectors.
+    let store = make_store("vector-index").await;
+    let row = |decl: &str, model: &str, v: Vec<f32>| EntityVectorRow {
+        decl_name: decl.to_string(),
+        model_tag: model.to_string(),
+        vector: v,
+    };
+
+    store
+        .append_with_index_rows(
+            "t:Item:item-b",
+            0,
+            &[test_envelope("Create", serde_json::json!({}))],
+            &[],
+            &[row("embed", "m1", vec![0.0, 1.0])],
+            true,
+        )
+        .await
+        .unwrap();
+    store
+        .append_with_index_rows(
+            "t:Item:item-a",
+            0,
+            &[test_envelope("Create", serde_json::json!({}))],
+            &[],
+            &[row("embed", "m1", vec![1.0, 0.0])],
+            true,
+        )
+        .await
+        .unwrap();
+    // A different model tag — must not appear in an m1 scan.
+    store
+        .append_with_index_rows(
+            "t:Item:item-c",
+            0,
+            &[test_envelope("Create", serde_json::json!({}))],
+            &[],
+            &[row("embed", "m2", vec![1.0, 0.0])],
+            true,
+        )
+        .await
+        .unwrap();
+
+    let candidates = store
+        .vector_candidates("t", "Item", "embed", "m1", 1000)
+        .await
+        .unwrap();
+    // Two m1 items, in entity_id order (a before b) with their vectors intact.
+    assert_eq!(candidates.len(), 2);
+    assert_eq!(candidates[0].entity_id, "item-a");
+    assert_eq!(candidates[0].vector, vec![1.0, 0.0]);
+    assert_eq!(candidates[1].entity_id, "item-b");
+    assert_eq!(candidates[1].vector, vec![0.0, 1.0]);
+
+    // Upsert: re-writing item-a's vector replaces (no duplicate row).
+    store
+        .backfill_entity_vectors("t", "Item", "item-a", &[row("embed", "m1", vec![0.5, 0.5])])
+        .await
+        .unwrap();
+    let candidates = store
+        .vector_candidates("t", "Item", "embed", "m1", 1000)
+        .await
+        .unwrap();
+    assert_eq!(candidates.len(), 2);
+    assert_eq!(candidates[0].vector, vec![0.5, 0.5]);
+
+    // Watermark roundtrip + resumable id listing.
+    store
+        .mark_vector_index_backfilled("t", "Item", "embed")
+        .await
+        .unwrap();
+    assert_eq!(
+        store.vector_index_backfilled_types("t").await.unwrap(),
+        vec![("Item".to_string(), "embed".to_string())]
+    );
+    let mut ids = store
+        .vectored_entity_ids_for_type("t", "Item")
+        .await
+        .unwrap();
+    ids.sort();
+    assert_eq!(ids, vec!["item-a", "item-b", "item-c"]);
+}
+
+#[tokio::test]
+async fn vector_index_reconcile_purges_on_delete_and_empty_rows() {
+    // ADR-0155: a delete/clear reconciles to an empty row set, purging the entity's
+    // vector rows (the turso-side "remove" cleanup) so it is never ranked again.
+    let store = make_store("vector-purge").await;
+    let row = |v: Vec<f32>| EntityVectorRow {
+        decl_name: "embed".to_string(),
+        model_tag: "m1".to_string(),
+        vector: v,
+    };
+
+    // Write-behind reconcile with a row, then a delete transition (empty rows).
+    store
+        .append_with_index_rows(
+            "t:Item:item-a",
+            0,
+            &[test_envelope("Create", serde_json::json!({}))],
+            &[],
+            std::slice::from_ref(&row(vec![1.0, 0.0])),
+            true,
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        store
+            .vector_candidates("t", "Item", "embed", "m1", 10)
+            .await
+            .unwrap()
+            .len(),
+        1
+    );
+    // A Deleted transition emits no vector rows but still reconciles (purge).
+    store
+        .append_with_index_rows(
+            "t:Item:item-a",
+            1,
+            &[test_envelope("Delete", serde_json::json!({}))],
+            &[],
+            &[],
+            true,
+        )
+        .await
+        .unwrap();
+    assert!(
+        store
+            .vector_candidates("t", "Item", "embed", "m1", 10)
+            .await
+            .unwrap()
+            .is_empty(),
+        "the deleted entity's vector row must be purged"
+    );
+
+    // The explicit backfill purge (empty rows) is idempotent.
+    store
+        .backfill_entity_vectors("t", "Item", "item-a", &[])
+        .await
+        .unwrap();
+    assert!(
+        store
+            .vector_candidates("t", "Item", "embed", "m1", 10)
+            .await
+            .unwrap()
+            .is_empty()
+    );
 }
 
 #[tokio::test]

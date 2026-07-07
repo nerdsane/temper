@@ -13,7 +13,8 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use temper_runtime::persistence::{
-    EventStore, PersistenceAppend, PersistenceAppendResult, PersistenceEnvelope, PersistenceError,
+    EntityVectorCandidate, EntityVectorRow, EventStore, PersistenceAppend, PersistenceAppendResult,
+    PersistenceEnvelope, PersistenceError,
 };
 use temper_runtime::tenant::parse_persistence_id_parts;
 
@@ -158,6 +159,16 @@ struct SimEventStoreInner {
     /// table — gates authoritative keyed absence, and detects a key-set change so a
     /// newly-declared key re-keys instead of being treated as already complete.
     key_index_watermark: BTreeMap<(String, String), String>,
+    /// ADR-0155: derived vector index, co-committed with the journal under the same
+    /// lock. `(tenant, entity_type, decl_name, model_tag, entity_id) -> vector`. The
+    /// deterministic reference for the real stores' `entity_vector_index` — the
+    /// exact-scan kNN access path. Unlike the key index this has no uniqueness
+    /// constraint; it is derived, rebuildable ranking state.
+    vector_index: BTreeMap<(String, String, String, String, String), Vec<f32>>,
+    /// ADR-0155 backfill watermark: `(tenant, entity_type) -> vector_set` — each
+    /// completed type mapped to the sorted comma-joined declared vector-path names the
+    /// backfill covered. Mirrors `key_index_watermark`.
+    vector_index_watermark: BTreeMap<(String, String), String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -186,6 +197,8 @@ impl SimEventStore {
                 pending_append_delays: BTreeMap::new(),
                 key_index: BTreeMap::new(),
                 key_index_watermark: BTreeMap::new(),
+                vector_index: BTreeMap::new(),
+                vector_index_watermark: BTreeMap::new(),
             })),
         }
     }
@@ -341,16 +354,18 @@ impl EventStore for SimEventStore {
         expected_sequence: u64,
         events: &[PersistenceEnvelope],
     ) -> Result<u64, PersistenceError> {
-        self.append_with_keys(persistence_id, expected_sequence, events, &[])
+        self.append_with_index_rows(persistence_id, expected_sequence, events, &[], &[], false)
             .await
     }
 
-    async fn append_with_keys(
+    async fn append_with_index_rows(
         &self,
         persistence_id: &str,
         expected_sequence: u64,
         events: &[PersistenceEnvelope],
         key_rows: &[temper_runtime::persistence::EntityKeyRow],
+        vector_rows: &[EntityVectorRow],
+        reconcile_vectors: bool,
     ) -> Result<u64, PersistenceError> {
         let append_delay = {
             let mut inner = self
@@ -539,6 +554,34 @@ impl EventStore for SimEventStore {
             }
         }
 
+        // ADR-0155: co-commit the derived vector-index rows under the SAME lock as
+        // the journal write. When the entity's type declares vector paths
+        // (`reconcile_vectors`), DELETE all of the entity's rows first, then insert
+        // the current ones — so a delete transition or a cleared vector/model
+        // property (empty `vector_rows`) purges the stale rows instead of leaving
+        // them to rank forever. No uniqueness constraint — vectors are derived state.
+        if reconcile_vectors {
+            let mut parts = persistence_id.splitn(3, ':');
+            let tenant = parts.next().unwrap_or("");
+            let entity_type = parts.next().unwrap_or("");
+            let entity_id = parts.next().unwrap_or("");
+            inner.vector_index.retain(|(t, et, _, _, eid), _| {
+                !(t.as_str() == tenant && et.as_str() == entity_type && eid.as_str() == entity_id)
+            });
+            for row in vector_rows {
+                inner.vector_index.insert(
+                    (
+                        tenant.to_string(),
+                        entity_type.to_string(),
+                        row.decl_name.clone(),
+                        row.model_tag.clone(),
+                        entity_id.to_string(),
+                    ),
+                    row.vector.clone(),
+                );
+            }
+        }
+
         Ok(new_seq)
     }
 
@@ -629,6 +672,107 @@ impl EventStore for SimEventStore {
         let inner = self.inner.lock().expect("SimEventStore lock poisoned"); // ci-ok: infallible lock
         let mut ids: BTreeSet<String> = BTreeSet::new();
         for ((t, et, _, _), entity_id) in inner.key_index.iter() {
+            if t.as_str() == tenant && et.as_str() == entity_type {
+                ids.insert(entity_id.clone());
+            }
+        }
+        Ok(ids.into_iter().collect())
+    }
+
+    async fn backfill_entity_vectors(
+        &self,
+        tenant: &str,
+        entity_type: &str,
+        entity_id: &str,
+        vector_rows: &[EntityVectorRow],
+    ) -> Result<(), PersistenceError> {
+        let mut inner = self.inner.lock().expect("SimEventStore lock poisoned"); // ci-ok: infallible lock
+        // Reconcile: drop ALL of the entity's rows, then insert the current ones.
+        // Empty `vector_rows` purges the entity (deleted / un-embedded). Idempotent.
+        inner.vector_index.retain(|(t, et, _, _, eid), _| {
+            !(t.as_str() == tenant && et.as_str() == entity_type && eid == entity_id)
+        });
+        for row in vector_rows {
+            inner.vector_index.insert(
+                (
+                    tenant.to_string(),
+                    entity_type.to_string(),
+                    row.decl_name.clone(),
+                    row.model_tag.clone(),
+                    entity_id.to_string(),
+                ),
+                row.vector.clone(),
+            );
+        }
+        Ok(())
+    }
+
+    async fn vector_candidates(
+        &self,
+        tenant: &str,
+        entity_type: &str,
+        decl_name: &str,
+        model_tag: &str,
+        limit: usize,
+    ) -> Result<Vec<EntityVectorCandidate>, PersistenceError> {
+        let inner = self.inner.lock().expect("SimEventStore lock poisoned"); // ci-ok: infallible lock
+        // BTreeMap iteration is ordered by key, so `entity_id` (the last key
+        // component within a fixed partition) yields deterministic candidate order.
+        // Cap at `limit` so an over-budget partition is detected without copying it all.
+        let mut out = Vec::new();
+        for ((t, et, decl, tag, entity_id), vector) in inner.vector_index.iter() {
+            if t.as_str() == tenant
+                && et.as_str() == entity_type
+                && decl.as_str() == decl_name
+                && tag.as_str() == model_tag
+            {
+                if out.len() >= limit {
+                    break;
+                }
+                out.push(EntityVectorCandidate {
+                    entity_id: entity_id.clone(),
+                    vector: vector.clone(),
+                });
+            }
+        }
+        Ok(out)
+    }
+
+    async fn mark_vector_index_backfilled(
+        &self,
+        tenant: &str,
+        entity_type: &str,
+        vector_set: &str,
+    ) -> Result<(), PersistenceError> {
+        let mut inner = self.inner.lock().expect("SimEventStore lock poisoned"); // ci-ok: infallible lock
+        inner.vector_index_watermark.insert(
+            (tenant.to_string(), entity_type.to_string()),
+            vector_set.to_string(),
+        );
+        Ok(())
+    }
+
+    async fn vector_index_backfilled_types(
+        &self,
+        tenant: &str,
+    ) -> Result<Vec<(String, String)>, PersistenceError> {
+        let inner = self.inner.lock().expect("SimEventStore lock poisoned"); // ci-ok: infallible lock
+        Ok(inner
+            .vector_index_watermark
+            .iter()
+            .filter(|((t, _), _)| t.as_str() == tenant)
+            .map(|((_, et), vector_set)| (et.clone(), vector_set.clone()))
+            .collect())
+    }
+
+    async fn vectored_entity_ids_for_type(
+        &self,
+        tenant: &str,
+        entity_type: &str,
+    ) -> Result<Vec<String>, PersistenceError> {
+        let inner = self.inner.lock().expect("SimEventStore lock poisoned"); // ci-ok: infallible lock
+        let mut ids: BTreeSet<String> = BTreeSet::new();
+        for ((t, et, _, _, entity_id), _) in inner.vector_index.iter() {
             if t.as_str() == tenant && et.as_str() == entity_type {
                 ids.insert(entity_id.clone());
             }

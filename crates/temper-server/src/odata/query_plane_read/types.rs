@@ -34,6 +34,18 @@ impl QueryPlaneReadBudget {
             .max(self.default_page_size)
     }
 
+    /// The candidate budget a kNN scan charges (ADR-0155): the same bound the
+    /// query-plane scan uses, exposed to the `Temper.Nearest` handler.
+    pub(in crate::odata) fn candidate_budget(self) -> usize {
+        self.scan_candidate_budget()
+    }
+
+    /// The cap on `k` (and the default when `k` is absent) for a kNN read: the
+    /// max page size any OData read may return.
+    pub(in crate::odata) fn max_result_k(self) -> usize {
+        self.max_entities
+    }
+
     pub(in crate::odata::query_plane_read) fn requested_top(
         self,
         query_options: &QueryOptions,

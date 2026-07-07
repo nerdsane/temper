@@ -650,6 +650,54 @@ fn validate(automaton: &Automaton) -> Result<(), AutomatonParseError> {
     // 6. Validate [[action.triggers]] declarations (ADR-0046).
     validate_action_triggers(automaton, &action_names)?;
 
+    // 7. Validate [[vector]] access-path declarations (ADR-0155).
+    //    - `property` and `model_property` must be declared state variables.
+    //    - `dims` must be > 0.
+    //    - `metric` must be one of cosine | dot | l2.
+    //    - names must be unique (each identifies one index partition + `decl=`).
+    validate_vector_decls(automaton)?;
+
+    Ok(())
+}
+
+/// Validate all `[[vector]]` access-path declarations per ADR-0155.
+fn validate_vector_decls(automaton: &Automaton) -> Result<(), AutomatonParseError> {
+    const METRICS: [&str; 3] = ["cosine", "dot", "l2"];
+    let state_var_names: std::collections::BTreeSet<&str> =
+        automaton.state.iter().map(|sv| sv.name.as_str()).collect();
+    let mut seen_names: std::collections::BTreeSet<&str> = std::collections::BTreeSet::new();
+    for vec_decl in &automaton.vectors {
+        if !seen_names.insert(vec_decl.name.as_str()) {
+            return Err(AutomatonParseError::Validation(format!(
+                "vector path '{}' declared twice",
+                vec_decl.name
+            )));
+        }
+        if !state_var_names.contains(vec_decl.property.as_str()) {
+            return Err(AutomatonParseError::Validation(format!(
+                "vector path '{}' references undeclared property state variable '{}'",
+                vec_decl.name, vec_decl.property
+            )));
+        }
+        if !state_var_names.contains(vec_decl.model_property.as_str()) {
+            return Err(AutomatonParseError::Validation(format!(
+                "vector path '{}' references undeclared model_property state variable '{}'",
+                vec_decl.name, vec_decl.model_property
+            )));
+        }
+        if vec_decl.dims == 0 {
+            return Err(AutomatonParseError::Validation(format!(
+                "vector path '{}' must declare dims > 0",
+                vec_decl.name
+            )));
+        }
+        if !METRICS.contains(&vec_decl.metric.as_str()) {
+            return Err(AutomatonParseError::Validation(format!(
+                "vector path '{}' has unknown metric '{}' (expected one of cosine, dot, l2)",
+                vec_decl.name, vec_decl.metric
+            )));
+        }
+    }
     Ok(())
 }
 

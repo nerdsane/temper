@@ -10,9 +10,11 @@ use super::ServerState;
 
 mod key_index;
 mod replay_parity;
+mod vector_index;
 
 pub(super) use key_index::populate_key_index_from_snapshots;
 pub(super) use replay_parity::verify_query_projection_replay_parity;
+pub(super) use vector_index::populate_vector_index_from_snapshots;
 
 pub(super) fn transition_table_for(
     state: &ServerState,
@@ -31,6 +33,59 @@ pub(super) fn transition_table_for(
             .get(entity_type)
             .map(|table| (**table).clone())
     })
+}
+
+/// Outcome of loading one entity's current state for an index backfill (ADR-0153,
+/// ADR-0155). Shared by the key and vector backfills so they classify entities the
+/// same way — the distinction is the watermark soundness gate.
+pub(super) enum EntityLoadOutcome {
+    /// Loaded — index it from these fields.
+    Fields(serde_json::Value),
+    /// Definitively skippable: deleted, or a phantom with no events. Correctly NOT
+    /// indexed, and NOT a failure (it must not block the watermark).
+    Skip,
+    /// The entity exists (it was enumerated from the durable store) but its current
+    /// state could not be loaded — no transition table to replay with, an unreadable
+    /// snapshot, or a replay error. Indexing it is impossible, so the type must NOT be
+    /// watermarked; otherwise a read would treat a present-but-unindexed entity as
+    /// authoritatively covered. This is the soundness gate.
+    LoadFailed,
+}
+
+/// Load one entity's CURRENT state for an index backfill: snapshot if present and
+/// readable, else strict event replay (so a field mutated after the last snapshot is
+/// indexed at its current value, and a journal read failure fails the watermark
+/// rather than silently "starting fresh").
+pub(super) async fn load_entity_current_fields(
+    tenant: &TenantId,
+    entity_type: &str,
+    entity_id: &str,
+    table: Option<&temper_jit::TransitionTable>,
+    store: &crate::storage::BoxedEventStore,
+    backend: crate::storage::BackendLabel,
+    blob_store: Option<&crate::blob_store::BlobStore>,
+) -> EntityLoadOutcome {
+    let Some(table) = table else {
+        return EntityLoadOutcome::LoadFailed;
+    };
+    match recover_entity_state_from_store(
+        tenant.as_str(),
+        entity_type,
+        entity_id,
+        table,
+        store,
+        backend,
+        &serde_json::json!({}),
+        blob_store,
+        true, // strict: a journal read failure → Err → LoadFailed (don't watermark)
+    )
+    .await
+    {
+        Err(_) => EntityLoadOutcome::LoadFailed,
+        Ok(state) if state.status == "Deleted" => EntityLoadOutcome::Skip,
+        Ok(state) if state.total_event_count == 0 => EntityLoadOutcome::Skip,
+        Ok(state) => EntityLoadOutcome::Fields(state.fields),
+    }
 }
 
 /// Backfill the broad `entity_field_index` (every field of every entity) so the native

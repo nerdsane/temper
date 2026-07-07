@@ -45,6 +45,7 @@ mod static_web;
 pub mod storage;
 pub(crate) mod trajectory_outbox;
 pub mod trigger;
+pub mod vector_index;
 pub mod wasm_registry;
 pub mod webhooks;
 pub(crate) mod workflow_tracing;

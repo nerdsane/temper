@@ -7,24 +7,8 @@ use std::collections::BTreeSet;
 use temper_runtime::tenant::TenantId;
 
 use crate::ServerState;
-use crate::entity_actor::recover_entity_state_from_store;
 
-use super::transition_table_for;
-
-/// Outcome of loading one entity's current state for keying.
-enum LoadOutcome {
-    /// Loaded — key it from these fields.
-    Fields(serde_json::Value),
-    /// Definitively skippable: deleted, or a phantom with no events. Correctly NOT
-    /// keyed, and NOT a failure (it must not block the watermark).
-    Skip,
-    /// The entity exists (it was enumerated from the durable store) but its current
-    /// state could not be loaded — no transition table to replay with, an unreadable
-    /// snapshot, or a replay error. Keying it is impossible, so the type must NOT be
-    /// watermarked: otherwise a keyed miss for this present entity would wrongly read
-    /// as authoritative absence. This is the soundness gate.
-    LoadFailed,
-}
+use super::{EntityLoadOutcome, load_entity_current_fields, transition_table_for};
 
 /// Backfill `entity_key_index` for existing entities, then record the watermark.
 ///
@@ -146,7 +130,7 @@ pub(in crate::state) async fn populate_key_index_from_snapshots(
                 already += 1;
                 continue;
             }
-            match load_entity_fields(
+            match load_entity_current_fields(
                 tenant,
                 entity_type,
                 entity_id,
@@ -157,7 +141,7 @@ pub(in crate::state) async fn populate_key_index_from_snapshots(
             )
             .await
             {
-                LoadOutcome::Fields(fields) => {
+                EntityLoadOutcome::Fields(fields) => {
                     let Some(field_map) = fields.as_object() else {
                         skipped += 1;
                         continue;
@@ -195,8 +179,8 @@ pub(in crate::state) async fn populate_key_index_from_snapshots(
                         }
                     }
                 }
-                LoadOutcome::Skip => skipped += 1,
-                LoadOutcome::LoadFailed => {
+                EntityLoadOutcome::Skip => skipped += 1,
+                EntityLoadOutcome::LoadFailed => {
                     failed += 1;
                     tracing::warn!(
                         entity_type = %entity_type, entity_id = %entity_id,
@@ -226,50 +210,5 @@ pub(in crate::state) async fn populate_key_index_from_snapshots(
                 "key index backfill: {failed} entities unresolved; type NOT watermarked (keyed misses keep scanning; will resume next run)"
             );
         }
-    }
-}
-
-/// Load one entity's current state for keying: snapshot if present and readable,
-/// else event replay. Distinguishes "key it" from "definitively skip" from "exists
-/// but unloadable" (the last fails the watermark — see [`LoadOutcome`]).
-async fn load_entity_fields(
-    tenant: &TenantId,
-    entity_type: &str,
-    entity_id: &str,
-    table: Option<&temper_jit::TransitionTable>,
-    store: &crate::storage::BoxedEventStore,
-    backend: crate::storage::BackendLabel,
-    blob_store: Option<&crate::blob_store::BlobStore>,
-) -> LoadOutcome {
-    // Recover CURRENT state via snapshot + event-tail (so a field mutated after the
-    // last snapshot — e.g. a Directory rename/move changing `Name`/`ParentId` — is
-    // keyed at its current value, not a stale snapshot value). The STRICT path makes a
-    // journal read failure propagate as `Err` instead of silently "starting fresh", so
-    // we can tell "no events" apart from "could not read the journal". Without a
-    // transition table we cannot replay → the entity is unresolved.
-    let Some(table) = table else {
-        return LoadOutcome::LoadFailed;
-    };
-    match recover_entity_state_from_store(
-        tenant.as_str(),
-        entity_type,
-        entity_id,
-        table,
-        store,
-        backend,
-        &serde_json::json!({}),
-        blob_store,
-        true, // strict: a journal read failure → Err → LoadFailed (don't watermark)
-    )
-    .await
-    {
-        // Read failed (strict), replay budget exceeded, etc. — cannot key it, so the
-        // type must NOT be watermarked.
-        Err(_) => LoadOutcome::LoadFailed,
-        Ok(state) if state.status == "Deleted" => LoadOutcome::Skip,
-        // Strict guarantees the journal read succeeded, so zero events is a genuine
-        // phantom (a catalog/field-index row with no journal) — unkeyable; safe to skip.
-        Ok(state) if state.total_event_count == 0 => LoadOutcome::Skip,
-        Ok(state) => LoadOutcome::Fields(state.fields),
     }
 }
