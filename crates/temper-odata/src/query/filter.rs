@@ -51,6 +51,7 @@ fn tokenize_filter(input: &str) -> Result<Vec<Token>, ODataError> {
         if chars[i] == '\'' {
             i += 1;
             let mut s = String::new();
+            let mut closed = false;
             while i < chars.len() {
                 if chars[i] == '\'' {
                     // Check for escaped quote ''
@@ -59,12 +60,21 @@ fn tokenize_filter(input: &str) -> Result<Vec<Token>, ODataError> {
                         i += 2;
                     } else {
                         i += 1;
+                        closed = true;
                         break;
                     }
                 } else {
                     s.push(chars[i]);
                     i += 1;
                 }
+            }
+            // An unterminated literal (no closing quote) must be rejected rather
+            // than silently accepted as if it were closed.
+            if !closed {
+                return Err(ODataError::InvalidFilter {
+                    message: "unterminated string literal".into(),
+                    position: offset,
+                });
             }
             tokens.push(Token {
                 text: format!("'{s}'"),
@@ -100,8 +110,14 @@ fn tokenize_filter(input: &str) -> Result<Vec<Token>, ODataError> {
             continue;
         }
 
-        // Identifiers and keywords (including dotted names like 'guid', property paths)
-        if chars[i].is_ascii_alphabetic() || chars[i] == '_' || chars[i] == '$' {
+        // Identifiers and keywords (dotted names like 'guid', property paths).
+        //
+        // '$' is deliberately NOT an identifier-start character. It is not valid
+        // in a property path, and accepting it here while the loop below does not
+        // consume it previously spun forever without advancing `i` — a
+        // denial-of-service on any `$filter` value containing a bare '$'. A stray
+        // '$' now falls through to the "unexpected character" error below (400).
+        if chars[i].is_ascii_alphabetic() || chars[i] == '_' {
             let mut word = String::new();
             while i < chars.len()
                 && (chars[i].is_ascii_alphanumeric()
@@ -110,13 +126,13 @@ fn tokenize_filter(input: &str) -> Result<Vec<Token>, ODataError> {
                     || chars[i] == '/'
                     || chars[i] == '-')
             {
-                // Stop at '.' if it looks like it's followed by whitespace or end
-                // (to not consume e.g. "Name eq" as "Name.eq"). Actually, dots
-                // are used in property paths like Address/City and in GUIDs.
-                // Let's keep consuming alphanumeric, underscore, dot, slash, and hyphen.
                 word.push(chars[i]);
                 i += 1;
             }
+            // Invariant: the identifier-start set (alphabetic | '_') is a subset
+            // of the continue set above, so the loop always consumes at least one
+            // character. This guarantees the tokenizer makes forward progress.
+            debug_assert!(i > offset, "tokenizer failed to advance on identifier");
             tokens.push(Token { text: word, offset });
             continue;
         }
@@ -132,14 +148,54 @@ fn tokenize_filter(input: &str) -> Result<Vec<Token>, ODataError> {
 
 // -- Recursive descent parser ------------------------------------------------
 
+/// Maximum nesting depth for a `$filter` expression.
+///
+/// The recursive-descent parser descends one level per parenthesized
+/// sub-expression, `not` operand, and function-call argument. Without a bound, a
+/// crafted filter such as `((((…))))` or `not not not …` would recurse until the
+/// request thread's stack overflows and the process aborts — a denial-of-service
+/// reachable from the public OData query surface. A well-formed query never
+/// nests anywhere near this deep.
+const MAX_FILTER_DEPTH: usize = 128;
+
 struct FilterParser<'a> {
     tokens: &'a [Token],
     pos: usize,
+    /// Current recursion depth, bounded by [`MAX_FILTER_DEPTH`].
+    depth: usize,
 }
 
 impl<'a> FilterParser<'a> {
     fn new(tokens: &'a [Token]) -> Self {
-        Self { tokens, pos: 0 }
+        Self {
+            tokens,
+            pos: 0,
+            depth: 0,
+        }
+    }
+
+    /// Enter one nesting level, rejecting filters that nest past
+    /// [`MAX_FILTER_DEPTH`] before the recursion can overflow the stack.
+    ///
+    /// Every recursive descent (parentheses, `not`, function arguments) must be
+    /// wrapped in a matching [`descend`](Self::descend)/[`ascend`](Self::ascend)
+    /// pair so that width (many siblings) does not count as depth.
+    fn descend(&mut self) -> Result<(), ODataError> {
+        self.depth += 1;
+        if self.depth > MAX_FILTER_DEPTH {
+            return Err(ODataError::InvalidFilter {
+                message: format!(
+                    "filter expression nesting exceeds maximum depth of {MAX_FILTER_DEPTH}"
+                ),
+                position: self.current_offset(),
+            });
+        }
+        Ok(())
+    }
+
+    /// Leave a nesting level previously entered via [`descend`](Self::descend).
+    fn ascend(&mut self) {
+        self.depth = self.depth.saturating_sub(1);
     }
 
     fn peek(&self) -> Option<&Token> {
@@ -208,7 +264,10 @@ impl<'a> FilterParser<'a> {
     fn parse_not(&mut self) -> Result<FilterExpr, ODataError> {
         if self.peek_text_is("not") {
             self.advance();
-            let operand = self.parse_not()?;
+            self.descend()?;
+            let operand = self.parse_not();
+            self.ascend();
+            let operand = operand?;
             return Ok(FilterExpr::UnaryOp {
                 op: UnaryOperator::Not,
                 operand: Box::new(operand),
@@ -250,7 +309,10 @@ impl<'a> FilterParser<'a> {
         // Parenthesized sub-expression
         if text == "(" {
             self.advance();
-            let expr = self.parse_or()?;
+            self.descend()?;
+            let expr = self.parse_or();
+            self.ascend();
+            let expr = expr?;
             self.expect_text(")")?;
             return Ok(expr);
         }
@@ -326,7 +388,10 @@ impl<'a> FilterParser<'a> {
         }
 
         loop {
-            args.push(self.parse_or()?);
+            self.descend()?;
+            let arg = self.parse_or();
+            self.ascend();
+            args.push(arg?);
             if self.peek_text_is(",") {
                 self.advance();
             } else {
@@ -533,6 +598,165 @@ mod tests {
                 op: BinaryOperator::Gt,
                 right: Box::new(FilterExpr::Literal(ODataValue::Int(-10))),
             }
+        );
+    }
+
+    // -- Security regression tests (ARN-176) ---------------------------------
+    //
+    // Two denial-of-service bugs on the public OData `$filter` surface. Each
+    // test documents the pre-fix behavior; all now return an `InvalidFilter`
+    // error (surfaced as HTTP 400) quickly instead of hanging or crashing the
+    // request thread.
+
+    #[test]
+    fn filter_dollar_sign_returns_error_not_hang() {
+        // Pre-fix: the tokenizer accepted '$' as an identifier-start character,
+        // but the identifier loop never consumed it, so `i` never advanced — an
+        // infinite loop that also grew the token vec without bound, hanging (and
+        // eventually OOM-ing) the request thread. The watchdog below turns that
+        // hang into a test failure instead of blocking the suite forever. On a
+        // regression the spawned thread is intentionally left detached (it never
+        // returns); the harness process exits and reaps it after the failure.
+        use std::sync::mpsc;
+        use std::time::Duration;
+
+        let (tx, rx) = mpsc::channel();
+        // A stray '$' outside a string literal is the trigger. Inside quotes it
+        // is fine (handled by the string-literal branch).
+        std::thread::spawn(move || {
+            let _ = tx.send(parse_filter("Name eq $foo").is_err());
+        });
+
+        match rx.recv_timeout(Duration::from_secs(5)) {
+            Ok(is_err) => assert!(
+                is_err,
+                "'$' in a filter value must return InvalidFilter, not succeed"
+            ),
+            Err(_) => {
+                panic!("parse_filter hung on '$' — tokenizer infinite loop is not fixed")
+            }
+        }
+    }
+
+    #[test]
+    fn filter_bare_dollar_sign_is_rejected() {
+        // A lone '$' is an unexpected character, not an identifier.
+        assert!(parse_filter("$").is_err());
+    }
+
+    #[test]
+    fn filter_deeply_nested_parens_returns_error_not_overflow() {
+        // Pre-fix: unbounded recursion (parse_primary -> parse_or per '(')
+        // overflowed the request thread's stack and aborted the process. Now
+        // bounded: returns InvalidFilter once nesting passes MAX_FILTER_DEPTH.
+        let depth = 100_000;
+        let mut input = String::with_capacity(depth * 2 + 16);
+        for _ in 0..depth {
+            input.push('(');
+        }
+        input.push_str("Name eq 'x'");
+        for _ in 0..depth {
+            input.push(')');
+        }
+        assert!(
+            parse_filter(&input).is_err(),
+            "deeply nested parens must return InvalidFilter, not overflow the stack"
+        );
+    }
+
+    #[test]
+    fn filter_deeply_nested_not_returns_error_not_overflow() {
+        // Pre-fix: `not not not …` recursed parse_not without bound and
+        // overflowed the stack. Now bounded past MAX_FILTER_DEPTH.
+        let mut input = String::new();
+        for _ in 0..100_000 {
+            input.push_str("not ");
+        }
+        input.push_str("Active eq true");
+        assert!(
+            parse_filter(&input).is_err(),
+            "deeply nested 'not' must return InvalidFilter, not overflow the stack"
+        );
+    }
+
+    #[test]
+    fn filter_deeply_nested_functions_returns_error_not_overflow() {
+        // Pre-fix: `f(f(f(…)))` recursed parse_argument_list -> parse_or without
+        // bound and overflowed the stack. Now bounded past MAX_FILTER_DEPTH.
+        let depth = 100_000;
+        let mut input = String::with_capacity(depth * 2 + 8);
+        for _ in 0..depth {
+            input.push_str("f(");
+        }
+        input.push('1');
+        for _ in 0..depth {
+            input.push(')');
+        }
+        assert!(
+            parse_filter(&input).is_err(),
+            "deeply nested function calls must return InvalidFilter, not overflow"
+        );
+    }
+
+    #[test]
+    fn filter_moderately_nested_parens_still_parse() {
+        // Nesting well within MAX_FILTER_DEPTH must still parse — the depth
+        // bound must not reject legitimate queries.
+        let depth = MAX_FILTER_DEPTH / 2;
+        let mut input = String::new();
+        for _ in 0..depth {
+            input.push('(');
+        }
+        input.push_str("Name eq 'x'");
+        for _ in 0..depth {
+            input.push(')');
+        }
+        assert!(
+            parse_filter(&input).is_ok(),
+            "nesting within the depth bound must still parse"
+        );
+
+        // A wide, shallow filter (many OR-ed comparisons) must not trip the
+        // depth bound — width is not depth.
+        let wide = (0..500)
+            .map(|n| format!("Id eq {n}"))
+            .collect::<Vec<_>>()
+            .join(" or ");
+        assert!(
+            parse_filter(&wide).is_ok(),
+            "wide filters must not be rejected"
+        );
+    }
+
+    #[test]
+    fn filter_unterminated_string_returns_error() {
+        // Pre-fix: an unterminated literal was silently accepted as if closed.
+        assert!(parse_filter("Name eq 'foo").is_err());
+    }
+
+    #[test]
+    fn filter_depth_bound_is_inclusive_at_the_limit() {
+        // Exercise the exact boundary so an off-by-one (e.g. flipping `>` to
+        // `>=`) is caught: MAX_FILTER_DEPTH levels of nesting must parse, and one
+        // level deeper must be rejected.
+        let nest = |levels: usize| {
+            let mut s = String::with_capacity(levels * 2 + 16);
+            for _ in 0..levels {
+                s.push('(');
+            }
+            s.push_str("Name eq 'x'");
+            for _ in 0..levels {
+                s.push(')');
+            }
+            s
+        };
+        assert!(
+            parse_filter(&nest(MAX_FILTER_DEPTH)).is_ok(),
+            "exactly MAX_FILTER_DEPTH levels must be accepted"
+        );
+        assert!(
+            parse_filter(&nest(MAX_FILTER_DEPTH + 1)).is_err(),
+            "one level past MAX_FILTER_DEPTH must be rejected"
         );
     }
 }
