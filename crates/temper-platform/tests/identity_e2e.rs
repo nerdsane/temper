@@ -437,7 +437,6 @@ async fn e2e_http_agent_credential_auth() {
             Request::post("/tdata/AgentTypes")
                 .header("Content-Type", "application/json")
                 .header("Authorization", "Bearer admin-test-key")
-                .header("X-Temper-Principal-Kind", "admin")
                 .header("X-Tenant-Id", TEST_TENANT)
                 .body(Body::from(r#"{"id": "http-cc-type"}"#))
                 .unwrap(),
@@ -453,7 +452,6 @@ async fn e2e_http_agent_credential_auth() {
             Request::post("/tdata/AgentTypes('http-cc-type')/Temper.Agent.Define")
                 .header("Content-Type", "application/json")
                 .header("Authorization", "Bearer admin-test-key")
-                .header("X-Temper-Principal-Kind", "admin")
                 .header("X-Tenant-Id", TEST_TENANT)
                 .body(Body::from(
                     r#"{"name": "claude-code", "system_prompt": "test", "tool_set": "local", "model": "claude-sonnet-4-6", "max_turns": "200", "adapter_config": "{}", "default_budget_cents": "0"}"#,
@@ -476,7 +474,6 @@ async fn e2e_http_agent_credential_auth() {
             Request::post("/tdata/AgentCredentials")
                 .header("Content-Type", "application/json")
                 .header("Authorization", "Bearer admin-test-key")
-                .header("X-Temper-Principal-Kind", "admin")
                 .header("X-Tenant-Id", TEST_TENANT)
                 .body(Body::from(format!(r#"{{"id": "{key_hash}"}}"#)))
                 .unwrap(),
@@ -494,7 +491,6 @@ async fn e2e_http_agent_credential_auth() {
             ))
             .header("Content-Type", "application/json")
             .header("Authorization", "Bearer admin-test-key")
-            .header("X-Temper-Principal-Kind", "admin")
             .header("X-Tenant-Id", TEST_TENANT)
             .body(Body::from(format!(
                 r#"{{"agent_type_id": "http-cc-type", "agent_instance_id": "http-inst-1", "key_hash": "{key_hash}", "key_prefix": "tmpr_http", "description": "HTTP auth test", "created_by": "test", "expires_at": ""}}"#
@@ -586,7 +582,6 @@ async fn e2e_http_global_api_key_admin_access() {
         .oneshot(
             Request::get("/tdata/AgentTypes")
                 .header("Authorization", "Bearer admin-test-key")
-                .header("X-Temper-Principal-Kind", "admin")
                 .header("X-Tenant-Id", TEST_TENANT)
                 .body(Body::empty())
                 .unwrap(),
@@ -660,7 +655,6 @@ async fn e2e_http_rotate_invalidates_identity_cache() {
             ))
             .header("Content-Type", "application/json")
             .header("Authorization", "Bearer admin-test-key")
-            .header("X-Temper-Principal-Kind", "admin")
             .header("X-Tenant-Id", TEST_TENANT)
             .body(Body::from(
                 r#"{"key_hash":"rotated-hash","key_prefix":"tmpr_rot","description":"rotated"}"#,

@@ -6,9 +6,15 @@ const PM_ISSUE_POLICY: &str =
     include_str!("../../../../os-apps/project-management/specs/policies/issue.cedar");
 
 fn admin_context() -> SecurityContext {
+    // The trusted marker (edge-stripped from client requests) is what makes an
+    // `admin` header derive Admin — see ADR-0157 / `from_headers`.
     SecurityContext::from_headers(&[
         ("X-Temper-Principal-Id".to_string(), "admin-1".to_string()),
         ("X-Temper-Principal-Kind".to_string(), "admin".to_string()),
+        (
+            crate::context::TRUSTED_PRINCIPAL_HEADER.to_string(),
+            "1".to_string(),
+        ),
     ])
 }
 

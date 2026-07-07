@@ -298,6 +298,16 @@ fn header_map(
             HeaderValue::from_str(tenant.as_str()).expect("TenantId is a valid HTTP header value");
         map.insert(HeaderName::from_static("x-tenant-id"), value);
     }
+    // In-process local-TData dispatch is trusted: it carries the invoking
+    // SecurityContext (and runs a WASM module under the platform's internal
+    // credential), so a privileged Admin principal is legitimate here. Mark the
+    // request so `from_headers` honors an Admin kind it would otherwise reject
+    // as a client-asserted header (ADR-0157). `System` is still never derivable
+    // from headers, and `security_context_headers` keeps downgrading it.
+    map.insert(
+        HeaderName::from_static(temper_authz::TRUSTED_PRINCIPAL_HEADER),
+        HeaderValue::from_static("1"),
+    );
     map
 }
 

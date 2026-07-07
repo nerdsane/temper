@@ -46,7 +46,11 @@ pub async fn bearer_auth_check(
     }
 
     let Some(ref _expected) = state.api_token else {
-        // No API key configured — passthrough (local dev mode).
+        // No API key configured. The ingress edge (ADR-0157) already stripped
+        // any client-asserted `x-temper-*` identity, so the request runs as an
+        // anonymous Customer — never trusted/admin. Privileged surfaces deny it.
+        // Passthrough keeps unprivileged local-dev/ungoverned reads working
+        // without failing open into privilege.
         return Ok(next.run(req).await);
     };
 
@@ -67,51 +71,37 @@ pub async fn bearer_auth_check(
         return Err(StatusCode::UNAUTHORIZED);
     };
 
-    let has_explicit_principal = req.headers().contains_key("x-temper-principal-kind")
-        && req.headers().contains_key("x-temper-principal-id");
     let matches_global_api_key = state
         .api_token
         .as_ref()
         .is_some_and(|expected| constant_time_eq(token.as_bytes(), expected.as_bytes()));
 
-    // ADR-0043 guest override path: internal loopback callers may present the
-    // platform API key while explicitly declaring the principal they are acting
-    // as. Preserve those headers instead of collapsing the request into the
-    // bootstrapped operator credential.
-    if matches_global_api_key && has_explicit_principal {
+    // Step 1: The global API key is the operator/admin credential and takes
+    // precedence. The operator principal is derived here from the *resolved
+    // credential* (a verified global-key match), never from a client header:
+    // the edge stripped any inbound `x-temper-*`, and the resolved principal is
+    // carried as a trusted `EdgeAuthenticatedPrincipal` extension that the edge
+    // materializes into headers after the strip. A caller that does not hold the
+    // key can neither set these headers (stripped) nor forge the extension — so
+    // it can never impersonate the operator. This replaces the former
+    // guest-override path, which forwarded arbitrary client principals (ARN-170).
+    if matches_global_api_key {
+        req.extensions_mut()
+            .insert(temper_server::authz::EdgeAuthenticatedPrincipal::operator());
         return Ok(next.run(req).await);
     }
 
-    // Step 1: Try to resolve as an agent credential.
+    // Step 2: Otherwise, try to resolve the token as an agent credential.
     let tenant = extract_tenant(&req);
     if let Some(identity) = state
         .identity_resolver
         .resolve(&state.server, &tenant, token)
         .await
     {
-        // Agent credential resolved — inject into request extensions.
+        // Agent credential resolved — inject the verified identity as a request
+        // extension (never a header). Downstream `from_resolved_identity` builds
+        // the Cedar principal from it.
         req.extensions_mut().insert(identity);
-        return Ok(next.run(req).await);
-    }
-
-    // Step 2: Fall back to global API key (admin/operator access).
-    if matches_global_api_key {
-        if !req.headers().contains_key("x-temper-principal-kind") {
-            req.headers_mut().insert(
-                "x-temper-principal-kind",
-                "admin"
-                    .parse()
-                    .expect("valid x-temper-principal-kind header"),
-            );
-        }
-        if !req.headers().contains_key("x-temper-principal-id") {
-            req.headers_mut().insert(
-                "x-temper-principal-id",
-                "api-key-holder"
-                    .parse()
-                    .expect("valid x-temper-principal-id header"),
-            );
-        }
         return Ok(next.run(req).await);
     }
 
@@ -333,8 +323,12 @@ mod tests {
         assert_eq!(resp.status(), StatusCode::OK);
     }
 
+    /// ARN-170: a global-API-key holder that also declares its own principal
+    /// headers can no longer impersonate that principal. Behind the full edge
+    /// (strip → bearer_auth → materialize), the client headers are stripped and
+    /// the caller is the credential-derived operator Admin.
     #[tokio::test]
-    async fn global_api_key_preserves_explicit_principal_headers() {
+    async fn global_api_key_holder_becomes_operator_admin_not_client_principal() {
         let mut state = PlatformState::new(None);
         state.api_token = Some("secret123".into());
         crate::bootstrap::bootstrap_system_tenant(&state, &BTreeMap::new());
@@ -343,9 +337,16 @@ mod tests {
 
         let app = Router::new()
             .route("/inspect", get(inspect_identity_handler))
+            // Inner → outer: materialize, then auth, then strip.
+            .layer(middleware::from_fn(
+                temper_server::authz::materialize_authenticated_principal,
+            ))
             .layer(middleware::from_fn_with_state(
                 state.clone(),
                 bearer_auth_check,
+            ))
+            .layer(middleware::from_fn(
+                temper_server::authz::strip_inbound_identity_headers,
             ))
             .with_state(state);
 
@@ -354,6 +355,7 @@ mod tests {
                 HttpRequest::get("/inspect")
                     .header("authorization", "Bearer secret123")
                     .header("x-tenant-id", "default")
+                    // Attempt to impersonate an agent/system principal.
                     .header("x-temper-principal-kind", "agent")
                     .header("x-temper-principal-id", "system")
                     .header("x-temper-agent-type", "system")
@@ -366,13 +368,127 @@ mod tests {
 
         let body = to_bytes(resp.into_body(), usize::MAX).await.unwrap();
         let body = String::from_utf8(body.to_vec()).unwrap();
-        assert!(
-            body.contains("resolved=none"),
-            "global API key with explicit principal headers must not inject operator identity: {body}"
-        );
-        assert!(body.contains("principal_kind=agent"));
-        assert!(body.contains("principal_id=system"));
-        assert!(body.contains("agent_type=system"));
+        // The client-declared principal was stripped; the operator Admin is what
+        // reaches the handler.
+        assert!(body.contains("resolved=none"), "{body}");
+        assert!(body.contains("principal_kind=admin"), "{body}");
+        assert!(body.contains("principal_id=api-key-holder"), "{body}");
+        // The impersonation attempt (agent/system) did not survive the edge.
+        assert!(!body.contains("system"), "{body}");
+    }
+
+    // ── ARN-170 / ADR-0157: Class A auth-edge exploit tests ──────────────
+    //
+    // Each builds the production edge (strip → bearer_auth → materialize) around
+    // a handler that reports the Cedar principal a real handler would derive via
+    // `SecurityContext::from_headers`.
+
+    /// Report the principal a handler derives from the (post-edge) request
+    /// headers — the same `from_headers` path every real handler uses.
+    async fn derived_principal(headers: HeaderMap) -> String {
+        let pairs: Vec<(String, String)> = headers
+            .iter()
+            .filter_map(|(k, v)| {
+                v.to_str()
+                    .ok()
+                    .map(|s| (k.as_str().to_string(), s.to_string()))
+            })
+            .collect();
+        let ctx = temper_authz::SecurityContext::from_headers(&pairs);
+        format!("{:?}:{}", ctx.principal.kind, ctx.principal.id)
+    }
+
+    fn edged_app(api_token: Option<String>) -> Router {
+        let mut state = PlatformState::new(None);
+        state.api_token = api_token;
+        Router::new()
+            .route("/whoami", get(derived_principal))
+            .layer(middleware::from_fn(
+                temper_server::authz::materialize_authenticated_principal,
+            ))
+            .layer(middleware::from_fn_with_state(
+                state.clone(),
+                bearer_auth_check,
+            ))
+            .layer(middleware::from_fn(
+                temper_server::authz::strip_inbound_identity_headers,
+            ))
+            .with_state(state)
+    }
+
+    async fn whoami(app: Router, req: HttpRequest<Body>) -> (StatusCode, String) {
+        let resp = app.oneshot(req).await.unwrap();
+        let status = resp.status();
+        let body = to_bytes(resp.into_body(), usize::MAX).await.unwrap();
+        (status, String::from_utf8(body.to_vec()).unwrap())
+    }
+
+    /// Exploit (a): a client-asserted `x-temper-principal-kind: admin` no longer
+    /// yields Admin — even in no-key mode it derives an anonymous Customer.
+    #[tokio::test]
+    async fn spoofed_admin_header_does_not_yield_admin() {
+        let (status, who) = whoami(
+            edged_app(None),
+            HttpRequest::get("/whoami")
+                .header("x-temper-principal-kind", "admin")
+                .header("x-temper-principal-id", "attacker")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(who, "Customer:anonymous");
+    }
+
+    /// Exploit (c): a client cannot smuggle the internal trust marker to force
+    /// Admin — the edge strips it.
+    #[tokio::test]
+    async fn client_cannot_smuggle_trusted_marker() {
+        let (status, who) = whoami(
+            edged_app(None),
+            HttpRequest::get("/whoami")
+                .header("x-temper-principal-kind", "admin")
+                .header("x-temper-principal-id", "attacker")
+                .header(temper_authz::TRUSTED_PRINCIPAL_HEADER, "1")
+                .header("x-temper-attr-approvallimit", "999999")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(who, "Customer:anonymous");
+    }
+
+    /// Exploit (b): with a key configured, a no-credential request (no bearer)
+    /// is denied outright — fail closed.
+    #[tokio::test]
+    async fn no_credential_request_is_denied_when_key_configured() {
+        let (status, _who) = whoami(
+            edged_app(Some("secret123".into())),
+            HttpRequest::get("/whoami")
+                .header("x-temper-principal-kind", "admin")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+    }
+
+    /// Positive: the real operator (holds the global key) still derives Admin —
+    /// from the credential, materialized after the edge.
+    #[tokio::test]
+    async fn operator_key_yields_admin() {
+        let (status, who) = whoami(
+            edged_app(Some("secret123".into())),
+            HttpRequest::get("/whoami")
+                .header("authorization", "Bearer secret123")
+                .header("x-tenant-id", "default")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(who, "Admin:api-key-holder");
     }
 
     #[test]

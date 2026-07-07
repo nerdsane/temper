@@ -212,9 +212,15 @@ fn parses_allowlisted_public_tdata_request() {
 
 #[test]
 fn local_tdata_headers_inherit_invoking_security_context() {
+    // The trusted marker (edge-stripped from client requests) is what makes an
+    // `admin` header derive Admin — see ADR-0157 / `from_headers`.
     let inherited = SecurityContext::from_headers(&[
         ("x-temper-principal-id".to_string(), "admin-1".to_string()),
         ("x-temper-principal-kind".to_string(), "admin".to_string()),
+        (
+            temper_authz::TRUSTED_PRINCIPAL_HEADER.to_string(),
+            "1".to_string(),
+        ),
         (
             "x-temper-principal-scopes".to_string(),
             "admin:repos,repo:write".to_string(),

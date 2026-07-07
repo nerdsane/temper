@@ -54,6 +54,14 @@ pub fn build_platform_router(state: PlatformState) -> Router {
         .merge(identity_api.with_state(state.server.clone()))
         .merge(platform_observe.with_state(state.clone()))
         .nest("/api", tenant_api.with_state(state.clone()))
+        // Ingress edge (ADR-0157), innermost: materialize the credential the
+        // edge resolved (an `EdgeAuthenticatedPrincipal` extension set by
+        // `bearer_auth_check`) into trusted principal headers. Applied first so
+        // it is the innermost layer, running after auth and covering every
+        // route — including the platform-merged ones above.
+        .layer(middleware::from_fn(
+            temper_server::authz::materialize_authenticated_principal,
+        ))
         .layer(middleware::from_fn_with_state(
             state.clone(),
             crate::identity_cache::invalidate_identity_cache_on_credential_mutation,
@@ -63,6 +71,14 @@ pub fn build_platform_router(state: PlatformState) -> Router {
             tenant_access_check,
         ))
         .layer(middleware::from_fn_with_state(state, bearer_auth_check))
+        // Ingress edge (ADR-0157), outermost: runs first — before credential
+        // resolution and `tenant_access_check` — and strips every
+        // client-asserted `x-temper-*` identity header. Only identity the
+        // platform resolves *after* the edge (the operator extension, or an
+        // agent's resolved-identity extension) reaches the handlers.
+        .layer(middleware::from_fn(
+            temper_server::authz::strip_inbound_identity_headers,
+        ))
 }
 
 #[cfg(test)]

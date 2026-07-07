@@ -332,6 +332,10 @@ async fn test_reconcile_os_app_repairs_missing_active_policies_for_unchanged_bun
     let admin_ctx = SecurityContext::from_headers(&[
         ("X-Temper-Principal-Id".to_string(), "admin-1".to_string()),
         ("X-Temper-Principal-Kind".to_string(), "admin".to_string()),
+        (
+            temper_authz::TRUSTED_PRINCIPAL_HEADER.to_string(),
+            "1".to_string(),
+        ),
     ]);
     let mut issue_attrs = HashMap::new();
     issue_attrs.insert("id".to_string(), serde_json::json!("issue-1"));
@@ -421,6 +425,10 @@ async fn test_reconcile_os_app_repairs_missing_authz_engine_policies_despite_tex
     let admin_ctx = SecurityContext::from_headers(&[
         ("X-Temper-Principal-Id".to_string(), "admin-1".to_string()),
         ("X-Temper-Principal-Kind".to_string(), "admin".to_string()),
+        (
+            temper_authz::TRUSTED_PRINCIPAL_HEADER.to_string(),
+            "1".to_string(),
+        ),
     ]);
     let mut issue_attrs = HashMap::new();
     issue_attrs.insert("id".to_string(), serde_json::json!("issue-1"));
@@ -1313,6 +1321,10 @@ async fn test_install_os_app_activates_tenant_cedar_policies() {
     let admin_ctx = SecurityContext::from_headers(&[
         ("X-Temper-Principal-Id".to_string(), "admin-1".to_string()),
         ("X-Temper-Principal-Kind".to_string(), "admin".to_string()),
+        (
+            temper_authz::TRUSTED_PRINCIPAL_HEADER.to_string(),
+            "1".to_string(),
+        ),
     ]);
     let mut issue_attrs = HashMap::new();
     issue_attrs.insert("id".to_string(), serde_json::json!("issue-1"));

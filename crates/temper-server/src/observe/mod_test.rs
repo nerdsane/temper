@@ -82,6 +82,7 @@ fn build_test_app() -> Router {
 fn system_get(uri: &str) -> Request<Body> {
     Request::get(uri)
         .header("X-Temper-Principal-Kind", "admin")
+        .header(temper_authz::TRUSTED_PRINCIPAL_HEADER, "1")
         .body(Body::empty())
         .unwrap()
 }
@@ -206,6 +207,7 @@ fn system_post(uri: &str, body: &str) -> Request<Body> {
     Request::post(uri)
         .header("Content-Type", "application/json")
         .header("X-Temper-Principal-Kind", "admin")
+        .header(temper_authz::TRUSTED_PRINCIPAL_HEADER, "1")
         .body(Body::from(body.to_string()))
         .unwrap()
 }
@@ -216,6 +218,7 @@ fn admin_post(uri: &str, body: &str) -> Request<Body> {
     Request::post(uri)
         .header("Content-Type", "application/json")
         .header("X-Temper-Principal-Kind", "admin")
+        .header(temper_authz::TRUSTED_PRINCIPAL_HEADER, "1")
         .body(Body::from(body.to_string()))
         .unwrap()
 }
@@ -508,6 +511,7 @@ async fn approved_wasm_upload_decision_allows_agent_retry() {
             .header("content-type", "application/json")
             .header("x-temper-principal-id", "admin-1")
             .header("x-temper-principal-kind", "admin")
+            .header(temper_authz::TRUSTED_PRINCIPAL_HEADER, "1")
             .body(Body::from(r#"{"scope":{"principal":"this_agent","action":"this_action","resource":"this_resource","duration":"always"},"decided_by":"admin-1"}"#))
             .unwrap(),
         )
@@ -556,6 +560,7 @@ async fn tenant_decision_lookup_returns_known_decision_by_id() {
         .oneshot(
             Request::get(format!("/api/tenants/default/decisions/{decision_id}"))
                 .header("X-Temper-Principal-Kind", "admin")
+                .header(temper_authz::TRUSTED_PRINCIPAL_HEADER, "1")
                 .body(Body::empty())
                 .unwrap(),
         )
@@ -1032,6 +1037,7 @@ async fn test_approve_decision_reload_failure_keeps_pending_and_policies_unchang
             .header("content-type", "application/json")
             .header("x-temper-principal-id", "admin-1")
             .header("x-temper-principal-kind", "admin")
+            .header(temper_authz::TRUSTED_PRINCIPAL_HEADER, "1")
             .body(Body::from(r#"{"scope":{"principal":"this_agent","action":"this_action","resource":"this_resource","duration":"always"},"decided_by":"admin-1"}"#))
             .unwrap(),
         )
@@ -1839,6 +1845,7 @@ async fn test_evolution_decide_creates_d_record() {
                 Request::post("/api/evolution/records/O-test-decide/decide")
                     .header("Content-Type", "application/json")
                     .header("X-Temper-Principal-Kind", "admin")
+                    .header(temper_authz::TRUSTED_PRINCIPAL_HEADER, "1")
                     .body(Body::from(r#"{"decision":"approved","decided_by":"alice@example.com","rationale":"Looks good"}"#))
                     .unwrap(),
             )
@@ -1865,6 +1872,7 @@ async fn test_evolution_decide_not_found() {
             Request::post("/api/evolution/records/O-nonexistent/decide")
                 .header("Content-Type", "application/json")
                 .header("X-Temper-Principal-Kind", "admin")
+                .header(temper_authz::TRUSTED_PRINCIPAL_HEADER, "1")
                 .body(Body::from(
                     r#"{"decision":"rejected","decided_by":"bob","rationale":"nope"}"#,
                 ))

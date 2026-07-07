@@ -1,8 +1,13 @@
 //! Authorization: Cedar policy enforcement and WASM host-function gating.
 
+pub mod edge;
 mod helpers;
 pub mod policy_persistence;
 pub mod wasm_gate;
+
+pub use edge::{
+    EdgeAuthenticatedPrincipal, materialize_authenticated_principal, strip_inbound_identity_headers,
+};
 
 #[allow(unused_imports)] // Used by observe/ handlers via crate::authz::observe_tenant_scope
 pub(crate) use helpers::{

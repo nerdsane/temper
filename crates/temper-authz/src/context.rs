@@ -46,14 +46,36 @@ pub struct SecurityContext {
     pub correlation_id: String,
 }
 
+/// Internal, edge-stripped trust marker (ADR-0157).
+///
+/// A client-asserted `x-temper-principal-kind` header can only ever yield an
+/// unprivileged kind (`Customer`/`Agent`). A privileged `Admin` is honored from
+/// headers only when this marker is also present. The ingress edge
+/// (`strip_inbound_identity_headers`) removes every `x-temper-*` authority
+/// header — including this one — from inbound requests, so only trusted
+/// in-process or post-credential-resolution code can ever set it. `System` is
+/// never derivable from headers at all; use [`SecurityContext::system`].
+pub const TRUSTED_PRINCIPAL_HEADER: &str = "x-temper-internal-trusted-principal";
+
 impl SecurityContext {
     /// Create a security context from HTTP request headers.
-    /// In production, this would validate JWT tokens, API keys, etc.
-    /// For now, extracts from X-Temper-* headers.
+    ///
+    /// Identity is only ever derived from headers for unprivileged kinds
+    /// (`Customer`, `Agent`). `Admin` is honored only when the request also
+    /// carries the internal [`TRUSTED_PRINCIPAL_HEADER`] marker (set exclusively
+    /// by trusted code after the ingress edge — see ADR-0157); `System` is never
+    /// derivable from headers. This prevents a client from asserting its own
+    /// privilege by spoofing `x-temper-principal-kind`.
     pub fn from_headers(headers: &[(String, String)]) -> Self {
+        // Whether a trusted, edge-stripped marker accompanies these headers.
+        // Computed up front because header order is not guaranteed.
+        let trusted_principal = headers.iter().any(|(key, value)| {
+            key.eq_ignore_ascii_case(TRUSTED_PRINCIPAL_HEADER) && value.trim() == "1"
+        });
+
         let mut principal_id = "anonymous".to_string();
-        // Default to Customer (most restrictive). System bypass is only via
-        // SecurityContext::system() or explicit "system" header value.
+        // Default to Customer (most restrictive). Admin/System are never minted
+        // from an untrusted header; see the header match below.
         let mut kind = PrincipalKind::Customer;
         let mut role = None;
         let mut acting_for = None;
@@ -67,12 +89,14 @@ impl SecurityContext {
                 "x-temper-principal-id" => principal_id = value.clone(),
                 "x-temper-principal-kind" => {
                     kind = match value.as_str() {
-                        "customer" => PrincipalKind::Customer,
                         "agent" => PrincipalKind::Agent,
-                        "admin" => PrincipalKind::Admin,
-                        // "system" is NOT accepted from headers to prevent
-                        // privilege escalation via header spoofing.  Use
+                        // "admin" is honored only alongside the trusted marker
+                        // the edge strips from client requests. "system" is
+                        // never accepted from headers — use
                         // SecurityContext::system() for trusted internal paths.
+                        // Everything else (including untrusted "admin" and
+                        // "system") falls back to the most restrictive kind.
+                        "admin" if trusted_principal => PrincipalKind::Admin,
                         _ => PrincipalKind::Customer,
                     };
                 }
@@ -306,6 +330,8 @@ mod tests {
         let headers = vec![
             ("X-Temper-Principal-Id".to_string(), "admin-1".to_string()),
             ("X-Temper-Principal-Kind".to_string(), "admin".to_string()),
+            // Trusted marker: only trusted, post-edge code can set it.
+            (TRUSTED_PRINCIPAL_HEADER.to_string(), "1".to_string()),
             (
                 "X-Temper-Attr-ApprovalLimit".to_string(),
                 "10000".to_string(),
@@ -320,6 +346,41 @@ mod tests {
         assert_eq!(ctx.principal.kind, PrincipalKind::Admin);
         assert!(ctx.principal.attributes.contains_key("approvallimit"));
         assert!(ctx.context_attrs.contains_key("ratelimitexceeded"));
+    }
+
+    #[test]
+    fn admin_principal_requires_trusted_marker() {
+        // A client-asserted admin header (no trusted marker) must NOT yield Admin.
+        let spoofed = vec![
+            ("X-Temper-Principal-Id".to_string(), "attacker".to_string()),
+            ("X-Temper-Principal-Kind".to_string(), "admin".to_string()),
+        ];
+        let ctx = SecurityContext::from_headers(&spoofed);
+        assert_eq!(ctx.principal.kind, PrincipalKind::Customer);
+        assert_eq!(ctx.principal.id, "attacker");
+
+        // The same header with the internal, edge-stripped marker is trusted.
+        let trusted = vec![
+            ("X-Temper-Principal-Id".to_string(), "operator".to_string()),
+            ("X-Temper-Principal-Kind".to_string(), "admin".to_string()),
+            (TRUSTED_PRINCIPAL_HEADER.to_string(), "1".to_string()),
+        ];
+        let ctx = SecurityContext::from_headers(&trusted);
+        assert_eq!(ctx.principal.kind, PrincipalKind::Admin);
+        assert_eq!(ctx.principal.id, "operator");
+    }
+
+    #[test]
+    fn system_principal_never_derivable_from_headers_even_when_marked() {
+        // Even with the trusted marker, "system" is never derivable from
+        // headers — it only comes from SecurityContext::system().
+        let headers = vec![
+            ("X-Temper-Principal-Id".to_string(), "svc".to_string()),
+            ("X-Temper-Principal-Kind".to_string(), "system".to_string()),
+            (TRUSTED_PRINCIPAL_HEADER.to_string(), "1".to_string()),
+        ];
+        let ctx = SecurityContext::from_headers(&headers);
+        assert_eq!(ctx.principal.kind, PrincipalKind::Customer);
     }
 
     #[test]

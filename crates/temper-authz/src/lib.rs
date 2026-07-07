@@ -10,7 +10,7 @@ mod error;
 mod metrics;
 mod policy_gen;
 
-pub use context::{Principal, PrincipalKind, SecurityContext};
+pub use context::{Principal, PrincipalKind, SecurityContext, TRUSTED_PRINCIPAL_HEADER};
 pub use engine::{AuthzDecision, AuthzEngine};
 pub use error::{AuthzDenial, AuthzError};
 pub use metrics::init_metrics;

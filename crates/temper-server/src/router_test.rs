@@ -1330,6 +1330,7 @@ async fn commons_account_verification_blocks_owner_scoped_writes_until_verified(
             .header("Content-Type", "application/json")
             .header("X-Temper-Principal-Id", "operator")
             .header("X-Temper-Principal-Kind", "admin")
+            .header(temper_authz::TRUSTED_PRINCIPAL_HEADER, "1")
             .body(Body::from(
                 r#"{"VerificationProvider":"email","VerificationSubject":"alice@example.test","VerifiedAt":"2026-05-19T00:00:00Z"}"#,
             ))
@@ -1508,6 +1509,7 @@ async fn test_post_bound_action() {
             Request::post("/tdata/Orders('abc-123')/Temper.Example.CancelOrder")
                 .header("Content-Type", "application/json")
                 .header("X-Temper-Principal-Kind", "admin")
+                .header(temper_authz::TRUSTED_PRINCIPAL_HEADER, "1")
                 .body(Body::from(r#"{"Reason": "changed mind"}"#))
                 .unwrap(),
         )
@@ -1938,6 +1940,7 @@ async fn test_sse_events_endpoint_delivers_state_changes() {
         .oneshot(
             Request::get("/tdata/$events")
                 .header("X-Temper-Principal-Kind", "admin")
+                .header(temper_authz::TRUSTED_PRINCIPAL_HEADER, "1")
                 .body(Body::empty())
                 .unwrap(),
         )
@@ -2009,6 +2012,7 @@ async fn test_sse_events_lagged_receiver_continues() {
         .oneshot(
             Request::get("/tdata/$events")
                 .header("X-Temper-Principal-Kind", "admin")
+                .header(temper_authz::TRUSTED_PRINCIPAL_HEADER, "1")
                 .body(Body::empty())
                 .unwrap(),
         )

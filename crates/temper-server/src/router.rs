@@ -289,7 +289,7 @@ async fn dispatch_matched_route(
     // ADR-0057 inbound exchange end-to-end streaming — without it,
     // even SDK-streaming guests are bounded by the buffered limit.
     let pump_streams = streams.clone();
-    tokio::spawn(async move {
+    let pump_task = async move {
         use tokio_stream::StreamExt as _;
         let mut stream = body.into_data_stream();
         while let Some(chunk_result) = stream.next().await {
@@ -312,7 +312,8 @@ async fn dispatch_matched_route(
             }
         }
         let _ = pump_streams.close(kernel_request_body).await;
-    });
+    };
+    tokio::spawn(pump_task); // determinism-ok: detached HTTP body pump, not simulation state
 
     // Build the invocation context.
     let header_pairs: Vec<(String, String)> = headers
@@ -440,7 +441,7 @@ async fn dispatch_matched_route(
         .await;
     }
 
-    let invoke_task = tokio::spawn(async move {
+    let invoke_future = async move {
         match engine
             .invoke_with_blobs(
                 &invoke_hash,
@@ -469,7 +470,8 @@ async fn dispatch_matched_route(
                 );
             }
         }
-    });
+    };
+    let invoke_task = tokio::spawn(invoke_future); // determinism-ok: detached WASM invocation task, not simulation state
 
     // Await the guest's response head — bounded by the route's
     // configured timeout so a bad guest doesn't wedge the request.
