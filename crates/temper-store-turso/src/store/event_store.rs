@@ -629,19 +629,16 @@ impl EventStore for TursoEventStore {
         tenant: &str,
     ) -> Result<Vec<(String, String)>, PersistenceError> {
         let conn = self.configured_connection().await?;
+        // ARN-192: deletion filtering lives once, in the server-layer cold path
+        // (`populate_index_from_store`), which applies the canonical
+        // `is_deleted_envelope` predicate uniformly across all backends. The store
+        // returns raw distinct pairs; keeping a second, narrower `event_type='Deleted'`
+        // filter here is the cross-backend divergence that fix removed.
         let mut rows = conn
             .query(
                 "SELECT DISTINCT e.entity_type, e.entity_id
                  FROM events e
-                 WHERE e.tenant = ?1
-                   AND NOT EXISTS (
-                     SELECT 1
-                     FROM events d
-                     WHERE d.tenant = e.tenant
-                       AND d.entity_type = e.entity_type
-                       AND d.entity_id = e.entity_id
-                       AND d.event_type = 'Deleted'
-                   )",
+                 WHERE e.tenant = ?1",
                 params![tenant],
             )
             .await

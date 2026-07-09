@@ -246,56 +246,17 @@ impl EventStore for RedisEventStore {
             .map_err(storage_error)?;
 
         match result.as_slice() {
-            [1, new_seq] => {
-                let new_seq = *new_seq as u64;
-                let current_segment_key = Self::current_segment_key(tenant, entity_type, entity_id);
-                let current_segment_raw: Option<String> = self
-                    .client
-                    .get(&current_segment_key)
-                    .await
-                    .map_err(storage_error)?;
-                let segment_index = current_segment_raw
-                    .and_then(|raw| raw.parse::<u64>().ok())
-                    .unwrap_or(0);
-                let segment_key = Self::segment_key(tenant, entity_type, entity_id, segment_index);
-                let existing: Option<String> =
-                    self.client.get(&segment_key).await.map_err(storage_error)?;
-                let mut record = existing
-                    .as_deref()
-                    .map(serde_json::from_str::<SegmentRecord>)
-                    .transpose()
-                    .map_err(|e| PersistenceError::Serialization(e.to_string()))?
-                    .unwrap_or_else(|| SegmentRecord {
-                        segment_index,
-                        start_sequence_nr: (expected_sequence + 1).max(1),
-                        end_sequence_nr: None,
-                        snapshot_sequence: None,
-                        event_count: 0,
-                        sealed_at: None,
-                        created_at: chrono::Utc::now(),
-                    });
-                record.end_sequence_nr = Some(new_seq);
-                record.event_count = new_seq.saturating_sub(record.start_sequence_nr) + 1;
-                let encoded = serde_json::to_string(&record)
-                    .map_err(|e| PersistenceError::Serialization(e.to_string()))?;
-                let _: () = self
-                    .client
-                    .set(&segment_key, encoded, None, None, false)
-                    .await
-                    .map_err(storage_error)?;
-                let _: () = self
-                    .client
-                    .set(
-                        &current_segment_key,
-                        segment_index.to_string(),
-                        None,
-                        None,
-                        false,
-                    )
-                    .await
-                    .map_err(storage_error)?;
-                Ok(new_seq)
-            }
+            // ARN-192: the Lua script is the sole authority on whether the append
+            // committed. It already RPUSHed the events and advanced `seq_key`
+            // atomically, so once it reports success the write is durable. We must
+            // NOT run any further `?`-propagating step here — a transient error in
+            // post-commit bookkeeping would return `Err` for a committed write,
+            // leaving the actor with a stale `sequence_nr` (permanent
+            // `ConcurrencyViolation` / wedged actor, and a retry that duplicates
+            // events). The previous per-segment metadata writes were never read back
+            // for the Redis backend, so they are dropped rather than moved into the
+            // script.
+            [1, new_seq] => Ok(*new_seq as u64),
             [0, actual] => Err(PersistenceError::ConcurrencyViolation {
                 expected: expected_sequence,
                 actual: *actual as u64,
@@ -797,5 +758,70 @@ mod tests {
 
         assert_eq!(successes, 1, "exactly one writer should succeed");
         assert_eq!(conflicts, 1, "exactly one writer should see a conflict");
+    }
+
+    /// ARN-192 (b): the Lua script is the sole authority on whether an append
+    /// committed. A failure in any post-commit metadata step must never turn a
+    /// durably-committed append into an `Err` — that is what left the actor with a
+    /// stale sequence and wedged it (permanent `ConcurrencyViolation`), and a retry
+    /// re-applied the command and duplicated events.
+    ///
+    /// We force the exact failure the old code was vulnerable to: the segment
+    /// bookkeeping's first Redis call was `GET current_segment_key`, so we pre-seed
+    /// that key as a LIST. The pre-fix code hit a `WRONGTYPE` there and returned
+    /// `Err` even though the event was already committed; the fixed code no longer
+    /// touches that key, so the append reports the truth (success).
+    #[tokio::test]
+    async fn committed_append_survives_broken_segment_metadata() {
+        let Some(store) = make_store().await else {
+            eprintln!("REDIS_URL not set, skipping test");
+            return;
+        };
+        let pid = unique_persistence_id();
+        let (tenant, entity_type, entity_id) =
+            parse_persistence_id_parts(&pid).expect("valid persistence id");
+
+        // Corrupt the segment-metadata key with a type that makes any GET on it fail.
+        let corrupt_key = RedisEventStore::current_segment_key(tenant, entity_type, entity_id);
+        let _: i64 = store
+            .client()
+            .rpush(&corrupt_key, "corrupt".to_string())
+            .await
+            .expect("seed corrupt segment key");
+
+        // The append commits via Lua; a broken metadata step must not poison it.
+        let new_seq = store
+            .append(
+                &pid,
+                0,
+                &[test_envelope(
+                    "OrderCreated",
+                    serde_json::json!({ "id": "ord" }),
+                )],
+            )
+            .await
+            .expect("committed append must not report failure on segment metadata");
+        assert_eq!(new_seq, 1);
+
+        // The event is durably readable and the sequence advanced, so the next append
+        // chains from the correct expected sequence — no wedge, no duplication.
+        let events = store.read_events(&pid, 0).await.unwrap();
+        assert_eq!(events.len(), 1, "the committed event is durably present");
+
+        let next_seq = store
+            .append(
+                &pid,
+                1,
+                &[test_envelope(
+                    "OrderApproved",
+                    serde_json::json!({ "ok": true }),
+                )],
+            )
+            .await
+            .expect("second append chains from the advanced sequence");
+        assert_eq!(next_seq, 2);
+
+        let events = store.read_events(&pid, 0).await.unwrap();
+        assert_eq!(events.len(), 2, "exactly two events — no duplication");
     }
 }

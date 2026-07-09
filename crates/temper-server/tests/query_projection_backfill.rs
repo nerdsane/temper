@@ -433,9 +433,16 @@ async fn replay_parity_verifier_detects_projection_drift() {
         .await
         .expect("clean replay parity report");
     assert!(clean.is_clean(), "expected clean parity report: {clean:?}");
-    assert_eq!(clean.checked, 1);
+    // ARN-192: whole-tenant `list_entity_ids` no longer filters tombstoned entities
+    // at the Turso store layer (deletion is now decided once, uniformly, in the
+    // server cold path), so the parity verifier — which enumerates via
+    // `list_entity_ids` — now also scans the deleted entity, exactly as it already
+    // did on Postgres. The deleted entity's projection was removed on delete, so it
+    // is classified `deleted_absent` (a clean match: replay says Deleted, catalog is
+    // absent), keeping the report clean while strengthening coverage.
+    assert_eq!(clean.checked, 2);
     assert_eq!(clean.matched, 1);
-    assert_eq!(clean.deleted_absent, 0);
+    assert_eq!(clean.deleted_absent, 1);
 
     let actor_state = state
         .get_tenant_entity_state(&tenant, entity_type, active_id)
@@ -463,8 +470,12 @@ async fn replay_parity_verifier_detects_projection_drift() {
         .await
         .expect("drift replay parity report");
     assert!(!drift.is_clean(), "expected drift report: {drift:?}");
-    assert_eq!(drift.checked, 1);
+    // ARN-192: the tombstoned entity is now enumerated here too (see the clean-check
+    // comment above), so the verifier scans both entities — the active one drifts,
+    // the deleted one stays a clean `deleted_absent`.
+    assert_eq!(drift.checked, 2);
     assert_eq!(drift.drifted, 1);
+    assert_eq!(drift.deleted_absent, 1);
     assert_eq!(drift.missing, 0);
     assert_eq!(drift.errors, 0);
     assert!(

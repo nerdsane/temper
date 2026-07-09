@@ -592,8 +592,15 @@ async fn list_entity_ids_by_type_includes_events_and_excludes_deleted() {
     assert_eq!(ids, vec!["ord-active".to_string()]);
 }
 
+/// ARN-192: whole-tenant `list_entity_ids` returns raw distinct pairs, including
+/// tombstoned entities. Deletion filtering moved out of this backend's SQL and into
+/// the server-layer cold path (`populate_index_from_store`), which applies the
+/// canonical `is_deleted_envelope` predicate uniformly across every backend. This
+/// test documents the store contract; the deleted-absent-after-restart guarantee is
+/// covered end-to-end in `temper-server` (`deleted_entity_index_parity`,
+/// `ensure_entity_loaded`).
 #[tokio::test]
-async fn list_entity_ids_excludes_entities_with_deleted_tombstones() {
+async fn list_entity_ids_returns_raw_pairs_including_tombstones() {
     let store = make_store("entity-list-deleted").await;
     let tenant = format!("tenant-{}", uuid::Uuid::new_v4());
 
@@ -643,7 +650,10 @@ async fn list_entity_ids_excludes_entities_with_deleted_tombstones() {
 
     assert_eq!(
         entities,
-        vec![("Order".to_string(), "ord-active".to_string())]
+        vec![
+            ("Order".to_string(), "ord-active".to_string()),
+            ("Order".to_string(), "ord-deleted".to_string()),
+        ]
     );
 }
 

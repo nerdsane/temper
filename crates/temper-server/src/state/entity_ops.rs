@@ -17,7 +17,7 @@ use crate::entity_actor::{EntityActor, EntityEvent, EntityMsg, EntityResponse, E
 use crate::events::EntityStateChange;
 use crate::registry::{VerificationDetail, VerificationStatus};
 use crate::runtime_metrics;
-use crate::storage::DataOnlyCreateRecord;
+use crate::storage::{BoxedEventStore, DataOnlyCreateRecord};
 
 fn actor_idle_timeout_secs() -> i64 {
     static ACTOR_IDLE_TIMEOUT: OnceLock<i64> = OnceLock::new();
@@ -39,6 +39,23 @@ fn is_deleted_envelope(event: &PersistenceEnvelope) -> bool {
         .get("action")
         .and_then(serde_json::Value::as_str)
         == Some("Deleted")
+}
+
+/// Whether the entity's latest persisted event is a deletion tombstone.
+///
+/// The single, backend-neutral deletion predicate for cold-path index population
+/// (ARN-192). It reads the entity's journal tail and applies [`is_deleted_envelope`]
+/// — the same check the hot-path `ensure_entity_loaded` uses — so all four store
+/// backends exclude deleted entities identically, including the
+/// `payload.action == "Deleted"` case a plain SQL `event_type='Deleted'` filter
+/// misses. On a read error the entity is treated as live: a listing must never hide
+/// durable data because of a transient read failure (a later populate corrects a
+/// genuinely-deleted entity that slips through).
+async fn latest_event_is_tombstone(store: &BoxedEventStore, persistence_id: &str) -> bool {
+    match store.read_events(persistence_id, 0).await {
+        Ok(events) => events.last().is_some_and(is_deleted_envelope),
+        Err(_) => false,
+    }
 }
 
 fn record_projection_update_started(
@@ -364,12 +381,26 @@ impl ServerState {
 
         match store.list_entity_ids(tenant.as_str()).await {
             Ok(entities) => {
+                // ARN-192: exclude entities whose latest event is a deletion
+                // tombstone, so a restart never re-indexes a deleted entity. This is
+                // the same deletion check the eager `hydrate_from_store` path already
+                // applies via `ensure_entity_loaded`; doing it here gives the
+                // memory-safe non-eager path identical semantics on every backend.
+                let mut live_entities: Vec<&(String, String)> = Vec::with_capacity(entities.len());
+                for entity in &entities {
+                    let (entity_type, entity_id) = entity;
+                    let persistence_id = format!("{tenant}:{entity_type}:{entity_id}");
+                    if !latest_event_is_tombstone(&store, &persistence_id).await {
+                        live_entities.push(entity);
+                    }
+                }
+                let live_count = live_entities.len();
                 {
                     let mut index = self
                         .entity_index
                         .write()
                         .expect("entity index lock poisoned");
-                    for (entity_type, entity_id) in &entities {
+                    for (entity_type, entity_id) in &live_entities {
                         let index_key = format!("{tenant}:{entity_type}");
                         index
                             .entry(index_key)
@@ -377,11 +408,14 @@ impl ServerState {
                             .insert(entity_id.clone());
                     }
                 } // write lock dropped before metrics call
-                // A full-store scan is authoritative for every type it observed.
+                // A full-store scan is authoritative for every type it observed,
+                // including types whose entities were all deleted — mark them
+                // hydrated so the first lazy list does not re-scan.
                 self.mark_types_hydrated(tenant, &entities);
                 tracing::info!(
                     tenant = %tenant,
-                    count = entities.len(),
+                    count = live_count,
+                    discovered = entities.len(),
                     "populated entity index from event store"
                 );
                 runtime_metrics::record_server_state_metrics(self);
@@ -416,7 +450,18 @@ impl ServerState {
             .await
         {
             Ok(entity_ids) => {
-                let count = entity_ids.len();
+                // ARN-192: drop tombstoned entities so the lazy list path
+                // (`list_entity_ids_lazy`) matches the eager one on every backend,
+                // not only the ones whose `list_entity_ids_by_type` SQL already
+                // filters deleted (Turso/Postgres).
+                let mut live_ids: Vec<String> = Vec::with_capacity(entity_ids.len());
+                for entity_id in entity_ids {
+                    let persistence_id = format!("{tenant}:{entity_type}:{entity_id}");
+                    if !latest_event_is_tombstone(&store, &persistence_id).await {
+                        live_ids.push(entity_id);
+                    }
+                }
+                let count = live_ids.len();
                 {
                     let mut index = self
                         .entity_index
@@ -424,7 +469,7 @@ impl ServerState {
                         .expect("entity index lock poisoned");
                     let index_key = format!("{tenant}:{entity_type}");
                     let ids = index.entry(index_key).or_default();
-                    for entity_id in entity_ids {
+                    for entity_id in live_ids {
                         ids.insert(entity_id);
                     }
                 }
