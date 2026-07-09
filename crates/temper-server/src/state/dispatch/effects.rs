@@ -563,6 +563,43 @@ impl crate::state::ServerState {
         }
     }
 
+    /// Dispatch a transition's deferred child effects: spawn requests and
+    /// scheduled actions.
+    ///
+    /// These belong to the ORIGINAL transition response and must run on every
+    /// successful path — including when an inline integration produced a
+    /// callback response. Both are fire-and-forget (background tasks), so the
+    /// caller is free to return the (possibly integration-updated) response
+    /// afterwards.
+    fn dispatch_transition_deferred_effects(
+        &self,
+        ctx: &PostDispatchContext<'_>,
+        response: &EntityResponse,
+    ) {
+        // Spawn requests
+        if !response.spawn_requests.is_empty() {
+            self.dispatch_spawn_requests(
+                ctx.tenant,
+                ctx.entity_type,
+                ctx.entity_id,
+                &response.spawn_requests,
+                ctx.action_params,
+                ctx.agent_ctx,
+            );
+        }
+
+        // Scheduled actions (propagate agent context for identity attribution)
+        if !response.scheduled_actions.is_empty() {
+            self.dispatch_scheduled_actions(
+                ctx.tenant,
+                ctx.entity_type,
+                ctx.entity_id,
+                &response.scheduled_actions,
+                ctx.agent_ctx,
+            );
+        }
+    }
+
     /// Run all post-dispatch effects for a successful action.
     ///
     /// This is the single orchestration point for side effects after a
@@ -692,6 +729,25 @@ impl crate::state::ServerState {
                 }
 
                 if let Some(final_response) = inline_response {
+                    // ARN-188: the inline integration produced a callback
+                    // response (a separate action), but the ORIGINAL
+                    // transition's spawn requests and scheduled actions still
+                    // need to run — the previous early return dropped them
+                    // silently. Dispatch them before returning the
+                    // integration-updated response.
+                    //
+                    // The remaining steps are intentionally NOT re-run on the
+                    // original response on this early-return path:
+                    //   5b platform hooks — the original custom effects were
+                    //      already routed to the inline integration (step 5);
+                    //      routing them to platform hooks too would double-handle.
+                    //   7b state timeouts — the callback's own dispatch already
+                    //      armed the timer for the post-callback state; re-arming
+                    //      on the stale intermediate state would supersede it with
+                    //      a wrong-state timer (7b is not stale-guarded).
+                    //   8  query projection — sequence-guarded, and the callback's
+                    //      higher-sequence projection is already the correct row.
+                    self.dispatch_transition_deferred_effects(ctx, &response);
                     return final_response;
                 }
             } else {
@@ -745,28 +801,10 @@ impl crate::state::ServerState {
             }
         }
 
-        // 6. Spawn requests
-        if !response.spawn_requests.is_empty() {
-            self.dispatch_spawn_requests(
-                ctx.tenant,
-                ctx.entity_type,
-                ctx.entity_id,
-                &response.spawn_requests,
-                ctx.action_params,
-                ctx.agent_ctx,
-            );
-        }
-
-        // 7. Scheduled actions (propagate agent context for identity attribution)
-        if !response.scheduled_actions.is_empty() {
-            self.dispatch_scheduled_actions(
-                ctx.tenant,
-                ctx.entity_type,
-                ctx.entity_id,
-                &response.scheduled_actions,
-                ctx.agent_ctx,
-            );
-        }
+        // 6 & 7. Spawn requests + scheduled actions (the transition's deferred
+        // child effects). Shared with the inline-integration early-return path
+        // so those effects are never dropped (ARN-188).
+        self.dispatch_transition_deferred_effects(ctx, &response);
 
         // 7b. ADR-0049 state-timeout arming. Arms (or re-arms) a timer on
         // state entry and on any reset_on action. Sequence-based
