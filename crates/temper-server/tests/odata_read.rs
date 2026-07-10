@@ -38,6 +38,21 @@ async fn get_json(
     (status, body)
 }
 
+#[tokio::test]
+async fn over_budget_filter_is_rejected_through_tdata_router() {
+    let (state, _) = build_default_state(176, "odata-filter-budget");
+    let filter = (0..513)
+        .map(|n| format!("Id eq {n}"))
+        .collect::<Vec<_>>()
+        .join(" or ")
+        .replace(' ', "%20");
+
+    let (status, body) = get_json(&state, &format!("/tdata/Orders?$filter={filter}")).await;
+
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert_eq!(body["error"]["code"].as_str(), Some("InvalidQuery"));
+}
+
 async fn post_json(
     state: &ServerState,
     path: &str,
