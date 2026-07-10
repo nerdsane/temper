@@ -162,8 +162,8 @@ temper-actor-runtime = { path = "crates/temper-actor-runtime" }
 temper-agents = { path = "crates/temper-agents" }
 
 # WASM runtime
-wasmtime = { version = "46", features = ["component-model", "profiling"] }
-wasmtime-wasi = "46"
+wasmtime = { version = "36.0.12", features = ["component-model", "profiling"] }
+wasmtime-wasi = "36.0.12"
 sha2 = "0.10"
 hostname = "0.4"
 aes-gcm = "0.10"

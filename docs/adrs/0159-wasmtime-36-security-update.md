@@ -1,4 +1,4 @@
-# ADR-0159: Bump wasmtime 29 → 46 (RUSTSEC-2026-0096 sandbox escape)
+# ADR-0159: Update Wasmtime 29 → 36.0.12 (RUSTSEC-2026-0096 sandbox escape)
 
 - Status: Accepted
 - Date: 2026-07-07
@@ -17,8 +17,10 @@ version. The most severe is **RUSTSEC-2026-0096 (CVSS 9.0)**: an aarch64 Craneli
 miscompilation of guest heap accesses that lets a WASM guest read/write outside its
 linear-memory sandbox — a full sandbox escape and host compromise. The kernel
 compiles and runs untrusted integration modules as WASM guests through
-`temper-wasm`, and Temper's macOS/ARM dev machines and any aarch64 host run exactly
-the affected code path, so this is directly reachable.
+`temper-wasm`, including on aarch64 hosts. Upstream exploitation additionally
+depends on memory64 and non-default Spectre/trap settings that Temper does not
+enable today, so the vulnerable compiler path is security-boundary-relevant but
+not known to be directly exploitable with Temper's current defaults.
 
 The remaining wasmtime advisories are lower severity but real: heap OOB reads and
 panics in the component-model string transcoders, WASI resource exhaustion, pooling-
@@ -28,12 +30,19 @@ are fixed in wasmtime 30–36; none has a backport to the 29.x line.
 
 ## Decision
 
-Bump the workspace pin to the current latest, **wasmtime / wasmtime-wasi 46**, rather
-than the minimum-viable 36. The API-migration surface is the same either way (the
-breaking WASI reorg lands at 34, below both targets), so taking latest clears the
-most advisories, tracks upstream's supported line, and avoids re-doing this bump
-next quarter. The workspace MSRV (1.92) and toolchain (nightly 1.95) satisfy
-wasmtime 46's MSRV.
+Pin the workspace to **wasmtime / wasmtime-wasi 36.0.12**, the maintained LTS
+line containing every relevant backport while remaining below Temper's Rust
+1.92 MSRV. Wasmtime 36.0.12 declares `rust-version = "1.86.0"`; Wasmtime
+46.0.1 declares `rust-version = "1.94.0"`.
+
+This choice is driven by the complete current advisory set, not just the
+original April finding. The critical aarch64 fix was backported to 36.0.7, the
+May WASIp1 `path_open(TRUNCATE)` fix to 36.0.10, the June `fd_renumber` leak to
+36.0.11, and the June hard-link/rename `FilePerms` bypass
+(RUSTSEC-2026-0188) to 36.0.12. The newest Rust-1.92-compatible 44.x release,
+44.0.3, remains affected by RUSTSEC-2026-0188; the fixed 45/46 lines require a
+higher Rust MSRV. Version 36.0.12 is therefore the newest fully patched choice
+that does not silently break Temper's supported toolchain.
 
 This is a **security bump, not a behavior change**. Every sandbox control is
 preserved unchanged:
@@ -51,16 +60,17 @@ preserved unchanged:
 The core embedding API (`Config`, `Engine`, `Module`, `Linker`, `InstancePre`,
 `Store`, `ResourceLimiter`, `Caller`, `Memory`, `Trap::OutOfFuel`,
 `Trap::Interrupt`, `ProfilingStrategy`, `func_wrap`, `get_typed_func`,
-`set_fuel`/`set_epoch_deadline`) is unchanged from 29 to 46. All of
+`set_fuel`/`set_epoch_deadline`) is unchanged from 29 to 36. All of
 `host_functions.rs` and `telemetry.rs` compile untouched.
 
-The only break is the `wasmtime-wasi` module reorganization (wasmtime 34), which
-renamed the preview1/preview2 modules. Migrated in `engine/mod.rs`:
+The only break is the `wasmtime-wasi` module reorganization that moved the
+shared pipe implementation under the Preview 2 module. Migrated in
+`engine/mod.rs`:
 
-| 29.x | 46.x |
+| 29.x | 36.x |
 | --- | --- |
-| `wasmtime_wasi::preview1::WasiP1Ctx` | `wasmtime_wasi::p1::WasiP1Ctx` |
-| `wasmtime_wasi::preview1::add_to_linker_sync` | `wasmtime_wasi::p1::add_to_linker_sync` |
+| `wasmtime_wasi::preview1::WasiP1Ctx` | `wasmtime_wasi::preview1::WasiP1Ctx` (unchanged) |
+| `wasmtime_wasi::preview1::add_to_linker_sync` | `wasmtime_wasi::preview1::add_to_linker_sync` (unchanged) |
 | `wasmtime_wasi::pipe::MemoryOutputPipe` | `wasmtime_wasi::p2::pipe::MemoryOutputPipe` |
 | `wasmtime_wasi::WasiCtxBuilder` | `wasmtime_wasi::WasiCtxBuilder` (unchanged) |
 | `WasiCtxBuilder::build_p1()` | `WasiCtxBuilder::build_p1()` (unchanged) |
@@ -71,13 +81,18 @@ Copy + Send + Sync + 'static`) is unchanged, so the existing accessor compiles a
 ## Consequences
 
 ### Positive
-- RUSTSEC-2026-0096 and the other 18 wasmtime/wasmtime-wasi advisories clear.
-- On latest upstream, so security backports land without another major bump.
+- RUSTSEC-2026-0096 and the other Wasmtime/Wasmtime-WASI advisories affecting
+  29.0.1 clear on an upstream-supported release line.
+- Temper keeps its documented Rust 1.92 support and its existing Docker build.
+- The dependency movement stays within the security runtime family instead of
+  mixing a Rust-platform migration into an emergency sandbox fix.
 
 ### Negative
-- A ~17-major-version jump pulls newer cranelift/regalloc transitively; larger diff
-  in `Cargo.lock`. Mitigated by the WASM test suite (fuel, timeout, memory-limit,
-  trap-isolation) passing unchanged.
+- A seven-major-version jump pulls newer Cranelift/regalloc transitively and still
+  produces a substantial `Cargo.lock` diff. The lockfile must be generated with
+  targeted updates so unrelated packages do not move opportunistically.
+- This deliberately does not take features introduced only in newer Wasmtime lines.
+  Temper does not use them, and they are not required to close this issue.
 
 ### DST Compliance
 `temper-wasm` is not a simulation-visible crate (it is not in temper-runtime /
@@ -90,24 +105,27 @@ changes. No new `// determinism-ok` annotations needed.
 - The temperpaw side of ARN-169 (its own `wasmtime` pin) — separate repo, separate PR.
 - Adopting the wasmtime component-model (`p2`/`p3`) host API — the guest ABI stays
   the custom `env.*` core-wasm linker plus WASIp1; unchanged here.
-- Ancillary advisories cleared by lockfile-only bumps in the same PR (not
-  architectural decisions): `postgres-protocol` 0.6.12, `tokio-postgres` 0.7.18,
-  `quinn-proto` 0.11.16, `crossbeam-epoch` 0.9.20, and the `rustls-webpki` 0.103
-  line (0.103.9 → 0.103.13, the reqwest/quinn copy).
+- Opportunistic lockfile-only updates outside the Wasmtime/WASI dependency
+  closure. Those changes need their own review and must not ride this CVE fix.
 - Advisories left standing because no safe bump exists in this PR (tracked as
   follow-ups, not decided here): `quick-xml` 0.37.5 (RUSTSEC-2026-0194/0195 — a
   breaking 0.37 → 0.41 Reader/Error migration in `temper-spec`'s CSDL parser, not a
   lockfile bump); a **second** `rustls-webpki` 0.102.8 copy pinned by
   `libsql → hyper-rustls → rustls 0.22` in the turso-store path (needs libsql on
   rustls 0.23); `protobuf` 2.28.0 pinned by `pprof`; and `rsa` / `tokio-tar` which
-  have no fixed release. This PR does not claim a clean `cargo audit` — it takes it
-  from 37 to 9, with the wasmtime class fully cleared.
+  have no fixed release. This PR does not claim a clean `cargo audit`; it requires
+  the Wasmtime/Wasmtime-WASI advisory class to be fully cleared and reports the
+  remaining unrelated advisories from the final resolved graph.
 
 ## Alternatives Considered
 
-1. **Pin to the minimum 36.** Rejected: same migration cost (the WASI reorg is at
-   34), fewer advisories cleared, and a near-term re-bump.
-2. **Backport-only / stay on 29.x.** Rejected: no 29.x backport exists for
+1. **Use Wasmtime 46.0.1 and raise Temper's MSRV to 1.94.** Rejected: this
+   emergency dependency fix is not authorization for a repository-wide Rust
+   platform migration, and the current PR did not update or test the 1.92
+   Docker/SDK/reference-app contract.
+2. **Use Wasmtime 44.0.3.** Rejected after the current advisory audit:
+   RUSTSEC-2026-0188 still affects this version and has no 44.x backport.
+3. **Backport-only / stay on 29.x.** Rejected: no 29.x backport exists for
    RUSTSEC-2026-0096; staying leaves a CVSS 9.0 sandbox escape open.
 
 ## Rollback Policy

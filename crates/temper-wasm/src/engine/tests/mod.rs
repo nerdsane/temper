@@ -1,5 +1,7 @@
 //! Unit and integration tests for the WASM engine.
 
+mod sandbox;
+
 use std::sync::Arc;
 use std::sync::RwLock;
 use std::time::Duration;
@@ -30,18 +32,6 @@ const WAT_INFINITE_LOOP: &str = r#"
       (func (export "run") (param i32 i32) (result i32)
         (loop $L
           br $L)
-        i32.const 0
-      )
-    )
-"#;
-
-// Tries to grow memory by 1000 pages (64 MB) — exceeds 16 MB default.
-const WAT_MEMORY_GROW: &str = r#"
-    (module
-      (memory (export "memory") 1)
-      (func (export "run") (param i32 i32) (result i32)
-        (memory.grow (i32.const 1000))
-        drop
         i32.const 0
       )
     )
@@ -434,41 +424,6 @@ async fn wasm_trap_does_not_crash_host() {
             Err(WasmError::FuelExhausted) | Err(WasmError::Timeout(_))
         ),
         "trap should not be FuelExhausted or Timeout"
-    );
-}
-
-/// Memory limiter: module tries to grow beyond max_memory — growth is denied
-/// but the module still returns (memory.grow returns -1, not a crash).
-#[tokio::test]
-async fn memory_growth_denied_by_limiter() {
-    let engine = WasmEngine::new().unwrap();
-    let hash = engine
-        .compile_and_cache(WAT_MEMORY_GROW.as_bytes())
-        .unwrap();
-
-    // Limit to 1 page (64 KB). Module tries to grow by 1000 pages.
-    let limits = WasmResourceLimits {
-        max_memory: 64 * 1024, // 1 WASM page
-        ..WasmResourceLimits::default()
-    };
-    let result = engine
-        .invoke(&hash, &make_context(), make_host(), &limits, make_streams())
-        .await;
-
-    // Module returns normally (memory.grow returned -1 per spec — not a trap).
-    // The invocation itself succeeds (no crash), but the result is empty
-    // because the module didn't call host_set_result.
-    assert!(
-        result.is_ok() || matches!(result, Err(WasmError::Invocation(_))),
-        "memory denial should not cause fuel/timeout error, got: {result:?}"
-    );
-    // Critically: no panic, no FuelExhausted, no Timeout.
-    assert!(
-        !matches!(
-            result,
-            Err(WasmError::FuelExhausted) | Err(WasmError::Timeout(_))
-        ),
-        "memory denial should not be misclassified"
     );
 }
 

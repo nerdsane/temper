@@ -17,8 +17,8 @@ use std::time::{Duration, Instant};
 
 use sha2::{Digest, Sha256};
 use wasmtime::{Config, Engine, Linker, Module, ProfilingStrategy, ResourceLimiter, Store};
-use wasmtime_wasi::p1::WasiP1Ctx;
-use wasmtime_wasi::{WasiCtxBuilder, p1};
+use wasmtime_wasi::preview1::WasiP1Ctx;
+use wasmtime_wasi::{WasiCtxBuilder, preview1};
 
 use crate::host_trait::WasmHost;
 use crate::stream::StreamRegistry;
@@ -284,7 +284,7 @@ impl WasmEngine {
             let mut linker = Linker::new(&self.engine);
             host_functions::link_host_functions(&mut linker)
                 .map_err(|e| WasmError::Compilation(format!("pre-link host functions: {e}")))?;
-            p1::add_to_linker_sync(&mut linker, |state: &mut HostState| {
+            preview1::add_to_linker_sync(&mut linker, |state: &mut HostState| {
                 state.wasi_ctx.as_mut().expect("wasi_ctx must be Some")
             })
             .map_err(|e| WasmError::Compilation(format!("pre-link WASI: {e}")))?;
@@ -550,7 +550,7 @@ impl WasmEngine {
                     phase.record("prelinked", false);
                     let mut linker = Linker::new(&engine);
                     host_functions::link_host_functions(&mut linker)?;
-                    p1::add_to_linker_sync(&mut linker, |state: &mut HostState| {
+                    preview1::add_to_linker_sync(&mut linker, |state: &mut HostState| {
                         state.wasi_ctx.as_mut().expect("wasi_ctx must be Some")
                     })
                     .map_err(|e| WasmError::Compilation(format!("failed to link WASI: {e}")))?;
