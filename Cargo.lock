@@ -1448,6 +1448,7 @@ dependencies = [
  "reqwest",
  "serde",
  "serde_json",
+ "temper-authz",
  "temper-jit",
  "temper-runtime",
  "temper-server",
