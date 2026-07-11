@@ -246,11 +246,6 @@ pub async fn handle_odata_post(
         .get("await_integration")
         .map(|v| v == "true")
         .unwrap_or(false);
-    let idempotency_key = headers
-        .get("idempotency-key")
-        .and_then(|v| v.to_str().ok())
-        .filter(|s| !s.is_empty())
-        .map(String::from);
     let odata_path = match parse_odata_path_or_400(&path) {
         Ok(p) => p,
         Err(resp) => return *resp,
@@ -686,7 +681,6 @@ pub async fn handle_odata_post(
                 &agent_ctx,
                 &headers,
                 await_integration,
-                idempotency_key.clone(),
                 resolved_identity.as_ref(),
             )
             .await

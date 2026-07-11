@@ -311,7 +311,7 @@ pub(crate) async fn record_authz_denial(
         "pending_decision_id": pd.id,
     });
     let system_tenant = TenantId::new("temper-system");
-    if let Err(e) = state
+    let governance_created = state
         .dispatch_tenant_action(
             &system_tenant,
             "GovernanceDecision",
@@ -320,18 +320,22 @@ pub(crate) async fn record_authz_denial(
             gd_params,
             &AgentContext::for_service("platform-dispatch"),
         )
-        .await
-    {
-        tracing::warn!(
-            error = %e,
-            "failed to create GovernanceDecision entity for denial"
-        );
-    }
-    pd.governance_decision_id = Some(gd_id.clone());
+        .await;
+    match governance_created {
+        Ok(_) => {
+            pd.governance_decision_id = Some(gd_id.clone());
 
-    // Re-persist with governance_decision_id link so approve/deny endpoints can find the GD.
-    if let Err(e) = state.persist_pending_decision(&pd).await {
-        tracing::warn!(error = %e, id = %pd.id, "failed to persist PD with governance_decision_id");
+            // Re-persist with governance_decision_id link so approve/deny endpoints can find the GD.
+            if let Err(e) = state.persist_pending_decision(&pd).await {
+                tracing::warn!(error = %e, id = %pd.id, "failed to persist PD with governance_decision_id");
+            }
+        }
+        Err(e) => {
+            tracing::warn!(
+                error = %e,
+                "failed to create GovernanceDecision entity for denial"
+            );
+        }
     }
 
     // Tell the Observe UI a new decision exists so the Decisions tab refreshes live.

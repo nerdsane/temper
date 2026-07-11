@@ -10,7 +10,6 @@ use axum::extract::{Path, Query, State};
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::IntoResponse;
 use axum::response::sse::{Event, KeepAlive, Sse};
-use temper_evolution::records::{Decision, DecisionRecord, RecordHeader, RecordType};
 use temper_runtime::scheduler::sim_now;
 use tokio_stream::StreamExt;
 use tokio_stream::wrappers::BroadcastStream;
@@ -19,24 +18,23 @@ use tracing::instrument;
 use temper_runtime::tenant::TenantId;
 
 use super::{PolicyAuthed, decisions_access, empty_decision_list, format_decision_list};
-use crate::authz::{persist_and_activate_policy, require_observe_auth};
+use crate::authz::require_observe_auth;
 use crate::request_context::AgentContext;
-use crate::state::{DecisionStatus, PendingDecision, ServerState};
+use crate::state::{
+    DecisionResolutionKind, DecisionResolutionPhase, DecisionStatus, PendingDecision, ServerState,
+};
+
+#[path = "decisions_approve.rs"]
+mod approve;
+#[path = "decisions_resolution.rs"]
+mod resolution;
+pub(crate) use approve::handle_approve_decision;
 
 /// Query parameters for listing decisions.
 #[derive(serde::Deserialize)]
 pub(crate) struct DecisionListParams {
     /// Optional status filter: "pending", "approved", "denied", "expired".
     status: Option<String>,
-}
-
-/// Body for approve request.
-#[derive(serde::Deserialize)]
-pub(crate) struct ApproveBody {
-    /// Policy scope matrix for Cedar generation.
-    scope: temper_authz::PolicyScopeMatrix,
-    /// Optional: who approved.
-    decided_by: Option<String>,
 }
 
 /// GET /api/tenants/{tenant}/decisions — list decisions with optional status filter.
@@ -67,207 +65,6 @@ pub(crate) async fn handle_list_decisions(
     empty_decision_list()
 }
 
-/// POST /api/tenants/{tenant}/decisions/{id}/approve — approve with scope.
-#[instrument(skip_all, fields(tenant, id, otel.name = "POST /api/tenants/{tenant}/decisions/{id}/approve"))]
-pub(crate) async fn handle_approve_decision(
-    State(state): State<ServerState>,
-    Path((tenant, id)): Path<(String, String)>,
-    _auth: PolicyAuthed,
-    axum::Json(body): axum::Json<ApproveBody>,
-) -> impl IntoResponse {
-    let scope = body.scope;
-    if let Err(e) = temper_authz::validate_policy_scope_matrix(&scope) {
-        return (
-            StatusCode::BAD_REQUEST,
-            format!("Invalid policy scope matrix: {e}"),
-        )
-            .into_response();
-    }
-
-    // Read decision from the durable metadata backend.
-    let mut decision: PendingDecision = {
-        let Some(store) = state.metadata_store_for_tenant(&tenant).await else {
-            tracing::error!("durable metadata backend not configured for approve decision");
-            return (
-                StatusCode::SERVICE_UNAVAILABLE,
-                "durable metadata backend not configured",
-            )
-                .into_response();
-        };
-        match store.get_pending_decision(&id).await {
-            Ok(Some(data_str)) => match serde_json::from_str::<PendingDecision>(&data_str) {
-                Ok(d) if d.tenant == tenant => d,
-                _ => {
-                    tracing::warn!("decision not found for approval");
-                    return (StatusCode::NOT_FOUND, "Decision not found").into_response();
-                }
-            },
-            Ok(None) => {
-                tracing::warn!("decision not found for approval");
-                return (StatusCode::NOT_FOUND, "Decision not found").into_response();
-            }
-            Err(e) => {
-                tracing::error!(error = %e, backend = store.backend_name(), "failed to load decision");
-                return (
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    format!("Failed to load decision: {e}"),
-                )
-                    .into_response();
-            }
-        }
-    };
-
-    if decision.status != DecisionStatus::Pending {
-        tracing::warn!(status = ?decision.status, "decision already resolved");
-        return (
-            StatusCode::CONFLICT,
-            format!("Decision already resolved as {:?}", decision.status),
-        )
-            .into_response();
-    }
-
-    let generated_policy = match decision.generate_policy_from_matrix(&scope) {
-        Ok(policy) => policy,
-        // Fail closed: a crafted/invalid type name must not produce a broken or
-        // wider-than-approved policy (ARN-172).
-        Err(e) => {
-            tracing::error!(error = %e, "failed to generate policy from scope matrix");
-            let msg = format!("Failed to generate policy: {e}");
-            return (StatusCode::BAD_REQUEST, msg).into_response();
-        }
-    };
-    let evolution_record_id = decision.evolution_record_id.clone();
-
-    // Validate the generated policy combined with existing enabled policies.
-    let prospective = {
-        let policies = state.tenant_policies.read().unwrap(); // ci-ok: infallible lock
-        let existing = policies.get(&tenant).cloned().unwrap_or_default();
-        if existing.is_empty() {
-            generated_policy.clone()
-        } else {
-            format!("{existing}\n{generated_policy}")
-        }
-    };
-    if let Err(resp) = super::validate_and_reload_policies(&state, &tenant, &prospective) {
-        return resp;
-    }
-
-    // Persist the individual policy to the granular `policies` table.
-    let decided_by_ref = body.decided_by.as_deref().unwrap_or("unknown");
-    persist_and_activate_policy(
-        &state,
-        &tenant,
-        &format!("decision:{id}"),
-        &generated_policy,
-        decided_by_ref,
-    )
-    .await;
-
-    // Update in-memory map to reflect the new policy.
-    {
-        let mut policies = state.tenant_policies.write().unwrap(); // ci-ok: infallible lock
-        policies.insert(tenant.clone(), prospective);
-    }
-
-    // Mark decision approved only after policy reload succeeds.
-    decision.status = DecisionStatus::Approved;
-    decision.approved_scope = Some(scope.clone());
-    decision.generated_policy = Some(generated_policy.clone());
-    decision.decided_by = body.decided_by.clone();
-    decision.decided_at = Some(sim_now().to_rfc3339());
-    let approved_decision = decision.clone();
-
-    // Persist updated decision synchronously.
-    if let Err(e) = state.persist_pending_decision(&approved_decision).await {
-        tracing::warn!(id = %id, error = %e, "failed to persist approved decision");
-    }
-    let _ = state
-        .observe_refresh_tx
-        .send(crate::state::ObserveRefreshHint::Decisions);
-
-    // Create D-Record for the approval (evolution audit trail).
-    // Link to the A-Record via derived_from for O-A-D chain tracing.
-    let d_header = RecordHeader::new(RecordType::Decision, "human:approval");
-    let d_header = match evolution_record_id {
-        Some(ref eid) => d_header.derived_from(eid.clone()),
-        None => d_header,
-    };
-    let d_record = DecisionRecord {
-        header: d_header,
-        decision: Decision::Approved,
-        decided_by: body
-            .decided_by
-            .clone()
-            .unwrap_or_else(|| "unknown".to_string()),
-        rationale: format!(
-            "Approved with scope: {:?}. Policy: {}",
-            scope, generated_policy
-        ),
-        verification_results: None,
-        implementation: None,
-    };
-    // Persist D-Record to the platform metadata backend.
-    if let Some(store) = state.platform_metadata_store() {
-        let data_json = serde_json::to_string(&d_record).unwrap_or_default();
-        if let Err(e) = store
-            .insert_evolution_record(
-                &d_record.header.id,
-                "Decision",
-                &format!("{:?}", d_record.header.status),
-                &d_record.header.created_by,
-                d_record.header.derived_from.as_deref(),
-                &data_json,
-            )
-            .await
-        {
-            tracing::warn!(error = %e, backend = store.backend_name(), "failed to persist D-Record");
-        }
-    }
-
-    // Dispatch GovernanceDecision.Approve — triggers DispatchCallback effect
-    // which resumes/fails the waiting Session via the registered callback.
-    if let Some(ref gd_id) = approved_decision.governance_decision_id {
-        let state_c = state.clone();
-        let gd_id = gd_id.clone();
-        let decided_by = body.decided_by.clone().unwrap_or_else(|| "unknown".into());
-        let generated_policy = generated_policy.clone();
-        let resolution_task = async move {
-            // determinism-ok: async callback dispatch for governance decision resolution
-            let system_tenant = TenantId::new("temper-system");
-            if let Err(e) = state_c
-                .dispatch_tenant_action(
-                    &system_tenant,
-                    "GovernanceDecision",
-                    &gd_id,
-                    "Approve",
-                    serde_json::json!({
-                        "decided_by": decided_by,
-                        "scope": "narrow",
-                        "generated_policy": generated_policy,
-                    }),
-                    &AgentContext::for_service("platform-dispatch"),
-                )
-                .await
-            {
-                tracing::error!(
-                    error = %e, gd_id, "failed to dispatch GovernanceDecision.Approve"
-                );
-            }
-        };
-        tokio::spawn(resolution_task); // determinism-ok: async callback dispatch for governance decision resolution
-    }
-
-    (
-        StatusCode::OK,
-        axum::Json(serde_json::json!({
-            "id": id,
-            "status": "approved",
-            "generated_policy": generated_policy,
-        })),
-    )
-        .into_response()
-}
-
 /// POST /api/tenants/{tenant}/decisions/{id}/deny — mark as denied.
 #[instrument(skip_all, fields(tenant, id, otel.name = "POST /api/tenants/{tenant}/decisions/{id}/deny"))]
 pub(crate) async fn handle_deny_decision(
@@ -282,39 +79,43 @@ pub(crate) async fn handle_deny_decision(
         .and_then(|v| v.as_str())
         .map(String::from);
 
-    // Read decision from the durable metadata backend.
-    let mut decision: PendingDecision = {
-        let Some(store) = state.metadata_store_for_tenant(&tenant).await else {
-            tracing::error!("durable metadata backend not configured for deny decision");
-            return (
-                StatusCode::SERVICE_UNAVAILABLE,
-                "durable metadata backend not configured",
-            )
-                .into_response();
-        };
-        match store.get_pending_decision(&id).await {
-            Ok(Some(data_str)) => match serde_json::from_str::<PendingDecision>(&data_str) {
-                Ok(d) if d.tenant == tenant => d,
-                _ => {
-                    tracing::warn!("decision not found for denial");
-                    return (StatusCode::NOT_FOUND, "Decision not found").into_response();
-                }
-            },
-            Ok(None) => {
+    let Some(store) = state.metadata_store_for_tenant(&tenant).await else {
+        tracing::error!("durable metadata backend not configured for deny decision");
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            "durable metadata backend not configured",
+        )
+            .into_response();
+    };
+    let mut decision: PendingDecision = match store.get_pending_decision(&id).await {
+        Ok(Some(data_str)) => match serde_json::from_str::<PendingDecision>(&data_str) {
+            Ok(d) if d.tenant == tenant => d,
+            _ => {
                 tracing::warn!("decision not found for denial");
                 return (StatusCode::NOT_FOUND, "Decision not found").into_response();
             }
-            Err(e) => {
-                tracing::error!(error = %e, backend = store.backend_name(), "failed to load decision");
-                return (
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    format!("Failed to load decision: {e}"),
-                )
-                    .into_response();
-            }
+        },
+        Ok(None) => {
+            tracing::warn!("decision not found for denial");
+            return (StatusCode::NOT_FOUND, "Decision not found").into_response();
+        }
+        Err(e) => {
+            tracing::error!(error = %e, backend = store.backend_name(), "failed to load decision");
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("Failed to load decision: {e}"),
+            )
+                .into_response();
         }
     };
 
+    if decision.status == DecisionStatus::Denied {
+        return (
+            StatusCode::OK,
+            axum::Json(serde_json::json!({"id": id, "status": "denied"})),
+        )
+            .into_response();
+    }
     if decision.status != DecisionStatus::Pending {
         tracing::warn!(status = ?decision.status, "decision already resolved");
         return (
@@ -324,52 +125,99 @@ pub(crate) async fn handle_deny_decision(
             .into_response();
     }
 
-    decision.status = DecisionStatus::Denied;
-    decision.decided_by = decided_by;
-    decision.decided_at = Some(sim_now().to_rfc3339());
-    let denied_decision = decision.clone();
+    let decided_by_value = decided_by.unwrap_or_else(|| "unknown".to_string());
+    let owner =
+        resolution::resolution_owner(&decision, DecisionResolutionKind::Deny, &decided_by_value);
+    decision =
+        match resolution::claim_or_resume(&store, &decision, &owner, DecisionResolutionKind::Deny)
+            .await
+        {
+            Ok(decision) => decision,
+            Err(error) => return (StatusCode::CONFLICT, error).into_response(),
+        };
 
-    // Persist updated decision synchronously.
-    if let Err(e) = state.persist_pending_decision(&denied_decision).await {
-        tracing::warn!(error = %e, "failed to persist denied decision");
+    // Dispatch GovernanceDecision.Deny — triggers DispatchCallback effect
+    // which fails the waiting Session via the registered callback.
+    if decision.resolution_phase != Some(DecisionResolutionPhase::GovernanceDispatched)
+        && let Some(ref gd_id) = decision.governance_decision_id
+    {
+        let mut context = AgentContext::for_service("platform-dispatch");
+        context.idempotency_key = Some(format!("governance-denial:{tenant}:{id}"));
+        let response = state
+            .dispatch_tenant_action(
+                &TenantId::new("temper-system"),
+                "GovernanceDecision",
+                gd_id,
+                "Deny",
+                serde_json::json!({
+                    "decided_by": decided_by_value,
+                    "denial_reason": "Denied by human reviewer",
+                }),
+                &context,
+            )
+            .await;
+        match response {
+            Ok(response)
+                if response.success
+                    && matches!(response.state.status.as_str(), "Denying" | "Denied") =>
+            {
+                let terminal = state
+                    .get_tenant_entity_state(
+                        &TenantId::new("temper-system"),
+                        "GovernanceDecision",
+                        gd_id,
+                    )
+                    .await;
+                match terminal {
+                    Ok(terminal) if terminal.state.status == "Denied" => {}
+                    Ok(terminal) => {
+                        return (
+                            StatusCode::BAD_GATEWAY,
+                            format!(
+                                "GovernanceDecision effects completed without final Denied status: {:?}",
+                                terminal.state.status
+                            ),
+                        )
+                            .into_response();
+                    }
+                    Err(error) => {
+                        return (
+                            StatusCode::BAD_GATEWAY,
+                            format!("failed to read finalized GovernanceDecision: {error}"),
+                        )
+                            .into_response();
+                    }
+                }
+            }
+            Ok(response) => {
+                return (
+                    StatusCode::BAD_GATEWAY,
+                    response
+                        .error
+                        .unwrap_or_else(|| "GovernanceDecision.Deny failed".to_string()),
+                )
+                    .into_response();
+            }
+            Err(error) => return (StatusCode::BAD_GATEWAY, error.to_string()).into_response(),
+        }
+    }
+    if decision.resolution_phase != Some(DecisionResolutionPhase::GovernanceDispatched) {
+        decision.resolution_phase = Some(DecisionResolutionPhase::GovernanceDispatched);
+        if let Err(error) = resolution::persist_resolution_progress(&store, &decision, &owner).await
+        {
+            return (StatusCode::INTERNAL_SERVER_ERROR, error).into_response();
+        }
+    }
+
+    decision.status = DecisionStatus::Denied;
+    decision.decided_by = Some(decided_by_value);
+    decision.decided_at = Some(sim_now().to_rfc3339());
+    if let Err(error) = resolution::complete_resolution(&store, &decision, &owner).await {
+        return (StatusCode::INTERNAL_SERVER_ERROR, error).into_response();
     }
     let _ = state
         .observe_refresh_tx
         .send(crate::state::ObserveRefreshHint::Decisions);
-
-    // Dispatch GovernanceDecision.Deny — triggers DispatchCallback effect
-    // which fails the waiting Session via the registered callback.
-    if let Some(ref gd_id) = denied_decision.governance_decision_id {
-        let state_c = state.clone();
-        let gd_id = gd_id.clone();
-        let decided_by_val = denied_decision
-            .decided_by
-            .clone()
-            .unwrap_or_else(|| "unknown".into());
-        let resolution_task = async move {
-            // determinism-ok: async callback dispatch for governance decision resolution
-            let system_tenant = TenantId::new("temper-system");
-            if let Err(e) = state_c
-                .dispatch_tenant_action(
-                    &system_tenant,
-                    "GovernanceDecision",
-                    &gd_id,
-                    "Deny",
-                    serde_json::json!({
-                        "decided_by": decided_by_val,
-                        "denial_reason": "Denied by human reviewer",
-                    }),
-                    &AgentContext::for_service("platform-dispatch"),
-                )
-                .await
-            {
-                tracing::error!(
-                    error = %e, gd_id, "failed to dispatch GovernanceDecision.Deny"
-                );
-            }
-        };
-        tokio::spawn(resolution_task); // determinism-ok: async callback dispatch for governance decision resolution
-    }
 
     (
         StatusCode::OK,

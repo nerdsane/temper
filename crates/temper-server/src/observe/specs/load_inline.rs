@@ -13,7 +13,10 @@ use temper_runtime::tenant::TenantId;
 use temper_spec::csdl::parse_csdl;
 use tracing::instrument;
 
-use crate::authz::{DenialInput, record_authz_denial, security_context_from_headers};
+use crate::authz::{
+    DenialInput, PolicyEntryUpsert, record_authz_denial, security_context_from_headers,
+    upsert_policy_entries,
+};
 use crate::state::{ServerState, TrajectoryEntry, TrajectorySource};
 
 use super::load_dir::handle_load_dir;
@@ -246,27 +249,14 @@ pub(crate) async fn handle_load_inline(
         && let Some(ref cedar_text) = cedar_policies
         && !cedar_text.trim().is_empty()
     {
-        if let Err(e) = cedar_text.parse::<cedar_policy::PolicySet>() {
-            tracing::warn!(error = %e, "bundled Cedar policies failed to parse, skipping");
-        } else {
-            // Update the in-memory text cache.
-            if let Ok(mut policies) = state.tenant_policies.write() {
-                let entry = policies.entry(tenant.clone()).or_default();
-                *entry = merge_inline_cedar_policy_text(entry, cedar_text);
-            }
-            // Reload the per-tenant Cedar policy set.
-            let full_text = state
-                .tenant_policies
-                .read()
-                .ok()
-                .and_then(|p| p.get(&tenant).cloned())
-                .unwrap_or_default();
-            if let Err(e) = state.authz.reload_tenant_policies(&tenant, &full_text) {
-                tracing::error!(error = %e, "failed to reload policies with bundled Cedar");
-            } else {
-                tracing::info!(tenant = %tenant, "bundled Cedar policies loaded successfully");
-            }
-        }
+        publish_inline_cedar_policy(
+            &state,
+            &tenant,
+            body.app_name.as_deref(),
+            cedar_text,
+            &security_ctx.principal.id,
+        )
+        .await?;
     }
 
     if result.is_ok() {
@@ -301,6 +291,93 @@ pub(crate) async fn handle_load_inline(
     }
 
     result
+}
+
+async fn publish_inline_cedar_policy(
+    state: &ServerState,
+    tenant: &str,
+    app_name: Option<&str>,
+    cedar_text: &str,
+    principal_id: &str,
+) -> Result<(), (StatusCode, String)> {
+    cedar_text.parse::<cedar_policy::PolicySet>().map_err(|e| {
+        (
+            StatusCode::BAD_REQUEST,
+            format!("Bundled Cedar policies failed to parse: {e}"),
+        )
+    })?;
+
+    if state.policy_store().is_some() {
+        let policy_id = inline_cedar_policy_id(tenant, app_name);
+        let created_by = format!("load-inline:{principal_id}");
+        upsert_policy_entries(
+            state,
+            tenant,
+            &[PolicyEntryUpsert {
+                policy_id: &policy_id,
+                cedar_text,
+                created_by: &created_by,
+            }],
+        )
+        .await
+        .map_err(|e| {
+            tracing::error!(tenant, policy_id, error = %e, "failed to publish bundled Cedar policy");
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("Failed to publish bundled Cedar policies: {e}"),
+            )
+        })?;
+        tracing::info!(tenant, policy_id, "bundled Cedar policy published durably");
+        return Ok(());
+    }
+
+    // Legacy in-memory-only mode for test or embedded states without a durable
+    // PolicyStore. Durable states must use the snapshot path above, otherwise
+    // request-time convergence can erase the bundled policy.
+    if let Ok(mut policies) = state.tenant_policies.write() {
+        let entry = policies.entry(tenant.to_string()).or_default();
+        *entry = merge_inline_cedar_policy_text(entry, cedar_text);
+    }
+    let full_text = state
+        .tenant_policies
+        .read()
+        .ok()
+        .and_then(|p| p.get(tenant).cloned())
+        .unwrap_or_default();
+    state
+        .authz
+        .reload_tenant_policies(tenant, &full_text)
+        .map_err(|e| {
+            tracing::error!(error = %e, "failed to reload policies with bundled Cedar");
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("Failed to activate bundled Cedar policies: {e}"),
+            )
+        })?;
+    tracing::info!(tenant, "bundled Cedar policies loaded in memory");
+    Ok(())
+}
+
+fn inline_cedar_policy_id(tenant: &str, app_name: Option<&str>) -> String {
+    let source = app_name
+        .filter(|name| !name.trim().is_empty())
+        .unwrap_or(tenant);
+    let mut slug = String::new();
+    for ch in source.chars() {
+        if ch.is_ascii_alphanumeric() || ch == '_' || ch == '-' {
+            slug.push(ch);
+        } else if ch == '/' || ch == '.' || ch == ':' {
+            slug.push('-');
+        } else {
+            slug.push('_');
+        }
+    }
+    let slug = slug.trim_matches('-');
+    if slug.is_empty() {
+        "inline:policy".to_string()
+    } else {
+        format!("inline:{slug}")
+    }
 }
 
 async fn build_adr_warning_context(

@@ -1,7 +1,7 @@
 [automaton]
 name = "GovernanceDecision"
 initial = "Pending"
-states = ["Pending", "Approved", "Denied", "Expired"]
+states = ["Pending", "Approving", "Denying", "Approved", "Denied", "Expired"]
 
 # --- State Variables ---
 
@@ -82,6 +82,11 @@ name = "callback_on_deny"
 type = "string"
 initial = ""
 
+[[state]]
+name = "callback_capability"
+type = "string"
+initial = ""
+
 # --- Actions ---
 
 [[action]]
@@ -95,25 +100,37 @@ params = ["tenant", "agent_id", "action_name", "resource_type", "resource_id", "
 name = "RegisterCallback"
 from = ["Pending", "Approved", "Denied"]
 kind = "input"
-params = ["callback_tenant", "callback_entity_set", "callback_entity_id", "callback_on_approve", "callback_on_deny"]
+params = ["callback_tenant", "callback_entity_set", "callback_entity_id", "callback_on_approve", "callback_on_deny", "callback_capability"]
 hint = "Register entity callback for decision resolution. Self-loop — does not change state. Late registration after approval/denial immediately replays DispatchCallback."
 effect = "trigger DispatchCallback"
 
 [[action]]
 name = "Approve"
 from = ["Pending"]
-to = "Approved"
-kind = "input"
+to = "Approving"
+kind = "internal"
 params = ["decided_by", "scope", "generated_policy"]
-effect = '[{ type = "trigger", name = "GenerateCedarPolicy" }, { type = "trigger", name = "DispatchCallback" }]'
+effect = "trigger CompleteGovernanceApproval"
 
 [[action]]
 name = "Deny"
 from = ["Pending"]
-to = "Denied"
-kind = "input"
+to = "Denying"
+kind = "internal"
 params = ["decided_by", "denial_reason"]
-effect = "trigger DispatchCallback"
+effect = "trigger CompleteGovernanceDenial"
+
+[[action]]
+name = "FinalizeApproval"
+from = ["Approving"]
+to = "Approved"
+kind = "internal"
+
+[[action]]
+name = "FinalizeDenial"
+from = ["Denying"]
+to = "Denied"
+kind = "internal"
 
 [[action]]
 name = "Expire"

@@ -1,13 +1,13 @@
-use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
+
+#[cfg(test)]
+use std::collections::{BTreeMap, BTreeSet};
 
 use async_trait::async_trait;
 use axum::body::{Bytes, to_bytes};
 use axum::extract::{Path, Query, State};
-use axum::http::{HeaderMap, HeaderName, HeaderValue};
 use axum::response::IntoResponse;
-use reqwest::Url;
-use temper_authz::{PrincipalKind, SecurityContext};
+use temper_authz::SecurityContext;
 use temper_runtime::tenant::TenantId;
 use temper_wasm::WasmHost;
 use temper_wasm::http_stream::{
@@ -16,6 +16,16 @@ use temper_wasm::http_stream::{
 use tracing::Instrument;
 
 use crate::state::ServerState;
+
+#[path = "local_tdata_host_support.rs"]
+mod support;
+#[cfg(test)]
+use support::is_temper_trust_header;
+use support::{
+    LocalTDataRequest, callback_registration_header_map, callback_string,
+    governance_callback_decision_id, header_map, pending_decision_filter_id,
+    security_context_headers, strip_untrusted_temper_headers,
+};
 
 const LOCAL_TDATA_RESPONSE_LIMIT_BYTES: usize = 64 * 1024 * 1024;
 
@@ -26,6 +36,8 @@ const LOCAL_TDATA_RESPONSE_LIMIT_BYTES: usize = 64 * 1024 * 1024;
 pub(super) struct LocalTDataWasmHost {
     state: ServerState,
     tenant: TenantId,
+    source_entity_type: Option<String>,
+    source_entity_id: Option<String>,
     inherited_headers: Vec<(String, String)>,
     delegate: Arc<dyn WasmHost>,
 }
@@ -41,11 +53,78 @@ impl LocalTDataWasmHost {
         Self {
             state,
             tenant,
+            source_entity_type: None,
+            source_entity_id: None,
             inherited_headers: security_ctx
                 .map(security_context_headers)
                 .unwrap_or_default(),
             delegate,
         }
+    }
+
+    /// Create a host bound to the exact target actor that may mint callback authority.
+    pub(super) fn new_for_invocation(
+        state: ServerState,
+        tenant: TenantId,
+        entity_type: &str,
+        entity_id: &str,
+        security_ctx: Option<&SecurityContext>,
+        delegate: Arc<dyn WasmHost>,
+    ) -> Self {
+        let mut host = Self::new(state, tenant, security_ctx, delegate);
+        host.source_entity_type = Some(entity_type.to_string());
+        host.source_entity_id = Some(entity_id.to_string());
+        host
+    }
+
+    fn callback_registration_headers(
+        &self,
+        method: &str,
+        url: &str,
+        headers: &[(String, String)],
+        body: &str,
+    ) -> Result<Option<Vec<(String, String)>>, String> {
+        if !method.eq_ignore_ascii_case("POST") {
+            return Ok(None);
+        }
+        if LocalTDataRequest::parse(url, self.state.local_tdata_hosts.as_ref()).is_none() {
+            return Ok(None);
+        }
+        let Some(governance_decision_id) = governance_callback_decision_id(url) else {
+            return Ok(None);
+        };
+        let Some(entity_type) = self.source_entity_type.as_deref() else {
+            return Ok(None);
+        };
+        let Some(entity_id) = self.source_entity_id.as_deref() else {
+            return Ok(None);
+        };
+        let body: serde_json::Value = serde_json::from_str(body)
+            .map_err(|error| format!("callback registration body is invalid JSON: {error}"))?;
+        let callback_tenant = callback_string(&body, "callback_tenant", "CallbackTenant")?;
+        let callback_entity_id = callback_string(&body, "callback_entity_id", "CallbackEntityId")?;
+        let approve_action = callback_string(&body, "callback_on_approve", "CallbackOnApprove")?;
+        let deny_action = callback_string(&body, "callback_on_deny", "CallbackOnDeny")?;
+        if callback_tenant != self.tenant.as_str() || callback_entity_id != entity_id {
+            return Err(
+                "callback registration target must be the exact invoking tenant/entity".to_string(),
+            );
+        }
+        let capability = self.state.mint_governance_callback_capability(
+            &governance_decision_id,
+            self.tenant.as_str(),
+            entity_type,
+            entity_id,
+            approve_action,
+            deny_action,
+        )?;
+        let mut signed_headers: Vec<_> = headers
+            .iter()
+            .filter(|(name, _)| !name.eq_ignore_ascii_case("x-temper-callback-capability"))
+            .cloned()
+            .collect();
+        signed_headers.push(("x-temper-callback-capability".to_string(), capability));
+        Ok(Some(signed_headers))
     }
 
     async fn local_http_call(
@@ -60,11 +139,33 @@ impl LocalTDataWasmHost {
             return Ok(None);
         };
 
+        if self.state.policy_store().is_some()
+            && let Err(error) =
+                crate::authz::refresh_policy_snapshot_if_stale(&self.state, self.tenant.as_str())
+                    .await
+        {
+            tracing::error!(tenant = %self.tenant, %error, "local TData policy convergence failed");
+            return Err("local TData authorization policy is unavailable".to_string());
+        }
+
         let method_upper = method.to_ascii_uppercase();
         if !matches!(method_upper.as_str(), "GET" | "POST") {
             return Ok(None);
         }
-        let headers = header_map(headers, &self.tenant, &self.inherited_headers);
+        if method_upper == "GET"
+            && let Some(response) = self.local_governance_decision_lookup(&request).await?
+        {
+            return Ok(Some(response));
+        }
+        let headers = if governance_callback_decision_id(url).is_some()
+            && headers
+                .iter()
+                .any(|(name, _)| name.eq_ignore_ascii_case("x-temper-callback-capability"))
+        {
+            callback_registration_header_map(headers)
+        } else {
+            header_map(headers, &self.tenant, &self.inherited_headers)
+        };
         let path_for_span = request.path.clone();
         let span = tracing::info_span!(
             "wasm.local_tdata_http_call",
@@ -107,6 +208,71 @@ impl LocalTDataWasmHost {
             .map_err(|err| format!("failed to read local TData response body: {err}"))?;
         Ok(Some((status, String::from_utf8_lossy(&body).into_owned())))
     }
+
+    async fn local_governance_decision_lookup(
+        &self,
+        request: &LocalTDataRequest,
+    ) -> Result<Option<(u16, String)>, String> {
+        if request.path != "GovernanceDecisions" {
+            return Ok(None);
+        }
+        let Some(filter) = request.query.get("$filter") else {
+            return Ok(None);
+        };
+        let Some(pending_decision_id) = pending_decision_filter_id(filter) else {
+            return Err(
+                "GovernanceDecision lookup requires one exact pending_decision_id filter"
+                    .to_string(),
+            );
+        };
+        if request.query.get("$top").map(String::as_str) != Some("1") {
+            return Err("GovernanceDecision lookup requires $top=1".to_string());
+        }
+        let Some(store) = self
+            .state
+            .metadata_store_for_tenant(self.tenant.as_str())
+            .await
+        else {
+            return Err("GovernanceDecision lookup requires durable metadata".to_string());
+        };
+        let encoded = match store.get_pending_decision(&pending_decision_id).await {
+            Ok(encoded) => encoded,
+            Err(error) => {
+                tracing::error!(
+                    tenant = %self.tenant,
+                    pending_decision_id,
+                    %error,
+                    "local GovernanceDecision lookup failed"
+                );
+                return Err("GovernanceDecision lookup is unavailable".to_string());
+            }
+        };
+        let decision = encoded
+            .map(|data| {
+                serde_json::from_str::<crate::state::PendingDecision>(&data).map_err(|error| {
+                    tracing::error!(
+                        tenant = %self.tenant,
+                        pending_decision_id,
+                        %error,
+                        "local GovernanceDecision lookup found corrupt durable state"
+                    );
+                    "GovernanceDecision lookup found invalid durable state".to_string()
+                })
+            })
+            .transpose()?
+            .filter(|decision| decision.tenant == self.tenant.as_str());
+        let value = decision
+            .and_then(|decision| decision.governance_decision_id)
+            .map(|id| {
+                serde_json::json!({
+                    "entity_id": id.clone(),
+                    "fields": {"Id": id},
+                })
+            })
+            .into_iter()
+            .collect::<Vec<_>>();
+        Ok(Some((200, serde_json::json!({"value": value}).to_string())))
+    }
 }
 
 #[async_trait]
@@ -118,6 +284,10 @@ impl WasmHost for LocalTDataWasmHost {
         headers: &[(String, String)],
         body: &str,
     ) -> Result<(u16, String), String> {
+        let sanitized_headers = strip_untrusted_temper_headers(headers);
+        let signed_headers =
+            self.callback_registration_headers(method, url, &sanitized_headers, body)?;
+        let headers = signed_headers.as_deref().unwrap_or(&sanitized_headers);
         if let Some(response) = self.local_http_call(method, url, headers, body).await? {
             return Ok(response);
         }
@@ -135,8 +305,9 @@ impl WasmHost for LocalTDataWasmHost {
         headers: &[(String, String)],
         body: &[u8],
     ) -> Result<(u16, Vec<u8>), String> {
+        let headers = strip_untrusted_temper_headers(headers);
         self.delegate
-            .http_call_binary(method, url, headers, body)
+            .http_call_binary(method, url, &headers, body)
             .await
     }
 
@@ -146,13 +317,15 @@ impl WasmHost for LocalTDataWasmHost {
         headers: &[(String, String)],
         body: &str,
     ) -> Result<Vec<String>, String> {
-        self.delegate.connect_call(url, headers, body).await
+        let headers = strip_untrusted_temper_headers(headers);
+        self.delegate.connect_call(url, &headers, body).await
     }
 
     async fn http_stream_begin_outbound(
         &self,
-        request: HttpRequestHead,
+        mut request: HttpRequestHead,
     ) -> Result<HttpStreamHandles, String> {
+        request.headers = strip_untrusted_temper_headers(&request.headers);
         self.delegate.http_stream_begin_outbound(request).await
     }
 
@@ -231,150 +404,10 @@ impl WasmHost for LocalTDataWasmHost {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct LocalTDataRequest {
-    path: String,
-    query: BTreeMap<String, String>,
-}
-
-impl LocalTDataRequest {
-    fn parse(url: &str, local_tdata_hosts: &BTreeSet<String>) -> Option<Self> {
-        let parsed = Url::parse(url).ok()?;
-        if !matches!(parsed.scheme(), "http" | "https") {
-            return None;
-        }
-        let host = parsed.host_str()?;
-        if !is_local_tdata_host(host, local_tdata_hosts) {
-            return None;
-        }
-
-        let raw_path = parsed.path();
-        let path = match raw_path {
-            "/tdata" | "/tdata/" => String::new(),
-            _ => raw_path.strip_prefix("/tdata/")?.to_string(),
-        };
-        if is_file_value_path(&path) {
-            return None;
-        }
-
-        let query = parsed
-            .query_pairs()
-            .map(|(key, value)| (key.into_owned(), value.into_owned()))
-            .collect::<BTreeMap<_, _>>();
-
-        Some(Self { path, query })
-    }
-}
-
-fn is_loopback_host(host: &str) -> bool {
-    matches!(host, "127.0.0.1" | "localhost" | "::1" | "[::1]")
-}
-
-fn is_local_tdata_host(host: &str, local_tdata_hosts: &BTreeSet<String>) -> bool {
-    if is_loopback_host(host) {
-        return true;
-    }
-    local_tdata_hosts.contains(&host.to_ascii_lowercase())
-}
-
-fn is_file_value_path(path: &str) -> bool {
-    path.starts_with("Files('") && path.ends_with("')/$value")
-}
-
-fn header_map(
-    headers: &[(String, String)],
-    tenant: &TenantId,
-    inherited_headers: &[(String, String)],
-) -> HeaderMap {
-    let mut map = HeaderMap::new();
-    for (name, value) in inherited_headers {
-        insert_header_if_absent(&mut map, name, value);
-    }
-    for (name, value) in headers {
-        insert_header(&mut map, name, value);
-    }
-    if !map.contains_key("x-tenant-id") {
-        let value =
-            HeaderValue::from_str(tenant.as_str()).expect("TenantId is a valid HTTP header value");
-        map.insert(HeaderName::from_static("x-tenant-id"), value);
-    }
-    map
-}
-
-fn insert_header(map: &mut HeaderMap, name: &str, value: &str) {
-    let Ok(name) = HeaderName::from_bytes(name.as_bytes()) else {
-        return;
-    };
-    let Ok(value) = HeaderValue::from_str(value) else {
-        return;
-    };
-    map.insert(name, value);
-}
-
-fn insert_header_if_absent(map: &mut HeaderMap, name: &str, value: &str) {
-    let Ok(name) = HeaderName::from_bytes(name.as_bytes()) else {
-        return;
-    };
-    if map.contains_key(&name) {
-        return;
-    }
-    let Ok(value) = HeaderValue::from_str(value) else {
-        return;
-    };
-    map.insert(name, value);
-}
-
-fn security_context_headers(ctx: &SecurityContext) -> Vec<(String, String)> {
-    let mut headers = Vec::new();
-    headers.push((
-        "x-temper-principal-id".to_string(),
-        ctx.principal.id.clone(),
-    ));
-    let kind = match ctx.principal.kind {
-        PrincipalKind::Customer => "customer",
-        PrincipalKind::Agent => "agent",
-        PrincipalKind::Admin => "admin",
-        // `SecurityContext::from_headers` intentionally rejects system from
-        // external headers. Local TData inheritance keeps that invariant and
-        // relies on explicit policies/service principals for system paths.
-        PrincipalKind::System => "customer",
-    };
-    headers.push(("x-temper-principal-kind".to_string(), kind.to_string()));
-    if let Some(role) = &ctx.principal.role {
-        headers.push(("x-temper-agent-role".to_string(), role.clone()));
-    }
-    if let Some(agent_type) = &ctx.principal.agent_type {
-        headers.push(("x-temper-agent-type".to_string(), agent_type.clone()));
-    }
-    if let Some(scopes) = ctx
-        .principal
-        .attributes
-        .get("scopes")
-        .and_then(|value| value.as_array())
-    {
-        let scopes = scopes
-            .iter()
-            .filter_map(|value| value.as_str())
-            .collect::<Vec<_>>()
-            .join(",");
-        if !scopes.is_empty() {
-            headers.push(("x-temper-principal-scopes".to_string(), scopes));
-        }
-    }
-    if let Some(action_context) = ctx
-        .principal
-        .attributes
-        .get("action_context")
-        .and_then(|value| value.as_str())
-    {
-        headers.push((
-            "x-temper-action-context".to_string(),
-            action_context.to_string(),
-        ));
-    }
-    headers
-}
-
 #[cfg(test)]
 #[path = "local_tdata_host_test.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "local_tdata_callback_capability_test.rs"]
+mod callback_capability_tests;

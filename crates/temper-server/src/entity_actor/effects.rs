@@ -20,7 +20,7 @@ use crate::blobs::{FIELD_OVERFLOW_BLOB_PREFIX, OverflowBlobWrite, blob_ref_value
 use super::types::{EntityEvent, EntityState, MAX_EVENTS_SINCE_SNAPSHOT};
 
 /// A scheduled action to fire after a delay.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ScheduledAction {
     /// The action name to dispatch.
     pub action: String,
@@ -29,7 +29,7 @@ pub struct ScheduledAction {
 }
 
 /// A request to spawn a child entity (executed post-transition by dispatch pipeline).
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SpawnRequest {
     /// The child entity type.
     pub entity_type: String,
@@ -117,6 +117,36 @@ pub struct ProcessResult {
     pub overflow_blobs: Vec<OverflowBlobWrite>,
     /// Error message (if action failed).
     pub error: Option<String>,
+}
+
+/// Stable identity of the transition definition that produced an effect receipt.
+///
+/// The digest binds the entity type, exact from/action/to tuple, and ordered
+/// transition effects. It is persisted with the event so replay can distinguish
+/// a receipt produced by the historical transition from a legacy event that had
+/// no receipt at all. This is deliberately content-derived rather than tied to a
+/// process-local hot-swap counter.
+pub(crate) fn effect_receipt_version(
+    entity_type: &str,
+    from_status: &str,
+    action: &str,
+    to_status: &str,
+    effects: &[Effect],
+) -> [u8; 32] {
+    fn write_component(hasher: &mut Sha256, value: &[u8]) {
+        hasher.update((value.len() as u64).to_be_bytes());
+        hasher.update(value);
+    }
+
+    let mut hasher = Sha256::new();
+    write_component(&mut hasher, entity_type.as_bytes());
+    write_component(&mut hasher, from_status.as_bytes());
+    write_component(&mut hasher, action.as_bytes());
+    write_component(&mut hasher, to_status.as_bytes());
+    let encoded_effects =
+        serde_json::to_vec(effects).expect("transition effects are always JSON serializable"); // ci-ok: Effect derives Serialize
+    write_component(&mut hasher, &encoded_effects);
+    hasher.finalize().into()
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -274,12 +304,23 @@ pub fn process_action_with_xref_and_field_mode(
             let mut all_scheduled = scheduled_actions;
             all_scheduled.extend(resolve_schedule_at_requests(state, &schedule_at_requests));
 
+            let effect_receipt_version = effect_receipt_version(
+                &table.entity_name,
+                &from_status,
+                action,
+                &state.status,
+                &transition_result.effects,
+            );
             let event = EntityEvent {
                 action: action.to_string(),
                 from_status,
                 to_status: state.status.clone(),
                 timestamp: sim_now(),
                 params: params.clone(),
+                custom_effects: custom_effects.clone(),
+                effect_receipt_version: Some(effect_receipt_version),
+                scheduled_actions: all_scheduled.clone(),
+                spawn_requests: spawn_requests.clone(),
                 idempotency_key: None,
             };
 

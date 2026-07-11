@@ -263,44 +263,106 @@ pub async fn assert_p6_cedar_spec_coherence(harness: &SimPlatformHarness) -> Res
 
 /// In-memory `tenant_policies` match what is stored in `SimPlatformStore`.
 pub async fn assert_p7_cedar_persistence(harness: &SimPlatformHarness) -> Result<(), String> {
-    let stored_policies = harness
-        .sim_platform_store
-        .load_tenant_policies()
-        .await
-        .map_err(|e| format!("P7: failed to load policies: {e}"))?;
-
     let in_memory = harness
         .platform_state
         .server
         .tenant_policies
         .read()
-        .unwrap(); // ci-ok: infallible lock
+        .unwrap() // ci-ok: infallible lock
+        .clone();
 
-    let stored_map: std::collections::BTreeMap<String, String> =
-        stored_policies.into_iter().collect();
+    let legacy_map: std::collections::BTreeMap<String, String> = harness
+        .sim_platform_store
+        .load_tenant_policies()
+        .await
+        .map_err(|e| format!("P7: failed to load legacy policies: {e}"))?
+        .into_iter()
+        .collect();
+    let baselines = harness
+        .platform_state
+        .server
+        .tenant_policy_baselines
+        .read()
+        .unwrap() // ci-ok: infallible lock
+        .clone();
+
+    let mut tenants: std::collections::BTreeSet<String> = in_memory.keys().cloned().collect();
+    tenants.extend(legacy_map.keys().cloned());
+    tenants.extend(baselines.keys().cloned());
+    if let Some(policy_store) = harness.platform_state.server.policy_store() {
+        for row in policy_store
+            .load_all_policies()
+            .await
+            .map_err(|e| format!("P7: failed to load granular policies: {e}"))?
+        {
+            tenants.insert(row.tenant);
+        }
+    }
+
+    let mut expected_map = std::collections::BTreeMap::new();
+    for tenant in &tenants {
+        let expected = if let Some(policy_store) = harness.platform_state.server.policy_store() {
+            let snapshot = policy_store
+                .load_policy_snapshot(tenant)
+                .await
+                .map_err(|e| format!("P7: failed to load policy snapshot for {tenant}: {e}"))?;
+            if snapshot.version > 0 || !snapshot.rows.is_empty() || baselines.contains_key(tenant) {
+                let mut named = snapshot
+                    .rows
+                    .iter()
+                    .filter(|row| row.enabled)
+                    .map(|row| (row.policy_id.clone(), row.cedar_text.clone()))
+                    .collect::<Vec<_>>();
+                if let Some(baseline) = baselines.get(tenant) {
+                    named.push(("__temper_policy_baseline".to_string(), baseline.clone()));
+                }
+                let engine = temper_authz::AuthzEngine::empty();
+                engine
+                    .reload_tenant_policies_named(tenant, &named)
+                    .map_err(|e| format!("P7: expected policy set did not parse: {e}"))?;
+                engine.get_tenant_policy_text(tenant)
+            } else {
+                legacy_map.get(tenant).cloned()
+            }
+        } else {
+            match (legacy_map.get(tenant), baselines.get(tenant)) {
+                (Some(stored), Some(baseline)) if stored.is_empty() => Some(baseline.clone()),
+                (Some(stored), Some(baseline)) => Some(format!("{stored}\n{baseline}")),
+                (Some(stored), None) => Some(stored.clone()),
+                (None, Some(baseline)) => Some(baseline.clone()),
+                (None, None) => None,
+            }
+        };
+        if let Some(expected) = expected {
+            expected_map.insert(tenant.clone(), expected);
+        }
+    }
 
     for (tenant, mem_text) in in_memory.iter() {
-        match stored_map.get(tenant) {
-            Some(store_text) if store_text == mem_text => {}
-            Some(store_text) => {
+        match expected_map.get(tenant) {
+            Some(expected_text) if expected_text == mem_text => {}
+            Some(expected_text) => {
                 return Err(format!(
-                    "P7: policy mismatch for tenant '{tenant}': in-memory len={}, store len={}",
+                    "P7: policy mismatch for tenant '{tenant}': in-memory len={}, expected len={}",
                     mem_text.len(),
-                    store_text.len()
+                    expected_text.len()
                 ));
             }
             None => {
+                if mem_text.is_empty() {
+                    continue;
+                }
                 return Err(format!(
-                    "P7: tenant '{tenant}' has in-memory policy but not in store"
+                    "P7: tenant '{tenant}' has in-memory policy but not in store or baseline"
                 ));
             }
         }
     }
 
-    for tenant in stored_map.keys() {
+    for tenant in expected_map.keys() {
         if !in_memory.contains_key(tenant) {
             return Err(format!(
-                "P7: tenant '{tenant}' has policy in store but not in memory"
+                "P7: tenant '{tenant}' has effective policy in store or baseline but not in memory"
             ));
         }
     }

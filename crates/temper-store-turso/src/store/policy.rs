@@ -112,6 +112,31 @@ impl TursoEventStore {
         Ok(true)
     }
 
+    /// Atomically create an immutable policy row without replacing an existing one.
+    #[instrument(skip_all, fields(tenant, policy_id, otel.name = "turso.create_policy_if_absent"))]
+    pub async fn create_policy_if_absent(
+        &self,
+        tenant: &str,
+        policy_id: &str,
+        cedar_text: &str,
+        created_by: &str,
+    ) -> Result<bool, PersistenceError> {
+        let _query_timer = TursoQueryTimer::start("turso.create_policy_if_absent");
+        let policy_hash = compute_policy_hash(cedar_text);
+        let conn = self.configured_connection().await?;
+        let affected = conn
+            .execute(
+                "INSERT INTO policies \
+                 (tenant, policy_id, cedar_text, policy_hash, created_at, created_by, enabled) \
+                 VALUES (?1, ?2, ?3, ?4, datetime('now'), ?5, 1) \
+                 ON CONFLICT(tenant, policy_id) DO NOTHING",
+                params![tenant, policy_id, cedar_text, policy_hash, created_by],
+            )
+            .await
+            .map_err(storage_error)?;
+        Ok(affected == 1)
+    }
+
     /// Load all Cedar policy rows for a tenant, ordered by creation time (oldest first).
     ///
     /// Returns all policies (enabled and disabled).  Callers that need to build the
@@ -392,7 +417,7 @@ impl TursoEventStore {
 ///
 /// Identical inputs always produce the same digest, enabling cheap change
 /// detection before issuing an expensive Turso write.
-fn compute_policy_hash(cedar_text: &str) -> String {
+pub(super) fn compute_policy_hash(cedar_text: &str) -> String {
     let mut hasher = Sha256::new();
     hasher.update(cedar_text.as_bytes());
     format!("{:x}", hasher.finalize())

@@ -252,6 +252,16 @@ impl FromRequestParts<ServerState> for PolicyAuthed {
             // {tenant} path parameter; reaching this branch is a routing bug.
             return Err(StatusCode::INTERNAL_SERVER_ERROR.into_response());
         };
+        if state.policy_store().is_some()
+            && let Err(error) = crate::authz::refresh_policy_snapshot_if_stale(state, tenant).await
+        {
+            tracing::error!(tenant, %error, "failed to converge policy-management authorization");
+            return Err((
+                StatusCode::SERVICE_UNAVAILABLE,
+                "authorization policy is temporarily unavailable",
+            )
+                .into_response());
+        }
         match require_policy_auth(state, &parts.headers, tenant).await {
             Some(resp) => Err(resp),
             None => Ok(Self),
@@ -310,29 +320,6 @@ async fn handle_policy_suggestions(
         axum::Json(serde_json::json!({ "suggestions": suggestions })),
     )
         .into_response()
-}
-
-/// Validate and reload combined Cedar policies for a tenant mutation.
-///
-/// Builds a combined policy text from all tenants, substituting `new_tenant_text`
-/// for the given tenant. Returns `Ok(())` on success, or an error response on
-/// validation failure.
-#[allow(clippy::result_large_err)]
-pub(crate) fn validate_and_reload_policies(
-    state: &ServerState,
-    tenant: &str,
-    new_tenant_text: &str,
-) -> Result<(), axum::response::Response> {
-    // Validate and reload only this tenant's policy set (per-tenant isolation).
-    if let Err(e) = state.authz.reload_tenant_policies(tenant, new_tenant_text) {
-        tracing::warn!(error = %e, "policy validation failed");
-        return Err((
-            StatusCode::BAD_REQUEST,
-            format!("Policy validation failed: {e}"),
-        )
-            .into_response());
-    }
-    Ok(())
 }
 
 /// Format decision query results into a JSON response with counts.

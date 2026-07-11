@@ -1369,20 +1369,7 @@ pub(super) async fn install_os_app_with_plan(
 
     // ── Step 3: Load Cedar policies into memory. ────────────────────
     if let Some(ref policy_text) = combined_policy {
-        if let Err(e) = state
-            .server
-            .authz
-            .reload_tenant_policies(tenant, policy_text)
-        {
-            tracing::warn!(
-                tenant,
-                error = %e,
-                "Failed to reload tenant Cedar policies after os-app install"
-            );
-        } else {
-            let mut policies = state.server.tenant_policies.write().unwrap(); // ci-ok: infallible lock
-            policies.insert(tenant.to_string(), policy_text.clone());
-        }
+        policy_rows::activate_installed_policy_rows(state, tenant, policy_text).await;
     }
 
     // ── Step 4: Persist/register WASM modules, warming only eager modules. ──

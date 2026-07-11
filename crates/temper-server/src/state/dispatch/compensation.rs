@@ -224,7 +224,7 @@ impl crate::state::ServerState {
         entity_type: &str,
         status: &str,
     ) -> Option<String> {
-        let registry = self.registry.read().unwrap(); // ci-ok: infallible lock
+        let registry = self.registry.read().expect("spec registry lock poisoned");
         let spec = registry.get_spec(tenant, entity_type)?;
         let table = spec.table();
 

@@ -22,6 +22,7 @@ mod append_config;
 mod authz;
 mod blobs;
 mod constraints;
+mod decision_resolution;
 mod entity_listing;
 mod event_store;
 mod evolution;
@@ -29,6 +30,7 @@ pub mod field_index;
 mod instrumentation;
 pub mod ots;
 mod policy;
+mod policy_snapshot;
 mod published_artifacts;
 mod query_page;
 mod secrets;
@@ -41,6 +43,7 @@ mod write_gate;
 
 pub use field_index::QueryProjectionUpsert;
 use instrumentation::InstrumentedConnection;
+pub use policy_snapshot::{PolicySnapshot, PolicySnapshotEntry};
 pub use published_artifacts::{PublishedArtifactRow, PublishedArtifactUpsert};
 
 #[derive(Clone, Debug)]
@@ -212,6 +215,9 @@ impl TursoEventStore {
             .await
             .map_err(storage_error)?;
         conn.execute(schema::CREATE_POLICIES_TABLE, ())
+            .await
+            .map_err(storage_error)?;
+        conn.execute(schema::CREATE_POLICY_PUBLICATIONS_TABLE, ())
             .await
             .map_err(storage_error)?;
         conn.execute(schema::CREATE_POLICY_DENIAL_PATTERNS_TABLE, ())

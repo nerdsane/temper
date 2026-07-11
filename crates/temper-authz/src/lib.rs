@@ -16,5 +16,5 @@ pub use error::{AuthzDenial, AuthzError};
 pub use metrics::init_metrics;
 pub use policy_gen::{
     ActionScope, DurationScope, PolicyScopeMatrix, PrincipalScope, ResourceScope,
-    generate_cedar_from_matrix, validate_policy_scope_matrix,
+    generate_cedar_from_matrix, render_cedar_entity_type, validate_policy_scope_matrix,
 };

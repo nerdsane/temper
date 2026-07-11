@@ -74,8 +74,8 @@ fn test_agents_of_type_condition() {
         generate_cedar_from_matrix("bot-1", "Agent", "submitOrder", "Order", "order-123", &m)
             .expect("valid policy");
     assert!(policy.contains("principal is Agent"));
-    assert!(policy.contains("context.agentType == \"claude-code\""));
-    assert!(policy.contains("context.agentTypeVerified == true"));
+    assert!(policy.contains("principal.agent_type == \"claude-code\""));
+    assert!(policy.contains("principal.agentTypeVerified == true"));
 }
 
 #[test]
@@ -92,7 +92,8 @@ fn test_agents_with_role_condition() {
     let policy =
         generate_cedar_from_matrix("bot-1", "Agent", "submitOrder", "Order", "order-123", &m)
             .expect("valid policy");
-    assert!(policy.contains("context.role == \"operations_agent\""));
+    assert!(policy.contains("principal.role == \"operations_agent\""));
+    assert!(policy.contains("principal.agentTypeVerified == true"));
 }
 
 #[test]
@@ -126,7 +127,7 @@ fn test_combined_agent_type_and_session() {
     let policy =
         generate_cedar_from_matrix("bot-1", "Agent", "submitOrder", "Order", "order-123", &m)
             .expect("valid policy");
-    assert!(policy.contains("context.agentType == \"openclaw\""));
+    assert!(policy.contains("principal.agent_type == \"openclaw\""));
     assert!(policy.contains("context.sessionId == \"sess-xyz\""));
 }
 
@@ -144,6 +145,32 @@ fn test_all_actions_on_type_still_constrains_resource() {
     let policy =
         generate_cedar_from_matrix("bot-1", "Agent", "submitOrder", "Order", "order-123", &m)
             .expect("valid policy");
+    assert!(policy.contains("resource is Order"));
+    assert!(!policy.contains("Action::"));
+}
+
+#[test]
+fn all_actions_on_type_cannot_be_widened_by_any_resource() {
+    let matrix = PolicyScopeMatrix {
+        principal: PrincipalScope::ThisAgent,
+        action: ActionScope::AllActionsOnType,
+        resource: ResourceScope::AnyResource,
+        duration: DurationScope::Always,
+        agent_type_value: None,
+        role_value: None,
+        session_id: None,
+    };
+
+    let policy = generate_cedar_from_matrix(
+        "bot-1",
+        "Agent",
+        "submitOrder",
+        "Order",
+        "order-123",
+        &matrix,
+    )
+    .expect("valid policy");
+
     assert!(policy.contains("resource is Order"));
     assert!(!policy.contains("Action::"));
 }
@@ -198,6 +225,25 @@ fn validate_matrix_requires_session_for_session_duration() {
         session_id: None,
     };
     assert!(validate_policy_scope_matrix(&m).is_err());
+}
+
+#[test]
+fn generation_fails_closed_when_scope_companion_is_missing() {
+    let m = PolicyScopeMatrix {
+        principal: PrincipalScope::AgentsOfType,
+        action: ActionScope::ThisAction,
+        resource: ResourceScope::AnyOfType,
+        duration: DurationScope::Always,
+        agent_type_value: None,
+        role_value: None,
+        session_id: None,
+    };
+
+    let result = generate_cedar_from_matrix("bot-1", "Agent", "act", "Order", "ord-1", &m);
+    assert!(
+        result.is_err(),
+        "invalid scope must not produce a broad permit"
+    );
 }
 
 // --------------------------------------------------------------------------

@@ -67,6 +67,9 @@ pub struct PolicyEntryRow {
     pub tenant: String,
     pub policy_id: String,
     pub cedar_text: String,
+    pub policy_hash: String,
+    pub created_at: String,
+    pub created_by: String,
     pub enabled: bool,
 }
 
@@ -336,6 +339,9 @@ impl PlatformStore for TursoEventStore {
                 tenant: row.tenant,
                 policy_id: row.policy_id,
                 cedar_text: row.cedar_text,
+                policy_hash: row.policy_hash,
+                created_at: row.created_at,
+                created_by: row.created_by,
                 enabled: row.enabled,
             })
             .collect())
@@ -596,6 +602,9 @@ impl PlatformStore for PostgresEventStore {
                 tenant: row.tenant,
                 policy_id: row.policy_id,
                 cedar_text: row.cedar_text,
+                policy_hash: row.policy_hash,
+                created_at: row.created_at,
+                created_by: row.created_by,
                 enabled: row.enabled,
             })
             .collect())
@@ -764,7 +773,10 @@ mod sim_platform_store {
     use super::*;
     use std::collections::{BTreeMap, BTreeSet};
     use std::sync::{Arc, Mutex};
+    use temper_runtime::persistence::PersistenceError;
     use temper_store_sim::DeterministicRng;
+
+    use crate::storage::{PolicySnapshot, PolicyStore, PolicyStoreRow};
 
     /// Fault injection configuration for platform store simulation.
     ///
@@ -859,6 +871,8 @@ mod sim_platform_store {
         policies: BTreeMap<String, String>,
         /// Granular Cedar policy rows keyed by (tenant, policy_id).
         policy_entries: BTreeMap<(String, String), PolicyEntryRow>,
+        /// Complete-snapshot publication version by tenant.
+        policy_versions: BTreeMap<String, u64>,
         /// Cross-invariant definitions keyed by tenant.
         constraints: BTreeMap<String, String>,
         /// Installed apps: (tenant, app_name).
@@ -882,6 +896,7 @@ mod sim_platform_store {
                     verification_cache: BTreeMap::new(),
                     policies: BTreeMap::new(),
                     policy_entries: BTreeMap::new(),
+                    policy_versions: BTreeMap::new(),
                     constraints: BTreeMap::new(),
                     installed_apps: BTreeSet::new(),
                     installed_app_records: BTreeMap::new(),
@@ -928,6 +943,9 @@ mod sim_platform_store {
                     tenant: tenant.to_string(),
                     policy_id: policy_id.to_string(),
                     cedar_text: cedar_text.to_string(),
+                    policy_hash: String::new(),
+                    created_at: "1970-01-01T00:00:00Z".to_string(),
+                    created_by: "test".to_string(),
                     enabled,
                 },
             );
@@ -1291,6 +1309,129 @@ mod sim_platform_store {
                 },
             );
             Ok(())
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl PolicyStore for SimPlatformStore {
+        async fn load_policy_snapshot(
+            &self,
+            tenant: &str,
+        ) -> Result<PolicySnapshot, PersistenceError> {
+            let mut inner = self.inner.lock().expect("SimPlatformStore lock poisoned"); // ci-ok: infallible lock
+
+            let prob = inner.faults.policy_read_failure_prob;
+            if inner.rng.chance(prob) {
+                return Err(PersistenceError::Storage(
+                    "SimPlatformStore: injected granular policy snapshot read failure".into(),
+                ));
+            }
+
+            let mut rows: Vec<PolicyStoreRow> = inner
+                .policy_entries
+                .values()
+                .filter(|row| row.tenant == tenant)
+                .map(|row| PolicyStoreRow {
+                    tenant: row.tenant.clone(),
+                    policy_id: row.policy_id.clone(),
+                    cedar_text: row.cedar_text.clone(),
+                    policy_hash: row.policy_hash.clone(),
+                    created_at: row.created_at.clone(),
+                    created_by: row.created_by.clone(),
+                    enabled: row.enabled,
+                })
+                .collect();
+            rows.sort_by(|left, right| left.policy_id.cmp(&right.policy_id));
+            Ok(PolicySnapshot {
+                version: inner.policy_versions.get(tenant).copied().unwrap_or(0),
+                rows,
+            })
+        }
+
+        async fn replace_policy_snapshot(
+            &self,
+            tenant: &str,
+            expected_version: u64,
+            rows: Vec<PolicyStoreRow>,
+        ) -> Result<u64, PersistenceError> {
+            let mut inner = self.inner.lock().expect("SimPlatformStore lock poisoned"); // ci-ok: infallible lock
+
+            let prob = inner.faults.policy_write_failure_prob;
+            if inner.rng.chance(prob) {
+                return Err(PersistenceError::Storage(
+                    "SimPlatformStore: injected granular policy snapshot write failure".into(),
+                ));
+            }
+
+            let actual_version = inner.policy_versions.get(tenant).copied().unwrap_or(0);
+            if actual_version != expected_version {
+                return Err(PersistenceError::ConcurrencyViolation {
+                    expected: expected_version,
+                    actual: actual_version,
+                });
+            }
+            if let Some(row) = rows.iter().find(|row| row.tenant != tenant) {
+                return Err(PersistenceError::Serialization(format!(
+                    "policy snapshot row {:?} belongs to tenant {:?}, expected {:?}",
+                    row.policy_id, row.tenant, tenant
+                )));
+            }
+
+            inner
+                .policy_entries
+                .retain(|(row_tenant, _), _| row_tenant != tenant);
+            for row in rows {
+                inner.policy_entries.insert(
+                    (tenant.to_string(), row.policy_id.clone()),
+                    PolicyEntryRow {
+                        tenant: row.tenant,
+                        policy_id: row.policy_id,
+                        cedar_text: row.cedar_text,
+                        policy_hash: row.policy_hash,
+                        created_at: row.created_at,
+                        created_by: row.created_by,
+                        enabled: row.enabled,
+                    },
+                );
+            }
+            let next_version = actual_version + 1;
+            inner
+                .policy_versions
+                .insert(tenant.to_string(), next_version);
+            Ok(next_version)
+        }
+
+        async fn load_policies_for_tenant(
+            &self,
+            tenant: &str,
+        ) -> Result<Vec<PolicyStoreRow>, String> {
+            self.load_policy_snapshot(tenant)
+                .await
+                .map(|snapshot| snapshot.rows)
+                .map_err(|error| error.to_string())
+        }
+
+        async fn load_all_policies(&self) -> Result<Vec<PolicyStoreRow>, String> {
+            let mut inner = self.inner.lock().expect("SimPlatformStore lock poisoned"); // ci-ok: infallible lock
+
+            let prob = inner.faults.policy_read_failure_prob;
+            if inner.rng.chance(prob) {
+                return Err("SimPlatformStore: injected granular policy read failure".into());
+            }
+
+            Ok(inner
+                .policy_entries
+                .values()
+                .map(|row| PolicyStoreRow {
+                    tenant: row.tenant.clone(),
+                    policy_id: row.policy_id.clone(),
+                    cedar_text: row.cedar_text.clone(),
+                    policy_hash: row.policy_hash.clone(),
+                    created_at: row.created_at.clone(),
+                    created_by: row.created_by.clone(),
+                    enabled: row.enabled,
+                })
+                .collect())
         }
     }
 }

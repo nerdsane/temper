@@ -474,6 +474,20 @@ initial = ""
     state
 }
 
+async fn install_durable_allow_all_policy(state: &ServerState, tenant: &str) {
+    crate::authz::upsert_policy_entries(
+        state,
+        tenant,
+        &[crate::authz::PolicyEntryUpsert {
+            policy_id: "test-allow-all",
+            cedar_text: r#"permit(principal, action, resource);"#,
+            created_by: "router-test",
+        }],
+    )
+    .await
+    .expect("install durable test policy");
+}
+
 #[tokio::test]
 async fn test_service_document() {
     let app = build_router(test_state());
@@ -641,6 +655,22 @@ async fn test_post_entity_creation_uses_odata_id_property() {
 #[tokio::test]
 async fn test_data_only_entity_create_fast_path_persists_projection_without_actor_spawn() {
     let state = test_state_with_data_only_ioa_and_turso().await;
+    install_durable_allow_all_policy(&state, TenantId::default().as_str()).await;
+    let setup_ctx = temper_authz::SecurityContext::from_headers(&[]);
+    let mut setup_attrs = std::collections::BTreeMap::new();
+    setup_attrs.insert(
+        "id".to_string(),
+        serde_json::Value::String("entry-1".to_string()),
+    );
+    state
+        .authorize_with_context(
+            &setup_ctx,
+            "create",
+            "LogEntry",
+            &setup_attrs,
+            TenantId::default().as_str(),
+        )
+        .expect("data-only create policy setup should allow anonymous create");
     let app = build_router(state.clone());
 
     let create_response = app
@@ -648,6 +678,7 @@ async fn test_data_only_entity_create_fast_path_persists_projection_without_acto
         .oneshot(
             Request::post("/tdata/LogEntries")
                 .header("Content-Type", "application/json")
+                .header("X-Tenant-Id", TenantId::default().as_str())
                 .body(Body::from(
                     r#"{"Id": "entry-1", "Body": "created through fast path"}"#,
                 ))
@@ -655,10 +686,16 @@ async fn test_data_only_entity_create_fast_path_persists_projection_without_acto
         )
         .await
         .unwrap();
-    assert_eq!(create_response.status(), StatusCode::CREATED);
+    let create_status = create_response.status();
     let create_body = axum::body::to_bytes(create_response.into_body(), 1024 * 1024)
         .await
         .unwrap();
+    assert_eq!(
+        create_status,
+        StatusCode::CREATED,
+        "create failed: {}",
+        std::str::from_utf8(&create_body).unwrap_or("<non-utf8>")
+    );
     let create_json: serde_json::Value = serde_json::from_slice(&create_body).unwrap();
     assert_eq!(create_json["status"], "Recorded");
     assert_eq!(create_json["fields"]["Body"], "created through fast path");

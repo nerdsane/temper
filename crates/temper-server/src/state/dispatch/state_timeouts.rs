@@ -465,6 +465,10 @@ mod tests {
             to_status: to.to_string(),
             timestamp: ts,
             params: serde_json::json!({}),
+            custom_effects: vec![],
+            effect_receipt_version: Some([1; 32]),
+            scheduled_actions: vec![],
+            spawn_requests: vec![],
             idempotency_key: None,
         }
     }

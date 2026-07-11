@@ -263,6 +263,115 @@ async fn duplicate_composite_idempotency_reemits_spec_trigger() {
     );
 }
 
+#[cfg(feature = "sim")]
+#[tokio::test]
+async fn duplicate_idempotency_replays_exact_custom_effect_after_restart() {
+    use crate::storage::{BackendLabel, BoxedEventStore};
+    use temper_runtime::scheduler::install_deterministic_context;
+    use temper_store_sim::SimEventStore;
+
+    let (_guard, _clock, _ids) = install_deterministic_context(91);
+    let store = BoxedEventStore::new(SimEventStore::no_faults(91));
+    let params = serde_json::json!({
+        "PackBytes": "pack",
+        "RefUpdates": [{"Name": "refs/heads/main"}],
+        "ClientRequestId": "restart-pack"
+    });
+
+    {
+        let system = ActorSystem::new("idempotency-before-restart");
+        let actor = EntityActor::with_persistence(
+            "Repository",
+            "rp-restart",
+            composite_table(),
+            serde_json::json!({}),
+            store.clone(),
+            BackendLabel::Sim,
+        );
+        let actor_ref = system.spawn(actor, "rp-restart");
+        let first: EntityResponse = actor_ref
+            .ask(
+                EntityMsg::Action {
+                    name: "IngestPack".into(),
+                    params: params.clone(),
+                    cross_entity_booleans: BTreeMap::new(),
+                    idempotency_key: Some("restart-pack".into()),
+                },
+                Duration::from_secs(1),
+            )
+            .await
+            .unwrap();
+        assert_eq!(first.custom_effects, vec!["scm_ingest_pack"]);
+    }
+
+    let system = ActorSystem::new("idempotency-after-restart");
+    let actor = EntityActor::with_persistence(
+        "Repository",
+        "rp-restart",
+        composite_table(),
+        serde_json::json!({}),
+        store,
+        BackendLabel::Sim,
+    );
+    let actor_ref = system.spawn(actor, "rp-restart-replayed");
+    let duplicate: EntityResponse = actor_ref
+        .ask(
+            EntityMsg::Action {
+                name: "IngestPack".into(),
+                params,
+                cross_entity_booleans: BTreeMap::new(),
+                idempotency_key: Some("restart-pack".into()),
+            },
+            Duration::from_secs(1),
+        )
+        .await
+        .unwrap();
+
+    assert!(duplicate.success);
+    assert_eq!(duplicate.custom_effects, vec!["scm_ingest_pack"]);
+    assert_eq!(duplicate.state.events.len(), 2, "Created + IngestPack only");
+
+    let mismatched_params: EntityResponse = actor_ref
+        .ask(
+            EntityMsg::Action {
+                name: "IngestPack".into(),
+                params: serde_json::json!({"PackBytes": "different"}),
+                cross_entity_booleans: BTreeMap::new(),
+                idempotency_key: Some("restart-pack".into()),
+            },
+            Duration::from_secs(1),
+        )
+        .await
+        .unwrap();
+    assert!(!mismatched_params.success);
+    assert!(
+        mismatched_params
+            .error
+            .as_deref()
+            .is_some_and(|error| error.contains("bound to different parameters"))
+    );
+
+    let mismatched: EntityResponse = actor_ref
+        .ask(
+            EntityMsg::Action {
+                name: "DifferentAction".into(),
+                params: serde_json::json!({}),
+                cross_entity_booleans: BTreeMap::new(),
+                idempotency_key: Some("restart-pack".into()),
+            },
+            Duration::from_secs(1),
+        )
+        .await
+        .unwrap();
+    assert!(!mismatched.success);
+    assert!(
+        mismatched
+            .error
+            .as_deref()
+            .is_some_and(|error| error.contains("already bound to action 'IngestPack'"))
+    );
+}
+
 #[tokio::test]
 async fn dst_cannot_submit_without_items() {
     let system = ActorSystem::new("dst");

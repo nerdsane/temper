@@ -678,9 +678,11 @@ impl crate::state::ServerState {
                         production_host_builder.with_secret_resolver(resolver);
                 }
                 let production_host: Arc<dyn WasmHost> = Arc::new(production_host_builder);
-                let inner: Arc<dyn WasmHost> = Arc::new(LocalTDataWasmHost::new(
+                let inner: Arc<dyn WasmHost> = Arc::new(LocalTDataWasmHost::new_for_invocation(
                     self.clone(),
                     ctx.entity_ref.tenant.clone(),
+                    ctx.entity_ref.entity_type,
+                    ctx.entity_ref.entity_id,
                     ctx.agent_ctx.security_ctx.as_ref(),
                     production_host,
                 ));
@@ -1367,9 +1369,11 @@ impl crate::state::ServerState {
             base_host = base_host.with_binary_http_interceptor(interceptor);
         }
         let production_host: Arc<dyn WasmHost> = Arc::new(base_host);
-        let inner: Arc<dyn WasmHost> = Arc::new(LocalTDataWasmHost::new(
+        let inner: Arc<dyn WasmHost> = Arc::new(LocalTDataWasmHost::new_for_invocation(
             self.clone(),
             tenant.clone(),
+            &context.entity_type,
+            &context.entity_id,
             None,
             production_host,
         ));

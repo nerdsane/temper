@@ -1104,6 +1104,16 @@ impl ServerState {
             to_status: state.status.clone(),
             timestamp: sim_now(),
             params: initial_fields,
+            custom_effects: vec![],
+            effect_receipt_version: Some(crate::entity_actor::effects::effect_receipt_version(
+                entity_type,
+                "",
+                "Created",
+                &state.status,
+                &[],
+            )),
+            scheduled_actions: vec![],
+            spawn_requests: vec![],
             idempotency_key: None,
         };
         let payload = serde_json::to_value(&created)

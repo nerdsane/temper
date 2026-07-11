@@ -12,7 +12,8 @@ use temper_server::request_context::AgentContext;
 /// now triggers `DispatchCallback`, so replaying callback wiring after a
 /// decision has already been approved or denied will immediately redeliver
 /// the resolution to the waiting target entity.
-pub(super) fn handle_dispatch_callback(
+pub(super) async fn handle_dispatch_callback(
+    governance_decision_id: &str,
     entity_fields: &serde_json::Value,
     server: &ServerState,
 ) -> Result<(), String> {
@@ -34,17 +35,29 @@ pub(super) fn handle_dispatch_callback(
         tracing::debug!("DispatchCallback: no callback registered — skipping");
         return Ok(());
     }
+    let callback_capability = entity_fields
+        .get("callback_capability")
+        .and_then(|value| value.as_str())
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| "DispatchCallback: target-minted capability is missing".to_string())?;
+    let capability = server
+        .validate_governance_callback_binding(
+            governance_decision_id,
+            entity_fields,
+            callback_capability,
+        )
+        .map_err(|error| format!("DispatchCallback: invalid callback capability: {error}"))?;
 
     let status = entity_fields
         .get("Status")
         .and_then(|v| v.as_str())
         .unwrap_or("");
     let callback_action = match status {
-        "Approved" => entity_fields
+        "Approving" | "Approved" => entity_fields
             .get("callback_on_approve")
             .and_then(|v| v.as_str())
             .unwrap_or(""),
-        "Denied" => entity_fields
+        "Denying" | "Denied" => entity_fields
             .get("callback_on_deny")
             .and_then(|v| v.as_str())
             .unwrap_or(""),
@@ -69,7 +82,12 @@ pub(super) fn handle_dispatch_callback(
         return Ok(());
     }
 
-    let params = if status == "Denied" {
+    let terminal_status = match status {
+        "Approving" | "Approved" => "Approved",
+        "Denying" | "Denied" => "Denied",
+        _ => unreachable!("callback status was matched above"),
+    };
+    let params = if terminal_status == "Denied" {
         serde_json::json!({"error_message": "Action denied by human reviewer"})
     } else {
         serde_json::json!({})
@@ -83,353 +101,46 @@ pub(super) fn handle_dispatch_callback(
         "DispatchCallback: dispatching callback"
     );
 
-    let server = server.clone();
-    let tenant = callback_tenant.to_string();
-    let entity_set = callback_entity_set.to_string();
-    let entity_id = callback_entity_id.to_string();
-    let action = callback_action.to_string();
-
-    tokio::spawn(async move {
-        // determinism-ok: async callback dispatch for governance decision resolution
-        let tid = TenantId::new(&tenant);
-        let entity_type = resolve_callback_entity_type(&server, &tid, &entity_set);
-        if let Err(e) = server
-            .dispatch_tenant_action(
-                &tid,
-                &entity_type,
-                &entity_id,
-                &action,
-                params,
-                &AgentContext::for_service("governance-service"),
+    let callback_idempotency_key = format!("{}:{terminal_status}", capability.delivery_id);
+    let tenant = TenantId::new(callback_tenant);
+    let entity_type = capability.target_entity_type;
+    let mut context = AgentContext::for_service("governance-service");
+    context.idempotency_key = Some(callback_idempotency_key);
+    let response = server
+        .dispatch_tenant_action(
+            &tenant,
+            &entity_type,
+            callback_entity_id,
+            callback_action,
+            params,
+            &context,
+        )
+        .await
+        .map_err(|error| {
+            format!(
+                "DispatchCallback: failed to dispatch {callback_entity_set}/{callback_entity_id}.{callback_action}: {error}"
             )
-            .await
-        {
-            tracing::error!(
-                error = %e,
-                tenant,
-                entity_set,
-                entity_type,
-                entity_id,
-                action,
-                "DispatchCallback: failed to dispatch callback action"
-            );
-        } else {
-            tracing::info!(
-                tenant,
-                entity_set,
-                entity_type,
-                entity_id,
-                action,
-                "DispatchCallback: callback action dispatched successfully"
-            );
-        }
-    });
+        })?;
+    if !response.success {
+        return Err(format!(
+            "DispatchCallback: target action failed: {}",
+            response
+                .error
+                .unwrap_or_else(|| "unknown callback failure".to_string())
+        ));
+    }
+    tracing::info!(
+        callback_tenant,
+        callback_entity_set,
+        entity_type,
+        callback_entity_id,
+        callback_action,
+        "DispatchCallback: callback action dispatched successfully"
+    );
 
     Ok(())
 }
 
-/// Resolve a callback target from an OData entity-set name to a governed entity type.
-///
-/// Callbacks are registered over HTTP and therefore store OData-facing entity set names
-/// like `Sessions`. The dispatch layer, however, expects governed entity type names like
-/// `Session`. If the callback already contains a type name, we preserve it.
-fn resolve_callback_entity_type(
-    server: &ServerState,
-    tenant: &TenantId,
-    entity_set_or_type: &str,
-) -> String {
-    {
-        let registry = match server.registry.read() {
-            Ok(registry) => registry,
-            Err(poisoned) => poisoned.into_inner(),
-        };
-        if let Some(entity_type) = registry.resolve_entity_type(tenant, entity_set_or_type) {
-            return entity_type;
-        }
-        if registry.get_spec(tenant, entity_set_or_type).is_some() {
-            return entity_set_or_type.to_string();
-        }
-    }
-    server
-        .entity_set_map
-        .get(entity_set_or_type)
-        .cloned()
-        .or_else(|| {
-            server
-                .transition_tables
-                .contains_key(entity_set_or_type)
-                .then(|| entity_set_or_type.to_string())
-        })
-        .unwrap_or_else(|| entity_set_or_type.to_string())
-}
-
 #[cfg(test)]
-mod tests {
-    use std::collections::BTreeMap;
-    use std::time::Duration;
-
-    use super::*;
-    use crate::bootstrap::{SYSTEM_TENANT, bootstrap_system_tenant};
-    use crate::state::PlatformState;
-    use temper_spec::csdl::{CsdlDocument, parse_csdl};
-
-    fn session_callback_csdl() -> (CsdlDocument, String) {
-        let xml = r#"<?xml version="1.0"?>
-        <edmx:Edmx Version="4.0" xmlns:edmx="http://docs.oasis-open.org/odata/ns/edmx">
-          <edmx:DataServices>
-            <Schema Namespace="OpenPaw.Test" xmlns="http://docs.oasis-open.org/odata/ns/edm">
-              <EntityType Name="Session">
-                <Key><PropertyRef Name="Id"/></Key>
-                <Property Name="Id" Type="Edm.Guid" Nullable="false"/>
-              </EntityType>
-              <EntityContainer Name="OpenPawTestService">
-                <EntitySet Name="Sessions" EntityType="OpenPaw.Test.Session"/>
-              </EntityContainer>
-            </Schema>
-          </edmx:DataServices>
-        </edmx:Edmx>"#;
-        (parse_csdl(xml).unwrap(), xml.to_string())
-    }
-
-    const SESSION_IOA: &str = r#"
-[automaton]
-name = "Session"
-initial = "WaitingForApproval"
-states = ["WaitingForApproval", "Executing", "Failed"]
-
-[[action]]
-name = "ResumeAfterApproval"
-from = ["WaitingForApproval"]
-to = "Executing"
-kind = "input"
-
-[[action]]
-name = "Fail"
-from = ["WaitingForApproval"]
-to = "Failed"
-kind = "input"
-params = ["error_message"]
-"#;
-
-    #[test]
-    fn callback_entity_set_resolution_uses_registry_mapping() {
-        let state = PlatformState::new(None);
-        let (csdl, xml) = session_callback_csdl();
-        state.registry.write().unwrap().register_tenant(
-            "default",
-            csdl,
-            xml,
-            &[("Session", SESSION_IOA)],
-        );
-
-        let tenant = TenantId::new("default");
-        assert_eq!(
-            resolve_callback_entity_type(&state.server, &tenant, "Sessions"),
-            "Session"
-        );
-    }
-
-    #[test]
-    fn callback_entity_set_resolution_preserves_entity_type_inputs() {
-        let state = PlatformState::new(None);
-        let (csdl, xml) = session_callback_csdl();
-        state.registry.write().unwrap().register_tenant(
-            "default",
-            csdl,
-            xml,
-            &[("Session", SESSION_IOA)],
-        );
-
-        let tenant = TenantId::new("default");
-        assert_eq!(
-            resolve_callback_entity_type(&state.server, &tenant, "Session"),
-            "Session"
-        );
-    }
-
-    #[tokio::test]
-    async fn approved_governance_decision_dispatches_callback_registered_with_entity_set_name() {
-        let state = PlatformState::new(None);
-        bootstrap_system_tenant(&state, &BTreeMap::new());
-
-        let (csdl, xml) = session_callback_csdl();
-        state.registry.write().unwrap().register_tenant(
-            "default",
-            csdl,
-            xml,
-            &[("Session", SESSION_IOA)],
-        );
-
-        let system_tenant = TenantId::new(SYSTEM_TENANT);
-        let app_tenant = TenantId::new("default");
-        let decision_id = "gd-callback-test";
-        let session_id = "ss-callback-test";
-
-        state
-            .server
-            .dispatch_tenant_action(
-                &system_tenant,
-                "GovernanceDecision",
-                decision_id,
-                "CreateGovernanceDecision",
-                serde_json::json!({
-                    "tenant": "default",
-                    "agent_id": "bot-openpaw",
-                    "action_name": "temper.submit_specs",
-                    "resource_type": "Session",
-                    "resource_id": session_id,
-                    "denial_reason": "",
-                    "scope": "narrow",
-                    "pending_decision_id": decision_id,
-                }),
-                &AgentContext::for_service("governance-service"),
-            )
-            .await
-            .expect("governance decision should be created");
-
-        state
-            .server
-            .dispatch_tenant_action(
-                &system_tenant,
-                "GovernanceDecision",
-                decision_id,
-                "RegisterCallback",
-                serde_json::json!({
-                    "callback_tenant": "default",
-                    "callback_entity_set": "Sessions",
-                    "callback_entity_id": session_id,
-                    "callback_on_approve": "ResumeAfterApproval",
-                    "callback_on_deny": "Fail",
-                }),
-                &AgentContext::for_service("governance-service"),
-            )
-            .await
-            .expect("callback should register");
-
-        state
-            .server
-            .dispatch_tenant_action(
-                &system_tenant,
-                "GovernanceDecision",
-                decision_id,
-                "Approve",
-                serde_json::json!({
-                    "decided_by": "human-reviewer",
-                    "scope": "narrow",
-                    "generated_policy": "",
-                }),
-                &AgentContext::for_service("governance-service"),
-            )
-            .await
-            .expect("approval should succeed");
-
-        tokio::time::timeout(Duration::from_secs(2), async {
-            loop {
-                if let Ok(entity) = state
-                    .server
-                    .get_tenant_entity_state(&app_tenant, "Session", session_id)
-                    .await
-                    && entity.state.status == "Executing"
-                {
-                    break;
-                }
-                tokio::time::sleep(Duration::from_millis(25)).await;
-            }
-        })
-        .await
-        .expect("callback should resume the target session");
-    }
-
-    #[tokio::test]
-    async fn late_callback_registration_replays_approved_governance_decision() {
-        let state = PlatformState::new(None);
-        bootstrap_system_tenant(&state, &BTreeMap::new());
-
-        let (csdl, xml) = session_callback_csdl();
-        state.registry.write().unwrap().register_tenant(
-            "default",
-            csdl,
-            xml,
-            &[("Session", SESSION_IOA)],
-        );
-
-        let system_tenant = TenantId::new(SYSTEM_TENANT);
-        let app_tenant = TenantId::new("default");
-        let decision_id = "gd-late-callback-test";
-        let session_id = "ss-late-callback-test";
-
-        state
-            .server
-            .dispatch_tenant_action(
-                &system_tenant,
-                "GovernanceDecision",
-                decision_id,
-                "CreateGovernanceDecision",
-                serde_json::json!({
-                    "tenant": "default",
-                    "agent_id": "bot-openpaw",
-                    "action_name": "temper.submit_specs",
-                    "resource_type": "Session",
-                    "resource_id": session_id,
-                    "denial_reason": "",
-                    "scope": "narrow",
-                    "pending_decision_id": decision_id,
-                }),
-                &AgentContext::for_service("governance-service"),
-            )
-            .await
-            .expect("governance decision should be created");
-
-        state
-            .server
-            .dispatch_tenant_action(
-                &system_tenant,
-                "GovernanceDecision",
-                decision_id,
-                "Approve",
-                serde_json::json!({
-                    "decided_by": "human-reviewer",
-                    "scope": "narrow",
-                    "generated_policy": "",
-                }),
-                &AgentContext::for_service("governance-service"),
-            )
-            .await
-            .expect("approval should succeed before callback registration");
-
-        state
-            .server
-            .dispatch_tenant_action(
-                &system_tenant,
-                "GovernanceDecision",
-                decision_id,
-                "RegisterCallback",
-                serde_json::json!({
-                    "callback_tenant": "default",
-                    "callback_entity_set": "Sessions",
-                    "callback_entity_id": session_id,
-                    "callback_on_approve": "ResumeAfterApproval",
-                    "callback_on_deny": "Fail",
-                }),
-                &AgentContext::for_service("governance-service"),
-            )
-            .await
-            .expect("late callback registration should replay the approval callback");
-
-        tokio::time::timeout(Duration::from_secs(2), async {
-            loop {
-                if let Ok(entity) = state
-                    .server
-                    .get_tenant_entity_state(&app_tenant, "Session", session_id)
-                    .await
-                    && entity.state.status == "Executing"
-                {
-                    break;
-                }
-                tokio::time::sleep(Duration::from_millis(25)).await;
-            }
-        })
-        .await
-        .expect("late callback registration should resume the target session");
-    }
-}
+#[path = "governance_callback_test.rs"]
+mod tests;

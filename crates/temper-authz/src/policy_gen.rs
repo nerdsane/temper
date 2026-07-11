@@ -62,7 +62,7 @@ pub enum DurationScope {
 ///
 /// Each dimension is independently selectable. The matrix is serialized as JSON
 /// and stored on approved `PendingDecision` records.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PolicyScopeMatrix {
     /// Who the policy applies to.
     pub principal: PrincipalScope,
@@ -153,7 +153,7 @@ fn cedar_uid(type_name: &str, id: &str) -> Result<String, String> {
 
 /// Validate and render a bare Cedar entity type name (for `principal is Type`
 /// / `resource is Type`). Fails closed on a non-identifier type name.
-fn cedar_type(type_name: &str) -> Result<String, String> {
+pub fn render_cedar_entity_type(type_name: &str) -> Result<String, String> {
     EntityTypeName::from_str(type_name)
         .map(|ty| ty.to_string())
         .map_err(|e| format!("invalid entity type name {type_name:?}: {e}"))
@@ -189,19 +189,11 @@ pub fn generate_cedar_from_matrix(
     resource_id: &str,
     matrix: &PolicyScopeMatrix,
 ) -> Result<String, String> {
-    // Pre-assertions (TigerStyle): companion fields must be present when their scope requires them.
-    debug_assert!(
-        matrix.principal != PrincipalScope::AgentsOfType || matrix.agent_type_value.is_some(),
-        "AgentsOfType requires agent_type_value"
-    );
-    debug_assert!(
-        matrix.principal != PrincipalScope::AgentsWithRole || matrix.role_value.is_some(),
-        "AgentsWithRole requires role_value"
-    );
-    debug_assert!(
-        matrix.duration != DurationScope::Session || matrix.session_id.is_some(),
-        "Session duration requires session_id"
-    );
+    // This function is the policy-generation security boundary. Validate here
+    // rather than relying on callers or debug-only assertions: a missing
+    // companion value would otherwise silently widen the generated policy in
+    // release builds.
+    validate_policy_scope_matrix(matrix)?;
 
     let principal_clause = match &matrix.principal {
         PrincipalScope::ThisAgent => {
@@ -209,7 +201,9 @@ pub fn generate_cedar_from_matrix(
         }
         PrincipalScope::AgentsWithRole
         | PrincipalScope::AgentsOfType
-        | PrincipalScope::AnyAgent => format!("principal is {}", cedar_type(principal_kind)?),
+        | PrincipalScope::AnyAgent => {
+            format!("principal is {}", render_cedar_entity_type(principal_kind)?)
+        }
     };
 
     let action_clause = match &matrix.action {
@@ -217,12 +211,15 @@ pub fn generate_cedar_from_matrix(
         ActionScope::AllActionsOnType | ActionScope::AllActions => "action".to_string(),
     };
 
-    let resource_clause = match &matrix.resource {
-        ResourceScope::ThisResource => {
+    let resource_clause = match (&matrix.action, &matrix.resource) {
+        (_, ResourceScope::ThisResource) => {
             format!("resource == {}", cedar_uid(resource_type, resource_id)?)
         }
-        ResourceScope::AnyOfType => format!("resource is {}", cedar_type(resource_type)?),
-        ResourceScope::AnyResource => "resource".to_string(),
+        (_, ResourceScope::AnyOfType)
+        | (ActionScope::AllActionsOnType, ResourceScope::AnyResource) => {
+            format!("resource is {}", render_cedar_entity_type(resource_type)?)
+        }
+        (_, ResourceScope::AnyResource) => "resource".to_string(),
     };
 
     // Build when conditions.
@@ -231,17 +228,18 @@ pub fn generate_cedar_from_matrix(
     match &matrix.principal {
         PrincipalScope::AgentsWithRole => {
             if let Some(ref role) = matrix.role_value {
-                conditions.push(format!("context.role == {}", cedar_string_literal(role)));
+                conditions.push(format!("principal.role == {}", cedar_string_literal(role)));
+                conditions.push("principal.agentTypeVerified == true".to_string());
             }
         }
         PrincipalScope::AgentsOfType => {
             if let Some(ref agent_type) = matrix.agent_type_value {
                 conditions.push(format!(
-                    "context.agentType == {}",
+                    "principal.agent_type == {}",
                     cedar_string_literal(agent_type)
                 ));
                 // Require credential-verified identity (ADR-0033).
-                conditions.push("context.agentTypeVerified == true".to_string());
+                conditions.push("principal.agentTypeVerified == true".to_string());
             }
         }
         _ => {}

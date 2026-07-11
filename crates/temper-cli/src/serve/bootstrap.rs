@@ -12,7 +12,6 @@ use anyhow::{Context, Result};
 
 use temper_platform::state::PlatformState;
 use temper_runtime::tenant::TenantId;
-use temper_server::authz::load_and_activate_tenant_policies;
 use temper_server::registry::SpecRegistry;
 use temper_server::registry_bootstrap::{
     restore_registry_from_postgres, restore_registry_from_turso,
@@ -276,18 +275,15 @@ pub(super) async fn hydrate_entities(state: &PlatformState, apps: &[(String, Str
 
 /// Phase 6: Recover Cedar policies from persistent storage.
 ///
-/// Two-pass recovery:
-/// 1. Legacy pass: reads from `tenant_policies` (flat blob per tenant) for
-///    backward compatibility with data written before this migration.
-/// 2. New pass: reads from `policies` (per-entry rows with hash tracking) via
-///    [`load_and_activate_tenant_policies`].  The new table takes precedence for
-///    any tenant that has entries there, overwriting what the legacy pass loaded.
+/// Loads the versioned granular snapshot for every tenant. A legacy flat blob
+/// is migrated through the same CAS publication boundary only when no granular
+/// snapshot exists yet; it is never activated as a parallel source of truth.
 pub(super) async fn recover_cedar_policies(state: &PlatformState) {
     let Some(stack) = state.server.storage_stack.as_ref() else {
         return;
     };
 
-    let mut all_policy_rows: Vec<(String, String)> = Vec::new();
+    let mut all_policy_rows = std::collections::BTreeMap::<String, String>::new();
 
     if let Some(platform_store) = stack.platform.as_ref() {
         match platform_store.load_tenant_policies().await {
@@ -309,36 +305,9 @@ pub(super) async fn recover_cedar_policies(state: &PlatformState) {
         }
     }
 
-    // Legacy pass: populate from old `tenant_policies` table (per-tenant reload).
-    if !all_policy_rows.is_empty() {
-        let mut loaded_count = 0usize;
-        for (tenant, policy_text) in &all_policy_rows {
-            // Validate each tenant's policies individually so one bad tenant
-            // doesn't prevent all others from loading.
-            if let Err(e) = state
-                .server
-                .authz
-                .reload_tenant_policies(tenant, policy_text)
-            {
-                eprintln!("  Warning: skipping invalid Cedar policies for tenant '{tenant}': {e}");
-                continue;
-            }
-            // Update in-memory text cache.
-            if let Ok(mut policies) = state.server.tenant_policies.write() {
-                policies.insert(tenant.clone(), policy_text.clone());
-            }
-            loaded_count += 1;
-        }
-        if loaded_count > 0 {
-            println!("  Restored Cedar policies for {loaded_count} tenants.");
-        }
-    }
-
-    // New pass: load from `policies` table (per-entry rows with hash tracking).
-    // Overwrites legacy data for any tenant that has entries in the new table.
-    // `load_and_activate_tenant_policies` logs via tracing on success; no-ops silently.
-    // Collect registered tenants; silently skip if registry lock is poisoned (unreachable in practice).
-    let tenants: Vec<String> = state
+    // Load complete versioned snapshots. A legacy blob is migrated once only
+    // when the tenant has no granular rows/publication yet.
+    let mut tenants: std::collections::BTreeSet<String> = state
         .server
         .registry
         .read()
@@ -349,9 +318,25 @@ pub(super) async fn recover_cedar_policies(state: &PlatformState) {
                 .collect()
         })
         .unwrap_or_default();
+    tenants.extend(all_policy_rows.keys().cloned());
 
-    for tenant in &tenants {
-        load_and_activate_tenant_policies(&state.server, tenant).await;
+    for tenant in tenants {
+        if let Err(error) = temper_server::authz::recover_policy_snapshot(
+            &state.server,
+            &tenant,
+            all_policy_rows.get(&tenant).map(String::as_str),
+        )
+        .await
+        {
+            eprintln!("  Warning: failed to activate policy snapshot for '{tenant}': {error}");
+            if let Err(fail_closed_error) =
+                temper_server::authz::fail_closed_tenant_policies(&state.server, &tenant)
+            {
+                eprintln!(
+                    "  Error: failed to default-deny tenant '{tenant}' after recovery fault: {fail_closed_error}"
+                );
+            }
+        }
     }
 }
 

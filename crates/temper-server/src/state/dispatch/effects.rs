@@ -727,13 +727,16 @@ impl crate::state::ServerState {
             && let Some(handler) = &self.custom_effect_handler
         {
             for effect_name in &response.custom_effects {
-                if let Err(e) = handler.handle(
-                    effect_name,
-                    ctx.entity_type,
-                    ctx.entity_id,
-                    &response.state.fields,
-                    self,
-                ) {
+                if let Err(e) = handler
+                    .handle(
+                        effect_name,
+                        ctx.entity_type,
+                        ctx.entity_id,
+                        &response.state.fields,
+                        self,
+                    )
+                    .await
+                {
                     tracing::error!(
                         effect = %effect_name,
                         entity_type = ctx.entity_type,
@@ -741,6 +744,22 @@ impl crate::state::ServerState {
                         error = %e,
                         "custom effect handler failed"
                     );
+                    // Custom effects are ordered spec semantics. Stop at the
+                    // first failure so later effects (notably governance
+                    // callbacks) cannot observe a partially-applied sequence.
+                    // Returning success=false also prevents the dispatch
+                    // idempotency entry from being marked effects-applied;
+                    // retrying the same key replays this effect list against
+                    // the already-durable transition.
+                    return EntityResponse {
+                        success: false,
+                        state: response.state.clone(),
+                        error: Some(format!("custom effect {effect_name:?} failed: {e}")),
+                        custom_effects: response.custom_effects.clone(),
+                        scheduled_actions: Vec::new(),
+                        spawn_requests: Vec::new(),
+                        spec_governed: response.spec_governed,
+                    };
                 }
             }
         }

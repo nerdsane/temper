@@ -6,6 +6,9 @@ use std::sync::OnceLock;
 use serde::{Deserialize, Serialize};
 use temper_runtime::actor::Message;
 
+use super::effects::{ScheduledAction, SpawnRequest};
+use super::idempotency::{DurableIdempotencyOutcome, idempotency_params_digest};
+
 // TigerStyle: Fixed resource budgets. No unbounded growth.
 // These are hard limits, not suggestions. Violations are assertion failures.
 
@@ -106,7 +109,7 @@ pub struct EntityState {
     /// Rebuilt from [`EntityEvent::idempotency_key`] during replay so a retry
     /// after process restart can return success without re-applying the action.
     #[serde(default)]
-    pub processed_idempotency_keys: BTreeMap<String, u64>,
+    pub processed_idempotency_keys: BTreeMap<String, DurableIdempotencyOutcome>,
 }
 
 impl EntityState {
@@ -119,8 +122,8 @@ impl EntityState {
     pub fn push_event_bounded(&mut self, event: EntityEvent) {
         self.total_event_count = self.total_event_count.saturating_add(1);
         self.events_since_snapshot = self.events_since_snapshot.saturating_add(1);
-        if let Some(key) = event.idempotency_key.as_deref() {
-            self.record_processed_idempotency_key(key);
+        if event.idempotency_key.is_some() {
+            self.record_processed_idempotency_event(&event);
         }
         self.events.push_back(event);
 
@@ -134,16 +137,35 @@ impl EntityState {
         self.processed_idempotency_keys.contains_key(key)
     }
 
-    fn record_processed_idempotency_key(&mut self, key: &str) {
+    /// Get the durable outcome for an already processed idempotency key.
+    pub fn processed_idempotency_outcome(&self, key: &str) -> Option<&DurableIdempotencyOutcome> {
+        self.processed_idempotency_keys.get(key)
+    }
+
+    fn record_processed_idempotency_event(&mut self, event: &EntityEvent) {
+        let key = event
+            .idempotency_key
+            .as_ref()
+            .expect("caller checks idempotency key presence");
         let sequence = self.sequence_nr.max(self.total_event_count as u64);
-        self.processed_idempotency_keys
-            .insert(key.to_string(), sequence);
+        self.processed_idempotency_keys.insert(
+            key.to_string(),
+            DurableIdempotencyOutcome::Completed {
+                sequence_nr: sequence,
+                action: event.action.clone(),
+                params_digest: Some(idempotency_params_digest(&event.params)),
+                effect_receipt_version: event.effect_receipt_version,
+                custom_effects: event.custom_effects.clone(),
+                scheduled_actions: event.scheduled_actions.clone(),
+                spawn_requests: event.spawn_requests.clone(),
+            },
+        );
 
         while self.processed_idempotency_keys.len() > MAX_DURABLE_IDEMPOTENCY_KEYS_PER_ENTITY {
             let Some(oldest_key) = self
                 .processed_idempotency_keys
                 .iter()
-                .min_by_key(|(_, sequence)| **sequence)
+                .min_by_key(|(_, outcome)| outcome.sequence_nr())
                 .map(|(key, _)| key.clone())
             else {
                 break;
@@ -166,6 +188,21 @@ pub struct EntityEvent {
     pub timestamp: chrono::DateTime<chrono::Utc>,
     /// Parameters passed with the action.
     pub params: serde_json::Value,
+    /// Ordered custom effects emitted by the committed transition.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub custom_effects: Vec<String>,
+    /// Content identity of the exact transition definition that produced the
+    /// persisted effect outputs. `None` means a legacy event had no explicit
+    /// receipt; `Some` with empty effect vectors is an authoritative empty
+    /// receipt and must never be re-derived from the current transition table.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub effect_receipt_version: Option<[u8; 32]>,
+    /// Ordered scheduled actions emitted by the committed transition.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub scheduled_actions: Vec<ScheduledAction>,
+    /// Ordered child-spawn requests emitted by the committed transition.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub spawn_requests: Vec<SpawnRequest>,
     /// Optional idempotency key that caused this transition.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub idempotency_key: Option<String>,
@@ -253,6 +290,69 @@ mod tests {
         assert_eq!(state.events_since_snapshot, 0);
         assert_eq!(state.last_snapshot_sequence_nr, 0);
         assert_eq!(state.sequence_nr, 0);
+    }
+
+    #[test]
+    fn legacy_sequence_only_idempotency_snapshot_still_deserializes() {
+        let state: EntityState = serde_json::from_value(json!({
+            "entity_type": "Task",
+            "entity_id": "task-legacy",
+            "status": "Done",
+            "item_count": 0,
+            "fields": {},
+            "events": [],
+            "processed_idempotency_keys": {"legacy-key": 7}
+        }))
+        .unwrap();
+
+        assert!(matches!(
+            state.processed_idempotency_outcome("legacy-key"),
+            Some(DurableIdempotencyOutcome::LegacySequence(7))
+        ));
+    }
+
+    #[test]
+    fn pushed_event_records_action_and_ordered_custom_effects() {
+        let mut state: EntityState = serde_json::from_value(json!({
+            "entity_type": "GovernanceDecision",
+            "entity_id": "gd-1",
+            "status": "Pending",
+            "item_count": 0,
+            "fields": {},
+            "events": []
+        }))
+        .unwrap();
+        state.push_event_bounded(EntityEvent {
+            action: "Approve".to_string(),
+            from_status: "Pending".to_string(),
+            to_status: "Approved".to_string(),
+            timestamp: chrono::DateTime::from_timestamp(0, 0).unwrap(),
+            params: json!({}),
+            custom_effects: vec![
+                "GenerateCedarPolicy".to_string(),
+                "DispatchCallback".to_string(),
+            ],
+            effect_receipt_version: Some([1; 32]),
+            scheduled_actions: vec![],
+            spawn_requests: vec![],
+            idempotency_key: Some("approval-1".to_string()),
+        });
+
+        assert!(matches!(
+            state.processed_idempotency_outcome("approval-1"),
+            Some(DurableIdempotencyOutcome::Completed {
+                action,
+                custom_effects,
+                ..
+            }) if action == "Approve"
+                && custom_effects == &["GenerateCedarPolicy", "DispatchCallback"]
+        ));
+        let round_trip: EntityState =
+            serde_json::from_str(&serde_json::to_string(&state).unwrap()).unwrap();
+        assert_eq!(
+            round_trip.processed_idempotency_outcome("approval-1"),
+            state.processed_idempotency_outcome("approval-1")
+        );
     }
 
     #[test]

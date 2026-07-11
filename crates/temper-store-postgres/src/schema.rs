@@ -263,6 +263,15 @@ CREATE TABLE IF NOT EXISTS policies (
     PRIMARY KEY (tenant, policy_id)
 );";
 
+/// Version head for one atomically published tenant policy snapshot.
+pub const CREATE_POLICY_PUBLICATIONS_TABLE: &str = "\
+CREATE TABLE IF NOT EXISTS policy_publications (
+    tenant        TEXT         PRIMARY KEY,
+    version       BIGINT       NOT NULL DEFAULT 0 CHECK (version >= 0),
+    snapshot_hash TEXT         NOT NULL DEFAULT '',
+    updated_at    TIMESTAMPTZ  NOT NULL DEFAULT now()
+);";
+
 /// Durable authorization denial patterns for policy suggestion reconstruction.
 pub const CREATE_POLICY_DENIAL_PATTERNS_TABLE: &str = "\
 CREATE TABLE IF NOT EXISTS policy_denial_patterns (
@@ -624,6 +633,13 @@ pub const ENABLE_TENANT_RLS: &[&str] = &[
          EXECUTE 'CREATE POLICY tenant_isolation ON policies USING (tenant = current_setting(''app.current_tenant'', true))'; \
        END IF; \
      END $$",
+    // -- policy_publications --
+    "ALTER TABLE policy_publications ENABLE ROW LEVEL SECURITY",
+    "DO $$ BEGIN \
+       IF NOT EXISTS (SELECT 1 FROM pg_policies WHERE tablename = 'policy_publications' AND policyname = 'tenant_isolation') THEN \
+         EXECUTE 'CREATE POLICY tenant_isolation ON policy_publications USING (tenant = current_setting(''app.current_tenant'', true))'; \
+       END IF; \
+     END $$",
     // -- policy_denial_patterns --
     "ALTER TABLE policy_denial_patterns ENABLE ROW LEVEL SECURITY",
     "DO $$ BEGIN \
@@ -833,6 +849,10 @@ mod tests {
             "policies schema should use IF NOT EXISTS"
         );
         assert!(
+            CREATE_POLICY_PUBLICATIONS_TABLE.contains("IF NOT EXISTS"),
+            "policy_publications schema should use IF NOT EXISTS"
+        );
+        assert!(
             CREATE_POLICY_DENIAL_PATTERNS_TABLE.contains("IF NOT EXISTS"),
             "policy_denial_patterns schema should use IF NOT EXISTS"
         );
@@ -960,6 +980,7 @@ mod tests {
             "pending_decisions",
             "tenant_policies",
             "policies",
+            "policy_publications",
             "policy_denial_patterns",
             "tenant_installed_apps",
             "entity_catalog",

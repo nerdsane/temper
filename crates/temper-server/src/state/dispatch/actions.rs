@@ -163,6 +163,31 @@ impl crate::state::ServerState {
             await_reactions,
         } = cmd;
 
+        if entity_type == "GovernanceDecision"
+            && action.rsplit('.').next() == Some("RegisterCallback")
+        {
+            let encoded = params
+                .get("callback_capability")
+                .and_then(serde_json::Value::as_str)
+                .filter(|value| !value.is_empty())
+                .ok_or_else(|| {
+                    DispatchError::AuthzDenied(
+                        "RegisterCallback requires a target-minted capability".to_string(),
+                    )
+                })?;
+            self.validate_governance_callback_binding(entity_id, &params, encoded)
+                .map_err(DispatchError::AuthzDenied)?;
+        }
+        if entity_type == "GovernanceDecision"
+            && matches!(action.rsplit('.').next(), Some("Approve" | "Deny"))
+            && agent_ctx.agent_id.as_deref() != Some("service:platform-dispatch")
+        {
+            return Err(DispatchError::AuthzDenied(
+                "GovernanceDecision resolution requires the canonical durable decision API"
+                    .to_string(),
+            ));
+        }
+
         if self
             .composite_metadata_for(tenant, entity_type, action)?
             .is_some()
@@ -406,6 +431,7 @@ impl crate::state::ServerState {
             return Err(DispatchError::Ungoverned(entity_type.to_string()));
         }
 
+        let actor_key = format!("{tenant}:{entity_type}:{entity_id}");
         // W2 phase: actor_spawn — registry lookup / actor-creation path.
         // Emitted as a child span so `aggregate_spans group by resource_name`
         // slices dispatch latency by phase cleanly.
@@ -418,7 +444,6 @@ impl crate::state::ServerState {
             )
             .entered();
             let registry_start = std::time::Instant::now(); // determinism-ok: wall-clock latency metric only, not on simulation path
-            let actor_key = format!("{tenant}:{entity_type}:{entity_id}");
             let existed = self
                 .actor_registry
                 .read()
@@ -698,13 +723,6 @@ impl crate::state::ServerState {
             await_integration,
         };
         let response = self.run_post_dispatch_effects(&ctx, response).await;
-        if response.success
-            && let Some(ref idem_key) = idempotency_key
-        {
-            let actor_key = format!("{tenant}:{entity_type}:{entity_id}");
-            self.idempotency_cache
-                .mark_effects_applied(&actor_key, idem_key);
-        }
         if response.success {
             self.clear_commons_storage_projection_cache_for_entity(entity_type);
         }
