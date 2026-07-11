@@ -97,6 +97,13 @@ impl RegistryQuarantineReason {
     }
 
     /// Parse the validated durable representation.
+    #[cfg_attr(
+        not(feature = "observe"),
+        allow(
+            dead_code,
+            reason = "registry quarantine HTTP API is compiled only with observe"
+        )
+    )]
     pub(crate) fn from_storage(value: &str) -> Option<Self> {
         match value {
             "missing_csdl" => Some(Self::MissingCsdl),
@@ -133,6 +140,13 @@ impl RegistryQuarantineSource {
     }
 
     /// Parse the validated durable representation.
+    #[cfg_attr(
+        not(feature = "observe"),
+        allow(
+            dead_code,
+            reason = "registry quarantine HTTP API is compiled only with observe"
+        )
+    )]
     pub(crate) fn from_storage(value: &str) -> Option<Self> {
         match value {
             "csdl" => Some(Self::Csdl),

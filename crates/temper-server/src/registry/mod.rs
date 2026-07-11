@@ -120,6 +120,13 @@ impl SpecRegistry {
     /// state is reconciled only if it did not change while the durable request
     /// was in flight; spec and constraint versions are never conflated into an
     /// unsound total ordering.
+    #[cfg_attr(
+        not(feature = "observe"),
+        allow(
+            dead_code,
+            reason = "registry quarantine HTTP API is compiled only with observe"
+        )
+    )]
     pub(crate) fn reconcile_acknowledged_restore_quarantine(
         &mut self,
         tenant: &str,

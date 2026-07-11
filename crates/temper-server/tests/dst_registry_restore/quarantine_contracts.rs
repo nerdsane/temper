@@ -52,6 +52,72 @@ async fn quarantine_durability_failure_cannot_masquerade_as_safe_degraded_boot()
 }
 
 #[tokio::test]
+async fn source_manifest_race_reloads_before_live_activation() {
+    let (_guard, _clock, _id_gen) = install_deterministic_context(96);
+    let store = SimPlatformStore::no_faults(96);
+    store
+        .upsert_spec("race", "Order", ORDER_IOA, ORDER_CSDL, "race-v1")
+        .await
+        .expect("seed race source");
+    store
+        .commit_specs("race")
+        .await
+        .expect("commit race source");
+    let mut faults = SimPlatformFaultConfig::none();
+    faults.registry_source_drift_budget = 1;
+    store.restore_faults(faults);
+
+    let mut registry = SpecRegistry::new();
+    assert_eq!(
+        restore_registry_from_platform_store(&mut registry, &store)
+            .await
+            .expect("one manifest race must be retried"),
+        1
+    );
+    assert!(
+        registry
+            .get_table(&TenantId::new("race"), "Order")
+            .is_some()
+    );
+    assert!(registry.restore_health().is_healthy());
+    assert_eq!(
+        store.load_specs().await.expect("load raced source")[0].version,
+        2,
+        "the successful activation must come from the reloaded source identity"
+    );
+}
+
+#[tokio::test]
+async fn exhausted_manifest_races_leave_live_registry_untouched() {
+    let (_guard, _clock, _id_gen) = install_deterministic_context(97);
+    let store = SimPlatformStore::no_faults(97);
+    store
+        .upsert_spec("racing", "Order", ORDER_IOA, ORDER_CSDL, "racing-v1")
+        .await
+        .expect("seed repeatedly racing source");
+    store
+        .commit_specs("racing")
+        .await
+        .expect("commit repeatedly racing source");
+    let mut faults = SimPlatformFaultConfig::none();
+    faults.registry_source_drift_budget = 3;
+    store.restore_faults(faults);
+
+    let mut registry = SpecRegistry::new();
+    let error = restore_registry_from_platform_store(&mut registry, &store)
+        .await
+        .expect_err("the bounded retry budget must terminate");
+    assert!(error.contains("snapshot changed on all 3 attempts"));
+    assert!(
+        registry
+            .get_table(&TenantId::new("racing"), "Order")
+            .is_none(),
+        "a source generation that lost CAS must never activate"
+    );
+    assert!(registry.restore_health().is_healthy());
+}
+
+#[tokio::test]
 async fn resolved_sim_quarantine_reopens_same_version_with_history_intact() {
     let (_guard, _clock, _id_gen) = install_deterministic_context(92);
     let store = SimPlatformStore::no_faults(92);

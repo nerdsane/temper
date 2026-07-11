@@ -20,6 +20,8 @@ pub struct SimPlatformFaultConfig {
     pub spec_read_failure_prob: f64,
     /// Probability of a durable quarantine reconciliation failure.
     pub quarantine_write_failure_prob: f64,
+    /// Number of quarantine CAS attempts that first advance a committed source version.
+    pub registry_source_drift_budget: usize,
     /// Probability of an active quarantine read failure.
     pub quarantine_read_failure_prob: f64,
     /// Probability of a write failure on policy upsert.
@@ -47,6 +49,7 @@ impl SimPlatformFaultConfig {
             spec_write_failure_prob: 0.0,
             spec_read_failure_prob: 0.0,
             quarantine_write_failure_prob: 0.0,
+            registry_source_drift_budget: 0,
             quarantine_read_failure_prob: 0.0,
             policy_write_failure_prob: 0.0,
             policy_read_failure_prob: 0.0,
@@ -65,6 +68,7 @@ impl SimPlatformFaultConfig {
             spec_write_failure_prob: 0.05,
             spec_read_failure_prob: 0.02,
             quarantine_write_failure_prob: 0.03,
+            registry_source_drift_budget: 0,
             quarantine_read_failure_prob: 0.02,
             policy_write_failure_prob: 0.05,
             policy_read_failure_prob: 0.02,

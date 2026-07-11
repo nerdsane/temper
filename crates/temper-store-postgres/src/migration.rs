@@ -42,6 +42,7 @@ mod tests {
             include_str!("../migrations/0011_key_index_watermark_key_set.sql"),
             include_str!("../migrations/0012_entity_vector_index.sql"),
             include_str!("../migrations/0013_registry_restore_quarantine.sql"),
+            include_str!("../migrations/0014_spec_source_generations.sql"),
         ]
         .join("\n")
         .to_lowercase();
@@ -59,6 +60,9 @@ mod tests {
             "snapshot_history",
             "ots_trajectories",
             "registry_restore_quarantines",
+            "spec_source_generations",
+            "spec_staging",
+            "tenant_constraint_generations",
         ] {
             assert!(
                 migration.contains(&format!("create table if not exists {table}")),

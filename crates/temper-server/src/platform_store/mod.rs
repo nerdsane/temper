@@ -11,6 +11,9 @@ use std::collections::{BTreeMap, BTreeSet};
 mod source_snapshot;
 pub use source_snapshot::RegistrySourceSnapshot;
 
+/// Maximum UTF-8 byte length of one persisted quarantine diagnostic.
+pub(crate) const REGISTRY_QUARANTINE_DETAIL_BUDGET_BYTES: usize = 512;
+
 // ---------------------------------------------------------------------------
 // Row / update types
 // ---------------------------------------------------------------------------
@@ -135,8 +138,10 @@ fn validate_registry_quarantine_snapshot(
                 row.source_kind
             ));
         }
-        if row.detail.len() > 512 {
-            return Err("registry quarantine detail exceeds 512-byte budget".to_string());
+        if row.detail.len() > REGISTRY_QUARANTINE_DETAIL_BUDGET_BYTES {
+            return Err(format!(
+                "registry quarantine detail exceeds {REGISTRY_QUARANTINE_DETAIL_BUDGET_BYTES}-byte budget"
+            ));
         }
         if row.constraint_version.is_some_and(|version| version <= 0) {
             return Err("registry quarantine constraint version must be positive".to_string());

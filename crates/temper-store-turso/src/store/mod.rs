@@ -33,6 +33,7 @@ mod published_artifacts;
 mod query_page;
 mod registry_quarantine;
 mod secrets;
+mod spec_promotion;
 mod specs;
 #[cfg(test)]
 mod tests;
@@ -298,6 +299,17 @@ impl TursoEventStore {
         // Specs table extensions — add content_hash column for verification caching.
         let _ = conn.execute(schema::ALTER_SPECS_ADD_CONTENT_HASH, ()).await;
         let _ = conn.execute(schema::ALTER_SPECS_ADD_COMMITTED, ()).await;
+        for statement in [
+            schema::CREATE_SPEC_SOURCE_GENERATIONS_TABLE,
+            schema::CREATE_SPEC_STAGING_TABLE,
+            schema::BACKFILL_SPEC_SOURCE_GENERATIONS,
+            schema::MIGRATE_LEGACY_UNCOMMITTED_SPECS,
+            schema::DELETE_LEGACY_UNCOMMITTED_SPECS,
+            schema::CREATE_TENANT_CONSTRAINT_GENERATIONS_TABLE,
+            schema::BACKFILL_TENANT_CONSTRAINT_GENERATIONS,
+        ] {
+            conn.execute(statement, ()).await.map_err(storage_error)?;
+        }
 
         // Trajectory table extensions — ALTER TABLE to add missing columns.
         // SQLite returns an error for duplicate columns, so we ignore failures.

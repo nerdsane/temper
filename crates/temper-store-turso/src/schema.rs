@@ -1,6 +1,7 @@
 //! SQLite-compatible schema for the Turso/libSQL event store.
 
 mod query_plane;
+mod spec_sources;
 
 pub use crate::schema_event_history::{
     ALTER_EVENTS_ADD_SEGMENT_INDEX, CREATE_EVENT_SEGMENTS_OPEN_INDEX, CREATE_EVENT_SEGMENTS_TABLE,
@@ -14,6 +15,7 @@ pub use query_plane::{
     CREATE_ENTITY_VECTOR_INDEX_ENTITY, CREATE_ENTITY_VECTOR_INDEX_PARTITION,
     CREATE_ENTITY_VECTOR_INDEX_TABLE, CREATE_VECTOR_INDEX_BACKFILL_WATERMARK,
 };
+pub use spec_sources::*;
 
 pub const CREATE_EVENTS_TABLE: &str = "\
 CREATE TABLE IF NOT EXISTS events (
@@ -43,22 +45,6 @@ CREATE TABLE IF NOT EXISTS snapshots (
     snapshot BLOB NOT NULL,
     created_at TEXT NOT NULL DEFAULT (datetime('now')),
     PRIMARY KEY(tenant, entity_type, entity_id)
-);";
-
-pub const CREATE_SPECS_TABLE: &str = "\
-CREATE TABLE IF NOT EXISTS specs (
-    tenant TEXT NOT NULL,
-    entity_type TEXT NOT NULL,
-    ioa_source TEXT NOT NULL,
-    csdl_xml TEXT,
-    version INTEGER NOT NULL DEFAULT 1,
-    verified INTEGER NOT NULL DEFAULT 0,
-    verification_status TEXT NOT NULL DEFAULT 'pending',
-    levels_passed INTEGER,
-    levels_total INTEGER,
-    verification_result TEXT,
-    updated_at TEXT NOT NULL DEFAULT (datetime('now')),
-    UNIQUE(tenant, entity_type)
 );";
 
 /// Durable active/history records for registry restore failures.
@@ -106,14 +92,6 @@ CREATE INDEX IF NOT EXISTS idx_trajectories_success
 pub const CREATE_TRAJECTORIES_ENTITY_ACTION_INDEX: &str = "\
 CREATE INDEX IF NOT EXISTS idx_trajectories_entity_action
     ON trajectories(tenant, entity_type, action);";
-
-pub const CREATE_TENANT_CONSTRAINTS_TABLE: &str = "\
-CREATE TABLE IF NOT EXISTS tenant_constraints (
-    tenant TEXT NOT NULL PRIMARY KEY,
-    cross_invariants_toml TEXT NOT NULL,
-    version INTEGER NOT NULL DEFAULT 1,
-    updated_at TEXT NOT NULL DEFAULT (datetime('now'))
-);";
 
 /// CREATE TABLE statement for WASM module storage.
 ///
@@ -293,13 +271,6 @@ pub use installed_apps::*;
 // ---------------------------------------------------------------------------
 // Phase 0: Turso as single source of truth — new tables + trajectory extensions
 // ---------------------------------------------------------------------------
-
-/// ALTER TABLE migration: add content_hash to specs table.
-pub const ALTER_SPECS_ADD_CONTENT_HASH: &str = "ALTER TABLE specs ADD COLUMN content_hash TEXT";
-
-/// ALTER TABLE migration: add committed flag to specs table (WAL-style commit pattern).
-pub const ALTER_SPECS_ADD_COMMITTED: &str =
-    "ALTER TABLE specs ADD COLUMN committed INTEGER NOT NULL DEFAULT 1";
 
 /// ALTER TABLE migrations for the `trajectories` table.
 ///

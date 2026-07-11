@@ -205,11 +205,21 @@ fn populate_registry_isolates_corrupt_tenant() {
     let failure = &outcome.quarantined_tenants["corrupt"].entity_failures["Order"];
     assert_eq!(failure.spec_version, 7);
     assert_eq!(failure.source_kind, RegistryQuarantineSource::Csdl);
-    assert!(failure.detail.len() <= QUARANTINE_DETAIL_BUDGET_BYTES);
+    assert!(failure.detail.len() <= REGISTRY_QUARANTINE_DETAIL_BUDGET_BYTES);
     assert!(
         outcome.is_quarantined("corrupt", "Order"),
         "corrupt Order row must remain explicitly accounted for"
     );
+}
+
+#[test]
+fn source_positions_require_a_marker_word_and_adjacent_number() {
+    assert_eq!(
+        source_position("no baseline value at offset 12; line 5, column: 7"),
+        (Some(5), Some(7))
+    );
+    assert_eq!(source_position("online protocol 12; color 8"), (None, None));
+    assert_eq!(source_position("lineage 3; 3-line buffer 4"), (None, None));
 }
 
 #[test]

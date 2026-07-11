@@ -12,8 +12,9 @@ use temper_store_postgres::PostgresEventStore;
 use temper_store_turso::TursoEventStore;
 
 use crate::platform_store::{
-    PlatformStore, RegistryQuarantineRecord, RegistryQuarantineResolution,
-    RegistryQuarantineUpsert, RegistrySourceSnapshot, SpecRow, TenantConstraintRow,
+    PlatformStore, REGISTRY_QUARANTINE_DETAIL_BUDGET_BYTES, RegistryQuarantineRecord,
+    RegistryQuarantineResolution, RegistryQuarantineUpsert, RegistrySourceSnapshot, SpecRow,
+    TenantConstraintRow,
 };
 use crate::registry::{
     EntityLevelSummary, EntityVerificationResult, RegistryQuarantineFailure,
@@ -21,7 +22,6 @@ use crate::registry::{
     RegistryTenantQuarantine, SpecRegistry, VerificationStatus,
 };
 
-const QUARANTINE_DETAIL_BUDGET_BYTES: usize = 512;
 pub(crate) const REGISTRY_QUARANTINE_ENTITY_BUDGET: usize = 256;
 
 /// Common accessors for spec rows from different storage backends.
@@ -151,10 +151,10 @@ fn restored_csdl_for_rows<R>(
 
 fn bounded_quarantine_detail(error: &str) -> String {
     let normalized = error.split_whitespace().collect::<Vec<_>>().join(" ");
-    if normalized.len() <= QUARANTINE_DETAIL_BUDGET_BYTES {
+    if normalized.len() <= REGISTRY_QUARANTINE_DETAIL_BUDGET_BYTES {
         return normalized;
     }
-    let mut end = QUARANTINE_DETAIL_BUDGET_BYTES - '…'.len_utf8();
+    let mut end = REGISTRY_QUARANTINE_DETAIL_BUDGET_BYTES - '…'.len_utf8();
     while !normalized.is_char_boundary(end) {
         end -= 1;
     }
@@ -162,13 +162,28 @@ fn bounded_quarantine_detail(error: &str) -> String {
 }
 
 fn number_after(text: &str, marker: &str) -> Option<i64> {
-    let start = text.to_ascii_lowercase().find(marker)? + marker.len();
-    let digits = text[start..]
-        .chars()
-        .skip_while(|character| !character.is_ascii_digit())
-        .take_while(char::is_ascii_digit)
-        .collect::<String>();
-    (!digits.is_empty()).then(|| digits.parse().ok()).flatten()
+    let lower = text.to_ascii_lowercase();
+    lower.match_indices(marker).find_map(|(start, _)| {
+        let marker_end = start + marker.len();
+        let before = lower[..start].chars().next_back();
+        let after = lower[marker_end..].chars().next();
+        let starts_word =
+            before.is_none_or(|character| !character.is_ascii_alphanumeric() && character != '_');
+        let ends_word =
+            after.is_none_or(|character| !character.is_ascii_alphabetic() && character != '_');
+        if !starts_word || !ends_word {
+            return None;
+        }
+
+        let suffix = text[marker_end..].trim_start_matches(|character: char| {
+            character.is_ascii_whitespace() || matches!(character, ':' | '=' | '#')
+        });
+        let digits = suffix
+            .chars()
+            .take_while(char::is_ascii_digit)
+            .collect::<String>();
+        (!digits.is_empty()).then(|| digits.parse().ok()).flatten()
+    })
 }
 
 fn source_position(error: &str) -> (Option<i64>, Option<i64>) {
@@ -268,7 +283,7 @@ fn restore_grouped_specs<R: SpecRowLike>(
                     .zip(ioa_owned.iter())
                     .map(|(row, (entity_type, _))| {
                         let is_direct_source = get_csdl(row)
-                            .is_some_and(|source| source.trim() == error.source.as_str());
+                            .is_some_and(|source| source.trim() == error.source.trim());
                         let (source_kind, detail) = if is_direct_source {
                             (RegistryQuarantineSource::Csdl, error.detail.clone())
                         } else {

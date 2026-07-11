@@ -88,11 +88,47 @@ otherwise clear an older quarantine without writing a new failure row.
 The quarantine transaction is part of the restore contract. If Temper cannot
 persist and re-read the active snapshot, startup returns an error rather than
 claiming a tenant was safely quarantined when the only evidence is a log line.
+If the complete manifest compare-and-set loses a concurrent source commit,
+restore reloads and recompiles the complete snapshot within a three-attempt
+budget. Compilation occurs in a detached registry and live activation happens
+only after the quarantine transaction wins, so neither a stale attempt nor an
+exhausted retry budget can leak an unaccounted source generation into service.
+
+Spec and constraint versions are durable source generations, not row-local
+counters. Separate high-water tables survive source deletion, abandoned staging,
+and cleanup, so recreating the same tenant/entity or constraint can never reuse
+an earlier identity. This makes the version manifest resistant to delete/recreate
+ABA races even when the recreated bytes are identical. Quarantine history and
+acknowledgment remain keyed by that generation; a recreated failure therefore
+opens a new unacknowledged record instead of aliasing prior operator intent.
 
 **Why this approach**: retained source is evidence of what failed, while the
 versioned quarantine record is evidence that activation was deliberately
 withheld. Both are required to distinguish safe degraded operation from silent
 registry/store drift.
+
+### Atomic source promotion and last-known-good preservation
+
+Single-source persistence writes a candidate into a staging table after
+reserving its non-reusable generation. It never overwrites the committed source.
+`commit_specs` promotes every staged row for a tenant in one transaction and
+then clears the staging rows. Startup cleanup removes abandoned staging and
+legacy uncommitted rows only; the prior committed generation remains readable.
+
+`load-dir` and `load-inline` use a tenant-level atomic promotion operation rather
+than issuing individual source writes. The transaction reserves generations,
+promotes every changed IOA/CSDL row, applies the exact constraint change, and,
+for replace mode, removes entity types absent from the submitted complete set.
+Merge mode preserves omitted entities and an omitted constraint source. Only
+after the transaction commits does the server activate the already-validated
+sources in memory. The same operation is selected through the tenant metadata
+router, so single-database and routed Turso have identical durability semantics;
+Postgres provides the same contract in a database transaction.
+
+**Why this approach**: a successful HTTP response must name a committed source
+generation that restart will load. A crash or storage failure at any point before
+commit leaves the complete last-known-good generation active, never a partial
+mixture and never a deleted replacement.
 
 ### Degraded boot is queryable state
 
@@ -206,12 +242,9 @@ constraints after durable resolution.
 - Parser details could expose source fragments. The health API carries only a
   stable category; bounded detail is limited to protected logs and the
   authenticated repair API.
-- The existing Turso single-row spec write path stages `committed = 0` by
-  overwriting the prior row, while `/api/specs/load-dir` does not complete a
-  batch commit. Startup cleanup can therefore delete a successfully hot-loaded
-  row and its prior last-known-good source. Fixing that requires a separate
-  atomic staged/batch commit design and restart E2E; ARN-190 deliberately does
-  not disguise it as part of quarantine recovery.
+- Abandoned staged generations consume generation numbers. This is deliberate:
+  non-reuse is more important than gap-free numbering, and operators never
+  infer successful activation from numerical adjacency.
 
 ### DST Compliance
 
@@ -227,9 +260,6 @@ constraints after durable resolution.
 
 - Automatically rewriting or repairing corrupt source is not part of startup.
 - Serving a tenant whose registry failed to compile is not permitted.
-- Redesigning all spec mutation endpoints around an atomic last-known-good
-  staging transaction is tracked separately; this ADR only defines how boot
-  handles the committed snapshot it receives.
 
 ## Alternatives Considered
 

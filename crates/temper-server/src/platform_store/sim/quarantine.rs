@@ -20,6 +20,21 @@ fn read_guard(inner: &mut SimPlatformStoreInner) -> Result<(), String> {
     }
 }
 
+fn inject_registry_source_drift(inner: &mut SimPlatformStoreInner, tenant_scope: Option<&str>) {
+    if inner.faults.registry_source_drift_budget == 0 {
+        return;
+    }
+    inner.faults.registry_source_drift_budget -= 1;
+    if let Some(row) = inner
+        .specs
+        .values_mut()
+        .find(|row| row.committed && tenant_scope.is_none_or(|tenant| row.tenant == tenant))
+    {
+        row.version = row.version.saturating_add(1);
+        row.updated_at = format!("sim-version-{}", row.version);
+    }
+}
+
 fn record(
     row: RegistryQuarantineUpsert<'_>,
     existing: Option<&RegistryQuarantineRecord>,
@@ -89,6 +104,7 @@ pub(super) fn replace(
     }
     let mut inner = store.inner.lock().expect("SimPlatformStore lock poisoned"); // ci-ok: infallible lock
     write_guard(&mut inner)?;
+    inject_registry_source_drift(&mut inner, tenant_scope);
     if !source_matches(&inner, tenant_scope, source) {
         return Ok(false);
     }

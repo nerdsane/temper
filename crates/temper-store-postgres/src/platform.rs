@@ -1050,31 +1050,99 @@ impl PostgresEventStore {
         csdl_xml: &str,
         content_hash: &str,
     ) -> Result<(), PersistenceError> {
-        crate::dbm::postgres_query!(
-            "INSERT INTO specs \
-             (tenant, entity_type, ioa_source, csdl_xml, content_hash, committed, version, verified, verification_status, updated_at) \
-             VALUES ($1, $2, $3, $4, $5, false, 1, false, 'pending', now()) \
-             ON CONFLICT (tenant, entity_type) DO UPDATE SET \
-                 ioa_source = CASE WHEN specs.content_hash IS DISTINCT FROM EXCLUDED.content_hash OR specs.csdl_xml IS DISTINCT FROM EXCLUDED.csdl_xml THEN EXCLUDED.ioa_source ELSE specs.ioa_source END, \
-                 csdl_xml = CASE WHEN specs.content_hash IS DISTINCT FROM EXCLUDED.content_hash OR specs.csdl_xml IS DISTINCT FROM EXCLUDED.csdl_xml THEN EXCLUDED.csdl_xml ELSE specs.csdl_xml END, \
-                 content_hash = CASE WHEN specs.content_hash IS DISTINCT FROM EXCLUDED.content_hash OR specs.csdl_xml IS DISTINCT FROM EXCLUDED.csdl_xml THEN EXCLUDED.content_hash ELSE specs.content_hash END, \
-                 committed = CASE WHEN specs.content_hash IS DISTINCT FROM EXCLUDED.content_hash OR specs.csdl_xml IS DISTINCT FROM EXCLUDED.csdl_xml THEN false ELSE specs.committed END, \
-                 version = CASE WHEN specs.content_hash IS DISTINCT FROM EXCLUDED.content_hash OR specs.csdl_xml IS DISTINCT FROM EXCLUDED.csdl_xml THEN specs.version + 1 ELSE specs.version END, \
-                 verified = CASE WHEN specs.content_hash IS DISTINCT FROM EXCLUDED.content_hash OR specs.csdl_xml IS DISTINCT FROM EXCLUDED.csdl_xml THEN false ELSE specs.verified END, \
-                 verification_status = CASE WHEN specs.content_hash IS DISTINCT FROM EXCLUDED.content_hash OR specs.csdl_xml IS DISTINCT FROM EXCLUDED.csdl_xml THEN 'pending' ELSE specs.verification_status END, \
-                 levels_passed = CASE WHEN specs.content_hash IS DISTINCT FROM EXCLUDED.content_hash OR specs.csdl_xml IS DISTINCT FROM EXCLUDED.csdl_xml THEN NULL ELSE specs.levels_passed END, \
-                 levels_total = CASE WHEN specs.content_hash IS DISTINCT FROM EXCLUDED.content_hash OR specs.csdl_xml IS DISTINCT FROM EXCLUDED.csdl_xml THEN NULL ELSE specs.levels_total END, \
-                 verification_result = CASE WHEN specs.content_hash IS DISTINCT FROM EXCLUDED.content_hash OR specs.csdl_xml IS DISTINCT FROM EXCLUDED.csdl_xml THEN NULL ELSE specs.verification_result END, \
-                 updated_at = CASE WHEN specs.content_hash IS DISTINCT FROM EXCLUDED.content_hash OR specs.csdl_xml IS DISTINCT FROM EXCLUDED.csdl_xml THEN now() ELSE specs.updated_at END",
+        let mut tx = self.pool().begin().await.map_err(storage_error)?;
+        let committed_match = sqlx::query(
+            "SELECT 1 FROM specs \
+             WHERE tenant = $1 AND entity_type = $2 AND committed = true \
+               AND ioa_source = $3 AND csdl_xml IS NOT DISTINCT FROM $4 \
+               AND content_hash IS NOT DISTINCT FROM $5 \
+             LIMIT 1",
         )
         .bind(tenant)
         .bind(entity_type)
         .bind(ioa_source)
         .bind(csdl_xml)
         .bind(content_hash)
-        .execute(self.pool())
+        .fetch_optional(&mut *tx)
         .await
-        .map_err(storage_error)?;
+        .map_err(storage_error)?
+        .is_some();
+        if committed_match {
+            sqlx::query("DELETE FROM spec_staging WHERE tenant = $1 AND entity_type = $2")
+                .bind(tenant)
+                .bind(entity_type)
+                .execute(&mut *tx)
+                .await
+                .map_err(storage_error)?;
+            tx.commit().await.map_err(storage_error)?;
+            return Ok(());
+        }
+
+        let staged_match = sqlx::query(
+            "SELECT 1 FROM spec_staging \
+             WHERE tenant = $1 AND entity_type = $2 \
+               AND ioa_source = $3 AND csdl_xml IS NOT DISTINCT FROM $4 \
+               AND content_hash IS NOT DISTINCT FROM $5 \
+             LIMIT 1",
+        )
+        .bind(tenant)
+        .bind(entity_type)
+        .bind(ioa_source)
+        .bind(csdl_xml)
+        .bind(content_hash)
+        .fetch_optional(&mut *tx)
+        .await
+        .map_err(storage_error)?
+        .is_some();
+        if !staged_match {
+            sqlx::query(
+                "INSERT INTO spec_source_generations (tenant, entity_type, generation) \
+                 VALUES ($1, $2, 1) \
+                 ON CONFLICT (tenant, entity_type) DO UPDATE SET generation = spec_source_generations.generation + 1",
+            )
+            .bind(tenant)
+            .bind(entity_type)
+            .execute(&mut *tx)
+            .await
+            .map_err(storage_error)?;
+            let generation: i64 = sqlx::query(
+                "SELECT generation FROM spec_source_generations WHERE tenant = $1 AND entity_type = $2",
+            )
+            .bind(tenant)
+            .bind(entity_type)
+            .fetch_one(&mut *tx)
+            .await
+            .map_err(storage_error)?
+            .get(0);
+            sqlx::query(
+                "INSERT INTO spec_staging (
+                     tenant, entity_type, ioa_source, csdl_xml, content_hash, version,
+                     verified, verification_status, levels_passed, levels_total,
+                     verification_result, staged_at
+                 ) VALUES ($1, $2, $3, $4, $5, $6, false, 'pending', NULL, NULL, NULL, now())
+                 ON CONFLICT (tenant, entity_type) DO UPDATE SET
+                     ioa_source = EXCLUDED.ioa_source,
+                     csdl_xml = EXCLUDED.csdl_xml,
+                     content_hash = EXCLUDED.content_hash,
+                     version = EXCLUDED.version,
+                     verified = false,
+                     verification_status = 'pending',
+                     levels_passed = NULL,
+                     levels_total = NULL,
+                     verification_result = NULL,
+                     staged_at = now()",
+            )
+            .bind(tenant)
+            .bind(entity_type)
+            .bind(ioa_source)
+            .bind(csdl_xml)
+            .bind(content_hash)
+            .bind(generation)
+            .execute(&mut *tx)
+            .await
+            .map_err(storage_error)?;
+        }
+        tx.commit().await.map_err(storage_error)?;
         Ok(())
     }
 
@@ -1095,32 +1163,81 @@ impl PostgresEventStore {
         tenant: &str,
         entity_type: &str,
     ) -> Result<(), PersistenceError> {
-        crate::dbm::postgres_query!("DELETE FROM specs WHERE tenant = $1 AND entity_type = $2")
+        let mut tx = self.pool().begin().await.map_err(storage_error)?;
+        sqlx::query("DELETE FROM spec_staging WHERE tenant = $1 AND entity_type = $2")
             .bind(tenant)
             .bind(entity_type)
-            .execute(self.pool())
+            .execute(&mut *tx)
             .await
             .map_err(storage_error)?;
+        sqlx::query("DELETE FROM specs WHERE tenant = $1 AND entity_type = $2")
+            .bind(tenant)
+            .bind(entity_type)
+            .execute(&mut *tx)
+            .await
+            .map_err(storage_error)?;
+        tx.commit().await.map_err(storage_error)?;
         Ok(())
     }
 
     pub async fn commit_specs(&self, tenant: &str) -> Result<(), PersistenceError> {
-        crate::dbm::postgres_query!(
-            "UPDATE specs SET committed = true, updated_at = now() WHERE tenant = $1"
+        let mut tx = self.pool().begin().await.map_err(storage_error)?;
+        sqlx::query(
+            "INSERT INTO specs (
+                 tenant, entity_type, ioa_source, csdl_xml, content_hash, committed,
+                 version, verified, verification_status, levels_passed, levels_total,
+                 verification_result, updated_at
+             )
+             SELECT tenant, entity_type, ioa_source, csdl_xml, content_hash, true,
+                    version, verified, verification_status, levels_passed, levels_total,
+                    verification_result, now()
+             FROM spec_staging WHERE tenant = $1
+             ON CONFLICT (tenant, entity_type) DO UPDATE SET
+                 ioa_source = EXCLUDED.ioa_source,
+                 csdl_xml = EXCLUDED.csdl_xml,
+                 content_hash = EXCLUDED.content_hash,
+                 committed = true,
+                 version = EXCLUDED.version,
+                 verified = EXCLUDED.verified,
+                 verification_status = EXCLUDED.verification_status,
+                 levels_passed = EXCLUDED.levels_passed,
+                 levels_total = EXCLUDED.levels_total,
+                 verification_result = EXCLUDED.verification_result,
+                 updated_at = now()",
         )
         .bind(tenant)
-        .execute(self.pool())
+        .execute(&mut *tx)
         .await
         .map_err(storage_error)?;
+        sqlx::query("DELETE FROM spec_staging WHERE tenant = $1")
+            .bind(tenant)
+            .execute(&mut *tx)
+            .await
+            .map_err(storage_error)?;
+        sqlx::query(
+            "UPDATE specs SET committed = true, updated_at = now() \
+             WHERE tenant = $1 AND committed != true",
+        )
+        .bind(tenant)
+        .execute(&mut *tx)
+        .await
+        .map_err(storage_error)?;
+        tx.commit().await.map_err(storage_error)?;
         Ok(())
     }
 
     pub async fn delete_uncommitted_specs(&self) -> Result<usize, PersistenceError> {
-        let result = crate::dbm::postgres_query!("DELETE FROM specs WHERE committed = false")
-            .execute(self.pool())
+        let mut tx = self.pool().begin().await.map_err(storage_error)?;
+        let staged = sqlx::query("DELETE FROM spec_staging")
+            .execute(&mut *tx)
             .await
             .map_err(storage_error)?;
-        Ok(result.rows_affected() as usize)
+        let legacy = sqlx::query("DELETE FROM specs WHERE committed = false")
+            .execute(&mut *tx)
+            .await
+            .map_err(storage_error)?;
+        tx.commit().await.map_err(storage_error)?;
+        Ok((staged.rows_affected() + legacy.rows_affected()) as usize)
     }
 
     pub async fn load_verification_cache(
@@ -1128,7 +1245,7 @@ impl PostgresEventStore {
         tenant: &str,
     ) -> Result<BTreeMap<String, (String, bool)>, PersistenceError> {
         let rows: Vec<(String, String, bool)> = crate::dbm::postgres_query_as!(
-            "SELECT entity_type, content_hash, verified FROM specs WHERE tenant = $1",
+            "SELECT entity_type, content_hash, verified FROM specs WHERE tenant = $1 AND committed = true",
         )
         .bind(tenant)
         .fetch_all(self.pool())
@@ -1147,7 +1264,8 @@ impl PostgresEventStore {
         update: PostgresSpecVerificationUpdate<'_>,
     ) -> Result<(), PersistenceError> {
         let verification_result = parse_optional_json(update.verification_result_json)?;
-        crate::dbm::postgres_query!(
+        let mut tx = self.pool().begin().await.map_err(storage_error)?;
+        sqlx::query(
             "UPDATE specs SET verification_status = $3, verified = $4, levels_passed = $5, \
              levels_total = $6, verification_result = $7, updated_at = now() \
              WHERE tenant = $1 AND entity_type = $2",
@@ -1158,10 +1276,26 @@ impl PostgresEventStore {
         .bind(update.verified)
         .bind(update.levels_passed)
         .bind(update.levels_total)
-        .bind(verification_result)
-        .execute(self.pool())
+        .bind(verification_result.clone())
+        .execute(&mut *tx)
         .await
         .map_err(storage_error)?;
+        sqlx::query(
+            "UPDATE spec_staging SET verification_status = $3, verified = $4, levels_passed = $5, \
+             levels_total = $6, verification_result = $7, staged_at = now() \
+             WHERE tenant = $1 AND entity_type = $2",
+        )
+        .bind(tenant)
+        .bind(entity_type)
+        .bind(update.status)
+        .bind(update.verified)
+        .bind(update.levels_passed)
+        .bind(update.levels_total)
+        .bind(verification_result)
+        .execute(&mut *tx)
+        .await
+        .map_err(storage_error)?;
+        tx.commit().await.map_err(storage_error)?;
         Ok(())
     }
 
@@ -1325,17 +1459,44 @@ impl PostgresEventStore {
         tenant: &str,
         cross_invariants_toml: &str,
     ) -> Result<(), PersistenceError> {
-        crate::dbm::postgres_query!(
-            "INSERT INTO tenant_constraints (tenant, cross_invariants_toml, version, updated_at) \
-             VALUES ($1, $2, 1, now()) \
-             ON CONFLICT (tenant) DO UPDATE SET cross_invariants_toml = EXCLUDED.cross_invariants_toml, \
-                 version = tenant_constraints.version + 1, updated_at = now()",
+        let mut tx = self.pool().begin().await.map_err(storage_error)?;
+        let unchanged = sqlx::query_scalar::<_, bool>(
+            "SELECT EXISTS(
+                 SELECT 1 FROM tenant_constraints
+                 WHERE tenant = $1 AND cross_invariants_toml = $2
+             )",
         )
         .bind(tenant)
         .bind(cross_invariants_toml)
-        .execute(self.pool())
+        .fetch_one(&mut *tx)
         .await
         .map_err(storage_error)?;
+        if !unchanged {
+            let generation: i64 = sqlx::query_scalar(
+                "INSERT INTO tenant_constraint_generations (tenant, generation)
+                 VALUES ($1, 1)
+                 ON CONFLICT (tenant) DO UPDATE
+                 SET generation = tenant_constraint_generations.generation + 1
+                 RETURNING generation",
+            )
+            .bind(tenant)
+            .fetch_one(&mut *tx)
+            .await
+            .map_err(storage_error)?;
+            sqlx::query(
+                "INSERT INTO tenant_constraints (tenant, cross_invariants_toml, version, updated_at) \
+                 VALUES ($1, $2, $3, now()) \
+                 ON CONFLICT (tenant) DO UPDATE SET cross_invariants_toml = EXCLUDED.cross_invariants_toml, \
+                     version = EXCLUDED.version, updated_at = now()",
+            )
+            .bind(tenant)
+            .bind(cross_invariants_toml)
+            .bind(generation)
+            .execute(&mut *tx)
+            .await
+            .map_err(storage_error)?;
+        }
+        tx.commit().await.map_err(storage_error)?;
         Ok(())
     }
 
