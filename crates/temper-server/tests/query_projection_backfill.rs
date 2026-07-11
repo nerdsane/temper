@@ -1,39 +1,19 @@
+use std::sync::Arc;
+
 use temper_runtime::ActorSystem;
 use temper_runtime::persistence::EventStore;
 use temper_runtime::tenant::TenantId;
+use temper_store_sim::SimEventStore;
 use temper_store_turso::TursoEventStore;
 
 use temper_server::registry::SpecRegistry;
 use temper_server::request_context::AgentContext;
 use temper_server::state::ServerState;
-use temper_server::storage::StorageStack;
+use temper_server::storage::{BackendLabel, BoxedEventStore, QueryPlaneStore, StorageStack};
 use temper_spec::csdl::parse_csdl;
 
 const CSDL_XML: &str = include_str!("../../../test-fixtures/specs/model.csdl.xml");
 const ORDER_IOA: &str = include_str!("../../../test-fixtures/specs/order.ioa.toml");
-const PROJECTION_AWARE_ORDER_IOA: &str = r#"
-[automaton]
-name = "Order"
-states = ["Draft"]
-initial = "Draft"
-
-[[state]]
-name = "Title"
-type = "string"
-initial = ""
-
-[[state]]
-name = "progress_token"
-type = "counter"
-initial = "0"
-query_indexed = false
-
-[[action]]
-name = "Touch"
-from = ["Draft"]
-to = "Draft"
-effect = [{ type = "increment", var = "progress_token" }]
-"#;
 
 fn build_state_with_turso(system_name: &str, store: TursoEventStore) -> ServerState {
     let mut registry = SpecRegistry::new();
@@ -50,21 +30,24 @@ fn build_state_with_turso(system_name: &str, store: TursoEventStore) -> ServerSt
     state
 }
 
-fn build_projection_aware_state_with_turso(
+fn build_state_with_sim_events_and_turso_projection(
     system_name: &str,
-    store: TursoEventStore,
+    events: SimEventStore,
+    projection: TursoEventStore,
 ) -> ServerState {
-    let mut registry = SpecRegistry::new();
-    let csdl = parse_csdl(CSDL_XML).expect("CSDL should parse");
-    registry.register_tenant(
-        "tenant-a",
-        csdl,
-        CSDL_XML.to_string(),
-        &[("Order", PROJECTION_AWARE_ORDER_IOA)],
-    );
-
-    let mut state = ServerState::from_registry(ActorSystem::new(system_name), registry);
-    state.set_storage_stack(StorageStack::from_turso(store));
+    let mut state = build_state_with_turso(system_name, projection.clone());
+    state.set_storage_stack(StorageStack::new(
+        BackendLabel::Sim,
+        BoxedEventStore::new(events),
+        None,
+        None,
+        None,
+        None,
+        Some(Arc::new(projection) as Arc<dyn QueryPlaneStore>),
+        None,
+        None,
+        None,
+    ));
     state
 }
 
@@ -256,13 +239,16 @@ async fn startup_backfill_rebuilds_query_projection_without_hydrating_actors() {
         .expect("clear existing query projection");
 
     let restarted = build_state_with_turso("test-query-projection-restart", store.clone());
-    restarted.populate_index_from_store(&tenant).await;
+    restarted.populate_index_from_store(&tenant).await.unwrap();
     assert!(
         restarted.actor_registry.read().unwrap().is_empty(),
         "restart should begin cold before backfill"
     );
 
-    restarted.populate_field_index_from_snapshots(&tenant).await;
+    restarted
+        .populate_field_index_from_snapshots(&tenant)
+        .await
+        .expect("backfill query projections");
 
     assert!(
         restarted.actor_registry.read().unwrap().is_empty(),
@@ -290,9 +276,9 @@ async fn startup_backfill_rebuilds_query_projection_without_hydrating_actors() {
 }
 
 #[tokio::test]
-async fn query_projection_excludes_fields_marked_not_query_indexed() {
+async fn startup_backfill_replays_tail_after_snapshot_before_publishing() {
     let db_path = std::env::temp_dir().join(format!(
-        "temper-query-projection-opt-out-{}.db",
+        "temper-query-projection-stale-snapshot-{}.db",
         uuid::Uuid::new_v4()
     ));
     let db_url = format!("file:{}", db_path.display());
@@ -302,190 +288,153 @@ async fn query_projection_excludes_fields_marked_not_query_indexed() {
 
     let tenant = TenantId::new("tenant-a");
     let entity_type = "Order";
-    let entity_id = "ord-projection-opt-out";
+    let entity_id = "ord-stale-snapshot";
+    let persistence_id = format!("{tenant}:{entity_type}:{entity_id}");
 
-    let state =
-        build_projection_aware_state_with_turso("test-query-projection-opt-out", store.clone());
+    let state = build_state_with_turso("test-query-projection-stale-seed", store.clone());
     state
         .get_or_create_tenant_entity(
             &tenant,
             entity_type,
             entity_id,
-            serde_json::json!({"Title": "Projection Lifecycle"}),
+            serde_json::json!({"Title": "Must Stay Deleted"}),
         )
         .await
         .expect("create entity");
-    let response = state
-        .dispatch_tenant_action(
-            &tenant,
-            entity_type,
-            entity_id,
-            "Touch",
-            serde_json::json!({}),
-            &AgentContext::default(),
+    let live = state
+        .get_tenant_entity_state(&tenant, entity_type, entity_id)
+        .await
+        .expect("load live state")
+        .state;
+    store
+        .save_snapshot(
+            &persistence_id,
+            live.sequence_nr,
+            &serde_json::to_vec(&live).expect("serialize live snapshot"),
         )
         .await
-        .expect("dispatch Touch");
-    assert!(
-        response.success,
-        "Touch should succeed for projection opt-out test"
-    );
+        .expect("save deliberately stale snapshot");
 
-    let title_ids = wait_for_query_projection_ids(
-        &store,
-        tenant.as_str(),
-        entity_type,
-        "Title",
-        "Projection Lifecycle",
-        &[entity_id.to_string()],
-    )
-    .await;
-    assert_eq!(title_ids, vec![entity_id.to_string()]);
+    state
+        .delete_tenant_entity(&tenant, entity_type, entity_id)
+        .await
+        .expect("append deletion after snapshot");
 
-    let progress_ids = store
+    store
+        .upsert_query_projection_with_state(
+            tenant.as_str(),
+            entity_type,
+            entity_id,
+            &live.status,
+            &live.fields,
+            &serde_json::to_value(&live).expect("serialize stale projection state"),
+            live.sequence_nr,
+        )
+        .await
+        .expect("inject stale live projection");
+
+    let restarted = build_state_with_turso("test-query-projection-stale-restart", store.clone());
+    restarted
+        .populate_field_index_from_snapshots(&tenant)
+        .await
+        .expect("backfill query projections");
+
+    let ids = store
         .query_field_index(
             tenant.as_str(),
             entity_type,
             "field_name = ?3 AND field_value = ?4",
-            vec!["progress_token".to_string(), "1".to_string()],
+            vec!["Title".to_string(), "Must Stay Deleted".to_string()],
         )
         .await
-        .expect("query opt-out field");
+        .expect("query projection after strict backfill");
     assert!(
-        progress_ids.is_empty(),
-        "fields marked query_indexed=false should not appear in the field index"
+        ids.is_empty(),
+        "the deletion tail must win over the stale live snapshot"
+    );
+    assert!(
+        store
+            .projected_entity_counts_by_tenant()
+            .await
+            .expect("projected entity counts")
+            .is_empty(),
+        "a tombstoned entity must not remain in the projection catalog"
     );
 
     let _ = std::fs::remove_file(db_path);
 }
 
 #[tokio::test]
-async fn replay_parity_verifier_detects_projection_drift() {
+async fn startup_backfill_quarantines_stale_projection_when_recovery_fails() {
     let db_path = std::env::temp_dir().join(format!(
-        "temper-query-projection-parity-{}.db",
+        "temper-query-projection-recovery-error-{}.db",
         uuid::Uuid::new_v4()
     ));
     let db_url = format!("file:{}", db_path.display());
-    let store = TursoEventStore::new(&db_url, None)
+    let projection = TursoEventStore::new(&db_url, None)
         .await
-        .expect("create local turso db");
-
+        .expect("create local turso projection db");
+    let events = SimEventStore::no_faults(195);
     let tenant = TenantId::new("tenant-a");
     let entity_type = "Order";
-    let active_id = "ord-parity-active";
-    let deleted_id = "ord-parity-deleted";
+    let entity_id = "ord-recovery-error";
+    let persistence_id = format!("{tenant}:{entity_type}:{entity_id}");
 
-    let state = build_state_with_turso("test-query-projection-parity", store.clone());
-    state
-        .get_or_create_tenant_entity(
-            &tenant,
-            entity_type,
-            active_id,
-            serde_json::json!({"Title": "Parity Good"}),
-        )
-        .await
-        .expect("create active entity");
-    let response = state
-        .dispatch_tenant_action(
-            &tenant,
-            entity_type,
-            active_id,
-            "AddItem",
-            serde_json::json!({"ProductId": "sku-3", "Quantity": 1}),
-            &AgentContext::default(),
-        )
-        .await
-        .expect("dispatch AddItem");
-    assert!(
-        response.success,
-        "AddItem should succeed for parity verifier test"
+    let writer = build_state_with_sim_events_and_turso_projection(
+        "test-query-projection-recovery-error-writer",
+        events.clone(),
+        projection.clone(),
     );
-
-    state
+    writer
         .get_or_create_tenant_entity(
             &tenant,
             entity_type,
-            deleted_id,
-            serde_json::json!({"Title": "Parity Deleted"}),
+            entity_id,
+            serde_json::json!({"Title": "Uncertain Projection"}),
         )
         .await
-        .expect("create entity that will be deleted");
-    state
-        .delete_tenant_entity(&tenant, entity_type, deleted_id)
+        .expect("create durable entity");
+    let live = writer
+        .get_tenant_entity_state(&tenant, entity_type, entity_id)
         .await
-        .expect("delete parity entity");
-
-    let active_ids = wait_for_query_projection_ids(
-        &store,
-        tenant.as_str(),
-        entity_type,
-        "Title",
-        "Parity Good",
-        &[active_id.to_string()],
-    )
-    .await;
-    assert_eq!(active_ids, vec![active_id.to_string()]);
-    let counts = wait_for_projected_counts(&store, &[("tenant-a".to_string(), 1)]).await;
-    assert_eq!(counts, vec![("tenant-a".to_string(), 1)]);
-
-    let clean = state
-        .verify_query_projection_replay_parity(&tenant)
-        .await
-        .expect("clean replay parity report");
-    assert!(clean.is_clean(), "expected clean parity report: {clean:?}");
-    // ARN-192: whole-tenant `list_entity_ids` no longer filters tombstoned entities
-    // at the Turso store layer (deletion is now decided once, uniformly, in the
-    // server cold path), so the parity verifier — which enumerates via
-    // `list_entity_ids` — now also scans the deleted entity, exactly as it already
-    // did on Postgres. The deleted entity's projection was removed on delete, so it
-    // is classified `deleted_absent` (a clean match: replay says Deleted, catalog is
-    // absent), keeping the report clean while strengthening coverage.
-    assert_eq!(clean.checked, 2);
-    assert_eq!(clean.matched, 1);
-    assert_eq!(clean.deleted_absent, 1);
-
-    let actor_state = state
-        .get_tenant_entity_state(&tenant, entity_type, active_id)
-        .await
-        .expect("load active state");
-    let mut catalog_state = serde_json::to_value(&actor_state.state).expect("serialize state");
-    if let Some(obj) = catalog_state.as_object_mut() {
-        obj.insert("events".to_string(), serde_json::json!([]));
-    }
-    store
+        .expect("load live state")
+        .state;
+    projection
         .upsert_query_projection_with_state(
             tenant.as_str(),
             entity_type,
-            active_id,
-            &actor_state.state.status,
-            &serde_json::json!({"Title": "Parity Drift"}),
-            &catalog_state,
-            actor_state.state.sequence_nr,
+            entity_id,
+            &live.status,
+            &live.fields,
+            &serde_json::to_value(&live).expect("serialize stale projection"),
+            live.sequence_nr,
         )
         .await
-        .expect("inject projection drift");
+        .expect("seed stale projection");
 
-    let drift = state
-        .verify_query_projection_replay_parity(&tenant)
+    events.fail_next_reads(&persistence_id, 1);
+    let restarted = build_state_with_sim_events_and_turso_projection(
+        "test-query-projection-recovery-error-reader",
+        events,
+        projection.clone(),
+    );
+    restarted
+        .populate_field_index_from_snapshots(&tenant)
         .await
-        .expect("drift replay parity report");
-    assert!(!drift.is_clean(), "expected drift report: {drift:?}");
-    // ARN-192: the tombstoned entity is now enumerated here too (see the clean-check
-    // comment above), so the verifier scans both entities — the active one drifts,
-    // the deleted one stays a clean `deleted_absent`.
-    assert_eq!(drift.checked, 2);
-    assert_eq!(drift.drifted, 1);
-    assert_eq!(drift.deleted_absent, 1);
-    assert_eq!(drift.missing, 0);
-    assert_eq!(drift.errors, 0);
+        .expect_err("unreadable journal must report incomplete backfill");
+
     assert!(
-        drift.drift_examples.iter().any(|example| {
-            example.entity_type == entity_type
-                && example.entity_id == active_id
-                && example.drift_kind == "fields"
-                && example.sequence_direction == "equal"
-        }),
-        "expected fields drift example for active entity: {drift:?}"
+        projection
+            .query_field_index(
+                tenant.as_str(),
+                entity_type,
+                "field_name = ?3 AND field_value = ?4",
+                vec!["Title".to_string(), "Uncertain Projection".to_string(),],
+            )
+            .await
+            .expect("query projection after failed recovery")
+            .is_empty(),
+        "an unreadable journal must quarantine a pre-existing projection"
     );
 
     let _ = std::fs::remove_file(db_path);

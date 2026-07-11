@@ -121,10 +121,21 @@ pub async fn restore_genesis_app_cache_roots(platform: &PlatformState) -> usize 
 
     for source_tenant in source_tenants {
         let tenant = TenantId::new(&source_tenant);
-        let installation_ids = platform
+        let installation_ids = match platform
             .server
             .list_entity_ids_lazy(&tenant, "AppInstallation")
-            .await;
+            .await
+        {
+            Ok(ids) => ids,
+            Err(error) => {
+                tracing::error!(
+                    tenant = %tenant,
+                    error = %error,
+                    "failed to enumerate Genesis app installations during cache restore"
+                );
+                continue;
+            }
+        };
         for installation_id in installation_ids {
             let Ok(installation) = platform
                 .server
@@ -1413,7 +1424,10 @@ async fn resolve_genesis_app_by_ref(
     name: &str,
     version_hash: &str,
 ) -> Result<GenesisAppBundle, String> {
-    let ids = state.list_entity_ids_lazy(tenant, "App").await;
+    let ids = state
+        .list_entity_ids_lazy(tenant, "App")
+        .await
+        .map_err(|error| format!("enumerate Genesis Apps: {error}"))?;
     for entity_id in ids {
         let candidate = state
             .get_tenant_entity_state(tenant, "App", &entity_id)
@@ -1616,7 +1630,10 @@ async fn resolve_genesis_dependency(
     dependency: &str,
 ) -> Result<GenesisAppBundle, String> {
     let requested = parse_dependency_ref(dependency, preferred_owner);
-    let ids = state.list_entity_ids_lazy(tenant, "App").await;
+    let ids = state
+        .list_entity_ids_lazy(tenant, "App")
+        .await
+        .map_err(|error| format!("enumerate Genesis Apps: {error}"))?;
     let mut matches = Vec::new();
 
     for entity_id in ids {

@@ -25,7 +25,8 @@ use super::query_plane_read::{
     QueryPlaneReadBudget, QueryPlaneReadRequest, read_entity_set_from_query_plane,
 };
 use super::read_support::{
-    record_entity_set_not_found, resolve_entity_set_name, try_load_entity_body_from_catalog,
+    CatalogEntityLookup, load_actor_state_at_least, record_entity_set_not_found,
+    resolve_entity_set_name, try_load_entity_body_from_catalog,
 };
 use super::response::annotate_entity;
 use super::stream_fast_path::try_file_stream_fast_path;
@@ -227,21 +228,72 @@ async fn load_existing_entity_body(
     key: &str,
 ) -> Result<serde_json::Value, Response> {
     let prefer_catalog = state.query_plane_store().is_some();
-    if let Some(body) =
-        try_load_entity_body_from_catalog(state, tenant, entity_type, set_name, key, prefer_catalog)
-            .await
+    let journal_sequence = match try_load_entity_body_from_catalog(
+        state,
+        tenant,
+        entity_type,
+        set_name,
+        key,
+        prefer_catalog,
+    )
+    .await
     {
-        return Ok(body);
-    }
+        Ok(CatalogEntityLookup::Body(body)) => return Ok(body),
+        Ok(CatalogEntityLookup::MissingJournal) => {
+            return Err(resource_not_found_response(set_name, key));
+        }
+        Ok(CatalogEntityLookup::LiveJournalFallback(sequence)) => Some(sequence),
+        Ok(CatalogEntityLookup::UncheckedFallback) => None,
+        Err(error) => {
+            tracing::error!(
+                error = %error,
+                tenant = %tenant,
+                entity_type,
+                entity_id = key,
+                "failed to validate journal state for OData entity read"
+            );
+            return Err(odata_error(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "StorageUnavailable",
+                "Durable entity state is temporarily unavailable. Retry the request.",
+            )
+            .into_response());
+        }
+    };
 
-    if !state.entity_exists(tenant, entity_type, key) {
+    // The catalog is a derived projection, so a miss must fall back through
+    // the same authoritative journal-tail gate as collection reads. Checking
+    // only the in-memory index is unsafe: a stale index entry with no journal
+    // would let get_tenant_entity_state bootstrap a brand-new Created event
+    // during a read.
+    if journal_sequence.is_none() && !state.ensure_entity_loaded(tenant, entity_type, key).await {
         return Err(resource_not_found_response(set_name, key));
     }
 
-    let response = state
-        .get_tenant_entity_state(tenant, entity_type, key)
+    let response = load_actor_state_at_least(state, tenant, entity_type, key, journal_sequence)
         .await
-        .map_err(|_| resource_not_found_response(set_name, key))?;
+        .map_err(|error| {
+            if journal_sequence.is_some() {
+                tracing::error!(
+                    error = %error,
+                    tenant = %tenant,
+                    entity_type,
+                    entity_id = key,
+                    "failed to recover journal-confirmed entity for OData read"
+                );
+                odata_error(
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    "StorageUnavailable",
+                    "Durable entity state is temporarily unavailable. Retry the request.",
+                )
+                .into_response()
+            } else {
+                resource_not_found_response(set_name, key)
+            }
+        })?;
+    if response.state.status == "Deleted" {
+        return Err(resource_not_found_response(set_name, key));
+    }
     let mut body = serde_json::to_value(&response.state).unwrap_or_default();
     hydrate_blob_refs_for_tenant(state, tenant, &mut body).await;
     if let Some(obj) = body.as_object_mut() {
@@ -271,6 +323,7 @@ async fn load_authorized_entity_body(
         key,
         &body,
     )
+    .await
     .map_err(|response| *response)?;
     Ok(body)
 }
@@ -879,7 +932,9 @@ async fn handle_entity(
                     &entity_type,
                     &key_str,
                     &body,
-                ) {
+                )
+                .await
+                {
                     return *response;
                 }
                 ODataResponse {

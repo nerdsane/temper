@@ -13,6 +13,7 @@
 
 use sha2::{Digest, Sha256};
 use temper_jit::table::types::DeclaredKey;
+use temper_runtime::persistence::EntityKeyRow;
 
 /// Separates `key_name` from the value list.
 const UNIT_SEP: u8 = 0x1F;
@@ -91,6 +92,21 @@ pub fn canonical_key_hash(
         return None;
     }
     Some(format!("{:x}", hasher.finalize()))
+}
+
+/// Derive the complete desired key-index row set for an entity state.
+pub fn entity_key_rows(keys: &[DeclaredKey], fields: &serde_json::Value) -> Vec<EntityKeyRow> {
+    let Some(field_map) = fields.as_object() else {
+        return Vec::new();
+    };
+    keys.iter()
+        .filter_map(|key| {
+            canonical_key_hash(&key.name, &key.properties, field_map).map(|key_hash| EntityKeyRow {
+                key_name: key.name.clone(),
+                key_hash,
+            })
+        })
+        .collect()
 }
 
 /// Look up a declared key property in the entity's fields, tolerant of the

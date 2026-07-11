@@ -3,7 +3,7 @@ use axum::response::IntoResponse;
 use serde_json::Value;
 use temper_runtime::tenant::TenantId;
 
-use crate::response::odata_error;
+use crate::response::{odata_error, service_unavailable_response};
 use crate::state::ServerState;
 use crate::state::storage_caps::CommonsStorageCapError;
 
@@ -44,11 +44,11 @@ pub(super) async fn enforce_commons_storage_cap(
                     .into_response(),
             )
         }
-        Err(CommonsStorageCapError::Internal(msg)) => {
-            Err(
-                odata_error(StatusCode::INTERNAL_SERVER_ERROR, "StorageCapError", &msg)
-                    .into_response(),
-            )
-        }
+        Err(CommonsStorageCapError::Internal(error)) => Err(service_unavailable_response(
+            "StorageCapUnavailable",
+            "Storage quota verification is temporarily unavailable",
+            "commons_storage_cap",
+            error,
+        )),
     }
 }

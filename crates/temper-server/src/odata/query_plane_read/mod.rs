@@ -36,12 +36,18 @@ fn should_try_native_before_catalog_coverage(
 /// absence. So hits are fast and correct now; authoritative absence follows the
 /// per-tenant backfill watermark. `$orderby`/`$count` also decline (a point read
 /// has neither to honor).
-async fn keyed_candidate_ids(request: &QueryPlaneReadRequest<'_>) -> Option<Vec<String>> {
+async fn keyed_candidate_ids(
+    request: &QueryPlaneReadRequest<'_>,
+) -> Result<Option<Vec<String>>, QueryPlaneReadError> {
     if request.query_options.orderby.is_some() || request.query_options.count == Some(true) {
-        return None;
+        return Ok(None);
     }
-    let filter = request.query_options.filter.as_ref()?;
-    let pairs = super::filter_sql::equality_field_predicates(filter)?;
+    let Some(filter) = request.query_options.filter.as_ref() else {
+        return Ok(None);
+    };
+    let Some(pairs) = super::filter_sql::equality_field_predicates(filter) else {
+        return Ok(None);
+    };
     // Resolve declared keys via the registry-aware path: runtime-installed os-app
     // entities (File, Directory, …) live in the per-tenant registry, NOT in
     // `transition_tables`. Reading `transition_tables` here would return `None` for
@@ -49,8 +55,12 @@ async fn keyed_candidate_ids(request: &QueryPlaneReadRequest<'_>) -> Option<Vec<
     let keys = request
         .state
         .declared_keys_for(request.tenant, request.entity_type);
-    let (key_name, key_hash) = crate::key_index::resolve_query_to_key(&keys, &pairs)?;
-    let (store, _) = request.state.event_journal()?;
+    let Some((key_name, key_hash)) = crate::key_index::resolve_query_to_key(&keys, &pairs) else {
+        return Ok(None);
+    };
+    let Some((store, _)) = request.state.event_journal() else {
+        return Ok(None);
+    };
     match store
         .lookup_by_key(
             request.tenant.as_str(),
@@ -60,7 +70,10 @@ async fn keyed_candidate_ids(request: &QueryPlaneReadRequest<'_>) -> Option<Vec<
         )
         .await
     {
-        Ok(Some(entity_id)) => Some(vec![entity_id]),
+        // Liveness and exact journal sequence are validated once, centrally,
+        // by entity materialization. Re-probing here would double backend tail
+        // reads for the keyed fast path.
+        Ok(Some(entity_id)) => Ok(Some(vec![entity_id])),
         Ok(None) => {
             // A miss is authoritative absence ONLY once the backfill watermark says
             // `entity_key_index` is complete for this (tenant, type) — then we can
@@ -77,13 +90,20 @@ async fn keyed_candidate_ids(request: &QueryPlaneReadRequest<'_>) -> Option<Vec<
                 .key_index_backfill_complete(request.tenant, request.entity_type, &current_key_set)
                 .await
             {
-                Some(Vec::new())
+                Ok(Some(Vec::new()))
             } else {
-                None
+                Ok(None)
             }
         }
-        // Error: fall back to the full path (never trust a transient failure as absence).
-        Err(_) => None,
+        Err(error) => {
+            tracing::error!(
+                error = %error,
+                tenant = %request.tenant,
+                entity_type = request.entity_type,
+                "failed to resolve declared-key OData candidate"
+            );
+            Err(QueryPlaneReadError::StorageUnavailable)
+        }
     }
 }
 
@@ -164,7 +184,9 @@ pub(in crate::odata) async fn read_entity_set_page(
         request.entity_type,
         "",
         &serde_json::json!({}),
-    ) {
+    )
+    .await
+    {
         return Err(QueryPlaneReadError::AuthorizationDenied(response));
     }
 
@@ -249,7 +271,7 @@ pub(in crate::odata) async fn read_entity_set_page(
     // the read (coverage, budget, materialization, row-auth) runs unchanged and the
     // scan budget can never trip. On a miss we fall back to the full list, which still
     // covers pre-backfill entities — a safe additive fast path until #324 is retired.
-    let keyed = keyed_candidate_ids(&request).await;
+    let keyed = keyed_candidate_ids(&request).await?;
     // A keyed result of `Some([])` is authoritative absence (the watermark is set):
     // the co-committed `entity_key_index` has no such entity. We must NOT then run a
     // native page read — the eventually-consistent field index could still surface a
@@ -258,12 +280,19 @@ pub(in crate::odata) async fn read_entity_set_page(
     let keyed_authoritative_absent = matches!(&keyed, Some(ids) if ids.is_empty());
     let all_entity_ids = match keyed {
         Some(ids) => ids,
-        None => {
-            request
-                .state
-                .list_entity_ids_lazy(request.tenant, request.entity_type)
-                .await
-        }
+        None => request
+            .state
+            .list_entity_ids_lazy(request.tenant, request.entity_type)
+            .await
+            .map_err(|error| {
+                tracing::error!(
+                    error = %error,
+                    tenant = %request.tenant,
+                    entity_type = request.entity_type,
+                    "failed to classify durable OData collection candidates"
+                );
+                QueryPlaneReadError::StorageUnavailable
+            })?,
     };
     let needs_full_proof = request.query_options.filter.is_some()
         || request.query_options.orderby.is_some()

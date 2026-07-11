@@ -3,7 +3,7 @@ use axum::response::IntoResponse;
 use serde_json::Value;
 use temper_runtime::tenant::TenantId;
 
-use crate::response::odata_error;
+use crate::response::{odata_error, service_unavailable_response};
 use crate::state::ServerState;
 use crate::state::account_verification::CommonsAccountVerificationError;
 
@@ -70,13 +70,13 @@ fn map_account_verification_error(
             )
             .into_response(),
         )),
-        Err(CommonsAccountVerificationError::Internal(msg)) => Err(Box::new(
-            odata_error(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "AccountVerificationError",
-                &msg,
-            )
-            .into_response(),
-        )),
+        Err(CommonsAccountVerificationError::Internal(error)) => {
+            Err(Box::new(service_unavailable_response(
+                "AccountVerificationUnavailable",
+                "Account verification is temporarily unavailable",
+                "commons_account_verification",
+                error,
+            )))
+        }
     }
 }

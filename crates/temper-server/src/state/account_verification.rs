@@ -188,21 +188,17 @@ impl ServerState {
         tenant: &TenantId,
         repository_id: &str,
     ) -> Result<Option<String>, CommonsAccountVerificationError> {
-        if !self
-            .ensure_entity_loaded(tenant, "Repository", repository_id)
-            .await
-        {
-            return Ok(None);
-        }
-
         let repository = self
-            .get_tenant_entity_state(tenant, "Repository", repository_id)
+            .get_tenant_entity_state_authoritative(tenant, "Repository", repository_id)
             .await
             .map_err(|e| {
                 CommonsAccountVerificationError::Internal(format!(
                     "failed to read Repository '{repository_id}' for account verification: {e}"
                 ))
             })?;
+        let Some(repository) = repository else {
+            return Ok(None);
+        };
 
         Ok(first_non_empty_string(
             &repository.state.fields,
@@ -215,30 +211,42 @@ impl ServerState {
         tenant: &TenantId,
         owner_id: &str,
     ) -> Result<Option<OwnerVerificationProfile>, CommonsAccountVerificationError> {
-        if self
-            .ensure_entity_loaded(tenant, OWNER_ENTITY_TYPE, owner_id)
+        if let Some(profile) = self
+            .get_tenant_entity_state_authoritative(tenant, OWNER_ENTITY_TYPE, owner_id)
             .await
+            .map_err(|error| {
+                CommonsAccountVerificationError::Internal(format!(
+                    "failed to read Owner '{owner_id}' for account verification: {error}"
+                ))
+            })?
         {
-            return self
-                .owner_verification_profile_by_entity_id(tenant, owner_id)
-                .await;
+            return Ok(Some(OwnerVerificationProfile::from_fields(
+                owner_id,
+                &profile.state.status,
+                &profile.state.fields,
+            )));
         }
 
-        for candidate_id in self.list_entity_ids_lazy(tenant, OWNER_ENTITY_TYPE).await {
-            if !self
-                .ensure_entity_loaded(tenant, OWNER_ENTITY_TYPE, &candidate_id)
-                .await
-            {
-                continue;
-            }
+        for candidate_id in self
+            .list_entity_ids_lazy(tenant, OWNER_ENTITY_TYPE)
+            .await
+            .map_err(|error| {
+                CommonsAccountVerificationError::Internal(format!(
+                    "failed to list Owners for account verification: {error}"
+                ))
+            })?
+        {
             let owner = self
-                .get_tenant_entity_state(tenant, OWNER_ENTITY_TYPE, &candidate_id)
+                .get_tenant_entity_state_authoritative(tenant, OWNER_ENTITY_TYPE, &candidate_id)
                 .await
                 .map_err(|e| {
                     CommonsAccountVerificationError::Internal(format!(
                         "failed to read Owner '{candidate_id}' for account verification: {e}"
                     ))
                 })?;
+            let Some(owner) = owner else {
+                continue;
+            };
             let matches_account = first_non_empty_string(&owner.state.fields, &["AccountId"])
                 .as_deref()
                 == Some(owner_id);
@@ -256,26 +264,6 @@ impl ServerState {
         }
 
         Ok(None)
-    }
-
-    async fn owner_verification_profile_by_entity_id(
-        &self,
-        tenant: &TenantId,
-        owner_entity_id: &str,
-    ) -> Result<Option<OwnerVerificationProfile>, CommonsAccountVerificationError> {
-        let owner = self
-            .get_tenant_entity_state(tenant, OWNER_ENTITY_TYPE, owner_entity_id)
-            .await
-            .map_err(|e| {
-                CommonsAccountVerificationError::Internal(format!(
-                    "failed to read Owner '{owner_entity_id}' for account verification: {e}"
-                ))
-            })?;
-        Ok(Some(OwnerVerificationProfile::from_fields(
-            owner_entity_id,
-            &owner.state.status,
-            &owner.state.fields,
-        )))
     }
 }
 

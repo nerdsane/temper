@@ -17,25 +17,28 @@ pub(crate) enum DecisionListAccess {
 }
 
 impl DecisionListAccess {
-    pub(crate) fn filter(&self, data_strings: Vec<String>) -> Vec<String> {
+    pub(crate) fn filter(
+        &self,
+        data_strings: Vec<String>,
+    ) -> Result<Vec<String>, serde_json::Error> {
         match self {
-            Self::Full => data_strings,
+            Self::Full => Ok(data_strings),
             Self::Owned {
                 agent_id,
                 session_id,
-            } => data_strings
-                .into_iter()
-                .filter(|data| {
-                    serde_json::from_str::<PendingDecision>(data)
-                        .map(|decision| {
-                            let same_session = session_id
-                                .as_deref()
-                                .is_some_and(|id| decision.session_id.as_deref() == Some(id));
-                            decision.agent_id == *agent_id || same_session
-                        })
-                        .unwrap_or(false)
-                })
-                .collect(),
+            } => {
+                let mut owned = Vec::new();
+                for data in data_strings {
+                    let decision = serde_json::from_str::<PendingDecision>(&data)?;
+                    let same_session = session_id
+                        .as_deref()
+                        .is_some_and(|id| decision.session_id.as_deref() == Some(id));
+                    if decision.agent_id == *agent_id || same_session {
+                        owned.push(data);
+                    }
+                }
+                Ok(owned)
+            }
         }
     }
 }
@@ -64,5 +67,24 @@ pub(crate) async fn decision_list_access(
     match require_policy_auth(state, headers, tenant).await {
         Some(response) => Err(response),
         None => Ok(DecisionListAccess::Full),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn owned_access_rejects_corrupt_durable_decision() {
+        let access = DecisionListAccess::Owned {
+            agent_id: "agent-1".to_owned(),
+            session_id: None,
+        };
+
+        let error = access
+            .filter(vec!["not-json-with-secret-sentinel".to_owned()])
+            .expect_err("corrupt durable decisions must fail closed");
+
+        assert!(error.is_syntax());
     }
 }

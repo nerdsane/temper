@@ -180,10 +180,10 @@ pub(crate) async fn require_governed_mutation_auth(
         return None;
     }
 
-    input
-        .resource_attrs
-        .entry("id".to_string())
-        .or_insert_with(|| serde_json::Value::String(input.resource_id.to_string()));
+    input.resource_attrs.insert(
+        "id".to_string(),
+        serde_json::Value::String(input.resource_id.to_string()),
+    );
 
     let Err(denial) = state.authorize_with_context(
         &security_ctx,

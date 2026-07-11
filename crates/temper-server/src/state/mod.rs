@@ -5,6 +5,7 @@ pub mod admission;
 pub(crate) mod app_uniqueness;
 pub mod custom_effects;
 mod dispatch;
+mod entity_enumeration;
 mod entity_ops;
 mod evolution;
 mod file_initial_writes;
@@ -27,6 +28,9 @@ pub mod wasm_invocation_log;
 
 pub use admission::{AdmissionController, AdmissionOutcome, AdmissionPermit};
 pub use dispatch::{DispatchCommand, DispatchError, DispatchExtOptions, StateTimeoutTracker};
+pub(crate) use entity_ops::{
+    AuthzResourceSnapshot, CreateEntityOutcome, DeleteTargetLifecycle, FieldUpdateAuthorization,
+};
 pub use entity_ops::{FailedLevelInfo, VerificationGateError};
 pub use file_reads::{IndexedFileStreamRead, TextFileReadResult, TextFileVersionReadResult};
 pub(crate) use file_writes::FileStreamContentError;
@@ -396,6 +400,12 @@ pub struct ServerState {
     /// collection queries (a consumer would read present, durable entities as
     /// "not found").
     pub entity_index_hydrated: Arc<RwLock<BTreeSet<String>>>,
+    /// Serializes entity-index mutations with store-scan publication.
+    ///
+    /// A scan captures its tenant or tenant/type epoch before I/O and may
+    /// publish/mark hydrated only if a mutation in that scope did not advance it.
+    /// The mutex closes the check-then-publish race; it is never held across I/O.
+    pub(crate) entity_index_epoch: Arc<Mutex<BTreeMap<String, u64>>>,
     /// `{tenant}:{entity_type}` keys whose `entity_key_index` backfill is complete
     /// `"tenant:entity_type" -> covered key-set` (ADR-0153 watermark cache). The value
     /// is the sorted comma-joined declared key names the backfill covered. A keyed read
@@ -682,6 +692,7 @@ impl ServerState {
             registry: Arc::new(RwLock::new(SpecRegistry::new())),
             entity_index: Arc::new(RwLock::new(BTreeMap::new())),
             entity_index_hydrated: Arc::new(RwLock::new(BTreeSet::new())),
+            entity_index_epoch: Arc::new(Mutex::new(BTreeMap::new())),
             key_index_backfilled: Arc::new(RwLock::new(BTreeMap::new())),
             key_index_watermarks_loaded: Arc::new(RwLock::new(BTreeSet::new())),
             event_tx: Arc::new(event_tx),
@@ -930,6 +941,7 @@ impl ServerState {
             registry,
             entity_index: Arc::new(RwLock::new(BTreeMap::new())),
             entity_index_hydrated: Arc::new(RwLock::new(BTreeSet::new())),
+            entity_index_epoch: Arc::new(Mutex::new(BTreeMap::new())),
             key_index_backfilled: Arc::new(RwLock::new(BTreeMap::new())),
             key_index_watermarks_loaded: Arc::new(RwLock::new(BTreeSet::new())),
             event_tx: Arc::new(event_tx),

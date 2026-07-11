@@ -253,6 +253,36 @@ async fn run_until_quiescent(system: &ActorSystem, max_polls: usize) {
 // ─── Tests ───────────────────────────────────────────────────────────────────
 
 #[tokio::test]
+async fn spawn_with_fields_if_absent_reports_collision_without_overwrite() {
+    let pool = test_pool().await;
+    let system = ActorSystem::new(pool.clone(), SchedulerConfig::default());
+    let namespace = format!("strict-create/{}", Uuid::new_v4());
+    let actor_type = "StrictCreate";
+
+    let created = system
+        .spawn_with_fields_if_absent(
+            &namespace,
+            actor_type,
+            serde_json::json!({"OwnerId": "winner"}),
+        )
+        .await
+        .unwrap();
+    assert!(matches!(created, ActorSpawnOutcome::Created(_)));
+    let collision = system
+        .spawn_with_fields_if_absent(
+            &namespace,
+            actor_type,
+            serde_json::json!({"OwnerId": "loser"}),
+        )
+        .await
+        .unwrap();
+    assert!(matches!(collision, ActorSpawnOutcome::AlreadyExists(_)));
+
+    let state = load_state(&pool, &namespace, actor_type).await;
+    assert_eq!(state["fields"]["OwnerId"], "winner");
+}
+
+#[tokio::test]
 async fn test_tell_and_activate() {
     let pool = test_pool().await;
     let system = ActorSystem::new(pool.clone(), SchedulerConfig::default());

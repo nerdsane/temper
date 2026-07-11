@@ -1,12 +1,11 @@
 use std::collections::BTreeMap;
 use std::time::Instant;
 
+use temper_runtime::persistence::{PersistenceError, validate_latest_event_batch};
 use temper_runtime::tenant::TenantId;
 
-use crate::entity_actor::recover_entity_state_from_store;
-use crate::runtime_metrics;
-
 use super::ServerState;
+use crate::entity_actor::recover_entity_state_from_store;
 
 mod key_index;
 mod replay_parity;
@@ -92,18 +91,21 @@ pub(super) async fn load_entity_current_fields(
 /// AND-equality candidate pushdown can bound any non-keyed point lookup (e.g. `Path eq
 /// '/souls' and WorkspaceId eq …`) instead of full-scanning and 413ing at tenant scale
 /// (ARN-68). Enumerates authoritatively (registry types + `store.list_entity_ids_by_type`),
-/// loads each entity's current state from its snapshot (or event replay), and upserts the
+/// rebuilds each entity's current state from its snapshot plus journal tail, and upserts the
 /// query projection. Idempotent (re-runs converge; it re-processes every entity — there
 /// is no watermark/skip like the key-index backfill has); runs as a background task off
 /// the boot path. This is the generic counterpart to the declared-key backfill — covers ALL
 /// types, where the key backfill covers only declared-key shapes (incl. null components).
-pub(super) async fn populate_field_index_from_snapshots(state: &ServerState, tenant: &TenantId) {
+pub(super) async fn populate_field_index_from_snapshots(
+    state: &ServerState,
+    tenant: &TenantId,
+) -> Result<(), PersistenceError> {
     let overall_started_at = Instant::now(); // determinism-ok: production-only backfill duration metric
     let Some((store, backend)) = state.event_journal() else {
-        return;
+        return Ok(());
     };
     let Some(query_plane) = state.query_plane_store() else {
-        return;
+        return Ok(());
     };
 
     // Enumerate authoritatively: every entity type from the registry, and its entity
@@ -124,9 +126,9 @@ pub(super) async fn populate_field_index_from_snapshots(state: &ServerState, ten
                 .collect()
         };
         let mut result = Vec::new();
+        let mut failed_types = Vec::new();
         for entity_type in &entity_types {
-            match store
-                .list_entity_ids_by_type(tenant.as_str(), entity_type)
+            match super::entity_enumeration::bounded_entity_ids_by_type(&store, tenant, entity_type)
                 .await
             {
                 Ok(ids) => {
@@ -139,11 +141,14 @@ pub(super) async fn populate_field_index_from_snapshots(state: &ServerState, ten
                         tenant = %tenant, entity_type = %entity_type, error = %e,
                         "field index backfill: failed to enumerate entities; type skipped"
                     );
+                    failed_types.push(entity_type.clone());
                 }
             }
         }
-        result
+        (result, failed_types)
     };
+
+    let (entities, enumeration_failures) = entities;
 
     let total = entities.len();
     let mut considered_by_type = BTreeMap::<String, u64>::new();
@@ -161,120 +166,38 @@ pub(super) async fn populate_field_index_from_snapshots(state: &ServerState, ten
     }
 
     let mut indexed = 0usize;
-    let mut errors = 0usize;
-    let mut needs_replay = Vec::new();
+    let mut errors = enumeration_failures.len();
+    let mut failed_types = enumeration_failures
+        .into_iter()
+        .collect::<std::collections::BTreeSet<_>>();
 
     for (entity_type, entity_id) in &entities {
-        let persistence_id = format!("{tenant}:{entity_type}:{entity_id}");
-        match store.load_snapshot(&persistence_id).await {
-            Ok(Some((_seq, snapshot_bytes))) => {
-                if let Ok(state_snapshot) =
-                    serde_json::from_slice::<crate::entity_actor::EntityState>(&snapshot_bytes)
-                {
-                    if let Err(e) = query_plane
-                        .upsert_projection(
-                            tenant.as_str(),
-                            entity_type,
-                            entity_id,
-                            &state_snapshot.status,
-                            &state.query_projection_fields(
-                                tenant,
-                                entity_type,
-                                &state_snapshot.fields,
-                            ),
-                            &state.query_projection_state(&state_snapshot),
-                            state_snapshot.sequence_nr,
-                        )
-                        .await
-                    {
-                        tracing::debug!(
-                            error = %e,
-                            entity_type = %entity_type,
-                            entity_id = %entity_id,
-                            "field index backfill: upsert failed"
-                        );
-                        errors += 1;
-                        crate::query_projection_metrics::record_backfill_entities(
-                            tenant.as_str(),
-                            entity_type,
-                            "backfill_snapshot",
-                            "error",
-                            1,
-                        );
-                    } else {
-                        indexed += 1;
-                        crate::query_projection_metrics::record_backfill_entities(
-                            tenant.as_str(),
-                            entity_type,
-                            "backfill_snapshot",
-                            "ok",
-                            1,
-                        );
-                        crate::query_projection_metrics::record_update_applied_sequence(
-                            tenant.as_str(),
-                            entity_type,
-                            "upsert",
-                            "backfill_snapshot",
-                            state_snapshot.sequence_nr,
-                        );
-                    }
-                }
-            }
-            Ok(None) => {
-                needs_replay.push((entity_type.clone(), entity_id.clone()));
-                crate::query_projection_metrics::record_backfill_entities(
-                    tenant.as_str(),
-                    entity_type,
-                    "backfill_snapshot",
-                    "missing_snapshot",
-                    1,
-                );
-            }
-            Err(e) => {
-                tracing::debug!(
-                    error = %e,
-                    entity_type = %entity_type,
-                    entity_id = %entity_id,
-                    "field index backfill: snapshot load failed"
-                );
-                errors += 1;
-                crate::query_projection_metrics::record_backfill_entities(
-                    tenant.as_str(),
-                    entity_type,
-                    "backfill_snapshot",
-                    "error",
-                    1,
-                );
-            }
-        }
-        // Phase 1 now iterates EVERY entity (not the near-empty lazy index), so yield
-        // between entities for cooperative back-pressure on large tenants — mirroring
-        // phase 2 and the key-index backfill.
-        tokio::task::yield_now().await;
-    }
-
-    tracing::info!(
-        tenant = %tenant,
-        total,
-        snapshot_indexed = indexed,
-        needs_replay = needs_replay.len(),
-        "field index phase 1 (snapshots) complete, starting phase 2 (persistence replay)"
-    );
-    if !needs_replay.is_empty() {
-        runtime_metrics::record_projection_backfill_snapshot_misses(
-            tenant.as_str(),
-            needs_replay.len() as u64,
-        );
-    }
-
-    for (entity_type, entity_id) in &needs_replay {
         let Some(table) = transition_table_for(state, tenant, entity_type) else {
-            tracing::debug!(
+            tracing::error!(
                 entity_type = %entity_type,
                 entity_id = %entity_id,
                 "field index backfill: no transition table available for replay"
             );
             errors += 1;
+            failed_types.insert(entity_type.clone());
+            if let Err(error) = remove_projection_at_current_tail(
+                &query_plane,
+                &store,
+                tenant,
+                entity_type,
+                entity_id,
+            )
+            .await
+            {
+                tracing::error!(
+                    %error,
+                    entity_type = %entity_type,
+                    entity_id = %entity_id,
+                    "field index backfill: failed to quarantine projection without a table"
+                );
+                errors += 1;
+                failed_types.insert(entity_type.clone());
+            }
             crate::query_projection_metrics::record_backfill_entities(
                 tenant.as_str(),
                 entity_type,
@@ -295,19 +218,46 @@ pub(super) async fn populate_field_index_from_snapshots(state: &ServerState, ten
             backend,
             &serde_json::json!({}),
             tenant_blob_store.as_ref(),
-            false, // field-index backfill: lenient (unchanged behavior)
+            true, // publication must fail closed when the journal tail is unreadable
         )
         .await;
         let replayed = match replayed {
             Ok(state) => state,
             Err(e) => {
-                tracing::debug!(
+                tracing::error!(
                     error = %e,
                     entity_type = %entity_type,
                     entity_id = %entity_id,
-                    "field index backfill: persistence replay failed"
+                    "field index backfill: snapshot-plus-tail recovery failed"
                 );
                 errors += 1;
+                failed_types.insert(entity_type.clone());
+                if let Err(error) = remove_projection_at_current_tail(
+                    &query_plane,
+                    &store,
+                    tenant,
+                    entity_type,
+                    entity_id,
+                )
+                .await
+                {
+                    tracing::error!(
+                        %error,
+                        entity_type = %entity_type,
+                        entity_id = %entity_id,
+                        "field index backfill: failed to quarantine projection after recovery error"
+                    );
+                    errors += 1;
+                    failed_types.insert(entity_type.clone());
+                }
+                crate::query_projection_metrics::record_backfill_entities(
+                    tenant.as_str(),
+                    entity_type,
+                    "backfill_replay",
+                    "error",
+                    1,
+                );
+                tokio::task::yield_now().await;
                 continue;
             }
         };
@@ -329,12 +279,18 @@ pub(super) async fn populate_field_index_from_snapshots(state: &ServerState, ten
             tracing::debug!(
                 entity_type = %entity_type,
                 entity_id = %entity_id,
-                "field index backfill: persistence replay produced no state"
+                "field index backfill: discovered stream recovered no events"
             );
             errors += 1;
+            failed_types.insert(entity_type.clone());
         } else if replayed.status == "Deleted" {
             if let Err(e) = query_plane
-                .remove_projection(tenant.as_str(), entity_type, entity_id)
+                .remove_projection_through_sequence(
+                    tenant.as_str(),
+                    entity_type,
+                    entity_id,
+                    replayed.sequence_nr,
+                )
                 .await
             {
                 tracing::debug!(
@@ -344,6 +300,7 @@ pub(super) async fn populate_field_index_from_snapshots(state: &ServerState, ten
                     "field index backfill: failed to clear deleted projection"
                 );
                 errors += 1;
+                failed_types.insert(entity_type.clone());
                 crate::query_projection_metrics::record_backfill_replay_events(
                     tenant.as_str(),
                     entity_type,
@@ -423,6 +380,7 @@ pub(super) async fn populate_field_index_from_snapshots(state: &ServerState, ten
                         "field index backfill: replay upsert failed"
                     );
                     errors += 1;
+                    failed_types.insert(entity_type.clone());
                     crate::query_projection_metrics::record_backfill_replay_events(
                         tenant.as_str(),
                         entity_type,
@@ -448,11 +406,43 @@ pub(super) async fn populate_field_index_from_snapshots(state: &ServerState, ten
         total,
         indexed,
         errors,
-        "populated query projections (snapshots + persistence replay)"
+        "populated query projections from snapshot-plus-tail recovery"
     );
     crate::query_projection_metrics::record_backfill_duration(
         tenant.as_str(),
         "overall",
         overall_started_at.elapsed(),
     );
+    if errors > 0 {
+        return Err(PersistenceError::Storage(format!(
+            "query projection backfill incomplete: {errors} errors across entity types [{}]",
+            failed_types.into_iter().collect::<Vec<_>>().join(",")
+        )));
+    }
+    Ok(())
+}
+
+async fn remove_projection_at_current_tail(
+    query_plane: &std::sync::Arc<dyn crate::storage::QueryPlaneStore>,
+    store: &crate::storage::BoxedEventStore,
+    tenant: &TenantId,
+    entity_type: &str,
+    entity_id: &str,
+) -> Result<(), PersistenceError> {
+    let persistence_ids = [format!("{tenant}:{entity_type}:{entity_id}")];
+    validate_latest_event_batch(&persistence_ids)?;
+    let mut latest = store.read_latest_events(&persistence_ids).await?;
+    let sequence_nr = latest
+        .pop()
+        .flatten()
+        .ok_or_else(|| {
+            PersistenceError::Storage(format!(
+                "cannot quarantine projection without journal tail for {}",
+                persistence_ids[0]
+            ))
+        })?
+        .sequence_nr;
+    query_plane
+        .remove_projection_through_sequence(tenant.as_str(), entity_type, entity_id, sequence_nr)
+        .await
 }

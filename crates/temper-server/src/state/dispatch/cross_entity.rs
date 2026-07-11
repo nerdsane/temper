@@ -51,11 +51,24 @@ impl crate::state::ServerState {
 
         // Get current entity fields to resolve target entity IDs
         let current_fields = match self
-            .get_tenant_entity_state(tenant, entity_type, entity_id)
+            .get_tenant_entity_state_authoritative(tenant, entity_type, entity_id)
             .await
         {
-            Ok(resp) => resp.state.fields,
-            Err(_) => return result,
+            Ok(Some(response)) => response.state.fields,
+            Ok(None) => return result,
+            Err(error) => {
+                tracing::error!(
+                    tenant = %tenant,
+                    entity_type,
+                    entity_id,
+                    error = %error,
+                    "cross-entity guard source state is unavailable"
+                );
+                for (target_type, id_source, _, _, _) in &cross_guards {
+                    result.insert(format!("__xref:{target_type}:{id_source}"), false);
+                }
+                return result;
+            }
         };
 
         // A resolvable target status satisfies the guard iff it is allowed by
@@ -112,22 +125,33 @@ impl crate::state::ServerState {
                         all_matched = false;
                         break;
                     }
-                    if let Some(status) = self
+                    match self
                         .resolve_entity_status(tenant, target_type, item_id)
                         .await
                     {
-                        if !status_ok(&status, required_statuses, forbidden_statuses) {
-                            all_matched = false;
-                            break;
+                        Ok(Some(status)) => {
+                            if !status_ok(&status, required_statuses, forbidden_statuses) {
+                                all_matched = false;
+                                break;
+                            }
                         }
-                    } else {
-                        // A non-empty list element pointing at a missing entity
-                        // cannot satisfy an allowlist; with a denylist-only
-                        // guard the absent target is treated as not-forbidden
-                        // (the container does not exist, so it cannot be in a
-                        // bad state). A *required* ref still fails (the relation
-                        // was declared mandatory).
-                        if *required_ref || !required_statuses.is_empty() {
+                        Ok(None) => {
+                            // A non-empty list element pointing at a missing entity
+                            // cannot satisfy an allowlist; with a denylist-only
+                            // guard the absent target is treated as not-forbidden.
+                            if *required_ref || !required_statuses.is_empty() {
+                                all_matched = false;
+                                break;
+                            }
+                        }
+                        Err(error) => {
+                            tracing::error!(
+                                tenant = %tenant,
+                                target_type,
+                                target_id = item_id,
+                                error = %error,
+                                "cross-entity guard target state is unavailable"
+                            );
                             all_matched = false;
                             break;
                         }
@@ -149,25 +173,32 @@ impl crate::state::ServerState {
             }
 
             lookup_count += 1;
-            if let Some(status) = self
+            match self
                 .resolve_entity_status(tenant, target_type, target_id)
                 .await
             {
-                result.insert(
-                    key,
-                    status_ok(&status, required_statuses, forbidden_statuses),
-                );
-            } else {
-                // Non-empty scalar ref to a target that does not resolve. An
-                // allowlist cannot be satisfied by an absent target, so it
-                // fails; a *required* ref likewise fails (the relation was
-                // declared mandatory). A denylist-only, non-required guard is
-                // about a *specific bad state* the container can be in — an
-                // absent container is not in any state, so it does not forbid
-                // the action (matches the runtime write-gate's "unresolvable ⇒
-                // allow" semantics, and the list-element-missing branch above).
-                let allow = required_statuses.is_empty() && !*required_ref;
-                result.insert(key, allow);
+                Ok(Some(status)) => {
+                    result.insert(
+                        key,
+                        status_ok(&status, required_statuses, forbidden_statuses),
+                    );
+                }
+                Ok(None) => {
+                    // A denylist-only optional guard treats a genuinely absent
+                    // target as vacuously not forbidden.
+                    let allow = required_statuses.is_empty() && !*required_ref;
+                    result.insert(key, allow);
+                }
+                Err(error) => {
+                    tracing::error!(
+                        tenant = %tenant,
+                        target_type,
+                        target_id,
+                        error = %error,
+                        "cross-entity guard target state is unavailable"
+                    );
+                    result.insert(key, false);
+                }
             }
         }
 

@@ -5,6 +5,8 @@
 //! the tombstoned entity is gone while a live sibling survives.
 
 use temper_runtime::ActorSystem;
+use temper_runtime::persistence::{EventMetadata, EventStore, PersistenceEnvelope};
+use temper_runtime::scheduler::{sim_now, sim_uuid};
 use temper_runtime::tenant::TenantId;
 
 use temper_server::registry::SpecRegistry;
@@ -49,9 +51,12 @@ async fn deleted_entity_absent_from_list_after_restart_sim() {
     // Fresh process: empty in-memory index over the same durable Sim store.
     let mut restarted = register("arn192-sim-reader", "tenant-a");
     restarted.set_storage_stack(StorageStack::from_sim(store, None));
-    restarted.populate_index_from_store(&tenant).await;
+    restarted.populate_index_from_store(&tenant).await.unwrap();
 
-    let ids = restarted.list_entity_ids_lazy(&tenant, entity_type).await;
+    let ids = restarted
+        .list_entity_ids_lazy(&tenant, entity_type)
+        .await
+        .unwrap();
     assert!(
         ids.iter().any(|id| id == "ord-live"),
         "live entity must survive the restart, got {ids:?}"
@@ -62,13 +67,94 @@ async fn deleted_entity_absent_from_list_after_restart_sim() {
     );
 }
 
-/// Redis backend: same property. Gated on `REDIS_URL` (skips when Redis is absent).
+/// A tail-read failure must not index the uncertain candidate or mark the type
+/// hydrated. The next list retries classification and succeeds once the injected
+/// failure is consumed.
 #[tokio::test]
+async fn latest_event_failure_keeps_index_unhydrated_and_retriable() {
+    let store = temper_store_sim::SimEventStore::no_faults(193);
+    let tenant = TenantId::new("tenant-failure");
+
+    let mut writer = register("arn192-failure-writer", "tenant-failure");
+    writer.set_storage_stack(StorageStack::from_sim(store.clone(), None));
+    writer
+        .get_or_create_tenant_entity(
+            &tenant,
+            "Order",
+            "ord-uncertain",
+            serde_json::json!({"Title": "uncertain"}),
+        )
+        .await
+        .expect("create uncertain entity");
+
+    store.fail_next_reads("tenant-failure:Order:ord-uncertain", 1);
+    let mut restarted = register("arn192-failure-reader", "tenant-failure");
+    restarted.set_storage_stack(StorageStack::from_sim(store, None));
+
+    assert!(restarted.populate_index_from_store(&tenant).await.is_err());
+    assert!(!restarted.entity_exists(&tenant, "Order", "ord-uncertain"));
+
+    let retried = restarted
+        .list_entity_ids_lazy(&tenant, "Order")
+        .await
+        .unwrap();
+    assert_eq!(retried, vec!["ord-uncertain".to_string()]);
+}
+
+#[tokio::test]
+async fn eager_hydration_failure_does_not_publish_partial_watermarks() {
+    let store = temper_store_sim::SimEventStore::no_faults(194);
+    let tenant = TenantId::new("tenant-eager-failure");
+
+    let mut writer = register("arn192-eager-failure-writer", tenant.as_str());
+    writer.set_storage_stack(StorageStack::from_sim(store.clone(), None));
+    writer
+        .get_or_create_tenant_entity(
+            &tenant,
+            "Order",
+            "ord-loaded-first",
+            serde_json::json!({"Title": "loaded before failure"}),
+        )
+        .await
+        .expect("create durable order");
+    store
+        .append(
+            "tenant-eager-failure:Zed:unregistered",
+            0,
+            &[PersistenceEnvelope {
+                sequence_nr: 0,
+                event_type: "Created".to_string(),
+                payload: serde_json::json!({}),
+                metadata: EventMetadata {
+                    event_id: sim_uuid(),
+                    causation_id: sim_uuid(),
+                    correlation_id: sim_uuid(),
+                    timestamp: sim_now(),
+                    actor_id: "eager-hydration-test".to_string(),
+                },
+            }],
+        )
+        .await
+        .expect("append unregistered stream that cannot spawn");
+
+    let mut restarted = register("arn192-eager-failure-reader", tenant.as_str());
+    restarted.set_storage_stack(StorageStack::from_sim(store, None));
+    assert!(restarted.hydrate_from_store(&tenant).await.is_err());
+    assert!(
+        restarted.entity_index_hydrated.read().unwrap().is_empty(),
+        "a failure after loading one actor must leave every affected type retriable"
+    );
+    assert!(
+        restarted.entity_exists(&tenant, "Order", "ord-loaded-first"),
+        "precondition: eager hydration reached the registered entity before failing"
+    );
+}
+
+/// Redis backend: same property against a live service.
+#[tokio::test]
+#[ignore = "requires REDIS_URL and a live Redis service"]
 async fn deleted_entity_absent_from_list_after_restart_redis() {
-    let Some(url) = std::env::var("REDIS_URL").ok() else {
-        eprintln!("REDIS_URL not set, skipping Redis deletion-parity test");
-        return;
-    };
+    let url = std::env::var("REDIS_URL").expect("REDIS_URL for ignored Redis integration test");
 
     let entity_type = "Order";
     // Unique tenant so repeated runs against a shared Redis never collide.
@@ -95,9 +181,12 @@ async fn deleted_entity_absent_from_list_after_restart_redis() {
 
     let mut restarted = register("arn192-redis-reader", &tenant_name);
     restarted.set_storage_stack(StorageStack::from_redis(store));
-    restarted.populate_index_from_store(&tenant).await;
+    restarted.populate_index_from_store(&tenant).await.unwrap();
 
-    let ids = restarted.list_entity_ids_lazy(&tenant, entity_type).await;
+    let ids = restarted
+        .list_entity_ids_lazy(&tenant, entity_type)
+        .await
+        .unwrap();
     assert!(
         ids.iter().any(|id| id == "ord-live"),
         "live entity must survive the restart, got {ids:?}"

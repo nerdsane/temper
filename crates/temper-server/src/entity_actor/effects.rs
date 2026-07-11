@@ -258,7 +258,8 @@ pub fn process_action_with_xref_and_field_mode(
             }
 
             let effective_params = normalize_ref_action_params(state, action, params);
-            let params = effective_params.as_ref();
+            let sanitized_params = sanitize_action_params(effective_params.as_ref());
+            let params = sanitized_params.as_ref();
 
             let (custom_effects, scheduled_actions, spawn_requests, schedule_at_requests) =
                 apply_effects(state, &transition_result.effects, params);
@@ -323,6 +324,117 @@ pub fn process_action_with_xref_and_field_mode(
             error: Some(format!("Unknown action: {}", action)),
         },
     }
+}
+
+/// Remove caller fields whose values are derived authoritatively by the runtime.
+///
+/// The returned value borrows the input when no reserved keys are present and
+/// clones only when sanitization is required. Persisted events therefore never
+/// acquire a second mutable identity, lifecycle, or context-status truth.
+pub(crate) fn sanitize_action_params(
+    params: &serde_json::Value,
+) -> std::borrow::Cow<'_, serde_json::Value> {
+    let Some(fields) = params.as_object() else {
+        return std::borrow::Cow::Borrowed(params);
+    };
+    if !fields
+        .keys()
+        .any(|key| temper_spec::automaton::is_server_derived_field_name(key))
+    {
+        return std::borrow::Cow::Borrowed(params);
+    }
+    let mut sanitized = fields.clone();
+    sanitized.retain(|key, _| !temper_spec::automaton::is_server_derived_field_name(key));
+    std::borrow::Cow::Owned(serde_json::Value::Object(sanitized))
+}
+
+/// Compute the exact actor-state precondition bound to an external field-update
+/// authorization decision.
+///
+/// The digest includes the durable sequence and the authorization-visible local
+/// lifecycle/field state. Canonical recursive JSON hashing keeps the result
+/// deterministic even if a caller constructed object keys in another order.
+pub(crate) fn field_update_precondition(state: &EntityState) -> String {
+    fn update_bytes(hasher: &mut Sha256, bytes: &[u8]) {
+        let len = u64::try_from(bytes.len()).unwrap_or(u64::MAX);
+        hasher.update(len.to_be_bytes());
+        hasher.update(bytes);
+    }
+
+    fn update_json(hasher: &mut Sha256, value: &serde_json::Value) {
+        match value {
+            serde_json::Value::Null => hasher.update([0]),
+            serde_json::Value::Bool(value) => {
+                hasher.update([1, u8::from(*value)]);
+            }
+            serde_json::Value::Number(value) => {
+                hasher.update([2]);
+                update_bytes(hasher, value.to_string().as_bytes());
+            }
+            serde_json::Value::String(value) => {
+                hasher.update([3]);
+                update_bytes(hasher, value.as_bytes());
+            }
+            serde_json::Value::Array(values) => {
+                hasher.update([4]);
+                let len = u64::try_from(values.len()).unwrap_or(u64::MAX);
+                hasher.update(len.to_be_bytes());
+                for value in values {
+                    update_json(hasher, value);
+                }
+            }
+            serde_json::Value::Object(values) => {
+                hasher.update([5]);
+                let len = u64::try_from(values.len()).unwrap_or(u64::MAX);
+                hasher.update(len.to_be_bytes());
+                let mut keys = values.keys().collect::<Vec<_>>();
+                keys.sort_unstable();
+                for key in keys {
+                    update_bytes(hasher, key.as_bytes());
+                    if let Some(value) = values.get(key) {
+                        update_json(hasher, value);
+                    }
+                }
+            }
+        }
+    }
+
+    let mut hasher = Sha256::new();
+    hasher.update(b"temper-field-update-precondition-v1");
+    hasher.update(state.sequence_nr.to_be_bytes());
+    update_bytes(&mut hasher, state.status.as_bytes());
+    update_json(&mut hasher, &state.fields);
+    format!("{:x}", hasher.finalize())
+}
+
+/// Apply a generic OData field replacement or merge through the same canonical
+/// field projection used by spec actions and replay.
+pub(crate) fn apply_field_update(
+    state: &mut EntityState,
+    params: &serde_json::Value,
+    replace: bool,
+    mode: FieldSyncMode,
+    state_var_metadata: Option<
+        &std::collections::BTreeMap<String, temper_jit::table::StateVarMetadata>,
+    >,
+) -> Result<Vec<OverflowBlobWrite>, String> {
+    if !params.is_object() {
+        return Err("entity field update must be a JSON object".to_string());
+    }
+    if replace {
+        state.fields = serde_json::Value::Object(serde_json::Map::new());
+    } else if !state.fields.is_object() {
+        return Err(format!(
+            "cannot merge fields into non-object state for {}:{}",
+            state.entity_type, state.entity_id
+        ));
+    }
+    Ok(sync_fields_with_metadata(
+        state,
+        params,
+        mode,
+        state_var_metadata,
+    ))
 }
 
 fn validate_ref_action_contract(
@@ -763,15 +875,14 @@ pub fn sync_fields_with_metadata(
     let entity_type = state.entity_type.clone();
     let entity_id = state.entity_id.clone();
     if let Some(obj) = state.fields.as_object_mut() {
-        obj.insert(
-            "Status".to_string(),
-            serde_json::Value::String(state.status.clone()),
-        );
+        canonicalize_entity_field_map(obj, &entity_id, &state.status);
         prune_transient_action_fields(&entity_type, obj);
         // Project action params into fields
         if let Some(p) = params.as_object() {
             for (k, v) in p {
-                if is_transient_action_field(&entity_type, k) {
+                if is_transient_action_field(&entity_type, k)
+                    || temper_spec::automaton::is_server_derived_field_name(k)
+                {
                     continue;
                 }
                 let field_meta = state_var_metadata.and_then(|m| m.get(k.as_str()));
@@ -791,14 +902,23 @@ pub fn sync_fields_with_metadata(
         }
         // Sync counters into fields
         for (k, v) in &state.counters {
+            if temper_spec::automaton::is_server_derived_field_name(k) {
+                continue;
+            }
             obj.insert(k.clone(), serde_json::Value::Number((*v as u64).into()));
         }
         // Sync booleans into fields
         for (k, v) in &state.booleans {
+            if temper_spec::automaton::is_server_derived_field_name(k) {
+                continue;
+            }
             obj.insert(k.clone(), serde_json::Value::Bool(*v));
         }
         // Sync lists into fields
         for (k, v) in &state.lists {
+            if temper_spec::automaton::is_server_derived_field_name(k) {
+                continue;
+            }
             let arr: Vec<serde_json::Value> = v
                 .iter()
                 .map(|s| serde_json::Value::String(s.clone()))
@@ -819,6 +939,44 @@ pub fn sync_fields_with_metadata(
         }
     }
     overflow_blobs
+}
+
+/// Remove mutable aliases of runtime-owned fields and publish canonical identity/status.
+pub(crate) fn canonicalize_entity_fields(
+    fields: &mut serde_json::Value,
+    entity_id: &str,
+    status: &str,
+) {
+    if !fields.is_object() {
+        *fields = serde_json::Value::Object(serde_json::Map::new());
+    }
+    if let Some(fields) = fields.as_object_mut() {
+        canonicalize_entity_field_map(fields, entity_id, status);
+    }
+}
+
+fn canonicalize_entity_field_map(
+    fields: &mut serde_json::Map<String, serde_json::Value>,
+    entity_id: &str,
+    status: &str,
+) {
+    fields.retain(|key, _| !temper_spec::automaton::is_server_derived_field_name(key));
+    fields.insert(
+        "id".to_string(),
+        serde_json::Value::String(entity_id.to_string()),
+    );
+    fields.insert(
+        "Id".to_string(),
+        serde_json::Value::String(entity_id.to_string()),
+    );
+    fields.insert(
+        "status".to_string(),
+        serde_json::Value::String(status.to_string()),
+    );
+    fields.insert(
+        "Status".to_string(),
+        serde_json::Value::String(status.to_string()),
+    );
 }
 
 fn prune_transient_action_fields(

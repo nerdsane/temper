@@ -1,10 +1,16 @@
 use std::collections::BTreeMap;
+#[cfg(feature = "sim")]
+use std::sync::Arc;
 
 use serde_json::json;
 use temper_runtime::ActorSystem;
+#[cfg(feature = "sim")]
+use temper_runtime::persistence::EventStore;
 use temper_spec::csdl::parse_csdl;
 #[cfg(feature = "sim")]
 use temper_store_sim::SimEventStore;
+#[cfg(feature = "sim")]
+use temper_store_turso::TursoEventStore;
 
 use crate::request_context::AgentContext;
 use crate::state::ServerState;
@@ -40,6 +46,34 @@ fn implicit_composite_idempotency_changes_with_integration_result() {
     );
 
     assert_ne!(first, second);
+}
+
+#[test]
+fn composite_idempotency_window_rejects_an_internal_sequence_gap() {
+    let event = CompositeEvent {
+        tenant: "default".to_string(),
+        parent_entity_type: "Parent".to_string(),
+        parent_entity_id: "gap".to_string(),
+        parent_action: "CreateChild".to_string(),
+        composite_idempotency_key: "gap-key".to_string(),
+        sub_writes: Vec::new(),
+    };
+    let mut first = composite_event_envelope("default:Parent:gap", &event).unwrap();
+    first.sequence_nr = 1;
+    let mut third = first.clone();
+    third.sequence_nr = 3;
+    let mut later = first.clone();
+    later.sequence_nr = 4;
+
+    let error = validate_composite_idempotency_window(
+        "default:Parent:gap",
+        0,
+        3,
+        3,
+        &[first, third, later],
+    )
+    .expect_err("a missing sequence must not be treated as a complete idempotency window");
+    assert!(error.to_string().contains("expected sequence 2, found 3"));
 }
 
 #[test]
@@ -204,6 +238,18 @@ action = "Delete"
 generated_from = "child"
 
 [[action]]
+name = "RenameChild"
+kind = "Composite"
+from = ["Active"]
+to = "Active"
+params = ["ChildId", "Name"]
+
+[[action.sub_writes]]
+target_entity = "Child"
+action = "Rename"
+generated_from = "child"
+
+[[action]]
 name = "CreateChildWithoutParentEvent"
 kind = "Composite"
 from = ["Active"]
@@ -223,6 +269,10 @@ name = "Child"
 states = ["Draft", "Active", "Deleted"]
 initial = "Draft"
 
+[[key]]
+name = "name"
+properties = ["Name"]
+
 [[action]]
 name = "Create"
 kind = "input"
@@ -236,6 +286,13 @@ kind = "input"
 from = ["Active"]
 to = "Deleted"
 params = []
+
+[[action]]
+name = "Rename"
+kind = "input"
+from = ["Active"]
+to = "Active"
+params = ["Name"]
 "#;
 
 const APP_IOA: &str = r#"
@@ -513,6 +570,271 @@ async fn composite_sub_write_authorization_receives_action_context() {
         err.contains("sub-write 0 denied"),
         "unexpected error: {err}"
     );
+}
+
+#[tokio::test]
+async fn composite_create_authorization_keeps_trusted_attributes_authoritative() {
+    let state = composite_test_state();
+    let tenant = TenantId::default();
+    let agent = AgentContext::for_service("composite-test");
+
+    state
+        .authz
+        .reload_policies(
+            r#"
+                permit(
+                  principal is Agent,
+                  action == Action::"Create",
+                  resource is Child
+                ) when {
+                  resource.id == "child-trusted-auth" &&
+                  resource.status == "Draft" &&
+                  resource.Id == "child-trusted-auth" &&
+                  resource.Status == "Draft" &&
+                  !resource.has_spec
+                };
+
+                forbid(
+                  principal is Agent,
+                  action == Action::"Create",
+                  resource is Child
+                ) when {
+                  resource has ctx_owner_status
+                };
+                "#,
+        )
+        .expect("policy should load");
+
+    let applied = state
+        .apply_composite_integration_result(
+            &tenant,
+            "Parent",
+            "parent-trusted-auth",
+            "CreateChild",
+            &json!({
+                "sub_writes": [{
+                    "entity_type": "Child",
+                    "entity_id": "child-trusted-auth",
+                    "action": "Create",
+                    "params": {
+                        "Name": "trusted attributes win",
+                        "id": "attacker-selected-id",
+                        "status": "Active",
+                        "Id": "attacker-selected-Id",
+                        "Status": "Deleted",
+                        "ctx_owner_status": "Privileged",
+                        "has_spec": true
+                    }
+                }]
+            }),
+            &agent,
+        )
+        .await
+        .expect("request fields must not spoof trusted Cedar attributes");
+
+    assert!(applied);
+}
+
+#[cfg(feature = "sim")]
+#[tokio::test]
+async fn composite_create_collision_authorizes_against_live_durable_fields() {
+    let store = SimEventStore::no_faults(47);
+    let state = composite_test_state_with_store(store.clone());
+    let tenant = TenantId::default();
+    let agent = AgentContext::for_service("composite-test");
+
+    let existing = state
+        .dispatch_tenant_action(
+            &tenant,
+            "App",
+            "app-live-auth",
+            "Create",
+            json!({
+                "OwnerId": "durable-owner",
+                "Name": "original",
+                "id": "persisted-spoof-id",
+                "status": "Draft",
+                "Id": "persisted-spoof-Id",
+                "Status": "Draft",
+                "ctx_owner_status": "Privileged"
+            }),
+            &agent,
+        )
+        .await
+        .expect("existing app should be durable");
+    assert!(existing.success);
+    assert_eq!(
+        existing.state.fields.get("Id"),
+        Some(&json!("app-live-auth"))
+    );
+    assert_eq!(existing.state.fields.get("Status"), Some(&json!("Active")));
+    assert_eq!(
+        existing.state.fields.get("id"),
+        Some(&json!("app-live-auth"))
+    );
+    assert_eq!(existing.state.fields.get("status"), Some(&json!("Active")));
+    for reserved in ["has_spec", "ctx_owner_status"] {
+        assert!(
+            existing.state.fields.get(reserved).is_none(),
+            "reserved field {reserved} must not enter live state"
+        );
+    }
+
+    state
+        .authz
+        .reload_policies(
+            r#"
+                permit(
+                  principal is Agent,
+                  action == Action::"Create",
+                  resource is App
+                ) when {
+                  resource.Id == "app-live-auth" &&
+                  resource.Status == "Active" &&
+                  resource.OwnerId == "durable-owner"
+                };
+                "#,
+        )
+        .expect("policy should load");
+
+    let applied = state
+        .apply_composite_integration_result(
+            &tenant,
+            "Parent",
+            "parent-live-auth",
+            "CreateChild",
+            &json!({
+                "sub_writes": [{
+                    "entity_type": "App",
+                    "entity_id": "app-live-auth",
+                    "action": "Create",
+                    "params": {
+                        "OwnerId": "request-owner",
+                        "Name": "updated",
+                        "Id": "second-spoof",
+                        "Status": "Deleted",
+                        "ctx_owner_status": "Privileged"
+                    }
+                }]
+            }),
+            &agent,
+        )
+        .await
+        .expect("a colliding Create must authorize against the live durable resource");
+
+    assert!(applied);
+
+    let live = state
+        .get_tenant_entity_state(&tenant, "App", "app-live-auth")
+        .await
+        .expect("updated app should remain readable");
+    assert_eq!(live.state.fields.get("Id"), Some(&json!("app-live-auth")));
+    assert_eq!(live.state.fields.get("Status"), Some(&json!("Active")));
+    assert_eq!(live.state.fields.get("id"), Some(&json!("app-live-auth")));
+    assert_eq!(live.state.fields.get("status"), Some(&json!("Active")));
+    for reserved in ["has_spec", "ctx_owner_status"] {
+        assert!(live.state.fields.get(reserved).is_none());
+    }
+
+    let journal = store.dump_journal("default:App:app-live-auth");
+    for envelope in journal {
+        let event: crate::entity_actor::EntityEvent =
+            serde_json::from_value(envelope.payload).expect("app journal event should decode");
+        for reserved in [
+            "Id",
+            "id",
+            "Status",
+            "status",
+            "has_spec",
+            "ctx_owner_status",
+        ] {
+            assert!(
+                event.params.get(reserved).is_none(),
+                "reserved field {reserved} must not enter the durable event"
+            );
+        }
+    }
+
+    let restarted = composite_test_state_with_store(store);
+    let replayed = restarted
+        .get_tenant_entity_state(&tenant, "App", "app-live-auth")
+        .await
+        .expect("app should replay after restart");
+    assert_eq!(
+        replayed.state.fields.get("Id"),
+        Some(&json!("app-live-auth"))
+    );
+    assert_eq!(replayed.state.fields.get("Status"), Some(&json!("Active")));
+    assert_eq!(
+        replayed.state.fields.get("id"),
+        Some(&json!("app-live-auth"))
+    );
+    assert_eq!(replayed.state.fields.get("status"), Some(&json!("Active")));
+    for reserved in ["has_spec", "ctx_owner_status"] {
+        assert!(replayed.state.fields.get(reserved).is_none());
+    }
+}
+
+#[cfg(feature = "sim")]
+#[tokio::test]
+async fn replay_canonicalizes_reserved_fields_from_legacy_event_params() {
+    let store = SimEventStore::no_faults(48);
+    let persistence_id = "default:App:legacy-spoof";
+    let event = crate::entity_actor::EntityEvent {
+        action: "Create".to_string(),
+        from_status: "Active".to_string(),
+        to_status: "Active".to_string(),
+        timestamp: temper_runtime::scheduler::sim_now(),
+        params: json!({
+            "OwnerId": "durable-owner",
+            "Name": "legacy",
+            "Id": "forged-Id",
+            "id": "forged-id",
+            "Status": "Deleted",
+            "status": "Deleted",
+            "has_spec": true,
+            "ctx_owner_status": "Privileged"
+        }),
+        idempotency_key: None,
+    };
+    store
+        .append(
+            persistence_id,
+            0,
+            &[temper_runtime::persistence::PersistenceEnvelope {
+                sequence_nr: 0,
+                event_type: "Create".to_string(),
+                payload: serde_json::to_value(event).unwrap(),
+                metadata: temper_runtime::persistence::EventMetadata {
+                    event_id: temper_runtime::scheduler::sim_uuid(),
+                    causation_id: temper_runtime::scheduler::sim_uuid(),
+                    correlation_id: temper_runtime::scheduler::sim_uuid(),
+                    timestamp: temper_runtime::scheduler::sim_now(),
+                    actor_id: persistence_id.to_string(),
+                },
+            }],
+        )
+        .await
+        .unwrap();
+
+    let state = composite_test_state_with_store(store);
+    let replayed = state
+        .get_tenant_entity_state(&TenantId::default(), "App", "legacy-spoof")
+        .await
+        .expect("legacy event should replay with canonical fields");
+    assert_eq!(
+        replayed.state.fields.get("Id"),
+        Some(&json!("legacy-spoof"))
+    );
+    assert_eq!(replayed.state.fields.get("Status"), Some(&json!("Active")));
+    assert_eq!(
+        replayed.state.fields.get("id"),
+        Some(&json!("legacy-spoof"))
+    );
+    assert_eq!(replayed.state.fields.get("status"), Some(&json!("Active")));
+    for reserved in ["has_spec", "ctx_owner_status"] {
+        assert!(replayed.state.fields.get(reserved).is_none());
+    }
 }
 
 #[tokio::test]
@@ -951,6 +1273,55 @@ async fn composite_atomic_batch_records_parent_composite_event_once() {
 
 #[cfg(feature = "sim")]
 #[tokio::test]
+async fn composite_idempotency_lookup_is_bounded_on_long_parent_journal() {
+    use temper_runtime::persistence::{EventMetadata, PersistenceEnvelope};
+    use temper_runtime::scheduler::{sim_now, sim_uuid};
+
+    let store = SimEventStore::no_faults(40_001);
+    let persistence_id = "default:Parent:long-idempotency-journal";
+    let mut events = (0..1_500)
+        .map(|_| PersistenceEnvelope {
+            sequence_nr: 0,
+            event_type: "AuditNoise".to_string(),
+            payload: json!({}),
+            metadata: EventMetadata {
+                event_id: sim_uuid(),
+                causation_id: sim_uuid(),
+                correlation_id: sim_uuid(),
+                timestamp: sim_now(),
+                actor_id: persistence_id.to_string(),
+            },
+        })
+        .collect::<Vec<_>>();
+    events.push(
+        composite_event_envelope(
+            persistence_id,
+            &CompositeEvent {
+                tenant: "default".to_string(),
+                parent_entity_type: "Parent".to_string(),
+                parent_entity_id: "long-idempotency-journal".to_string(),
+                parent_action: "CreateChild".to_string(),
+                composite_idempotency_key: "recent-composite-key".to_string(),
+                sub_writes: Vec::new(),
+            },
+        )
+        .unwrap(),
+    );
+    store.append(persistence_id, 0, &events).await.unwrap();
+
+    let state = composite_test_state_with_store(store.clone());
+    let boxed = crate::storage::BoxedEventStore::new(store);
+    assert!(
+        state
+            .composite_event_already_persisted(&boxed, persistence_id, "recent-composite-key",)
+            .await
+            .unwrap(),
+        "the bounded recent window must find a duplicate without scanning lifetime history"
+    );
+}
+
+#[cfg(feature = "sim")]
+#[tokio::test]
 async fn composite_atomic_batch_can_skip_parent_composite_event_by_spec() {
     let store = SimEventStore::no_faults(40);
     let state = composite_test_state_with_store(store.clone());
@@ -1354,9 +1725,126 @@ async fn composite_sub_write_idempotency_survives_actor_restart() {
 
 #[cfg(feature = "sim")]
 #[tokio::test]
+async fn composite_batches_replace_declared_keys_on_create_update_and_delete() {
+    let store = SimEventStore::no_faults(39);
+    let state = composite_test_state_with_store(store.clone());
+    let tenant = TenantId::default();
+    let agent = AgentContext::for_service("composite-key-test");
+    let child_id = "child-composite-key-lifecycle";
+    let key_hash = |name: &str| {
+        crate::key_index::canonical_key_hash(
+            "name",
+            &["Name".to_string()],
+            serde_json::json!({"Name": name}).as_object().unwrap(),
+        )
+        .unwrap()
+    };
+
+    state
+        .apply_composite_integration_result(
+            &tenant,
+            "Parent",
+            "parent-key-lifecycle",
+            "CreateChild",
+            &json!({
+                "sub_writes": [{
+                    "entity_type": "Child",
+                    "entity_id": child_id,
+                    "action": "Create",
+                    "params": {"Name": "before"}
+                }]
+            }),
+            &agent,
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        store
+            .lookup_by_key("default", "Child", "name", &key_hash("before"))
+            .await
+            .unwrap(),
+        Some(child_id.to_string())
+    );
+
+    state
+        .apply_composite_integration_result(
+            &tenant,
+            "Parent",
+            "parent-key-lifecycle",
+            "RenameChild",
+            &json!({
+                "sub_writes": [{
+                    "entity_type": "Child",
+                    "entity_id": child_id,
+                    "action": "Rename",
+                    "params": {"Name": "after"}
+                }]
+            }),
+            &agent,
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        store
+            .lookup_by_key("default", "Child", "name", &key_hash("before"))
+            .await
+            .unwrap(),
+        None,
+        "batch update must retire the old key claim"
+    );
+    assert_eq!(
+        store
+            .lookup_by_key("default", "Child", "name", &key_hash("after"))
+            .await
+            .unwrap(),
+        Some(child_id.to_string())
+    );
+
+    state
+        .apply_composite_integration_result(
+            &tenant,
+            "Parent",
+            "parent-key-lifecycle",
+            "DeleteChild",
+            &json!({
+                "sub_writes": [{
+                    "entity_type": "Child",
+                    "entity_id": child_id,
+                    "action": "Delete",
+                    "params": {}
+                }]
+            }),
+            &agent,
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        store
+            .lookup_by_key("default", "Child", "name", &key_hash("after"))
+            .await
+            .unwrap(),
+        None
+    );
+}
+
+#[cfg(feature = "sim")]
+#[tokio::test]
 async fn composite_atomic_batch_allows_existing_sub_write_to_delete_target() {
     let store = SimEventStore::no_faults(40);
-    let state = composite_test_state_with_store(store.clone());
+    let projection_path = std::env::temp_dir().join(format!(
+        "temper-composite-delete-projection-{}.db",
+        temper_runtime::scheduler::sim_uuid()
+    ));
+    let _ = std::fs::remove_file(&projection_path);
+    let projection_store =
+        TursoEventStore::new(&format!("file:{}", projection_path.display()), None)
+            .await
+            .expect("create projection store");
+    let mut state = composite_test_state();
+    let mut storage = StorageStack::from_sim(store.clone(), None);
+    storage.query_plane = Some(Arc::new(projection_store.clone()));
+    state.set_storage_stack(storage);
+    *state.query_projection_queue.lock().unwrap() = None;
     let tenant = TenantId::default();
     let agent = AgentContext::for_service("composite-test");
     let child_id = "child-delete-through-composite";
@@ -1374,6 +1862,19 @@ async fn composite_atomic_batch_allows_existing_sub_write_to_delete_target() {
         .expect("child create should run");
     assert!(created.success);
     assert!(state.entity_exists(&tenant, "Child", child_id));
+    let child_key_hash = crate::key_index::canonical_key_hash(
+        "name",
+        &["Name".to_string()],
+        created.state.fields.as_object().unwrap(),
+    )
+    .expect("created child has declared key");
+    assert_eq!(
+        store
+            .lookup_by_key("default", "Child", "name", &child_key_hash)
+            .await
+            .unwrap(),
+        Some(child_id.to_string())
+    );
 
     let applied = state
         .apply_composite_integration_result(
@@ -1400,6 +1901,34 @@ async fn composite_atomic_batch_allows_existing_sub_write_to_delete_target() {
         "deleted composite sub-write target should not be reloaded as a live entity"
     );
     assert!(!state.entity_exists(&tenant, "Child", child_id));
+    assert!(
+        state
+            .list_entity_ids_lazy(&tenant, "Child")
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    assert_eq!(
+        store
+            .lookup_by_key("default", "Child", "name", &child_key_hash)
+            .await
+            .unwrap(),
+        None,
+        "composite tombstone must retire the declared key claim"
+    );
+    assert!(
+        projection_store
+            .query_field_index(
+                "default",
+                "Child",
+                "field_name = ?3 AND field_value = ?4",
+                vec!["Name".to_string(), "temporary child".to_string()],
+            )
+            .await
+            .unwrap()
+            .is_empty(),
+        "composite delete must remove the durable query projection"
+    );
 
     let child_journal = store.dump_journal(&format!("default:Child:{child_id}"));
     assert_eq!(
@@ -1409,6 +1938,10 @@ async fn composite_atomic_batch_allows_existing_sub_write_to_delete_target() {
             .collect::<Vec<_>>(),
         vec!["Created", "Create", "Delete"]
     );
+    assert!(temper_runtime::persistence::is_deletion_tombstone(
+        child_journal.last().unwrap()
+    ));
+    let _ = std::fs::remove_file(projection_path);
 }
 
 #[cfg(feature = "sim")]

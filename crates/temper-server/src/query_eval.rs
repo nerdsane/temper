@@ -496,6 +496,7 @@ async fn expand_entity_recursive(
                 "",
                 &serde_json::json!({}),
             )
+            .await
         {
             return Err(*response);
         }
@@ -572,20 +573,28 @@ async fn expand_entity_recursive(
             }
         }
 
-        related_entities.retain(|entity| {
-            crate::odata::authz::entity_id_from_body(entity).is_some_and(|entity_id| {
-                crate::odata::authz::authorize_read(
-                    state,
-                    tenant,
-                    security_ctx,
-                    crate::odata::authz::READ_ACTION,
-                    &info.target_type,
-                    entity_id,
-                    entity,
-                )
-                .is_ok()
-            })
-        });
+        let mut authorized_entities = Vec::with_capacity(related_entities.len());
+        for related in related_entities {
+            let Some(related_id) = crate::odata::authz::entity_id_from_body(&related) else {
+                continue;
+            };
+            match crate::odata::authz::authorize_read(
+                state,
+                tenant,
+                security_ctx,
+                crate::odata::authz::READ_ACTION,
+                &info.target_type,
+                related_id,
+                &related,
+            )
+            .await
+            {
+                Ok(()) => authorized_entities.push(related),
+                Err(response) if response.status() == axum::http::StatusCode::FORBIDDEN => {}
+                Err(response) => return Err(*response),
+            }
+        }
+        related_entities = authorized_entities;
 
         // Apply nested query options if present
         if let Some(ref nested_opts) = item.options {

@@ -109,7 +109,19 @@ impl ReactionDispatcher {
                     let status = state
                         .resolve_entity_status(tenant, &q.entity_type, &q.target_entity_id)
                         .await;
-                    let matched = status.as_deref().map(|s| q.matches(s)).unwrap_or(false);
+                    let matched = match status {
+                        Ok(Some(status)) => q.matches(&status),
+                        Ok(None) => false,
+                        Err(error) => {
+                            tracing::error!(
+                                error = %error,
+                                target_entity_type = %q.entity_type,
+                                target_entity_id = %q.target_entity_id,
+                                "reaction guard target state is unavailable"
+                            );
+                            false
+                        }
+                    };
                     resolved.insert(q.key(), matched);
                 }
                 let passed = super::guard::evaluate_with_resolved(
@@ -173,11 +185,17 @@ impl ReactionDispatcher {
                 action,
             );
 
-            let authz_snapshot = match state
-                .load_authz_resource_snapshot(tenant, &rule.then.entity_type, &target_entity_id)
-                .await
+            let (resource_attrs, target_status) = match reaction_authz_resource(
+                state,
+                tenant,
+                &rule.then.entity_type,
+                &target_entity_id,
+                &rule.then.action,
+                &effective_params,
+            )
+            .await
             {
-                Ok(snapshot) => snapshot,
+                Ok(resource) => resource,
                 Err(e) => {
                     tracing::warn!(
                         rule = rule.name,
@@ -202,7 +220,7 @@ impl ReactionDispatcher {
                 &security_ctx,
                 &rule.then.action,
                 &rule.then.entity_type,
-                &authz_snapshot.resource_attrs,
+                &resource_attrs,
                 tenant.as_str(),
             ) {
                 let reason = denial.to_string();
@@ -219,7 +237,7 @@ impl ReactionDispatcher {
                 results.push(ReactionResult {
                     rule_name: rule.name.clone(),
                     success: false,
-                    target_status: Some(authz_snapshot.current_state.state.status.clone()),
+                    target_status: Some(target_status),
                     error: Some(reason),
                     depth,
                 });
@@ -309,6 +327,47 @@ impl ReactionDispatcher {
 
         results
     }
+}
+
+pub(super) async fn reaction_authz_resource(
+    state: &crate::ServerState,
+    tenant: &TenantId,
+    entity_type: &str,
+    entity_id: &str,
+    action: &str,
+    params: &serde_json::Value,
+) -> Result<
+    (
+        std::collections::BTreeMap<String, serde_json::Value>,
+        String,
+    ),
+    String,
+> {
+    if let Some(snapshot) = state
+        .find_authz_resource_snapshot(tenant, entity_type, entity_id)
+        .await?
+    {
+        let status = snapshot.current_state.state.status.clone();
+        return Ok((snapshot.resource_attrs, status));
+    }
+    if action != "Create" {
+        return Err(format!(
+            "reaction target {tenant}:{entity_type}:{entity_id} is not live"
+        ));
+    }
+
+    let resource_attrs = state
+        .build_create_authz_resource_attrs(tenant, entity_type, entity_id, params)
+        .await
+        .map_err(|error| error.to_string())?;
+    let status = resource_attrs
+        .get("status")
+        .and_then(serde_json::Value::as_str)
+        .ok_or_else(|| {
+            format!("create authorization resource for {entity_type} is missing status")
+        })?
+        .to_string();
+    Ok((resource_attrs, status))
 }
 
 #[derive(Default)]

@@ -95,10 +95,22 @@ impl crate::state::ServerState {
         triggering_action: &str,
         error: &str,
     ) {
-        let status = self
+        let status = match self
             .resolve_entity_status(tenant, entity_type, entity_id)
             .await
-            .unwrap_or_default();
+        {
+            Ok(status) => status.unwrap_or_default(),
+            Err(status_error) => {
+                tracing::error!(
+                    tenant = %tenant,
+                    entity_type,
+                    entity_id,
+                    error = %status_error,
+                    "failed to resolve entity status for integration compensation"
+                );
+                String::new()
+            }
+        };
 
         let compensating_action =
             self.find_failure_transition(tenant, entity_type, status.as_str());

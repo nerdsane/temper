@@ -27,10 +27,7 @@ use sha1::Digest;
 use tokio_stream::StreamExt as _;
 
 use super::account_verification::enforce_commons_account_verified_for_write;
-use super::authz::{
-    CREATE_ACTION, MutationResource, authorize_mutation, request_security_context,
-    resource_attrs_from_body,
-};
+use super::authz::{CREATE_ACTION, MutationResource, authorize_mutation, request_security_context};
 use super::common::{extract_tenant, run_write_prechecks};
 use super::response::annotate_entity;
 use super::storage_guardrails::enforce_commons_storage_cap;
@@ -230,7 +227,20 @@ async fn ingest_raw_inner(
     }
 
     let security_ctx = request_security_context(&headers, &agent_ctx, resolved_identity.as_ref());
-    let attrs = resource_attrs_from_body(&state, &tenant, entity_type, &sha, &initial_fields);
+    let attrs = match state
+        .build_create_authz_resource_attrs(&tenant, entity_type, &sha, &initial_fields)
+        .await
+    {
+        Ok(attrs) => attrs,
+        Err(error) => {
+            return odata_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "AuthorizationResourceError",
+                &error,
+            )
+            .into_response();
+        }
+    };
     if let Err(response) = authorize_mutation(
         &state,
         &tenant,

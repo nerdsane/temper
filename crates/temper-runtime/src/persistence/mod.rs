@@ -1,5 +1,14 @@
 use serde::{Deserialize, Serialize};
 
+mod append;
+pub use append::{
+    contains_deletion_tombstone, ends_in_deletion_tombstone,
+    validate_guarded_persistence_append_batch, validate_persistence_append_batch,
+};
+
+mod latest;
+pub use latest::{LATEST_EVENT_BATCH_SIZE, is_deletion_tombstone, validate_latest_event_batch};
+
 /// Event type used for the parent-journal record of a Composite action.
 ///
 /// Concrete sub-write events remain the state-changing events on their target
@@ -87,7 +96,7 @@ pub trait PersistentActor: Send + 'static {
 /// `key_hash` for `key_name`; the store writes it into `entity_key_index` in the
 /// same transaction as the journal append, giving the read plane an `O(log n)`
 /// present/absent probe (the negative-existence access path, ARN-68).
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct EntityKeyRow {
     /// The declared key's identifier (the `[[key]]` block's `name`).
     pub key_name: String,
@@ -158,6 +167,9 @@ pub struct EntityVectorCandidate {
 /// Uses desugared async-in-trait to enforce Send bounds on futures.
 pub trait EventStore: Send + Sync + 'static {
     /// Append events to the journal.
+    ///
+    /// An empty event slice is a no-op: it returns `expected_sequence` and must
+    /// not create a discoverable persistence stream.
     fn append(
         &self,
         persistence_id: &str,
@@ -290,6 +302,32 @@ pub trait EventStore: Send + Sync + 'static {
         async { Ok(Vec::new()) }
     }
 
+    /// Append events with an explicit declared-key replacement mode.
+    ///
+    /// `Some(rows)` means `rows` is the complete desired key set after the
+    /// append, including `Some(&[])` for an intentional clear. `None` preserves
+    /// existing claims. Index-maintaining stores override this primitive so
+    /// [`EventStore::append`] and [`EventStore::append_with_keys`] can share one
+    /// transaction without conflating an unindexed raw append with a deliberate
+    /// empty key set.
+    fn append_with_optional_keys(
+        &self,
+        persistence_id: &str,
+        expected_sequence: u64,
+        events: &[PersistenceEnvelope],
+        key_rows: Option<&[EntityKeyRow]>,
+    ) -> impl std::future::Future<Output = Result<u64, PersistenceError>> + Send {
+        async move {
+            match key_rows {
+                Some(key_rows) => {
+                    self.append_with_keys(persistence_id, expected_sequence, events, key_rows)
+                        .await
+                }
+                None => self.append(persistence_id, expected_sequence, events).await,
+            }
+        }
+    }
+
     /// Backfill declared key-index rows for an **existing** entity (ADR-0153),
     /// without appending a journal event. Idempotent: re-running yields the same
     /// rows. Used to populate `entity_key_index` for entities written before the
@@ -304,6 +342,22 @@ pub trait EventStore: Send + Sync + 'static {
         key_rows: &[EntityKeyRow],
     ) -> impl std::future::Future<Output = Result<(), PersistenceError>> + Send {
         let _ = (tenant, entity_type, entity_id, key_rows);
+        async { Ok(()) }
+    }
+
+    /// Retire stale declared-key rows for a deletion generation.
+    ///
+    /// Authoritative key-index backends must preserve claims belonging to a
+    /// recreation after `delete_sequence`. Non-indexing backends keep the
+    /// no-op default.
+    fn retire_entity_keys_through_sequence(
+        &self,
+        tenant: &str,
+        entity_type: &str,
+        entity_id: &str,
+        delete_sequence: u64,
+    ) -> impl std::future::Future<Output = Result<(), PersistenceError>> + Send {
+        let _ = (tenant, entity_type, entity_id, delete_sequence);
         async { Ok(()) }
     }
 
@@ -393,12 +447,61 @@ pub trait EventStore: Send + Sync + 'static {
         appends: &[PersistenceAppend],
     ) -> impl std::future::Future<Output = Result<Vec<PersistenceAppendResult>, PersistenceError>> + Send;
 
+    /// Atomically append events while comparing independent journal sequences.
+    ///
+    /// Every guard must still equal `expected_sequence` at the serialization
+    /// point of the append. Guards never create streams or append events. This
+    /// is the commit-time authorization primitive for a decision that depends
+    /// on other entities' lifecycle state.
+    fn append_batch_guarded(
+        &self,
+        appends: &[PersistenceAppend],
+        guards: &[PersistenceSequenceGuard],
+    ) -> impl std::future::Future<Output = Result<Vec<PersistenceAppendResult>, PersistenceError>> + Send
+    {
+        async move {
+            validate_guarded_persistence_append_batch(appends, guards)?;
+            if guards.is_empty() {
+                return self.append_batch(appends).await;
+            }
+            Err(PersistenceError::Storage(
+                "event store does not support guarded atomic append".to_string(),
+            ))
+        }
+    }
+
     /// Read events from the journal, starting after the given sequence number.
     fn read_events(
         &self,
         persistence_id: &str,
         from_sequence: u64,
     ) -> impl std::future::Future<Output = Result<Vec<PersistenceEnvelope>, PersistenceError>> + Send;
+
+    /// Read at most `limit` events after the given sequence number.
+    ///
+    /// Implementations must apply the bound in the backing store before
+    /// decoding rows. This is used on error-reconciliation paths where an
+    /// unexpectedly long journal must not create unbounded recovery work.
+    fn read_events_bounded(
+        &self,
+        persistence_id: &str,
+        from_sequence: u64,
+        limit: usize,
+    ) -> impl std::future::Future<Output = Result<Vec<PersistenceEnvelope>, PersistenceError>> + Send;
+
+    /// Read only the latest event for a bounded batch of persistence streams.
+    ///
+    /// The result must have exactly the same length and order as
+    /// `persistence_ids`. `None` means that the requested stream has no journal;
+    /// transport, decoding, and backend-consistency failures must return `Err`.
+    /// Implementations must enforce [`LATEST_EVENT_BATCH_SIZE`] with
+    /// [`validate_latest_event_batch`].
+    fn read_latest_events(
+        &self,
+        persistence_ids: &[String],
+    ) -> impl std::future::Future<
+        Output = Result<Vec<Option<PersistenceEnvelope>>, PersistenceError>,
+    > + Send;
 
     /// Save a state snapshot.
     fn save_snapshot(
@@ -414,21 +517,27 @@ pub trait EventStore: Send + Sync + 'static {
         persistence_id: &str,
     ) -> impl std::future::Future<Output = Result<Option<(u64, Vec<u8>)>, PersistenceError>> + Send;
 
-    /// List all distinct `(entity_type, entity_id)` pairs for a tenant.
+    /// List raw distinct `(entity_type, entity_id)` discovery candidates.
+    ///
+    /// Tombstoned streams are included. Callers that require live entities must
+    /// classify candidates through [`EventStore::read_latest_events`] and
+    /// [`is_deletion_tombstone`].
     fn list_entity_ids(
         &self,
         tenant: &str,
     ) -> impl std::future::Future<Output = Result<Vec<(String, String)>, PersistenceError>> + Send;
 
-    /// List distinct entity IDs for one `(tenant, entity_type)` pair.
+    /// List raw distinct entity IDs for one `(tenant, entity_type)` pair.
+    ///
+    /// Tombstoned streams are included, matching [`EventStore::list_entity_ids`].
     fn list_entity_ids_by_type(
         &self,
         tenant: &str,
         entity_type: &str,
     ) -> impl std::future::Future<Output = Result<Vec<String>, PersistenceError>> + Send;
 
-    /// List at most `limit` authoritative `(entity_type, entity_id)` pairs for
-    /// a tenant, optionally scoped to one entity type.
+    /// List at most `limit` raw `(entity_type, entity_id)` discovery candidates
+    /// for a tenant, optionally scoped to one entity type.
     ///
     /// Storage backends should override this to apply the bound inside the
     /// backing query. The default is intended for small in-memory/test stores.
@@ -481,6 +590,14 @@ pub struct PersistenceAppend {
     pub expected_sequence: u64,
     /// Events to append to this journal.
     pub events: Vec<PersistenceEnvelope>,
+    /// Optional complete desired declared-key rows after applying `events`.
+    ///
+    /// `None` means the caller has no authoritative key information, so an
+    /// indexing backend preserves the stream's existing claims. `Some(rows)`
+    /// replaces all prior claims, including `Some(Vec::new())` for an explicit
+    /// clear. Tombstones always clear claims and ignore this field.
+    #[serde(default)]
+    pub key_rows: Option<Vec<EntityKeyRow>>,
 }
 
 /// New sequence number for one stream after an atomic batch append.
@@ -492,12 +609,31 @@ pub struct PersistenceAppendResult {
     pub sequence_nr: u64,
 }
 
+/// Compare-only journal precondition for an atomic append.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PersistenceSequenceGuard {
+    /// Persistence ID in the form `{tenant}:{entity_type}:{entity_id}`.
+    pub persistence_id: String,
+    /// Sequence that must still be current when the append commits.
+    pub expected_sequence: u64,
+}
+
 /// Errors that can occur during event persistence operations.
 #[derive(Debug, thiserror::Error)]
 pub enum PersistenceError {
     /// Optimistic concurrency check failed (another writer appended first).
     #[error("optimistic concurrency violation: expected sequence {expected}, got {actual}")]
     ConcurrencyViolation { expected: u64, actual: u64 },
+
+    /// A compare-only stream changed after a caller derived a decision from it.
+    #[error(
+        "persistence precondition failed for {persistence_id}: expected sequence {expected}, got {actual}"
+    )]
+    PreconditionFailed {
+        persistence_id: String,
+        expected: u64,
+        actual: u64,
+    },
 
     /// Event serialization or deserialization failed.
     #[error("serialization error: {0}")]
@@ -507,6 +643,9 @@ pub enum PersistenceError {
     #[error("storage error: {0}")]
     Storage(String),
 }
+
+#[cfg(test)]
+mod tests;
 
 /// Convert backend-specific errors into [`PersistenceError::Storage`].
 pub fn storage_error(err: impl std::fmt::Display) -> PersistenceError {

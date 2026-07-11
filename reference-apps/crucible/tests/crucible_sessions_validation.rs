@@ -276,15 +276,15 @@ async fn create_session_with_unknown_status_is_rejected() {
         "UpdatedAt": "2026-04-11T00:00:00Z"
     }"#;
     let (status, body_out) = post(&state, "/tdata/Sessions", body).await;
-    assert_eq!(status, StatusCode::CONFLICT, "{body_out:?}");
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body_out:?}");
     assert_eq!(
-        body_out["error"]["details"]["invariant"].as_str(),
-        Some("StatusMustBeKnown")
+        body_out["error"]["code"].as_str(),
+        Some("InvalidInitialStatus")
     );
 }
 
 #[tokio::test]
-async fn create_session_terminated_without_terminated_at_is_rejected() {
+async fn create_session_terminated_directly_is_rejected_before_termination_invariants() {
     let state = build_crucible_state();
     make_environment(&state, "env-term").await;
     make_managed_agent(&state, "agent-term").await;
@@ -298,15 +298,15 @@ async fn create_session_terminated_without_terminated_at_is_rejected() {
         "UpdatedAt": "2026-04-11T00:00:00Z"
     }"#;
     let (status, body_out) = post(&state, "/tdata/Sessions", body).await;
-    assert_eq!(status, StatusCode::CONFLICT, "{body_out:?}");
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body_out:?}");
     assert_eq!(
-        body_out["error"]["details"]["invariant"].as_str(),
-        Some("TerminatedRequiresTerminatedAt")
+        body_out["error"]["code"].as_str(),
+        Some("InvalidInitialStatus")
     );
 }
 
 #[tokio::test]
-async fn create_session_archived_without_archived_at_is_rejected() {
+async fn create_session_archived_directly_is_rejected_before_archive_invariants() {
     let state = build_crucible_state();
     make_environment(&state, "env-arch").await;
     make_managed_agent(&state, "agent-arch").await;
@@ -320,10 +320,10 @@ async fn create_session_archived_without_archived_at_is_rejected() {
         "UpdatedAt": "2026-04-11T00:00:00Z"
     }"#;
     let (status, body_out) = post(&state, "/tdata/Sessions", body).await;
-    assert_eq!(status, StatusCode::CONFLICT, "{body_out:?}");
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body_out:?}");
     assert_eq!(
-        body_out["error"]["details"]["invariant"].as_str(),
-        Some("ArchivedRequiresArchivedAt")
+        body_out["error"]["code"].as_str(),
+        Some("InvalidInitialStatus")
     );
 }
 

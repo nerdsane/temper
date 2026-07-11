@@ -3,7 +3,7 @@ use axum::response::IntoResponse;
 use serde_json::Value;
 use temper_runtime::tenant::TenantId;
 
-use crate::response::odata_error;
+use crate::response::{odata_error, service_unavailable_response};
 use crate::state::ServerState;
 use crate::state::app_uniqueness::CommonsAppUniquenessError;
 
@@ -28,11 +28,11 @@ pub(super) async fn enforce_commons_app_name_unique_for_write(
             ),
         )
         .into_response()),
-        Err(CommonsAppUniquenessError::Internal(msg)) => Err(odata_error(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            "AppUniquenessError",
-            &msg,
-        )
-        .into_response()),
+        Err(CommonsAppUniquenessError::Internal(error)) => Err(service_unavailable_response(
+            "AppUniquenessUnavailable",
+            "App name availability is temporarily unavailable",
+            "commons_app_name_uniqueness",
+            error,
+        )),
     }
 }

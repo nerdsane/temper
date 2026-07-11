@@ -1,7 +1,11 @@
 use super::*;
 use crate::migration::run_migrations;
 use sqlx::PgPool;
-use temper_runtime::persistence::{EntityKeyRow, EventStore};
+use temper_runtime::persistence::{
+    EntityKeyRow, EventStore, PersistenceAppend, PersistenceError, PersistenceSequenceGuard,
+};
+
+type SegmentRow = (i64, i64, Option<i64>, Option<i64>, i64, bool);
 
 fn test_envelope(event_type: &str, payload: serde_json::Value) -> PersistenceEnvelope {
     PersistenceEnvelope {
@@ -16,6 +20,295 @@ fn test_envelope(event_type: &str, payload: serde_json::Value) -> PersistenceEnv
             actor_id: "store-projection-test".to_string(),
         },
     }
+}
+
+/// ARN-192 contract proof for the real PostgreSQL tail query. Gated on
+/// `DATABASE_URL`; preserves input order and duplicates, returns `None` for a
+/// missing stream, and decodes only the newest row.
+#[test]
+#[ignore = "requires DATABASE_URL and a live PostgreSQL service"]
+fn latest_events_preserve_order_duplicates_missing_and_tail_on_postgres() {
+    let database_url = std::env::var("DATABASE_URL")
+        .expect("DATABASE_URL for ignored PostgreSQL integration test");
+
+    sqlx::test_block_on(async {
+        let pool = PgPool::connect(&database_url).await.unwrap();
+        run_migrations(&pool).await.unwrap();
+        let store = PostgresEventStore::new(pool.clone());
+        let tenant = format!("tenant-latest-{}", uuid::Uuid::new_v4());
+        let first = format!("{tenant}:Order:first");
+        let second = format!("{tenant}:Order:second");
+        let missing = format!("{tenant}:Order:missing");
+
+        store
+            .append(
+                &first,
+                0,
+                &[
+                    test_envelope("Created", serde_json::json!({"version": 1})),
+                    test_envelope("Updated", serde_json::json!({"version": 2})),
+                ],
+            )
+            .await
+            .unwrap();
+        store
+            .append(
+                &second,
+                0,
+                &[test_envelope("Created", serde_json::json!({"version": 1}))],
+            )
+            .await
+            .unwrap();
+
+        let latest = store
+            .read_latest_events(&[second.clone(), missing, first.clone(), first.clone()])
+            .await
+            .unwrap();
+        assert_eq!(latest.len(), 4);
+        assert_eq!(latest[0].as_ref().unwrap().sequence_nr, 1);
+        assert!(latest[1].is_none());
+        assert_eq!(latest[2].as_ref().unwrap().sequence_nr, 2);
+        assert_eq!(latest[2].as_ref().unwrap().payload["version"], 2);
+        assert_eq!(latest[3].as_ref().unwrap().sequence_nr, 2);
+
+        let bounded = store.read_events_bounded(&first, 0, 1).await.unwrap();
+        assert_eq!(bounded.len(), 1);
+        assert_eq!(bounded[0].sequence_nr, 1);
+        assert!(
+            store
+                .read_events_bounded(&first, 0, 0)
+                .await
+                .unwrap()
+                .is_empty()
+        );
+
+        crate::dbm::postgres_query!(
+            "UPDATE events SET metadata = '{}'::jsonb \
+             WHERE tenant = $1 AND entity_type = 'Order' AND entity_id = 'first' \
+               AND sequence_nr = 2",
+        )
+        .bind(&tenant)
+        .execute(&pool)
+        .await
+        .unwrap();
+        assert!(matches!(
+            store.read_latest_events(std::slice::from_ref(&first)).await,
+            Err(PersistenceError::Serialization(_))
+        ));
+
+        crate::dbm::postgres_query!("DELETE FROM events WHERE tenant = $1")
+            .bind(&tenant)
+            .execute(&pool)
+            .await
+            .unwrap();
+    });
+}
+
+#[test]
+#[ignore = "requires DATABASE_URL and a live PostgreSQL service"]
+fn delayed_snapshot_preserves_postgres_recovery_and_segment_order() {
+    let database_url = std::env::var("DATABASE_URL")
+        .expect("DATABASE_URL for ignored PostgreSQL integration test");
+
+    sqlx::test_block_on(async {
+        let pool = PgPool::connect(&database_url).await.unwrap();
+        run_migrations(&pool).await.unwrap();
+        let store = PostgresEventStore::new(pool.clone());
+        let tenant = format!("tenant-snapshot-{}", uuid::Uuid::new_v4());
+        let snapshot_only = format!("{tenant}:Order:snapshot-only");
+        store
+            .save_snapshot(&snapshot_only, 5, b"snapshot-only")
+            .await
+            .unwrap();
+        let invented_segments: i64 = crate::dbm::postgres_query_scalar!(
+            "SELECT COUNT(*)::bigint FROM event_segments \
+             WHERE tenant = $1 AND entity_type = 'Order' AND entity_id = 'snapshot-only'",
+        )
+        .bind(&tenant)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(invented_segments, 0);
+
+        let persistence_id = format!("{tenant}:Order:ordered");
+        store
+            .append(
+                &persistence_id,
+                0,
+                &[
+                    test_envelope("Created", serde_json::json!({})),
+                    test_envelope("Updated", serde_json::json!({})),
+                ],
+            )
+            .await
+            .unwrap();
+        store
+            .save_snapshot(&persistence_id, 2, b"snapshot-2")
+            .await
+            .unwrap();
+        store
+            .append(
+                &persistence_id,
+                2,
+                &[test_envelope("UpdatedAgain", serde_json::json!({}))],
+            )
+            .await
+            .unwrap();
+        store
+            .save_snapshot(&persistence_id, 2, b"snapshot-2-delayed")
+            .await
+            .unwrap();
+        store
+            .save_snapshot(&persistence_id, 3, b"snapshot-3")
+            .await
+            .unwrap();
+        store
+            .save_snapshot(&persistence_id, 1, b"snapshot-1-stale")
+            .await
+            .unwrap();
+
+        assert_eq!(
+            store.load_snapshot(&persistence_id).await.unwrap(),
+            Some((3, b"snapshot-3".to_vec()))
+        );
+        let segments: Vec<SegmentRow> = crate::dbm::postgres_query_as!(
+            "SELECT segment_index, start_sequence_nr, end_sequence_nr, \
+                        snapshot_sequence, event_count, (sealed_at IS NOT NULL) \
+                 FROM event_segments \
+                 WHERE tenant = $1 AND entity_type = 'Order' AND entity_id = 'ordered' \
+                 ORDER BY segment_index",
+        )
+        .bind(&tenant)
+        .fetch_all(&pool)
+        .await
+        .unwrap();
+        assert_eq!(
+            segments,
+            vec![
+                (0, 1, Some(2), Some(2), 2, true),
+                (1, 3, Some(3), Some(3), 1, true),
+                (2, 4, None, None, 0, false),
+            ]
+        );
+
+        for table in ["snapshot_history", "snapshots", "event_segments", "events"] {
+            let query = format!("DELETE FROM {table} WHERE tenant = $1");
+            sqlx::query(&query)
+                .bind(&tenant)
+                .execute(&pool)
+                .await
+                .unwrap();
+        }
+    });
+}
+
+#[test]
+fn unconditional_projection_removal_clears_orphan_field_rows() {
+    let database_url = match std::env::var("DATABASE_URL") {
+        Ok(url) => url,
+        Err(_) => return,
+    };
+
+    sqlx::test_block_on(async {
+        let pool = PgPool::connect(&database_url).await.unwrap();
+        run_migrations(&pool).await.unwrap();
+        let store = PostgresEventStore::new(pool.clone());
+        let tenant = format!("tenant-orphan-{}", uuid::Uuid::new_v4());
+        let entity_type = "Order";
+        let entity_id = "ord-orphan";
+        crate::dbm::postgres_query!(
+            "INSERT INTO entity_field_index \
+             (tenant, entity_type, entity_id, field_name, field_value, status) \
+             VALUES ($1, $2, $3, 'Title', 'orphan', 'Draft')",
+        )
+        .bind(&tenant)
+        .bind(entity_type)
+        .bind(entity_id)
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        store
+            .remove_query_projection(&tenant, entity_type, entity_id)
+            .await
+            .unwrap();
+
+        let remaining: i64 = crate::dbm::postgres_query_scalar!(
+            "SELECT COUNT(*)::bigint FROM entity_field_index \
+             WHERE tenant = $1 AND entity_type = $2 AND entity_id = $3",
+        )
+        .bind(&tenant)
+        .bind(entity_type)
+        .bind(entity_id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(remaining, 0);
+    });
+}
+
+#[test]
+fn guarded_append_rejects_stale_context_without_writing_target() {
+    let database_url = match std::env::var("DATABASE_URL") {
+        Ok(url) => url,
+        Err(_) => return,
+    };
+
+    sqlx::test_block_on(async {
+        let pool = PgPool::connect(&database_url).await.unwrap();
+        run_migrations(&pool).await.unwrap();
+        let store = PostgresEventStore::new(pool.clone());
+        let tenant = format!("tenant-guarded-{}", uuid::Uuid::new_v4());
+        let context_id = format!("{tenant}:Owner:owner-guard");
+        let target_id = format!("{tenant}:Document:document-guard");
+        store
+            .append(
+                &context_id,
+                0,
+                &[test_envelope("Created", serde_json::json!({}))],
+            )
+            .await
+            .unwrap();
+        let error = store
+            .append_batch_guarded(
+                &[PersistenceAppend {
+                    persistence_id: target_id.clone(),
+                    expected_sequence: 0,
+                    events: vec![test_envelope("FieldsPatched", serde_json::json!({}))],
+                    key_rows: None,
+                }],
+                &[PersistenceSequenceGuard {
+                    persistence_id: context_id.clone(),
+                    expected_sequence: 0,
+                }],
+            )
+            .await
+            .expect_err("stale PostgreSQL guard must abort target append");
+        assert!(matches!(error, PersistenceError::PreconditionFailed { .. }));
+        assert!(store.read_events(&target_id, 0).await.unwrap().is_empty());
+        let result = store
+            .append_batch_guarded(
+                &[PersistenceAppend {
+                    persistence_id: target_id.clone(),
+                    expected_sequence: 0,
+                    events: vec![test_envelope("FieldsPatched", serde_json::json!({}))],
+                    key_rows: None,
+                }],
+                &[PersistenceSequenceGuard {
+                    persistence_id: context_id,
+                    expected_sequence: 1,
+                }],
+            )
+            .await
+            .expect("current PostgreSQL guard should commit target atomically");
+        assert_eq!(result[0].sequence_nr, 1);
+        assert_eq!(store.read_events(&target_id, 0).await.unwrap().len(), 1);
+        crate::dbm::postgres_query!("DELETE FROM events WHERE tenant = $1")
+            .bind(&tenant)
+            .execute(&pool)
+            .await
+            .unwrap();
+    });
 }
 
 /// ADR-0153 live verification: the real postgres store honors the same
@@ -87,6 +380,192 @@ fn entity_key_index_present_absent_and_atomic_reject() {
                 .await
                 .unwrap(),
             Some("doc-a".to_string()),
+        );
+
+        // A's tombstone retires every key claim in the SAME transaction, so a
+        // later generation/entity can safely reuse the declared key.
+        store
+            .append_batch(&[PersistenceAppend {
+                persistence_id: pid_a.clone(),
+                expected_sequence: 1,
+                events: vec![
+                    test_envelope("Deleted", serde_json::json!({})),
+                    test_envelope(
+                        temper_runtime::persistence::COMPOSITE_EVENT_TYPE,
+                        serde_json::json!({}),
+                    ),
+                ],
+                key_rows: None,
+            }])
+            .await
+            .unwrap();
+        assert_eq!(
+            store
+                .lookup_by_key(&tenant, "Doc", "path", &key.key_hash)
+                .await
+                .unwrap(),
+            None,
+        );
+        store
+            .append_with_keys(
+                &pid_b,
+                0,
+                &[test_envelope("Create", serde_json::json!({}))],
+                std::slice::from_ref(&key),
+            )
+            .await
+            .expect("deleted key can be reused by another entity");
+        assert_eq!(
+            store
+                .lookup_by_key(&tenant, "Doc", "path", &key.key_hash)
+                .await
+                .unwrap(),
+            Some("doc-b".to_string()),
+        );
+
+        // A delayed cleanup for A's first deletion generation must not erase
+        // a key claimed by A after a valid recreation at sequence 4.
+        let recreated_key = EntityKeyRow {
+            key_name: "path".to_string(),
+            key_hash: format!("kh-recreated-{}", uuid::Uuid::new_v4()),
+        };
+        store
+            .append_with_keys(
+                &pid_a,
+                3,
+                &[test_envelope("Created", serde_json::json!({}))],
+                std::slice::from_ref(&recreated_key),
+            )
+            .await
+            .expect("recreate deleted stream");
+        store
+            .retire_entity_keys_through_sequence(&tenant, "Doc", "doc-a", 3)
+            .await
+            .expect("run delayed cleanup for old generation");
+        assert_eq!(
+            store
+                .lookup_by_key(&tenant, "Doc", "path", &recreated_key.key_hash)
+                .await
+                .unwrap(),
+            Some("doc-a".to_string()),
+        );
+
+        // Legacy rows that survived a terminal tombstone are still repaired
+        // when there is no later Created generation.
+        let legacy_pid = format!("{tenant}:Doc:doc-legacy");
+        let legacy_key = EntityKeyRow {
+            key_name: "path".to_string(),
+            key_hash: format!("kh-legacy-{}", uuid::Uuid::new_v4()),
+        };
+        store
+            .append(
+                &legacy_pid,
+                0,
+                &[
+                    test_envelope("Created", serde_json::json!({})),
+                    test_envelope("Deleted", serde_json::json!({})),
+                ],
+            )
+            .await
+            .unwrap();
+        store
+            .backfill_entity_keys(
+                &tenant,
+                "Doc",
+                "doc-legacy",
+                std::slice::from_ref(&legacy_key),
+            )
+            .await
+            .expect("seed a legacy stale key row");
+        store
+            .retire_entity_keys_through_sequence(&tenant, "Doc", "doc-legacy", 2)
+            .await
+            .expect("retire the legacy stale key row");
+        assert_eq!(
+            store
+                .lookup_by_key(&tenant, "Doc", "path", &legacy_key.key_hash)
+                .await
+                .unwrap(),
+            None,
+        );
+
+        let empty_pid = format!("{tenant}:Doc:empty-batch");
+        let empty_result = store
+            .append_batch(&[PersistenceAppend {
+                persistence_id: empty_pid.clone(),
+                expected_sequence: 7,
+                events: vec![],
+                key_rows: None,
+            }])
+            .await
+            .unwrap();
+        assert_eq!(empty_result[0].sequence_nr, 7);
+        assert!(store.read_events(&empty_pid, 0).await.unwrap().is_empty());
+        assert!(
+            !store
+                .list_entity_ids(&tenant)
+                .await
+                .unwrap()
+                .iter()
+                .any(|(_, entity_id)| entity_id == "empty-batch")
+        );
+        let segment_count: i64 = crate::dbm::postgres_query_scalar!(
+            "SELECT COUNT(*) FROM event_segments \
+             WHERE tenant = $1 AND entity_type = 'Doc' AND entity_id = 'empty-batch'",
+        )
+        .bind(&tenant)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(segment_count, 0);
+
+        let raw_pid = format!("{tenant}:Doc:doc-raw-key");
+        let raw_key = EntityKeyRow {
+            key_name: "path".to_string(),
+            key_hash: format!("kh-raw-{}", uuid::Uuid::new_v4()),
+        };
+        store
+            .append_with_keys(
+                &raw_pid,
+                0,
+                &[test_envelope("Created", serde_json::json!({}))],
+                std::slice::from_ref(&raw_key),
+            )
+            .await
+            .unwrap();
+        store
+            .append_batch(&[PersistenceAppend {
+                persistence_id: raw_pid.clone(),
+                expected_sequence: 1,
+                events: vec![test_envelope("ExternalAudit", serde_json::json!({}))],
+                key_rows: None,
+            }])
+            .await
+            .unwrap();
+        assert_eq!(
+            store
+                .lookup_by_key(&tenant, "Doc", "path", &raw_key.key_hash)
+                .await
+                .unwrap(),
+            Some("doc-raw-key".to_string()),
+            "raw batch append must preserve key claims it cannot recompute"
+        );
+        store
+            .append_batch(&[PersistenceAppend {
+                persistence_id: raw_pid.clone(),
+                expected_sequence: 2,
+                events: vec![test_envelope("KeyRemoved", serde_json::json!({}))],
+                key_rows: Some(Vec::new()),
+            }])
+            .await
+            .unwrap();
+        assert_eq!(
+            store
+                .lookup_by_key(&tenant, "Doc", "path", &raw_key.key_hash)
+                .await
+                .unwrap(),
+            None,
+            "authoritative empty batch replacement must clear prior claims"
         );
 
         // Clean up this test tenant's rows.
@@ -197,7 +676,7 @@ fn key_index_backfill_and_watermark_methods_round_trip_on_postgres() {
 }
 
 #[test]
-fn list_entity_ids_by_type_unions_catalog_field_index_and_events() {
+fn list_entity_ids_by_type_uses_only_authoritative_event_streams() {
     let database_url = match std::env::var("DATABASE_URL") {
         Ok(url) => url,
         Err(_) => return,
@@ -268,14 +747,7 @@ fn list_entity_ids_by_type_unions_catalog_field_index_and_events() {
             .await
             .unwrap();
 
-        assert_eq!(
-            ids,
-            vec![
-                "dl-catalog".to_string(),
-                "dl-event".to_string(),
-                "dl-index".to_string(),
-            ]
-        );
+        assert_eq!(ids, vec!["dl-deleted".to_string(), "dl-event".to_string(),]);
 
         crate::dbm::postgres_query!("DELETE FROM entity_field_index WHERE tenant = $1")
             .bind(&tenant)

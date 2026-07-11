@@ -1202,7 +1202,7 @@ async fn session_schedule_create_and_activate() {
 }
 
 #[tokio::test]
-async fn session_schedule_status_invariant() {
+async fn session_schedule_create_rejects_non_initial_status() {
     let state = build_crucible_state();
     let sess_id = seed_session(&state, "sched2").await;
 
@@ -1224,13 +1224,10 @@ async fn session_schedule_status_invariant() {
     .await;
     assert_eq!(
         status,
-        StatusCode::CONFLICT,
+        StatusCode::BAD_REQUEST,
         "bad status rejected: {body:?}"
     );
-    assert_eq!(
-        body["error"]["details"]["invariant"].as_str(),
-        Some("StatusMustBeKnown")
-    );
+    assert_eq!(body["error"]["code"].as_str(), Some("InvalidInitialStatus"));
 }
 
 #[tokio::test]

@@ -20,6 +20,7 @@ impl ServerState {
             .ok()
             .and_then(|slot| slot.clone());
         let mut projection_upserts = Vec::new();
+        let mut projection_removals = Vec::new();
 
         for stream in streams.values().filter(|stream| !stream.events.is_empty()) {
             self.cache_entity_status(
@@ -35,21 +36,37 @@ impl ServerState {
                     stream,
                     projection_queue.as_ref(),
                     &mut projection_upserts,
+                    &mut projection_removals,
                 );
             }
         }
 
-        if let Some(query_plane) = query_plane
-            && !projection_upserts.is_empty()
-        {
-            query_plane
-                .upsert_projections(tenant.as_str(), &projection_upserts)
-                .await
-                .map_err(|e| {
-                    DispatchError::Internal(format!(
-                        "query projection write failed after composite batch: {e}"
-                    ))
-                })?;
+        if let Some(query_plane) = query_plane {
+            for (entity_type, entity_id, sequence_nr) in projection_removals {
+                query_plane
+                    .remove_projection_through_sequence(
+                        tenant.as_str(),
+                        &entity_type,
+                        &entity_id,
+                        sequence_nr,
+                    )
+                    .await
+                    .map_err(|e| {
+                        DispatchError::Internal(format!(
+                            "query projection removal failed after composite batch: {e}"
+                        ))
+                    })?;
+            }
+            if !projection_upserts.is_empty() {
+                query_plane
+                    .upsert_projections(tenant.as_str(), &projection_upserts)
+                    .await
+                    .map_err(|e| {
+                        DispatchError::Internal(format!(
+                            "query projection write failed after composite batch: {e}"
+                        ))
+                    })?;
+            }
         }
 
         Ok(())
@@ -61,13 +78,19 @@ impl ServerState {
         stream: &AtomicCompositeStream,
     ) -> Result<(), DispatchError> {
         let index_key = format!("{tenant}:{}", stream.entity_type);
-        let mut index = self.entity_index.write().map_err(|_| {
-            DispatchError::Internal("entity index lock poisoned after composite batch".to_string())
-        })?;
-        index
-            .entry(index_key)
-            .or_default()
-            .insert(stream.entity_id.clone());
+        self.mutate_entity_index(tenant, &stream.entity_type, |index| {
+            if stream.state.status == "Deleted" {
+                if let Some(ids) = index.get_mut(&index_key) {
+                    ids.remove(&stream.entity_id);
+                }
+            } else {
+                index
+                    .entry(index_key)
+                    .or_default()
+                    .insert(stream.entity_id.clone());
+            }
+        })
+        .map_err(DispatchError::Internal)?;
         Ok(())
     }
 
@@ -77,7 +100,27 @@ impl ServerState {
         stream: &AtomicCompositeStream,
         projection_queue: Option<&std::sync::Arc<crate::state::QueryProjectionWriteQueue>>,
         projection_upserts: &mut Vec<QueryProjectionUpsert>,
+        projection_removals: &mut Vec<(String, String, u64)>,
     ) {
+        if stream.state.status == "Deleted" {
+            if let Some(queue) = projection_queue {
+                let outcome = queue.enqueue_remove(
+                    tenant.to_string(),
+                    stream.entity_type.clone(),
+                    stream.entity_id.clone(),
+                    stream.state.sequence_nr,
+                    "queued_composite",
+                );
+                record_composite_projection_enqueue(tenant, stream, outcome);
+            } else {
+                projection_removals.push((
+                    stream.entity_type.clone(),
+                    stream.entity_id.clone(),
+                    stream.state.sequence_nr,
+                ));
+            }
+            return;
+        }
         let fields = stream.state.fields.clone();
         let projected_state = self.query_projection_state(&stream.state);
         if let Some(queue) = projection_queue {
@@ -118,7 +161,11 @@ fn record_composite_projection_enqueue(
             crate::query_projection_metrics::record_update_enqueued(
                 tenant.as_str(),
                 &stream.entity_type,
-                "upsert",
+                if stream.state.status == "Deleted" {
+                    "remove"
+                } else {
+                    "upsert"
+                },
                 "queued_composite",
             );
         }

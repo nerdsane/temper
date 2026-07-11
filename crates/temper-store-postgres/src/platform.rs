@@ -14,6 +14,7 @@ use crate::metrics::{
     record_postgres_transaction_begin_duration, record_postgres_transaction_commit_duration,
 };
 
+mod projection_remove;
 mod rows;
 use rows::*;
 
@@ -28,6 +29,28 @@ const BUNDLED_REPLACE_UPLOAD_SOURCE: &str = "bundled-replace-upload";
 const MAX_INDEXABLE_FIELD_VALUE_BYTES: usize = 2000;
 const QUERY_PROJECTION_UPSERT_OPERATION: &str = "query_projection_upsert";
 const QUERY_PROJECTION_REMOVE_OPERATION: &str = "query_projection_remove";
+
+fn postgres_projection_sequence(
+    sequence_nr: u64,
+    operation: &str,
+) -> Result<i64, PersistenceError> {
+    i64::try_from(sequence_nr).map_err(|_| {
+        PersistenceError::Storage(format!(
+            "projection sequence exceeds PostgreSQL range during {operation}"
+        ))
+    })
+}
+
+pub(crate) fn decoded_projection_sequence(
+    sequence_nr: i64,
+    entity_id: &str,
+) -> Result<u64, PersistenceError> {
+    u64::try_from(sequence_nr).map_err(|_| {
+        PersistenceError::Serialization(format!(
+            "projection for entity '{entity_id}' has a negative sequence"
+        ))
+    })
+}
 
 pub(crate) type ScalarFieldIndex = BTreeMap<String, String>;
 type CatalogProjectionFingerprint = (String, String, i64);
@@ -50,7 +73,7 @@ struct QueryProjectionCatalogUpdate<'a> {
     status: &'a str,
     fields: &'a serde_json::Value,
     state: &'a serde_json::Value,
-    sequence_nr: u64,
+    sequence_nr: i64,
     projection_hash: &'a str,
 }
 
@@ -74,7 +97,7 @@ async fn update_query_projection_catalog_row(
     .bind(update.entity_id)
     .bind(update.status)
     .bind(update.fields)
-    .bind(update.sequence_nr as i64)
+    .bind(update.sequence_nr)
     .bind(update.projection_hash)
     .bind(update.state)
     .execute(&mut **tx)
@@ -565,6 +588,7 @@ impl PostgresEventStore {
         state: &serde_json::Value,
         sequence_nr: u64,
     ) -> Result<(), PersistenceError> {
+        let new_sequence_nr = postgres_projection_sequence(sequence_nr, "projection upsert")?;
         let status = canonical_projection_status(status, state);
         let projection_hash = json_hash(fields);
         let (new_index, indexed_fields, skipped_fields) = scalar_index_fields(fields);
@@ -623,7 +647,6 @@ impl PostgresEventStore {
             .await
             .map_err(storage_error)?;
 
-        let new_sequence_nr = sequence_nr as i64;
         let previous_catalog = if previous_catalog
             .as_ref()
             .is_some_and(|(_, _, existing_sequence)| *existing_sequence > new_sequence_nr)
@@ -664,7 +687,7 @@ impl PostgresEventStore {
                     status,
                     fields,
                     state,
-                    sequence_nr,
+                    sequence_nr: new_sequence_nr,
                     projection_hash: projection_hash.as_str(),
                 },
             )
@@ -684,7 +707,7 @@ impl PostgresEventStore {
             .bind(status)
             .bind(fields)
             .bind(state)
-            .bind(sequence_nr as i64)
+            .bind(new_sequence_nr)
             .bind(projection_hash.as_str())
             .fetch_optional(&mut *tx)
             .await
@@ -746,7 +769,7 @@ impl PostgresEventStore {
                         status,
                         fields,
                         state,
-                        sequence_nr,
+                        sequence_nr: new_sequence_nr,
                         projection_hash: projection_hash.as_str(),
                     },
                 )
@@ -806,86 +829,6 @@ impl PostgresEventStore {
         record_postgres_projection_index_reconciliation(
             QUERY_PROJECTION_UPSERT_OPERATION,
             reconciliation_path,
-        );
-        transaction_timer.set_outcome("ok");
-        Ok(())
-    }
-
-    pub async fn remove_query_projection(
-        &self,
-        tenant: &str,
-        entity_type: &str,
-        entity_id: &str,
-    ) -> Result<(), PersistenceError> {
-        let mut transaction_timer =
-            PostgresTransactionTimer::start(QUERY_PROJECTION_REMOVE_OPERATION);
-        let acquire_started = Instant::now();
-        let mut conn = match self.pool().acquire().await {
-            Ok(conn) => {
-                record_postgres_pool_acquire_duration(
-                    acquire_started.elapsed(),
-                    QUERY_PROJECTION_REMOVE_OPERATION,
-                    "ok",
-                );
-                conn
-            }
-            Err(e) => {
-                record_postgres_pool_acquire_duration(
-                    acquire_started.elapsed(),
-                    QUERY_PROJECTION_REMOVE_OPERATION,
-                    "error",
-                );
-                return Err(storage_error(e));
-            }
-        };
-        let begin_started = Instant::now();
-        let mut tx = match conn.begin().await {
-            Ok(tx) => {
-                record_postgres_transaction_begin_duration(
-                    begin_started.elapsed(),
-                    QUERY_PROJECTION_REMOVE_OPERATION,
-                    "ok",
-                );
-                tx
-            }
-            Err(e) => {
-                record_postgres_transaction_begin_duration(
-                    begin_started.elapsed(),
-                    QUERY_PROJECTION_REMOVE_OPERATION,
-                    "error",
-                );
-                return Err(storage_error(e));
-            }
-        };
-        crate::dbm::postgres_query!(
-            "DELETE FROM entity_catalog WHERE tenant = $1 AND entity_type = $2 AND entity_id = $3",
-        )
-        .bind(tenant)
-        .bind(entity_type)
-        .bind(entity_id)
-        .execute(&mut *tx)
-        .await
-        .map_err(storage_error)?;
-        crate::dbm::postgres_query!("DELETE FROM entity_field_index WHERE tenant = $1 AND entity_type = $2 AND entity_id = $3")
-            .bind(tenant)
-            .bind(entity_type)
-            .bind(entity_id)
-            .execute(&mut *tx)
-            .await
-            .map_err(storage_error)?;
-        let commit_started = Instant::now();
-        tx.commit().await.map_err(|e| {
-            record_postgres_transaction_commit_duration(
-                commit_started.elapsed(),
-                QUERY_PROJECTION_REMOVE_OPERATION,
-                "error",
-            );
-            storage_error(e)
-        })?;
-        record_postgres_transaction_commit_duration(
-            commit_started.elapsed(),
-            QUERY_PROJECTION_REMOVE_OPERATION,
-            "ok",
         );
         transaction_timer.set_outcome("ok");
         Ok(())
@@ -1027,18 +970,17 @@ impl PostgresEventStore {
         .fetch_all(self.pool())
         .await
         .map_err(storage_error)?;
-        Ok(rows
-            .into_iter()
-            .map(|(entity_id, status, fields, state, seq)| {
-                crate::platform::PostgresEntityCatalogRow {
+        rows.into_iter()
+            .map(|(entity_id, status, fields, state, sequence_nr)| {
+                Ok(crate::platform::PostgresEntityCatalogRow {
+                    sequence_nr: decoded_projection_sequence(sequence_nr, &entity_id)?,
                     entity_id,
                     status,
                     fields,
                     state,
-                    sequence_nr: seq.max(0) as u64,
-                }
+                })
             })
-            .collect())
+            .collect()
     }
 
     pub async fn upsert_spec(

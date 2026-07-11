@@ -39,6 +39,25 @@ pub fn odata_error(status: StatusCode, code: &str, message: &str) -> ODataRespon
     }
 }
 
+/// Log an internal dependency failure and return a stable, sanitized 503.
+///
+/// Backend and driver diagnostics belong in server telemetry, never in the
+/// OData response body.
+pub(crate) fn service_unavailable_response(
+    code: &str,
+    message: &str,
+    operation: &str,
+    error: impl std::fmt::Display,
+) -> Response {
+    tracing::error!(
+        error = %error,
+        error_code = code,
+        operation,
+        "request dependency is temporarily unavailable"
+    );
+    odata_error(StatusCode::SERVICE_UNAVAILABLE, code, message).into_response()
+}
+
 /// An OData XML response (for $metadata).
 pub struct ODataXmlResponse {
     /// The XML body content.

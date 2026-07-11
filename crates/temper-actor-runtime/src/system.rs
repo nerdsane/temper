@@ -12,6 +12,15 @@ use crate::pg::{PgActorActivator, PgMailbox, PgMailboxConfig};
 use crate::scheduler::{Scheduler, SchedulerConfig};
 use crate::schema;
 
+/// Result of an atomic actor insert.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ActorSpawnOutcome {
+    /// This call inserted the actor instance.
+    Created(ActorHandle),
+    /// The actor instance already existed and its state was not replaced.
+    AlreadyExists(ActorHandle),
+}
+
 /// The actor system. Entry point for all actor operations.
 pub struct ActorSystem {
     pool: Pool,
@@ -99,6 +108,23 @@ impl ActorSystem {
         actor_type: &str,
         fields: serde_json::Value,
     ) -> Result<ActorHandle, ActorError> {
+        match self
+            .spawn_with_fields_if_absent(namespace, actor_type, fields)
+            .await?
+        {
+            ActorSpawnOutcome::Created(handle) | ActorSpawnOutcome::AlreadyExists(handle) => {
+                Ok(handle)
+            }
+        }
+    }
+
+    /// Atomically spawn with fields and distinguish an existing actor.
+    pub async fn spawn_with_fields_if_absent(
+        &self,
+        namespace: &str,
+        actor_type: &str,
+        fields: serde_json::Value,
+    ) -> Result<ActorSpawnOutcome, ActorError> {
         let handle = ActorHandle::new(namespace, actor_type);
 
         // Build initial state with fields pre-populated.
@@ -124,15 +150,18 @@ impl ActorSystem {
             .await
             .map_err(|e| ActorError::Internal(format!("pool: {e}")))?;
 
-        client
-            .execute(
-                schema::CREATE_ACTOR,
+        let inserted = client
+            .query_opt(
+                schema::CREATE_ACTOR_RETURNING,
                 &[&handle.namespace, &handle.actor_type, &initial_state],
             )
             .await
             .map_err(|e| ActorError::Internal(format!("spawn_with_fields: {e}")))?;
-
-        Ok(handle)
+        if inserted.is_some() {
+            Ok(ActorSpawnOutcome::Created(handle))
+        } else {
+            Ok(ActorSpawnOutcome::AlreadyExists(handle))
+        }
     }
     pub async fn tell<M: prost::Message>(
         &self,

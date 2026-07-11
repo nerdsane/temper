@@ -2,7 +2,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use futures_util::stream::{self, StreamExt};
+use temper_runtime::persistence::PersistenceError;
 use temper_runtime::tenant::TenantId;
 
 use crate::blobs::hydrate_blob_refs_for_tenant;
@@ -12,21 +12,55 @@ use crate::storage::{
 };
 
 mod config;
+mod materialize;
 mod select_projection;
 mod shadow;
 
-use config::{catalog_fast_read_enabled, entity_set_materialization_concurrency};
+use config::catalog_fast_read_enabled;
 pub(super) use config::{odata_default_page_size, odata_max_entities};
+pub(super) use materialize::materialize_entity_set_entities;
+#[cfg(test)]
 use select_projection::catalog_row_to_selected_entity_body;
 #[cfg(test)]
 pub(super) use select_projection::catalog_select_projection_fields;
-use shadow::{
-    CatalogShadowReadBudget, maybe_spawn_catalog_shadow_check,
-    maybe_spawn_catalog_shadow_check_with_budget,
-};
+use shadow::maybe_spawn_catalog_shadow_check;
 
 fn should_read_catalog_for_materialization(prefer_catalog: bool) -> bool {
     prefer_catalog || catalog_fast_read_enabled()
+}
+
+pub(super) enum CatalogEntityLookup {
+    Body(serde_json::Value),
+    /// The journal tail proves this entity live, but the catalog cannot serve
+    /// the exact sequence. The caller must use actor recovery, not re-probe
+    /// liveness and not return 404 on a transient second read.
+    LiveJournalFallback(u64),
+    /// The authoritative journal has no live generation for this id.
+    MissingJournal,
+    /// No durable journal is configured; use the in-memory existence gate.
+    UncheckedFallback,
+}
+
+/// Read state at or beyond a previously validated journal sequence.
+/// Journal-backed reads use strict recovery without stopping a process-local
+/// actor; asynchronous eviction could overlap old and new actor generations.
+pub(super) async fn load_actor_state_at_least(
+    state: &ServerState,
+    tenant: &TenantId,
+    entity_type: &str,
+    entity_id: &str,
+    minimum_sequence: Option<u64>,
+) -> Result<crate::entity_actor::types::EntityResponse, PersistenceError> {
+    if let Some(minimum) = minimum_sequence {
+        return state
+            .get_tenant_entity_state_at_least_strict(tenant, entity_type, entity_id, minimum)
+            .await;
+    }
+    let response = state
+        .get_tenant_entity_state(tenant, entity_type, entity_id)
+        .await
+        .map_err(PersistenceError::Storage)?;
+    Ok(response)
 }
 
 /// Build the OData JSON body for a single catalog row.
@@ -226,153 +260,61 @@ pub(super) async fn try_load_entity_body_from_catalog(
     entity_set_name: &str,
     key: &str,
     prefer_catalog: bool,
-) -> Option<serde_json::Value> {
+) -> Result<CatalogEntityLookup, PersistenceError> {
+    let validated = state
+        .live_journal_candidate_sequences(tenant, entity_type, &[key.to_string()])
+        .await?;
+    if validated.as_ref().is_some_and(BTreeMap::is_empty) {
+        return Ok(CatalogEntityLookup::MissingJournal);
+    }
     if !should_read_catalog_for_materialization(prefer_catalog) {
-        return None;
+        return Ok(match validated {
+            Some(sequences) => CatalogEntityLookup::LiveJournalFallback(
+                sequences
+                    .get(key)
+                    .copied()
+                    .expect("validated live candidate has a sequence"),
+            ),
+            None => CatalogEntityLookup::UncheckedFallback,
+        });
     }
     let ids = [key.to_string()];
     let rows = try_load_catalog_rows(state, tenant, entity_type, &ids).await;
-    let row = rows.into_iter().next().map(|(_, r)| r)?;
+    let Some(row) = rows.into_iter().next().map(|(_, row)| row) else {
+        return Ok(if validated.is_some() {
+            CatalogEntityLookup::LiveJournalFallback(
+                validated
+                    .as_ref()
+                    .and_then(|sequences| sequences.get(key))
+                    .copied()
+                    .expect("non-empty validated candidate has a sequence"),
+            )
+        } else {
+            CatalogEntityLookup::UncheckedFallback
+        });
+    };
+    if let Some(sequences) = validated
+        && sequences.get(key).copied() != Some(row.sequence_nr)
+    {
+        tracing::warn!(
+            tenant = %tenant,
+            entity_type,
+            entity_id = key,
+            catalog_sequence = row.sequence_nr,
+            journal_sequence = ?sequences.get(key),
+            "catalog row is stale relative to the journal; using authoritative actor state"
+        );
+        return Ok(CatalogEntityLookup::LiveJournalFallback(
+            sequences
+                .get(key)
+                .copied()
+                .expect("validated candidate has a sequence"),
+        ));
+    }
     maybe_spawn_catalog_shadow_check(state, tenant, entity_type, &row);
     let mut body = catalog_row_to_entity_body(entity_type, entity_set_name, row);
     hydrate_blob_refs_for_tenant(state, tenant, &mut body).await;
-    Some(body)
-}
-
-pub(super) async fn materialize_entity_set_entities(
-    state: &ServerState,
-    tenant: &TenantId,
-    entity_type: &str,
-    entity_set_name: &str,
-    entity_ids: &[String],
-    prefer_catalog: bool,
-    selected_catalog_fields: Option<&[String]>,
-) -> MaterializedEntitySet {
-    let selected_catalog_fields_owned = selected_catalog_fields.map(Vec::from);
-    let mut catalog_hits: BTreeMap<String, EntityCatalogRow> =
-        if should_read_catalog_for_materialization(prefer_catalog) {
-            match selected_catalog_fields {
-                Some(select) => {
-                    try_load_selected_catalog_rows(state, tenant, entity_type, entity_ids, select)
-                        .await
-                }
-                None => try_load_catalog_rows(state, tenant, entity_type, entity_ids).await,
-            }
-        } else {
-            BTreeMap::new()
-        };
-    let mut shadow_budget = CatalogShadowReadBudget::for_entity_set();
-
-    let concurrency = entity_set_materialization_concurrency();
-    let entities = stream::iter(entity_ids.iter().cloned())
-        .map(|id| {
-            let catalog_row = catalog_hits.remove(&id);
-            if selected_catalog_fields_owned.is_none()
-                && let Some(row) = catalog_row.as_ref()
-            {
-                let _ = maybe_spawn_catalog_shadow_check_with_budget(
-                    state,
-                    tenant,
-                    entity_type,
-                    row,
-                    &mut shadow_budget,
-                );
-            }
-            let state = state.clone();
-            let tenant = tenant.clone();
-            let entity_type = entity_type.to_string();
-            let entity_set_name = entity_set_name.to_string();
-            let selected_catalog_fields = selected_catalog_fields_owned.clone();
-            async move {
-                if let Some(row) = catalog_row {
-                    let mut entity = match selected_catalog_fields.as_deref() {
-                        Some(select) => catalog_row_to_selected_entity_body(
-                            &entity_type,
-                            &entity_set_name,
-                            row,
-                            select,
-                        ),
-                        None => catalog_row_to_entity_body(&entity_type, &entity_set_name, row),
-                    };
-                    hydrate_blob_refs_for_tenant(&state, &tenant, &mut entity).await;
-                    return Some(entity);
-                }
-                match state
-                    .get_tenant_entity_state(&tenant, &entity_type, &id)
-                    .await
-                {
-                    Ok(response) => {
-                        if response.state.status != "Deleted"
-                            && let Some(query_plane) = state.query_plane_store()
-                        {
-                            let fields = state.query_projection_fields(
-                                &tenant,
-                                &entity_type,
-                                &response.state.fields,
-                            );
-                            let projected_state = state.query_projection_state(&response.state);
-                            if let Err(error) = query_plane
-                                .upsert_projection(
-                                    tenant.as_str(),
-                                    &entity_type,
-                                    &id,
-                                    &response.state.status,
-                                    &fields,
-                                    &projected_state,
-                                    response.state.sequence_nr,
-                                )
-                                .await
-                            {
-                                tracing::debug!(
-                                    error = %error,
-                                    tenant = %tenant,
-                                    entity_type = %entity_type,
-                                    entity_id = %id,
-                                    "failed to repair query projection after actor materialization fallback"
-                                );
-                            }
-                        }
-                        let mut entity = serde_json::to_value(&response.state).unwrap_or_default();
-                        hydrate_blob_refs_for_tenant(&state, &tenant, &mut entity).await;
-                        if let Some(obj) = entity.as_object_mut() {
-                            obj.insert(
-                                "@odata.id".into(),
-                                serde_json::json!(format!("{entity_set_name}('{id}')")),
-                            );
-                        }
-                        Some(entity)
-                    }
-                    Err(error) => {
-                        tracing::debug!(
-                            error = %error,
-                            tenant = %tenant,
-                            entity_type = %entity_type,
-                            entity_id = %id,
-                            "failed to materialize entity for OData collection"
-                        );
-                        None
-                    }
-                }
-            }
-        })
-        .buffered(concurrency)
-        .collect::<Vec<_>>()
-        .await
-        .into_iter()
-        .flatten()
-        .collect::<Vec<_>>();
-
-    MaterializedEntitySet {
-        entities,
-        catalog_shadow_check_budget: shadow_budget.configured(),
-        catalog_shadow_check_scheduled: shadow_budget.scheduled(),
-    }
-}
-
-pub(super) struct MaterializedEntitySet {
-    pub(super) entities: Vec<serde_json::Value>,
-    pub(super) catalog_shadow_check_budget: usize,
-    pub(super) catalog_shadow_check_scheduled: usize,
+    Ok(CatalogEntityLookup::Body(body))
 }
 
 #[cfg(test)]

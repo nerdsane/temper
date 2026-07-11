@@ -82,6 +82,24 @@ impl QueryPlaneStore for SimQueryPlane {
         Ok(())
     }
 
+    async fn remove_projection_through_sequence(
+        &self,
+        _tenant: &str,
+        entity_type: &str,
+        entity_id: &str,
+        sequence_nr: u64,
+    ) -> Result<(), PersistenceError> {
+        let key = (entity_type.to_string(), entity_id.to_string());
+        let mut catalog = self.catalog.lock().unwrap();
+        if catalog
+            .get(&key)
+            .is_some_and(|row| row.sequence_nr <= sequence_nr)
+        {
+            catalog.remove(&key);
+        }
+        Ok(())
+    }
+
     async fn query_field_index(
         &self,
         _tenant: &str,

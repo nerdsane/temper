@@ -162,7 +162,9 @@ pub(super) async fn handle_nearest(
         &entity_type,
         "",
         &serde_json::json!({}),
-    ) {
+    )
+    .await
+    {
         return *response;
     }
 
@@ -199,7 +201,25 @@ pub(super) async fn handle_nearest(
                 true,
                 None,
             )
-            .await;
+            .await
+            .map_err(|error| {
+                tracing::error!(
+                    error = %error,
+                    tenant = %tenant,
+                    entity_type,
+                    "failed to materialize nearest reference entity"
+                );
+                odata_error(
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    "ResourceStateUnavailable",
+                    "Entity state is temporarily unavailable",
+                )
+                .into_response()
+            });
+            let materialized = match materialized {
+                Ok(materialized) => materialized,
+                Err(response) => return response,
+            };
             let Some(body) = materialized.entities.into_iter().next() else {
                 return odata_error(
                     StatusCode::NOT_FOUND,
@@ -230,7 +250,9 @@ pub(super) async fn handle_nearest(
                 &entity_type,
                 reference_id,
                 &body,
-            ) {
+            )
+            .await
+            {
                 return *response;
             }
             let Some(vector) = entity_field(&body, &decl.property)
@@ -359,6 +381,19 @@ pub(super) async fn handle_nearest(
             None,
         )
         .await;
+        let materialized = match materialized {
+            Ok(materialized) => materialized,
+            Err(error) => {
+                tracing::error!(
+                    error = %error,
+                    tenant = %tenant,
+                    entity_type,
+                    entity_id = %scored.entity_id,
+                    "failed to materialize nearest candidate entity"
+                );
+                continue;
+            }
+        };
         let Some(mut body) = materialized.entities.into_iter().next() else {
             continue;
         };
@@ -381,6 +416,7 @@ pub(super) async fn handle_nearest(
             &scored.entity_id,
             &body,
         )
+        .await
         .is_err()
         {
             continue;

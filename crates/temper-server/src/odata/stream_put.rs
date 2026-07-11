@@ -17,7 +17,7 @@ use super::common::{
 use crate::blobs::hydrate_blob_refs_for_tenant;
 use crate::entity_actor::EntityResponse;
 use crate::request_context::AgentContext;
-use crate::response::odata_error;
+use crate::response::{odata_error, service_unavailable_response};
 use crate::state::{FileStreamContentError, ServerState};
 
 type ODataStreamPutError = Box<axum::response::Response>;
@@ -108,7 +108,11 @@ pub(super) async fn handle_stream_put(
     // deleted one; an existing Archived File probes true and takes the
     // unchanged path (where ArchivedIsFinal rejects the write).
     if entity_type == "File" && !state.ensure_entity_loaded(tenant, "File", &key).await {
-        let new_file_attrs = match state.synthesize_new_file_resource_attrs(tenant, &key) {
+        let new_file_fields = serde_json::json!({});
+        let new_file_attrs = match state
+            .build_create_authz_resource_attrs(tenant, "File", &key, &new_file_fields)
+            .await
+        {
             Ok(attrs) => attrs,
             Err(error) => {
                 return odata_error(StatusCode::INTERNAL_SERVER_ERROR, "StateError", &error)
@@ -153,7 +157,12 @@ pub(super) async fn handle_stream_put(
     {
         Ok(snapshot) => snapshot,
         Err(error) => {
-            return odata_error(StatusCode::NOT_FOUND, "ResourceNotFound", &error).into_response();
+            return service_unavailable_response(
+                "ResourceStateUnavailable",
+                "Entity state is temporarily unavailable",
+                "stream_put_authorization_snapshot",
+                error,
+            );
         }
     };
     if let Err(response) = authorize_mutation(

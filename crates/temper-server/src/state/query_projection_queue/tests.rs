@@ -44,6 +44,16 @@ impl QueryPlaneStore for RecordingQueryPlane {
         Ok(())
     }
 
+    async fn remove_projection_through_sequence(
+        &self,
+        tenant: &str,
+        entity_type: &str,
+        entity_id: &str,
+        _sequence_nr: u64,
+    ) -> Result<(), PersistenceError> {
+        self.remove_projection(tenant, entity_type, entity_id).await
+    }
+
     async fn query_field_index(
         &self,
         _tenant: &str,

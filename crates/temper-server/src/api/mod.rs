@@ -22,6 +22,7 @@ use axum::routing::{get, patch, post, put};
 use temper_authz::PrincipalKind;
 
 use crate::authz::{DenialInput, record_authz_denial, security_context_from_headers};
+use crate::response::service_unavailable_response;
 use crate::state::ServerState;
 
 /// Build the management API router (mounted at /api).
@@ -337,10 +338,14 @@ pub(crate) fn validate_and_reload_policies(
 
 /// Format decision query results into a JSON response with counts.
 pub(crate) fn format_decision_list(data_strings: Vec<String>) -> axum::response::Response {
-    let entries: Vec<serde_json::Value> = data_strings
+    let entries: Vec<serde_json::Value> = match data_strings
         .iter()
-        .filter_map(|s| serde_json::from_str(s).ok())
-        .collect();
+        .map(|data| serde_json::from_str(data))
+        .collect::<Result<_, _>>()
+    {
+        Ok(entries) => entries,
+        Err(error) => return decision_data_unavailable_response(error),
+    };
     let pending_count = entries
         .iter()
         .filter(|d| d.get("status").and_then(|v| v.as_str()) == Some("pending"))
@@ -367,6 +372,15 @@ pub(crate) fn format_decision_list(data_strings: Vec<String>) -> axum::response:
         .into_response()
 }
 
+fn decision_data_unavailable_response(error: serde_json::Error) -> axum::response::Response {
+    service_unavailable_response(
+        "DecisionDataUnavailable",
+        "Decision data is temporarily unavailable",
+        "list decisions",
+        error,
+    )
+}
+
 /// Empty decision list response (used when no store is available).
 pub(crate) fn empty_decision_list() -> axum::response::Response {
     (
@@ -380,4 +394,23 @@ pub(crate) fn empty_decision_list() -> axum::response::Response {
         })),
     )
         .into_response()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn corrupt_durable_decision_returns_sanitized_service_unavailable() {
+        const SECRET_SENTINEL: &str = "postgres://admin:secret@internal-db";
+        let response = format_decision_list(vec![format!("{{{SECRET_SENTINEL}")]);
+
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+        let body = axum::body::to_bytes(response.into_body(), 1024)
+            .await
+            .expect("response body");
+        let body = String::from_utf8(body.to_vec()).expect("utf-8 response");
+        assert!(body.contains("DecisionDataUnavailable"));
+        assert!(!body.contains(SECRET_SENTINEL));
+    }
 }

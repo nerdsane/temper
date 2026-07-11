@@ -112,6 +112,13 @@ pub const CREATE_ACTOR: &str = "\
     VALUES ($1, $2, $3) \
     ON CONFLICT DO NOTHING";
 
+/// Create an actor and report whether this transaction inserted it.
+pub const CREATE_ACTOR_RETURNING: &str = "\
+    INSERT INTO odp_temper.actor_instances (namespace, actor_type, state) \
+    VALUES ($1, $2, $3) \
+    ON CONFLICT DO NOTHING \
+    RETURNING namespace";
+
 /// Update actor state + advance cursor (optimistic concurrency).
 pub const UPDATE_ACTOR: &str = "\
     UPDATE odp_temper.actor_instances \

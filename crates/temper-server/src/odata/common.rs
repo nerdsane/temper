@@ -213,12 +213,12 @@ pub(super) async fn load_entity_or_404(
         .get_tenant_entity_state(tenant, entity_type, key)
         .await
         .map_err(|e| {
-            crate::response::odata_error(
-                StatusCode::NOT_FOUND,
-                "ResourceNotFound",
-                &format!("Entity '{set_name}' with key '{key}' not found: {e}"),
+            crate::response::service_unavailable_response(
+                "ResourceStateUnavailable",
+                "Entity state is temporarily unavailable",
+                "load_existing_entity_for_mutation",
+                format!("{set_name}('{key}') failed: {e}"),
             )
-            .into_response()
         })
 }
 

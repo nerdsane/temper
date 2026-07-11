@@ -58,7 +58,10 @@ pub(crate) async fn handle_list_decisions(
             .query_decisions(&tenant, params.status.as_deref())
             .await
         {
-            Ok(data_strings) => return format_decision_list(access.filter(data_strings)),
+            Ok(data_strings) => match access.filter(data_strings) {
+                Ok(visible) => return format_decision_list(visible),
+                Err(error) => return super::decision_data_unavailable_response(error),
+            },
             Err(e) => {
                 tracing::warn!(error = %e, backend = store.backend_name(), "failed to query decisions");
             }

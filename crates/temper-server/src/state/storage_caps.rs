@@ -231,35 +231,11 @@ impl ServerState {
             if write.entity_type != BLOB_ENTITY_TYPE || !is_create_action(&write.action) {
                 continue;
             }
-            if self.entity_exists(tenant, BLOB_ENTITY_TYPE, &write.entity_id) {
-                existing.insert(write.entity_id.clone());
-            } else {
-                candidates.insert(write.entity_id.clone());
-            }
-        }
-
-        if candidates.is_empty() {
-            return Ok(existing);
-        }
-
-        if let Some(query_plane) = self.query_plane_store() {
-            let blob_ids = candidates.iter().cloned().collect::<Vec<_>>();
-            if let Some(rows) = query_plane
-                .load_entity_catalog_rows(tenant.as_str(), BLOB_ENTITY_TYPE, &blob_ids)
-                .await
-                .map_err(|e| {
-                    CommonsStorageCapError::Internal(format!(
-                        "blob storage cap preflight failed: {e}"
-                    ))
-                })?
-            {
-                existing.extend(rows.into_iter().map(|row| row.entity_id));
-                return Ok(existing);
-            }
+            candidates.insert(write.entity_id.clone());
         }
 
         for blob_id in candidates {
-            if self.blob_already_exists(tenant, &blob_id).await {
+            if self.blob_already_exists(tenant, &blob_id).await? {
                 existing.insert(blob_id);
             }
         }
@@ -290,21 +266,26 @@ impl ServerState {
 
         let mut repo_owner_cache: BTreeMap<String, Option<String>> = BTreeMap::new();
         let mut used_bytes = 0i64;
-        for blob_id in self.list_entity_ids_lazy(tenant, BLOB_ENTITY_TYPE).await {
-            if !self
-                .ensure_entity_loaded(tenant, BLOB_ENTITY_TYPE, &blob_id)
-                .await
-            {
-                continue;
-            }
+        for blob_id in self
+            .list_entity_ids_lazy(tenant, BLOB_ENTITY_TYPE)
+            .await
+            .map_err(|error| {
+                CommonsStorageCapError::Internal(format!(
+                    "failed to list Blobs for storage projection: {error}"
+                ))
+            })?
+        {
             let blob = self
-                .get_tenant_entity_state(tenant, BLOB_ENTITY_TYPE, &blob_id)
+                .get_tenant_entity_state_authoritative(tenant, BLOB_ENTITY_TYPE, &blob_id)
                 .await
                 .map_err(|e| {
                     CommonsStorageCapError::Internal(format!(
                         "failed to read Blob '{blob_id}' for storage projection: {e}"
                     ))
                 })?;
+            let Some(blob) = blob else {
+                continue;
+            };
             let Some(repository_id) = read_string(&blob.state.fields, "RepositoryId") else {
                 continue;
             };
@@ -352,11 +333,19 @@ impl ServerState {
         Ok(owner && repository && blob)
     }
 
-    async fn blob_already_exists(&self, tenant: &TenantId, blob_id: &str) -> bool {
-        self.entity_exists(tenant, BLOB_ENTITY_TYPE, blob_id)
-            || self
-                .ensure_entity_loaded(tenant, BLOB_ENTITY_TYPE, blob_id)
-                .await
+    async fn blob_already_exists(
+        &self,
+        tenant: &TenantId,
+        blob_id: &str,
+    ) -> Result<bool, CommonsStorageCapError> {
+        self.get_tenant_entity_state_authoritative(tenant, BLOB_ENTITY_TYPE, blob_id)
+            .await
+            .map(|entity| entity.is_some())
+            .map_err(|error| {
+                CommonsStorageCapError::Internal(format!(
+                    "failed to verify Blob '{blob_id}' existence: {error}"
+                ))
+            })
     }
 
     async fn repository_owner_id(
@@ -364,21 +353,17 @@ impl ServerState {
         tenant: &TenantId,
         repository_id: &str,
     ) -> Result<Option<String>, CommonsStorageCapError> {
-        if !self
-            .ensure_entity_loaded(tenant, REPOSITORY_ENTITY_TYPE, repository_id)
-            .await
-        {
-            return Ok(None);
-        }
-
         let repository = self
-            .get_tenant_entity_state(tenant, REPOSITORY_ENTITY_TYPE, repository_id)
+            .get_tenant_entity_state_authoritative(tenant, REPOSITORY_ENTITY_TYPE, repository_id)
             .await
             .map_err(|e| {
                 CommonsStorageCapError::Internal(format!(
                     "failed to read Repository '{repository_id}': {e}"
                 ))
             })?;
+        let Some(repository) = repository else {
+            return Ok(None);
+        };
 
         Ok(repository_owner_from_fields(&repository.state.fields))
     }
@@ -388,30 +373,38 @@ impl ServerState {
         tenant: &TenantId,
         owner_id: &str,
     ) -> Result<Option<OwnerStorageProfile>, CommonsStorageCapError> {
-        if self
-            .ensure_entity_loaded(tenant, OWNER_ENTITY_TYPE, owner_id)
+        if let Some(owner) = self
+            .get_tenant_entity_state_authoritative(tenant, OWNER_ENTITY_TYPE, owner_id)
             .await
+            .map_err(|error| {
+                CommonsStorageCapError::Internal(format!(
+                    "failed to read Owner '{owner_id}': {error}"
+                ))
+            })?
         {
-            return self
-                .owner_storage_profile_by_entity_id(tenant, owner_id)
-                .await;
+            return OwnerStorageProfile::from_fields(owner_id, &owner.state.fields).map(Some);
         }
 
-        for candidate_id in self.list_entity_ids_lazy(tenant, OWNER_ENTITY_TYPE).await {
-            if !self
-                .ensure_entity_loaded(tenant, OWNER_ENTITY_TYPE, &candidate_id)
-                .await
-            {
-                continue;
-            }
+        for candidate_id in self
+            .list_entity_ids_lazy(tenant, OWNER_ENTITY_TYPE)
+            .await
+            .map_err(|error| {
+                CommonsStorageCapError::Internal(format!(
+                    "failed to list Owners for storage projection: {error}"
+                ))
+            })?
+        {
             let owner = self
-                .get_tenant_entity_state(tenant, OWNER_ENTITY_TYPE, &candidate_id)
+                .get_tenant_entity_state_authoritative(tenant, OWNER_ENTITY_TYPE, &candidate_id)
                 .await
                 .map_err(|e| {
                     CommonsStorageCapError::Internal(format!(
                         "failed to read Owner '{candidate_id}': {e}"
                     ))
                 })?;
+            let Some(owner) = owner else {
+                continue;
+            };
             let matches_account =
                 read_string(&owner.state.fields, "AccountId").as_deref() == Some(owner_id);
             let matches_id = read_string(&owner.state.fields, "Id")
@@ -425,22 +418,6 @@ impl ServerState {
         }
 
         Ok(None)
-    }
-
-    async fn owner_storage_profile_by_entity_id(
-        &self,
-        tenant: &TenantId,
-        owner_entity_id: &str,
-    ) -> Result<Option<OwnerStorageProfile>, CommonsStorageCapError> {
-        let owner = self
-            .get_tenant_entity_state(tenant, OWNER_ENTITY_TYPE, owner_entity_id)
-            .await
-            .map_err(|e| {
-                CommonsStorageCapError::Internal(format!(
-                    "failed to read Owner '{owner_entity_id}': {e}"
-                ))
-            })?;
-        OwnerStorageProfile::from_fields(owner_entity_id, &owner.state.fields).map(Some)
     }
 }
 

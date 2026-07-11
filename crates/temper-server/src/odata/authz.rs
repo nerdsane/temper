@@ -36,52 +36,6 @@ pub(super) fn request_security_context(
     }
 }
 
-/// Flatten an entity representation into the resource attributes supplied to Cedar.
-///
-/// Read responses wrap application fields below `fields`, while create payloads
-/// supply fields at the top level. Supporting both shapes keeps policy
-/// evaluation identical across CRUD paths.
-pub(super) fn resource_attrs_from_body(
-    state: &ServerState,
-    tenant: &TenantId,
-    entity_type: &str,
-    resource_id: &str,
-    body: &serde_json::Value,
-) -> BTreeMap<String, serde_json::Value> {
-    let mut attrs = BTreeMap::new();
-    attrs.insert(
-        "id".to_string(),
-        serde_json::Value::String(resource_id.to_string()),
-    );
-
-    let status = body
-        .get("status")
-        .or_else(|| body.get("Status"))
-        .or_else(|| body.get("fields").and_then(|fields| fields.get("status")))
-        .or_else(|| body.get("fields").and_then(|fields| fields.get("Status")))
-        .cloned()
-        .unwrap_or_else(|| serde_json::Value::String(String::new()));
-    attrs.insert("status".to_string(), status);
-
-    if let Some(fields) = body.get("fields").and_then(serde_json::Value::as_object) {
-        for (key, value) in fields {
-            attrs.insert(key.clone(), value.clone());
-        }
-    } else if let Some(fields) = body.as_object() {
-        for (key, value) in fields {
-            if !key.starts_with('@') {
-                attrs.insert(key.clone(), value.clone());
-            }
-        }
-    }
-
-    let has_spec = state
-        .has_registered_spec(tenant, entity_type)
-        .unwrap_or(false);
-    attrs.insert("has_spec".to_string(), serde_json::Value::Bool(has_spec));
-    attrs
-}
-
 pub(crate) fn entity_id_from_body(body: &serde_json::Value) -> Option<&str> {
     body.get("entity_id")
         .and_then(serde_json::Value::as_str)
@@ -98,7 +52,7 @@ pub(crate) fn entity_id_from_body(body: &serde_json::Value) -> Option<&str> {
         })
 }
 
-pub(crate) fn authorize_read(
+pub(crate) async fn authorize_read(
     state: &ServerState,
     tenant: &TenantId,
     security_ctx: &SecurityContext,
@@ -107,7 +61,34 @@ pub(crate) fn authorize_read(
     entity_id: &str,
     body: &serde_json::Value,
 ) -> Result<(), Box<Response>> {
-    let attrs = resource_attrs_from_body(state, tenant, entity_type, entity_id, body);
+    let fields = body.get("fields").unwrap_or(body);
+    let status = body
+        .get("status")
+        .or_else(|| body.get("Status"))
+        .or_else(|| fields.get("status"))
+        .or_else(|| fields.get("Status"))
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or("");
+    let attrs = state
+        .build_authz_resource_attrs(tenant, entity_type, entity_id, status, fields)
+        .await
+        .map_err(|error| {
+            tracing::error!(
+                error = %error,
+                tenant = %tenant,
+                entity_type,
+                entity_id,
+                "failed to build authoritative read authorization resource"
+            );
+            Box::new(
+                odata_error(
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    "ResourceStateUnavailable",
+                    "Authorization resource state is temporarily unavailable",
+                )
+                .into_response(),
+            )
+        })?;
     state
         .authorize_with_context(security_ctx, action, entity_type, &attrs, tenant.as_str())
         .map_err(|denial| {

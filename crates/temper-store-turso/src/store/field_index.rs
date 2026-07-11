@@ -19,6 +19,22 @@ use super::{TursoEventStore, TursoQueryProjectionRow};
 /// `entity_catalog.fields` but are not copied into the filter index.
 const MAX_INDEXABLE_FIELD_VALUE_BYTES: usize = 2000;
 
+fn turso_projection_sequence(sequence_nr: u64, operation: &str) -> Result<i64, PersistenceError> {
+    i64::try_from(sequence_nr).map_err(|_| {
+        PersistenceError::Storage(format!(
+            "projection sequence exceeds libSQL range during {operation}"
+        ))
+    })
+}
+
+fn decoded_projection_sequence(sequence_nr: i64, entity_id: &str) -> Result<u64, PersistenceError> {
+    u64::try_from(sequence_nr).map_err(|_| {
+        PersistenceError::Serialization(format!(
+            "projection for entity '{entity_id}' has a negative sequence"
+        ))
+    })
+}
+
 fn projection_hash(status: &str, fields: &serde_json::Value) -> String {
     let mut hasher = Sha256::new();
     hasher.update(status.as_bytes());
@@ -148,7 +164,7 @@ impl TursoEventStore {
         let state_json = serde_json::to_string(state)
             .map_err(|error| PersistenceError::Serialization(error.to_string()))?;
         let updated_at = sim_now().to_rfc3339();
-        let sequence_nr = i64::try_from(sequence_nr).unwrap_or(i64::MAX);
+        let sequence_nr = turso_projection_sequence(sequence_nr, "projection upsert")?;
 
         let unchanged_rows = conn
             .execute(
@@ -350,7 +366,8 @@ impl TursoEventStore {
                 .map_err(|error| PersistenceError::Serialization(error.to_string()))?;
             let state_json = serde_json::to_string(&projection.state)
                 .map_err(|error| PersistenceError::Serialization(error.to_string()))?;
-            let sequence_nr = i64::try_from(projection.sequence_nr).unwrap_or(i64::MAX);
+            let sequence_nr =
+                turso_projection_sequence(projection.sequence_nr, "batch projection upsert")?;
             let key = (projection.entity_type.clone(), projection.entity_id.clone());
             let existing_row = existing.get(&key);
             if existing_row.is_some_and(|(existing_sequence, _)| *existing_sequence > sequence_nr) {
@@ -530,6 +547,36 @@ impl TursoEventStore {
         entity_type: &str,
         entity_id: &str,
     ) -> Result<(), PersistenceError> {
+        self.remove_query_projection_inner(tenant, entity_type, entity_id, None)
+            .await
+    }
+
+    pub async fn remove_query_projection_through_sequence(
+        &self,
+        tenant: &str,
+        entity_type: &str,
+        entity_id: &str,
+        sequence_nr: u64,
+    ) -> Result<(), PersistenceError> {
+        self.remove_query_projection_inner(
+            tenant,
+            entity_type,
+            entity_id,
+            Some(turso_projection_sequence(
+                sequence_nr,
+                "projection removal",
+            )?),
+        )
+        .await
+    }
+
+    async fn remove_query_projection_inner(
+        &self,
+        tenant: &str,
+        entity_type: &str,
+        entity_id: &str,
+        through_sequence: Option<i64>,
+    ) -> Result<(), PersistenceError> {
         let _write_permit = self
             .acquire_write_permit("turso.remove_query_projection", WritePriority::Low)
             .await?;
@@ -538,18 +585,43 @@ impl TursoEventStore {
             .transaction_with_behavior(TransactionBehavior::Immediate)
             .await
             .map_err(storage_error)?;
-        tx.execute(
-            "DELETE FROM entity_catalog WHERE tenant = ?1 AND entity_type = ?2 AND entity_id = ?3",
-            params![tenant, entity_type, entity_id],
-        )
-        .await
-        .map_err(storage_error)?;
-        tx.execute(
-            "DELETE FROM entity_field_index WHERE tenant = ?1 AND entity_type = ?2 AND entity_id = ?3",
-            params![tenant, entity_type, entity_id],
-        )
-        .await
-        .map_err(storage_error)?;
+        if let Some(sequence_nr) = through_sequence {
+            tx.execute(
+                "DELETE FROM entity_field_index \
+                 WHERE tenant = ?1 AND entity_type = ?2 AND entity_id = ?3 \
+                   AND EXISTS ( \
+                       SELECT 1 FROM entity_catalog \
+                        WHERE tenant = ?1 AND entity_type = ?2 AND entity_id = ?3 \
+                          AND sequence_nr <= ?4 \
+                   )",
+                params![tenant, entity_type, entity_id, sequence_nr],
+            )
+            .await
+            .map_err(storage_error)?;
+            tx.execute(
+                "DELETE FROM entity_catalog \
+                 WHERE tenant = ?1 AND entity_type = ?2 AND entity_id = ?3 \
+                   AND sequence_nr <= ?4",
+                params![tenant, entity_type, entity_id, sequence_nr],
+            )
+            .await
+            .map_err(storage_error)?;
+        } else {
+            tx.execute(
+                "DELETE FROM entity_field_index \
+                 WHERE tenant = ?1 AND entity_type = ?2 AND entity_id = ?3",
+                params![tenant, entity_type, entity_id],
+            )
+            .await
+            .map_err(storage_error)?;
+            tx.execute(
+                "DELETE FROM entity_catalog \
+                 WHERE tenant = ?1 AND entity_type = ?2 AND entity_id = ?3",
+                params![tenant, entity_type, entity_id],
+            )
+            .await
+            .map_err(storage_error)?;
+        }
         tx.commit().await.map_err(storage_error)?;
         Ok(())
     }
@@ -739,7 +811,8 @@ impl TursoEventStore {
             let entity_id: String = row.get(2).map_err(storage_error)?;
             let status: String = row.get(3).map_err(storage_error)?;
             let fields_text: String = row.get(4).map_err(storage_error)?;
-            let sequence_nr = row.get::<i64>(5).map_err(storage_error)?.max(0) as u64;
+            let sequence_nr =
+                decoded_projection_sequence(row.get::<i64>(5).map_err(storage_error)?, &entity_id)?;
             let fields = serde_json::from_str(&fields_text)
                 .map_err(|error| PersistenceError::Serialization(error.to_string()))?;
             out.push(TursoQueryProjectionRow {
@@ -776,7 +849,10 @@ impl TursoEventStore {
         while let Some(row) = rows.next().await.map_err(storage_error)? {
             let tenant: String = row.get(0).map_err(storage_error)?;
             let count: i64 = row.get(1).map_err(storage_error)?;
-            counts.push((tenant, count.max(0) as u64));
+            let count = u64::try_from(count).map_err(|_| {
+                PersistenceError::Storage("projected entity count is negative".to_string())
+            })?;
+            counts.push((tenant, count));
         }
         Ok(counts)
     }
@@ -831,11 +907,11 @@ impl TursoEventStore {
                 .transpose()
                 .map_err(|error| PersistenceError::Serialization(error.to_string()))?;
             out.push(EntityCatalogRow {
+                sequence_nr: decoded_projection_sequence(sequence_nr, &entity_id)?,
                 entity_id,
                 status,
                 fields,
                 state,
-                sequence_nr: sequence_nr.max(0) as u64,
             });
         }
         Ok(out)
@@ -889,52 +965,5 @@ fn indexed_projection_fields(
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn scalar_to_text_converts_primitives() {
-        assert_eq!(
-            scalar_to_text(&serde_json::json!("hello")),
-            Some("hello".to_string())
-        );
-        assert_eq!(
-            scalar_to_text(&serde_json::json!(42)),
-            Some("42".to_string())
-        );
-        assert_eq!(
-            scalar_to_text(&serde_json::json!(true)),
-            Some("true".to_string())
-        );
-        assert_eq!(scalar_to_text(&serde_json::Value::Null), None);
-    }
-
-    #[test]
-    fn scalar_to_text_skips_complex_types() {
-        assert_eq!(scalar_to_text(&serde_json::json!({"a": 1})), None);
-        assert_eq!(scalar_to_text(&serde_json::json!([1, 2, 3])), None);
-    }
-
-    #[test]
-    fn indexed_projection_fields_skips_oversized_scalars() {
-        let long = "x".repeat(MAX_INDEXABLE_FIELD_VALUE_BYTES + 1);
-        let fields = serde_json::json!({
-            "Title": "short",
-            "Payload": long,
-        });
-
-        let indexed = indexed_projection_fields("Active", &fields);
-
-        assert!(
-            indexed
-                .iter()
-                .any(|(name, value)| name == "Title" && value.as_deref() == Some("short"))
-        );
-        assert!(indexed.iter().all(|(name, _)| name != "Payload"));
-        assert!(
-            indexed
-                .iter()
-                .any(|(name, value)| name == "Status" && value.as_deref() == Some("Active"))
-        );
-    }
-}
+#[path = "field_index_test.rs"]
+mod tests;

@@ -5,6 +5,7 @@ use std::sync::OnceLock;
 
 use serde::{Deserialize, Serialize};
 use temper_runtime::actor::Message;
+use temper_runtime::persistence::PersistenceSequenceGuard;
 
 // TigerStyle: Fixed resource budgets. No unbounded growth.
 // These are hard limits, not suggestions. Violations are assertion failures.
@@ -51,12 +52,27 @@ pub enum EntityMsg {
     },
     /// Get the current entity state.
     GetState,
+    /// Strictly rebuild state from the durable journal before replying.
+    ///
+    /// The refresh runs inside the actor mailbox, so it cannot overlap a
+    /// command executing on the same actor generation. `minimum_sequence`
+    /// carries the journal-tail proof obtained by the caller.
+    GetStateAtLeastStrict { minimum_sequence: u64 },
     /// Get a specific field value.
     GetField { field: String },
     /// Update entity fields (PATCH: merge, PUT: replace).
     UpdateFields {
         fields: serde_json::Value,
         replace: bool,
+        /// Stable across actor-ask retries so a lost reply cannot append the
+        /// same durable field mutation twice.
+        idempotency_key: String,
+        /// Digest of the exact state used for authorization, when the caller
+        /// made a decision. The actor rejects a stale decision before mutation.
+        expected_precondition: Option<String>,
+        /// Context journals whose lifecycle state contributed to authorization.
+        /// The store compares these in the same commit as the field event.
+        context_guards: Vec<PersistenceSequenceGuard>,
     },
     /// Delete this entity.
     Delete,
@@ -65,7 +81,7 @@ pub enum EntityMsg {
 impl Message for EntityMsg {}
 
 /// The entity's runtime state.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct EntityState {
     /// Entity type (e.g., "Order").
     pub entity_type: String,
@@ -154,7 +170,7 @@ impl EntityState {
 }
 
 /// A recorded state transition event.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct EntityEvent {
     /// The action that triggered the transition.
     pub action: String,
