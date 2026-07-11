@@ -89,6 +89,22 @@ impl TransitionTable {
             }
         }
 
+        // ARN-247: declared parameter names per action, keyed by action name.
+        // The runtime restricts caller-supplied request-body params to this set
+        // so it can only write what the verification cascade modeled it writing.
+        // Every declared action gets an entry (empty set = declares no params).
+        let mut action_params = std::collections::BTreeMap::new();
+        for action in &automaton.actions {
+            action_params.insert(
+                action.name.clone(),
+                action
+                    .params
+                    .iter()
+                    .map(|p| p.name().to_string())
+                    .collect::<std::collections::BTreeSet<String>>(),
+            );
+        }
+
         let mut composite_actions = std::collections::BTreeMap::new();
         for action in &automaton.actions {
             if !action.kind.eq_ignore_ascii_case("composite") {
@@ -142,6 +158,7 @@ impl TransitionTable {
                 .collect(),
             state_var_metadata,
             composite_actions,
+            action_params,
             rule_index,
         }
     }
@@ -295,6 +312,51 @@ generated_from = "pack_bytes"
         assert!(!metadata.record_parent_event);
         assert_eq!(metadata.sub_writes.len(), 1);
         assert_eq!(metadata.sub_writes[0].target_entity, "Blob");
+    }
+
+    #[test]
+    fn declared_params_are_recorded_per_action() {
+        // ARN-247: `from_automaton` records each action's declared param names so
+        // the runtime can restrict caller params to the verified set. An action
+        // with no params gets an empty set (declared, not unknown); an action not
+        // in the spec is unknown (`None`).
+        let spec = r#"
+[automaton]
+name = "WorkSummary"
+states = ["Open", "Done"]
+initial = "Open"
+
+[[action]]
+name = "RecordSummary"
+kind = "input"
+from = ["Open"]
+to = "Done"
+params = ["kr_delta", "outcome"]
+
+[[action]]
+name = "Reopen"
+kind = "input"
+from = ["Done"]
+to = "Open"
+"#;
+        let table = TransitionTable::from_ioa_source(spec);
+
+        let record = table
+            .declared_params("RecordSummary")
+            .expect("declared action is known");
+        assert!(record.contains("kr_delta"));
+        assert!(record.contains("outcome"));
+        assert_eq!(record.len(), 2);
+
+        let reopen = table
+            .declared_params("Reopen")
+            .expect("param-less action is still known");
+        assert!(reopen.is_empty(), "no declared params -> empty set");
+
+        assert!(
+            table.declared_params("NotAnAction").is_none(),
+            "unknown action -> None (runtime must not restrict)",
+        );
     }
 }
 

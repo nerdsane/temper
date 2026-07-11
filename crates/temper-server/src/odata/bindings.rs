@@ -130,6 +130,42 @@ pub(super) async fn dispatch_bound_action(
         .into_response();
     }
 
+    // ARN-247: reject undeclared request-body params at the external boundary so
+    // caller/agent bugs surface loudly — a typo'd or smuggled param is a 400, not
+    // a silent no-op that lets the caller believe a write landed. The runtime
+    // chokepoint additionally *drops* undeclared keys on every dispatch path
+    // (internal spawn/composite included); this is the loud external guard, using
+    // the same allow-rule (declared ∪ transient action fields). Fail-open on a
+    // table-lookup miss — the drop still enforces the verified model.
+    if let Some(table) = state
+        .registry
+        .read()
+        .ok()
+        .and_then(|reg| reg.get_table(tenant, entity_type))
+    {
+        let undeclared = crate::entity_actor::effects::undeclared_param_keys(
+            &table,
+            action,
+            entity_type,
+            &body_json,
+        );
+        if !undeclared.is_empty() {
+            http_span.set_status(Status::error("UndeclaredActionParams"));
+            http_span.set_attribute(OtelKeyValue::new("http.status_code", 400i64));
+            let end_time: std::time::SystemTime = sim_now().into();
+            http_span.end_with_timestamp(end_time);
+            return odata_error(
+                StatusCode::BAD_REQUEST,
+                "UndeclaredActionParams",
+                &format!(
+                    "action '{action}' does not declare param(s): {}. Only declared params are accepted (ARN-247).",
+                    undeclared.join(", ")
+                ),
+            )
+            .into_response();
+        }
+    }
+
     let authz_snapshot = match state
         .load_authz_resource_snapshot(tenant, entity_type, key_str)
         .await

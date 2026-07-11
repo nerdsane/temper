@@ -269,20 +269,15 @@ impl crate::state::ServerState {
             tokio::spawn(
                 async move {
                     // determinism-ok: spawn dispatch is a background side-effect
-                    let mut parent_fields = serde_json::Map::new();
-                    parent_fields.insert(
-                        "parent_type".to_string(),
-                        serde_json::Value::String(parent_t.clone()),
-                    );
-                    parent_fields.insert(
-                        "parent_id".to_string(),
-                        serde_json::Value::String(parent_i.clone()),
-                    );
-                    parent_fields.insert(
-                        format!("{}_id", to_snake_case(&parent_t)),
-                        serde_json::Value::String(parent_i.clone()),
-                    );
-                    let initial_fields = serde_json::Value::Object(parent_fields.clone());
+                    let parent_fields = child_parent_linkage_fields(&parent_t, &parent_i);
+                    // ARN-247: persist parent linkage AND `copy_fields` values into
+                    // the child at creation, so they land regardless of whether the
+                    // child's initial action declares them as params. The
+                    // declared-params filter (effects.rs) drops undeclared keys from
+                    // the *action* projection; relying on the action alone would
+                    // silently lose copied fields for a spec whose child action omits
+                    // them.
+                    let initial_fields = child_initial_fields(&parent_t, &parent_i, &copied_fields);
 
                     match state
                         .get_or_create_tenant_entity(&t, &child_type, &child_id, initial_fields)
@@ -361,6 +356,76 @@ fn to_snake_case(value: &str) -> String {
     result
 }
 
+/// Parent-linkage fields injected into a spawned child: `parent_type`,
+/// `parent_id`, and `{parent_snake}_id`.
+fn child_parent_linkage_fields(
+    parent_type: &str,
+    parent_id: &str,
+) -> serde_json::Map<String, serde_json::Value> {
+    let mut fields = serde_json::Map::new();
+    fields.insert(
+        "parent_type".to_string(),
+        serde_json::Value::String(parent_type.to_string()),
+    );
+    fields.insert(
+        "parent_id".to_string(),
+        serde_json::Value::String(parent_id.to_string()),
+    );
+    fields.insert(
+        format!("{}_id", to_snake_case(parent_type)),
+        serde_json::Value::String(parent_id.to_string()),
+    );
+    fields
+}
+
+/// ARN-247: fields persisted into a spawned child at *creation* — parent linkage
+/// plus `copy_fields` values. Persisting these here (not only through the child's
+/// initial action) means they land regardless of whether the child's initial
+/// action declares them, so the declared-params filter (effects.rs) cannot
+/// silently drop them from the action projection.
+fn child_initial_fields(
+    parent_type: &str,
+    parent_id: &str,
+    copied_fields: &serde_json::Map<String, serde_json::Value>,
+) -> serde_json::Value {
+    let mut fields = child_parent_linkage_fields(parent_type, parent_id);
+    for (key, value) in copied_fields {
+        fields.insert(key.clone(), value.clone());
+    }
+    serde_json::Value::Object(fields)
+}
+
 #[cfg(test)]
 #[path = "cross_entity_test.rs"]
 mod required_ref_tests;
+
+#[cfg(test)]
+mod spawn_initial_fields_tests {
+    use super::{child_initial_fields, child_parent_linkage_fields};
+
+    #[test]
+    fn parent_linkage_fields_are_snake_cased() {
+        let fields = child_parent_linkage_fields("WorkSummary", "ws-1");
+        assert_eq!(fields.get("parent_type").unwrap(), "WorkSummary");
+        assert_eq!(fields.get("parent_id").unwrap(), "ws-1");
+        assert_eq!(fields.get("work_summary_id").unwrap(), "ws-1");
+    }
+
+    #[test]
+    fn copied_fields_are_persisted_at_creation() {
+        // ARN-247: copy_fields values must be in the child's creation fields so
+        // they survive even when the child's initial action does not declare them
+        // (the declared-params filter would otherwise drop them from the action).
+        let mut copied = serde_json::Map::new();
+        copied.insert("system_prompt".to_string(), serde_json::json!("be terse"));
+        copied.insert("model".to_string(), serde_json::json!("opus"));
+
+        let initial = child_initial_fields("Agent", "a-1", &copied);
+        let obj = initial.as_object().unwrap();
+        // Parent linkage still present...
+        assert_eq!(obj.get("parent_id").unwrap(), "a-1");
+        // ...and the copied fields landed at creation, independent of any action.
+        assert_eq!(obj.get("system_prompt").unwrap(), "be terse");
+        assert_eq!(obj.get("model").unwrap(), "opus");
+    }
+}

@@ -5,7 +5,7 @@
 //!
 //! Guard conditions and their evaluation live in [`super::guard`].
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use serde::{Deserialize, Serialize};
 
@@ -65,6 +65,15 @@ pub struct TransitionTable {
     /// Composite-action metadata keyed by action name (ADR-0040).
     #[serde(default)]
     pub composite_actions: BTreeMap<String, CompositeActionMetadata>,
+    /// Declared parameter names per action (ADR-0156, ARN-247), keyed by action
+    /// name. This is the set the verification cascade models an action as being
+    /// able to write; the runtime restricts caller-supplied params to it so a
+    /// proven invariant is an enforced one. An action present with an empty set
+    /// declares no params; an action *absent* from this map (older/deserialized
+    /// tables, or synthetic kernel actions) is treated as "unknown" and its
+    /// params are not restricted — see [`TransitionTable::declared_params`].
+    #[serde(default)]
+    pub action_params: BTreeMap<String, BTreeSet<String>>,
     /// Pre-built index: action name → indices into `rules`.
     ///
     /// Eliminates the O(N) linear scan + Vec allocation in [`evaluate_ctx()`].
@@ -160,6 +169,8 @@ impl<'de> Deserialize<'de> for TransitionTable {
             #[serde(default)]
             composite_actions: BTreeMap<String, CompositeActionMetadata>,
             #[serde(default)]
+            action_params: BTreeMap<String, BTreeSet<String>>,
+            #[serde(default)]
             keys: Vec<DeclaredKey>,
             #[serde(default)]
             vectors: Vec<DeclaredVector>,
@@ -175,6 +186,7 @@ impl<'de> Deserialize<'de> for TransitionTable {
             vectors: raw.vectors,
             state_var_metadata: raw.state_var_metadata,
             composite_actions: raw.composite_actions,
+            action_params: raw.action_params,
             rule_index: BTreeMap::new(),
         };
         table.rebuild_index();
@@ -259,6 +271,19 @@ pub struct TransitionResult {
 }
 
 impl TransitionTable {
+    /// Declared parameter names for `action`, or `None` when the table carries
+    /// no declaration for it (ARN-247).
+    ///
+    /// `Some(set)` — the action is known and may write exactly `set` (possibly
+    /// empty). Callers restrict request-body params to this set so the runtime
+    /// matches the verified model. `None` — the action is absent from
+    /// `action_params` (an older/deserialized table built before this field, or
+    /// a synthetic kernel action); callers must treat this as "unknown" and skip
+    /// restriction to preserve behavior.
+    pub fn declared_params(&self, action: &str) -> Option<&BTreeSet<String>> {
+        self.action_params.get(action)
+    }
+
     /// Rebuild the rule index from the current rules vec.
     ///
     /// Called automatically during construction. Must be called explicitly
@@ -313,6 +338,7 @@ mod tests {
             ],
             state_var_metadata: BTreeMap::new(),
             composite_actions: BTreeMap::new(),
+            action_params: BTreeMap::new(),
             rule_index: BTreeMap::new(),
         };
         table.rebuild_index();
