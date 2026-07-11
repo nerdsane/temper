@@ -13,6 +13,9 @@ struct MockRow {
 }
 
 impl SpecRowLike for MockRow {
+    fn spec_version(&self) -> i64 {
+        1
+    }
     fn verification_status(&self) -> &str {
         &self.status
     }
@@ -42,6 +45,9 @@ struct MockSpecRow {
 }
 
 impl SpecRowLike for MockSpecRow {
+    fn spec_version(&self) -> i64 {
+        7
+    }
     fn verification_status(&self) -> &str {
         &self.status
     }
@@ -114,9 +120,9 @@ fn populate_registry_merges_csdl_fragments_from_all_restored_rows() {
         |row| (row.entity_type.clone(), row.ioa_source.clone()),
     );
     assert!(
-        outcome.orphaned_specs.is_empty(),
+        outcome.is_healthy(),
         "no tenant should be quarantined: {:?}",
-        outcome.orphaned_specs
+        outcome.quarantined_tenants
     );
     assert_eq!(outcome.restored_specs, 2);
 
@@ -185,13 +191,154 @@ fn populate_registry_isolates_corrupt_tenant() {
         "corrupt tenant must be quarantined"
     );
 
-    // Exactly the healthy tenant's spec restored; the corrupt one is reported
-    // as an orphan for the caller to reconcile.
+    // Exactly the healthy tenant's spec restored; the corrupt one is retained
+    // under an explicit quarantine.
     assert_eq!(outcome.restored_specs, 1);
     assert_eq!(
-        outcome.orphaned_specs,
-        vec![("corrupt".to_string(), "Order".to_string())]
+        outcome
+            .quarantined_tenants
+            .get("corrupt")
+            .and_then(|entry| entry.entity_failures.get("Order"))
+            .map(|failure| failure.reason),
+        Some(RegistryQuarantineReason::InvalidCsdl)
     );
+    let failure = &outcome.quarantined_tenants["corrupt"].entity_failures["Order"];
+    assert_eq!(failure.spec_version, 7);
+    assert_eq!(failure.source_kind, RegistryQuarantineSource::Csdl);
+    assert!(failure.detail.len() <= QUARANTINE_DETAIL_BUDGET_BYTES);
+    assert!(
+        outcome.is_quarantined("corrupt", "Order"),
+        "corrupt Order row must remain explicitly accounted for"
+    );
+}
+
+#[test]
+fn failed_restore_does_not_partially_replace_existing_tenant() {
+    let tenant = TenantId::new("default");
+    let order_ioa = include_str!("../../../test-fixtures/specs/order.ioa.toml");
+    let mut registry = SpecRegistry::new();
+    registry.register_tenant(
+        tenant.clone(),
+        parse_csdl(&csdl_xml_for("Order", "Orders")).unwrap(),
+        csdl_xml_for("Order", "Orders"),
+        &[("Order", order_ioa)],
+    );
+    let original_csdl = registry.get_tenant(&tenant).unwrap().csdl_xml.clone();
+
+    let mut grouped = BTreeMap::new();
+    grouped.insert(
+        tenant.as_str().to_string(),
+        vec![MockSpecRow {
+            entity_type: "Task".to_string(),
+            ioa_source: "[automaton]\nname = \"Task\"\n".to_string(),
+            csdl_xml: csdl_xml_for("Task", "Tasks"),
+            status: "passed".to_string(),
+            verified: true,
+        }],
+    );
+    let outcome = populate_registry(
+        &mut registry,
+        grouped,
+        &mut BTreeMap::new(),
+        |row| Some(row.csdl_xml.clone()),
+        |row| (row.entity_type.clone(), row.ioa_source.clone()),
+    );
+
+    assert!(outcome.is_quarantined("default", "Task"));
+    assert_eq!(
+        registry
+            .get_tenant(&tenant)
+            .map(|config| config.csdl_xml.as_str()),
+        Some(original_csdl.as_str()),
+        "failed re-registration must preserve the last-known-good CSDL"
+    );
+    assert!(registry.get_table(&tenant, "Order").is_some());
+    assert!(registry.get_table(&tenant, "Task").is_none());
+    assert_eq!(
+        registry.resolve_entity_type(&tenant, "Orders").as_deref(),
+        Some("Order")
+    );
+}
+
+#[test]
+fn registration_quarantine_attributes_only_the_failing_ioa_as_source() {
+    let order_ioa = include_str!("../../../test-fixtures/specs/order.ioa.toml").to_string();
+    let mut grouped = BTreeMap::new();
+    grouped.insert(
+        "default".to_string(),
+        vec![
+            MockSpecRow {
+                entity_type: "Order".to_string(),
+                ioa_source: order_ioa,
+                csdl_xml: csdl_xml_for("Order", "Orders"),
+                status: "passed".to_string(),
+                verified: true,
+            },
+            MockSpecRow {
+                entity_type: "Task".to_string(),
+                ioa_source: "[automaton]\nname = \"Task\"\n".to_string(),
+                csdl_xml: csdl_xml_for("Task", "Tasks"),
+                status: "passed".to_string(),
+                verified: true,
+            },
+        ],
+    );
+    let mut registry = SpecRegistry::new();
+    let outcome = populate_registry(
+        &mut registry,
+        grouped,
+        &mut BTreeMap::new(),
+        |row| Some(row.csdl_xml.clone()),
+        |row| (row.entity_type.clone(), row.ioa_source.clone()),
+    );
+    let failures = &outcome.quarantined_tenants["default"].entity_failures;
+    assert_eq!(failures["Task"].source_kind, RegistryQuarantineSource::Ioa);
+    assert_eq!(
+        failures["Order"].source_kind,
+        RegistryQuarantineSource::Registration
+    );
+    assert!(failures["Order"].detail.contains("sibling entity 'Task'"));
+}
+
+#[test]
+fn invalid_csdl_quarantine_attributes_only_the_failing_fragment_as_source() {
+    let order_ioa = include_str!("../../../test-fixtures/specs/order.ioa.toml").to_string();
+    let task_ioa = order_ioa.replace("name = \"Order\"", "name = \"Task\"");
+    let mut grouped = BTreeMap::new();
+    grouped.insert(
+        "default".to_string(),
+        vec![
+            MockSpecRow {
+                entity_type: "Order".to_string(),
+                ioa_source: order_ioa,
+                csdl_xml: csdl_xml_for("Order", "Orders"),
+                status: "passed".to_string(),
+                verified: true,
+            },
+            MockSpecRow {
+                entity_type: "Task".to_string(),
+                ioa_source: task_ioa,
+                csdl_xml: "<a><b".to_string(),
+                status: "passed".to_string(),
+                verified: true,
+            },
+        ],
+    );
+    let mut registry = SpecRegistry::new();
+    let outcome = populate_registry(
+        &mut registry,
+        grouped,
+        &mut BTreeMap::new(),
+        |row| Some(row.csdl_xml.clone()),
+        |row| (row.entity_type.clone(), row.ioa_source.clone()),
+    );
+    let failures = &outcome.quarantined_tenants["default"].entity_failures;
+    assert_eq!(failures["Task"].source_kind, RegistryQuarantineSource::Csdl);
+    assert_eq!(
+        failures["Order"].source_kind,
+        RegistryQuarantineSource::Registration
+    );
+    assert!(failures["Order"].detail.contains("sibling CSDL fragment"));
 }
 
 #[test]

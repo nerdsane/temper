@@ -168,6 +168,7 @@ pub struct PostgresSpecRow {
     pub levels_total: Option<i32>,
     pub verification_result: Option<String>,
     pub content_hash: Option<String>,
+    pub version: i64,
     pub updated_at: String,
     pub committed: bool,
 }
@@ -1080,7 +1081,7 @@ impl PostgresEventStore {
     pub async fn load_specs(&self) -> Result<Vec<PostgresSpecRow>, PersistenceError> {
         let rows = crate::dbm::postgres_query!(
             "SELECT tenant, entity_type, ioa_source, csdl_xml, verification_status, verified, \
-                    levels_passed, levels_total, verification_result, content_hash, updated_at, committed \
+                    levels_passed, levels_total, verification_result, content_hash, version, updated_at, committed \
              FROM specs WHERE committed = true ORDER BY tenant, entity_type",
         )
         .fetch_all(self.pool())

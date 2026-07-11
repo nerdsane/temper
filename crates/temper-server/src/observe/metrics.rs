@@ -11,6 +11,54 @@ use temper_runtime::scheduler::sim_now;
 
 use crate::state::ServerState;
 
+pub(super) const HEALTH_QUARANTINE_ENTRY_BUDGET: usize = 64;
+
+fn bounded_registry_restore_health(
+    health: &crate::registry::RegistryRestoreHealth,
+) -> serde_json::Value {
+    let total = health.quarantined_spec_count();
+    let mut remaining = HEALTH_QUARANTINE_ENTRY_BUDGET;
+    let mut tenants = serde_json::Map::new();
+    for (tenant, quarantine) in &health.quarantined_tenants {
+        if remaining == 0 {
+            break;
+        }
+        let mut failures = serde_json::Map::new();
+        for (entity_type, failure) in &quarantine.entity_failures {
+            if remaining == 0 {
+                break;
+            }
+            failures.insert(
+                entity_type.clone(),
+                serde_json::json!({
+                    "spec_version": failure.spec_version,
+                    "constraint_version": failure.constraint_version,
+                    "reason": failure.reason.as_str(),
+                    "source_kind": failure.source_kind.as_str(),
+                    "source_line": failure.source_line,
+                    "source_column": failure.source_column,
+                    "acknowledged": failure.acknowledged,
+                }),
+            );
+            remaining -= 1;
+        }
+        if !failures.is_empty() {
+            tenants.insert(
+                tenant.clone(),
+                serde_json::json!({"entity_failures": failures}),
+            );
+        }
+    }
+    let visible = HEALTH_QUARANTINE_ENTRY_BUDGET - remaining;
+    serde_json::json!({
+        "restored_specs": health.restored_specs,
+        "quarantined_specs": total,
+        "quarantined_tenants": tenants,
+        "visible_quarantines": visible,
+        "truncated": total > visible,
+    })
+}
+
 /// Format a colon-delimited key map into Prometheus exposition lines.
 ///
 /// Each key is split into exactly 3 parts by `:`. Keys with fewer parts are
@@ -44,13 +92,18 @@ pub(crate) async fn handle_health(State(state): State<ServerState>) -> Json<serd
     let now = sim_now();
     let uptime = (now - state.start_time).num_seconds().max(0) as u64;
 
-    let specs_loaded = {
+    let (specs_loaded, registry_restore) = {
         let registry = state.registry.read().unwrap_or_else(|e| e.into_inner());
         let mut count: u64 = 0;
         for tid in registry.tenant_ids() {
             count += registry.entity_types(tid).len() as u64;
         }
-        count
+        (count, registry.restore_health().clone())
+    };
+    let health_status = if registry_restore.is_healthy() {
+        "healthy"
+    } else {
+        "degraded"
     };
 
     let active_actors = {
@@ -75,7 +128,7 @@ pub(crate) async fn handle_health(State(state): State<ServerState>) -> Json<serd
         .unwrap_or("none");
 
     Json(serde_json::json!({
-        "status": "healthy",
+        "status": health_status,
         "uptime_seconds": uptime,
         "specs_loaded": specs_loaded,
         "active_actors": active_actors,
@@ -83,6 +136,7 @@ pub(crate) async fn handle_health(State(state): State<ServerState>) -> Json<serd
         "transitions_total": transitions_total,
         "errors_total": errors_total,
         "event_store": event_store_type,
+        "registry_restore": bounded_registry_restore_health(&registry_restore),
         "cross_invariant_enforce": state.cross_invariant_enforce,
         "cross_invariant_eventual_enforce": state.cross_invariant_eventual_enforce,
     }))
@@ -93,6 +147,33 @@ pub(crate) async fn handle_metrics(
     State(state): State<ServerState>,
 ) -> (StatusCode, [(String, String); 1], String) {
     let mut lines = Vec::new();
+
+    let (quarantined_specs, quarantined_tenants) = {
+        let registry = state
+            .registry
+            .read()
+            .unwrap_or_else(|error| error.into_inner());
+        (
+            registry.restore_health().quarantined_spec_count(),
+            registry.restore_health().quarantined_tenants.len(),
+        )
+    };
+    lines.push(
+        "# HELP temper_registry_restore_quarantined_specs Committed specs withheld from activation during registry restore."
+            .to_string(),
+    );
+    lines.push("# TYPE temper_registry_restore_quarantined_specs gauge".to_string());
+    lines.push(format!(
+        "temper_registry_restore_quarantined_specs {quarantined_specs}"
+    ));
+    lines.push(
+        "# HELP temper_registry_restore_quarantined_tenants Tenants with at least one active registry restore quarantine."
+            .to_string(),
+    );
+    lines.push("# TYPE temper_registry_restore_quarantined_tenants gauge".to_string());
+    lines.push(format!(
+        "temper_registry_restore_quarantined_tenants {quarantined_tenants}"
+    ));
 
     // -- temper_transitions_total --
     lines.push("# HELP temper_transitions_total Total entity state transitions.".to_string());

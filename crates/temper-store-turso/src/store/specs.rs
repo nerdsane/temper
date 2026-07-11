@@ -600,7 +600,7 @@ impl TursoEventStore {
         let mut rows = conn
             .query(
                 "SELECT tenant, entity_type, ioa_source, csdl_xml, verification_status, verified, \
-                        levels_passed, levels_total, verification_result, content_hash, updated_at, committed \
+                        levels_passed, levels_total, verification_result, content_hash, version, updated_at, committed \
                  FROM specs \
                  WHERE committed = 1 \
                  ORDER BY tenant, entity_type",
@@ -628,9 +628,10 @@ impl TursoEventStore {
                     .map(|v| v as i32),
                 verification_result: row.get::<Option<String>>(8).map_err(storage_error)?,
                 content_hash: row.get::<Option<String>>(9).map_err(storage_error)?,
-                updated_at: row.get::<String>(10).map_err(storage_error)?,
+                version: row.get::<i64>(10).map_err(storage_error)?,
+                updated_at: row.get::<String>(11).map_err(storage_error)?,
                 committed: row
-                    .get::<Option<i64>>(11)
+                    .get::<Option<i64>>(12)
                     .map_err(storage_error)?
                     .unwrap_or(1)
                     != 0,

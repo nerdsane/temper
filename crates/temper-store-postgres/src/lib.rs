@@ -18,6 +18,7 @@ mod metrics;
 pub mod migration;
 pub mod platform;
 mod query_page;
+mod registry_quarantine;
 pub mod schema;
 mod schema_event_history;
 mod segments;
@@ -35,5 +36,9 @@ pub use platform::{
     PostgresTrajectoryRow, PostgresTrajectoryStats, PostgresUnmetIntentAggRow,
     PostgresWasmInvocationInsert, PostgresWasmInvocationRow, PostgresWasmModuleMetadataRow,
     PostgresWasmModuleRow,
+};
+pub use registry_quarantine::{
+    PostgresRegistryQuarantineResolution, PostgresRegistryQuarantineRow,
+    PostgresRegistryQuarantineUpsert, PostgresRegistrySourceSnapshot,
 };
 pub use store::PostgresEventStore;

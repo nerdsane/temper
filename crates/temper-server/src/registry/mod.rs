@@ -5,28 +5,27 @@
 //! in `ServerState`, enabling multi-tenant deployments where each tenant has
 //! its own entity types and specs.
 
+mod access;
 mod relations;
 pub mod types;
 
 use std::collections::BTreeMap;
-use std::sync::{Arc, RwLock};
+use std::sync::Arc;
 
 use tracing::instrument;
 
 use temper_jit::swap::SwapController;
 use temper_jit::table::TransitionTable;
 use temper_runtime::tenant::TenantId;
-use temper_spec::FieldInvariant;
 use temper_spec::automaton;
 use temper_spec::cross_invariant::parse_cross_invariants;
 use temper_spec::csdl::{CsdlDocument, emit_csdl_xml, merge_csdl};
 
-use crate::trigger::ReactionRegistry;
 use crate::trigger::types::ReactionRule;
 
 pub use types::*;
 
-use relations::{build_relation_graph, build_webhook_routes, synthesize_action_trigger_reaction};
+use relations::{build_relation_graph, build_webhook_routes};
 
 fn merge_reaction_rules(
     existing: &[ReactionRule],
@@ -51,12 +50,94 @@ fn merge_reaction_rules(
 #[derive(Debug, Clone, Default)]
 pub struct SpecRegistry {
     tenants: BTreeMap<TenantId, TenantConfig>,
+    restore_health: RegistryRestoreHealth,
 }
 
 impl SpecRegistry {
     /// Create an empty registry.
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Health from the current process's durable registry restore.
+    pub fn restore_health(&self) -> &RegistryRestoreHealth {
+        &self.restore_health
+    }
+
+    /// Merge one backend's restore result into current boot health.
+    pub(crate) fn record_restore_health(&mut self, report: &RegistryRestoreHealth) {
+        self.restore_health.restored_specs = self
+            .restore_health
+            .restored_specs
+            .saturating_add(report.restored_specs);
+        for (tenant, quarantine) in &report.quarantined_tenants {
+            self.restore_health
+                .quarantined_tenants
+                .entry(tenant.clone())
+                .or_default()
+                .entity_failures
+                .extend(quarantine.entity_failures.clone());
+        }
+    }
+
+    /// Replace one tenant's process-local quarantine after its durable tenant
+    /// snapshot has been replaced. Retry reconciliation is snapshot-based, so
+    /// merging here would retain entities that are no longer active durably.
+    pub(crate) fn replace_tenant_restore_quarantine(
+        &mut self,
+        tenant: &str,
+        quarantine: Option<RegistryTenantQuarantine>,
+    ) {
+        match quarantine {
+            Some(quarantine) if !quarantine.entity_failures.is_empty() => {
+                self.restore_health
+                    .quarantined_tenants
+                    .insert(tenant.to_string(), quarantine);
+            }
+            _ => {
+                self.restore_health.quarantined_tenants.remove(tenant);
+            }
+        }
+    }
+
+    /// Return one exact process-local quarantine source identity.
+    pub(crate) fn restore_quarantine_identity(
+        &self,
+        tenant: &str,
+        entity_type: &str,
+    ) -> Option<(i64, Option<i64>)> {
+        self.restore_health
+            .quarantined_tenants
+            .get(tenant)
+            .and_then(|quarantine| quarantine.entity_failures.get(entity_type))
+            .map(|failure| (failure.spec_version, failure.constraint_version))
+    }
+
+    /// Reconcile one acknowledged durable record into process-local health.
+    ///
+    /// This is an optimistic local compare-and-set. The caller snapshots the
+    /// complete local identity before any storage await. Missing or stale local
+    /// state is reconciled only if it did not change while the durable request
+    /// was in flight; spec and constraint versions are never conflated into an
+    /// unsound total ordering.
+    pub(crate) fn reconcile_acknowledged_restore_quarantine(
+        &mut self,
+        tenant: &str,
+        entity_type: &str,
+        expected_local_identity: Option<(i64, Option<i64>)>,
+        durable: RegistryQuarantineFailure,
+    ) -> bool {
+        if self.restore_quarantine_identity(tenant, entity_type) != expected_local_identity {
+            return false;
+        }
+        let failures = &mut self
+            .restore_health
+            .quarantined_tenants
+            .entry(tenant.to_string())
+            .or_default()
+            .entity_failures;
+        failures.insert(entity_type.to_string(), durable);
+        true
     }
 
     /// Register a tenant with its CSDL document and IOA specs.
@@ -179,6 +260,31 @@ impl SpecRegistry {
             }
         }
 
+        // Compile every IOA before touching an existing tenant. Restore and
+        // hot-reload are transactional at the registry boundary: one malformed
+        // entity must not replace CSDL, reactions, or earlier entity tables.
+        let compiled_entities = ioa_sources
+            .iter()
+            .map(|(entity_type, ioa_source)| {
+                let automaton = automaton::parse_automaton(ioa_source).map_err(|error| {
+                    RegistryError::IoaParse {
+                        tenant: tenant_name.clone(),
+                        entity_type: (*entity_type).to_string(),
+                        source: error.to_string(),
+                    }
+                })?;
+                let table = TransitionTable::from_automaton(&automaton);
+                let integrations = automaton.integrations.clone();
+                Ok((
+                    (*entity_type).to_string(),
+                    automaton,
+                    table,
+                    integrations,
+                    (*ioa_source).to_string(),
+                ))
+            })
+            .collect::<Result<Vec<_>, RegistryError>>()?;
+
         if let Some(existing_config) = self.tenants.get_mut(&tenant) {
             // Hot-reload path: swap tables on existing entities, add new ones.
             if merge {
@@ -211,38 +317,28 @@ impl SpecRegistry {
                 existing_config.cross_invariants_source = cross_invariants_source;
             }
 
-            for (entity_type, ioa_source) in ioa_sources {
-                let automaton = automaton::parse_automaton(ioa_source).map_err(|e| {
-                    RegistryError::IoaParse {
-                        tenant: tenant_name.clone(),
-                        entity_type: (*entity_type).to_string(),
-                        source: e.to_string(),
-                    }
-                })?;
-                let table = TransitionTable::from_automaton(&automaton);
-                let integrations = automaton.integrations.clone();
-
-                if let Some(existing_spec) = existing_config.entities.get_mut(*entity_type) {
+            for (entity_type, automaton, table, integrations, ioa_source) in compiled_entities {
+                if let Some(existing_spec) = existing_config.entities.get_mut(&entity_type) {
                     // Hot-swap: write new table into the SAME RwLock that actors hold.
                     let result = existing_spec.swap_controller().swap(table);
                     tracing::info!(
-                        entity_type,
+                        %entity_type,
                         ?result,
                         "hot-swapped transition table for existing entity"
                     );
                     // Update metadata on the existing spec.
                     existing_spec.automaton = automaton;
                     existing_spec.integrations = integrations;
-                    existing_spec.ioa_source = ioa_source.to_string();
+                    existing_spec.ioa_source = ioa_source;
                 } else {
                     // New entity type — create fresh EntitySpec.
                     existing_config.entities.insert(
-                        entity_type.to_string(),
+                        entity_type,
                         EntitySpec {
                             automaton,
                             integrations,
                             swap: Arc::new(SwapController::new(table)),
-                            ioa_source: ioa_source.to_string(),
+                            ioa_source,
                         },
                     );
                 }
@@ -278,23 +374,14 @@ impl SpecRegistry {
         } else {
             // First registration: create new TenantConfig.
             let mut entities = BTreeMap::new();
-            for (entity_type, ioa_source) in ioa_sources {
-                let automaton = automaton::parse_automaton(ioa_source).map_err(|e| {
-                    RegistryError::IoaParse {
-                        tenant: tenant_name.clone(),
-                        entity_type: (*entity_type).to_string(),
-                        source: e.to_string(),
-                    }
-                })?;
-                let table = TransitionTable::from_automaton(&automaton);
-                let integrations = automaton.integrations.clone();
+            for (entity_type, automaton, table, integrations, ioa_source) in compiled_entities {
                 entities.insert(
-                    entity_type.to_string(),
+                    entity_type,
                     EntitySpec {
                         automaton,
                         integrations,
                         swap: Arc::new(SwapController::new(table)),
-                        ioa_source: ioa_source.to_string(),
+                        ioa_source,
                     },
                 );
             }
@@ -365,498 +452,8 @@ impl SpecRegistry {
             false,
         )
     }
-
-    /// Build a [`ReactionRegistry`] from all tenants' reaction rules,
-    /// including synthesized rules from `[[agent_trigger]]` sections.
-    pub fn build_reaction_registry(&self) -> ReactionRegistry {
-        let mut registry = ReactionRegistry::new();
-        for (tenant, config) in &self.tenants {
-            let mut rules = config.reactions.clone();
-            // ADR-0046: synthesize reaction rules from [[action.triggers]]
-            // entity-kind blocks on every entity's actions. Wasm/Webhook
-            // kinds are handled by a separate runtime path.
-            for (entity_type, spec) in &config.entities {
-                for action in &spec.automaton.actions {
-                    for trigger in &action.triggers {
-                        if let Some(rule) =
-                            synthesize_action_trigger_reaction(entity_type, &action.name, trigger)
-                        {
-                            rules.push(rule);
-                        }
-                    }
-                }
-            }
-            if !rules.is_empty() {
-                registry.register_tenant_rules(tenant.clone(), rules);
-            }
-        }
-        registry
-    }
-
-    /// Look up a tenant's configuration.
-    pub fn get_tenant(&self, tenant: &TenantId) -> Option<&TenantConfig> {
-        self.tenants.get(tenant)
-    }
-
-    /// Look up a transition table for a specific tenant and entity type.
-    ///
-    /// Returns a snapshot of the current table. If a hot-swap has occurred
-    /// since the last call, this returns the new table.
-    pub fn get_table(&self, tenant: &TenantId, entity_type: &str) -> Option<Arc<TransitionTable>> {
-        self.tenants
-            .get(tenant)
-            .and_then(|tc| tc.entities.get(entity_type))
-            .map(|es| es.table())
-    }
-
-    /// Get a live reference to the transition table's `RwLock`.
-    ///
-    /// Unlike [`get_table()`](Self::get_table) which returns a cloned snapshot,
-    /// this returns the `Arc<RwLock<TransitionTable>>` from the [`SwapController`].
-    /// Actors holding this reference will see hot-swapped tables on their next read.
-    pub fn get_table_live(
-        &self,
-        tenant: &TenantId,
-        entity_type: &str,
-    ) -> Option<Arc<RwLock<TransitionTable>>> {
-        self.tenants
-            .get(tenant)
-            .and_then(|tc| tc.entities.get(entity_type))
-            .map(|es| es.swap_controller().current())
-    }
-
-    /// Look up the entity type name for an entity set in a tenant.
-    pub fn resolve_entity_type(&self, tenant: &TenantId, entity_set: &str) -> Option<String> {
-        self.tenants
-            .get(tenant)
-            .and_then(|tc| tc.entity_set_map.get(entity_set).cloned())
-    }
-
-    /// Look up the IOA spec for a tenant and entity type.
-    pub fn get_spec(&self, tenant: &TenantId, entity_type: &str) -> Option<&EntitySpec> {
-        self.tenants
-            .get(tenant)
-            .and_then(|tc| tc.entities.get(entity_type))
-    }
-
-    /// Look up the `[[field_invariant]]` declarations for a tenant and entity
-    /// type, returning a cloned snapshot so the caller does not need to hold a
-    /// registry read lock across subsequent async work.
-    pub fn field_invariants_for(
-        &self,
-        tenant: &TenantId,
-        entity_type: &str,
-    ) -> Option<Vec<FieldInvariant>> {
-        self.tenants
-            .get(tenant)
-            .and_then(|tc| tc.entities.get(entity_type))
-            .map(|es| es.automaton.field_invariants.clone())
-    }
-
-    /// Mutable access to the IOA spec for a tenant and entity type.
-    pub fn get_spec_mut(
-        &mut self,
-        tenant: &TenantId,
-        entity_type: &str,
-    ) -> Option<&mut EntitySpec> {
-        self.tenants
-            .get_mut(tenant)
-            .and_then(|tc| tc.entities.get_mut(entity_type))
-    }
-
-    /// Remove a tenant and all its specs from the registry.
-    ///
-    /// Returns `true` if the tenant was found and removed, `false` otherwise.
-    #[instrument(skip_all, fields(otel.name = "registry.remove_tenant", tenant = %tenant))]
-    pub fn remove_tenant(&mut self, tenant: &TenantId) -> bool {
-        self.tenants.remove(tenant).is_some()
-    }
-
-    /// List all registered tenant IDs.
-    pub fn tenant_ids(&self) -> Vec<&TenantId> {
-        self.tenants.keys().collect()
-    }
-
-    /// List all entity types for a tenant.
-    pub fn entity_types(&self, tenant: &TenantId) -> Vec<&str> {
-        self.tenants
-            .get(tenant)
-            .map(|tc| tc.entities.keys().map(|k| k.as_str()).collect())
-            .unwrap_or_default()
-    }
-
-    /// Set verification status for a specific entity type.
-    #[instrument(skip_all, fields(otel.name = "registry.set_verification_status", tenant = %tenant, entity_type))]
-    pub fn set_verification_status(
-        &mut self,
-        tenant: &TenantId,
-        entity_type: &str,
-        status: VerificationStatus,
-    ) {
-        if let Some(config) = self.tenants.get_mut(tenant) {
-            config.verification.insert(entity_type.to_string(), status);
-        }
-    }
-
-    /// Get verification status for a specific entity type.
-    pub fn get_verification_status(
-        &self,
-        tenant: &TenantId,
-        entity_type: &str,
-    ) -> Option<&VerificationStatus> {
-        self.tenants
-            .get(tenant)
-            .and_then(|tc| tc.verification.get(entity_type))
-    }
-
-    /// Get all verification statuses for a tenant.
-    pub fn verification_statuses(
-        &self,
-        tenant: &TenantId,
-    ) -> Option<&BTreeMap<String, VerificationStatus>> {
-        self.tenants.get(tenant).map(|tc| &tc.verification)
-    }
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use temper_spec::csdl::parse_csdl;
-
-    const CSDL_XML: &str = include_str!("../../../../test-fixtures/specs/model.csdl.xml");
-    const ORDER_IOA: &str = include_str!("../../../../test-fixtures/specs/order.ioa.toml");
-
-    fn minimal_csdl() -> (CsdlDocument, String) {
-        let doc = parse_csdl(CSDL_XML).expect("CSDL should parse");
-        (doc, CSDL_XML.to_string())
-    }
-
-    #[test]
-    fn register_and_lookup_tenant() {
-        let mut registry = SpecRegistry::new();
-        let (csdl, csdl_xml) = minimal_csdl();
-
-        registry.register_tenant("alpha", csdl, csdl_xml, &[("Order", ORDER_IOA)]);
-
-        let tenant = TenantId::new("alpha");
-        assert!(registry.get_tenant(&tenant).is_some());
-        assert!(registry.get_table(&tenant, "Order").is_some());
-        assert!(registry.get_table(&tenant, "NonExistent").is_none());
-    }
-
-    #[test]
-    fn unknown_tenant_returns_none() {
-        let registry = SpecRegistry::new();
-        let tenant = TenantId::new("unknown");
-        assert!(registry.get_tenant(&tenant).is_none());
-        assert!(registry.get_table(&tenant, "Order").is_none());
-    }
-
-    #[test]
-    fn multiple_tenants_isolated() {
-        let mut registry = SpecRegistry::new();
-        let (csdl1, csdl_xml1) = minimal_csdl();
-        let (csdl2, csdl_xml2) = minimal_csdl();
-
-        registry.register_tenant("alpha", csdl1, csdl_xml1, &[("Order", ORDER_IOA)]);
-        registry.register_tenant("beta", csdl2, csdl_xml2, &[("Task", ORDER_IOA)]);
-
-        let a = TenantId::new("alpha");
-        let b = TenantId::new("beta");
-
-        // Each tenant sees only its own entities
-        assert!(registry.get_table(&a, "Order").is_some());
-        assert!(registry.get_table(&a, "Task").is_none());
-        assert!(registry.get_table(&b, "Task").is_some());
-        assert!(registry.get_table(&b, "Order").is_none());
-    }
-
-    #[test]
-    fn tenant_ids_listed() {
-        let mut registry = SpecRegistry::new();
-        let (csdl1, xml1) = minimal_csdl();
-        let (csdl2, xml2) = minimal_csdl();
-
-        registry.register_tenant("alpha", csdl1, xml1, &[]);
-        registry.register_tenant("beta", csdl2, xml2, &[]);
-
-        let ids: Vec<&str> = registry.tenant_ids().iter().map(|t| t.as_str()).collect();
-        assert!(ids.contains(&"alpha"));
-        assert!(ids.contains(&"beta"));
-    }
-
-    #[test]
-    fn entity_types_for_tenant() {
-        let mut registry = SpecRegistry::new();
-        let (csdl, xml) = minimal_csdl();
-
-        registry.register_tenant("alpha", csdl, xml, &[("Order", ORDER_IOA)]);
-
-        let types = registry.entity_types(&TenantId::new("alpha"));
-        assert_eq!(types, vec!["Order"]);
-    }
-
-    #[test]
-    fn transition_table_is_functional() {
-        let mut registry = SpecRegistry::new();
-        let (csdl, xml) = minimal_csdl();
-
-        registry.register_tenant("alpha", csdl, xml, &[("Order", ORDER_IOA)]);
-
-        let table = registry
-            .get_table(&TenantId::new("alpha"), "Order")
-            .unwrap();
-        assert_eq!(table.entity_name, "Order");
-        assert_eq!(table.initial_state, "Draft");
-        assert!(!table.rules.is_empty());
-
-        // Verify it evaluates correctly
-        let result = table.evaluate("Draft", 1, "SubmitOrder");
-        assert!(result.is_some());
-        assert!(result.unwrap().success);
-    }
-
-    #[test]
-    fn remove_tenant_succeeds() {
-        let mut registry = SpecRegistry::new();
-        let (csdl, xml) = minimal_csdl();
-
-        registry.register_tenant("doomed", csdl, xml, &[("Order", ORDER_IOA)]);
-        let tenant = TenantId::new("doomed");
-        assert!(registry.get_tenant(&tenant).is_some());
-
-        assert!(registry.remove_tenant(&tenant));
-        assert!(registry.get_tenant(&tenant).is_none());
-        assert!(registry.get_table(&tenant, "Order").is_none());
-    }
-
-    #[test]
-    fn remove_nonexistent_tenant_returns_false() {
-        let mut registry = SpecRegistry::new();
-        let tenant = TenantId::new("nonexistent");
-        assert!(!registry.remove_tenant(&tenant));
-    }
-
-    #[test]
-    fn spec_metadata_accessible() {
-        let mut registry = SpecRegistry::new();
-        let (csdl, xml) = minimal_csdl();
-
-        registry.register_tenant("alpha", csdl, xml, &[("Order", ORDER_IOA)]);
-
-        let spec = registry.get_spec(&TenantId::new("alpha"), "Order").unwrap();
-        assert_eq!(spec.automaton.automaton.name, "Order");
-        assert!(!spec.ioa_source.is_empty());
-    }
-
-    /// Minimal CSDL with a single EntityType + EntitySet for merge tests.
-    fn task_csdl() -> (CsdlDocument, String) {
-        let xml = r#"<?xml version="1.0"?>
-        <edmx:Edmx Version="4.0" xmlns:edmx="http://docs.oasis-open.org/odata/ns/edmx">
-          <edmx:DataServices>
-            <Schema Namespace="Temper.Example" xmlns="http://docs.oasis-open.org/odata/ns/edm">
-              <EntityType Name="Task">
-                <Key><PropertyRef Name="Id"/></Key>
-                <Property Name="Id" Type="Edm.Guid" Nullable="false"/>
-              </EntityType>
-              <EntityContainer Name="ExampleService">
-                <EntitySet Name="Tasks" EntityType="Temper.Example.Task"/>
-              </EntityContainer>
-            </Schema>
-          </edmx:DataServices>
-        </edmx:Edmx>"#;
-        (parse_csdl(xml).unwrap(), xml.to_string())
-    }
-
-    #[test]
-    fn merge_preserves_existing_entities_and_entity_set_map() {
-        let mut registry = SpecRegistry::new();
-        let (csdl, xml) = minimal_csdl();
-        registry.register_tenant("alpha", csdl, xml, &[("Order", ORDER_IOA)]);
-        let tenant = TenantId::new("alpha");
-
-        let (new_csdl, new_xml) = task_csdl();
-        registry
-            .try_register_tenant_with_reactions_and_constraints(
-                "alpha",
-                new_csdl,
-                new_xml,
-                &[("Task", ORDER_IOA)],
-                Vec::new(),
-                None,
-                true,
-            )
-            .expect("merge should succeed");
-
-        assert!(
-            registry.get_table(&tenant, "Order").is_some(),
-            "Order survives merge"
-        );
-        assert!(
-            registry.get_table(&tenant, "Task").is_some(),
-            "Task added by merge"
-        );
-
-        let config = registry.get_tenant(&tenant).unwrap();
-        assert!(config.entity_set_map.contains_key("Orders"));
-        assert!(config.entity_set_map.contains_key("Tasks"));
-        assert!(matches!(
-            config.verification.get("Task"),
-            Some(VerificationStatus::Pending)
-        ));
-    }
-
-    #[test]
-    fn merge_with_no_cross_invariants_preserves_existing_ones() {
-        // Regression: a follow-up merge that does not declare cross-invariants
-        // (e.g. the Agent OS bootstrap running after a user app load) must not
-        // wipe the ones already registered for the tenant. Observed live when
-        // child entities on a Local parent returned 201 instead of 409 in the
-        // Crucible walkthrough — the app load registered the rules, then the
-        // agent-spec merge immediately erased them.
-        const CROSS_INVARIANTS_TOML: &str = r#"
-version = 1
-default_delete_policy = "restrict"
-
-[[invariant]]
-name = "OrderStatusSanity"
-kind = "hard"
-on = "Order.*"
-assert = 'related(Order, OrderId).status in ["Active"]'
-"#;
-
-        let mut registry = SpecRegistry::new();
-        let (csdl, xml) = minimal_csdl();
-        registry
-            .try_register_tenant_with_reactions_and_constraints(
-                "alpha",
-                csdl,
-                xml,
-                &[("Order", ORDER_IOA)],
-                Vec::new(),
-                Some(CROSS_INVARIANTS_TOML.to_string()),
-                false,
-            )
-            .expect("initial load should succeed");
-
-        let tenant = TenantId::new("alpha");
-        let initial_count = registry
-            .get_tenant(&tenant)
-            .unwrap()
-            .cross_invariants
-            .as_ref()
-            .map(|c| c.invariants.len())
-            .unwrap_or(0);
-        assert_eq!(initial_count, 1, "sanity: cross-invariant registered");
-
-        // Merge with cross_invariants_source = None (mimics agent OS bootstrap).
-        let (new_csdl, new_xml) = task_csdl();
-        registry
-            .try_register_tenant_with_reactions_and_constraints(
-                "alpha",
-                new_csdl,
-                new_xml,
-                &[("Task", ORDER_IOA)],
-                Vec::new(),
-                None,
-                true,
-            )
-            .expect("merge should succeed");
-
-        let after_merge = registry
-            .get_tenant(&tenant)
-            .unwrap()
-            .cross_invariants
-            .as_ref()
-            .map(|c| c.invariants.len())
-            .unwrap_or(0);
-        assert_eq!(
-            after_merge, 1,
-            "merge without cross-invariants must preserve existing ones"
-        );
-    }
-
-    #[test]
-    fn replace_without_cross_invariants_clears_existing_ones() {
-        // Replace mode is the opposite of merge: the caller is the full source
-        // of truth, so a replace with `cross_invariants_source = None` must
-        // clear any previously loaded rules.
-        const CROSS_INVARIANTS_TOML: &str = r#"
-version = 1
-default_delete_policy = "restrict"
-
-[[invariant]]
-name = "OrderStatusSanity"
-kind = "hard"
-on = "Order.*"
-assert = 'related(Order, OrderId).status in ["Active"]'
-"#;
-
-        let mut registry = SpecRegistry::new();
-        let (csdl, xml) = minimal_csdl();
-        registry
-            .try_register_tenant_with_reactions_and_constraints(
-                "alpha",
-                csdl,
-                xml,
-                &[("Order", ORDER_IOA)],
-                Vec::new(),
-                Some(CROSS_INVARIANTS_TOML.to_string()),
-                false,
-            )
-            .expect("initial load should succeed");
-
-        let (csdl2, xml2) = minimal_csdl();
-        registry
-            .try_register_tenant_with_reactions_and_constraints(
-                "alpha",
-                csdl2,
-                xml2,
-                &[("Order", ORDER_IOA)],
-                Vec::new(),
-                None,
-                false,
-            )
-            .expect("replace should succeed");
-
-        let tenant = TenantId::new("alpha");
-        assert!(
-            registry
-                .get_tenant(&tenant)
-                .unwrap()
-                .cross_invariants
-                .is_none(),
-            "replace mode must clear cross-invariants when the new payload has none"
-        );
-    }
-
-    #[test]
-    fn replace_removes_entities_not_in_new_spec_set() {
-        let mut registry = SpecRegistry::new();
-        let (csdl, xml) = minimal_csdl();
-        registry.register_tenant("alpha", csdl, xml, &[("Order", ORDER_IOA)]);
-        let tenant = TenantId::new("alpha");
-
-        let (csdl2, xml2) = minimal_csdl();
-        registry
-            .try_register_tenant_with_reactions_and_constraints(
-                "alpha",
-                csdl2,
-                xml2,
-                &[("Task", ORDER_IOA)],
-                Vec::new(),
-                None,
-                false,
-            )
-            .expect("replace should succeed");
-
-        assert!(
-            registry.get_table(&tenant, "Order").is_none(),
-            "Order removed in replace"
-        );
-        assert!(
-            registry.get_table(&tenant, "Task").is_some(),
-            "Task exists after replace"
-        );
-    }
-}
+#[path = "tests.rs"]
+mod tests;

@@ -19,6 +19,7 @@ use temper_server::registry_bootstrap::{
 };
 use temper_server::storage::StorageStack;
 use temper_server::webhooks::WebhookDispatcher;
+use temper_store_postgres::PostgresEventStore;
 use temper_store_redis::RedisEventStore;
 use temper_store_turso::{TenantStoreRouter, TursoEventStore};
 
@@ -136,7 +137,8 @@ pub(super) async fn build_registry(
 
     // Restore from persistent backend first.
     if let Some(pool) = pg_pool {
-        let restored = restore_registry_from_postgres(&mut registry, pool)
+        let store = PostgresEventStore::new(pool.clone());
+        let restored = restore_registry_from_postgres(&mut registry, &store)
             .await
             .map_err(|e| anyhow::anyhow!(e))?;
         if restored > 0 {

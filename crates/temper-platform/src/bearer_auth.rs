@@ -12,6 +12,7 @@ use axum::http::StatusCode;
 use axum::middleware::Next;
 use axum::response::Response;
 use temper_runtime::tenant::TenantId;
+use temper_server::authz::TrustedIngressPrincipal;
 
 /// Marker extension for requests that were already authenticated by an
 /// outer layer and have trusted principal headers injected server-side.
@@ -54,6 +55,7 @@ pub async fn bearer_auth_check(
         && req.headers().contains_key("x-temper-principal-kind")
         && req.headers().contains_key("x-temper-principal-id")
     {
+        req.extensions_mut().insert(TrustedIngressPrincipal);
         return Ok(next.run(req).await);
     }
 
@@ -79,6 +81,7 @@ pub async fn bearer_auth_check(
     // as. Preserve those headers instead of collapsing the request into the
     // bootstrapped operator credential.
     if matches_global_api_key && has_explicit_principal {
+        req.extensions_mut().insert(TrustedIngressPrincipal);
         return Ok(next.run(req).await);
     }
 
@@ -91,6 +94,7 @@ pub async fn bearer_auth_check(
     {
         // Agent credential resolved — inject into request extensions.
         req.extensions_mut().insert(identity);
+        req.extensions_mut().insert(TrustedIngressPrincipal);
         return Ok(next.run(req).await);
     }
 
@@ -112,6 +116,7 @@ pub async fn bearer_auth_check(
                     .expect("valid x-temper-principal-id header"),
             );
         }
+        req.extensions_mut().insert(TrustedIngressPrincipal);
         return Ok(next.run(req).await);
     }
 
@@ -157,6 +162,16 @@ mod tests {
 
     async fn ok_handler() -> &'static str {
         "ok"
+    }
+
+    async fn inspect_trusted_ingress(
+        marker: Option<Extension<TrustedIngressPrincipal>>,
+    ) -> &'static str {
+        if marker.is_some() {
+            "trusted"
+        } else {
+            "untrusted"
+        }
     }
 
     async fn inspect_identity_handler(
@@ -238,6 +253,33 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(resp.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn valid_bearer_marks_principal_headers_as_trusted() {
+        let mut state = PlatformState::new(None);
+        state.api_token = Some("secret123".into());
+        let app = Router::new()
+            .route("/inspect-trust", get(inspect_trusted_ingress))
+            .layer(middleware::from_fn_with_state(
+                state.clone(),
+                bearer_auth_check,
+            ))
+            .with_state(state);
+        let response = app
+            .oneshot(
+                HttpRequest::get("/inspect-trust")
+                    .header("authorization", "Bearer secret123")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(
+            to_bytes(response.into_body(), 64).await.unwrap().as_ref(),
+            b"trusted"
+        );
     }
 
     #[tokio::test]

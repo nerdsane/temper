@@ -231,3 +231,7 @@ pub fn build_observe_router() -> Router<ServerState> {
 #[cfg(test)]
 #[path = "mod_test.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "metrics_test.rs"]
+mod metrics_tests;

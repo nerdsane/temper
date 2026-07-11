@@ -11,3 +11,8 @@ pub(crate) use helpers::{
 };
 pub use policy_persistence::{load_and_activate_tenant_policies, persist_and_activate_policy};
 pub use wasm_gate::{CedarWasmAuthzGate, PermissiveWasmAuthzGate};
+
+/// Request extension proving principal headers were established by a trusted
+/// authentication edge rather than supplied directly by the client.
+#[derive(Debug, Clone, Copy)]
+pub struct TrustedIngressPrincipal;

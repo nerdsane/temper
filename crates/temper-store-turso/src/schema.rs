@@ -61,6 +61,30 @@ CREATE TABLE IF NOT EXISTS specs (
     UNIQUE(tenant, entity_type)
 );";
 
+/// Durable active/history records for registry restore failures.
+pub const CREATE_REGISTRY_RESTORE_QUARANTINES_TABLE: &str = "\
+CREATE TABLE IF NOT EXISTS registry_restore_quarantines (
+    tenant TEXT NOT NULL,
+    entity_type TEXT NOT NULL,
+    spec_version INTEGER NOT NULL CHECK (spec_version > 0),
+    constraint_version INTEGER NOT NULL DEFAULT 0 CHECK (constraint_version >= 0),
+    reason TEXT NOT NULL CHECK (reason IN ('missing_csdl', 'invalid_csdl', 'registration_failed')),
+    source_kind TEXT NOT NULL CHECK (source_kind IN ('csdl', 'ioa', 'cross_invariants', 'registration')),
+    source_line INTEGER,
+    source_column INTEGER,
+    detail TEXT NOT NULL CHECK (length(CAST(detail AS BLOB)) <= 512),
+    acknowledged_at TEXT,
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    last_observed_at TEXT NOT NULL DEFAULT (datetime('now')),
+    resolved_at TEXT,
+    PRIMARY KEY (tenant, entity_type, spec_version, constraint_version)
+);";
+
+pub const CREATE_REGISTRY_RESTORE_QUARANTINES_ACTIVE_INDEX: &str = "\
+CREATE UNIQUE INDEX IF NOT EXISTS idx_registry_restore_quarantines_one_active
+    ON registry_restore_quarantines(tenant, entity_type)
+    WHERE resolved_at IS NULL;";
+
 pub const CREATE_TRAJECTORIES_TABLE: &str = "\
 CREATE TABLE IF NOT EXISTS trajectories (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
