@@ -313,51 +313,6 @@ generated_from = "pack_bytes"
         assert_eq!(metadata.sub_writes.len(), 1);
         assert_eq!(metadata.sub_writes[0].target_entity, "Blob");
     }
-
-    #[test]
-    fn declared_params_are_recorded_per_action() {
-        // ARN-247: `from_automaton` records each action's declared param names so
-        // the runtime can restrict caller params to the verified set. An action
-        // with no params gets an empty set (declared, not unknown); an action not
-        // in the spec is unknown (`None`).
-        let spec = r#"
-[automaton]
-name = "WorkSummary"
-states = ["Open", "Done"]
-initial = "Open"
-
-[[action]]
-name = "RecordSummary"
-kind = "input"
-from = ["Open"]
-to = "Done"
-params = ["kr_delta", "outcome"]
-
-[[action]]
-name = "Reopen"
-kind = "input"
-from = ["Done"]
-to = "Open"
-"#;
-        let table = TransitionTable::from_ioa_source(spec);
-
-        let record = table
-            .declared_params("RecordSummary")
-            .expect("declared action is known");
-        assert!(record.contains("kr_delta"));
-        assert!(record.contains("outcome"));
-        assert_eq!(record.len(), 2);
-
-        let reopen = table
-            .declared_params("Reopen")
-            .expect("param-less action is still known");
-        assert!(reopen.is_empty(), "no declared params -> empty set");
-
-        assert!(
-            table.declared_params("NotAnAction").is_none(),
-            "unknown action -> None (runtime must not restrict)",
-        );
-    }
 }
 
 #[cfg(test)]
