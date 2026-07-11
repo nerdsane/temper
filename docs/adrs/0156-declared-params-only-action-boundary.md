@@ -103,9 +103,16 @@ is not fixed.
 - Well-formed callers are unaffected: audited Katagami curation, Aya, and Genesis
   callers already send exactly their declared params (modulo the snake/Pascal
   convention that normalization bridges).
-- Undeclared params on a bound action are now a 400 rather than a silent write;
-  callers that relied on writing undeclared fields must declare them (none found
-  in the audit).
+- Undeclared params on a bound action are now a 400 rather than a silent write,
+  and undeclared params on internal dispatch are silently dropped. **Actions must
+  declare the params for the fields they set.** Audited production apps already
+  do: the Aya specs' `WikiPage.Draft`/`Revise` and `Note.Save` param lists match
+  `aya.py`'s bodies field-for-field, and the Katagami curation WASM sends exactly
+  each action's declared params. The one case found relying on verbatim
+  projection was a hand-written kernel *test* spec (`trigger_e2e_prod`'s
+  `Order.AddItem`, which set `payment_id` without declaring it) — fixed by
+  declaring the param. A full audit of every deployed spec (all os-apps, not just
+  the sampled apps) remains a cheap, recommended **pre-deploy** gate.
 - Kernel entity types with hardcoded domain logic that reads specific params were
   verified to declare them: the deployed Genesis `Ref` spec declares
   `PreviousCommitSha`/`NewCommitSha` on `Update`/`ForceUpdate`, and `Repository`

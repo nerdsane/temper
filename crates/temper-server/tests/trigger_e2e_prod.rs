@@ -57,6 +57,7 @@ initial = ""
 name = "AddItem"
 kind = "input"
 from = ["Draft"]
+params = ["payment_id"]
 
 [[action]]
 name = "SubmitOrder"
