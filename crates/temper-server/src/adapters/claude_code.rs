@@ -6,7 +6,10 @@ use async_trait::async_trait;
 use serde_json::Value;
 use tokio::process::Command;
 
-use super::{AdapterContext, AdapterError, AdapterResult, AgentAdapter};
+use super::{
+    AdapterContext, AdapterError, AdapterResult, AgentAdapter, CliAdapterEnvironment,
+    configure_cli_child_environment, execute_cli_command,
+};
 
 /// Adapter implementation for local `claude` CLI execution.
 #[derive(Debug, Default)]
@@ -16,6 +19,10 @@ pub struct ClaudeCodeAdapter;
 impl AgentAdapter for ClaudeCodeAdapter {
     fn adapter_type(&self) -> &str {
         "claude_code"
+    }
+
+    fn requires_platform_credential(&self) -> bool {
+        true
     }
 
     async fn execute(&self, ctx: AdapterContext) -> Result<AdapterResult, AdapterError> {
@@ -92,12 +99,10 @@ async fn run_claude(
         command.current_dir(workdir);
     }
 
-    // Pass platform-minted credential for identity resolution (ADR-0033).
-    // The spawned agent uses this token to authenticate back to Temper,
-    // and the platform resolves it to a verified identity.
-    if let Some(ref api_key) = ctx.agent_ctx.agent_api_key {
-        command.env("TEMPER_API_KEY", api_key);
-    }
+    // Start from an empty environment, then install only the Claude provider's
+    // tenant-scoped auth/config and the platform invocation credential.
+    configure_cli_child_environment(&mut command, ctx, CliAdapterEnvironment::ClaudeCode);
+    command.kill_on_drop(true);
     command
         .env("TEMPER_RUN_ID", ctx.entity_id.clone())
         .env("TEMPER_TASK_ID", ctx.entity_id.clone())
@@ -107,10 +112,7 @@ async fn run_claude(
         command.arg(prompt);
     }
 
-    let output = command
-        .output()
-        .await
-        .map_err(|e| AdapterError::Invocation(format!("failed to spawn '{command_name}': {e}")))?;
+    let output = execute_cli_command(&mut command, command_name).await?;
 
     let duration_ms = started.elapsed().as_millis() as u64;
     let stdout = String::from_utf8_lossy(&output.stdout).to_string();

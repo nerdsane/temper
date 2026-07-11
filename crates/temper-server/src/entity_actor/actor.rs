@@ -32,6 +32,7 @@ use temper_runtime::persistence::{
     COMPOSITE_EVENT_TYPE, EventMetadata, PersistenceEnvelope, PersistenceError,
 };
 use temper_runtime::scheduler::{sim_now, sim_uuid};
+use tokio::time::sleep as sleep_persistence_retry; // determinism-ok: production persistence retry backoff
 
 use crate::storage::{BackendLabel, BoxedEventStore};
 
@@ -44,6 +45,27 @@ use super::types::{
     EntityEvent, EntityMsg, EntityResponse, EntityState, MAX_EVENTS_SINCE_SNAPSHOT,
     MAX_ITEMS_PER_ENTITY,
 };
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ReplayPolicy {
+    LenientSnapshot,
+    StrictSnapshot,
+    StrictFullJournal,
+}
+
+impl ReplayPolicy {
+    fn loads_snapshot(self) -> bool {
+        self != Self::StrictFullJournal
+    }
+
+    fn strict_journal_read(self) -> bool {
+        self != Self::LenientSnapshot
+    }
+
+    fn strict_event_validation(self) -> bool {
+        self == Self::StrictFullJournal
+    }
+}
 
 fn event_budget_workspace_id(state: &EntityState) -> String {
     if state.entity_type == "Workspace" {
@@ -127,12 +149,7 @@ impl EntityActor {
         initial_fields: &serde_json::Value,
     ) -> EntityState {
         let mut fields = initial_fields.clone();
-        if let Some(obj) = fields.as_object_mut() {
-            obj.entry("Id".to_string())
-                .or_insert(serde_json::Value::String(entity_id.to_string()));
-            obj.entry("Status".to_string())
-                .or_insert(serde_json::Value::String(table.initial_state.clone()));
-        }
+        super::effects::canonicalize_entity_fields(&mut fields, entity_id, &table.initial_state);
 
         EntityState {
             entity_type: entity_type.to_string(),
@@ -210,6 +227,16 @@ impl EntityActor {
 
         match serde_json::from_value::<EntityState>(value) {
             Ok(mut restored) => {
+                if restored.entity_type != state.entity_type
+                    || restored.entity_id != state.entity_id
+                {
+                    return false;
+                }
+                super::effects::canonicalize_entity_fields(
+                    &mut restored.fields,
+                    &state.entity_id,
+                    &restored.status,
+                );
                 restored.sequence_nr = sequence_nr;
                 restored.events_since_snapshot = 0;
                 restored.last_snapshot_sequence_nr = sequence_nr;
@@ -405,7 +432,7 @@ impl EntityActor {
             }
             (key_rows, vector_rows, reconcile_vectors)
         };
-        let append_start = Instant::now();
+        let append_start = Instant::now(); // determinism-ok: production-only event-store wait metric
         let result = store
             .append_with_index_rows(
                 persistence_id,
@@ -504,12 +531,7 @@ impl EntityActor {
         state: &mut EntityState,
         tenant: &str,
         blob_store: Option<&crate::blob_store::BlobStore>,
-        // When true, a journal read failure PROPAGATES as an error instead of being
-        // swallowed ("start fresh"). The key-index backfill needs this: it must
-        // distinguish "entity genuinely has no events" from "could not read the
-        // journal", or it would watermark a type while a present entity is unkeyed
-        // (a wrong-absent bug). Actor hydration keeps the lenient default (false).
-        strict_journal_read: bool,
+        replay_policy: ReplayPolicy,
     ) -> Result<(), ActorError> {
         let replay_start = Instant::now(); // determinism-ok: wall-clock for production replay duration metric only
         let persistence_id = format!("{tenant}:{}:{}", state.entity_type, state.entity_id);
@@ -517,31 +539,33 @@ impl EntityActor {
         let mut from_sequence = 0;
         let mut loaded_snapshot = false;
 
-        match store.load_snapshot(persistence_id).await {
-            Ok(Some((snapshot_seq, snapshot_bytes))) => {
-                if Self::apply_snapshot_bytes(state, snapshot_seq, &snapshot_bytes) {
-                    from_sequence = snapshot_seq;
-                    loaded_snapshot = true;
-                    tracing::info!(
-                        entity = %state.entity_id,
-                        seq = snapshot_seq,
-                        "loaded snapshot before replay"
-                    );
-                } else {
+        if replay_policy.loads_snapshot() {
+            match store.load_snapshot(persistence_id).await {
+                Ok(Some((snapshot_seq, snapshot_bytes))) => {
+                    if Self::apply_snapshot_bytes(state, snapshot_seq, &snapshot_bytes) {
+                        from_sequence = snapshot_seq;
+                        loaded_snapshot = true;
+                        tracing::info!(
+                            entity = %state.entity_id,
+                            seq = snapshot_seq,
+                            "loaded snapshot before replay"
+                        );
+                    } else {
+                        tracing::warn!(
+                            entity = %state.entity_id,
+                            seq = snapshot_seq,
+                            "failed to deserialize snapshot, falling back to full replay"
+                        );
+                    }
+                }
+                Ok(None) => {}
+                Err(e) => {
                     tracing::warn!(
                         entity = %state.entity_id,
-                        seq = snapshot_seq,
-                        "failed to deserialize snapshot, falling back to full replay"
+                        error = %e,
+                        "failed to load snapshot, falling back to full replay"
                     );
                 }
-            }
-            Ok(None) => {}
-            Err(e) => {
-                tracing::warn!(
-                    entity = %state.entity_id,
-                    error = %e,
-                    "failed to load snapshot, falling back to full replay"
-                );
             }
         }
 
@@ -556,8 +580,41 @@ impl EntityActor {
                         MAX_EVENTS_SINCE_SNAPSHOT
                     )));
                 }
-                for env in &envelopes {
+                let mut expected_sequence = from_sequence.saturating_add(1);
+                for (index, env) in envelopes.iter().enumerate() {
+                    if replay_policy.strict_event_validation() {
+                        if env.sequence_nr != expected_sequence {
+                            return Err(ActorError::custom(format!(
+                                "non-contiguous journal for {}:{}: expected sequence {}, found {}",
+                                state.entity_type,
+                                state.entity_id,
+                                expected_sequence,
+                                env.sequence_nr
+                            )));
+                        }
+                        expected_sequence = env.sequence_nr.checked_add(1).ok_or_else(|| {
+                            ActorError::custom(format!(
+                                "journal sequence overflow for {}:{}",
+                                state.entity_type, state.entity_id
+                            ))
+                        })?;
+                        if env.metadata.actor_id != persistence_id {
+                            return Err(ActorError::custom(format!(
+                                "journal event for {}:{} at sequence {} is bound to actor '{}'",
+                                state.entity_type,
+                                state.entity_id,
+                                env.sequence_nr,
+                                env.metadata.actor_id
+                            )));
+                        }
+                    }
+
                     if env.event_type == COMPOSITE_EVENT_TYPE {
+                        if replay_policy.strict_event_validation() {
+                            super::replay_validation::validate_strict_composite_event(
+                                tenant, state, env,
+                            )?;
+                        }
                         state.sequence_nr = env.sequence_nr;
                         continue;
                     }
@@ -567,14 +624,33 @@ impl EntityActor {
                     // Tombstone is terminal: once deleted, entity must not replay
                     // into a live state. Stop at the first Deleted event.
                     if env.event_type == "Deleted" {
-                        let tombstone = parsed_event.unwrap_or_else(|_| EntityEvent {
-                            action: "Deleted".to_string(),
-                            from_status: state.status.clone(),
-                            to_status: "Deleted".to_string(),
-                            timestamp: env.metadata.timestamp,
-                            params: serde_json::json!({}),
-                            idempotency_key: None,
-                        });
+                        let tombstone = match parsed_event {
+                            Ok(mut event) => {
+                                if replay_policy.strict_event_validation() {
+                                    super::replay_validation::validate_strict_entity_event(
+                                        table, state, env, &event,
+                                    )?;
+                                }
+                                event.params =
+                                    super::effects::sanitize_action_params(&event.params)
+                                        .into_owned();
+                                event
+                            }
+                            Err(error) if replay_policy.strict_event_validation() => {
+                                return Err(ActorError::custom(format!(
+                                    "invalid tombstone event for {}:{} at sequence {}: {error}",
+                                    state.entity_type, state.entity_id, env.sequence_nr
+                                )));
+                            }
+                            Err(_) => EntityEvent {
+                                action: "Deleted".to_string(),
+                                from_status: state.status.clone(),
+                                to_status: "Deleted".to_string(),
+                                timestamp: env.metadata.timestamp,
+                                params: serde_json::json!({}),
+                                idempotency_key: None,
+                            },
+                        };
                         state.status = tombstone.to_status.clone();
                         if let Some(obj) = state.fields.as_object_mut() {
                             obj.insert(
@@ -584,11 +660,24 @@ impl EntityActor {
                         }
                         state.push_event_bounded(tombstone);
                         state.sequence_nr = env.sequence_nr;
+                        if replay_policy.strict_event_validation() && index + 1 != envelopes.len() {
+                            return Err(ActorError::custom(format!(
+                                "journal for {}:{} contains events after terminal tombstone at sequence {}",
+                                state.entity_type, state.entity_id, env.sequence_nr
+                            )));
+                        }
                         break;
                     }
 
                     match parsed_event {
-                        Ok(event) => {
+                        Ok(mut event) => {
+                            if replay_policy.strict_event_validation() {
+                                super::replay_validation::validate_strict_entity_event(
+                                    table, state, env, &event,
+                                )?;
+                            }
+                            event.params =
+                                super::effects::sanitize_action_params(&event.params).into_owned();
                             // A persisted event is a historical fact: its guard
                             // already passed at commit time and its `to_status`
                             // is authoritative. Replay therefore re-derives the
@@ -657,6 +746,12 @@ impl EntityActor {
                             state.push_event_bounded(event);
                         }
                         Err(e) => {
+                            if replay_policy.strict_event_validation() {
+                                return Err(ActorError::custom(format!(
+                                    "invalid event for {}:{} at sequence {}: {e}",
+                                    state.entity_type, state.entity_id, env.sequence_nr
+                                )));
+                            }
                             // Schema-mismatched event: log and skip rather than panic.
                             // This preserves entity hydration across spec evolution —
                             // the last valid state is used and replay continues.
@@ -710,7 +805,7 @@ impl EntityActor {
                 }
             }
             Err(e) => {
-                if strict_journal_read {
+                if replay_policy.strict_journal_read() {
                     return Err(ActorError::custom(format!(
                         "failed to read events for replay of {}:{}: {e}",
                         state.entity_type, state.entity_id
@@ -758,7 +853,42 @@ pub(crate) async fn recover_entity_state_from_store(
         &mut state,
         tenant,
         blob_store,
-        strict_journal_read,
+        if strict_journal_read {
+            ReplayPolicy::StrictSnapshot
+        } else {
+            ReplayPolicy::LenientSnapshot
+        },
+    )
+    .await?;
+    Ok(state)
+}
+
+/// Rebuild security-sensitive state from the complete durable journal.
+///
+/// This intentionally ignores snapshots and fails closed on read errors,
+/// sequence gaps, incompatible events, or history after a terminal tombstone.
+/// Identity resolution uses this path so a stale or corrupt snapshot cannot
+/// preserve revoked authority.
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn recover_authoritative_entity_state_from_store(
+    tenant: &str,
+    entity_type: &str,
+    entity_id: &str,
+    table: &TransitionTable,
+    store: &BoxedEventStore,
+    backend: BackendLabel,
+    initial_fields: &serde_json::Value,
+    blob_store: Option<&crate::blob_store::BlobStore>,
+) -> Result<EntityState, ActorError> {
+    let mut state = EntityActor::build_initial_state(entity_type, entity_id, table, initial_fields);
+    EntityActor::replay_events(
+        table,
+        store,
+        backend,
+        &mut state,
+        tenant,
+        blob_store,
+        ReplayPolicy::StrictFullJournal,
     )
     .await?;
     Ok(state)
@@ -801,12 +931,14 @@ impl Actor for EntityActor {
         // Persist a bootstrap Created event for first-time entities so initial
         // fields are durable and replayable.
         if self.event_journal.is_some() && state.total_event_count == 0 {
+            let initial_params =
+                super::effects::sanitize_action_params(&self.initial_fields).into_owned();
             let created = EntityEvent {
                 action: "Created".to_string(),
                 from_status: String::new(),
                 to_status: state.status.clone(),
                 timestamp: sim_now(),
-                params: self.initial_fields.clone(),
+                params: initial_params,
                 idempotency_key: None,
             };
 
@@ -839,6 +971,7 @@ impl Actor for EntityActor {
                 params,
                 cross_entity_booleans,
                 idempotency_key,
+                expected_authorization_precondition,
             } => {
                 // Capture start time for span duration (DST-safe: sim_now()
                 // returns logical clock in simulation, wall clock in production).
@@ -885,6 +1018,24 @@ impl Actor for EntityActor {
                         state: response_state,
                         error: None,
                         custom_effects,
+                        scheduled_actions: vec![],
+                        spawn_requests: vec![],
+                        spec_governed: true,
+                    });
+                    return Ok(());
+                }
+
+                if let Some(expected) = expected_authorization_precondition
+                    && super::effects::entity_authorization_precondition(state) != expected
+                {
+                    ctx.reply(EntityResponse {
+                        success: false,
+                        state: state.clone(),
+                        error: Some(
+                            "action authorization became stale; retry against current state"
+                                .to_string(),
+                        ),
+                        custom_effects: vec![],
                         scheduled_actions: vec![],
                         spawn_requests: vec![],
                         spec_governed: true,
@@ -1073,7 +1224,7 @@ impl Actor for EntityActor {
                                         self.blob_store.as_ref(),
                                         // Actor hydration keeps the lenient "start
                                         // fresh on read error" behavior (unchanged).
-                                        false,
+                                        ReplayPolicy::LenientSnapshot,
                                     )
                                     .await?;
 
@@ -1147,10 +1298,10 @@ impl Actor for EntityActor {
 
                                     // Backoff: retry 1 → 10ms, retry 2 → 50ms.
                                     let backoff_ms = if retry_idx == 1 { 10 } else { 50 };
-                                    tokio::time::sleep(std::time::Duration::from_millis(
+                                    sleep_persistence_retry(std::time::Duration::from_millis(
                                         backoff_ms,
                                     ))
-                                    .await; // determinism-ok: rare retry backoff (ADR-0046)
+                                    .await;
 
                                     match self
                                         .persist_event(
@@ -1419,26 +1570,59 @@ impl Actor for EntityActor {
                     .unwrap_or(serde_json::Value::Null);
                 ctx.reply(value);
             }
-            EntityMsg::UpdateFields { fields, replace } => {
+            EntityMsg::UpdateFields {
+                fields,
+                replace,
+                expected_precondition,
+            } => {
+                if let Some(expected_precondition) = expected_precondition
+                    && super::effects::entity_authorization_precondition(state)
+                        != expected_precondition
+                {
+                    ctx.reply(EntityResponse {
+                        success: false,
+                        state: state.clone(),
+                        error: Some(
+                            "field update authorization became stale; retry against current state"
+                                .to_string(),
+                        ),
+                        custom_effects: vec![],
+                        scheduled_actions: vec![],
+                        spawn_requests: vec![],
+                        spec_governed: true,
+                    });
+                    return Ok(());
+                }
+                if state.status == "Deleted" {
+                    ctx.reply(EntityResponse {
+                        success: false,
+                        state: state.clone(),
+                        error: Some("cannot update fields after entity deletion".to_string()),
+                        custom_effects: vec![],
+                        scheduled_actions: vec![],
+                        spawn_requests: vec![],
+                        spec_governed: true,
+                    });
+                    return Ok(());
+                }
+                let fields = super::effects::sanitize_action_params(&fields);
                 if replace {
-                    // PUT: replace all fields (preserve Id and Status)
-                    let id = state.entity_id.clone();
-                    let status = state.status.clone();
-                    state.fields = fields;
-                    if let Some(obj) = state.fields.as_object_mut() {
-                        obj.insert("Id".to_string(), serde_json::Value::String(id));
-                        obj.insert("Status".to_string(), serde_json::Value::String(status));
-                    }
+                    state.fields = fields.into_owned();
                 } else {
                     // PATCH: merge fields into existing
                     if let (Some(existing), Some(updates)) =
-                        (state.fields.as_object_mut(), fields.as_object())
+                        (state.fields.as_object_mut(), fields.as_ref().as_object())
                     {
                         for (k, v) in updates {
                             existing.insert(k.clone(), v.clone());
                         }
                     }
                 }
+                super::effects::canonicalize_entity_fields(
+                    &mut state.fields,
+                    &state.entity_id,
+                    &state.status,
+                );
                 ctx.reply(EntityResponse {
                     success: true,
                     state: state.clone(),
@@ -1449,7 +1633,26 @@ impl Actor for EntityActor {
                     spec_governed: true,
                 });
             }
-            EntityMsg::Delete => {
+            EntityMsg::Delete {
+                expected_authorization_precondition,
+            } => {
+                if let Some(expected) = expected_authorization_precondition
+                    && super::effects::entity_authorization_precondition(state) != expected
+                {
+                    ctx.reply(EntityResponse {
+                        success: false,
+                        state: state.clone(),
+                        error: Some(
+                            "delete authorization became stale; retry against current state"
+                                .to_string(),
+                        ),
+                        custom_effects: vec![],
+                        scheduled_actions: vec![],
+                        spawn_requests: vec![],
+                        spec_governed: true,
+                    });
+                    return Ok(());
+                }
                 let deleted = EntityEvent {
                     action: "Deleted".to_string(),
                     from_status: state.status.clone(),
@@ -1514,3 +1717,7 @@ impl Actor for EntityActor {
 #[cfg(test)]
 #[path = "actor_test.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "authoritative_replay_test.rs"]
+mod authoritative_replay_tests;

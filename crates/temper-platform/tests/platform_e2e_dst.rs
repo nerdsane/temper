@@ -355,7 +355,7 @@ async fn e2e_full_platform_scenario() {
 /// Full Project lifecycle through HTTP: POST create → POST UpdateSpecs → POST Verify → GET state.
 #[tokio::test]
 async fn e2e_http_project_lifecycle() {
-    let app = bootstrapped_router();
+    let app = bootstrapped_router().await;
 
     // POST /tdata/Projects → 201, creates a new Project entity
     let response = app
@@ -460,7 +460,7 @@ async fn e2e_http_project_lifecycle() {
 /// Metadata and service document show all system entity types after bootstrap.
 #[tokio::test]
 async fn e2e_http_metadata_shows_system_entities() {
-    let app = bootstrapped_router();
+    let app = bootstrapped_router().await;
 
     // GET /tdata/$metadata → body contains all 5 entity types
     let response = app

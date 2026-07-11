@@ -1,137 +1,101 @@
-//! Ingress edge: strip client-asserted identity, materialize resolved identity
-//! (ADR-0157).
+//! Ingress defense for caller-controlled Temper headers (ADR-0157).
 //!
-//! A request from an external client must never assert its own Cedar principal.
-//! `SecurityContext::from_headers` reads a family of `x-temper-*` headers —
-//! principal id/kind, agent type/role, scopes, ABAC attributes, action-context
-//! — to build the authoritative principal. The edge removes all of those
-//! *before any handler or auth middleware reads them*, so identity can only
-//! come from a resolved credential or a trusted in-process context (ADR-0033).
-//!
-//! Because a client's headers are stripped but the platform still needs to
-//! convey the principal it resolved from a credential, the credential is carried
-//! as an [`EdgeAuthenticatedPrincipal`] request *extension* — which the strip
-//! (a header-only transform) cannot forge or remove — and materialized back
-//! into trusted headers after the strip by [`materialize_authenticated_principal`].
-//!
-//! Two layers, ordered outer→inner:
-//! 1. [`strip_inbound_identity_headers`] (outermost) — remove client `x-temper-*`.
-//! 2. credential resolution (platform `bearer_auth`) — set the extension.
-//! 3. [`materialize_authenticated_principal`] (innermost) — extension → headers.
+//! Cedar authority is carried in an immutable
+//! [`temper_authz::AuthenticatedRequestContext`] request extension. Headers
+//! never materialize that authority. This middleware removes the closed
+//! `x-temper-*` authority namespace while retaining the two correlation-only
+//! namespaces consumed by tracing and workflow observability.
 
 use axum::extract::Request;
-use axum::http::{HeaderName, HeaderValue};
+use axum::http::{HeaderName, Method, StatusCode};
 use axum::middleware::Next;
-use axum::response::Response;
-use temper_authz::{PrincipalKind, TRUSTED_PRINCIPAL_HEADER};
+use axum::response::{IntoResponse, Response};
 
-/// `x-temper-*` header-name prefixes that carry request-scoped *observability*
-/// context (session, intent, workflow trace correlation). These are the only
-/// `x-temper-*` headers a client is permitted to set; everything else under
-/// `x-temper-` is authority the platform derives, never the caller.
+const CORRELATION_PREFIXES: [&str; 2] = ["x-temper-observe-", "x-temper-workflow-"];
+
+/// Return whether a header belongs to the caller-controlled authority
+/// namespace that must be removed before dispatch.
 ///
-/// See `request_context::extract_agent_context`, which reads exactly these.
-const OBSERVABILITY_PREFIXES: [&str; 2] = ["x-temper-observe-", "x-temper-workflow-"];
-
-/// A principal the platform resolved from a credential, to be materialized into
-/// trusted headers by the edge after client headers are stripped.
-///
-/// Set only by credential-resolution middleware (never derived from client
-/// input). Carried as a request extension so it survives
-/// [`strip_inbound_identity_headers`], which only rewrites headers.
-#[derive(Debug, Clone)]
-pub struct EdgeAuthenticatedPrincipal {
-    /// The resolved principal kind.
-    pub kind: PrincipalKind,
-    /// The resolved principal id.
-    pub id: String,
-}
-
-impl EdgeAuthenticatedPrincipal {
-    /// The bootstrapped operator/admin principal for a verified global-API-key
-    /// (`TEMPER_API_KEY`) holder.
-    pub fn operator() -> Self {
-        Self {
-            kind: PrincipalKind::Admin,
-            id: "api-key-holder".to_string(),
-        }
-    }
-}
-
-/// Whether `name` is an `x-temper-*` header the client is not allowed to
-/// assert. `HeaderName` is stored lowercase, so a plain prefix match is a
-/// case-insensitive match.
-fn is_client_asserted_identity_header(name: &HeaderName) -> bool {
+/// `HeaderName` values are normalized to lowercase. The allowlist is narrow on
+/// purpose: new `x-temper-*` headers are authority by default unless explicitly
+/// placed in a correlation-only namespace.
+pub(crate) fn is_caller_authority_header(name: &HeaderName) -> bool {
     let name = name.as_str();
     name.starts_with("x-temper-")
-        && !OBSERVABILITY_PREFIXES
+        && !CORRELATION_PREFIXES
             .iter()
             .any(|prefix| name.starts_with(prefix))
 }
 
-/// Axum middleware that removes every client-asserted `x-temper-*` identity
-/// header at the ingress edge (ADR-0157, Sub-Decision 2).
+/// Remove caller-supplied `x-temper-*` authority headers.
 ///
-/// Applied outermost so it runs before credential resolution and before any
-/// handler: internal components (the bearer-auth edge, the WASM host) convey
-/// identity only *after* this layer — via [`EdgeAuthenticatedPrincipal`] or a
-/// resolved-identity extension — never through a header this layer would strip.
-pub async fn strip_inbound_identity_headers(mut req: Request, next: Next) -> Response {
-    let headers = req.headers_mut();
-    // Collect first (immutable borrow ends), then remove — a header name may
-    // carry multiple values, and `remove` clears all of them at once.
-    let to_remove: Vec<HeaderName> = headers
+/// Credential resolution communicates identity through
+/// [`temper_authz::AuthenticatedRequestContext`], never by adding headers back
+/// after this layer. `x-temper-observe-*` and `x-temper-workflow-*` survive only
+/// as correlation metadata and are not Cedar inputs.
+pub async fn strip_inbound_identity_headers(mut request: Request, next: Next) -> Response {
+    let names = request
+        .headers()
         .keys()
-        .filter(|name| is_client_asserted_identity_header(name))
+        .filter(|name| is_caller_authority_header(name))
         .cloned()
-        .collect();
-    for name in to_remove {
-        headers.remove(&name);
+        .collect::<Vec<_>>();
+    for name in names {
+        request.headers_mut().remove(name);
     }
-    next.run(req).await
+    next.run(request).await
 }
 
-/// Axum middleware that materializes an [`EdgeAuthenticatedPrincipal`] extension
-/// into trusted `x-temper-principal-*` headers plus the internal trust marker
-/// (ADR-0157).
+/// Return whether the kernel route has its own non-Class-A admission boundary.
 ///
-/// Runs *after* [`strip_inbound_identity_headers`] and after credential
-/// resolution, so the headers it writes are the only principal headers a
-/// downstream handler's `from_headers` will see. A `System` principal is
-/// intentionally never materialized — `System` is not derivable from headers;
-/// in-process code uses `SecurityContext::system()`.
-pub async fn materialize_authenticated_principal(mut req: Request, next: Next) -> Response {
-    if let Some(principal) = req
-        .extensions()
-        .get::<EdgeAuthenticatedPrincipal>()
-        .cloned()
+/// This is the single classifier shared by the kernel guard and the outer
+/// platform bearer edge. Keep it exact: webhook ingress is admitted by its
+/// Class B verifier; the remaining routes expose only bootstrap metadata or
+/// immutable static assets.
+pub fn is_public_kernel_request(method: &Method, path: &str) -> bool {
+    if method == Method::GET
+        && matches!(
+            path,
+            "/tdata"
+                | "/tdata/"
+                | "/tdata/$metadata"
+                | "/temper-client.js"
+                | "/static/temper-client.js"
+                | "/genesis"
+                | "/genesis/"
+        )
     {
-        let kind = match principal.kind {
-            PrincipalKind::Customer => "customer",
-            PrincipalKind::Agent => "agent",
-            PrincipalKind::Admin => "admin",
-            // Not materialized into headers; from_headers never honors it.
-            PrincipalKind::System => "customer",
-        };
-        if let Ok(id_value) = HeaderValue::from_str(&principal.id) {
-            let headers = req.headers_mut();
-            headers.insert(
-                HeaderName::from_static("x-temper-principal-kind"),
-                HeaderValue::from_static(kind),
-            );
-            headers.insert(HeaderName::from_static("x-temper-principal-id"), id_value);
-            headers.insert(
-                HeaderName::from_static(TRUSTED_PRINCIPAL_HEADER),
-                HeaderValue::from_static("1"),
-            );
-        } else {
-            tracing::warn!(
-                principal_id = %principal.id,
-                "resolved principal id is not a valid header value; dropping to anonymous"
-            );
-        }
+        return true;
     }
-    next.run(req).await
+    (matches!(*method, Method::GET | Method::POST) && path.starts_with("/webhooks/"))
+        || (method == Method::GET && path.starts_with("/genesis/"))
+}
+
+/// Reject protected kernel routes that lack authenticated typed authority.
+///
+/// The guard is installed by [`crate::build_router`] itself so direct embedders
+/// cannot accidentally expose a handler that reconstructs identity from HTTP
+/// headers. Webhook ingress remains governed by its Class B admission boundary.
+pub async fn require_authenticated_request_context(request: Request, next: Next) -> Response {
+    if is_public_kernel_request(request.method(), request.uri().path())
+        || request
+            .extensions()
+            .get::<temper_authz::AuthenticatedRequestContext>()
+            .is_some()
+    {
+        return next.run(request).await;
+    }
+
+    (
+        StatusCode::UNAUTHORIZED,
+        axum::Json(serde_json::json!({
+            "error": {
+                "code": "AuthenticationRequired",
+                "message": "A valid tenant credential is required"
+            }
+        })),
+    )
+        .into_response()
 }
 
 #[cfg(test)]
@@ -143,168 +107,145 @@ mod tests {
     use axum::routing::get;
     use tower::ServiceExt;
 
-    /// Echo back which `x-temper-*` headers survived, so tests can assert what
-    /// reached the handler.
     async fn echo_temper_headers(headers: HeaderMap) -> String {
-        let mut names: Vec<String> = headers
+        let mut names = headers
             .keys()
-            .map(|k| k.as_str().to_string())
-            .filter(|k| k.starts_with("x-temper-"))
-            .collect();
+            .map(|name| name.as_str().to_string())
+            .filter(|name| name.starts_with("x-temper-"))
+            .collect::<Vec<_>>();
         names.sort();
         names.join(",")
     }
 
-    fn strip_app() -> Router {
-        Router::new()
+    async fn surviving_headers(request: HttpRequest<Body>) -> String {
+        let app = Router::new()
             .route("/echo", get(echo_temper_headers))
-            .layer(axum::middleware::from_fn(strip_inbound_identity_headers))
-    }
-
-    async fn surviving_headers(req: HttpRequest<Body>) -> String {
-        let resp = strip_app().oneshot(req).await.unwrap();
-        assert_eq!(resp.status(), StatusCode::OK);
-        let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .layer(axum::middleware::from_fn(strip_inbound_identity_headers));
+        let response = app.oneshot(request).await.expect("request should run");
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
             .await
-            .unwrap();
-        String::from_utf8(body.to_vec()).unwrap()
+            .expect("response body should be readable");
+        String::from_utf8(body.to_vec()).expect("header names should be UTF-8")
     }
 
     #[tokio::test]
-    async fn strips_principal_and_trust_marker_headers() {
-        let req = HttpRequest::get("/echo")
+    async fn strips_complete_authority_namespace_including_legacy_marker() {
+        let request = HttpRequest::get("/echo")
             .header("x-temper-principal-kind", "admin")
             .header("x-temper-principal-id", "attacker")
-            .header("x-temper-agent-type", "claude-code")
+            .header("x-temper-agent-type", "operator")
             .header("x-temper-agent-role", "supervisor")
             .header("x-temper-acting-for", "victim")
             .header("x-temper-principal-scopes", "repo:push")
             .header("x-temper-attr-approvallimit", "999999")
             .header("x-temper-action-context", "composite:App.Fork")
             .header("x-temper-ctx-agenttypeverified", "true")
-            // A client cannot smuggle the internal trust marker either.
-            .header(TRUSTED_PRINCIPAL_HEADER, "1")
+            .header("x-temper-internal-trusted-principal", "1")
+            .header("x-temper-future-authority", "also stripped")
             .body(Body::empty())
-            .unwrap();
-        assert_eq!(surviving_headers(req).await, "");
+            .expect("request should build");
+
+        assert_eq!(surviving_headers(request).await, "");
     }
 
     #[tokio::test]
-    async fn preserves_observability_headers() {
-        let req = HttpRequest::get("/echo")
-            .header("x-temper-observe-session-id", "sess-1")
+    async fn preserves_only_observe_and_workflow_correlation_namespaces() {
+        let request = HttpRequest::get("/echo")
+            .header("x-temper-observe-session-id", "session-1")
             .header("x-temper-observe-intent", "approve invoice")
-            .header("x-temper-workflow-run-id", "WF:1")
+            .header("x-temper-workflow-run-id", "workflow-1")
             .header("x-temper-workflow-root-entity-type", "Job")
-            // authority header alongside them — must still be stripped
             .header("x-temper-principal-kind", "admin")
             .body(Body::empty())
-            .unwrap();
+            .expect("request should build");
+
         assert_eq!(
-            surviving_headers(req).await,
+            surviving_headers(request).await,
             "x-temper-observe-intent,x-temper-observe-session-id,x-temper-workflow-root-entity-type,x-temper-workflow-run-id"
         );
     }
 
-    #[tokio::test]
-    async fn leaves_non_temper_headers_untouched() {
-        let req = HttpRequest::get("/echo")
-            .header("authorization", "Bearer tok")
-            .header("x-tenant-id", "default")
-            .header("content-type", "application/json")
-            .body(Body::empty())
-            .unwrap();
-        // No x-temper-* headers reached the handler, and the request still ran.
-        assert_eq!(surviving_headers(req).await, "");
+    #[test]
+    fn classifier_leaves_non_temper_transport_headers_alone() {
+        for name in [
+            "authorization",
+            "content-type",
+            "x-tenant-id",
+            "traceparent",
+        ] {
+            assert!(!is_caller_authority_header(&HeaderName::from_static(name)));
+        }
     }
 
     #[test]
-    fn classifier_matches_authority_not_observability() {
-        let authority = [
-            "x-temper-principal-kind",
-            "x-temper-principal-id",
-            "x-temper-agent-type",
-            "x-temper-principal-scopes",
-            "x-temper-attr-region",
-            "x-temper-ctx-sessionid",
-            "x-temper-action-context",
-            TRUSTED_PRINCIPAL_HEADER,
-        ];
-        for h in authority {
-            assert!(
-                is_client_asserted_identity_header(&HeaderName::from_static(leak(h))),
-                "{h} should be treated as client-asserted authority"
-            );
+    fn public_route_allowlist_is_exact() {
+        for path in [
+            "/tdata",
+            "/tdata/",
+            "/tdata/$metadata",
+            "/temper-client.js",
+            "/static/temper-client.js",
+            "/genesis",
+            "/genesis/app.js",
+            "/webhooks/tenant/provider",
+        ] {
+            assert!(is_public_kernel_request(&Method::GET, path), "{path}");
         }
-        let allowed = [
-            "x-temper-observe-session-id",
-            "x-temper-workflow-run-id",
-            "content-type",
-            "authorization",
-            "x-tenant-id",
-        ];
-        for h in allowed {
-            assert!(
-                !is_client_asserted_identity_header(&HeaderName::from_static(leak(h))),
-                "{h} should pass through"
-            );
+        for path in [
+            "/tdata/Orders",
+            "/tdata/$hints",
+            "/tdata/$events",
+            "/api/authorize",
+            "/observe/decisions",
+            "/_admin/reload",
+            "/not-a-static-route",
+        ] {
+            assert!(!is_public_kernel_request(&Method::GET, path), "{path}");
         }
+        assert!(!is_public_kernel_request(&Method::POST, "/tdata"));
+        assert!(!is_public_kernel_request(
+            &Method::DELETE,
+            "/webhooks/tenant/provider"
+        ));
     }
 
-    /// Materialize turns a resolved operator principal into trusted headers so
-    /// `from_headers` yields Admin — the credential-derived path, never a client
-    /// header.
     #[tokio::test]
-    async fn materialize_injects_trusted_operator_headers() {
-        async fn set_operator(mut req: Request, next: Next) -> Response {
-            req.extensions_mut()
-                .insert(EdgeAuthenticatedPrincipal::operator());
-            next.run(req).await
-        }
-
+    async fn protected_route_requires_typed_context_not_identity_headers() {
         let app = Router::new()
-            .route("/echo", get(echo_principal))
-            // Inner: materialize. Outer: set the extension (stands in for
-            // bearer-auth) then strip.
+            .route("/protected", get(|| async { StatusCode::OK }))
             .layer(axum::middleware::from_fn(
-                materialize_authenticated_principal,
-            ))
-            .layer(axum::middleware::from_fn(set_operator))
-            .layer(axum::middleware::from_fn(strip_inbound_identity_headers));
-
-        // Client tries to assert admin directly — stripped — but the resolved
-        // operator extension still yields a trusted Admin.
-        let resp = app
-            .oneshot(
-                HttpRequest::get("/echo")
-                    .header("x-temper-principal-id", "attacker")
-                    .header("x-temper-principal-kind", "admin")
-                    .body(Body::empty())
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
-            .await
-            .unwrap();
+                require_authenticated_request_context,
+            ));
+        let forged = HttpRequest::get("/protected")
+            .header("x-temper-principal-kind", "admin")
+            .header("x-temper-principal-id", "attacker")
+            .body(Body::empty())
+            .expect("request should build");
         assert_eq!(
-            String::from_utf8(body.to_vec()).unwrap(),
-            "Admin:api-key-holder"
+            app.clone()
+                .oneshot(forged)
+                .await
+                .expect("request should run")
+                .status(),
+            StatusCode::UNAUTHORIZED
         );
-    }
 
-    async fn echo_principal(headers: HeaderMap) -> String {
-        let pairs: Vec<(String, String)> = headers
-            .iter()
-            .map(|(k, v)| (k.as_str().to_string(), v.to_str().unwrap_or("").to_string()))
-            .collect();
-        let ctx = temper_authz::SecurityContext::from_headers(&pairs);
-        format!("{:?}:{}", ctx.principal.kind, ctx.principal.id)
-    }
-
-    /// `HeaderName::from_static` needs a `'static str`; leak the small test
-    /// inputs so the loop can build names from an array of `&str`.
-    fn leak(s: &str) -> &'static str {
-        Box::leak(s.to_string().into_boxed_str())
+        let mut authenticated = HttpRequest::get("/protected")
+            .body(Body::empty())
+            .expect("request should build");
+        authenticated
+            .extensions_mut()
+            .insert(temper_authz::AuthenticatedRequestContext::new(
+                temper_runtime::tenant::TenantId::new("tenant-a"),
+                temper_authz::SecurityContext::from_resolved_identity("agent-1", "operator", None),
+            ));
+        assert_eq!(
+            app.oneshot(authenticated)
+                .await
+                .expect("request should run")
+                .status(),
+            StatusCode::OK
+        );
     }
 }

@@ -1,23 +1,24 @@
-use std::path::{Path, PathBuf};
+use std::fs; // determinism-ok: authenticated server-local spec staging boundary
 
-use axum::extract::State;
-use axum::http::HeaderMap;
+use axum::extract::{Extension, State};
 use axum::http::StatusCode;
-use axum::response::Json;
-use serde_json::json;
+use temper_authz::AuthenticatedRequestContext;
 use temper_evolution::records::{
     AnalysisRecord, ObservationClass, ObservationRecord, RecordHeader, RecordType, SolutionOption,
 };
 use temper_runtime::scheduler::sim_now;
-use temper_runtime::tenant::TenantId;
-use temper_spec::csdl::parse_csdl;
 use tracing::instrument;
 
-use crate::authz::{DenialInput, record_authz_denial, security_context_from_headers};
+use crate::authz::{
+    DenialInput, record_authz_denial, require_authenticated_context, require_tenant_match,
+};
 use crate::state::{ServerState, TrajectoryEntry, TrajectorySource};
 
-use super::load_dir::handle_load_dir;
+use super::load_dir::{load_specs_from_directory, validate_spec_directory};
 use super::types::{LoadDirRequest, LoadInlineRequest};
+
+mod support;
+use support::{build_adr_warning_context, resolve_inline_specs_root};
 
 /// POST /api/specs/load-inline -- load specs from inline content.
 ///
@@ -27,9 +28,11 @@ use super::types::{LoadDirRequest, LoadInlineRequest};
 #[instrument(skip_all, fields(otel.name = "POST /api/specs/load-inline"))]
 pub(crate) async fn handle_load_inline(
     State(state): State<ServerState>,
-    headers: HeaderMap,
+    authenticated: Option<Extension<AuthenticatedRequestContext>>,
     raw_body: String,
 ) -> Result<axum::response::Response, (StatusCode, String)> {
+    let authenticated = require_authenticated_context(authenticated.as_deref())
+        .map_err(|status| (status, "authentication required".to_string()))?;
     let body: LoadInlineRequest = serde_json::from_str(&raw_body).map_err(|e| {
         (
             StatusCode::BAD_REQUEST,
@@ -39,9 +42,21 @@ pub(crate) async fn handle_load_inline(
         )
     })?;
     let tenant = body.tenant.clone();
+    require_tenant_match(authenticated, &tenant)
+        .map_err(|status| (status, "credential tenant mismatch".to_string()))?;
+    if body
+        .cedar_policies
+        .as_deref()
+        .is_some_and(|policy| !policy.trim().is_empty())
+    {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            "Inline spec submission cannot activate Cedar policy text; use the tenant policy management API and its separate manage_policies authorization"
+                .to_string(),
+        ));
+    }
 
-    // Cedar authorization gate.
-    let security_ctx = security_context_from_headers(&headers, None, None, None);
+    let security_ctx = authenticated.security_context();
     let entity_names: Vec<String> = body
         .specs
         .keys()
@@ -56,29 +71,25 @@ pub(crate) async fn handle_load_inline(
             && let Ok(automaton) = temper_spec::automaton::parse_automaton(spec_content)
         {
             let metadata = automaton.extract_metadata();
-            for (k, v) in metadata.to_flat_map() {
-                spec_resource_attrs.insert(k, v);
+            for (key, value) in metadata.to_flat_map() {
+                spec_resource_attrs.insert(key, value);
             }
         }
     }
 
-    let authz_result = state.authorize_with_context(
-        &security_ctx,
+    if let Err(denial) = state.authorize_with_context(
+        security_ctx,
         "submit_specs",
         "SpecRegistry",
         &spec_resource_attrs,
         &tenant,
-    );
-    if let Err(denial) = authz_result {
+    ) {
         let reason = denial.to_string();
-        // Record denials and use the first decision ID as the primary chain anchor.
-        // Record a single denial per authz check. The resource_id must match
-        // what Cedar evaluated: SpecRegistry::"<tenant>".
-        let pd = record_authz_denial(
+        let pending_decision = record_authz_denial(
             &state,
             DenialInput {
                 tenant: &tenant,
-                security_ctx: &security_ctx,
+                security_ctx,
                 agent_id_override: None,
                 action: "submit_specs",
                 resource_type: "SpecRegistry",
@@ -90,11 +101,10 @@ pub(crate) async fn handle_load_inline(
             },
         )
         .await;
-        let primary_decision_id = pd.id.clone();
-        let decision_ids = vec![pd.id];
+        let primary_decision_id = pending_decision.id.clone();
+        let decision_ids = vec![pending_decision.id];
 
-        // Create O-Record for the denied spec submission.
-        let o_record = ObservationRecord {
+        let observation = ObservationRecord {
             header: RecordHeader::new(RecordType::Observation, "cedar:spec_submission"),
             source: "cedar:spec_submission".to_string(),
             classification: ObservationClass::AuthzDenied,
@@ -113,32 +123,31 @@ pub(crate) async fn handle_load_inline(
                 "spec_metadata": spec_resource_attrs,
             }),
         };
-        let o_id = o_record.header.id.clone();
-        let data_json = serde_json::to_string(&o_record).unwrap_or_default();
+        let observation_id = observation.header.id.clone();
+        let data_json = serde_json::to_string(&observation).unwrap_or_default();
         let _ = state
-            .insert_evolution_record(
-                &o_record.header.id,
-                "Observation",
-                &format!("{:?}", o_record.header.status),
-                &o_record.header.created_by,
-                o_record.header.derived_from.as_deref(),
-                &data_json,
-            )
+            .insert_evolution_record(crate::storage::EvolutionRecordWrite {
+                tenant: &tenant,
+                id: &observation.header.id,
+                record_type: "Observation",
+                status: &format!("{:?}", observation.header.status),
+                created_by: &observation.header.created_by,
+                derived_from: observation.header.derived_from.as_deref(),
+                data_json: &data_json,
+            })
             .await;
 
-        // Create A-Record with the proposed spec as spec_diff.
-        let spec_summary: String = body
+        let spec_summary = body
             .specs
             .keys()
-            .map(|k| k.as_str())
+            .map(String::as_str)
             .collect::<Vec<_>>()
             .join(", ");
-        let a_record = AnalysisRecord {
+        let analysis = AnalysisRecord {
             header: RecordHeader::new(RecordType::Analysis, "cedar:spec_submission")
-                .derived_from(o_id),
+                .derived_from(observation_id),
             root_cause: format!(
-                "Agent proposed new entity types ({}) but lacks Cedar permission.",
-                spec_summary,
+                "Agent proposed new entity types ({spec_summary}) but lacks Cedar permission."
             ),
             options: vec![SolutionOption {
                 description: "Approve spec submission via Observe UI".to_string(),
@@ -149,30 +158,28 @@ pub(crate) async fn handle_load_inline(
             }],
             recommendation: Some(0),
         };
-        let a_record_id = a_record.header.id.clone();
-        let data_json = serde_json::to_string(&a_record).unwrap_or_default();
+        let analysis_id = analysis.header.id.clone();
+        let data_json = serde_json::to_string(&analysis).unwrap_or_default();
         let _ = state
-            .insert_evolution_record(
-                &a_record.header.id,
-                "Analysis",
-                &format!("{:?}", a_record.header.status),
-                &a_record.header.created_by,
-                a_record.header.derived_from.as_deref(),
-                &data_json,
-            )
+            .insert_evolution_record(crate::storage::EvolutionRecordWrite {
+                tenant: &tenant,
+                id: &analysis.header.id,
+                record_type: "Analysis",
+                status: &format!("{:?}", analysis.header.status),
+                created_by: &analysis.header.created_by,
+                derived_from: analysis.header.derived_from.as_deref(),
+                data_json: &data_json,
+            })
             .await;
 
-        // Link the PendingDecision to the A-Record for O-A-D chain tracing.
-        // Decisions are persisted to the tenant store; the evolution_record_id
-        // link will be available when the decision is read back from the durable backend.
         if let Some(store) = state.metadata_store_for_tenant(&tenant).await {
             for decision_id in &decision_ids {
-                if let Ok(Some(data_str)) = store.get_pending_decision(decision_id).await
-                    && let Ok(mut pd) =
+                if let Ok(Some(data_str)) = store.get_pending_decision(&tenant, decision_id).await
+                    && let Ok(mut decision) =
                         serde_json::from_str::<crate::state::PendingDecision>(&data_str)
                 {
-                    pd.evolution_record_id = Some(a_record_id.clone());
-                    let _ = state.persist_pending_decision(&pd).await;
+                    decision.evolution_record_id = Some(analysis_id.clone());
+                    let _ = state.persist_pending_decision(&decision).await;
                 }
             }
         }
@@ -182,97 +189,66 @@ pub(crate) async fn handle_load_inline(
             serde_json::json!({
                 "error": {
                     "code": "AuthorizationDenied",
-                    "message": format!("{reason} Decision {}", primary_decision_id),
+                    "message": format!("{reason} Decision {primary_decision_id}"),
                 }
             })
             .to_string(),
         ));
     }
 
-    // Write specs to a temp directory
-    let tmp_dir = std::env::temp_dir().join(format!("temper-inline-{}", tenant)); // determinism-ok: HTTP handler writes user specs to temp dir for loading
-    let _ = std::fs::remove_dir_all(&tmp_dir); // determinism-ok: HTTP handler cleans previous temp dir
-    std::fs::create_dir_all(&tmp_dir).map_err(|e| {
-        // determinism-ok: HTTP handler creates temp dir
-        (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            format!("Failed to create temp dir: {e}"),
-        )
-    })?;
-
-    let specs_root = resolve_inline_specs_root(&tmp_dir, &body.specs)?;
+    let temp_dir = tempfile::Builder::new()
+        .prefix("temper-inline-")
+        .tempdir()
+        .map_err(|error| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("Failed to create isolated spec staging directory: {error}"),
+            )
+        })?;
+    let specs_root = resolve_inline_specs_root(temp_dir.path(), &body.specs)?;
 
     for (filename, content) in &body.specs {
-        let path = tmp_dir.join(filename);
+        let path = temp_dir.path().join(filename);
         if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent).map_err(|e| {
-                // determinism-ok: HTTP handler creates temp subdirectories for nested inline specs
+            fs::create_dir_all(parent).map_err(|error| {
                 (
                     StatusCode::INTERNAL_SERVER_ERROR,
-                    format!("Failed to create parent directory for {filename}: {e}"),
+                    format!("Failed to create parent directory for {filename}: {error}"),
                 )
             })?;
         }
-        std::fs::write(&path, content).map_err(|e| {
-            // determinism-ok: HTTP handler writes specs
+        fs::write(&path, content).map_err(|error| {
             (
                 StatusCode::INTERNAL_SERVER_ERROR,
-                format!("Failed to write {filename}: {e}"),
+                format!("Failed to write {filename}: {error}"),
             )
         })?;
     }
 
     if let Some(source) = body.cross_invariants_toml.as_deref() {
-        std::fs::write(specs_root.join("cross-invariants.toml"), source).map_err(|e| {
-            // determinism-ok: HTTP handler writes cross-invariants
+        fs::write(specs_root.join("cross-invariants.toml"), source).map_err(|error| {
             (
                 StatusCode::INTERNAL_SERVER_ERROR,
-                format!("Failed to write cross-invariants.toml: {e}"),
+                format!("Failed to write cross-invariants.toml: {error}"),
             )
         })?;
     }
 
-    // Delegate to load-dir logic with merge=true so agent-submitted specs
-    // are added to the existing tenant config instead of replacing it.
-    let cedar_policies = body.cedar_policies.clone();
     let dir_request = LoadDirRequest {
         tenant: tenant.clone(),
         specs_dir: specs_root.to_string_lossy().to_string(),
         merge: true,
     };
-    let result = handle_load_dir(State(state.clone()), Json(dir_request)).await;
-
-    if result.is_ok()
-        && let Some(ref cedar_text) = cedar_policies
-        && !cedar_text.trim().is_empty()
-    {
-        if let Err(e) = cedar_text.parse::<cedar_policy::PolicySet>() {
-            tracing::warn!(error = %e, "bundled Cedar policies failed to parse, skipping");
-        } else {
-            // Update the in-memory text cache.
-            if let Ok(mut policies) = state.tenant_policies.write() {
-                let entry = policies.entry(tenant.clone()).or_default();
-                *entry = merge_inline_cedar_policy_text(entry, cedar_text);
-            }
-            // Reload the per-tenant Cedar policy set.
-            let full_text = state
-                .tenant_policies
-                .read()
-                .ok()
-                .and_then(|p| p.get(&tenant).cloned())
-                .unwrap_or_default();
-            if let Err(e) = state.authz.reload_tenant_policies(&tenant, &full_text) {
-                tracing::error!(error = %e, "failed to reload policies with bundled Cedar");
-            } else {
-                tracing::info!(tenant = %tenant, "bundled Cedar policies loaded successfully");
-            }
-        }
+    let directory = validate_spec_directory(&dir_request.specs_dir)?;
+    let result = load_specs_from_directory(state.clone(), dir_request, directory).await;
+    if let Err(error) = temp_dir.close() {
+        tracing::warn!(error = %error, "failed to remove isolated inline-spec staging directory");
     }
 
     if result.is_ok() {
         let warning_context = build_adr_warning_context(&state, &body, &tenant).await;
         for entity_name in &entity_names {
-            let traj = TrajectoryEntry {
+            let trajectory = TrajectoryEntry {
                 timestamp: sim_now().to_rfc3339(),
                 tenant: tenant.clone(),
                 entity_type: entity_name.clone(),
@@ -294,311 +270,11 @@ pub(crate) async fn handle_load_inline(
                 intent: None,
                 matched_policy_ids: None,
             };
-            if !state.enqueue_trajectory_entry(traj) {
+            if !state.enqueue_trajectory_entry(trajectory) {
                 tracing::warn!("failed to enqueue spec submission trajectory");
             }
         }
     }
 
     result
-}
-
-async fn build_adr_warning_context(
-    state: &ServerState,
-    body: &LoadInlineRequest,
-    tenant: &str,
-) -> Option<serde_json::Value> {
-    let namespaces = extract_submitted_namespaces(&body.specs);
-    let candidate_paths = adr_candidate_paths(body.app_name.as_deref(), &namespaces);
-    if candidate_paths.is_empty() {
-        return None;
-    }
-
-    let hits = find_existing_adr_paths(state, tenant, &candidate_paths).await;
-    if !hits.is_empty() {
-        return None;
-    }
-
-    tracing::warn!(
-        tenant,
-        app_name = body.app_name.as_deref().unwrap_or(""),
-        namespaces = ?namespaces,
-        candidate_paths = ?candidate_paths,
-        "Spec submitted with no ADRs — design decisions should be recorded under /apps/<app>/adrs/"
-    );
-
-    Some(json!({
-        "warnings": [{
-            "code": "missing_adrs",
-            "message": "Spec submitted with no ADRs — design decisions should be recorded under /apps/<app>/adrs/.",
-            "candidate_paths": candidate_paths,
-            "namespaces": namespaces,
-            "app_name": body.app_name,
-        }]
-    }))
-}
-
-fn extract_submitted_namespaces(specs: &std::collections::BTreeMap<String, String>) -> Vec<String> {
-    let mut namespaces = std::collections::BTreeSet::new();
-    for (filename, content) in specs {
-        if !filename.ends_with(".csdl.xml") {
-            continue;
-        }
-        if let Ok(document) = parse_csdl(content) {
-            for schema in document.schemas {
-                if schema.namespace.ends_with(".Vocab") || schema.namespace == "Temper.Vocab" {
-                    continue;
-                }
-                namespaces.insert(schema.namespace);
-            }
-        }
-    }
-    namespaces.into_iter().collect()
-}
-
-fn resolve_inline_specs_root(
-    tmp_dir: &Path,
-    specs: &std::collections::BTreeMap<String, String>,
-) -> Result<PathBuf, (StatusCode, String)> {
-    let model_paths: Vec<&str> = specs
-        .keys()
-        .filter_map(|path| path.ends_with("model.csdl.xml").then_some(path.as_str()))
-        .collect();
-
-    if model_paths.is_empty() {
-        return Err((
-            StatusCode::BAD_REQUEST,
-            "Inline spec submission must include model.csdl.xml".to_string(),
-        ));
-    }
-
-    if model_paths.len() > 1 {
-        return Err((
-            StatusCode::BAD_REQUEST,
-            format!(
-                "Inline spec submission must contain exactly one model.csdl.xml, found {}",
-                model_paths.len()
-            ),
-        ));
-    }
-
-    let model_path = Path::new(model_paths[0]);
-    let relative_root = model_path.parent().unwrap_or_else(|| Path::new(""));
-    Ok(if relative_root.as_os_str().is_empty() {
-        tmp_dir.to_path_buf()
-    } else {
-        tmp_dir.join(relative_root)
-    })
-}
-
-fn merge_inline_cedar_policy_text(existing: &str, incoming: &str) -> String {
-    let mut policy_text = existing.trim_end().to_string();
-    let incoming = incoming.trim();
-    if incoming.is_empty() || policy_text.contains(incoming) {
-        return policy_text;
-    }
-    if !policy_text.is_empty() {
-        policy_text.push('\n');
-    }
-    policy_text.push_str(incoming);
-    policy_text
-}
-
-fn adr_candidate_paths(app_name: Option<&str>, namespaces: &[String]) -> Vec<String> {
-    let mut candidates = std::collections::BTreeSet::new();
-    if let Some(app_name) = app_name {
-        let normalized = normalize_app_slug(app_name);
-        if !normalized.is_empty() {
-            candidates.insert(format!("/apps/{normalized}/adrs/"));
-        }
-    }
-
-    for namespace in namespaces {
-        for candidate in namespace_to_app_candidates(namespace) {
-            if !candidate.is_empty() {
-                candidates.insert(format!("/apps/{candidate}/adrs/"));
-            }
-        }
-    }
-
-    candidates.into_iter().collect()
-}
-
-fn namespace_to_app_candidates(namespace: &str) -> Vec<String> {
-    let parts: Vec<&str> = namespace
-        .split('.')
-        .filter(|part| !part.is_empty())
-        .collect();
-    if parts.is_empty() {
-        return Vec::new();
-    }
-
-    let full = normalize_app_slug(namespace);
-    let remainder = if parts.len() > 1 {
-        kebab_join(&parts[1..])
-    } else {
-        normalize_app_slug(parts[0])
-    };
-
-    let mut candidates = std::collections::BTreeSet::new();
-    if !full.is_empty() {
-        candidates.insert(full);
-    }
-    if !remainder.is_empty() {
-        candidates.insert(remainder.clone());
-    }
-    match parts[0].to_ascii_lowercase().as_str() {
-        "openpaw" | "paw" => {
-            if !remainder.is_empty() {
-                candidates.insert(format!("paw-{remainder}"));
-            }
-        }
-        "temper" => {
-            if !remainder.is_empty() {
-                candidates.insert(format!("temper-{remainder}"));
-            }
-        }
-        _ => {}
-    }
-    candidates.into_iter().collect()
-}
-
-fn kebab_join(parts: &[&str]) -> String {
-    parts
-        .iter()
-        .map(|part| normalize_app_slug(part))
-        .filter(|part| !part.is_empty())
-        .collect::<Vec<_>>()
-        .join("-")
-}
-
-fn normalize_app_slug(value: &str) -> String {
-    let mut slug = String::new();
-    let mut prev_was_sep = true;
-    let mut prev_was_lower_or_digit = false;
-
-    for ch in value.chars() {
-        if ch.is_ascii_alphanumeric() {
-            let is_upper = ch.is_ascii_uppercase();
-            if is_upper && prev_was_lower_or_digit && !prev_was_sep {
-                slug.push('-');
-            }
-            slug.push(ch.to_ascii_lowercase());
-            prev_was_sep = false;
-            prev_was_lower_or_digit = ch.is_ascii_lowercase() || ch.is_ascii_digit();
-        } else if !prev_was_sep {
-            slug.push('-');
-            prev_was_sep = true;
-            prev_was_lower_or_digit = false;
-        }
-    }
-
-    slug.trim_matches('-').to_string()
-}
-
-async fn find_existing_adr_paths(
-    state: &ServerState,
-    tenant: &str,
-    candidate_paths: &[String],
-) -> Vec<String> {
-    let tenant_id = TenantId::new(tenant);
-    let has_files = {
-        let registry = state.registry.read().unwrap(); // ci-ok: infallible lock
-        registry.get_spec(&tenant_id, "File").is_some()
-    };
-    if !has_files {
-        return Vec::new();
-    }
-
-    let mut hits = Vec::new();
-    for file_id in state.list_entity_ids(&tenant_id, "File") {
-        let Ok(resp) = state
-            .get_tenant_entity_state(&tenant_id, "File", &file_id)
-            .await
-        else {
-            continue;
-        };
-        if resp.state.status == "Archived" {
-            continue;
-        }
-        let path = resp
-            .state
-            .fields
-            .get("Path")
-            .and_then(|value| value.as_str())
-            .or_else(|| {
-                resp.state
-                    .fields
-                    .get("path")
-                    .and_then(|value| value.as_str())
-            });
-        let Some(path) = path else { continue };
-        if candidate_paths
-            .iter()
-            .any(|prefix| path.starts_with(prefix))
-        {
-            hits.push(path.to_string());
-        }
-    }
-    hits.sort();
-    hits.dedup();
-    hits
-}
-
-#[cfg(test)]
-mod tests {
-    use super::{
-        adr_candidate_paths, merge_inline_cedar_policy_text, namespace_to_app_candidates,
-        normalize_app_slug,
-    };
-
-    #[test]
-    fn normalize_app_slug_kebab_cases_namespaces() {
-        assert_eq!(
-            normalize_app_slug("Temper.ProjectManagement"),
-            "temper-project-management"
-        );
-        assert_eq!(normalize_app_slug("OpenPaw"), "open-paw");
-        assert_eq!(normalize_app_slug("llm-wiki"), "llm-wiki");
-    }
-
-    #[test]
-    fn namespace_to_app_candidates_adds_platform_aware_variants() {
-        let paw = namespace_to_app_candidates("OpenPaw.Foresight");
-        assert!(paw.contains(&"open-paw-foresight".to_string()));
-        assert!(paw.contains(&"foresight".to_string()));
-        assert!(paw.contains(&"paw-foresight".to_string()));
-
-        let temper = namespace_to_app_candidates("Temper.ProjectManagement");
-        assert!(temper.contains(&"temper-project-management".to_string()));
-        assert!(temper.contains(&"project-management".to_string()));
-    }
-
-    #[test]
-    fn adr_candidate_paths_prefers_explicit_app_name() {
-        let paths =
-            adr_candidate_paths(Some("llm-wiki"), &["Temper.ProjectManagement".to_string()]);
-        assert!(paths.contains(&"/apps/llm-wiki/adrs/".to_string()));
-        assert!(paths.contains(&"/apps/project-management/adrs/".to_string()));
-    }
-
-    #[test]
-    fn inline_cedar_policy_merge_deduplicates_repeated_bundle_text() {
-        let policy = "permit(principal, action, resource);";
-        let merged_once = merge_inline_cedar_policy_text("", policy);
-        let merged_twice = merge_inline_cedar_policy_text(&merged_once, policy);
-
-        assert_eq!(merged_twice, policy);
-    }
-
-    #[test]
-    fn inline_cedar_policy_merge_preserves_distinct_existing_policy() {
-        let existing = "permit(principal, action == Action::\"read\", resource);";
-        let incoming = "permit(principal, action == Action::\"write\", resource);";
-
-        assert_eq!(
-            merge_inline_cedar_policy_text(existing, incoming),
-            format!("{existing}\n{incoming}")
-        );
-    }
 }

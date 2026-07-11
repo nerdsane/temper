@@ -18,7 +18,7 @@ use crate::blobs::hydrate_blob_refs_for_tenant;
 use crate::entity_actor::EntityResponse;
 use crate::request_context::AgentContext;
 use crate::response::odata_error;
-use crate::state::{FileStreamContentError, ServerState};
+use crate::state::{DispatchCommand, FileStreamContentError, ServerState};
 
 type ODataStreamPutError = Box<axum::response::Response>;
 
@@ -172,10 +172,21 @@ pub(super) async fn handle_stream_put(
     {
         return response;
     }
+    let expected_authorization_precondition =
+        crate::entity_actor::effects::entity_authorization_precondition(
+            &snapshot.current_state.state,
+        );
 
     if entity_type == "File" {
         return match state
-            .put_file_stream_content_checked(tenant, &key, body.as_ref(), &content_type, agent_ctx)
+            .put_file_stream_content_checked(
+                tenant,
+                &key,
+                body.as_ref(),
+                &content_type,
+                agent_ctx,
+                Some(expected_authorization_precondition),
+            )
             .await
         {
             Ok(entity_resp) => stream_put_success_response(&entity_resp),
@@ -183,20 +194,8 @@ pub(super) async fn handle_stream_put(
         };
     }
 
-    let entity_state = match state
-        .get_tenant_entity_state(tenant, &entity_type, &key)
-        .await
-    {
-        Ok(resp) => {
-            let mut entity_state = serde_json::to_value(&resp.state).unwrap_or_default();
-            hydrate_blob_refs_for_tenant(state, tenant, &mut entity_state).await;
-            entity_state
-        }
-        Err(e) => {
-            return odata_error(StatusCode::INTERNAL_SERVER_ERROR, "StateError", &e)
-                .into_response();
-        }
-    };
+    let mut entity_state = serde_json::to_value(&snapshot.current_state.state).unwrap_or_default();
+    hydrate_blob_refs_for_tenant(state, tenant, &mut entity_state).await;
 
     let size_bytes = body.len() as i64;
     let stream_id = format!("upload-{}", temper_runtime::scheduler::sim_uuid());
@@ -269,18 +268,25 @@ pub(super) async fn handle_stream_put(
 
     if !wasm_result.callback_action.is_empty() {
         match state
-            .dispatch_tenant_action(
-                tenant,
-                &entity_type,
-                &key,
-                &wasm_result.callback_action,
-                wasm_result.callback_params,
-                agent_ctx,
+            .dispatch_tenant_action_ext_typed_if_current(
+                DispatchCommand {
+                    tenant,
+                    entity_type: &entity_type,
+                    entity_id: &key,
+                    action: &wasm_result.callback_action,
+                    params: wasm_result.callback_params,
+                    agent_ctx,
+                    await_integration: false,
+                    await_reactions: true,
+                },
+                expected_authorization_precondition,
             )
             .await
         {
             Ok(entity_resp) => stream_put_success_response(&entity_resp),
-            Err(e) => odata_error(StatusCode::CONFLICT, "ActionRejected", &e).into_response(),
+            Err(e) => {
+                odata_error(StatusCode::CONFLICT, "ActionRejected", &e.to_string()).into_response()
+            }
         }
     } else {
         StatusCode::NO_CONTENT.into_response()

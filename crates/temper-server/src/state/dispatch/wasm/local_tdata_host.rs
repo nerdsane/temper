@@ -3,11 +3,11 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use axum::body::{Bytes, to_bytes};
-use axum::extract::{Path, Query, State};
+use axum::extract::{Extension, Path, Query, State};
 use axum::http::{HeaderMap, HeaderName, HeaderValue};
 use axum::response::IntoResponse;
 use reqwest::Url;
-use temper_authz::{PrincipalKind, SecurityContext};
+use temper_authz::{AuthenticatedRequestContext, SecurityContext};
 use temper_runtime::tenant::TenantId;
 use temper_wasm::WasmHost;
 use temper_wasm::http_stream::{
@@ -25,8 +25,7 @@ const LOCAL_TDATA_RESPONSE_LIMIT_BYTES: usize = 64 * 1024 * 1024;
 /// through the same OData handlers as external HTTP traffic.
 pub(super) struct LocalTDataWasmHost {
     state: ServerState,
-    tenant: TenantId,
-    inherited_headers: Vec<(String, String)>,
+    authenticated: Option<AuthenticatedRequestContext>,
     delegate: Arc<dyn WasmHost>,
 }
 
@@ -40,10 +39,9 @@ impl LocalTDataWasmHost {
     ) -> Self {
         Self {
             state,
-            tenant,
-            inherited_headers: security_ctx
-                .map(security_context_headers)
-                .unwrap_or_default(),
+            authenticated: security_ctx
+                .cloned()
+                .map(|security_ctx| AuthenticatedRequestContext::new(tenant, security_ctx)),
             delegate,
         }
     }
@@ -64,7 +62,10 @@ impl LocalTDataWasmHost {
         if !matches!(method_upper.as_str(), "GET" | "POST") {
             return Ok(None);
         }
-        let headers = header_map(headers, &self.tenant, &self.inherited_headers);
+        let Some(authenticated) = self.authenticated.clone() else {
+            return Ok(None);
+        };
+        let headers = header_map(headers);
         let path_for_span = request.path.clone();
         let span = tracing::info_span!(
             "wasm.local_tdata_http_call",
@@ -78,7 +79,7 @@ impl LocalTDataWasmHost {
             match method_upper.as_str() {
                 "GET" => crate::odata::handle_odata_get(
                     State(self.state.clone()),
-                    None,
+                    Some(Extension(authenticated.clone())),
                     headers,
                     Path(request.path),
                     Query(request.query),
@@ -87,7 +88,7 @@ impl LocalTDataWasmHost {
                 .into_response(),
                 "POST" => crate::odata::handle_odata_post(
                     State(self.state.clone()),
-                    None,
+                    Some(Extension(authenticated)),
                     headers,
                     Path(request.path),
                     Query(request.query),
@@ -281,108 +282,22 @@ fn is_file_value_path(path: &str) -> bool {
     path.starts_with("Files('") && path.ends_with("')/$value")
 }
 
-fn header_map(
-    headers: &[(String, String)],
-    tenant: &TenantId,
-    inherited_headers: &[(String, String)],
-) -> HeaderMap {
+fn header_map(headers: &[(String, String)]) -> HeaderMap {
     let mut map = HeaderMap::new();
-    for (name, value) in inherited_headers {
-        insert_header_if_absent(&mut map, name, value);
-    }
     for (name, value) in headers {
-        insert_header(&mut map, name, value);
-    }
-    if !map.contains_key("x-tenant-id") {
-        let value =
-            HeaderValue::from_str(tenant.as_str()).expect("TenantId is a valid HTTP header value");
-        map.insert(HeaderName::from_static("x-tenant-id"), value);
-    }
-    // In-process local-TData dispatch is trusted: it carries the invoking
-    // SecurityContext (and runs a WASM module under the platform's internal
-    // credential), so a privileged Admin principal is legitimate here. Mark the
-    // request so `from_headers` honors an Admin kind it would otherwise reject
-    // as a client-asserted header (ADR-0157). `System` is still never derivable
-    // from headers, and `security_context_headers` keeps downgrading it.
-    map.insert(
-        HeaderName::from_static(temper_authz::TRUSTED_PRINCIPAL_HEADER),
-        HeaderValue::from_static("1"),
-    );
-    map
-}
-
-fn insert_header(map: &mut HeaderMap, name: &str, value: &str) {
-    let Ok(name) = HeaderName::from_bytes(name.as_bytes()) else {
-        return;
-    };
-    let Ok(value) = HeaderValue::from_str(value) else {
-        return;
-    };
-    map.insert(name, value);
-}
-
-fn insert_header_if_absent(map: &mut HeaderMap, name: &str, value: &str) {
-    let Ok(name) = HeaderName::from_bytes(name.as_bytes()) else {
-        return;
-    };
-    if map.contains_key(&name) {
-        return;
-    }
-    let Ok(value) = HeaderValue::from_str(value) else {
-        return;
-    };
-    map.insert(name, value);
-}
-
-fn security_context_headers(ctx: &SecurityContext) -> Vec<(String, String)> {
-    let mut headers = Vec::new();
-    headers.push((
-        "x-temper-principal-id".to_string(),
-        ctx.principal.id.clone(),
-    ));
-    let kind = match ctx.principal.kind {
-        PrincipalKind::Customer => "customer",
-        PrincipalKind::Agent => "agent",
-        PrincipalKind::Admin => "admin",
-        // `SecurityContext::from_headers` intentionally rejects system from
-        // external headers. Local TData inheritance keeps that invariant and
-        // relies on explicit policies/service principals for system paths.
-        PrincipalKind::System => "customer",
-    };
-    headers.push(("x-temper-principal-kind".to_string(), kind.to_string()));
-    if let Some(role) = &ctx.principal.role {
-        headers.push(("x-temper-agent-role".to_string(), role.clone()));
-    }
-    if let Some(agent_type) = &ctx.principal.agent_type {
-        headers.push(("x-temper-agent-type".to_string(), agent_type.clone()));
-    }
-    if let Some(scopes) = ctx
-        .principal
-        .attributes
-        .get("scopes")
-        .and_then(|value| value.as_array())
-    {
-        let scopes = scopes
-            .iter()
-            .filter_map(|value| value.as_str())
-            .collect::<Vec<_>>()
-            .join(",");
-        if !scopes.is_empty() {
-            headers.push(("x-temper-principal-scopes".to_string(), scopes));
+        let Ok(parsed_name) = HeaderName::from_bytes(name.as_bytes()) else {
+            continue;
+        };
+        if parsed_name == HeaderName::from_static("x-tenant-id")
+            || crate::authz::edge::is_caller_authority_header(&parsed_name)
+        {
+            continue;
+        }
+        if let Ok(value) = HeaderValue::from_str(value) {
+            map.insert(parsed_name, value);
         }
     }
-    if let Some(action_context) = ctx
-        .principal
-        .attributes
-        .get("action_context")
-        .and_then(|value| value.as_str())
-    {
-        headers.push((
-            "x-temper-action-context".to_string(),
-            action_context.to_string(),
-        ));
-    }
-    headers
+    map
 }
 
 #[cfg(test)]

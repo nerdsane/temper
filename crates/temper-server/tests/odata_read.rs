@@ -21,6 +21,48 @@ use tower::ServiceExt;
 
 const CSDL_XML: &str = common::CSDL_XML;
 const ORDER_IOA: &str = common::ORDER_IOA;
+const ORDER_CRUD_TEST_POLICY: &str = r#"
+    permit(
+        principal,
+        action in [
+            Action::"list",
+            Action::"read",
+            Action::"create",
+            Action::"update",
+            Action::"delete"
+        ],
+        resource is Order
+    );
+"#;
+
+fn install_order_crud_test_policy(state: &ServerState) {
+    state
+        .authz
+        .reload_tenant_policies(TenantId::default().as_str(), ORDER_CRUD_TEST_POLICY)
+        .expect("install Order CRUD test policy");
+}
+
+fn authenticate(mut request: Request<Body>, principal_id: &str) -> Request<Body> {
+    let security_context = temper_authz::SecurityContext {
+        principal: temper_authz::Principal {
+            id: principal_id.to_string(),
+            kind: temper_authz::PrincipalKind::Customer,
+            role: None,
+            acting_for: None,
+            agent_type: None,
+            attributes: Default::default(),
+        },
+        context_attrs: Default::default(),
+        correlation_id: "odata-read-test".to_string(),
+    };
+    request
+        .extensions_mut()
+        .insert(temper_authz::AuthenticatedRequestContext::new(
+            TenantId::default(),
+            security_context,
+        ));
+    request
+}
 
 /// Send a GET request to the router and return status + parsed JSON body.
 async fn get_json(
@@ -28,7 +70,10 @@ async fn get_json(
     path: &str,
 ) -> (StatusCode, serde_json::Value) {
     let router = build_router(state.clone());
-    let req = Request::builder().uri(path).body(Body::empty()).unwrap();
+    let req = authenticate(
+        Request::builder().uri(path).body(Body::empty()).unwrap(),
+        "test-customer",
+    );
     let resp = router.oneshot(req).await.unwrap();
     let status = resp.status();
     let bytes = axum::body::to_bytes(resp.into_body(), 1_000_000)
@@ -44,10 +89,13 @@ async fn post_json(
     body: serde_json::Value,
 ) -> (StatusCode, serde_json::Value) {
     let router = build_router(state.clone());
-    let req = Request::post(path)
-        .header("Content-Type", "application/json")
-        .body(Body::from(body.to_string()))
-        .unwrap();
+    let req = authenticate(
+        Request::post(path)
+            .header("Content-Type", "application/json")
+            .body(Body::from(body.to_string()))
+            .unwrap(),
+        "test-customer",
+    );
     let resp = router.oneshot(req).await.unwrap();
     let status = resp.status();
     let bytes = axum::body::to_bytes(resp.into_body(), 1_000_000)
@@ -93,12 +141,15 @@ async fn patch_json(
     body: serde_json::Value,
 ) -> (StatusCode, serde_json::Value) {
     let router = build_router(state.clone());
-    let req = Request::builder()
-        .method(axum::http::Method::PATCH)
-        .uri(path)
-        .header("Content-Type", "application/json")
-        .body(Body::from(body.to_string()))
-        .unwrap();
+    let req = authenticate(
+        Request::builder()
+            .method(axum::http::Method::PATCH)
+            .uri(path)
+            .header("Content-Type", "application/json")
+            .body(Body::from(body.to_string()))
+            .unwrap(),
+        "test-customer",
+    );
     let resp = router.oneshot(req).await.unwrap();
     let status = resp.status();
     let bytes = axum::body::to_bytes(resp.into_body(), 1_000_000)
@@ -115,17 +166,16 @@ async fn customer_json(
     body: Option<serde_json::Value>,
 ) -> (StatusCode, serde_json::Value) {
     let router = build_router(state.clone());
-    let mut request = Request::builder()
-        .method(method)
-        .uri(path)
-        .header("x-temper-principal-kind", "customer")
-        .header("x-temper-principal-id", "customer-1");
+    let mut request = Request::builder().method(method).uri(path);
     if body.is_some() {
         request = request.header("Content-Type", "application/json");
     }
-    let req = request
-        .body(body.map_or_else(Body::empty, |value| Body::from(value.to_string())))
-        .unwrap();
+    let req = authenticate(
+        request
+            .body(body.map_or_else(Body::empty, |value| Body::from(value.to_string())))
+            .unwrap(),
+        "customer-1",
+    );
     let resp = router.oneshot(req).await.unwrap();
     let status = resp.status();
     let bytes = axum::body::to_bytes(resp.into_body(), 1_000_000)
@@ -166,12 +216,14 @@ fn build_turso_state(system_name: &str, store: TursoEventStore) -> ServerState {
 
     let mut state = state;
     state.set_storage_stack(StorageStack::from_turso(store));
+    install_order_crud_test_policy(&state);
     state
 }
 
 #[tokio::test]
 async fn entity_set_returns_created_entities() {
     let (state, _sim) = build_default_state(42, "odata-read-set");
+    install_order_crud_test_policy(&state);
     let tenant = TenantId::default();
 
     dispatch(
@@ -205,6 +257,7 @@ async fn entity_set_returns_created_entities() {
 #[tokio::test]
 async fn entity_get_returns_single_entity_with_actions() {
     let (state, _sim) = build_default_state(43, "odata-read-entity");
+    install_order_crud_test_policy(&state);
     let tenant = TenantId::default();
 
     dispatch(
@@ -649,6 +702,63 @@ async fn crud_routes_apply_cedar_mutation_policies() {
     let (status, _) =
         customer_json(&state, Method::GET, "/tdata/Orders('ord-existing')", None).await;
     assert_eq!(status, StatusCode::OK, "denied mutation deleted the entity");
+
+    let _ = std::fs::remove_file(db_path);
+}
+
+#[tokio::test]
+async fn patch_and_put_authorize_the_prospective_resource() {
+    let db_path = std::env::temp_dir().join(format!(
+        "temper-odata-read-cedar-prospective-{}.db",
+        uuid::Uuid::new_v4()
+    ));
+    let db_url = format!("file:{}", db_path.display());
+    let store = TursoEventStore::new(&db_url, None)
+        .await
+        .expect("create local turso db");
+    let state = build_turso_state("odata-read-cedar-prospective", store);
+
+    let (status, body) = post_json(
+        &state,
+        "/tdata/Orders",
+        serde_json::json!({"id": "ord-prospective", "Currency": "EUR"}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "seed create failed: {body:?}");
+
+    state
+        .authz
+        .reload_tenant_policies(
+            TenantId::default().as_str(),
+            r#"
+                permit(principal, action in [Action::"read", Action::"list"], resource is Order);
+                permit(principal, action == Action::"update", resource is Order)
+                when { resource.Currency == "EUR" };
+            "#,
+        )
+        .expect("install Cedar policy");
+
+    for (method, currency) in [(Method::PATCH, "USD"), (Method::PUT, "GBP")] {
+        let (status, body) = customer_json(
+            &state,
+            method,
+            "/tdata/Orders('ord-prospective')",
+            Some(serde_json::json!({"Currency": currency})),
+        )
+        .await;
+        assert_eq!(status, StatusCode::FORBIDDEN, "unexpected body: {body:?}");
+        assert_eq!(body["error"]["code"], "AuthorizationDenied");
+    }
+
+    let (status, body) = customer_json(
+        &state,
+        Method::GET,
+        "/tdata/Orders('ord-prospective')",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["fields"]["Currency"], "EUR");
 
     let _ = std::fs::remove_file(db_path);
 }

@@ -282,19 +282,55 @@ impl ServerState {
             .get_tenant_entity_state(tenant, entity_type, entity_id)
             .await?;
 
+        let resource_attrs = self
+            .build_authz_resource_attrs(
+                tenant,
+                entity_type,
+                entity_id,
+                &current_state.state.status,
+                &current_state.state.fields,
+            )
+            .await?;
+
+        Ok(AuthzResourceSnapshot {
+            current_state,
+            resource_attrs,
+        })
+    }
+
+    /// Build the Cedar resource view for a prospective entity representation.
+    ///
+    /// Mutation handlers use this after applying PATCH/PUT fields so policies
+    /// evaluate the state that would be committed, including refreshed context
+    /// entity status attributes.
+    pub(crate) async fn build_authz_resource_attrs(
+        &self,
+        tenant: &TenantId,
+        entity_type: &str,
+        entity_id: &str,
+        status: &str,
+        fields: &serde_json::Value,
+    ) -> Result<BTreeMap<String, serde_json::Value>, String> {
         let mut resource_attrs = BTreeMap::new();
-        resource_attrs.insert(
-            "id".to_string(),
-            serde_json::Value::String(entity_id.to_string()),
-        );
-        resource_attrs.insert(
-            "status".to_string(),
-            serde_json::Value::String(current_state.state.status.clone()),
-        );
-        if let serde_json::Value::Object(fields) = &current_state.state.fields {
+        if let serde_json::Value::Object(fields) = fields {
             for (k, v) in fields {
-                resource_attrs.insert(k.clone(), v.clone());
+                if !temper_spec::automaton::is_server_derived_field_name(k) {
+                    resource_attrs.insert(k.clone(), v.clone());
+                }
             }
+        }
+
+        for key in ["id", "Id"] {
+            resource_attrs.insert(
+                key.to_string(),
+                serde_json::Value::String(entity_id.to_string()),
+            );
+        }
+        for key in ["status", "Status"] {
+            resource_attrs.insert(
+                key.to_string(),
+                serde_json::Value::String(status.to_string()),
+            );
         }
 
         let context_entities: Vec<temper_spec::automaton::ContextEntityDecl> = self
@@ -306,9 +342,7 @@ impl ServerState {
             .unwrap_or_default();
 
         for ce in &context_entities {
-            let target_id = current_state
-                .state
-                .fields
+            let target_id = fields
                 .get(&ce.id_field)
                 .and_then(|v| v.as_str())
                 .unwrap_or("");
@@ -327,11 +361,42 @@ impl ServerState {
 
         let has_spec = self.has_registered_spec(tenant, entity_type)?;
         resource_attrs.insert("has_spec".to_string(), serde_json::Value::Bool(has_spec));
+        Ok(resource_attrs)
+    }
 
-        Ok(AuthzResourceSnapshot {
-            current_state,
-            resource_attrs,
-        })
+    /// Return the spec-defined initial state used by a true entity create.
+    pub(crate) fn initial_entity_status(
+        &self,
+        tenant: &TenantId,
+        entity_type: &str,
+    ) -> Result<String, String> {
+        if let Some(table) = self
+            .registry
+            .read()
+            .map_err(|error| format!("registry lock poisoned: {error}"))?
+            .get_table(tenant, entity_type)
+        {
+            return Ok(table.initial_state.clone());
+        }
+        self.transition_tables
+            .get(entity_type)
+            .map(|table| table.initial_state.clone())
+            .ok_or_else(|| {
+                format!("No transition table for tenant '{tenant}', entity type '{entity_type}'")
+            })
+    }
+
+    /// Build trusted Cedar attributes for a durably absent create target.
+    pub(crate) async fn build_create_authz_resource_attrs(
+        &self,
+        tenant: &TenantId,
+        entity_type: &str,
+        entity_id: &str,
+        fields: &serde_json::Value,
+    ) -> Result<BTreeMap<String, serde_json::Value>, String> {
+        let initial_status = self.initial_entity_status(tenant, entity_type)?;
+        self.build_authz_resource_attrs(tenant, entity_type, entity_id, &initial_status, fields)
+            .await
     }
 
     /// Mark every entity type observed in `entities` as fully hydrated from the
@@ -840,28 +905,11 @@ impl ServerState {
             .unwrap_or_default()
     }
 
-    /// Check authorization for an action using the Cedar ABAC engine.
-    ///
-    /// Returns a typed [`AuthzDenial`] on failure, preserving the denial kind
-    /// (policy denied, no matching permit, invalid principal, etc.).
-    ///
-    /// Accepts `BTreeMap` for DST compliance; converts at the authz boundary.
-    pub fn authorize(
-        &self,
-        headers: &[(String, String)],
-        action: &str,
-        resource_type: &str,
-        resource_attrs: &BTreeMap<String, serde_json::Value>,
-    ) -> Result<(), AuthzDenial> {
-        let ctx = SecurityContext::from_headers(headers);
-        self.authorize_with_context(&ctx, action, resource_type, resource_attrs, "default")
-    }
-
     /// Check authorization using a pre-built `SecurityContext`.
     ///
-    /// Unlike [`authorize`] which builds the context from raw headers, this
-    /// method accepts an already-constructed context enriched with agent
-    /// identity and resource attributes.
+    /// This method accepts an already-constructed, credential-derived context
+    /// enriched with agent identity and resource attributes. There is no
+    /// header-based authorization entry point.
     ///
     /// Returns a typed [`AuthzDenial`] on failure, preserving the denial kind.
     ///
@@ -1103,13 +1151,14 @@ impl ServerState {
         };
 
         let persistence_id = format!("{tenant}:{entity_type}:{entity_id}");
+        let initial_fields =
+            crate::entity_actor::effects::sanitize_action_params(&initial_fields).into_owned();
         let mut fields = initial_fields.clone();
-        if let Some(obj) = fields.as_object_mut() {
-            obj.entry("Id".to_string())
-                .or_insert(serde_json::Value::String(entity_id.to_string()));
-            obj.entry("Status".to_string())
-                .or_insert(serde_json::Value::String(table.initial_state.clone()));
-        }
+        crate::entity_actor::effects::canonicalize_entity_fields(
+            &mut fields,
+            entity_id,
+            &table.initial_state,
+        );
 
         let mut state = EntityState {
             entity_type: entity_type.to_string(),
@@ -1345,19 +1394,82 @@ impl ServerState {
         fields: serde_json::Value,
         replace: bool,
     ) -> Result<EntityResponse, String> {
+        let response = self
+            .update_tenant_entity_fields_checked(
+                tenant,
+                entity_type,
+                entity_id,
+                fields,
+                replace,
+                None,
+            )
+            .await?;
+        if response.success {
+            Ok(response)
+        } else {
+            Err(response
+                .error
+                .clone()
+                .unwrap_or_else(|| "entity field update was rejected".to_string()))
+        }
+    }
+
+    /// Update fields only if the actor still matches the state that Cedar
+    /// authorized. The comparison and mutation are serialized by the actor
+    /// mailbox, closing the read/authorize/write race.
+    pub(crate) async fn update_tenant_entity_fields_if_current(
+        &self,
+        tenant: &TenantId,
+        entity_type: &str,
+        entity_id: &str,
+        fields: serde_json::Value,
+        replace: bool,
+        expected_precondition: String,
+    ) -> Result<EntityResponse, String> {
+        self.update_tenant_entity_fields_checked(
+            tenant,
+            entity_type,
+            entity_id,
+            fields,
+            replace,
+            Some(expected_precondition),
+        )
+        .await
+    }
+
+    async fn update_tenant_entity_fields_checked(
+        &self,
+        tenant: &TenantId,
+        entity_type: &str,
+        entity_id: &str,
+        fields: serde_json::Value,
+        replace: bool,
+        expected_precondition: Option<String>,
+    ) -> Result<EntityResponse, String> {
+        if !fields.is_object() {
+            return Err("entity field update must be a JSON object".to_string());
+        }
         let actor_ref = self
             .get_or_spawn_tenant_actor(tenant, entity_type, entity_id)
             .ok_or_else(|| {
                 format!("No transition table for tenant '{tenant}', entity type '{entity_type}'")
             })?;
 
-        let policy = self.dispatch_retry_policy();
+        let mut policy = self.dispatch_retry_policy();
+        if expected_precondition.is_some() {
+            // A timed-out compare-and-set may already have committed. Retrying
+            // the same precondition would turn that ambiguity into a false
+            // conflict, so the caller must re-read and re-authorize instead.
+            policy.max_attempts = 1;
+        }
         let fields_for_retry = fields;
+        let precondition_for_retry = expected_precondition;
         let response = retry::ask_with_backoff::<_, EntityResponse, _>(
             &actor_ref,
             || EntityMsg::UpdateFields {
                 fields: fields_for_retry.clone(),
                 replace,
+                expected_precondition: precondition_for_retry.clone(),
             },
             &policy,
         )
@@ -1428,16 +1540,59 @@ impl ServerState {
         entity_type: &str,
         entity_id: &str,
     ) -> Result<EntityResponse, String> {
+        let response = self
+            .delete_tenant_entity_checked(tenant, entity_type, entity_id, None)
+            .await?;
+        if response.success {
+            Ok(response)
+        } else {
+            Err(response
+                .error
+                .clone()
+                .unwrap_or_else(|| "entity delete was rejected".to_string()))
+        }
+    }
+
+    /// Delete only if the actor still matches the state Cedar authorized.
+    pub(crate) async fn delete_tenant_entity_if_current(
+        &self,
+        tenant: &TenantId,
+        entity_type: &str,
+        entity_id: &str,
+        expected_authorization_precondition: String,
+    ) -> Result<EntityResponse, String> {
+        self.delete_tenant_entity_checked(
+            tenant,
+            entity_type,
+            entity_id,
+            Some(expected_authorization_precondition),
+        )
+        .await
+    }
+
+    async fn delete_tenant_entity_checked(
+        &self,
+        tenant: &TenantId,
+        entity_type: &str,
+        entity_id: &str,
+        expected_authorization_precondition: Option<String>,
+    ) -> Result<EntityResponse, String> {
         let actor_ref = self
             .get_or_spawn_tenant_actor(tenant, entity_type, entity_id)
             .ok_or_else(|| {
                 format!("No transition table for tenant '{tenant}', entity type '{entity_type}'")
             })?;
 
-        let policy = self.dispatch_retry_policy();
+        let mut policy = self.dispatch_retry_policy();
+        if expected_authorization_precondition.is_some() {
+            policy.max_attempts = 1;
+        }
+        let precondition_for_retry = expected_authorization_precondition;
         let response = retry::ask_with_backoff::<_, EntityResponse, _>(
             &actor_ref,
-            || EntityMsg::Delete,
+            || EntityMsg::Delete {
+                expected_authorization_precondition: precondition_for_retry.clone(),
+            },
             &policy,
         )
         .await
@@ -1715,11 +1870,12 @@ impl ServerState {
     }
 
     /// Update Agent.Hint annotations based on trajectory analysis.
-    pub fn enrich_metadata(&self, action_name: &str, hint: &str) {
+    pub fn enrich_metadata(&self, tenant: &TenantId, action_name: &str, hint: &str) {
         const AGENT_HINTS_BUDGET: usize = 1_000;
-        let Ok(mut hints) = self.agent_hints.write() else {
+        let Ok(mut all_hints) = self.agent_hints.write() else {
             return;
         };
+        let hints = all_hints.entry(tenant.clone()).or_default();
         hints.insert(action_name.to_string(), hint.to_string());
         while hints.len() > AGENT_HINTS_BUDGET {
             let oldest_key = hints.iter().next().map(|(k, _)| k.clone());

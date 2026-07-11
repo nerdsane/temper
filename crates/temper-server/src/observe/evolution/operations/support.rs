@@ -7,17 +7,22 @@ use temper_runtime::tenant::TenantId;
 use crate::request_context::AgentContext;
 use crate::sentinel;
 use crate::state::{DispatchExtOptions, ObserveRefreshHint, ServerState};
+use crate::storage::EvolutionRecordWrite;
 
 pub(super) async fn persist_evolution_record(
     state: &ServerState,
-    record_id: &str,
-    record_type: &str,
-    status: &str,
-    created_by: &str,
-    derived_from: Option<&str>,
-    data_json: &str,
+    record: EvolutionRecordWrite<'_>,
 ) -> Result<(), String> {
-    let Some(store) = state.platform_metadata_store() else {
+    let EvolutionRecordWrite {
+        tenant,
+        id: record_id,
+        record_type,
+        status,
+        created_by,
+        derived_from,
+        data_json,
+    } = record;
+    let Some(store) = state.metadata_store_for_tenant(tenant).await else {
         tracing::debug!(
             record_id,
             record_type,
@@ -29,14 +34,15 @@ pub(super) async fn persist_evolution_record(
     };
 
     store
-        .insert_evolution_record(
-            record_id,
+        .insert_evolution_record(EvolutionRecordWrite {
+            tenant,
+            id: record_id,
             record_type,
             status,
             created_by,
             derived_from,
             data_json,
-        )
+        })
         .await
         .map_err(|error| {
             tracing::warn!(
@@ -63,6 +69,7 @@ pub(super) async fn persist_evolution_record(
 
 pub(super) async fn persist_record<T: serde::Serialize>(
     state: &ServerState,
+    tenant: &str,
     record_type: &str,
     header: &RecordHeader,
     record: &T,
@@ -78,12 +85,15 @@ pub(super) async fn persist_record<T: serde::Serialize>(
     })?;
     persist_evolution_record(
         state,
-        &header.id,
-        record_type,
-        &format!("{:?}", header.status),
-        &header.created_by,
-        header.derived_from.as_deref(),
-        &data_json,
+        EvolutionRecordWrite {
+            tenant,
+            id: &header.id,
+            record_type,
+            status: &format!("{:?}", header.status),
+            created_by: &header.created_by,
+            derived_from: header.derived_from.as_deref(),
+            data_json: &data_json,
+        },
     )
     .await
     .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)
@@ -151,6 +161,7 @@ pub(super) async fn create_system_entity_logged(
 
 pub(super) async fn persist_alerts(
     state: &ServerState,
+    tenant: &str,
     alerts: &[sentinel::SentinelAlert],
 ) -> Result<Vec<serde_json::Value>, StatusCode> {
     let mut results = Vec::new();
@@ -165,7 +176,14 @@ pub(super) async fn persist_alerts(
             "evolution.sentinel"
         );
 
-        persist_record(state, "Observation", &alert.record.header, &alert.record).await?;
+        persist_record(
+            state,
+            tenant,
+            "Observation",
+            &alert.record.header,
+            &alert.record,
+        )
+        .await?;
 
         let observation_id = next_system_entity_id("OBS");
         create_system_entity_logged(
@@ -199,8 +217,9 @@ pub(super) async fn persist_alerts(
 
 pub(super) async fn persist_insights(
     state: &ServerState,
+    tenant: &str,
     insights: &[InsightRecord],
-) -> Vec<serde_json::Value> {
+) -> Result<Vec<serde_json::Value>, StatusCode> {
     let mut results = Vec::new();
     for insight in insights {
         tracing::info!(
@@ -212,13 +231,7 @@ pub(super) async fn persist_insights(
             priority_score = insight.priority_score,
             "evolution.insight"
         );
-        if let Err(e) = persist_record(state, "Insight", &insight.header, insight).await {
-            tracing::warn!(
-                record_id = %insight.header.id,
-                error = %e,
-                "failed to persist insight record"
-            );
-        }
+        persist_record(state, tenant, "Insight", &insight.header, insight).await?;
 
         let insight_id = next_system_entity_id("INS");
         create_system_entity_logged(
@@ -246,7 +259,7 @@ pub(super) async fn persist_insights(
             "recommendation": insight.recommendation,
         }));
     }
-    results
+    Ok(results)
 }
 
 pub(super) async fn spawn_intent_discovery(

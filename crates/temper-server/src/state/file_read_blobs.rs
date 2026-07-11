@@ -3,6 +3,7 @@ use temper_runtime::tenant::TenantId;
 use super::ServerState;
 
 impl ServerState {
+    #[cfg(feature = "observe")]
     pub(crate) async fn fetch_blob_text_for_hash(
         &self,
         tenant: &TenantId,

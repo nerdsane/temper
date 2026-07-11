@@ -1,19 +1,18 @@
 use std::collections::BTreeMap;
 use std::convert::Infallible;
 
-use axum::extract::{Path, Query, State};
-use axum::http::{HeaderMap, StatusCode};
+use axum::extract::{Extension, Path, Query, State};
+use axum::http::StatusCode;
 use axum::response::Json;
 use axum::response::sse::{Event, KeepAlive, Sse};
+use temper_authz::AuthenticatedRequestContext;
 use temper_evolution::FeatureRequestDisposition;
-use temper_runtime::tenant::TenantId;
 use tokio_stream::StreamExt;
 use tokio_stream::wrappers::BroadcastStream;
 use tracing::instrument;
 
 use super::insight_generator;
-use crate::authz::require_observe_auth;
-use crate::odata::extract_tenant;
+use crate::authz::{require_authenticated_context, require_observe_auth};
 use crate::request_context::AgentContext;
 use crate::sentinel;
 use crate::state::{ObserveRefreshHint, ServerState};
@@ -41,10 +40,12 @@ use support::{
 ))]
 pub(crate) async fn handle_sentinel_check(
     State(state): State<ServerState>,
-    headers: HeaderMap,
+    authenticated: Option<Extension<AuthenticatedRequestContext>>,
 ) -> Result<Json<serde_json::Value>, StatusCode> {
-    require_observe_auth(&state, &headers, "run_sentinel", "Evolution")?;
-    let trajectory_entries = state.load_trajectory_entries(1_000).await;
+    let authenticated = require_authenticated_context(authenticated.as_deref())?;
+    require_observe_auth(&state, authenticated, "run_sentinel", "Evolution")?;
+    let tenant = authenticated.tenant().as_str();
+    let trajectory_entries = state.load_trajectory_entries(tenant, 1_000).await;
     tracing::Span::current().record("trajectory_count", trajectory_entries.len());
     tracing::info!(
         trajectory_count = trajectory_entries.len(),
@@ -63,10 +64,9 @@ pub(crate) async fn handle_sentinel_check(
             "evolution.sentinel"
         );
     }
-    let results = persist_alerts(&state, &alerts).await?;
+    let results = persist_alerts(&state, tenant, &alerts).await?;
 
-    let analysis_tenant =
-        extract_tenant(&headers, &state).unwrap_or_else(|_| TenantId::new("temper-system"));
+    let analysis_tenant = authenticated.tenant().clone();
     let mut discovery_results = Vec::new();
     let system_ctx = AgentContext::for_service("evolution-engine");
     for alert in &alerts {
@@ -105,7 +105,7 @@ pub(crate) async fn handle_sentinel_check(
     let insights = insight_generator::generate_insights(&trajectory_entries);
     tracing::Span::current().record("insights_count", insights.len());
     tracing::info!(insights_count = insights.len(), "evolution.insight");
-    let insight_results = persist_insights(&state, &insights).await;
+    let insight_results = persist_insights(&state, tenant, &insights).await?;
 
     emit_refresh_hints(
         &state,
@@ -139,10 +139,13 @@ pub(crate) async fn handle_sentinel_check(
 ))]
 pub(crate) async fn handle_unmet_intents(
     State(state): State<ServerState>,
-    headers: HeaderMap,
+    authenticated: Option<Extension<AuthenticatedRequestContext>>,
 ) -> Result<Json<serde_json::Value>, StatusCode> {
-    require_observe_auth(&state, &headers, "read_evolution", "Evolution")?;
-    let (failure_rows, submitted_specs) = state.load_unmet_intent_rows_aggregated().await;
+    let authenticated = require_authenticated_context(authenticated.as_deref())?;
+    require_observe_auth(&state, authenticated, "read_evolution", "Evolution")?;
+    let (failure_rows, submitted_specs) = state
+        .load_unmet_intent_rows_aggregated(authenticated.tenant().as_str())
+        .await;
     let intents =
         insight_generator::generate_unmet_intents_from_aggregated(&failure_rows, &submitted_specs);
     let open_count = intents
@@ -201,10 +204,13 @@ pub(crate) async fn handle_unmet_intents(
 #[instrument(skip_all, fields(otel.name = "GET /observe/evolution/intent-evidence"))]
 pub(crate) async fn handle_intent_evidence(
     State(state): State<ServerState>,
-    headers: HeaderMap,
+    authenticated: Option<Extension<AuthenticatedRequestContext>>,
 ) -> Result<Json<serde_json::Value>, StatusCode> {
-    require_observe_auth(&state, &headers, "read_evolution", "Evolution")?;
-    let trajectory_entries = state.load_trajectory_entries(2_000).await;
+    let authenticated = require_authenticated_context(authenticated.as_deref())?;
+    require_observe_auth(&state, authenticated, "read_evolution", "Evolution")?;
+    let trajectory_entries = state
+        .load_trajectory_entries(authenticated.tenant().as_str(), 2_000)
+        .await;
     let evidence = insight_generator::generate_intent_evidence(&trajectory_entries);
     Ok(Json(serde_json::to_value(evidence).unwrap_or_else(|_| {
         serde_json::json!({
@@ -222,15 +228,17 @@ pub(crate) async fn handle_intent_evidence(
 #[instrument(skip_all, fields(otel.name = "GET /observe/evolution/feature-requests"))]
 pub(crate) async fn handle_feature_requests(
     State(state): State<ServerState>,
-    headers: HeaderMap,
+    authenticated: Option<Extension<AuthenticatedRequestContext>>,
     Query(params): Query<BTreeMap<String, String>>,
 ) -> Result<Json<serde_json::Value>, StatusCode> {
-    require_observe_auth(&state, &headers, "read_evolution", "Evolution")?;
+    let authenticated = require_authenticated_context(authenticated.as_deref())?;
+    require_observe_auth(&state, authenticated, "read_evolution", "Evolution")?;
     let disposition_filter = params.get("disposition").map(String::as_str);
+    let tenant = authenticated.tenant().as_str();
 
-    let trajectory_entries = state.load_trajectory_entries(1_000).await;
+    let trajectory_entries = state.load_trajectory_entries(tenant, 1_000).await;
 
-    if let Some(store) = state.platform_metadata_store() {
+    if let Some(store) = state.metadata_store_for_tenant(tenant).await {
         let generated = insight_generator::generate_feature_requests(&trajectory_entries);
         for feature_request in &generated {
             let refs_json = serde_json::to_string(&feature_request.trajectory_refs)
@@ -244,6 +252,7 @@ pub(crate) async fn handle_feature_requests(
             };
             if let Err(error) = store
                 .upsert_feature_request(
+                    tenant,
                     &feature_request.header.id,
                     &format!("{:?}", feature_request.category),
                     &feature_request.description,
@@ -273,7 +282,10 @@ pub(crate) async fn handle_feature_requests(
             .await;
         }
 
-        return match store.list_feature_requests(disposition_filter).await {
+        return match store
+            .list_feature_requests(tenant, disposition_filter)
+            .await
+        {
             Ok(rows) => {
                 let feature_requests = rows
                     .iter()
@@ -309,18 +321,18 @@ pub(crate) async fn handle_feature_requests(
 
 /// PATCH /observe/evolution/feature-requests/:id -- update disposition + notes.
 ///
-/// Admin principals bypass Cedar; other principals require "manage_feature_requests"
-/// on "FeatureRequest".
+/// Requires `manage_feature_requests` on `FeatureRequest`.
 #[instrument(skip_all, fields(otel.name = "PATCH /observe/evolution/feature-requests/{id}"))]
 pub(crate) async fn handle_update_feature_request(
     State(state): State<ServerState>,
-    headers: HeaderMap,
+    authenticated: Option<Extension<AuthenticatedRequestContext>>,
     Path(id): Path<String>,
     Json(body): Json<serde_json::Value>,
 ) -> Result<Json<serde_json::Value>, StatusCode> {
+    let authenticated = require_authenticated_context(authenticated.as_deref())?;
     require_observe_auth(
         &state,
-        &headers,
+        authenticated,
         "manage_feature_requests",
         "FeatureRequest",
     )?;
@@ -340,17 +352,21 @@ pub(crate) async fn handle_update_feature_request(
         }
     }
 
-    let Some(store) = state.platform_metadata_store() else {
+    let tenant = authenticated.tenant().as_str();
+    let Some(store) = state.metadata_store_for_tenant(tenant).await else {
         return Err(StatusCode::SERVICE_UNAVAILABLE);
     };
 
-    store
-        .update_feature_request(&id, disposition.unwrap_or(""), notes)
+    let updated = store
+        .update_feature_request(tenant, &id, disposition.unwrap_or(""), notes)
         .await
         .map_err(|error| {
             tracing::error!(error = %error, "failed to update feature request");
             StatusCode::INTERNAL_SERVER_ERROR
         })?;
+    if !updated {
+        return Err(StatusCode::NOT_FOUND);
+    }
 
     emit_refresh_hints(&state, &[ObserveRefreshHint::FeatureRequests]);
 
@@ -367,12 +383,14 @@ pub(crate) async fn handle_update_feature_request(
 #[instrument(skip_all, fields(otel.name = "GET /observe/evolution/stream"))]
 pub(crate) async fn handle_evolution_stream(
     State(state): State<ServerState>,
-    headers: HeaderMap,
+    authenticated: Option<Extension<AuthenticatedRequestContext>>,
 ) -> Result<Sse<impl tokio_stream::Stream<Item = Result<Event, Infallible>>>, StatusCode> {
-    require_observe_auth(&state, &headers, "read_evolution", "EvolutionStream")?;
+    let authenticated = require_authenticated_context(authenticated.as_deref())?;
+    require_observe_auth(&state, authenticated, "read_evolution", "EvolutionStream")?;
+    let tenant = authenticated.tenant().as_str().to_string();
     let rx = state.pending_decision_tx.subscribe();
-    let stream = BroadcastStream::new(rx).filter_map(|result| match result {
-        Ok(pending_decision) => Some(Ok(Event::default()
+    let stream = BroadcastStream::new(rx).filter_map(move |result| match result {
+        Ok(pending_decision) if pending_decision.tenant == tenant => Some(Ok(Event::default()
             .event("evolution_event")
             .json_data(serde_json::json!({
                 "type": "new_decision",
@@ -382,7 +400,7 @@ pub(crate) async fn handle_evolution_stream(
                 "status": "pending",
             }))
             .unwrap_or_else(|_| Event::default().data("{}")))),
-        Err(_) => None,
+        Ok(_) | Err(_) => None,
     });
 
     Ok(Sse::new(stream).keep_alive(KeepAlive::default()))

@@ -171,6 +171,21 @@ fn test_state() -> ServerState {
         .expect("test state should build")
 }
 
+fn customer_security_context(id: &str) -> SecurityContext {
+    SecurityContext {
+        principal: temper_authz::Principal {
+            id: id.to_string(),
+            kind: temper_authz::PrincipalKind::Customer,
+            role: None,
+            acting_for: None,
+            agent_type: None,
+            attributes: Default::default(),
+        },
+        context_attrs: Default::default(),
+        correlation_id: "local-tdata-test".to_string(),
+    }
+}
+
 #[test]
 fn parses_loopback_tdata_request() {
     let request = LocalTDataRequest::parse(
@@ -211,42 +226,33 @@ fn parses_allowlisted_public_tdata_request() {
 }
 
 #[test]
-fn local_tdata_headers_inherit_invoking_security_context() {
-    // The trusted marker (edge-stripped from client requests) is what makes an
-    // `admin` header derive Admin — see ADR-0157 / `from_headers`.
-    let inherited = SecurityContext::from_headers(&[
-        ("x-temper-principal-id".to_string(), "admin-1".to_string()),
+fn local_tdata_headers_discard_guest_authority_and_tenant() {
+    let map = header_map(&[
+        ("accept".to_string(), "application/json".to_string()),
+        ("x-tenant-id".to_string(), "victim".to_string()),
+        ("x-temper-principal-id".to_string(), "attacker".to_string()),
         ("x-temper-principal-kind".to_string(), "admin".to_string()),
+        ("x-temper-agent-role".to_string(), "supervisor".to_string()),
+        ("x-temper-principal-scopes".to_string(), "root".to_string()),
+        ("x-temper-attr-region".to_string(), "all".to_string()),
+        ("x-temper-action-context".to_string(), "forged".to_string()),
         (
-            temper_authz::TRUSTED_PRINCIPAL_HEADER.to_string(),
-            "1".to_string(),
-        ),
-        (
-            "x-temper-principal-scopes".to_string(),
-            "admin:repos,repo:write".to_string(),
+            "x-temper-workflow-run-id".to_string(),
+            "workflow-1".to_string(),
         ),
     ]);
-    let inherited_headers = security_context_headers(&inherited);
-    let map = header_map(
-        &[("accept".to_string(), "application/json".to_string())],
-        &temper_runtime::tenant::TenantId::default(),
-        &inherited_headers,
-    );
 
+    assert!(map.get("x-tenant-id").is_none());
+    assert!(map.get("x-temper-principal-id").is_none());
+    assert!(map.get("x-temper-principal-kind").is_none());
+    assert!(map.get("x-temper-agent-role").is_none());
+    assert!(map.get("x-temper-principal-scopes").is_none());
+    assert!(map.get("x-temper-attr-region").is_none());
+    assert!(map.get("x-temper-action-context").is_none());
     assert_eq!(
-        map.get("x-temper-principal-id")
-            .and_then(|v| v.to_str().ok()),
-        Some("admin-1")
-    );
-    assert_eq!(
-        map.get("x-temper-principal-kind")
-            .and_then(|v| v.to_str().ok()),
-        Some("admin")
-    );
-    assert_eq!(
-        map.get("x-temper-principal-scopes")
-            .and_then(|v| v.to_str().ok()),
-        Some("admin:repos,repo:write")
+        map.get("x-temper-workflow-run-id")
+            .and_then(|value| value.to_str().ok()),
+        Some("workflow-1")
     );
 }
 
@@ -255,7 +261,7 @@ async fn local_tdata_calls_use_odata_handlers() {
     let host = LocalTDataWasmHost::new(
         test_state(),
         temper_runtime::tenant::TenantId::default(),
-        None,
+        Some(&SecurityContext::system()),
         Arc::new(FailingHost),
     );
     let headers = vec![
@@ -305,13 +311,91 @@ async fn local_tdata_calls_use_odata_handlers() {
 }
 
 #[tokio::test]
-async fn local_tdata_synthesizes_invocation_tenant_header() {
+async fn local_tdata_forged_admin_headers_cannot_upgrade_customer() {
+    let state = test_state();
+    state
+        .authz
+        .reload_tenant_policies(
+            TenantId::default().as_str(),
+            "permit(principal is Admin, action, resource);",
+        )
+        .expect("admin-only policy should parse");
+    let customer = customer_security_context("customer-1");
+    let host = LocalTDataWasmHost::new(
+        state,
+        TenantId::default(),
+        Some(&customer),
+        Arc::new(FailingHost),
+    );
+    let headers = vec![
+        ("content-type".to_string(), "application/json".to_string()),
+        ("x-temper-principal-kind".to_string(), "admin".to_string()),
+        ("x-temper-principal-id".to_string(), "attacker".to_string()),
+        ("x-temper-principal-scopes".to_string(), "root".to_string()),
+        ("x-temper-attr-owner".to_string(), "*".to_string()),
+        ("x-temper-action-context".to_string(), "forged".to_string()),
+    ];
+
+    let (status, body) = host
+        .http_call(
+            "POST",
+            "http://127.0.0.1:8787/tdata/Orders",
+            &headers,
+            r#"{"id":"forged-admin-order"}"#,
+        )
+        .await
+        .expect("local OData response should be returned");
+
+    assert_eq!(status, StatusCode::FORBIDDEN.as_u16(), "{body}");
+}
+
+#[tokio::test]
+async fn local_tdata_uses_exact_agent_and_ignores_guest_tenant() {
+    let state = test_state();
+    state
+        .authz
+        .reload_tenant_policies(
+            TenantId::default().as_str(),
+            "permit(principal is Agent, action, resource);",
+        )
+        .expect("agent-only policy should parse");
+    let agent = SecurityContext::from_resolved_identity("agent-1", "operator", None);
+    let host = LocalTDataWasmHost::new(
+        state.clone(),
+        TenantId::default(),
+        Some(&agent),
+        Arc::new(FailingHost),
+    );
+    let headers = vec![
+        ("content-type".to_string(), "application/json".to_string()),
+        ("x-tenant-id".to_string(), "victim".to_string()),
+        ("x-temper-principal-kind".to_string(), "admin".to_string()),
+        ("x-temper-principal-id".to_string(), "attacker".to_string()),
+    ];
+
+    let (status, body) = host
+        .http_call(
+            "POST",
+            "http://localhost:8787/tdata/Orders",
+            &headers,
+            r#"{"id":"exact-agent-order"}"#,
+        )
+        .await
+        .expect("local OData response should be returned");
+
+    assert_eq!(status, StatusCode::CREATED.as_u16(), "{body}");
+    assert!(state.entity_exists(&TenantId::default(), "Order", "exact-agent-order"));
+    assert!(!state.entity_exists(&TenantId::new("victim"), "Order", "exact-agent-order"));
+}
+
+#[tokio::test]
+async fn local_tdata_uses_invocation_tenant_without_a_tenant_header() {
     let mut state = test_state();
     state.single_tenant_mode = false;
     let host = LocalTDataWasmHost::new(
         state,
         temper_runtime::tenant::TenantId::default(),
-        None,
+        Some(&SecurityContext::system()),
         Arc::new(FailingHost),
     );
     let headers = vec![
@@ -327,7 +411,7 @@ async fn local_tdata_synthesizes_invocation_tenant_header() {
             r#"{"id":"order-local-no-header","Customer":"Lin"}"#,
         )
         .await
-        .expect("local create should synthesize tenant header");
+        .expect("local create should use typed tenant context");
     assert_eq!(status, StatusCode::CREATED.as_u16(), "{body}");
 
     let (status, body) = host
@@ -338,113 +422,10 @@ async fn local_tdata_synthesizes_invocation_tenant_header() {
             "",
         )
         .await
-        .expect("local read should synthesize tenant header");
+        .expect("local read should use typed tenant context");
     assert_eq!(status, StatusCode::OK.as_u16(), "{body}");
     let fetched: serde_json::Value = serde_json::from_str(&body).expect("fetched JSON");
     assert_eq!(fetched["fields"]["Customer"], "Lin");
-}
-
-#[tokio::test]
-async fn boundary_paths_delegate_to_production_host() {
-    let calls = Arc::new(AtomicUsize::new(0));
-    let host = LocalTDataWasmHost::new(
-        test_state(),
-        temper_runtime::tenant::TenantId::default(),
-        None,
-        Arc::new(CountingHost {
-            calls: calls.clone(),
-            stream_calls: Arc::new(AtomicUsize::new(0)),
-        }),
-    );
-    let headers = vec![("x-tenant-id".to_string(), "default".to_string())];
-
-    let delegated = [
-        (
-            "DELETE",
-            "http://127.0.0.1:8787/tdata/Orders('order-local-1')",
-        ),
-        (
-            "GET",
-            "http://127.0.0.1:8787/tdata/Files('file-local-1')/$value",
-        ),
-        ("GET", "https://api.example.com/tdata/Orders"),
-    ];
-
-    for (method, url) in delegated {
-        let (status, body) = host
-            .http_call(method, url, &headers, "")
-            .await
-            .expect("boundary path should delegate");
-        assert_eq!(status, 299);
-        assert_eq!(body, "delegated");
-    }
-
-    assert_eq!(calls.load(Ordering::SeqCst), delegated.len());
-}
-
-#[tokio::test]
-async fn outbound_streaming_delegates_to_production_host() {
-    let stream_calls = Arc::new(AtomicUsize::new(0));
-    let host = LocalTDataWasmHost::new(
-        test_state(),
-        temper_runtime::tenant::TenantId::default(),
-        None,
-        Arc::new(CountingHost {
-            calls: Arc::new(AtomicUsize::new(0)),
-            stream_calls: stream_calls.clone(),
-        }),
-    );
-
-    let handles = host
-        .http_stream_begin_outbound(HttpRequestHead {
-            method: "POST".to_string(),
-            url: "https://chatgpt.com/backend-api/codex/responses".to_string(),
-            headers: vec![("accept".to_string(), "text/event-stream".to_string())],
-        })
-        .await
-        .expect("local TData wrapper must preserve outbound streaming support");
-
-    assert_eq!(handles.request_body, StreamHandle(11));
-    assert_eq!(handles.response_body, StreamHandle(12));
-    assert_eq!(
-        host.http_stream_try_write(handles.request_body, b"hello".to_vec())
-            .await
-            .expect("stream writes must delegate"),
-        5
-    );
-    let head = host
-        .http_stream_response_head(handles.response_body)
-        .await
-        .expect("stream response head must delegate");
-    assert_eq!(head.status, 299);
-    assert_eq!(
-        head.headers,
-        vec![("x-test-stream".to_string(), "delegated".to_string())]
-    );
-    let bounded_chunk = host
-        .http_stream_read_bounded(handles.response_body, 1024)
-        .await
-        .expect("bounded stream reads must delegate");
-    assert_eq!(bounded_chunk, b"delegated-bounded-read");
-    let direct_chunk = host
-        .http_stream_read(handles.response_body)
-        .await
-        .expect("direct stream reads must delegate");
-    assert_eq!(direct_chunk, b"delegated-direct-read");
-    host.http_stream_send_response_head(
-        handles.response_body,
-        HttpResponseHead {
-            status: 204,
-            headers: Vec::new(),
-        },
-    )
-    .await
-    .expect("inbound stream response heads must delegate");
-    host.http_stream_close(handles.request_body)
-        .await
-        .expect("stream close must delegate");
-
-    assert_eq!(stream_calls.load(Ordering::SeqCst), 7);
 }
 
 #[tokio::test]
@@ -454,7 +435,7 @@ async fn allowlisted_public_tdata_calls_use_odata_handlers() {
     let host = LocalTDataWasmHost::new(
         state,
         temper_runtime::tenant::TenantId::default(),
-        None,
+        Some(&SecurityContext::system()),
         Arc::new(FailingHost),
     );
     let headers = vec![
@@ -489,3 +470,6 @@ async fn allowlisted_public_tdata_calls_use_odata_handlers() {
     let fetched: serde_json::Value = serde_json::from_str(&body).expect("fetched JSON");
     assert_eq!(fetched["fields"]["Customer"], "Grace");
 }
+
+#[path = "local_tdata_host_test/delegation_tests.rs"]
+mod delegation_tests;

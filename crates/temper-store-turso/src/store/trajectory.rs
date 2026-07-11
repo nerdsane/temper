@@ -130,6 +130,7 @@ impl TursoEventStore {
     #[instrument(skip_all, fields(otel.name = "turso.load_recent_trajectories", row_count = tracing::field::Empty))]
     pub async fn load_recent_trajectories(
         &self,
+        tenant: &str,
         limit: i64,
     ) -> Result<Vec<TursoTrajectoryRow>, PersistenceError> {
         let _query_timer = TursoQueryTimer::start("turso.load_recent_trajectories");
@@ -139,9 +140,10 @@ impl TursoEventStore {
                 "SELECT tenant, entity_type, entity_id, action, success, from_status, to_status, error, \
                         agent_id, session_id, authz_denied, denied_resource, denied_module, source, spec_governed, created_at, request_body, intent, matched_policy_ids \
                  FROM trajectories \
+                 WHERE tenant = ?1 \
                  ORDER BY created_at DESC \
-                 LIMIT ?1",
-                params![limit],
+                 LIMIT ?2",
+                params![tenant, limit],
             )
             .await
             .map_err(|e| {
@@ -165,7 +167,10 @@ impl TursoEventStore {
     /// timestamps. This replaces the previous pattern of loading up to 10,000
     /// raw trajectory rows and grouping them in Rust.
     #[instrument(skip_all, fields(otel.name = "turso.load_unmet_intent_rows", row_count = tracing::field::Empty))]
-    pub async fn load_unmet_intent_rows(&self) -> Result<Vec<UnmetIntentAggRow>, PersistenceError> {
+    pub async fn load_unmet_intent_rows(
+        &self,
+        tenant: &str,
+    ) -> Result<Vec<UnmetIntentAggRow>, PersistenceError> {
         let _query_timer = TursoQueryTimer::start("turso.load_unmet_intent_rows");
         let conn = self.configured_connection().await?;
         let mut rows = conn
@@ -177,12 +182,13 @@ impl TursoEventStore {
                         MIN(created_at) AS first_seen, \
                         MAX(created_at) AS last_seen \
                  FROM trajectories \
-                 WHERE success = 0 \
+                 WHERE tenant = ?1 \
+                   AND success = 0 \
                    AND (authz_denied IS NULL OR authz_denied = 0) \
                  GROUP BY entity_type, error \
                  ORDER BY cnt DESC \
                  LIMIT 100",
-                (),
+                params![tenant],
             )
             .await
             .map_err(|e| {
@@ -214,6 +220,7 @@ impl TursoEventStore {
     #[instrument(skip_all, fields(otel.name = "turso.load_submit_spec_timestamps"))]
     pub async fn load_submit_spec_timestamps(
         &self,
+        tenant: &str,
     ) -> Result<std::collections::BTreeMap<String, String>, PersistenceError> {
         let _query_timer = TursoQueryTimer::start("turso.load_submit_spec_timestamps");
         let conn = self.configured_connection().await?;
@@ -221,9 +228,9 @@ impl TursoEventStore {
             .query(
                 "SELECT entity_type, MAX(created_at) AS latest_at \
                  FROM trajectories \
-                 WHERE success = 1 AND action = 'SubmitSpec' \
+                 WHERE tenant = ?1 AND success = 1 AND action = 'SubmitSpec' \
                  GROUP BY entity_type",
-                (),
+                params![tenant],
             )
             .await
             .map_err(storage_error)?;

@@ -3,14 +3,43 @@
 //! Exposes the Temper Monty sandbox over HTTP, allowing agents to execute
 //! Python code with `temper.*` methods that loop back to the server.
 
-use axum::extract::State;
+use std::sync::Arc;
+
+use axum::extract::{Extension, State};
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::IntoResponse;
+use temper_authz::AuthenticatedRequestContext;
 use temper_runtime::scheduler::sim_now;
 use tracing::instrument;
 
-use crate::odata::extract_tenant;
+use crate::authz::require_authenticated_context;
 use crate::state::{ServerState, TrajectoryEntry, TrajectorySource};
+
+fn require_repl_authorization(
+    state: &ServerState,
+    authenticated: &AuthenticatedRequestContext,
+) -> Result<(), StatusCode> {
+    state
+        .authorize_with_context(
+            authenticated.security_context(),
+            "execute_repl",
+            "Repl",
+            &std::collections::BTreeMap::from([(
+                "id".to_string(),
+                serde_json::Value::String(authenticated.tenant().to_string()),
+            )]),
+            authenticated.tenant().as_str(),
+        )
+        .map_err(|denial| {
+            tracing::warn!(
+                reason = %denial,
+                tenant = %authenticated.tenant(),
+                principal_id = %authenticated.security_context().principal.id,
+                "REPL execution denied"
+            );
+            StatusCode::FORBIDDEN
+        })
+}
 
 /// Request body for POST /api/repl.
 #[derive(serde::Deserialize)]
@@ -21,9 +50,7 @@ pub(crate) struct ReplRequest {
 /// POST /api/repl — execute Python code in the Temper Monty sandbox.
 ///
 /// The sandbox provides `temper.*` methods (create, action, submit_specs, etc.)
-/// that loop back to this server via HTTP. Agent identity is extracted from
-/// `X-Temper-Principal-Id` / `X-Temper-Principal-Kind` / `X-Temper-Agent-Role`
-/// headers and forwarded on internal requests.
+/// that loop back to this server via single-use, request-bound credentials.
 ///
 /// Security: 180s timeout, 64MB memory, method allowlisting, no filesystem or
 /// network access. External APIs go through `[[integration]]` in IOA specs.
@@ -31,38 +58,48 @@ pub(crate) struct ReplRequest {
 pub(crate) async fn handle_repl(
     State(state): State<ServerState>,
     headers: HeaderMap,
+    authenticated: Option<Extension<AuthenticatedRequestContext>>,
     axum::Json(body): axum::Json<ReplRequest>,
 ) -> impl IntoResponse {
-    let principal_id = headers
-        .get("x-temper-principal-id")
-        .and_then(|v| v.to_str().ok())
-        .map(String::from);
-    let principal_kind = headers
-        .get("x-temper-principal-kind")
-        .and_then(|v| v.to_str().ok())
-        .map(String::from);
-    let agent_role = headers
-        .get("x-temper-agent-role")
-        .and_then(|v| v.to_str().ok())
-        .map(String::from);
-    let agent_type = headers
-        .get("x-temper-agent-type")
-        .and_then(|v| v.to_str().ok())
-        .map(String::from);
+    let authenticated = match require_authenticated_context(authenticated.as_deref()) {
+        Ok(authenticated) => authenticated,
+        Err(status) => return status.into_response(),
+    };
+    if let Err(status) = require_repl_authorization(&state, authenticated) {
+        return status.into_response();
+    }
     let session_id = headers
         .get("x-session-id")
         .and_then(|v| v.to_str().ok())
         .map(String::from);
 
-    let tenant = match extract_tenant(&headers, &state) {
-        Ok(t) => t.as_str().to_string(),
-        Err(e) => return e.into_response(),
+    let tenant = authenticated.tenant().to_string();
+    let agent_id = Some(authenticated.security_context().principal.id.clone());
+    let agent_type = authenticated
+        .security_context()
+        .principal
+        .agent_type
+        .clone();
+    let Some(capability_issuer) = crate::state::internal_http_capability_issuer(
+        &state,
+        authenticated.tenant(),
+        Some(authenticated.security_context()),
+    ) else {
+        tracing::error!("authenticated REPL request has no internal capability issuer");
+        return StatusCode::INTERNAL_SERVER_ERROR.into_response();
     };
-
-    let agent_id = principal_id.clone();
+    let internal_credential_issuer: temper_sandbox::http::InternalRequestCredentialIssuer =
+        Arc::new(move |method, url| {
+            let capability = capability_issuer(method, url)?;
+            temper_sandbox::http::InternalRequestCredential::new(
+                capability.bearer_token().to_string(),
+                capability.tenant().to_string(),
+            )
+        });
     let port = state.listen_port.get().copied().unwrap_or(4200);
     let code = body.code;
     let tenant_for_repl = tenant.clone();
+    let agent_id_for_repl = agent_id.clone();
 
     // The Monty sandbox types are !Send, so we run in a dedicated
     // single-threaded runtime via spawn_blocking.
@@ -75,12 +112,9 @@ pub(crate) async fn handle_repl(
             let config = temper_sandbox::repl::ReplConfig {
                 server_port: port,
                 tenant: tenant_for_repl,
-                agent_id: principal_id.clone(),
-                principal_id,
-                principal_kind,
-                agent_role,
-                agent_type,
+                agent_id: agent_id_for_repl,
                 session_id,
+                internal_credential_issuer,
             };
             temper_sandbox::repl::run_repl(&config, &code).await
         })
@@ -120,7 +154,7 @@ pub(crate) async fn handle_repl(
                 denied_module: None,
                 source: Some(TrajectorySource::Platform),
                 spec_governed: None,
-                agent_type: None,
+                agent_type,
                 request_body: None,
                 intent: None,
                 matched_policy_ids: None,
@@ -149,5 +183,67 @@ pub(crate) async fn handle_repl(
             )
                 .into_response()
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use temper_authz::{AuthenticatedRequestContext, SecurityContext};
+    use temper_runtime::ActorSystem;
+    use temper_runtime::tenant::TenantId;
+
+    use super::require_repl_authorization;
+    use crate::registry::SpecRegistry;
+    use crate::state::ServerState;
+
+    #[test]
+    fn repl_requires_explicit_tenant_resource_authority() {
+        let state = ServerState::from_registry(ActorSystem::new("repl-auth"), SpecRegistry::new());
+        state
+            .authz
+            .reload_tenant_policies(
+                "tenant-a",
+                r#"
+permit(
+  principal == Agent::"agent-1",
+  action == Action::"execute_repl",
+  resource == Repl::"tenant-a"
+);
+"#,
+            )
+            .expect("REPL policy should parse");
+        let allowed = AuthenticatedRequestContext::new(
+            TenantId::new("tenant-a"),
+            SecurityContext::from_resolved_identity("agent-1", "worker", None),
+        );
+        let denied = AuthenticatedRequestContext::new(
+            TenantId::new("tenant-a"),
+            SecurityContext::from_resolved_identity("agent-2", "worker", None),
+        );
+        let claimed_admin = AuthenticatedRequestContext::new(
+            TenantId::new("tenant-a"),
+            SecurityContext {
+                principal: temper_authz::Principal {
+                    id: "claimed-admin".to_string(),
+                    kind: temper_authz::PrincipalKind::Admin,
+                    role: None,
+                    acting_for: None,
+                    agent_type: None,
+                    attributes: Default::default(),
+                },
+                context_attrs: Default::default(),
+                correlation_id: "repl-admin-side-channel-test".to_string(),
+            },
+        );
+
+        assert!(require_repl_authorization(&state, &allowed).is_ok());
+        assert_eq!(
+            require_repl_authorization(&state, &denied),
+            Err(axum::http::StatusCode::FORBIDDEN)
+        );
+        assert_eq!(
+            require_repl_authorization(&state, &claimed_admin),
+            Err(axum::http::StatusCode::FORBIDDEN)
+        );
     }
 }

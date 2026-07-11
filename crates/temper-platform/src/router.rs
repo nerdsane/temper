@@ -37,10 +37,6 @@ pub fn build_platform_router(state: PlatformState) -> Router {
         .route(
             "/observe/os-apps/{name}",
             routing::get(crate::tenant_api::get_os_app_guide),
-        )
-        .route(
-            "/observe/tenants/{id}",
-            routing::delete(crate::tenant_api::delete_tenant),
         );
 
     // Identity resolution endpoint — used by MCP server at startup.
@@ -54,28 +50,13 @@ pub fn build_platform_router(state: PlatformState) -> Router {
         .merge(identity_api.with_state(state.server.clone()))
         .merge(platform_observe.with_state(state.clone()))
         .nest("/api", tenant_api.with_state(state.clone()))
-        // Ingress edge (ADR-0157), innermost: materialize the credential the
-        // edge resolved (an `EdgeAuthenticatedPrincipal` extension set by
-        // `bearer_auth_check`) into trusted principal headers. Applied first so
-        // it is the innermost layer, running after auth and covering every
-        // route — including the platform-merged ones above.
-        .layer(middleware::from_fn(
-            temper_server::authz::materialize_authenticated_principal,
-        ))
-        .layer(middleware::from_fn_with_state(
-            state.clone(),
-            crate::identity_cache::invalidate_identity_cache_on_credential_mutation,
-        ))
         .layer(middleware::from_fn_with_state(
             state.clone(),
             tenant_access_check,
         ))
         .layer(middleware::from_fn_with_state(state, bearer_auth_check))
-        // Ingress edge (ADR-0157), outermost: runs first — before credential
-        // resolution and `tenant_access_check` — and strips every
-        // client-asserted `x-temper-*` identity header. Only identity the
-        // platform resolves *after* the edge (the operator extension, or an
-        // agent's resolved-identity extension) reaches the handlers.
+        // Defense in depth: raw authority headers are removed before tenant
+        // credential resolution creates a typed request context (ADR-0157).
         .layer(middleware::from_fn(
             temper_server::authz::strip_inbound_identity_headers,
         ))
@@ -85,11 +66,66 @@ pub fn build_platform_router(state: PlatformState) -> Router {
 mod tests {
     use super::*;
     use axum::body::Body;
-    use axum::http::{Request, StatusCode};
+    use axum::http::{Method, Request, StatusCode};
+    use temper_authz::{AuthenticatedRequestContext, SecurityContext};
+    use temper_runtime::tenant::TenantId;
     use tower::ServiceExt;
+
+    const ROUTER_TEST_PRINCIPAL: &str = "router-test-agent";
 
     fn test_state() -> PlatformState {
         PlatformState::new(None)
+    }
+
+    fn authenticated_request(
+        state: &PlatformState,
+        method: Method,
+        uri: &str,
+        body: Body,
+    ) -> Request<Body> {
+        let credential = state
+            .server
+            .internal_invocation_credentials
+            .issue_for_url(
+                AuthenticatedRequestContext::new(
+                    TenantId::default(),
+                    SecurityContext::from_resolved_identity(
+                        ROUTER_TEST_PRINCIPAL,
+                        "operator",
+                        None,
+                    ),
+                ),
+                method.as_str(),
+                &format!("http://127.0.0.1:3000{uri}"),
+            )
+            .expect("test credential should issue");
+
+        Request::builder()
+            .method(method)
+            .uri(uri)
+            .header("authorization", format!("Bearer {credential}"))
+            .header("x-tenant-id", "default")
+            .body(body)
+            .expect("test request should build")
+    }
+
+    fn allow_app_catalog(state: &PlatformState) {
+        state
+            .server
+            .authz
+            .reload_tenant_policies(
+                "default",
+                &format!(
+                    r#"
+permit(
+  principal == Agent::"{ROUTER_TEST_PRINCIPAL}",
+  action == Action::"read_app_catalog",
+  resource == AppCatalog::"all"
+);
+"#
+                ),
+            )
+            .expect("test catalog policy should parse");
     }
 
     #[tokio::test]
@@ -110,11 +146,10 @@ mod tests {
 
     #[tokio::test]
     async fn test_unknown_route_returns_404() {
-        let app = build_platform_router(test_state());
-        let response = app
-            .oneshot(Request::get("/nonexistent").body(Body::empty()).unwrap())
-            .await
-            .unwrap();
+        let state = test_state();
+        let request = authenticated_request(&state, Method::GET, "/nonexistent", Body::empty());
+        let app = build_platform_router(state);
+        let response = app.oneshot(request).await.unwrap();
 
         assert_eq!(response.status(), StatusCode::NOT_FOUND);
     }
@@ -131,16 +166,30 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_old_routes_gone() {
+    async fn identity_resolve_rejects_malformed_body_tenant_without_panicking() {
         let app = build_platform_router(test_state());
+        let response = app
+            .oneshot(
+                Request::post("/api/identity/resolve")
+                    .header("content-type", "application/json")
+                    .body(Body::from(r#"{"bearer_token":"x","tenant":":"}"#))
+                    .unwrap(),
+            )
+            .await
+            .expect("malformed tenant must produce an HTTP response");
+
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn test_old_routes_gone() {
+        let state = test_state();
+        let app = build_platform_router(state.clone());
 
         // /dev, /prod, and /odata should not exist
         for path in &["/dev", "/prod", "/odata"] {
-            let response = app
-                .clone()
-                .oneshot(Request::get(*path).body(Body::empty()).unwrap())
-                .await
-                .unwrap();
+            let request = authenticated_request(&state, Method::GET, path, Body::empty());
+            let response = app.clone().oneshot(request).await.unwrap();
             assert_eq!(
                 response.status(),
                 StatusCode::NOT_FOUND,
@@ -153,11 +202,11 @@ mod tests {
 
     #[tokio::test]
     async fn test_get_os_apps_returns_200() {
-        let app = build_platform_router(test_state());
-        let response = app
-            .oneshot(Request::get("/api/os-apps").body(Body::empty()).unwrap())
-            .await
-            .unwrap();
+        let state = test_state();
+        allow_app_catalog(&state);
+        let request = authenticated_request(&state, Method::GET, "/api/os-apps", Body::empty());
+        let app = build_platform_router(state);
+        let response = app.oneshot(request).await.unwrap();
 
         assert_eq!(response.status(), StatusCode::OK);
 
@@ -177,31 +226,26 @@ mod tests {
 
     #[tokio::test]
     async fn test_local_os_app_install_route_is_removed() {
-        let app = build_platform_router(test_state());
-        let response = app
-            .oneshot(
-                Request::post("/api/os-apps/project-management/install")
-                    .header("content-type", "application/json")
-                    .body(Body::from(r#"{"tenant":"test-install"}"#))
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
+        let state = test_state();
+        let request = authenticated_request(
+            &state,
+            Method::POST,
+            "/api/os-apps/project-management/install",
+            Body::from(r#"{"tenant":"test-install"}"#),
+        );
+        let app = build_platform_router(state);
+        let response = app.oneshot(request).await.unwrap();
 
         assert_eq!(response.status(), StatusCode::NOT_FOUND);
     }
 
     #[tokio::test]
     async fn test_get_observe_os_apps_returns_200() {
-        let app = build_platform_router(test_state());
-        let response = app
-            .oneshot(
-                Request::get("/observe/os-apps")
-                    .body(Body::empty())
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
+        let state = test_state();
+        allow_app_catalog(&state);
+        let request = authenticated_request(&state, Method::GET, "/observe/os-apps", Body::empty());
+        let app = build_platform_router(state);
+        let response = app.oneshot(request).await.unwrap();
 
         assert_eq!(response.status(), StatusCode::OK);
 
@@ -221,16 +265,15 @@ mod tests {
 
     #[tokio::test]
     async fn test_observe_local_os_app_install_route_is_removed() {
-        let app = build_platform_router(test_state());
-        let response = app
-            .oneshot(
-                Request::post("/observe/os-apps/project-management/install")
-                    .header("content-type", "application/json")
-                    .body(Body::from(r#"{"tenant":"test"}"#))
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
+        let state = test_state();
+        let request = authenticated_request(
+            &state,
+            Method::POST,
+            "/observe/os-apps/project-management/install",
+            Body::from(r#"{"tenant":"test"}"#),
+        );
+        let app = build_platform_router(state);
+        let response = app.oneshot(request).await.unwrap();
 
         assert_eq!(response.status(), StatusCode::NOT_FOUND);
     }

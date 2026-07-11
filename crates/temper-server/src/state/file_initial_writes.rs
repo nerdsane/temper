@@ -319,6 +319,7 @@ impl ServerState {
             let fields = response.state.fields.clone();
             let agent_ctx = agent_ctx.clone();
             tokio::spawn(async move {
+                // determinism-ok: post-commit external reaction side effects
                 // determinism-ok: post-commit reaction side effects mirror the
                 // existing non-awaited File `$value` update behavior.
                 dispatcher
@@ -344,13 +345,13 @@ fn initial_file_state(
     table: &temper_jit::table::TransitionTable,
     initial_fields: serde_json::Value,
 ) -> EntityState {
-    let mut fields = initial_fields;
-    if let Some(obj) = fields.as_object_mut() {
-        obj.entry("Id".to_string())
-            .or_insert(serde_json::Value::String(file_id.to_string()));
-        obj.entry("Status".to_string())
-            .or_insert(serde_json::Value::String(table.initial_state.clone()));
-    }
+    let mut fields =
+        crate::entity_actor::effects::sanitize_action_params(&initial_fields).into_owned();
+    crate::entity_actor::effects::canonicalize_entity_fields(
+        &mut fields,
+        file_id,
+        &table.initial_state,
+    );
 
     EntityState {
         entity_type: "File".to_string(),

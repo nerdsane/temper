@@ -1,7 +1,4 @@
-use std::collections::{BTreeMap, BTreeSet};
-use std::sync::Arc;
-
-use futures_util::stream::{self, StreamExt};
+use std::collections::BTreeMap;
 use temper_runtime::tenant::TenantId;
 use tracing::instrument;
 
@@ -11,7 +8,11 @@ use super::file_read_projection::{
     file_version_projection_from_row, file_version_projection_from_state,
 };
 
-const FILE_BATCH_READ_CONCURRENCY: usize = 8;
+#[cfg(feature = "observe")]
+mod batch_text;
+
+#[cfg(feature = "observe")]
+pub(crate) use batch_text::{BatchTextReadError, validate_batch_text_ids};
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 pub struct TextFileReadResult {
@@ -169,99 +170,7 @@ impl ServerState {
         }
     }
 
-    #[instrument(skip_all, fields(
-        otel.name = "state.read_file_texts_batch",
-        tenant = %tenant,
-        file_count = file_ids.len(),
-    ))]
-    pub async fn read_file_texts_batch(
-        &self,
-        tenant: &TenantId,
-        file_ids: &[String],
-    ) -> Result<Vec<TextFileReadResult>, String> {
-        if file_ids.is_empty() {
-            return Ok(Vec::new());
-        }
-
-        let mut unique_ids = Vec::new();
-        let mut seen = BTreeSet::new();
-        for file_id in file_ids {
-            if seen.insert(file_id.clone()) {
-                unique_ids.push(file_id.clone());
-            }
-        }
-
-        let meta_by_id = self
-            .load_file_projection_metadata_batch(tenant, &unique_ids)
-            .await?;
-
-        let meta_by_id = Arc::new(meta_by_id);
-        let results = stream::iter(file_ids.iter().cloned())
-            .map(|file_id| {
-                let meta_by_id = Arc::clone(&meta_by_id);
-                async move {
-                    let meta = meta_by_id.get(&file_id).cloned();
-                    self.read_single_file_text(tenant, file_id, meta).await
-                }
-            })
-            .buffered(FILE_BATCH_READ_CONCURRENCY)
-            .collect::<Vec<_>>()
-            .await;
-
-        let mut out = Vec::with_capacity(results.len());
-        for result in results {
-            out.push(result?);
-        }
-        Ok(out)
-    }
-
-    #[instrument(skip_all, fields(
-        otel.name = "state.read_file_version_texts_batch",
-        tenant = %tenant,
-        file_version_count = file_version_ids.len(),
-    ))]
-    pub async fn read_file_version_texts_batch(
-        &self,
-        tenant: &TenantId,
-        file_version_ids: &[String],
-    ) -> Result<Vec<TextFileVersionReadResult>, String> {
-        if file_version_ids.is_empty() {
-            return Ok(Vec::new());
-        }
-
-        let mut unique_ids = Vec::new();
-        let mut seen = BTreeSet::new();
-        for file_version_id in file_version_ids {
-            if seen.insert(file_version_id.clone()) {
-                unique_ids.push(file_version_id.clone());
-            }
-        }
-
-        let meta_by_id = self
-            .load_file_version_projection_metadata_batch(tenant, &unique_ids)
-            .await?;
-
-        let meta_by_id = Arc::new(meta_by_id);
-        let results = stream::iter(file_version_ids.iter().cloned())
-            .map(|file_version_id| {
-                let meta_by_id = Arc::clone(&meta_by_id);
-                async move {
-                    let meta = meta_by_id.get(&file_version_id).cloned();
-                    self.read_single_file_version_text(tenant, file_version_id, meta)
-                        .await
-                }
-            })
-            .buffered(FILE_BATCH_READ_CONCURRENCY)
-            .collect::<Vec<_>>()
-            .await;
-
-        let mut out = Vec::with_capacity(results.len());
-        for result in results {
-            out.push(result?);
-        }
-        Ok(out)
-    }
-
+    #[cfg(feature = "observe")]
     async fn load_file_projection_metadata_batch(
         &self,
         tenant: &TenantId,
@@ -286,6 +195,7 @@ impl ServerState {
         Ok(by_id)
     }
 
+    #[cfg(feature = "observe")]
     async fn load_file_version_projection_metadata_batch(
         &self,
         tenant: &TenantId,
@@ -425,86 +335,6 @@ impl ServerState {
             file_version_projection_from_state(&resp.state.fields),
         )
         .await
-    }
-
-    async fn read_single_file_text(
-        &self,
-        tenant: &TenantId,
-        file_id: String,
-        meta: Option<FileProjectionMeta>,
-    ) -> Result<TextFileReadResult, String> {
-        let Some(meta) = meta else {
-            return Ok(TextFileReadResult {
-                file_id,
-                found: false,
-                content_hash: String::new(),
-                mime_type: String::new(),
-                text: String::new(),
-            });
-        };
-
-        if !meta.has_content || meta.content_hash.is_empty() {
-            return Ok(TextFileReadResult {
-                file_id,
-                found: true,
-                content_hash: meta.content_hash,
-                mime_type: meta.mime_type,
-                text: String::new(),
-            });
-        }
-
-        let text = self
-            .fetch_blob_text_for_hash(tenant, &meta.content_hash)
-            .await?
-            .unwrap_or_default();
-
-        Ok(TextFileReadResult {
-            file_id,
-            found: true,
-            content_hash: meta.content_hash,
-            mime_type: meta.mime_type,
-            text,
-        })
-    }
-
-    async fn read_single_file_version_text(
-        &self,
-        tenant: &TenantId,
-        file_version_id: String,
-        meta: Option<FileProjectionMeta>,
-    ) -> Result<TextFileVersionReadResult, String> {
-        let Some(meta) = meta else {
-            return Ok(TextFileVersionReadResult {
-                file_version_id,
-                found: false,
-                content_hash: String::new(),
-                mime_type: String::new(),
-                text: String::new(),
-            });
-        };
-
-        if !meta.has_content || meta.content_hash.is_empty() {
-            return Ok(TextFileVersionReadResult {
-                file_version_id,
-                found: true,
-                content_hash: meta.content_hash,
-                mime_type: meta.mime_type,
-                text: String::new(),
-            });
-        }
-
-        let text = self
-            .fetch_blob_text_for_hash(tenant, &meta.content_hash)
-            .await?
-            .unwrap_or_default();
-
-        Ok(TextFileVersionReadResult {
-            file_version_id,
-            found: true,
-            content_hash: meta.content_hash,
-            mime_type: meta.mime_type,
-            text,
-        })
     }
 }
 

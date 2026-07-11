@@ -1,87 +1,42 @@
-//! Tenant access validation middleware.
-//!
-//! Defense-in-depth layer that verifies `github:*` principals have access
-//! to the requested tenant. Agent principals and requests without identity
-//! headers pass through (backward compatibility for local dev / MCP).
+//! Tenant access validation for authenticated requests.
 
 use axum::extract::{Request, State};
 use axum::http::StatusCode;
 use axum::middleware::Next;
 use axum::response::Response;
+use temper_authz::{AuthenticatedRequestContext, PrincipalKind};
 
 use crate::state::PlatformState;
 
-/// Extract the tenant ID from the request.
-///
-/// Checks `X-Tenant-Id` header first, then falls back to URL path inspection.
-fn extract_tenant(req: &Request) -> Option<String> {
-    // Check header first.
-    if let Some(val) = req.headers().get("x-tenant-id") {
-        return val.to_str().ok().map(|s| s.to_string());
-    }
-
-    // Check URL path for /api/tenants/:id patterns.
-    let path = req.uri().path();
-    if let Some(rest) = path.strip_prefix("/api/tenants/") {
-        let tenant_id = rest.split('/').next().unwrap_or("");
-        if !tenant_id.is_empty() {
-            return Some(tenant_id.to_string());
-        }
-    }
-
-    None
-}
-
-/// Axum middleware that validates tenant access for `github:*` principals.
-///
-/// Passthrough rules (no access check):
-/// - No `X-Temper-Principal-Id` header (local dev / backward compat)
-/// - `X-Temper-Principal-Kind` is `agent` (trusted backend-to-backend)
-/// - Principal doesn't start with `github:` (non-human principal)
-/// - No tenant could be extracted from the request
-/// - Tenant is `temper-system` (always accessible)
-/// - Not in TenantRouted mode (single-DB has no per-tenant access control)
+/// Validate that the credential-bound tenant is the tenant addressed by the
+/// request, then apply routed-storage membership checks for GitHub users.
 pub async fn tenant_access_check(
     State(state): State<PlatformState>,
     req: Request,
     next: Next,
 ) -> Result<Response, StatusCode> {
-    // No identity header → passthrough (local dev).
-    let Some(principal_id) = req
-        .headers()
-        .get("x-temper-principal-id")
-        .and_then(|v| v.to_str().ok())
-        .map(|s| s.to_string())
+    let Some(authenticated) = req
+        .extensions()
+        .get::<AuthenticatedRequestContext>()
+        .cloned()
     else {
+        // The outer bearer edge permits only exact public routes without a
+        // context. It remains authoritative for that classification.
         return Ok(next.run(req).await);
     };
 
-    // Agent principals pass through (trusted backend-to-backend).
-    let kind = req
-        .headers()
-        .get("x-temper-principal-kind")
-        .and_then(|v| v.to_str().ok())
-        .unwrap_or("");
-    if kind == "agent" {
+    let credential_tenant = authenticated.tenant().as_str();
+    if let Some(path_tenant) = tenant_from_path(req.uri().path())
+        && path_tenant != credential_tenant
+    {
+        return Err(StatusCode::FORBIDDEN);
+    }
+
+    let principal = &authenticated.security_context().principal;
+    if principal.kind == PrincipalKind::Agent || !principal.id.starts_with("github:") {
         return Ok(next.run(req).await);
     }
 
-    // Only validate github:* principals.
-    if !principal_id.starts_with("github:") {
-        return Ok(next.run(req).await);
-    }
-
-    // Extract tenant from request.
-    let Some(tenant_id) = extract_tenant(&req) else {
-        return Ok(next.run(req).await);
-    };
-
-    // Always-accessible tenants.
-    if tenant_id == "temper-system" {
-        return Ok(next.run(req).await);
-    }
-
-    // Check tenant access via the routed Turso capability.
     let Some(provider) = state
         .server
         .storage_stack
@@ -91,26 +46,43 @@ pub async fn tenant_access_check(
         return Ok(next.run(req).await);
     };
     if !provider.supports_tenant_admin() {
-        // Not in routed mode — no per-tenant access control.
         return Ok(next.run(req).await);
     }
 
-    match provider.tenants_for_user(&principal_id).await {
-        Ok(user_tenants) => {
-            if user_tenants.iter().any(|t| t.tenant_id == tenant_id) {
-                Ok(next.run(req).await)
-            } else {
-                Err(StatusCode::FORBIDDEN)
-            }
+    match provider.tenants_for_user(&principal.id).await {
+        Ok(user_tenants)
+            if user_tenants
+                .iter()
+                .any(|tenant| tenant.tenant_id == credential_tenant) =>
+        {
+            Ok(next.run(req).await)
         }
-        Err(e) => {
+        Ok(_) => Err(StatusCode::FORBIDDEN),
+        Err(error) => {
             tracing::error!(
-                principal = %principal_id,
-                tenant = %tenant_id,
-                error = %e,
+                principal = %principal.id,
+                tenant = credential_tenant,
+                error = %error,
                 "failed to check tenant access"
             );
             Err(StatusCode::SERVICE_UNAVAILABLE)
         }
+    }
+}
+
+fn tenant_from_path(path: &str) -> Option<&str> {
+    let rest = path.strip_prefix("/api/tenants/")?;
+    rest.split('/').next().filter(|tenant| !tenant.is_empty())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn extracts_only_explicit_tenant_path_segments() {
+        assert_eq!(tenant_from_path("/api/tenants/acme/specs"), Some("acme"));
+        assert_eq!(tenant_from_path("/api/tenants/"), None);
+        assert_eq!(tenant_from_path("/tdata/Orders"), None);
     }
 }

@@ -16,8 +16,10 @@ use std::collections::BTreeMap;
 use temper_platform::bootstrap::{bootstrap_agent_specs, bootstrap_system_tenant};
 use temper_platform::state::PlatformState;
 use temper_runtime::tenant::TenantId;
+use temper_server::StorageStack;
 use temper_server::identity::{IdentityResolver, hash_token};
 use temper_server::request_context::AgentContext;
+use temper_store_turso::TursoEventStore;
 use tower::ServiceExt;
 
 mod common;
@@ -25,6 +27,45 @@ mod common;
 use common::http::body_json;
 
 const TEST_TENANT: &str = "identity-test";
+const TEST_OPERATOR_KEY: &str = "registered-operator-test-key";
+
+const HTTP_IDENTITY_POLICY: &str = r#"
+permit(
+  principal == Agent::"operator",
+  action == Action::"create",
+  resource is AgentType
+);
+permit(
+  principal == Agent::"operator",
+  action == Action::"Define",
+  resource is AgentType
+);
+permit(
+  principal == Agent::"operator",
+  action == Action::"create",
+  resource is AgentCredential
+);
+permit(
+  principal == Agent::"operator",
+  action == Action::"Issue",
+  resource is AgentCredential
+);
+permit(
+  principal == Agent::"operator",
+  action == Action::"Rotate",
+  resource is AgentCredential
+);
+permit(
+  principal == Agent::"operator",
+  action == Action::"delete",
+  resource is AgentCredential
+);
+permit(
+  principal == Agent::"http-inst-1",
+  action == Action::"list",
+  resource is AgentType
+);
+"#;
 
 /// Build a `PlatformState` with both system and agent specs bootstrapped
 /// on a dedicated test tenant.
@@ -55,6 +96,52 @@ async fn dispatch(
         )
         .await
         .unwrap_or_else(|e| panic!("dispatch {entity_type}.{action} failed: {e}"))
+}
+
+async fn define_type_and_issue_credential(
+    state: &PlatformState,
+    agent_type_id: &str,
+    agent_type_name: &str,
+    plaintext: &str,
+    agent_instance_id: &str,
+) -> String {
+    let response = dispatch(
+        state,
+        "AgentType",
+        agent_type_id,
+        "Define",
+        serde_json::json!({
+            "name": agent_type_name,
+            "system_prompt": "test",
+            "tool_set": "local",
+            "model": "claude-sonnet-4-6",
+            "max_turns": "200",
+            "adapter_config": "{}",
+            "default_budget_cents": "0"
+        }),
+    )
+    .await;
+    assert!(response.success, "Define: {:?}", response.error);
+
+    let key_hash = hash_token(plaintext);
+    let response = dispatch(
+        state,
+        "AgentCredential",
+        &key_hash,
+        "Issue",
+        serde_json::json!({
+            "agent_type_id": agent_type_id,
+            "agent_instance_id": agent_instance_id,
+            "key_hash": key_hash,
+            "key_prefix": "tmpr_test",
+            "description": "identity E2E credential",
+            "created_by": "test",
+            "expires_at": ""
+        }),
+    )
+    .await;
+    assert!(response.success, "Issue: {:?}", response.error);
+    key_hash
 }
 
 // =========================================================================
@@ -312,9 +399,93 @@ async fn e2e_identity_resolution_rotated_credential() {
     .await;
 
     // Should no longer resolve (status is Rotated, not Active)
-    let resolver2 = IdentityResolver::new();
-    let result = resolver2.resolve(&state.server, &tenant, plaintext).await;
+    let result = resolver.resolve(&state.server, &tenant, plaintext).await;
     assert!(result.is_none(), "rotated credential should not resolve");
+}
+
+/// Identity resolver: revocation takes effect for an already-used resolver.
+#[tokio::test]
+async fn e2e_identity_resolution_revocation_is_immediate() {
+    let state = identity_test_state();
+    let tenant = TenantId::new(TEST_TENANT);
+    let plaintext = "tmpr_immediate-revocation-test";
+    let key_hash = define_type_and_issue_credential(
+        &state,
+        "revoke-type",
+        "revocable-agent",
+        plaintext,
+        "revoke-inst",
+    )
+    .await;
+    let resolver = IdentityResolver::new();
+
+    assert!(
+        resolver
+            .resolve(&state.server, &tenant, plaintext)
+            .await
+            .is_some()
+    );
+    let response = dispatch(
+        &state,
+        "AgentCredential",
+        &key_hash,
+        "Revoke",
+        serde_json::json!({}),
+    )
+    .await;
+    assert!(response.success, "Revoke: {:?}", response.error);
+
+    assert!(
+        resolver
+            .resolve(&state.server, &tenant, plaintext)
+            .await
+            .is_none(),
+        "revocation must remove authority on the next resolution"
+    );
+}
+
+/// Identity resolution rejects registry rows whose stored hash no longer
+/// matches the entity ID derived from the presented credential.
+#[tokio::test]
+async fn e2e_identity_resolution_rejects_mismatched_stored_hash() {
+    let state = identity_test_state();
+    let tenant = TenantId::new(TEST_TENANT);
+    let plaintext = "tmpr_hash-binding-test";
+    let key_hash = define_type_and_issue_credential(
+        &state,
+        "hash-binding-type",
+        "hash-binding-agent",
+        plaintext,
+        "hash-binding-inst",
+    )
+    .await;
+    let resolver = IdentityResolver::new();
+    assert!(
+        resolver
+            .resolve(&state.server, &tenant, plaintext)
+            .await
+            .is_some()
+    );
+
+    state
+        .server
+        .update_tenant_entity_fields(
+            &tenant,
+            "AgentCredential",
+            &key_hash,
+            serde_json::json!({"key_hash": "different-hash"}),
+            false,
+        )
+        .await
+        .expect("generic test mutation should succeed");
+
+    assert!(
+        resolver
+            .resolve(&state.server, &tenant, plaintext)
+            .await
+            .is_none(),
+        "mismatched durable lookup ID and stored key hash must fail closed"
+    );
 }
 
 /// Identity resolver: deprecated AgentType → None.
@@ -381,8 +552,7 @@ async fn e2e_identity_resolution_deprecated_agent_type() {
     .await;
 
     // Should no longer resolve (AgentType status is Deprecated, not Active)
-    let resolver2 = IdentityResolver::new();
-    let result = resolver2.resolve(&state.server, &tenant, plaintext).await;
+    let result = resolver.resolve(&state.server, &tenant, plaintext).await;
     assert!(
         result.is_none(),
         "credential linked to deprecated AgentType should not resolve"
@@ -393,17 +563,26 @@ async fn e2e_identity_resolution_deprecated_agent_type() {
 // HTTP-level identity tests
 // =========================================================================
 
-/// Build a router with agent specs and an API key configured for bearer auth.
-fn identity_test_router() -> axum::Router {
-    let mut state = identity_test_state();
-    state.api_token = Some("admin-test-key".to_string());
-    temper_platform::router::build_platform_router(state)
+/// Build state with an ordinary tenant operator and exact HTTP test policy.
+async fn identity_http_state() -> PlatformState {
+    let state = identity_test_state();
+    temper_platform::bootstrap_operator_credential(&state, TEST_OPERATOR_KEY, TEST_TENANT).await;
+    state
+        .server
+        .authz
+        .reload_tenant_policies(TEST_TENANT, HTTP_IDENTITY_POLICY)
+        .expect("HTTP identity test policy should parse");
+    state
+}
+
+async fn identity_test_router() -> axum::Router {
+    temper_platform::router::build_platform_router(identity_http_state().await)
 }
 
 /// Bearer auth: `/api/identity/resolve` is accessible without Authorization header.
 #[tokio::test]
 async fn e2e_http_identity_resolve_exempt_from_auth() {
-    let app = identity_test_router();
+    let app = identity_test_router().await;
 
     // POST /api/identity/resolve without any Authorization header — should NOT 401
     let response = app
@@ -428,15 +607,15 @@ async fn e2e_http_identity_resolve_exempt_from_auth() {
 /// Bearer auth: valid agent credential resolves identity on HTTP requests.
 #[tokio::test]
 async fn e2e_http_agent_credential_auth() {
-    let app = identity_test_router();
+    let app = identity_test_router().await;
 
-    // 1. Create AgentType (as admin)
+    // 1. Create AgentType as a registered, tenant-scoped operator.
     let response = app
         .clone()
         .oneshot(
             Request::post("/tdata/AgentTypes")
                 .header("Content-Type", "application/json")
-                .header("Authorization", "Bearer admin-test-key")
+                .header("Authorization", format!("Bearer {TEST_OPERATOR_KEY}"))
                 .header("X-Tenant-Id", TEST_TENANT)
                 .body(Body::from(r#"{"id": "http-cc-type"}"#))
                 .unwrap(),
@@ -451,7 +630,7 @@ async fn e2e_http_agent_credential_auth() {
         .oneshot(
             Request::post("/tdata/AgentTypes('http-cc-type')/Temper.Agent.Define")
                 .header("Content-Type", "application/json")
-                .header("Authorization", "Bearer admin-test-key")
+                .header("Authorization", format!("Bearer {TEST_OPERATOR_KEY}"))
                 .header("X-Tenant-Id", TEST_TENANT)
                 .body(Body::from(
                     r#"{"name": "claude-code", "system_prompt": "test", "tool_set": "local", "model": "claude-sonnet-4-6", "max_turns": "200", "adapter_config": "{}", "default_budget_cents": "0"}"#,
@@ -473,7 +652,7 @@ async fn e2e_http_agent_credential_auth() {
         .oneshot(
             Request::post("/tdata/AgentCredentials")
                 .header("Content-Type", "application/json")
-                .header("Authorization", "Bearer admin-test-key")
+                .header("Authorization", format!("Bearer {TEST_OPERATOR_KEY}"))
                 .header("X-Tenant-Id", TEST_TENANT)
                 .body(Body::from(format!(r#"{{"id": "{key_hash}"}}"#)))
                 .unwrap(),
@@ -490,7 +669,7 @@ async fn e2e_http_agent_credential_auth() {
                 "/tdata/AgentCredentials('{key_hash}')/Temper.Agent.Issue"
             ))
             .header("Content-Type", "application/json")
-            .header("Authorization", "Bearer admin-test-key")
+            .header("Authorization", format!("Bearer {TEST_OPERATOR_KEY}"))
             .header("X-Tenant-Id", TEST_TENANT)
             .body(Body::from(format!(
                 r#"{{"agent_type_id": "http-cc-type", "agent_instance_id": "http-inst-1", "key_hash": "{key_hash}", "key_prefix": "tmpr_http", "description": "HTTP auth test", "created_by": "test", "expires_at": ""}}"#
@@ -543,7 +722,7 @@ async fn e2e_http_agent_credential_auth() {
 /// Bearer auth: no token → 401, wrong token → 401.
 #[tokio::test]
 async fn e2e_http_missing_and_wrong_token_rejected() {
-    let app = identity_test_router();
+    let app = identity_test_router().await;
 
     // No auth header
     let response = app
@@ -573,73 +752,45 @@ async fn e2e_http_missing_and_wrong_token_rejected() {
     assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
 }
 
-/// Bearer auth: global API key passes as admin.
+/// Bearer auth: configuring a deployment key does not create runtime Admin authority.
 #[tokio::test]
-async fn e2e_http_global_api_key_admin_access() {
-    let app = identity_test_router();
+async fn e2e_http_unregistered_deployment_key_has_no_admin_fallback() {
+    let mut state = identity_test_state();
+    state.api_token = Some("unregistered-deployment-key".to_string());
+    let app = temper_platform::router::build_platform_router(state);
 
     let response = app
         .oneshot(
             Request::get("/tdata/AgentTypes")
-                .header("Authorization", "Bearer admin-test-key")
+                .header("Authorization", "Bearer unregistered-deployment-key")
                 .header("X-Tenant-Id", TEST_TENANT)
                 .body(Body::empty())
                 .unwrap(),
         )
         .await
         .unwrap();
-    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
 }
 
-/// Cache coherence: rotating a credential invalidates resolver cache immediately.
+/// A generic OData deletion removes credential authority immediately.
 #[tokio::test]
-async fn e2e_http_rotate_invalidates_identity_cache() {
-    let mut state = identity_test_state();
-    state.api_token = Some("admin-test-key".to_string());
-    let resolver = state.identity_resolver.clone();
+async fn e2e_http_generic_delete_removes_credential_authority() {
+    let state = identity_http_state().await;
+    let resolver = IdentityResolver::new();
     let app = temper_platform::router::build_platform_router(state.clone());
     let tenant = TenantId::new(TEST_TENANT);
 
-    // Create AgentType + credential.
-    let r = dispatch(
+    let plaintext = "tmpr_generic-delete-test";
+    let key_hash = define_type_and_issue_credential(
         &state,
-        "AgentType",
-        "cache-type",
-        "Define",
-        serde_json::json!({
-            "name": "cache-agent",
-            "system_prompt": "test",
-            "tool_set": "local",
-            "model": "claude-sonnet-4-6",
-            "max_turns": "200",
-            "adapter_config": "{}",
-            "default_budget_cents": "0"
-        }),
+        "delete-type",
+        "deletable-agent",
+        plaintext,
+        "delete-inst",
     )
     .await;
-    assert!(r.success);
 
-    let plaintext = "tmpr_cache-invalidate-test";
-    let key_hash = hash_token(plaintext);
-    let r = dispatch(
-        &state,
-        "AgentCredential",
-        &key_hash,
-        "Issue",
-        serde_json::json!({
-            "agent_type_id": "cache-type",
-            "agent_instance_id": "cache-inst-1",
-            "key_hash": key_hash,
-            "key_prefix": "tmpr_cach",
-            "description": "cache test",
-            "created_by": "test",
-            "expires_at": ""
-        }),
-    )
-    .await;
-    assert!(r.success);
-
-    // Populate cache with a successful resolution.
+    // Establish that this resolver has already returned positive authority.
     assert!(
         resolver
             .resolve(&state.server, &tenant, plaintext)
@@ -647,31 +798,85 @@ async fn e2e_http_rotate_invalidates_identity_cache() {
             .is_some()
     );
 
-    // Rotate through HTTP route (this should trigger middleware invalidation).
+    // Use the generic entity mutation path, not an AgentCredential action.
     let response = app
         .oneshot(
-            Request::post(format!(
-                "/tdata/AgentCredentials('{key_hash}')/Temper.Agent.Rotate"
-            ))
-            .header("Content-Type", "application/json")
-            .header("Authorization", "Bearer admin-test-key")
-            .header("X-Tenant-Id", TEST_TENANT)
-            .body(Body::from(
-                r#"{"key_hash":"rotated-hash","key_prefix":"tmpr_rot","description":"rotated"}"#,
-            ))
-            .unwrap(),
+            Request::delete(format!("/tdata/AgentCredentials('{key_hash}')"))
+                .header("Authorization", format!("Bearer {TEST_OPERATOR_KEY}"))
+                .header("X-Tenant-Id", TEST_TENANT)
+                .body(Body::empty())
+                .unwrap(),
         )
         .await
         .unwrap();
-    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(response.status(), StatusCode::NO_CONTENT);
 
-    // Resolver should not return stale cached identity after rotate.
     assert!(
         resolver
             .resolve(&state.server, &tenant, plaintext)
             .await
             .is_none(),
-        "rotated credential must be invalidated in resolver cache immediately"
+        "generic deletion must remove authority on the next resolution"
+    );
+}
+
+/// A mutation on one replica is authoritative for identity checks on another.
+#[tokio::test]
+async fn e2e_replica_revocation_is_read_from_shared_durable_state() {
+    let directory = tempfile::tempdir().expect("create identity replica test directory");
+    let database_url = format!("file:{}", directory.path().join("identity.db").display());
+    let store = TursoEventStore::new(&database_url, None)
+        .await
+        .expect("create shared identity store");
+
+    let mut first = identity_test_state();
+    let registry = first
+        .registry
+        .read()
+        .expect("identity registry lock should be healthy")
+        .clone();
+    let mut second = PlatformState::with_registry(registry, None);
+    first
+        .server
+        .set_storage_stack(StorageStack::from_turso(store.clone()));
+    second
+        .server
+        .set_storage_stack(StorageStack::from_turso(store));
+
+    let plaintext = "tmpr_cross-replica-revocation";
+    let key_hash = define_type_and_issue_credential(
+        &first,
+        "replica-type",
+        "replica-agent",
+        plaintext,
+        "replica-inst",
+    )
+    .await;
+    let tenant = TenantId::new(TEST_TENANT);
+    let resolver = IdentityResolver::new();
+    assert!(
+        resolver
+            .resolve(&first.server, &tenant, plaintext)
+            .await
+            .is_some()
+    );
+
+    let response = dispatch(
+        &second,
+        "AgentCredential",
+        &key_hash,
+        "Revoke",
+        serde_json::json!({}),
+    )
+    .await;
+    assert!(response.success, "replica Revoke: {:?}", response.error);
+
+    assert!(
+        resolver
+            .resolve(&first.server, &tenant, plaintext)
+            .await
+            .is_none(),
+        "the first replica must observe revocation from shared durable state"
     );
 }
 
@@ -723,10 +928,9 @@ async fn e2e_bootstrap_operator_credential_idempotent() {
     assert!(identity.verified);
 }
 
-/// Resolver cache is tenant-scoped — a credential resolved in one tenant must
-/// not leak into another tenant that has no matching AgentCredential entity.
+/// Identity resolution is tenant-scoped.
 #[tokio::test]
-async fn e2e_identity_resolution_cache_is_tenant_scoped() {
+async fn e2e_identity_resolution_is_tenant_scoped() {
     let state = identity_test_state();
     let api_key = "tmpr_tenant_scoped_cache_test";
 
@@ -744,7 +948,7 @@ async fn e2e_identity_resolution_cache_is_tenant_scoped() {
         .await;
     assert!(
         leaked.is_none(),
-        "resolver cache must not reuse identities across tenants"
+        "identity authority must not cross tenant boundaries"
     );
 }
 

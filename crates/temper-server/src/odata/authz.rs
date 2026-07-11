@@ -2,13 +2,13 @@
 
 use std::collections::BTreeMap;
 
-use axum::http::{HeaderMap, StatusCode};
+use axum::extract::Extension;
+use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
-use temper_authz::SecurityContext;
+use temper_authz::{AuthenticatedRequestContext, SecurityContext};
 use temper_runtime::tenant::TenantId;
 
-use crate::authz::{DenialInput, record_authz_denial, security_context_from_headers};
-use crate::identity::ResolvedIdentity;
+use crate::authz::{DenialInput, record_authz_denial};
 use crate::request_context::AgentContext;
 use crate::response::odata_error;
 use crate::state::ServerState;
@@ -19,20 +19,44 @@ pub(crate) const READ_ACTION: &str = "read";
 pub(super) const UPDATE_ACTION: &str = "update";
 pub(super) const DELETE_ACTION: &str = "delete";
 
-/// Build the authoritative Cedar principal for an external OData request.
-pub(super) fn request_security_context(
-    headers: &HeaderMap,
-    agent_ctx: &AgentContext,
-    resolved_identity: Option<&ResolvedIdentity>,
-) -> SecurityContext {
-    if let Some(identity) = resolved_identity {
-        SecurityContext::from_resolved_identity(
-            &identity.agent_instance_id,
-            &identity.agent_type_name,
-            agent_ctx.session_id.as_deref(),
+/// Require the immutable context installed by credential authentication.
+#[derive(Clone, Copy, Debug)]
+pub(super) struct AuthenticationRequired;
+
+impl IntoResponse for AuthenticationRequired {
+    fn into_response(self) -> Response {
+        odata_error(
+            StatusCode::UNAUTHORIZED,
+            "AuthenticationRequired",
+            "A valid tenant credential is required",
         )
-    } else {
-        security_context_from_headers(headers, None, agent_ctx.session_id.as_deref(), None)
+        .into_response()
+    }
+}
+
+pub(super) fn require_authenticated_context(
+    context: Option<Extension<AuthenticatedRequestContext>>,
+) -> Result<AuthenticatedRequestContext, AuthenticationRequired> {
+    context
+        .map(|Extension(context)| context)
+        .ok_or(AuthenticationRequired)
+}
+
+/// Attach exact authenticated authority to downstream dispatch context.
+///
+/// Correlation metadata remains header-derived, but no principal field is
+/// reconstructed or enriched from headers.
+pub(super) fn apply_authenticated_context(
+    agent_context: &mut AgentContext,
+    security_context: &SecurityContext,
+) {
+    agent_context.security_ctx = Some(security_context.clone());
+    if matches!(
+        security_context.principal.kind,
+        temper_authz::PrincipalKind::Agent | temper_authz::PrincipalKind::Admin
+    ) {
+        agent_context.agent_id = Some(security_context.principal.id.clone());
+        agent_context.agent_type = security_context.principal.agent_type.clone();
     }
 }
 
@@ -49,11 +73,6 @@ pub(super) fn resource_attrs_from_body(
     body: &serde_json::Value,
 ) -> BTreeMap<String, serde_json::Value> {
     let mut attrs = BTreeMap::new();
-    attrs.insert(
-        "id".to_string(),
-        serde_json::Value::String(resource_id.to_string()),
-    );
-
     let status = body
         .get("status")
         .or_else(|| body.get("Status"))
@@ -61,23 +80,34 @@ pub(super) fn resource_attrs_from_body(
         .or_else(|| body.get("fields").and_then(|fields| fields.get("Status")))
         .cloned()
         .unwrap_or_else(|| serde_json::Value::String(String::new()));
-    attrs.insert("status".to_string(), status);
 
     if let Some(fields) = body.get("fields").and_then(serde_json::Value::as_object) {
         for (key, value) in fields {
-            attrs.insert(key.clone(), value.clone());
+            if !temper_spec::automaton::is_server_derived_field_name(key) {
+                attrs.insert(key.clone(), value.clone());
+            }
         }
     } else if let Some(fields) = body.as_object() {
         for (key, value) in fields {
-            if !key.starts_with('@') {
+            if !key.starts_with('@') && !temper_spec::automaton::is_server_derived_field_name(key) {
                 attrs.insert(key.clone(), value.clone());
             }
         }
     }
 
+    for key in ["id", "Id"] {
+        attrs.insert(
+            key.to_string(),
+            serde_json::Value::String(resource_id.to_string()),
+        );
+    }
+    for key in ["status", "Status"] {
+        attrs.insert(key.to_string(), status.clone());
+    }
+
     let has_spec = state
         .has_registered_spec(tenant, entity_type)
-        .unwrap_or(false);
+        .expect("registry lock poisoned while building OData authorization attributes");
     attrs.insert("has_spec".to_string(), serde_json::Value::Bool(has_spec));
     attrs
 }

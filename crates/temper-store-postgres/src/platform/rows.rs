@@ -191,6 +191,7 @@ pub(super) fn row_to_feature_request(row: sqlx::postgres::PgRow) -> PostgresFeat
     let updated_at: chrono::DateTime<chrono::Utc> = row.get("updated_at");
     PostgresFeatureRequestRow {
         id: row.get("id"),
+        tenant: row.get("tenant"),
         category: row.get("category"),
         description: row.get("description"),
         frequency: row.get("frequency"),
@@ -207,6 +208,7 @@ pub(super) fn row_to_evolution_record(row: sqlx::postgres::PgRow) -> PostgresEvo
     let timestamp: chrono::DateTime<chrono::Utc> = row.get("timestamp");
     PostgresEvolutionRecordRow {
         id: row.get("id"),
+        tenant: row.get("tenant"),
         record_type: row.get("record_type"),
         status: row.get("status"),
         created_by: row.get("created_by"),

@@ -1,6 +1,10 @@
 use super::*;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
+
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
+use sha1::Digest as _;
 use temper_runtime::ActorSystem;
 use temper_runtime::tenant::TenantId;
 use temper_spec::csdl::parse_csdl;
@@ -9,6 +13,96 @@ use tower::ServiceExt;
 
 use crate::events::EntityStateChange;
 use crate::storage::StorageStack;
+
+fn test_security_context() -> temper_authz::SecurityContext {
+    temper_authz::SecurityContext {
+        principal: temper_authz::Principal {
+            id: "test-customer".to_string(),
+            kind: temper_authz::PrincipalKind::Customer,
+            role: None,
+            acting_for: None,
+            agent_type: None,
+            attributes: Default::default(),
+        },
+        context_attrs: Default::default(),
+        correlation_id: "router-test".to_string(),
+    }
+}
+
+fn claimed_admin_security_context() -> temper_authz::SecurityContext {
+    temper_authz::SecurityContext {
+        principal: temper_authz::Principal {
+            id: "claimed-admin".to_string(),
+            kind: temper_authz::PrincipalKind::Admin,
+            role: None,
+            acting_for: None,
+            agent_type: None,
+            attributes: Default::default(),
+        },
+        context_attrs: Default::default(),
+        correlation_id: "router-admin-side-channel-test".to_string(),
+    }
+}
+
+async fn authenticate_test_request(
+    mut request: axum::extract::Request,
+    next: axum::middleware::Next,
+) -> axum::response::Response {
+    if request
+        .extensions()
+        .get::<temper_authz::AuthenticatedRequestContext>()
+        .is_none()
+    {
+        let tenant = request
+            .headers()
+            .get("x-tenant-id")
+            .and_then(|value| value.to_str().ok())
+            .filter(|value| !value.trim().is_empty())
+            .map(str::trim)
+            .map(TenantId::try_new)
+            .transpose()
+            .expect("test tenant header should be valid")
+            .unwrap_or_default();
+        request
+            .extensions_mut()
+            .insert(temper_authz::AuthenticatedRequestContext::new(
+                tenant,
+                test_security_context(),
+            ));
+    }
+    next.run(request).await
+}
+
+fn authenticated_router(state: ServerState) -> Router {
+    if state
+        .authz
+        .get_tenant_policy_text(TenantId::default().as_str())
+        .is_none()
+    {
+        state
+            .authz
+            .reload_tenant_policies(
+                TenantId::default().as_str(),
+                "permit(principal, action, resource);",
+            )
+            .expect("functional router tests should install an explicit policy");
+    }
+    super::build_router(state).layer(axum::middleware::from_fn(authenticate_test_request))
+}
+
+fn git_blob_id(body: &[u8]) -> String {
+    let mut hasher = sha1::Sha1::new();
+    hasher.update(format!("blob {}\0", body.len()).as_bytes());
+    hasher.update(body);
+    format!("{:x}", hasher.finalize())
+}
+
+fn counted_body(bytes: &'static [u8], polls: Arc<AtomicUsize>) -> Body {
+    Body::from_stream(futures_util::stream::once(async move {
+        polls.fetch_add(1, Ordering::SeqCst);
+        Ok::<_, std::io::Error>(bytes::Bytes::from_static(bytes))
+    }))
+}
 
 fn test_state() -> ServerState {
     let csdl_xml = include_str!("../../../test-fixtures/specs/model.csdl.xml");
@@ -88,7 +182,16 @@ params = ["RepositoryId", "Size", "Content", "CanonicalBytes", "CreatedAt"]
     let system = ActorSystem::new("test-blob-ingest");
     let mut specs = std::collections::BTreeMap::new();
     specs.insert("Blob".to_string(), blob_ioa.to_string());
-    ServerState::with_specs(system, csdl, csdl_xml.to_string(), specs).unwrap()
+    let mut state = ServerState::with_specs(system, csdl, csdl_xml.to_string(), specs).unwrap();
+    state.data_dir = std::env::temp_dir().join("temper-router-blob-tests");
+    state
+        .authz
+        .reload_tenant_policies(
+            "default",
+            r#"permit(principal, action == Action::"create", resource is Blob);"#,
+        )
+        .expect("install Blob test policy");
+    state
 }
 
 fn test_state_with_rate_limit_ioa() -> ServerState {
@@ -251,7 +354,13 @@ params = ["RepositoryId", "Size", "Content", "CanonicalBytes", "CreatedAt"]
     specs.insert("Owner".to_string(), owner_ioa.to_string());
     specs.insert("Repository".to_string(), repository_ioa.to_string());
     specs.insert("Blob".to_string(), blob_ioa.to_string());
-    ServerState::with_specs(system, csdl, csdl_xml.to_string(), specs).unwrap()
+    let mut state = ServerState::with_specs(system, csdl, csdl_xml.to_string(), specs).unwrap();
+    state.data_dir = std::env::temp_dir().join("temper-router-storage-cap-tests");
+    state
+        .authz
+        .reload_tenant_policies("default", "permit(principal, action, resource);")
+        .expect("install commons storage test policy");
+    state
 }
 
 fn test_state_with_account_verification_ioa() -> ServerState {
@@ -476,7 +585,7 @@ initial = ""
 
 #[tokio::test]
 async fn test_service_document() {
-    let app = build_router(test_state());
+    let app = authenticated_router(test_state());
     let response = app
         .oneshot(Request::get("/tdata").body(Body::empty()).unwrap())
         .await
@@ -492,8 +601,81 @@ async fn test_service_document() {
 }
 
 #[tokio::test]
+async fn protected_kernel_route_rejects_forged_headers_without_typed_context() {
+    let response = super::build_router(test_state())
+        .oneshot(
+            Request::get("/tdata/Orders")
+                .header("x-tenant-id", "victim")
+                .header("x-temper-principal-kind", "admin")
+                .header("x-temper-principal-id", "attacker")
+                .header("x-temper-agent-role", "supervisor")
+                .header("x-temper-principal-scopes", "root")
+                .header("x-temper-attr-owner", "*")
+                .header("x-temper-action-context", "forged")
+                .body(Body::empty())
+                .expect("request should build"),
+        )
+        .await
+        .expect("request should run");
+
+    assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+}
+
+#[tokio::test]
+async fn typed_admin_kind_does_not_bypass_governed_mutation_cedar() {
+    let mut request = Request::post("/tdata/Orders")
+        .header("content-type", "application/json")
+        .body(Body::from(r#"{"Id":"claimed-admin-order"}"#))
+        .expect("request should build");
+    request
+        .extensions_mut()
+        .insert(temper_authz::AuthenticatedRequestContext::new(
+            TenantId::default(),
+            claimed_admin_security_context(),
+        ));
+    let response = super::build_router(test_state_with_ioa())
+        .oneshot(request)
+        .await
+        .expect("request should run");
+    assert_eq!(response.status(), StatusCode::FORBIDDEN);
+}
+
+#[tokio::test]
+async fn hints_require_typed_authentication_and_are_tenant_scoped() {
+    let state = test_state();
+    state.enrich_metadata(&TenantId::default(), "Submit", "default hint");
+    state.enrich_metadata(&TenantId::new("tenant-b"), "Approve", "tenant-b hint");
+
+    let unauthenticated = super::build_router(state.clone())
+        .oneshot(
+            Request::get("/tdata/$hints")
+                .body(Body::empty())
+                .expect("unauthenticated hints request"),
+        )
+        .await
+        .expect("unauthenticated hints response");
+    assert_eq!(unauthenticated.status(), StatusCode::UNAUTHORIZED);
+
+    let response = authenticated_router(state)
+        .oneshot(
+            Request::get("/tdata/$hints")
+                .body(Body::empty())
+                .expect("authenticated hints request"),
+        )
+        .await
+        .expect("authenticated hints response");
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(response.into_body(), 64 * 1024)
+        .await
+        .expect("hints body");
+    let body: serde_json::Value = serde_json::from_slice(&body).expect("hints JSON");
+    assert_eq!(body["Submit"], "default hint");
+    assert!(body.get("Approve").is_none());
+}
+
+#[tokio::test]
 async fn test_metadata_endpoint() {
-    let app = build_router(test_state());
+    let app = authenticated_router(test_state());
     let response = app
         .oneshot(
             Request::get("/tdata/$metadata")
@@ -516,7 +698,7 @@ async fn test_metadata_endpoint() {
 
 #[tokio::test]
 async fn test_entity_set_listing() {
-    let app = build_router(test_state());
+    let app = authenticated_router(test_state());
     let response = app
         .oneshot(Request::get("/tdata/Orders").body(Body::empty()).unwrap())
         .await
@@ -532,7 +714,7 @@ async fn test_entity_set_listing() {
 
 #[tokio::test]
 async fn test_entity_by_key_not_found() {
-    let app = build_router(test_state());
+    let app = authenticated_router(test_state());
     let response = app
         .oneshot(
             Request::get("/tdata/Orders('abc-123')")
@@ -548,7 +730,7 @@ async fn test_entity_by_key_not_found() {
 
 #[tokio::test]
 async fn test_entity_by_key_found() {
-    let app = build_router(test_state_with_ioa());
+    let app = authenticated_router(test_state_with_ioa());
 
     // First create an entity via POST
     let create_response = app
@@ -583,7 +765,7 @@ async fn test_entity_by_key_found() {
 
 #[tokio::test]
 async fn test_unknown_entity_set_returns_404() {
-    let app = build_router(test_state());
+    let app = authenticated_router(test_state());
     let response = app
         .oneshot(
             Request::get("/tdata/NonExistent")
@@ -598,7 +780,7 @@ async fn test_unknown_entity_set_returns_404() {
 
 #[tokio::test]
 async fn test_post_entity_creation() {
-    let app = build_router(test_state_with_ioa());
+    let app = authenticated_router(test_state_with_ioa());
     let response = app
         .oneshot(
             Request::post("/tdata/Orders")
@@ -614,7 +796,7 @@ async fn test_post_entity_creation() {
 
 #[tokio::test]
 async fn test_post_entity_creation_uses_odata_id_property() {
-    let app = build_router(test_state_with_ioa());
+    let app = authenticated_router(test_state_with_ioa());
     let create_response = app
         .clone()
         .oneshot(
@@ -639,9 +821,95 @@ async fn test_post_entity_creation_uses_odata_id_property() {
 }
 
 #[tokio::test]
+async fn collection_create_rejects_conflicting_identity_or_lifecycle_aliases() {
+    let app = authenticated_router(test_state_with_ioa());
+
+    let conflicting_id = app
+        .clone()
+        .oneshot(
+            Request::post("/tdata/Orders")
+                .header("Content-Type", "application/json")
+                .body(Body::from(
+                    r#"{"id":"order-lower","Id":"order-upper","status":"Draft"}"#,
+                ))
+                .expect("conflicting ID request"),
+        )
+        .await
+        .expect("conflicting ID response");
+    assert_eq!(conflicting_id.status(), StatusCode::BAD_REQUEST);
+
+    let forged_status = app
+        .oneshot(
+            Request::post("/tdata/Orders")
+                .header("Content-Type", "application/json")
+                .body(Body::from(r#"{"id":"order-status","Status":"Shipped"}"#))
+                .expect("forged status request"),
+        )
+        .await
+        .expect("forged status response");
+    assert_eq!(forged_status.status(), StatusCode::BAD_REQUEST);
+}
+
+#[tokio::test]
+async fn collection_create_derives_and_persists_authoritative_compatibility_aliases() {
+    let state = test_state_with_ioa();
+    state
+        .authz
+        .reload_tenant_policies(
+            "default",
+            r#"
+permit(principal, action == Action::"create", resource is Order)
+when {
+  resource.id == "order-trusted" &&
+  resource.Id == "order-trusted" &&
+  resource.status == "Draft" &&
+  resource.Status == "Draft"
+};
+forbid(principal, action == Action::"create", resource is Order)
+when { resource has ctx_owner_status };
+"#,
+        )
+        .expect("trusted create policy");
+    let app = authenticated_router(state);
+
+    let response = app
+        .oneshot(
+            Request::post("/tdata/Orders")
+                .header("Content-Type", "application/json")
+                .body(Body::from(
+                    r#"{
+                        "id":"order-trusted",
+                        "Id":"order-trusted",
+                        "status":"Draft",
+                        "Status":"Draft",
+                        "has_spec":true,
+                        "HasSpec":true,
+                        "ctx_owner_status":"Privileged",
+                        "customer":"Alice"
+                    }"#,
+                ))
+                .expect("trusted create request"),
+        )
+        .await
+        .expect("trusted create response");
+    assert_eq!(response.status(), StatusCode::CREATED);
+    let body = axum::body::to_bytes(response.into_body(), 1024 * 1024)
+        .await
+        .expect("create response body");
+    let body: serde_json::Value = serde_json::from_slice(&body).expect("create response JSON");
+    assert_eq!(body["fields"]["id"], "order-trusted");
+    assert_eq!(body["fields"]["Id"], "order-trusted");
+    assert_eq!(body["fields"]["status"], "Draft");
+    assert_eq!(body["fields"]["Status"], "Draft");
+    assert!(body["fields"].get("ctx_owner_status").is_none());
+    assert!(body["fields"].get("has_spec").is_none());
+    assert!(body["fields"].get("HasSpec").is_none());
+}
+
+#[tokio::test]
 async fn test_data_only_entity_create_fast_path_persists_projection_without_actor_spawn() {
     let state = test_state_with_data_only_ioa_and_turso().await;
-    let app = build_router(state.clone());
+    let app = authenticated_router(state.clone());
 
     let create_response = app
         .clone()
@@ -710,9 +978,13 @@ async fn test_data_only_create_fast_path_declines_action_bearing_entities() {
 #[tokio::test]
 async fn commons_rate_limit_returns_429_per_owner_bucket() {
     let state = test_state_with_rate_limit_ioa();
+    state
+        .authz
+        .reload_tenant_policies("beta", "permit(principal, action, resource);")
+        .expect("beta functional test policy should parse");
     state.enable_commons_guardrails("default");
     state.enable_commons_guardrails("beta");
-    let app = build_router(state.clone());
+    let app = authenticated_router(state.clone());
 
     let alice_bucket = ServerState::commons_rate_limit_entity_id("alice", "write");
     let response = app
@@ -770,6 +1042,25 @@ async fn commons_rate_limit_returns_429_per_owner_bucket() {
         .await
         .unwrap();
     assert_eq!(exhausted.status(), StatusCode::TOO_MANY_REQUESTS);
+
+    let mut claimed_admin_request = Request::post("/tdata/Widgets")
+        .header("Content-Type", "application/json")
+        .body(Body::from(
+            r#"{"Id":"wd-alice-admin","OwnerId":"alice","Name":"claimed admin"}"#,
+        ))
+        .expect("claimed-admin request should build");
+    claimed_admin_request
+        .extensions_mut()
+        .insert(temper_authz::AuthenticatedRequestContext::new(
+            TenantId::default(),
+            claimed_admin_security_context(),
+        ));
+    let claimed_admin = app
+        .clone()
+        .oneshot(claimed_admin_request)
+        .await
+        .expect("claimed-admin request should run");
+    assert_eq!(claimed_admin.status(), StatusCode::TOO_MANY_REQUESTS);
 
     let bob_bucket = ServerState::commons_rate_limit_entity_id("bob", "write");
     let response = app
@@ -907,12 +1198,13 @@ async fn commons_rate_limit_returns_429_per_owner_bucket() {
 
 #[tokio::test]
 async fn test_blob_ingest_raw_route_streams_body_without_path_param() {
-    let app = build_router(test_state_with_blob_ioa());
+    let app = authenticated_router(test_state_with_blob_ioa());
     let response = app
         .oneshot(
             Request::post("/tdata/Blobs/Temper.IngestRaw")
                 .header("Content-Type", "application/octet-stream")
                 .header("Content-Length", "3")
+                .header("X-Expected-Object-Id", git_blob_id(b"abc"))
                 .header("X-Repository-Id", "rp-acme-demo")
                 .body(Body::from("abc"))
                 .unwrap(),
@@ -945,11 +1237,12 @@ async fn test_blob_ingest_raw_applies_cedar_create_policy() {
         )
         .expect("install Cedar policy");
 
-    let response = build_router(state.clone())
+    let response = authenticated_router(state.clone())
         .oneshot(
             Request::post("/tdata/Blobs/Temper.IngestRaw")
                 .header("Content-Type", "application/octet-stream")
                 .header("Content-Length", "3")
+                .header("X-Expected-Object-Id", git_blob_id(b"abc"))
                 .header("X-Repository-Id", "rp-acme-demo")
                 .header("X-Temper-Principal-Id", "customer-1")
                 .header("X-Temper-Principal-Kind", "customer")
@@ -967,7 +1260,7 @@ async fn test_blob_ingest_raw_applies_cedar_create_policy() {
 async fn commons_storage_cap_blocks_raw_blob_ingest_per_owner() {
     let state = test_state_with_storage_cap_ioa();
     state.enable_commons_guardrails("default");
-    let app = build_router(state.clone());
+    let app = authenticated_router(state.clone());
 
     let alice_owner = app
         .clone()
@@ -1007,6 +1300,7 @@ async fn commons_storage_cap_blocks_raw_blob_ingest_per_owner() {
             Request::post("/tdata/Blobs/Temper.IngestRaw")
                 .header("Content-Type", "application/octet-stream")
                 .header("Content-Length", "3")
+                .header("X-Expected-Object-Id", git_blob_id(b"abc"))
                 .header("X-Repository-Id", "rp-alice")
                 .header("X-Temper-Principal-Id", "alice")
                 .header("X-Temper-Principal-Kind", "customer")
@@ -1017,21 +1311,28 @@ async fn commons_storage_cap_blocks_raw_blob_ingest_per_owner() {
         .unwrap();
     assert_eq!(alice_first.status(), StatusCode::CREATED);
 
+    let exceeded_body_polls = Arc::new(AtomicUsize::new(0));
     let alice_exceeded = app
         .clone()
         .oneshot(
             Request::post("/tdata/Blobs/Temper.IngestRaw")
                 .header("Content-Type", "application/octet-stream")
                 .header("Content-Length", "2")
+                .header("X-Expected-Object-Id", git_blob_id(b"de"))
                 .header("X-Repository-Id", "rp-alice")
                 .header("X-Temper-Principal-Id", "alice")
                 .header("X-Temper-Principal-Kind", "customer")
-                .body(Body::from("de"))
+                .body(counted_body(b"de", exceeded_body_polls.clone()))
                 .unwrap(),
         )
         .await
         .unwrap();
     assert_eq!(alice_exceeded.status(), StatusCode::PAYLOAD_TOO_LARGE);
+    assert_eq!(
+        exceeded_body_polls.load(Ordering::SeqCst),
+        0,
+        "over-quota raw bodies must not be polled"
+    );
 
     let bob_owner = app
         .clone()
@@ -1071,6 +1372,7 @@ async fn commons_storage_cap_blocks_raw_blob_ingest_per_owner() {
             Request::post("/tdata/Blobs/Temper.IngestRaw")
                 .header("Content-Type", "application/octet-stream")
                 .header("Content-Length", "2")
+                .header("X-Expected-Object-Id", git_blob_id(b"xy"))
                 .header("X-Repository-Id", "rp-bob")
                 .header("X-Temper-Principal-Id", "bob")
                 .header("X-Temper-Principal-Kind", "customer")
@@ -1104,7 +1406,7 @@ async fn commons_storage_cap_blocks_raw_blob_ingest_per_owner() {
 async fn commons_storage_projection_cache_invalidates_after_blob_write() {
     let state = test_state_with_storage_cap_ioa();
     state.enable_commons_guardrails("default");
-    let app = build_router(state.clone());
+    let app = authenticated_router(state.clone());
 
     let owner = app
         .clone()
@@ -1145,6 +1447,7 @@ async fn commons_storage_projection_cache_invalidates_after_blob_write() {
             Request::post("/tdata/Blobs/Temper.IngestRaw")
                 .header("Content-Type", "application/octet-stream")
                 .header("Content-Length", "2")
+                .header("X-Expected-Object-Id", git_blob_id(b"aa"))
                 .header("X-Repository-Id", "rp-carol")
                 .header("X-Temper-Principal-Id", "carol")
                 .header("X-Temper-Principal-Kind", "customer")
@@ -1168,6 +1471,7 @@ async fn commons_storage_projection_cache_invalidates_after_blob_write() {
             Request::post("/tdata/Blobs/Temper.IngestRaw")
                 .header("Content-Type", "application/octet-stream")
                 .header("Content-Length", "2")
+                .header("X-Expected-Object-Id", git_blob_id(b"bb"))
                 .header("X-Repository-Id", "rp-carol")
                 .header("X-Temper-Principal-Id", "carol")
                 .header("X-Temper-Principal-Kind", "customer")
@@ -1188,10 +1492,23 @@ async fn commons_storage_projection_cache_invalidates_after_blob_write() {
 }
 
 #[tokio::test]
-async fn commons_storage_cap_serializes_concurrent_blob_writes_per_owner() {
-    let state = test_state_with_storage_cap_ioa();
+async fn commons_storage_reservation_allows_other_writers_and_prevents_overreservation() {
+    let mut state = test_state_with_storage_cap_ioa();
+    state.raw_blob_ingest_budget = crate::blob_store::BlobIngestBudget::with_limits(
+        16,
+        1,
+        4,
+        2,
+        crate::blob_store::BlobIngestProgressPolicy::new(
+            std::time::Duration::from_secs(5),
+            std::time::Duration::from_secs(10),
+            std::time::Duration::from_secs(5),
+            std::time::Duration::from_secs(1),
+            1,
+        ),
+    );
     state.enable_commons_guardrails("default");
-    let app = build_router(state.clone());
+    let app = authenticated_router(state.clone());
 
     let owner = app
         .clone()
@@ -1226,46 +1543,80 @@ async fn commons_storage_cap_serializes_concurrent_blob_writes_per_owner() {
     assert_eq!(repo.status(), StatusCode::CREATED);
 
     let first_app = app.clone();
-    let second_app = app.clone();
-    let (first, second) = tokio::join!(
-        async move {
-            first_app
-                .oneshot(
-                    Request::post("/tdata/Blobs/Temper.IngestRaw")
-                        .header("Content-Type", "application/octet-stream")
-                        .header("Content-Length", "4")
-                        .header("X-Repository-Id", "rp-dana")
-                        .header("X-Temper-Principal-Id", "dana")
-                        .header("X-Temper-Principal-Kind", "customer")
-                        .body(Body::from("abcd"))
-                        .unwrap(),
-                )
-                .await
-                .unwrap()
-        },
-        async move {
-            second_app
-                .oneshot(
-                    Request::post("/tdata/Blobs/Temper.IngestRaw")
-                        .header("Content-Type", "application/octet-stream")
-                        .header("Content-Length", "4")
-                        .header("X-Repository-Id", "rp-dana")
-                        .header("X-Temper-Principal-Id", "dana")
-                        .header("X-Temper-Principal-Kind", "customer")
-                        .body(Body::from("wxyz"))
-                        .unwrap(),
-                )
-                .await
-                .unwrap()
+    let first_body_polls = Arc::new(AtomicUsize::new(0));
+    let second_body_polls = Arc::new(AtomicUsize::new(0));
+    let first_body_polls_for_request = first_body_polls.clone();
+    let slow_body = Body::from_stream(async_stream::stream! {
+        first_body_polls_for_request.fetch_add(1, Ordering::SeqCst);
+        yield Ok::<_, std::io::Error>(bytes::Bytes::from_static(b"abcd"));
+        std::future::pending::<()>().await;
+    });
+    let first = tokio::spawn(
+        first_app.oneshot(
+            Request::post("/tdata/Blobs/Temper.IngestRaw")
+                .header("Content-Type", "application/octet-stream")
+                .header("Content-Length", "4")
+                .header("X-Expected-Object-Id", git_blob_id(b"abcd"))
+                .header("X-Repository-Id", "rp-dana")
+                .body(slow_body)
+                .unwrap(),
+        ),
+    );
+    tokio::time::timeout(std::time::Duration::from_secs(2), async {
+        while first_body_polls.load(Ordering::SeqCst) == 0 {
+            tokio::task::yield_now().await;
         }
-    );
+    })
+    .await
+    .expect("slow upload should reach body staging");
 
-    let mut statuses = vec![first.status(), second.status()];
-    statuses.sort();
-    assert_eq!(
-        statuses,
-        vec![StatusCode::CREATED, StatusCode::PAYLOAD_TOO_LARGE]
-    );
+    let unrelated_owner = tokio::time::timeout(
+        std::time::Duration::from_secs(2),
+        app.clone().oneshot(
+            Request::post("/tdata/Owners")
+                .header("Content-Type", "application/json")
+                .body(Body::from(
+                    r#"{"Id":"erin","AccountId":"erin","DisplayName":"Erin","Contact":"erin@example.test","StorageCapBytes":4,"RateLimitTier":"free","PublicKey":""}"#,
+                ))
+                .unwrap(),
+        ),
+    )
+    .await
+    .expect("slow Blob body must not hold the coarse commons lock")
+    .unwrap();
+    assert_eq!(unrelated_owner.status(), StatusCode::CREATED);
+
+    let second = app
+        .clone()
+        .oneshot(
+            Request::post("/tdata/Blobs/Temper.IngestRaw")
+                .header("Content-Type", "application/octet-stream")
+                .header("Content-Length", "4")
+                .header("X-Expected-Object-Id", git_blob_id(b"wxyz"))
+                .header("X-Repository-Id", "rp-dana")
+                .body(counted_body(b"wxyz", second_body_polls.clone()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(second.status(), StatusCode::PAYLOAD_TOO_LARGE);
+    assert_eq!(second_body_polls.load(Ordering::SeqCst), 0);
+
+    first.abort();
+    let _ = first.await;
+    let committed = app
+        .oneshot(
+            Request::post("/tdata/Blobs/Temper.IngestRaw")
+                .header("Content-Type", "application/octet-stream")
+                .header("Content-Length", "4")
+                .header("X-Expected-Object-Id", git_blob_id(b"abcd"))
+                .header("X-Repository-Id", "rp-dana")
+                .body(Body::from("abcd"))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(committed.status(), StatusCode::CREATED);
 
     let tenant = temper_runtime::tenant::TenantId::default();
     let projection = state
@@ -1282,7 +1633,7 @@ async fn commons_storage_cap_serializes_concurrent_blob_writes_per_owner() {
 async fn commons_account_verification_blocks_owner_scoped_writes_until_verified() {
     let state = test_state_with_account_verification_ioa();
     state.enable_commons_guardrails("default");
-    let app = build_router(state.clone());
+    let app = authenticated_router(state.clone());
 
     let owner = app
         .clone()
@@ -1330,7 +1681,6 @@ async fn commons_account_verification_blocks_owner_scoped_writes_until_verified(
             .header("Content-Type", "application/json")
             .header("X-Temper-Principal-Id", "operator")
             .header("X-Temper-Principal-Kind", "admin")
-            .header(temper_authz::TRUSTED_PRINCIPAL_HEADER, "1")
             .body(Body::from(
                 r#"{"VerificationProvider":"email","VerificationSubject":"alice@example.test","VerifiedAt":"2026-05-19T00:00:00Z"}"#,
             ))
@@ -1383,7 +1733,7 @@ async fn commons_account_verification_blocks_owner_scoped_writes_until_verified(
 async fn commons_app_name_unique_per_owner_on_create_and_patch() {
     let state = test_state_with_owner_app_ioa();
     state.enable_commons_guardrails("default");
-    let app = build_router(state);
+    let app = authenticated_router(state);
 
     let owner = app
         .clone()
@@ -1503,13 +1853,12 @@ async fn commons_app_name_unique_per_owner_on_create_and_patch() {
 
 #[tokio::test]
 async fn test_post_bound_action() {
-    let app = build_router(test_state_with_ioa());
+    let app = authenticated_router(test_state_with_ioa());
     let response = app
         .oneshot(
             Request::post("/tdata/Orders('abc-123')/Temper.Example.CancelOrder")
                 .header("Content-Type", "application/json")
                 .header("X-Temper-Principal-Kind", "admin")
-                .header(temper_authz::TRUSTED_PRINCIPAL_HEADER, "1")
                 .body(Body::from(r#"{"Reason": "changed mind"}"#))
                 .unwrap(),
         )
@@ -1526,7 +1875,7 @@ async fn test_post_bound_action() {
 
 #[tokio::test]
 async fn test_odata_version_header() {
-    let app = build_router(test_state());
+    let app = authenticated_router(test_state());
     let response = app
         .oneshot(Request::get("/tdata/Orders").body(Body::empty()).unwrap())
         .await
@@ -1538,7 +1887,7 @@ async fn test_odata_version_header() {
 
 #[tokio::test]
 async fn test_old_odata_path_returns_404() {
-    let app = build_router(test_state());
+    let app = authenticated_router(test_state());
     let response = app
         .oneshot(Request::get("/odata").body(Body::empty()).unwrap())
         .await
@@ -1549,7 +1898,7 @@ async fn test_old_odata_path_returns_404() {
 
 #[tokio::test]
 async fn test_post_body_used_for_entity_creation() {
-    let app = build_router(test_state_with_ioa());
+    let app = authenticated_router(test_state_with_ioa());
 
     // Create with specific ID and fields
     let response = app
@@ -1575,7 +1924,7 @@ async fn test_post_body_used_for_entity_creation() {
 
 #[tokio::test]
 async fn test_entity_set_returns_created_entities() {
-    let app = build_router(test_state_with_ioa());
+    let app = authenticated_router(test_state_with_ioa());
 
     // Create two entities
     let _ = app
@@ -1616,7 +1965,7 @@ async fn test_entity_set_returns_created_entities() {
 
 #[tokio::test]
 async fn test_patch_updates_entity() {
-    let app = build_router(test_state_with_ioa());
+    let app = authenticated_router(test_state_with_ioa());
 
     // Create entity
     let _ = app
@@ -1652,7 +2001,7 @@ async fn test_patch_updates_entity() {
 
 #[tokio::test]
 async fn test_delete_removes_entity() {
-    let app = build_router(test_state_with_ioa());
+    let app = authenticated_router(test_state_with_ioa());
 
     // Create entity
     let _ = app
@@ -1692,7 +2041,7 @@ async fn test_delete_removes_entity() {
 
 #[tokio::test]
 async fn test_patch_nonexistent_returns_404() {
-    let app = build_router(test_state_with_ioa());
+    let app = authenticated_router(test_state_with_ioa());
     let response = app
         .oneshot(
             Request::patch("/tdata/Orders('nope')")
@@ -1707,7 +2056,7 @@ async fn test_patch_nonexistent_returns_404() {
 
 #[tokio::test]
 async fn test_delete_nonexistent_returns_404() {
-    let app = build_router(test_state_with_ioa());
+    let app = authenticated_router(test_state_with_ioa());
     let response = app
         .oneshot(
             Request::delete("/tdata/Orders('nope')")
@@ -1721,7 +2070,7 @@ async fn test_delete_nonexistent_returns_404() {
 
 #[tokio::test]
 async fn test_navigation_property_single_entity() {
-    let app = build_router(test_state_with_order_and_payment_ioa());
+    let app = authenticated_router(test_state_with_order_and_payment_ioa());
 
     // Create parent order.
     let order_create = app
@@ -1795,7 +2144,7 @@ async fn test_collection_navigation_requires_cedar_list_policy() {
         )
         .expect("install Cedar policy");
 
-    let response = build_router(state)
+    let response = authenticated_router(state)
         .oneshot(
             Request::get("/tdata/Customers('cust-nav')?$expand=Orders")
                 .header("X-Temper-Principal-Id", "customer-1")
@@ -1811,7 +2160,7 @@ async fn test_collection_navigation_requires_cedar_list_policy() {
 
 #[tokio::test]
 async fn test_navigation_property_not_found_returns_404() {
-    let app = build_router(test_state_with_ioa());
+    let app = authenticated_router(test_state_with_ioa());
     let _ = app
         .clone()
         .oneshot(
@@ -1836,7 +2185,7 @@ async fn test_navigation_property_not_found_returns_404() {
 
 #[tokio::test]
 async fn test_temper_client_script_served() {
-    let app = build_router(test_state());
+    let app = authenticated_router(test_state());
     let response = app
         .oneshot(
             Request::get("/temper-client.js")
@@ -1864,7 +2213,7 @@ async fn test_temper_client_script_served() {
 
 #[tokio::test]
 async fn test_temper_client_script_alias_served() {
-    let app = build_router(test_state());
+    let app = authenticated_router(test_state());
     let response = app
         .oneshot(
             Request::get("/static/temper-client.js")
@@ -1883,7 +2232,7 @@ async fn test_temper_client_script_alias_served() {
 
 #[tokio::test]
 async fn test_cors_header_present() {
-    let app = build_router(test_state());
+    let app = authenticated_router(test_state());
     let response = app
         .oneshot(
             Request::get("/tdata/Orders")
@@ -1933,14 +2282,13 @@ async fn collect_sse_frames_until(
 async fn test_sse_events_endpoint_delivers_state_changes() {
     let state = test_state_with_ioa();
     let event_tx = state.event_tx.clone();
-    let app = build_router(state);
+    let app = authenticated_router(state);
 
     // Connect to SSE endpoint — response should be 200 with text/event-stream.
     let response = app
         .oneshot(
             Request::get("/tdata/$events")
                 .header("X-Temper-Principal-Kind", "admin")
-                .header(temper_authz::TRUSTED_PRINCIPAL_HEADER, "1")
                 .body(Body::empty())
                 .unwrap(),
         )
@@ -2007,12 +2355,11 @@ async fn test_sse_events_lagged_receiver_continues() {
         });
     }
 
-    let app = build_router(state);
+    let app = authenticated_router(state);
     let response = app
         .oneshot(
             Request::get("/tdata/$events")
                 .header("X-Temper-Principal-Kind", "admin")
-                .header(temper_authz::TRUSTED_PRINCIPAL_HEADER, "1")
                 .body(Body::empty())
                 .unwrap(),
         )
@@ -2042,80 +2389,6 @@ async fn test_sse_events_lagged_receiver_continues() {
         collected.contains("after-flood"),
         "SSE should recover after lag. Got: {collected}"
     );
-}
-
-#[test]
-fn bridge_resolved_principal_builds_security_context_with_scopes() {
-    let callback = serde_json::json!({
-        "action_params": {},
-        "bridge_principal": {
-            "kind": "customer",
-            "id": "user-rita",
-            "scopes": ["repo:push", "force", " ", ""]
-        }
-    });
-
-    let ctx = bridge_resolved_principal(&callback).expect("principal should resolve");
-
-    assert_eq!(ctx.principal.id, "user-rita");
-    assert!(matches!(
-        ctx.principal.kind,
-        temper_authz::PrincipalKind::Customer
-    ));
-    let scopes = ctx
-        .principal
-        .attributes
-        .get("scopes")
-        .and_then(|v| v.as_array())
-        .cloned()
-        .unwrap_or_default();
-    assert!(scopes.contains(&serde_json::Value::String("repo:push".to_string())));
-    assert!(scopes.contains(&serde_json::Value::String("force".to_string())));
-    assert_eq!(scopes.len(), 2);
-}
-
-#[test]
-fn bridge_resolved_principal_rejects_missing_or_empty_identity() {
-    assert!(bridge_resolved_principal(&serde_json::json!({ "action_params": {} })).is_none());
-    assert!(
-        bridge_resolved_principal(&serde_json::json!({
-            "action_params": {},
-            "bridge_principal": { "kind": "customer", "id": "  " }
-        }))
-        .is_none()
-    );
-    assert!(
-        bridge_resolved_principal(&serde_json::json!({
-            "action_params": {},
-            "bridge_principal": { "kind": "", "id": "user-1" }
-        }))
-        .is_none()
-    );
-}
-
-#[test]
-fn bridge_resolved_principal_requires_structured_action_params() {
-    // A passthrough adapter (top-level params, no action_params key)
-    // must never hand the caller an identity (ADR-0138).
-    assert!(
-        bridge_resolved_principal(&serde_json::json!({
-            "bridge_principal": { "kind": "customer", "id": "user-1" }
-        }))
-        .is_none()
-    );
-}
-
-#[test]
-fn bridge_resolved_principal_cannot_smuggle_system_kind() {
-    let ctx = bridge_resolved_principal(&serde_json::json!({
-        "action_params": {},
-        "bridge_principal": { "kind": "system", "id": "evil" }
-    }))
-    .expect("principal should resolve");
-    assert!(matches!(
-        ctx.principal.kind,
-        temper_authz::PrincipalKind::Customer
-    ));
 }
 
 #[test]
@@ -2232,29 +2505,4 @@ fn bridge_short_circuit_response_absent_is_none() {
     }))
     .expect("missing status still short-circuits");
     assert_eq!(response.status(), StatusCode::BAD_GATEWAY);
-}
-
-#[test]
-fn http_endpoint_fallback_tenant_prefers_default_over_sort_order() {
-    // Regression: tenants that sort before "default" (e.g. Directed
-    // Evolution control tenants on production) must not capture
-    // header-less protocol requests.
-    let de = TenantId::new("de-control-agent-answers");
-    let default = TenantId::new("default");
-    let other = TenantId::new("acme");
-    let ids = vec![&other, &de, &default];
-    assert_eq!(http_endpoint_fallback_tenant(&ids), Some(&default));
-}
-
-#[test]
-fn http_endpoint_fallback_tenant_skips_system_then_takes_first() {
-    let system = TenantId::new("temper-system");
-    let acme = TenantId::new("acme");
-    assert_eq!(
-        http_endpoint_fallback_tenant(&[&system, &acme]),
-        Some(&acme)
-    );
-    // Only the system tenant registered: still resolves rather than 404.
-    assert_eq!(http_endpoint_fallback_tenant(&[&system]), Some(&system));
-    assert_eq!(http_endpoint_fallback_tenant(&[]), None);
 }

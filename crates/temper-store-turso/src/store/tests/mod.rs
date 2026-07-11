@@ -9,6 +9,9 @@ use temper_runtime::persistence::{
 use super::{PublishedArtifactUpsert, QueryProjectionUpsert, TursoEventStore};
 use crate::TursoSpecVerificationUpdate;
 
+mod evolution_tenant;
+mod policy_approval;
+
 fn test_envelope(event_type: &str, payload: serde_json::Value) -> PersistenceEnvelope {
     PersistenceEnvelope {
         sequence_nr: 0,

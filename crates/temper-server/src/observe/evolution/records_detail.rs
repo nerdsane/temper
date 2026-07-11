@@ -1,14 +1,14 @@
-use axum::extract::{Path, State};
-use axum::http::{HeaderMap, StatusCode};
+use axum::extract::{Extension, Path, State};
+use axum::http::StatusCode;
 use axum::response::Json;
 use serde::Deserialize;
-use temper_authz::PrincipalKind;
+use temper_authz::AuthenticatedRequestContext;
 use temper_evolution::{Decision, DecisionRecord, RecordHeader, RecordStatus, RecordType};
 use temper_runtime::scheduler::{sim_now, sim_uuid};
 use temper_runtime::tenant::TenantId;
 use tracing::instrument;
 
-use crate::authz::{require_observe_auth, security_context_from_headers};
+use crate::authz::{require_authenticated_context, require_observe_auth};
 use crate::request_context::AgentContext;
 use crate::state::ServerState;
 
@@ -16,12 +16,14 @@ use crate::state::ServerState;
 #[instrument(skip_all, fields(otel.name = "GET /observe/evolution/records/{id}"))]
 pub(crate) async fn handle_get_evolution_record(
     State(state): State<ServerState>,
-    headers: HeaderMap,
+    authenticated: Option<Extension<AuthenticatedRequestContext>>,
     Path(id): Path<String>,
 ) -> Result<Json<serde_json::Value>, StatusCode> {
-    require_observe_auth(&state, &headers, "read_evolution", "Evolution")?;
+    let authenticated = require_authenticated_context(authenticated.as_deref())?;
+    require_observe_auth(&state, authenticated, "read_evolution", "Evolution")?;
 
-    match state.get_evolution_record(&id).await {
+    let tenant = authenticated.tenant().as_str();
+    match state.get_evolution_record(tenant, &id).await {
         Ok(Some(row)) => {
             let mut record: serde_json::Value =
                 serde_json::from_str(&row.data).unwrap_or_else(|_| serde_json::json!({}));
@@ -38,7 +40,7 @@ pub(crate) async fn handle_get_evolution_record(
                     obj.insert("derived_from".to_string(), serde_json::json!(df));
                 }
             }
-            let chain = validate_chain(&state, &id).await;
+            let chain = validate_chain(&state, tenant, &id).await;
             Ok(Json(serde_json::json!({
                 "record": record,
                 "chain": {
@@ -64,8 +66,6 @@ pub(crate) async fn handle_get_evolution_record(
 pub(crate) struct DecideRequest {
     /// The decision: "approved", "rejected", or "deferred".
     pub decision: String,
-    /// Who is making the decision (email or identifier).
-    pub decided_by: String,
     /// Human rationale for the decision.
     pub rationale: String,
 }
@@ -73,36 +73,34 @@ pub(crate) struct DecideRequest {
 /// POST /api/evolution/records/{id}/decide -- create a D-Record for a record.
 ///
 /// The target record (by ID) must exist. Creates a DecisionRecord derived from it.
-/// Admin principals bypass Cedar; other principals require "manage_decisions" on "EvolutionRecord".
+/// Requires `manage_decisions` on the exact tenant's `EvolutionRecord` surface.
 #[instrument(skip_all, fields(otel.name = "POST /api/evolution/records/{id}/decide"))]
 pub(crate) async fn handle_decide(
     State(state): State<ServerState>,
-    headers: HeaderMap,
+    authenticated: Option<Extension<AuthenticatedRequestContext>>,
     Path(id): Path<String>,
     Json(body): Json<DecideRequest>,
 ) -> Result<Json<serde_json::Value>, StatusCode> {
-    // Cedar authorization: admin bypass, others need manage_decisions.
-    let security_ctx = security_context_from_headers(&headers, None, None, None);
-    let tenant_hint = headers
-        .get("x-tenant-id")
-        .and_then(|v| v.to_str().ok())
-        .unwrap_or("system");
-    if !matches!(security_ctx.principal.kind, PrincipalKind::Admin)
-        && let Err(denial) = state.authorize_with_context(
-            &security_ctx,
-            "manage_decisions",
-            "EvolutionRecord",
-            &std::collections::BTreeMap::new(),
-            tenant_hint,
-        )
-    {
+    let authenticated = require_authenticated_context(authenticated.as_deref())?;
+    let security_ctx = authenticated.security_context();
+    let tenant = authenticated.tenant();
+    if let Err(denial) = state.authorize_with_context(
+        security_ctx,
+        "manage_decisions",
+        "EvolutionRecord",
+        &std::collections::BTreeMap::from([(
+            "id".to_string(),
+            serde_json::Value::String(id.clone()),
+        )]),
+        tenant.as_str(),
+    ) {
         tracing::warn!(reason = %denial, "unauthorized decide attempt");
         return Err(StatusCode::FORBIDDEN);
     }
 
     // Verify the target record exists.
     let exists = state
-        .get_evolution_record(&id)
+        .get_evolution_record(tenant.as_str(), &id)
         .await
         .map_err(|e| {
             tracing::error!(record_id = %id, error = %e, "failed to lookup record");
@@ -130,18 +128,19 @@ pub(crate) async fn handle_decide(
     let id_suffix = &temper_runtime::scheduler::sim_uuid().to_string()[..8];
     let year = now.format("%Y");
     let record_id = format!("D-{year}-{id_suffix}");
+    let decided_by = security_ctx.principal.id.clone();
 
     let d_record = DecisionRecord {
         header: RecordHeader {
             id: record_id.clone(),
             record_type: RecordType::Decision,
             timestamp: now,
-            created_by: body.decided_by.clone(),
+            created_by: decided_by.clone(),
             derived_from: Some(id.clone()),
             status: RecordStatus::Open,
         },
         decision,
-        decided_by: body.decided_by,
+        decided_by,
         rationale: body.rationale,
         verification_results: None,
         implementation: None,
@@ -150,14 +149,15 @@ pub(crate) async fn handle_decide(
     // Persist to the available evolution store.
     let data_json = serde_json::to_string(&d_record).unwrap_or_default();
     state
-        .insert_evolution_record(
-            &record_id,
-            "Decision",
-            &format!("{:?}", d_record.header.status),
-            &d_record.header.created_by,
-            d_record.header.derived_from.as_deref(),
-            &data_json,
-        )
+        .insert_evolution_record(crate::storage::EvolutionRecordWrite {
+            tenant: tenant.as_str(),
+            id: &record_id,
+            record_type: "Decision",
+            status: &format!("{:?}", d_record.header.status),
+            created_by: &d_record.header.created_by,
+            derived_from: d_record.header.derived_from.as_deref(),
+            data_json: &data_json,
+        })
         .await
         .map_err(|e| {
             tracing::error!(record_id = %record_id, error = %e, "failed to persist decision record");
@@ -227,7 +227,11 @@ fn record_type_from_id_prefix(id: &str) -> Option<RecordType> {
     }
 }
 
-async fn validate_chain(state: &ServerState, leaf_id: &str) -> ChainValidationSummary {
+async fn validate_chain(
+    state: &ServerState,
+    tenant: &str,
+    leaf_id: &str,
+) -> ChainValidationSummary {
     let mut errors = Vec::new();
     let mut chain_length = 0usize;
     let mut current_id = leaf_id.to_string();
@@ -256,7 +260,7 @@ async fn validate_chain(state: &ServerState, leaf_id: &str) -> ChainValidationSu
             RecordType::FeatureRequest => vec![RecordType::Insight],
         };
 
-        let derived_from = match state.get_evolution_record(&current_id).await {
+        let derived_from = match state.get_evolution_record(tenant, &current_id).await {
             Ok(Some(row)) => row.derived_from,
             Ok(None) => {
                 errors.push(format!("record \'{current_id}\' not found"));

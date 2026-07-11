@@ -5,7 +5,6 @@ use std::collections::{BTreeMap, BTreeSet};
 use futures_util::stream::{self, StreamExt};
 use temper_runtime::tenant::TenantId;
 
-use crate::blobs::hydrate_blob_refs_for_tenant;
 use crate::state::ServerState;
 use crate::storage::{
     CatalogRowsLoad, EntityCatalogRow, load_catalog_rows_by_id, load_selected_catalog_rows_by_id,
@@ -234,9 +233,11 @@ pub(super) async fn try_load_entity_body_from_catalog(
     let rows = try_load_catalog_rows(state, tenant, entity_type, &ids).await;
     let row = rows.into_iter().next().map(|(_, r)| r)?;
     maybe_spawn_catalog_shadow_check(state, tenant, entity_type, &row);
-    let mut body = catalog_row_to_entity_body(entity_type, entity_set_name, row);
-    hydrate_blob_refs_for_tenant(state, tenant, &mut body).await;
-    Some(body)
+    Some(catalog_row_to_entity_body(
+        entity_type,
+        entity_set_name,
+        row,
+    ))
 }
 
 pub(super) async fn materialize_entity_set_entities(
@@ -285,7 +286,7 @@ pub(super) async fn materialize_entity_set_entities(
             let selected_catalog_fields = selected_catalog_fields_owned.clone();
             async move {
                 if let Some(row) = catalog_row {
-                    let mut entity = match selected_catalog_fields.as_deref() {
+                    let entity = match selected_catalog_fields.as_deref() {
                         Some(select) => catalog_row_to_selected_entity_body(
                             &entity_type,
                             &entity_set_name,
@@ -294,7 +295,6 @@ pub(super) async fn materialize_entity_set_entities(
                         ),
                         None => catalog_row_to_entity_body(&entity_type, &entity_set_name, row),
                     };
-                    hydrate_blob_refs_for_tenant(&state, &tenant, &mut entity).await;
                     return Some(entity);
                 }
                 match state
@@ -333,7 +333,6 @@ pub(super) async fn materialize_entity_set_entities(
                             }
                         }
                         let mut entity = serde_json::to_value(&response.state).unwrap_or_default();
-                        hydrate_blob_refs_for_tenant(&state, &tenant, &mut entity).await;
                         if let Some(obj) = entity.as_object_mut() {
                             obj.insert(
                                 "@odata.id".into(),

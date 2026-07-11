@@ -19,6 +19,18 @@ use serde::{Deserialize, Serialize};
 pub struct TenantId(String);
 
 impl TenantId {
+    /// Parse a tenant ID without panicking on caller-controlled input.
+    pub fn try_new(id: impl Into<String>) -> Result<Self, String> {
+        let id = id.into();
+        if id.is_empty() {
+            return Err("tenant ID must not be empty".to_string());
+        }
+        if id.contains(':') {
+            return Err(format!("tenant ID must not contain colons: {id}"));
+        }
+        Ok(Self(id))
+    }
+
     /// Create a new tenant ID.
     ///
     /// # Panics
@@ -26,10 +38,7 @@ impl TenantId {
     /// Panics if the tenant ID is empty or contains colons (which are used as
     /// separators in persistence IDs).
     pub fn new(id: impl Into<String>) -> Self {
-        let id = id.into();
-        assert!(!id.is_empty(), "tenant ID must not be empty");
-        assert!(!id.contains(':'), "tenant ID must not contain colons: {id}");
-        Self(id)
+        Self::try_new(id).unwrap_or_else(|error| panic!("{error}"))
     }
 
     /// The default tenant for single-tenant deployments.
@@ -180,6 +189,18 @@ mod tests {
         let t = TenantId::new("alpha");
         assert_eq!(t.as_str(), "alpha");
         assert_eq!(t.to_string(), "alpha");
+    }
+
+    #[test]
+    fn tenant_id_try_new_rejects_untrusted_invalid_values() {
+        assert_eq!(
+            TenantId::try_new("").unwrap_err(),
+            "tenant ID must not be empty"
+        );
+        assert_eq!(
+            TenantId::try_new("a:b").unwrap_err(),
+            "tenant ID must not contain colons: a:b"
+        );
     }
 
     #[test]

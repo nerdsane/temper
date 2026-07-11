@@ -26,8 +26,13 @@ pub mod trajectory;
 pub mod wasm_invocation_log;
 
 pub use admission::{AdmissionController, AdmissionOutcome, AdmissionPermit};
+pub(crate) use dispatch::authorized_http_endpoint_host;
+#[cfg(feature = "observe")]
+pub(crate) use dispatch::internal_http_capability_issuer;
 pub use dispatch::{DispatchCommand, DispatchError, DispatchExtOptions, StateTimeoutTracker};
 pub use entity_ops::{FailedLevelInfo, VerificationGateError};
+#[cfg(feature = "observe")]
+pub(crate) use file_reads::{BatchTextReadError, validate_batch_text_ids};
 pub use file_reads::{IndexedFileStreamRead, TextFileReadResult, TextFileVersionReadResult};
 pub(crate) use file_writes::FileStreamContentError;
 pub use metrics::MetricsCollector;
@@ -38,6 +43,10 @@ pub use pending_decisions::{
 pub use persistence::WasmModuleSource;
 pub use policy_suggestions::PolicySuggestionEngine;
 pub use published_artifacts::PublishFileArtifactRequest;
+#[cfg(feature = "observe")]
+pub(crate) use published_artifacts::{
+    PUBLISH_ARTIFACT_STALE_AUTHORIZATION, PublishArtifactAuthorization,
+};
 pub(crate) use query_projection_queue::{ProjectionEnqueueOutcome, QueryProjectionWriteQueue};
 pub use trajectory::{TrajectoryEntry, TrajectorySource};
 pub use wasm_invocation_log::WasmInvocationEntry;
@@ -64,6 +73,7 @@ use crate::adapters::AdapterRegistry;
 use crate::entity_actor::{EntityMsg, SnapshotWriteQueue};
 use crate::events::EntityStateChange;
 use crate::idempotency::IdempotencyCache;
+use crate::internal_invocation::InternalInvocationCredentialStore;
 use crate::ots_trajectory_outbox::OtsTrajectoryOutbox;
 use crate::registry::SpecRegistry;
 use crate::secrets::vault::SecretsVault;
@@ -382,7 +392,7 @@ pub struct ServerState {
     /// Runtime data directory for persisted local metadata (e.g. specs registry).
     pub data_dir: std::path::PathBuf,
     /// Agent hints learned from trajectory analysis, keyed by action name.
-    pub agent_hints: Arc<RwLock<BTreeMap<String, String>>>,
+    pub agent_hints: Arc<RwLock<BTreeMap<TenantId, BTreeMap<String, String>>>>,
     /// Cedar ABAC authorization engine.
     pub authz: Arc<AuthzEngine>,
     /// Multi-tenant specification registry (shared, mutable for live registration).
@@ -459,11 +469,17 @@ pub struct ServerState {
     pub eventual_tracker: Arc<RwLock<crate::eventual_invariants::EventualInvariantTracker>>,
     /// Idempotency cache for deduplicating agent retries.
     pub idempotency_cache: Arc<IdempotencyCache>,
+    /// Bounded, single-use credentials for authenticated internal HTTP re-entry.
+    pub internal_invocation_credentials: InternalInvocationCredentialStore,
     /// Optional encrypted secrets vault for per-tenant secret management.
     /// Broadcast channel for new pending decisions (SSE subscriptions).
     pub pending_decision_tx: Arc<tokio::sync::broadcast::Sender<PendingDecision>>,
     /// Per-tenant Cedar policy text (tenant -> policy text).
     pub tenant_policies: Arc<RwLock<BTreeMap<String, String>>>,
+    /// Serializes approval commit/activation so concurrent approvals cannot
+    /// replace one another with policy text derived from a stale cache.
+    #[cfg(feature = "observe")]
+    pub(crate) policy_approval_lock: Arc<tokio::sync::Mutex<()>>,
     /// Tenants installed in commons mode. Collection creates for these tenants
     /// must pass Cedar so commons guardrail forbids apply to direct OData
     /// writes as well as bound actions and composite sub-writes.
@@ -480,6 +496,9 @@ pub struct ServerState {
     /// writes; storage cap enforcement prefers freshness over narrow retention.
     pub(crate) commons_storage_projection_cache:
         Arc<Mutex<BTreeMap<String, storage_caps::CommonsStorageProjection>>>,
+    /// Pending owner-byte reservations held by admitted raw Blob uploads.
+    commons_storage_reservations:
+        Arc<Mutex<BTreeMap<String, storage_caps::CommonsStorageReservationEntry>>>,
     /// Coarse commons-mode write guardrail lock.
     ///
     /// Held from preflight through persistence for commons writes so exact
@@ -487,6 +506,9 @@ pub struct ServerState {
     /// between "check" and "write" while cross-actor transactions are still
     /// being built out.
     pub(crate) commons_write_guardrail_lock: Arc<tokio::sync::Mutex<()>>,
+    /// Weighted declared-byte admission for disk-backed raw Blob ingest.
+    /// State ownership permits deterministic capacity injection in simulation.
+    pub(crate) raw_blob_ingest_budget: crate::blob_store::BlobIngestBudget,
     pub secrets_vault: Option<Arc<SecretsVault>>,
     /// Broadcast channel for agent progress events (SSE subscriptions).
     /// // determinism-ok: broadcast channel for external observation only
@@ -678,7 +700,10 @@ impl ServerState {
             ots_trajectory_outbox: Arc::new(Mutex::new(None)),
             data_dir: std::path::PathBuf::new(),
             agent_hints: Arc::new(RwLock::new(BTreeMap::new())),
-            authz: Arc::new(AuthzEngine::permissive()),
+            // Network and tenant-scoped authorization starts fail-closed.
+            // Tests/development that intentionally need a permissive tenant
+            // must install that tenant policy explicitly (ARN-230).
+            authz: Arc::new(AuthzEngine::empty()),
             registry: Arc::new(RwLock::new(SpecRegistry::new())),
             entity_index: Arc::new(RwLock::new(BTreeMap::new())),
             entity_index_hydrated: Arc::new(RwLock::new(BTreeSet::new())),
@@ -708,12 +733,17 @@ impl ServerState {
                 crate::eventual_invariants::EventualInvariantTracker::new(),
             )),
             idempotency_cache: Arc::new(IdempotencyCache::new()),
+            internal_invocation_credentials: InternalInvocationCredentialStore::runtime(),
             pending_decision_tx: Arc::new(pending_decision_tx),
             tenant_policies: Arc::new(RwLock::new(BTreeMap::new())),
+            #[cfg(feature = "observe")]
+            policy_approval_lock: Arc::new(tokio::sync::Mutex::new(())),
             commons_guardrail_tenants: Arc::new(RwLock::new(BTreeSet::new())),
             commons_rate_limit_buckets: Arc::new(Mutex::new(BTreeMap::new())),
             commons_storage_projection_cache: Arc::new(Mutex::new(BTreeMap::new())),
+            commons_storage_reservations: Arc::new(Mutex::new(BTreeMap::new())),
             commons_write_guardrail_lock: Arc::new(tokio::sync::Mutex::new(())),
+            raw_blob_ingest_budget: crate::blob_store::BlobIngestBudget::runtime(),
             secrets_vault: None,
             agent_progress_tx: Arc::new(agent_progress_tx), // determinism-ok: broadcast for external observation
             entity_event_sequences: Arc::new(Mutex::new(BTreeMap::new())),
@@ -926,7 +956,9 @@ impl ServerState {
             ots_trajectory_outbox: Arc::new(Mutex::new(None)),
             data_dir: std::path::PathBuf::new(),
             agent_hints: Arc::new(RwLock::new(BTreeMap::new())),
-            authz: Arc::new(AuthzEngine::permissive()),
+            // Missing tenant policy state is never an implicit permit-all
+            // compatibility mode (ARN-230).
+            authz: Arc::new(AuthzEngine::empty()),
             registry,
             entity_index: Arc::new(RwLock::new(BTreeMap::new())),
             entity_index_hydrated: Arc::new(RwLock::new(BTreeSet::new())),
@@ -956,12 +988,17 @@ impl ServerState {
                 crate::eventual_invariants::EventualInvariantTracker::new(),
             )),
             idempotency_cache: Arc::new(IdempotencyCache::new()),
+            internal_invocation_credentials: InternalInvocationCredentialStore::runtime(),
             pending_decision_tx: Arc::new(pending_decision_tx),
             tenant_policies: Arc::new(RwLock::new(BTreeMap::new())),
+            #[cfg(feature = "observe")]
+            policy_approval_lock: Arc::new(tokio::sync::Mutex::new(())),
             commons_guardrail_tenants: Arc::new(RwLock::new(BTreeSet::new())),
             commons_rate_limit_buckets: Arc::new(Mutex::new(BTreeMap::new())),
             commons_storage_projection_cache: Arc::new(Mutex::new(BTreeMap::new())),
+            commons_storage_reservations: Arc::new(Mutex::new(BTreeMap::new())),
             commons_write_guardrail_lock: Arc::new(tokio::sync::Mutex::new(())),
+            raw_blob_ingest_budget: crate::blob_store::BlobIngestBudget::runtime(),
             secrets_vault: None,
             agent_progress_tx: Arc::new(agent_progress_tx), // determinism-ok: broadcast for external observation
             entity_event_sequences: Arc::new(Mutex::new(BTreeMap::new())),
@@ -1292,36 +1329,31 @@ impl ServerState {
         None
     }
 
-    /// Load aggregated unmet-intent failure groups from durable metadata stores.
-    ///
-    /// Uses fan-out across all tenant stores in TenantRouted mode.
-    /// Returns an empty vec when Turso is not configured.
+    /// Load aggregated unmet-intent failure groups for one tenant.
     pub async fn load_unmet_intent_rows_aggregated(
         &self,
+        tenant: &str,
     ) -> (
         Vec<temper_store_turso::UnmetIntentAggRow>,
         std::collections::BTreeMap<String, String>,
     ) {
-        let stores = self.collect_all_metadata_stores().await;
-        if stores.is_empty() {
+        let Some(store) = self.metadata_store_for_tenant(tenant).await else {
             return (Vec::new(), std::collections::BTreeMap::new());
-        }
+        };
 
         let mut failures = Vec::new();
         let mut submitted_specs = std::collections::BTreeMap::new();
 
-        for store in &stores {
-            match store.load_unmet_intent_rows().await {
-                Ok(rows) => failures.extend(rows),
-                Err(e) => {
-                    tracing::warn!(error = %e, backend = store.backend_name(), "failed to load unmet intent rows");
-                }
+        match store.load_unmet_intent_rows(tenant).await {
+            Ok(rows) => failures.extend(rows),
+            Err(e) => {
+                tracing::warn!(error = %e, backend = store.backend_name(), tenant, "failed to load unmet intent rows");
             }
-            match store.load_submit_spec_timestamps().await {
-                Ok(map) => submitted_specs.extend(map),
-                Err(e) => {
-                    tracing::warn!(error = %e, backend = store.backend_name(), "failed to load submit-spec timestamps");
-                }
+        }
+        match store.load_submit_spec_timestamps(tenant).await {
+            Ok(map) => submitted_specs.extend(map),
+            Err(e) => {
+                tracing::warn!(error = %e, backend = store.backend_name(), tenant, "failed to load submit-spec timestamps");
             }
         }
         (failures, submitted_specs)
@@ -1352,50 +1384,45 @@ impl ServerState {
         counts
     }
 
-    /// Load trajectory entries from durable metadata stores.
-    ///
-    /// Uses fan-out across all tenant stores in TenantRouted mode.
-    pub async fn load_trajectory_entries(&self, limit: i64) -> Vec<TrajectoryEntry> {
-        let stores = self.collect_all_metadata_stores().await;
-        if stores.is_empty() {
+    /// Load trajectory entries owned by one tenant.
+    pub async fn load_trajectory_entries(&self, tenant: &str, limit: i64) -> Vec<TrajectoryEntry> {
+        let Some(store) = self.metadata_store_for_tenant(tenant).await else {
             return Vec::new();
-        }
+        };
 
         let mut all_entries = Vec::new();
-        for store in &stores {
-            match store.load_recent_trajectories(limit).await {
-                Ok(rows) => {
-                    all_entries.extend(rows.into_iter().map(|r| TrajectoryEntry {
-                        timestamp: r.created_at,
-                        tenant: r.tenant,
-                        entity_type: r.entity_type,
-                        entity_id: r.entity_id,
-                        action: r.action,
-                        success: r.success,
-                        from_status: r.from_status,
-                        to_status: r.to_status,
-                        error: r.error,
-                        agent_id: r.agent_id,
-                        session_id: r.session_id,
-                        authz_denied: r.authz_denied,
-                        denied_resource: r.denied_resource,
-                        denied_module: r.denied_module,
-                        source: r.source.as_deref().and_then(|s| match s {
-                            "Entity" => Some(TrajectorySource::Entity),
-                            "Platform" => Some(TrajectorySource::Platform),
-                            "Authz" => Some(TrajectorySource::Authz),
-                            _ => None,
-                        }),
-                        spec_governed: r.spec_governed,
-                        agent_type: None,
-                        request_body: r.request_body.and_then(|s| serde_json::from_str(&s).ok()),
-                        intent: r.intent,
-                        matched_policy_ids: r.matched_policy_ids,
-                    }));
-                }
-                Err(e) => {
-                    tracing::warn!(error = %e, backend = store.backend_name(), "failed to load trajectories");
-                }
+        match store.load_recent_trajectories(tenant, limit).await {
+            Ok(rows) => {
+                all_entries.extend(rows.into_iter().map(|r| TrajectoryEntry {
+                    timestamp: r.created_at,
+                    tenant: r.tenant,
+                    entity_type: r.entity_type,
+                    entity_id: r.entity_id,
+                    action: r.action,
+                    success: r.success,
+                    from_status: r.from_status,
+                    to_status: r.to_status,
+                    error: r.error,
+                    agent_id: r.agent_id,
+                    session_id: r.session_id,
+                    authz_denied: r.authz_denied,
+                    denied_resource: r.denied_resource,
+                    denied_module: r.denied_module,
+                    source: r.source.as_deref().and_then(|s| match s {
+                        "Entity" => Some(TrajectorySource::Entity),
+                        "Platform" => Some(TrajectorySource::Platform),
+                        "Authz" => Some(TrajectorySource::Authz),
+                        _ => None,
+                    }),
+                    spec_governed: r.spec_governed,
+                    agent_type: None,
+                    request_body: r.request_body.and_then(|s| serde_json::from_str(&s).ok()),
+                    intent: r.intent,
+                    matched_policy_ids: r.matched_policy_ids,
+                }));
+            }
+            Err(e) => {
+                tracing::warn!(error = %e, backend = store.backend_name(), tenant, "failed to load trajectories");
             }
         }
         // Sort by timestamp descending and limit

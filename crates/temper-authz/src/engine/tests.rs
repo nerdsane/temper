@@ -6,26 +6,37 @@ const PM_ISSUE_POLICY: &str =
     include_str!("../../../../os-apps/project-management/specs/policies/issue.cedar");
 
 fn admin_context() -> SecurityContext {
-    // The trusted marker (edge-stripped from client requests) is what makes an
-    // `admin` header derive Admin — see ADR-0157 / `from_headers`.
-    SecurityContext::from_headers(&[
-        ("X-Temper-Principal-Id".to_string(), "admin-1".to_string()),
-        ("X-Temper-Principal-Kind".to_string(), "admin".to_string()),
-        (
-            crate::context::TRUSTED_PRINCIPAL_HEADER.to_string(),
-            "1".to_string(),
-        ),
-    ])
+    SecurityContext {
+        principal: crate::context::Principal {
+            id: "admin-1".to_string(),
+            kind: crate::context::PrincipalKind::Admin,
+            role: None,
+            acting_for: None,
+            agent_type: None,
+            attributes: HashMap::new(),
+        },
+        context_attrs: HashMap::new(),
+        correlation_id: "test-admin".to_string(),
+    }
 }
 
 fn customer_context(id: &str) -> SecurityContext {
-    SecurityContext::from_headers(&[
-        ("X-Temper-Principal-Id".to_string(), id.to_string()),
-        (
-            "X-Temper-Principal-Kind".to_string(),
-            "customer".to_string(),
-        ),
-    ])
+    SecurityContext {
+        principal: crate::context::Principal {
+            id: id.to_string(),
+            kind: crate::context::PrincipalKind::Customer,
+            role: None,
+            acting_for: None,
+            agent_type: None,
+            attributes: HashMap::new(),
+        },
+        context_attrs: HashMap::new(),
+        correlation_id: "test-customer".to_string(),
+    }
+}
+
+fn agent_context(id: &str, agent_type: &str) -> SecurityContext {
+    SecurityContext::from_resolved_identity(id, agent_type, None)
 }
 
 #[test]
@@ -69,13 +80,7 @@ fn system_authorized_via_system_platform_policy_not_bypass() {
 
     // Non-system principal against empty engine is denied (Cedar default-deny).
     // This would have been silently bypassed if we still used is_system.
-    let customer = SecurityContext::from_headers(&[
-        ("X-Temper-Principal-Id".to_string(), "alice".to_string()),
-        (
-            "X-Temper-Principal-Kind".to_string(),
-            "customer".to_string(),
-        ),
-    ]);
+    let customer = customer_context("alice");
     let decision = engine.authorize(&customer, "AnyAction", "AnyResource", &attrs);
     assert!(
         !decision.is_allowed(),
@@ -136,17 +141,11 @@ fn test_scoped_customer_principal_exposes_account_id() {
     "#;
 
     let engine = AuthzEngine::new(policy).unwrap();
-    let ctx = SecurityContext::from_headers(&[
-        ("X-Temper-Principal-Id".to_string(), "acct-1".to_string()),
-        (
-            "X-Temper-Principal-Kind".to_string(),
-            "customer".to_string(),
-        ),
-        (
-            "X-Temper-Principal-Scopes".to_string(),
-            "repo:read,repo:write".to_string(),
-        ),
-    ]);
+    let mut ctx = customer_context("acct-1");
+    ctx.principal.attributes.insert(
+        "scopes".to_string(),
+        serde_json::json!(["repo:read", "repo:write"]),
+    );
     let attrs = HashMap::from([
         (
             "Id".to_string(),
@@ -287,22 +286,14 @@ fn test_agent_type_in_cedar_context() {
         )
         .unwrap();
     // With matching agentType -> Allow
-    let ctx = SecurityContext::from_headers(&[
-        ("X-Temper-Principal-Id".to_string(), "bot-1".to_string()),
-        ("X-Temper-Principal-Kind".to_string(), "agent".to_string()),
-    ])
-    .with_agent_context(Some("bot-1"), None, Some("claude-code"));
+    let ctx = agent_context("bot-1", "claude-code");
     let mut attrs = HashMap::new();
     attrs.insert("id".to_string(), serde_json::json!("doc-1"));
     let result = engine.authorize(&ctx, "read", "Doc", &attrs);
     assert!(result.is_allowed(), "should allow claude-code agent");
 
     // Without matching agentType -> Deny
-    let ctx2 = SecurityContext::from_headers(&[
-        ("X-Temper-Principal-Id".to_string(), "bot-2".to_string()),
-        ("X-Temper-Principal-Kind".to_string(), "agent".to_string()),
-    ])
-    .with_agent_context(Some("bot-2"), None, Some("openclaw"));
+    let ctx2 = agent_context("bot-2", "openclaw");
     let mut attrs2 = HashMap::new();
     attrs2.insert("id".to_string(), serde_json::json!("doc-2"));
     let result2 = engine.authorize(&ctx2, "read", "Doc", &attrs2);
@@ -316,10 +307,7 @@ fn test_exact_agent_principal_match() {
     let policy =
         r#"permit(principal == Agent::"bot-1", action == Action::"Assign", resource is Issue);"#;
     let engine = AuthzEngine::new(policy).unwrap();
-    let ctx = SecurityContext::from_headers(&[
-        ("X-Temper-Principal-Id".to_string(), "bot-1".to_string()),
-        ("X-Temper-Principal-Kind".to_string(), "agent".to_string()),
-    ]);
+    let ctx = agent_context("bot-1", "test-agent");
     let mut attrs = HashMap::new();
     attrs.insert("id".to_string(), serde_json::json!("issue-1"));
     let decision = engine.authorize(&ctx, "Assign", "Issue", &attrs);
@@ -334,10 +322,7 @@ fn test_exact_principal_match_wrong_id_denied() {
     let policy =
         r#"permit(principal == Agent::"bot-1", action == Action::"Assign", resource is Issue);"#;
     let engine = AuthzEngine::new(policy).unwrap();
-    let ctx = SecurityContext::from_headers(&[
-        ("X-Temper-Principal-Id".to_string(), "bot-2".to_string()),
-        ("X-Temper-Principal-Kind".to_string(), "agent".to_string()),
-    ]);
+    let ctx = agent_context("bot-2", "test-agent");
     let mut attrs = HashMap::new();
     attrs.insert("id".to_string(), serde_json::json!("issue-1"));
     let decision = engine.authorize(&ctx, "Assign", "Issue", &attrs);
@@ -362,11 +347,7 @@ fn test_principal_attribute_access_in_policy() {
     let engine = AuthzEngine::new(policy).unwrap();
 
     // With matching agent_type → Allow
-    let ctx = SecurityContext::from_headers(&[
-        ("X-Temper-Principal-Id".to_string(), "bot-1".to_string()),
-        ("X-Temper-Principal-Kind".to_string(), "agent".to_string()),
-        ("X-Temper-Agent-Type".to_string(), "supervisor".to_string()),
-    ]);
+    let ctx = agent_context("bot-1", "supervisor");
     let mut attrs = HashMap::new();
     attrs.insert("id".to_string(), serde_json::json!("issue-1"));
     let decision = engine.authorize(&ctx, "Triage", "Issue", &attrs);
@@ -376,11 +357,7 @@ fn test_principal_attribute_access_in_policy() {
     );
 
     // Without matching agent_type → Deny
-    let ctx2 = SecurityContext::from_headers(&[
-        ("X-Temper-Principal-Id".to_string(), "bot-2".to_string()),
-        ("X-Temper-Principal-Kind".to_string(), "agent".to_string()),
-        ("X-Temper-Agent-Type".to_string(), "worker".to_string()),
-    ]);
+    let ctx2 = agent_context("bot-2", "worker");
     let decision2 = engine.authorize(&ctx2, "Triage", "Issue", &attrs);
     assert!(
         !decision2.is_allowed(),
@@ -405,14 +382,7 @@ fn test_resource_attribute_access_in_policy() {
     "#;
     let engine = AuthzEngine::new(policy).unwrap();
 
-    let worker_ctx = SecurityContext::from_headers(&[
-        (
-            "X-Temper-Principal-Id".to_string(),
-            "local-codex-worker".to_string(),
-        ),
-        ("X-Temper-Principal-Kind".to_string(), "agent".to_string()),
-        ("X-Temper-Agent-Type".to_string(), "worker".to_string()),
-    ]);
+    let worker_ctx = agent_context("local-codex-worker", "worker");
     let mut attrs = HashMap::new();
     attrs.insert("id".to_string(), serde_json::json!("wr-1"));
     attrs.insert(
@@ -426,14 +396,7 @@ fn test_resource_attribute_access_in_policy() {
         "claimed worker should be allowed through resource.worker_id: {decision:?}"
     );
 
-    let other_ctx = SecurityContext::from_headers(&[
-        (
-            "X-Temper-Principal-Id".to_string(),
-            "other-worker".to_string(),
-        ),
-        ("X-Temper-Principal-Kind".to_string(), "agent".to_string()),
-        ("X-Temper-Agent-Type".to_string(), "worker".to_string()),
-    ]);
+    let other_ctx = agent_context("other-worker", "worker");
     let decision = engine.authorize(&other_ctx, "StartLocal", "WorkerRun", &attrs);
     assert!(
         !decision.is_allowed(),
@@ -457,28 +420,14 @@ fn test_principal_agent_type_set_membership_filtering() {
     let mut attrs = HashMap::new();
     attrs.insert("id".to_string(), serde_json::json!("issue-1"));
 
-    let supervisor_ctx = SecurityContext::from_headers(&[
-        (
-            "X-Temper-Principal-Id".to_string(),
-            "bot-supervisor".to_string(),
-        ),
-        ("X-Temper-Principal-Kind".to_string(), "agent".to_string()),
-        ("X-Temper-Agent-Type".to_string(), "supervisor".to_string()),
-    ]);
+    let supervisor_ctx = agent_context("bot-supervisor", "supervisor");
     let supervisor_decision = engine.authorize(&supervisor_ctx, "Assign", "Issue", &attrs);
     assert!(
         supervisor_decision.is_allowed(),
         "set membership should allow supervisor agent_type: {supervisor_decision:?}"
     );
 
-    let worker_ctx = SecurityContext::from_headers(&[
-        (
-            "X-Temper-Principal-Id".to_string(),
-            "bot-worker".to_string(),
-        ),
-        ("X-Temper-Principal-Kind".to_string(), "agent".to_string()),
-        ("X-Temper-Agent-Type".to_string(), "worker".to_string()),
-    ]);
+    let worker_ctx = agent_context("bot-worker", "worker");
     let worker_decision = engine.authorize(&worker_ctx, "Assign", "Issue", &attrs);
     assert!(
         !worker_decision.is_allowed(),
@@ -501,10 +450,7 @@ fn test_context_entity_status_in_cedar_context() {
 
     let engine = AuthzEngine::new(policy).unwrap();
 
-    let ctx = SecurityContext::from_headers(&[
-        ("x-temper-principal-id".to_string(), "agent-1".to_string()),
-        ("x-temper-principal-kind".to_string(), "agent".to_string()),
-    ]);
+    let ctx = agent_context("agent-1", "test-agent");
 
     // Without context entity status: should deny
     let mut attrs = HashMap::new();
@@ -616,6 +562,91 @@ fn test_per_tenant_isolation() {
         engine
             .authorize_for_tenant("tenant-b", &ctx, "write", "Doc", &attrs)
             .is_allowed()
+    );
+}
+
+#[test]
+fn missing_tenant_never_inherits_permissive_fallback() {
+    let engine = AuthzEngine::permissive();
+    let ctx = customer_context("anonymous");
+    let attrs = HashMap::from([("id".to_string(), serde_json::json!("doc-1"))]);
+
+    assert!(
+        engine.authorize(&ctx, "read", "Doc", &attrs).is_allowed(),
+        "negative control: the explicit global compatibility policy is permissive"
+    );
+    let decision = engine.authorize_for_tenant("unloaded", &ctx, "read", "Doc", &attrs);
+    assert_eq!(
+        decision,
+        AuthzDecision::Deny(AuthzDenial::NoMatchingPermit),
+        "tenant-scoped authorization must fail closed when its policy is absent"
+    );
+}
+
+#[test]
+fn missing_tenant_system_uses_only_the_builtin_platform_policy() {
+    let engine = AuthzEngine::permissive();
+    let attrs = HashMap::from([("id".to_string(), serde_json::json!("doc-1"))]);
+
+    assert!(
+        engine
+            .authorize_for_tenant(
+                "unloaded",
+                &SecurityContext::system(),
+                "bootstrap",
+                "Doc",
+                &attrs,
+            )
+            .is_allowed(),
+        "kernel System work must remain authorized by the explicit built-in policy"
+    );
+    assert_eq!(
+        engine.authorize_for_tenant(
+            "unloaded",
+            &customer_context("anonymous"),
+            "read",
+            "Doc",
+            &attrs,
+        ),
+        AuthzDecision::Deny(AuthzDenial::NoMatchingPermit),
+        "an unloaded tenant must not inherit the permissive compatibility policy"
+    );
+}
+
+#[test]
+fn failed_tenant_reload_preserves_last_known_good_without_global_fallback() {
+    let engine = AuthzEngine::permissive();
+    engine
+        .reload_tenant_policies(
+            "tenant-a",
+            r#"permit(principal is Customer, action == Action::"read", resource is Doc);"#,
+        )
+        .unwrap();
+    assert!(
+        engine
+            .reload_tenant_policies("tenant-a", "not cedar")
+            .is_err()
+    );
+
+    let ctx = customer_context("customer-1");
+    let attrs = HashMap::from([("id".to_string(), serde_json::json!("doc-1"))]);
+    assert!(
+        engine
+            .authorize_for_tenant("tenant-a", &ctx, "read", "Doc", &attrs)
+            .is_allowed(),
+        "a failed reload must preserve the exact tenant's last-known-good policy"
+    );
+    assert!(
+        !engine
+            .authorize_for_tenant("tenant-a", &ctx, "write", "Doc", &attrs)
+            .is_allowed(),
+        "a failed reload must not widen to the permissive global policy"
+    );
+    assert!(
+        !engine
+            .authorize_for_tenant("tenant-b", &ctx, "read", "Doc", &attrs)
+            .is_allowed(),
+        "another unloaded tenant must remain denied"
     );
 }
 

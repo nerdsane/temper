@@ -61,13 +61,17 @@ impl TursoEventStore {
 
     /// Get a single pending decision by ID, returning the full JSON data.
     #[instrument(skip_all, fields(id, otel.name = "turso.get_pending_decision"))]
-    pub async fn get_pending_decision(&self, id: &str) -> Result<Option<String>, PersistenceError> {
+    pub async fn get_pending_decision(
+        &self,
+        tenant: &str,
+        id: &str,
+    ) -> Result<Option<String>, PersistenceError> {
         let _query_timer = TursoQueryTimer::start("turso.get_pending_decision");
         let conn = self.configured_connection().await?;
         let mut rows = conn
             .query(
-                "SELECT data FROM pending_decisions WHERE id = ?1",
-                params![id],
+                "SELECT data FROM pending_decisions WHERE tenant = ?1 AND id = ?2",
+                params![tenant, id],
             )
             .await
             .map_err(storage_error)?;
@@ -89,14 +93,21 @@ impl TursoEventStore {
     ) -> Result<(), PersistenceError> {
         let _query_timer = TursoQueryTimer::start("turso.upsert_pending_decision");
         let conn = self.configured_connection().await?;
-        conn.execute(
-            "INSERT INTO pending_decisions (id, tenant, status, data, updated_at) \
+        let affected = conn
+            .execute(
+                "INSERT INTO pending_decisions (id, tenant, status, data, updated_at) \
              VALUES (?1, ?2, ?3, ?4, datetime('now')) \
-             ON CONFLICT(id) DO UPDATE SET status = ?3, data = ?4, updated_at = datetime('now')",
-            params![id, tenant, status, data_json],
-        )
-        .await
-        .map_err(storage_error)?;
+             ON CONFLICT(id) DO UPDATE SET status = ?3, data = ?4, updated_at = datetime('now') \
+             WHERE pending_decisions.tenant = excluded.tenant",
+                params![id, tenant, status, data_json],
+            )
+            .await
+            .map_err(storage_error)?;
+        if affected != 1 {
+            return Err(PersistenceError::Storage(format!(
+                "pending decision '{id}' is owned by another tenant"
+            )));
+        }
         Ok(())
     }
 

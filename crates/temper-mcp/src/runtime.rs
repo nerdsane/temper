@@ -381,7 +381,6 @@ impl RuntimeContext {
         let http = self.http.clone();
         let base_url = self.base_url.clone();
         let agent_id = self.agent_id.clone();
-        let agent_type = self.agent_type.clone();
         let session_id = self.session_id.clone();
         let api_key = self.api_key.clone();
 
@@ -394,7 +393,6 @@ impl RuntimeContext {
                     let http = http.clone();
                     let base_url = base_url.clone();
                     let agent_id = agent_id.clone();
-                    let agent_type = agent_type.clone();
                     let session_id = session_id.clone();
                     let api_key = api_key.clone();
                     async move {
@@ -425,14 +423,11 @@ impl RuntimeContext {
                             base_url: &base_url,
                             tenant: &tenant,
                             agent_id: agent_id.as_deref(),
-                            agent_type: agent_type.as_deref(),
                             session_id: session_id.as_deref(),
-                            principal_id: None,
-                            principal_kind: None,
-                            agent_role: None,
                             entity_set_resolver: None,
                             binary_path: None,
                             api_key: api_key.as_deref(),
+                            internal_credential_issuer: None,
                         };
                         temper_sandbox::dispatch::dispatch_temper_method(
                             &ctx,

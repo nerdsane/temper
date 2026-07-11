@@ -3,14 +3,14 @@
 //! Provides lightweight Cedar authorization checks for agent tool calls and
 //! records tool invocations in the trajectory log for observability.
 
-use axum::extract::State;
-use axum::http::{HeaderMap, StatusCode};
+use axum::extract::{Extension, State};
+use axum::http::StatusCode;
 use axum::response::IntoResponse;
+use temper_authz::AuthenticatedRequestContext;
 use temper_runtime::scheduler::sim_now;
 use tracing::instrument;
 
-use crate::authz::{DenialInput, record_authz_denial, security_context_from_headers};
-use crate::odata::extract_tenant;
+use crate::authz::{DenialInput, record_authz_denial, require_authenticated_context};
 use crate::state::{ServerState, TrajectoryEntry, TrajectorySource};
 
 /// Request body for POST /api/authorize.
@@ -31,18 +31,46 @@ pub(crate) struct AuthorizeRequest {
 #[instrument(skip_all, fields(otel.name = "POST /api/authorize"))]
 pub(crate) async fn handle_authorize(
     State(state): State<ServerState>,
-    headers: HeaderMap,
+    authenticated: Option<Extension<AuthenticatedRequestContext>>,
     axum::Json(body): axum::Json<AuthorizeRequest>,
 ) -> impl IntoResponse {
-    let security_ctx = security_context_from_headers(&headers, Some(&body.agent_id), None, None);
-    let resource_attrs = std::collections::BTreeMap::new();
-    let tenant = match extract_tenant(&headers, &state) {
-        Ok(t) => t,
-        Err(e) => return e.into_response(),
+    let authenticated = match require_authenticated_context(authenticated.as_deref()) {
+        Ok(authenticated) => authenticated,
+        Err(status) => return status.into_response(),
     };
+    let security_ctx = authenticated.security_context();
+    if body.agent_id != security_ctx.principal.id {
+        return (
+            StatusCode::FORBIDDEN,
+            axum::Json(serde_json::json!({
+                "error": "agent_id must match the authenticated principal"
+            })),
+        )
+            .into_response();
+    }
+    let mut resource_attrs = match body.context {
+        serde_json::Value::Null => std::collections::BTreeMap::new(),
+        serde_json::Value::Object(context) => context.into_iter().collect(),
+        _ => {
+            return (
+                StatusCode::BAD_REQUEST,
+                axum::Json(serde_json::json!({
+                    "error": "context must be a JSON object"
+                })),
+            )
+                .into_response();
+        }
+    };
+    // The requested resource identity is canonical. Caller-supplied context
+    // may enrich the resource, but can never replace the UID Cedar evaluates.
+    resource_attrs.insert(
+        "id".to_string(),
+        serde_json::Value::String(body.resource_id.clone()),
+    );
+    let tenant = authenticated.tenant();
 
     match state.authorize_with_context(
-        &security_ctx,
+        security_ctx,
         &body.action,
         &body.resource_type,
         &resource_attrs,
@@ -62,15 +90,14 @@ pub(crate) async fn handle_authorize(
                 &state,
                 DenialInput {
                     tenant: tenant.as_str(),
-                    security_ctx: &security_ctx,
-                    agent_id_override: Some(&body.agent_id),
+                    security_ctx,
+                    agent_id_override: None,
                     action: &body.action,
                     resource_type: &body.resource_type,
                     resource_id: &body.resource_id,
-                    resource_attrs: serde_json::json!({
-                        "agent_id": body.agent_id,
-                        "context": body.context,
-                    }),
+                    resource_attrs: serde_json::Value::Object(
+                        resource_attrs.clone().into_iter().collect(),
+                    ),
                     reason: &reason,
                     module_name: None,
                     from_status: None,
@@ -121,13 +148,24 @@ pub(crate) struct AuditRequest {
 #[instrument(skip_all, fields(otel.name = "POST /api/audit"))]
 pub(crate) async fn handle_audit(
     State(state): State<ServerState>,
-    headers: HeaderMap,
+    authenticated: Option<Extension<AuthenticatedRequestContext>>,
     axum::Json(body): axum::Json<AuditRequest>,
 ) -> impl IntoResponse {
-    let tenant = match extract_tenant(&headers, &state) {
-        Ok(t) => t,
-        Err(e) => return e.into_response(),
+    let authenticated = match require_authenticated_context(authenticated.as_deref()) {
+        Ok(authenticated) => authenticated,
+        Err(status) => return status.into_response(),
     };
+    let security_ctx = authenticated.security_context();
+    if body.agent_id != security_ctx.principal.id {
+        return (
+            StatusCode::FORBIDDEN,
+            axum::Json(serde_json::json!({
+                "error": "agent_id must match the authenticated principal"
+            })),
+        )
+            .into_response();
+    }
+    let tenant = authenticated.tenant();
 
     let entry = TrajectoryEntry {
         timestamp: sim_now().to_rfc3339(),
@@ -139,14 +177,14 @@ pub(crate) async fn handle_audit(
         from_status: None,
         to_status: None,
         error: body.error,
-        agent_id: Some(body.agent_id),
+        agent_id: Some(security_ctx.principal.id.clone()),
         session_id: body.session_id,
         authz_denied: None,
         denied_resource: None,
         denied_module: None,
         source: Some(TrajectorySource::Entity),
         spec_governed: Some(false),
-        agent_type: None,
+        agent_type: security_ctx.principal.agent_type.clone(),
         request_body: body.request_body,
         intent: body.intent,
         matched_policy_ids: None,

@@ -1,11 +1,14 @@
-use axum::extract::{Query, State};
+use axum::extract::{Extension, Query, State};
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::Json;
 use serde::Deserialize;
+use temper_authz::AuthenticatedRequestContext;
 use temper_runtime::scheduler::{sim_now, sim_uuid};
 use tracing::instrument;
 
-use crate::authz::{observe_tenant_scope, require_observe_auth};
+use crate::authz::{
+    observe_tenant_scope, require_authenticated_context, require_observe_auth, require_tenant_match,
+};
 use crate::ots_trajectory_outbox::{OtsTrajectoryEnqueueError, OtsTrajectoryWrite};
 use crate::state::{ServerState, TrajectoryEntry, TrajectorySource};
 
@@ -32,22 +35,17 @@ pub(crate) struct TrajectoryQueryParams {
 #[instrument(skip_all, fields(otel.name = "GET /observe/trajectories"))]
 pub(crate) async fn handle_trajectories(
     State(state): State<ServerState>,
-    headers: HeaderMap,
+    authenticated: Option<Extension<AuthenticatedRequestContext>>,
     Query(params): Query<TrajectoryQueryParams>,
 ) -> Result<Json<serde_json::Value>, StatusCode> {
-    require_observe_auth(&state, &headers, "read_trajectories", "Trajectory")?;
-    let tenant_scope = observe_tenant_scope(&state, &headers)?;
+    let authenticated = require_authenticated_context(authenticated.as_deref())?;
+    require_observe_auth(&state, authenticated, "read_trajectories", "Trajectory")?;
+    let tenant_scope = observe_tenant_scope(authenticated);
     let failed_limit = params.failed_limit.unwrap_or(50).min(500);
     let success_filter: Option<bool> = params.success.as_deref().map(|s| s == "true");
 
-    let stores = if let Some(ref scope) = tenant_scope {
-        match state.metadata_store_for_tenant(scope.as_str()).await {
-            Some(store) => vec![store],
-            None => Vec::new(),
-        }
-    } else {
-        state.collect_all_metadata_stores().await
-    };
+    let store = state.metadata_store_for_tenant(tenant_scope.as_str()).await;
+    let stores = store.into_iter().collect::<Vec<_>>();
 
     if !stores.is_empty() {
         // Aggregate stats across all queried stores.
@@ -130,10 +128,12 @@ pub(crate) async fn handle_trajectories(
 #[instrument(skip_all, fields(otel.name = "POST /api/evolution/trajectories/unmet"))]
 pub(crate) async fn handle_unmet_intent(
     State(state): State<ServerState>,
-    headers: HeaderMap,
+    authenticated: Option<Extension<AuthenticatedRequestContext>>,
     Json(body): Json<serde_json::Value>,
 ) -> Result<StatusCode, (StatusCode, String)> {
-    require_observe_auth(&state, &headers, "write_trajectories", "Trajectory")
+    let authenticated = require_authenticated_context(authenticated.as_deref())
+        .map_err(|status| (status, "unauthorized".to_string()))?;
+    require_observe_auth(&state, authenticated, "write_trajectories", "Trajectory")
         .map_err(|sc| (sc, "unauthorized".to_string()))?;
 
     let intent = body
@@ -141,10 +141,11 @@ pub(crate) async fn handle_unmet_intent(
         .or_else(|| body.get("intent"))
         .and_then(|v| v.as_str())
         .unwrap_or("unknown");
-    let tenant = body
-        .get("tenant")
-        .and_then(|v| v.as_str())
-        .unwrap_or("default");
+    if let Some(requested_tenant) = body.get("tenant").and_then(|value| value.as_str()) {
+        require_tenant_match(authenticated, requested_tenant)
+            .map_err(|status| (status, "tenant mismatch".to_string()))?;
+    }
+    let tenant = authenticated.tenant().as_str();
     let entity_type = body
         .get("entity_type")
         .and_then(|v| v.as_str())
@@ -160,10 +161,7 @@ pub(crate) async fn handle_unmet_intent(
         success: false,
         from_status: None,
         to_status: None,
-        agent_id: body
-            .get("agent_id")
-            .and_then(|v| v.as_str())
-            .map(str::to_string),
+        agent_id: Some(authenticated.security_context().principal.id.clone()),
         session_id: body
             .get("session_id")
             .and_then(|v| v.as_str())
@@ -186,7 +184,11 @@ pub(crate) async fn handle_unmet_intent(
             error_msg.to_string()
         }),
         spec_governed: None,
-        agent_type: None,
+        agent_type: authenticated
+            .security_context()
+            .principal
+            .agent_type
+            .clone(),
         request_body: body.get("request_body").cloned(),
         intent: body
             .get("intent")
@@ -219,8 +221,13 @@ pub(crate) struct OtsTrajectoryQueryParams {
 pub(crate) async fn handle_post_ots_trajectory(
     State(state): State<ServerState>,
     headers: HeaderMap,
+    authenticated: Option<Extension<AuthenticatedRequestContext>>,
     body: String,
 ) -> Result<StatusCode, (StatusCode, String)> {
+    let authenticated = require_authenticated_context(authenticated.as_deref())
+        .map_err(|status| (status, "unauthorized".to_string()))?;
+    require_observe_auth(&state, authenticated, "write_trajectories", "OtsTrajectory")
+        .map_err(|status| (status, "unauthorized".to_string()))?;
     // Parse the OTS trajectory JSON to extract indexed fields.
     let trajectory: serde_json::Value = serde_json::from_str(&body)
         .map_err(|e| (StatusCode::BAD_REQUEST, format!("invalid JSON: {e}")))?;
@@ -232,16 +239,7 @@ pub(crate) async fn handle_post_ots_trajectory(
         .map(|s| s.to_string())
         .unwrap_or_else(|| sim_uuid().to_string());
 
-    let agent_id = headers
-        .get("X-Agent-Id")
-        .and_then(|v| v.to_str().ok())
-        .or_else(|| {
-            trajectory
-                .get("metadata")
-                .and_then(|m| m.get("agent_id"))
-                .and_then(|v| v.as_str())
-        })
-        .unwrap_or("unknown");
+    let agent_id = authenticated.security_context().principal.id.as_str();
 
     let session_id = headers
         .get("X-Session-Id")
@@ -260,10 +258,7 @@ pub(crate) async fn handle_post_ots_trajectory(
         .map(|a| a.len() as i64)
         .unwrap_or(0);
 
-    let tenant = headers
-        .get("X-Tenant-Id")
-        .and_then(|v| v.to_str().ok())
-        .unwrap_or("default");
+    let tenant = authenticated.tenant().as_str();
 
     let Some(store) = state.metadata_store_for_tenant(tenant).await else {
         tracing::warn!(
@@ -325,13 +320,12 @@ pub(crate) async fn handle_post_ots_trajectory(
 #[instrument(skip_all, fields(otel.name = "GET /api/ots/trajectories"))]
 pub(crate) async fn handle_get_ots_trajectories(
     State(state): State<ServerState>,
-    headers: HeaderMap,
+    authenticated: Option<Extension<AuthenticatedRequestContext>>,
     Query(params): Query<OtsTrajectoryQueryParams>,
 ) -> Result<Json<serde_json::Value>, StatusCode> {
-    let tenant = headers
-        .get("X-Tenant-Id")
-        .and_then(|v| v.to_str().ok())
-        .unwrap_or("default");
+    let authenticated = require_authenticated_context(authenticated.as_deref())?;
+    require_observe_auth(&state, authenticated, "read_trajectories", "OtsTrajectory")?;
+    let tenant = authenticated.tenant().as_str();
     let limit = params.limit.unwrap_or(50).min(500);
 
     let Some(store) = state.metadata_store_for_tenant(tenant).await else {

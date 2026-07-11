@@ -15,11 +15,11 @@ use crate::webhooks::receiver as webhook_receiver;
 
 use axum::body::Body;
 use axum::extract::DefaultBodyLimit;
-use axum::extract::State;
+use axum::extract::{Extension, State};
 use axum::http::HeaderMap;
 use axum::http::Uri;
-use axum::response::Response;
-use temper_runtime::tenant::TenantId;
+use axum::response::{IntoResponse, Response};
+use temper_authz::AuthenticatedRequestContext;
 
 const TEMPER_CLIENT_JS: &str = include_str!("../static/temper-client.js");
 const INTERNAL_BLOB_BODY_LIMIT_BYTES: usize = 128 * 1024 * 1024;
@@ -123,11 +123,9 @@ pub fn build_router(state: ServerState) -> Router {
             AUTHORIZATION,
             HeaderName::from_static("x-tenant-id"),
             HeaderName::from_static("x-session-id"),
+            HeaderName::from_static("x-repository-id"),
+            HeaderName::from_static("x-expected-object-id"),
             HeaderName::from_static("idempotency-key"),
-            HeaderName::from_static("x-temper-principal-id"),
-            HeaderName::from_static("x-temper-principal-kind"),
-            HeaderName::from_static("x-temper-agent-role"),
-            HeaderName::from_static("x-temper-agent-type"),
         ]);
 
     router
@@ -157,6 +155,14 @@ pub fn build_router(state: ServerState) -> Router {
                 ),
         )
         .layer(cors)
+        // Axum applies the last layer first: strip caller authority before the
+        // typed-context guard or any route handler observes the request.
+        .layer(axum::middleware::from_fn(
+            crate::authz::require_authenticated_request_context,
+        ))
+        .layer(axum::middleware::from_fn(
+            crate::authz::strip_inbound_identity_headers,
+        ))
         .with_state(state)
 }
 
@@ -168,69 +174,40 @@ pub fn build_router(state: ServerState) -> Router {
 #[tracing::instrument(skip_all, fields(http.method = %method, http.route = %uri.path()))]
 async fn http_endpoint_fallback(
     State(state): State<ServerState>,
+    authenticated: Option<Extension<AuthenticatedRequestContext>>,
+    admitted: Option<Extension<crate::http_endpoint::AdmittedHttpEndpoint>>,
     method: axum::http::Method,
     uri: Uri,
     headers: HeaderMap,
     _body: Body,
 ) -> Response {
-    let tenant_header = headers
-        .get("x-tenant-id")
-        .and_then(|v| v.to_str().ok())
-        .map(str::to_string);
-
-    // Git clients (and GitHub-REST-compat clients) can't send
-    // X-Tenant-Id; the whole point of the HttpEndpoint surface is
-    // to terminate foreign wire protocols. When the header is absent
-    // the fallback prefers the registered `default` tenant — protocol
-    // endpoint rows live there on single-operator deployments — and
-    // only then any other non-system tenant. Picking "first
-    // registered" made resolution depend on registry iteration order:
-    // a production server whose extra tenants sort before "default"
-    // resolved header-less git/REST requests to a tenant with an
-    // empty route table and answered 404. Multi-tenant deployments
-    // that need strict tenant routing should encode the tenant in the
-    // path prefix of their HttpEndpoint rows
-    // (e.g. /{tenant}/{repo}.git/...).
-    let tenant_id = match tenant_header {
-        Some(t) if !t.is_empty() => TenantId::new(&t),
-        _ => {
-            let Ok(registry) = state.registry.read() else {
-                return http_404_response(uri.path());
-            };
-            match http_endpoint_fallback_tenant(&registry.tenant_ids()) {
-                Some(t) => t.clone(),
-                None => return http_404_response(uri.path()),
-            }
+    let Some(Extension(authenticated)) = authenticated else {
+        return StatusCode::UNAUTHORIZED.into_response();
+    };
+    let tenant_id = authenticated.tenant().clone();
+    let route = if let Some(Extension(admitted)) = admitted {
+        let Some(matched) = admitted.into_matched(&tenant_id, method.as_str(), uri.path()) else {
+            tracing::warn!(tenant = %tenant_id, "HttpEndpoint admission binding mismatch");
+            return StatusCode::UNAUTHORIZED.into_response();
+        };
+        matched
+    } else {
+        if authenticated.security_context().principal.id == "anonymous" {
+            return StatusCode::UNAUTHORIZED.into_response();
         }
+        let Some(table) = state.http_endpoint_tables.get(&tenant_id).await else {
+            return http_404_response(uri.path());
+        };
+        let Some(matched) = table.match_request(method.as_str(), uri.path()).await else {
+            return http_404_response(uri.path());
+        };
+        matched
     };
+    if route.route.requires_auth && authenticated.security_context().principal.id == "anonymous" {
+        return StatusCode::UNAUTHORIZED.into_response();
+    }
 
-    let table = state.http_endpoint_tables.table_for(&tenant_id).await;
-    let matched = table.match_request(method.as_str(), uri.path()).await;
-
-    let Some(route) = matched else {
-        return http_404_response(uri.path());
-    };
-
-    dispatch_matched_route(state, tenant_id, method, uri, headers, _body, route).await
-}
-
-/// Tenant for a header-less HttpEndpoint request: the registered
-/// `default` tenant when present (deterministic — protocol endpoint
-/// rows live there on single-operator deployments), else the first
-/// non-system tenant, else any tenant at all.
-fn http_endpoint_fallback_tenant<'a>(tenant_ids: &[&'a TenantId]) -> Option<&'a TenantId> {
-    let default_tenant = TenantId::default();
-    tenant_ids
-        .iter()
-        .copied()
-        .find(|t| **t == default_tenant)
-        .or_else(|| {
-            tenant_ids
-                .iter()
-                .copied()
-                .find(|t| t.as_str() != "temper-system")
-        })
-        .or_else(|| tenant_ids.first().copied())
+    dispatch_matched_route(state, authenticated, method, uri, headers, _body, route).await
 }
 
 /// End-to-end dispatch: open an InboundExchange on the shared
@@ -241,7 +218,7 @@ fn http_endpoint_fallback_tenant<'a>(tenant_ids: &[&'a TenantId]) -> Option<&'a 
 /// response.
 async fn dispatch_matched_route(
     state: ServerState,
-    tenant_id: TenantId,
+    authenticated: AuthenticatedRequestContext,
     method: axum::http::Method,
     uri: Uri,
     headers: HeaderMap,
@@ -250,6 +227,7 @@ async fn dispatch_matched_route(
 ) -> Response {
     use temper_wasm::http_stream::HttpResponseHead;
     use temper_wasm::types::{HttpDispatchContext, WasmInvocationContext};
+    let tenant_id = authenticated.tenant().clone();
 
     // Resolve the integration module hash. The WASM module must
     // already be registered for this tenant (via app install).
@@ -318,6 +296,7 @@ async fn dispatch_matched_route(
     // Build the invocation context.
     let header_pairs: Vec<(String, String)> = headers
         .iter()
+        .filter(|(name, _)| !name.as_str().eq_ignore_ascii_case("authorization"))
         .filter_map(|(k, v)| {
             v.to_str()
                 .ok()
@@ -337,7 +316,7 @@ async fn dispatch_matched_route(
         wasm_module: Some(route.route.integration_module.clone()),
         trigger_params: serde_json::Value::Null,
         entity_state: serde_json::Value::Null,
-        agent_id: None,
+        agent_id: Some(authenticated.security_context().principal.id.clone()),
         session_id: None,
         integration_config: std::collections::BTreeMap::new(),
         trace_id: String::new(),
@@ -354,22 +333,28 @@ async fn dispatch_matched_route(
             },
             params: route_params.clone(),
             headers: header_pairs,
-            principal_id: None,
+            principal_id: Some(authenticated.security_context().principal.id.clone()),
             request_body_handle: guest_request_body.0,
             response_body_handle: guest_response_body.0,
         }),
     };
 
-    // Build a per-request host that shares the registry.
-    let secrets: std::collections::BTreeMap<String, String> = state
-        .secrets_vault
-        .as_ref()
-        .map(|v| v.get_tenant_secrets(tenant_id.as_str()))
-        .unwrap_or_default();
-    let host: std::sync::Arc<dyn temper_wasm::WasmHost> = std::sync::Arc::new(
-        temper_wasm::ProductionWasmHost::with_shared_streams(secrets, streams.clone())
-            .with_invocation_context(ctx.clone()),
-    );
+    // Build the canonical Cedar-gated host chain while retaining the inbound
+    // exchange's shared stream registry.
+    let host = match crate::state::authorized_http_endpoint_host(
+        &state,
+        &tenant_id,
+        &route.route.integration_module,
+        &ctx,
+        streams.clone(),
+        authenticated.security_context(),
+    ) {
+        Ok(host) => host,
+        Err(error) => {
+            tracing::error!(%error, "failed to construct authorized HttpEndpoint host");
+            return StatusCode::INTERNAL_SERVER_ERROR.into_response();
+        }
+    };
 
     // Spawn task B: invoke the WASM module. Runs to completion
     // (guest writes head + body via FFI; we drain on the axum side).
@@ -431,10 +416,9 @@ async fn dispatch_matched_route(
 
         return dispatch_action_bridge_result(
             state,
-            tenant_id,
+            authenticated,
             headers,
             route_params,
-            route.route.requires_auth,
             action_bridge,
             result,
         )
@@ -531,13 +515,13 @@ async fn dispatch_matched_route(
 
 async fn dispatch_action_bridge_result(
     state: ServerState,
-    tenant_id: TenantId,
+    authenticated: AuthenticatedRequestContext,
     headers: HeaderMap,
     route_params: std::collections::BTreeMap<String, String>,
-    requires_auth: bool,
     bridge: crate::http_endpoint::HttpActionBridge,
     result: temper_wasm::types::WasmInvocationResult,
 ) -> Response {
+    let tenant_id = authenticated.tenant().clone();
     let callback_params = result.callback_params.clone();
     let refs = bridge_git_receive_pack_refs(&callback_params);
     let sideband = bridge_git_receive_pack_sideband(&callback_params);
@@ -567,27 +551,13 @@ async fn dispatch_action_bridge_result(
     let action_params = bridge_action_params(&callback_params);
 
     let mut agent_ctx = crate::request_context::extract_agent_context(&headers);
-    let explicit_principal = headers.contains_key("x-temper-principal-kind")
-        || headers.contains_key("x-temper-principal-id")
-        || headers.contains_key("x-temper-principal-scopes");
-    // Protocol adapters (git wire, REST shims) authenticate callers whose
-    // credentials are not X-Temper-* headers; their resolved principal
-    // takes precedence over header context and the system fallback
-    // (ADR-0138).
-    agent_ctx.security_ctx = Some(
-        if let Some(adapter_principal) = bridge_resolved_principal(&callback_params) {
-            adapter_principal
-        } else if requires_auth || explicit_principal {
-            crate::authz::security_context_from_headers(
-                &headers,
-                agent_ctx.agent_id.as_deref(),
-                agent_ctx.session_id.as_deref(),
-                agent_ctx.agent_type.as_deref(),
-            )
-        } else {
-            temper_authz::SecurityContext::system()
-        },
-    );
+    agent_ctx.security_ctx = Some(authenticated.security_context().clone());
+    agent_ctx.agent_id = Some(authenticated.security_context().principal.id.clone());
+    agent_ctx.agent_type = authenticated
+        .security_context()
+        .principal
+        .agent_type
+        .clone();
     if agent_ctx.idempotency_key.is_none() {
         agent_ctx.idempotency_key = action_params
             .get("ClientRequestId")
@@ -771,57 +741,6 @@ fn build_bridge_short_circuit(resp: &serde_json::Value) -> Result<Response, Stri
     builder
         .body(Body::from(body))
         .map_err(|e| format!("bridge_response could not be built: {e}"))
-}
-
-/// Adapter-resolved principal for action-bridge dispatch (ADR-0138).
-///
-/// Adapters that authenticate protocol-native credentials (git Basic auth
-/// mapping to a domain token entity) return `bridge_principal` with `kind`,
-/// `id`, and optional `scopes`. Honored only alongside an explicit
-/// `action_params` key: a passthrough adapter that echoes request content
-/// into top-level params must never hand the caller an identity. Scopes are
-/// token-like (`repo:push`, `force`); values containing whitespace, commas,
-/// or semicolons would be split by the header-parsing path. The `system`
-/// kind cannot be smuggled — `SecurityContext::from_headers` maps unknown
-/// kinds to Customer.
-fn bridge_resolved_principal(
-    callback_params: &serde_json::Value,
-) -> Option<temper_authz::SecurityContext> {
-    let principal = callback_params.get("bridge_principal")?;
-    if callback_params.get("action_params").is_none()
-        && callback_params.get("ActionParams").is_none()
-    {
-        tracing::warn!(
-            "bridge_principal without explicit action_params is ignored (ADR-0138 structured shape required)"
-        );
-        return None;
-    }
-    let kind = principal.get("kind").and_then(|v| v.as_str())?.trim();
-    let id = principal.get("id").and_then(|v| v.as_str())?.trim();
-    if kind.is_empty() || id.is_empty() {
-        return None;
-    }
-    let mut header_pairs = vec![
-        ("x-temper-principal-kind".to_string(), kind.to_string()),
-        ("x-temper-principal-id".to_string(), id.to_string()),
-    ];
-    let scopes = principal
-        .get("scopes")
-        .and_then(|v| v.as_array())
-        .map(|items| {
-            items
-                .iter()
-                .filter_map(|s| s.as_str())
-                .map(str::trim)
-                .filter(|s| !s.is_empty())
-                .collect::<Vec<_>>()
-                .join(",")
-        })
-        .unwrap_or_default();
-    if !scopes.is_empty() {
-        header_pairs.push(("x-temper-principal-scopes".to_string(), scopes));
-    }
-    Some(temper_authz::SecurityContext::from_headers(&header_pairs))
 }
 
 fn bridge_git_receive_pack_refs(callback_params: &serde_json::Value) -> Vec<String> {

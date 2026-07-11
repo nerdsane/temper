@@ -193,6 +193,7 @@ impl crate::state::ServerState {
                     prepared.params,
                     &sub_agent_ctx,
                     false,
+                    None,
                 )
                 .await?;
 

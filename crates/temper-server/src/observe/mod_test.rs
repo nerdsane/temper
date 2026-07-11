@@ -75,16 +75,98 @@ fn build_test_app() -> Router {
         .with_state(state)
 }
 
-/// Build a GET request with admin auth headers for observe endpoints.
-///
-/// Uses "admin" principal kind — "system" is no longer accepted from headers
-/// (only via `SecurityContext::system()` on internal paths).
+fn admin_security_context() -> temper_authz::SecurityContext {
+    temper_authz::SecurityContext {
+        principal: temper_authz::Principal {
+            id: "admin-1".to_string(),
+            kind: temper_authz::PrincipalKind::Admin,
+            role: None,
+            acting_for: None,
+            agent_type: None,
+            attributes: Default::default(),
+        },
+        context_attrs: Default::default(),
+        correlation_id: "observe-test-admin".to_string(),
+    }
+}
+
+fn customer_security_context(id: &str) -> temper_authz::SecurityContext {
+    temper_authz::SecurityContext {
+        principal: temper_authz::Principal {
+            id: id.to_string(),
+            kind: temper_authz::PrincipalKind::Customer,
+            role: None,
+            acting_for: None,
+            agent_type: None,
+            attributes: Default::default(),
+        },
+        context_attrs: Default::default(),
+        correlation_id: "observe-test-customer".to_string(),
+    }
+}
+
+fn with_security_context(
+    mut request: Request<Body>,
+    security_context: temper_authz::SecurityContext,
+) -> Request<Body> {
+    request
+        .extensions_mut()
+        .insert(temper_authz::AuthenticatedRequestContext::new(
+            TenantId::default(),
+            security_context,
+        ));
+    request
+}
+
+fn with_tenant_security_context(
+    mut request: Request<Body>,
+    tenant: &str,
+    security_context: temper_authz::SecurityContext,
+) -> Request<Body> {
+    request
+        .extensions_mut()
+        .insert(temper_authz::AuthenticatedRequestContext::new(
+            TenantId::new(tenant),
+            security_context,
+        ));
+    request
+}
+
+fn admin_request(request: Request<Body>) -> Request<Body> {
+    with_security_context(request, admin_security_context())
+}
+
+fn system_request(request: Request<Body>) -> Request<Body> {
+    with_security_context(request, temper_authz::SecurityContext::system())
+}
+
+fn agent_request(request: Request<Body>) -> Request<Body> {
+    with_security_context(
+        request,
+        temper_authz::SecurityContext::from_resolved_identity("agent-1", "swe", Some("session-1")),
+    )
+}
+
+fn customer_request(request: Request<Body>, id: &str) -> Request<Body> {
+    with_security_context(request, customer_security_context(id))
+}
+
+#[tokio::test]
+async fn typed_admin_kind_does_not_bypass_observe_cedar() {
+    let response = build_app_with_state(test_state_with_registry())
+        .oneshot(admin_request(
+            Request::get("/observe/specs")
+                .body(Body::empty())
+                .expect("request should build"),
+        ))
+        .await
+        .expect("request should run");
+    assert_eq!(response.status(), StatusCode::FORBIDDEN);
+}
+
+/// Build a GET request with kernel System authority for functional tests.
 fn system_get(uri: &str) -> Request<Body> {
-    Request::get(uri)
-        .header("X-Temper-Principal-Kind", "admin")
-        .header(temper_authz::TRUSTED_PRINCIPAL_HEADER, "1")
-        .body(Body::empty())
-        .unwrap()
+    system_request(Request::get(uri).body(Body::empty()).unwrap())
 }
 
 async fn observe_json(app: Router, uri: &str) -> serde_json::Value {
@@ -202,47 +284,32 @@ async fn projection_replay_parity_endpoint_reports_projection_drift() {
     assert_eq!(json["report"]["drift_examples"][0]["drift_kind"], "fields");
 }
 
-/// Build a POST request with admin auth headers for observe endpoints.
+/// Build a POST request with kernel System authority for functional tests.
 fn system_post(uri: &str, body: &str) -> Request<Body> {
-    Request::post(uri)
-        .header("Content-Type", "application/json")
-        .header("X-Temper-Principal-Kind", "admin")
-        .header(temper_authz::TRUSTED_PRINCIPAL_HEADER, "1")
-        .body(Body::from(body.to_string()))
-        .unwrap()
-}
-
-/// Build a POST request with admin auth headers.
-#[allow(dead_code)]
-fn admin_post(uri: &str, body: &str) -> Request<Body> {
-    Request::post(uri)
-        .header("Content-Type", "application/json")
-        .header("X-Temper-Principal-Kind", "admin")
-        .header(temper_authz::TRUSTED_PRINCIPAL_HEADER, "1")
-        .body(Body::from(body.to_string()))
-        .unwrap()
+    system_request(
+        Request::post(uri)
+            .header("Content-Type", "application/json")
+            .body(Body::from(body.to_string()))
+            .unwrap(),
+    )
 }
 
 fn agent_post(uri: &str, body: impl Into<Body>) -> Request<Body> {
-    Request::post(uri)
-        .header("X-Tenant-Id", "default")
-        .header("X-Temper-Principal-Id", "agent-1")
-        .header("X-Temper-Principal-Kind", "agent")
-        .header("X-Temper-Agent-Type", "swe")
-        .header("X-Temper-Ctx-SessionId", "session-1")
-        .body(body.into())
-        .unwrap()
+    agent_request(
+        Request::post(uri)
+            .header("X-Tenant-Id", "default")
+            .body(body.into())
+            .unwrap(),
+    )
 }
 
 fn agent_get(uri: &str) -> Request<Body> {
-    Request::get(uri)
-        .header("X-Tenant-Id", "default")
-        .header("X-Temper-Principal-Id", "agent-1")
-        .header("X-Temper-Principal-Kind", "agent")
-        .header("X-Temper-Agent-Type", "swe")
-        .header("X-Temper-Ctx-SessionId", "session-1")
-        .body(Body::empty())
-        .unwrap()
+    agent_request(
+        Request::get(uri)
+            .header("X-Tenant-Id", "default")
+            .body(Body::empty())
+            .unwrap(),
+    )
 }
 
 const ADMIN_MANAGE_POLICIES_POLICY: &str = r#"
@@ -264,15 +331,36 @@ permit(
 fn install_admin_policy(state: &ServerState) {
     state
         .authz
-        .reload_policies(ADMIN_MANAGE_POLICIES_POLICY)
+        .reload_tenant_policies("default", ADMIN_MANAGE_POLICIES_POLICY)
         .expect("admin policy should parse");
 }
 
-fn install_admin_submit_specs_policy(state: &ServerState) {
+fn install_admin_submit_specs_policy(state: &ServerState, tenant: &str) {
     state
         .authz
-        .reload_policies(ADMIN_SUBMIT_SPECS_POLICY)
+        .reload_tenant_policies(tenant, ADMIN_SUBMIT_SPECS_POLICY)
         .expect("submit_specs policy should parse");
+}
+
+fn install_admin_file_read_policy(state: &ServerState) {
+    state
+        .authz
+        .reload_tenant_policies(
+            "default",
+            r#"
+permit(
+  principal == Admin::"admin-1",
+  action == Action::"read",
+  resource is File
+);
+permit(
+  principal == Admin::"admin-1",
+  action == Action::"read",
+  resource is FileVersion
+);
+"#,
+        )
+        .expect("admin file read policy should parse");
 }
 
 fn build_app_with_state(state: ServerState) -> Router {
@@ -392,7 +480,7 @@ async fn wasm_upload_denial_creates_pending_decision_for_module_resource() {
 
     let turso = state.platform_turso_store().expect("turso configured");
     let data_str = turso
-        .get_pending_decision(decision_id)
+        .get_pending_decision("default", decision_id)
         .await
         .expect("query decision")
         .expect("decision should be persisted");
@@ -417,16 +505,12 @@ async fn wasm_delete_denial_creates_pending_decision_for_module_resource() {
     let app = build_app_with_state(state.clone());
 
     let response = app
-        .oneshot(
+        .oneshot(agent_request(
             Request::delete("/api/wasm/modules/git_receive_pack")
                 .header("X-Tenant-Id", "default")
-                .header("X-Temper-Principal-Id", "agent-1")
-                .header("X-Temper-Principal-Kind", "agent")
-                .header("X-Temper-Agent-Type", "swe")
-                .header("X-Temper-Ctx-SessionId", "session-1")
                 .body(Body::empty())
                 .unwrap(),
-        )
+        ))
         .await
         .unwrap();
 
@@ -439,7 +523,7 @@ async fn wasm_delete_denial_creates_pending_decision_for_module_resource() {
 
     let turso = state.platform_turso_store().expect("turso configured");
     let data_str = turso
-        .get_pending_decision(decision_id)
+        .get_pending_decision("default", decision_id)
         .await
         .expect("query decision")
         .expect("decision should be persisted");
@@ -462,7 +546,7 @@ async fn wasm_upload_accepts_json_base64_body() {
     });
 
     let response = app
-        .oneshot(admin_post(
+        .oneshot(system_post(
             "/api/wasm/modules/base64_module",
             &payload.to_string(),
         ))
@@ -504,17 +588,14 @@ async fn approved_wasm_upload_decision_allows_agent_retry() {
 
     let approved = app
         .clone()
-        .oneshot(
+        .oneshot(admin_request(
             Request::post(format!(
                 "/api/tenants/default/decisions/{decision_id}/approve"
             ))
             .header("content-type", "application/json")
-            .header("x-temper-principal-id", "admin-1")
-            .header("x-temper-principal-kind", "admin")
-            .header(temper_authz::TRUSTED_PRINCIPAL_HEADER, "1")
             .body(Body::from(r#"{"scope":{"principal":"this_agent","action":"this_action","resource":"this_resource","duration":"always"},"decided_by":"admin-1"}"#))
             .unwrap(),
-        )
+        ))
         .await
         .unwrap();
     assert_eq!(approved.status(), StatusCode::OK);
@@ -557,13 +638,11 @@ async fn tenant_decision_lookup_returns_known_decision_by_id() {
     let app = build_app_with_state(state);
 
     let response = app
-        .oneshot(
+        .oneshot(admin_request(
             Request::get(format!("/api/tenants/default/decisions/{decision_id}"))
-                .header("X-Temper-Principal-Kind", "admin")
-                .header(temper_authz::TRUSTED_PRINCIPAL_HEADER, "1")
                 .body(Body::empty())
                 .unwrap(),
-        )
+        ))
         .await
         .unwrap();
 
@@ -635,6 +714,7 @@ async fn tenant_decision_list_allows_agent_to_read_owned_pending_decisions() {
 #[tokio::test]
 async fn batch_file_text_read_returns_projected_file_contents_in_request_order() {
     let state = test_state_with_turso().await;
+    install_admin_file_read_policy(&state);
     let tenant = "default";
     let turso = state
         .turso_store_for_tenant(tenant)
@@ -711,6 +791,7 @@ async fn batch_file_text_read_returns_projected_file_contents_in_request_order()
 #[tokio::test]
 async fn batch_file_version_text_read_returns_immutable_version_contents_in_request_order() {
     let state = test_state_with_turso().await;
+    install_admin_file_read_policy(&state);
     let tenant = "default";
     let turso = state
         .turso_store_for_tenant(tenant)
@@ -785,6 +866,7 @@ async fn batch_file_version_text_read_returns_immutable_version_contents_in_requ
 #[tokio::test]
 async fn batch_file_version_text_read_uses_local_store_for_internal_blob_endpoint() {
     let mut state = test_state_with_turso().await;
+    install_admin_file_read_policy(&state);
     let tenant = "default";
     let turso = state
         .turso_store_for_tenant(tenant)
@@ -895,20 +977,26 @@ async fn test_get_spec_detail_not_found() {
 #[tokio::test]
 async fn test_load_inline_supports_nested_paths() {
     let state = test_state_with_registry();
-    install_admin_submit_specs_policy(&state);
+    install_admin_submit_specs_policy(&state, "nested-inline");
     let app = build_app_with_state(state.clone());
 
     let response = app
-        .oneshot(system_post(
-            "/api/specs/load-inline",
-            &serde_json::json!({
-                "tenant": "nested-inline",
-                "specs": {
-                    "InlineProbe/model.csdl.xml": CSDL_XML,
-                    "InlineProbe/order.ioa.toml": ORDER_IOA
-                }
-            })
-            .to_string(),
+        .oneshot(with_tenant_security_context(
+            Request::post("/api/specs/load-inline")
+                .header("Content-Type", "application/json")
+                .body(Body::from(
+                    serde_json::json!({
+                        "tenant": "nested-inline",
+                        "specs": {
+                            "InlineProbe/model.csdl.xml": CSDL_XML,
+                            "InlineProbe/order.ioa.toml": ORDER_IOA
+                        }
+                    })
+                    .to_string(),
+                ))
+                .unwrap(),
+            "nested-inline",
+            admin_security_context(),
         ))
         .await
         .unwrap();
@@ -924,12 +1012,56 @@ async fn test_load_inline_supports_nested_paths() {
 }
 
 #[tokio::test]
-async fn test_tenant_decisions_accessible_without_auth() {
+async fn test_load_inline_cannot_bundle_policy_authority() {
     let state = test_state_with_registry();
+    let app = build_app_with_state(state.clone());
+    let response = app
+        .oneshot(system_post(
+            "/api/specs/load-inline",
+            &serde_json::json!({
+                "tenant": "default",
+                "specs": {
+                    "model.csdl.xml": CSDL_XML,
+                    "order.ioa.toml": ORDER_IOA
+                },
+                "cedar_policies": "permit(principal, action, resource);"
+            })
+            .to_string(),
+        ))
+        .await
+        .expect("request should run");
+
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    assert!(
+        state
+            .authorize_with_context(
+                &admin_security_context(),
+                "delete",
+                "Secret",
+                &BTreeMap::new(),
+                "default",
+            )
+            .is_err(),
+        "bundled policy text must never become active"
+    );
+}
+
+#[tokio::test]
+async fn tenant_decisions_require_auth_without_leaking_rows() {
+    let state = test_state_with_turso().await;
+    state
+        .platform_turso_store()
+        .expect("turso configured")
+        .upsert_pending_decision(
+            "PD-private",
+            "default",
+            "pending",
+            r#"{"id":"PD-private","tenant":"default","status":"pending","marker":"tenant-secret"}"#,
+        )
+        .await
+        .expect("seed private decision");
     let app = build_app_with_state(state);
 
-    // Decision list is accessible without auth headers (consistent with
-    // other observe endpoints).
     let response = app
         .oneshot(
             Request::get("/api/tenants/default/decisions")
@@ -938,15 +1070,18 @@ async fn test_tenant_decisions_accessible_without_auth() {
         )
         .await
         .unwrap();
-    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+    let body = axum::body::to_bytes(response.into_body(), 1024 * 1024)
+        .await
+        .unwrap();
+    assert!(!String::from_utf8_lossy(&body).contains("tenant-secret"));
 }
 
 #[tokio::test]
-async fn test_tenant_decision_stream_accessible_without_auth() {
+async fn tenant_decision_stream_requires_auth() {
     let state = test_state_with_registry();
     let app = build_app_with_state(state);
 
-    // Decision stream is accessible without auth headers.
     let response = app
         .oneshot(
             Request::get("/api/tenants/default/decisions/stream")
@@ -955,16 +1090,13 @@ async fn test_tenant_decision_stream_accessible_without_auth() {
         )
         .await
         .unwrap();
-    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
     let ct = response
         .headers()
         .get("content-type")
         .and_then(|v| v.to_str().ok())
         .unwrap_or("");
-    assert!(
-        ct.contains("text/event-stream"),
-        "expected SSE content-type, got: {ct}"
-    );
+    assert!(!ct.contains("text/event-stream"));
 }
 
 #[tokio::test]
@@ -975,27 +1107,25 @@ async fn test_tenant_decision_mutations_require_manage_policies() {
 
     let deny_approve = app
         .clone()
-        .oneshot(
+        .oneshot(customer_request(
             Request::post("/api/tenants/default/decisions/PD-does-not-exist/approve")
                 .header("content-type", "application/json")
-                .header("x-temper-principal-id", "cust-1")
-                .header("x-temper-principal-kind", "customer")
                 .body(Body::from(r#"{"scope":{"principal":"this_agent","action":"this_action","resource":"this_resource","duration":"always"}}"#))
                 .unwrap(),
-        )
+            "cust-1",
+        ))
         .await
         .unwrap();
     assert_eq!(deny_approve.status(), StatusCode::FORBIDDEN);
 
     let deny_deny = app
-        .oneshot(
+        .oneshot(customer_request(
             Request::post("/api/tenants/default/decisions/PD-does-not-exist/deny")
                 .header("content-type", "application/json")
-                .header("x-temper-principal-id", "cust-1")
-                .header("x-temper-principal-kind", "customer")
                 .body(Body::from(r#"{"decided_by":"cust-1"}"#))
                 .unwrap(),
-        )
+            "cust-1",
+        ))
         .await
         .unwrap();
     assert_eq!(deny_deny.status(), StatusCode::FORBIDDEN);
@@ -1030,17 +1160,14 @@ async fn test_approve_decision_reload_failure_keeps_pending_and_policies_unchang
 
     let app = build_app_with_state(state.clone());
     let response = app
-        .oneshot(
+        .oneshot(admin_request(
             Request::post(format!(
                 "/api/tenants/default/decisions/{decision_id}/approve"
             ))
             .header("content-type", "application/json")
-            .header("x-temper-principal-id", "admin-1")
-            .header("x-temper-principal-kind", "admin")
-            .header(temper_authz::TRUSTED_PRINCIPAL_HEADER, "1")
             .body(Body::from(r#"{"scope":{"principal":"this_agent","action":"this_action","resource":"this_resource","duration":"always"},"decided_by":"admin-1"}"#))
             .unwrap(),
-        )
+        ))
         .await
         .unwrap();
     assert_eq!(response.status(), StatusCode::BAD_REQUEST);
@@ -1048,7 +1175,7 @@ async fn test_approve_decision_reload_failure_keeps_pending_and_policies_unchang
     // Verify decision status unchanged in Turso.
     let turso = state.platform_turso_store().expect("turso configured");
     let data_str = turso
-        .get_pending_decision(&decision_id)
+        .get_pending_decision("default", &decision_id)
         .await
         .expect("query turso")
         .expect("decision should still exist");
@@ -1823,14 +1950,15 @@ async fn test_evolution_decide_creates_d_record() {
     state
         .platform_turso_store()
         .expect("turso configured")
-        .insert_evolution_record(
-            &obs.header.id,
-            "Observation",
-            &format!("{:?}", obs.header.status),
-            &obs.header.created_by,
-            obs.header.derived_from.as_deref(),
-            &data_json,
-        )
+        .insert_evolution_record(temper_store_turso::TursoEvolutionRecordInsert {
+            tenant: "default",
+            id: &obs.header.id,
+            record_type: "Observation",
+            status: &format!("{:?}", obs.header.status),
+            created_by: &obs.header.created_by,
+            derived_from: obs.header.derived_from.as_deref(),
+            data_json: &data_json,
+        })
         .await
         .expect("insert O-Record to Turso");
 
@@ -1840,17 +1968,14 @@ async fn test_evolution_decide_creates_d_record() {
         .with_state(state);
 
     // Create a D-Record decision.
-    let response = app.clone()
-            .oneshot(
-                Request::post("/api/evolution/records/O-test-decide/decide")
-                    .header("Content-Type", "application/json")
-                    .header("X-Temper-Principal-Kind", "admin")
-                    .header(temper_authz::TRUSTED_PRINCIPAL_HEADER, "1")
-                    .body(Body::from(r#"{"decision":"approved","decided_by":"alice@example.com","rationale":"Looks good"}"#))
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
+    let response = app
+        .clone()
+        .oneshot(system_post(
+            "/api/evolution/records/O-test-decide/decide",
+            r#"{"decision":"approved","decided_by":"alice@example.com","rationale":"Looks good"}"#,
+        ))
+        .await
+        .unwrap();
 
     assert_eq!(response.status(), StatusCode::OK);
     let body = axum::body::to_bytes(response.into_body(), 1024 * 1024)
@@ -1868,16 +1993,10 @@ async fn test_evolution_decide_not_found() {
     let app = build_app_with_state(state);
 
     let response = app
-        .oneshot(
-            Request::post("/api/evolution/records/O-nonexistent/decide")
-                .header("Content-Type", "application/json")
-                .header("X-Temper-Principal-Kind", "admin")
-                .header(temper_authz::TRUSTED_PRINCIPAL_HEADER, "1")
-                .body(Body::from(
-                    r#"{"decision":"rejected","decided_by":"bob","rationale":"nope"}"#,
-                ))
-                .unwrap(),
-        )
+        .oneshot(system_post(
+            "/api/evolution/records/O-nonexistent/decide",
+            r#"{"decision":"rejected","decided_by":"bob","rationale":"nope"}"#,
+        ))
         .await
         .unwrap();
 
@@ -1889,14 +2008,7 @@ async fn test_evolution_decide_not_found() {
 #[tokio::test]
 async fn test_workflows_returns_tenant_data() {
     let app = build_test_app();
-    let response = app
-        .oneshot(
-            Request::get("/observe/workflows")
-                .body(Body::empty())
-                .unwrap(),
-        )
-        .await
-        .unwrap();
+    let response = app.oneshot(system_get("/observe/workflows")).await.unwrap();
 
     assert_eq!(response.status(), StatusCode::OK);
     let body = axum::body::to_bytes(response.into_body(), 1024 * 1024)
@@ -1922,250 +2034,6 @@ async fn test_workflows_returns_tenant_data() {
     assert_eq!(steps[6]["step"], "deployed");
 }
 
-// -- Load-dir endpoint tests --
-
-#[tokio::test]
-async fn test_load_dir_registers_specs() {
-    let system = ActorSystem::new("test-load-dir");
-    let registry = SpecRegistry::new();
-    let state = ServerState::from_registry(system, registry);
-
-    let app = Router::new()
-        .nest("/observe", build_observe_router())
-        .nest("/api", crate::api::build_api_router())
-        .with_state(state.clone());
-
-    // Use the test-fixtures/specs directory which has valid specs
-    let specs_dir =
-        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../test-fixtures/specs");
-
-    let body = serde_json::json!({
-        "tenant": "test-tenant",
-        "specs_dir": specs_dir.to_str().unwrap(),
-    });
-
-    let response = app
-        .oneshot(
-            Request::post("/api/specs/load-dir")
-                .header("Content-Type", "application/json")
-                .body(Body::from(serde_json::to_string(&body).unwrap()))
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-
-    assert_eq!(response.status(), StatusCode::OK);
-    // Response is NDJSON — parse each line
-    let body = axum::body::to_bytes(response.into_body(), 10 * 1024 * 1024)
-        .await
-        .unwrap();
-    let body_str = std::str::from_utf8(&body).unwrap();
-    let lines: Vec<serde_json::Value> = body_str
-        .lines()
-        .filter(|l| !l.is_empty())
-        .map(|l| serde_json::from_str(l).unwrap())
-        .collect();
-
-    // First line: specs_loaded
-    assert_eq!(lines[0]["type"], "specs_loaded");
-    assert_eq!(lines[0]["tenant"], "test-tenant");
-    let entities = lines[0]["entities"].as_array().unwrap();
-    assert!(
-        !entities.is_empty(),
-        "should have loaded at least one entity"
-    );
-
-    // Last line: summary
-    let summary = lines.last().unwrap();
-    assert_eq!(summary["type"], "summary");
-    assert_eq!(summary["tenant"], "test-tenant");
-
-    // Verify specs are in the registry
-    let registry = state.registry.read().unwrap();
-    let tenant_id: temper_runtime::tenant::TenantId = "test-tenant".into();
-    let entity_types = registry.entity_types(&tenant_id);
-    assert!(
-        !entity_types.is_empty(),
-        "registry should have entity types for test-tenant"
-    );
-}
-
-#[tokio::test]
-async fn test_load_dir_missing_dir_returns_error() {
-    let system = ActorSystem::new("test-load-dir-missing");
-    let registry = SpecRegistry::new();
-    let state = ServerState::from_registry(system, registry);
-
-    let app = Router::new()
-        .nest("/observe", build_observe_router())
-        .nest("/api", crate::api::build_api_router())
-        .with_state(state);
-
-    let body = serde_json::json!({
-        "tenant": "test-tenant",
-        "specs_dir": "/nonexistent/path/to/specs",
-    });
-
-    let response = app
-        .oneshot(
-            Request::post("/api/specs/load-dir")
-                .header("Content-Type", "application/json")
-                .body(Body::from(serde_json::to_string(&body).unwrap()))
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-
-    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
-}
-
-#[tokio::test]
-async fn test_load_dir_lint_error_aborts_registration() {
-    let system = ActorSystem::new("test-load-dir-lint-error");
-    let registry = SpecRegistry::new();
-    let state = ServerState::from_registry(system, registry);
-
-    let app = Router::new()
-        .nest("/observe", build_observe_router())
-        .nest("/api", crate::api::build_api_router())
-        .with_state(state.clone());
-
-    let temp_specs =
-        std::env::temp_dir().join(format!("temper-load-dir-lint-{}", uuid::Uuid::new_v4())); // determinism-ok: test-only temp dir
-    std::fs::create_dir_all(&temp_specs).expect("create temp specs dir"); // determinism-ok: test-only
-    std::fs::write(
-        // determinism-ok: test-only
-        temp_specs.join("model.csdl.xml"),
-        include_str!("../../../../test-fixtures/specs/model.csdl.xml"),
-    )
-    .expect("write csdl");
-    std::fs::write(
-        // determinism-ok: test-only
-        temp_specs.join("order.ioa.toml"),
-        r#"
-[automaton]
-name = "Order"
-states = ["Draft", "Done"]
-initial = "Draft"
-
-[[action]]
-name = "Complete"
-from = ["Draft"]
-to = "Done"
-effect = "set phantom true"
-"#,
-    )
-    .expect("write ioa");
-
-    let body = serde_json::json!({
-        "tenant": "lint-tenant",
-        "specs_dir": temp_specs.to_str().unwrap(),
-    });
-
-    let response = app
-        .oneshot(
-            Request::post("/api/specs/load-dir")
-                .header("Content-Type", "application/json")
-                .body(Body::from(serde_json::to_string(&body).unwrap()))
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-
-    let _ = std::fs::remove_dir_all(&temp_specs); // determinism-ok: test-only
-
-    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
-    let body = axum::body::to_bytes(response.into_body(), 1024 * 1024)
-        .await
-        .unwrap();
-    let body_str = std::str::from_utf8(&body).unwrap();
-    let lines: Vec<serde_json::Value> = body_str
-        .lines()
-        .filter(|l| !l.is_empty())
-        .map(|l| serde_json::from_str(l).unwrap())
-        .collect();
-
-    assert_eq!(lines[0]["type"], "specs_loaded");
-    assert!(lines.iter().any(|l| l["type"] == "lint_error"));
-    assert!(!lines.iter().any(|l| l["type"] == "verification_started"));
-
-    let registry = state.registry.read().unwrap();
-    let tenant_id: temper_runtime::tenant::TenantId = "lint-tenant".into();
-    assert!(
-        registry.get_tenant(&tenant_id).is_none(),
-        "tenant should not be registered when lint errors exist"
-    );
-}
-
-#[tokio::test]
-async fn test_load_dir_emits_design_time_events() {
-    let db_url = format!(
-        "file:/tmp/temper-design-time-test-{}.db",
-        std::process::id(),
-    );
-    let turso = TursoEventStore::new(&db_url, None)
-        .await
-        .expect("create local turso db");
-    let system = ActorSystem::new("test-load-dir-events");
-    let registry = SpecRegistry::new();
-    let mut state = ServerState::from_registry(system, registry);
-    state.set_storage_stack(StorageStack::from_turso(turso));
-
-    let app = Router::new()
-        .nest("/observe", build_observe_router())
-        .nest("/api", crate::api::build_api_router())
-        .with_state(state.clone());
-
-    let specs_dir =
-        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../test-fixtures/specs");
-
-    let body = serde_json::json!({
-        "tenant": "event-tenant",
-        "specs_dir": specs_dir.to_str().unwrap(),
-    });
-
-    let response = app
-        .oneshot(
-            Request::post("/api/specs/load-dir")
-                .header("Content-Type", "application/json")
-                .body(Body::from(serde_json::to_string(&body).unwrap()))
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-
-    assert_eq!(response.status(), StatusCode::OK);
-
-    // Consume entire body to wait for verification to complete
-    let _ = axum::body::to_bytes(response.into_body(), 10 * 1024 * 1024)
-        .await
-        .unwrap();
-
-    // Check that design-time events were persisted to Turso.
-    let turso = state.platform_turso_store().expect("turso configured");
-    let events = turso
-        .list_design_time_events(None, 1000)
-        .await
-        .expect("query design-time events from Turso");
-    assert!(!events.is_empty(), "design-time events should be in Turso");
-
-    // Should have spec_loaded, verify_started, and verify_done events
-    let loaded_events: Vec<_> = events.iter().filter(|e| e.kind == "spec_loaded").collect();
-    assert!(!loaded_events.is_empty(), "should have spec_loaded events");
-
-    let started_events: Vec<_> = events
-        .iter()
-        .filter(|e| e.kind == "verify_started")
-        .collect();
-    assert!(
-        !started_events.is_empty(),
-        "should have verify_started events"
-    );
-
-    let done_events: Vec<_> = events.iter().filter(|e| e.kind == "verify_done").collect();
-    assert!(!done_events.is_empty(), "should have verify_done events");
-}
-
 #[tokio::test]
 async fn test_evolution_insights_empty() {
     let app = build_test_app();
@@ -2184,3 +2052,6 @@ async fn test_evolution_insights_empty() {
     let insights = json["insights"].as_array().unwrap();
     assert!(insights.is_empty());
 }
+
+#[path = "mod_test/load_dir_tests.rs"]
+mod load_dir_tests;

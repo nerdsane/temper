@@ -3,6 +3,7 @@
 use std::collections::HashMap;
 
 use serde::{Deserialize, Serialize};
+use temper_runtime::tenant::TenantId;
 
 /// The kind of principal making the request.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -35,7 +36,9 @@ pub struct Principal {
 }
 
 /// Security context carried with every actor message dispatch.
-/// Constructed from HTTP request headers at the server boundary.
+///
+/// Protected HTTP requests receive this from credential resolution. The legacy
+/// header constructor intentionally produces only anonymous authority.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SecurityContext {
     /// The principal making the request.
@@ -46,118 +49,73 @@ pub struct SecurityContext {
     pub correlation_id: String,
 }
 
-/// Internal, edge-stripped trust marker (ADR-0157).
+/// Credential-authenticated authority bound to one tenant.
 ///
-/// A client-asserted `x-temper-principal-kind` header can only ever yield an
-/// unprivileged kind (`Customer`/`Agent`). A privileged `Admin` is honored from
-/// headers only when this marker is also present. The ingress edge
-/// (`strip_inbound_identity_headers`) removes every `x-temper-*` authority
-/// header — including this one — from inbound requests, so only trusted
-/// in-process or post-credential-resolution code can ever set it. `System` is
-/// never derivable from headers at all; use [`SecurityContext::system`].
-pub const TRUSTED_PRINCIPAL_HEADER: &str = "x-temper-internal-trusted-principal";
+/// Authentication middleware constructs this once after resolving a credential.
+/// Downstream handlers receive the value as an axum extension or a direct
+/// in-process argument. Private fields prevent handlers from replacing only the
+/// tenant or only the principal and accidentally creating a mixed context.
+#[derive(Debug, Clone)]
+pub struct AuthenticatedRequestContext {
+    tenant: TenantId,
+    security_context: SecurityContext,
+}
+
+impl AuthenticatedRequestContext {
+    /// Bind an already-resolved security context to its authenticated tenant.
+    pub fn new(tenant: TenantId, security_context: SecurityContext) -> Self {
+        Self {
+            tenant,
+            security_context,
+        }
+    }
+
+    /// Tenant selected during credential resolution.
+    pub fn tenant(&self) -> &TenantId {
+        &self.tenant
+    }
+
+    /// Exact security context produced by credential resolution.
+    pub fn security_context(&self) -> &SecurityContext {
+        &self.security_context
+    }
+}
 
 impl SecurityContext {
     /// Create a security context from HTTP request headers.
     ///
-    /// Identity is only ever derived from headers for unprivileged kinds
-    /// (`Customer`, `Agent`). `Admin` is honored only when the request also
-    /// carries the internal [`TRUSTED_PRINCIPAL_HEADER`] marker (set exclusively
-    /// by trusted code after the ingress edge — see ADR-0157); `System` is never
-    /// derivable from headers. This prevents a client from asserting its own
-    /// privilege by spoofing `x-temper-principal-kind`.
+    /// This legacy compatibility constructor never derives `Admin` or `System`
+    /// authority from headers. In fact, all caller-supplied principal, role,
+    /// scope, ABAC, provenance, and context attributes are ignored: the result
+    /// is always an anonymous Customer. Protected HTTP handlers must consume an
+    /// [`AuthenticatedRequestContext`] produced by credential resolution.
     pub fn from_headers(headers: &[(String, String)]) -> Self {
-        // Whether a trusted, edge-stripped marker accompanies these headers.
-        // Computed up front because header order is not guaranteed.
-        let trusted_principal = headers.iter().any(|(key, value)| {
-            key.eq_ignore_ascii_case(TRUSTED_PRINCIPAL_HEADER) && value.trim() == "1"
-        });
-
-        let mut principal_id = "anonymous".to_string();
-        // Default to Customer (most restrictive). Admin/System are never minted
-        // from an untrusted header; see the header match below.
-        let mut kind = PrincipalKind::Customer;
-        let mut role = None;
-        let mut acting_for = None;
-        let mut agent_type = None;
-        let mut attributes = HashMap::new();
-        let mut context_attrs = HashMap::new();
         let mut correlation_id = uuid::Uuid::now_v7().to_string();
 
         for (key, value) in headers {
-            match key.to_lowercase().as_str() {
-                "x-temper-principal-id" => principal_id = value.clone(),
-                "x-temper-principal-kind" => {
-                    kind = match value.as_str() {
-                        "agent" => PrincipalKind::Agent,
-                        // "admin" is honored only alongside the trusted marker
-                        // the edge strips from client requests. "system" is
-                        // never accepted from headers — use
-                        // SecurityContext::system() for trusted internal paths.
-                        // Everything else (including untrusted "admin" and
-                        // "system") falls back to the most restrictive kind.
-                        "admin" if trusted_principal => PrincipalKind::Admin,
-                        _ => PrincipalKind::Customer,
-                    };
-                }
-                "x-temper-agent-role" => role = Some(value.clone()),
-                "x-temper-acting-for" => acting_for = Some(value.clone()),
-                "x-temper-agent-type" => agent_type = Some(value.clone()),
-                "x-temper-principal-scopes" => {
-                    let scopes: Vec<serde_json::Value> = value
-                        .split(|c: char| c == ',' || c == ';' || c.is_whitespace())
-                        .filter(|s| !s.is_empty())
-                        .map(|s| serde_json::Value::String(s.to_string()))
-                        .collect();
-                    attributes.insert("scopes".to_string(), serde_json::Value::Array(scopes));
-                }
-                "x-temper-action-context" => {
-                    attributes.insert(
-                        "action_context".to_string(),
-                        serde_json::Value::String(value.clone()),
-                    );
-                }
-                "x-temper-correlation-id" => correlation_id = value.clone(),
-                k if k.starts_with("x-temper-attr-") => {
-                    let attr_name = k.strip_prefix("x-temper-attr-").unwrap(); // ci-ok: guarded by starts_with
-                    attributes.insert(
-                        attr_name.to_string(),
-                        serde_json::Value::String(value.clone()),
-                    );
-                }
-                k if k.starts_with("x-temper-ctx-") => {
-                    let raw_ctx_name = k.strip_prefix("x-temper-ctx-").unwrap(); // ci-ok: guarded by starts_with
-                    let ctx_name = match raw_ctx_name {
-                        "agentid" => "agentId",
-                        "agenttype" => "agentType",
-                        "agenttypeverified" => "agentTypeVerified",
-                        "sessionid" => "sessionId",
-                        other => other,
-                    };
-                    context_attrs.insert(
-                        ctx_name.to_string(),
-                        serde_json::Value::String(value.clone()),
-                    );
-                }
-                _ => {}
+            if key.eq_ignore_ascii_case("x-temper-correlation-id") {
+                correlation_id = value.clone();
             }
         }
 
         SecurityContext {
             principal: Principal {
-                id: principal_id,
-                kind,
-                role,
-                acting_for,
-                agent_type,
-                attributes,
+                id: "anonymous".to_string(),
+                kind: PrincipalKind::Customer,
+                role: None,
+                acting_for: None,
+                agent_type: None,
+                attributes: HashMap::new(),
             },
-            context_attrs,
+            context_attrs: HashMap::new(),
             correlation_id,
         }
     }
 
-    /// Create a system-level security context (bypasses all checks).
+    /// Create a system-level security context for explicit in-process work.
+    ///
+    /// System requests still pass Cedar evaluation through the built-in system
+    /// policy; this constructor is never reachable from HTTP headers.
     pub fn system() -> Self {
         SecurityContext {
             principal: Principal {
@@ -224,11 +182,11 @@ impl SecurityContext {
         }
     }
 
-    /// Enrich security context with agent identity from self-declared headers.
+    /// Enrich an internal context with an explicitly unverified agent identity.
     ///
-    /// **Deprecated**: Use `from_resolved_identity()` for credential-based identity.
-    /// This method is retained only for the global API key path (admin/operator access)
-    /// where no agent credential exists.
+    /// **Deprecated**: Use `from_resolved_identity()` for credential-based
+    /// identity. This compatibility helper is limited to legacy internal
+    /// trigger/service construction; callers must never pass raw HTTP values.
     pub fn with_agent_context(
         mut self,
         agent_id: Option<&str>,
@@ -292,7 +250,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_context_from_headers_customer() {
+    fn customer_headers_are_non_authoritative() {
         let headers = vec![
             ("X-Temper-Principal-Id".to_string(), "cust-123".to_string()),
             (
@@ -302,13 +260,25 @@ mod tests {
         ];
 
         let ctx = SecurityContext::from_headers(&headers);
-        assert_eq!(ctx.principal.id, "cust-123");
+        assert_eq!(ctx.principal.id, "anonymous");
         assert_eq!(ctx.principal.kind, PrincipalKind::Customer);
         assert!(ctx.principal.role.is_none());
     }
 
     #[test]
-    fn test_context_from_headers_agent() {
+    fn correlation_header_does_not_restore_authority() {
+        let ctx = SecurityContext::from_headers(&[
+            ("x-temper-correlation-id".to_string(), "trace-1".to_string()),
+            ("x-temper-principal-kind".to_string(), "admin".to_string()),
+        ]);
+
+        assert_eq!(ctx.correlation_id, "trace-1");
+        assert_eq!(ctx.principal.id, "anonymous");
+        assert_eq!(ctx.principal.kind, PrincipalKind::Customer);
+    }
+
+    #[test]
+    fn agent_role_and_delegation_headers_are_non_authoritative() {
         let headers = vec![
             ("X-Temper-Principal-Id".to_string(), "agent-1".to_string()),
             ("X-Temper-Principal-Kind".to_string(), "agent".to_string()),
@@ -320,9 +290,10 @@ mod tests {
         ];
 
         let ctx = SecurityContext::from_headers(&headers);
-        assert_eq!(ctx.principal.kind, PrincipalKind::Agent);
-        assert_eq!(ctx.principal.role, Some("customer_agent".to_string()));
-        assert_eq!(ctx.principal.acting_for, Some("cust-456".to_string()));
+        assert_eq!(ctx.principal.id, "anonymous");
+        assert_eq!(ctx.principal.kind, PrincipalKind::Customer);
+        assert!(ctx.principal.role.is_none());
+        assert!(ctx.principal.acting_for.is_none());
     }
 
     #[test]
@@ -330,8 +301,6 @@ mod tests {
         let headers = vec![
             ("X-Temper-Principal-Id".to_string(), "admin-1".to_string()),
             ("X-Temper-Principal-Kind".to_string(), "admin".to_string()),
-            // Trusted marker: only trusted, post-edge code can set it.
-            (TRUSTED_PRINCIPAL_HEADER.to_string(), "1".to_string()),
             (
                 "X-Temper-Attr-ApprovalLimit".to_string(),
                 "10000".to_string(),
@@ -343,48 +312,56 @@ mod tests {
         ];
 
         let ctx = SecurityContext::from_headers(&headers);
-        assert_eq!(ctx.principal.kind, PrincipalKind::Admin);
-        assert!(ctx.principal.attributes.contains_key("approvallimit"));
-        assert!(ctx.context_attrs.contains_key("ratelimitexceeded"));
+        assert_eq!(ctx.principal.kind, PrincipalKind::Customer);
+        assert!(ctx.principal.attributes.is_empty());
+        assert!(ctx.context_attrs.is_empty());
     }
 
     #[test]
-    fn admin_principal_requires_trusted_marker() {
-        // A client-asserted admin header (no trusted marker) must NOT yield Admin.
-        let spoofed = vec![
+    fn no_header_marker_can_mint_admin() {
+        let headers = vec![
             ("X-Temper-Principal-Id".to_string(), "attacker".to_string()),
             ("X-Temper-Principal-Kind".to_string(), "admin".to_string()),
+            (
+                "x-temper-internal-trusted-principal".to_string(),
+                "1".to_string(),
+            ),
         ];
-        let ctx = SecurityContext::from_headers(&spoofed);
+        let ctx = SecurityContext::from_headers(&headers);
         assert_eq!(ctx.principal.kind, PrincipalKind::Customer);
-        assert_eq!(ctx.principal.id, "attacker");
-
-        // The same header with the internal, edge-stripped marker is trusted.
-        let trusted = vec![
-            ("X-Temper-Principal-Id".to_string(), "operator".to_string()),
-            ("X-Temper-Principal-Kind".to_string(), "admin".to_string()),
-            (TRUSTED_PRINCIPAL_HEADER.to_string(), "1".to_string()),
-        ];
-        let ctx = SecurityContext::from_headers(&trusted);
-        assert_eq!(ctx.principal.kind, PrincipalKind::Admin);
-        assert_eq!(ctx.principal.id, "operator");
+        assert_eq!(ctx.principal.id, "anonymous");
     }
 
     #[test]
-    fn system_principal_never_derivable_from_headers_even_when_marked() {
-        // Even with the trusted marker, "system" is never derivable from
-        // headers — it only comes from SecurityContext::system().
+    fn system_principal_never_derivable_from_headers() {
         let headers = vec![
             ("X-Temper-Principal-Id".to_string(), "svc".to_string()),
             ("X-Temper-Principal-Kind".to_string(), "system".to_string()),
-            (TRUSTED_PRINCIPAL_HEADER.to_string(), "1".to_string()),
         ];
         let ctx = SecurityContext::from_headers(&headers);
         assert_eq!(ctx.principal.kind, PrincipalKind::Customer);
     }
 
     #[test]
-    fn test_context_from_headers_normalizes_session_id() {
+    fn authenticated_context_binds_exact_tenant_and_security_context() {
+        let security_context =
+            SecurityContext::from_resolved_identity("agent-1", "operator", Some("session-1"));
+        let authenticated =
+            AuthenticatedRequestContext::new(TenantId::new("tenant-a"), security_context.clone());
+
+        assert_eq!(authenticated.tenant().as_str(), "tenant-a");
+        assert_eq!(
+            authenticated.security_context().principal.id,
+            security_context.principal.id
+        );
+        assert_eq!(
+            authenticated.security_context().context_attrs,
+            security_context.context_attrs
+        );
+    }
+
+    #[test]
+    fn context_attribute_headers_are_non_authoritative() {
         let headers = vec![
             ("X-Temper-Principal-Id".to_string(), "agent-1".to_string()),
             ("X-Temper-Principal-Kind".to_string(), "agent".to_string()),
@@ -395,10 +372,7 @@ mod tests {
         ];
 
         let ctx = SecurityContext::from_headers(&headers);
-        assert_eq!(
-            ctx.context_attrs.get("sessionId"),
-            Some(&serde_json::Value::String("session-1".to_string()))
-        );
+        assert!(ctx.context_attrs.is_empty());
     }
 
     #[test]
@@ -430,7 +404,7 @@ mod tests {
     }
 
     #[test]
-    fn test_with_agent_context_preserves_explicit_principal() {
+    fn explicit_agent_context_promotes_header_anonymous_context() {
         let headers = vec![
             ("X-Temper-Principal-Id".to_string(), "cust-123".to_string()),
             (
@@ -441,10 +415,8 @@ mod tests {
         let ctx =
             SecurityContext::from_headers(&headers).with_agent_context(Some("agent-1"), None, None);
 
-        // Should NOT overwrite explicit customer principal
-        assert_eq!(ctx.principal.id, "cust-123");
-        assert_eq!(ctx.principal.kind, PrincipalKind::Customer);
-        // But agentId should be in context attrs
+        assert_eq!(ctx.principal.id, "agent-1");
+        assert_eq!(ctx.principal.kind, PrincipalKind::Agent);
         assert_eq!(
             ctx.context_attrs.get("agentId"),
             Some(&serde_json::Value::String("agent-1".to_string()))
@@ -460,7 +432,7 @@ mod tests {
         let ctx = SecurityContext::from_headers(&headers);
         // Must NOT be System — falls back to Customer.
         assert_eq!(ctx.principal.kind, PrincipalKind::Customer);
-        assert_eq!(ctx.principal.id, "attacker");
+        assert_eq!(ctx.principal.id, "anonymous");
     }
 
     #[test]
@@ -479,7 +451,7 @@ mod tests {
             ("X-Temper-Agent-Type".to_string(), "claude-code".to_string()),
         ];
         let ctx = SecurityContext::from_headers(&headers);
-        assert_eq!(ctx.principal.agent_type, Some("claude-code".to_string()));
+        assert!(ctx.principal.agent_type.is_none());
     }
 
     #[test]
@@ -496,25 +468,17 @@ mod tests {
             ),
         ];
         let ctx = SecurityContext::from_headers(&headers);
-        assert_eq!(
-            ctx.principal.attributes.get("scopes"),
-            Some(&serde_json::json!(["repo:read", "repo:write", "force"]))
-        );
+        assert!(!ctx.principal.attributes.contains_key("scopes"));
     }
 
     #[test]
-    fn action_context_is_principal_attribute() {
+    fn action_context_header_is_ignored_but_explicit_context_is_preserved() {
         let ctx = SecurityContext::from_headers(&[(
             "x-temper-action-context".to_string(),
             "composite:Apps.Fork".to_string(),
         )]);
 
-        assert_eq!(
-            ctx.principal.attributes.get("action_context"),
-            Some(&serde_json::Value::String(
-                "composite:Apps.Fork".to_string()
-            ))
-        );
+        assert!(!ctx.principal.attributes.contains_key("action_context"));
 
         let ctx = SecurityContext::from_headers(&[]).with_action_context("composite:Repo.Write");
         assert_eq!(

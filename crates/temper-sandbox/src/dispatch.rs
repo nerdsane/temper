@@ -10,7 +10,10 @@ use sha2::{Digest, Sha256};
 use crate::helpers::{
     escape_odata_key, expect_json_object_arg, expect_string_arg, optional_string_arg,
 };
-use crate::http::{AgentIdentity, temper_governance_request, temper_request, temper_request_bytes};
+use crate::http::{
+    AgentIdentity, InternalRequestCredentialIssuer, temper_governance_request, temper_request,
+    temper_request_bytes,
+};
 
 /// Shared context for dispatching temper methods.
 pub struct DispatchContext<'a> {
@@ -22,22 +25,16 @@ pub struct DispatchContext<'a> {
     pub tenant: &'a str,
     /// Agent instance ID for Cedar authorization and trajectory attribution.
     pub agent_id: Option<&'a str>,
-    /// Agent software type (e.g. `claude-code`).
-    pub agent_type: Option<&'a str>,
     /// Session ID for grouping actions within a conversation.
     pub session_id: Option<&'a str>,
-    /// Optional passthrough principal id for server-hosted REPL loopback calls.
-    pub principal_id: Option<&'a str>,
-    /// Optional passthrough principal kind for server-hosted REPL loopback calls.
-    pub principal_kind: Option<&'a str>,
-    /// Optional passthrough agent role for server-hosted REPL loopback calls.
-    pub agent_role: Option<&'a str>,
     /// Optional closure to resolve entity type to entity set name.
     pub entity_set_resolver: Option<&'a (dyn Fn(&str) -> String + Send + Sync)>,
     /// Optional path to temper binary (for `compile_wasm` SDK resolution).
     pub binary_path: Option<&'a std::path::Path>,
     /// Optional API key for authentication.
     pub api_key: Option<&'a str>,
+    /// Per-request credential issuer for trusted server-side loopback calls.
+    pub internal_credential_issuer: Option<&'a InternalRequestCredentialIssuer>,
 }
 
 impl<'a> DispatchContext<'a> {
@@ -45,10 +42,7 @@ impl<'a> DispatchContext<'a> {
     fn identity(&self) -> AgentIdentity<'a> {
         AgentIdentity {
             session_id: self.session_id,
-            principal_id: self.principal_id,
-            principal_kind: self.principal_kind,
-            agent_role: self.agent_role,
-            agent_type: self.agent_type,
+            internal_credential_issuer: self.internal_credential_issuer,
         }
     }
 
@@ -417,10 +411,7 @@ async fn dispatch_governance(
                     async move {
                         let identity = AgentIdentity {
                             session_id: session_id_owned.as_deref(),
-                            principal_id: None,
-                            principal_kind: None,
-                            agent_role: None,
-                            agent_type: None,
+                            internal_credential_issuer: None,
                         };
                         temper_governance_request(
                             &http,

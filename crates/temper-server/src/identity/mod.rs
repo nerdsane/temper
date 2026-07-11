@@ -7,4 +7,4 @@
 pub mod endpoint;
 mod resolver;
 
-pub use resolver::{IdentityResolver, ResolvedIdentity, hash_token};
+pub use resolver::{IdentityResolver, MAX_CREDENTIAL_BYTES, ResolvedIdentity, hash_token};

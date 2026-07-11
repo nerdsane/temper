@@ -1,12 +1,13 @@
 //! GET /observe/paths/{entity} -- extract state machine paths.
 
-use axum::extract::{Path, Query, State};
-use axum::http::{HeaderMap, StatusCode};
+use axum::extract::{Extension, Path, Query, State};
+use axum::http::StatusCode;
 use axum::response::Json;
 use serde::Deserialize;
+use temper_authz::AuthenticatedRequestContext;
 use tracing::instrument;
 
-use crate::authz::require_observe_auth;
+use crate::authz::{require_authenticated_context, require_observe_auth};
 use crate::state::ServerState;
 
 /// Query parameters for path extraction.
@@ -20,11 +21,12 @@ pub(crate) struct PathsQueryParams {
 #[instrument(skip_all, fields(entity, otel.name = "GET /observe/paths/{entity}"))]
 pub(crate) async fn handle_get_paths(
     State(state): State<ServerState>,
-    headers: HeaderMap,
+    authenticated: Option<Extension<AuthenticatedRequestContext>>,
     Path(entity): Path<String>,
     Query(params): Query<PathsQueryParams>,
 ) -> Result<Json<temper_verify::PathExtractionResult>, StatusCode> {
-    require_observe_auth(&state, &headers, "read_verification", "Verification")?;
+    let authenticated = require_authenticated_context(authenticated.as_deref())?;
+    require_observe_auth(&state, authenticated, "read_verification", "Verification")?;
 
     let Some((_tenant_id, ioa_source)) = state.find_entity_ioa_source(&entity) else {
         tracing::warn!("entity spec not found for path extraction");
