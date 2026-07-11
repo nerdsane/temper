@@ -724,9 +724,9 @@ pub(super) async fn handle_odata_get_for_tenant(
                     &parent,
                     &function,
                     &query_options,
-                &hydration_budget,
-            )
-            .await
+                    &hydration_budget,
+                )
+                .await
             }
         }
 
