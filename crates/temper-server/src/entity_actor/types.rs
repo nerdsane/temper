@@ -134,6 +134,19 @@ impl EntityState {
         self.processed_idempotency_keys.contains_key(key)
     }
 
+    /// Return the recent event originally committed for an idempotency key.
+    ///
+    /// The actor keeps a bounded event tail, so this is a best-effort fast path
+    /// for retrying post-dispatch side effects after a caller retry. If the
+    /// original event aged out, the caller still receives a deduplicated success
+    /// response but no deferred effects are re-surfaced.
+    pub fn event_for_idempotency_key(&self, key: &str) -> Option<&EntityEvent> {
+        self.events
+            .iter()
+            .rev()
+            .find(|event| event.idempotency_key.as_deref() == Some(key))
+    }
+
     fn record_processed_idempotency_key(&mut self, key: &str) {
         let sequence = self.sequence_nr.max(self.total_event_count as u64);
         self.processed_idempotency_keys
@@ -169,6 +182,16 @@ pub struct EntityEvent {
     /// Optional idempotency key that caused this transition.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub idempotency_key: Option<String>,
+    /// Scheduled actions durably emitted by this transition.
+    ///
+    /// These are persisted on the event, not only returned in the transient
+    /// [`EntityResponse`], so an idempotent retry after a crash can re-surface
+    /// the original deferred work instead of silently dropping it.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub scheduled_actions: Vec<crate::entity_actor::effects::ScheduledAction>,
+    /// Child-entity spawn requests durably emitted by this transition.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub spawn_requests: Vec<crate::entity_actor::effects::SpawnRequest>,
 }
 
 /// Default value for `spec_governed`: actions are spec-governed unless explicitly marked otherwise.
@@ -297,6 +320,53 @@ mod tests {
         };
 
         assert!(!state.can_accept_event());
+    }
+
+    #[test]
+    fn idempotency_lookup_returns_persisted_deferred_effects() {
+        let mut state = EntityState {
+            entity_type: "Parent".to_string(),
+            entity_id: "parent-1".to_string(),
+            status: "Ready".to_string(),
+            item_count: 0,
+            counters: BTreeMap::new(),
+            booleans: BTreeMap::new(),
+            lists: BTreeMap::new(),
+            fields: json!({}),
+            events: VecDeque::new(),
+            total_event_count: 0,
+            events_since_snapshot: 0,
+            last_snapshot_sequence_nr: 0,
+            sequence_nr: 0,
+            processed_idempotency_keys: std::collections::BTreeMap::new(),
+        };
+        state.push_event_bounded(EntityEvent {
+            action: "Trigger".to_string(),
+            from_status: "Ready".to_string(),
+            to_status: "Triggered".to_string(),
+            timestamp: chrono::Utc::now(),
+            params: json!({}),
+            idempotency_key: Some("idem-1".to_string()),
+            scheduled_actions: vec![crate::entity_actor::effects::ScheduledAction {
+                action: "Tick".to_string(),
+                delay_seconds: 0,
+            }],
+            spawn_requests: vec![crate::entity_actor::effects::SpawnRequest {
+                entity_type: "Child".to_string(),
+                entity_id: "child-1".to_string(),
+                initial_action: Some("Init".to_string()),
+                store_id_in: None,
+                copy_fields: None,
+                copied_field_values: serde_json::Map::new(),
+            }],
+        });
+
+        let event = state
+            .event_for_idempotency_key("idem-1")
+            .expect("event should remain in recent tail");
+        assert_eq!(event.scheduled_actions[0].action, "Tick");
+        assert_eq!(event.spawn_requests[0].entity_id, "child-1");
+        assert!(state.event_for_idempotency_key("missing").is_none());
     }
 
     #[test]

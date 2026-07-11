@@ -513,14 +513,18 @@ impl crate::state::ServerState {
         entity_id: &str,
         scheduled_actions: &[ScheduledAction],
         agent_ctx: &AgentContext,
+        source_sequence: u64,
     ) {
-        for sched in scheduled_actions {
+        for (effect_index, sched) in scheduled_actions.iter().enumerate() {
             let state = self.clone();
             let t = tenant.clone();
             let et = entity_type.to_string();
             let eid = entity_id.to_string();
             let action = sched.action.clone();
-            let ctx = agent_ctx.clone();
+            let mut ctx = agent_ctx.clone();
+            ctx.idempotency_key = Some(format!(
+                "deferred:scheduled:{t}:{et}:{eid}:{source_sequence}:{effect_index}:{action}"
+            ));
             let delay = std::time::Duration::from_secs(sched.delay_seconds);
             let workflow_root_entity_type = ctx
                 .workflow_root_entity_type
@@ -578,14 +582,15 @@ impl crate::state::ServerState {
     ) {
         // Spawn requests
         if !response.spawn_requests.is_empty() {
-            self.dispatch_spawn_requests(
-                ctx.tenant,
-                ctx.entity_type,
-                ctx.entity_id,
-                &response.spawn_requests,
-                ctx.action_params,
-                ctx.agent_ctx,
-            );
+            self.dispatch_spawn_requests(super::cross_entity::SpawnDispatchBatch {
+                tenant: ctx.tenant,
+                parent_type: ctx.entity_type,
+                parent_id: ctx.entity_id,
+                spawn_requests: &response.spawn_requests,
+                action_params: ctx.action_params,
+                agent_ctx: ctx.agent_ctx,
+                source_sequence: response.state.sequence_nr,
+            });
         }
 
         // Scheduled actions (propagate agent context for identity attribution)
@@ -596,6 +601,7 @@ impl crate::state::ServerState {
                 ctx.entity_id,
                 &response.scheduled_actions,
                 ctx.agent_ctx,
+                response.state.sequence_nr,
             );
         }
     }

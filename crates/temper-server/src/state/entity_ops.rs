@@ -1135,6 +1135,8 @@ impl ServerState {
             timestamp: sim_now(),
             params: initial_fields,
             idempotency_key: None,
+            scheduled_actions: Vec::new(),
+            spawn_requests: Vec::new(),
         };
         let payload = serde_json::to_value(&created)
             .map_err(|e| format!("failed to serialize Created event: {e}"))?;

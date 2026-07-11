@@ -281,6 +281,8 @@ pub fn process_action_with_xref_and_field_mode(
                 timestamp: sim_now(),
                 params: params.clone(),
                 idempotency_key: None,
+                scheduled_actions: all_scheduled.clone(),
+                spawn_requests: spawn_requests.clone(),
             };
 
             ProcessResult {

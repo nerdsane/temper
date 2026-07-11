@@ -466,6 +466,8 @@ mod tests {
             timestamp: ts,
             params: serde_json::json!({}),
             idempotency_key: None,
+            scheduled_actions: Vec::new(),
+            spawn_requests: Vec::new(),
         }
     }
 

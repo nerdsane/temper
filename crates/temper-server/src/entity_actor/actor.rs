@@ -574,6 +574,8 @@ impl EntityActor {
                             timestamp: env.metadata.timestamp,
                             params: serde_json::json!({}),
                             idempotency_key: None,
+                            scheduled_actions: Vec::new(),
+                            spawn_requests: Vec::new(),
                         });
                         state.status = tombstone.to_status.clone();
                         if let Some(obj) = state.fields.as_object_mut() {
@@ -808,6 +810,8 @@ impl Actor for EntityActor {
                 timestamp: sim_now(),
                 params: self.initial_fields.clone(),
                 idempotency_key: None,
+                scheduled_actions: Vec::new(),
+                spawn_requests: Vec::new(),
             };
 
             if let (Some(store), Some(backend)) = (self.event_journal.as_ref(), self.event_backend)
@@ -870,6 +874,7 @@ impl Actor for EntityActor {
                 if let Some(key) = idempotency_key.as_deref()
                     && state.has_processed_idempotency_key(key)
                 {
+                    let deferred_event = state.event_for_idempotency_key(key);
                     let custom_effects = duplicate_idempotency_custom_effects(
                         &table,
                         state,
@@ -885,8 +890,12 @@ impl Actor for EntityActor {
                         state: response_state,
                         error: None,
                         custom_effects,
-                        scheduled_actions: vec![],
-                        spawn_requests: vec![],
+                        scheduled_actions: deferred_event
+                            .map(|event| event.scheduled_actions.clone())
+                            .unwrap_or_default(),
+                        spawn_requests: deferred_event
+                            .map(|event| event.spawn_requests.clone())
+                            .unwrap_or_default(),
                         spec_governed: true,
                     });
                     return Ok(());
@@ -1457,6 +1466,8 @@ impl Actor for EntityActor {
                     timestamp: sim_now(),
                     params: serde_json::json!({}),
                     idempotency_key: None,
+                    scheduled_actions: Vec::new(),
+                    spawn_requests: Vec::new(),
                 };
 
                 if let (Some(store), Some(backend)) =
