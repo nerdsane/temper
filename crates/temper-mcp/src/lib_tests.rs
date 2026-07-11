@@ -495,9 +495,8 @@ async fn execute_specs_returns_data() {
     let (port, shutdown) = start_test_temper_server().await;
     let mut ctx = authenticated_ctx_for_port(port);
 
-    // The test server uses with_specs() which doesn't populate the spec registry.
-    // The /observe/specs endpoint reads from the registry, so it returns an empty list
-    // (not a 404). This verifies the specs() method dispatches correctly.
+    // The authenticated fixture uses the platform router so this call verifies
+    // specs() dispatches with the same bearer-to-typed-context path as runtime.
     let response = rpc(
         &mut ctx,
         call_tool_request(10, "execute", "return await temper.specs('demo')"),
