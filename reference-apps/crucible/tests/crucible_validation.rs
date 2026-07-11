@@ -35,6 +35,100 @@ const SESSION_SCHEDULE_IOA: &str = include_str!("../specs/session_schedule.ioa.t
 const CRUCIBLE_SCHEDULER_IOA: &str = include_str!("../specs/crucible_scheduler.ioa.toml");
 const CROSS_INVARIANTS_TOML: &str = include_str!("../specs/cross-invariants.toml");
 const MODEL_CSDL: &str = include_str!("../specs/model.csdl.xml");
+const CRUCIBLE_VALIDATION_POLICY: &str = r#"
+permit(
+    principal,
+    action in [
+        Action::"list",
+        Action::"read",
+        Action::"create",
+        Action::"update",
+        Action::"delete",
+        Action::"ArchiveEnvironment"
+    ],
+    resource is Environment
+);
+permit(principal, action in [Action::"list", Action::"read", Action::"create", Action::"update", Action::"delete"], resource is EnvironmentAllowedHost);
+permit(principal, action in [Action::"list", Action::"read", Action::"create", Action::"update", Action::"delete"], resource is EnvironmentPackage);
+permit(principal, action in [Action::"list", Action::"read", Action::"create", Action::"update", Action::"delete"], resource is ManagedAgent);
+permit(
+    principal,
+    action in [
+        Action::"list",
+        Action::"read",
+        Action::"create",
+        Action::"update",
+        Action::"delete",
+        Action::"StartSession",
+        Action::"IdleSession",
+        Action::"ResumeSession",
+        Action::"RescheduleSession",
+        Action::"TerminateSession",
+        Action::"ArchiveSession"
+    ],
+    resource is Session
+);
+permit(principal, action in [Action::"list", Action::"read", Action::"create", Action::"update", Action::"delete"], resource is SessionResource);
+permit(
+    principal,
+    action in [
+        Action::"list",
+        Action::"read",
+        Action::"create",
+        Action::"update",
+        Action::"delete",
+        Action::"ArchiveMemoryStore"
+    ],
+    resource is MemoryStore
+);
+permit(principal, action in [Action::"list", Action::"read", Action::"create", Action::"update", Action::"delete"], resource is Memory);
+permit(
+    principal,
+    action in [
+        Action::"list",
+        Action::"read",
+        Action::"create",
+        Action::"update",
+        Action::"delete",
+        Action::"RedactVersion"
+    ],
+    resource is MemoryVersion
+);
+permit(
+    principal,
+    action in [
+        Action::"list",
+        Action::"read",
+        Action::"create",
+        Action::"update",
+        Action::"delete",
+        Action::"ActivateSchedule",
+        Action::"Trigger",
+        Action::"TriggerComplete",
+        Action::"TriggerFailed",
+        Action::"PauseSchedule",
+        Action::"ResumeSchedule",
+        Action::"ExpireSchedule"
+    ],
+    resource is SessionSchedule
+);
+permit(
+    principal,
+    action in [
+        Action::"list",
+        Action::"read",
+        Action::"create",
+        Action::"update",
+        Action::"delete",
+        Action::"Start",
+        Action::"ScheduledCheck",
+        Action::"CheckComplete",
+        Action::"CheckFailed",
+        Action::"ScheduleFailed"
+    ],
+    resource is CrucibleScheduler
+);
+"#;
 
 /// Build a `ServerState` preloaded with Crucible's three IOAs, CSDL, and
 /// the cross-invariants file. Marks all three entity types as verified so
@@ -102,6 +196,32 @@ fn build_crucible_state() -> ServerState {
         }
     }
     state
+        .authz
+        .reload_tenant_policies(TenantId::default().as_str(), CRUCIBLE_VALIDATION_POLICY)
+        .expect("install Crucible validation policy");
+    state
+}
+
+fn authenticate(mut request: Request<Body>) -> Request<Body> {
+    let security_context = temper_authz::SecurityContext {
+        principal: temper_authz::Principal {
+            id: "crucible-validation".to_string(),
+            kind: temper_authz::PrincipalKind::Customer,
+            role: None,
+            acting_for: None,
+            agent_type: None,
+            attributes: Default::default(),
+        },
+        context_attrs: Default::default(),
+        correlation_id: "crucible-validation".to_string(),
+    };
+    request
+        .extensions_mut()
+        .insert(temper_authz::AuthenticatedRequestContext::new(
+            TenantId::default(),
+            security_context,
+        ));
+    request
 }
 
 /// Send an HTTP request through the router and return `(status, body_json)`.
@@ -112,12 +232,14 @@ async fn send(
     body: &str,
 ) -> (StatusCode, serde_json::Value) {
     let router = build_router(state.clone());
-    let req = Request::builder()
-        .method(method)
-        .uri(uri)
-        .header("Content-Type", "application/json")
-        .body(Body::from(body.to_string()))
-        .unwrap();
+    let req = authenticate(
+        Request::builder()
+            .method(method)
+            .uri(uri)
+            .header("Content-Type", "application/json")
+            .body(Body::from(body.to_string()))
+            .unwrap(),
+    );
     let resp = router.oneshot(req).await.unwrap();
     let status = resp.status();
     let bytes = axum::body::to_bytes(resp.into_body(), 1_000_000)
@@ -1224,12 +1346,13 @@ async fn session_schedule_status_invariant() {
     .await;
     assert_eq!(
         status,
-        StatusCode::CONFLICT,
+        StatusCode::BAD_REQUEST,
         "bad status rejected: {body:?}"
     );
+    assert_eq!(body["error"]["code"].as_str(), Some("InvalidBody"));
     assert_eq!(
-        body["error"]["details"]["invariant"].as_str(),
-        Some("StatusMustBeKnown")
+        body["error"]["message"].as_str(),
+        Some("Status must equal the spec-defined initial state 'Draft'")
     );
 }
 
