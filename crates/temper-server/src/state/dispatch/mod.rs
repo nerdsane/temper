@@ -10,6 +10,7 @@ use tracing::Instrument;
 
 mod actions;
 mod adapter;
+mod adapter_selection;
 mod compensation;
 mod composite;
 mod cross_entity;
@@ -385,9 +386,9 @@ impl crate::state::ServerState {
             entity_type = %entity_type,
             entity_id = %entity_id,
         );
-        tokio::spawn(
+        #[rustfmt::skip]
+        tokio::spawn( // determinism-ok: async integration side-effects run outside simulation core
             async move {
-                // determinism-ok: async integration side-effects run outside simulation core
                 let req = WasmDispatchRequest {
                     tenant: &tenant,
                     entity_type: &entity_type,

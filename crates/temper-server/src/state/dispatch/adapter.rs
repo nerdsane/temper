@@ -1,5 +1,6 @@
 use tracing::{Instrument, instrument};
 
+use super::adapter_selection::{AdapterSelectionError, select_permitted_adapter};
 use crate::adapters::{AdapterAgentContext, AdapterContext, AdapterResult};
 use crate::entity_actor::{EntityResponse, EntityState};
 use crate::identity::hash_token;
@@ -62,9 +63,9 @@ impl crate::state::ServerState {
             entity_id = %entity_id,
         );
 
-        tokio::spawn(
+        #[rustfmt::skip]
+        tokio::spawn( // determinism-ok: async integration side-effects run outside simulation core
             async move {
-                // determinism-ok: async integration side-effects run outside simulation core
                 let req = WasmDispatchRequest {
                     tenant: &tenant,
                     entity_type: &entity_type,
@@ -175,21 +176,45 @@ impl crate::state::ServerState {
         entity_state: &EntityState,
         action_params: &serde_json::Value,
     ) -> Result<Option<EntityResponse>, String> {
-        let adapter_type = entity_state
-            .fields
-            .get("adapter_type")
-            .and_then(|v| v.as_str())
-            .map(str::trim)
-            .filter(|v| !v.is_empty())
-            .map(str::to_string)
-            .or_else(|| integration.config.get("adapter").cloned())
-            .or_else(|| integration.config.get("adapter_type").cloned())
-            .ok_or_else(|| {
-                format!(
+        // The entity may switch adapters at runtime, but only within the set the
+        // spec explicitly declared — otherwise a mutable `adapter_type` field could
+        // pivot a benign integration onto an unsandboxed host-process adapter
+        // (ARN-228). The declared set is the authorization boundary.
+        let adapter_type = match select_permitted_adapter(
+            entity_state
+                .fields
+                .get("adapter_type")
+                .and_then(|v| v.as_str()),
+            &integration.config,
+        ) {
+            Ok(adapter_type) => adapter_type,
+            Err(AdapterSelectionError::Undeclared) => {
+                return Err(format!(
                     "adapter integration '{}' is missing required config key 'adapter'",
                     integration.name
-                )
-            })?;
+                ));
+            }
+            Err(AdapterSelectionError::NotPermitted {
+                requested,
+                permitted,
+            }) => {
+                // Fail closed via the integration's on_failure path — never spawn
+                // an adapter the spec did not declare.
+                return self
+                    .handle_adapter_failure(
+                        ctx,
+                        integration,
+                        format!(
+                            "adapter '{requested}' requested by entity state is not permitted by \
+                             integration '{}'; declared adapters: [{}]",
+                            integration.name,
+                            permitted.join(", ")
+                        ),
+                        0,
+                    )
+                    .await;
+            }
+        };
 
         let Some(adapter) = self.adapter_registry.get(&adapter_type) else {
             return self
