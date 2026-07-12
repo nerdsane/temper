@@ -183,6 +183,16 @@ pub async fn handle_webhook(
         session_id: None,
         agent_type: Some("webhook".to_string()),
         intent: None,
+        idempotency_key: Some(webhook_idempotency_key(WebhookIdempotencyInput {
+            method: &method,
+            tenant: &tenant,
+            webhook_path: &webhook_path,
+            webhook: &webhook,
+            entity_type: &entity_type,
+            entity_id: &entity_id,
+            query: &query,
+            body: &body,
+        })),
         ..AgentContext::default()
     };
 
@@ -319,6 +329,50 @@ fn signature_matches(secret: &str, body: &[u8], provided: &str) -> bool {
         .as_bytes()
         .ct_eq(expected_hex.as_bytes())
         .into()
+}
+
+/// Build a stable dispatch idempotency key for one exact webhook delivery.
+///
+/// This is the route's replay boundary. The dispatch layer persists processed
+/// idempotency keys on entity events, so an identical callback replay is
+/// deduplicated by the existing actor/store mechanism instead of by a local
+/// in-memory cache. The key intentionally covers the resolved tenant, route,
+/// webhook declaration, target entity, ordered query parameters, and raw body.
+struct WebhookIdempotencyInput<'a> {
+    method: &'a Method,
+    tenant: &'a TenantId,
+    webhook_path: &'a str,
+    webhook: &'a Webhook,
+    entity_type: &'a str,
+    entity_id: &'a str,
+    query: &'a BTreeMap<String, String>,
+    body: &'a [u8],
+}
+
+fn webhook_idempotency_key(input: WebhookIdempotencyInput<'_>) -> String {
+    use sha2::{Digest, Sha256};
+
+    let mut hasher = Sha256::new();
+    update_hash_part(&mut hasher, b"temper-webhook-v1");
+    update_hash_part(&mut hasher, input.method.as_str().as_bytes());
+    update_hash_part(&mut hasher, input.tenant.as_str().as_bytes());
+    update_hash_part(&mut hasher, input.webhook_path.as_bytes());
+    update_hash_part(&mut hasher, input.webhook.name.as_bytes());
+    update_hash_part(&mut hasher, input.webhook.action.as_bytes());
+    update_hash_part(&mut hasher, input.entity_type.as_bytes());
+    update_hash_part(&mut hasher, input.entity_id.as_bytes());
+    for (key, value) in input.query {
+        update_hash_part(&mut hasher, key.as_bytes());
+        update_hash_part(&mut hasher, value.as_bytes());
+    }
+    update_hash_part(&mut hasher, input.body);
+
+    format!("webhook:v1:{}", hex::encode(hasher.finalize()))
+}
+
+fn update_hash_part(hasher: &mut impl sha2::Digest, part: &[u8]) {
+    hasher.update(part.len().to_be_bytes());
+    hasher.update(part);
 }
 
 /// Build the restricted Cedar principal for a webhook caller.

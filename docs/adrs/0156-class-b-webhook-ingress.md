@@ -104,6 +104,22 @@ declared)` → `entity-id extraction (400)` → `Cedar gate (403)` → `dispatch
 HMAC runs before entity resolution so an unauthenticated caller learns
 nothing about entity state.
 
+### Sub-Decision 4: Exact replay uses durable dispatch idempotency
+
+Every accepted webhook delivery receives a deterministic dispatch
+idempotency key derived from the resolved tenant, HTTP method, webhook route,
+webhook declaration, target entity, ordered query parameters, and raw body.
+The key is threaded through `AgentContext.idempotency_key`, so the existing
+entity actor/store idempotency path records it with the committed event and
+deduplicates an exact replay of the same callback.
+
+This deliberately avoids a process-local replay cache: a local cache would be
+lost on restart and would not prove anything about the committed state. It
+also avoids inventing a timestamp header that external providers do not send.
+Signed providers that need stricter provider-native windows (for example
+Stripe-style timestamped signatures) should use a follow-up signature scheme
+selector.
+
 ### Tenant/principal are authenticated, not merely claimed
 
 The tenant still appears in the URL, but it is no longer *trusted* from the
@@ -166,6 +182,9 @@ unaffected (permissive fallback), but no production app tenant is policy-less.
   write, and authenticated by HMAC when a secret is configured. No code path
   dispatches with `security_ctx: None`.
 - The long-dead `hmac_secret`/`hmac_header` spec fields become live.
+- Exact callback replays are idempotent through the same durable dispatch
+  mechanism as agent retries; a replay does not attempt a second state
+  transition after the first delivery commits.
 - Establishes the kernel pattern the TemperPaw fix (ARN-168) mirrors.
 
 **Precondition on the Cedar fail-closed guarantee.** `authorize_for_tenant`
@@ -189,6 +208,11 @@ is a deployment requirement, not an automatic property of this route.
   stricter alternative (below) was rejected to avoid breaking OAuth.
 - Webhook authors must add a Cedar permit for the `webhook:*` principal for
   webhooks to fire in production — intentional, and auditable.
+- Exact replay idempotency is not a substitute for authenticating an
+  unsigned callback. It prevents a captured callback from applying the same
+  transition twice; it does not prove that the first caller was the intended
+  OAuth provider. First-class unsigned callback capabilities remain a
+  follow-up spec surface.
 
 ### Risks
 - Signature-format assumptions: hex digest with an optional `sha256=`
@@ -206,7 +230,8 @@ is a deployment requirement, not an automatic property of this route.
 ## Non-Goals
 - Base64 or provider-specific signature schemes (Stripe timestamped, Shopify
   base64). Hex (optionally `sha256=`-prefixed) only.
-- Replay protection (timestamp/nonce windows) — a possible follow-up.
+- Provider-native timestamp/nonce windows — a possible follow-up. This ADR
+  now covers exact replay idempotency only.
 - Changing the outbound `WebhookDispatcher`.
 
 ## Alternatives Considered

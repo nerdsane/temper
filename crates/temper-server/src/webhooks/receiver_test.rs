@@ -374,6 +374,58 @@ async fn webhook_valid_signature_and_authorized_succeeds() {
     assert_eq!(json["state"]["status"], "Authorized");
 }
 
+/// A replay of the exact same signed delivery must be idempotent. Without the
+/// route-derived idempotency key, the second request tries to apply
+/// `HandleOAuthCallback` from `Authorized` and fails instead of replaying the
+/// first successful result.
+#[tokio::test]
+async fn webhook_replay_returns_original_success_once() {
+    let state = build_test_state();
+    seed_submitted_order(&state).await;
+    state
+        .authz
+        .reload_tenant_policies(
+            "test-tenant",
+            r#"permit(principal, action == Action::"HandleOAuthCallback", resource is Order);"#,
+        )
+        .expect("install Cedar policy");
+
+    let body = br#"{"event":"paid"}"#;
+    let sig = sign_webhook(TEST_WEBHOOK_SECRET, body);
+    let uri = "/webhooks/test-tenant/pay/callback?state=ent-1&code=abc123";
+    let app = crate::router::build_router(state);
+
+    for attempt in 1..=2 {
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(uri)
+                    .header("X-Temper-Signature", sig.clone())
+                    .body(Body::from(body.to_vec()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(
+            response.status(),
+            StatusCode::OK,
+            "webhook replay attempt {attempt} should return the original success"
+        );
+        let bytes = axum::body::to_bytes(response.into_body(), 1024 * 1024)
+            .await
+            .unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(json["state"]["status"], "Authorized");
+        assert!(
+            json["success"].as_bool().unwrap_or(false),
+            "webhook replay attempt {attempt} should stay successful"
+        );
+    }
+}
+
 /// A well-formed but WRONG 64-hex signature must be rejected. Unlike the
 /// short `deadbeef` case (rejected on length), this exercises the
 /// equal-length constant-time byte comparison.
