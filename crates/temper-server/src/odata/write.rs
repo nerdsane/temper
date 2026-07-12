@@ -87,9 +87,18 @@ fn undeclared_create_field_keys(
     for nav in &entity.navigation_properties {
         allowed.insert(nav.name.as_str());
     }
+    // CSDL properties are the deterministic PascalCase spelling; create bodies
+    // conventionally use snake_case (e.g. POST Projects {"name": …} against a
+    // `Name` property). Accept a key whose PascalCase form matches a declared
+    // property — the same snake_case<->PascalCase tolerance the action boundary
+    // uses — while a genuinely undeclared key still matches nothing.
     let mut undeclared: Vec<String> = object
         .keys()
-        .filter(|key| !key.starts_with('@') && !allowed.contains(key.as_str()))
+        .filter(|key| {
+            !key.starts_with('@')
+                && !allowed.contains(key.as_str())
+                && !allowed.contains(temper_spec::naming::to_pascal_case(key).as_str())
+        })
         .cloned()
         .collect();
     undeclared.sort();
