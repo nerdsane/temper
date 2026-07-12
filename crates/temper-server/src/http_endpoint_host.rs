@@ -30,9 +30,7 @@ const STRIPPED_INBOUND_HEADERS: &[&str] = &[
 /// True when an inbound header must be stripped before guest delivery.
 pub fn is_sensitive_inbound_header(name: &str) -> bool {
     let lower = name.to_ascii_lowercase();
-    STRIPPED_INBOUND_HEADERS
-        .iter()
-        .any(|blocked| *blocked == lower.as_str())
+    STRIPPED_INBOUND_HEADERS.contains(&lower.as_str())
 }
 
 /// Filter inbound headers for guest `HttpDispatchContext` delivery.
