@@ -211,8 +211,10 @@ impl RegistryState {
             ));
         }
         // determinism-ok: production host I/O path; not SimActor scheduling.
+        // ~31 bits of unguessability (low bit forced 1 so id is never 0).
+        // Grants remain the authority boundary; opacity is defense-in-depth.
         for _ in 0..64 {
-            let id = (Uuid::new_v4().as_u128() as u32) | 1; // never zero
+            let id = (Uuid::new_v4().as_u128() as u32) | 1;
             if !self.handles.contains_key(&id) {
                 return Ok(id);
             }

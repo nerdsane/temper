@@ -125,7 +125,9 @@ async fn legitimate_owner_can_use_granted_inbound_handles() {
         .unwrap();
 
     let owner = ProductionWasmHost::with_shared_streams(BTreeMap::new(), registry.clone());
-    owner.grant_stream_handles([exchange.guest_request_body, exchange.guest_response_body]);
+    owner
+        .grant_stream_handles([exchange.guest_request_body, exchange.guest_response_body])
+        .unwrap();
 
     let body = owner
         .http_stream_read(exchange.guest_request_body)
@@ -150,7 +152,9 @@ async fn guest_cannot_operate_on_kernel_side_handles_even_when_guessed() {
 
     let owner = ProductionWasmHost::with_shared_streams(BTreeMap::new(), registry.clone());
     // Grant only guest ends — mirrors HttpEndpoint dispatcher.
-    owner.grant_stream_handles([exchange.guest_request_body, exchange.guest_response_body]);
+    owner
+        .grant_stream_handles([exchange.guest_request_body, exchange.guest_response_body])
+        .unwrap();
 
     let kernel_read = owner.http_stream_read(exchange.kernel_request_body).await;
     assert!(
@@ -164,6 +168,61 @@ async fn guest_cannot_operate_on_kernel_side_handles_even_when_guessed() {
     assert!(
         matches!(kernel_write, Err(StreamError::InvalidHandle)),
         "guest must not write kernel-side handle; got {kernel_write:?}"
+    );
+}
+
+#[tokio::test]
+async fn cross_tenant_guest_cannot_send_or_await_foreign_response_head() {
+    let registry = shared_registry();
+    let victim = registry.open_inbound_exchange().await.unwrap();
+
+    let attacker = ProductionWasmHost::with_shared_streams(BTreeMap::new(), registry.clone());
+
+    let send = attacker
+        .http_stream_send_response_head(
+            victim.guest_response_body,
+            temper_wasm::http_stream::HttpResponseHead {
+                status: 200,
+                headers: vec![],
+            },
+        )
+        .await;
+    assert!(
+        matches!(send, Err(StreamError::InvalidHandle)),
+        "cross-tenant send_response_head must be denied; got {send:?}"
+    );
+
+    // Outbound head await on a foreign inbound response handle is also denied.
+    let await_head = attacker
+        .http_stream_response_head(victim.guest_response_body)
+        .await;
+    assert!(
+        await_head.is_err(),
+        "cross-tenant response_head await must be denied; got {await_head:?}"
+    );
+}
+
+#[tokio::test]
+async fn close_revokes_grant_so_handle_cannot_be_reused() {
+    let registry = shared_registry();
+    let exchange = registry.open_inbound_exchange().await.unwrap();
+    let owner = ProductionWasmHost::with_shared_streams(BTreeMap::new(), registry.clone());
+    owner
+        .grant_stream_handles([exchange.guest_request_body, exchange.guest_response_body])
+        .unwrap();
+
+    owner
+        .http_stream_close(exchange.guest_response_body)
+        .await
+        .unwrap();
+    assert!(
+        !owner.has_stream_grant(exchange.guest_response_body),
+        "successful close must revoke the grant"
+    );
+    let reclose = owner.http_stream_close(exchange.guest_response_body).await;
+    assert!(
+        matches!(reclose, Err(StreamError::InvalidHandle)),
+        "revoked grant must deny further ops; got {reclose:?}"
     );
 }
 
@@ -183,9 +242,13 @@ async fn concurrent_tenants_cannot_cross_read_shared_registry() {
         .unwrap();
 
     let host_a = ProductionWasmHost::with_shared_streams(BTreeMap::new(), registry.clone());
-    host_a.grant_stream_handles([a.guest_request_body, a.guest_response_body]);
+    host_a
+        .grant_stream_handles([a.guest_request_body, a.guest_response_body])
+        .unwrap();
     let host_b = ProductionWasmHost::with_shared_streams(BTreeMap::new(), registry.clone());
-    host_b.grant_stream_handles([b.guest_request_body, b.guest_response_body]);
+    host_b
+        .grant_stream_handles([b.guest_request_body, b.guest_response_body])
+        .unwrap();
 
     // Each owner reads only its own body.
     assert_eq!(
@@ -206,4 +269,19 @@ async fn concurrent_tenants_cannot_cross_read_shared_registry() {
         host_b.http_stream_read(a.guest_request_body).await,
         Err(StreamError::InvalidHandle)
     ));
+}
+
+#[tokio::test]
+async fn close_granted_streams_clears_all_grants() {
+    let registry = shared_registry();
+    let exchange = registry.open_inbound_exchange().await.unwrap();
+    let owner = ProductionWasmHost::with_shared_streams(BTreeMap::new(), registry.clone());
+    owner
+        .grant_stream_handles([exchange.guest_request_body, exchange.guest_response_body])
+        .unwrap();
+    owner.close_granted_streams().await;
+    assert!(!owner.has_stream_grant(exchange.guest_request_body));
+    assert!(!owner.has_stream_grant(exchange.guest_response_body));
+    let read = owner.http_stream_read(exchange.guest_request_body).await;
+    assert!(matches!(read, Err(StreamError::InvalidHandle)));
 }

@@ -38,7 +38,9 @@ pub fn host_with_inbound_grants(
 ) -> ProductionWasmHost {
     let host =
         ProductionWasmHost::with_shared_streams(secrets, streams).with_invocation_context(ctx);
-    host.grant_stream_handles([guest_request_body, guest_response_body]);
+    // Fresh host: grant budget is empty; two guest ends always fit.
+    host.grant_stream_handles([guest_request_body, guest_response_body])
+        .expect("fresh host must accept inbound guest grants");
     host
 }
 

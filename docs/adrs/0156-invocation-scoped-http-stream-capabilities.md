@@ -60,9 +60,16 @@ when it knows the ID from a leak.
 ### Sub-Decision 4: Budgets and cleanup
 
 - Global registry handle budget and per-invocation grant budget bound resource
-  use (concurrent streams / DoS).
-- `close_granted_streams` / dispatcher cleanup closes granted guest ends on
-  success, failure, timeout, and cancellation so entries do not retain forever.
+  use (concurrent streams / DoS). Grant insertion is fallible: if the budget
+  is exhausted, the open/begin path rolls back registry allocation rather than
+  handing the guest unusable handles.
+- Dispatcher cleanup closes all four exchange ends on **head failure and head
+  timeout** (the paths where the guest never completed a normal stream).
+  Successful exchanges still rely on channel EOF and peer close (existing
+  ADR-0057 semantics). Hosts also revoke a grant on successful
+  `http_stream_close` so the capability does not outlive the handle.
+- `close_granted_streams` is available for request-end teardown when a host
+  must drop every remaining grant (cancel / dispatcher abort).
 
 ### Sub-Decision 5: Kernel path stays privileged
 
