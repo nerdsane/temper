@@ -233,41 +233,6 @@ fn http_endpoint_fallback_tenant<'a>(tenant_ids: &[&'a TenantId]) -> Option<&'a 
         .or_else(|| tenant_ids.first().copied())
 }
 
-impl ServerState {
-    /// Build the WASM host for an HttpEndpoint invocation.
-    ///
-    /// The `ProductionWasmHost` owns the shared inbound/outbound streams for the
-    /// request/response bodies, and is wrapped in the governed `AuthorizedWasmHost`
-    /// so secret access and outbound HTTP go through the same Cedar default-deny gate
-    /// as entity-action WASM (ARN-208) — an HttpEndpoint module can no longer read
-    /// tenant secrets outside policy. Body streaming stays ungated so the endpoint's
-    /// own request/response handling is unchanged.
-    pub(crate) fn build_http_endpoint_wasm_host(
-        &self,
-        ctx: &temper_wasm::types::WasmInvocationContext,
-        secrets: std::collections::BTreeMap<String, String>,
-        streams: std::sync::Arc<temper_wasm::http_stream::HttpStreamRegistry>,
-    ) -> std::sync::Arc<dyn temper_wasm::WasmHost> {
-        let inner: std::sync::Arc<dyn temper_wasm::WasmHost> = std::sync::Arc::new(
-            temper_wasm::ProductionWasmHost::with_shared_streams(secrets, streams)
-                .with_invocation_context(ctx.clone()),
-        );
-        let authz_ctx = temper_wasm::types::WasmAuthzContext {
-            tenant: ctx.tenant.clone(),
-            module_name: ctx.wasm_module.clone().unwrap_or_default(),
-            agent_id: ctx.agent_id.clone(),
-            session_id: ctx.session_id.clone(),
-            entity_type: ctx.entity_type.clone(),
-            trigger_action: ctx.trigger_action.clone(),
-        };
-        std::sync::Arc::new(temper_wasm::AuthorizedWasmHost::new(
-            inner,
-            self.wasm_authz_gate(),
-            authz_ctx,
-        ))
-    }
-}
-
 /// End-to-end dispatch: open an InboundExchange on the shared
 /// HttpStreamRegistry, spawn tasks to pump axum body into the
 /// guest-visible request-body handle and build an axum Response
