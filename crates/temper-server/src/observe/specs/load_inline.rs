@@ -17,7 +17,8 @@ use crate::state::{ServerState, TrajectoryEntry, TrajectorySource};
 
 use super::load_dir::load_specs_from_resolved_path;
 use super::path_security::{
-    create_inline_staging_dir, ensure_under_root, validate_inline_bundle, validate_inline_spec_key,
+    create_inline_staging_dir, enforce_extra_payload_budget, ensure_under_root,
+    validate_inline_bundle, validate_inline_spec_key,
 };
 use super::types::{LoadDirRequest, LoadInlineRequest};
 
@@ -193,14 +194,16 @@ pub(crate) async fn handle_load_inline(
 
     // ADR-0159 / ARN-229: validate keys + budgets, then materialize into an
     // invocation-unique staging directory (never a shared tenant temp path).
-    let validated = validate_inline_bundle(&body.specs)?;
-    let tmp_dir = create_inline_staging_dir(&tenant)?;
-    let specs_root = resolve_inline_specs_root(&tmp_dir, &body.specs)?;
-    ensure_under_root(&tmp_dir, &specs_root)?;
+    // InlineStagingDir Drop always removes the tree (success, error, panic).
+    let (validated, total_bytes) = validate_inline_bundle(&body.specs)?;
+    let staging = create_inline_staging_dir(&tenant)?;
+    let tmp_dir = staging.path();
+    let specs_root = resolve_inline_specs_root(tmp_dir, &body.specs)?;
+    ensure_under_root(tmp_dir, &specs_root)?;
 
     for (rel, content) in validated {
         let path = tmp_dir.join(&rel);
-        ensure_under_root(&tmp_dir, &path)?;
+        ensure_under_root(tmp_dir, &path)?;
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent).map_err(|e| {
                 // determinism-ok: HTTP handler creates temp subdirectories for nested inline specs
@@ -223,8 +226,9 @@ pub(crate) async fn handle_load_inline(
     }
 
     if let Some(source) = body.cross_invariants_toml.as_deref() {
+        enforce_extra_payload_budget("cross-invariants.toml", source, total_bytes)?;
         let cross_path = specs_root.join("cross-invariants.toml");
-        ensure_under_root(&tmp_dir, &cross_path)?;
+        ensure_under_root(tmp_dir, &cross_path)?;
         std::fs::write(&cross_path, source).map_err(|e| {
             // determinism-ok: HTTP handler writes cross-invariants
             (
@@ -242,9 +246,7 @@ pub(crate) async fn handle_load_inline(
         merge: true,
     };
     let result = load_specs_from_resolved_path(state.clone(), dir_request).await;
-
-    // Best-effort cleanup of this invocation's staging tree.
-    let _ = std::fs::remove_dir_all(&tmp_dir); // determinism-ok: HTTP handler cleans staging
+    // staging Drop removes the tree after files are fully read into memory.
 
     if result.is_ok()
         && let Some(ref cedar_text) = cedar_policies

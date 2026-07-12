@@ -27,7 +27,7 @@ use crate::state::ServerState;
 /// Build the management API router (mounted at /api).
 ///
 /// Route structure:
-/// - POST   /api/specs/load-dir                        -> load specs from directory
+/// - POST   /api/specs/load-dir                        -> 410 Gone (no host paths; use load-inline)
 /// - POST   /api/specs/load-inline                     -> load specs from inline payload
 /// - POST   /api/specs/validate-ioa                    -> validate IOA source without loading it
 /// - POST   /api/wasm/modules/{module_name}            -> upload WASM module
