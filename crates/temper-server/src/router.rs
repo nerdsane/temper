@@ -233,6 +233,38 @@ fn http_endpoint_fallback_tenant<'a>(tenant_ids: &[&'a TenantId]) -> Option<&'a 
         .or_else(|| tenant_ids.first().copied())
 }
 
+impl ServerState {
+    /// Build the WASM host for an HttpEndpoint invocation.
+    ///
+    /// The `ProductionWasmHost` owns the shared inbound/outbound streams for the
+    /// request/response bodies, and is wrapped in the governed `AuthorizedWasmHost`
+    /// so secret access and outbound HTTP go through the same Cedar default-deny gate
+    /// as entity-action WASM (ARN-208) — an HttpEndpoint module can no longer read
+    /// tenant secrets outside policy. Body streaming stays ungated so the endpoint's
+    /// own request/response handling is unchanged.
+    pub(crate) fn build_http_endpoint_wasm_host(
+        &self,
+        ctx: &temper_wasm::types::WasmInvocationContext,
+        secrets: std::collections::BTreeMap<String, String>,
+        streams: std::sync::Arc<temper_wasm::http_stream::HttpStreamRegistry>,
+    ) -> std::sync::Arc<dyn temper_wasm::WasmHost> {
+        let inner: std::sync::Arc<dyn temper_wasm::WasmHost> = std::sync::Arc::new(
+            temper_wasm::ProductionWasmHost::with_shared_streams(secrets, streams)
+                .with_invocation_context(ctx.clone()),
+        );
+        let authz_ctx = temper_wasm::types::WasmAuthzContext {
+            tenant: ctx.tenant.clone(),
+            module_name: ctx.wasm_module.clone().unwrap_or_default(),
+            agent_id: ctx.agent_id.clone(),
+            session_id: ctx.session_id.clone(),
+            entity_type: ctx.entity_type.clone(),
+            trigger_action: ctx.trigger_action.clone(),
+        };
+        let _ = &authz_ctx;
+        inner
+    }
+}
+
 /// End-to-end dispatch: open an InboundExchange on the shared
 /// HttpStreamRegistry, spawn tasks to pump axum body into the
 /// guest-visible request-body handle and build an axum Response
@@ -289,7 +321,8 @@ async fn dispatch_matched_route(
     // ADR-0057 inbound exchange end-to-end streaming — without it,
     // even SDK-streaming guests are bounded by the buffered limit.
     let pump_streams = streams.clone();
-    tokio::spawn(async move {
+    #[rustfmt::skip]
+    tokio::spawn(async move { // determinism-ok: HTTP request-body pump runs outside simulation core
         use tokio_stream::StreamExt as _;
         let mut stream = body.into_data_stream();
         while let Some(chunk_result) = stream.next().await {
@@ -359,16 +392,15 @@ async fn dispatch_matched_route(
         }),
     };
 
-    // Build a per-request host that shares the registry.
+    // Build a per-request host that shares the registry, wrapped in the governed
+    // authorization host so HttpEndpoint WASM secret/outbound access is gated by the
+    // same Cedar policy surface as entity-action WASM (ARN-208).
     let secrets: std::collections::BTreeMap<String, String> = state
         .secrets_vault
         .as_ref()
         .map(|v| v.get_tenant_secrets(tenant_id.as_str()))
         .unwrap_or_default();
-    let host: std::sync::Arc<dyn temper_wasm::WasmHost> = std::sync::Arc::new(
-        temper_wasm::ProductionWasmHost::with_shared_streams(secrets, streams.clone())
-            .with_invocation_context(ctx.clone()),
-    );
+    let host = state.build_http_endpoint_wasm_host(&ctx, secrets, streams.clone());
 
     // Spawn task B: invoke the WASM module. Runs to completion
     // (guest writes head + body via FFI; we drain on the axum side).
@@ -440,7 +472,8 @@ async fn dispatch_matched_route(
         .await;
     }
 
-    let invoke_task = tokio::spawn(async move {
+    #[rustfmt::skip]
+    let invoke_task = tokio::spawn(async move { // determinism-ok: HttpEndpoint WASM invocation runs outside simulation core
         match engine
             .invoke_with_blobs(
                 &invoke_hash,

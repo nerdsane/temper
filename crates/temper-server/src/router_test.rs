@@ -17,6 +17,48 @@ fn test_state() -> ServerState {
     ServerState::new(system, csdl, csdl_xml.to_string())
 }
 
+fn http_endpoint_invocation_ctx() -> temper_wasm::types::WasmInvocationContext {
+    temper_wasm::types::WasmInvocationContext {
+        tenant: "default".to_string(),
+        entity_type: "HttpEndpoint".to_string(),
+        entity_id: "ep-1".to_string(),
+        trigger_action: "HandleHttp".to_string(),
+        wasm_module: Some("handler".to_string()),
+        trigger_params: serde_json::Value::Null,
+        entity_state: serde_json::Value::Null,
+        agent_id: None,
+        session_id: None,
+        integration_config: std::collections::BTreeMap::new(),
+        trace_id: String::new(),
+        workflow_root_entity_type: None,
+        workflow_root_entity_id: None,
+        workflow_run_id: None,
+        http_request: None,
+    }
+}
+
+#[test]
+fn http_endpoint_wasm_host_gates_secret_access() {
+    // ARN-208: a WASM module bound to an HttpEndpoint must not read tenant secrets
+    // outside Cedar governance. With no permit policy, the Cedar gate is default-deny,
+    // so `get_secret` must be refused — exactly as it is for entity-action WASM.
+    let state = test_state();
+    let mut secrets = std::collections::BTreeMap::new();
+    secrets.insert("STRIPE_API_KEY".to_string(), "sk-tenant-secret".to_string());
+
+    let host = state.build_http_endpoint_wasm_host(
+        &http_endpoint_invocation_ctx(),
+        secrets,
+        state.http_stream_registry.clone(),
+    );
+
+    let result = host.get_secret("STRIPE_API_KEY");
+    assert!(
+        result.is_err(),
+        "ARN-208: HttpEndpoint WASM read a tenant secret outside Cedar governance: {result:?}"
+    );
+}
+
 fn test_state_with_ioa() -> ServerState {
     let csdl_xml = include_str!("../../../test-fixtures/specs/model.csdl.xml");
     let order_ioa = include_str!("../../../test-fixtures/specs/order.ioa.toml");
