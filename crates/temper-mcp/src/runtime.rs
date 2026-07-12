@@ -18,6 +18,23 @@ use super::protocol::dispatch_json_line;
 const OTS_UPLOAD_MAX_ATTEMPTS: u32 = 3;
 const OTS_UPLOAD_RETRY_DELAY_MS: u64 = 100;
 
+/// Max UTF-8 characters retained for trajectory code/results (ARN-222).
+const MAX_TRAJECTORY_CODE_CHARS: usize = 16_384;
+/// Max UTF-8 characters retained for execution results (ARN-222).
+const MAX_TRAJECTORY_RESULT_CHARS: usize = 16_384;
+/// Max stdio JSON-RPC line bytes accepted (ARN-222).
+const MAX_STDIO_LINE_BYTES: usize = 1_048_576;
+
+/// Character-safe truncation with an explicit marker (never panics on multibyte).
+fn char_safe_truncate(s: &str, max_chars: usize) -> String {
+    let count = s.chars().count();
+    if count <= max_chars {
+        return s.to_string();
+    }
+    let truncated: String = s.chars().take(max_chars).collect();
+    format!("{truncated}…[truncated]")
+}
+
 /// Client identity received from the MCP `initialize` handshake.
 #[derive(Clone, Debug, Default)]
 pub(crate) struct ClientInfo {
@@ -170,7 +187,41 @@ impl RuntimeContext {
 
     /// Record an execute tool call as an OTS turn with a decision.
     pub(crate) fn record_execute_turn(&mut self, code: &str, result: &Result<String>) {
-        let extracted_actions = extract_trajectory_actions_from_code(code);
+        // ARN-222: bound capture size before retention (char-safe).
+        let code = char_safe_truncate(code, MAX_TRAJECTORY_CODE_CHARS);
+        let extracted_actions = extract_trajectory_actions_from_code(&code);
+
+        // ARN-222: only track metadata for the session-bound identity tenant.
+        // Cross-tenant code must not retarget the upload under a different tenant.
+        for meta in extract_temper_call_metadata(&code) {
+            if let Some(ref tenant) = meta.tenant {
+                if tenant != &self.identity_tenant {
+                    tracing::warn!(
+                        identity_tenant = %self.identity_tenant,
+                        other_tenant = %tenant,
+                        "ots.trajectory.skip_cross_tenant_metadata"
+                    );
+                    continue;
+                }
+                self.tenants_seen
+                    .entry(tenant.clone())
+                    .and_modify(|count| *count += 1)
+                    .or_insert(1);
+            }
+            if let Some(entity_type) = meta.entity_type {
+                if meta
+                    .tenant
+                    .as_deref()
+                    .unwrap_or(self.identity_tenant.as_str())
+                    == self.identity_tenant
+                {
+                    self.entity_types_seen
+                        .entry(entity_type)
+                        .and_modify(|count| *count += 1)
+                        .or_insert(1);
+                }
+            }
+        }
 
         let Some(ref mut builder) = self.trajectory else {
             return;
@@ -179,38 +230,37 @@ impl RuntimeContext {
         let now = sim_now(); // determinism-ok: sim_now is DST-safe
         builder.start_turn(now);
 
-        // User message: the Python code submitted
+        // User message: the Python code submitted (bounded).
         builder.add_message(OTSMessage::new(
             MessageRole::User,
-            OTSMessageContent::text(code),
+            OTSMessageContent::text(&code),
             now,
         ));
 
         // Decision: the execution outcome
         let (outcome_str, consequence) = match result {
             Ok(text) => {
-                // Assistant message: the execution result
+                let text = char_safe_truncate(text, MAX_TRAJECTORY_RESULT_CHARS);
                 builder.add_message(OTSMessage::new(
                     MessageRole::Assistant,
-                    OTSMessageContent::text(text),
+                    OTSMessageContent::text(&text),
                     now,
                 ));
                 ("success", OTSConsequence::success())
             }
             Err(e) => {
+                let err = char_safe_truncate(&e.to_string(), MAX_TRAJECTORY_RESULT_CHARS);
                 builder.add_message(OTSMessage::new(
                     MessageRole::Assistant,
-                    OTSMessageContent::text(e.to_string()),
+                    OTSMessageContent::text(&err),
                     now,
                 ));
-                (
-                    "failure",
-                    OTSConsequence::failure().with_error_type(e.to_string()),
-                )
+                ("failure", OTSConsequence::failure().with_error_type(err))
             }
         };
 
-        let mut choice = OTSChoice::new(format!("execute: {}", &code[..code.len().min(100)]));
+        let summary = char_safe_truncate(&code, 100);
+        let mut choice = OTSChoice::new(format!("execute: {summary}"));
         if !extracted_actions.is_empty() {
             choice = choice.with_arguments(serde_json::json!({
                 "trajectory_actions": extracted_actions,
@@ -223,21 +273,6 @@ impl RuntimeContext {
         builder.end_turn(now);
 
         tracing::debug!(outcome = outcome_str, "ots.trajectory.turn_recorded");
-
-        for meta in extract_temper_call_metadata(code) {
-            if let Some(tenant) = meta.tenant {
-                self.tenants_seen
-                    .entry(tenant)
-                    .and_modify(|count| *count += 1)
-                    .or_insert(1);
-            }
-            if let Some(entity_type) = meta.entity_type {
-                self.entity_types_seen
-                    .entry(entity_type)
-                    .and_modify(|count| *count += 1)
-                    .or_insert(1);
-            }
-        }
     }
 
     /// Flush a snapshot of the trajectory mid-session without consuming it.
@@ -360,13 +395,9 @@ impl RuntimeContext {
         }
     }
 
-    /// Most-used tenant for this session, falling back to configured identity tenant.
+    /// Session-bound tenant (ARN-222): never retarget uploads by majority vote.
     fn primary_tenant(&self) -> &str {
-        self.tenants_seen
-            .iter()
-            .max_by_key(|(_, count)| *count)
-            .map(|(tenant, _)| tenant.as_str())
-            .unwrap_or(self.identity_tenant.as_str())
+        self.identity_tenant.as_str()
     }
 
     /// Most-used entity type for this session.
@@ -855,6 +886,15 @@ pub async fn run_stdio_server(config: McpConfig) -> Result<()> {
         if line.is_empty() {
             continue;
         }
+        // ARN-222: reject unbounded stdio frames before parse/dispatch.
+        if line.len() > MAX_STDIO_LINE_BYTES {
+            tracing::warn!(
+                bytes = line.len(),
+                limit = MAX_STDIO_LINE_BYTES,
+                "mcp.stdio.line_too_large"
+            );
+            continue;
+        }
 
         if let Some(response) = dispatch_json_line(&mut ctx, line).await {
             let encoded = serde_json::to_string(&response)?;
@@ -974,5 +1014,38 @@ await temper.create("tenant-b", "Task", {"Title": "x"})
         ctx.finalize_trajectory().await;
 
         assert_eq!(attempts.load(Ordering::SeqCst), 2);
+    }
+
+    #[test]
+    fn char_safe_truncate_handles_multibyte() {
+        let s = "日本語テスト";
+        let out = char_safe_truncate(s, 2);
+        assert!(out.starts_with("日本"), "{out}");
+        assert!(out.contains("[truncated]"), "{out}");
+        // Must not panic and must be valid UTF-8.
+        assert!(std::str::from_utf8(out.as_bytes()).is_ok());
+    }
+
+    #[test]
+    fn primary_tenant_is_identity_not_majority() {
+        let mut ctx = RuntimeContext {
+            base_url: "http://127.0.0.1".into(),
+            http: reqwest::Client::new(),
+            agent_id: None,
+            agent_type: None,
+            session_id: None,
+            api_key: None,
+            identity_tenant: "bound-tenant".into(),
+            sandbox: temper_sandbox::runner::PersistentSandbox::new(&[]),
+            trajectory: None,
+            tenants_seen: BTreeMap::from([
+                ("other".into(), 99usize),
+                ("bound-tenant".into(), 1usize),
+            ]),
+            entity_types_seen: BTreeMap::new(),
+        };
+        assert_eq!(ctx.primary_tenant(), "bound-tenant");
+        // silence mut warning if any
+        let _ = &mut ctx;
     }
 }
