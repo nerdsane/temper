@@ -439,58 +439,13 @@ impl DiscordTransport {
     /// extracts `thread_id` + `content`, maps thread_id to a Discord DM
     /// channel, and delivers the reply via Discord REST API.
     async fn spawn_webhook_listener(&self) -> Result<u16, String> {
-        use axum::{Router, extract::State, routing::post};
-
-        #[derive(Clone)]
-        struct WebhookState {
-            http: reqwest::Client,
-            bot_token: String,
-            dm_channels: Arc<RwLock<BTreeMap<String, String>>>,
-        }
-
-        async fn handle_reply(
-            State(state): State<WebhookState>,
-            axum::Json(body): axum::Json<serde_json::Value>,
-        ) -> axum::http::StatusCode {
-            let thread_id = body.get("thread_id").and_then(|v| v.as_str()).unwrap_or("");
-            let content = body.get("content").and_then(|v| v.as_str()).unwrap_or("");
-
-            if thread_id.is_empty() || content.is_empty() {
-                eprintln!("  [discord] Webhook received empty reply (thread={thread_id})");
-                return axum::http::StatusCode::BAD_REQUEST;
-            }
-
-            // thread_id is the Discord user ID (for DMs). Look up their DM channel.
-            let channel_id = state.dm_channels.read().await.get(thread_id).cloned();
-            let Some(channel_id) = channel_id else {
-                eprintln!("  [discord] No DM channel found for thread_id={thread_id}");
-                return axum::http::StatusCode::NOT_FOUND;
-            };
-
-            println!(
-                "  [discord] Delivering reply via webhook ({} chars to {})",
-                content.len(),
-                thread_id
-            );
-
-            match send_discord_message(&state.http, &state.bot_token, &channel_id, content).await {
-                Ok(()) => axum::http::StatusCode::OK,
-                Err(e) => {
-                    eprintln!("  [discord] Reply delivery failed: {e}");
-                    axum::http::StatusCode::INTERNAL_SERVER_ERROR
-                }
-            }
-        }
-
         let webhook_state = WebhookState {
             http: self.http.clone(),
             bot_token: self.config.bot_token.clone(),
             dm_channels: self.dm_channels.clone(),
         };
 
-        let app = Router::new()
-            .route("/reply", post(handle_reply))
-            .with_state(webhook_state);
+        let app = build_reply_router(webhook_state);
 
         let port = self.config.webhook_port;
         let listener = tokio::net::TcpListener::bind(format!("127.0.0.1:{port}"))
@@ -511,6 +466,58 @@ impl DiscordTransport {
     }
 }
 
+/// State shared with the `/reply` callback handler.
+#[derive(Clone)]
+struct WebhookState {
+    http: reqwest::Client,
+    bot_token: String,
+    dm_channels: Arc<RwLock<BTreeMap<String, String>>>,
+}
+
+/// Build the reply-callback router.
+fn build_reply_router(state: WebhookState) -> axum::Router {
+    use axum::routing::post;
+    axum::Router::new()
+        .route("/reply", post(handle_reply))
+        .with_state(state)
+}
+
+/// Handle a reply callback from the `send_reply` WASM module: look up the
+/// recipient's DM channel and deliver `content` as the bot.
+async fn handle_reply(
+    axum::extract::State(state): axum::extract::State<WebhookState>,
+    axum::Json(body): axum::Json<serde_json::Value>,
+) -> axum::http::StatusCode {
+    let thread_id = body.get("thread_id").and_then(|v| v.as_str()).unwrap_or("");
+    let content = body.get("content").and_then(|v| v.as_str()).unwrap_or("");
+
+    if thread_id.is_empty() || content.is_empty() {
+        eprintln!("  [discord] Webhook received empty reply (thread={thread_id})");
+        return axum::http::StatusCode::BAD_REQUEST;
+    }
+
+    // thread_id is the Discord user ID (for DMs). Look up their DM channel.
+    let channel_id = state.dm_channels.read().await.get(thread_id).cloned();
+    let Some(channel_id) = channel_id else {
+        eprintln!("  [discord] No DM channel found for thread_id={thread_id}");
+        return axum::http::StatusCode::NOT_FOUND;
+    };
+
+    println!(
+        "  [discord] Delivering reply via webhook ({} chars to {})",
+        content.len(),
+        thread_id
+    );
+
+    match send_discord_message(&state.http, &state.bot_token, &channel_id, content).await {
+        Ok(()) => axum::http::StatusCode::OK,
+        Err(e) => {
+            eprintln!("  [discord] Reply delivery failed: {e}");
+            axum::http::StatusCode::INTERNAL_SERVER_ERROR
+        }
+    }
+}
+
 /// Read one Gateway payload from the WebSocket with timeout.
 async fn read_payload(read: &mut WsStream) -> Result<Option<GatewayPayload>, String> {
     let frame = tokio::time::timeout(Duration::from_secs(60), read.next())
@@ -521,4 +528,58 @@ async fn read_payload(read: &mut WsStream) -> Result<Option<GatewayPayload>, Str
     };
     let frame = frame.map_err(|e| format!("WebSocket read error: {e}"))?;
     parse_frame(frame)
+}
+
+#[cfg(test)]
+mod reply_auth_tests {
+    //! ARN-234: the `/reply` callback must not accept unauthenticated requests.
+    use super::*;
+
+    /// Bind the reply router on an ephemeral loopback port and return it.
+    async fn spawn_reply_listener(dm: BTreeMap<String, String>) -> u16 {
+        let state = WebhookState {
+            http: reqwest::Client::new(),
+            bot_token: "test-bot-token".to_string(),
+            dm_channels: Arc::new(RwLock::new(dm)),
+        };
+        let app = build_reply_router(state);
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        tokio::spawn(async move {
+            let _ = axum::serve(listener, app).await;
+        });
+        port
+    }
+
+    async fn post_reply(port: u16, body: serde_json::Value) -> u16 {
+        // Retry briefly while the accept loop spins up.
+        for _ in 0..20 {
+            match reqwest::Client::new()
+                .post(format!("http://127.0.0.1:{port}/reply"))
+                .json(&body)
+                .send()
+                .await
+            {
+                Ok(resp) => return resp.status().as_u16(),
+                Err(_) => tokio::task::yield_now().await,
+            }
+        }
+        panic!("reply listener never became reachable");
+    }
+
+    #[tokio::test]
+    async fn unauthenticated_reply_is_rejected() {
+        // No token, unknown recipient: a bare local caller. It must be denied
+        // at the auth layer, not proceed into recipient/delivery handling.
+        let port = spawn_reply_listener(BTreeMap::new()).await;
+        let status = post_reply(
+            port,
+            serde_json::json!({"thread_id": "victim-user", "content": "spam"}),
+        )
+        .await;
+        assert_eq!(
+            status, 401,
+            "SECURITY: unauthenticated /reply must be rejected with 401, got {status}"
+        );
+    }
 }
