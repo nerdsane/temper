@@ -218,6 +218,21 @@ to = "Published"
     }
 
     #[test]
+    fn rejects_oversized_dims() {
+        // ARN-217: an unbounded `dims` lets a spec force multi-gigabyte
+        // allocation and dot-product work per query (dims × candidate rows).
+        // Verification must reject a dimensionality above the resource cap.
+        let spec = format!(
+            "{BASE_SPEC}\n[[vector]]\nname = \"taste\"\nproperty = \"taste_vector\"\nmodel_property = \"taste_vector_model\"\ndims = 100000000\nmetric = \"cosine\"\n"
+        );
+        let err = parse_automaton(&spec).expect_err("oversized dims must reject");
+        assert!(
+            err.to_string().contains("exceeds the maximum"),
+            "got: {err}"
+        );
+    }
+
+    #[test]
     fn rejects_unknown_metric() {
         let spec = format!(
             "{BASE_SPEC}\n[[vector]]\nname = \"taste\"\nproperty = \"taste_vector\"\nmodel_property = \"taste_vector_model\"\ndims = 384\nmetric = \"manhattan\"\n"
