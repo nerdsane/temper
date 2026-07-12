@@ -5,8 +5,9 @@
 //! into the platform's app installer.
 
 use std::collections::BTreeSet;
+use std::net::{IpAddr, Ipv4Addr, SocketAddr, ToSocketAddrs};
 use std::path::{Component, Path, PathBuf};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use base64::Engine as _;
 use serde::{Deserialize, Serialize};
@@ -668,6 +669,173 @@ fn normalize_registry_url(raw: &str) -> Result<String, String> {
     Ok(value.to_string())
 }
 
+/// Deadline for any single registry/bundle HTTP request (connect and total).
+const REGISTRY_HTTP_TIMEOUT: Duration = Duration::from_secs(30);
+/// Cap on a registry JSON row body (App metadata) before decoding.
+const MAX_REGISTRY_JSON_BYTES: usize = 4 * 1024 * 1024;
+/// Cap on a bundle response body before decoding (a bundle carries base64 app files).
+const MAX_BUNDLE_BODY_BYTES: usize = 64 * 1024 * 1024;
+
+/// True only for globally-routable addresses. Loopback, private, link-local,
+/// unspecified, broadcast, documentation, multicast, and CGNAT (100.64.0.0/10)
+/// ranges are all treated as non-public so a registry can't point the installer
+/// at internal infrastructure or a cloud metadata endpoint.
+fn ipv4_is_public(v4: &Ipv4Addr) -> bool {
+    let octets = v4.octets();
+    let is_cgnat = octets[0] == 100 && (octets[1] & 0xc0) == 0x40;
+    // 0.0.0.0/8 ("this host on this network") is non-routable and some stacks
+    // treat it as localhost, so block the whole block, not just 0.0.0.0.
+    let is_this_network = octets[0] == 0;
+    !(v4.is_loopback()
+        || v4.is_private()
+        || v4.is_link_local()
+        || v4.is_unspecified()
+        || v4.is_broadcast()
+        || v4.is_documentation()
+        || v4.is_multicast()
+        || is_cgnat
+        || is_this_network)
+}
+
+fn ip_is_public(ip: &IpAddr) -> bool {
+    match ip {
+        IpAddr::V4(v4) => ipv4_is_public(v4),
+        IpAddr::V6(v6) => {
+            if v6.is_loopback() || v6.is_unspecified() || v6.is_multicast() {
+                return false;
+            }
+            // Both IPv4-mapped (::ffff:a.b.c.d) and the deprecated IPv4-compatible
+            // (::a.b.c.d) forms carry an embedded IPv4 host, so judge them by the
+            // IPv4 rules — otherwise ::ffff:127.0.0.1 or ::7f00:1 would slip past
+            // as "some v6 address". `to_ipv4` matches only those two ranges; a real
+            // global unicast address returns `None` and is checked below.
+            if let Some(v4) = v6.to_ipv4() {
+                return ipv4_is_public(&v4);
+            }
+            let segments = v6.segments();
+            let is_unique_local = (segments[0] & 0xfe00) == 0xfc00;
+            let is_link_local = (segments[0] & 0xffc0) == 0xfe80;
+            !(is_unique_local || is_link_local)
+        }
+    }
+}
+
+fn registry_host_and_port(url: &str) -> Result<(String, u16), String> {
+    let parsed =
+        reqwest::Url::parse(url).map_err(|error| format!("parse registry URL '{url}': {error}"))?;
+    let host = parsed
+        .host_str()
+        .ok_or_else(|| format!("registry URL '{url}' has no host"))?;
+    // `host_str()` brackets IPv6 literals (`[::1]`); strip them so the host parses
+    // as an `IpAddr` and is classified by `ip_is_public`, rather than falling to a
+    // resolution failure (which would also wrongly reject a public IPv6 literal).
+    let host = host
+        .strip_prefix('[')
+        .and_then(|h| h.strip_suffix(']'))
+        .unwrap_or(host)
+        .to_string();
+    let port = parsed.port_or_known_default().unwrap_or(0);
+    Ok((host, port))
+}
+
+/// Resolve `host` and return its addresses, failing closed if *any* resolved
+/// address is non-public. Resolution runs on the blocking pool so it never
+/// stalls the async runtime.
+async fn resolve_public_addrs(host: &str, port: u16) -> Result<Vec<SocketAddr>, String> {
+    if let Ok(ip) = host.parse::<IpAddr>() {
+        if !ip_is_public(&ip) {
+            return Err(format!(
+                "registry host '{host}' is a non-public address {ip}; refusing to fetch (SSRF guard)"
+            ));
+        }
+        return Ok(vec![SocketAddr::new(ip, port)]);
+    }
+    let host_owned = host.to_string();
+    let addrs = tokio::task::spawn_blocking(move || {
+        (host_owned.as_str(), port)
+            .to_socket_addrs()
+            .map(|iter| iter.collect::<Vec<_>>())
+    })
+    .await
+    .map_err(|error| format!("resolve registry host '{host}' task failed: {error}"))?
+    .map_err(|error| format!("resolve registry host '{host}': {error}"))?;
+    if addrs.is_empty() {
+        return Err(format!(
+            "registry host '{host}' did not resolve to any address"
+        ));
+    }
+    for addr in &addrs {
+        if !ip_is_public(&addr.ip()) {
+            return Err(format!(
+                "registry host '{host}' resolves to non-public address {}; refusing to fetch (SSRF guard)",
+                addr.ip()
+            ));
+        }
+    }
+    Ok(addrs)
+}
+
+/// SSRF guard for the git-clone fallback, which egresses through the git binary
+/// rather than our HTTP client and so needs the host checked independently. Note
+/// this only validates the resolved address at check time; git performs its own
+/// DNS lookup at connect, so a rebinding attacker retains a narrow TOCTOU window
+/// here (unlike the address-pinned HTTP client). The fallback is off by default
+/// (`TEMPER_GENESIS_INSTALL_GIT_FALLBACK`, admin/debug recovery only); pinning
+/// git's resolution is tracked as an ADR follow-up.
+async fn assert_registry_host_is_public(url: &str) -> Result<(), String> {
+    let (host, port) = registry_host_and_port(url)?;
+    resolve_public_addrs(&host, port).await.map(|_| ())
+}
+
+/// A hardened HTTP client for one registry/bundle URL: bounded deadlines,
+/// redirects disabled, and — for DNS names — pinned to the exact public
+/// addresses we just checked, so a rebinding second lookup can't swing the
+/// connection onto an internal host after the check (no TOCTOU window).
+async fn guarded_registry_client(url: &str) -> Result<reqwest::Client, String> {
+    let (host, port) = registry_host_and_port(url)?;
+    let addrs = resolve_public_addrs(&host, port).await?;
+    let mut builder = reqwest::Client::builder()
+        .connect_timeout(REGISTRY_HTTP_TIMEOUT)
+        .timeout(REGISTRY_HTTP_TIMEOUT)
+        .redirect(reqwest::redirect::Policy::none());
+    if host.parse::<IpAddr>().is_err() {
+        for addr in &addrs {
+            builder = builder.resolve(&host, *addr);
+        }
+    }
+    builder
+        .build()
+        .map_err(|error| format!("build hardened registry client: {error}"))
+}
+
+/// Read a response body under a byte budget, rejecting an oversized
+/// `Content-Length` up front and any body that streams past the cap.
+async fn read_capped_body(
+    mut response: reqwest::Response,
+    max_bytes: usize,
+    what: &str,
+) -> Result<Vec<u8>, String> {
+    if let Some(len) = response.content_length()
+        && len > max_bytes as u64
+    {
+        return Err(format!(
+            "{what} advertises {len} bytes, over the {max_bytes}-byte cap"
+        ));
+    }
+    let mut buf: Vec<u8> = Vec::new();
+    while let Some(chunk) = response
+        .chunk()
+        .await
+        .map_err(|error| format!("read {what} body: {error}"))?
+    {
+        if buf.len().saturating_add(chunk.len()) > max_bytes {
+            return Err(format!("{what} body exceeds the {max_bytes}-byte cap"));
+        }
+        buf.extend_from_slice(&chunk);
+    }
+    Ok(buf)
+}
+
 fn follow_latest_error_update(
     record: InstalledAppRecord,
     error: String,
@@ -707,7 +875,8 @@ async fn fetch_registry_latest_version_hash(
         registry_url.trim_end_matches('/'),
         app_id.replace('\'', "''")
     );
-    let response = reqwest::Client::new()
+    let response = guarded_registry_client(&url)
+        .await?
         .get(&url)
         .header("X-Tenant-Id", registry_tenant)
         .send()
@@ -715,15 +884,21 @@ async fn fetch_registry_latest_version_hash(
         .map_err(|error| format!("request Genesis App row {url}: {error}"))?;
     let status = response.status();
     if !status.is_success() {
-        let body = response.text().await.unwrap_or_default();
+        let body = read_capped_body(response, MAX_REGISTRY_JSON_BYTES, "Genesis App row error")
+            .await
+            .unwrap_or_default();
         return Err(format!(
             "request Genesis App row {url} returned {status}: {}",
-            body.trim()
+            String::from_utf8_lossy(&body).trim()
         ));
     }
-    let row: Value = response
-        .json()
-        .await
+    let bytes = read_capped_body(
+        response,
+        MAX_REGISTRY_JSON_BYTES,
+        &format!("Genesis App row {url}"),
+    )
+    .await?;
+    let row: Value = serde_json::from_slice(&bytes)
         .map_err(|error| format!("decode Genesis App row {url}: {error}"))?;
     string_field(row.get("fields").unwrap_or(&row), "LatestVersionHash")
         .filter(|hash| !hash.trim().is_empty())
@@ -785,6 +960,7 @@ async fn materialize_git_registry_app(
     version_hash: Option<&str>,
     app_dir: &Path,
 ) -> Result<String, String> {
+    assert_registry_host_is_public(registry_url).await?;
     let remote = registry_git_url(registry_url, owner, name);
     let git_dir = app_dir.join(".git");
     if app_dir.exists() && !git_dir.is_dir() {
@@ -885,7 +1061,8 @@ async fn materialize_registry_app_closure_via_bundle(
         root_ref.name,
         version_hash.trim_start_matches('@')
     );
-    let response = reqwest::Client::new()
+    let response = guarded_registry_client(&bundle_url)
+        .await?
         .get(&bundle_url)
         .header("X-Tenant-Id", registry_tenant)
         .send()
@@ -893,15 +1070,21 @@ async fn materialize_registry_app_closure_via_bundle(
         .map_err(|error| format!("request Genesis bundle {bundle_url}: {error}"))?;
     let status = response.status();
     if !status.is_success() {
-        let body = response.text().await.unwrap_or_default();
+        let body = read_capped_body(response, MAX_REGISTRY_JSON_BYTES, "Genesis bundle error")
+            .await
+            .unwrap_or_default();
         return Err(format!(
             "request Genesis bundle {bundle_url} returned {status}: {}",
-            body.trim()
+            String::from_utf8_lossy(&body).trim()
         ));
     }
-    let bundle: GenesisRegistryBundleResponse = response
-        .json()
-        .await
+    let bytes = read_capped_body(
+        response,
+        MAX_BUNDLE_BODY_BYTES,
+        &format!("Genesis bundle {bundle_url}"),
+    )
+    .await?;
+    let bundle: GenesisRegistryBundleResponse = serde_json::from_slice(&bytes)
         .map_err(|error| format!("decode Genesis bundle {bundle_url}: {error}"))?;
 
     if cache_root.exists() {
@@ -993,7 +1176,18 @@ fn safe_bundle_relative_path(path: &str) -> Result<PathBuf, String> {
 /// escape the cache root and drive `remove_dir_all` + writes at an arbitrary
 /// filesystem location (ARN-210).
 fn bundle_app_dir(cache_root: &Path, app_name: &str) -> Result<PathBuf, String> {
-    Ok(cache_root.join(app_name))
+    // The name must be exactly one `Normal` path component: `..` parses as
+    // `ParentDir`, an absolute path starts with `RootDir`/`Prefix`, and a nested
+    // name yields more than one component — all rejected, so the result can only
+    // ever be a direct child of `cache_root`.
+    let mut components = Path::new(app_name).components();
+    match (components.next(), components.next()) {
+        (Some(Component::Normal(part)), None) => Ok(cache_root.join(part)),
+        _ => Err(format!(
+            "registry app name '{app_name}' must be a single relative path component \
+             (no empty, '/', '..', or absolute paths)"
+        )),
+    }
 }
 
 fn registry_git_url(registry_url: &str, owner: &str, name: &str) -> String {
@@ -2133,6 +2327,58 @@ mod tests {
             bundle_app_dir(root, "my-app").expect("normal name accepted"),
             root.join("my-app")
         );
+    }
+
+    #[test]
+    fn ip_is_public_rejects_internal_ranges() {
+        // ARN-210 SSRF: a registry_url must not be able to point the installer at
+        // loopback, private, link-local, CGNAT, or the cloud metadata endpoint.
+        for blocked in [
+            "127.0.0.1",
+            "10.0.0.5",
+            "172.16.4.4",
+            "192.168.1.1",
+            "169.254.169.254", // AWS/GCP instance metadata
+            "100.64.0.1",      // CGNAT / shared address space
+            "0.0.0.0",
+            "0.1.2.3",          // 0.0.0.0/8 "this network"
+            "::1",              // ipv6 loopback (classified, not resolution failure)
+            "::ffff:127.0.0.1", // IPv4-mapped loopback
+            "::7f00:1",         // deprecated IPv4-compatible ::127.0.0.1
+            "fe80::1",          // link-local
+            "fc00::1",          // unique local
+        ] {
+            let ip: IpAddr = blocked.parse().expect("parse test ip");
+            assert!(
+                !ip_is_public(&ip),
+                "{blocked} must be treated as non-public"
+            );
+        }
+        for allowed in ["8.8.8.8", "1.1.1.1", "93.184.216.34", "2606:2800:220:1::"] {
+            let ip: IpAddr = allowed.parse().expect("parse test ip");
+            assert!(ip_is_public(&ip), "{allowed} must be treated as public");
+        }
+    }
+
+    #[tokio::test]
+    async fn ssrf_guard_rejects_internal_registry_hosts() {
+        // IP-literal hosts are checked without any DNS lookup, so these are hermetic.
+        assert_registry_host_is_public("http://127.0.0.1:8080/tdata")
+            .await
+            .expect_err("loopback registry host must be rejected");
+        assert_registry_host_is_public("http://169.254.169.254/latest/meta-data")
+            .await
+            .expect_err("metadata endpoint must be rejected");
+        assert_registry_host_is_public("http://[::1]:9000/")
+            .await
+            .expect_err("ipv6 loopback registry host must be rejected");
+        assert_registry_host_is_public("http://10.1.2.3/")
+            .await
+            .expect_err("private registry host must be rejected");
+        // A public IP literal passes the guard (no egress happens in the check).
+        assert_registry_host_is_public("https://8.8.8.8/tdata")
+            .await
+            .expect("public registry host must pass the guard");
     }
 
     #[test]

@@ -41,10 +41,16 @@ mirrors the existing `safe_bundle_relative_path` posture for file paths.
 
 ### Sub-Decision 2: SSRF-safe, bounded registry fetches
 
-Registry and bundle fetches go through one hardened client: connect/read/total
+Registry and bundle fetches go through one hardened client: connect/total
 deadlines and redirects disabled, and the target host is rejected if it resolves
-to a loopback / private / link-local / unspecified address. The bundle response
-body is read under a byte budget before decoding.
+to a non-public address — loopback, private (RFC1918), link-local, CGNAT
+(100.64.0.0/10), unspecified / `0.0.0.0/8`, broadcast, documentation, multicast,
+IPv6 unique-local / link-local, and IPv4-mapped / IPv4-compatible IPv6 forms of
+any of these. For DNS names the resolved address is *pinned* into the client
+(`resolve`), so a rebinding second lookup can't swing the connection onto an
+internal host after the check. The bundle response body is read under a byte
+budget before decoding. The git-clone fallback host is checked with the same
+classifier before egress.
 
 ## Consequences
 
@@ -71,6 +77,15 @@ and are recorded as follow-ups:
    signed digest) needs registry signing-key infrastructure.
 3. **Collision-resistant cache keys** — `sanitize_registry_id_component` is
    lossy; a collision-resistant scheme is a broader cache-key redesign.
+4. **Pin git-fallback resolution.** The HTTP client pins its checked address, but
+   the git-clone fallback (off by default) re-resolves at connect, leaving a
+   narrow DNS-rebinding window. Closing it means resolving once and handing git a
+   pinned address/URL — deferred because the fallback is admin/debug-only.
+5. **Opt-in trusted-host allowlist for self-hosted registries.** The guard blocks
+   all loopback/private hosts unconditionally. No in-repo flow installs from such
+   a host today (production uses a public registry), so nothing that currently
+   works is broken; a self-hosted or CI-local Genesis on a private address would
+   need a documented, explicit opt-in env to be reachable.
 
 ## Alternatives Considered
 
