@@ -40,9 +40,15 @@ fn http_endpoint_invocation_ctx() -> temper_wasm::types::WasmInvocationContext {
 #[test]
 fn http_endpoint_wasm_host_gates_secret_access() {
     // ARN-208: a WASM module bound to an HttpEndpoint must not read tenant secrets
-    // outside Cedar governance. With no permit policy, the Cedar gate is default-deny,
-    // so `get_secret` must be refused — exactly as it is for entity-action WASM.
-    let state = test_state();
+    // outside Cedar governance. Under a governing (non-permissive) policy set with no
+    // permit for `access_secret`, the gate default-denies, so `get_secret` must be
+    // refused — exactly as it is for entity-action WASM. Before the fix the
+    // HttpEndpoint host bypassed the gate entirely and returned the plaintext secret.
+    let mut state = test_state();
+    // Govern the tenant: an empty (loaded) policy set is Cedar default-deny for the
+    // Agent principal a WASM module runs as. `permissive()` (the test default) would
+    // mask the gate, so it could not distinguish governed from ungoverned.
+    state.authz = std::sync::Arc::new(temper_authz::AuthzEngine::empty());
     let mut secrets = std::collections::BTreeMap::new();
     secrets.insert("STRIPE_API_KEY".to_string(), "sk-tenant-secret".to_string());
 

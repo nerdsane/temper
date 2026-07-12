@@ -260,8 +260,11 @@ impl ServerState {
             entity_type: ctx.entity_type.clone(),
             trigger_action: ctx.trigger_action.clone(),
         };
-        let _ = &authz_ctx;
-        inner
+        std::sync::Arc::new(temper_wasm::AuthorizedWasmHost::new(
+            inner,
+            self.wasm_authz_gate(),
+            authz_ctx,
+        ))
     }
 }
 
