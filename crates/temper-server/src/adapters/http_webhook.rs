@@ -1,4 +1,4 @@
-//! Generic HTTP adapter with fail-closed egress (ADR-0156 / ARN-228).
+//! Generic HTTP adapter with fail-closed egress (ADR-0160 / ARN-228).
 
 use std::time::{Duration, Instant};
 

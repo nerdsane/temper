@@ -175,7 +175,7 @@ impl crate::state::ServerState {
         entity_state: &EntityState,
         action_params: &serde_json::Value,
     ) -> Result<Option<EntityResponse>, String> {
-        // ADR-0156 / ARN-228: adapter type comes only from the declared
+        // ADR-0160 / ARN-228: adapter type comes only from the declared
         // integration. Entity fields must not select or escalate the adapter.
         let adapter_type = integration
             .config
@@ -224,7 +224,7 @@ impl crate::state::ServerState {
                 agent_id: ctx.agent_ctx.agent_id.clone(),
                 session_id: ctx.agent_ctx.session_id.clone(),
                 agent_type: ctx.agent_ctx.agent_type.clone(),
-                // ADR-0156: no ambient platform credential for in-kernel adapters.
+                // ADR-0160: no ambient platform credential for in-kernel adapters.
                 agent_api_key: None,
             },
             secrets: BTreeMap::new(),

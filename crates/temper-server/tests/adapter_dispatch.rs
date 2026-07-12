@@ -1,4 +1,4 @@
-//! Native adapter dispatch integration tests (ADR-0156 / ARN-228).
+//! Native adapter dispatch integration tests (ADR-0160 / ARN-228).
 
 use std::sync::Once;
 

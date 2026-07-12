@@ -1,4 +1,4 @@
-# ADR-0156: Native adapter sandbox boundary (ARN-228)
+# ADR-0160: Native adapter sandbox boundary (ARN-228)
 
 - Status: Accepted
 - Date: 2026-07-12

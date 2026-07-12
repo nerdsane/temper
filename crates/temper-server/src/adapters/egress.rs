@@ -1,4 +1,4 @@
-//! HTTP adapter egress policy (ADR-0156 / ARN-228).
+//! HTTP adapter egress policy (ADR-0160 / ARN-228).
 //!
 //! Fail-closed URL validation for native HTTP integrations: block private /
 //! metadata / link-local destinations, require https unless loopback is

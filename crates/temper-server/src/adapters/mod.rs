@@ -1,6 +1,6 @@
 //! Native integration adapters for `type = "adapter"` execution.
 //!
-//! ADR-0156 / ARN-228: the kernel keeps only a generic HTTP adapter behind a
+//! ADR-0160 / ARN-228: the kernel keeps only a generic HTTP adapter behind a
 //! fail-closed egress gate. App-specific agent CLIs (Claude Code, Codex,
 //! OpenClaw) are **not** registered here — they execute in capability-scoped
 //! TemperPaw workers (follow-up).
@@ -21,7 +21,7 @@ pub use http_webhook::HttpWebhookAdapter;
 /// Agent identity context provided to adapter executions.
 ///
 /// Platform credentials (`agent_api_key`) are intentionally never populated
-/// for in-kernel adapters (ADR-0156).
+/// for in-kernel adapters (ADR-0160).
 #[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
 pub struct AdapterAgentContext {
     /// Calling principal ID.
@@ -55,7 +55,7 @@ pub struct AdapterContext {
     pub integration_config: BTreeMap<String, String>,
     /// Agent identity context (no ambient platform credential).
     pub agent_ctx: AdapterAgentContext,
-    /// Always empty for in-kernel adapters (ADR-0156). Secret values appear only
+    /// Always empty for in-kernel adapters (ADR-0160). Secret values appear only
     /// where `{secret:KEY}` templates expanded into `integration_config`.
     pub secrets: BTreeMap<String, String>,
 }
@@ -150,7 +150,7 @@ impl AdapterRegistry {
 
     /// Create a registry with built-in **kernel-safe** adapters only.
     ///
-    /// ADR-0156: no Claude Code / Codex / OpenClaw process spawners.
+    /// ADR-0160: no Claude Code / Codex / OpenClaw process spawners.
     pub fn with_builtins() -> Self {
         let mut registry = Self::new();
         registry.register(Arc::new(HttpWebhookAdapter));
