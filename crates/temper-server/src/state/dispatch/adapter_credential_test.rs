@@ -338,6 +338,54 @@ async fn adapter_error_still_revokes_captured_token() {
 }
 
 #[tokio::test]
+async fn adapter_success_is_preserved_when_credential_cleanup_fails() {
+    let fixture = persisted_identity_fixture().await;
+
+    let result = fixture
+        .first
+        .execute_adapter_with_credential_cleanup(
+            Arc::new(ResultAdapter {
+                captured: Mutex::new(None),
+                fails: false,
+            }),
+            adapter_context("ephemeral-token".to_string()),
+            &TenantId::default(),
+            Some("missing-credential-key-hash".to_string()),
+        )
+        .await
+        .expect("successful adapter result must survive cleanup failure");
+
+    assert!(result.success);
+}
+
+#[tokio::test]
+async fn adapter_error_is_preserved_and_redacted_when_credential_cleanup_fails() {
+    let fixture = persisted_identity_fixture().await;
+    let plaintext = "ephemeral-token".to_string();
+
+    let error = fixture
+        .first
+        .execute_adapter_with_credential_cleanup(
+            Arc::new(ResultAdapter {
+                captured: Mutex::new(None),
+                fails: true,
+            }),
+            adapter_context(plaintext.clone()),
+            &TenantId::default(),
+            Some("missing-credential-key-hash".to_string()),
+        )
+        .await
+        .expect_err("adapter error must remain primary after cleanup failure");
+
+    let error = error.to_string();
+    assert!(error.contains("injected adapter error"));
+    assert!(!error.contains(&plaintext));
+    assert!(!error.contains(PROVIDER_SECRET));
+    assert!(error.contains(REDACTED_ADAPTER_CREDENTIAL));
+    assert!(error.contains(REDACTED_ADAPTER_SECRET));
+}
+
+#[tokio::test]
 async fn adapter_panic_is_contained_and_still_revokes_token() {
     let fixture = persisted_identity_fixture().await;
     let credential = mint(&fixture).await;

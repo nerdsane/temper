@@ -450,9 +450,13 @@ impl crate::state::ServerState {
                     .revoke_minted_adapter_credential(&tenant, &credential_key_hash)
                     .await
                 {
-                    return Err(AdapterError::Execution(format!(
-                        "adapter credential cleanup failed: {error}"
-                    )));
+                    tracing::error!(
+                        tenant = %tenant,
+                        adapter_execution_completed = execution.is_ok(),
+                        credential_ttl_secs = ADAPTER_CREDENTIAL_TTL_SECS,
+                        error = %error,
+                        "adapter credential cleanup exhausted its retry budget; preserving the adapter execution outcome"
+                    );
                 }
                 execution
             }
