@@ -63,11 +63,13 @@ randomness, which keeps the design deterministic and simulation-friendly (no
 `OsRng`/`getrandom`). The finding's "non-addressable invocation-local indices"
 requirement is met: an index is only addressable from within its own scope.
 
-Handle IDs are allocated from a monotonic counter and **never reused** within a
-process lifetime, so a freed ID can never be reallocated to a different scope.
-This makes the ownership check robust against time-of-check/time-of-use races:
-the worst case for a racing close is a benign `InvalidHandle`, never a
-cross-scope leak.
+Handle IDs are allocated from a monotonic `u32` counter and **not reused** until
+it wraps at 2^32 allocations — unreachable in any real process lifetime (a single
+FFI `u32` handle bounds this by design), so a freed ID is not reallocated to a
+different scope. This makes the ownership check robust against
+time-of-check/time-of-use races: the worst case for a racing close is a benign
+`InvalidHandle`, never a cross-scope leak. (The scope counter is a `u64` for the
+same reason with far more headroom.)
 
 ### Sub-Decision 2: Guest-facing vs kernel/bridge handles
 
