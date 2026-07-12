@@ -242,7 +242,7 @@ pub(crate) async fn load_specs_from_resolved_path(
     }
     state.rebuild_reaction_dispatcher();
 
-    // ADR-0160 / ARN-229: never durable-write ephemeral inline staging paths
+    // ADR-0162 / ARN-229: never durable-write ephemeral inline staging paths
     // (`temper-inline-*`). Those dirs are deleted when InlineStagingDir drops;
     // persisting them poisons restart reload with missing directories.
     if !state.data_dir.as_os_str().is_empty() {
