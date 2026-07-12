@@ -114,6 +114,11 @@ fn read_guest_string(caller: &mut Caller<'_, HostState>, ptr: i32, len: i32) -> 
         return Err(());
     };
     if !guest_read_bounds_ok(memory.data_size(&mut *caller), ptr as usize, len as usize) {
+        tracing::warn!(
+            ptr,
+            len,
+            "guest string read range exceeds linear memory; returning error before allocating"
+        );
         return Err(());
     }
     let mut buf = vec![0u8; len as usize];
