@@ -36,7 +36,7 @@ async fn verifier_subprocess_does_not_inherit_parent_environment() {
     std::fs::write(
         &script,
         format!(
-            "#!/bin/sh\nif [ -n \"${{{PARENT_ENV_SENTINEL}+x}}\" ]; then echo inherited-parent-secret >&2; exit 42; fi\necho '{{}}'\n"
+            "#!/bin/sh\nif [ -n \"${{{PARENT_ENV_SENTINEL}+x}}\" ]; then echo inherited-parent-secret >&2; exit 42; fi\ncat >/dev/null\necho '{{}}'\n"
         ),
     )
     .expect("write verifier test script");
