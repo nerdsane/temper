@@ -1,5 +1,5 @@
 use axum::extract::{Extension, Query, State};
-use axum::http::{HeaderMap, StatusCode};
+use axum::http::StatusCode;
 use axum::response::Json;
 use serde::Deserialize;
 use temper_authz::AuthenticatedRequestContext;
@@ -220,11 +220,19 @@ fn tenant_scoped_ots_trajectory_id(tenant: &str, trajectory_id: &str) -> String 
     format!("{tenant}::{trajectory_id}")
 }
 
+fn authenticated_session_id(authenticated: &AuthenticatedRequestContext) -> &str {
+    authenticated
+        .security_context()
+        .context_attrs
+        .get("sessionId")
+        .and_then(|value| value.as_str())
+        .unwrap_or("")
+}
+
 /// POST /api/ots/trajectories — receive a full OTS trajectory from an MCP session.
 #[instrument(skip_all, fields(otel.name = "POST /api/ots/trajectories"))]
 pub(crate) async fn handle_post_ots_trajectory(
     State(state): State<ServerState>,
-    headers: HeaderMap,
     authenticated: Option<Extension<AuthenticatedRequestContext>>,
     body: String,
 ) -> Result<StatusCode, (StatusCode, String)> {
@@ -245,10 +253,7 @@ pub(crate) async fn handle_post_ots_trajectory(
 
     let agent_id = authenticated.security_context().principal.id.as_str();
 
-    let session_id = headers
-        .get("X-Session-Id")
-        .and_then(|v| v.to_str().ok())
-        .unwrap_or("");
+    let session_id = authenticated_session_id(authenticated);
 
     let outcome = trajectory
         .get("metadata")
@@ -320,6 +325,10 @@ pub(crate) async fn handle_post_ots_trajectory(
         )),
     }
 }
+
+#[cfg(test)]
+#[path = "trajectories_test.rs"]
+mod tests;
 
 /// GET /api/ots/trajectories — list OTS trajectories with optional filters.
 #[instrument(skip_all, fields(otel.name = "GET /api/ots/trajectories"))]

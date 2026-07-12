@@ -17,7 +17,7 @@
 use axum::Router;
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
-use temper_authz::{AuthenticatedRequestContext, SecurityContext};
+use temper_authz::{AuthenticatedRequestContext, Principal, PrincipalKind, SecurityContext};
 use temper_runtime::tenant::TenantId;
 use tower::ServiceExt;
 
@@ -49,6 +49,20 @@ fn ots_storage_trajectory_ids_are_tenant_scoped() {
     );
 }
 
+#[test]
+fn ots_session_id_comes_from_authenticated_context() {
+    let authenticated = AuthenticatedRequestContext::new(
+        TenantId::new("tenant-a"),
+        SecurityContext::from_resolved_identity("agent-a", "worker", Some("trusted-session")),
+    );
+
+    assert_eq!(
+        super::authenticated_session_id(&authenticated),
+        "trusted-session",
+        "OTS indexing must use the credential-resolved session, not raw request headers"
+    );
+}
+
 /// Build a `ServerState` whose Cedar engine actually enforces (admin-only
 /// baseline) instead of the permissive test default.
 fn enforcing_state() -> ServerState {
@@ -58,6 +72,10 @@ fn enforcing_state() -> ServerState {
         .authz
         .reload_policies(ADMIN_ONLY_POLICY)
         .expect("baseline policy should parse");
+    state
+        .authz
+        .reload_tenant_policies("tenant-a", ADMIN_ONLY_POLICY)
+        .expect("tenant-a baseline policy should parse");
     state
 }
 
@@ -83,7 +101,18 @@ fn with_auth(
 }
 
 fn admin_auth() -> SecurityContext {
-    SecurityContext::from_resolved_identity("admin-1", "operator", None)
+    SecurityContext {
+        principal: Principal {
+            id: "admin-1".to_string(),
+            kind: PrincipalKind::Admin,
+            role: None,
+            acting_for: None,
+            agent_type: None,
+            attributes: Default::default(),
+        },
+        context_attrs: Default::default(),
+        correlation_id: "ots-admin-test".to_string(),
+    }
 }
 
 fn agent_auth(id: &str) -> SecurityContext {
@@ -153,16 +182,14 @@ async fn raw_admin_headers_do_not_authorize_ots_trajectories() {
 async fn authorized_admin_get_ots_trajectories_succeeds() {
     let app = app(enforcing_state());
     let resp = app
-        .oneshot(
-            with_auth(
-                Request::get("/api/ots/trajectories")
-                    .header("X-Tenant-Id", "tenant-a")
-                    .body(Body::empty())
-                    .unwrap(),
-                "tenant-a",
-                admin_auth(),
-            ),
-        )
+        .oneshot(with_auth(
+            Request::get("/api/ots/trajectories")
+                .header("X-Tenant-Id", "tenant-a")
+                .body(Body::empty())
+                .unwrap(),
+            "tenant-a",
+            admin_auth(),
+        ))
         .await
         .unwrap();
     assert_eq!(
@@ -197,17 +224,15 @@ async fn negative_ots_list_limit_is_rejected_before_store_query() {
 async fn authorized_admin_post_ots_trajectory_succeeds() {
     let app = app(enforcing_state());
     let resp = app
-        .oneshot(
-            with_auth(
-                Request::post("/api/ots/trajectories")
-                    .header("content-type", "application/json")
-                    .header("X-Tenant-Id", "tenant-a")
-                    .body(Body::from(SAMPLE_TRAJECTORY))
-                    .unwrap(),
-                "tenant-a",
-                admin_auth(),
-            ),
-        )
+        .oneshot(with_auth(
+            Request::post("/api/ots/trajectories")
+                .header("content-type", "application/json")
+                .header("X-Tenant-Id", "tenant-a")
+                .body(Body::from(SAMPLE_TRAJECTORY))
+                .unwrap(),
+            "tenant-a",
+            admin_auth(),
+        ))
         .await
         .unwrap();
     // With no durable metadata store configured the handler short-circuits to
@@ -244,16 +269,14 @@ async fn tenant_scoped_credential_cannot_read_other_tenant() {
     // Same-tenant read (tenant-a agent → tenant-a) succeeds.
     let same_tenant = app
         .clone()
-        .oneshot(
-            with_auth(
-                Request::get("/api/ots/trajectories")
-                    .header("X-Tenant-Id", "tenant-a")
-                    .body(Body::empty())
-                    .unwrap(),
-                "tenant-a",
-                agent_auth("agent-a"),
-            ),
-        )
+        .oneshot(with_auth(
+            Request::get("/api/ots/trajectories")
+                .header("X-Tenant-Id", "tenant-a")
+                .body(Body::empty())
+                .unwrap(),
+            "tenant-a",
+            agent_auth("agent-a"),
+        ))
         .await
         .unwrap();
     assert_eq!(
@@ -265,16 +288,14 @@ async fn tenant_scoped_credential_cannot_read_other_tenant() {
     // Cross-tenant read (tenant-a agent + spoofed tenant-b header) still uses
     // the credential-bound tenant-a context.
     let cross_tenant = app
-        .oneshot(
-            with_auth(
-                Request::get("/api/ots/trajectories")
-                    .header("X-Tenant-Id", "tenant-b")
-                    .body(Body::empty())
-                    .unwrap(),
-                "tenant-a",
-                agent_auth("agent-a"),
-            ),
-        )
+        .oneshot(with_auth(
+            Request::get("/api/ots/trajectories")
+                .header("X-Tenant-Id", "tenant-b")
+                .body(Body::empty())
+                .unwrap(),
+            "tenant-a",
+            agent_auth("agent-a"),
+        ))
         .await
         .unwrap();
     assert_eq!(
@@ -309,17 +330,15 @@ async fn tenant_scoped_credential_cannot_write_other_tenant() {
     // Same-tenant write (tenant-a agent → tenant-a) succeeds.
     let same_tenant = app
         .clone()
-        .oneshot(
-            with_auth(
-                Request::post("/api/ots/trajectories")
-                    .header("content-type", "application/json")
-                    .header("X-Tenant-Id", "tenant-a")
-                    .body(Body::from(SAMPLE_TRAJECTORY))
-                    .unwrap(),
-                "tenant-a",
-                agent_auth("agent-a"),
-            ),
-        )
+        .oneshot(with_auth(
+            Request::post("/api/ots/trajectories")
+                .header("content-type", "application/json")
+                .header("X-Tenant-Id", "tenant-a")
+                .body(Body::from(SAMPLE_TRAJECTORY))
+                .unwrap(),
+            "tenant-a",
+            agent_auth("agent-a"),
+        ))
         .await
         .unwrap();
     assert_eq!(
@@ -331,17 +350,15 @@ async fn tenant_scoped_credential_cannot_write_other_tenant() {
     // Cross-tenant write (tenant-a agent + spoofed tenant-b header) still uses
     // the credential-bound tenant-a context.
     let cross_tenant = app
-        .oneshot(
-            with_auth(
-                Request::post("/api/ots/trajectories")
-                    .header("content-type", "application/json")
-                    .header("X-Tenant-Id", "tenant-b")
-                    .body(Body::from(SAMPLE_TRAJECTORY))
-                    .unwrap(),
-                "tenant-a",
-                agent_auth("agent-a"),
-            ),
-        )
+        .oneshot(with_auth(
+            Request::post("/api/ots/trajectories")
+                .header("content-type", "application/json")
+                .header("X-Tenant-Id", "tenant-b")
+                .body(Body::from(SAMPLE_TRAJECTORY))
+                .unwrap(),
+            "tenant-a",
+            agent_auth("agent-a"),
+        ))
         .await
         .unwrap();
     assert_eq!(
