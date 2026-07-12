@@ -482,25 +482,77 @@ fn llmobs_max_content_chars() -> usize {
 pub fn redact_and_bound(text: &str, max_chars: usize) -> String {
     let mut out = text.to_string();
     // Lightweight redaction without pulling regex into observe.
+    // Loop until no more matches so repeated secrets are all scrubbed (ARN-243).
     for needle in ["Bearer ", "bearer ", "sk-"] {
-        if let Some(idx) = out.find(needle) {
+        let mut search_from = 0;
+        while let Some(rel) = out[search_from..].find(needle) {
+            let idx = search_from + rel;
             let after = idx + needle.len();
             let end = out[after..]
-                .find(|c: char| c.is_whitespace() || c == '"' || c == '\'')
+                .find(|c: char| c.is_whitespace() || c == '"' || c == '\'' || c == ',' || c == '}')
                 .map(|i| after + i)
                 .unwrap_or(out.len());
             out.replace_range(after..end, "[REDACTED]");
+            // Advance past the replacement to avoid infinite loops.
+            search_from = after + "[REDACTED]".len();
+            if search_from > out.len() {
+                break;
+            }
         }
     }
-    for key in ["api_key=", "api-key=", "token=", "password=", "secret="] {
-        if let Some(idx) = out.to_ascii_lowercase().find(key) {
-            let after = idx + key.len();
+    // URL/query form (`api_key=...`) and JSON key form (`"api_key": "..."` / `api_key":"`).
+    for key in [
+        "api_key=",
+        "api-key=",
+        "token=",
+        "password=",
+        "secret=",
+        "\"api_key\":",
+        "\"api-key\":",
+        "\"token\":",
+        "\"password\":",
+        "\"secret\":",
+        "api_key\":",
+        "api-key\":",
+        "token\":",
+        "password\":",
+        "secret\":",
+    ] {
+        let mut search_from = 0;
+        loop {
+            let lower = out.to_ascii_lowercase();
+            if search_from >= lower.len() {
+                break;
+            }
+            let Some(rel) = lower[search_from..].find(key) else {
+                break;
+            };
+            let idx = search_from + rel;
+            let mut after = idx + key.len();
+            // Skip optional whitespace and opening quote after JSON colon keys.
+            while after < out.len()
+                && out
+                    .get(after..)
+                    .is_some_and(|s| s.starts_with(|c: char| c.is_whitespace()))
+            {
+                after += 1;
+            }
+            if after < out.len() && (out.as_bytes()[after] == b'"' || out.as_bytes()[after] == b'\'')
+            {
+                after += 1;
+            }
             let end = out[after..]
-                .find(|c: char| c.is_whitespace() || c == '"' || c == '\'')
+                .find(|c: char| c.is_whitespace() || c == '"' || c == '\'' || c == ',' || c == '}')
                 .map(|i| after + i)
                 .unwrap_or(out.len());
             if after <= out.len() && end <= out.len() && after <= end {
                 out.replace_range(after..end, "[REDACTED]");
+                search_from = after + "[REDACTED]".len();
+            } else {
+                break;
+            }
+            if search_from > out.len() {
+                break;
             }
         }
     }

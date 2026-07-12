@@ -161,10 +161,10 @@ fn llm_span_payload_can_emit_agent_workflow_tree() {
     assert_eq!(spans[0]["span_id"], "11");
     assert_eq!(spans[0]["meta"]["kind"], "agent");
     assert_eq!(spans[0]["meta"]["metadata"]["session_id"], "session-1");
-    // ARN-243: content export is opt-in; default payloads omit prompt text.
+    // ARN-243: content export is opt-in; default (no DD config / export off) omits prompt text.
     assert!(
-        spans[0]["meta"]["input"]["value"].is_null()
-            || spans[0]["meta"]["input"]["value"] == "Debug this session"
+        spans[0]["meta"]["input"]["value"].is_null(),
+        "agent input value must be omitted when content export is disabled"
     );
 
     assert_eq!(spans[1]["name"], "Session.ContextReady");
@@ -172,8 +172,8 @@ fn llm_span_payload_can_emit_agent_workflow_tree() {
     assert_eq!(spans[1]["span_id"], "12");
     assert_eq!(spans[1]["meta"]["kind"], "workflow");
     assert!(
-        spans[1]["meta"]["input"]["value"].is_null()
-            || spans[1]["meta"]["input"]["value"] == "Debug this session"
+        spans[1]["meta"]["input"]["value"].is_null(),
+        "workflow input value must be omitted when content export is disabled"
     );
     assert!(spans[0]["meta"]["input"].get("messages").is_none());
     assert!(spans[1]["meta"]["input"].get("messages").is_none());
@@ -182,11 +182,11 @@ fn llm_span_payload_can_emit_agent_workflow_tree() {
     assert_eq!(spans[2]["parent_id"], "12");
     assert_eq!(spans[2]["span_id"], "10");
     assert_eq!(spans[2]["meta"]["kind"], "llm");
-    // Default content export off: LLM span may omit messages entirely.
+    // Default content export off: no prompt/response text in the payload.
     let llm_dump = spans[2]["meta"].to_string();
     assert!(
-        !llm_dump.contains("Debug this session") || llm_dump.contains("messages"),
-        "tree structure preserved; content gated by TEMPER_LLMOBS_EXPORT_CONTENT"
+        !llm_dump.contains("Debug this session"),
+        "LLM content must not be exported by default: {llm_dump}"
     );
 }
 
@@ -199,6 +199,24 @@ fn redact_and_bound_strips_bearer_and_bounds() {
     let out = redact_and_bound(&raw, 40);
     assert!(out.contains("[REDACTED]"), "{out}");
     assert!(out.chars().count() <= 40 + "…[truncated]".chars().count());
+}
+
+#[test]
+fn redact_and_bound_redacts_all_occurrences_and_json_keys() {
+    let raw = concat!(
+        "Authorization: Bearer aaa Authorization: Bearer bbb ",
+        r#"{"api_key": "secret1", "token": "secret2", "password": "p3"} "#,
+        "api_key=querysecret token=querytoken"
+    );
+    let out = redact_and_bound(raw, 10_000);
+    assert!(!out.contains("aaa"), "{out}");
+    assert!(!out.contains("bbb"), "{out}");
+    assert!(!out.contains("secret1"), "{out}");
+    assert!(!out.contains("secret2"), "{out}");
+    assert!(!out.contains("p3"), "{out}");
+    assert!(!out.contains("querysecret"), "{out}");
+    assert!(!out.contains("querytoken"), "{out}");
+    assert!(out.matches("[REDACTED]").count() >= 6, "{out}");
 }
 
 #[test]
