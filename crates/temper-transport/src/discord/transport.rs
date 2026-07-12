@@ -520,10 +520,20 @@ fn ct_eq(a: &[u8], b: &[u8]) -> bool {
 }
 
 /// Build the reply-callback router.
+/// Maximum `/reply` request body axum will read (ADR-0158). Enforced by a
+/// `DefaultBodyLimit` layer, so an unauthenticated caller cannot force axum to
+/// buffer up to its 2 MiB default before the token check runs — the body is
+/// capped before extraction. Sized generously above the largest valid reply
+/// (a ~16 KiB fan-out budget's worth of content, even fully JSON-escaped, plus
+/// the request envelope); the fan-out budget remains the exact delivery bound.
+const MAX_REPLY_BODY_BYTES: usize = 64 * 1024;
+
 fn build_reply_router(state: WebhookState) -> axum::Router {
+    use axum::extract::DefaultBodyLimit;
     use axum::routing::post;
     axum::Router::new()
         .route("/reply", post(handle_reply))
+        .layer(DefaultBodyLimit::max(MAX_REPLY_BODY_BYTES))
         .with_state(state)
 }
 
@@ -704,6 +714,26 @@ mod reply_auth_tests {
         assert_eq!(
             status, 413,
             "oversized reply must be rejected by the budget"
+        );
+    }
+
+    #[tokio::test]
+    async fn oversized_body_is_capped_before_auth() {
+        // Even with NO token, a body larger than MAX_REPLY_BODY_BYTES is
+        // rejected by the DefaultBodyLimit layer (413) before the Json
+        // extractor buffers it — an unauthenticated caller cannot force a
+        // large pre-auth allocation.
+        let port = spawn_reply_listener(BTreeMap::new()).await;
+        let huge = "x".repeat(MAX_REPLY_BODY_BYTES + 10_000);
+        let status = post_reply(
+            port,
+            None,
+            serde_json::json!({"thread_id": "victim", "content": huge}),
+        )
+        .await;
+        assert_eq!(
+            status, 413,
+            "oversized body must be capped before auth, got {status}"
         );
     }
 }

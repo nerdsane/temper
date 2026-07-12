@@ -61,10 +61,18 @@ redacting `webhook_url` for non-system readers, or the durable one-time reply
 intent in Follow-up 1, which removes the shared bearer entirely. This ADR
 deliberately does not broaden or narrow the pre-existing Channel read policy.
 
-### Sub-Decision 2: Fan-out budget
+### Sub-Decision 2: Body limit and fan-out budget
 
-The handler rejects, with `413 Payload Too Large` before any Discord call, any
-reply that would split into more than `MAX_REPLY_CHUNKS` (8) Discord messages.
+axum runs all extractors before the handler body, so the `Json` extractor would
+buffer up to axum's 2 MiB default before the token check runs — letting an
+unauthenticated caller force a large pre-auth allocation. A
+`DefaultBodyLimit::max(MAX_REPLY_BODY_BYTES)` layer caps the request body
+*before* extraction, so an over-large body is rejected (`413`) with no token and
+no big allocation. The limit is sized well above the largest valid reply and far
+below axum's default.
+
+The handler then rejects, with `413 Payload Too Large` before any Discord call,
+any reply that would split into more than `MAX_REPLY_CHUNKS` (8) Discord messages.
 The **chunk count is the authority**, not a raw byte count: message splitting can
 break on newlines and produce more, smaller chunks than `bytes / 2000`, so a
 byte-only limit would either admit a >8-message fan-out or fail a legitimate
