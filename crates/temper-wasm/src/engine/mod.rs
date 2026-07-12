@@ -663,6 +663,19 @@ impl WasmEngine {
                 let result_len = u32::from_le_bytes(len_bytes) as usize;
                 phase.record("result_bytes", result_len as u64);
 
+                // ARN-226: bound the result allocation by the guest's memory size
+                // before allocating, so a forged length prefix can't drive a large
+                // host allocation ahead of the bounds check.
+                if !host_functions::guest_read_bounds_ok(
+                    memory.data_size(&store),
+                    result_ptr as usize,
+                    result_len,
+                ) {
+                    store.data_mut().guest_spans.cleanup_unclosed();
+                    return Err(WasmError::Invocation(
+                        "result length exceeds guest linear memory".to_string(),
+                    ));
+                }
                 let mut result_bytes = vec![0u8; result_len];
                 if let Err(e) = memory.read(&store, result_ptr as usize, &mut result_bytes) {
                     store.data_mut().guest_spans.cleanup_unclosed();
