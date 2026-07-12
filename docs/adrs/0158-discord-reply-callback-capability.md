@@ -39,13 +39,27 @@ CSPRNG entropy). The webhook URL published to the Channel entity carries it:
 token and compares it in constant time; a missing or wrong token is rejected with
 `401 Unauthorized` **before** any thread lookup or Discord call.
 
-**Why this authenticates the caller**: the only way to learn the token is to read
-the Channel entity's webhook config, which is served through Temper's
-authenticated OData API under the temper-channels Cedar policy. A bare local
-process or an SSRF probe that discovers the port does not have the token, so it is
-denied. The legitimate `send_reply` module already POSTs to exactly the URL it
-reads from the Channel entity, so it presents the token transparently — no module
-change. The token is per-run, so a leaked value dies with the process.
+**Why this authenticates the caller**: the token is only reachable by reading the
+Channel entity's webhook config through Temper's authenticated, Cedar-governed
+OData API. A bare local process or an SSRF probe that discovers the port cannot
+read the Channel entity, so it does not have the token and is denied — which
+closes the disclosed threat ("any local process, or any SSRF-capable component
+that reaches the port"). The legitimate `send_reply` module already POSTs to
+exactly the URL it reads from the Channel entity, so it presents the token
+transparently — no module change. The token is per-run, so a leaked value dies
+with the process.
+
+The token's confidentiality is therefore exactly the Channel entity's read
+authorization. Under the current `temper-channels` Cedar policy
+(`os-apps/temper-channels/policies/channels.cedar`) **any authenticated agent in
+the tenant** may read a Channel, so this design defends against the disclosed
+unauthenticated / SSRF caller but not against a fully-authenticated tenant insider
+who reads the Channel to obtain the token (they could then impersonate the bot to
+already-met DM recipients, still bounded by the recipient gate and fan-out
+budget). Closing that narrower vector means either tightening Channel read /
+redacting `webhook_url` for non-system readers, or the durable one-time reply
+intent in Follow-up 1, which removes the shared bearer entirely. This ADR
+deliberately does not broaden or narrow the pre-existing Channel read policy.
 
 ### Sub-Decision 2: Fan-out budget
 
@@ -76,8 +90,11 @@ recipients; it is retained as a second authorization check alongside the token.
 - The token rides in the webhook URL, so it can appear in the `send_reply`
   module's internal request telemetry. That telemetry is inside the trust
   boundary (not reachable by the disclosed threat — a local/SSRF caller without
-  OData access), so the residual is low. A future design (Sub-Decision below)
-  removes it.
+  OData access), so the residual is low. A future design (Follow-up 1) removes it.
+- The token is confidential only up to the Channel entity's read authorization,
+  which the current Cedar policy grants to any authenticated tenant agent (see
+  Sub-Decision 1). The disclosed unauthenticated/SSRF hole is fully closed; a
+  fully-authenticated insider vector remains and is addressed by Follow-up 1.
 
 ### DST Compliance
 - `temper-transport` is not a simulation-visible crate (not temper-runtime /

@@ -443,9 +443,10 @@ impl DiscordTransport {
     /// Start a webhook HTTP listener that receives reply callbacks from
     /// the `send_reply` WASM module. Returns the bound port.
     ///
-    /// When `send_reply` WASM POSTs to `{webhook_url}/reply`, this listener
-    /// extracts `thread_id` + `content`, maps thread_id to a Discord DM
-    /// channel, and delivers the reply via Discord REST API.
+    /// The `send_reply` module POSTs `{thread_id, content}` to the tokenized
+    /// `/reply?token=…` URL published on the Channel entity (ADR-0158); this
+    /// listener authenticates the token, maps `thread_id` to a Discord DM
+    /// channel, and delivers the reply via the Discord REST API.
     async fn spawn_webhook_listener(&self) -> Result<u16, String> {
         let webhook_state = WebhookState {
             http: self.http.clone(),
