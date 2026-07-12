@@ -6,9 +6,9 @@
 //! - `STRING` per entity for snapshots
 //! - `SET` per tenant to track distinct `(entity_type, entity_id)` pairs
 //!
-//! The `append()` operation uses a Lua script (`EVALSHA`) to atomically
-//! check-and-set the sequence number, preventing lost-update races between
-//! concurrent writers on the same entity.
+//! The `append()` and `save_snapshot()` operations use Lua scripts (`EVALSHA`)
+//! to atomically check-and-set sequence numbers, preventing lost-update races
+//! between concurrent writers on the same entity.
 
 use std::sync::Arc;
 
@@ -52,11 +52,83 @@ redis.call('SADD', entities_key, entity_ref)
 return {1, new_seq}
 "#;
 
+/// Lua script for atomic monotonic snapshot CAS (ARN-239).
+///
+/// KEYS[1] = latest snapshot key, KEYS[2] = history key for this sequence
+/// ARGV[1] = sequence_nr
+/// ARGV[2] = encoded SnapshotRecord JSON
+/// ARGV[3] = encoded SnapshotHistoryRecord JSON
+///
+/// Returns:
+///   `{1, seq}` written (advanced latest + history inserted if vacant)
+///   `{2, seq}` idempotent same-content success
+///   `{0, existing_seq}` concurrency violation (stale or conflicting content)
+const SNAPSHOT_CAS_LUA: &str = r#"
+local latest_key = KEYS[1]
+local history_key = KEYS[2]
+local seq = tonumber(ARGV[1])
+local new_latest = ARGV[2]
+local new_history = ARGV[3]
+
+local function snapshot_bytes_equal(a, b)
+    if type(a) ~= 'table' or type(b) ~= 'table' then
+        return false
+    end
+    if #a ~= #b then
+        return false
+    end
+    for i = 1, #a do
+        if a[i] ~= b[i] then
+            return false
+        end
+    end
+    return true
+end
+
+local existing_raw = redis.call('GET', latest_key)
+if existing_raw then
+    local ok, existing = pcall(cjson.decode, existing_raw)
+    if ok and type(existing) == 'table' and existing['sequence_nr'] ~= nil then
+        local existing_seq = tonumber(existing['sequence_nr'])
+        if seq < existing_seq then
+            return {0, existing_seq}
+        end
+        if seq == existing_seq then
+            local ok_new, new_obj = pcall(cjson.decode, new_latest)
+            if ok_new and type(new_obj) == 'table'
+                and snapshot_bytes_equal(existing['snapshot'], new_obj['snapshot']) then
+                return {2, existing_seq}
+            end
+            return {0, existing_seq}
+        end
+    end
+end
+
+-- History must not gain a different body at the same sequence.
+local history_raw = redis.call('GET', history_key)
+if history_raw then
+    local ok_h, existing_h = pcall(cjson.decode, history_raw)
+    local ok_n, new_h = pcall(cjson.decode, new_history)
+    if ok_h and ok_n and type(existing_h) == 'table' and type(new_h) == 'table' then
+        if not snapshot_bytes_equal(existing_h['snapshot'], new_h['snapshot']) then
+            return {0, seq}
+        end
+        -- same content: leave history, still advance/refresh latest below
+    end
+else
+    redis.call('SET', history_key, new_history)
+end
+
+redis.call('SET', latest_key, new_latest)
+return {1, seq}
+"#;
+
 /// Redis-backed event store.
 #[derive(Clone)]
 pub struct RedisEventStore {
     client: Arc<fred::clients::Client>,
     append_script: Script,
+    snapshot_script: Script,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -100,6 +172,7 @@ impl RedisEventStore {
         Ok(Self {
             client: Arc::new(client),
             append_script: Script::from_lua(APPEND_LUA),
+            snapshot_script: Script::from_lua(SNAPSHOT_CAS_LUA),
         })
     }
 
@@ -369,66 +442,52 @@ impl EventStore for RedisEventStore {
         let (tenant, entity_type, entity_id) =
             parse_persistence_id_parts(persistence_id).map_err(PersistenceError::Storage)?;
         let key = Self::snapshot_key(tenant, entity_type, entity_id);
-        // ARN-239: monotonic CAS against current latest.
-        let existing_raw: Option<String> = self.client.get(&key).await.map_err(storage_error)?;
-        if let Some(raw) = existing_raw
-            && let Ok(existing) = serde_json::from_str::<SnapshotRecord>(&raw)
-        {
-            if sequence_nr < existing.sequence_nr {
-                return Err(PersistenceError::ConcurrencyViolation {
-                    expected: existing.sequence_nr,
-                    actual: sequence_nr,
-                });
-            }
-            if sequence_nr == existing.sequence_nr {
-                if existing.snapshot.as_slice() == snapshot {
-                    return Ok(());
-                }
-                return Err(PersistenceError::ConcurrencyViolation {
-                    expected: existing.sequence_nr,
-                    actual: sequence_nr,
-                });
-            }
-        }
+        let history_key = Self::snapshot_history_key(tenant, entity_type, entity_id, sequence_nr);
+
+        // ARN-239: atomic monotonic CAS for latest + history (Lua, like append).
         let record = SnapshotRecord {
             sequence_nr,
             snapshot: snapshot.to_vec(),
         };
         let encoded = serde_json::to_string(&record)
             .map_err(|e| PersistenceError::Serialization(e.to_string()))?;
-        let _: () = self
-            .client
-            .set(&key, encoded, None, None, false)
+        let history = SnapshotHistoryRecord {
+            sequence_nr,
+            snapshot: snapshot.to_vec(),
+            created_at: chrono::Utc::now(),
+        };
+        let encoded_history = serde_json::to_string(&history)
+            .map_err(|e| PersistenceError::Serialization(e.to_string()))?;
+
+        let result: Vec<i64> = self
+            .snapshot_script
+            .evalsha_with_reload(
+                &self.client,
+                vec![key, history_key],
+                vec![sequence_nr.to_string(), encoded, encoded_history],
+            )
             .await
             .map_err(storage_error)?;
 
-        let history_key = Self::snapshot_history_key(tenant, entity_type, entity_id, sequence_nr);
-        // History: never overwrite different content at the same sequence.
-        let history_raw: Option<String> =
-            self.client.get(&history_key).await.map_err(storage_error)?;
-        if let Some(raw) = history_raw {
-            if let Ok(existing) = serde_json::from_str::<SnapshotHistoryRecord>(&raw)
-                && existing.snapshot.as_slice() != snapshot
-            {
+        match result.as_slice() {
+            [2, _] => {
+                // Idempotent same-content retry — no segment rotation needed.
+                return Ok(());
+            }
+            [0, existing_seq] => {
                 return Err(PersistenceError::ConcurrencyViolation {
-                    expected: sequence_nr,
+                    expected: *existing_seq as u64,
                     actual: sequence_nr,
                 });
             }
-            // same content — leave history entry
-        } else {
-            let history = SnapshotHistoryRecord {
-                sequence_nr,
-                snapshot: snapshot.to_vec(),
-                created_at: chrono::Utc::now(),
-            };
-            let encoded_history = serde_json::to_string(&history)
-                .map_err(|e| PersistenceError::Serialization(e.to_string()))?;
-            let _: () = self
-                .client
-                .set(&history_key, encoded_history, None, None, false)
-                .await
-                .map_err(storage_error)?;
+            [1, _] => {
+                // Advanced — continue to best-effort segment metadata update.
+            }
+            other => {
+                return Err(PersistenceError::Storage(format!(
+                    "unexpected snapshot Lua result: {other:?}"
+                )));
+            }
         }
 
         let current_segment_key = Self::current_segment_key(tenant, entity_type, entity_id);
