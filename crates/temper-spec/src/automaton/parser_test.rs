@@ -233,6 +233,34 @@ to = "Published"
     }
 
     #[test]
+    fn accepts_dims_at_the_maximum() {
+        // The cap itself is a valid dimensionality — no legitimate spec at or
+        // below the maximum is rejected.
+        let max = super::super::MAX_VECTOR_DIMS;
+        let spec = format!(
+            "{BASE_SPEC}\n[[vector]]\nname = \"taste\"\nproperty = \"taste_vector\"\nmodel_property = \"taste_vector_model\"\ndims = {max}\nmetric = \"cosine\"\n"
+        );
+        parse_automaton(&spec).expect("dims at the maximum must be accepted");
+    }
+
+    #[test]
+    fn rejects_oversized_identifier() {
+        // `name` is the field the length bound truly guards: an over-long
+        // `property`/`model_property` would first fail the "undeclared state
+        // variable" check (no state var has that name), so the identifier bound
+        // is exercised here through `name`.
+        let long_name = "v".repeat(super::super::MAX_VECTOR_IDENT_LEN + 1);
+        let spec = format!(
+            "{BASE_SPEC}\n[[vector]]\nname = \"{long_name}\"\nproperty = \"taste_vector\"\nmodel_property = \"taste_vector_model\"\ndims = 384\nmetric = \"cosine\"\n"
+        );
+        let err = parse_automaton(&spec).expect_err("oversized identifier must reject");
+        assert!(
+            err.to_string().contains("exceeds the maximum"),
+            "got: {err}"
+        );
+    }
+
+    #[test]
     fn rejects_unknown_metric() {
         let spec = format!(
             "{BASE_SPEC}\n[[vector]]\nname = \"taste\"\nproperty = \"taste_vector\"\nmodel_property = \"taste_vector_model\"\ndims = 384\nmetric = \"manhattan\"\n"
