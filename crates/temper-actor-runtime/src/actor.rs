@@ -8,10 +8,27 @@ use serde::{Deserialize, Serialize};
 use temper_runtime::scheduler::sim_now;
 use uuid::Uuid;
 
-/// Maximum outbound messages buffered by one actor activation.
-const MAX_BUFFERED_TELLS_PER_ACTIVATION: usize = 256;
-/// Maximum child creations buffered by one actor activation.
-const MAX_BUFFERED_SPAWNS_PER_ACTIVATION: usize = 8;
+/// Default outbound budgets for actor handlers without declared command plans.
+const DEFAULT_MAX_BUFFERED_TELLS_PER_ACTIVATION: usize = 256;
+const DEFAULT_MAX_BUFFERED_SPAWNS_PER_ACTIVATION: usize = 8;
+
+/// Per-activation command budgets declared by an actor handler.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ActorBudgets {
+    /// Maximum tells and scheduled tells produced by one successful activation.
+    pub max_tells: usize,
+    /// Maximum child creations produced by one successful activation.
+    pub max_spawns: usize,
+}
+
+impl Default for ActorBudgets {
+    fn default() -> Self {
+        Self {
+            max_tells: DEFAULT_MAX_BUFFERED_TELLS_PER_ACTIVATION,
+            max_spawns: DEFAULT_MAX_BUFFERED_SPAWNS_PER_ACTIVATION,
+        }
+    }
+}
 
 /// An actor's address: `(namespace, actor_type)`.
 ///
@@ -128,14 +145,26 @@ pub struct ActorContext {
     pub(crate) mailbox: Option<std::sync::Arc<dyn crate::mailbox::Mailbox>>,
     /// Pool for spawn/lookup operations.
     pub(crate) pool: Option<deadpool_postgres::Pool>,
+    budgets: ActorBudgets,
 }
 
 impl ActorContext {
     /// Create a new context for an activation.
+    #[cfg(test)]
     pub(crate) fn new(
         self_handle: ActorHandle,
         mailbox: Option<std::sync::Arc<dyn crate::mailbox::Mailbox>>,
         pool: Option<deadpool_postgres::Pool>,
+    ) -> Self {
+        Self::new_with_budgets(self_handle, mailbox, pool, ActorBudgets::default())
+    }
+
+    /// Create an activation context with handler-derived command budgets.
+    pub(crate) fn new_with_budgets(
+        self_handle: ActorHandle,
+        mailbox: Option<std::sync::Arc<dyn crate::mailbox::Mailbox>>,
+        pool: Option<deadpool_postgres::Pool>,
+        budgets: ActorBudgets,
     ) -> Self {
         Self {
             self_handle,
@@ -143,6 +172,7 @@ impl ActorContext {
             pending_spawns: Mutex::new(Vec::new()),
             mailbox,
             pool,
+            budgets,
         }
     }
 
@@ -203,12 +233,18 @@ impl ActorContext {
     /// Fire-and-forget message. Buffered — only committed to PG when the
     /// activation transaction succeeds. If handle() fails, tells are discarded.
     /// Message type is auto-derived from the proto type name.
-    pub async fn tell<M: prost::Message>(&self, to: &ActorHandle, msg: M) {
+    pub async fn tell<M: prost::Message>(
+        &self,
+        to: &ActorHandle,
+        msg: M,
+    ) -> Result<(), ActorError> {
         let mut pending = self.pending_tells.lock().await;
-        assert!(
-            pending.len() < MAX_BUFFERED_TELLS_PER_ACTIVATION,
-            "actor activation exceeded buffered tell budget of {MAX_BUFFERED_TELLS_PER_ACTIVATION}"
-        );
+        if pending.len() >= self.budgets.max_tells {
+            return Err(ActorError::HandlerFailed(format!(
+                "actor activation exceeded buffered tell budget of {}",
+                self.budgets.max_tells
+            )));
+        }
         pending.push(BufferedTell {
             to: to.clone(),
             message_type: type_name_of::<M>(),
@@ -216,6 +252,7 @@ impl ActorContext {
             correlation_id: None,
             deliver_at: None,
         });
+        Ok(())
     }
 
     /// Buffer a message for durable delivery at an absolute timestamp.
@@ -224,12 +261,14 @@ impl ActorContext {
         to: &ActorHandle,
         msg: M,
         deliver_at: DateTime<Utc>,
-    ) {
+    ) -> Result<(), ActorError> {
         let mut pending = self.pending_tells.lock().await;
-        assert!(
-            pending.len() < MAX_BUFFERED_TELLS_PER_ACTIVATION,
-            "actor activation exceeded buffered tell budget of {MAX_BUFFERED_TELLS_PER_ACTIVATION}"
-        );
+        if pending.len() >= self.budgets.max_tells {
+            return Err(ActorError::HandlerFailed(format!(
+                "actor activation exceeded buffered tell budget of {}",
+                self.budgets.max_tells
+            )));
+        }
         pending.push(BufferedTell {
             to: to.clone(),
             message_type: type_name_of::<M>(),
@@ -237,6 +276,7 @@ impl ActorContext {
             correlation_id: None,
             deliver_at: Some(deliver_at),
         });
+        Ok(())
     }
 
     /// Buffer a message for durable delivery after a relative delay.
@@ -245,18 +285,24 @@ impl ActorContext {
         to: &ActorHandle,
         msg: M,
         delay: chrono::Duration,
-    ) {
-        self.tell_at(to, msg, sim_now() + delay).await;
+    ) -> Result<(), ActorError> {
+        self.tell_at(to, msg, sim_now() + delay).await
     }
 
     /// Reply to an ask() message. Convenience for tell() with correlation_id set.
-    pub async fn reply<M: prost::Message>(&self, original: &Message, msg: M) {
+    pub async fn reply<M: prost::Message>(
+        &self,
+        original: &Message,
+        msg: M,
+    ) -> Result<(), ActorError> {
         if let Some(cid) = original.correlation_id {
             let mut pending = self.pending_tells.lock().await;
-            assert!(
-                pending.len() < MAX_BUFFERED_TELLS_PER_ACTIVATION,
-                "actor activation exceeded buffered tell budget of {MAX_BUFFERED_TELLS_PER_ACTIVATION}"
-            );
+            if pending.len() >= self.budgets.max_tells {
+                return Err(ActorError::HandlerFailed(format!(
+                    "actor activation exceeded buffered tell budget of {}",
+                    self.budgets.max_tells
+                )));
+            }
             pending.push(BufferedTell {
                 to: original
                     .from
@@ -268,6 +314,7 @@ impl ActorContext {
                 deliver_at: None,
             });
         }
+        Ok(())
     }
 
     /// Buffer a child actor creation and optional initial message.
@@ -278,9 +325,10 @@ impl ActorContext {
         initial_message: Option<BufferedTell>,
     ) -> Result<(), ActorError> {
         let mut pending = self.pending_spawns.lock().await;
-        if pending.len() >= MAX_BUFFERED_SPAWNS_PER_ACTIVATION {
+        if pending.len() >= self.budgets.max_spawns {
             return Err(ActorError::HandlerFailed(format!(
-                "actor activation exceeded buffered spawn budget of {MAX_BUFFERED_SPAWNS_PER_ACTIVATION}"
+                "actor activation exceeded buffered spawn budget of {}",
+                self.budgets.max_spawns
             )));
         }
         pending.push(BufferedSpawn {
@@ -394,6 +442,11 @@ impl ActorContext {
 pub trait Actor: Send + Sync + 'static {
     /// Unique type name for this actor (e.g., "Session", "ToolRunner").
     fn actor_type(&self) -> &str;
+
+    /// Maximum buffered commands this handler can produce in one activation.
+    fn activation_budgets(&self) -> ActorBudgets {
+        ActorBudgets::default()
+    }
 
     /// Initial state for a new actor instance (serialized bytes).
     fn initial_state(&self) -> Vec<u8> {

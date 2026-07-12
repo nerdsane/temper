@@ -170,7 +170,7 @@ impl Actor for LlmIntegrationActor {
             history.push(user_msg(json!(content)));
         } else if history.is_empty() {
             ctx.tell(&from, SpecMessage::new("InferenceCompleteEndTurn"))
-                .await;
+                .await?;
             return Ok(());
         }
 
@@ -241,7 +241,7 @@ impl Actor for LlmIntegrationActor {
                 &from,
                 SpecMessage::with_params("InferenceFailed", json!({ "error": err })),
             )
-            .await;
+            .await?;
             return Ok(());
         }
 
@@ -346,7 +346,7 @@ impl Actor for LlmIntegrationActor {
                     json!({ "tool_calls": calls }),
                 ),
             )
-            .await;
+            .await?;
         } else {
             tracing::info!("[LLM] response ({} chars)", full_text.len());
             append_message(ctx, &namespace, "assistant", full_text.clone()).await;
@@ -362,7 +362,7 @@ impl Actor for LlmIntegrationActor {
                     payload: full_text.as_bytes().to_vec(),
                 },
             )
-            .await;
+            .await?;
 
             ctx.tell(
                 &from,
@@ -371,7 +371,7 @@ impl Actor for LlmIntegrationActor {
                     json!({ "response": full_text }),
                 ),
             )
-            .await;
+            .await?;
         }
 
         Ok(())

@@ -283,10 +283,12 @@ async fn admitted_reaction_fanout_plus_schedule_fits_command_budget() {
         .map(|index| {
             reaction(
                 &format!("fanout-{index}"),
-                Some("Changed"),
+                None,
                 None,
                 "Target",
-                TargetResolver::SameId,
+                TargetResolver::CreateIfMissing {
+                    id_field: "missing_target".into(),
+                },
             )
         })
         .collect();
@@ -296,7 +298,8 @@ async fn admitted_reaction_fanout_plus_schedule_fits_command_budget() {
     )
     .expect("fanout spec must parse");
     let handle = ActorHandle::new("default/source-1", "Router");
-    let context = ActorContext::new(handle.clone(), None, None);
+    let context =
+        ActorContext::new_with_budgets(handle.clone(), None, None, actor.activation_budgets());
     let mut state = actor.initial_state();
 
     actor
@@ -310,6 +313,36 @@ async fn admitted_reaction_fanout_plus_schedule_fits_command_budget() {
 
     assert_eq!(
         context.take_pending_tells().await.len(),
-        temper_runtime::reaction::MAX_REACTIONS_PER_ACTOR + 1
+        temper_runtime::reaction::MAX_REACTIONS_PER_ACTOR * 2 + 1
+    );
+    assert_eq!(
+        context.take_pending_spawns().await.len(),
+        temper_runtime::reaction::MAX_REACTIONS_PER_ACTOR * 2
+    );
+}
+
+#[tokio::test]
+async fn command_buffer_overflow_returns_handler_error_without_panicking() {
+    let handle = ActorHandle::new("default/source-1", "Router");
+    let command_budget = ActorBudgets {
+        max_tells: temper_runtime::reaction::MAX_REACTIONS_PER_ACTOR * 2 + 1,
+        max_spawns: 0,
+    };
+    let context = ActorContext::new_with_budgets(handle.clone(), None, None, command_budget);
+    for index in 0..command_budget.max_tells {
+        context
+            .tell(&handle, SpecMessage::new(format!("command-{index}")))
+            .await
+            .expect("admitted command budget");
+    }
+
+    let error = context
+        .tell(&handle, SpecMessage::new("overflow"))
+        .await
+        .expect_err("overflow must be returned as an activation error");
+    assert!(matches!(error, ActorError::HandlerFailed(_)));
+    assert_eq!(
+        context.take_pending_tells().await.len(),
+        command_budget.max_tells
     );
 }

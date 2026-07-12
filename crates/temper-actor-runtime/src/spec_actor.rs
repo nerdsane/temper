@@ -21,7 +21,9 @@ use temper_jit::table::{EffectExecution, EffectState, TransitionTable};
 use temper_runtime::reaction::{ReactionRegistry, ReactionRule, TargetResolver};
 use temper_spec::automaton::Automaton;
 
-use crate::actor::{Actor, ActorContext, ActorError, ActorHandle, BufferedTell, Message};
+use crate::actor::{
+    Actor, ActorBudgets, ActorContext, ActorError, ActorHandle, BufferedTell, Message,
+};
 
 // ─── SpecMessage ─────────────────────────────────────────────────────────────
 
@@ -35,6 +37,9 @@ pub struct SpecMessage {
     /// JSON-encoded params (empty bytes for parameterless actions).
     #[prost(bytes, tag = "2")]
     pub params: Vec<u8>,
+    /// Durable reaction cascade depth. External and scheduled actions start at zero.
+    #[prost(uint32, tag = "3")]
+    pub cascade_depth: u32,
 }
 
 impl SpecMessage {
@@ -42,6 +47,7 @@ impl SpecMessage {
         Self {
             action: action.into(),
             params: Vec::new(),
+            cascade_depth: 0,
         }
     }
 
@@ -49,6 +55,15 @@ impl SpecMessage {
         Self {
             action: action.into(),
             params: serde_json::to_vec(&params).unwrap_or_default(),
+            cascade_depth: 0,
+        }
+    }
+
+    fn routed(action: impl Into<String>, cascade_depth: u32) -> Self {
+        Self {
+            action: action.into(),
+            params: Vec::new(),
+            cascade_depth,
         }
     }
 }
@@ -140,6 +155,8 @@ pub struct SpecDrivenActor {
     reactions: ReactionRegistry,
     /// Leaked static refs for subscriptions() return.
     subscriptions_static: Vec<&'static str>,
+    /// Exact conservative command bounds derived from the finite spec and registry.
+    activation_budgets: ActorBudgets,
 }
 
 impl SpecDrivenActor {
@@ -158,6 +175,7 @@ impl SpecDrivenActor {
     ) -> Self {
         let name = automaton.automaton.name.clone();
         let table = TransitionTable::from_ioa_source(ioa_source);
+        let activation_budgets = activation_budgets(&table, &reactions, &name);
 
         // Build initial state from spec variables.
         let mut init_state = SpecActorState {
@@ -196,6 +214,7 @@ impl SpecDrivenActor {
             init_state,
             reactions,
             subscriptions_static,
+            activation_budgets,
         }
     }
 
@@ -214,6 +233,10 @@ impl SpecDrivenActor {
 impl Actor for SpecDrivenActor {
     fn actor_type(&self) -> &str {
         &self.name
+    }
+
+    fn activation_budgets(&self) -> ActorBudgets {
+        self.activation_budgets
     }
 
     fn initial_state(&self) -> Vec<u8> {
@@ -254,6 +277,10 @@ impl Actor for SpecDrivenActor {
             .filter(|m| !m.action.is_empty())
             .map(|m| m.action.clone())
             .unwrap_or_else(|| message.message_type.clone());
+        let cascade_depth = spec_msg
+            .as_ref()
+            .map(|message| message.cascade_depth)
+            .unwrap_or(0);
 
         // Store incoming params in state.fields so integrations can read them.
         // Merge non-empty params into fields to preserve context from prior steps
@@ -315,7 +342,8 @@ impl Actor for SpecDrivenActor {
                 if actor_state.status == from_status && !r.new_state.is_empty() {
                     actor_state.status = r.new_state.clone();
                 }
-                self.execute_commands(&actor_state, execution, ctx).await?;
+                self.execute_commands(&actor_state, execution, cascade_depth, ctx)
+                    .await?;
 
                 tracing::info!(
                     actor = %self.name,
@@ -347,6 +375,65 @@ impl Actor for SpecDrivenActor {
 
         Ok(())
     }
+}
+
+fn activation_budgets(
+    table: &TransitionTable,
+    reactions: &ReactionRegistry,
+    actor_type: &str,
+) -> ActorBudgets {
+    let reaction_count = reactions.rules_for_actor_count(actor_type);
+    let create_if_missing_count = reactions.create_if_missing_for_actor_count(actor_type);
+    table
+        .rules
+        .iter()
+        .map(|rule| {
+            let routed_commands = rule
+                .effects
+                .iter()
+                .filter(|effect| {
+                    matches!(
+                        effect,
+                        temper_jit::table::Effect::EmitEvent(_)
+                            | temper_jit::table::Effect::Custom(_)
+                    )
+                })
+                .count();
+            let scheduled_commands = rule
+                .effects
+                .iter()
+                .filter(|effect| {
+                    matches!(
+                        effect,
+                        temper_jit::table::Effect::ScheduleAction { .. }
+                            | temper_jit::table::Effect::ScheduleAtAction { .. }
+                    )
+                })
+                .count();
+            let spawned_commands = rule
+                .effects
+                .iter()
+                .filter(|effect| matches!(effect, temper_jit::table::Effect::SpawnEntity { .. }))
+                .count();
+            ActorBudgets {
+                max_tells: routed_commands
+                    .saturating_mul(reaction_count)
+                    .saturating_add(scheduled_commands),
+                max_spawns: routed_commands
+                    .saturating_mul(create_if_missing_count)
+                    .saturating_add(spawned_commands),
+            }
+        })
+        .fold(
+            ActorBudgets {
+                max_tells: 0,
+                max_spawns: 0,
+            },
+            |maximum, current| ActorBudgets {
+                max_tells: maximum.max_tells.max(current.max_tells),
+                max_spawns: maximum.max_spawns.max(current.max_spawns),
+            },
+        )
 }
 
 #[path = "spec_actor/commands.rs"]

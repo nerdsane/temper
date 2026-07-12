@@ -77,8 +77,8 @@ pub enum TargetResolver {
 /// No tenant isolation — namespace already encodes tenant context.
 #[derive(Debug, Clone, Default)]
 pub struct ReactionRegistry {
-    /// Index: key = "ActorType:EmitName" or "ActorType:*".
-    index: BTreeMap<String, Vec<ReactionRule>>,
+    /// Typed index: `(source actor type, exact action or wildcard)`.
+    index: BTreeMap<(String, Option<String>), Vec<ReactionRule>>,
 }
 
 impl ReactionRegistry {
@@ -93,18 +93,15 @@ impl ReactionRegistry {
             "Reaction rules exceed budget of {MAX_REACTIONS_PER_ACTOR}"
         );
         for rule in rules {
-            let key = match &rule.when.action {
-                Some(action) => format!("{}:{}", rule.when.entity_type, action),
-                None => format!("{}:*", rule.when.entity_type),
-            };
+            let key = (rule.when.entity_type.clone(), rule.when.action.clone());
             self.index.entry(key).or_default().push(rule);
         }
     }
 
     /// Look up matching reaction rules for (actor_type, emit_name, to_state).
     pub fn lookup(&self, actor_type: &str, emit_name: &str, to_state: &str) -> Vec<&ReactionRule> {
-        let exact = format!("{actor_type}:{emit_name}");
-        let wildcard = format!("{actor_type}:*");
+        let exact = (actor_type.to_string(), Some(emit_name.to_string()));
+        let wildcard = (actor_type.to_string(), None);
         let mut results = Vec::new();
 
         for key in [&exact, &wildcard] {
@@ -122,6 +119,27 @@ impl ReactionRegistry {
     /// Is the registry empty?
     pub fn is_empty(&self) -> bool {
         self.index.is_empty()
+    }
+
+    /// Number of rules declared for one source actor type.
+    pub fn rules_for_actor_count(&self, actor_type: &str) -> usize {
+        self.index
+            .values()
+            .flatten()
+            .filter(|rule| rule.when.entity_type == actor_type)
+            .count()
+    }
+
+    /// Number of create-if-missing rules declared for one source actor type.
+    pub fn create_if_missing_for_actor_count(&self, actor_type: &str) -> usize {
+        self.index
+            .values()
+            .flatten()
+            .filter(|rule| {
+                rule.when.entity_type == actor_type
+                    && matches!(rule.resolve_target, TargetResolver::CreateIfMissing { .. })
+            })
+            .count()
     }
 }
 

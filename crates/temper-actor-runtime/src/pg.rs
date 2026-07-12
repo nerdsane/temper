@@ -321,10 +321,11 @@ impl PgActorActivator {
         );
 
         // 4. Build context and call handler.
-        let ctx = ActorContext::new(
+        let ctx = ActorContext::new_with_budgets(
             actor_handle.clone(),
             Some(self.mailbox.clone()),
             Some(self.pool.clone()),
+            handler.activation_budgets(),
         );
 
         handler.handle(&ctx, &mut state, &message).await?;

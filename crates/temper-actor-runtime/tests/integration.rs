@@ -127,7 +127,7 @@ impl Actor for PingActor {
                         payload: format!("ping-{i}"),
                     },
                 )
-                .await;
+                .await?;
             }
             s["sent"] = serde_json::json!(self.count);
         } else if message.is::<PongMessage>() {
@@ -189,7 +189,7 @@ impl Actor for PongActor {
                         payload: format!("re:{}", ping.payload),
                     },
                 )
-                .await;
+                .await?;
             }
         }
 

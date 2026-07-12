@@ -5,6 +5,7 @@ impl SpecDrivenActor {
         &self,
         state: &SpecActorState,
         execution: EffectExecution,
+        cascade_depth: u32,
         ctx: &ActorContext,
     ) -> Result<(), ActorError> {
         let EffectExecution {
@@ -16,10 +17,12 @@ impl SpecDrivenActor {
         } = execution;
 
         for event in emitted_events {
-            self.route_command(state, &event, ctx).await?;
+            self.route_command(state, &event, cascade_depth, ctx)
+                .await?;
         }
         for trigger in custom_effects {
-            self.route_command(state, &trigger, ctx).await?;
+            self.route_command(state, &trigger, cascade_depth, ctx)
+                .await?;
         }
         for scheduled in scheduled_actions {
             let delay_seconds = i64::try_from(scheduled.delay_seconds).map_err(|_| {
@@ -30,19 +33,19 @@ impl SpecDrivenActor {
             })?;
             ctx.tell_after(
                 ctx.self_handle(),
-                SpecMessage::with_params(scheduled.action, state.fields.clone()),
+                SpecMessage::new(scheduled.action),
                 chrono::Duration::seconds(delay_seconds),
             )
-            .await;
+            .await?;
         }
         for request in schedule_at_requests {
             let deliver_at = schedule_at_timestamp(state, &request.field)?;
             ctx.tell_at(
                 ctx.self_handle(),
-                SpecMessage::with_params(request.action, state.fields.clone()),
+                SpecMessage::new(request.action),
                 deliver_at,
             )
-            .await;
+            .await?;
         }
 
         if spawn_requests.len() > 8 {
@@ -74,6 +77,7 @@ impl SpecDrivenActor {
         &self,
         state: &SpecActorState,
         command: &str,
+        cascade_depth: u32,
         ctx: &ActorContext,
     ) -> Result<(), ActorError> {
         let rules: Vec<ReactionRule> = self
@@ -90,7 +94,8 @@ impl SpecDrivenActor {
             );
             return Ok(());
         }
-        self.route_rules(state, command, rules, ctx).await
+        self.route_rules(state, command, rules, cascade_depth, ctx)
+            .await
     }
 
     async fn route_rules(
@@ -98,10 +103,28 @@ impl SpecDrivenActor {
         state: &SpecActorState,
         command: &str,
         rules: Vec<ReactionRule>,
+        cascade_depth: u32,
         ctx: &ActorContext,
     ) -> Result<(), ActorError> {
+        if cascade_depth >= temper_runtime::reaction::MAX_REACTION_DEPTH {
+            tracing::warn!(
+                actor = %self.name,
+                command,
+                cascade_depth,
+                "reaction cascade depth budget reached"
+            );
+            return Ok(());
+        }
         for rule in rules {
-            let target = self.resolve_reaction_target(state, &rule, ctx).await?;
+            let Some(target) = self.resolve_reaction_target(state, &rule, ctx).await? else {
+                tracing::warn!(
+                    actor = %self.name,
+                    command,
+                    reaction = %rule.name,
+                    "reaction target could not be resolved; source transition remains committed"
+                );
+                continue;
+            };
             tracing::info!(
                 actor = %self.name,
                 command,
@@ -112,9 +135,9 @@ impl SpecDrivenActor {
             );
             ctx.tell(
                 &target,
-                SpecMessage::with_params(rule.then.action, state.fields.clone()),
+                SpecMessage::routed(rule.then.action, cascade_depth + 1),
             )
-            .await;
+            .await?;
         }
         Ok(())
     }
@@ -124,18 +147,27 @@ impl SpecDrivenActor {
         state: &SpecActorState,
         rule: &ReactionRule,
         ctx: &ActorContext,
-    ) -> Result<ActorHandle, ActorError> {
+    ) -> Result<Option<ActorHandle>, ActorError> {
         let namespace = match &rule.resolve_target {
             TargetResolver::SameId => ctx.self_handle().namespace.clone(),
-            TargetResolver::Field { field } => entity_namespace(
-                &ctx.self_handle().namespace,
-                required_string_field(state, field)?,
-            ),
+            TargetResolver::Field { field } => {
+                let Some(entity_id) = optional_string_field(state, field) else {
+                    return Ok(None);
+                };
+                entity_namespace(&ctx.self_handle().namespace, entity_id)
+            }
             TargetResolver::Static { entity_id } => {
                 entity_namespace(&ctx.self_handle().namespace, entity_id)
             }
             TargetResolver::CreateIfMissing { id_field } => {
-                let entity_id = required_string_field(state, id_field)?;
+                let source_id = ctx
+                    .self_handle()
+                    .namespace
+                    .rsplit('/')
+                    .next()
+                    .unwrap_or(&ctx.self_handle().namespace);
+                let derived_id = format!("{source_id}-derived");
+                let entity_id = optional_string_field(state, id_field).unwrap_or(&derived_id);
                 let namespace = child_namespace(&ctx.self_handle().namespace, entity_id);
                 let target = ActorHandle::new(namespace.clone(), rule.then.entity_type.clone());
                 ctx.buffer_spawn(target, serde_json::json!({}), None)
@@ -143,24 +175,30 @@ impl SpecDrivenActor {
                 namespace
             }
         };
-        Ok(ActorHandle::new(namespace, rule.then.entity_type.clone()))
+        Ok(Some(ActorHandle::new(
+            namespace,
+            rule.then.entity_type.clone(),
+        )))
     }
+}
+
+fn optional_string_field<'a>(state: &'a SpecActorState, field: &str) -> Option<&'a str> {
+    state
+        .fields
+        .get(field)
+        .and_then(serde_json::Value::as_str)
+        .filter(|value| !value.is_empty())
 }
 
 fn required_string_field<'a>(
     state: &'a SpecActorState,
     field: &str,
 ) -> Result<&'a str, ActorError> {
-    state
-        .fields
-        .get(field)
-        .and_then(serde_json::Value::as_str)
-        .filter(|value| !value.is_empty())
-        .ok_or_else(|| {
-            ActorError::HandlerFailed(format!(
-                "reaction target field {field:?} is missing or not a non-empty string"
-            ))
-        })
+    optional_string_field(state, field).ok_or_else(|| {
+        ActorError::HandlerFailed(format!(
+            "reaction target field {field:?} is missing or not a non-empty string"
+        ))
+    })
 }
 
 fn child_namespace(parent_namespace: &str, child_id: &str) -> String {

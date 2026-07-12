@@ -66,7 +66,7 @@ impl Actor for ToolRegistryActor {
                     message,
                     SpecMessage::with_params("ToolRegistered", json!({ "client_id": client_id })),
                 )
-                .await;
+                .await?;
             }
 
             // Server registers a tool (MCP, lassie, builtin):
@@ -103,7 +103,7 @@ impl Actor for ToolRegistryActor {
                     message,
                     SpecMessage::with_params("AllTools", json!({ "tools": tools })),
                 )
-                .await;
+                .await?;
             }
 
             // { tool_name } -> { source, client_id?, ...driver_info } or { error }
@@ -117,7 +117,7 @@ impl Actor for ToolRegistryActor {
                     json!({ "error": format!("tool '{tool_name}' not registered") })
                 };
                 ctx.reply(message, SpecMessage::with_params("ToolInfo", reply))
-                    .await;
+                    .await?;
             }
 
             // { client_id } - remove all tools for a disconnected client

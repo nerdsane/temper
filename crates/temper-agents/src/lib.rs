@@ -177,7 +177,7 @@ impl Actor for MockContextAssembler {
         if message_action(message) == "assemble_context"
             && let Some(from) = &message.from
         {
-            ctx.tell(from, SpecMessage::new("ContextReady")).await;
+            ctx.tell(from, SpecMessage::new("ContextReady")).await?;
         }
         Ok(())
     }
@@ -201,7 +201,8 @@ impl Actor for MockCompactionIntegration {
         if message_action(message) == "run_compaction"
             && let Some(from) = &message.from
         {
-            ctx.tell(from, SpecMessage::new("CompactionComplete")).await;
+            ctx.tell(from, SpecMessage::new("CompactionComplete"))
+                .await?;
         }
         Ok(())
     }
@@ -226,7 +227,7 @@ impl Actor for MockLlmIntegration {
             && let Some(from) = &message.from
         {
             ctx.tell(from, SpecMessage::new("InferenceCompleteEndTurn"))
-                .await;
+                .await?;
         }
         Ok(())
     }
@@ -251,7 +252,7 @@ impl Actor for MockToolExecutor {
             && let Some(from) = &message.from
         {
             ctx.tell(from, SpecMessage::new("ToolCallBatchComplete"))
-                .await;
+                .await?;
         }
         Ok(())
     }

@@ -45,7 +45,7 @@ impl Actor for WakeupSchedulerIntegration {
             &process,
             temper_actor_runtime::spec_actor::SpecMessage::new("Resume"),
         )
-        .await;
+        .await?;
         tracing::info!(process_id, "WakeupScheduler: sent Resume");
         Ok(())
     }

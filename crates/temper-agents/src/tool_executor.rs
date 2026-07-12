@@ -96,7 +96,7 @@ impl Actor for ToolExecutorActor {
             Some(calls) => calls.clone(),
             None => {
                 ctx.tell(&from, SpecMessage::new("ToolCallBatchComplete"))
-                    .await;
+                    .await?;
                 return Ok(());
             }
         };
@@ -143,7 +143,7 @@ impl Actor for ToolExecutorActor {
 
             let output = match source {
                 // Builtin process primitives.
-                "builtin" => dispatch_builtin(ctx, &process, &tool_name, &input).await,
+                "builtin" => dispatch_builtin(ctx, &process, &tool_name, &input).await?,
                 "client" => {
                     let client_id = tool_info["client_id"].as_str().unwrap_or("").to_string();
                     tracing::info!("ToolExecutor: {tool_name} → Bus (client={client_id})");
@@ -193,7 +193,7 @@ impl Actor for ToolExecutorActor {
             &from,
             SpecMessage::with_params("ToolCallBatchComplete", json!({ "tool_results": results })),
         )
-        .await;
+        .await?;
 
         Ok(())
     }
@@ -204,8 +204,8 @@ async fn dispatch_builtin(
     process: &ActorHandle,
     tool_name: &str,
     input: &Value,
-) -> String {
-    match tool_name {
+) -> Result<String, ActorError> {
+    let output = match tool_name {
         "spawn_child" => {
             let prompt = input["prompt"].as_str().unwrap_or("").to_string();
             let tool_names = input["tool_names"]
@@ -245,7 +245,7 @@ async fn dispatch_builtin(
                     }),
                 ),
             )
-            .await;
+            .await?;
             serde_json::json!({
                 "status": "spawned",
                 "child_process_id": child_process_id,
@@ -275,12 +275,12 @@ async fn dispatch_builtin(
                         "Ready" | "Failed" | "Terminated"
                     )
                 {
-                    return serde_json::json!({
+                    return Ok(serde_json::json!({
                         "child_process_id": child_id,
                         "status": child_state.status,
                         "result": child_state.fields,
                     })
-                    .to_string();
+                    .to_string());
                 }
             }
 
@@ -296,11 +296,11 @@ async fn dispatch_builtin(
                 })
                 .unwrap_or_default();
             if !state.fields["child_result"].is_null() {
-                return serde_json::to_string(&state.fields["child_result"]).unwrap_or_default();
+                return Ok(serde_json::to_string(&state.fields["child_result"]).unwrap_or_default());
             }
 
             // Otherwise block parent and wait for child_result to arrive.
-            ctx.tell(process, SpecMessage::new("BlockOnChild")).await;
+            ctx.tell(process, SpecMessage::new("BlockOnChild")).await?;
             let timeout = std::time::Duration::from_secs(
                 std::env::var("WAIT_CHILD_TIMEOUT_SECS")
                     .ok()
@@ -323,8 +323,9 @@ async fn dispatch_builtin(
                     })
                     .unwrap_or_default();
                 if !state.fields["child_result"].is_null() {
-                    return serde_json::to_string(&state.fields["child_result"])
-                        .unwrap_or_default();
+                    return Ok(
+                        serde_json::to_string(&state.fields["child_result"]).unwrap_or_default()
+                    );
                 }
             }
             "timeout waiting for child process".to_string()
@@ -335,23 +336,24 @@ async fn dispatch_builtin(
                 process,
                 SpecMessage::with_params("SleepProcess", json!({ "sleep_seconds": seconds })),
             )
-            .await;
+            .await?;
             format!("sleep scheduled for {seconds}s")
         }
         "get_process_status" => {
             let Some(process_id) = input["process_id"].as_str() else {
-                return "error: process_id is required".to_string();
+                return Ok("error: process_id is required".to_string());
             };
             get_process_state(ctx, process_id, false).await
         }
         "get_process_output" => {
             let Some(process_id) = input["process_id"].as_str() else {
-                return "error: process_id is required".to_string();
+                return Ok("error: process_id is required".to_string());
             };
             get_process_state(ctx, process_id, true).await
         }
         _ => format!("unknown builtin tool '{tool_name}'"),
-    }
+    };
+    Ok(output)
 }
 
 async fn get_process_state(ctx: &ActorContext, process_id: &str, output_only: bool) -> String {

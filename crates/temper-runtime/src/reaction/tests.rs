@@ -16,6 +16,12 @@ fn rule(from_type: &str, emit: &str, to_type: &str, to_action: &str) -> Reaction
     }
 }
 
+fn wildcard_rule(from_type: &str, to_type: &str, to_action: &str) -> ReactionRule {
+    let mut reaction = rule(from_type, "wildcard", to_type, to_action);
+    reaction.when.action = None;
+    reaction
+}
+
 #[test]
 fn test_lookup_exact() {
     let mut reg = ReactionRegistry::new();
@@ -34,6 +40,34 @@ fn test_lookup_exact() {
 fn test_no_match() {
     let reg = ReactionRegistry::new();
     assert!(reg.lookup("Agent", "PrepareContext", "").is_empty());
+}
+
+#[test]
+fn literal_star_action_does_not_duplicate_wildcard_rule() {
+    let mut registry = ReactionRegistry::new();
+    registry.register(vec![wildcard_rule("Agent", "Target", "Run")]);
+
+    let matches = registry.lookup("Agent", "*", "");
+    assert_eq!(matches.len(), 1);
+    assert_eq!(matches[0].then.entity_type, "Target");
+}
+
+#[test]
+fn delimiter_characters_do_not_alias_actor_and_action_keys() {
+    let mut registry = ReactionRegistry::new();
+    registry.register(vec![
+        rule("A:B", "C", "FirstTarget", "Run"),
+        rule("A", "B:C", "SecondTarget", "Run"),
+    ]);
+
+    let first = registry.lookup("A:B", "C", "");
+    assert_eq!(first.len(), 1);
+    assert_eq!(first[0].then.entity_type, "FirstTarget");
+    let second = registry.lookup("A", "B:C", "");
+    assert_eq!(second.len(), 1);
+    assert_eq!(second[0].then.entity_type, "SecondTarget");
+    assert_eq!(registry.rules_for_actor_count("A:B"), 1);
+    assert_eq!(registry.rules_for_actor_count("A"), 1);
 }
 
 #[test]
