@@ -2387,4 +2387,69 @@ mod tests {
     fn source_tenants_default_to_default() {
         assert!(genesis_source_tenants().contains(&"default".to_string()));
     }
+
+    // --- ARN-210 exploit / security contract (RED on unfixed code) ---
+    //
+    // These assert the secure post-condition. On unfixed main they fail because
+    // normalize_registry_url accepts any http(s) URL and sanitize_fragment
+    // collapses distinct refs onto the same cache key.
+
+    #[test]
+    fn arn210_private_loopback_registry_urls_must_be_rejected() {
+        let result = normalize_registry_url("https://127.0.0.1/genesis");
+        assert!(
+            result.is_err(),
+            "loopback registry URL must be rejected (SSRF); got {result:?}"
+        );
+        let result = normalize_registry_url("https://10.0.0.5/registry");
+        assert!(
+            result.is_err(),
+            "private registry URL must be rejected (SSRF); got {result:?}"
+        );
+        let result = normalize_registry_url("https://169.254.169.254/latest");
+        assert!(
+            result.is_err(),
+            "link-local metadata URL must be rejected (SSRF); got {result:?}"
+        );
+    }
+
+    #[test]
+    fn arn210_localhost_hostname_must_be_rejected() {
+        let result = normalize_registry_url("https://localhost/genesis");
+        assert!(
+            result.is_err(),
+            "https://localhost must be rejected by default (SSRF); got {result:?}"
+        );
+    }
+
+    #[test]
+    fn arn210_registry_userinfo_must_be_rejected() {
+        let result = normalize_registry_url("https://user:pass@evil.example/g");
+        assert!(
+            result.is_err(),
+            "registry URLs with userinfo must be rejected; got {result:?}"
+        );
+    }
+
+    #[test]
+    fn arn210_plain_http_non_loopback_must_be_rejected() {
+        let result = normalize_registry_url("http://evil.example/registry");
+        assert!(
+            result.is_err(),
+            "plain http non-loopback registry must be rejected; got {result:?}"
+        );
+    }
+
+    #[test]
+    fn arn210_cache_key_must_not_collide_across_distinct_refs() {
+        // Lossy sanitize_fragment maps "a.b" and "a/b" onto the same key —
+        // that is a package collision hole (ARN-210). Distinct refs must
+        // produce distinct cache keys.
+        let a = sanitize_fragment("a.b");
+        let b = sanitize_fragment("a/b");
+        assert_ne!(
+            a, b,
+            "distinct app refs must not share a cache key (got both {a:?})"
+        );
+    }
 }
