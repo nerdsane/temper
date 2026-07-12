@@ -704,15 +704,25 @@ fn ip_is_public(ip: &IpAddr) -> bool {
             if v6.is_loopback() || v6.is_unspecified() || v6.is_multicast() {
                 return false;
             }
+            let segments = v6.segments();
             // Both IPv4-mapped (::ffff:a.b.c.d) and the deprecated IPv4-compatible
             // (::a.b.c.d) forms carry an embedded IPv4 host, so judge them by the
-            // IPv4 rules — otherwise ::ffff:127.0.0.1 or ::7f00:1 would slip past
-            // as "some v6 address". `to_ipv4` matches only those two ranges; a real
-            // global unicast address returns `None` and is checked below.
-            if let Some(v4) = v6.to_ipv4() {
+            // IPv4 rules — otherwise ::ffff:127.0.0.1 or ::7f00:1 (::127.0.0.1)
+            // would slip past as "some v6 address". Handle each form explicitly
+            // rather than via the dual-range `to_ipv4()`, so the classification
+            // never depends on that method's exact semantics.
+            if let Some(v4) = v6.to_ipv4_mapped() {
                 return ipv4_is_public(&v4);
             }
-            let segments = v6.segments();
+            if segments[..6].iter().all(|&s| s == 0) {
+                let v4 = Ipv4Addr::new(
+                    (segments[6] >> 8) as u8,
+                    (segments[6] & 0xff) as u8,
+                    (segments[7] >> 8) as u8,
+                    (segments[7] & 0xff) as u8,
+                );
+                return ipv4_is_public(&v4);
+            }
             let is_unique_local = (segments[0] & 0xfe00) == 0xfc00;
             let is_link_local = (segments[0] & 0xffc0) == 0xfe80;
             !(is_unique_local || is_link_local)
@@ -799,9 +809,9 @@ async fn guarded_registry_client(url: &str) -> Result<reqwest::Client, String> {
         .timeout(REGISTRY_HTTP_TIMEOUT)
         .redirect(reqwest::redirect::Policy::none());
     if host.parse::<IpAddr>().is_err() {
-        for addr in &addrs {
-            builder = builder.resolve(&host, *addr);
-        }
+        // Pin every checked address in one call — a per-address `resolve` loop
+        // would keep only the last, dropping failover across A/AAAA records.
+        builder = builder.resolve_to_addrs(&host, &addrs);
     }
     builder
         .build()
