@@ -26,9 +26,10 @@ ClickHouse queries will translate trusted `$N` placeholders into ClickHouse type
 placeholders such as `{p1:String}`. The SQL remains in the multipart `query` field;
 each value is sent separately as `param_pN`. Parameter text never becomes SQL source.
 
-The translator is a single-pass scanner over trusted query templates. It recognizes
-single-, double-, and backtick-quoted regions plus line and block comments, and only
-rewrites placeholders in SQL code. Missing and zero-indexed parameters fail locally.
+The translator is a single-pass scanner over trusted query templates. It mirrors
+ClickHouse lexical non-code regions: ASCII and Unicode quotes, heredocs, all line-comment
+forms, and nested block comments. It only rewrites placeholders in SQL code. Missing
+and zero-indexed parameters fail locally.
 `SqlParam::Null` remains the trusted SQL token `NULL`, because the cross-store enum
 does not carry the target type required for `Nullable(T)`.
 
@@ -55,7 +56,7 @@ database protocol and eliminate a security-critical escaper instead of extending
 
 - Attacker-controlled parameter bytes do not occur in generated SQL.
 - The real HTTP request carries values only in `param_pN` multipart fields.
-- Quoted/comment placeholders are not rewritten.
+- Quoted, heredoc, and comment placeholders are not rewritten.
 - PostgreSQL and Turso dynamic order fields are bound.
 - Formatting, focused tests, independent review, and live ClickHouse verification pass.
 
