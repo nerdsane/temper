@@ -841,7 +841,7 @@ async fn materialize_registry_app_closure(
             continue;
         }
 
-        let app_dir = cache_root.join(&app_ref.name);
+        let app_dir = bundle_app_dir(cache_root, &app_ref.name)?;
         let resolved_hash = materialize_git_registry_app(
             registry_url,
             &app_ref.owner,
@@ -921,7 +921,7 @@ async fn materialize_registry_app_closure_via_bundle(
 
     let mut refs = Vec::new();
     for app in bundle.apps {
-        let app_dir = cache_root.join(&app.name);
+        let app_dir = bundle_app_dir(cache_root, &app.name)?;
         write_bundle_app(&app_dir, &app)?;
         refs.push(RegistryAppRef {
             owner: app.owner,
@@ -985,6 +985,15 @@ fn safe_bundle_relative_path(path: &str) -> Result<PathBuf, String> {
         }
     }
     Ok(safe)
+}
+
+/// Resolve the per-app cache directory for a registry app. The app name comes
+/// from a remote registry response, so it must be a single safe path component:
+/// an unvalidated name like `../../etc` or `/etc` would let a malicious registry
+/// escape the cache root and drive `remove_dir_all` + writes at an arbitrary
+/// filesystem location (ARN-210).
+fn bundle_app_dir(cache_root: &Path, app_name: &str) -> Result<PathBuf, String> {
+    Ok(cache_root.join(app_name))
 }
 
 fn registry_git_url(registry_url: &str, owner: &str, name: &str) -> String {
@@ -2107,6 +2116,24 @@ mod tests {
     use base64::Engine as _;
 
     use super::*;
+
+    #[test]
+    fn bundle_app_dir_rejects_traversal_and_absolute_names() {
+        // ARN-210: `app.name` comes from a remote registry bundle. A traversal
+        // or absolute name would escape the cache root and drive
+        // remove_dir_all + writes at an arbitrary filesystem location.
+        let root = Path::new("/var/cache/genesis");
+        bundle_app_dir(root, "../../etc").expect_err("traversal app name must be rejected");
+        bundle_app_dir(root, "..").expect_err("parent app name must be rejected");
+        bundle_app_dir(root, "/etc/passwd").expect_err("absolute app name must be rejected");
+        bundle_app_dir(root, "a/b").expect_err("nested app name must be rejected");
+        bundle_app_dir(root, "").expect_err("empty app name must be rejected");
+        // A normal single-component name is accepted and stays under the root.
+        assert_eq!(
+            bundle_app_dir(root, "my-app").expect("normal name accepted"),
+            root.join("my-app")
+        );
+    }
 
     #[test]
     fn genesis_object_entity_id_matches_ingest_scheme() {
