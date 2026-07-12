@@ -1490,98 +1490,74 @@ to = "Done"
 ///
 /// SelectCandidate → gepa-replay (WASM) → RecordEvaluation
 ///                → gepa-reflective (WASM) → RecordDataset
-///                → claude_code adapter (mock script) → RecordMutation
-///                → claude_code adapter (mock verifier) → RecordVerificationPass
+///                → http adapter (mock proposer) → RecordMutation
+///                → http adapter (mock verifier) → RecordVerificationPass
 ///                → gepa-score (WASM) → RecordScore
 ///                → gepa-pareto (WASM) → RecordFrontier
 ///
 /// Production uses `gepa-proposer-agent` WASM + TemperAgent. This test
-/// overrides `propose_mutation` and `verify_candidate` to deterministic mock adapters
-/// so CI can run without LLM keys or a live verification HTTP server.
+/// overrides `propose_mutation` and `verify_candidate` to deterministic HTTP
+/// adapters (ARN-228: host process adapters removed from the kernel) so CI can
+/// run without LLM keys or a live verification HTTP server.
 #[test]
 fn e2e_gepa_full_autonomous_loop_with_adapter() {
     run_gepa_e2e_with_large_stack(async {
-        use std::io::Write;
         use std::time::Duration;
         use temper_runtime::ActorSystem;
         use temper_runtime::tenant::TenantId;
         use temper_server::registry::SpecRegistry;
         use temper_server::request_context::AgentContext;
         use temper_spec::csdl::parse_csdl;
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
 
         let (_guard, _clock, _id_gen) = install_deterministic_context(42);
 
-        // --- Create mock "claude" script that returns a mutated spec ---
-        let mock_dir = std::env::temp_dir().join("gepa-mock-adapter-test"); // determinism-ok: test harness
-        let mock_workdir = mock_dir.join("workspace");
-        std::fs::create_dir_all(&mock_dir).expect("create mock dir");
-        std::fs::create_dir_all(&mock_workdir).expect("create mock workdir");
-        let mock_script = mock_dir.join("mock-claude");
-        let verify_script = mock_dir.join("mock-verify");
-        {
-            let mut f = std::fs::File::create(&mock_script).expect("create mock script");
-            // The script outputs stream-JSON with MutatedSpecSource and MutationSummary.
-            // This is exactly what the real Claude Code would output when acting as
-            // the evolution agent — it reads the reflective dataset and proposes a fix.
-            write!(
-            f,
-            r#"#!/bin/bash
-# Mock evolution agent — simulates Claude Code proposing a spec mutation.
-# In production, Claude reads the reflective dataset (failure traces) and
-# proposes a minimal IOA spec edit. Here we return a deterministic mutation.
-cat <<'MOCK_OUTPUT'
-{{"MutatedSpecSource": "[automaton]\nname = \"TestIssue\"\nstates = [\"Backlog\", \"InProgress\", \"Done\"]\ninitial = \"Backlog\"\n\n[[action]]\nname = \"StartWork\"\nkind = \"input\"\nfrom = [\"Backlog\"]\nto = \"InProgress\"\n\n[[action]]\nname = \"Complete\"\nkind = \"input\"\nfrom = [\"InProgress\"]\nto = \"Done\"\n\n[[action]]\nname = \"Reassign\"\nkind = \"input\"\nfrom = [\"Backlog\", \"InProgress\"]\nto = \"InProgress\"\nparams = [\"NewAssigneeId\"]\n", "MutationSummary": "Added Reassign action to TestIssue spec based on trajectory failure analysis"}}
-MOCK_OUTPUT
-"#
-        )
-        .expect("write mock script");
-            // Make executable
-            #[cfg(unix)]
-            {
-                use std::os::unix::fs::PermissionsExt;
-                std::fs::set_permissions(&mock_script, std::fs::Permissions::from_mode(0o755))
-                    .expect("chmod +x mock script");
-            }
+        // SAFETY: test process; loopback HTTP mocks for ARN-228 egress policy.
+        unsafe {
+            std::env::set_var("TEMPER_ADAPTER_ALLOW_HTTP_LOOPBACK", "1");
         }
-        {
-            let mut f = std::fs::File::create(&verify_script).expect("create verify script");
-            write!(
-                f,
-                r#"#!/bin/bash
-cat <<'MOCK_OUTPUT'
-{{"VerificationReport": "L0-L3 cascade passed for TestIssue"}}
-MOCK_OUTPUT
-"#
-            )
-            .expect("write verify script");
-            #[cfg(unix)]
-            {
-                use std::os::unix::fs::PermissionsExt;
-                std::fs::set_permissions(&verify_script, std::fs::Permissions::from_mode(0o755))
-                    .expect("chmod +x verify script");
-            }
-        }
+
+        let mock_server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/propose"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "callback_params": {
+                    "MutatedSpecSource": "[automaton]\nname = \"TestIssue\"\nstates = [\"Backlog\", \"InProgress\", \"Done\"]\ninitial = \"Backlog\"\n\n[[action]]\nname = \"StartWork\"\nkind = \"input\"\nfrom = [\"Backlog\"]\nto = \"InProgress\"\n\n[[action]]\nname = \"Complete\"\nkind = \"input\"\nfrom = [\"InProgress\"]\nto = \"Done\"\n\n[[action]]\nname = \"Reassign\"\nkind = \"input\"\nfrom = [\"Backlog\", \"InProgress\"]\nto = \"InProgress\"\nparams = [\"NewAssigneeId\"]\n",
+                    "MutationSummary": "Added Reassign action to TestIssue spec based on trajectory failure analysis"
+                }
+            })))
+            .mount(&mock_server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/verify"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "callback_params": {
+                    "VerificationReport": "L0-L3 cascade passed for TestIssue"
+                }
+            })))
+            .mount(&mock_server)
+            .await;
 
         // --- Build EvolutionRun spec with propose_mutation test override ---
         let base_ioa = include_str!("../../../os-apps/evolution/evolution_run.ioa.toml");
-        // Replace proposer + verifier action triggers with deterministic adapters for test-only
-        // execution. Production keeps the WASM proposer/verifier modules.
-        let mock_path = mock_script.to_str().expect("mock path to str");
-        let verify_path = verify_script.to_str().expect("verify path to str");
-        let mock_workdir = mock_workdir.to_str().expect("mock workdir to str");
+        // Replace proposer + verifier action triggers with deterministic HTTP adapters
+        // for test-only execution. Production keeps the WASM proposer/verifier modules.
+        let propose_url = format!("{}/propose", mock_server.uri());
+        let verify_url = format!("{}/verify", mock_server.uri());
         let modified_ioa = base_ioa
         .replace(
             "kind = \"wasm\"\nmodule = \"gepa-proposer-agent\"",
-            "kind = \"adapter\"\nadapter = \"claude_code\"",
+            "kind = \"adapter\"\nadapter = \"http\"",
         )
         .replace(
             "workdir = \"/workspace\"",
-            &format!("command = \"{mock_path}\"\nworkdir = \"{mock_workdir}\""),
+            &format!("url = \"{propose_url}\"\nmethod = \"POST\""),
         )
         .replace(
             "kind = \"wasm\"\nmodule = \"gepa-verify\"\non_failure = \"Fail\"\n\n[action.triggers.config]\ntemper_api_url = \"http://127.0.0.1:4455\"",
             &format!(
-                "kind = \"adapter\"\nadapter = \"claude_code\"\non_success = \"RecordVerificationPass\"\non_failure = \"Fail\"\n\n[action.triggers.config]\ncommand = \"{verify_path}\"\ntemper_api_url = \"http://127.0.0.1:4455\""
+                "kind = \"adapter\"\nadapter = \"http\"\non_success = \"RecordVerificationPass\"\non_failure = \"Fail\"\n\n[action.triggers.config]\nurl = \"{verify_url}\"\nmethod = \"POST\""
             ),
         );
 
@@ -1738,7 +1714,7 @@ to = "Done"
 
         assert!(
             event_trail.contains(&"RecordMutation".to_string()),
-            "RecordMutation must appear — proves the claude_code adapter (mock) executed and \
+            "RecordMutation must appear — proves the HTTP adapter (mock proposer) executed and \
          returned a mutated spec. Events: {event_trail:?}"
         );
         assert_eq!(

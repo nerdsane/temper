@@ -1,9 +1,12 @@
-//! Generic HTTP adapter.
+//! Generic HTTP adapter with fail-closed egress (ADR-0156 / ARN-228).
 
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
 
+use super::egress::{
+    ADAPTER_HTTP_TIMEOUT_SECS, ADAPTER_MAX_RESPONSE_BYTES, validate_adapter_http_url,
+};
 use super::{AdapterContext, AdapterError, AdapterResult, AgentAdapter};
 
 /// Adapter implementation for generic HTTP callback execution.
@@ -17,9 +20,9 @@ impl AgentAdapter for HttpWebhookAdapter {
     }
 
     async fn execute(&self, ctx: AdapterContext) -> Result<AdapterResult, AdapterError> {
-        let started = Instant::now();
+        let started = Instant::now(); // determinism-ok: wall-clock timing for external HTTP
 
-        let url = ctx
+        let raw_url = ctx
             .integration_config
             .get("url")
             .or_else(|| ctx.integration_config.get("endpoint"))
@@ -28,19 +31,29 @@ impl AgentAdapter for HttpWebhookAdapter {
                 AdapterError::Invocation("missing adapter config key 'url'".to_string())
             })?;
 
+        let url = validate_adapter_http_url(&raw_url).map_err(AdapterError::Invocation)?;
+
         let method = ctx
             .integration_config
             .get("method")
             .map(|m| m.to_ascii_uppercase())
             .unwrap_or_else(|| "POST".to_string());
 
-        let mut request = reqwest::Client::new().request(
+        let client = reqwest::Client::builder()
+            .timeout(Duration::from_secs(ADAPTER_HTTP_TIMEOUT_SECS))
+            .redirect(reqwest::redirect::Policy::none())
+            .build()
+            .map_err(|e| AdapterError::Invocation(format!("HTTP client build failed: {e}")))?;
+
+        let mut request = client.request(
             reqwest::Method::from_bytes(method.as_bytes()).map_err(|e| {
                 AdapterError::Invocation(format!("invalid HTTP method '{method}': {e}"))
             })?,
             &url,
         );
 
+        // Authorization material comes only from resolved integration config
+        // templates — never from a full tenant secret map dump.
         if let Some(auth) = ctx.integration_config.get("authorization") {
             request = request.header("authorization", auth);
         }
@@ -49,6 +62,7 @@ impl AgentAdapter for HttpWebhookAdapter {
             request = request.bearer_auth(token);
         }
 
+        // Never forward ambient platform credentials or the full secret map.
         let payload = serde_json::json!({
             "tenant": ctx.tenant,
             "entity_type": ctx.entity_type,
@@ -56,7 +70,11 @@ impl AgentAdapter for HttpWebhookAdapter {
             "trigger_action": ctx.trigger_action,
             "trigger_params": ctx.trigger_params,
             "entity_state": ctx.entity_state,
-            "agent_ctx": ctx.agent_ctx,
+            "agent_ctx": {
+                "agent_id": ctx.agent_ctx.agent_id,
+                "session_id": ctx.agent_ctx.session_id,
+                "agent_type": ctx.agent_ctx.agent_type,
+            },
         });
 
         let response = request
@@ -67,10 +85,23 @@ impl AgentAdapter for HttpWebhookAdapter {
 
         let duration_ms = started.elapsed().as_millis() as u64;
         let status = response.status();
-        let text = response
-            .text()
+
+        // Bound body bytes before buffering into memory.
+        let bytes = response
+            .bytes()
             .await
             .map_err(|e| AdapterError::Parse(format!("failed reading HTTP response body: {e}")))?;
+        if bytes.len() > ADAPTER_MAX_RESPONSE_BYTES {
+            return Ok(AdapterResult::failure(
+                format!(
+                    "HTTP response exceeded budget: {} bytes > {}",
+                    bytes.len(),
+                    ADAPTER_MAX_RESPONSE_BYTES
+                ),
+                duration_ms,
+            ));
+        }
+        let text = String::from_utf8_lossy(&bytes).to_string();
 
         if status.is_success() {
             if let Ok(json) = serde_json::from_str::<serde_json::Value>(&text) {
@@ -81,6 +112,15 @@ impl AgentAdapter for HttpWebhookAdapter {
             }
             Ok(AdapterResult::success(
                 serde_json::json!({"response": text}),
+                duration_ms,
+            ))
+        } else if status.is_redirection() {
+            // Redirect policy is none; treat any 3xx as a blocked open-redirect surface.
+            Ok(AdapterResult::failure(
+                format!(
+                    "HTTP {} returned redirect status {} (redirects are disabled)",
+                    method, status
+                ),
                 duration_ms,
             ))
         } else {
