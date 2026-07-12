@@ -263,7 +263,9 @@ async fn dispatch_builtin(
                 }
                 let child_ns = format!("{tenant}/{child_id}");
                 // ARN-215: only after validating id is a single path segment under self tenant.
-                ctx.grant_cross_namespace(child_ns.clone());
+                if let Err(e) = ctx.grant_cross_namespace(child_ns.clone()) {
+                    return format!("error: {e}");
+                }
                 if let Some(child_state) = ctx
                     .load_actor_state(&child_ns, "Process")
                     .await
@@ -393,7 +395,10 @@ async fn get_process_state(ctx: &ActorContext, process_id: &str, output_only: bo
         "target namespace must be a direct child of self tenant"
     );
     // ARN-215: grant only after validation; capability is same-tenant process lookup.
-    ctx.grant_cross_namespace(target_ns.clone());
+    // Tenant-root bound is enforced inside grant_cross_namespace.
+    if let Err(e) = ctx.grant_cross_namespace(target_ns.clone()) {
+        return format!("error: {e}");
+    }
     let Some(state) = ctx
         .load_actor_state(&target_ns, "Process")
         .await

@@ -136,24 +136,53 @@ impl ActorContext {
         }
     }
 
-    /// Grant cross-namespace load/upsert for the named namespaces (ARN-215).
+    /// Grant cross-namespace load/upsert for a same-tenant namespace (ARN-215).
     ///
-    /// Own namespace is always allowed. Grants are additive.
+    /// Own namespace is always allowed without a grant. Grants are additive.
     ///
     /// # Security contract
     ///
-    /// Callers must only grant namespaces that have already been validated as
-    /// in-tenant and free of path traversal. Untrusted payload strings (e.g.
-    /// user-supplied `process_id`) must be validated before calling this method
-    /// — see `temper-agents` process-id checks. This is a trusted runtime/tool
-    /// privilege, not a guest-facing capability; handlers must never pass
-    /// attacker-controlled namespace strings through without validation.
-    pub fn grant_cross_namespace(&self, namespace: impl Into<String>) {
+    /// Grants are **type-enforced to the caller's tenant root** (first path
+    /// segment of `self_handle.namespace`). A handler cannot self-grant into
+    /// another tenant's namespace tree. Path separators, `..`, NUL, and empty
+    /// strings are rejected. Untrusted payload segments (e.g. `process_id`)
+    /// must still be validated by the caller before composition — see
+    /// `temper-agents` process-id checks.
+    ///
+    /// Returns [`ActorError::NamespaceDenied`] when the grant would cross
+    /// tenant roots or fails structural validation.
+    pub fn grant_cross_namespace(&self, namespace: impl Into<String>) -> Result<(), ActorError> {
+        let ns = namespace.into();
+        self.validate_grant_target(&ns)?;
         // Recover poison so a prior panic does not silently drop later grants.
         self.cross_namespace_grants
             .lock()
             .unwrap_or_else(|e| e.into_inner())
-            .insert(namespace.into());
+            .insert(ns);
+        Ok(())
+    }
+
+    /// Reject grants outside the actor's tenant root or with path traversal.
+    fn validate_grant_target(&self, namespace: &str) -> Result<(), ActorError> {
+        if namespace.is_empty()
+            || namespace.contains('\0')
+            || namespace.contains('\\')
+            || namespace.contains("..")
+            || namespace.starts_with('/')
+        {
+            return Err(ActorError::NamespaceDenied(format!(
+                "invalid grant namespace '{namespace}'"
+            )));
+        }
+        let self_root = self.self_handle.namespace.split('/').next().unwrap_or("");
+        let grant_root = namespace.split('/').next().unwrap_or("");
+        if self_root.is_empty() || grant_root != self_root {
+            return Err(ActorError::NamespaceDenied(format!(
+                "actor '{}' cannot grant namespace '{}' outside tenant root '{}'",
+                self.self_handle.namespace, namespace, self_root
+            )));
+        }
+        Ok(())
     }
 
     /// This actor's own address.
@@ -405,9 +434,26 @@ mod namespace_cap_tests {
     }
 
     #[test]
-    fn cross_namespace_allowed_after_grant() {
+    fn same_tenant_child_allowed_after_grant() {
         let ctx = ActorContext::new(ActorHandle::new("ns-a", "Process"), None, None);
-        ctx.grant_cross_namespace("ns-b");
-        assert!(ctx.require_namespace_access("ns-b").is_ok());
+        ctx.grant_cross_namespace("ns-a/child")
+            .expect("same-tenant child grant");
+        assert!(ctx.require_namespace_access("ns-a/child").is_ok());
+    }
+
+    #[test]
+    fn grant_rejects_other_tenant_root() {
+        let ctx = ActorContext::new(ActorHandle::new("ns-a", "Process"), None, None);
+        let err = ctx.grant_cross_namespace("ns-b").unwrap_err();
+        assert!(matches!(err, ActorError::NamespaceDenied(_)));
+        assert!(ctx.require_namespace_access("ns-b").is_err());
+    }
+
+    #[test]
+    fn grant_rejects_path_traversal() {
+        let ctx = ActorContext::new(ActorHandle::new("tenant/proc", "Process"), None, None);
+        assert!(ctx.grant_cross_namespace("tenant/../other").is_err());
+        assert!(ctx.grant_cross_namespace("").is_err());
+        assert!(ctx.grant_cross_namespace("/tenant/x").is_err());
     }
 }

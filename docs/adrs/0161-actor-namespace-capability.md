@@ -19,14 +19,19 @@ its activation namespace.
 
 Access to `namespace == self_handle.namespace` is always allowed.
 
-### Sub-Decision 2: Explicit grant for cross-namespace
+### Sub-Decision 2: Explicit grant for cross-namespace (same tenant root)
 
 Any other namespace requires a prior `grant_cross_namespace` on the context.
-Grants are set only by runtime/tool code, not by untrusted message payload.
+Grants are **restricted to the caller's tenant root** (first `/`-separated
+segment of `self_handle.namespace`). A handler cannot self-grant into another
+tenant's namespace tree. Path traversal, empty, absolute, and backslash
+namespaces are rejected at grant time. Callers still validate untrusted path
+segments (e.g. `process_id`) before composing the namespace string.
 
 ### Sub-Decision 3: Fail closed
 
-Missing grant → `ActorError::NamespaceDenied`.
+Missing grant → `ActorError::NamespaceDenied`. Invalid grant targets also
+return `NamespaceDenied` (no silent accept).
 
 ## Consequences
 
