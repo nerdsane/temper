@@ -6,7 +6,7 @@
 //! # Architecture
 //!
 //! - Spec → TransitionTable (via temper-jit)
-//! - Reaction rules → routing map (emit name → target actor type)
+//! - Reaction rules → canonical reaction registry
 //! - handle(): evaluate table → apply effects → route emits via ctx.tell()
 //!
 //! # Message protocol
@@ -15,13 +15,13 @@
 //! - `action`: the action/emit name (e.g., "PrepareContext")
 //! - `params`: JSON-encoded params (empty for actions with no params)
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::BTreeMap;
 
-use temper_jit::table::{EvalContext, TransitionTable};
-use temper_runtime::reaction::ReactionRule;
+use temper_jit::table::{EffectExecution, EffectState, TransitionTable};
+use temper_runtime::reaction::{ReactionRegistry, ReactionRule, TargetResolver};
 use temper_spec::automaton::Automaton;
 
-use crate::actor::{Actor, ActorContext, ActorError, ActorHandle, Message};
+use crate::actor::{Actor, ActorContext, ActorError, ActorHandle, BufferedTell, Message};
 
 // ─── SpecMessage ─────────────────────────────────────────────────────────────
 
@@ -72,63 +72,54 @@ pub struct SpecActorState {
     pub fields: serde_json::Value,
 }
 
-impl SpecActorState {
-    fn to_eval_context(&self) -> EvalContext {
-        let mut ctx = EvalContext::default();
-        for (k, v) in &self.counters {
-            ctx.counters.insert(k.clone(), *v);
-        }
-        for (k, v) in &self.booleans {
-            ctx.booleans.insert(k.clone(), *v);
-        }
-        for (k, v) in &self.lists {
-            ctx.lists.insert(k.clone(), v.clone());
-        }
-        ctx
-    }
-}
-
-// ─── Routing map builder ─────────────────────────────────────────────────────
-
-/// Build per-actor routing maps from reaction rules.
-///
-/// Returns `HashMap<actor_type, HashMap<emit_name, (target_actor_type, target_action)>>`.
-pub fn build_routing_maps(
-    rules: &[ReactionRule],
-) -> HashMap<String, HashMap<String, (String, String)>> {
-    let mut maps: HashMap<String, HashMap<String, (String, String)>> = HashMap::new();
-
-    for rule in rules {
-        if let Some(emit_name) = &rule.when.action {
-            maps.entry(rule.when.entity_type.clone())
-                .or_default()
-                .insert(
-                    emit_name.clone(),
-                    (rule.then.entity_type.clone(), rule.then.action.clone()),
-                );
-        }
+impl EffectState for SpecActorState {
+    fn status(&self) -> &str {
+        &self.status
     }
 
-    maps
-}
+    fn status_mut(&mut self) -> &mut String {
+        &mut self.status
+    }
 
-/// Build a single actor's routing map from a reaction registry.
-pub fn build_actor_routing(
-    actor_type: &str,
-    rules: &[ReactionRule],
-) -> HashMap<String, (String, String)> {
-    rules
-        .iter()
-        .filter(|r| r.when.entity_type == actor_type)
-        .filter_map(|r| {
-            r.when.action.as_ref().map(|emit| {
-                (
-                    emit.clone(),
-                    (r.then.entity_type.clone(), r.then.action.clone()),
-                )
-            })
-        })
-        .collect()
+    fn legacy_item_count(&self) -> Option<usize> {
+        None
+    }
+
+    fn legacy_item_count_mut(&mut self) -> Option<&mut usize> {
+        None
+    }
+
+    fn counters(&self) -> &BTreeMap<String, usize> {
+        &self.counters
+    }
+
+    fn counters_mut(&mut self) -> &mut BTreeMap<String, usize> {
+        &mut self.counters
+    }
+
+    fn booleans(&self) -> &BTreeMap<String, bool> {
+        &self.booleans
+    }
+
+    fn booleans_mut(&mut self) -> &mut BTreeMap<String, bool> {
+        &mut self.booleans
+    }
+
+    fn lists(&self) -> &BTreeMap<String, Vec<String>> {
+        &self.lists
+    }
+
+    fn lists_mut(&mut self) -> &mut BTreeMap<String, Vec<String>> {
+        &mut self.lists
+    }
+
+    fn fields(&self) -> &serde_json::Value {
+        &self.fields
+    }
+
+    fn fields_mut(&mut self) -> &mut serde_json::Value {
+        &mut self.fields
+    }
 }
 
 // ─── SpecDrivenActor ─────────────────────────────────────────────────────────
@@ -145,28 +136,25 @@ pub struct SpecDrivenActor {
     table: TransitionTable,
     /// Initial state (from spec's initial state + variable declarations).
     init_state: SpecActorState,
-    /// Routing map: emit/trigger name → (target actor type, target action).
-    routing: HashMap<String, (String, String)>,
+    /// Canonical reaction rules, preserving fan-out and target semantics.
+    reactions: ReactionRegistry,
     /// Leaked static refs for subscriptions() return.
     subscriptions_static: Vec<&'static str>,
 }
 
 impl SpecDrivenActor {
-    /// Create from an IOA TOML source + routing map.
-    pub fn from_ioa(
-        ioa_source: &str,
-        routing: HashMap<String, (String, String)>,
-    ) -> Result<Self, String> {
+    /// Create from an IOA TOML source and canonical reaction rules.
+    pub fn from_ioa(ioa_source: &str, reactions: ReactionRegistry) -> Result<Self, String> {
         let automaton = temper_spec::parse_automaton(ioa_source)
             .map_err(|e| format!("failed to parse spec: {e}"))?;
-        Ok(Self::from_automaton(&automaton, ioa_source, routing))
+        Ok(Self::from_automaton(&automaton, ioa_source, reactions))
     }
 
-    /// Create from a pre-parsed Automaton + routing map.
+    /// Create from a pre-parsed automaton and reaction registry.
     pub fn from_automaton(
         automaton: &Automaton,
         ioa_source: &str,
-        routing: HashMap<String, (String, String)>,
+        reactions: ReactionRegistry,
     ) -> Self {
         let name = automaton.automaton.name.clone();
         let table = TransitionTable::from_ioa_source(ioa_source);
@@ -206,7 +194,7 @@ impl SpecDrivenActor {
             name,
             table,
             init_state,
-            routing,
+            reactions,
             subscriptions_static,
         }
     }
@@ -216,9 +204,9 @@ impl SpecDrivenActor {
         &self.subscriptions_static
     }
 
-    /// The routing map (emit name → target actor type).
-    pub fn routing(&self) -> &HashMap<String, (String, String)> {
-        &self.routing
+    /// Canonical reaction registry used by this actor.
+    pub fn reactions(&self) -> &ReactionRegistry {
+        &self.reactions
     }
 }
 
@@ -230,6 +218,13 @@ impl Actor for SpecDrivenActor {
 
     fn initial_state(&self) -> Vec<u8> {
         serde_json::to_vec(&self.init_state).unwrap_or_default()
+    }
+
+    fn initial_state_with_fields(&self, fields: serde_json::Value) -> Result<Vec<u8>, ActorError> {
+        let mut state = self.init_state.clone();
+        state.fields = fields;
+        serde_json::to_vec(&state)
+            .map_err(|error| ActorError::HandlerFailed(format!("initial state ser: {error}")))
     }
 
     async fn handle(
@@ -279,23 +274,29 @@ impl Actor for SpecDrivenActor {
             }
         }
 
-        if let Some(fields) = spec_msg
+        let action_params = spec_msg
             .as_ref()
             .filter(|m| !m.params.is_empty())
             .and_then(|m| serde_json::from_slice::<serde_json::Value>(&m.params).ok())
-            .filter(|p| !p.as_object().is_some_and(|o| o.is_empty()))
+            .unwrap_or_else(|| serde_json::json!({}));
+        if !action_params
+            .as_object()
+            .is_some_and(serde_json::Map::is_empty)
         {
-            match (actor_state.fields.as_object_mut(), fields.as_object()) {
+            match (
+                actor_state.fields.as_object_mut(),
+                action_params.as_object(),
+            ) {
                 (Some(existing), Some(new_fields)) => {
                     for (k, v) in new_fields {
                         existing.insert(k.clone(), v.clone());
                     }
                 }
-                _ => actor_state.fields = fields,
+                _ => actor_state.fields = action_params.clone(),
             }
         }
 
-        let eval_ctx = actor_state.to_eval_context();
+        let eval_ctx = temper_jit::table::build_effect_eval_context(&actor_state);
 
         // 2. Evaluate transition table.
         let result = self
@@ -306,15 +307,15 @@ impl Actor for SpecDrivenActor {
             Some(r) if r.success => {
                 let from_status = actor_state.status.clone();
 
-                // 3. Apply effects — may include SetState.
-                for effect in &r.effects {
-                    self.apply_effect(&mut actor_state, effect, ctx).await;
-                }
+                // 3. Apply effects through the shared exhaustive executor.
+                let execution =
+                    temper_jit::table::apply_effects(&mut actor_state, &r.effects, &action_params);
 
                 // 4. Apply state transition fallback (if no SetState effect fired).
                 if actor_state.status == from_status && !r.new_state.is_empty() {
                     actor_state.status = r.new_state.clone();
                 }
+                self.execute_commands(&actor_state, execution, ctx).await?;
 
                 tracing::info!(
                     actor = %self.name,
@@ -348,78 +349,8 @@ impl Actor for SpecDrivenActor {
     }
 }
 
-impl SpecDrivenActor {
-    async fn apply_effect(
-        &self,
-        state: &mut SpecActorState,
-        effect: &temper_jit::table::Effect,
-        ctx: &ActorContext,
-    ) {
-        match effect {
-            temper_jit::table::Effect::SetState(s) => {
-                state.status = s.clone();
-            }
-            temper_jit::table::Effect::IncrementItems => {
-                *state.counters.entry("items".into()).or_default() += 1;
-            }
-            temper_jit::table::Effect::IncrementCounter(var) => {
-                *state.counters.entry(var.clone()).or_default() += 1;
-            }
-            temper_jit::table::Effect::DecrementItems => {
-                let c = state.counters.entry("items".into()).or_default();
-                *c = c.saturating_sub(1);
-            }
-            temper_jit::table::Effect::DecrementCounter(var) => {
-                let c = state.counters.entry(var.clone()).or_default();
-                *c = c.saturating_sub(1);
-            }
-            temper_jit::table::Effect::SetBool { var, value } => {
-                state.booleans.insert(var.clone(), *value);
-            }
-            temper_jit::table::Effect::EmitEvent(emit_name) => {
-                if let Some((target_type, target_action)) = self.routing.get(emit_name.as_str()) {
-                    tracing::info!(actor=%self.name, emit=%emit_name, target=%target_type, target_action=%target_action, "routing emit");
-                    let target =
-                        ActorHandle::new(ctx.self_handle().namespace.clone(), target_type.clone());
-                    ctx.tell(
-                        &target,
-                        SpecMessage::with_params(target_action.clone(), state.fields.clone()),
-                    )
-                    .await;
-                } else {
-                    tracing::warn!(
-                        actor = %self.name,
-                        emit = %emit_name,
-                        "no routing for emit (no reaction rule)"
-                    );
-                }
-            }
-            temper_jit::table::Effect::Custom(trigger_name) => {
-                if let Some((target_type, target_action)) = self.routing.get(trigger_name.as_str())
-                {
-                    tracing::info!(actor=%self.name, trigger=%trigger_name, target=%target_type, target_action=%target_action, "routing trigger");
-                    let target =
-                        ActorHandle::new(ctx.self_handle().namespace.clone(), target_type.clone());
-                    ctx.tell(
-                        &target,
-                        SpecMessage::with_params(target_action.clone(), state.fields.clone()),
-                    )
-                    .await;
-                } else {
-                    tracing::warn!(
-                        actor = %self.name,
-                        trigger = %trigger_name,
-                        "no routing for trigger"
-                    );
-                }
-            }
-            _ => {
-                tracing::debug!("unhandled effect: {:?}", effect);
-            }
-        }
-    }
-}
-
+#[path = "spec_actor/commands.rs"]
+mod commands;
 #[cfg(test)]
 #[path = "spec_actor/tests.rs"]
 mod tests;

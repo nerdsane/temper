@@ -1,6 +1,7 @@
 //! Postgres-backed implementations of Mailbox and ActorActivator.
 
-use std::sync::Arc;
+use std::collections::HashMap;
+use std::sync::{Arc, RwLock};
 use std::time::Duration;
 
 use chrono::{DateTime, Utc};
@@ -197,11 +198,20 @@ pub enum ActivationError {
 pub struct PgActorActivator {
     pool: Pool,
     mailbox: Arc<dyn Mailbox>,
+    handlers: Arc<RwLock<HashMap<String, Arc<dyn Actor>>>>,
 }
 
 impl PgActorActivator {
-    pub fn new(pool: Pool, mailbox: Arc<dyn Mailbox>) -> Self {
-        Self { pool, mailbox }
+    pub fn new(
+        pool: Pool,
+        mailbox: Arc<dyn Mailbox>,
+        handlers: Arc<RwLock<HashMap<String, Arc<dyn Actor>>>>,
+    ) -> Self {
+        Self {
+            pool,
+            mailbox,
+            handlers,
+        }
     }
 
     /// Activate an actor instance.
@@ -338,28 +348,98 @@ impl PgActorActivator {
             return Err(ActivationError::ConcurrencyViolation { expected: version });
         }
 
-        // 6. Flush buffered tell() messages.
+        // 6. Flush buffered child spawns.
+        let pending_spawns = ctx.take_pending_spawns().await;
+        for spawn in &pending_spawns {
+            let handler = self
+                .handlers
+                .read()
+                .map_err(|_| ActivationError::Storage("handler registry poisoned".into()))?
+                .get(&spawn.handle.actor_type)
+                .cloned()
+                .ok_or_else(|| {
+                    ActorError::HandlerFailed(format!(
+                        "spawn target actor type {} is not registered",
+                        spawn.handle.actor_type
+                    ))
+                })?;
+            let initial_state = handler.initial_state_with_fields(spawn.fields.clone())?;
+            tx.execute(
+                schema::CREATE_ACTOR,
+                &[
+                    &spawn.handle.namespace,
+                    &spawn.handle.actor_type,
+                    &initial_state,
+                ],
+            )
+            .await
+            .map_err(|e| ActivationError::Storage(format!("flush spawn: {e}")))?;
+
+            if let Some(initial_message) = &spawn.initial_message {
+                let from_namespace = Some(actor_handle.namespace.as_str());
+                let from_actor = Some(actor_handle.actor_type.as_str());
+                tx.execute(
+                    schema::INSERT_MESSAGE,
+                    &[
+                        &initial_message.to.namespace,
+                        &initial_message.to.actor_type,
+                        &from_namespace,
+                        &from_actor,
+                        &initial_message.message_type,
+                        &initial_message.payload,
+                        &initial_message.correlation_id,
+                    ],
+                )
+                .await
+                .map_err(|e| {
+                    ActivationError::Storage(format!("flush spawn initial message: {e}"))
+                })?;
+            }
+        }
+
+        // 7. Flush buffered tell() messages.
         let pending = ctx.take_pending_tells().await;
         for tell in &pending {
             let from_namespace = Some(actor_handle.namespace.as_str());
             let from_actor = Some(actor_handle.actor_type.as_str());
-            tx.execute(
-                schema::INSERT_MESSAGE,
-                &[
-                    &tell.to.namespace,
-                    &tell.to.actor_type,
-                    &from_namespace,
-                    &from_actor,
-                    &tell.message_type,
-                    &tell.payload,
-                    &tell.correlation_id,
-                ],
-            )
-            .await
-            .map_err(|e| ActivationError::Storage(format!("flush tell: {e}")))?;
+            match tell.deliver_at {
+                Some(deliver_at) => {
+                    tx.execute(
+                        schema::INSERT_SCHEDULED_MESSAGE,
+                        &[
+                            &tell.to.namespace,
+                            &tell.to.actor_type,
+                            &from_namespace,
+                            &from_actor,
+                            &tell.message_type,
+                            &tell.payload,
+                            &tell.correlation_id,
+                            &deliver_at,
+                        ],
+                    )
+                    .await
+                    .map_err(|e| ActivationError::Storage(format!("flush scheduled tell: {e}")))?;
+                }
+                None => {
+                    tx.execute(
+                        schema::INSERT_MESSAGE,
+                        &[
+                            &tell.to.namespace,
+                            &tell.to.actor_type,
+                            &from_namespace,
+                            &from_actor,
+                            &tell.message_type,
+                            &tell.payload,
+                            &tell.correlation_id,
+                        ],
+                    )
+                    .await
+                    .map_err(|e| ActivationError::Storage(format!("flush tell: {e}")))?;
+                }
+            }
         }
 
-        // 7. Commit — lock auto-releases.
+        // 8. Commit — lock auto-releases.
         tx.commit()
             .await
             .map_err(|e| ActivationError::Storage(format!("commit: {e}")))?;
@@ -368,6 +448,7 @@ impl PgActorActivator {
             actor = %actor_handle,
             message_type = %message.message_type,
             tells_flushed = pending.len(),
+            spawns_flushed = pending_spawns.len(),
             "activation complete"
         );
 

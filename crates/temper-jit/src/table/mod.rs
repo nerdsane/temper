@@ -5,10 +5,15 @@
 //! at runtime without any compiled transition logic.
 
 mod builder;
+mod effects;
 mod evaluate;
 pub mod guard;
 pub mod types;
 
+pub use effects::{
+    EffectExecution, EffectState, ScheduleAtRequest, ScheduledAction, SpawnRequest, apply_effects,
+    build_eval_context as build_effect_eval_context,
+};
 pub use guard::{EvalContext, Guard, GuardFailure, GuardFailureKind};
 pub use types::{
     CompositeActionMetadata, CompositeCedarGate, Effect, StateVarMetadata, SubWriteSpec,

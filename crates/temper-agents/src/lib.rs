@@ -20,8 +20,8 @@ use std::sync::Arc;
 
 use temper_actor_runtime::spec_actor::SpecMessage;
 use temper_actor_runtime::{Actor, ActorContext, ActorError, Message};
-use temper_actor_runtime::{ActorSystem, SpecDrivenActor, build_actor_routing};
-use temper_runtime::reaction::parse_reactions;
+use temper_actor_runtime::{ActorSystem, SpecDrivenActor};
+use temper_runtime::reaction::{ReactionRegistry, parse_reactions};
 
 pub use llm::LlmIntegrationActor;
 pub use tool_executor::{ToolDriver, ToolExecutorActor, ToolResult};
@@ -67,44 +67,45 @@ pub async fn register_agent_actors(
 ) -> Result<(), Box<dyn std::error::Error>> {
     let rules = parse_reactions(PROCESS_REACTIONS)
         .map_err(|e| format!("failed to parse reactions: {e}"))?;
+    let reactions = ReactionRegistry::from(rules);
 
     // Process (renamed from Agent) — the orchestrator state machine.
     system
         .register(Arc::new(SpecDrivenActor::from_ioa(
             PROCESS_SPEC,
-            build_actor_routing("Process", &rules),
+            reactions.clone(),
         )?))
         .await?;
     // AgentDefinition — config template, spawns Process instances.
     system
         .register(Arc::new(SpecDrivenActor::from_ioa(
             AGENT_DEFINITION_SPEC,
-            build_actor_routing("AgentDefinition", &rules),
+            reactions.clone(),
         )?))
         .await?;
     // Message — conversation history, written by Process/LLM actors.
     system
         .register(Arc::new(SpecDrivenActor::from_ioa(
             MESSAGE_SPEC,
-            build_actor_routing("Message", &rules),
+            reactions.clone(),
         )?))
         .await?;
     system
         .register(Arc::new(SpecDrivenActor::from_ioa(
             CONTEXT_MANAGER_SPEC,
-            build_actor_routing("ContextManager", &rules),
+            reactions.clone(),
         )?))
         .await?;
     system
         .register(Arc::new(SpecDrivenActor::from_ioa(
             TOOL_ROUTER_SPEC,
-            build_actor_routing("ToolRouter", &rules),
+            reactions.clone(),
         )?))
         .await?;
     system
         .register(Arc::new(SpecDrivenActor::from_ioa(
             COMPACTOR_SPEC,
-            build_actor_routing("Compactor", &rules),
+            reactions,
         )?))
         .await?;
 
@@ -263,22 +264,35 @@ mod tests {
     #[test]
     fn process_reactions_route_core_effects() {
         let rules = parse_reactions(PROCESS_REACTIONS).expect("parse reactions");
-        let routing = build_actor_routing("Process", &rules);
-        assert_eq!(routing.get("PrepareContext").unwrap().0, "ContextManager");
+        let reactions = ReactionRegistry::from(rules);
         assert_eq!(
-            routing.get("ToolCallBatchRequested").unwrap().0,
+            reactions.lookup("Process", "PrepareContext", "")[0]
+                .then
+                .entity_type,
+            "ContextManager"
+        );
+        assert_eq!(
+            reactions.lookup("Process", "ToolCallBatchRequested", "")[0]
+                .then
+                .entity_type,
             "ToolRouter"
         );
         assert_eq!(
-            routing.get("spawn_child").unwrap().0,
+            reactions.lookup("Process", "spawn_child", "")[0]
+                .then
+                .entity_type,
             "ChildSpawnerIntegration"
         );
         assert_eq!(
-            routing.get("schedule_wakeup").unwrap().0,
+            reactions.lookup("Process", "schedule_wakeup", "")[0]
+                .then
+                .entity_type,
             "WakeupSchedulerIntegration"
         );
         assert_eq!(
-            routing.get("notify_parent").unwrap().0,
+            reactions.lookup("Process", "notify_parent", "")[0]
+                .then
+                .entity_type,
             "ChildCompletionIntegration"
         );
     }

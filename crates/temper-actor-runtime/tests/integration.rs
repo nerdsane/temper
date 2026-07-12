@@ -10,6 +10,7 @@ use tokio_postgres::NoTls;
 use uuid::Uuid;
 
 static POSTGRES: OnceCell<ContainerAsync<Postgres>> = OnceCell::const_new();
+static LOCAL_SCHEMA: OnceCell<()> = OnceCell::const_new();
 
 // ─── Proto messages (prost derive) ───────────────────────────────────────────
 
@@ -37,6 +38,23 @@ pub struct GenericMessage {
 // ─── Test setup ──────────────────────────────────────────────────────────────
 
 async fn test_pool() -> deadpool_postgres::Pool {
+    if let Ok(database_url) = std::env::var("TEMPER_TEST_DATABASE_URL") {
+        let mut config = deadpool_postgres::Config::new();
+        config.url = Some(database_url);
+        let pool = config
+            .create_pool(Some(deadpool_postgres::Runtime::Tokio1), NoTls)
+            .expect("local PostgreSQL pool");
+        LOCAL_SCHEMA
+            .get_or_init(|| async {
+                let mut client = pool.get().await.expect("local schema client");
+                temper_actor_runtime::schema::create_tables(&mut client)
+                    .await
+                    .expect("local actor schema");
+            })
+            .await;
+        return pool;
+    }
+
     let pg = POSTGRES
         .get_or_init(|| async {
             let container = Postgres::default()
@@ -49,11 +67,11 @@ async fn test_pool() -> deadpool_postgres::Pool {
                 "host={} port={} user={} password={} dbname={}",
                 host, port, "postgres", "postgres", "postgres"
             );
-            let (client, conn) = tokio_postgres::connect(&connstr, NoTls)
+            let (mut client, conn) = tokio_postgres::connect(&connstr, NoTls)
                 .await
                 .expect("connect failed");
             tokio::spawn(conn);
-            temper_actor_runtime::schema::create_tables(&client)
+            temper_actor_runtime::schema::create_tables(&mut client)
                 .await
                 .expect("schema failed");
             container

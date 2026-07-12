@@ -1,6 +1,6 @@
 //! Actor runtime startup wiring for `temper serve`.
 
-use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::collections::{BTreeMap, BTreeSet};
 use std::sync::{Arc, RwLock};
 
 use anyhow::{Context, Result, anyhow, bail};
@@ -9,10 +9,14 @@ use tokio::sync::watch;
 use tokio_postgres::NoTls;
 
 use temper_actor_runtime::{ActorSystem as PgActorSystem, SchedulerConfig, SpecDrivenActor};
+use temper_runtime::reaction::{
+    ReactionRegistry, ReactionRule as ActorReactionRule, ReactionTarget as ActorReactionTarget,
+    ReactionTrigger as ActorReactionTrigger, TargetResolver as ActorTargetResolver,
+};
 use temper_runtime::tenant::TenantId;
 use temper_server::registry::{EntitySpec, SpecRegistry};
 use temper_server::state::ServerState;
-use temper_spec::automaton::Effect;
+use temper_server::trigger::{ReactionRule as ServerReactionRule, TargetResolver};
 
 use crate::StorageBackend;
 
@@ -44,6 +48,7 @@ pub(super) async fn install_postgres_actor_runtime(
 struct ActorRuntimeDefinition {
     entity_type: String,
     ioa_source: String,
+    reaction_rules: Vec<ActorReactionRule>,
 }
 
 #[derive(Debug)]
@@ -86,8 +91,11 @@ pub(super) async fn configure_postgres_actor_runtime(
 
     let system = Arc::new(PgActorSystem::new(actor_pool, SchedulerConfig::default()));
     for definition in definitions.definitions {
-        let actor = SpecDrivenActor::from_ioa(&definition.ioa_source, HashMap::new())
-            .map_err(|e| anyhow!("failed to build actor for {}: {e}", definition.entity_type))?;
+        let actor = SpecDrivenActor::from_ioa(
+            &definition.ioa_source,
+            ReactionRegistry::from(definition.reaction_rules),
+        )
+        .map_err(|e| anyhow!("failed to build actor for {}: {e}", definition.entity_type))?;
         system.register(Arc::new(actor)).await.with_context(|| {
             format!(
                 "failed to register postgres actor type {}",
@@ -116,11 +124,11 @@ async fn connect_actor_pool(database_url: &str) -> Result<deadpool_postgres::Poo
         .create_pool(Some(Runtime::Tokio1), NoTls)
         .context("failed to create Postgres actor-runtime pool")?;
 
-    let client = pool
+    let mut client = pool
         .get()
         .await
         .context("failed to get Postgres actor-runtime client")?;
-    temper_actor_runtime::schema::create_tables(&client)
+    temper_actor_runtime::schema::create_tables(&mut client)
         .await
         .context("failed to initialize Postgres actor-runtime tables")?;
 
@@ -169,11 +177,17 @@ fn collect_actor_runtime_definitions(
                 anyhow!("missing registry spec for tenant {tenant} entity {entity_type}")
             })?;
             validate_actor_runtime_compatible(tenant, entity_type, spec)?;
+            let reaction_rules = actor_reaction_rules(registry, tenant, entity_type, &selected)?;
 
             match definitions.get(entity_type) {
-                Some(existing) if existing.ioa_source != spec.ioa_source => bail!(
-                    "actor-backed entity type {entity_type:?} has different IOA sources across tenants; the current Postgres actor runtime supports one handler per actor type"
-                ),
+                Some(existing)
+                    if existing.ioa_source != spec.ioa_source
+                        || existing.reaction_rules != reaction_rules =>
+                {
+                    bail!(
+                        "actor-backed entity type {entity_type:?} has different IOA or reaction definitions across tenants; the current Postgres actor runtime supports one handler per actor type"
+                    )
+                }
                 Some(_) => {}
                 None => {
                     definitions.insert(
@@ -181,6 +195,7 @@ fn collect_actor_runtime_definitions(
                         ActorRuntimeDefinition {
                             entity_type: entity_type.to_string(),
                             ioa_source: spec.ioa_source.clone(),
+                            reaction_rules,
                         },
                     );
                 }
@@ -258,160 +273,81 @@ fn validate_actor_runtime_compatible(
         );
     }
 
-    for action in &spec.automaton.actions {
-        if !action.triggers.is_empty() {
-            bail!(
-                "tenant {tenant} entity {entity_type} action {} declares action triggers, which are not yet supported by --actor-runtime postgres",
-                action.name
-            );
-        }
-        for effect in &action.effect {
-            match effect {
-                Effect::Increment {
-                    amount: Some(_), ..
-                }
-                | Effect::Decrement {
-                    amount: Some(_), ..
-                }
-                | Effect::SetCounterFromParam { .. }
-                | Effect::ListAppend { .. }
-                | Effect::ListRemoveAt { .. }
-                | Effect::Trigger { .. }
-                | Effect::Schedule { .. }
-                | Effect::ScheduleAt { .. }
-                | Effect::Spawn { .. } => {
-                    bail!(
-                        "tenant {tenant} entity {entity_type} action {} uses effect {:?}, which is not yet supported by --actor-runtime postgres",
-                        action.name,
-                        effect
-                    );
-                }
-                Effect::Increment { amount: None, .. }
-                | Effect::Decrement { amount: None, .. }
-                | Effect::SetBool { .. }
-                | Effect::Emit { .. } => {}
-            }
-        }
-    }
     Ok(())
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use temper_spec::csdl::parse_csdl;
-
-    const CSDL_XML: &str = include_str!("../../../../test-fixtures/specs/model.csdl.xml");
-    const ORDER_IOA: &str = include_str!("../../../../test-fixtures/specs/order.ioa.toml");
-    const PROCESS_IOA: &str = include_str!("../../../../test-fixtures/specs/process.ioa.toml");
-
-    fn registry_with(tenant: &str, entity_type: &str, ioa_source: &str) -> SpecRegistry {
-        let csdl = parse_csdl(CSDL_XML).expect("CSDL should parse");
-        let mut registry = SpecRegistry::new();
-        registry.register_tenant(
-            tenant,
-            csdl,
-            CSDL_XML.to_string(),
-            &[(entity_type, ioa_source)],
-        );
-        registry
+fn actor_reaction_rules(
+    registry: &SpecRegistry,
+    tenant: &TenantId,
+    entity_type: &str,
+    selected: &ActorBackedSelection,
+) -> Result<Vec<ActorReactionRule>> {
+    let mut converted = Vec::new();
+    for rule in registry
+        .reaction_rules_for_tenant(tenant)
+        .into_iter()
+        .filter(|rule| rule.when.entity_type == entity_type)
+    {
+        let target_type = &rule.then.entity_type;
+        if registry.get_spec(tenant, target_type).is_none()
+            || !selected.matches(tenant.as_str(), target_type)
+        {
+            bail!(
+                "tenant {tenant} reaction {:?} targets actor type {target_type:?}, which must be loaded and selected for --actor-runtime postgres",
+                rule.name
+            );
+        }
+        converted.push(actor_reaction_rule(tenant, &rule)?);
     }
-
-    #[test]
-    fn parses_actor_backed_type_tokens() {
-        let parsed = parse_actor_backed_types(&["Order,Invoice".into(), "Customer".into()])
-            .expect("actor-backed type list should parse");
-        assert!(!parsed.all);
-        assert!(parsed.global_types.contains("Order"));
-        assert!(parsed.global_types.contains("Invoice"));
-        assert!(parsed.global_types.contains("Customer"));
-    }
-
-    #[test]
-    fn parses_tenant_scoped_actor_backed_type_tokens() {
-        let parsed = parse_actor_backed_types(&["alpha:Order,beta:Invoice".into()])
-            .expect("tenant-scoped actor-backed type list should parse");
-
-        assert!(!parsed.all);
-        assert!(
-            parsed
-                .tenant_types
-                .contains(&("alpha".into(), "Order".into()))
-        );
-        assert!(
-            parsed
-                .tenant_types
-                .contains(&("beta".into(), "Invoice".into()))
-        );
-    }
-
-    #[test]
-    fn parses_all_actor_backed_types() {
-        assert!(
-            parse_actor_backed_types(&["all".into()])
-                .expect("all selector should parse")
-                .all
-        );
-        assert!(
-            parse_actor_backed_types(&["*".into()])
-                .expect("wildcard selector should parse")
-                .all
-        );
-    }
-
-    #[test]
-    fn rejects_all_mixed_with_specific_types() {
-        let err = parse_actor_backed_types(&["all".into(), "Order".into()]).unwrap_err();
-        assert!(err.to_string().contains("cannot be combined"));
-    }
-
-    #[test]
-    fn collects_compatible_registry_specs() {
-        let registry = registry_with("alpha", "Order", ORDER_IOA);
-        let definitions = collect_actor_runtime_definitions(&registry, &[])
-            .expect("compatible registry specs should collect");
-
-        assert_eq!(definitions.definitions.len(), 1);
-        assert_eq!(definitions.definitions[0].entity_type, "Order");
-        assert!(definitions.actor_backed_keys.contains("Order"));
-    }
-
-    #[test]
-    fn collects_tenant_scoped_registry_specs() {
-        let registry = registry_with("alpha", "Order", ORDER_IOA);
-        let definitions = collect_actor_runtime_definitions(&registry, &["alpha:Order".into()])
-            .expect("tenant-scoped registry specs should collect");
-
-        assert_eq!(definitions.definitions.len(), 1);
-        assert_eq!(definitions.definitions[0].entity_type, "Order");
-        assert!(definitions.actor_backed_keys.contains("alpha:Order"));
-    }
-
-    #[test]
-    fn rejects_missing_explicit_actor_backed_type() {
-        let registry = registry_with("alpha", "Order", ORDER_IOA);
-        let err = collect_actor_runtime_definitions(&registry, &["Invoice".into()]).unwrap_err();
-
-        assert!(err.to_string().contains("is not loaded"));
-    }
-
-    #[test]
-    fn rejects_unsupported_actor_effects() {
-        let registry = registry_with("alpha", "Process", PROCESS_IOA);
-        let err = collect_actor_runtime_definitions(&registry, &["Process".into()]).unwrap_err();
-
-        assert!(err.to_string().contains("not yet supported"));
-    }
-
-    #[test]
-    fn rejects_conflicting_same_named_specs_across_tenants() {
-        let mut registry = registry_with("alpha", "Order", ORDER_IOA);
-        let csdl = parse_csdl(CSDL_XML).expect("CSDL should parse");
-        let beta_ioa = ORDER_IOA.replace("initial = \"Draft\"", "initial = \"Submitted\"");
-        registry.register_tenant("beta", csdl, CSDL_XML.to_string(), &[("Order", &beta_ioa)]);
-
-        let err = collect_actor_runtime_definitions(&registry, &["Order".into()]).unwrap_err();
-
-        assert!(err.to_string().contains("different IOA sources"));
-    }
+    Ok(converted)
 }
+
+fn actor_reaction_rule(tenant: &TenantId, rule: &ServerReactionRule) -> Result<ActorReactionRule> {
+    if rule.when.guard.is_some()
+        || rule.principal.is_some()
+        || !rule.then.params_from.is_empty()
+        || !empty_params(&rule.then.params)
+    {
+        bail!(
+            "tenant {tenant} reaction {:?} uses guarded, principal, or parameter mapping semantics that --actor-runtime postgres cannot preserve",
+            rule.name
+        );
+    }
+    let resolve_target = match &rule.resolve_target {
+        TargetResolver::SameId => ActorTargetResolver::SameId,
+        TargetResolver::Field { field } => ActorTargetResolver::Field {
+            field: field.clone(),
+        },
+        TargetResolver::Static { entity_id } => ActorTargetResolver::Static {
+            entity_id: entity_id.clone(),
+        },
+        TargetResolver::CreateIfMissing { id_field } => ActorTargetResolver::CreateIfMissing {
+            id_field: id_field.clone(),
+        },
+        TargetResolver::Create => bail!(
+            "tenant {tenant} reaction {:?} uses create target resolution, which --actor-runtime postgres cannot preserve",
+            rule.name
+        ),
+    };
+    Ok(ActorReactionRule {
+        name: rule.name.clone(),
+        when: ActorReactionTrigger {
+            entity_type: rule.when.entity_type.clone(),
+            action: rule.when.action.clone(),
+            to_state: rule.when.to_state.clone(),
+        },
+        then: ActorReactionTarget {
+            entity_type: rule.then.entity_type.clone(),
+            action: rule.then.action.clone(),
+        },
+        resolve_target,
+    })
+}
+
+fn empty_params(params: &serde_json::Value) -> bool {
+    params.is_null() || params.as_object().is_some_and(serde_json::Map::is_empty)
+}
+
+#[cfg(test)]
+#[path = "actor_runtime/tests.rs"]
+mod tests;

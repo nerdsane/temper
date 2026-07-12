@@ -5,7 +5,13 @@ use tokio::sync::Mutex;
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
+use temper_runtime::scheduler::sim_now;
 use uuid::Uuid;
+
+/// Maximum outbound messages buffered by one actor activation.
+const MAX_BUFFERED_TELLS_PER_ACTIVATION: usize = 256;
+/// Maximum child creations buffered by one actor activation.
+const MAX_BUFFERED_SPAWNS_PER_ACTIVATION: usize = 8;
 
 /// An actor's address: `(namespace, actor_type)`.
 ///
@@ -81,6 +87,15 @@ pub(crate) struct BufferedTell {
     pub message_type: String,
     pub payload: Vec<u8>,
     pub correlation_id: Option<Uuid>,
+    pub deliver_at: Option<DateTime<Utc>>,
+}
+
+/// A child actor creation buffered until the parent activation commits.
+#[derive(Debug, Clone)]
+pub(crate) struct BufferedSpawn {
+    pub handle: ActorHandle,
+    pub fields: serde_json::Value,
+    pub initial_message: Option<BufferedTell>,
 }
 
 /// Errors from actor operations.
@@ -107,6 +122,8 @@ pub struct ActorContext {
     self_handle: ActorHandle,
     /// Buffered tell() messages — flushed to PG on successful activation.
     pub(crate) pending_tells: Mutex<Vec<BufferedTell>>,
+    /// Buffered child spawns — flushed atomically with actor state.
+    pub(crate) pending_spawns: Mutex<Vec<BufferedSpawn>>,
     /// Mailbox reference for ask() (immediate I/O).
     pub(crate) mailbox: Option<std::sync::Arc<dyn crate::mailbox::Mailbox>>,
     /// Pool for spawn/lookup operations.
@@ -123,6 +140,7 @@ impl ActorContext {
         Self {
             self_handle,
             pending_tells: Mutex::new(Vec::new()),
+            pending_spawns: Mutex::new(Vec::new()),
             mailbox,
             pool,
         }
@@ -186,18 +204,60 @@ impl ActorContext {
     /// activation transaction succeeds. If handle() fails, tells are discarded.
     /// Message type is auto-derived from the proto type name.
     pub async fn tell<M: prost::Message>(&self, to: &ActorHandle, msg: M) {
-        self.pending_tells.lock().await.push(BufferedTell {
+        let mut pending = self.pending_tells.lock().await;
+        assert!(
+            pending.len() < MAX_BUFFERED_TELLS_PER_ACTIVATION,
+            "actor activation exceeded buffered tell budget of {MAX_BUFFERED_TELLS_PER_ACTIVATION}"
+        );
+        pending.push(BufferedTell {
             to: to.clone(),
             message_type: type_name_of::<M>(),
             payload: msg.encode_to_vec(),
             correlation_id: None,
+            deliver_at: None,
         });
+    }
+
+    /// Buffer a message for durable delivery at an absolute timestamp.
+    pub async fn tell_at<M: prost::Message>(
+        &self,
+        to: &ActorHandle,
+        msg: M,
+        deliver_at: DateTime<Utc>,
+    ) {
+        let mut pending = self.pending_tells.lock().await;
+        assert!(
+            pending.len() < MAX_BUFFERED_TELLS_PER_ACTIVATION,
+            "actor activation exceeded buffered tell budget of {MAX_BUFFERED_TELLS_PER_ACTIVATION}"
+        );
+        pending.push(BufferedTell {
+            to: to.clone(),
+            message_type: type_name_of::<M>(),
+            payload: msg.encode_to_vec(),
+            correlation_id: None,
+            deliver_at: Some(deliver_at),
+        });
+    }
+
+    /// Buffer a message for durable delivery after a relative delay.
+    pub async fn tell_after<M: prost::Message>(
+        &self,
+        to: &ActorHandle,
+        msg: M,
+        delay: chrono::Duration,
+    ) {
+        self.tell_at(to, msg, sim_now() + delay).await;
     }
 
     /// Reply to an ask() message. Convenience for tell() with correlation_id set.
     pub async fn reply<M: prost::Message>(&self, original: &Message, msg: M) {
         if let Some(cid) = original.correlation_id {
-            self.pending_tells.lock().await.push(BufferedTell {
+            let mut pending = self.pending_tells.lock().await;
+            assert!(
+                pending.len() < MAX_BUFFERED_TELLS_PER_ACTIVATION,
+                "actor activation exceeded buffered tell budget of {MAX_BUFFERED_TELLS_PER_ACTIVATION}"
+            );
+            pending.push(BufferedTell {
                 to: original
                     .from
                     .clone()
@@ -205,8 +265,30 @@ impl ActorContext {
                 message_type: type_name_of::<M>(),
                 payload: msg.encode_to_vec(),
                 correlation_id: Some(cid),
+                deliver_at: None,
             });
         }
+    }
+
+    /// Buffer a child actor creation and optional initial message.
+    pub(crate) async fn buffer_spawn(
+        &self,
+        handle: ActorHandle,
+        fields: serde_json::Value,
+        initial_message: Option<BufferedTell>,
+    ) -> Result<(), ActorError> {
+        let mut pending = self.pending_spawns.lock().await;
+        if pending.len() >= MAX_BUFFERED_SPAWNS_PER_ACTIVATION {
+            return Err(ActorError::HandlerFailed(format!(
+                "actor activation exceeded buffered spawn budget of {MAX_BUFFERED_SPAWNS_PER_ACTIVATION}"
+            )));
+        }
+        pending.push(BufferedSpawn {
+            handle,
+            fields,
+            initial_message,
+        });
+        Ok(())
     }
 
     /// Request-response. Sends a message immediately and blocks until a reply
@@ -297,6 +379,11 @@ impl ActorContext {
     pub(crate) async fn take_pending_tells(&self) -> Vec<BufferedTell> {
         self.pending_tells.lock().await.drain(..).collect()
     }
+
+    /// Take buffered child spawns (consumed by the activator on commit).
+    pub(crate) async fn take_pending_spawns(&self) -> Vec<BufferedSpawn> {
+        self.pending_spawns.lock().await.drain(..).collect()
+    }
 }
 
 /// The core actor trait.
@@ -311,6 +398,18 @@ pub trait Actor: Send + Sync + 'static {
     /// Initial state for a new actor instance (serialized bytes).
     fn initial_state(&self) -> Vec<u8> {
         vec![]
+    }
+
+    /// Build initial state with runtime-provided fields for a spawned actor.
+    fn initial_state_with_fields(&self, fields: serde_json::Value) -> Result<Vec<u8>, ActorError> {
+        if fields.as_object().is_some_and(serde_json::Map::is_empty) || fields.is_null() {
+            Ok(self.initial_state())
+        } else {
+            Err(ActorError::HandlerFailed(format!(
+                "actor {} does not accept spawn fields",
+                self.actor_type()
+            )))
+        }
     }
 
     /// Handle a single message.

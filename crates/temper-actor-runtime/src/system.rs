@@ -25,12 +25,13 @@ impl ActorSystem {
     /// Create a new actor system backed by PG.
     pub fn new(pool: Pool, scheduler_config: SchedulerConfig) -> Self {
         let mailbox = Arc::new(PgMailbox::new(pool.clone(), PgMailboxConfig::default()));
-        let activator = PgActorActivator::new(pool.clone(), mailbox.clone());
+        let handlers = Arc::new(RwLock::new(HashMap::new()));
+        let activator = PgActorActivator::new(pool.clone(), mailbox.clone(), handlers.clone());
         Self {
             pool,
             mailbox,
             activator,
-            handlers: Arc::new(RwLock::new(HashMap::new())),
+            handlers,
             scheduler_config,
         }
     }

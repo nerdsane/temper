@@ -24,7 +24,5 @@ pub use bus::{BUS_ACTOR_TYPE, CallMsg, CallReply, StreamMsg};
 pub use mailbox::{Mailbox, MailboxError};
 pub use pg::{ActivationError, ActivationResult, PgActorActivator, PgMailbox, PgMailboxConfig};
 pub use scheduler::{Scheduler, SchedulerConfig};
-pub use spec_actor::{
-    SpecActorState, SpecDrivenActor, SpecMessage, build_actor_routing, build_routing_maps,
-};
+pub use spec_actor::{SpecActorState, SpecDrivenActor, SpecMessage};
 pub use system::ActorSystem;

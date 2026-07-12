@@ -5,9 +5,23 @@ use deadpool_postgres::{Config as PgConfig, Pool};
 use testcontainers::ContainerAsync;
 use testcontainers_modules::postgres::Postgres;
 
-/// Start a fresh isolated Postgres container per test. Drop ContainerAsync to stop it.
-pub async fn setup_test_pg() -> (Pool, ContainerAsync<Postgres>) {
+/// Keeps an optional PostgreSQL testcontainer alive for the duration of a test.
+pub struct TestPostgres {
+    _container: Option<ContainerAsync<Postgres>>,
+}
+
+/// Start isolated PostgreSQL for a test, using `TEMPER_TEST_DATABASE_URL` when provided.
+pub async fn setup_test_pg() -> (Pool, TestPostgres) {
     use testcontainers::runners::AsyncRunner;
+
+    if let Ok(database_url) = std::env::var("TEMPER_TEST_DATABASE_URL") {
+        let mut config = PgConfig::new();
+        config.url = Some(database_url);
+        return (
+            configured_pool(config).await,
+            TestPostgres { _container: None },
+        );
+    }
 
     let container = Postgres::default()
         .start()
@@ -24,19 +38,12 @@ pub async fn setup_test_pg() -> (Pool, ContainerAsync<Postgres>) {
     cfg.password = Some("postgres".to_string());
     cfg.dbname = Some("postgres".to_string());
 
-    let pool = cfg
-        .create_pool(
-            Some(deadpool_postgres::Runtime::Tokio1),
-            tokio_postgres::NoTls,
-        )
-        .expect("create pool");
-
-    let client = pool.get().await.expect("get client");
-    crate::schema::create_tables(&client)
-        .await
-        .expect("apply schema");
-
-    (pool, container)
+    (
+        configured_pool(cfg).await,
+        TestPostgres {
+            _container: Some(container),
+        },
+    )
 }
 
 /// Start a shared Postgres container (one per test binary, container leaked intentionally).
@@ -45,6 +52,12 @@ pub async fn setup_shared_pg() -> Pool {
     static POOL: OnceLock<Pool> = OnceLock::new();
     if let Some(p) = POOL.get() {
         return p.clone();
+    }
+    if let Ok(database_url) = std::env::var("TEMPER_TEST_DATABASE_URL") {
+        let mut config = PgConfig::new();
+        config.url = Some(database_url);
+        let pool = configured_pool(config).await;
+        return POOL.get_or_init(|| pool.clone()).clone();
     }
     use testcontainers::runners::AsyncRunner;
 
@@ -66,17 +79,22 @@ pub async fn setup_shared_pg() -> Pool {
     cfg.password = Some("postgres".to_string());
     cfg.dbname = Some("postgres".to_string());
 
-    let pool = cfg
+    let pool = configured_pool(cfg).await;
+
+    POOL.get_or_init(|| pool.clone()).clone()
+}
+
+async fn configured_pool(config: PgConfig) -> Pool {
+    let pool = config
         .create_pool(
             Some(deadpool_postgres::Runtime::Tokio1),
             tokio_postgres::NoTls,
         )
         .expect("create pool");
 
-    let client = pool.get().await.expect("get client");
-    crate::schema::create_tables(&client)
+    let mut client = pool.get().await.expect("get client");
+    crate::schema::create_tables(&mut client)
         .await
         .expect("apply schema");
-
-    POOL.get_or_init(|| pool.clone()).clone()
+    pool
 }

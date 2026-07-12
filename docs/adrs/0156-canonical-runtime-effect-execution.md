@@ -73,9 +73,12 @@ activation transaction:
 
 The scheduler promotes due rows from the scheduled-message table into the ordinary
 mailbox before actor discovery. Promotion is one bounded PostgreSQL statement: a CTE
-selects due rows in `(deliver_at, id)` order, deletes those rows, and inserts their
-payloads into `actor_messages` in the same statement and transaction. A failed insert
-rolls the deletion back. Only promoted rows receive ordinary mailbox IDs, so
+serializes promoters with a transaction-scoped advisory lock, selects due rows in
+`(deliver_at, id)` order, deletes those rows, and inserts their payloads into
+`actor_messages` in the same statement and transaction. Serializing promotion prevents
+another scheduler worker from skipping an earlier locked timer and assigning a later
+timer the lower mailbox ID. A failed insert rolls the deletion back. Only promoted rows
+receive ordinary mailbox IDs, so
 `last_msg_id` never advances past an ineligible delayed message and existing FIFO cursor
 semantics remain unchanged. The promotion batch has an explicit budget and a later poll
 continues any remaining due work.

@@ -86,6 +86,13 @@ impl Scheduler {
     pub async fn poll_once(&self) -> Result<usize, anyhow::Error> {
         let client = self.pool.get().await?;
 
+        let promoted = client
+            .execute(schema::PROMOTE_DUE_MESSAGES, &[&self.config.batch_size])
+            .await?;
+        if promoted > 0 {
+            debug!(promoted, "promoted due actor messages");
+        }
+
         let rows = client
             .query(schema::FIND_PENDING_ACTORS, &[&self.config.batch_size])
             .await?;

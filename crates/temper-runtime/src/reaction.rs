@@ -14,7 +14,7 @@
 //! resolve_target = { type = "SameId" }
 //! ```
 
-use std::collections::HashMap;
+use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
 
@@ -25,7 +25,7 @@ pub const MAX_REACTIONS_PER_ACTOR: usize = 256;
 pub const MAX_REACTION_DEPTH: u32 = 8;
 
 /// A reaction rule: when actor X emits Y, tell actor Z action A.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ReactionRule {
     /// Human-readable name for logging and debugging.
     pub name: String,
@@ -38,7 +38,7 @@ pub struct ReactionRule {
 }
 
 /// Trigger condition for a reaction rule.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ReactionTrigger {
     /// The actor type that emits (e.g., "Agent").
     pub entity_type: String,
@@ -49,7 +49,7 @@ pub struct ReactionTrigger {
 }
 
 /// The target action to dispatch when a reaction fires.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ReactionTarget {
     /// The actor type to tell (e.g., "ContextManager").
     pub entity_type: String,
@@ -58,7 +58,7 @@ pub struct ReactionTarget {
 }
 
 /// How to resolve the target actor's namespace/ID.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
 #[serde(tag = "type")]
 pub enum TargetResolver {
     /// Same namespace as the source actor (most common for session actors).
@@ -77,8 +77,8 @@ pub enum TargetResolver {
 /// No tenant isolation — namespace already encodes tenant context.
 #[derive(Debug, Clone, Default)]
 pub struct ReactionRegistry {
-    /// Index: key = "ActorType:EmitName" or "ActorType:*"
-    index: HashMap<String, Vec<ReactionRule>>,
+    /// Index: key = "ActorType:EmitName" or "ActorType:*".
+    index: BTreeMap<String, Vec<ReactionRule>>,
 }
 
 impl ReactionRegistry {
@@ -116,13 +116,20 @@ impl ReactionRegistry {
                 }
             }
         }
-
         results
     }
 
     /// Is the registry empty?
     pub fn is_empty(&self) -> bool {
         self.index.is_empty()
+    }
+}
+
+impl From<Vec<ReactionRule>> for ReactionRegistry {
+    fn from(rules: Vec<ReactionRule>) -> Self {
+        let mut registry = Self::new();
+        registry.register(rules);
+        registry
     }
 }
 
@@ -231,68 +238,5 @@ pub fn parse_reactions(toml_str: &str) -> Result<Vec<ReactionRule>, String> {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn rule(from_type: &str, emit: &str, to_type: &str, to_action: &str) -> ReactionRule {
-        ReactionRule {
-            name: format!("{from_type}_{emit}_to_{to_type}"),
-            when: ReactionTrigger {
-                entity_type: from_type.to_string(),
-                action: Some(emit.to_string()),
-                to_state: None,
-            },
-            then: ReactionTarget {
-                entity_type: to_type.to_string(),
-                action: to_action.to_string(),
-            },
-            resolve_target: TargetResolver::SameId,
-        }
-    }
-
-    #[test]
-    fn test_lookup_exact() {
-        let mut reg = ReactionRegistry::new();
-        reg.register(vec![rule(
-            "Agent",
-            "PrepareContext",
-            "ContextManager",
-            "PrepareContext",
-        )]);
-        let results = reg.lookup("Agent", "PrepareContext", "");
-        assert_eq!(results.len(), 1);
-        assert_eq!(results[0].then.entity_type, "ContextManager");
-    }
-
-    #[test]
-    fn test_no_match() {
-        let reg = ReactionRegistry::new();
-        assert!(reg.lookup("Agent", "PrepareContext", "").is_empty());
-    }
-
-    #[test]
-    fn test_parse_reactions_toml() {
-        let toml = r#"
-[[reaction]]
-name = "agent_requests_context"
-[reaction.when]
-entity_type = "Agent"
-action = "StartProcess"
-[reaction.then]
-entity_type = "ContextManager"
-action = "PrepareContext"
-[reaction.resolve_target]
-type = "SameId"
-"#;
-        let rules = parse_reactions(toml).unwrap();
-        assert_eq!(rules.len(), 1);
-        assert_eq!(rules[0].name, "agent_requests_context");
-        assert_eq!(rules[0].then.entity_type, "ContextManager");
-        assert_eq!(rules[0].resolve_target, TargetResolver::SameId);
-    }
-
-    #[test]
-    fn test_parse_empty() {
-        assert!(parse_reactions("").unwrap().is_empty());
-    }
-}
+#[path = "reaction/tests.rs"]
+mod tests;

@@ -366,26 +366,32 @@ impl SpecRegistry {
         )
     }
 
-    /// Build a [`ReactionRegistry`] from all tenants' reaction rules,
-    /// including synthesized rules from `[[agent_trigger]]` sections.
-    pub fn build_reaction_registry(&self) -> ReactionRegistry {
-        let mut registry = ReactionRegistry::new();
-        for (tenant, config) in &self.tenants {
-            let mut rules = config.reactions.clone();
-            // ADR-0046: synthesize reaction rules from [[action.triggers]]
-            // entity-kind blocks on every entity's actions. Wasm/Webhook
-            // kinds are handled by a separate runtime path.
-            for (entity_type, spec) in &config.entities {
-                for action in &spec.automaton.actions {
-                    for trigger in &action.triggers {
-                        if let Some(rule) =
-                            synthesize_action_trigger_reaction(entity_type, &action.name, trigger)
-                        {
-                            rules.push(rule);
-                        }
+    /// Return a tenant's declared and inline-synthesized reaction rules.
+    pub fn reaction_rules_for_tenant(&self, tenant: &TenantId) -> Vec<ReactionRule> {
+        let Some(config) = self.tenants.get(tenant) else {
+            return Vec::new();
+        };
+        let mut rules = config.reactions.clone();
+        for (entity_type, spec) in &config.entities {
+            for action in &spec.automaton.actions {
+                for trigger in &action.triggers {
+                    if let Some(rule) =
+                        synthesize_action_trigger_reaction(entity_type, &action.name, trigger)
+                    {
+                        rules.push(rule);
                     }
                 }
             }
+        }
+        rules
+    }
+
+    /// Build a [`ReactionRegistry`] from all tenants' reaction rules,
+    /// including synthesized rules from `[[action.triggers]]` sections.
+    pub fn build_reaction_registry(&self) -> ReactionRegistry {
+        let mut registry = ReactionRegistry::new();
+        for tenant in self.tenants.keys() {
+            let rules = self.reaction_rules_for_tenant(tenant);
             if !rules.is_empty() {
                 registry.register_tenant_rules(tenant.clone(), rules);
             }
