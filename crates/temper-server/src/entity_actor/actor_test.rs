@@ -865,6 +865,331 @@ async fn replay_skips_schema_mismatched_events() {
     assert_eq!(response.state.total_event_count, 1);
 }
 
+/// ARN-189: PATCH-style field updates must be journaled — a merge applied via
+/// `EntityMsg::UpdateFields` has to survive actor eviction/restart, or any
+/// OData PATCH is silently lost the moment the actor rehydrates from the
+/// event store.
+#[cfg(feature = "sim")]
+#[tokio::test]
+async fn patched_fields_survive_actor_restart() {
+    use temper_store_sim::SimEventStore;
+
+    let store = Arc::new(SimEventStore::no_faults(7));
+    let entity_id = "arn189-patch-1";
+    let pid = format!("default:Order:{entity_id}");
+
+    // Generation 1: live actor accepts the PATCH merge.
+    let system = ActorSystem::new("sim-arn189-patch-a");
+    let actor = EntityActor::with_persistence(
+        "Order",
+        entity_id,
+        order_table(),
+        serde_json::json!({}),
+        crate::storage::BoxedEventStore::from_arc(store.clone()),
+        crate::storage::BackendLabel::Sim,
+    );
+    let actor_ref = system.spawn(actor, entity_id);
+    let response: EntityResponse = actor_ref
+        .ask(
+            EntityMsg::UpdateFields {
+                fields: serde_json::json!({"Title": "durable title", "Priority": 3}),
+                replace: false,
+            },
+            Duration::from_secs(5),
+        )
+        .await
+        .unwrap();
+    assert!(response.success);
+    assert_eq!(
+        response.state.fields.get("Title").and_then(|v| v.as_str()),
+        Some("durable title"),
+        "live merge must apply"
+    );
+
+    // Generation 2: fresh actor over the same store — replay is the only input.
+    let system2 = ActorSystem::new("sim-arn189-patch-b");
+    let actor2 = EntityActor::with_persistence(
+        "Order",
+        entity_id,
+        order_table(),
+        serde_json::json!({}),
+        crate::storage::BoxedEventStore::from_arc(store.clone()),
+        crate::storage::BackendLabel::Sim,
+    );
+    let actor_ref2 = system2.spawn(actor2, entity_id);
+    let rehydrated: EntityResponse = actor_ref2
+        .ask(EntityMsg::GetState, Duration::from_secs(5))
+        .await
+        .unwrap();
+    assert_eq!(
+        rehydrated.state.fields.get("Title").and_then(|v| v.as_str()),
+        Some("durable title"),
+        "PATCHed field must survive restart via journal replay (pid {pid})"
+    );
+    assert_eq!(
+        rehydrated
+            .state
+            .fields
+            .get("Priority")
+            .and_then(|v| v.as_i64()),
+        Some(3),
+        "all merged fields must survive restart"
+    );
+}
+
+/// ARN-189: PUT-style replacement must also be journaled with REPLACE
+/// semantics — after restart the replaced field set must match the live
+/// result, including the absence of keys the replacement dropped.
+#[cfg(feature = "sim")]
+#[tokio::test]
+async fn replaced_fields_survive_actor_restart_with_replace_semantics() {
+    use temper_store_sim::SimEventStore;
+
+    let store = Arc::new(SimEventStore::no_faults(11));
+    let entity_id = "arn189-put-1";
+
+    let system = ActorSystem::new("sim-arn189-put-a");
+    let actor = EntityActor::with_persistence(
+        "Order",
+        entity_id,
+        order_table(),
+        serde_json::json!({}),
+        crate::storage::BoxedEventStore::from_arc(store.clone()),
+        crate::storage::BackendLabel::Sim,
+    );
+    let actor_ref = system.spawn(actor, entity_id);
+
+    // First a merge that introduces a key the later replacement drops.
+    let merged: EntityResponse = actor_ref
+        .ask(
+            EntityMsg::UpdateFields {
+                fields: serde_json::json!({"Title": "before", "Legacy": "drop me"}),
+                replace: false,
+            },
+            Duration::from_secs(5),
+        )
+        .await
+        .unwrap();
+    assert!(merged.success);
+
+    // PUT: full replacement (Id/Status are preserved by the live path).
+    let replaced: EntityResponse = actor_ref
+        .ask(
+            EntityMsg::UpdateFields {
+                fields: serde_json::json!({"Title": "after"}),
+                replace: true,
+            },
+            Duration::from_secs(5),
+        )
+        .await
+        .unwrap();
+    assert!(replaced.success);
+    assert!(
+        replaced.state.fields.get("Legacy").is_none(),
+        "live replacement must drop absent keys"
+    );
+
+    let system2 = ActorSystem::new("sim-arn189-put-b");
+    let actor2 = EntityActor::with_persistence(
+        "Order",
+        entity_id,
+        order_table(),
+        serde_json::json!({}),
+        crate::storage::BoxedEventStore::from_arc(store.clone()),
+        crate::storage::BackendLabel::Sim,
+    );
+    let actor_ref2 = system2.spawn(actor2, entity_id);
+    let rehydrated: EntityResponse = actor_ref2
+        .ask(EntityMsg::GetState, Duration::from_secs(5))
+        .await
+        .unwrap();
+    assert_eq!(
+        rehydrated.state.fields.get("Title").and_then(|v| v.as_str()),
+        Some("after"),
+        "replaced field value must survive restart"
+    );
+    assert!(
+        rehydrated.state.fields.get("Legacy").is_none(),
+        "replacement semantics must survive restart — dropped keys must not resurrect"
+    );
+    assert_eq!(
+        rehydrated.state.fields.get("Id").and_then(|v| v.as_str()),
+        Some(entity_id),
+        "Id must be preserved through replace + replay"
+    );
+}
+
+/// Delegating event store whose appends fail once `armed` is set. Lets a test
+/// start an actor normally (bootstrap Created append succeeds) and then fail
+/// exactly the append under test, deterministically.
+#[cfg(feature = "sim")]
+struct AppendFuseStore {
+    inner: temper_store_sim::SimEventStore,
+    armed: std::sync::atomic::AtomicBool,
+}
+
+#[cfg(feature = "sim")]
+impl AppendFuseStore {
+    fn fuse_err(&self) -> Option<temper_runtime::persistence::PersistenceError> {
+        if self.armed.load(std::sync::atomic::Ordering::SeqCst) {
+            Some(temper_runtime::persistence::PersistenceError::Storage(
+                "injected append failure (fuse armed)".to_string(),
+            ))
+        } else {
+            None
+        }
+    }
+}
+
+#[cfg(feature = "sim")]
+impl temper_runtime::persistence::EventStore for AppendFuseStore {
+    async fn append(
+        &self,
+        persistence_id: &str,
+        expected_sequence: u64,
+        events: &[PersistenceEnvelope],
+    ) -> Result<u64, temper_runtime::persistence::PersistenceError> {
+        if let Some(e) = self.fuse_err() {
+            return Err(e);
+        }
+        self.inner
+            .append(persistence_id, expected_sequence, events)
+            .await
+    }
+
+    async fn append_with_index_rows(
+        &self,
+        persistence_id: &str,
+        expected_sequence: u64,
+        events: &[PersistenceEnvelope],
+        key_rows: &[temper_runtime::persistence::EntityKeyRow],
+        vector_rows: &[temper_runtime::persistence::EntityVectorRow],
+        reconcile_vectors: bool,
+    ) -> Result<u64, temper_runtime::persistence::PersistenceError> {
+        if let Some(e) = self.fuse_err() {
+            return Err(e);
+        }
+        self.inner
+            .append_with_index_rows(
+                persistence_id,
+                expected_sequence,
+                events,
+                key_rows,
+                vector_rows,
+                reconcile_vectors,
+            )
+            .await
+    }
+
+    async fn append_batch(
+        &self,
+        appends: &[temper_runtime::persistence::PersistenceAppend],
+    ) -> Result<
+        Vec<temper_runtime::persistence::PersistenceAppendResult>,
+        temper_runtime::persistence::PersistenceError,
+    > {
+        if let Some(e) = self.fuse_err() {
+            return Err(e);
+        }
+        self.inner.append_batch(appends).await
+    }
+
+    async fn read_events(
+        &self,
+        persistence_id: &str,
+        from_sequence: u64,
+    ) -> Result<Vec<PersistenceEnvelope>, temper_runtime::persistence::PersistenceError> {
+        self.inner.read_events(persistence_id, from_sequence).await
+    }
+
+    async fn save_snapshot(
+        &self,
+        persistence_id: &str,
+        sequence_nr: u64,
+        snapshot: &[u8],
+    ) -> Result<(), temper_runtime::persistence::PersistenceError> {
+        self.inner
+            .save_snapshot(persistence_id, sequence_nr, snapshot)
+            .await
+    }
+
+    async fn load_snapshot(
+        &self,
+        persistence_id: &str,
+    ) -> Result<Option<(u64, Vec<u8>)>, temper_runtime::persistence::PersistenceError> {
+        self.inner.load_snapshot(persistence_id).await
+    }
+
+    async fn list_entity_ids(
+        &self,
+        tenant: &str,
+    ) -> Result<Vec<(String, String)>, temper_runtime::persistence::PersistenceError> {
+        self.inner.list_entity_ids(tenant).await
+    }
+
+    async fn list_entity_ids_by_type(
+        &self,
+        tenant: &str,
+        entity_type: &str,
+    ) -> Result<Vec<String>, temper_runtime::persistence::PersistenceError> {
+        self.inner.list_entity_ids_by_type(tenant, entity_type).await
+    }
+}
+
+/// ARN-189 fail-closed: when the journal append fails, a field update must
+/// NOT report success — otherwise the caller believes a write is durable
+/// while restart will lose it.
+#[cfg(feature = "sim")]
+#[tokio::test]
+async fn field_update_with_failed_journal_append_does_not_report_success() {
+    use temper_store_sim::SimEventStore;
+
+    let store = Arc::new(AppendFuseStore {
+        inner: SimEventStore::no_faults(13),
+        armed: std::sync::atomic::AtomicBool::new(false),
+    });
+    let entity_id = "arn189-fail-1";
+
+    let system = ActorSystem::new("sim-arn189-fail");
+    let actor = EntityActor::with_persistence(
+        "Order",
+        entity_id,
+        order_table(),
+        serde_json::json!({}),
+        crate::storage::BoxedEventStore::from_arc(store.clone()),
+        crate::storage::BackendLabel::Sim,
+    );
+    let actor_ref = system.spawn(actor, entity_id);
+
+    // Let startup (bootstrap Created append) succeed, then arm the fuse so the
+    // field-update append is the one that fails.
+    let started: EntityResponse = actor_ref
+        .ask(EntityMsg::GetState, Duration::from_secs(5))
+        .await
+        .unwrap();
+    assert!(started.success);
+    store.armed.store(true, std::sync::atomic::Ordering::SeqCst);
+
+    let response: EntityResponse = actor_ref
+        .ask(
+            EntityMsg::UpdateFields {
+                fields: serde_json::json!({"Title": "never durable"}),
+                replace: false,
+            },
+            Duration::from_secs(5),
+        )
+        .await
+        .unwrap();
+    assert!(
+        !response.success,
+        "a field update whose journal append failed must not claim success"
+    );
+    assert!(
+        response.state.fields.get("Title").is_none(),
+        "failed update must not leave half-applied in-memory state"
+    );
+}
+
 /// A committed cross-entity-guarded transition must survive replay.
 ///
 /// Regression: `File.StreamUpdated` carries a `cross_entity_state` guard on the
