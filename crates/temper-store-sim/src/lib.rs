@@ -953,10 +953,8 @@ impl EventStore for SimEventStore {
             // Higher sequence: keep history immutable; do not rewrite prior seq keys.
         }
 
-        inner
-            .snapshots
-            .insert(persistence_id.to_string(), (sequence_nr, snapshot.to_vec()));
-        // History is append-only for new sequence numbers (never overwrite).
+        // History check BEFORE latest pointer update so a conflict never leaves
+        // snapshots advanced to uncommitted content (ARN-239 / TigerStyle).
         use std::collections::btree_map::Entry;
         match inner
             .snapshot_history
@@ -976,6 +974,9 @@ impl EventStore for SimEventStore {
                 vac.insert(snapshot.to_vec());
             }
         }
+        inner
+            .snapshots
+            .insert(persistence_id.to_string(), (sequence_nr, snapshot.to_vec()));
         let segments = inner
             .event_segments
             .entry(persistence_id.to_string())
