@@ -98,61 +98,33 @@ pub(crate) enum FieldResolution {
 }
 
 fn read_guest_string(caller: &mut Caller<'_, HostState>, ptr: i32, len: i32) -> Result<String, ()> {
-    if ptr < 0 || len < 0 {
-        return Err(());
-    }
     let memory = caller.get_export("memory").and_then(|e| e.into_memory());
     let Some(memory) = memory else {
         return Err(());
     };
-    let mut buf = vec![0u8; len as usize];
-    memory
-        .read(caller, ptr as usize, &mut buf)
-        .map_err(|_| ())?;
+    let buf = read_guest_bytes(caller, &memory, ptr, len, "host_read_string", "string")?;
     String::from_utf8(buf).map_err(|_| ())
 }
 
 /// Read `len` bytes of guest memory at `ptr`.
 ///
-/// On failure (negative pointer/length or out-of-bounds read) emits a
-/// `tracing::warn!` naming the host function and operand being read, and
-/// returns `Err(())` so the caller can return its ABI error sentinel
-/// instead of acting on uninitialized buffer contents.
+/// ADR-0160 / ARN-226: validates signedness, range, and aggregate copy budget
+/// **before** allocating a host buffer.
 fn read_guest_bytes(
-    caller: &Caller<'_, HostState>,
+    caller: &mut Caller<'_, HostState>,
     memory: &wasmtime::Memory,
     ptr: i32,
     len: i32,
     host_fn: &'static str,
     what: &'static str,
 ) -> Result<Vec<u8>, ()> {
-    if ptr < 0 || len < 0 {
-        tracing::warn!(
-            host_fn,
-            operand = what,
-            ptr,
-            len,
-            "guest passed negative pointer or length; returning error to guest"
-        );
-        return Err(());
-    }
-    let mut buf = vec![0u8; len as usize];
-    if let Err(error) = memory.read(caller, ptr as usize, &mut buf) {
-        tracing::warn!(
-            host_fn,
-            operand = what,
-            error = %error,
-            "guest memory read failed; returning error to guest"
-        );
-        return Err(());
-    }
-    Ok(buf)
+    super::guest_memory::read_guest_bytes_checked(caller, memory, ptr, len, host_fn, what)
 }
 
 /// Read `len` bytes of guest memory at `ptr` as a lossy UTF-8 string.
 /// Same warn-and-`Err(())` contract as [`read_guest_bytes`].
 fn read_guest_lossy(
-    caller: &Caller<'_, HostState>,
+    caller: &mut Caller<'_, HostState>,
     memory: &wasmtime::Memory,
     ptr: i32,
     len: i32,
@@ -160,7 +132,7 @@ fn read_guest_lossy(
     what: &'static str,
 ) -> Result<String, ()> {
     let buf = read_guest_bytes(caller, memory, ptr, len, host_fn, what)?;
-    Ok(String::from_utf8_lossy(&buf).to_string())
+    Ok(String::from_utf8_lossy(&buf).into_owned())
 }
 
 /// Write `bytes` into guest memory at `ptr`.
@@ -348,14 +320,24 @@ pub(super) fn link_host_functions(linker: &mut Linker<HostState>) -> Result<(), 
                 let Some(memory) = memory else {
                     return;
                 };
-                let Ok(level) =
-                    read_guest_lossy(&caller, &memory, level_ptr, level_len, "host_log", "level")
-                else {
+                let Ok(level) = read_guest_lossy(
+                    &mut caller,
+                    &memory,
+                    level_ptr,
+                    level_len,
+                    "host_log",
+                    "level",
+                ) else {
                     return;
                 };
-                let Ok(msg) =
-                    read_guest_lossy(&caller, &memory, msg_ptr, msg_len, "host_log", "message")
-                else {
+                let Ok(msg) = read_guest_lossy(
+                    &mut caller,
+                    &memory,
+                    msg_ptr,
+                    msg_len,
+                    "host_log",
+                    "message",
+                ) else {
                     return;
                 };
                 let _guest_span = caller.data().guest_spans.enter_active();
@@ -407,7 +389,7 @@ pub(super) fn link_host_functions(linker: &mut Linker<HostState>) -> Result<(), 
                     return;
                 };
                 let Ok(buf) =
-                    read_guest_bytes(&caller, &memory, ptr, len, "host_set_result", "result")
+                    read_guest_bytes(&mut caller, &memory, ptr, len, "host_set_result", "result")
                 else {
                     return;
                 };
@@ -630,9 +612,14 @@ pub(super) fn link_host_functions(linker: &mut Linker<HostState>) -> Result<(), 
                 let memory = caller.get_export("memory").and_then(|e| e.into_memory());
                 let Some(memory) = memory else { return -1 };
 
-                let Ok(key) =
-                    read_guest_lossy(&caller, &memory, key_ptr, key_len, "host_get_secret", "key")
-                else {
+                let Ok(key) = read_guest_lossy(
+                    &mut caller,
+                    &memory,
+                    key_ptr,
+                    key_len,
+                    "host_get_secret",
+                    "key",
+                ) else {
                     return -1;
                 };
 
@@ -690,7 +677,7 @@ pub(super) fn link_host_functions(linker: &mut Linker<HostState>) -> Result<(), 
 
                 // Read method
                 let Ok(method) = read_guest_lossy(
-                    &caller,
+                    &mut caller,
                     &memory,
                     method_ptr,
                     method_len,
@@ -701,16 +688,21 @@ pub(super) fn link_host_functions(linker: &mut Linker<HostState>) -> Result<(), 
                 };
 
                 // Read URL
-                let Ok(url) =
-                    read_guest_lossy(&caller, &memory, url_ptr, url_len, "host_http_call", "url")
-                else {
+                let Ok(url) = read_guest_lossy(
+                    &mut caller,
+                    &memory,
+                    url_ptr,
+                    url_len,
+                    "host_http_call",
+                    "url",
+                ) else {
                     return -1;
                 };
 
                 // Read headers (JSON array of [key, value] pairs)
                 let headers: Vec<(String, String)> = if headers_len > 0 {
                     let Ok(hdr_buf) = read_guest_bytes(
-                        &caller,
+                        &mut caller,
                         &memory,
                         headers_ptr,
                         headers_len,
@@ -730,7 +722,7 @@ pub(super) fn link_host_functions(linker: &mut Linker<HostState>) -> Result<(), 
                 // Read body
                 let body = if body_len > 0 {
                     let Ok(body) = read_guest_lossy(
-                        &caller,
+                        &mut caller,
                         &memory,
                         body_ptr,
                         body_len,
@@ -804,7 +796,7 @@ pub(super) fn link_host_functions(linker: &mut Linker<HostState>) -> Result<(), 
 
                 let requests: Vec<HostHttpBatchRequest> = if requests_len > 0 {
                     let Ok(requests_buf) = read_guest_bytes(
-                        &caller,
+                        &mut caller,
                         &memory,
                         requests_ptr,
                         requests_len,
@@ -905,7 +897,7 @@ pub(super) fn link_host_functions(linker: &mut Linker<HostState>) -> Result<(), 
 
                 // Read URL
                 let Ok(url) = read_guest_lossy(
-                    &caller,
+                    &mut caller,
                     &memory,
                     url_ptr,
                     url_len,
@@ -918,7 +910,7 @@ pub(super) fn link_host_functions(linker: &mut Linker<HostState>) -> Result<(), 
                 // Read headers (JSON array of [key, value] pairs)
                 let headers: Vec<(String, String)> = if headers_len > 0 {
                     let Ok(hdr_buf) = read_guest_bytes(
-                        &caller,
+                        &mut caller,
                         &memory,
                         headers_ptr,
                         headers_len,
@@ -938,7 +930,7 @@ pub(super) fn link_host_functions(linker: &mut Linker<HostState>) -> Result<(), 
                 // Read body
                 let body = if body_len > 0 {
                     let Ok(body) = read_guest_lossy(
-                        &caller,
+                        &mut caller,
                         &memory,
                         body_ptr,
                         body_len,
@@ -1022,7 +1014,7 @@ pub(super) fn link_host_functions(linker: &mut Linker<HostState>) -> Result<(), 
 
                 // Read method
                 let Ok(method) = read_guest_lossy(
-                    &caller,
+                    &mut caller,
                     &memory,
                     method_ptr,
                     method_len,
@@ -1034,7 +1026,7 @@ pub(super) fn link_host_functions(linker: &mut Linker<HostState>) -> Result<(), 
 
                 // Read URL
                 let Ok(url) = read_guest_lossy(
-                    &caller,
+                    &mut caller,
                     &memory,
                     url_ptr,
                     url_len,
@@ -1047,7 +1039,7 @@ pub(super) fn link_host_functions(linker: &mut Linker<HostState>) -> Result<(), 
                 // Read headers (JSON array of [key, value] pairs)
                 let headers: Vec<(String, String)> = if headers_len > 0 {
                     let Ok(hdr_buf) = read_guest_bytes(
-                        &caller,
+                        &mut caller,
                         &memory,
                         headers_ptr,
                         headers_len,
@@ -1067,7 +1059,7 @@ pub(super) fn link_host_functions(linker: &mut Linker<HostState>) -> Result<(), 
                 // Read body stream ID
                 let body_stream_id = if body_stream_id_len > 0 {
                     let Ok(id) = read_guest_lossy(
-                        &caller,
+                        &mut caller,
                         &memory,
                         body_stream_id_ptr,
                         body_stream_id_len,
@@ -1084,7 +1076,7 @@ pub(super) fn link_host_functions(linker: &mut Linker<HostState>) -> Result<(), 
                 // Read response stream ID
                 let response_stream_id = if response_stream_id_len > 0 {
                     let Ok(id) = read_guest_lossy(
-                        &caller,
+                        &mut caller,
                         &memory,
                         response_stream_id_ptr,
                         response_stream_id_len,
@@ -1157,7 +1149,7 @@ pub(super) fn link_host_functions(linker: &mut Linker<HostState>) -> Result<(), 
                 };
 
                 let Ok(key) = read_guest_lossy(
-                    &caller,
+                    &mut caller,
                     &memory,
                     key_ptr,
                     key_len,
@@ -1221,7 +1213,7 @@ pub(super) fn link_host_functions(linker: &mut Linker<HostState>) -> Result<(), 
                 };
 
                 let Ok(key) = read_guest_lossy(
-                    &caller,
+                    &mut caller,
                     &memory,
                     key_ptr,
                     key_len,
@@ -1232,7 +1224,7 @@ pub(super) fn link_host_functions(linker: &mut Linker<HostState>) -> Result<(), 
                 };
 
                 let Ok(stream_id) = read_guest_lossy(
-                    &caller,
+                    &mut caller,
                     &memory,
                     stream_id_ptr,
                     stream_id_len,
@@ -1429,7 +1421,7 @@ pub(super) fn link_host_functions(linker: &mut Linker<HostState>) -> Result<(), 
                 };
 
                 let Ok(key) = read_guest_lossy(
-                    &caller,
+                    &mut caller,
                     &memory,
                     key_ptr,
                     key_len,
@@ -1440,7 +1432,7 @@ pub(super) fn link_host_functions(linker: &mut Linker<HostState>) -> Result<(), 
                 };
 
                 let Ok(stream_id) = read_guest_lossy(
-                    &caller,
+                    &mut caller,
                     &memory,
                     stream_id_ptr,
                     stream_id_len,
@@ -1531,7 +1523,7 @@ pub(super) fn link_host_functions(linker: &mut Linker<HostState>) -> Result<(), 
 
                 // Read stream ID
                 let Ok(stream_id) = read_guest_lossy(
-                    &caller,
+                    &mut caller,
                     &memory,
                     stream_id_ptr,
                     stream_id_len,
@@ -1543,7 +1535,7 @@ pub(super) fn link_host_functions(linker: &mut Linker<HostState>) -> Result<(), 
 
                 // Read algorithm
                 let Ok(algorithm) = read_guest_lossy(
-                    &caller,
+                    &mut caller,
                     &memory,
                     algorithm_ptr,
                     algorithm_len,
@@ -1820,7 +1812,7 @@ pub(super) fn link_host_functions(linker: &mut Linker<HostState>) -> Result<(), 
                 let Some(memory) = memory else { return -4 };
 
                 let Ok(method) = read_guest_lossy(
-                    &caller,
+                    &mut caller,
                     &memory,
                     method_ptr,
                     method_len,
@@ -1831,7 +1823,7 @@ pub(super) fn link_host_functions(linker: &mut Linker<HostState>) -> Result<(), 
                 };
 
                 let Ok(url) = read_guest_lossy(
-                    &caller,
+                    &mut caller,
                     &memory,
                     url_ptr,
                     url_len,
@@ -1843,7 +1835,7 @@ pub(super) fn link_host_functions(linker: &mut Linker<HostState>) -> Result<(), 
 
                 let headers: Vec<(String, String)> = if headers_len > 0 {
                     let Ok(hdr_buf) = read_guest_bytes(
-                        &caller,
+                        &mut caller,
                         &memory,
                         headers_ptr,
                         headers_len,
@@ -1979,7 +1971,7 @@ pub(super) fn link_host_functions(linker: &mut Linker<HostState>) -> Result<(), 
                 let Some(memory) = memory else { return -4 };
 
                 let Ok(buf) = read_guest_bytes(
-                    &caller,
+                    &mut caller,
                     &memory,
                     data_ptr,
                     data_len,

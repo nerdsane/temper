@@ -3,6 +3,7 @@
 //! Modules are compiled once and cached by SHA-256 hash. Each invocation
 //! gets a fresh `Store` with fuel + memory limits (TigerStyle budgets).
 
+mod guest_memory;
 mod guest_spans;
 mod host_functions;
 mod telemetry;
@@ -193,6 +194,10 @@ pub(crate) struct HostState {
     pub(crate) blob_cache: BTreeMap<String, Vec<u8>>,
     /// Guest-created observability spans scoped to this invocation.
     pub(crate) guest_spans: GuestSpanRegistry,
+    /// Per-invocation budget for host-side copies of guest memory (ARN-226).
+    pub(crate) guest_copy_budget: usize,
+    /// Bytes already copied from guest memory this invocation.
+    pub(crate) guest_copy_consumed: usize,
 }
 
 impl HostState {
@@ -498,6 +503,12 @@ impl WasmEngine {
                 None
             };
 
+            // Guest→host copy budget: at least max_response_bytes, capped by max_memory.
+            // Fail-closed against multi-GB allocations from guest lengths (ARN-226).
+            let guest_copy_budget = limits
+                .max_response_bytes
+                .max(guest_memory::DEFAULT_MAX_GUEST_COPY)
+                .min(limits.max_memory);
             let host_state = HostState {
                 context_json: context_json.clone(),
                 result_json: None,
@@ -510,6 +521,8 @@ impl WasmEngine {
                 wasi_ctx,
                 blob_cache,
                 guest_spans: GuestSpanRegistry::for_invocation(context.clone(), needs_wasi),
+                guest_copy_budget,
+                guest_copy_consumed: 0,
             };
             (wasi_stderr_pipe, host_state)
         };
