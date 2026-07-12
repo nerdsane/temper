@@ -42,6 +42,8 @@ pub struct DiscordTransport {
     channel_entity_id: Arc<RwLock<Option<String>>>,
     /// Maps Discord channel_id (DM channel) → user_id for reply routing.
     dm_channels: Arc<RwLock<BTreeMap<String, String>>>,
+    /// Per-run capability token required by the `/reply` callback (ADR-0158).
+    reply_token: Arc<String>,
 }
 
 impl DiscordTransport {
@@ -54,14 +56,20 @@ impl DiscordTransport {
             gateway: GatewayState::new(),
             channel_entity_id: Arc::new(RwLock::new(None)),
             dm_channels: Arc::new(RwLock::new(BTreeMap::new())),
+            reply_token: Arc::new(generate_reply_token()),
         }
     }
 
     /// Run the transport indefinitely.
     pub async fn run(&self) -> Result<(), String> {
-        // Phase 1: Start webhook listener for reply delivery.
+        // Phase 1: Start webhook listener for reply delivery. The capability
+        // token (ADR-0158) rides in the URL so the send_reply module presents
+        // it transparently; the port (not the tokenized URL) is logged.
         let webhook_port = self.spawn_webhook_listener().await?;
-        let webhook_url = format!("http://127.0.0.1:{webhook_port}/reply");
+        let webhook_url = format!(
+            "http://127.0.0.1:{webhook_port}/reply?token={}",
+            self.reply_token
+        );
         println!("  [discord] Webhook listener on port {webhook_port}");
 
         // Phase 2: Bootstrap Channel + AgentRoute entities.
@@ -443,6 +451,7 @@ impl DiscordTransport {
             http: self.http.clone(),
             bot_token: self.config.bot_token.clone(),
             dm_channels: self.dm_channels.clone(),
+            reply_token: self.reply_token.clone(),
         };
 
         let app = build_reply_router(webhook_state);
@@ -472,6 +481,41 @@ struct WebhookState {
     http: reqwest::Client,
     bot_token: String,
     dm_channels: Arc<RwLock<BTreeMap<String, String>>>,
+    /// Per-run capability token the caller must present (ADR-0158). Delivered
+    /// to the legitimate `send_reply` module via the Cedar-governed Channel
+    /// entity's webhook URL; a bare local/SSRF caller does not have it.
+    reply_token: Arc<String>,
+}
+
+/// Query parameters on the `/reply` callback (carries the capability token).
+#[derive(serde::Deserialize)]
+struct ReplyQuery {
+    #[serde(default)]
+    token: String,
+}
+
+/// Mint an unguessable per-run capability token (two v4 UUIDs of CSPRNG
+/// entropy → 64 hex chars).
+fn generate_reply_token() -> String {
+    format!(
+        "{}{}",
+        uuid::Uuid::new_v4().simple(),
+        uuid::Uuid::new_v4().simple()
+    )
+}
+
+/// Constant-time byte equality. Returns early only on a length mismatch (the
+/// token length is fixed and public); otherwise it never short-circuits, so it
+/// leaks no timing signal about the secret's contents.
+fn ct_eq(a: &[u8], b: &[u8]) -> bool {
+    if a.len() != b.len() {
+        return false;
+    }
+    let mut diff = 0u8;
+    for (x, y) in a.iter().zip(b.iter()) {
+        diff |= x ^ y;
+    }
+    diff == 0
 }
 
 /// Build the reply-callback router.
@@ -482,12 +526,21 @@ fn build_reply_router(state: WebhookState) -> axum::Router {
         .with_state(state)
 }
 
-/// Handle a reply callback from the `send_reply` WASM module: look up the
-/// recipient's DM channel and deliver `content` as the bot.
+/// Handle a reply callback from the `send_reply` WASM module: authenticate the
+/// capability token, bound the content, look up the recipient's DM channel, and
+/// deliver `content` as the bot (ADR-0158).
 async fn handle_reply(
+    axum::extract::Query(query): axum::extract::Query<ReplyQuery>,
     axum::extract::State(state): axum::extract::State<WebhookState>,
     axum::Json(body): axum::Json<serde_json::Value>,
 ) -> axum::http::StatusCode {
+    // Capability check first — before any recipient lookup or Discord call, so
+    // an unauthenticated caller learns nothing and triggers no side effect.
+    if !ct_eq(query.token.as_bytes(), state.reply_token.as_bytes()) {
+        tracing::warn!("discord /reply rejected: missing or invalid capability token");
+        return axum::http::StatusCode::UNAUTHORIZED;
+    }
+
     let thread_id = body.get("thread_id").and_then(|v| v.as_str()).unwrap_or("");
     let content = body.get("content").and_then(|v| v.as_str()).unwrap_or("");
 
@@ -496,7 +549,17 @@ async fn handle_reply(
         return axum::http::StatusCode::BAD_REQUEST;
     }
 
-    // thread_id is the Discord user ID (for DMs). Look up their DM channel.
+    if !reply_fits_fanout_budget(content) {
+        tracing::warn!(
+            content_bytes = content.len(),
+            max_messages = MAX_REPLY_CHUNKS,
+            "discord /reply rejected: content would exceed the fan-out budget"
+        );
+        return axum::http::StatusCode::PAYLOAD_TOO_LARGE;
+    }
+
+    // thread_id is the Discord user ID (for DMs). Look up their DM channel;
+    // replies are only delivered to users the bot has actually met.
     let channel_id = state.dm_channels.read().await.get(thread_id).cloned();
     let Some(channel_id) = channel_id else {
         eprintln!("  [discord] No DM channel found for thread_id={thread_id}");
@@ -532,15 +595,20 @@ async fn read_payload(read: &mut WsStream) -> Result<Option<GatewayPayload>, Str
 
 #[cfg(test)]
 mod reply_auth_tests {
-    //! ARN-234: the `/reply` callback must not accept unauthenticated requests.
+    //! ARN-234: the `/reply` callback must reject unauthenticated / oversized
+    //! requests before any recipient lookup or Discord call.
     use super::*;
 
-    /// Bind the reply router on an ephemeral loopback port and return it.
+    const TOKEN: &str = "test-capability-token-0123456789abcdef";
+
+    /// Bind the reply router (with a known capability token) on an ephemeral
+    /// loopback port; returns the port.
     async fn spawn_reply_listener(dm: BTreeMap<String, String>) -> u16 {
         let state = WebhookState {
             http: reqwest::Client::new(),
             bot_token: "test-bot-token".to_string(),
             dm_channels: Arc::new(RwLock::new(dm)),
+            reply_token: Arc::new(TOKEN.to_string()),
         };
         let app = build_reply_router(state);
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -551,15 +619,14 @@ mod reply_auth_tests {
         port
     }
 
-    async fn post_reply(port: u16, body: serde_json::Value) -> u16 {
-        // Retry briefly while the accept loop spins up.
+    /// POST to `/reply` with an optional `?token=`; returns the status code.
+    async fn post_reply(port: u16, token: Option<&str>, body: serde_json::Value) -> u16 {
+        let url = match token {
+            Some(t) => format!("http://127.0.0.1:{port}/reply?token={t}"),
+            None => format!("http://127.0.0.1:{port}/reply"),
+        };
         for _ in 0..20 {
-            match reqwest::Client::new()
-                .post(format!("http://127.0.0.1:{port}/reply"))
-                .json(&body)
-                .send()
-                .await
-            {
+            match reqwest::Client::new().post(&url).json(&body).send().await {
                 Ok(resp) => return resp.status().as_u16(),
                 Err(_) => tokio::task::yield_now().await,
             }
@@ -569,17 +636,73 @@ mod reply_auth_tests {
 
     #[tokio::test]
     async fn unauthenticated_reply_is_rejected() {
-        // No token, unknown recipient: a bare local caller. It must be denied
-        // at the auth layer, not proceed into recipient/delivery handling.
+        // No token: a bare local caller. Denied at the auth layer (401) before
+        // any recipient lookup or Discord call.
         let port = spawn_reply_listener(BTreeMap::new()).await;
         let status = post_reply(
             port,
+            None,
             serde_json::json!({"thread_id": "victim-user", "content": "spam"}),
         )
         .await;
         assert_eq!(
             status, 401,
             "SECURITY: unauthenticated /reply must be rejected with 401, got {status}"
+        );
+    }
+
+    #[tokio::test]
+    async fn wrong_token_is_rejected() {
+        // A caller who guessed the port but not the token is denied even for a
+        // known recipient — so no impersonating message is sent.
+        let dm = BTreeMap::from([("known-user".to_string(), "dm-channel-1".to_string())]);
+        let port = spawn_reply_listener(dm).await;
+        let status = post_reply(
+            port,
+            Some("wrong-token"),
+            serde_json::json!({"thread_id": "known-user", "content": "spam"}),
+        )
+        .await;
+        assert_eq!(status, 401, "wrong capability token must be rejected");
+    }
+
+    #[tokio::test]
+    async fn valid_token_passes_auth() {
+        // Correct token but an unknown recipient: auth passes, so the handler
+        // proceeds to the recipient check and returns 404 (never 401). No
+        // Discord call happens because the recipient is unknown.
+        let port = spawn_reply_listener(BTreeMap::new()).await;
+        let status = post_reply(
+            port,
+            Some(TOKEN),
+            serde_json::json!({"thread_id": "unknown-user", "content": "hi"}),
+        )
+        .await;
+        assert_eq!(
+            status, 404,
+            "authenticated reply to unknown recipient is 404"
+        );
+    }
+
+    #[tokio::test]
+    async fn oversized_reply_is_rejected() {
+        // Authenticated but oversized: a body that would fan out to more than
+        // MAX_REPLY_CHUNKS Discord messages is rejected cleanly with 413,
+        // before any delivery (not an opaque 500).
+        let dm = BTreeMap::from([("known-user".to_string(), "dm-channel-1".to_string())]);
+        let port = spawn_reply_listener(dm).await;
+        // 20 000 bytes → 10 chunks > MAX_REPLY_CHUNKS.
+        let big = "x".repeat(20_000);
+        assert!(!reply_fits_fanout_budget(&big));
+        let status = post_reply(
+            port,
+            Some(TOKEN),
+            serde_json::json!({"thread_id": "known-user", "content": big}),
+        )
+        .await;
+        assert_eq!(
+            status, 413,
+            "oversized reply must be rejected by the budget"
         );
     }
 }

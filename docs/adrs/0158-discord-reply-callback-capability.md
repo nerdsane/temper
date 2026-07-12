@@ -47,13 +47,15 @@ denied. The legitimate `send_reply` module already POSTs to exactly the URL it
 reads from the Channel entity, so it presents the token transparently — no module
 change. The token is per-run, so a leaked value dies with the process.
 
-### Sub-Decision 2: Content and fan-out budgets
+### Sub-Decision 2: Fan-out budget
 
-The handler rejects a reply whose `content` exceeds `MAX_REPLY_CONTENT_BYTES`
-(16 KiB) with `413 Payload Too Large`, before any Discord call. Because Discord
-messages are 2 000 bytes, this bounds the fan-out to at most 8 sequential bot
-messages per reply. As defense in depth, `send_discord_message` independently
-caps the number of chunks it will send, so any other caller is bounded too.
+The handler rejects, with `413 Payload Too Large` before any Discord call, any
+reply that would split into more than `MAX_REPLY_CHUNKS` (8) Discord messages.
+The **chunk count is the authority**, not a raw byte count: message splitting can
+break on newlines and produce more, smaller chunks than `bytes / 2000`, so a
+byte-only limit would either admit a >8-message fan-out or fail a legitimate
+multi-line reply with an opaque error. `send_discord_message` independently
+enforces the same cap as a defensive backstop for any other caller.
 
 ### Sub-Decision 3: Recipient gate (unchanged, retained as authorization)
 
