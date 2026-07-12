@@ -95,13 +95,9 @@ pub fn validate_inline_spec_key(key: &str) -> Result<PathBuf, PathSecurityError>
     for component in path.components() {
         match component {
             Component::Normal(part) => {
+                // Component::Normal never yields "." / ".." (those are CurDir/ParentDir).
+                // Still reject embedded ".." tokens like "foo..bar".
                 let s = part.to_string_lossy();
-                if s == ".." || s == "." {
-                    return Err((
-                        StatusCode::BAD_REQUEST,
-                        format!("inline spec key '{key}' has forbidden component"),
-                    ));
-                }
                 if s.contains("..") {
                     return Err((
                         StatusCode::BAD_REQUEST,
@@ -152,7 +148,12 @@ pub fn ensure_under_root(root: &Path, joined: &Path) -> Result<(), PathSecurityE
     }
 
     let root_canon = root.canonicalize().unwrap_or_else(|_| root.to_path_buf());
-    if !joined.starts_with(root) && !joined.starts_with(&root_canon) {
+    // Prefer a canonical joined path when it already exists (closes symlink escapes
+    // under the staging root). Fall back to the raw path for not-yet-created targets.
+    let joined_check = joined
+        .canonicalize()
+        .unwrap_or_else(|_| joined.to_path_buf());
+    if !joined_check.starts_with(root) && !joined_check.starts_with(&root_canon) {
         return Err((
             StatusCode::BAD_REQUEST,
             format!(
