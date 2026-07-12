@@ -379,8 +379,6 @@ fn validate_process_id(process_id: &str) -> Result<(), String> {
     Ok(())
 }
 
-
-
 async fn get_process_state(ctx: &ActorContext, process_id: &str, output_only: bool) -> String {
     if let Err(msg) = validate_process_id(process_id) {
         return format!("error: {msg}");
@@ -390,7 +388,8 @@ async fn get_process_state(ctx: &ActorContext, process_id: &str, output_only: bo
     // Always bind to the caller's tenant prefix — never accept a foreign tenant.
     let target_ns = format!("{tenant}/{process_id}");
     debug_assert!(
-        target_ns.starts_with(&format!("{tenant}/")) && !target_ns[tenant.len() + 1..].contains('/'),
+        target_ns.starts_with(&format!("{tenant}/"))
+            && !target_ns[tenant.len() + 1..].contains('/'),
         "target namespace must be a direct child of self tenant"
     );
     // ARN-215: grant only after validation; capability is same-tenant process lookup.
