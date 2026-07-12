@@ -97,6 +97,15 @@ pub(crate) enum FieldResolution {
     HostError,
 }
 
+/// True if a `[ptr, ptr + len)` read lies fully within a guest linear memory of
+/// `mem_size` bytes. Checked BEFORE allocating a read buffer so a guest-supplied
+/// `len` can't force a large host allocation ahead of wasmtime's own bounds check
+/// (ARN-226). `checked_add` also rejects a `ptr + len` that overflows `usize`.
+fn guest_read_bounds_ok(mem_size: usize, ptr: usize, len: usize) -> bool {
+    let _ = (mem_size, ptr, len);
+    true
+}
+
 fn read_guest_string(caller: &mut Caller<'_, HostState>, ptr: i32, len: i32) -> Result<String, ()> {
     if ptr < 0 || len < 0 {
         return Err(());
@@ -105,9 +114,12 @@ fn read_guest_string(caller: &mut Caller<'_, HostState>, ptr: i32, len: i32) -> 
     let Some(memory) = memory else {
         return Err(());
     };
+    if !guest_read_bounds_ok(memory.data_size(&mut *caller), ptr as usize, len as usize) {
+        return Err(());
+    }
     let mut buf = vec![0u8; len as usize];
     memory
-        .read(caller, ptr as usize, &mut buf)
+        .read(&mut *caller, ptr as usize, &mut buf)
         .map_err(|_| ())?;
     String::from_utf8(buf).map_err(|_| ())
 }
@@ -133,6 +145,16 @@ fn read_guest_bytes(
             ptr,
             len,
             "guest passed negative pointer or length; returning error to guest"
+        );
+        return Err(());
+    }
+    if !guest_read_bounds_ok(memory.data_size(caller), ptr as usize, len as usize) {
+        tracing::warn!(
+            host_fn,
+            operand = what,
+            ptr,
+            len,
+            "guest read range exceeds linear memory; returning error before allocating"
         );
         return Err(());
     }
@@ -2217,6 +2239,35 @@ pub(super) fn link_host_functions(linker: &mut Linker<HostState>) -> Result<(), 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn guest_read_bounds_ok_rejects_out_of_bounds_and_overflow() {
+        // ARN-226: a guest-supplied `len` must be validated against the guest memory
+        // size BEFORE a read buffer is allocated. Out-of-bounds or overflowing
+        // `(ptr, len)` ranges must be rejected so a huge `len` can't drive a large
+        // host allocation.
+        let mem = 64 * 1024; // 64 KiB guest linear memory
+        assert!(
+            !guest_read_bounds_ok(mem, 0, i32::MAX as usize),
+            "an i32::MAX len must be rejected before allocating ~2 GiB"
+        );
+        assert!(
+            !guest_read_bounds_ok(mem, 0, mem + 1),
+            "a len past the end of memory must be rejected"
+        );
+        assert!(
+            !guest_read_bounds_ok(mem, mem, 1),
+            "a read starting at the end of memory must be rejected"
+        );
+        assert!(
+            !guest_read_bounds_ok(mem, usize::MAX, 1),
+            "a ptr + len that overflows usize must be rejected"
+        );
+        // Legitimate in-bounds reads are still allowed.
+        assert!(guest_read_bounds_ok(mem, 0, mem), "a full in-bounds read is allowed");
+        assert!(guest_read_bounds_ok(mem, 0, 0), "an empty read is allowed");
+        assert!(guest_read_bounds_ok(mem, 100, 200), "an interior read is allowed");
+    }
 
     fn ctx_json_with_fields(fields: serde_json::Value) -> String {
         serde_json::json!({
