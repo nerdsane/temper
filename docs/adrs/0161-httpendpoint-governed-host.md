@@ -5,7 +5,7 @@
 - Deciders: Temper core maintainers
 - Related:
   - ARN-208: HttpEndpoint WASM bypasses the governed host
-  - ADR-0156: Native adapter sandbox boundary (parallel trust edge)
+  - ADR-0160: Native adapter sandbox boundary (parallel trust edge)
   - `crates/temper-server/src/router.rs` (HttpEndpoint dispatch)
   - `crates/temper-server/src/http_endpoint_host.rs`
   - `crates/temper-server/src/state/dispatch/wasm.rs` (entity dispatch path)
@@ -18,7 +18,7 @@ with Cedar-gated HTTP and secret access, and only bootstrap secrets up front.
 
 The inbound `HttpEndpoint` fallback in the router constructed a raw
 `ProductionWasmHost` with the **full tenant secret map** and forwarded every
-inbound header (including `Authorization` / principal headers) into the guest
+inbound header (including `Authorization`, `x-session-id`, and principal headers) into the guest
 context. That is a second production invocation path that skips the trust
 boundary.
 
@@ -43,6 +43,7 @@ Before building `HttpDispatchContext.headers`, drop:
 - `authorization` / `proxy-authorization`
 - `cookie` / `set-cookie`
 - `x-api-key` / `x-temper-api-key`
+- `x-session-id`
 - any header whose name starts with `x-temper-principal` (id, kind, scopes, attrs)
 - any header whose name starts with `x-temper-agent-` (type, role, …)
 
