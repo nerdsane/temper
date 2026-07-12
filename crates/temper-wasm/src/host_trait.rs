@@ -603,9 +603,10 @@ impl ProductionWasmHost {
                 .collect()
         };
         self.http_streams.close_handles(granted).await;
-        if let Ok(mut grants) = self.stream_grants.lock() {
-            grants.clear();
-        }
+        // Recover from a poisoned lock so teardown always clears grants
+        // (same pattern as grant/require/revoke — Greptile ARN-207).
+        let mut grants = self.stream_grants.lock().unwrap_or_else(|e| e.into_inner());
+        grants.clear();
     }
 
     /// Create with a spec evaluator for `host_evaluate_spec` support.
