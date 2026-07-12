@@ -151,7 +151,10 @@ mod tests {
     #[test]
     fn rejects_metadata_hostname() {
         let err = validate_adapter_http_url("https://metadata.google.internal/").unwrap_err();
-        assert!(err.contains("not allowed") || err.contains("blocked"), "{err}");
+        assert!(
+            err.contains("not allowed") || err.contains("blocked"),
+            "{err}"
+        );
     }
 
     #[test]
@@ -206,8 +209,6 @@ mod tests {
             "192.168.1.1".parse().expect("parse private v4")
         ));
         assert!(is_blocked_ip("::1".parse().expect("parse loopback v6")));
-        assert!(!is_blocked_ip(
-            "8.8.8.8".parse().expect("parse public v4")
-        ));
+        assert!(!is_blocked_ip("8.8.8.8".parse().expect("parse public v4")));
     }
 }

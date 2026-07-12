@@ -355,7 +355,6 @@ impl crate::state::ServerState {
             }
         }
     }
-
 }
 
 fn normalize_success_params(result: AdapterResult) -> serde_json::Value {
