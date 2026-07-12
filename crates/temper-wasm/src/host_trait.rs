@@ -375,8 +375,15 @@ pub struct ProductionWasmHost {
     /// the server sets it per tenant. See ADR-0166.
     export_llm_content: bool,
     /// Registry of active streaming HTTP exchanges (ADR-0057).
-    /// One per host instance; handle IDs are unique within the host.
+    /// May be shared with the ADR-0069 dispatcher; isolation comes from
+    /// `stream_scope`, not from the registry being private.
     http_streams: Arc<crate::http_stream::HttpStreamRegistry>,
+    /// This invocation's ambient stream ownership scope (ADR-0156).
+    /// Presented to the registry on every guest stream op; never crosses
+    /// the guest FFI boundary. `StreamScope::PRIVATE` for hosts that own
+    /// an unshared registry; a unique minted scope for shared-registry
+    /// hosts built via `with_shared_streams`.
+    stream_scope: crate::http_stream::StreamScope,
 }
 
 #[derive(Debug, Deserialize)]
@@ -580,12 +587,28 @@ impl ProductionWasmHost {
     /// ADR-0069 Phase 2 dispatcher and the per-request host share
     /// the same registry — handles minted by the dispatcher are
     /// reachable via FFI from the guest.
+    ///
+    /// `scope` is the invocation's unique ownership scope (ADR-0156),
+    /// minted from the shared registry via
+    /// [`HttpStreamRegistry::mint_scope`]. It is required because a
+    /// shared registry serves many invocations; the scope is what keeps
+    /// one invocation from reaching another's handles.
     pub fn with_shared_streams(
         secrets: BTreeMap<String, String>,
         http_streams: Arc<crate::http_stream::HttpStreamRegistry>,
+        scope: crate::http_stream::StreamScope,
     ) -> Self {
+        // A shared registry serves many invocations, so its host must be
+        // given a unique minted scope — never the fixed PRIVATE scope,
+        // which would let it reach another shared-registry host's handles.
+        debug_assert_ne!(
+            scope,
+            crate::http_stream::StreamScope::PRIVATE,
+            "shared-registry host must use a minted scope, not PRIVATE"
+        );
         let mut host = Self::new(secrets);
         host.http_streams = http_streams;
+        host.stream_scope = scope;
         host
     }
 
@@ -620,6 +643,9 @@ impl ProductionWasmHost {
             invocation_context: None,
             export_llm_content: false,
             http_streams: Arc::new(crate::http_stream::HttpStreamRegistry::new()),
+            // Private registry ⇒ its handles are unreachable from any
+            // other host, so the fixed PRIVATE scope is safe here.
+            stream_scope: crate::http_stream::StreamScope::PRIVATE,
         }
     }
 
@@ -1711,7 +1737,18 @@ impl WasmHost for ProductionWasmHost {
         use futures_util::StreamExt;
         use tracing::Instrument;
 
-        let exchange = self.http_streams.open_outbound_exchange().await;
+        // Validate the method before reserving any stream resources, so an
+        // unsupported verb never strands an exchange or a budget slot.
+        let method = request.method.to_uppercase();
+        if !matches!(method.as_str(), "GET" | "POST" | "PUT" | "DELETE" | "PATCH") {
+            return Err(format!("unsupported HTTP method: {method}"));
+        }
+
+        let exchange = self
+            .http_streams
+            .open_outbound_exchange(self.stream_scope)
+            .await
+            .map_err(|e| e.to_string())?;
         let guest = exchange.guest_handles();
         let bridge_req = exchange.bridge_request_body;
         let bridge_resp = exchange.bridge_response_body;
@@ -1779,9 +1816,8 @@ impl WasmHost for ProductionWasmHost {
         record_invocation_context_on_span(&span, self.invocation_context.as_ref(), "http_stream");
         apply_span_hints(&span, &span_hints);
 
-        // Build the request head before moving into the task so we
-        // can surface malformed-method errors synchronously.
-        let builder = match request.method.to_uppercase().as_str() {
+        // Method already validated above; build the reqwest request.
+        let builder = match method.as_str() {
             "GET" => client.get(&request.url),
             "POST" => client.post(&request.url),
             "PUT" => client.put(&request.url),
@@ -1881,7 +1917,9 @@ impl WasmHost for ProductionWasmHost {
         &self,
         handle: crate::http_stream::StreamHandle,
     ) -> Result<Vec<u8>, crate::http_stream::StreamError> {
-        self.http_streams.read(handle).await
+        self.http_streams
+            .read_as_guest(self.stream_scope, handle)
+            .await
     }
 
     async fn http_stream_read_bounded(
@@ -1889,7 +1927,9 @@ impl WasmHost for ProductionWasmHost {
         handle: crate::http_stream::StreamHandle,
         max_bytes: usize,
     ) -> Result<Vec<u8>, crate::http_stream::StreamError> {
-        self.http_streams.read_bounded(handle, max_bytes).await
+        self.http_streams
+            .read_bounded_as_guest(self.stream_scope, handle, max_bytes)
+            .await
     }
 
     async fn http_stream_try_write(
@@ -1897,14 +1937,18 @@ impl WasmHost for ProductionWasmHost {
         handle: crate::http_stream::StreamHandle,
         chunk: Vec<u8>,
     ) -> Result<usize, crate::http_stream::StreamError> {
-        self.http_streams.try_write(handle, chunk).await
+        self.http_streams
+            .try_write_as_guest(self.stream_scope, handle, chunk)
+            .await
     }
 
     async fn http_stream_close(
         &self,
         handle: crate::http_stream::StreamHandle,
     ) -> Result<(), crate::http_stream::StreamError> {
-        self.http_streams.close(handle).await
+        self.http_streams
+            .close_as_guest(self.stream_scope, handle)
+            .await
     }
 
     async fn http_stream_response_head(
@@ -1912,7 +1956,7 @@ impl WasmHost for ProductionWasmHost {
         response_body: crate::http_stream::StreamHandle,
     ) -> Result<crate::http_stream::HttpResponseHead, String> {
         self.http_streams
-            .await_response_head(response_body)
+            .await_response_head_as_guest(self.stream_scope, response_body)
             .await
             .map_err(|e| e.to_string())
     }
@@ -1923,7 +1967,7 @@ impl WasmHost for ProductionWasmHost {
         head: crate::http_stream::HttpResponseHead,
     ) -> Result<(), crate::http_stream::StreamError> {
         self.http_streams
-            .submit_inbound_response_head(response_body, head)
+            .submit_inbound_response_head_as_guest(self.stream_scope, response_body, head)
             .await
     }
 }

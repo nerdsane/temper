@@ -89,22 +89,31 @@ Direction (read vs write) is already enforced structurally by the
 
 `HttpStreamRegistry::close_scope(scope)` removes every handle, pending read, and
 head channel owned by a scope in one call; dropping the channels signals EOF/abort
-to any peer and unblocks the pump/bridge tasks. The inbound dispatcher owns the
-exchange for its whole lifetime and tears the scope down when the exchange
-finishes — on the success path (after the response body has drained), on the
-error/timeout paths, and on client disconnect (a drop guard captured by the
-response body stream). Cleanup is bounded to the invocation rather than leaking
-into the process-global map.
+to any peer and unblocks the pump/bridge tasks. The inbound dispatcher creates a
+`ScopeCleanupGuard` **the moment it opens the exchange** and holds it for the
+whole request, moving it into the response body stream on the success path. So
+the scope is reclaimed on every exit: the error/timeout paths call `close_scope`
+explicitly (guaranteed, awaited), the success path drops the guard when the body
+finishes draining, and — critically — if the handler future is dropped
+mid-request (client disconnect while the guest runs or while we await its head)
+the guard's `Drop` still reclaims the scope. `Drop` first tries a non-blocking
+lock; if the registry is momentarily contended it hands the reclaim to the async
+runtime rather than skipping it, so cleanup is guaranteed, not best-effort.
+Cleanup is bounded to the invocation rather than leaking into the process-global
+map.
 
 ### Sub-Decision 4: Per-scope concurrent-stream bound
 
-A guest can open outbound streaming exchanges in a loop. Each new exchange is
-counted against a per-scope budget (`MAX_STREAMS_PER_SCOPE`); once reached,
-`open_outbound_exchange` returns `StreamError::Aborted` and the guest's
-`http_stream_begin_outbound` surfaces it as an error. Combined with the existing
-per-handle channel bound (64 × 16 KiB), this bounds total buffered bytes per
-invocation. Inbound exchanges are minted one-per-request by the kernel and are
-not guest-multipliable.
+A guest can open outbound streaming exchanges in a loop. Each currently-open
+exchange is counted against a per-scope budget (`MAX_OUTBOUND_STREAMS_PER_SCOPE`);
+once the concurrency limit is reached, `open_outbound_exchange` returns
+`StreamError::Aborted` and the guest's `http_stream_begin_outbound` surfaces it
+as an error. The count is a *concurrency* bound, not a cumulative one: the slot
+is released when the guest closes the exchange's response-body handle, so a guest
+that makes many outbound calls sequentially is never throttled — only one that
+holds many open at once. Combined with the per-handle channel bound (64 × 16 KiB),
+this bounds live buffered bytes per invocation. Inbound exchanges are minted
+one-per-request by the kernel and are not guest-multipliable.
 
 ## Consequences
 

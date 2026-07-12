@@ -19,7 +19,7 @@
 //! writes. Host-originated chunks can be larger; bounded reads split
 //! those chunks across guest buffers while preserving stream order.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 use tokio::sync::{Mutex, mpsc, oneshot};
 
@@ -35,8 +35,38 @@ pub const STREAM_CHANNEL_CAPACITY: usize = 64;
 /// Opaque handle identifying one end of a streaming channel. Passed
 /// from guest to host via FFI; host-side lookups go through
 /// [`HttpStreamRegistry`].
+///
+/// The `u32` is only an index. Authority comes from the [`StreamScope`]
+/// the handle is bound to (ADR-0156): a guest may only operate on a
+/// handle whose owning scope matches the guest's ambient scope, so a
+/// guessed integer from another invocation resolves to nothing.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct StreamHandle(pub u32);
+
+/// Per-invocation ownership scope for stream handles (ADR-0156).
+///
+/// Minted once per WASM invocation and carried ambiently on the host;
+/// it never crosses the guest FFI boundary. Every handle created for an
+/// invocation is bound to its scope, and guest read/write/close ops must
+/// present the owning scope. Because the guest never names its scope, it
+/// cannot forge another invocation's — making the guessable handle index
+/// non-authoritative on its own.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct StreamScope(pub u64);
+
+impl StreamScope {
+    /// Scope used by hosts that own a private (non-shared) registry.
+    /// Safe as a constant because such a registry is never shared across
+    /// invocations, so its handles are unreachable from any other host.
+    /// Shared-registry hosts always receive a unique minted scope.
+    pub const PRIVATE: StreamScope = StreamScope(1);
+}
+
+/// Maximum concurrent outbound streaming exchanges a single invocation
+/// may open (ADR-0156). Bounds buffered bytes per invocation together
+/// with the per-handle channel capacity. Inbound exchanges are minted
+/// one-per-request by the kernel and are not counted here.
+pub const MAX_OUTBOUND_STREAMS_PER_SCOPE: usize = 64;
 
 /// Head metadata for an outbound streaming request. Body is streamed
 /// separately through a [`StreamHandle`].
@@ -158,17 +188,42 @@ enum ChannelEnd {
     Receiver(Arc<Mutex<mpsc::Receiver<Vec<u8>>>>),
 }
 
+/// A registry slot: one channel end plus the authority metadata that
+/// governs who may operate on it (ADR-0156).
+struct HandleEntry {
+    end: ChannelEnd,
+    /// The invocation that owns this handle. Guest ops must present it.
+    scope: StreamScope,
+    /// Whether this handle was handed to the guest. Kernel/bridge-facing
+    /// handles are `false` and are unreachable from the guest FFI even
+    /// within the guest's own scope.
+    guest_facing: bool,
+}
+
 /// Registry of active stream handles. Lives on `ProductionWasmHost`
-/// (and any other host that implements streaming). One registry per
-/// host instance; handle IDs are unique within a host but not across
-/// hosts — they're opaque u32s.
+/// (and any other host that implements streaming) and may be shared
+/// between the ADR-0069 dispatcher and a per-request host. Handle IDs
+/// are indices; authority is the owning [`StreamScope`], so sharing the
+/// registry never lets one invocation reach another's handles.
 pub struct HttpStreamRegistry {
     inner: Mutex<RegistryState>,
 }
 
 struct RegistryState {
     next_id: u32,
-    handles: BTreeMap<u32, ChannelEnd>,
+    next_scope: u64,
+    handles: BTreeMap<u32, HandleEntry>,
+    /// Every handle / head-channel id created under a scope, so
+    /// [`HttpStreamRegistry::close_scope`] can reclaim an invocation's
+    /// entire footprint in one call. Ids are never reused, so an id
+    /// belongs to exactly one scope for the process lifetime.
+    scope_ids: BTreeMap<StreamScope, BTreeSet<u32>>,
+    /// Currently-open outbound exchanges per scope, keyed by their
+    /// guest response-body id, for the per-scope *concurrency* bound
+    /// (ADR-0156 Sub-Decision 4). An entry is removed when the guest
+    /// closes that exchange, so sequential outbound calls never exhaust
+    /// the budget — only genuinely concurrent ones count.
+    outbound_open: BTreeMap<StreamScope, BTreeSet<u32>>,
     /// Outbound: oneshot receivers keyed on response-body handle ID.
     /// Bridge task holds the Sender and fires once the HTTP response
     /// head is received. Guest consumes via `await_response_head`.
@@ -182,12 +237,25 @@ struct RegistryState {
     pending_reads: BTreeMap<u32, Vec<u8>>,
 }
 
+impl RegistryState {
+    /// Record that `id` belongs to `scope` for later `close_scope`.
+    fn tag_scope(&mut self, scope: StreamScope, id: u32) {
+        self.scope_ids.entry(scope).or_default().insert(id);
+    }
+}
+
 impl HttpStreamRegistry {
     pub fn new() -> Self {
         Self {
             inner: Mutex::new(RegistryState {
                 next_id: 1,
+                // Scope 1 is reserved for `StreamScope::PRIVATE`; minted
+                // scopes start at 2 so a shared-registry host never
+                // collides with a private-registry host.
+                next_scope: 2,
                 handles: BTreeMap::new(),
+                scope_ids: BTreeMap::new(),
+                outbound_open: BTreeMap::new(),
                 response_head_receivers: BTreeMap::new(),
                 inbound_head_senders: BTreeMap::new(),
                 inbound_head_receivers: BTreeMap::new(),
@@ -196,21 +264,85 @@ impl HttpStreamRegistry {
         }
     }
 
-    /// Allocate a new paired (sender, receiver) channel. Returns
-    /// (write_handle, read_handle) — guests write into the first,
-    /// the other end reads from the second.
-    pub async fn create_pair(&self) -> (StreamHandle, StreamHandle) {
-        let (tx, rx) = mpsc::channel::<Vec<u8>>(STREAM_CHANNEL_CAPACITY);
+    /// Mint a fresh, unique [`StreamScope`] for one invocation. The
+    /// caller binds every handle it opens to this scope and carries it
+    /// ambiently on the host; it must never cross the guest FFI boundary.
+    pub async fn mint_scope(&self) -> StreamScope {
         let mut state = self.inner.lock().await;
+        let scope = StreamScope(state.next_scope);
+        state.next_scope += 1;
+        scope
+    }
+
+    /// Allocate a new paired (sender, receiver) channel bound to
+    /// `scope`. `write_guest_facing`/`read_guest_facing` mark which end
+    /// (if any) is handed to the guest.
+    async fn create_pair_scoped(
+        &self,
+        scope: StreamScope,
+        write_guest_facing: bool,
+        read_guest_facing: bool,
+    ) -> (StreamHandle, StreamHandle) {
+        let mut state = self.inner.lock().await;
+        Self::create_pair_locked(&mut state, scope, write_guest_facing, read_guest_facing)
+    }
+
+    /// Allocate a scoped pair against an already-held registry lock, so a
+    /// caller can create channels and update budgets atomically.
+    fn create_pair_locked(
+        state: &mut RegistryState,
+        scope: StreamScope,
+        write_guest_facing: bool,
+        read_guest_facing: bool,
+    ) -> (StreamHandle, StreamHandle) {
+        let (tx, rx) = mpsc::channel::<Vec<u8>>(STREAM_CHANNEL_CAPACITY);
         let write_id = state.next_id;
         state.next_id += 1;
         let read_id = state.next_id;
         state.next_id += 1;
-        state.handles.insert(write_id, ChannelEnd::Sender(tx));
-        state
-            .handles
-            .insert(read_id, ChannelEnd::Receiver(Arc::new(Mutex::new(rx))));
+        state.handles.insert(
+            write_id,
+            HandleEntry {
+                end: ChannelEnd::Sender(tx),
+                scope,
+                guest_facing: write_guest_facing,
+            },
+        );
+        state.handles.insert(
+            read_id,
+            HandleEntry {
+                end: ChannelEnd::Receiver(Arc::new(Mutex::new(rx))),
+                scope,
+                guest_facing: read_guest_facing,
+            },
+        );
+        state.tag_scope(scope, write_id);
+        state.tag_scope(scope, read_id);
         (StreamHandle(write_id), StreamHandle(read_id))
+    }
+
+    /// Allocate a new paired (sender, receiver) channel under a private
+    /// scope with both ends guest-usable. Convenience for tests and
+    /// callers that own an unshared registry.
+    pub async fn create_pair(&self) -> (StreamHandle, StreamHandle) {
+        self.create_pair_scoped(StreamScope::PRIVATE, true, true)
+            .await
+    }
+
+    /// Verify that `scope` may operate on `handle` as a guest: the
+    /// handle must exist, be owned by `scope`, and be guest-facing.
+    /// Returns [`StreamError::InvalidHandle`] otherwise — the same error
+    /// used for unknown handles, so ownership is never leaked.
+    async fn authorize_guest(
+        &self,
+        scope: StreamScope,
+        handle: StreamHandle,
+    ) -> Result<(), StreamError> {
+        let state = self.inner.lock().await;
+        match state.handles.get(&handle.0) {
+            Some(entry) if entry.scope == scope && entry.guest_facing => Ok(()),
+            _ => Err(StreamError::InvalidHandle),
+        }
     }
 
     /// Write `chunk` to the handle's channel. Suspends if the
@@ -279,8 +411,129 @@ impl HttpStreamRegistry {
         let mut state = self.inner.lock().await;
         state.pending_reads.remove(&handle.0);
         match state.handles.remove(&handle.0) {
-            Some(_) => Ok(()),
+            Some(entry) => {
+                // Releasing an outbound exchange's response-body handle
+                // frees a slot in its scope's concurrency budget.
+                if let Some(open) = state.outbound_open.get_mut(&entry.scope) {
+                    open.remove(&handle.0);
+                }
+                // The id is intentionally left in `scope_ids`: `close_scope`
+                // relies on it to also reclaim any head channel still keyed
+                // on this id that a guest never consumed. Every scope is
+                // eventually `close_scope`d (per dispatch, or on host drop
+                // for a private registry), so this does not grow unbounded.
+                Ok(())
+            }
             None => Err(StreamError::InvalidHandle),
+        }
+    }
+
+    // --- Guest-checked operations (ADR-0156) ---
+    //
+    // These are the only stream ops reachable from the guest FFI. Each
+    // verifies the guest's ambient `scope` owns a guest-facing `handle`
+    // before delegating to the privileged op above. Kernel/bridge tasks
+    // use the privileged ops directly.
+
+    /// Guest read: authorize `scope` then read the next chunk.
+    pub async fn read_as_guest(
+        &self,
+        scope: StreamScope,
+        handle: StreamHandle,
+    ) -> Result<Vec<u8>, StreamError> {
+        self.authorize_guest(scope, handle).await?;
+        self.read(handle).await
+    }
+
+    /// Guest bounded read: authorize `scope` then read up to `max_bytes`.
+    pub async fn read_bounded_as_guest(
+        &self,
+        scope: StreamScope,
+        handle: StreamHandle,
+        max_bytes: usize,
+    ) -> Result<Vec<u8>, StreamError> {
+        self.authorize_guest(scope, handle).await?;
+        self.read_bounded(handle, max_bytes).await
+    }
+
+    /// Guest non-blocking write: authorize `scope` then write.
+    pub async fn try_write_as_guest(
+        &self,
+        scope: StreamScope,
+        handle: StreamHandle,
+        chunk: Vec<u8>,
+    ) -> Result<usize, StreamError> {
+        self.authorize_guest(scope, handle).await?;
+        self.try_write(handle, chunk).await
+    }
+
+    /// Guest close: authorize `scope` then close.
+    pub async fn close_as_guest(
+        &self,
+        scope: StreamScope,
+        handle: StreamHandle,
+    ) -> Result<(), StreamError> {
+        self.authorize_guest(scope, handle).await?;
+        self.close(handle).await
+    }
+
+    /// Guest await of an outbound response head: authorize `scope` then
+    /// consume the head receiver.
+    pub async fn await_response_head_as_guest(
+        &self,
+        scope: StreamScope,
+        response_body: StreamHandle,
+    ) -> Result<HttpResponseHead, StreamError> {
+        self.authorize_guest(scope, response_body).await?;
+        self.await_response_head(response_body).await
+    }
+
+    /// Guest submit of an inbound response head: authorize `scope` then
+    /// fire the head sender.
+    pub async fn submit_inbound_response_head_as_guest(
+        &self,
+        scope: StreamScope,
+        guest_response_body: StreamHandle,
+        head: HttpResponseHead,
+    ) -> Result<(), StreamError> {
+        self.authorize_guest(scope, guest_response_body).await?;
+        self.submit_inbound_response_head(guest_response_body, head)
+            .await
+    }
+
+    /// Reclaim every handle, pending read, and head channel owned by
+    /// `scope` (ADR-0156 Sub-Decision 3). Dropping the channels signals
+    /// EOF/abort to any peer and unblocks pump/bridge tasks. Idempotent.
+    pub async fn close_scope(&self, scope: StreamScope) {
+        let mut state = self.inner.lock().await;
+        Self::close_scope_locked(&mut state, scope);
+    }
+
+    fn close_scope_locked(state: &mut RegistryState, scope: StreamScope) {
+        let Some(ids) = state.scope_ids.remove(&scope) else {
+            return;
+        };
+        for id in ids {
+            state.handles.remove(&id);
+            state.pending_reads.remove(&id);
+            state.response_head_receivers.remove(&id);
+            state.inbound_head_senders.remove(&id);
+            state.inbound_head_receivers.remove(&id);
+        }
+        state.outbound_open.remove(&scope);
+    }
+
+    /// Try to reclaim `scope` synchronously via a non-blocking lock.
+    /// Returns `true` if the scope was reclaimed, `false` if the lock was
+    /// contended (leaving the caller to retry asynchronously). Used by
+    /// [`ScopeCleanupGuard`] on drop.
+    pub fn try_close_scope(&self, scope: StreamScope) -> bool {
+        match self.inner.try_lock() {
+            Ok(mut state) => {
+                Self::close_scope_locked(&mut state, scope);
+                true
+            }
+            Err(_) => false,
         }
     }
 
@@ -291,21 +544,44 @@ impl HttpStreamRegistry {
     /// is kept on the bridge task until the HTTP response arrives; the
     /// receiver is stored in the registry and handed to the guest on
     /// its first `await_response_head(response_body)` call.
-    pub async fn open_outbound_exchange(&self) -> OutboundExchange {
-        let (req_writer, req_reader) = self.create_pair().await;
-        let (resp_writer, resp_reader) = self.create_pair().await;
+    pub async fn open_outbound_exchange(
+        &self,
+        scope: StreamScope,
+    ) -> Result<OutboundExchange, StreamError> {
         let (head_tx, head_rx) = oneshot::channel();
-        {
+        // Budget check, channel creation, and budget update happen under a
+        // single lock so the concurrency bound can never be overshot by
+        // two opens racing between a separate check and insert.
+        let (req_writer, req_reader, resp_writer, resp_reader) = {
             let mut state = self.inner.lock().await;
+            let open = state.outbound_open.get(&scope).map_or(0, BTreeSet::len);
+            if open >= MAX_OUTBOUND_STREAMS_PER_SCOPE {
+                return Err(StreamError::Aborted(format!(
+                    "outbound stream budget exhausted ({MAX_OUTBOUND_STREAMS_PER_SCOPE} concurrent per invocation)"
+                )));
+            }
+            // Request: guest writes (guest-facing), bridge reads.
+            let (req_writer, req_reader) = Self::create_pair_locked(&mut state, scope, true, false);
+            // Response: bridge writes, guest reads (guest-facing).
+            let (resp_writer, resp_reader) =
+                Self::create_pair_locked(&mut state, scope, false, true);
             state.response_head_receivers.insert(resp_reader.0, head_rx);
-        }
-        OutboundExchange {
+            // Track this exchange for the per-scope concurrency bound; the
+            // slot is released when the guest closes `resp_reader`.
+            state
+                .outbound_open
+                .entry(scope)
+                .or_default()
+                .insert(resp_reader.0);
+            (req_writer, req_reader, resp_writer, resp_reader)
+        };
+        Ok(OutboundExchange {
             guest_request_body: req_writer,
             guest_response_body: resp_reader,
             bridge_request_body: req_reader,
             bridge_response_body: resp_writer,
             bridge_head_sender: head_tx,
-        }
+        })
     }
 
     /// Await the response head for the given response-body handle.
@@ -335,9 +611,12 @@ impl HttpStreamRegistry {
     /// `kernel_response_body`. Guest fires the response head with
     /// `submit_inbound_response_head`; kernel awaits it via
     /// `await_inbound_response_head`.
-    pub async fn open_inbound_exchange(&self) -> InboundExchange {
-        let (kern_req_writer, guest_req_reader) = self.create_pair().await;
-        let (guest_resp_writer, kern_resp_reader) = self.create_pair().await;
+    pub async fn open_inbound_exchange(&self, scope: StreamScope) -> InboundExchange {
+        // Request: kernel writes, guest reads (guest-facing).
+        let (kern_req_writer, guest_req_reader) = self.create_pair_scoped(scope, false, true).await;
+        // Response: guest writes (guest-facing), kernel reads.
+        let (guest_resp_writer, kern_resp_reader) =
+            self.create_pair_scoped(scope, true, false).await;
         let (head_tx, head_rx) = oneshot::channel();
         {
             let mut state = self.inner.lock().await;
@@ -401,7 +680,7 @@ impl HttpStreamRegistry {
 
     async fn sender_for(&self, handle: StreamHandle) -> Result<mpsc::Sender<Vec<u8>>, StreamError> {
         let state = self.inner.lock().await;
-        match state.handles.get(&handle.0) {
+        match state.handles.get(&handle.0).map(|entry| &entry.end) {
             Some(ChannelEnd::Sender(tx)) => Ok(tx.clone()),
             Some(ChannelEnd::Receiver(_)) => Err(StreamError::InvalidHandle),
             None => Err(StreamError::InvalidHandle),
@@ -413,7 +692,7 @@ impl HttpStreamRegistry {
         handle: StreamHandle,
     ) -> Result<Arc<Mutex<mpsc::Receiver<Vec<u8>>>>, StreamError> {
         let state = self.inner.lock().await;
-        match state.handles.get(&handle.0) {
+        match state.handles.get(&handle.0).map(|entry| &entry.end) {
             Some(ChannelEnd::Receiver(rx)) => Ok(rx.clone()),
             Some(ChannelEnd::Sender(_)) => Err(StreamError::InvalidHandle),
             None => Err(StreamError::InvalidHandle),
@@ -458,173 +737,50 @@ impl Default for HttpStreamRegistry {
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
+/// RAII guard that reclaims a [`StreamScope`]'s registry footprint when
+/// dropped (ADR-0156 Sub-Decision 3). The inbound dispatcher holds one
+/// for the life of an exchange — moved into the response body stream on
+/// the success path — so a scope's streams are reclaimed on success,
+/// error, timeout, and client disconnect alike.
+pub struct ScopeCleanupGuard {
+    registry: Arc<HttpStreamRegistry>,
+    scope: StreamScope,
+}
 
-    #[tokio::test]
-    async fn create_pair_returns_distinct_ids() {
-        let reg = HttpStreamRegistry::new();
-        let (w, r) = reg.create_pair().await;
-        assert_ne!(w.0, r.0);
-        assert_eq!(reg.handle_count().await, 2);
-    }
-
-    #[tokio::test]
-    async fn write_then_read_roundtrips_chunk() {
-        let reg = HttpStreamRegistry::new();
-        let (w, r) = reg.create_pair().await;
-        let n = reg.write(w, b"hello".to_vec()).await.unwrap();
-        assert_eq!(n, 5);
-        let chunk = reg.read(r).await.unwrap();
-        assert_eq!(&chunk, b"hello");
-    }
-
-    #[tokio::test]
-    async fn bounded_read_splits_oversized_chunk_and_preserves_order() {
-        let reg = HttpStreamRegistry::new();
-        let (w, r) = reg.create_pair().await;
-        reg.write(w, b"abcdefghij".to_vec()).await.unwrap();
-        reg.write(w, b"next".to_vec()).await.unwrap();
-
-        let first = reg.read_bounded(r, 4).await.unwrap();
-        let second = reg.read_bounded(r, 4).await.unwrap();
-        let third = reg.read_bounded(r, 4).await.unwrap();
-        let fourth = reg.read_bounded(r, 4).await.unwrap();
-
-        assert_eq!(&first, b"abcd");
-        assert_eq!(&second, b"efgh");
-        assert_eq!(&third, b"ij");
-        assert_eq!(&fourth, b"next");
-    }
-
-    #[tokio::test]
-    async fn write_into_receiver_handle_is_invalid() {
-        let reg = HttpStreamRegistry::new();
-        let (_w, r) = reg.create_pair().await;
-        let err = reg.write(r, b"hi".to_vec()).await.unwrap_err();
-        assert_eq!(err, StreamError::InvalidHandle);
-    }
-
-    #[tokio::test]
-    async fn read_from_sender_handle_is_invalid() {
-        let reg = HttpStreamRegistry::new();
-        let (w, _r) = reg.create_pair().await;
-        let err = reg.read(w).await.unwrap_err();
-        assert_eq!(err, StreamError::InvalidHandle);
-    }
-
-    #[tokio::test]
-    async fn try_write_returns_wouldblock_when_full() {
-        let reg = HttpStreamRegistry::new();
-        let (w, _r) = reg.create_pair().await;
-        // Fill the channel to capacity.
-        for _ in 0..STREAM_CHANNEL_CAPACITY {
-            reg.try_write(w, vec![0u8; 8]).await.unwrap();
-        }
-        // Next try_write should WouldBlock.
-        let err = reg.try_write(w, vec![0u8; 8]).await.unwrap_err();
-        assert_eq!(err, StreamError::WouldBlock);
-    }
-
-    #[tokio::test]
-    async fn close_sender_causes_receiver_eof() {
-        let reg = HttpStreamRegistry::new();
-        let (w, r) = reg.create_pair().await;
-        reg.write(w, b"first".to_vec()).await.unwrap();
-        reg.close(w).await.unwrap();
-        // Drain buffered chunk then EOF.
-        let first = reg.read(r).await.unwrap();
-        assert_eq!(&first, b"first");
-        let eof = reg.read(r).await.unwrap();
-        assert!(eof.is_empty(), "expected EOF, got {:?}", eof);
-    }
-
-    #[tokio::test]
-    async fn write_after_receiver_close_returns_closed() {
-        let reg = HttpStreamRegistry::new();
-        let (w, r) = reg.create_pair().await;
-        reg.close(r).await.unwrap();
-        let err = reg.write(w, b"x".to_vec()).await.unwrap_err();
-        assert_eq!(err, StreamError::Closed);
-    }
-
-    #[tokio::test]
-    async fn close_unknown_handle_errs() {
-        let reg = HttpStreamRegistry::new();
-        let err = reg.close(StreamHandle(9999)).await.unwrap_err();
-        assert_eq!(err, StreamError::InvalidHandle);
-    }
-
-    #[tokio::test]
-    async fn inbound_exchange_roundtrips_head_and_body() {
-        let reg = HttpStreamRegistry::new();
-        let exchange = reg.open_inbound_exchange().await;
-
-        // Kernel pushes request body.
-        reg.write(
-            exchange.kernel_request_body,
-            b"git-upload-pack-request-body".to_vec(),
-        )
-        .await
-        .unwrap();
-        reg.close(exchange.kernel_request_body).await.unwrap();
-
-        // Guest reads request, produces response body + head.
-        let chunk = reg.read(exchange.guest_request_body).await.unwrap();
-        assert_eq!(&chunk, b"git-upload-pack-request-body");
-        let eof = reg.read(exchange.guest_request_body).await.unwrap();
-        assert!(eof.is_empty());
-
-        // Guest submits head.
-        let head = HttpResponseHead {
-            status: 200,
-            headers: vec![(
-                "content-type".into(),
-                "application/x-git-upload-pack-result".into(),
-            )],
-        };
-        reg.submit_inbound_response_head(exchange.guest_response_body, head.clone())
-            .await
-            .unwrap();
-
-        // Guest writes response body and closes.
-        reg.write(exchange.guest_response_body, b"packfile-bytes".to_vec())
-            .await
-            .unwrap();
-        reg.close(exchange.guest_response_body).await.unwrap();
-
-        // Kernel awaits head, then drains response body.
-        let kernel_head = reg
-            .await_inbound_response_head(exchange.kernel_head_receiver_slot)
-            .await
-            .unwrap();
-        assert_eq!(kernel_head.status, head.status);
-        assert_eq!(kernel_head.headers, head.headers);
-        let body_chunk = reg.read(exchange.kernel_response_body).await.unwrap();
-        assert_eq!(&body_chunk, b"packfile-bytes");
-        let eof2 = reg.read(exchange.kernel_response_body).await.unwrap();
-        assert!(eof2.is_empty());
-    }
-
-    #[tokio::test]
-    async fn inbound_submit_head_unknown_handle() {
-        let reg = HttpStreamRegistry::new();
-        let head = HttpResponseHead::default();
-        let err = reg
-            .submit_inbound_response_head(StreamHandle(9999), head)
-            .await
-            .unwrap_err();
-        assert_eq!(err, StreamError::InvalidHandle);
-    }
-
-    #[tokio::test]
-    async fn handle_ids_monotonic_within_registry() {
-        let reg = HttpStreamRegistry::new();
-        let (w1, r1) = reg.create_pair().await;
-        let (w2, r2) = reg.create_pair().await;
-        assert!(w1.0 < r1.0);
-        assert!(r1.0 < w2.0);
-        assert!(w2.0 < r2.0);
+impl ScopeCleanupGuard {
+    /// Create a guard that will close `scope` on `registry` when dropped.
+    pub fn new(registry: Arc<HttpStreamRegistry>, scope: StreamScope) -> Self {
+        Self { registry, scope }
     }
 }
+
+impl Drop for ScopeCleanupGuard {
+    fn drop(&mut self) {
+        // Fast path: reclaim synchronously if the registry lock is free
+        // (the common case — the guard drops once its exchange is idle).
+        if self.registry.try_close_scope(self.scope) {
+            return;
+        }
+        // Contended: hand the reclaim to the async runtime so it still
+        // happens rather than leaking. This keeps cleanup guaranteed even
+        // when the guard drops while another task holds the lock (e.g. a
+        // client disconnect racing an in-flight stream op).
+        match tokio::runtime::Handle::try_current() {
+            Ok(handle) => {
+                let registry = self.registry.clone();
+                let scope = self.scope;
+                handle.spawn(async move { registry.close_scope(scope).await });
+            }
+            Err(_) => {
+                tracing::warn!(
+                    scope = self.scope.0,
+                    "stream scope cleanup skipped: registry contended and no runtime available"
+                );
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+#[path = "http_stream_test.rs"]
+mod tests;

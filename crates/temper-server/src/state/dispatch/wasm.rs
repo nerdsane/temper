@@ -72,6 +72,7 @@ pub(crate) fn authorized_http_endpoint_host(
     module_name: &str,
     invocation_context: &WasmInvocationContext,
     http_streams: Arc<temper_wasm::http_stream::HttpStreamRegistry>,
+    stream_scope: temper_wasm::http_stream::StreamScope,
     security_context: &SecurityContext,
 ) -> Result<Arc<dyn WasmHost>, String> {
     let gate = state.wasm_authz_gate();
@@ -107,7 +108,8 @@ pub(crate) fn authorized_http_endpoint_host(
         module_name.to_string(),
     );
 
-    let mut base_host = ProductionWasmHost::with_shared_streams(bootstrap_secrets, http_streams)
+    let mut base_host =
+        ProductionWasmHost::with_shared_streams(bootstrap_secrets, http_streams, stream_scope)
         .with_spec_evaluator(spec_evaluator_fn())
         .with_progress_emitter(progress_emitter)
         .with_internal_api_base_url(internal_api_url)
