@@ -585,9 +585,10 @@ impl ProductionWasmHost {
     }
 
     fn revoke_stream_grant(&self, handle: crate::http_stream::StreamHandle) {
-        if let Ok(mut grants) = self.stream_grants.lock() {
-            grants.remove(&handle.0);
-        }
+        // Match grant/require paths: recover from a poisoned lock so a
+        // prior panic cannot leave a stale capability in place.
+        let mut grants = self.stream_grants.lock().unwrap_or_else(|e| e.into_inner());
+        grants.remove(&handle.0);
     }
 
     /// Close every still-granted stream handle and clear the grant set.
