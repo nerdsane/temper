@@ -28,7 +28,7 @@ async fn cross_tenant_guest_cannot_read_foreign_request_body() {
     let registry = shared_registry();
 
     // Victim tenant opens an inbound exchange (HttpEndpoint path).
-    let victim = registry.open_inbound_exchange().await;
+    let victim = registry.open_inbound_exchange().await.unwrap();
     registry
         .write(victim.kernel_request_body, b"SECRET-TENANT-A-BODY".to_vec())
         .await
@@ -52,7 +52,7 @@ async fn cross_tenant_guest_cannot_read_foreign_request_body() {
 #[tokio::test]
 async fn cross_tenant_guest_cannot_write_foreign_response_body() {
     let registry = shared_registry();
-    let victim = registry.open_inbound_exchange().await;
+    let victim = registry.open_inbound_exchange().await.unwrap();
 
     let attacker = ProductionWasmHost::with_shared_streams(BTreeMap::new(), registry.clone());
     let result = attacker
@@ -68,7 +68,7 @@ async fn cross_tenant_guest_cannot_write_foreign_response_body() {
 #[tokio::test]
 async fn cross_tenant_guest_cannot_close_foreign_handle() {
     let registry = shared_registry();
-    let victim = registry.open_inbound_exchange().await;
+    let victim = registry.open_inbound_exchange().await.unwrap();
 
     let attacker = ProductionWasmHost::with_shared_streams(BTreeMap::new(), registry.clone());
     let result = attacker.http_stream_close(victim.guest_request_body).await;
@@ -90,7 +90,7 @@ async fn cross_tenant_guest_cannot_close_foreign_handle() {
 #[tokio::test]
 async fn sequential_handle_enumeration_cannot_steal_body() {
     let registry = shared_registry();
-    let victim = registry.open_inbound_exchange().await;
+    let victim = registry.open_inbound_exchange().await.unwrap();
     registry
         .write(victim.kernel_request_body, b"secret-payload".to_vec())
         .await
@@ -113,4 +113,97 @@ async fn sequential_handle_enumeration_cannot_steal_body() {
         !stolen,
         "sequential handle enumeration must not yield a foreign stream body"
     );
+}
+
+#[tokio::test]
+async fn legitimate_owner_can_use_granted_inbound_handles() {
+    let registry = shared_registry();
+    let exchange = registry.open_inbound_exchange().await.unwrap();
+    registry
+        .write(exchange.kernel_request_body, b"hello-owner".to_vec())
+        .await
+        .unwrap();
+
+    let owner = ProductionWasmHost::with_shared_streams(BTreeMap::new(), registry.clone());
+    owner.grant_stream_handles([exchange.guest_request_body, exchange.guest_response_body]);
+
+    let body = owner
+        .http_stream_read(exchange.guest_request_body)
+        .await
+        .expect("owner must read granted request body");
+    assert_eq!(&body, b"hello-owner");
+
+    let n = owner
+        .http_stream_try_write(exchange.guest_response_body, b"reply".to_vec())
+        .await
+        .expect("owner must write granted response body");
+    assert_eq!(n, 5);
+
+    let drained = registry.read(exchange.kernel_response_body).await.unwrap();
+    assert_eq!(&drained, b"reply");
+}
+
+#[tokio::test]
+async fn guest_cannot_operate_on_kernel_side_handles_even_when_guessed() {
+    let registry = shared_registry();
+    let exchange = registry.open_inbound_exchange().await.unwrap();
+
+    let owner = ProductionWasmHost::with_shared_streams(BTreeMap::new(), registry.clone());
+    // Grant only guest ends — mirrors HttpEndpoint dispatcher.
+    owner.grant_stream_handles([exchange.guest_request_body, exchange.guest_response_body]);
+
+    let kernel_read = owner.http_stream_read(exchange.kernel_request_body).await;
+    assert!(
+        matches!(kernel_read, Err(StreamError::InvalidHandle)),
+        "guest must not read kernel-side handle; got {kernel_read:?}"
+    );
+
+    let kernel_write = owner
+        .http_stream_try_write(exchange.kernel_response_body, b"nope".to_vec())
+        .await;
+    assert!(
+        matches!(kernel_write, Err(StreamError::InvalidHandle)),
+        "guest must not write kernel-side handle; got {kernel_write:?}"
+    );
+}
+
+#[tokio::test]
+async fn concurrent_tenants_cannot_cross_read_shared_registry() {
+    let registry = shared_registry();
+
+    let a = registry.open_inbound_exchange().await.unwrap();
+    let b = registry.open_inbound_exchange().await.unwrap();
+    registry
+        .write(a.kernel_request_body, b"tenant-a".to_vec())
+        .await
+        .unwrap();
+    registry
+        .write(b.kernel_request_body, b"tenant-b".to_vec())
+        .await
+        .unwrap();
+
+    let host_a = ProductionWasmHost::with_shared_streams(BTreeMap::new(), registry.clone());
+    host_a.grant_stream_handles([a.guest_request_body, a.guest_response_body]);
+    let host_b = ProductionWasmHost::with_shared_streams(BTreeMap::new(), registry.clone());
+    host_b.grant_stream_handles([b.guest_request_body, b.guest_response_body]);
+
+    // Each owner reads only its own body.
+    assert_eq!(
+        host_a.http_stream_read(a.guest_request_body).await.unwrap(),
+        b"tenant-a"
+    );
+    assert_eq!(
+        host_b.http_stream_read(b.guest_request_body).await.unwrap(),
+        b"tenant-b"
+    );
+
+    // Cross-tenant reads denied.
+    assert!(matches!(
+        host_a.http_stream_read(b.guest_request_body).await,
+        Err(StreamError::InvalidHandle)
+    ));
+    assert!(matches!(
+        host_b.http_stream_read(a.guest_request_body).await,
+        Err(StreamError::InvalidHandle)
+    ));
 }
