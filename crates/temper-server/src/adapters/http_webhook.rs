@@ -92,9 +92,7 @@ impl AgentAdapter for HttpWebhookAdapter {
             && cl as usize > ADAPTER_MAX_RESPONSE_BYTES
         {
             return Ok(AdapterResult::failure(
-                format!(
-                    "HTTP Content-Length {cl} exceeds budget {ADAPTER_MAX_RESPONSE_BYTES}"
-                ),
+                format!("HTTP Content-Length {cl} exceeds budget {ADAPTER_MAX_RESPONSE_BYTES}"),
                 duration_ms,
             ));
         }

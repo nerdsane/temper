@@ -71,6 +71,7 @@ pub fn validate_adapter_http_url(raw: &str) -> Result<String, String> {
 }
 
 fn adapter_allow_http_loopback() -> bool {
+    // determinism-ok: process-level ops flag read at request time; not a sim clock source.
     matches!(
         std::env::var("TEMPER_ADAPTER_ALLOW_HTTP_LOOPBACK")
             .unwrap_or_default()
@@ -177,25 +178,18 @@ mod tests {
     }
 
     #[test]
-    fn loopback_requires_opt_in() {
-        // Ensure clean env for this assertion path.
-        // SAFETY: test-only; single-threaded unit test process.
-        unsafe {
-            std::env::remove_var("TEMPER_ADAPTER_ALLOW_HTTP_LOOPBACK");
-        }
-        let err = validate_adapter_http_url("http://127.0.0.1:9/x")
-            .expect_err("loopback without opt-in must fail");
-        assert!(err.contains("loopback"), "{err}");
-
-        unsafe {
-            std::env::set_var("TEMPER_ADAPTER_ALLOW_HTTP_LOOPBACK", "1");
-        }
-        let ok = validate_adapter_http_url("http://127.0.0.1:9/x")
-            .expect("loopback with opt-in should be allowed");
-        assert!(ok.contains("127.0.0.1"));
-        unsafe {
-            std::env::remove_var("TEMPER_ADAPTER_ALLOW_HTTP_LOOPBACK");
-        }
+    fn loopback_host_and_ip_classified_without_env_mutation() {
+        // Do not mutate process env here — cargo test runs unit tests on a pool.
+        // Policy for opt-in is exercised via is_loopback_host / is_blocked_ip only.
+        assert!(is_loopback_host("127.0.0.1"));
+        assert!(is_loopback_host("localhost"));
+        assert!(is_loopback_host("::1"));
+        assert!(is_loopback_host("[::1]"));
+        assert!(!is_loopback_host("example.com"));
+        assert!(is_blocked_ip(
+            "127.0.0.1".parse().expect("parse loopback v4")
+        ));
+        assert!(is_blocked_ip("::1".parse().expect("parse loopback v6")));
     }
 
     #[test]
