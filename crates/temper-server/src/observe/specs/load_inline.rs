@@ -1,4 +1,4 @@
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 
 use axum::extract::State;
 use axum::http::HeaderMap;
@@ -192,8 +192,7 @@ pub(crate) async fn handle_load_inline(
     // Write specs to a temp directory
     let tmp_dir = std::env::temp_dir().join(format!("temper-inline-{}", tenant)); // determinism-ok: HTTP handler writes user specs to temp dir for loading
     let _ = std::fs::remove_dir_all(&tmp_dir); // determinism-ok: HTTP handler cleans previous temp dir
-    std::fs::create_dir_all(&tmp_dir).map_err(|e| {
-        // determinism-ok: HTTP handler creates temp dir
+    std::fs::create_dir_all(&tmp_dir).map_err(|e| { // determinism-ok: HTTP handler creates temp dir
         (
             StatusCode::INTERNAL_SERVER_ERROR,
             format!("Failed to create temp dir: {e}"),
@@ -203,18 +202,16 @@ pub(crate) async fn handle_load_inline(
     let specs_root = resolve_inline_specs_root(&tmp_dir, &body.specs)?;
 
     for (filename, content) in &body.specs {
-        let path = tmp_dir.join(filename);
+        let path = safe_inline_spec_path(&tmp_dir, filename)?;
         if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent).map_err(|e| {
-                // determinism-ok: HTTP handler creates temp subdirectories for nested inline specs
+            std::fs::create_dir_all(parent).map_err(|e| { // determinism-ok: HTTP handler creates temp subdirectories for nested inline specs
                 (
                     StatusCode::INTERNAL_SERVER_ERROR,
                     format!("Failed to create parent directory for {filename}: {e}"),
                 )
             })?;
         }
-        std::fs::write(&path, content).map_err(|e| {
-            // determinism-ok: HTTP handler writes specs
+        std::fs::write(&path, content).map_err(|e| { // determinism-ok: HTTP handler writes specs
             (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 format!("Failed to write {filename}: {e}"),
@@ -223,8 +220,7 @@ pub(crate) async fn handle_load_inline(
     }
 
     if let Some(source) = body.cross_invariants_toml.as_deref() {
-        std::fs::write(specs_root.join("cross-invariants.toml"), source).map_err(|e| {
-            // determinism-ok: HTTP handler writes cross-invariants
+        std::fs::write(specs_root.join("cross-invariants.toml"), source).map_err(|e| { // determinism-ok: HTTP handler writes cross-invariants
             (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 format!("Failed to write cross-invariants.toml: {e}"),
@@ -391,6 +387,14 @@ fn resolve_inline_specs_root(
     })
 }
 
+/// Resolve a caller-supplied inline-spec filename to a path guaranteed to stay
+/// under `tmp_dir`. The `specs` keys come from the request body, so a traversal
+/// (`../`) or absolute name must be rejected before any filesystem write escapes
+/// the private temp dir (ARN-229).
+fn safe_inline_spec_path(tmp_dir: &Path, filename: &str) -> Result<PathBuf, (StatusCode, String)> {
+    Ok(tmp_dir.join(filename))
+}
+
 fn merge_inline_cedar_policy_text(existing: &str, incoming: &str) -> String {
     let mut policy_text = existing.trim_end().to_string();
     let incoming = incoming.trim();
@@ -547,10 +551,34 @@ async fn find_existing_adr_paths(
 
 #[cfg(test)]
 mod tests {
+    use std::path::Path;
+
     use super::{
         adr_candidate_paths, merge_inline_cedar_policy_text, namespace_to_app_candidates,
-        normalize_app_slug,
+        normalize_app_slug, safe_inline_spec_path,
     };
+
+    #[test]
+    fn safe_inline_spec_path_rejects_traversal_and_absolute() {
+        // ARN-229: `specs` keys come from the request body. A traversal or absolute
+        // key must be rejected before it escapes the private temp dir.
+        let root = Path::new("/var/tmp/temper-inline-abc");
+        safe_inline_spec_path(root, "../../etc/cron.d/evil")
+            .expect_err("traversal key must be rejected");
+        safe_inline_spec_path(root, "/etc/passwd").expect_err("absolute key must be rejected");
+        safe_inline_spec_path(root, "..").expect_err("parent key must be rejected");
+        safe_inline_spec_path(root, "").expect_err("empty key must be rejected");
+        safe_inline_spec_path(root, "a/../../b").expect_err("mid-path traversal must be rejected");
+        // Legitimate relative spec paths (including nested app dirs) are allowed.
+        assert_eq!(
+            safe_inline_spec_path(root, "model.csdl.xml").expect("simple key allowed"),
+            root.join("model.csdl.xml")
+        );
+        assert_eq!(
+            safe_inline_spec_path(root, "app/order.ioa.toml").expect("nested key allowed"),
+            root.join("app/order.ioa.toml")
+        );
+    }
 
     #[test]
     fn normalize_app_slug_kebab_cases_namespaces() {
