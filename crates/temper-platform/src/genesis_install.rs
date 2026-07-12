@@ -1294,7 +1294,7 @@ impl BoundActionHook for GenesisInstallHook {
             },
         )
         .await?;
-        let app_dir = cache_root.join(&name);
+        let app_dir = bundle_app_dir(&cache_root, &name)?;
         add_os_apps_dir_preferred(cache_root);
 
         let mut platform = self.platform.clone();
@@ -1575,7 +1575,7 @@ pub async fn export_genesis_registry_bundle(
     let mut apps = Vec::new();
 
     for app in closure {
-        let app_dir = cache_root.join(&app.name);
+        let app_dir = bundle_app_dir(&cache_root, &app.name)?;
         let started = Instant::now();
         materialize_commit_tree(
             &platform.server,
@@ -1675,7 +1675,7 @@ async fn resolve_genesis_app_closure(
                 app.version_hash.trim_start_matches('@')
             ),
         );
-        let app_dir = cache_root.join(&app.name);
+        let app_dir = bundle_app_dir(&cache_root, &app.name)?;
         materialize_commit_tree(
             state,
             tenant,
@@ -1774,7 +1774,7 @@ async fn materialize_app_closure(
             continue;
         }
 
-        let app_dir = cache_root.join(&app.name);
+        let app_dir = bundle_app_dir(cache_root, &app.name)?;
         materialize_commit_tree(
             state,
             tenant,
