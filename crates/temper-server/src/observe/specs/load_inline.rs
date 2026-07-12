@@ -192,7 +192,7 @@ pub(crate) async fn handle_load_inline(
         ));
     }
 
-    // ADR-0159 / ARN-229: validate keys + budgets, then materialize into an
+    // ADR-0162 / ARN-229: validate keys + budgets, then materialize into an
     // invocation-unique staging directory (never a shared tenant temp path).
     // InlineStagingDir Drop always removes the tree (success, error, panic).
     let (validated, total_bytes) = validate_inline_bundle(&body.specs)?;

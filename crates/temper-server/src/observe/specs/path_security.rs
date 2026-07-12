@@ -1,4 +1,4 @@
-//! Spec ingestion path security (ADR-0159 / ARN-229).
+//! Spec ingestion path security (ADR-0162 / ARN-229).
 //!
 //! Fail-closed validation for inline spec map keys and staging under a
 //! capability-owned, invocation-unique directory.

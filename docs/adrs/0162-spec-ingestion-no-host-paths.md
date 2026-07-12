@@ -1,4 +1,4 @@
-# ADR-0159: Spec ingestion without host paths (ARN-229)
+# ADR-0162: Spec ingestion without host paths (ARN-229)
 
 - Status: Accepted
 - Date: 2026-07-12

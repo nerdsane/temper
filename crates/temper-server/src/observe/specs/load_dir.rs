@@ -16,7 +16,7 @@ use super::types::LoadDirRequest;
 use super::verification_stream::build_verification_stream_response;
 use crate::state::ServerState;
 
-/// POST /api/specs/load-dir — **disabled for network callers** (ADR-0159 / ARN-229).
+/// POST /api/specs/load-dir — **disabled for network callers** (ADR-0162 / ARN-229).
 ///
 /// Callers must not name host directories. Use `POST /api/specs/load-inline`
 /// with an in-memory filename→content map. Internal loads after validated
