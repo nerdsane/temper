@@ -193,11 +193,12 @@ pub(crate) async fn handle_load_inline(
     // suffix (ARN-229) means a local attacker can't pre-plant a symlink at a fixed
     // path to redirect the writes, and nothing is shared across requests/tenants.
     let inline_id = uuid::Uuid::now_v7(); // determinism-ok: HTTP handler needs an unpredictable per-request temp dir
-    // The tenant comes from the request body and is interpolated into the path, so
-    // validate the whole leaf name through the same component check — a tenant like
-    // `a/../../etc` would otherwise escape the temp root and reopen the
-    // arbitrary-write primitive this fix closes (ARN-229).
-    let tmp_dir = safe_inline_spec_path(
+    // The tenant comes from the request body and is interpolated into the leaf
+    // name, so require the leaf to be a single safe path component — a tenant with
+    // `/` (permitted by TenantId::new) or `..` would otherwise create a predictable
+    // intermediate dir or escape the temp root, reopening the symlink / arbitrary
+    // write primitive this fix closes (ARN-229).
+    let tmp_dir = safe_temp_dir_leaf(
         &std::env::temp_dir(),
         &format!("temper-inline-{tenant}-{inline_id}"),
     )?;
@@ -438,6 +439,25 @@ fn safe_inline_spec_path(tmp_dir: &Path, filename: &str) -> Result<PathBuf, (Sta
     Ok(tmp_dir.join(safe))
 }
 
+/// Resolve the per-request temp-dir leaf name to a direct child of `temp_root`.
+/// Unlike `safe_inline_spec_path` (which permits nested spec paths), the leaf must
+/// be exactly ONE `Component::Normal`: it embeds the caller-supplied tenant, and a
+/// tenant containing `/` would make only the final component uuid-suffixed, leaving
+/// a *predictable* intermediate dir a local attacker could pre-plant a symlink at
+/// (ARN-229). A single component keeps the whole dir unpredictable.
+fn safe_temp_dir_leaf(temp_root: &Path, leaf: &str) -> Result<PathBuf, (StatusCode, String)> {
+    let mut components = Path::new(leaf).components();
+    match (components.next(), components.next()) {
+        (Some(Component::Normal(part)), None) => Ok(temp_root.join(part)),
+        _ => Err((
+            StatusCode::BAD_REQUEST,
+            "invalid inline spec request: tenant must be a single safe path component \
+             (no '/', '..', or absolute segments)"
+                .to_string(),
+        )),
+    }
+}
+
 fn merge_inline_cedar_policy_text(existing: &str, incoming: &str) -> String {
     let mut policy_text = existing.trim_end().to_string();
     let incoming = incoming.trim();
@@ -598,7 +618,7 @@ mod tests {
 
     use super::{
         adr_candidate_paths, merge_inline_cedar_policy_text, namespace_to_app_candidates,
-        normalize_app_slug, safe_inline_spec_path,
+        normalize_app_slug, safe_inline_spec_path, safe_temp_dir_leaf,
     };
 
     #[test]
@@ -624,14 +644,20 @@ mod tests {
     }
 
     #[test]
-    fn safe_inline_spec_path_rejects_tenant_escape_in_leaf() {
-        // ARN-229: the tenant is interpolated into the temp-dir leaf name, so the
-        // whole leaf is validated too — a tenant like `a/../../etc` must not escape.
+    fn safe_temp_dir_leaf_requires_single_component() {
+        // ARN-229: the tenant is interpolated into the temp-dir leaf name, which must
+        // stay a single unpredictable directory.
         let temp_root = Path::new("/var/folders/tmp");
-        safe_inline_spec_path(temp_root, "temper-inline-a/../../etc-01890000")
+        // Traversal tenant escapes the temp root.
+        safe_temp_dir_leaf(temp_root, "temper-inline-a/../../etc-01890000")
             .expect_err("tenant traversal in the leaf name must be rejected");
+        // A tenant containing `/` (permitted by TenantId::new) would leave a
+        // predictable intermediate dir — reject the nested leaf.
+        safe_temp_dir_leaf(temp_root, "temper-inline-evil/x-01890000")
+            .expect_err("nested leaf (tenant with '/') must be rejected");
+        // A normal tenant yields a single child dir under the temp root.
         assert_eq!(
-            safe_inline_spec_path(temp_root, "temper-inline-default-01890000")
+            safe_temp_dir_leaf(temp_root, "temper-inline-default-01890000")
                 .expect("normal tenant leaf allowed"),
             temp_root.join("temper-inline-default-01890000")
         );
