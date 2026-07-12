@@ -91,9 +91,7 @@ impl ClickHouseStore {
                     }
                     if is_clickhouse_word_char(c) {
                         let mut end = i + 1;
-                        while end < bytes.len()
-                            && (is_clickhouse_word_char(bytes[end]) || bytes[end] == b'$')
-                        {
+                        while end < bytes.len() && is_clickhouse_bareword_char(bytes[end]) {
                             end += 1;
                         }
                         out.push_str(&sql[i..end]);
@@ -127,6 +125,17 @@ impl ClickHouseStore {
                             let mut end = i + 1;
                             while end < bytes.len() && bytes[end].is_ascii_digit() {
                                 end += 1;
+                            }
+                            if bytes
+                                .get(end)
+                                .is_some_and(|byte| is_clickhouse_bareword_char(*byte))
+                            {
+                                while end < bytes.len() && is_clickhouse_bareword_char(bytes[end]) {
+                                    end += 1;
+                                }
+                                out.push_str(&sql[i..end]);
+                                i = end;
+                                continue;
                             }
                             let one_based = sql[i + 1..end].parse::<usize>().map_err(|_| {
                                 ObserveError::InvalidQuery(format!(
@@ -341,6 +350,10 @@ fn heredoc_delimiter_len(source: &str, start: usize) -> Option<usize> {
     source[start + delimiter_len..]
         .contains(delimiter)
         .then_some(delimiter_len)
+}
+
+fn is_clickhouse_bareword_char(byte: u8) -> bool {
+    is_clickhouse_word_char(byte) || byte == b'$'
 }
 
 fn is_clickhouse_word_char(byte: u8) -> bool {

@@ -48,11 +48,11 @@ fn bind_params_preserves_clickhouse_extended_lexical_regions() {
 
 #[test]
 fn bind_params_handles_repetition_and_escaped_quotes() {
-    let sql = r#"SELECT '$1''$1', 'escaped \' $1', "$1""$1", `$1``$1`, metric$1, 1$1, $1, $1"#;
+    let sql = r#"SELECT '$1''$1', 'escaped \' $1', "$1""$1", `$1``$1`, metric$1, 1$1, $1suffix, $1_foo, $1$, $1, $1"#;
     let result = ClickHouseStore::bind_params(sql, &[SqlParam::Int(7)]).unwrap();
     assert_eq!(
         result.sql,
-        r#"SELECT '$1''$1', 'escaped \' $1', "$1""$1", `$1``$1`, metric$1, 1$1, {p1:Int64}, {p1:Int64}"#
+        r#"SELECT '$1''$1', 'escaped \' $1', "$1""$1", `$1``$1`, metric$1, 1$1, $1suffix, $1_foo, $1$, {p1:Int64}, {p1:Int64}"#
     );
     assert_eq!(result.form_params, vec![("param_p1".into(), "7".into())]);
 }

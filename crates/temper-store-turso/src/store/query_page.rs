@@ -141,11 +141,10 @@ fn turso_query_field_order_sql(
     let mut params = Vec::new();
     for (field_name, descending) in order_by {
         let direction = if *descending { "DESC" } else { "ASC" };
-        let null_direction = if *descending { "DESC" } else { "ASC" };
         if field_name == "entity_id" || field_name == "Id" || field_name == "id" {
             clauses.push(format!("entity_id {direction}"));
         } else if field_name == "status" || field_name == "Status" {
-            clauses.push(format!("status IS NULL {null_direction}"));
+            clauses.push(format!("status IS NULL {direction}"));
             clauses.push(format!("status {direction}"));
         } else {
             let field_param = format!("?{}", first_param + params.len());
@@ -158,7 +157,7 @@ fn turso_query_field_order_sql(
                 "(SELECT type FROM json_each(fields) \
                  WHERE key = {field_param} LIMIT 1)"
             );
-            clauses.push(format!("{value} IS NULL {null_direction}"));
+            clauses.push(format!("{value} IS NULL {direction}"));
             clauses.push(format!(
                 "CASE WHEN {value_type} IN ('integer', 'real') \
                  THEN CAST({value} AS REAL) END IS NULL ASC"
