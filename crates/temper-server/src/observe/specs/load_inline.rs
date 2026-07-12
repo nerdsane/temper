@@ -189,9 +189,19 @@ pub(crate) async fn handle_load_inline(
         ));
     }
 
-    // Write specs to a temp directory
-    let tmp_dir = std::env::temp_dir().join(format!("temper-inline-{}", tenant)); // determinism-ok: HTTP handler writes user specs to temp dir for loading
-    let _ = std::fs::remove_dir_all(&tmp_dir); // determinism-ok: HTTP handler cleans previous temp dir
+    // Write specs to a private, per-request temp directory. The unpredictable
+    // suffix (ARN-229) means a local attacker can't pre-plant a symlink at a fixed
+    // path to redirect the writes, and nothing is shared across requests/tenants.
+    let inline_id = uuid::Uuid::now_v7(); // determinism-ok: HTTP handler needs an unpredictable per-request temp dir
+    // The tenant comes from the request body and is interpolated into the path, so
+    // validate the whole leaf name through the same component check — a tenant like
+    // `a/../../etc` would otherwise escape the temp root and reopen the
+    // arbitrary-write primitive this fix closes (ARN-229).
+    let tmp_dir = safe_inline_spec_path(
+        &std::env::temp_dir(),
+        &format!("temper-inline-{tenant}-{inline_id}"),
+    )?;
+    #[rustfmt::skip]
     std::fs::create_dir_all(&tmp_dir).map_err(|e| { // determinism-ok: HTTP handler creates temp dir
         (
             StatusCode::INTERNAL_SERVER_ERROR,
@@ -204,6 +214,7 @@ pub(crate) async fn handle_load_inline(
     for (filename, content) in &body.specs {
         let path = safe_inline_spec_path(&tmp_dir, filename)?;
         if let Some(parent) = path.parent() {
+            #[rustfmt::skip]
             std::fs::create_dir_all(parent).map_err(|e| { // determinism-ok: HTTP handler creates temp subdirectories for nested inline specs
                 (
                     StatusCode::INTERNAL_SERVER_ERROR,
@@ -211,6 +222,7 @@ pub(crate) async fn handle_load_inline(
                 )
             })?;
         }
+        #[rustfmt::skip]
         std::fs::write(&path, content).map_err(|e| { // determinism-ok: HTTP handler writes specs
             (
                 StatusCode::INTERNAL_SERVER_ERROR,
@@ -220,6 +232,7 @@ pub(crate) async fn handle_load_inline(
     }
 
     if let Some(source) = body.cross_invariants_toml.as_deref() {
+        #[rustfmt::skip]
         std::fs::write(specs_root.join("cross-invariants.toml"), source).map_err(|e| { // determinism-ok: HTTP handler writes cross-invariants
             (
                 StatusCode::INTERNAL_SERVER_ERROR,
@@ -237,6 +250,10 @@ pub(crate) async fn handle_load_inline(
         merge: true,
     };
     let result = handle_load_dir(State(state.clone()), Json(dir_request)).await;
+
+    // The loader has read the specs into the registry; the per-request dir is no
+    // longer needed. Best-effort cleanup so unique temp dirs don't accumulate.
+    let _ = std::fs::remove_dir_all(&tmp_dir); // determinism-ok: HTTP handler removes its private temp dir after loading
 
     if result.is_ok()
         && let Some(ref cedar_text) = cedar_policies
@@ -378,13 +395,13 @@ fn resolve_inline_specs_root(
         ));
     }
 
-    let model_path = Path::new(model_paths[0]);
-    let relative_root = model_path.parent().unwrap_or_else(|| Path::new(""));
-    Ok(if relative_root.as_os_str().is_empty() {
-        tmp_dir.to_path_buf()
-    } else {
-        tmp_dir.join(relative_root)
-    })
+    // Validate the model path the same way as every other spec key, then take the
+    // parent of the *validated* path so `specs_root` is always under `tmp_dir`.
+    let validated_model = safe_inline_spec_path(tmp_dir, model_paths[0])?;
+    Ok(validated_model
+        .parent()
+        .map(Path::to_path_buf)
+        .unwrap_or_else(|| tmp_dir.to_path_buf()))
 }
 
 /// Resolve a caller-supplied inline-spec filename to a path guaranteed to stay
@@ -392,7 +409,33 @@ fn resolve_inline_specs_root(
 /// (`../`) or absolute name must be rejected before any filesystem write escapes
 /// the private temp dir (ARN-229).
 fn safe_inline_spec_path(tmp_dir: &Path, filename: &str) -> Result<PathBuf, (StatusCode, String)> {
-    Ok(tmp_dir.join(filename))
+    let rel = Path::new(filename);
+    if rel.as_os_str().is_empty() {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            "inline spec path must not be empty".to_string(),
+        ));
+    }
+    // Every component must be a plain name: `..` is `ParentDir`, an absolute path
+    // starts with `RootDir`/`Prefix`, `.` is `CurDir` — all rejected, so the join
+    // can only ever land under `tmp_dir`. Nested relative paths (app subdirs) are
+    // allowed, since inline submissions legitimately carry them.
+    let mut safe = PathBuf::new();
+    for component in rel.components() {
+        match component {
+            Component::Normal(part) => safe.push(part),
+            _ => {
+                return Err((
+                    StatusCode::BAD_REQUEST,
+                    format!(
+                        "inline spec path '{filename}' must be a relative path with no '..', \
+                         '.', or absolute segments"
+                    ),
+                ));
+            }
+        }
+    }
+    Ok(tmp_dir.join(safe))
 }
 
 fn merge_inline_cedar_policy_text(existing: &str, incoming: &str) -> String {
@@ -577,6 +620,20 @@ mod tests {
         assert_eq!(
             safe_inline_spec_path(root, "app/order.ioa.toml").expect("nested key allowed"),
             root.join("app/order.ioa.toml")
+        );
+    }
+
+    #[test]
+    fn safe_inline_spec_path_rejects_tenant_escape_in_leaf() {
+        // ARN-229: the tenant is interpolated into the temp-dir leaf name, so the
+        // whole leaf is validated too — a tenant like `a/../../etc` must not escape.
+        let temp_root = Path::new("/var/folders/tmp");
+        safe_inline_spec_path(temp_root, "temper-inline-a/../../etc-01890000")
+            .expect_err("tenant traversal in the leaf name must be rejected");
+        assert_eq!(
+            safe_inline_spec_path(temp_root, "temper-inline-default-01890000")
+                .expect("normal tenant leaf allowed"),
+            temp_root.join("temper-inline-default-01890000")
         );
     }
 

@@ -51,6 +51,12 @@ relative path whose every component is a `Component::Normal` (no `..`, no absolu
 so a traversal or absolute name is rejected with `400` before touching the
 filesystem. This mirrors the `safe_bundle_relative_path` posture used elsewhere.
 
+The **`tenant`** value is also caller-supplied and is interpolated into the temp
+dir leaf name, and `TenantId::new` permits `/` and `..`. So the whole leaf name
+(`temper-inline-{tenant}-{uuid}`) is validated through the same component check —
+otherwise a tenant like `a/../../etc` would escape the temp root and reopen the
+arbitrary-write primitive. "Every caller-supplied path" includes the tenant.
+
 ### Sub-Decision 2: Private, unpredictable temp dir
 
 The per-request dir gets an unguessable suffix
