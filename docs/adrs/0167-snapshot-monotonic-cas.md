@@ -1,4 +1,4 @@
-# ADR-0164: Monotonic snapshot compare-and-set (ARN-239)
+# ADR-0167: Monotonic snapshot compare-and-set (ARN-239)
 
 - Status: Accepted
 - Date: 2026-07-12
