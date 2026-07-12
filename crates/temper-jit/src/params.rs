@@ -83,7 +83,17 @@ fn reject_ambiguous_aliases(
 ) -> Result<(), ParamContractError> {
     for exact in declared {
         let alias = temper_spec::naming::to_pascal_case(exact);
-        if alias != *exact && object.contains_key(exact) && object.contains_key(&alias) {
+        if alias == *exact {
+            continue;
+        }
+        // Supplying both spellings is only ambiguous when they carry *different*
+        // values — that is the smuggling vector. Identical duplicates are benign:
+        // callers legitimately write both the snake_case and PascalCase alias of a
+        // field with the same value for query compatibility (e.g. the os-app
+        // markdown-file bootstrap), and one is kept by the filter.
+        if let (Some(exact_value), Some(alias_value)) = (object.get(exact), object.get(&alias))
+            && exact_value != alias_value
+        {
             return Err(ParamContractError::AmbiguousAlias {
                 exact: exact.clone(),
                 alias,
@@ -259,9 +269,8 @@ params = ["name", "parent_id", "workspace_id"]
         );
     }
 
-    #[test]
-    fn ambiguous_alias_is_rejected() {
-        let table = TransitionTable::from_ioa_source(
+    fn update_owner_table() -> TransitionTable {
+        TransitionTable::from_ioa_source(
             r#"
 [automaton]
 name = "Account"
@@ -275,7 +284,12 @@ from = ["Active"]
 to = "Active"
 params = ["user_id"]
 "#,
-        );
+        )
+    }
+
+    #[test]
+    fn differing_alias_values_are_rejected() {
+        let table = update_owner_table();
         let params = serde_json::json!({ "user_id": "a", "UserId": "b" });
         assert!(matches!(
             restrict_to_declared_params(&table, "UpdateOwner", &params),
@@ -285,5 +299,23 @@ params = ["user_id"]
             undeclared_param_keys(&table, "UpdateOwner", &params),
             Err(ParamContractError::AmbiguousAlias { .. })
         ));
+    }
+
+    #[test]
+    fn identical_alias_values_are_allowed() {
+        // Callers legitimately write both the snake_case and PascalCase spelling
+        // of a field with the SAME value (os-app markdown-file bootstrap); that is
+        // a benign duplicate, not smuggling.
+        let table = update_owner_table();
+        let params = serde_json::json!({ "user_id": "same", "UserId": "same" });
+        assert!(
+            undeclared_param_keys(&table, "UpdateOwner", &params)
+                .unwrap()
+                .is_empty()
+        );
+        let restricted = restrict_to_declared_params(&table, "UpdateOwner", &params).unwrap();
+        let object = restricted.as_object().unwrap();
+        assert_eq!(object.get("user_id").unwrap(), "same");
+        assert_eq!(object.get("UserId").unwrap(), "same");
     }
 }
