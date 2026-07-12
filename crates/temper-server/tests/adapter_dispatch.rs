@@ -1,14 +1,43 @@
 //! Native adapter dispatch integration tests.
 
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
+
+use async_trait::async_trait;
 use temper_runtime::ActorSystem;
 use temper_runtime::tenant::TenantId;
 use temper_server::ServerState;
+use temper_server::adapters::{
+    AdapterContext, AdapterError, AdapterRegistry, AdapterResult, AgentAdapter,
+};
 use temper_server::registry::SpecRegistry;
 use temper_server::request_context::AgentContext;
 use temper_server::state::DispatchExtOptions;
 use temper_spec::csdl::parse_csdl;
 use wiremock::matchers::{method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
+
+/// A stand-in for a dangerous unsandboxed native adapter (e.g. a host-process
+/// CLI). It records whether it was ever executed so a test can prove selection
+/// reached it — without spawning a real process.
+struct RecordingAdapter {
+    invoked: Arc<AtomicBool>,
+}
+
+#[async_trait]
+impl AgentAdapter for RecordingAdapter {
+    fn adapter_type(&self) -> &str {
+        "sensitive_native"
+    }
+
+    async fn execute(&self, _ctx: AdapterContext) -> Result<AdapterResult, AdapterError> {
+        self.invoked.store(true, Ordering::SeqCst);
+        Ok(AdapterResult::success(
+            serde_json::json!({ "result": "sensitive-native-executed" }),
+            0,
+        ))
+    }
+}
 
 const ADAPTER_CSDL_XML: &str = r#"<?xml version="1.0" encoding="utf-8"?>
 <edmx:Edmx Version="4.0" xmlns:edmx="http://docs.oasis-open.org/odata/ns/edmx">
@@ -296,6 +325,121 @@ method = "POST"
 
     assert!(response.success);
     assert_eq!(response.state.status, "Done");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn entity_adapter_type_cannot_escalate_beyond_declared_adapters() {
+    // ARN-228: the integration declares only the benign `http` adapter, but the
+    // entity's mutable `adapter_type` field is set to a different, unsandboxed
+    // native adapter. The declared adapter is the authorization boundary — a
+    // production actor able to write that field must not be able to pivot dispatch
+    // onto an adapter the spec never declared (host-process exec / sandbox escape).
+    let invoked = Arc::new(AtomicBool::new(false));
+
+    let spec = r#"
+[automaton]
+name = "AdapterTest"
+states = ["Idle", "Pending", "Done", "Failed"]
+initial = "Idle"
+
+[[state]]
+name = "adapter_type"
+type = "string"
+initial = "http"
+
+[[action]]
+name = "Configure"
+kind = "input"
+from = ["Idle"]
+params = ["adapter_type"]
+
+[[action]]
+name = "Trigger"
+kind = "input"
+from = ["Idle"]
+to = "Pending"
+effect = [{ type = "trigger", name = "adapter_call" }]
+
+[[action]]
+name = "AdapterSucceeded"
+kind = "input"
+from = ["Pending"]
+to = "Done"
+params = ["result"]
+
+[[action]]
+name = "AdapterFailed"
+kind = "input"
+from = ["Pending"]
+to = "Failed"
+params = ["error_message"]
+
+[[integration]]
+name = "adapter_call"
+trigger = "adapter_call"
+type = "adapter"
+adapter = "http"
+on_success = "AdapterSucceeded"
+on_failure = "AdapterFailed"
+url = "http://127.0.0.1:1/execute"
+method = "POST"
+"#;
+
+    let mut state = build_state(spec);
+    // Register the stand-in dangerous adapter alongside the built-ins.
+    let mut registry = AdapterRegistry::with_builtins();
+    registry.register(Arc::new(RecordingAdapter {
+        invoked: invoked.clone(),
+    }));
+    state.adapter_registry = Arc::new(registry);
+
+    let tenant = TenantId::default();
+    let agent_ctx = AgentContext::default();
+
+    // Attacker sets the entity's adapter_type to the sensitive native adapter.
+    let configure = state
+        .dispatch_tenant_action_ext(
+            &tenant,
+            "AdapterTest",
+            "adapter-escalation",
+            "Configure",
+            serde_json::json!({ "adapter_type": "sensitive_native" }),
+            DispatchExtOptions {
+                agent_ctx: &agent_ctx,
+                await_integration: true,
+                await_reactions: true,
+            },
+        )
+        .await
+        .expect("Configure should set adapter_type");
+    assert!(configure.success);
+
+    let response = state
+        .dispatch_tenant_action_ext(
+            &tenant,
+            "AdapterTest",
+            "adapter-escalation",
+            "Trigger",
+            serde_json::json!({}),
+            DispatchExtOptions {
+                agent_ctx: &agent_ctx,
+                await_integration: true,
+                await_reactions: true,
+            },
+        )
+        .await
+        .expect("Trigger dispatch should complete");
+
+    // Declared set is {http}; the entity requested `sensitive_native`, which is not
+    // declared. Dispatch must refuse to run it and fail the integration closed.
+    assert!(
+        !invoked.load(Ordering::SeqCst),
+        "ARN-228: entity adapter_type escalated dispatch onto an undeclared native adapter"
+    );
+    assert_eq!(
+        response.state.status, "Failed",
+        "undeclared adapter selection must fail closed via on_failure"
+    );
 }
 
 // ---------------------------------------------------------------------------

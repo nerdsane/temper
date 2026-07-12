@@ -65,6 +65,7 @@ pprof = { version = "0.14", features = ["protobuf", "protobuf-codec"] }
 
 [dev-dependencies]
 tokio-test = { workspace = true }
+async-trait = { workspace = true }
 criterion = { workspace = true }
 tokio = { workspace = true, features = ["full"] }
 wiremock = { workspace = true }
