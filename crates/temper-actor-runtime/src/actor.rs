@@ -115,7 +115,7 @@ pub struct ActorContext {
     pub(crate) mailbox: Option<std::sync::Arc<dyn crate::mailbox::Mailbox>>,
     /// Pool for spawn/lookup operations.
     pub(crate) pool: Option<deadpool_postgres::Pool>,
-    /// Explicit grants for cross-namespace load/upsert (ADR-0161 / ARN-215).
+    /// Explicit grants for cross-namespace load/upsert (ADR-0164 / ARN-215).
     /// Own namespace is always allowed without a grant.
     cross_namespace_grants: std::sync::Mutex<std::collections::BTreeSet<String>>,
 }

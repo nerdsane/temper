@@ -1,4 +1,4 @@
-# ADR-0161: ActorContext namespace capability (ARN-215)
+# ADR-0164: ActorContext namespace capability (ARN-215)
 
 - Status: Accepted
 - Date: 2026-07-12
