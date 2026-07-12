@@ -140,8 +140,8 @@ mod tests {
 
     use wasmtime::{Engine, Memory, MemoryType, Store};
 
-    use super::*;
     use super::super::{GuestSpanRegistry, MemoryLimiter};
+    use super::*;
     use crate::host_trait::SimWasmHost;
     use crate::stream::StreamRegistry;
     use crate::types::WasmInvocationContext;
@@ -187,8 +187,7 @@ mod tests {
     fn memory_with_pages(pages: u32) -> (Store<()>, Memory) {
         let engine = Engine::default();
         let mut store = Store::new(&engine, ());
-        let memory =
-            Memory::new(&mut store, MemoryType::new(pages, Some(pages))).expect("memory");
+        let memory = Memory::new(&mut store, MemoryType::new(pages, Some(pages))).expect("memory");
         (store, memory)
     }
 
