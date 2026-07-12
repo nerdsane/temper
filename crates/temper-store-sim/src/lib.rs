@@ -957,22 +957,24 @@ impl EventStore for SimEventStore {
             .snapshots
             .insert(persistence_id.to_string(), (sequence_nr, snapshot.to_vec()));
         // History is append-only for new sequence numbers (never overwrite).
-        let history = inner
+        use std::collections::btree_map::Entry;
+        match inner
             .snapshot_history
             .entry(persistence_id.to_string())
-            .or_default();
-        if history.contains_key(&sequence_nr) {
-            // Same sequence already recorded under a different path — conflict.
-            if history.get(&sequence_nr).map(|b| b.as_slice()) == Some(snapshot) {
-                // already consistent
-            } else {
-                return Err(PersistenceError::ConcurrencyViolation {
-                    expected: sequence_nr,
-                    actual: sequence_nr,
-                });
+            .or_default()
+            .entry(sequence_nr)
+        {
+            Entry::Occupied(occ) => {
+                if occ.get().as_slice() != snapshot {
+                    return Err(PersistenceError::ConcurrencyViolation {
+                        expected: sequence_nr,
+                        actual: sequence_nr,
+                    });
+                }
             }
-        } else {
-            history.insert(sequence_nr, snapshot.to_vec());
+            Entry::Vacant(vac) => {
+                vac.insert(snapshot.to_vec());
+            }
         }
         let segments = inner
             .event_segments
