@@ -279,19 +279,41 @@ impl Actor for SpecDrivenActor {
             }
         }
 
-        if let Some(fields) = spec_msg
+        // ARN-247: restrict incoming params to the action's declared set before
+        // they can touch fields, so the pg-actor runtime enforces the same
+        // declared-parameter boundary as the in-process runtime. A contract
+        // violation (undeclared param on a known action, missing metadata, or an
+        // ambiguous alias) fails closed: no field mutation and no state persisted.
+        if let Some(raw_params) = spec_msg
             .as_ref()
             .filter(|m| !m.params.is_empty())
             .and_then(|m| serde_json::from_slice::<serde_json::Value>(&m.params).ok())
-            .filter(|p| !p.as_object().is_some_and(|o| o.is_empty()))
         {
-            match (actor_state.fields.as_object_mut(), fields.as_object()) {
-                (Some(existing), Some(new_fields)) => {
-                    for (k, v) in new_fields {
-                        existing.insert(k.clone(), v.clone());
-                    }
+            let filtered = match temper_jit::params::restrict_to_declared_params(
+                &self.table,
+                &action,
+                &raw_params,
+            ) {
+                Ok(filtered) => filtered,
+                Err(error) => {
+                    tracing::warn!(
+                        actor = %self.name,
+                        action = %action,
+                        %error,
+                        "rejected undeclared action params; no state change",
+                    );
+                    return Ok(());
                 }
-                _ => actor_state.fields = fields,
+            };
+            if let Some(new_fields) = filtered.as_object().filter(|o| !o.is_empty()) {
+                match actor_state.fields.as_object_mut() {
+                    Some(existing) => {
+                        for (k, v) in new_fields {
+                            existing.insert(k.clone(), v.clone());
+                        }
+                    }
+                    None => actor_state.fields = filtered.clone().into_owned(),
+                }
             }
         }
 
@@ -322,27 +344,30 @@ impl Actor for SpecDrivenActor {
                     new_state = %actor_state.status,
                     "transition"
                 );
+
+                // 5. Persist ONLY on a successful transition. ARN-247: a rejected
+                // or unknown action must not persist the merged params (otherwise
+                // an invalid action name is a smuggling primitive for undeclared
+                // fields).
+                *state = serde_json::to_vec(&actor_state)
+                    .map_err(|e| ActorError::HandlerFailed(format!("state ser: {e}")))?;
             }
             Some(_) => {
                 tracing::warn!(
                     actor = %self.name,
                     action = %action,
                     status = %actor_state.status,
-                    "action not valid from current state"
+                    "action not valid from current state; no state change"
                 );
             }
             None => {
                 tracing::warn!(
                     actor = %self.name,
                     action = %action,
-                    "unknown action"
+                    "unknown action; no state change"
                 );
             }
         }
-
-        // 5. Serialize state back.
-        *state = serde_json::to_vec(&actor_state)
-            .map_err(|e| ActorError::HandlerFailed(format!("state ser: {e}")))?;
 
         Ok(())
     }
@@ -456,6 +481,88 @@ to = "Idle"
         let state: SpecActorState = serde_json::from_slice(&state_bytes).unwrap();
         assert_eq!(state.status, "Idle");
         assert_eq!(state.counters.get("rounds"), Some(&0usize));
+    }
+
+    const PARAM_SPEC: &str = r#"
+[automaton]
+name = "WorkSummary"
+states = ["Done"]
+initial = "Done"
+
+[[state]]
+name = "goal"
+type = "string"
+initial = ""
+
+[[action]]
+name = "AttachVector"
+kind = "input"
+from = ["Done"]
+to = "Done"
+params = ["semantic_vector"]
+"#;
+
+    fn spec_message(action: &str, params: serde_json::Value) -> Message {
+        let spec_msg = SpecMessage::with_params(action, params);
+        Message {
+            id: 1,
+            from: None,
+            to: ActorHandle::new("ns", "WorkSummary"),
+            message_type: "SpecMessage".to_string(),
+            payload: prost::Message::encode_to_vec(&spec_msg),
+            correlation_id: None,
+            created_at: chrono::DateTime::<chrono::Utc>::from_timestamp(0, 0).unwrap(), // determinism-ok: test fixture
+        }
+    }
+
+    fn seeded_state(actor: &SpecDrivenActor) -> Vec<u8> {
+        let mut state: SpecActorState = serde_json::from_slice(&actor.initial_state()).unwrap();
+        // Seed a "frozen" field, forcing `fields` to a proper object.
+        state.fields = serde_json::json!({ "goal": "original" });
+        serde_json::to_vec(&state).unwrap()
+    }
+
+    // ARN-247 BLOCKER 1: the pg-actor runtime must enforce the declared-parameter
+    // boundary too — undeclared params are dropped, and a failed/unknown action
+    // never persists the merged params.
+    #[tokio::test]
+    async fn pg_actor_drops_undeclared_params_on_a_valid_action() {
+        let actor = SpecDrivenActor::from_ioa(PARAM_SPEC, HashMap::new()).unwrap();
+        let ctx = ActorContext::new(ActorHandle::new("ns", "WorkSummary"), None, None);
+        let mut state = seeded_state(&actor);
+
+        let message = spec_message(
+            "AttachVector",
+            serde_json::json!({ "semantic_vector": "[0.1]", "goal": "HIJACKED" }),
+        );
+        actor.handle(&ctx, &mut state, &message).await.unwrap();
+
+        let after: SpecActorState = serde_json::from_slice(&state).unwrap();
+        assert_eq!(after.fields["semantic_vector"], "[0.1]");
+        assert_eq!(
+            after.fields["goal"], "original",
+            "undeclared goal was dropped"
+        );
+    }
+
+    #[tokio::test]
+    async fn pg_actor_does_not_persist_smuggled_field_on_unknown_action() {
+        let actor = SpecDrivenActor::from_ioa(PARAM_SPEC, HashMap::new()).unwrap();
+        let ctx = ActorContext::new(ActorHandle::new("ns", "WorkSummary"), None, None);
+        let mut state = seeded_state(&actor);
+        let before = state.clone();
+
+        // An unknown action name is the amplifier: pre-fix it still merged +
+        // persisted the smuggled field. It must now be a no-op on state.
+        let message = spec_message("GhostAction", serde_json::json!({ "goal": "HIJACKED" }));
+        actor.handle(&ctx, &mut state, &message).await.unwrap();
+
+        assert_eq!(
+            state, before,
+            "unknown action must not persist any state change"
+        );
+        let after: SpecActorState = serde_json::from_slice(&state).unwrap();
+        assert_eq!(after.fields["goal"], "original");
     }
 
     #[test]

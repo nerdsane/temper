@@ -275,3 +275,51 @@ async fn unauthorized_caller_cannot_enumerate_action_params_via_validation_order
         "unauthorized callers must not learn whether a parameter is declared"
     );
 }
+
+// ARN-247 BLOCKER 3: collection create (POST /Set) must reject fields the entity
+// type does not declare as a CSDL property — the same unrestricted-write
+// primitive as the action path, but at creation.
+#[tokio::test]
+async fn create_rejects_undeclared_entity_field() {
+    let state = build_state();
+    let (status, body) = post(
+        &state,
+        "/tdata/Orders",
+        r#"{"id": "ord-b3", "Currency": "EUR", "goal": "undeclared"}"#,
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::BAD_REQUEST,
+        "create with an undeclared field must be rejected: {body:?}"
+    );
+    assert_eq!(
+        body["error"]["code"].as_str(),
+        Some("UndeclaredEntityFields"),
+        "error code should name the undeclared-field rejection: {body:?}"
+    );
+    assert!(
+        body["error"]["message"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("goal"),
+        "error should name the offending field: {body:?}"
+    );
+}
+
+#[tokio::test]
+async fn create_with_declared_properties_succeeds() {
+    let state = build_state();
+    // `Currency` is a declared CSDL property; `id` is a control key.
+    let (status, body) = post(
+        &state,
+        "/tdata/Orders",
+        r#"{"id": "ord-b3-ok", "Currency": "EUR"}"#,
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::CREATED,
+        "create with only declared properties should succeed: {body:?}"
+    );
+}

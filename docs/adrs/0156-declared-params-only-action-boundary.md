@@ -125,10 +125,66 @@ is not fixed.
   declares its `IngestPack`/`WriteFile` params (incl. the transient `PackBytes`).
   If those specs ever narrowed their declared params, filtering would strip the
   input the kernel logic needs — a cross-repo invariant worth a boot-time check.
-- The DROP enforces the invariant on *action dispatch* only. Direct `POST /Set`
-  creation and `PATCH` write fields without an action, so the ARN-245-class
-  invariant remains bypassable via PATCH — pre-existing, tracked under the ARN-165
-  audit epic, not closed here.
 - Spawn `copy_fields` must be declared by the target initial action. Bundle lint
   rejects an undeclared copy contract instead of bypassing action projection or
   silently dropping intended state.
+
+## Round 2 — every dispatch/write path, not just the in-process action boundary
+
+An adversarial review found the first cut only covered the in-process runtime.
+The boundary now holds on every path an entity's fields can be written:
+
+### pg-actor runtime (the load-bearing gap)
+
+openpaw runs the **Postgres** actor runtime. Its bound-action path
+(`odata/write.rs`, `is_pg_actor_backed`) previously ran Cedar authz then
+`SpecMessage::with_params(action, body_json)` and returned *before*
+`dispatch_bound_action`, so the declared-param boundary never ran; `spec_actor`
+then merged every param into `fields` — even for an **unknown/invalid action** —
+and always persisted. That is the exact ARN-247 primitive, live in prod.
+
+Fix: the filter core moved to `temper_jit::params` so both runtimes share it.
+`spec_actor` now (a) restricts incoming params to the declared set before they
+touch fields (fail-closed on a contract violation) and (b) **persists only on a
+successful transition** — a failed or unknown action is a no-op on state. The pg
+bound-action path in `write.rs` also runs the external reject before the tell.
+
+### Collection create (`POST /Set`)
+
+Create wrote the request body verbatim into initial fields with no filter — the
+same primitive at creation. It now rejects body keys the entity type does not
+declare as a CSDL property/key (control keys `id`/`Id`/`status`/`Status` and
+`@odata.*` excepted), failing open only when the type has no CSDL entity. `PATCH`
+remains documented out of scope (tracked under the ARN-165 epic).
+
+### Kernel-synthesized File params
+
+`file_initial_writes.rs` synthesizes `version_number`/`previous_version_id`/
+`created_by` for `StreamUpdated`. Their keys are kernel-fixed (the caller controls
+only values), so they are re-applied **post-filter** into fields and the recorded
+event — surviving even a tenant whose persisted File spec predates those
+declarations. The bundled `file.ioa.toml` declares all six; the force-inject makes
+it robust regardless of an older tenant's persisted `ioa_source`. Caller-controlled
+`Create` params are *not* force-injected — they stay filtered.
+
+### Spawn `copy_fields` vs parent linkage
+
+Parent linkage (`parent_id`/`parent_type`/`{snake}_id`) is inserted into the
+child's initial-action params **last**, after `copy_fields`, so a multi-level
+spawn A→B→C whose `copy_fields` copies `parent_id` records B (not grandparent A)
+as C's parent.
+
+### Replay/snapshot re-poisoning (operational, not a replay filter)
+
+`actor.rs` replay re-projects raw `event.params` with no filter. A naive replay
+filter is **unsafe**: going-forward events legitimately carry kernel-injected
+params that are *not* declared — Ref's `TargetCommitSha`, the File synthesizers —
+so filtering at replay would strip them and corrupt those entities on every
+rehydration. Instead: going-forward events are already clean (filtered at write
+time), so their replay is clean; the residuals are operational —
+  1. **Deploy** with drain-then-cutover so no un-fixed replica journals a poisoned
+     event that a fixed replica faithfully replays during rollout.
+  2. **Scrub** any already-poisoned entity's journal/snapshot (offline job); the
+     runtime fix stops new poisoning but does not rewrite history.
+These are tracked under the ARN-165 epic; they are deployment/data tasks, not a
+kernel code change in this PR.

@@ -263,6 +263,7 @@ pub fn process_action_with_xref_and_field_mode(
     // also keeps replay faithful (replay re-projects `event.params`
     // directly). Runs ahead of `normalize_ref_action_params` so kernel-derived
     // params survive.
+    let original_params = params;
     let restricted = match restrict_to_declared_params(table, action, params) {
         Ok(restricted) => restricted,
         Err(error) => {
@@ -300,6 +301,12 @@ pub fn process_action_with_xref_and_field_mode(
             }
 
             let effective_params = normalize_ref_action_params(state, action, params);
+            let effective_params = preserve_kernel_synthesized_file_params(
+                state,
+                action,
+                effective_params,
+                original_params,
+            );
             let params = effective_params.as_ref();
 
             let (custom_effects, scheduled_actions, spawn_requests, schedule_at_requests) =
@@ -439,6 +446,52 @@ fn normalize_ref_action_params<'a>(
     } else {
         std::borrow::Cow::Borrowed(params)
     }
+}
+
+/// ARN-247 BLOCKER 4: preserve kernel-synthesized `File.StreamUpdated` params past
+/// the declared-param filter.
+///
+/// Both file-write paths (the atomic initial-content path and the version-update
+/// path) dispatch `StreamUpdated` with `version_number`/`previous_version_id`/
+/// `created_by` computed by the kernel — their keys are kernel-fixed (the caller
+/// controls only the file bytes, never these keys). A tenant whose *persisted*
+/// File spec predates those declarations would otherwise silently drop them on
+/// every write; re-add, from the pre-filter params, any the filter removed, so
+/// version lineage survives regardless of the tenant's spec version. Mirrors the
+/// Ref derived-param injection; runs at this one chokepoint so both paths are
+/// covered uniformly.
+fn preserve_kernel_synthesized_file_params<'a>(
+    state: &EntityState,
+    action: &str,
+    params: std::borrow::Cow<'a, serde_json::Value>,
+    original_params: &serde_json::Value,
+) -> std::borrow::Cow<'a, serde_json::Value> {
+    if state.entity_type != "File" || action != "StreamUpdated" {
+        return params;
+    }
+    const SYNTHESIZED: [&str; 3] = ["version_number", "previous_version_id", "created_by"];
+    let Some(original) = original_params.as_object() else {
+        return params;
+    };
+    let missing: Vec<(&str, serde_json::Value)> = SYNTHESIZED
+        .iter()
+        .filter_map(|key| original.get(*key).map(|value| (*key, value.clone())))
+        .filter(|(key, _)| {
+            !params
+                .as_object()
+                .is_some_and(|object| object.contains_key(*key))
+        })
+        .collect();
+    if missing.is_empty() {
+        return params;
+    }
+    let mut owned = params.into_owned();
+    if let Some(object) = owned.as_object_mut() {
+        for (key, value) in missing {
+            object.insert(key.to_string(), value);
+        }
+    }
+    std::borrow::Cow::Owned(owned)
 }
 
 fn current_ref_target(state: &EntityState) -> Option<&str> {
