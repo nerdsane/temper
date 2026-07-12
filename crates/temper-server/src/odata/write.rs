@@ -58,7 +58,9 @@ fn undeclared_create_field_keys(
     if object.is_empty() {
         return Vec::new();
     }
-    let registry = state.registry.read().unwrap(); // ci-ok: infallible lock
+    let Ok(registry) = state.registry.read() else {
+        return Vec::new(); // fail open on a poisoned lock — the action boundary still enforces
+    };
     let Some(tc) = registry.get_tenant(tenant) else {
         return Vec::new();
     };
