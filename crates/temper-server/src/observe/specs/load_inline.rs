@@ -562,8 +562,6 @@ async fn find_existing_adr_paths(
 
 #[cfg(test)]
 mod tests {
-    use std::path::Path;
-
     use super::{
         adr_candidate_paths, merge_inline_cedar_policy_text, namespace_to_app_candidates,
         normalize_app_slug,
