@@ -256,6 +256,20 @@ pub fn validate_inline_bundle(
     Ok((out, total))
 }
 
+/// True when `path` is (or contains) an ephemeral inline staging directory.
+///
+/// Staging dirs are named `temper-inline-{tenant}-{uuid}` under the process
+/// temp root and are deleted when [`InlineStagingDir`] drops. They must never
+/// be written into `specs-registry.json`.
+pub fn is_ephemeral_inline_staging_path(path: &str) -> bool {
+    std::path::Path::new(path).components().any(|c| match c {
+        std::path::Component::Normal(s) => s
+            .to_str()
+            .is_some_and(|name| name.starts_with("temper-inline-")),
+        _ => false,
+    })
+}
+
 /// Create an invocation-unique staging directory for inline specs.
 ///
 /// Uses exclusive `create_dir` so an existing path cannot be clobbered.
@@ -290,6 +304,20 @@ pub fn create_inline_staging_dir(tenant: &str) -> Result<InlineStagingDir, PathS
 mod tests {
     use super::*;
     use std::collections::BTreeMap;
+
+    #[test]
+    fn detects_ephemeral_inline_staging_paths() {
+        assert!(is_ephemeral_inline_staging_path(
+            "/tmp/temper-inline-acme-aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee/app"
+        ));
+        assert!(is_ephemeral_inline_staging_path(
+            "/var/folders/xx/temper-inline-t1-uuid"
+        ));
+        assert!(!is_ephemeral_inline_staging_path(
+            "/var/lib/temper/specs/acme"
+        ));
+        assert!(!is_ephemeral_inline_staging_path("/tmp/other-temper-data"));
+    }
 
     #[test]
     fn rejects_parent_and_absolute_keys() {

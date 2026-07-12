@@ -41,6 +41,12 @@ Every map key must be a relative path:
 Staging directories are `temper-inline-{tenant}-{uuid}` (not tenant-only), so
 concurrent submissions cannot delete each other's trees.
 
+### Sub-Decision 3b: No durable registry for ephemeral staging
+
+`specs-registry.json` must not record `temper-inline-*` paths. Staging is
+deleted when the request finishes; writing those paths would poison restart
+reload. Existing poisoned entries are scrubbed on the next registry rewrite.
+
 ### Sub-Decision 4: Auth on load-inline remains required
 
 Cedar `submit_specs` continues to gate load-inline. load-dir no longer accepts

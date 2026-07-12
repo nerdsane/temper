@@ -11,6 +11,7 @@ use super::super::specs_helpers::{
     build_ndjson_response, cross_lint_ndjson_line, lint_loaded_specs, lint_ndjson_line,
     to_pascal_case,
 };
+use super::path_security::is_ephemeral_inline_staging_path;
 use super::types::LoadDirRequest;
 use super::verification_stream::build_verification_stream_response;
 use crate::state::ServerState;
@@ -241,6 +242,9 @@ pub(crate) async fn load_specs_from_resolved_path(
     }
     state.rebuild_reaction_dispatcher();
 
+    // ADR-0160 / ARN-229: never durable-write ephemeral inline staging paths
+    // (`temper-inline-*`). Those dirs are deleted when InlineStagingDir drops;
+    // persisting them poisons restart reload with missing directories.
     if !state.data_dir.as_os_str().is_empty() {
         let registry_path = state.data_dir.join("specs-registry.json");
         let mut specs_registry = std::collections::BTreeMap::<String, String>::new();
@@ -252,13 +256,27 @@ pub(crate) async fn load_specs_from_resolved_path(
             {
                 for (tenant, specs_dir) in obj {
                     if let Some(specs_dir) = specs_dir.as_str() {
+                        // Scrub historically poisoned inline staging entries.
+                        if is_ephemeral_inline_staging_path(specs_dir) {
+                            continue;
+                        }
                         specs_registry.insert(tenant.clone(), specs_dir.to_string());
                     }
                 }
             }
         }
 
-        specs_registry.insert(body.tenant.clone(), body.specs_dir.clone());
+        if is_ephemeral_inline_staging_path(&body.specs_dir) {
+            // Inline load: leave any prior durable mapping for this tenant alone
+            // (or scrub if it was itself ephemeral — handled above). Do not
+            // insert the deleted staging path.
+            tracing::debug!(
+                tenant = %body.tenant,
+                "specs.registry.skip_ephemeral_inline_staging"
+            );
+        } else {
+            specs_registry.insert(body.tenant.clone(), body.specs_dir.clone());
+        }
 
         if let Ok(encoded) = serde_json::to_string_pretty(&specs_registry) {
             let _ = std::fs::create_dir_all(&state.data_dir); // determinism-ok: HTTP handler creates data dir
