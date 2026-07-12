@@ -537,7 +537,8 @@ pub fn redact_and_bound(text: &str, max_chars: usize) -> String {
             {
                 after += 1;
             }
-            if after < out.len() && (out.as_bytes()[after] == b'"' || out.as_bytes()[after] == b'\'')
+            if after < out.len()
+                && (out.as_bytes()[after] == b'"' || out.as_bytes()[after] == b'\'')
             {
                 after += 1;
             }
