@@ -21,6 +21,8 @@ const STRIPPED_INBOUND_HEADERS: &[&str] = &[
     "set-cookie",
     "x-api-key",
     "x-temper-api-key",
+    // Ambient session correlation is platform context, not guest input (ARN-208).
+    "x-session-id",
 ];
 
 /// True when an inbound header must be stripped before guest delivery.
@@ -141,6 +143,7 @@ mod tests {
             ("x-temper-agent-type".into(), "claude-code".into()),
             ("x-temper-agent-role".into(), "supervisor".into()),
             ("x-api-key".into(), "k".into()),
+            ("x-session-id".into(), "sess-should-not-reach-guest".into()),
             ("accept".into(), "*/*".into()),
         ];
         let safe = guest_safe_headers(&headers);
@@ -152,8 +155,10 @@ mod tests {
         assert!(!names.iter().any(|n| n.contains("api-key")));
         assert!(!names.iter().any(|n| n.contains("agent-type")));
         assert!(!names.iter().any(|n| n.contains("agent-role")));
+        assert!(!names.iter().any(|n| n == "x-session-id"));
         assert!(!safe.iter().any(|(_, v)| v.contains("secret-token")));
         assert!(!safe.iter().any(|(_, v)| v == "admin" || v == "evil"));
+        assert!(!safe.iter().any(|(_, v)| v.contains("sess-should-not")));
     }
 
     #[test]
@@ -166,6 +171,8 @@ mod tests {
         ));
         assert!(!is_sensitive_inbound_header("content-type"));
         assert!(!is_sensitive_inbound_header("x-temper-observe-session-id"));
+        assert!(is_sensitive_inbound_header("x-session-id"));
+        assert!(is_sensitive_inbound_header("X-Session-Id"));
     }
 
     #[test]
