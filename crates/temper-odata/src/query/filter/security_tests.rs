@@ -1,5 +1,17 @@
 use super::*;
 
+const FILTER_TEST_STACK_BYTES: usize = 512 * 1024;
+
+fn assert_on_small_stack(name: &str, test: impl FnOnce() + Send + 'static) {
+    std::thread::Builder::new()
+        .name(name.into())
+        .stack_size(FILTER_TEST_STACK_BYTES)
+        .spawn(test)
+        .expect("spawn constrained-stack filter test")
+        .join()
+        .expect("filter boundary must fit the constrained request stack");
+}
+
 // -- Security regression tests (ARN-176) ---------------------------------
 //
 // Denial-of-service regressions on the public OData `$filter` surface. Each
@@ -200,22 +212,35 @@ fn filter_operator_budget_is_inclusive() {
 }
 
 #[test]
-fn filter_budgeted_wide_ast_drops_on_small_stack() {
+fn filter_budgeted_wide_ast_parses_and_drops_on_small_stack() {
     let input = (0..FILTER_OPERATOR_BUDGET / 2)
         .map(|n| format!("Id eq {n}"))
         .collect::<Vec<_>>()
         .join(" or ");
 
-    std::thread::Builder::new()
-        .name("filter-small-stack".into())
-        .stack_size(2 * 1024 * 1024)
-        .spawn(move || {
-            let expr = parse_filter(&input).expect("expression must fit the budget");
-            drop(expr);
-        })
-        .expect("spawn parser thread")
-        .join()
-        .expect("budgeted AST must parse and drop without stack overflow");
+    assert_on_small_stack("filter-wide-boundary", move || {
+        let expr = parse_filter(&input).expect("expression must fit the budget");
+        drop(expr);
+    });
+}
+
+#[test]
+fn filter_mixed_depth_and_width_fits_small_stack() {
+    let wide = (0..FILTER_OPERATOR_BUDGET / 2)
+        .map(|n| format!("Id eq {n}"))
+        .collect::<Vec<_>>()
+        .join(" or ");
+    let input = format!(
+        "{}{}{}",
+        "(".repeat(FILTER_DEPTH_BUDGET),
+        wide,
+        ")".repeat(FILTER_DEPTH_BUDGET)
+    );
+
+    assert_on_small_stack("filter-mixed-budget-boundary", move || {
+        let expr = parse_filter(&input).expect("mixed boundary expression must parse");
+        drop(expr);
+    });
 }
 
 #[test]
@@ -249,12 +274,14 @@ fn filter_depth_bound_is_inclusive_at_the_limit() {
         }
         s
     };
-    assert!(
-        parse_filter(&nest(FILTER_DEPTH_BUDGET)).is_ok(),
-        "exactly FILTER_DEPTH_BUDGET levels must be accepted"
-    );
-    assert!(
-        parse_filter(&nest(FILTER_DEPTH_BUDGET + 1)).is_err(),
-        "one level past FILTER_DEPTH_BUDGET must be rejected"
-    );
+    assert_on_small_stack("filter-depth-boundary", move || {
+        assert!(
+            parse_filter(&nest(FILTER_DEPTH_BUDGET)).is_ok(),
+            "exactly FILTER_DEPTH_BUDGET levels must be accepted"
+        );
+        assert!(
+            parse_filter(&nest(FILTER_DEPTH_BUDGET + 1)).is_err(),
+            "one level past FILTER_DEPTH_BUDGET must be rejected"
+        );
+    });
 }

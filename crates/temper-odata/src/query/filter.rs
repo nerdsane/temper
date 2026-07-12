@@ -172,7 +172,10 @@ fn push_token(
 /// request thread's stack overflows and the process aborts — a denial-of-service
 /// reachable from the public OData query surface. A well-formed query never
 /// nests anywhere near this deep.
-const FILTER_DEPTH_BUDGET: usize = 128;
+// Keep ample headroom below the request worker's stack: filter canaries
+// exercise the accepted boundary on 512 KiB, rather than merely fitting a
+// default 2 MiB worker before the surrounding request frames are considered.
+const FILTER_DEPTH_BUDGET: usize = 32;
 
 struct FilterParser<'a> {
     tokens: &'a [Token],
@@ -251,38 +254,28 @@ impl<'a> FilterParser<'a> {
 
     // or_expr = and_expr ( 'or' and_expr )*
     fn parse_or(&mut self) -> Result<FilterExpr, ODataError> {
-        let mut left = self.parse_and()?;
+        let mut operands = vec![self.parse_and()?];
         while self.peek_text_is("or") {
             let operator_offset = self.current_offset();
             self.budget.consume_operator(operator_offset)?;
             self.budget.consume_node(operator_offset)?;
             self.advance();
-            let right = self.parse_and()?;
-            left = FilterExpr::BinaryOp {
-                left: Box::new(left),
-                op: BinaryOperator::Or,
-                right: Box::new(right),
-            };
+            operands.push(self.parse_and()?);
         }
-        Ok(left)
+        Ok(balance_associative(operands, BinaryOperator::Or))
     }
 
     // and_expr = not_expr ( 'and' not_expr )*
     fn parse_and(&mut self) -> Result<FilterExpr, ODataError> {
-        let mut left = self.parse_not()?;
+        let mut operands = vec![self.parse_not()?];
         while self.peek_text_is("and") {
             let operator_offset = self.current_offset();
             self.budget.consume_operator(operator_offset)?;
             self.budget.consume_node(operator_offset)?;
             self.advance();
-            let right = self.parse_not()?;
-            left = FilterExpr::BinaryOp {
-                left: Box::new(left),
-                op: BinaryOperator::And,
-                right: Box::new(right),
-            };
+            operands.push(self.parse_not()?);
         }
-        Ok(left)
+        Ok(balance_associative(operands, BinaryOperator::And))
     }
 
     // not_expr = 'not' not_expr | comparison
@@ -461,6 +454,40 @@ impl<'a> FilterParser<'a> {
             _ => None,
         })
     }
+}
+
+/// Build an order-preserving balanced tree for an associative boolean operator.
+///
+/// A left fold makes an accepted wide filter's AST as deep as its width. Every
+/// downstream consumer then inherits that attacker-controlled recursion depth,
+/// including in-memory evaluation, SQL translation, and `Drop`. Pairing adjacent
+/// operands keeps the same left-to-right order and boolean meaning while bounding
+/// tree depth logarithmically.
+fn balance_associative(mut operands: Vec<FilterExpr>, op: BinaryOperator) -> FilterExpr {
+    assert!(
+        !operands.is_empty(),
+        "boolean chain must contain an operand"
+    );
+
+    while operands.len() > 1 {
+        let mut next_level = Vec::with_capacity(operands.len().div_ceil(2));
+        let mut iter = operands.into_iter();
+        while let Some(left) = iter.next() {
+            if let Some(right) = iter.next() {
+                next_level.push(FilterExpr::BinaryOp {
+                    left: Box::new(left),
+                    op,
+                    right: Box::new(right),
+                });
+            } else {
+                next_level.push(left);
+            }
+        }
+        operands = next_level;
+    }
+
+    debug_assert_eq!(operands.len(), 1, "balancing must produce one root");
+    operands.remove(0)
 }
 
 // ---------------------------------------------------------------------------

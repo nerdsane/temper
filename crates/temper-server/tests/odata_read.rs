@@ -38,19 +38,34 @@ async fn get_json(
     (status, body)
 }
 
-#[tokio::test]
-async fn over_budget_filter_is_rejected_through_tdata_router() {
-    let (state, _) = build_default_state(176, "odata-filter-budget");
-    let filter = (0..513)
+fn encoded_wide_filter(comparisons: usize) -> String {
+    (0..comparisons)
         .map(|n| format!("Id eq {n}"))
         .collect::<Vec<_>>()
         .join(" or ")
-        .replace(' ', "%20");
+        .replace(' ', "%20")
+}
+
+#[tokio::test]
+async fn over_budget_filter_is_rejected_through_tdata_router() {
+    let (state, _) = build_default_state(176, "odata-filter-budget");
+    let filter = encoded_wide_filter(513);
 
     let (status, body) = get_json(&state, &format!("/tdata/Orders?$filter={filter}")).await;
 
     assert_eq!(status, StatusCode::BAD_REQUEST);
     assert_eq!(body["error"]["code"].as_str(), Some("InvalidQuery"));
+}
+
+#[tokio::test]
+async fn budget_boundary_filter_is_accepted_through_tdata_router() {
+    let (state, _) = build_default_state(176, "odata-filter-budget-boundary");
+    let filter = encoded_wide_filter(512);
+
+    let (status, body) = get_json(&state, &format!("/tdata/Orders?$filter={filter}")).await;
+
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["value"].as_array().map(Vec::len), Some(0));
 }
 
 async fn post_json(
