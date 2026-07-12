@@ -69,9 +69,9 @@ pub struct TransitionTable {
     /// name. This is the set the verification cascade models an action as being
     /// able to write; the runtime restricts caller-supplied params to it so a
     /// proven invariant is an enforced one. An action present with an empty set
-    /// declares no params; an action *absent* from this map (older/deserialized
-    /// tables, or synthetic kernel actions) is treated as "unknown" and its
-    /// params are not restricted — see [`TransitionTable::declared_params`].
+    /// declares no params. A rule-backed action absent from this map is invalid
+    /// metadata and must fail closed at dispatch — see
+    /// [`TransitionTable::declared_params`].
     #[serde(default)]
     pub action_params: BTreeMap<String, BTreeSet<String>>,
     /// Pre-built index: action name → indices into `rules`.
@@ -274,14 +274,17 @@ impl TransitionTable {
     /// Declared parameter names for `action`, or `None` when the table carries
     /// no declaration for it (ARN-247).
     ///
-    /// `Some(set)` — the action is known and may write exactly `set` (possibly
-    /// empty). Callers restrict request-body params to this set so the runtime
-    /// matches the verified model. `None` — the action is absent from
-    /// `action_params` (an older/deserialized table built before this field, or
-    /// a synthetic kernel action); callers must treat this as "unknown" and skip
-    /// restriction to preserve behavior.
+    /// `Some(set)` means the action may accept exactly `set` (possibly empty).
+    /// `None` is only valid when the table has no such action. If
+    /// [`TransitionTable::has_action`] is true while this returns `None`, the
+    /// table is missing security-relevant metadata and dispatch must fail closed.
     pub fn declared_params(&self, action: &str) -> Option<&BTreeSet<String>> {
         self.action_params.get(action)
+    }
+
+    /// Whether this table contains at least one transition rule for `action`.
+    pub fn has_action(&self, action: &str) -> bool {
+        self.rule_index.contains_key(action)
     }
 
     /// Rebuild the rule index from the current rules vec.

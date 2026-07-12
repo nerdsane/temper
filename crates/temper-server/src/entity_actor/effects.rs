@@ -17,6 +17,7 @@ use temper_runtime::scheduler::{sim_now, sim_uuid};
 
 use crate::blobs::{FIELD_OVERFLOW_BLOB_PREFIX, OverflowBlobWrite, blob_ref_value};
 
+use super::declared_params::restrict_to_declared_params;
 use super::types::{EntityEvent, EntityState, MAX_EVENTS_SINCE_SNAPSHOT};
 
 /// A scheduled action to fire after a delay.
@@ -237,15 +238,45 @@ pub fn process_action_with_xref_and_field_mode(
         };
     }
 
+    // Missing declaration metadata for a real action is not a compatibility
+    // case: it would recreate the unrestricted write primitive this boundary
+    // exists to remove. Unknown actions continue to the normal evaluator error.
+    if table.has_action(action) && table.declared_params(action).is_none() {
+        return ProcessResult {
+            success: false,
+            event: None,
+            custom_effects: vec![],
+            scheduled_actions: vec![],
+            spawn_requests: vec![],
+            overflow_blobs: vec![],
+            error: Some(format!(
+                "Action '{action}' is missing declared-parameter metadata"
+            )),
+        };
+    }
+
     // ARN-247: restrict caller params to the action's declared set BEFORE guard
     // evaluation, effect application, field projection, and event recording — so
     // this single chokepoint (shared by every live dispatch path: OData bound
     // actions, composite sub-writes, spawn initial actions, DST sim) can only
-    // write what the verification cascade modeled. Recording the filtered params
-    // on the event also keeps replay faithful (replay re-projects `event.params`
+    // project declared action inputs. Recording the filtered params on the event
+    // also keeps replay faithful (replay re-projects `event.params`
     // directly). Runs ahead of `normalize_ref_action_params` so kernel-derived
     // params survive.
-    let restricted = restrict_to_declared_params(table, action, &state.entity_type, params);
+    let restricted = match restrict_to_declared_params(table, action, params) {
+        Ok(restricted) => restricted,
+        Err(error) => {
+            return ProcessResult {
+                success: false,
+                event: None,
+                custom_effects: vec![],
+                scheduled_actions: vec![],
+                spawn_requests: vec![],
+                overflow_blobs: vec![],
+                error: Some(error.to_string()),
+            };
+        }
+    };
     let params = restricted.as_ref();
 
     let ctx = build_eval_context_with_xref(state, cross_entity_booleans);
@@ -435,120 +466,6 @@ fn json_string_param(params: &serde_json::Value, field: &str) -> Option<String> 
         serde_json::Value::Number(value) => Some(value.to_string()),
         _ => None,
     })
-}
-
-/// ARN-247: canonical form for matching an action's declared param name against
-/// a request-body key.
-///
-/// Lowercase and drop underscores so the two Temper naming conventions for one
-/// logical field compare equal: IOA `[[action]] params` are snake_case *logical*
-/// names, while some callers send the PascalCase field names they actually store
-/// — e.g. paw-fs dispatches `Directory.Create` with `WorkspaceId`/`ParentId` for
-/// declared `workspace_id`/`parent_id` ("the snake_case `params` list names the
-/// action's logical inputs but does not rename or gate them"). Matching up to
-/// this convention keeps those callers working while a genuinely undeclared key
-/// (e.g. `goal` smuggled into an action that never declared it) still matches no
-/// declared param.
-fn normalized_param_key(key: &str) -> String {
-    key.chars()
-        .filter(|c| *c != '_')
-        .flat_map(char::to_lowercase)
-        .collect()
-}
-
-/// ARN-247: whether the runtime may keep request-body key `key` for `action`.
-///
-/// Allowed iff `key` matches a declared param up to naming convention
-/// ([`normalized_param_key`]), or is a transient action field. **Transient action
-/// fields** (large/ephemeral inputs consumed by triggers but never persisted,
-/// e.g. `Repository` pack bytes) are kept so trigger dispatch still sees them,
-/// mirroring [`is_transient_action_field`]. The drop filter
-/// ([`restrict_to_declared_params`]) and the OData-boundary reject
-/// ([`undeclared_param_keys`]) share this one rule so they never drift.
-///
-/// `normalized_declared` is the action's declared param set pre-normalized by
-/// the caller so it is built once per dispatch, not once per key.
-fn param_key_allowed(
-    normalized_declared: &std::collections::BTreeSet<String>,
-    entity_type: &str,
-    key: &str,
-) -> bool {
-    normalized_declared.contains(&normalized_param_key(key))
-        || is_transient_action_field(entity_type, key)
-}
-
-/// ARN-247: restrict caller-supplied action params to the action's declared set.
-///
-/// The verification cascade models an action as writing only its declared
-/// params; without this, the runtime projected *every* request-body key into
-/// entity fields ([`sync_fields`]), so a proven invariant was violable. This
-/// drops any key that is not allowed by [`param_key_allowed`] — so the runtime
-/// can only write what was verified.
-///
-/// **Kernel-injected params survive by construction, not by exemption here:**
-/// the `Ref` `TargetCommitSha` is derived by [`normalize_ref_action_params`],
-/// which runs *after* this filter; spawn's `parent_id`/`parent_type` and its
-/// `copy_fields` values are persisted into the child at creation (via
-/// `initial_fields`, which is not action dispatch and so never reaches this
-/// filter — see `dispatch/cross_entity.rs`). This filter only ever restricts the
-/// caller-supplied action body. When the table carries no declaration for
-/// `action` ([`TransitionTable::declared_params`] returns `None` — an older
-/// deserialized table, or a synthetic kernel action) params pass through
-/// unchanged, preserving prior behavior.
-fn restrict_to_declared_params<'a>(
-    table: &TransitionTable,
-    action: &str,
-    entity_type: &str,
-    params: &'a serde_json::Value,
-) -> std::borrow::Cow<'a, serde_json::Value> {
-    let Some(declared) = table.declared_params(action) else {
-        return std::borrow::Cow::Borrowed(params);
-    };
-    let Some(obj) = params.as_object() else {
-        return std::borrow::Cow::Borrowed(params);
-    };
-    let normalized_declared: std::collections::BTreeSet<String> =
-        declared.iter().map(|d| normalized_param_key(d)).collect();
-    // Fast path: nothing undeclared — avoid the clone.
-    if obj
-        .keys()
-        .all(|k| param_key_allowed(&normalized_declared, entity_type, k))
-    {
-        return std::borrow::Cow::Borrowed(params);
-    }
-    let filtered: serde_json::Map<String, serde_json::Value> = obj
-        .iter()
-        .filter(|(k, _)| param_key_allowed(&normalized_declared, entity_type, k))
-        .map(|(k, v)| (k.clone(), v.clone()))
-        .collect();
-    std::borrow::Cow::Owned(serde_json::Value::Object(filtered))
-}
-
-/// ARN-247: the request-body keys `action` does not declare and that are not
-/// transient action fields — i.e. exactly the keys the runtime would silently
-/// drop via [`restrict_to_declared_params`]. The OData boundary rejects a bound
-/// action carrying any of these (400) so external caller bugs surface loudly,
-/// while internal dispatch (spawn, composite) keeps dropping them. Empty when
-/// the table declares no params for the action (unknown/synthetic action) or the
-/// body is not a JSON object — in those cases the caller must not reject.
-pub(crate) fn undeclared_param_keys(
-    table: &TransitionTable,
-    action: &str,
-    entity_type: &str,
-    body: &serde_json::Value,
-) -> Vec<String> {
-    let Some(declared) = table.declared_params(action) else {
-        return Vec::new();
-    };
-    let Some(obj) = body.as_object() else {
-        return Vec::new();
-    };
-    let normalized_declared: std::collections::BTreeSet<String> =
-        declared.iter().map(|d| normalized_param_key(d)).collect();
-    obj.keys()
-        .filter(|k| !param_key_allowed(&normalized_declared, entity_type, k))
-        .cloned()
-        .collect()
 }
 
 /// Apply a list of transition effects to entity state.
@@ -2029,236 +1946,5 @@ params = ["NewCommitSha"]
         let overflow = sync_fields(&mut state, &params, FieldSyncMode::blob_refs_default());
 
         assert_eq!(overflow.len(), 1, "dedupe by content hash");
-    }
-
-    /// ARN-247: an action that declares a *subset* of the entity's state vars
-    /// must not project undeclared request-body keys into entity fields. Models
-    /// the ARN-245 case: `AttachVector` (declares only the two vector params),
-    /// enabled from the terminal-ish `Done` state, must leave a closed
-    /// WorkSummary's `goal`/`outcome` frozen even if the caller smuggles them
-    /// into the body. Red before the fix (undeclared keys overwrite fields);
-    /// green after (they are dropped at the runtime action boundary).
-    #[test]
-    fn declared_params_only_undeclared_body_keys_do_not_mutate_fields() {
-        let _guard = temper_runtime::scheduler::install_deterministic_context(247);
-
-        let spec = r#"
-[automaton]
-name = "WorkSummary"
-states = ["Open", "Done"]
-initial = "Open"
-
-[[state]]
-name = "goal"
-type = "string"
-initial = ""
-
-[[state]]
-name = "outcome"
-type = "string"
-initial = ""
-
-[[state]]
-name = "semantic_vector"
-type = "string"
-initial = ""
-
-[[state]]
-name = "semantic_vector_model"
-type = "string"
-initial = ""
-
-[[action]]
-name = "AttachVector"
-kind = "input"
-from = ["Done"]
-to = "Done"
-params = ["semantic_vector", "semantic_vector_model"]
-"#;
-
-        let table = temper_jit::table::TransitionTable::from_ioa_source(spec);
-        let mut state = make_state("WorkSummary", "g");
-        state.status = "Done".into();
-        state.fields = serde_json::json!({
-            "goal": "original goal",
-            "outcome": "shipped honestly",
-        });
-
-        // Caller smuggles undeclared `goal`/`outcome` alongside the two declared params.
-        let params = serde_json::json!({
-            "semantic_vector": "[0.1,0.2]",
-            "semantic_vector_model": "text-embedding-3-small",
-            "goal": "HIJACKED",
-            "outcome": "REWRITTEN",
-        });
-
-        let result = process_action(&mut state, &table, "AttachVector", &params);
-        assert!(result.success, "AttachVector should succeed from Done");
-
-        // Declared params ARE written.
-        assert_eq!(
-            state.fields.get("semantic_vector").and_then(|v| v.as_str()),
-            Some("[0.1,0.2]"),
-            "declared param semantic_vector must be projected",
-        );
-        assert_eq!(
-            state
-                .fields
-                .get("semantic_vector_model")
-                .and_then(|v| v.as_str()),
-            Some("text-embedding-3-small"),
-            "declared param semantic_vector_model must be projected",
-        );
-
-        // Undeclared params must NOT overwrite the closed record's fields.
-        assert_eq!(
-            state.fields.get("goal").and_then(|v| v.as_str()),
-            Some("original goal"),
-            "ARN-247: undeclared `goal` must not overwrite a closed WorkSummary field",
-        );
-        assert_eq!(
-            state.fields.get("outcome").and_then(|v| v.as_str()),
-            Some("shipped honestly"),
-            "ARN-247: undeclared `outcome` must not overwrite a closed WorkSummary field",
-        );
-    }
-
-    fn work_summary_table() -> TransitionTable {
-        let spec = r#"
-[automaton]
-name = "WorkSummary"
-states = ["Open", "Done"]
-initial = "Open"
-
-[[action]]
-name = "AttachVector"
-kind = "input"
-from = ["Done"]
-to = "Done"
-params = ["semantic_vector", "semantic_vector_model"]
-"#;
-        TransitionTable::from_ioa_source(spec)
-    }
-
-    #[test]
-    fn restrict_to_declared_params_drops_undeclared_keeps_declared() {
-        let table = work_summary_table();
-        let params = serde_json::json!({
-            "semantic_vector": "v",
-            "semantic_vector_model": "m",
-            "goal": "smuggled",
-        });
-        let restricted =
-            restrict_to_declared_params(&table, "AttachVector", "WorkSummary", &params);
-        let obj = restricted.as_object().expect("object");
-        assert!(obj.contains_key("semantic_vector"), "declared kept");
-        assert!(obj.contains_key("semantic_vector_model"), "declared kept");
-        assert!(!obj.contains_key("goal"), "undeclared dropped");
-    }
-
-    #[test]
-    fn restrict_to_declared_params_passes_through_unknown_action() {
-        // Action absent from the table's declaration map -> no restriction, so
-        // synthetic/kernel actions and older deserialized tables keep behavior.
-        let table = work_summary_table();
-        let params = serde_json::json!({ "anything": "kept" });
-        let restricted =
-            restrict_to_declared_params(&table, "NotADeclaredAction", "WorkSummary", &params);
-        assert_eq!(
-            restricted.as_ref(),
-            &params,
-            "unknown action passes through"
-        );
-    }
-
-    #[test]
-    fn restrict_to_declared_params_keeps_transient_repository_fields() {
-        // Transient action fields are consumed by triggers but never persisted;
-        // they must survive the filter even when this action declares none.
-        let spec = r#"
-[automaton]
-name = "Repository"
-states = ["Active"]
-initial = "Active"
-
-[[action]]
-name = "IngestPackNoDecl"
-kind = "input"
-from = ["Active"]
-to = "Active"
-"#;
-        let table = TransitionTable::from_ioa_source(spec);
-        let params = serde_json::json!({ "PackBytes": "base64", "Bogus": "drop-me" });
-        let restricted =
-            restrict_to_declared_params(&table, "IngestPackNoDecl", "Repository", &params);
-        let obj = restricted.as_object().expect("object");
-        assert!(obj.contains_key("PackBytes"), "transient field preserved");
-        assert!(
-            !obj.contains_key("Bogus"),
-            "undeclared non-transient dropped"
-        );
-    }
-
-    #[test]
-    fn restrict_to_declared_params_matches_snake_declared_against_pascal_body() {
-        // paw-fs declares snake_case logical params but dispatches with the
-        // PascalCase field names it stores; they must be treated as the same
-        // declared field, while a genuinely undeclared key is still dropped.
-        let spec = r#"
-[automaton]
-name = "Directory"
-states = ["Active"]
-initial = "Active"
-
-[[action]]
-name = "Create"
-kind = "input"
-from = ["Active"]
-to = "Active"
-params = ["name", "path", "parent_id", "workspace_id"]
-"#;
-        let table = TransitionTable::from_ioa_source(spec);
-        let params = serde_json::json!({
-            "Name": "/",
-            "Path": "/",
-            "WorkspaceId": "wsA",
-            "ParentId": "d-1",
-            "Smuggled": "drop-me",
-        });
-        let restricted = restrict_to_declared_params(&table, "Create", "Directory", &params);
-        let obj = restricted.as_object().expect("object");
-        assert!(obj.contains_key("Name"), "PascalCase declared kept as sent");
-        assert!(obj.contains_key("WorkspaceId"), "snake<->Pascal match kept");
-        assert!(obj.contains_key("ParentId"), "snake<->Pascal match kept");
-        assert!(!obj.contains_key("Smuggled"), "truly undeclared dropped");
-        // And the reject boundary agrees: only the smuggled key is undeclared.
-        assert_eq!(
-            undeclared_param_keys(&table, "Create", "Directory", &params),
-            vec!["Smuggled".to_string()],
-        );
-    }
-
-    #[test]
-    fn undeclared_param_keys_lists_only_undeclared() {
-        let table = work_summary_table();
-        let body = serde_json::json!({
-            "semantic_vector": "v",
-            "goal": "x",
-            "outcome": "y",
-        });
-        let mut keys = undeclared_param_keys(&table, "AttachVector", "WorkSummary", &body);
-        keys.sort();
-        assert_eq!(keys, vec!["goal".to_string(), "outcome".to_string()]);
-    }
-
-    #[test]
-    fn undeclared_param_keys_empty_for_unknown_action() {
-        // No declaration -> nothing to reject (the boundary must not 400).
-        let table = work_summary_table();
-        let body = serde_json::json!({ "whatever": "1" });
-        assert!(
-            undeclared_param_keys(&table, "GhostAction", "WorkSummary", &body).is_empty(),
-            "unknown action yields no rejectable keys",
-        );
     }
 }

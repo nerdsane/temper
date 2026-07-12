@@ -19,9 +19,12 @@ action's declared `params`. Counters were re-synced from `state.counters`, so
 counter state vars were safe, but every string state var was written straight from
 the body.
 
-Meanwhile the verification cascade models an action as writing only its declared
-params. So L0–L3 proved invariants over a model the runtime did not enforce:
-**an invariant could be provable yet violable.** Concrete case (ARN-245): an
+The action contract exposes only declared params to generated/verifier-facing
+metadata, while the runtime accepted every body key. That mismatch let a caller
+mutate fields outside the declared action surface. The current verifier does not
+model arbitrary string-field assignments; ARN-212/ARN-213 track that larger
+semantic gap. This ADR closes the runtime input-contract hole without claiming
+those verifier limitations are solved. Concrete case (ARN-245): an
 `AttachVector(params=[semantic_vector, semantic_vector_model])` enabled from a
 terminal-ish `Done` state could, at runtime, also be POSTed with
 `{goal, outcome}` and overwrite those closed-record fields — the only guard is
@@ -36,12 +39,12 @@ the runtime matches the verified model. Two complementary points, one shared rul
 
 `from_automaton` records `action_params: BTreeMap<String, BTreeSet<String>>` (one
 entry per action; empty set = declares no params). `declared_params(action)`
-returns `Some(set)` for a known action, `None` when absent (older deserialized
-table, or a synthetic kernel action) — in which case callers do **not** restrict,
-preserving behavior.
+returns `Some(set)` for a known action. A rule-backed action with no entry is
+invalid metadata and dispatch fails closed; an unknown action proceeds only to
+the normal unknown-action rejection.
 
-**Why**: the verifier already reads `[[action]] params`; the runtime now sees the
-same data instead of trusting the raw body.
+**Why**: IOA, codegen, and runtime now share one declared input contract instead
+of the runtime trusting the raw body.
 
 ### Sub-Decision 2: DROP undeclared params at the single runtime chokepoint
 
@@ -50,21 +53,20 @@ same data instead of trusting the raw body.
 recording. This one function is the shared path for every live dispatch (OData
 bound actions, composite sub-writes, spawn initial actions, DST sim), so the model
 is enforced everywhere. It is a **drop**, not a reject, because internal dispatch
-legitimately injects system params the child action never declared — spawn merges
-`parent_id`/`parent_type` and `copy_fields` values into the child's initial-action
-body, and rejecting there would break entity spawning.
+also carries typed kernel linkage and parent-action context; the target action
+must see only its declared subset. External callers get an explicit 400 instead.
 
-Those spawn-injected values must not be *lost* by the drop either: parent linkage
-and `copy_fields` values are persisted into the child at **creation**
-(`initial_fields` in `dispatch/cross_entity.rs`), which is direct field writing and
-never reaches this filter — so the child keeps them regardless of whether its
-initial action declares them. The drop only ever narrows the action body.
+Parent linkage remains typed kernel creation metadata. Explicit `copy_fields`
+values flow through the child initial action and therefore must be declared by
+that action. Bundle lint rejects a spawn contract that copies an undeclared
+field; the runtime does not create a second direct-write path to preserve a bad
+spec.
 
 Ordering matters: the filter runs **ahead of** `normalize_ref_action_params`, so
 kernel-derived params (the `Ref` `TargetCommitSha` synthesized from `NewCommitSha`)
 are added after the filter and survive. Transient action fields (large/ephemeral
-inputs consumed by triggers but never persisted, e.g. `Repository` pack bytes) are
-also preserved.
+inputs consumed by triggers but never persisted, e.g. `Repository` pack bytes)
+must be declared and are then preserved for trigger evaluation.
 
 Replay is unaffected: it bypasses this function and reconstructs faithfully from
 stored events; new events are recorded from the already-filtered params, so their
@@ -80,29 +82,33 @@ through this handler, so they keep the lenient drop. The reject and the drop sha
 one allow-rule so they never diverge. Entity creation (`POST /Set`) and PATCH are
 direct field writes, not action dispatch, and are out of scope.
 
-### Sub-Decision 4: Match declared params up to naming convention
+### Sub-Decision 4: Accept one explicit CSDL naming alias
 
-IOA `params` are snake_case *logical* names, but some callers dispatch with the
-PascalCase field names they store — paw-fs dispatches `Directory.Create` with
-`WorkspaceId`/`ParentId` for declared `workspace_id`/`parent_id` (the keys ADR-0153
-then hashes). Matching is therefore done on a normalized key (lowercase, drop
-underscores), so those callers keep working while a genuinely undeclared key
-(`goal` on an action that never declared it) still matches nothing.
+IOA `params` are conventionally snake_case logical names, while their CSDL/OData
+property spelling is the deterministic PascalCase form. The allow-set contains
+only the exact declared name and `to_pascal_case(name)`. It does not case-fold or
+strip punctuation, because those lossy transforms create collisions. A request
+that supplies both spellings for one logical parameter is rejected as ambiguous,
+and spec lint rejects declared parameters that map to the same canonical spelling
+(for example `user_id` and `UserId`). Runtime metadata validation fails closed as
+defense in depth if such a table is loaded without passing lint.
 
-**Why not exact match**: it would drop paw-fs's PascalCase fields, emptying the
-directory fields the declared key is computed from — breaking keyed existence in
-production. **Why not match the CSDL property set instead**: `goal` *is* a valid
+**Why not exact-only match**: it would reject existing CSDL/OData PascalCase
+spellings for a snake_case IOA parameter. **Why not broad normalization**:
+`user_id`, `userid`, and `USER_ID` are not interchangeable contract keys. **Why
+not match the CSDL property set instead**: `goal` *is* a valid
 `WorkSummary` property, just not a declared param of `AttachVector` — enforcement
 must be per-action (declared params), not per-entity (schema), or the ARN-245 case
 is not fixed.
 
 ## Consequences
 
-- A proven invariant over declared params is now enforced at runtime for every
-  Temper app, on every dispatch path, without a per-spec opt-in.
+- The declared action-input boundary is now enforced at runtime for every Temper
+  app, on every dispatch path, without a per-spec opt-in. This narrows the
+  verifier/runtime gap but does not add string-field semantics to the verifier.
 - Well-formed callers are unaffected: audited Katagami curation, Aya, and Genesis
-  callers already send exactly their declared params (modulo the snake/Pascal
-  convention that normalization bridges).
+  callers already send exactly their declared params (modulo the one canonical
+  snake_case-to-PascalCase CSDL alias).
 - Undeclared params on a bound action are now a 400 rather than a silent write,
   and undeclared params on internal dispatch are silently dropped. **Actions must
   declare the params for the fields they set.** Audited production apps already
@@ -123,7 +129,6 @@ is not fixed.
   creation and `PATCH` write fields without an action, so the ARN-245-class
   invariant remains bypassable via PATCH — pre-existing, tracked under the ARN-165
   audit epic, not closed here.
-- Minor: an *undeclared* `copy_fields` value now persists inline at child creation
-  rather than through overflow-aware `sync_fields`. Declared copied fields still go
-  through the overflow path; copy_fields are config-shaped in practice, so this is
-  a storage-representation nuance, not a correctness issue.
+- Spawn `copy_fields` must be declared by the target initial action. Bundle lint
+  rejects an undeclared copy contract instead of bypassing action projection or
+  silently dropping intended state.

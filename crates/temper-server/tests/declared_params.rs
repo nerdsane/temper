@@ -44,7 +44,7 @@ name = "Annotate"
 kind = "input"
 from = ["Draft"]
 to = "Draft"
-params = ["Notes"]
+params = ["notes"]
 "#;
 
 fn build_state() -> ServerState {
@@ -202,5 +202,76 @@ async fn bound_action_with_only_declared_params_succeeds() {
         fields["Currency"].as_str(),
         Some("EUR"),
         "pre-existing field preserved: {fields:?}"
+    );
+}
+
+#[tokio::test]
+async fn bound_action_rejects_conflicting_exact_and_pascal_aliases() {
+    let state = build_state();
+
+    let (status, body) = post(
+        &state,
+        "/tdata/Orders",
+        r#"{"id": "ord-alias", "Currency": "EUR"}"#,
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "seed create failed: {body:?}");
+
+    let (status, body) = post(
+        &state,
+        "/tdata/Orders('ord-alias')/Temper.Annotate",
+        r#"{"notes": "attacker", "Notes": "victim"}"#,
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::BAD_REQUEST,
+        "ambiguous aliases: {body:?}"
+    );
+    assert_eq!(
+        body["error"]["code"].as_str(),
+        Some("AmbiguousActionParams")
+    );
+
+    let fields = get_order_fields(&state, "ord-alias").await;
+    assert!(fields.get("notes").is_none());
+    assert!(fields.get("Notes").is_none());
+}
+
+#[tokio::test]
+async fn unauthorized_caller_cannot_enumerate_action_params_via_validation_order() {
+    let state = build_state();
+
+    let (status, body) = post(
+        &state,
+        "/tdata/Orders",
+        r#"{"id": "ord-auth", "Currency": "EUR"}"#,
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "seed create failed: {body:?}");
+
+    state
+        .authz
+        .reload_tenant_policies(
+            TenantId::default().as_str(),
+            r#"permit(principal, action == Action::"list", resource);"#,
+        )
+        .expect("install policy that does not permit Annotate");
+
+    let (status, body) = post(
+        &state,
+        "/tdata/Orders('ord-auth')/Temper.Annotate",
+        r#"{"Notes": "legit", "Currency": "undeclared"}"#,
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::FORBIDDEN,
+        "authorization must run before request-shape validation: {body:?}"
+    );
+    assert_eq!(
+        body["error"]["code"].as_str(),
+        Some("AuthorizationDenied"),
+        "unauthorized callers must not learn whether a parameter is declared"
     );
 }

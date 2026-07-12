@@ -6,6 +6,7 @@ use std::time::Instant;
 
 use tracing::{Instrument, instrument};
 
+use temper_jit::TransitionTable;
 use temper_observe::wide_event;
 use temper_runtime::persistence::{EventMetadata, PersistenceEnvelope, PersistenceError};
 use temper_runtime::scheduler::{sim_now, sim_uuid};
@@ -216,6 +217,25 @@ impl ServerState {
     ) -> Result<bool, String> {
         Ok(self.has_registered_spec(tenant, entity_type)?
             || self.transition_tables.contains_key(entity_type))
+    }
+
+    /// Resolve the transition table from the same registry-first sources used
+    /// by dispatch: tenant-scoped runtime installs first, then the legacy
+    /// single-tenant table map. Registry lock failure is explicit.
+    pub(crate) fn transition_table_for_entity(
+        &self,
+        tenant: &TenantId,
+        entity_type: &str,
+    ) -> Result<Option<Arc<TransitionTable>>, String> {
+        if let Some(table) = self
+            .registry
+            .read()
+            .map_err(|error| format!("registry lock poisoned: {error}"))?
+            .get_table(tenant, entity_type)
+        {
+            return Ok(Some(table));
+        }
+        Ok(self.transition_tables.get(entity_type).cloned())
     }
 
     /// Declared `[[key]]` set for a `(tenant, entity_type)` (ADR-0153), resolved

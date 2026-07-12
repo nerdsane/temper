@@ -11,6 +11,7 @@ use tracing_opentelemetry::OpenTelemetrySpanExt;
 use temper_authz::SecurityContext;
 
 use super::account_verification::enforce_commons_account_verified_for_action;
+use super::action_params::validate_bound_action_params;
 use super::common::run_write_prechecks;
 use super::rate_limit::{enforce_commons_write_rate_limit, owner_id_from_action};
 use super::response::annotate_entity;
@@ -130,42 +131,6 @@ pub(super) async fn dispatch_bound_action(
         .into_response();
     }
 
-    // ARN-247: reject undeclared request-body params at the external boundary so
-    // caller/agent bugs surface loudly — a typo'd or smuggled param is a 400, not
-    // a silent no-op that lets the caller believe a write landed. The runtime
-    // chokepoint additionally *drops* undeclared keys on every dispatch path
-    // (internal spawn/composite included); this is the loud external guard, using
-    // the same allow-rule (declared ∪ transient action fields). Fail-open on a
-    // table-lookup miss — the drop still enforces the verified model.
-    if let Some(table) = state
-        .registry
-        .read()
-        .ok()
-        .and_then(|reg| reg.get_table(tenant, entity_type))
-    {
-        let undeclared = crate::entity_actor::effects::undeclared_param_keys(
-            &table,
-            action,
-            entity_type,
-            &body_json,
-        );
-        if !undeclared.is_empty() {
-            http_span.set_status(Status::error("UndeclaredActionParams"));
-            http_span.set_attribute(OtelKeyValue::new("http.status_code", 400i64));
-            let end_time: std::time::SystemTime = sim_now().into();
-            http_span.end_with_timestamp(end_time);
-            return odata_error(
-                StatusCode::BAD_REQUEST,
-                "UndeclaredActionParams",
-                &format!(
-                    "action '{action}' does not declare param(s): {}. Only declared params are accepted (ARN-247).",
-                    undeclared.join(", ")
-                ),
-            )
-            .into_response();
-        }
-    }
-
     let authz_snapshot = match state
         .load_authz_resource_snapshot(tenant, entity_type, key_str)
         .await
@@ -257,6 +222,23 @@ pub(super) async fn dispatch_bound_action(
             &reason_with_id,
         )
         .into_response();
+    }
+
+    // Validate the request shape only after authorization so an unauthorized
+    // caller cannot use 400-vs-403 responses to enumerate action contracts.
+    // The actor chokepoint independently enforces the same allow-set for every
+    // internal path. Missing tables and invalid action metadata are explicit
+    // 500s, never a silent success that drops caller data.
+    if let Err(error) = validate_bound_action_params(state, tenant, entity_type, action, &body_json)
+    {
+        http_span.set_status(Status::error(error.code));
+        http_span.set_attribute(OtelKeyValue::new(
+            "http.status_code",
+            i64::from(error.status.as_u16()),
+        ));
+        let end_time: std::time::SystemTime = sim_now().into();
+        http_span.end_with_timestamp(end_time);
+        return odata_error(error.status, error.code, &error.message).into_response();
     }
 
     let current_fields = current_state.state.fields.clone();
