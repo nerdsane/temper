@@ -933,14 +933,47 @@ impl EventStore for SimEventStore {
             ));
         }
 
+        // ARN-239: monotonic snapshot contract — reject stale, idempotent same content.
+        if let Some((existing_seq, existing_bytes)) = inner.snapshots.get(persistence_id) {
+            if sequence_nr < *existing_seq {
+                return Err(PersistenceError::ConcurrencyViolation {
+                    expected: *existing_seq,
+                    actual: sequence_nr,
+                });
+            }
+            if sequence_nr == *existing_seq {
+                if existing_bytes.as_slice() == snapshot {
+                    return Ok(());
+                }
+                return Err(PersistenceError::ConcurrencyViolation {
+                    expected: *existing_seq,
+                    actual: sequence_nr,
+                });
+            }
+            // Higher sequence: keep history immutable; do not rewrite prior seq keys.
+        }
+
         inner
             .snapshots
             .insert(persistence_id.to_string(), (sequence_nr, snapshot.to_vec()));
-        inner
+        // History is append-only for new sequence numbers (never overwrite).
+        let history = inner
             .snapshot_history
             .entry(persistence_id.to_string())
-            .or_default()
-            .insert(sequence_nr, snapshot.to_vec());
+            .or_default();
+        if history.contains_key(&sequence_nr) {
+            // Same sequence already recorded under a different path — conflict.
+            if history.get(&sequence_nr).map(|b| b.as_slice()) == Some(snapshot) {
+                // already consistent
+            } else {
+                return Err(PersistenceError::ConcurrencyViolation {
+                    expected: sequence_nr,
+                    actual: sequence_nr,
+                });
+            }
+        } else {
+            history.insert(sequence_nr, snapshot.to_vec());
+        }
         let segments = inner
             .event_segments
             .entry(persistence_id.to_string())

@@ -489,6 +489,36 @@ impl EventStore for TursoEventStore {
             .await
             .map_err(storage_error)?;
 
+        // ARN-239: monotonic latest + immutable history.
+        let mut current_rows = tx
+            .query(
+                "SELECT sequence_nr, snapshot FROM snapshots \
+                 WHERE tenant = ?1 AND entity_type = ?2 AND entity_id = ?3",
+                params![tenant, entity_type, entity_id],
+            )
+            .await
+            .map_err(storage_error)?;
+        if let Some(row) = current_rows.next().await.map_err(storage_error)? {
+            let existing_seq = row.get::<i64>(0).map_err(storage_error)? as u64;
+            let existing_bytes: Vec<u8> = row.get(1).map_err(storage_error)?;
+            if sequence_nr < existing_seq {
+                return Err(PersistenceError::ConcurrencyViolation {
+                    expected: existing_seq,
+                    actual: sequence_nr,
+                });
+            }
+            if sequence_nr == existing_seq {
+                if existing_bytes.as_slice() == snapshot {
+                    tx.commit().await.map_err(storage_error)?;
+                    return Ok(());
+                }
+                return Err(PersistenceError::ConcurrencyViolation {
+                    expected: existing_seq,
+                    actual: sequence_nr,
+                });
+            }
+        }
+
         tx.execute(
             "INSERT INTO snapshots (tenant, entity_type, entity_id, sequence_nr, snapshot)
              VALUES (?1, ?2, ?3, ?4, ?5)
@@ -496,7 +526,8 @@ impl EventStore for TursoEventStore {
              DO UPDATE SET
                 sequence_nr = excluded.sequence_nr,
                 snapshot = excluded.snapshot,
-                created_at = datetime('now')",
+                created_at = datetime('now')
+             WHERE snapshots.sequence_nr < excluded.sequence_nr",
             params![
                 tenant,
                 entity_type,
@@ -512,7 +543,7 @@ impl EventStore for TursoEventStore {
             "INSERT INTO snapshot_history (tenant, entity_type, entity_id, sequence_nr, snapshot)
              VALUES (?1, ?2, ?3, ?4, ?5)
              ON CONFLICT (tenant, entity_type, entity_id, sequence_nr)
-             DO UPDATE SET snapshot = excluded.snapshot, created_at = datetime('now')",
+             DO NOTHING",
             params![
                 tenant,
                 entity_type,

@@ -369,6 +369,27 @@ impl EventStore for RedisEventStore {
         let (tenant, entity_type, entity_id) =
             parse_persistence_id_parts(persistence_id).map_err(PersistenceError::Storage)?;
         let key = Self::snapshot_key(tenant, entity_type, entity_id);
+        // ARN-239: monotonic CAS against current latest.
+        let existing_raw: Option<String> = self.client.get(&key).await.map_err(storage_error)?;
+        if let Some(raw) = existing_raw
+            && let Ok(existing) = serde_json::from_str::<SnapshotRecord>(&raw)
+        {
+            if sequence_nr < existing.sequence_nr {
+                return Err(PersistenceError::ConcurrencyViolation {
+                    expected: existing.sequence_nr,
+                    actual: sequence_nr,
+                });
+            }
+            if sequence_nr == existing.sequence_nr {
+                if existing.snapshot.as_slice() == snapshot {
+                    return Ok(());
+                }
+                return Err(PersistenceError::ConcurrencyViolation {
+                    expected: existing.sequence_nr,
+                    actual: sequence_nr,
+                });
+            }
+        }
         let record = SnapshotRecord {
             sequence_nr,
             snapshot: snapshot.to_vec(),
@@ -382,18 +403,33 @@ impl EventStore for RedisEventStore {
             .map_err(storage_error)?;
 
         let history_key = Self::snapshot_history_key(tenant, entity_type, entity_id, sequence_nr);
-        let history = SnapshotHistoryRecord {
-            sequence_nr,
-            snapshot: snapshot.to_vec(),
-            created_at: chrono::Utc::now(),
-        };
-        let encoded_history = serde_json::to_string(&history)
-            .map_err(|e| PersistenceError::Serialization(e.to_string()))?;
-        let _: () = self
-            .client
-            .set(&history_key, encoded_history, None, None, false)
-            .await
-            .map_err(storage_error)?;
+        // History: never overwrite different content at the same sequence.
+        let history_raw: Option<String> =
+            self.client.get(&history_key).await.map_err(storage_error)?;
+        if let Some(raw) = history_raw {
+            if let Ok(existing) = serde_json::from_str::<SnapshotHistoryRecord>(&raw)
+                && existing.snapshot.as_slice() != snapshot
+            {
+                return Err(PersistenceError::ConcurrencyViolation {
+                    expected: sequence_nr,
+                    actual: sequence_nr,
+                });
+            }
+            // same content — leave history entry
+        } else {
+            let history = SnapshotHistoryRecord {
+                sequence_nr,
+                snapshot: snapshot.to_vec(),
+                created_at: chrono::Utc::now(),
+            };
+            let encoded_history = serde_json::to_string(&history)
+                .map_err(|e| PersistenceError::Serialization(e.to_string()))?;
+            let _: () = self
+                .client
+                .set(&history_key, encoded_history, None, None, false)
+                .await
+                .map_err(storage_error)?;
+        }
 
         let current_segment_key = Self::current_segment_key(tenant, entity_type, entity_id);
         let current_segment_raw: Option<String> = self

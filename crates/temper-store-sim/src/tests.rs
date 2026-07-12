@@ -292,3 +292,25 @@ async fn fault_injection_produces_errors() {
     let err = store.append(pid, 0, &[test_envelope(0, "Created")]).await;
     assert!(err.is_err());
 }
+
+#[tokio::test]
+async fn stale_snapshot_rejected_and_same_content_idempotent() {
+    let store = SimEventStore::no_faults(7);
+    let id = "default:Issue:i1";
+    store.save_snapshot(id, 5, b"v5").await.expect("save 5");
+    let err = store
+        .save_snapshot(id, 3, b"stale")
+        .await
+        .expect_err("stale");
+    assert!(matches!(
+        err,
+        temper_runtime::persistence::PersistenceError::ConcurrencyViolation { .. }
+    ));
+    store
+        .save_snapshot(id, 5, b"v5")
+        .await
+        .expect("idempotent same content");
+    let loaded = store.load_snapshot(id).await.expect("load").expect("some");
+    assert_eq!(loaded.0, 5);
+    assert_eq!(loaded.1, b"v5");
+}
