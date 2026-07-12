@@ -176,13 +176,16 @@ impl RuntimeContext {
     pub(crate) fn record_execute_turn(&mut self, code: &str, result: &Result<String>) {
         // ARN-222: bound capture size before retention (char-safe).
         let code = char_safe_truncate(code, MAX_TRAJECTORY_CODE_CHARS);
-        let extracted_actions = extract_trajectory_actions_from_code(&code);
+        let call_metadata = extract_temper_call_metadata(&code);
 
         // ARN-222: only track metadata for the session-bound identity tenant.
-        // Cross-tenant code must not retarget the upload under a different tenant.
-        for meta in extract_temper_call_metadata(&code) {
+        // Cross-tenant code must not retarget the upload under a different tenant,
+        // and must not retain foreign-tenant code/results under this identity.
+        let mut has_cross_tenant = false;
+        for meta in &call_metadata {
             if let Some(ref tenant) = meta.tenant {
                 if tenant != &self.identity_tenant {
+                    has_cross_tenant = true;
                     tracing::warn!(
                         identity_tenant = %self.identity_tenant,
                         other_tenant = %tenant,
@@ -195,7 +198,7 @@ impl RuntimeContext {
                     .and_modify(|count| *count += 1)
                     .or_insert(1);
             }
-            if let Some(entity_type) = meta.entity_type
+            if let Some(ref entity_type) = meta.entity_type
                 && meta
                     .tenant
                     .as_deref()
@@ -203,7 +206,7 @@ impl RuntimeContext {
                     == self.identity_tenant
             {
                 self.entity_types_seen
-                    .entry(entity_type)
+                    .entry(entity_type.clone())
                     .and_modify(|count| *count += 1)
                     .or_insert(1);
             }
@@ -216,41 +219,69 @@ impl RuntimeContext {
         let now = sim_now(); // determinism-ok: sim_now is DST-safe
         builder.start_turn(now);
 
-        // User message: the Python code submitted (bounded).
+        // ARN-222: redact cross-tenant execute bodies so foreign content is not
+        // durably stored under the identity tenant's trajectory.
+        const CROSS_TENANT_REDACTED: &str =
+            "[redacted: cross-tenant execute omitted from trajectory]";
+        let code_for_record = if has_cross_tenant {
+            CROSS_TENANT_REDACTED.to_string()
+        } else {
+            code.clone()
+        };
+
         builder.add_message(OTSMessage::new(
             MessageRole::User,
-            OTSMessageContent::text(&code),
+            OTSMessageContent::text(&code_for_record),
             now,
         ));
 
         // Decision: the execution outcome
-        let (outcome_str, consequence) = match result {
-            Ok(text) => {
-                let text = char_safe_truncate(text, MAX_TRAJECTORY_RESULT_CHARS);
-                builder.add_message(OTSMessage::new(
-                    MessageRole::Assistant,
-                    OTSMessageContent::text(&text),
-                    now,
-                ));
-                ("success", OTSConsequence::success())
+        let (outcome_str, consequence) = if has_cross_tenant {
+            builder.add_message(OTSMessage::new(
+                MessageRole::Assistant,
+                OTSMessageContent::text(CROSS_TENANT_REDACTED),
+                now,
+            ));
+            match result {
+                Ok(_) => ("success", OTSConsequence::success()),
+                Err(_) => (
+                    "failure",
+                    OTSConsequence::failure().with_error_type(CROSS_TENANT_REDACTED),
+                ),
             }
-            Err(e) => {
-                let err = char_safe_truncate(&e.to_string(), MAX_TRAJECTORY_RESULT_CHARS);
-                builder.add_message(OTSMessage::new(
-                    MessageRole::Assistant,
-                    OTSMessageContent::text(&err),
-                    now,
-                ));
-                ("failure", OTSConsequence::failure().with_error_type(err))
+        } else {
+            match result {
+                Ok(text) => {
+                    let text = char_safe_truncate(text, MAX_TRAJECTORY_RESULT_CHARS);
+                    builder.add_message(OTSMessage::new(
+                        MessageRole::Assistant,
+                        OTSMessageContent::text(&text),
+                        now,
+                    ));
+                    ("success", OTSConsequence::success())
+                }
+                Err(e) => {
+                    let err = char_safe_truncate(&e.to_string(), MAX_TRAJECTORY_RESULT_CHARS);
+                    builder.add_message(OTSMessage::new(
+                        MessageRole::Assistant,
+                        OTSMessageContent::text(&err),
+                        now,
+                    ));
+                    ("failure", OTSConsequence::failure().with_error_type(err))
+                }
             }
         };
 
-        let summary = char_safe_truncate(&code, 100);
+        let summary = char_safe_truncate(&code_for_record, 100);
         let mut choice = OTSChoice::new(format!("execute: {summary}"));
-        if !extracted_actions.is_empty() {
-            choice = choice.with_arguments(serde_json::json!({
-                "trajectory_actions": extracted_actions,
-            }));
+        // Only attach action args for same-tenant executes (no foreign params).
+        if !has_cross_tenant {
+            let extracted_actions = extract_trajectory_actions_from_code(&code);
+            if !extracted_actions.is_empty() {
+                choice = choice.with_arguments(serde_json::json!({
+                    "trajectory_actions": extracted_actions,
+                }));
+            }
         }
 
         let decision = OTSDecision::new(DecisionType::ToolSelection, choice, consequence);
@@ -258,7 +289,11 @@ impl RuntimeContext {
 
         builder.end_turn(now);
 
-        tracing::debug!(outcome = outcome_str, "ots.trajectory.turn_recorded");
+        tracing::debug!(
+            outcome = outcome_str,
+            cross_tenant_redacted = has_cross_tenant,
+            "ots.trajectory.turn_recorded"
+        );
     }
 
     /// Flush a snapshot of the trajectory mid-session without consuming it.
@@ -879,6 +914,23 @@ pub async fn run_stdio_server(config: McpConfig) -> Result<()> {
                 limit = MAX_STDIO_LINE_BYTES,
                 "mcp.stdio.line_too_large"
             );
+            // Always answer so clients do not hang waiting for a response.
+            let response = serde_json::json!({
+                "jsonrpc": "2.0",
+                "id": null,
+                "error": {
+                    "code": -32600,
+                    "message": format!(
+                        "request too large: {} bytes (limit {})",
+                        line.len(),
+                        MAX_STDIO_LINE_BYTES
+                    ),
+                },
+            });
+            let encoded = serde_json::to_string(&response)?;
+            stdout.write_all(encoded.as_bytes()).await?;
+            stdout.write_all(b"\n").await?;
+            stdout.flush().await?;
             continue;
         }
 
