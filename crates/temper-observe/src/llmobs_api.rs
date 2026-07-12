@@ -13,6 +13,10 @@ use llmobs_format::{convert_otel_messages_to_llmobs, parent_io_value_from_messag
 struct LlmObsConfig {
     api_key: String,
     site: String,
+    /// When false (default), prompt/tool content is not exported (ARN-243).
+    export_content: bool,
+    /// Max characters retained for any single content field when export is on.
+    max_content_chars: usize,
 }
 
 #[derive(Clone, Debug)]
@@ -65,28 +69,57 @@ pub async fn submit_llm_span(input: LlmSpanInput<'_>) -> Result<(), String> {
     post_payload(&config, payload).await
 }
 fn build_llm_span_payload(input: &LlmSpanInput<'_>) -> Result<Value, String> {
-    let mut input_messages = input
-        .input_messages_json
-        .map(convert_otel_messages_to_llmobs)
-        .transpose()
-        .map_err(|error| format!("failed to convert input messages: {error}"))?
-        .unwrap_or_default();
-    if let Some(system) = input
-        .system_instructions
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
+    let export_content = llmobs_export_content_enabled();
+    let max_chars = llmobs_max_content_chars();
+
+    let mut input_messages = if export_content {
+        input
+            .input_messages_json
+            .map(convert_otel_messages_to_llmobs)
+            .transpose()
+            .map_err(|error| format!("failed to convert input messages: {error}"))?
+            .unwrap_or_default()
+    } else {
+        Vec::new()
+    };
+    if export_content
+        && let Some(system) = input
+            .system_instructions
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
     {
-        input_messages.insert(0, json!({ "role": "system", "content": system }));
+        input_messages.insert(
+            0,
+            json!({ "role": "system", "content": redact_and_bound(system, max_chars) }),
+        );
+    }
+    if export_content {
+        redact_messages_in_place(&mut input_messages, max_chars);
     }
 
-    let output_messages = input
-        .output_messages_json
-        .map(convert_otel_messages_to_llmobs)
-        .transpose()
-        .map_err(|error| format!("failed to convert output messages: {error}"))?
-        .unwrap_or_default();
-    let parent_input_value = parent_io_value_from_messages(&input_messages, "user");
-    let parent_output_value = parent_io_value_from_messages(&output_messages, "assistant");
+    let mut output_messages = if export_content {
+        input
+            .output_messages_json
+            .map(convert_otel_messages_to_llmobs)
+            .transpose()
+            .map_err(|error| format!("failed to convert output messages: {error}"))?
+            .unwrap_or_default()
+    } else {
+        Vec::new()
+    };
+    if export_content {
+        redact_messages_in_place(&mut output_messages, max_chars);
+    }
+    let parent_input_value = if export_content {
+        parent_io_value_from_messages(&input_messages, "user")
+    } else {
+        None
+    };
+    let parent_output_value = if export_content {
+        parent_io_value_from_messages(&output_messages, "assistant")
+    } else {
+        None
+    };
 
     let start_ns = approximate_start_ns(input.duration_ms);
     let duration_ns_u64 = input.duration_ms.saturating_mul(1_000_000);
@@ -322,24 +355,27 @@ pub async fn submit_tool_spans(
             "{}:{}:{}",
             trace_id, parent_span_id, span.tool_call_id
         ));
+        let export_content = llmobs_export_content_enabled();
+        let max_chars = llmobs_max_content_chars();
+        let input_value = if export_content {
+            json!(redact_and_bound(span.arguments_json, max_chars))
+        } else {
+            json!({"redacted": true, "reason": "content_export_disabled"})
+        };
+        let output_value = if export_content {
+            json!(redact_and_bound(span.result_text, max_chars))
+        } else {
+            json!({"redacted": true, "reason": "content_export_disabled"})
+        };
         let mut meta = Map::from_iter([
             ("kind".to_string(), json!("tool")),
-            (
-                "input".to_string(),
-                json!({
-                    "value": span.arguments_json,
-                }),
-            ),
-            (
-                "output".to_string(),
-                json!({
-                    "value": span.result_text,
-                }),
-            ),
+            ("input".to_string(), json!({ "value": input_value })),
+            ("output".to_string(), json!({ "value": output_value })),
             (
                 "metadata".to_string(),
                 json!({
                     "tool_call_id": span.tool_call_id,
+                    "content_export": export_content,
                 }),
             ),
         ]);
@@ -347,7 +383,11 @@ pub async fn submit_tool_spans(
             meta.insert(
                 "error".to_string(),
                 json!({
-                    "message": span.result_text,
+                    "message": if export_content {
+                        redact_and_bound(span.result_text, max_chars)
+                    } else {
+                        "redacted".to_string()
+                    },
                     "type": "tool_call_error",
                 }),
             );
@@ -404,8 +444,85 @@ fn llmobs_config() -> &'static Option<LlmObsConfig> {
         }
 
         let site = read_non_empty_env("DD_SITE").unwrap_or_else(|| "datadoghq.com".to_string());
-        Some(LlmObsConfig { api_key, site })
+        // ARN-243: content export is opt-in. Metadata-only is the default.
+        let export_content = matches!(
+            read_non_empty_env("TEMPER_LLMOBS_EXPORT_CONTENT")
+                .unwrap_or_default()
+                .as_str(),
+            "1" | "true" | "TRUE" | "yes" | "YES"
+        );
+        let max_content_chars = read_non_empty_env("TEMPER_LLMOBS_MAX_CONTENT_CHARS")
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(2_048);
+        Some(LlmObsConfig {
+            api_key,
+            site,
+            export_content,
+            max_content_chars,
+        })
     })
+}
+
+/// Whether full prompt/tool content may leave the process (ARN-243).
+fn llmobs_export_content_enabled() -> bool {
+    llmobs_config()
+        .as_ref()
+        .map(|c| c.export_content)
+        .unwrap_or(false)
+}
+
+fn llmobs_max_content_chars() -> usize {
+    llmobs_config()
+        .as_ref()
+        .map(|c| c.max_content_chars)
+        .unwrap_or(2_048)
+}
+
+/// Redact obvious secret shapes and bound length before export.
+pub fn redact_and_bound(text: &str, max_chars: usize) -> String {
+    let mut out = text.to_string();
+    // Lightweight redaction without pulling regex into observe.
+    for needle in ["Bearer ", "bearer ", "sk-"] {
+        if let Some(idx) = out.find(needle) {
+            let after = idx + needle.len();
+            let end = out[after..]
+                .find(|c: char| c.is_whitespace() || c == '"' || c == '\'')
+                .map(|i| after + i)
+                .unwrap_or(out.len());
+            out.replace_range(after..end, "[REDACTED]");
+        }
+    }
+    for key in ["api_key=", "api-key=", "token=", "password=", "secret="] {
+        if let Some(idx) = out.to_ascii_lowercase().find(key) {
+            let after = idx + key.len();
+            let end = out[after..]
+                .find(|c: char| c.is_whitespace() || c == '"' || c == '\'')
+                .map(|i| after + i)
+                .unwrap_or(out.len());
+            if after <= out.len() && end <= out.len() && after <= end {
+                out.replace_range(after..end, "[REDACTED]");
+            }
+        }
+    }
+    if out.chars().count() > max_chars {
+        let truncated: String = out.chars().take(max_chars).collect();
+        format!("{truncated}…[truncated]")
+    } else {
+        out
+    }
+}
+
+fn redact_messages_in_place(messages: &mut [Value], max_chars: usize) {
+    for msg in messages.iter_mut() {
+        if let Some(obj) = msg.as_object_mut()
+            && let Some(content) = obj.get("content").and_then(|v| v.as_str())
+        {
+            obj.insert(
+                "content".to_string(),
+                json!(redact_and_bound(content, max_chars)),
+            );
+        }
+    }
 }
 
 fn llmobs_client() -> &'static Client {
