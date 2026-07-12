@@ -15,14 +15,31 @@ use super::types::LoadDirRequest;
 use super::verification_stream::build_verification_stream_response;
 use crate::state::ServerState;
 
-/// POST /api/specs/load-dir -- hot-load specs from a directory into the running server.///
-/// Reads CSDL and IOA files from `specs_dir`, registers them under `tenant`,
-/// emits design-time SSE events for each entity, and spawns background
-/// verification tasks that stream progress via SSE.
+/// POST /api/specs/load-dir — **disabled for network callers** (ADR-0159 / ARN-229).
+///
+/// Callers must not name host directories. Use `POST /api/specs/load-inline`
+/// with an in-memory filename→content map. Internal loads after validated
+/// staging use [`load_specs_from_resolved_path`].
 #[instrument(skip_all, fields(otel.name = "POST /api/specs/load-dir"))]
 pub(crate) async fn handle_load_dir(
-    State(state): State<ServerState>,
-    Json(body): Json<LoadDirRequest>,
+    State(_state): State<ServerState>,
+    Json(_body): Json<LoadDirRequest>,
+) -> Result<axum::response::Response, (StatusCode, String)> {
+    Err((
+        StatusCode::GONE,
+        "POST /api/specs/load-dir no longer accepts host paths (ARN-229). \
+         Submit an in-memory bundle via POST /api/specs/load-inline."
+            .to_string(),
+    ))
+}
+
+/// Load specs from a kernel-resolved directory (after safe staging).
+///
+/// Not a public network contract — only called after path validation.
+#[instrument(skip_all, fields(otel.name = "specs.load_from_resolved_path"))]
+pub(crate) async fn load_specs_from_resolved_path(
+    state: ServerState,
+    body: LoadDirRequest,
 ) -> Result<axum::response::Response, (StatusCode, String)> {
     let specs_path = std::path::Path::new(&body.specs_dir);
 

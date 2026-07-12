@@ -3,7 +3,6 @@ use std::path::{Path, PathBuf};
 use axum::extract::State;
 use axum::http::HeaderMap;
 use axum::http::StatusCode;
-use axum::response::Json;
 use serde_json::json;
 use temper_evolution::records::{
     AnalysisRecord, ObservationClass, ObservationRecord, RecordHeader, RecordType, SolutionOption,
@@ -16,7 +15,10 @@ use tracing::instrument;
 use crate::authz::{DenialInput, record_authz_denial, security_context_from_headers};
 use crate::state::{ServerState, TrajectoryEntry, TrajectorySource};
 
-use super::load_dir::handle_load_dir;
+use super::load_dir::load_specs_from_resolved_path;
+use super::path_security::{
+    create_inline_staging_dir, ensure_under_root, validate_inline_bundle, validate_inline_spec_key,
+};
 use super::types::{LoadDirRequest, LoadInlineRequest};
 
 /// POST /api/specs/load-inline -- load specs from inline content.
@@ -189,27 +191,25 @@ pub(crate) async fn handle_load_inline(
         ));
     }
 
-    // Write specs to a temp directory
-    let tmp_dir = std::env::temp_dir().join(format!("temper-inline-{}", tenant)); // determinism-ok: HTTP handler writes user specs to temp dir for loading
-    let _ = std::fs::remove_dir_all(&tmp_dir); // determinism-ok: HTTP handler cleans previous temp dir
-    std::fs::create_dir_all(&tmp_dir).map_err(|e| {
-        // determinism-ok: HTTP handler creates temp dir
-        (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            format!("Failed to create temp dir: {e}"),
-        )
-    })?;
-
+    // ADR-0159 / ARN-229: validate keys + budgets, then materialize into an
+    // invocation-unique staging directory (never a shared tenant temp path).
+    let validated = validate_inline_bundle(&body.specs)?;
+    let tmp_dir = create_inline_staging_dir(&tenant)?;
     let specs_root = resolve_inline_specs_root(&tmp_dir, &body.specs)?;
+    ensure_under_root(&tmp_dir, &specs_root)?;
 
-    for (filename, content) in &body.specs {
-        let path = tmp_dir.join(filename);
+    for (rel, content) in validated {
+        let path = tmp_dir.join(&rel);
+        ensure_under_root(&tmp_dir, &path)?;
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent).map_err(|e| {
                 // determinism-ok: HTTP handler creates temp subdirectories for nested inline specs
                 (
                     StatusCode::INTERNAL_SERVER_ERROR,
-                    format!("Failed to create parent directory for {filename}: {e}"),
+                    format!(
+                        "Failed to create parent directory for {}: {e}",
+                        rel.display()
+                    ),
                 )
             })?;
         }
@@ -217,13 +217,15 @@ pub(crate) async fn handle_load_inline(
             // determinism-ok: HTTP handler writes specs
             (
                 StatusCode::INTERNAL_SERVER_ERROR,
-                format!("Failed to write {filename}: {e}"),
+                format!("Failed to write {}: {e}", rel.display()),
             )
         })?;
     }
 
     if let Some(source) = body.cross_invariants_toml.as_deref() {
-        std::fs::write(specs_root.join("cross-invariants.toml"), source).map_err(|e| {
+        let cross_path = specs_root.join("cross-invariants.toml");
+        ensure_under_root(&tmp_dir, &cross_path)?;
+        std::fs::write(&cross_path, source).map_err(|e| {
             // determinism-ok: HTTP handler writes cross-invariants
             (
                 StatusCode::INTERNAL_SERVER_ERROR,
@@ -232,15 +234,17 @@ pub(crate) async fn handle_load_inline(
         })?;
     }
 
-    // Delegate to load-dir logic with merge=true so agent-submitted specs
-    // are added to the existing tenant config instead of replacing it.
+    // Kernel-resolved path only — never a caller-named host directory.
     let cedar_policies = body.cedar_policies.clone();
     let dir_request = LoadDirRequest {
         tenant: tenant.clone(),
         specs_dir: specs_root.to_string_lossy().to_string(),
         merge: true,
     };
-    let result = handle_load_dir(State(state.clone()), Json(dir_request)).await;
+    let result = load_specs_from_resolved_path(state.clone(), dir_request).await;
+
+    // Best-effort cleanup of this invocation's staging tree.
+    let _ = std::fs::remove_dir_all(&tmp_dir); // determinism-ok: HTTP handler cleans staging
 
     if result.is_ok()
         && let Some(ref cedar_text) = cedar_policies
@@ -382,13 +386,15 @@ fn resolve_inline_specs_root(
         ));
     }
 
-    let model_path = Path::new(model_paths[0]);
-    let relative_root = model_path.parent().unwrap_or_else(|| Path::new(""));
-    Ok(if relative_root.as_os_str().is_empty() {
+    let model_rel = validate_inline_spec_key(model_paths[0])?;
+    let relative_root = model_rel.parent().unwrap_or_else(|| Path::new(""));
+    let root = if relative_root.as_os_str().is_empty() {
         tmp_dir.to_path_buf()
     } else {
         tmp_dir.join(relative_root)
-    })
+    };
+    ensure_under_root(tmp_dir, &root)?;
+    Ok(root)
 }
 
 fn merge_inline_cedar_policy_text(existing: &str, incoming: &str) -> String {

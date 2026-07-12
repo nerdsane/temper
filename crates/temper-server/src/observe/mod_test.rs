@@ -1946,44 +1946,12 @@ async fn test_load_dir_registers_specs() {
         .await
         .unwrap();
 
-    assert_eq!(response.status(), StatusCode::OK);
-    // Response is NDJSON — parse each line
-    let body = axum::body::to_bytes(response.into_body(), 10 * 1024 * 1024)
-        .await
-        .unwrap();
-    let body_str = std::str::from_utf8(&body).unwrap();
-    let lines: Vec<serde_json::Value> = body_str
-        .lines()
-        .filter(|l| !l.is_empty())
-        .map(|l| serde_json::from_str(l).unwrap())
-        .collect();
-
-    // First line: specs_loaded
-    assert_eq!(lines[0]["type"], "specs_loaded");
-    assert_eq!(lines[0]["tenant"], "test-tenant");
-    let entities = lines[0]["entities"].as_array().unwrap();
-    assert!(
-        !entities.is_empty(),
-        "should have loaded at least one entity"
-    );
-
-    // Last line: summary
-    let summary = lines.last().unwrap();
-    assert_eq!(summary["type"], "summary");
-    assert_eq!(summary["tenant"], "test-tenant");
-
-    // Verify specs are in the registry
-    let registry = state.registry.read().unwrap();
-    let tenant_id: temper_runtime::tenant::TenantId = "test-tenant".into();
-    let entity_types = registry.entity_types(&tenant_id);
-    assert!(
-        !entity_types.is_empty(),
-        "registry should have entity types for test-tenant"
-    );
+    // ARN-229: network load-dir is gone — host paths are not accepted.
+    assert_eq!(response.status(), StatusCode::GONE);
 }
 
 #[tokio::test]
-async fn test_load_dir_missing_dir_returns_error() {
+async fn test_load_dir_host_path_is_gone() {
     let system = ActorSystem::new("test-load-dir-missing");
     let registry = SpecRegistry::new();
     let state = ServerState::from_registry(system, registry);
@@ -2008,7 +1976,7 @@ async fn test_load_dir_missing_dir_returns_error() {
         .await
         .unwrap();
 
-    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    assert_eq!(response.status(), StatusCode::GONE);
 }
 
 #[tokio::test]
@@ -2066,27 +2034,8 @@ effect = "set phantom true"
 
     let _ = std::fs::remove_dir_all(&temp_specs); // determinism-ok: test-only
 
-    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
-    let body = axum::body::to_bytes(response.into_body(), 1024 * 1024)
-        .await
-        .unwrap();
-    let body_str = std::str::from_utf8(&body).unwrap();
-    let lines: Vec<serde_json::Value> = body_str
-        .lines()
-        .filter(|l| !l.is_empty())
-        .map(|l| serde_json::from_str(l).unwrap())
-        .collect();
-
-    assert_eq!(lines[0]["type"], "specs_loaded");
-    assert!(lines.iter().any(|l| l["type"] == "lint_error"));
-    assert!(!lines.iter().any(|l| l["type"] == "verification_started"));
-
-    let registry = state.registry.read().unwrap();
-    let tenant_id: temper_runtime::tenant::TenantId = "lint-tenant".into();
-    assert!(
-        registry.get_tenant(&tenant_id).is_none(),
-        "tenant should not be registered when lint errors exist"
-    );
+    // ARN-229: network load-dir is disabled; host-path lint path is not reachable.
+    assert_eq!(response.status(), StatusCode::GONE);
 }
 
 #[tokio::test]
@@ -2126,36 +2075,9 @@ async fn test_load_dir_emits_design_time_events() {
         .await
         .unwrap();
 
-    assert_eq!(response.status(), StatusCode::OK);
-
-    // Consume entire body to wait for verification to complete
-    let _ = axum::body::to_bytes(response.into_body(), 10 * 1024 * 1024)
-        .await
-        .unwrap();
-
-    // Check that design-time events were persisted to Turso.
-    let turso = state.platform_turso_store().expect("turso configured");
-    let events = turso
-        .list_design_time_events(None, 1000)
-        .await
-        .expect("query design-time events from Turso");
-    assert!(!events.is_empty(), "design-time events should be in Turso");
-
-    // Should have spec_loaded, verify_started, and verify_done events
-    let loaded_events: Vec<_> = events.iter().filter(|e| e.kind == "spec_loaded").collect();
-    assert!(!loaded_events.is_empty(), "should have spec_loaded events");
-
-    let started_events: Vec<_> = events
-        .iter()
-        .filter(|e| e.kind == "verify_started")
-        .collect();
-    assert!(
-        !started_events.is_empty(),
-        "should have verify_started events"
-    );
-
-    let done_events: Vec<_> = events.iter().filter(|e| e.kind == "verify_done").collect();
-    assert!(!done_events.is_empty(), "should have verify_done events");
+    // ARN-229: host-path load-dir is gone. Design-time events for load-inline
+    // remain covered by inline submission paths; this test guards the network ban.
+    assert_eq!(response.status(), StatusCode::GONE);
 }
 
 #[tokio::test]
