@@ -171,3 +171,36 @@ async fn overdue_state_timeout_fires_after_restart() {
         "an overdue state timeout must fire at boot, not wait another full budget or never fire"
     );
 }
+
+/// Sibling of the restart cases (same defect class, found during review of
+/// the fix): an entity CREATED into a timed initial state has no dispatch
+/// to arm its timer, so without arming at creation its `on_timeout` never
+/// fires while the server stays up.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn state_timeout_fires_for_entity_created_into_timed_state() {
+    let db_path =
+        std::env::temp_dir().join(format!("temper-arn203-create-{}.db", uuid::Uuid::new_v4()));
+    let db_url = format!("file:{}", db_path.display());
+    let tenant = TenantId::from("tenant-a".to_string());
+
+    let state = build_state("arn203-create", open_store(&db_url).await);
+    let created = state
+        .get_or_create_tenant_entity(&tenant, "Ticket", "t-created-1", serde_json::json!({}))
+        .await
+        .expect("create ticket");
+    assert_eq!(created.state.status, "Open");
+
+    // No restart, no dispatch — the creation itself must arm the timer.
+    let status = wait_for_status(
+        &state,
+        &tenant,
+        "t-created-1",
+        "InProgress",
+        Duration::from_secs(5),
+    )
+    .await;
+    assert_eq!(
+        status, "InProgress",
+        "a state timeout must fire for an entity created into the timed state, without any dispatch"
+    );
+}
