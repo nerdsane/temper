@@ -259,6 +259,8 @@ async fn dispatch_builtin(
             // If the caller provided a child_id, check child state directly first.
             if let Some(child_id) = input["child_id"].as_str().filter(|s| !s.is_empty()) {
                 let child_ns = format!("{tenant}/{child_id}");
+                // ARN-215: sibling Process rows require an explicit namespace grant.
+                ctx.grant_cross_namespace(child_ns.clone());
                 if let Some(child_state) = ctx
                     .load_actor_state(&child_ns, "Process")
                     .await
@@ -358,6 +360,8 @@ async fn get_process_state(ctx: &ActorContext, process_id: &str, output_only: bo
     let ns = ctx.self_handle().namespace.clone();
     let tenant = ns.split('/').next().unwrap_or("default");
     let target_ns = format!("{tenant}/{process_id}");
+    // ARN-215: cross-namespace Process read requires an explicit grant.
+    ctx.grant_cross_namespace(target_ns.clone());
     let Some(state) = ctx
         .load_actor_state(&target_ns, "Process")
         .await

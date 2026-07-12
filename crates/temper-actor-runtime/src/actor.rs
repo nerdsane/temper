@@ -97,6 +97,10 @@ pub enum ActorError {
 
     #[error("internal error: {0}")]
     Internal(String),
+
+    /// Cross-namespace persistence denied (ARN-215).
+    #[error("namespace capability denied: {0}")]
+    NamespaceDenied(String),
 }
 
 /// The actor's interface to the system. Passed to `handle()`.
@@ -111,6 +115,9 @@ pub struct ActorContext {
     pub(crate) mailbox: Option<std::sync::Arc<dyn crate::mailbox::Mailbox>>,
     /// Pool for spawn/lookup operations.
     pub(crate) pool: Option<deadpool_postgres::Pool>,
+    /// Explicit grants for cross-namespace load/upsert (ADR-0161 / ARN-215).
+    /// Own namespace is always allowed without a grant.
+    cross_namespace_grants: std::sync::Mutex<std::collections::BTreeSet<String>>,
 }
 
 impl ActorContext {
@@ -125,6 +132,17 @@ impl ActorContext {
             pending_tells: Mutex::new(Vec::new()),
             mailbox,
             pool,
+            cross_namespace_grants: std::sync::Mutex::new(std::collections::BTreeSet::new()),
+        }
+    }
+
+    /// Grant cross-namespace load/upsert for the named namespaces (ARN-215).
+    ///
+    /// Own namespace is always allowed. Grants are additive and must be set by
+    /// the runtime/tool layer before cross-namespace access — not by guest data.
+    pub fn grant_cross_namespace(&self, namespace: impl Into<String>) {
+        if let Ok(mut grants) = self.cross_namespace_grants.lock() {
+            grants.insert(namespace.into());
         }
     }
 
@@ -133,12 +151,34 @@ impl ActorContext {
         &self.self_handle
     }
 
+    /// Fail closed unless `namespace` is self or explicitly granted (ARN-215).
+    fn require_namespace_access(&self, namespace: &str) -> Result<(), ActorError> {
+        if namespace == self.self_handle.namespace {
+            return Ok(());
+        }
+        let granted = self
+            .cross_namespace_grants
+            .lock()
+            .map(|g| g.contains(namespace))
+            .unwrap_or(false);
+        if granted {
+            return Ok(());
+        }
+        Err(ActorError::NamespaceDenied(format!(
+            "actor '{}' cannot access namespace '{}' without an explicit grant",
+            self.self_handle.namespace, namespace
+        )))
+    }
+
     /// Load raw state bytes for an actor instance.
+    ///
+    /// Cross-namespace reads require a prior [`grant_cross_namespace`].
     pub async fn load_actor_state(
         &self,
         namespace: &str,
         actor_type: &str,
     ) -> Result<Option<Vec<u8>>, ActorError> {
+        self.require_namespace_access(namespace)?;
         let Some(pool) = &self.pool else {
             return Err(ActorError::Internal("no pool in ActorContext".into()));
         };
@@ -158,12 +198,15 @@ impl ActorContext {
 
     /// Best-effort spawn/update of an actor instance with explicit state bytes.
     /// Used by integrations to persist auxiliary entities (e.g. Message).
+    ///
+    /// Cross-namespace writes require a prior [`grant_cross_namespace`].
     pub async fn upsert_actor_state(
         &self,
         namespace: &str,
         actor_type: &str,
         state: Vec<u8>,
     ) -> Result<(), ActorError> {
+        self.require_namespace_access(namespace)?;
         let Some(pool) = &self.pool else {
             return Err(ActorError::Internal("no pool in ActorContext".into()));
         };
@@ -332,4 +375,29 @@ pub trait Actor: Send + Sync + 'static {
         state: &mut Vec<u8>,
         message: &Message,
     ) -> Result<(), ActorError>;
+}
+
+#[cfg(test)]
+mod namespace_cap_tests {
+    use super::*;
+
+    #[test]
+    fn same_namespace_allowed_without_grant() {
+        let ctx = ActorContext::new(ActorHandle::new("ns-a", "Process"), None, None);
+        assert!(ctx.require_namespace_access("ns-a").is_ok());
+    }
+
+    #[test]
+    fn cross_namespace_denied_without_grant() {
+        let ctx = ActorContext::new(ActorHandle::new("ns-a", "Process"), None, None);
+        let err = ctx.require_namespace_access("ns-b").unwrap_err();
+        assert!(matches!(err, ActorError::NamespaceDenied(_)));
+    }
+
+    #[test]
+    fn cross_namespace_allowed_after_grant() {
+        let ctx = ActorContext::new(ActorHandle::new("ns-a", "Process"), None, None);
+        ctx.grant_cross_namespace("ns-b");
+        assert!(ctx.require_namespace_access("ns-b").is_ok());
+    }
 }

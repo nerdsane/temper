@@ -70,6 +70,8 @@ pub async fn append_message(
         fields,
     };
     if let Ok(bytes) = serde_json::to_vec(&state) {
+        // ARN-215: Message rows live under a child namespace; grant before write.
+        ctx.grant_cross_namespace(message_namespace.clone());
         let _ = ctx
             .upsert_actor_state(&message_namespace, "Message", bytes)
             .await;
