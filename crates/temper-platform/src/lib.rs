@@ -10,6 +10,7 @@ pub mod bearer_auth;
 pub mod bootstrap;
 pub mod deploy;
 pub mod genesis_install;
+pub mod genesis_install_security;
 pub mod hooks;
 pub mod identity_cache;
 pub mod integration;

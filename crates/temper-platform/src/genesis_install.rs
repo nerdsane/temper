@@ -265,8 +265,23 @@ pub async fn restore_genesis_registry_cache_roots(platform: &PlatformState) -> u
         } else {
             record.registry_tenant.trim()
         };
+        // Re-validate stored registry URL on every fetch (ARN-210 defense-in-depth).
+        let registry_url = match normalize_registry_url(&record.registry_url) {
+            Ok(url) => url,
+            Err(error) => {
+                tracing::warn!(
+                    tenant = %tenant,
+                    app = %app_name,
+                    app_ref = %record.app_ref,
+                    registry_url = %record.registry_url,
+                    error = %error,
+                    "Installed app has blocked/invalid Genesis registry_url"
+                );
+                continue;
+            }
+        };
         let materialized = match materialize_registry_app_closure_via_bundle(
-            &record.registry_url,
+            &registry_url,
             registry_tenant,
             root_ref.clone(),
             &cache_root,
@@ -279,11 +294,11 @@ pub async fn restore_genesis_registry_cache_roots(platform: &PlatformState) -> u
                     tenant = %tenant,
                     app = %app_name,
                     app_ref = %record.app_ref,
-                    registry_url = %record.registry_url,
+                    registry_url = %registry_url,
                     error = %error,
                     "Genesis bundle cache recovery failed; falling back to git clone because TEMPER_GENESIS_INSTALL_GIT_FALLBACK is enabled"
                 );
-                materialize_registry_app_closure(&record.registry_url, root_ref, &cache_root).await
+                materialize_registry_app_closure(&registry_url, root_ref, &cache_root).await
             }
             Err(error) => Err(error),
         };
@@ -652,20 +667,8 @@ fn genesis_git_fallback_enabled() -> bool {
 }
 
 fn normalize_registry_url(raw: &str) -> Result<String, String> {
-    let fallback = std::env::var("TEMPER_GENESIS_REGISTRY_URL").unwrap_or_default();
-    let raw = if raw.trim().is_empty() {
-        fallback.as_str()
-    } else {
-        raw
-    };
-    let value = raw.trim().trim_end_matches('/');
-    if value.is_empty() {
-        return Err("registry_url is required for Genesis app install".to_string());
-    }
-    if !(value.starts_with("http://") || value.starts_with("https://")) {
-        return Err("registry_url must start with http:// or https://".to_string());
-    }
-    Ok(value.to_string())
+    // SSRF / supply-chain boundary — see ADR-0157 / ARN-210.
+    crate::genesis_install_security::normalize_and_validate_registry_url(raw)
 }
 
 fn follow_latest_error_update(
@@ -707,7 +710,15 @@ async fn fetch_registry_latest_version_hash(
         registry_url.trim_end_matches('/'),
         app_id.replace('\'', "''")
     );
-    let response = reqwest::Client::new()
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(
+            crate::genesis_install_security::REGISTRY_HTTP_TIMEOUT_SECS,
+        ))
+        .connect_timeout(std::time::Duration::from_secs(10))
+        .redirect(reqwest::redirect::Policy::none())
+        .build()
+        .map_err(|error| format!("build registry HTTP client: {error}"))?;
+    let response = client
         .get(&url)
         .header("X-Tenant-Id", registry_tenant)
         .send()
@@ -841,7 +852,7 @@ async fn materialize_registry_app_closure(
             continue;
         }
 
-        let app_dir = cache_root.join(&app_ref.name);
+        let app_dir = crate::genesis_install_security::join_under_cache(cache_root, &app_ref.name)?;
         let resolved_hash = materialize_git_registry_app(
             registry_url,
             &app_ref.owner,
@@ -885,7 +896,16 @@ async fn materialize_registry_app_closure_via_bundle(
         root_ref.name,
         version_hash.trim_start_matches('@')
     );
-    let response = reqwest::Client::new()
+    use crate::genesis_install_security::{
+        MAX_BUNDLE_APPS, MAX_BUNDLE_RESPONSE_BYTES, REGISTRY_HTTP_TIMEOUT_SECS, join_under_cache,
+    };
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(REGISTRY_HTTP_TIMEOUT_SECS))
+        .connect_timeout(std::time::Duration::from_secs(10))
+        .redirect(reqwest::redirect::Policy::none())
+        .build()
+        .map_err(|error| format!("build registry HTTP client: {error}"))?;
+    let response = client
         .get(&bundle_url)
         .header("X-Tenant-Id", registry_tenant)
         .send()
@@ -899,10 +919,60 @@ async fn materialize_registry_app_closure_via_bundle(
             body.trim()
         ));
     }
-    let bundle: GenesisRegistryBundleResponse = response
-        .json()
-        .await
+    // Bound response body while streaming (ARN-210 DoS — abort before OOM).
+    let bytes =
+        crate::genesis_install_security::read_body_capped(response, MAX_BUNDLE_RESPONSE_BYTES)
+            .await
+            .map_err(|error| format!("read Genesis bundle body {bundle_url}: {error}"))?;
+    let bundle: GenesisRegistryBundleResponse = serde_json::from_slice(&bytes)
         .map_err(|error| format!("decode Genesis bundle {bundle_url}: {error}"))?;
+    if bundle.apps.len() > MAX_BUNDLE_APPS {
+        return Err(format!(
+            "Genesis bundle contains {} apps; max is {MAX_BUNDLE_APPS}",
+            bundle.apps.len()
+        ));
+    }
+
+    // Stage under a private directory, then rename into place (atomic-ish).
+    let stage_root = cache_root.with_extension("staging");
+    if stage_root.exists() {
+        std::fs::remove_dir_all(&stage_root).map_err(|error| {
+            format!(
+                "clear Genesis registry bundle staging '{}': {error}",
+                stage_root.display()
+            )
+        })?;
+    }
+    std::fs::create_dir_all(&stage_root).map_err(|error| {
+        format!(
+            "create Genesis registry bundle staging '{}': {error}",
+            stage_root.display()
+        )
+    })?;
+
+    let mut refs = Vec::new();
+    for app in bundle.apps {
+        // Verify root identity when present.
+        if app.name == root_ref.name
+            && let Some(expected) = root_ref.version_hash.as_deref()
+        {
+            let got = app.version_hash.trim_start_matches('@');
+            let exp = expected.trim_start_matches('@');
+            if got != exp {
+                return Err(format!(
+                    "bundle version_hash mismatch for '{}': expected {exp}, got {got}",
+                    app.name
+                ));
+            }
+        }
+        let app_dir = join_under_cache(&stage_root, &app.name)?;
+        write_bundle_app(&app_dir, &app)?;
+        refs.push(RegistryAppRef {
+            owner: app.owner,
+            name: app.name,
+            version_hash: Some(app.version_hash),
+        });
+    }
 
     if cache_root.exists() {
         std::fs::remove_dir_all(cache_root).map_err(|error| {
@@ -912,27 +982,24 @@ async fn materialize_registry_app_closure_via_bundle(
             )
         })?;
     }
-    std::fs::create_dir_all(cache_root).map_err(|error| {
+    std::fs::rename(&stage_root, cache_root).map_err(|error| {
         format!(
-            "create Genesis registry bundle cache '{}': {error}",
+            "promote Genesis registry bundle staging to '{}': {error}",
             cache_root.display()
         )
     })?;
-
-    let mut refs = Vec::new();
-    for app in bundle.apps {
-        let app_dir = cache_root.join(&app.name);
-        write_bundle_app(&app_dir, &app)?;
-        refs.push(RegistryAppRef {
-            owner: app.owner,
-            name: app.name,
-            version_hash: Some(app.version_hash),
-        });
-    }
     Ok(refs)
 }
 
 fn write_bundle_app(app_dir: &Path, app: &GenesisRegistryBundleApp) -> Result<(), String> {
+    use crate::genesis_install_security::{MAX_FILE_BYTES, MAX_FILES_PER_APP};
+    if app.files.len() > MAX_FILES_PER_APP {
+        return Err(format!(
+            "bundle app '{}' has {} files; max is {MAX_FILES_PER_APP}",
+            app.name,
+            app.files.len()
+        ));
+    }
     if app_dir.exists() {
         std::fs::remove_dir_all(app_dir).map_err(|error| {
             format!("clear Genesis bundle app '{}': {error}", app_dir.display())
@@ -952,6 +1019,12 @@ fn write_bundle_app(app_dir: &Path, app: &GenesisRegistryBundleApp) -> Result<()
         let bytes = base64::engine::general_purpose::STANDARD
             .decode(&file.content_base64)
             .map_err(|error| format!("decode bundle file '{}': {error}", file.path))?;
+        if bytes.len() > MAX_FILE_BYTES {
+            return Err(format!(
+                "bundle file '{}' exceeds max size {MAX_FILE_BYTES} bytes",
+                file.path
+            ));
+        }
         std::fs::write(&path, bytes)
             .map_err(|error| format!("write bundle file '{}': {error}", path.display()))?;
     }
@@ -2051,7 +2124,9 @@ fn genesis_cache_root(state: &ServerState, app_ref: &str) -> PathBuf {
     } else {
         state.data_dir.join("genesis-app-cache")
     };
-    root.join(sanitize_fragment(app_ref))
+    // Collision-resistant keys (ARN-210): lossy sanitize alone can map
+    // distinct refs onto the same directory.
+    root.join(crate::genesis_install_security::collision_resistant_cache_key(app_ref))
 }
 
 fn genesis_source_tenants() -> Vec<String> {
@@ -2388,11 +2463,7 @@ mod tests {
         assert!(genesis_source_tenants().contains(&"default".to_string()));
     }
 
-    // --- ARN-210 exploit / security contract (RED on unfixed code) ---
-    //
-    // These assert the secure post-condition. On unfixed main they fail because
-    // normalize_registry_url accepts any http(s) URL and sanitize_fragment
-    // collapses distinct refs onto the same cache key.
+    // --- ARN-210 exploit / security contract (RED on unfixed → GREEN after fix) ---
 
     #[test]
     fn arn210_private_loopback_registry_urls_must_be_rejected() {
@@ -2442,11 +2513,10 @@ mod tests {
 
     #[test]
     fn arn210_cache_key_must_not_collide_across_distinct_refs() {
-        // Lossy sanitize_fragment maps "a.b" and "a/b" onto the same key —
-        // that is a package collision hole (ARN-210). Distinct refs must
-        // produce distinct cache keys.
-        let a = sanitize_fragment("a.b");
-        let b = sanitize_fragment("a/b");
+        // Green: collision_resistant_cache_key (used by genesis_cache_root).
+        // Red history asserted the same contract against lossy sanitize_fragment.
+        let a = crate::genesis_install_security::collision_resistant_cache_key("a.b");
+        let b = crate::genesis_install_security::collision_resistant_cache_key("a/b");
         assert_ne!(
             a, b,
             "distinct app refs must not share a cache key (got both {a:?})"
