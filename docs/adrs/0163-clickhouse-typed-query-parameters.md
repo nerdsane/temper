@@ -32,6 +32,12 @@ rewrites placeholders in SQL code. Missing and zero-indexed parameters fail loca
 `SqlParam::Null` remains the trusted SQL token `NULL`, because the cross-store enum
 does not carry the target type required for `Nullable(T)`.
 
+ClickHouse's server project documents this exact multipart protocol (`query` plus
+`param_pN` fields) in [ClickHouse/ClickHouse#8842](https://github.com/ClickHouse/ClickHouse/issues/8842),
+including a working server example. The official Java client tracks and ships the
+same body-based parameter transport in
+[ClickHouse/clickhouse-java#2324](https://github.com/ClickHouse/clickhouse-java/issues/2324).
+
 PostgreSQL will bind dynamic JSONB member names. Turso will use `json_each(fields)`
 and bind the exact member key rather than constructing a JSON path literal.
 

@@ -35,9 +35,9 @@ impl TursoEventStore {
         }
 
         let conn = self.configured_connection().await?;
-        let order_sql = turso_query_field_order_sql(order_by);
-        let limit_param = params.len() + 3;
-        let offset_param = params.len() + 4;
+        let (order_sql, order_params) = turso_query_field_order_sql(order_by, params.len() + 3);
+        let limit_param = params.len() + order_params.len() + 3;
+        let offset_param = limit_param + 1;
         let sql = turso_query_field_page_sql(
             where_clause,
             &order_sql,
@@ -51,6 +51,7 @@ impl TursoEventStore {
             libsql::Value::from(entity_type.to_string()),
         ];
         all_params.extend(params.iter().cloned().map(libsql::Value::from));
+        all_params.extend(order_params.into_iter().map(libsql::Value::from));
         all_params.push(libsql::Value::from(top.min(i64::MAX as usize) as i64));
         all_params.push(libsql::Value::from(skip.min(i64::MAX as usize) as i64));
 
@@ -132,8 +133,12 @@ fn turso_query_field_page_sql(
     )
 }
 
-fn turso_query_field_order_sql(order_by: &[(String, bool)]) -> String {
+fn turso_query_field_order_sql(
+    order_by: &[(String, bool)],
+    first_param: usize,
+) -> (String, Vec<String>) {
     let mut clauses = Vec::new();
+    let mut params = Vec::new();
     for (field_name, descending) in order_by {
         let direction = if *descending { "DESC" } else { "ASC" };
         let null_direction = if *descending { "DESC" } else { "ASC" };
@@ -143,38 +148,37 @@ fn turso_query_field_order_sql(order_by: &[(String, bool)]) -> String {
             clauses.push(format!("status IS NULL {null_direction}"));
             clauses.push(format!("status {direction}"));
         } else {
-            let path = turso_json_path_literal(field_name);
+            let field_param = format!("?{}", first_param + params.len());
+            params.push(field_name.clone());
+            let value = format!(
+                "(SELECT value FROM json_each(fields) \
+                 WHERE key = {field_param} LIMIT 1)"
+            );
+            let value_type = format!(
+                "(SELECT type FROM json_each(fields) \
+                 WHERE key = {field_param} LIMIT 1)"
+            );
+            clauses.push(format!("{value} IS NULL {null_direction}"));
             clauses.push(format!(
-                "json_extract(fields, {path}) IS NULL {null_direction}"
+                "CASE WHEN {value_type} IN ('integer', 'real') \
+                 THEN CAST({value} AS REAL) END IS NULL ASC"
             ));
             clauses.push(format!(
-                "CASE WHEN json_type(fields, {path}) IN ('integer', 'real') \
-                 THEN CAST(json_extract(fields, {path}) AS REAL) END IS NULL ASC"
+                "CASE WHEN {value_type} IN ('integer', 'real') \
+                 THEN CAST({value} AS REAL) END {direction}"
             ));
             clauses.push(format!(
-                "CASE WHEN json_type(fields, {path}) IN ('integer', 'real') \
-                 THEN CAST(json_extract(fields, {path}) AS REAL) END {direction}"
+                "CASE WHEN {value_type} NOT IN ('integer', 'real') \
+                 THEN {value} END IS NULL ASC"
             ));
             clauses.push(format!(
-                "CASE WHEN json_type(fields, {path}) NOT IN ('integer', 'real') \
-                 THEN json_extract(fields, {path}) END IS NULL ASC"
-            ));
-            clauses.push(format!(
-                "CASE WHEN json_type(fields, {path}) NOT IN ('integer', 'real') \
-                 THEN json_extract(fields, {path}) END {direction}"
+                "CASE WHEN {value_type} NOT IN ('integer', 'real') \
+                 THEN {value} END {direction}"
             ));
         }
     }
     clauses.push("entity_id ASC".to_string());
-    clauses.join(", ")
-}
-
-fn turso_json_path_literal(field_name: &str) -> String {
-    let escaped = field_name
-        .replace('\\', "\\\\")
-        .replace('"', "\\\"")
-        .replace('\'', "''");
-    format!("'$.\"{escaped}\"'")
+    (clauses.join(", "), params)
 }
 
 #[cfg(test)]
@@ -194,5 +198,94 @@ mod tests {
         let sql = turso_query_field_page_sql("entity_id = ?3", "entity_id ASC", 4, 5, true);
 
         assert!(sql.contains("COUNT(*) OVER() AS total_count"));
+    }
+
+    #[test]
+    fn custom_order_paths_are_bound_not_interpolated() {
+        let attack = "field'\\\"; DROP TABLE entity_catalog; --";
+        let (sql, params) = turso_query_field_order_sql(&[(attack.to_string(), false)], 7);
+
+        assert!(sql.contains("WHERE key = ?7"));
+        assert!(!sql.contains("DROP TABLE"));
+        assert_eq!(params, vec![attack]);
+    }
+
+    #[tokio::test]
+    async fn bound_json_path_round_trips_metacharacter_field_name() {
+        let field_name = "field'\\\".name";
+        let document =
+            serde_json::to_string(&std::collections::BTreeMap::from([(field_name, "found")]))
+                .unwrap();
+        let database = libsql::Builder::new_local(":memory:")
+            .build()
+            .await
+            .unwrap();
+        let connection = database.connect().unwrap();
+        let mut rows = connection
+            .query(
+                "SELECT value FROM json_each(?1) WHERE key = ?2",
+                libsql::params![document, field_name],
+            )
+            .await
+            .unwrap();
+        let row = rows.next().await.unwrap().unwrap();
+        let value: String = row.get(0).unwrap();
+
+        assert_eq!(value, "found");
+    }
+
+    #[tokio::test]
+    async fn generated_page_query_orders_by_bound_metacharacter_field() {
+        let field_name = "field'\\\".name";
+        let (order_sql, order_params) =
+            turso_query_field_order_sql(&[(field_name.to_string(), false)], 3);
+        let sql = turso_query_field_page_sql("1 = 1", &order_sql, 4, 5, false);
+
+        let database = libsql::Builder::new_local(":memory:")
+            .build()
+            .await
+            .unwrap();
+        let connection = database.connect().unwrap();
+        connection
+            .execute(
+                "CREATE TABLE entity_catalog (\
+                 tenant TEXT NOT NULL, entity_type TEXT NOT NULL, \
+                 entity_id TEXT NOT NULL, status TEXT, fields TEXT NOT NULL)",
+                (),
+            )
+            .await
+            .unwrap();
+        for (entity_id, value) in [("late", "z"), ("early", "a")] {
+            let fields =
+                serde_json::to_string(&std::collections::BTreeMap::from([(field_name, value)]))
+                    .unwrap();
+            connection
+                .execute(
+                    "INSERT INTO entity_catalog \
+                     (tenant, entity_type, entity_id, status, fields) \
+                     VALUES (?1, ?2, ?3, 'Active', ?4)",
+                    libsql::params!["tenant-a", "Document", entity_id, fields],
+                )
+                .await
+                .unwrap();
+        }
+
+        let mut params = vec![
+            libsql::Value::from("tenant-a"),
+            libsql::Value::from("Document"),
+        ];
+        params.extend(order_params.into_iter().map(libsql::Value::from));
+        params.push(libsql::Value::from(10_i64));
+        params.push(libsql::Value::from(0_i64));
+        let mut rows = connection
+            .query(&sql, libsql::params_from_iter(params))
+            .await
+            .unwrap();
+        let mut ids = Vec::new();
+        while let Some(row) = rows.next().await.unwrap() {
+            ids.push(row.get::<String>(0).unwrap());
+        }
+
+        assert_eq!(ids, vec!["early", "late"]);
     }
 }
