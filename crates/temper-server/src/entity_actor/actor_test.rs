@@ -922,7 +922,11 @@ async fn patched_fields_survive_actor_restart() {
         .await
         .unwrap();
     assert_eq!(
-        rehydrated.state.fields.get("Title").and_then(|v| v.as_str()),
+        rehydrated
+            .state
+            .fields
+            .get("Title")
+            .and_then(|v| v.as_str()),
         Some("durable title"),
         "PATCHed field must survive restart via journal replay (pid {pid})"
     );
@@ -1004,7 +1008,11 @@ async fn replaced_fields_survive_actor_restart_with_replace_semantics() {
         .await
         .unwrap();
     assert_eq!(
-        rehydrated.state.fields.get("Title").and_then(|v| v.as_str()),
+        rehydrated
+            .state
+            .fields
+            .get("Title")
+            .and_then(|v| v.as_str()),
         Some("after"),
         "replaced field value must survive restart"
     );
@@ -1019,17 +1027,27 @@ async fn replaced_fields_survive_actor_restart_with_replace_semantics() {
     );
 }
 
-/// Delegating event store whose appends fail once `armed` is set. Lets a test
-/// start an actor normally (bootstrap Created append succeeds) and then fail
-/// exactly the append under test, deterministically.
+/// Delegating event store whose appends fail once `armed` is set (so a test
+/// can start an actor normally and then fail exactly the append under test)
+/// and whose snapshot saves fail once `fail_snapshots` is set (so a test can
+/// model a stalled snapshot path while appends keep succeeding).
 #[cfg(feature = "sim")]
 struct AppendFuseStore {
     inner: temper_store_sim::SimEventStore,
     armed: std::sync::atomic::AtomicBool,
+    fail_snapshots: std::sync::atomic::AtomicBool,
 }
 
 #[cfg(feature = "sim")]
 impl AppendFuseStore {
+    fn no_faults(seed: u64) -> Self {
+        Self {
+            inner: temper_store_sim::SimEventStore::no_faults(seed),
+            armed: std::sync::atomic::AtomicBool::new(false),
+            fail_snapshots: std::sync::atomic::AtomicBool::new(false),
+        }
+    }
+
     fn fuse_err(&self) -> Option<temper_runtime::persistence::PersistenceError> {
         if self.armed.load(std::sync::atomic::Ordering::SeqCst) {
             Some(temper_runtime::persistence::PersistenceError::Storage(
@@ -1108,6 +1126,14 @@ impl temper_runtime::persistence::EventStore for AppendFuseStore {
         sequence_nr: u64,
         snapshot: &[u8],
     ) -> Result<(), temper_runtime::persistence::PersistenceError> {
+        if self
+            .fail_snapshots
+            .load(std::sync::atomic::Ordering::SeqCst)
+        {
+            return Err(temper_runtime::persistence::PersistenceError::Storage(
+                "injected snapshot failure (stalled snapshot path)".to_string(),
+            ));
+        }
         self.inner
             .save_snapshot(persistence_id, sequence_nr, snapshot)
             .await
@@ -1132,7 +1158,9 @@ impl temper_runtime::persistence::EventStore for AppendFuseStore {
         tenant: &str,
         entity_type: &str,
     ) -> Result<Vec<String>, temper_runtime::persistence::PersistenceError> {
-        self.inner.list_entity_ids_by_type(tenant, entity_type).await
+        self.inner
+            .list_entity_ids_by_type(tenant, entity_type)
+            .await
     }
 }
 
@@ -1142,12 +1170,7 @@ impl temper_runtime::persistence::EventStore for AppendFuseStore {
 #[cfg(feature = "sim")]
 #[tokio::test]
 async fn field_update_with_failed_journal_append_does_not_report_success() {
-    use temper_store_sim::SimEventStore;
-
-    let store = Arc::new(AppendFuseStore {
-        inner: SimEventStore::no_faults(13),
-        armed: std::sync::atomic::AtomicBool::new(false),
-    });
+    let store = Arc::new(AppendFuseStore::no_faults(13));
     let entity_id = "arn189-fail-1";
 
     let system = ActorSystem::new("sim-arn189-fail");
@@ -1187,6 +1210,80 @@ async fn field_update_with_failed_journal_append_does_not_report_success() {
     assert!(
         response.state.fields.get("Title").is_none(),
         "failed update must not leave half-applied in-memory state"
+    );
+
+    // The actor's RETAINED state must also be unmutated — not just the
+    // error reply's snapshot.
+    let retained: EntityResponse = actor_ref
+        .ask(EntityMsg::GetState, Duration::from_secs(5))
+        .await
+        .unwrap();
+    assert!(
+        retained.state.fields.get("Title").is_none(),
+        "failed update must not persist in the actor's retained state"
+    );
+}
+
+/// ARN-189: field updates consume the same event budget as spec actions.
+/// With the snapshot path stalled (all snapshot failures are soft), sustained
+/// PATCH traffic must be REJECTED at MAX_EVENTS_SINCE_SNAPSHOT instead of
+/// growing a replay tail that makes the entity permanently unhydratable.
+#[cfg(feature = "sim")]
+#[tokio::test]
+async fn field_updates_reject_when_event_budget_exhausted() {
+    let store = Arc::new(AppendFuseStore::no_faults(17));
+    // Snapshots fail from the start: models a stalled snapshot path while
+    // appends keep succeeding.
+    store
+        .fail_snapshots
+        .store(true, std::sync::atomic::Ordering::SeqCst);
+    let entity_id = "arn189-budget-1";
+
+    let system = ActorSystem::new("sim-arn189-budget");
+    let actor = EntityActor::with_persistence(
+        "Order",
+        entity_id,
+        order_table(),
+        serde_json::json!({}),
+        crate::storage::BoxedEventStore::from_arc(store.clone()),
+        crate::storage::BackendLabel::Sim,
+    );
+    let actor_ref = system.spawn(actor, entity_id);
+
+    let mut rejected_at = None;
+    for i in 0..=MAX_EVENTS_SINCE_SNAPSHOT {
+        let response: EntityResponse = actor_ref
+            .ask(
+                EntityMsg::UpdateFields {
+                    fields: serde_json::json!({"counter": i}),
+                    replace: false,
+                },
+                Duration::from_secs(5),
+            )
+            .await
+            .unwrap();
+        if !response.success {
+            assert!(
+                response
+                    .error
+                    .as_deref()
+                    .unwrap_or_default()
+                    .contains("Event budget exhausted"),
+                "rejection must be the event budget, got: {:?}",
+                response.error
+            );
+            assert!(
+                response.state.events_since_snapshot >= MAX_EVENTS_SINCE_SNAPSHOT,
+                "rejection must fire only at the budget boundary"
+            );
+            rejected_at = Some(i);
+            break;
+        }
+    }
+    assert!(
+        rejected_at.is_some(),
+        "sustained field updates with a stalled snapshot path must hit the event budget, \
+         not grow the replay tail unboundedly"
     );
 }
 
