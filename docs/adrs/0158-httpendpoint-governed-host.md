@@ -40,12 +40,15 @@ router without that envelope.
 
 Before building `HttpDispatchContext.headers`, drop:
 
-- `authorization`
+- `authorization` / `proxy-authorization`
 - `cookie` / `set-cookie`
-- `x-temper-principal-id` / `x-temper-principal-kind` / `x-temper-principal-scopes`
-- `x-api-key` and similar credential carriers
+- `x-api-key` / `x-temper-api-key`
+- any header whose name starts with `x-temper-principal` (id, kind, scopes, attrs)
+- any header whose name starts with `x-temper-agent-` (type, role, …)
 
-Guests never receive ambient platform credentials from the inbound request.
+Guests never receive ambient platform credentials or identity carriers from
+the inbound request. Kernel-side action-bridge auth still reads the raw
+request headers.
 
 ### Sub-Decision 3: Principal for host ops
 

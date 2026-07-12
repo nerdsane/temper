@@ -4,7 +4,6 @@
 //! entity WASM dispatch: bootstrap secrets only, gated secret resolver, and
 //! `AuthorizedWasmHost` — never a raw production host with a full secret map.
 
-use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use temper_runtime::tenant::TenantId;
@@ -14,7 +13,7 @@ use temper_wasm::{AuthorizedWasmHost, ProductionWasmHost, WasmHost};
 
 use crate::state::ServerState;
 
-/// Header names that must never be delivered to endpoint guests.
+/// Exact header names that must never be delivered to endpoint guests.
 const STRIPPED_INBOUND_HEADERS: &[&str] = &[
     "authorization",
     "proxy-authorization",
@@ -22,15 +21,20 @@ const STRIPPED_INBOUND_HEADERS: &[&str] = &[
     "set-cookie",
     "x-api-key",
     "x-temper-api-key",
-    "x-temper-principal-id",
-    "x-temper-principal-kind",
-    "x-temper-principal-scopes",
 ];
 
 /// True when an inbound header must be stripped before guest delivery.
+///
+/// Exact denylist covers classic credential carriers. Prefix rules cover
+/// ambient platform identity (`x-temper-principal*`, `x-temper-agent-*`)
+/// so guests cannot inherit authority material from request headers
+/// (ADR-0158 / ARN-208).
 pub fn is_sensitive_inbound_header(name: &str) -> bool {
     let lower = name.to_ascii_lowercase();
-    STRIPPED_INBOUND_HEADERS.contains(&lower.as_str())
+    if STRIPPED_INBOUND_HEADERS.contains(&lower.as_str()) {
+        return true;
+    }
+    lower.starts_with("x-temper-principal") || lower.starts_with("x-temper-agent-")
 }
 
 /// Filter inbound headers for guest `HttpDispatchContext` delivery.
@@ -76,49 +80,17 @@ pub fn build_httpendpoint_wasm_host(
     Arc::new(AuthorizedWasmHost::new(inner, gate, authz_ctx))
 }
 
-/// Empty secret map proof helper for tests and diagnostics.
-pub fn empty_secret_map() -> BTreeMap<String, String> {
-    BTreeMap::new()
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::BTreeMap;
 
-    #[test]
-    fn strips_authorization_and_principal_headers() {
-        let headers = vec![
-            ("content-type".into(), "application/json".into()),
-            ("authorization".into(), "Bearer secret-token".into()),
-            ("X-Temper-Principal-Kind".into(), "admin".into()),
-            ("x-temper-principal-id".into(), "evil".into()),
-            ("x-api-key".into(), "k".into()),
-            ("accept".into(), "*/*".into()),
-        ];
-        let safe = guest_safe_headers(&headers);
-        let names: Vec<_> = safe.iter().map(|(k, _)| k.to_ascii_lowercase()).collect();
-        assert!(names.contains(&"content-type".to_string()));
-        assert!(names.contains(&"accept".to_string()));
-        assert!(!names.iter().any(|n| n.contains("authorization")));
-        assert!(!names.iter().any(|n| n.contains("principal")));
-        assert!(!names.iter().any(|n| n.contains("api-key")));
-        assert!(!safe.iter().any(|(_, v)| v.contains("secret-token")));
-    }
+    use crate::registry::SpecRegistry;
+    use crate::secrets::SecretsVault;
+    use temper_runtime::ActorSystem;
+    use temper_wasm::types::WasmInvocationContext;
 
-    #[test]
-    fn sensitive_header_match_is_case_insensitive() {
-        assert!(is_sensitive_inbound_header("Authorization"));
-        assert!(is_sensitive_inbound_header("COOKIE"));
-        assert!(!is_sensitive_inbound_header("content-type"));
-    }
-
-    #[test]
-    fn build_httpendpoint_host_does_not_require_full_secret_map() {
-        use crate::registry::SpecRegistry;
-        use crate::secrets::SecretsVault;
-        use temper_runtime::ActorSystem;
-        use temper_wasm::types::WasmInvocationContext;
-
+    fn deny_all_state_with_leaked_secret() -> ServerState {
         let vault = SecretsVault::new(&[9u8; 32]);
         vault
             .cache_secret(
@@ -130,15 +102,16 @@ mod tests {
         let system = ActorSystem::new("httpendpoint-host-test");
         let state =
             ServerState::from_registry(system, SpecRegistry::new()).with_secrets_vault(vault);
-        // Default ServerState uses a permissive authz engine for local/dev.
-        // Force empty Cedar policies so access_secret is default-deny (ARN-208).
+        // Force empty Cedar policies so host ops are default-deny (ARN-208).
         state
             .authz
             .reload_policies("")
             .expect("empty policy set should parse");
-        let tenant = TenantId::default();
-        let streams = Arc::new(HttpStreamRegistry::new());
-        let inv = WasmInvocationContext {
+        state
+    }
+
+    fn sample_invocation_ctx() -> WasmInvocationContext {
+        WasmInvocationContext {
             tenant: "default".into(),
             entity_type: "HttpEndpoint".into(),
             entity_id: "ep-1".into(),
@@ -154,14 +127,85 @@ mod tests {
             workflow_root_entity_id: None,
             workflow_run_id: None,
             http_request: None,
-        };
-        let host = build_httpendpoint_wasm_host(&state, &tenant, "mod", streams, inv);
+        }
+    }
+
+    #[test]
+    fn strips_authorization_and_principal_headers() {
+        let headers = vec![
+            ("content-type".into(), "application/json".into()),
+            ("authorization".into(), "Bearer secret-token".into()),
+            ("X-Temper-Principal-Kind".into(), "admin".into()),
+            ("x-temper-principal-id".into(), "evil".into()),
+            ("x-temper-principal-scopes".into(), "admin".into()),
+            ("x-temper-agent-type".into(), "claude-code".into()),
+            ("x-temper-agent-role".into(), "supervisor".into()),
+            ("x-api-key".into(), "k".into()),
+            ("accept".into(), "*/*".into()),
+        ];
+        let safe = guest_safe_headers(&headers);
+        let names: Vec<_> = safe.iter().map(|(k, _)| k.to_ascii_lowercase()).collect();
+        assert!(names.contains(&"content-type".to_string()));
+        assert!(names.contains(&"accept".to_string()));
+        assert!(!names.iter().any(|n| n.contains("authorization")));
+        assert!(!names.iter().any(|n| n.contains("principal")));
+        assert!(!names.iter().any(|n| n.contains("api-key")));
+        assert!(!names.iter().any(|n| n.contains("agent-type")));
+        assert!(!names.iter().any(|n| n.contains("agent-role")));
+        assert!(!safe.iter().any(|(_, v)| v.contains("secret-token")));
+        assert!(!safe.iter().any(|(_, v)| v == "admin" || v == "evil"));
+    }
+
+    #[test]
+    fn sensitive_header_match_is_case_insensitive() {
+        assert!(is_sensitive_inbound_header("Authorization"));
+        assert!(is_sensitive_inbound_header("COOKIE"));
+        assert!(is_sensitive_inbound_header("X-Temper-Agent-Type"));
+        assert!(is_sensitive_inbound_header(
+            "x-temper-principal-attr-region"
+        ));
+        assert!(!is_sensitive_inbound_header("content-type"));
+        assert!(!is_sensitive_inbound_header("x-temper-observe-session-id"));
+    }
+
+    #[test]
+    fn build_httpendpoint_host_does_not_require_full_secret_map() {
+        let state = deny_all_state_with_leaked_secret();
+        let tenant = TenantId::default();
+        let streams = Arc::new(HttpStreamRegistry::new());
+        let host =
+            build_httpendpoint_wasm_host(&state, &tenant, "mod", streams, sample_invocation_ctx());
         // Host is constructed; secret lookups for non-bootstrap keys go through
         // the gated resolver and fail closed without Cedar permit.
         let err = host.get_secret("LEAKED_TENANT_SECRET");
         assert!(
             err.is_err(),
             "unauthorized secret must not be readable via endpoint host: {err:?}"
+        );
+        let msg = err.expect_err("denied");
+        assert!(
+            msg.contains("authorization denied"),
+            "expected Cedar denial via AuthorizedWasmHost, got: {msg}"
+        );
+    }
+
+    /// Proves the outer envelope is `AuthorizedWasmHost`: empty Cedar policies
+    /// deny outbound HTTP. A bare `ProductionWasmHost` would attempt the call
+    /// and fail with a network/client error instead of an authorization denial.
+    #[tokio::test]
+    async fn build_httpendpoint_host_gates_outbound_http() {
+        let state = deny_all_state_with_leaked_secret();
+        let tenant = TenantId::default();
+        let streams = Arc::new(HttpStreamRegistry::new());
+        let host =
+            build_httpendpoint_wasm_host(&state, &tenant, "mod", streams, sample_invocation_ctx());
+        let err = host
+            .http_call("GET", "https://evil.example.com/ssrf", &[], "")
+            .await
+            .expect_err("outbound HTTP must be Cedar-gated");
+        assert!(
+            err.contains("authorization denied"),
+            "expected AuthorizedWasmHost denial, got: {err}"
         );
     }
 }
