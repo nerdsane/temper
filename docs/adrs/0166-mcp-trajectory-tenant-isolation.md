@@ -1,4 +1,4 @@
-# ADR-0163: MCP trajectory tenant isolation and bounded capture (ARN-222)
+# ADR-0166: MCP trajectory tenant isolation and bounded capture (ARN-222)
 
 - Status: Accepted
 - Date: 2026-07-12

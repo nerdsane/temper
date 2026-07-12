@@ -1,4 +1,4 @@
-//! Trajectory capture budgets (ARN-222 / ADR-0163).
+//! Trajectory capture budgets (ARN-222 / ADR-0166).
 
 /// Max UTF-8 characters retained for trajectory code/results (includes truncation marker).
 pub(crate) const MAX_TRAJECTORY_CODE_CHARS: usize = 16_384;
