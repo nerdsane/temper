@@ -15,12 +15,12 @@ use tokio::io::{self, AsyncBufReadExt, AsyncWriteExt, BufReader};
 use super::McpConfig;
 use super::protocol::dispatch_json_line;
 use crate::trajectory_bounds::{
-    MAX_STDIO_LINE_BYTES, MAX_TRAJECTORY_CODE_CHARS, MAX_TRAJECTORY_RESULT_CHARS, char_safe_truncate,
+    MAX_STDIO_LINE_BYTES, MAX_TRAJECTORY_CODE_CHARS, MAX_TRAJECTORY_RESULT_CHARS,
+    char_safe_truncate,
 };
 
 const OTS_UPLOAD_MAX_ATTEMPTS: u32 = 3;
 const OTS_UPLOAD_RETRY_DELAY_MS: u64 = 100;
-
 
 /// Client identity received from the MCP `initialize` handshake.
 #[derive(Clone, Debug, Default)]
