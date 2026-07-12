@@ -315,7 +315,7 @@ async fn dispatch_matched_route(
     });
 
     // Build the invocation context. Strip credential/principal headers so
-    // guests never receive ambient authority material (ADR-0158 / ARN-208).
+    // guests never receive ambient authority material (ADR-0161 / ARN-208).
     let header_pairs: Vec<(String, String)> = headers
         .iter()
         .filter_map(|(k, v)| {
@@ -361,7 +361,7 @@ async fn dispatch_matched_route(
         }),
     };
 
-    // ADR-0158 / ARN-208: governed host (AuthorizedWasmHost + bootstrap
+    // ADR-0161 / ARN-208: governed host (AuthorizedWasmHost + bootstrap
     // secrets + gated resolver). Never attach the full tenant secret map.
     let host = crate::http_endpoint_host::build_httpendpoint_wasm_host(
         &state,

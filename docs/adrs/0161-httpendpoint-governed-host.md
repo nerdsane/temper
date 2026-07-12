@@ -1,4 +1,4 @@
-# ADR-0158: HttpEndpoint uses one governed WASM host (ARN-208)
+# ADR-0161: HttpEndpoint uses one governed WASM host (ARN-208)
 
 - Status: Accepted
 - Date: 2026-07-12

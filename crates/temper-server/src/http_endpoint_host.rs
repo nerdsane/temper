@@ -1,4 +1,4 @@
-//! Governed WASM host construction for HttpEndpoint (ADR-0158 / ARN-208).
+//! Governed WASM host construction for HttpEndpoint (ADR-0161 / ARN-208).
 //!
 //! Ensures the inbound endpoint path uses the same authorization envelope as
 //! entity WASM dispatch: bootstrap secrets only, gated secret resolver, and
@@ -30,7 +30,7 @@ const STRIPPED_INBOUND_HEADERS: &[&str] = &[
 /// Exact denylist covers classic credential carriers. Prefix rules cover
 /// ambient platform identity (`x-temper-principal*`, `x-temper-agent-*`)
 /// so guests cannot inherit authority material from request headers
-/// (ADR-0158 / ARN-208).
+/// (ADR-0161 / ARN-208).
 pub fn is_sensitive_inbound_header(name: &str) -> bool {
     let lower = name.to_ascii_lowercase();
     if STRIPPED_INBOUND_HEADERS.contains(&lower.as_str()) {
