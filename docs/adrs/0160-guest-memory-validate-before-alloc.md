@@ -20,7 +20,7 @@ host allocations before wasmtime bounds checks ran.
 
 ### Sub-Decision 1: Single guest-memory API
 
-All guest copies go through helpers that:
+Guest→host copies use helpers that:
 
 1. Reject negative `ptr` / `len`
 2. Reject `ptr + len` overflow
@@ -28,15 +28,20 @@ All guest copies go through helpers that:
 4. Consume a per-invocation **guest copy budget** (default: `max_response_bytes`
    clamped, with a floor for small calls)
 
+All host-function guest length parameters and the engine result-buffer path
+must use this checked path (no direct `vec![0u8; guest_len]` from ABI lengths).
+
 ### Sub-Decision 2: Budget on HostState
 
 `HostState` carries `guest_copy_budget` / `guest_copy_consumed`. Exhaustion
 returns an error to the guest (fail-closed) without allocating.
 
-### Sub-Decision 3: HTTP response body
+### Sub-Decision 3: HTTP response body (follow-up)
 
-Host HTTP response accumulation respects `max_response_bytes` (stop / fail when
-exceeded).
+`WasmResourceLimits.max_response_bytes` is reused as the guest-copy budget
+floor input. Enforcing the same cap on **host HTTP response accumulation**
+(`host_trait` buffering paths) is required for full ARN-226 closure but is
+a separate land — not claimed done by this ADR's first ship.
 
 ## Consequences
 
@@ -53,3 +58,6 @@ exceeded).
 ## Non-Goals
 
 - Full table-growth / module-cache concurrency redesign (follow-up).
+- HTTP response/request body accumulation caps on every `host_trait` path
+  (follow-up; see Sub-Decision 3).
+- Fuzz/property suite for adversarial guest lengths (follow-up).

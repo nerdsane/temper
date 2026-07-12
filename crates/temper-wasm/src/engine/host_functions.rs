@@ -410,10 +410,16 @@ pub(super) fn link_host_functions(linker: &mut Linker<HostState>) -> Result<(), 
                 let Some(memory) = memory else {
                     return -1;
                 };
-                let mut buf = vec![0u8; len as usize];
-                if memory.read(&caller, ptr as usize, &mut buf).is_err() {
+                let Ok(buf) = read_guest_bytes(
+                    &mut caller,
+                    &memory,
+                    ptr,
+                    len,
+                    "host_emit_progress",
+                    "payload",
+                ) else {
                     return -1;
-                }
+                };
                 let Ok(payload) = String::from_utf8(buf) else {
                     return -1;
                 };
@@ -436,10 +442,16 @@ pub(super) fn link_host_functions(linker: &mut Linker<HostState>) -> Result<(), 
                 let Some(memory) = memory else {
                     return -1;
                 };
-                let mut buf = vec![0u8; len as usize];
-                if memory.read(&caller, ptr as usize, &mut buf).is_err() {
+                let Ok(buf) = read_guest_bytes(
+                    &mut caller,
+                    &memory,
+                    ptr,
+                    len,
+                    "host_emit_wide_event",
+                    "payload",
+                ) else {
                     return -1;
-                }
+                };
                 let Ok(payload) = String::from_utf8(buf) else {
                     return -1;
                 };
@@ -462,10 +474,16 @@ pub(super) fn link_host_functions(linker: &mut Linker<HostState>) -> Result<(), 
                 let Some(memory) = memory else {
                     return -1;
                 };
-                let mut buf = vec![0u8; len as usize];
-                if memory.read(&caller, ptr as usize, &mut buf).is_err() {
+                let Ok(buf) = read_guest_bytes(
+                    &mut caller,
+                    &memory,
+                    ptr,
+                    len,
+                    "host_log_structured",
+                    "payload",
+                ) else {
                     return -1;
-                }
+                };
                 let Ok(payload) = String::from_utf8(buf) else {
                     return -1;
                 };
@@ -488,10 +506,16 @@ pub(super) fn link_host_functions(linker: &mut Linker<HostState>) -> Result<(), 
                 let Some(memory) = memory else {
                     return -1;
                 };
-                let mut buf = vec![0u8; len as usize];
-                if memory.read(&caller, ptr as usize, &mut buf).is_err() {
+                let Ok(buf) = read_guest_bytes(
+                    &mut caller,
+                    &memory,
+                    ptr,
+                    len,
+                    "host_emit_metric",
+                    "payload",
+                ) else {
                     return -1;
-                }
+                };
                 let Ok(payload) = String::from_utf8(buf) else {
                     return -1;
                 };
@@ -1315,14 +1339,16 @@ pub(super) fn link_host_functions(linker: &mut Linker<HostState>) -> Result<(), 
                     return -3;
                 };
 
-                let mut name_buf = vec![0u8; field_name_len as usize];
-                if memory
-                    .read(&caller, field_name_ptr as usize, &mut name_buf)
-                    .is_err()
-                {
+                let Ok(field_name) = read_guest_lossy(
+                    &mut caller,
+                    &memory,
+                    field_name_ptr,
+                    field_name_len,
+                    "host_read_field",
+                    "field_name",
+                ) else {
                     return -3;
-                }
-                let field_name = String::from_utf8_lossy(&name_buf).to_string();
+                };
                 let started = Instant::now();
                 let _guest_span = caller.data().guest_spans.enter_active();
                 let span = tracing::info_span!(
@@ -1701,45 +1727,54 @@ pub(super) fn link_host_functions(linker: &mut Linker<HostState>) -> Result<(), 
                 };
 
                 // Read IOA source
-                let mut ioa_buf = vec![0u8; ioa_len as usize];
-                if memory
-                    .read(&caller, ioa_ptr as usize, &mut ioa_buf)
-                    .is_err()
-                {
+                let Ok(ioa_source) = read_guest_lossy(
+                    &mut caller,
+                    &memory,
+                    ioa_ptr,
+                    ioa_len,
+                    "host_evaluate_spec",
+                    "ioa",
+                ) else {
                     return -1;
-                }
-                let ioa_source = String::from_utf8_lossy(&ioa_buf).to_string();
+                };
 
                 // Read current state
-                let mut state_buf = vec![0u8; state_len as usize];
-                if memory
-                    .read(&caller, state_ptr as usize, &mut state_buf)
-                    .is_err()
-                {
+                let Ok(current_state) = read_guest_lossy(
+                    &mut caller,
+                    &memory,
+                    state_ptr,
+                    state_len,
+                    "host_evaluate_spec",
+                    "state",
+                ) else {
                     return -1;
-                }
-                let current_state = String::from_utf8_lossy(&state_buf).to_string();
+                };
 
                 // Read action
-                let mut action_buf = vec![0u8; action_len as usize];
-                if memory
-                    .read(&caller, action_ptr as usize, &mut action_buf)
-                    .is_err()
-                {
+                let Ok(action) = read_guest_lossy(
+                    &mut caller,
+                    &memory,
+                    action_ptr,
+                    action_len,
+                    "host_evaluate_spec",
+                    "action",
+                ) else {
                     return -1;
-                }
-                let action = String::from_utf8_lossy(&action_buf).to_string();
+                };
 
                 // Read params JSON
                 let params_json = if params_len > 0 {
-                    let mut params_buf = vec![0u8; params_len as usize];
-                    if memory
-                        .read(&caller, params_ptr as usize, &mut params_buf)
-                        .is_err()
-                    {
+                    let Ok(params) = read_guest_lossy(
+                        &mut caller,
+                        &memory,
+                        params_ptr,
+                        params_len,
+                        "host_evaluate_spec",
+                        "params",
+                    ) else {
                         return -1;
-                    }
-                    String::from_utf8_lossy(&params_buf).to_string()
+                    };
+                    params
                 } else {
                     "{}".to_string()
                 };
@@ -2140,10 +2175,16 @@ pub(super) fn link_host_functions(linker: &mut Linker<HostState>) -> Result<(), 
                 let memory = caller.get_export("memory").and_then(|e| e.into_memory());
                 let Some(memory) = memory else { return -4 };
 
-                let mut buf = vec![0u8; head_len as usize];
-                if memory.read(&caller, head_ptr as usize, &mut buf).is_err() {
+                let Ok(buf) = read_guest_bytes(
+                    &mut caller,
+                    &memory,
+                    head_ptr,
+                    head_len,
+                    "host_http_stream_send_response_head",
+                    "head",
+                ) else {
                     return -4;
-                }
+                };
                 #[derive(serde::Deserialize)]
                 struct RawHead {
                     status: u16,

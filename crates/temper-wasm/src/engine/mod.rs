@@ -676,8 +676,42 @@ impl WasmEngine {
                 let result_len = u32::from_le_bytes(len_bytes) as usize;
                 phase.record("result_bytes", result_len as u64);
 
+                // ARN-226: prove range + budget before allocating the result buffer.
+                // `result_ptr > 0` is already established by the branch above.
+                let result_offset = result_ptr as usize;
+                let Some(result_end) = result_offset.checked_add(result_len) else {
+                    store.data_mut().guest_spans.cleanup_unclosed();
+                    return Err(WasmError::Invocation(
+                        "result pointer+length overflows".into(),
+                    ));
+                };
+                let mem_size = memory.data_size(&store);
+                if result_end > mem_size {
+                    store.data_mut().guest_spans.cleanup_unclosed();
+                    return Err(WasmError::Invocation(format!(
+                        "result range exceeds linear memory (end={result_end}, mem_size={mem_size})"
+                    )));
+                }
+                {
+                    let state = store.data_mut();
+                    let Some(next) = state.guest_copy_consumed.checked_add(result_len) else {
+                        state.guest_spans.cleanup_unclosed();
+                        return Err(WasmError::Invocation(
+                            "guest copy budget arithmetic overflow".into(),
+                        ));
+                    };
+                    if next > state.guest_copy_budget {
+                        state.guest_spans.cleanup_unclosed();
+                        return Err(WasmError::Invocation(format!(
+                            "guest copy budget exhausted reading result (len={result_len}, consumed={}, budget={})",
+                            state.guest_copy_consumed, state.guest_copy_budget
+                        )));
+                    }
+                    state.guest_copy_consumed = next;
+                }
+
                 let mut result_bytes = vec![0u8; result_len];
-                if let Err(e) = memory.read(&store, result_ptr as usize, &mut result_bytes) {
+                if let Err(e) = memory.read(&store, result_offset, &mut result_bytes) {
                     store.data_mut().guest_spans.cleanup_unclosed();
                     return Err(WasmError::Invocation(format!("failed to read result: {e}")));
                 }
