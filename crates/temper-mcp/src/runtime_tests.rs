@@ -1,7 +1,6 @@
 //! Unit tests for MCP runtime (ARN-222).
 
 use super::*;
-
 use axum::{Router, extract::State, http::StatusCode, routing::post};
 use std::sync::{
     Arc,
@@ -107,17 +106,18 @@ async fn finalize_trajectory_retries_retryable_ots_upload_failure() {
 
 #[test]
 fn char_safe_truncate_handles_multibyte() {
-    let s = "日本語テスト";
-    let out = char_safe_truncate(s, 2);
-    assert!(out.starts_with("日本"), "{out}");
+    let s = "日本語テスト".repeat(10);
+    let out = char_safe_truncate(&s, 20); // marker counts toward max_chars
+    assert!(out.starts_with('日'), "{out}");
     assert!(out.contains("[truncated]"), "{out}");
+    assert_eq!(out.chars().count(), 20, "{out}");
     // Must not panic and must be valid UTF-8.
     assert!(std::str::from_utf8(out.as_bytes()).is_ok());
 }
 
 #[test]
 fn primary_tenant_is_identity_not_majority() {
-    let mut ctx = RuntimeContext {
+    let ctx = RuntimeContext {
         base_url: "http://127.0.0.1".into(),
         http: reqwest::Client::new(),
         agent_id: None,
@@ -127,10 +127,93 @@ fn primary_tenant_is_identity_not_majority() {
         identity_tenant: "bound-tenant".into(),
         sandbox: temper_sandbox::runner::PersistentSandbox::new(&[]),
         trajectory: None,
-        tenants_seen: BTreeMap::from([("other".into(), 99usize), ("bound-tenant".into(), 1usize)]),
+        tenants_seen: BTreeMap::from([
+            ("other".into(), 99usize),
+            ("bound-tenant".into(), 1usize),
+        ]),
         entity_types_seen: BTreeMap::new(),
     };
     assert_eq!(ctx.primary_tenant(), "bound-tenant");
-    // silence mut warning if any
-    let _ = &mut ctx;
+}
+
+#[test]
+fn cross_tenant_execute_content_redacted_from_trajectory() {
+    let mut ctx = RuntimeContext {
+        base_url: "http://127.0.0.1".into(),
+        http: reqwest::Client::new(),
+        agent_id: Some("agent".into()),
+        agent_type: Some("test".into()),
+        session_id: Some("sess".into()),
+        api_key: None,
+        identity_tenant: "tenant-a".into(),
+        sandbox: temper_sandbox::runner::PersistentSandbox::new(&[]),
+        trajectory: None,
+        tenants_seen: BTreeMap::new(),
+        entity_types_seen: BTreeMap::new(),
+    };
+    ctx.init_trajectory();
+
+    let foreign_secret = "FOREIGN_TENANT_SECRET_PAYLOAD";
+    let code = format!(
+        r#"await temper.action("tenant-b", "Issue", "i-1", "Assign", {{"Secret": "{foreign_secret}"}})"#
+    );
+    let result = Ok(format!("leaked result with {foreign_secret}"));
+    ctx.record_execute_turn(&code, &result);
+
+    let snapshot = ctx
+        .trajectory
+        .as_ref()
+        .expect("trajectory")
+        .snapshot();
+    let dump = serde_json::to_string(&snapshot).expect("serialize");
+    assert!(
+        !dump.contains(foreign_secret),
+        "foreign-tenant content must not be retained under identity trajectory: {dump}"
+    );
+    assert!(
+        !dump.contains("tenant-b"),
+        "cross-tenant identifiers must not remain in retained execute body: {dump}"
+    );
+    assert!(
+        dump.contains("cross-tenant execute omitted"),
+        "expected redaction marker in trajectory: {dump}"
+    );
+    // Metadata counters must not adopt the foreign tenant.
+    assert!(!ctx.tenants_seen.contains_key("tenant-b"));
+    assert_eq!(ctx.primary_tenant(), "tenant-a");
+}
+
+#[test]
+fn same_tenant_execute_content_retained() {
+    let mut ctx = RuntimeContext {
+        base_url: "http://127.0.0.1".into(),
+        http: reqwest::Client::new(),
+        agent_id: Some("agent".into()),
+        agent_type: Some("test".into()),
+        session_id: Some("sess".into()),
+        api_key: None,
+        identity_tenant: "tenant-a".into(),
+        sandbox: temper_sandbox::runner::PersistentSandbox::new(&[]),
+        trajectory: None,
+        tenants_seen: BTreeMap::new(),
+        entity_types_seen: BTreeMap::new(),
+    };
+    ctx.init_trajectory();
+
+    let code =
+        r#"await temper.action("tenant-a", "Issue", "i-1", "Assign", {"AgentId": "agent-1"})"#;
+    let result = Ok("ok-result".to_string());
+    ctx.record_execute_turn(code, &result);
+
+    let snapshot = ctx
+        .trajectory
+        .as_ref()
+        .expect("trajectory")
+        .snapshot();
+    let dump = serde_json::to_string(&snapshot).expect("serialize");
+    assert!(
+        dump.contains("tenant-a") && dump.contains("ok-result"),
+        "same-tenant execute should retain code/result: {dump}"
+    );
+    assert!(!dump.contains("cross-tenant execute omitted"), "{dump}");
 }
