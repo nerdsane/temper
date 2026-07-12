@@ -86,22 +86,36 @@ impl AgentAdapter for HttpWebhookAdapter {
         let duration_ms = started.elapsed().as_millis() as u64;
         let status = response.status();
 
-        // Bound body bytes before buffering into memory.
-        let bytes = response
-            .bytes()
-            .await
-            .map_err(|e| AdapterError::Parse(format!("failed reading HTTP response body: {e}")))?;
-        if bytes.len() > ADAPTER_MAX_RESPONSE_BYTES {
+        // Fail closed before buffering: reject oversized Content-Length, then
+        // stream with a hard byte cap (ARN-228 independent review P1).
+        if let Some(cl) = response.content_length()
+            && cl as usize > ADAPTER_MAX_RESPONSE_BYTES
+        {
             return Ok(AdapterResult::failure(
                 format!(
-                    "HTTP response exceeded budget: {} bytes > {}",
-                    bytes.len(),
-                    ADAPTER_MAX_RESPONSE_BYTES
+                    "HTTP Content-Length {cl} exceeds budget {ADAPTER_MAX_RESPONSE_BYTES}"
                 ),
                 duration_ms,
             ));
         }
-        let text = String::from_utf8_lossy(&bytes).to_string();
+        let mut collected = Vec::new();
+        let mut stream = response.bytes_stream();
+        use futures_util::StreamExt;
+        while let Some(chunk) = stream.next().await {
+            let chunk = chunk.map_err(|e| {
+                AdapterError::Parse(format!("failed reading HTTP response body: {e}"))
+            })?;
+            if collected.len().saturating_add(chunk.len()) > ADAPTER_MAX_RESPONSE_BYTES {
+                return Ok(AdapterResult::failure(
+                    format!(
+                        "HTTP response exceeded budget while streaming: > {ADAPTER_MAX_RESPONSE_BYTES}"
+                    ),
+                    duration_ms,
+                ));
+            }
+            collected.extend_from_slice(&chunk);
+        }
+        let text = String::from_utf8_lossy(&collected).to_string();
 
         if status.is_success() {
             if let Ok(json) = serde_json::from_str::<serde_json::Value>(&text) {

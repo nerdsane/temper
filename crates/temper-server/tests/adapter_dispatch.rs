@@ -543,9 +543,107 @@ method = "POST"
     assert!(response.success);
     assert_eq!(response.state.status, "Done");
 
-    // Direct unit proof: AdapterContext.secrets is always empty at construction site.
-    // Integration proof: request succeeded; secret was never needed and vault was present.
-    let _ = mock_server.received_requests().await;
+    let requests = mock_server.received_requests().await.expect("requests");
+    assert_eq!(requests.len(), 1, "exactly one adapter HTTP call");
+    let body = String::from_utf8_lossy(&requests[0].body);
+    assert!(
+        !body.contains("super-secret-value-xyz"),
+        "tenant secret value must not appear in adapter payload: {body}"
+    );
+    assert!(
+        !body.contains("LEAKED_TENANT_SECRET"),
+        "secret key name must not appear as a dumped secrets map: {body}"
+    );
+    assert!(
+        !body.contains("\"secrets\""),
+        "payload must not include a secrets object: {body}"
+    );
+    assert!(
+        !body.contains("agent_api_key"),
+        "payload must not include ambient platform credential: {body}"
+    );
+}
+
+/// Oversized HTTP responses fail closed without success callback.
+#[tokio::test(flavor = "multi_thread")]
+async fn adapter_http_oversized_response_fails_closed() {
+    allow_adapter_loopback_for_tests();
+    let mock_server = MockServer::start().await;
+    let big = "x".repeat(temper_server::adapters::ADAPTER_MAX_RESPONSE_BYTES + 64);
+    Mock::given(method("POST"))
+        .and(path("/execute"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .insert_header(
+                    "content-length",
+                    (temper_server::adapters::ADAPTER_MAX_RESPONSE_BYTES + 64).to_string(),
+                )
+                .set_body_string(big),
+        )
+        .mount(&mock_server)
+        .await;
+
+    let spec = format!(
+        r#"
+[automaton]
+name = "AdapterTest"
+states = ["Idle", "Pending", "Done", "Failed"]
+initial = "Idle"
+
+[[action]]
+name = "Trigger"
+kind = "input"
+from = ["Idle"]
+to = "Pending"
+effect = [{{ type = "trigger", name = "adapter_call" }}]
+
+[[action]]
+name = "AdapterSucceeded"
+kind = "input"
+from = ["Pending"]
+to = "Done"
+params = ["result"]
+
+[[action]]
+name = "AdapterFailed"
+kind = "input"
+from = ["Pending"]
+to = "Failed"
+params = ["error_message"]
+
+[[integration]]
+name = "adapter_call"
+trigger = "adapter_call"
+type = "adapter"
+adapter = "http"
+on_success = "AdapterSucceeded"
+on_failure = "AdapterFailed"
+url = "{url}/execute"
+method = "POST"
+"#,
+        url = mock_server.uri()
+    );
+
+    let state = build_state(&spec);
+    let tenant = TenantId::default();
+    let agent_ctx = AgentContext::default();
+    let response = state
+        .dispatch_tenant_action_ext(
+            &tenant,
+            "AdapterTest",
+            "adapter-oversized",
+            "Trigger",
+            serde_json::json!({}),
+            DispatchExtOptions {
+                agent_ctx: &agent_ctx,
+                await_integration: true,
+                await_reactions: true,
+            },
+        )
+        .await
+        .expect("Trigger should complete with failure callback");
+    assert!(response.success);
+    assert_eq!(response.state.status, "Failed");
 }
 
 // ---------------------------------------------------------------------------
