@@ -166,6 +166,8 @@ async fn insert_order_projections(
                     },
                 }],
                 key_rows: None,
+                vector_rows: Vec::new(),
+                reconcile_vectors: false,
             })
             .collect::<Vec<_>>();
         let results = store.append_batch(&appends).await.unwrap();

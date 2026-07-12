@@ -105,53 +105,15 @@ impl PostgresEventStore {
 // EventStore implementation
 // ---------------------------------------------------------------------------
 
-impl EventStore for PostgresEventStore {
-    /// Append one or more events to the journal.
-    ///
-    /// Events are inserted with consecutive sequence numbers starting from
-    /// `expected_sequence + 1`.  The UNIQUE index on
-    /// `(entity_type, entity_id, sequence_nr)` enforces optimistic
-    /// concurrency; a duplicate-key violation is surfaced as
-    /// [`PersistenceError::ConcurrencyViolation`].
-    ///
-    /// Returns the new highest sequence number after the append.
-    async fn append(
-        &self,
-        persistence_id: &str,
-        expected_sequence: u64,
-        events: &[PersistenceEnvelope],
-    ) -> Result<u64, PersistenceError> {
-        self.append_with_optional_keys(persistence_id, expected_sequence, events, None)
-            .await
-    }
-
-    async fn append_with_index_rows(
-        &self,
-        persistence_id: &str,
-        expected_sequence: u64,
-        events: &[PersistenceEnvelope],
-        key_rows: &[temper_runtime::persistence::EntityKeyRow],
-        vector_rows: &[EntityVectorRow],
-        reconcile_vectors: bool,
-    ) -> Result<u64, PersistenceError> {
-        let new_seq = self
-            .append_with_optional_keys(persistence_id, expected_sequence, events, Some(key_rows))
-            .await?;
-        if reconcile_vectors {
-            let (tenant, entity_type, entity_id) =
-                parse_persistence_id_parts(persistence_id).map_err(PersistenceError::Storage)?;
-            self.backfill_entity_vectors(tenant, entity_type, entity_id, vector_rows)
-                .await?;
-        }
-        Ok(new_seq)
-    }
-
-    async fn append_with_optional_keys(
+impl PostgresEventStore {
+    async fn append_with_indexes(
         &self,
         persistence_id: &str,
         expected_sequence: u64,
         events: &[PersistenceEnvelope],
         key_rows: Option<&[temper_runtime::persistence::EntityKeyRow]>,
+        vector_rows: &[EntityVectorRow],
+        reconcile_vectors: bool,
     ) -> Result<u64, PersistenceError> {
         if events.is_empty() {
             return Ok(expected_sequence);
@@ -164,8 +126,6 @@ impl EventStore for PostgresEventStore {
         let ends_in_deletion = ends_in_deletion_tombstone(events);
         let replaces_keys = key_rows.is_some();
         let key_rows = key_rows.unwrap_or_default();
-        let reconcile_vectors = false;
-        let vector_rows: &[EntityVectorRow] = &[];
 
         let mut transaction_timer = PostgresTransactionTimer::start(EVENT_APPEND_OPERATION);
         let acquire_started = Instant::now();
@@ -399,6 +359,65 @@ impl EventStore for PostgresEventStore {
         transaction_timer.set_outcome("ok");
 
         Ok(new_seq)
+    }
+}
+
+impl EventStore for PostgresEventStore {
+    /// Append one or more events to the journal.
+    ///
+    /// Events are inserted with consecutive sequence numbers starting from
+    /// `expected_sequence + 1`.  The UNIQUE index on
+    /// `(entity_type, entity_id, sequence_nr)` enforces optimistic
+    /// concurrency; a duplicate-key violation is surfaced as
+    /// [`PersistenceError::ConcurrencyViolation`].
+    ///
+    /// Returns the new highest sequence number after the append.
+    async fn append(
+        &self,
+        persistence_id: &str,
+        expected_sequence: u64,
+        events: &[PersistenceEnvelope],
+    ) -> Result<u64, PersistenceError> {
+        self.append_with_optional_keys(persistence_id, expected_sequence, events, None)
+            .await
+    }
+
+    async fn append_with_index_rows(
+        &self,
+        persistence_id: &str,
+        expected_sequence: u64,
+        events: &[PersistenceEnvelope],
+        key_rows: &[temper_runtime::persistence::EntityKeyRow],
+        vector_rows: &[EntityVectorRow],
+        reconcile_vectors: bool,
+    ) -> Result<u64, PersistenceError> {
+        self.append_with_indexes(
+            persistence_id,
+            expected_sequence,
+            events,
+            Some(key_rows),
+            vector_rows,
+            reconcile_vectors,
+        )
+        .await
+    }
+
+    async fn append_with_optional_keys(
+        &self,
+        persistence_id: &str,
+        expected_sequence: u64,
+        events: &[PersistenceEnvelope],
+        key_rows: Option<&[temper_runtime::persistence::EntityKeyRow]>,
+    ) -> Result<u64, PersistenceError> {
+        self.append_with_indexes(
+            persistence_id,
+            expected_sequence,
+            events,
+            key_rows,
+            &[],
+            false,
+        )
+        .await
     }
 
     async fn backfill_entity_keys(
@@ -928,6 +947,26 @@ impl EventStore for PostgresEventStore {
             .map_err(|e| PersistenceError::Storage(e.to_string()))?;
         }
 
+        // Vector rows are derived state, but when a caller has recomputed them
+        // they must be co-committed with the same guarded/batch append as the
+        // journal and declared-key rows. Otherwise a lifecycle guard could make
+        // Postgres diverge from Sim/normal append behavior.
+        for (append, (tenant, entity_type, entity_id, _)) in appends.iter().zip(parsed.iter()) {
+            if append.events.is_empty() || !append.reconcile_vectors {
+                continue;
+            }
+            crate::dbm::postgres_query!(
+                "DELETE FROM entity_vector_index \
+                 WHERE tenant = $1 AND entity_type = $2 AND entity_id = $3",
+            )
+            .bind(tenant)
+            .bind(entity_type)
+            .bind(entity_id)
+            .execute(&mut *tx)
+            .await
+            .map_err(|e| PersistenceError::Storage(e.to_string()))?;
+        }
+
         let mut results = Vec::with_capacity(appends.len());
         for (append, (tenant, entity_type, entity_id, segment_index)) in
             appends.iter().zip(parsed.iter())
@@ -995,6 +1034,25 @@ impl EventStore for PostgresEventStore {
                     .bind(&key.key_hash)
                     .bind(entity_id)
                     .bind(postgres_sequence(new_seq, "batch declared-key append")?)
+                    .execute(&mut *tx)
+                    .await
+                    .map_err(|e| PersistenceError::Storage(e.to_string()))?;
+                }
+            }
+            if append.reconcile_vectors {
+                for row in &append.vector_rows {
+                    crate::dbm::postgres_query!(
+                        "INSERT INTO entity_vector_index \
+                         (tenant, entity_type, decl_name, model_tag, entity_id, vector, sequence_nr) \
+                         VALUES ($1, $2, $3, $4, $5, $6, $7)",
+                    )
+                    .bind(tenant)
+                    .bind(entity_type)
+                    .bind(&row.decl_name)
+                    .bind(&row.model_tag)
+                    .bind(entity_id)
+                    .bind(pack_f32_le(&row.vector))
+                    .bind(postgres_sequence(new_seq, "batch vector append")?)
                     .execute(&mut *tx)
                     .await
                     .map_err(|e| PersistenceError::Storage(e.to_string()))?;

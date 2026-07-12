@@ -326,44 +326,15 @@ impl std::fmt::Debug for SimEventStore {
     }
 }
 
-impl EventStore for SimEventStore {
-    async fn append(
-        &self,
-        persistence_id: &str,
-        expected_sequence: u64,
-        events: &[PersistenceEnvelope],
-    ) -> Result<u64, PersistenceError> {
-        self.append_with_optional_keys(persistence_id, expected_sequence, events, None)
-            .await
-    }
-
-    async fn append_with_index_rows(
-        &self,
-        persistence_id: &str,
-        expected_sequence: u64,
-        events: &[PersistenceEnvelope],
-        key_rows: &[temper_runtime::persistence::EntityKeyRow],
-        vector_rows: &[EntityVectorRow],
-        reconcile_vectors: bool,
-    ) -> Result<u64, PersistenceError> {
-        let new_seq = self
-            .append_with_optional_keys(persistence_id, expected_sequence, events, Some(key_rows))
-            .await?;
-        if reconcile_vectors {
-            let (tenant, entity_type, entity_id) =
-                parse_persistence_id_parts(persistence_id).map_err(PersistenceError::Storage)?;
-            self.backfill_entity_vectors(tenant, entity_type, entity_id, vector_rows)
-                .await?;
-        }
-        Ok(new_seq)
-    }
-
-    async fn append_with_optional_keys(
+impl SimEventStore {
+    async fn append_with_indexes(
         &self,
         persistence_id: &str,
         expected_sequence: u64,
         events: &[PersistenceEnvelope],
         key_rows: Option<&[temper_runtime::persistence::EntityKeyRow]>,
+        vector_rows: &[EntityVectorRow],
+        reconcile_vectors: bool,
     ) -> Result<u64, PersistenceError> {
         if events.is_empty() {
             return Ok(expected_sequence);
@@ -376,8 +347,6 @@ impl EventStore for SimEventStore {
         let ends_in_deletion = ends_in_deletion_tombstone(events);
         let replaces_keys = key_rows.is_some();
         let key_rows = key_rows.unwrap_or_default();
-        let reconcile_vectors = false;
-        let vector_rows: &[EntityVectorRow] = &[];
 
         let append_delay = {
             let mut inner = self
@@ -558,6 +527,56 @@ impl EventStore for SimEventStore {
         }
 
         Ok(new_seq)
+    }
+}
+
+impl EventStore for SimEventStore {
+    async fn append(
+        &self,
+        persistence_id: &str,
+        expected_sequence: u64,
+        events: &[PersistenceEnvelope],
+    ) -> Result<u64, PersistenceError> {
+        self.append_with_optional_keys(persistence_id, expected_sequence, events, None)
+            .await
+    }
+
+    async fn append_with_index_rows(
+        &self,
+        persistence_id: &str,
+        expected_sequence: u64,
+        events: &[PersistenceEnvelope],
+        key_rows: &[temper_runtime::persistence::EntityKeyRow],
+        vector_rows: &[EntityVectorRow],
+        reconcile_vectors: bool,
+    ) -> Result<u64, PersistenceError> {
+        self.append_with_indexes(
+            persistence_id,
+            expected_sequence,
+            events,
+            Some(key_rows),
+            vector_rows,
+            reconcile_vectors,
+        )
+        .await
+    }
+
+    async fn append_with_optional_keys(
+        &self,
+        persistence_id: &str,
+        expected_sequence: u64,
+        events: &[PersistenceEnvelope],
+        key_rows: Option<&[temper_runtime::persistence::EntityKeyRow]>,
+    ) -> Result<u64, PersistenceError> {
+        self.append_with_indexes(
+            persistence_id,
+            expected_sequence,
+            events,
+            key_rows,
+            &[],
+            false,
+        )
+        .await
     }
 
     async fn backfill_entity_keys(
@@ -921,6 +940,35 @@ impl EventStore for SimEventStore {
             }
         }
 
+        // Build the complete post-batch vector map before mutating journals.
+        // Normal appends co-commit vector rows under the same store lock; the
+        // guarded/batch path must do the same so storage backends do not
+        // diverge when a commit-time lifecycle guard is present.
+        let mut next_vector_index = inner.vector_index.clone();
+        for append in appends
+            .iter()
+            .filter(|append| !append.events.is_empty() && append.reconcile_vectors)
+        {
+            let (tenant, entity_type, entity_id) =
+                parse_persistence_id_parts(&append.persistence_id)
+                    .map_err(PersistenceError::Storage)?;
+            next_vector_index.retain(|(t, et, _, _, eid), _| {
+                !(t.as_str() == tenant && et.as_str() == entity_type && eid.as_str() == entity_id)
+            });
+            for row in &append.vector_rows {
+                next_vector_index.insert(
+                    (
+                        tenant.to_string(),
+                        entity_type.to_string(),
+                        row.decl_name.clone(),
+                        row.model_tag.clone(),
+                        entity_id.to_string(),
+                    ),
+                    row.vector.clone(),
+                );
+            }
+        }
+
         let mut next_segments = inner.event_segments.clone();
         let mut prepared_events = BTreeMap::new();
         let mut planned_sequences = BTreeMap::new();
@@ -962,6 +1010,7 @@ impl EventStore for SimEventStore {
 
         inner.event_segments = next_segments;
         inner.key_index = next_key_index;
+        inner.vector_index = next_vector_index;
 
         Ok(appends
             .iter()

@@ -156,6 +156,8 @@ async fn delete_relation_scan_has_an_explicit_candidate_budget() {
                 expected_sequence: 0,
                 events: vec![created_payment(&persistence_id, "different-order")],
                 key_rows: None,
+                vector_rows: Vec::new(),
+                reconcile_vectors: false,
             }
         })
         .collect::<Vec<_>>();

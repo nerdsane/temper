@@ -330,6 +330,8 @@ async fn boxed_event_store_delegates_through_object_safe_adapter() {
                 expected_sequence: 0,
                 events: events.clone(),
                 key_rows: None,
+                vector_rows: Vec::new(),
+                reconcile_vectors: false,
             }])
             .await
             .expect("append batch through dyn adapter"),
@@ -431,6 +433,8 @@ async fn boxed_event_store_reconciles_lost_commit_ack_for_single_and_batch_appen
         expected_sequence: 0,
         events: vec![test_envelope(0), test_envelope(0)],
         key_rows: None,
+        vector_rows: Vec::new(),
+        reconcile_vectors: false,
     }];
     assert_eq!(
         batch
@@ -521,6 +525,8 @@ async fn boxed_event_store_rejects_duplicate_batches_before_reconciliation() {
         expected_sequence: 0,
         events: Vec::new(),
         key_rows: None,
+        vector_rows: Vec::new(),
+        reconcile_vectors: false,
     };
     let error = store
         .append_batch(&[duplicate_empty.clone(), duplicate_empty])
@@ -539,6 +545,8 @@ async fn boxed_event_store_rejects_duplicate_batches_before_reconciliation() {
         expected_sequence: 0,
         events: vec![durable_event],
         key_rows: None,
+        vector_rows: Vec::new(),
+        reconcile_vectors: false,
     };
     let error = store
         .append_batch(&[duplicate_durable.clone(), duplicate_durable])

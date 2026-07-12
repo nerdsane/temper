@@ -7,8 +7,8 @@ use sha2::{Digest, Sha256};
 use temper_authz::SecurityContext;
 use temper_jit::table::{CompositeActionMetadata, TransitionTable};
 use temper_runtime::persistence::{
-    COMPOSITE_EVENT_TYPE, CompositeEvent, CompositeEventSubWrite, EventMetadata, PersistenceAppend,
-    PersistenceEnvelope, PersistenceError,
+    COMPOSITE_EVENT_TYPE, CompositeEvent, CompositeEventSubWrite, EntityKeyRow, EntityVectorRow,
+    EventMetadata, PersistenceAppend, PersistenceEnvelope, PersistenceError,
 };
 use temper_runtime::scheduler::{sim_now, sim_uuid};
 use temper_runtime::tenant::TenantId;
@@ -79,6 +79,55 @@ struct AtomicCompositeStream {
 
 fn empty_params() -> Value {
     Value::Object(Default::default())
+}
+
+fn index_rows_for_table(
+    table: &TransitionTable,
+    state: &EntityState,
+) -> (Vec<EntityKeyRow>, Vec<EntityVectorRow>, bool) {
+    let reconcile_vectors = !table.vectors.is_empty();
+    let mut key_rows = Vec::new();
+    let mut vector_rows = Vec::new();
+    let Some(field_map) = state.fields.as_object() else {
+        return (key_rows, vector_rows, reconcile_vectors);
+    };
+
+    for key in &table.keys {
+        if let Some(hash) =
+            crate::key_index::canonical_key_hash(&key.name, &key.properties, field_map)
+        {
+            key_rows.push(EntityKeyRow {
+                key_name: key.name.clone(),
+                key_hash: hash,
+            });
+        }
+    }
+
+    if state.status == "Deleted" {
+        return (key_rows, vector_rows, reconcile_vectors);
+    }
+    for decl in &table.vectors {
+        let Some(vector) = field_map
+            .get(&decl.property)
+            .and_then(|v| crate::vector_index::parse_vector_property(v, decl.dims))
+        else {
+            continue;
+        };
+        let Some(model_tag) = field_map
+            .get(&decl.model_property)
+            .and_then(|v| v.as_str())
+            .filter(|tag| !tag.is_empty())
+        else {
+            continue;
+        };
+        vector_rows.push(EntityVectorRow {
+            decl_name: decl.name.clone(),
+            model_tag: model_tag.to_string(),
+            vector,
+        });
+    }
+
+    (key_rows, vector_rows, reconcile_vectors)
 }
 
 impl crate::state::ServerState {
@@ -374,14 +423,15 @@ impl crate::state::ServerState {
             .filter(|(_, stream)| !stream.events.is_empty())
         {
             let table = self.transition_table_for_dispatch(tenant, &stream.entity_type)?;
+            let (key_rows, vector_rows, reconcile_vectors) =
+                index_rows_for_table(&table, &stream.state);
             appends.push(PersistenceAppend {
                 persistence_id: persistence_id.clone(),
                 expected_sequence: stream.expected_sequence,
                 events: stream.events.clone(),
-                key_rows: Some(crate::key_index::entity_key_rows(
-                    &table.keys,
-                    &stream.state.fields,
-                )),
+                key_rows: Some(key_rows),
+                vector_rows,
+                reconcile_vectors,
             });
         }
         if appends.is_empty() {

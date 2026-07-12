@@ -110,7 +110,7 @@ pub struct EntityKeyRow {
 /// `entity_vector_index` write one row per `(decl_name, model_tag, entity_id)`; the
 /// blob is packed little-endian f32. Unlike a key row this has no uniqueness
 /// constraint — it is derived, rebuildable ranking state.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct EntityVectorRow {
     /// The declared vector path's identifier (the `[[vector]]` block's `name`).
     pub decl_name: String,
@@ -222,6 +222,51 @@ pub trait EventStore: Send + Sync + 'static {
     ) -> impl std::future::Future<Output = Result<u64, PersistenceError>> + Send {
         let _ = (key_rows, vector_rows, reconcile_vectors);
         self.append(persistence_id, expected_sequence, events)
+    }
+
+    /// Append events with optional declared-key replacement and optional vector
+    /// reconciliation in one backend primitive.
+    ///
+    /// `key_rows = None` preserves declared-key claims; `Some(rows)` replaces the
+    /// complete declared-key set. `reconcile_vectors = true` replaces the complete
+    /// vector row set with `vector_rows`. Stores with transactional query indexes
+    /// override this so the journal, declared keys, and vectors co-commit.
+    fn append_with_indexes(
+        &self,
+        persistence_id: &str,
+        expected_sequence: u64,
+        events: &[PersistenceEnvelope],
+        key_rows: Option<&[EntityKeyRow]>,
+        vector_rows: &[EntityVectorRow],
+        reconcile_vectors: bool,
+    ) -> impl std::future::Future<Output = Result<u64, PersistenceError>> + Send {
+        async move {
+            match key_rows {
+                Some(key_rows) => {
+                    self.append_with_index_rows(
+                        persistence_id,
+                        expected_sequence,
+                        events,
+                        key_rows,
+                        vector_rows,
+                        reconcile_vectors,
+                    )
+                    .await
+                }
+                None if reconcile_vectors => {
+                    self.append_with_index_rows(
+                        persistence_id,
+                        expected_sequence,
+                        events,
+                        &[],
+                        vector_rows,
+                        true,
+                    )
+                    .await
+                }
+                None => self.append(persistence_id, expected_sequence, events).await,
+            }
+        }
     }
 
     /// Reconcile the derived vector-index rows for an **existing** entity to exactly
@@ -598,6 +643,21 @@ pub struct PersistenceAppend {
     /// clear. Tombstones always clear claims and ignore this field.
     #[serde(default)]
     pub key_rows: Option<Vec<EntityKeyRow>>,
+    /// Complete desired derived vector rows after applying `events`.
+    ///
+    /// Used only when [`Self::reconcile_vectors`] is true. Guarded/batched
+    /// writers carry these rows so vector indexes are co-committed with the
+    /// same atomic append as the journal and declared-key rows.
+    #[serde(default)]
+    pub vector_rows: Vec<EntityVectorRow>,
+    /// Whether `vector_rows` is authoritative for this entity after the append.
+    ///
+    /// `false` means the backend must preserve existing vector rows because the
+    /// caller did not recompute the current vector projection. `true` means the
+    /// backend must replace all prior vector rows for the entity, including
+    /// replacing them with none when `vector_rows` is empty.
+    #[serde(default)]
+    pub reconcile_vectors: bool,
 }
 
 /// New sequence number for one stream after an atomic batch append.

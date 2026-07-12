@@ -66,6 +66,8 @@ fn append_batch_validation_rejects_duplicate_streams() {
         expected_sequence: 0,
         events: Vec::new(),
         key_rows: None,
+        vector_rows: Vec::new(),
+        reconcile_vectors: false,
     };
     assert!(
         validate_persistence_append_batch(&[duplicate.clone(), duplicate]).is_err(),
@@ -77,10 +79,16 @@ fn append_batch_validation_rejects_duplicate_streams() {
         expected_sequence: 0,
         events: Vec::new(),
         key_rows: None,
+        vector_rows: Vec::new(),
+        reconcile_vectors: false,
     };
     let qualified = PersistenceAppend {
         persistence_id: "default:Order:aliased".to_string(),
-        ..legacy.clone()
+        expected_sequence: legacy.expected_sequence,
+        events: legacy.events.clone(),
+        key_rows: legacy.key_rows.clone(),
+        vector_rows: legacy.vector_rows.clone(),
+        reconcile_vectors: false,
     };
     assert!(
         validate_persistence_append_batch(&[legacy, qualified]).is_err(),
@@ -95,6 +103,8 @@ fn guarded_batch_validation_rejects_guard_aliasing_append() {
         expected_sequence: 0,
         events: vec![envelope("Created", serde_json::json!({}))],
         key_rows: None,
+        vector_rows: Vec::new(),
+        reconcile_vectors: false,
     };
     let guard = PersistenceSequenceGuard {
         persistence_id: "default:Widget:w1".to_string(),

@@ -1,5 +1,5 @@
 use super::*;
-use temper_runtime::persistence::{COMPOSITE_EVENT_TYPE, EventMetadata};
+use temper_runtime::persistence::{COMPOSITE_EVENT_TYPE, EntityVectorRow, EventMetadata};
 
 fn test_envelope(event_type: &str) -> PersistenceEnvelope {
     PersistenceEnvelope {
@@ -92,6 +92,8 @@ async fn tombstone_atomically_retires_declared_keys_before_recreation() {
                 test_envelope(COMPOSITE_EVENT_TYPE),
             ],
             key_rows: None,
+            vector_rows: Vec::new(),
+            reconcile_vectors: false,
         }])
         .await
         .unwrap();
@@ -137,6 +139,70 @@ async fn raw_append_preserves_declared_keys_it_cannot_recompute() {
 }
 
 #[tokio::test]
+async fn guarded_batch_reconciles_vector_rows_atomically() {
+    let store = SimEventStore::no_faults(42);
+    let persistence_id = "default:Doc:guarded-vector";
+    let vector_row = EntityVectorRow {
+        decl_name: "embedding".to_string(),
+        model_tag: "model-a".to_string(),
+        vector: vec![1.0, 0.0],
+    };
+
+    store
+        .append_batch_guarded(
+            &[PersistenceAppend {
+                persistence_id: persistence_id.to_string(),
+                expected_sequence: 0,
+                events: vec![test_envelope("Created")],
+                key_rows: Some(Vec::new()),
+                vector_rows: vec![vector_row],
+                reconcile_vectors: true,
+            }],
+            &[temper_runtime::persistence::PersistenceSequenceGuard {
+                persistence_id: "default:Account:owner".to_string(),
+                expected_sequence: 0,
+            }],
+        )
+        .await
+        .unwrap();
+
+    let candidates = store
+        .vector_candidates("default", "Doc", "embedding", "model-a", 10)
+        .await
+        .unwrap();
+    assert_eq!(candidates.len(), 1);
+    assert_eq!(candidates[0].entity_id, "guarded-vector");
+    assert_eq!(candidates[0].vector, vec![1.0, 0.0]);
+
+    store
+        .append_batch_guarded(
+            &[PersistenceAppend {
+                persistence_id: persistence_id.to_string(),
+                expected_sequence: 1,
+                events: vec![test_envelope("Updated")],
+                key_rows: Some(Vec::new()),
+                vector_rows: Vec::new(),
+                reconcile_vectors: true,
+            }],
+            &[temper_runtime::persistence::PersistenceSequenceGuard {
+                persistence_id: "default:Account:owner".to_string(),
+                expected_sequence: 0,
+            }],
+        )
+        .await
+        .unwrap();
+
+    let candidates = store
+        .vector_candidates("default", "Doc", "embedding", "model-a", 10)
+        .await
+        .unwrap();
+    assert!(
+        candidates.is_empty(),
+        "guarded append with an empty authoritative vector set must purge stale vector rows"
+    );
+}
+
+#[tokio::test]
 async fn batch_key_intent_distinguishes_preserve_from_authoritative_clear() {
     let store = SimEventStore::no_faults(42);
     let persistence_id = "default:Order:batch-key-intent";
@@ -160,6 +226,8 @@ async fn batch_key_intent_distinguishes_preserve_from_authoritative_clear() {
             expected_sequence: 1,
             events: vec![test_envelope("ExternalAudit")],
             key_rows: None,
+            vector_rows: Vec::new(),
+            reconcile_vectors: false,
         }])
         .await
         .unwrap();
@@ -178,6 +246,8 @@ async fn batch_key_intent_distinguishes_preserve_from_authoritative_clear() {
             expected_sequence: 2,
             events: vec![test_envelope("Deleted"), test_envelope("Created")],
             key_rows: None,
+            vector_rows: Vec::new(),
+            reconcile_vectors: false,
         }])
         .await
         .unwrap();
@@ -205,6 +275,8 @@ async fn batch_key_intent_distinguishes_preserve_from_authoritative_clear() {
             expected_sequence: 5,
             events: vec![test_envelope("KeyRemoved")],
             key_rows: Some(Vec::new()),
+            vector_rows: Vec::new(),
+            reconcile_vectors: false,
         }])
         .await
         .unwrap();

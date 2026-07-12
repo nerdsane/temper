@@ -172,6 +172,8 @@ async fn segment_update_failure_rolls_back_every_batch_stream() {
         expected_sequence: 1,
         events: vec![test_envelope("Updated", serde_json::json!({}))],
         key_rows: None,
+        vector_rows: Vec::new(),
+        reconcile_vectors: false,
     });
 
     let error = store
@@ -415,6 +417,8 @@ async fn append_batch_zero_sequence_detects_existing_stream_by_unique_key() {
                 serde_json::json!({ "step": 2 }),
             )],
             key_rows: None,
+            vector_rows: Vec::new(),
+            reconcile_vectors: false,
         }])
         .await
         .unwrap_err();
@@ -452,6 +456,8 @@ async fn guarded_append_rejects_stale_context_without_writing_target() {
                 expected_sequence: 0,
                 events: vec![test_envelope("FieldsPatched", serde_json::json!({}))],
                 key_rows: None,
+                vector_rows: Vec::new(),
+                reconcile_vectors: false,
             }],
             &[PersistenceSequenceGuard {
                 persistence_id: context_id.to_string(),
@@ -469,6 +475,8 @@ async fn guarded_append_rejects_stale_context_without_writing_target() {
                 expected_sequence: 0,
                 events: vec![test_envelope("FieldsPatched", serde_json::json!({}))],
                 key_rows: None,
+                vector_rows: Vec::new(),
+                reconcile_vectors: false,
             }],
             &[PersistenceSequenceGuard {
                 persistence_id: context_id.to_string(),
@@ -491,6 +499,8 @@ async fn append_batch_empty_member_is_not_discoverable() {
             expected_sequence: 7,
             events: vec![],
             key_rows: None,
+            vector_rows: Vec::new(),
+            reconcile_vectors: false,
         }])
         .await
         .unwrap();
@@ -512,12 +522,16 @@ async fn append_batch_empty_member_is_not_discoverable() {
                 expected_sequence: 3,
                 events: vec![],
                 key_rows: None,
+                vector_rows: Vec::new(),
+                reconcile_vectors: false,
             },
             PersistenceAppend {
                 persistence_id: "tenant-a:Order:empty-b".to_string(),
                 expected_sequence: 9,
                 events: vec![],
                 key_rows: None,
+                vector_rows: Vec::new(),
+                reconcile_vectors: false,
             },
         ])
         .await

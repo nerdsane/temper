@@ -94,6 +94,186 @@ impl BoxedEventStore {
             .append_with_keys(persistence_id, expected_sequence, events, key_rows)
             .await
     }
+
+    pub async fn append_with_index_rows(
+        &self,
+        persistence_id: &str,
+        expected_sequence: u64,
+        events: &[PersistenceEnvelope],
+        key_rows: &[temper_runtime::persistence::EntityKeyRow],
+        vector_rows: &[temper_runtime::persistence::EntityVectorRow],
+        reconcile_vectors: bool,
+    ) -> Result<u64, PersistenceError> {
+        self.0
+            .append_with_index_rows(
+                persistence_id,
+                expected_sequence,
+                events,
+                key_rows,
+                vector_rows,
+                reconcile_vectors,
+            )
+            .await
+    }
+
+    pub async fn backfill_entity_vectors(
+        &self,
+        tenant: &str,
+        entity_type: &str,
+        entity_id: &str,
+        vector_rows: &[temper_runtime::persistence::EntityVectorRow],
+    ) -> Result<(), PersistenceError> {
+        self.0
+            .backfill_entity_vectors(tenant, entity_type, entity_id, vector_rows)
+            .await
+    }
+
+    pub async fn vector_candidates(
+        &self,
+        tenant: &str,
+        entity_type: &str,
+        decl_name: &str,
+        model_tag: &str,
+        limit: usize,
+    ) -> Result<Vec<temper_runtime::persistence::EntityVectorCandidate>, PersistenceError> {
+        self.0
+            .vector_candidates(tenant, entity_type, decl_name, model_tag, limit)
+            .await
+    }
+
+    pub async fn mark_vector_index_backfilled(
+        &self,
+        tenant: &str,
+        entity_type: &str,
+        vector_set: &str,
+    ) -> Result<(), PersistenceError> {
+        self.0
+            .mark_vector_index_backfilled(tenant, entity_type, vector_set)
+            .await
+    }
+
+    pub async fn vector_index_backfilled_types(
+        &self,
+        tenant: &str,
+    ) -> Result<Vec<(String, String)>, PersistenceError> {
+        self.0.vector_index_backfilled_types(tenant).await
+    }
+
+    pub async fn vectored_entity_ids_for_type(
+        &self,
+        tenant: &str,
+        entity_type: &str,
+    ) -> Result<Vec<String>, PersistenceError> {
+        self.0
+            .vectored_entity_ids_for_type(tenant, entity_type)
+            .await
+    }
+
+    pub async fn lookup_by_key(
+        &self,
+        tenant: &str,
+        entity_type: &str,
+        key_name: &str,
+        key_hash: &str,
+    ) -> Result<Option<String>, PersistenceError> {
+        self.0
+            .lookup_by_key(tenant, entity_type, key_name, key_hash)
+            .await
+    }
+
+    pub async fn backfill_entity_keys(
+        &self,
+        tenant: &str,
+        entity_type: &str,
+        entity_id: &str,
+        key_rows: &[temper_runtime::persistence::EntityKeyRow],
+    ) -> Result<(), PersistenceError> {
+        self.0
+            .backfill_entity_keys(tenant, entity_type, entity_id, key_rows)
+            .await
+    }
+
+    pub async fn retire_entity_keys_through_sequence(
+        &self,
+        tenant: &str,
+        entity_type: &str,
+        entity_id: &str,
+        delete_sequence: u64,
+    ) -> Result<(), PersistenceError> {
+        self.0
+            .retire_entity_keys_through_sequence(tenant, entity_type, entity_id, delete_sequence)
+            .await
+    }
+
+    pub async fn mark_key_index_backfilled(
+        &self,
+        tenant: &str,
+        entity_type: &str,
+        key_set: &str,
+    ) -> Result<(), PersistenceError> {
+        self.0
+            .mark_key_index_backfilled(tenant, entity_type, key_set)
+            .await
+    }
+
+    pub async fn key_index_backfilled_types(
+        &self,
+        tenant: &str,
+    ) -> Result<Vec<(String, String)>, PersistenceError> {
+        self.0.key_index_backfilled_types(tenant).await
+    }
+
+    pub async fn keyed_entity_ids_for_type(
+        &self,
+        tenant: &str,
+        entity_type: &str,
+    ) -> Result<Vec<String>, PersistenceError> {
+        self.0.keyed_entity_ids_for_type(tenant, entity_type).await
+    }
+
+    pub async fn save_snapshot(
+        &self,
+        persistence_id: &str,
+        sequence_nr: u64,
+        snapshot: &[u8],
+    ) -> Result<(), PersistenceError> {
+        self.0
+            .save_snapshot(persistence_id, sequence_nr, snapshot)
+            .await
+    }
+
+    pub async fn load_snapshot(
+        &self,
+        persistence_id: &str,
+    ) -> Result<Option<(u64, Vec<u8>)>, PersistenceError> {
+        self.0.load_snapshot(persistence_id).await
+    }
+
+    pub async fn list_entity_ids(
+        &self,
+        tenant: &str,
+    ) -> Result<Vec<(String, String)>, PersistenceError> {
+        self.0.list_entity_ids(tenant).await
+    }
+
+    pub async fn list_entity_ids_by_type(
+        &self,
+        tenant: &str,
+        entity_type: &str,
+    ) -> Result<Vec<String>, PersistenceError> {
+        self.0.list_entity_ids_by_type(tenant, entity_type).await
+    }
+
+    pub async fn list_entity_ids_limited(
+        &self,
+        tenant: &str,
+        entity_type: Option<&str>,
+        limit: usize,
+    ) -> Result<Vec<(String, String)>, PersistenceError> {
+        self.0
+            .list_entity_ids_limited(tenant, entity_type, limit)
+            .await
+    }
 }
 
 #[cfg(all(test, feature = "sim"))]
@@ -197,12 +377,16 @@ mod tests {
                 expected_sequence: 0,
                 events: vec![raw_event.clone()],
                 key_rows: None,
+                vector_rows: Vec::new(),
+                reconcile_vectors: false,
             },
             PersistenceAppend {
                 persistence_id: keyed_id.to_string(),
                 expected_sequence: 0,
                 events: vec![keyed_event.clone()],
                 key_rows: Some(vec![key("K1")]),
+                vector_rows: Vec::new(),
+                reconcile_vectors: false,
             },
         ];
         EventStore::append_batch(&store, &committed)

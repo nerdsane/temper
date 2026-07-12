@@ -276,6 +276,8 @@ fn guarded_append_rejects_stale_context_without_writing_target() {
                     expected_sequence: 0,
                     events: vec![test_envelope("FieldsPatched", serde_json::json!({}))],
                     key_rows: None,
+                    vector_rows: Vec::new(),
+                    reconcile_vectors: false,
                 }],
                 &[PersistenceSequenceGuard {
                     persistence_id: context_id.clone(),
@@ -293,6 +295,8 @@ fn guarded_append_rejects_stale_context_without_writing_target() {
                     expected_sequence: 0,
                     events: vec![test_envelope("FieldsPatched", serde_json::json!({}))],
                     key_rows: None,
+                    vector_rows: Vec::new(),
+                    reconcile_vectors: false,
                 }],
                 &[PersistenceSequenceGuard {
                     persistence_id: context_id,
@@ -396,6 +400,8 @@ fn entity_key_index_present_absent_and_atomic_reject() {
                     ),
                 ],
                 key_rows: None,
+                vector_rows: Vec::new(),
+                reconcile_vectors: false,
             }])
             .await
             .unwrap();
@@ -496,6 +502,8 @@ fn entity_key_index_present_absent_and_atomic_reject() {
                 expected_sequence: 7,
                 events: vec![],
                 key_rows: None,
+                vector_rows: Vec::new(),
+                reconcile_vectors: false,
             }])
             .await
             .unwrap();
@@ -539,6 +547,8 @@ fn entity_key_index_present_absent_and_atomic_reject() {
                 expected_sequence: 1,
                 events: vec![test_envelope("ExternalAudit", serde_json::json!({}))],
                 key_rows: None,
+                vector_rows: Vec::new(),
+                reconcile_vectors: false,
             }])
             .await
             .unwrap();
@@ -556,6 +566,8 @@ fn entity_key_index_present_absent_and_atomic_reject() {
                 expected_sequence: 2,
                 events: vec![test_envelope("KeyRemoved", serde_json::json!({}))],
                 key_rows: Some(Vec::new()),
+                vector_rows: Vec::new(),
+                reconcile_vectors: false,
             }])
             .await
             .unwrap();

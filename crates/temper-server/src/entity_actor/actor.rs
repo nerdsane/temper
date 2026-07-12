@@ -446,6 +446,8 @@ impl EntityActor {
                 expected_sequence: state.sequence_nr,
                 events: vec![envelope],
                 key_rows: Some(key_rows),
+                vector_rows,
+                reconcile_vectors,
             };
             store
                 .append_batch_guarded(std::slice::from_ref(&append), guards)

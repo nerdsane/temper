@@ -140,6 +140,8 @@ async fn empty_batch_member_does_not_create_journal_segment_or_discovery_entry()
             expected_sequence: 7,
             events: vec![],
             key_rows: None,
+            vector_rows: Vec::new(),
+            reconcile_vectors: false,
         }])
         .await
         .unwrap();
@@ -160,6 +162,8 @@ async fn batch_append_updates_segment_metadata_for_every_stream() {
         expected_sequence: 0,
         events: vec![test_envelope(0, "Created"), test_envelope(0, "Updated")],
         key_rows: None,
+        vector_rows: Vec::new(),
+        reconcile_vectors: false,
     });
 
     store.append_batch(&appends).await.unwrap();
@@ -220,12 +224,16 @@ async fn append_batch_commits_multiple_journals_atomically() {
             expected_sequence: 0,
             events: vec![test_envelope(0, "Created")],
             key_rows: None,
+            vector_rows: Vec::new(),
+            reconcile_vectors: false,
         },
         PersistenceAppend {
             persistence_id: "default:Order:ord-b".to_string(),
             expected_sequence: 0,
             events: vec![test_envelope(0, "Created"), test_envelope(0, "Submitted")],
             key_rows: None,
+            vector_rows: Vec::new(),
+            reconcile_vectors: false,
         },
     ];
 
@@ -267,12 +275,16 @@ async fn append_batch_conflict_leaves_all_journals_untouched() {
                 expected_sequence: 0,
                 events: vec![test_envelope(0, "Created")],
                 key_rows: None,
+                vector_rows: Vec::new(),
+                reconcile_vectors: false,
             },
             PersistenceAppend {
                 persistence_id: "default:Order:ord-existing".to_string(),
                 expected_sequence: 0,
                 events: vec![test_envelope(0, "Submitted")],
                 key_rows: None,
+                vector_rows: Vec::new(),
+                reconcile_vectors: false,
             },
         ])
         .await
@@ -307,6 +319,8 @@ async fn guarded_append_checks_context_and_target_in_one_commit() {
         expected_sequence: 0,
         events: vec![test_envelope(0, "FieldsPatched")],
         key_rows: None,
+        vector_rows: Vec::new(),
+        reconcile_vectors: false,
     };
 
     let error = store

@@ -694,6 +694,8 @@ impl EventStore for RedisEventStore {
 }
 
 #[cfg(test)]
+mod recovery_test;
+#[cfg(test)]
 mod sequence_test;
 #[cfg(test)]
 mod tests;

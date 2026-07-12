@@ -230,11 +230,11 @@ pub(super) async fn hydrate_entities(state: &PlatformState, apps: &[(String, Str
         let tenant_id = TenantId::new(tenant.as_str());
         if eager_hydrate {
             if let Err(error) = state.server.hydrate_from_store(&tenant_id).await {
-                eprintln!("  Warning: failed to hydrate entities for {tenant_id}: {error}");
+                tracing::warn!(%tenant_id, %error, "failed to hydrate entities");
             }
         } else {
             if let Err(error) = state.server.populate_index_from_store(&tenant_id).await {
-                eprintln!("  Warning: failed to populate entity index for {tenant_id}: {error}");
+                tracing::warn!(%tenant_id, %error, "failed to populate entity index");
             }
         }
         all_tenants.push(tenant_id);
@@ -250,13 +250,11 @@ pub(super) async fn hydrate_entities(state: &PlatformState, apps: &[(String, Str
             let tenant_id = TenantId::new(&tenant);
             if eager_hydrate {
                 if let Err(error) = state.server.hydrate_from_store(&tenant_id).await {
-                    eprintln!("  Warning: failed to hydrate entities for {tenant_id}: {error}");
+                    tracing::warn!(%tenant_id, %error, "failed to hydrate entities");
                 }
             } else {
                 if let Err(error) = state.server.populate_index_from_store(&tenant_id).await {
-                    eprintln!(
-                        "  Warning: failed to populate entity index for {tenant_id}: {error}"
-                    );
+                    tracing::warn!(%tenant_id, %error, "failed to populate entity index");
                 }
             }
             all_tenants.push(tenant_id);
@@ -293,16 +291,20 @@ pub(super) async fn hydrate_entities(state: &PlatformState, apps: &[(String, Str
                         break;
                     }
                     Err(error) => {
-                        eprintln!(
-                            "  Warning: query projection backfill attempt {attempt}/3 failed for {tenant_id}: {error}"
+                        tracing::warn!(
+                            %tenant_id,
+                            %error,
+                            attempt,
+                            "query projection backfill attempt failed"
                         );
                         tokio::task::yield_now().await;
                     }
                 }
             }
             if !completed {
-                eprintln!(
-                    "  Error: query projection backfill remains incomplete for {tenant_id}; health is degraded and a later restart must retry"
+                tracing::error!(
+                    %tenant_id,
+                    "query projection backfill remains incomplete; health is degraded and a later restart must retry"
                 );
             }
         }
