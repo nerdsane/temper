@@ -17,6 +17,8 @@ use temper_server::request_context::AgentContext;
 use temper_server::trigger::registry::parse_reactions;
 use temper_spec::csdl::parse_csdl;
 
+const REACTION_E2E_SERVICE: &str = "reaction-e2e-prod-test";
+
 const CSDL_XML: &str = r#"<?xml version="1.0" encoding="utf-8"?>
 <edmx:Edmx Version="4.0" xmlns:edmx="http://docs.oasis-open.org/odata/ns/edmx">
   <edmx:DataServices>
@@ -119,6 +121,31 @@ fn build_state(tenant: &str, reactions_toml: &str) -> ServerState {
 
     let system = ActorSystem::new("reaction-e2e-prod");
     let state = ServerState::from_registry(system, registry);
+    state
+        .authz
+        .reload_tenant_policies(
+            tenant,
+            r#"
+                permit(
+                  principal == Agent::"service:reaction-e2e-prod-test",
+                  action in [
+                    Action::"AddItem",
+                    Action::"SubmitOrder",
+                    Action::"ConfirmOrder"
+                  ],
+                  resource is Order
+                );
+                permit(
+                  principal == Agent::"service:reaction-e2e-prod-test",
+                  action in [
+                    Action::"AuthorizePayment",
+                    Action::"FailPayment"
+                  ],
+                  resource is Payment
+                );
+                "#,
+        )
+        .expect("reaction E2E policy should load");
     state.rebuild_reaction_dispatcher();
     state
 }
@@ -138,7 +165,7 @@ async fn dispatch(
             entity_id,
             action,
             params,
-            &AgentContext::default(),
+            &AgentContext::for_service(REACTION_E2E_SERVICE),
         )
         .await
         .unwrap_or_else(|e| panic!("dispatch {entity_type}.{action} failed: {e}"))
