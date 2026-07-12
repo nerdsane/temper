@@ -1,4 +1,4 @@
-# ADR-0162: LLMObs content export is opt-in (ARN-243)
+# ADR-0165: LLMObs content export is opt-in (ARN-243)
 
 - Status: Accepted
 - Date: 2026-07-12
