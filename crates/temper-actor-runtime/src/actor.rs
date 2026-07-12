@@ -138,12 +138,22 @@ impl ActorContext {
 
     /// Grant cross-namespace load/upsert for the named namespaces (ARN-215).
     ///
-    /// Own namespace is always allowed. Grants are additive and must be set by
-    /// the runtime/tool layer before cross-namespace access — not by guest data.
+    /// Own namespace is always allowed. Grants are additive.
+    ///
+    /// # Security contract
+    ///
+    /// Callers must only grant namespaces that have already been validated as
+    /// in-tenant and free of path traversal. Untrusted payload strings (e.g.
+    /// user-supplied `process_id`) must be validated before calling this method
+    /// — see `temper-agents` process-id checks. This is a trusted runtime/tool
+    /// privilege, not a guest-facing capability; handlers must never pass
+    /// attacker-controlled namespace strings through without validation.
     pub fn grant_cross_namespace(&self, namespace: impl Into<String>) {
-        if let Ok(mut grants) = self.cross_namespace_grants.lock() {
-            grants.insert(namespace.into());
-        }
+        // Recover poison so a prior panic does not silently drop later grants.
+        self.cross_namespace_grants
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .insert(namespace.into());
     }
 
     /// This actor's own address.
@@ -159,8 +169,8 @@ impl ActorContext {
         let granted = self
             .cross_namespace_grants
             .lock()
-            .map(|g| g.contains(namespace))
-            .unwrap_or(false);
+            .unwrap_or_else(|e| e.into_inner())
+            .contains(namespace);
         if granted {
             return Ok(());
         }

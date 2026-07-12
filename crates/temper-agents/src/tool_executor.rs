@@ -258,8 +258,11 @@ async fn dispatch_builtin(
 
             // If the caller provided a child_id, check child state directly first.
             if let Some(child_id) = input["child_id"].as_str().filter(|s| !s.is_empty()) {
+                if let Err(msg) = validate_process_id(child_id) {
+                    return format!("error: {msg}");
+                }
                 let child_ns = format!("{tenant}/{child_id}");
-                // ARN-215: sibling Process rows require an explicit namespace grant.
+                // ARN-215: only after validating id is a single path segment under self tenant.
                 ctx.grant_cross_namespace(child_ns.clone());
                 if let Some(child_state) = ctx
                     .load_actor_state(&child_ns, "Process")
@@ -356,11 +359,39 @@ async fn dispatch_builtin(
     }
 }
 
+/// Reject path traversal / multi-segment process ids before any grant (ARN-215).
+///
+/// Cross-namespace access is only granted for `{self_tenant}/{process_id}` where
+/// `process_id` is a single non-empty segment (no `/`, `\`, or `..`).
+fn validate_process_id(process_id: &str) -> Result<(), String> {
+    if process_id.is_empty() {
+        return Err("process_id must not be empty".to_string());
+    }
+    if process_id.contains('/') || process_id.contains('\\') || process_id.contains("..") {
+        return Err("process_id must not contain path separators or '..'".to_string());
+    }
+    if !process_id
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_' || c == '.')
+    {
+        return Err("process_id has invalid characters".to_string());
+    }
+    Ok(())
+}
+
 async fn get_process_state(ctx: &ActorContext, process_id: &str, output_only: bool) -> String {
+    if let Err(msg) = validate_process_id(process_id) {
+        return format!("error: {msg}");
+    }
     let ns = ctx.self_handle().namespace.clone();
     let tenant = ns.split('/').next().unwrap_or("default");
+    // Always bind to the caller's tenant prefix — never accept a foreign tenant.
     let target_ns = format!("{tenant}/{process_id}");
-    // ARN-215: cross-namespace Process read requires an explicit grant.
+    debug_assert!(
+        target_ns.starts_with(&format!("{tenant}/")) && !target_ns[tenant.len() + 1..].contains('/'),
+        "target namespace must be a direct child of self tenant"
+    );
+    // ARN-215: grant only after validation; capability is same-tenant process lookup.
     ctx.grant_cross_namespace(target_ns.clone());
     let Some(state) = ctx
         .load_actor_state(&target_ns, "Process")
