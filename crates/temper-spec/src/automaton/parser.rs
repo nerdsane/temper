@@ -712,6 +712,7 @@ fn validate_vector_decls(automaton: &Automaton) -> Result<(), AutomatonParseErro
             ("name", &vec_decl.name),
             ("property", &vec_decl.property),
             ("model_property", &vec_decl.model_property),
+            ("metric", &vec_decl.metric),
         ] {
             if ident.len() > MAX_VECTOR_IDENT_LEN {
                 return Err(AutomatonParseError::Validation(format!(
