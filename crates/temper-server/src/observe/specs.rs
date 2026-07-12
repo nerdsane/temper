@@ -12,6 +12,7 @@ use super::{ActionDetail, InvariantDetail, SpecDetail, SpecSummary, StateVarDeta
 
 mod load_dir;
 mod load_inline;
+mod paths;
 mod types;
 mod validate_ioa;
 mod verification_stream;
