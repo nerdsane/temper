@@ -1,4 +1,4 @@
-# ADR-0160: Guest memory validate-before-allocate (ARN-226)
+# ADR-0163: Guest memory validate-before-allocate (ARN-226)
 
 - Status: Accepted
 - Date: 2026-07-12

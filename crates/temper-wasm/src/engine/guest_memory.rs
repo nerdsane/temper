@@ -1,4 +1,4 @@
-//! Guest memory range validation before host allocation (ADR-0160 / ARN-226).
+//! Guest memory range validation before host allocation (ADR-0163 / ARN-226).
 //!
 //! All guest→host copies must prove signedness, range, and remaining budget
 //! **before** allocating a host buffer.

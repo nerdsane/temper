@@ -108,7 +108,7 @@ fn read_guest_string(caller: &mut Caller<'_, HostState>, ptr: i32, len: i32) -> 
 
 /// Read `len` bytes of guest memory at `ptr`.
 ///
-/// ADR-0160 / ARN-226: validates signedness, range, and aggregate copy budget
+/// ADR-0163 / ARN-226: validates signedness, range, and aggregate copy budget
 /// **before** allocating a host buffer.
 fn read_guest_bytes(
     caller: &mut Caller<'_, HostState>,
