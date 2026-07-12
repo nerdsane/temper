@@ -39,9 +39,11 @@ With `dims` bounded at verification and the row count already bounded by ADR-015
 `candidate_budget`, the query's bytes and dot-product operations are bounded by
 construction: `work ≤ candidate_budget × MAX_VECTOR_DIMS`, both explicit
 constants. This also bounds the blobs materialized before the row-count check —
-each candidate blob is now at most `MAX_VECTOR_DIMS × 4` bytes — so the "stores
-materialize each full blob before the count is checked" concern is closed without
-changing the query path. A separate per-query element budget was considered but
+each candidate blob is at most `MAX_VECTOR_DIMS × 4` bytes, because the write path
+only ever indexes an exactly-`dims`-length vector (`parse_vector_property(v, dims)`
+rejects any other length in `crates/temper-server/src/vector_index.rs`) — so the
+"stores materialize each full blob before the count is checked" concern is closed
+without changing the query path. A separate per-query element budget was considered but
 rejected (below) as redundant and risk-prone to size.
 
 ## Consequences
