@@ -751,7 +751,7 @@ impl EventStore for TenantStoreRouter {
         events: &[PersistenceEnvelope],
         key_rows: &[temper_runtime::persistence::EntityKeyRow],
         vector_rows: &[temper_runtime::persistence::EntityVectorRow],
-        reconcile_vectors: bool,
+        reconciliation: temper_runtime::persistence::IndexReconciliation,
     ) -> Result<u64, PersistenceError> {
         let (tenant, _, _) =
             parse_persistence_id_parts(persistence_id).map_err(PersistenceError::Storage)?;
@@ -763,7 +763,7 @@ impl EventStore for TenantStoreRouter {
                 events,
                 key_rows,
                 vector_rows,
-                reconcile_vectors,
+                reconciliation,
             )
             .await
     }

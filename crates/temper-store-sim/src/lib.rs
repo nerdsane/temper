@@ -354,8 +354,15 @@ impl EventStore for SimEventStore {
         expected_sequence: u64,
         events: &[PersistenceEnvelope],
     ) -> Result<u64, PersistenceError> {
-        self.append_with_index_rows(persistence_id, expected_sequence, events, &[], &[], false)
-            .await
+        self.append_with_index_rows(
+            persistence_id,
+            expected_sequence,
+            events,
+            &[],
+            &[],
+            temper_runtime::persistence::IndexReconciliation::default(),
+        )
+        .await
     }
 
     async fn append_with_index_rows(
@@ -365,7 +372,7 @@ impl EventStore for SimEventStore {
         events: &[PersistenceEnvelope],
         key_rows: &[temper_runtime::persistence::EntityKeyRow],
         vector_rows: &[EntityVectorRow],
-        reconcile_vectors: bool,
+        reconciliation: temper_runtime::persistence::IndexReconciliation,
     ) -> Result<u64, PersistenceError> {
         let append_delay = {
             let mut inner = self
@@ -528,20 +535,28 @@ impl EventStore for SimEventStore {
         // the journal write above (uniqueness was validated before the journal, so
         // this only mutates — never fails). A keyed read is therefore consistent
         // with the journal: the negative-existence access path.
-        if !key_rows.is_empty() {
+        if reconciliation.keys || !key_rows.is_empty() {
             let mut parts = persistence_id.splitn(3, ':');
             let tenant = parts.next().unwrap_or("");
             let entity_type = parts.next().unwrap_or("");
             let entity_id = parts.next().unwrap_or("");
-            for row in key_rows {
-                // Drop the entity's prior row for this key_name (the value may have
-                // changed), then claim the new (key_name, key_hash) -> entity_id.
-                inner.key_index.retain(|(t, et, kn, _), eid| {
+            if reconciliation.keys {
+                inner.key_index.retain(|(t, et, _, _), eid| {
                     !(t.as_str() == tenant
                         && et.as_str() == entity_type
-                        && kn.as_str() == row.key_name.as_str()
                         && eid.as_str() == entity_id)
                 });
+            }
+            for row in key_rows {
+                if !reconciliation.keys {
+                    // Legacy partial-key callers replace only the provided key name.
+                    inner.key_index.retain(|(t, et, kn, _), eid| {
+                        !(t.as_str() == tenant
+                            && et.as_str() == entity_type
+                            && kn.as_str() == row.key_name.as_str()
+                            && eid.as_str() == entity_id)
+                    });
+                }
                 inner.key_index.insert(
                     (
                         tenant.to_string(),
@@ -560,7 +575,7 @@ impl EventStore for SimEventStore {
         // the current ones — so a delete transition or a cleared vector/model
         // property (empty `vector_rows`) purges the stale rows instead of leaving
         // them to rank forever. No uniqueness constraint — vectors are derived state.
-        if reconcile_vectors {
+        if reconciliation.vectors {
             let mut parts = persistence_id.splitn(3, ':');
             let tenant = parts.next().unwrap_or("");
             let entity_type = parts.next().unwrap_or("");

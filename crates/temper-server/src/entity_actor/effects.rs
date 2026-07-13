@@ -223,6 +223,18 @@ pub fn process_action_with_xref_and_field_mode(
     cross_entity_booleans: &std::collections::BTreeMap<String, bool>,
     field_sync_mode: FieldSyncMode,
 ) -> ProcessResult {
+    if let Err(error) = super::validate_domain_action_name(action) {
+        return ProcessResult {
+            success: false,
+            event: None,
+            custom_effects: vec![],
+            scheduled_actions: vec![],
+            spawn_requests: vec![],
+            overflow_blobs: vec![],
+            error: Some(error),
+        };
+    }
+
     if state.events_since_snapshot >= MAX_EVENTS_SINCE_SNAPSHOT {
         return ProcessResult {
             success: false,
@@ -1028,6 +1040,39 @@ to = "Closed"
         assert!(!result.success);
         let error = result.error.expect("rejection must carry an error");
         assert_eq!(error, "Action 'Close' not valid from state 'Draft'");
+    }
+
+    #[test]
+    fn shared_action_core_rejects_reserved_field_update_event_name() {
+        let _guard = temper_runtime::scheduler::install_deterministic_context(189);
+        let spec = r#"
+[automaton]
+name = "ReservedAction"
+states = ["Draft", "Updated"]
+initial = "Draft"
+
+[[action]]
+name = "$temper.entity.fields-updated.v1"
+kind = "input"
+from = ["Draft"]
+to = "Updated"
+"#;
+        let table = TransitionTable::from_ioa_source(spec);
+        let mut state = test_state("ReservedAction", "Draft");
+
+        let result = process_action_with_xref_and_field_mode(
+            &mut state,
+            &table,
+            crate::entity_actor::FIELD_UPDATE_EVENT_TYPE,
+            &serde_json::json!({}),
+            &std::collections::BTreeMap::new(),
+            FieldSyncMode::InlineTruncate,
+        );
+
+        assert!(!result.success);
+        assert!(result.event.is_none());
+        assert_eq!(state.status, "Draft");
+        assert_eq!(state.total_event_count, 0);
     }
 
     #[test]

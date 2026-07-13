@@ -35,6 +35,7 @@ use temper_runtime::scheduler::{sim_now, sim_uuid};
 
 use crate::storage::{BackendLabel, BoxedEventStore};
 
+use super::FIELD_UPDATE_EVENT_TYPE;
 use super::effects::{
     FieldSyncMode, build_eval_context_with_xref, process_action_with_xref_and_field_mode,
     prune_transient_action_fields_from_state,
@@ -44,6 +45,10 @@ use super::types::{
     EntityEvent, EntityMsg, EntityResponse, EntityState, MAX_EVENTS_SINCE_SNAPSHOT,
     MAX_ITEMS_PER_ENTITY,
 };
+
+mod field_updates;
+
+const FIELD_UPDATE_RETRY_BUDGET: usize = 2;
 
 fn event_budget_workspace_id(state: &EntityState) -> String {
     if state.entity_type == "Workspace" {
@@ -354,8 +359,9 @@ impl EntityActor {
         // ADR-0153/0155: derive the declared key rows AND the vector-index rows from
         // the new state and co-commit them with the journal append, so a keyed read
         // is correct without a scan and a kNN read reflects the write deterministically.
-        let (key_rows, vector_rows, reconcile_vectors) = {
+        let (key_rows, reconcile_keys, vector_rows, reconcile_vectors) = {
             let table = self.table.read().expect("table lock poisoned");
+            let reconcile_keys = !table.keys.is_empty();
             // The type declares vector paths → the store reconciles this entity's
             // vector rows (delete stale + insert current) even when no row is emitted
             // this write (a delete transition or a cleared property), so stale rows are
@@ -364,7 +370,7 @@ impl EntityActor {
             let mut key_rows = Vec::new();
             let mut vector_rows = Vec::new();
             if let Some(field_map) = state.fields.as_object() {
-                for key in &table.keys {
+                for key in table.keys.iter().filter(|_| state.status != "Deleted") {
                     if let Some(hash) =
                         crate::key_index::canonical_key_hash(&key.name, &key.properties, field_map)
                     {
@@ -403,7 +409,7 @@ impl EntityActor {
                     });
                 }
             }
-            (key_rows, vector_rows, reconcile_vectors)
+            (key_rows, reconcile_keys, vector_rows, reconcile_vectors)
         };
         let append_start = Instant::now();
         let result = store
@@ -413,7 +419,10 @@ impl EntityActor {
                 &[envelope],
                 &key_rows,
                 &vector_rows,
-                reconcile_vectors,
+                temper_runtime::persistence::IndexReconciliation {
+                    keys: reconcile_keys,
+                    vectors: reconcile_vectors,
+                },
             )
             .await;
         crate::runtime_metrics::record_event_store_append_wait(
@@ -430,7 +439,7 @@ impl EntityActor {
             Err(e) => {
                 tracing::error!(
                     entity = %state.entity_id, error = %e,
-                    "failed to persist event — state advanced but not durable"
+                    "failed to persist event"
                 );
                 Err(e)
             }
@@ -563,6 +572,30 @@ impl EntityActor {
                     }
 
                     let parsed_event = serde_json::from_value::<EntityEvent>(env.payload.clone());
+
+                    if env.event_type == FIELD_UPDATE_EVENT_TYPE {
+                        match parsed_event {
+                            Ok(event) => match Self::apply_field_update_event(state, &event) {
+                                Ok(()) => state.push_event_bounded(event),
+                                Err(error) => tracing::warn!(
+                                    entity = %state.entity_id,
+                                    event_id = %env.metadata.event_id,
+                                    sequence_nr = env.sequence_nr,
+                                    error,
+                                    "skipping malformed field update during replay"
+                                ),
+                            },
+                            Err(error) => tracing::warn!(
+                                entity = %state.entity_id,
+                                event_id = %env.metadata.event_id,
+                                sequence_nr = env.sequence_nr,
+                                error = %error,
+                                "skipping field update with incompatible schema during replay"
+                            ),
+                        }
+                        state.sequence_nr = env.sequence_nr;
+                        continue;
+                    }
 
                     // Tombstone is terminal: once deleted, entity must not replay
                     // into a live state. Stop at the first Deleted event.
@@ -1420,29 +1453,18 @@ impl Actor for EntityActor {
                 ctx.reply(value);
             }
             EntityMsg::UpdateFields { fields, replace } => {
-                if replace {
-                    // PUT: replace all fields (preserve Id and Status)
-                    let id = state.entity_id.clone();
-                    let status = state.status.clone();
-                    state.fields = fields;
-                    if let Some(obj) = state.fields.as_object_mut() {
-                        obj.insert("Id".to_string(), serde_json::Value::String(id));
-                        obj.insert("Status".to_string(), serde_json::Value::String(status));
+                let committed = self.commit_field_update(state, &fields, replace).await;
+                let (success, error) = match committed {
+                    Ok(committed) => {
+                        *state = committed;
+                        (true, None)
                     }
-                } else {
-                    // PATCH: merge fields into existing
-                    if let (Some(existing), Some(updates)) =
-                        (state.fields.as_object_mut(), fields.as_object())
-                    {
-                        for (k, v) in updates {
-                            existing.insert(k.clone(), v.clone());
-                        }
-                    }
-                }
+                    Err(error) => (false, Some(error)),
+                };
                 ctx.reply(EntityResponse {
-                    success: true,
+                    success,
                     state: state.clone(),
-                    error: None,
+                    error,
                     custom_effects: vec![],
                     scheduled_actions: vec![],
                     spawn_requests: vec![],

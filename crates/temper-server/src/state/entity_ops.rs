@@ -1365,9 +1365,14 @@ impl ServerState {
         .result
         .map_err(|e| format!("Actor update failed: {e}"))?;
 
-        if response.success
-            && let Some(query_plane) = self.query_plane_store()
-        {
+        if !response.success {
+            return Err(response
+                .error
+                .clone()
+                .unwrap_or_else(|| "Actor field update failed".to_string()));
+        }
+
+        if let Some(query_plane) = self.query_plane_store() {
             let status = response.state.status.clone();
             let fields = self.query_projection_fields(tenant, entity_type, &response.state.fields);
             let projected_state = self.query_projection_state(&response.state);

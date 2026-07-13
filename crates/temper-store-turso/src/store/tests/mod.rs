@@ -2,12 +2,17 @@
 
 use libsql::params;
 use temper_runtime::persistence::{
-    EntityVectorRow, EventMetadata, EventStore, PersistenceAppend, PersistenceEnvelope,
-    PersistenceError,
+    EntityVectorRow, EventMetadata, EventStore, IndexReconciliation, PersistenceAppend,
+    PersistenceEnvelope, PersistenceError,
 };
 
 use super::{PublishedArtifactUpsert, QueryProjectionUpsert, TursoEventStore};
 use crate::TursoSpecVerificationUpdate;
+
+const VECTOR_RECONCILIATION: IndexReconciliation = IndexReconciliation {
+    keys: false,
+    vectors: true,
+};
 
 fn test_envelope(event_type: &str, payload: serde_json::Value) -> PersistenceEnvelope {
     PersistenceEnvelope {
@@ -85,7 +90,7 @@ async fn vector_index_write_behind_candidates_and_partitioning() {
             &[test_envelope("Create", serde_json::json!({}))],
             &[],
             &[row("embed", "m1", vec![0.0, 1.0])],
-            true,
+            VECTOR_RECONCILIATION,
         )
         .await
         .unwrap();
@@ -96,7 +101,7 @@ async fn vector_index_write_behind_candidates_and_partitioning() {
             &[test_envelope("Create", serde_json::json!({}))],
             &[],
             &[row("embed", "m1", vec![1.0, 0.0])],
-            true,
+            VECTOR_RECONCILIATION,
         )
         .await
         .unwrap();
@@ -108,7 +113,7 @@ async fn vector_index_write_behind_candidates_and_partitioning() {
             &[test_envelope("Create", serde_json::json!({}))],
             &[],
             &[row("embed", "m2", vec![1.0, 0.0])],
-            true,
+            VECTOR_RECONCILIATION,
         )
         .await
         .unwrap();
@@ -172,7 +177,7 @@ async fn vector_index_reconcile_purges_on_delete_and_empty_rows() {
             &[test_envelope("Create", serde_json::json!({}))],
             &[],
             std::slice::from_ref(&row(vec![1.0, 0.0])),
-            true,
+            VECTOR_RECONCILIATION,
         )
         .await
         .unwrap();
@@ -192,7 +197,7 @@ async fn vector_index_reconcile_purges_on_delete_and_empty_rows() {
             &[test_envelope("Delete", serde_json::json!({}))],
             &[],
             &[],
-            true,
+            VECTOR_RECONCILIATION,
         )
         .await
         .unwrap();

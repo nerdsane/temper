@@ -13,7 +13,9 @@ use std::time::Duration;
 
 use temper_jit::table::TransitionTable;
 use temper_runtime::ActorSystem;
-use temper_runtime::scheduler::install_deterministic_context;
+use temper_runtime::persistence::{EventMetadata, EventStore, PersistenceEnvelope};
+use temper_runtime::scheduler::{install_deterministic_context, sim_now, sim_uuid};
+use temper_server::key_index::canonical_key_hash;
 use temper_server::storage::{BackendLabel, BoxedEventStore};
 use temper_server::{EntityActor, EntityMsg, EntityResponse};
 use temper_store_sim::{SimEventStore, SimFaultConfig};
@@ -27,6 +29,18 @@ fn order_table() -> Arc<RwLock<TransitionTable>> {
 
 fn sim_store(seed: u64) -> BoxedEventStore {
     BoxedEventStore::new(SimEventStore::no_faults(seed))
+}
+
+fn order_key_hash(workspace: &str, path: &str) -> String {
+    canonical_key_hash(
+        "ws_path",
+        &["WorkspaceId".to_string(), "Path".to_string()],
+        &serde_json::Map::from_iter([
+            ("WorkspaceId".to_string(), serde_json::json!(workspace)),
+            ("Path".to_string(), serde_json::json!(path)),
+        ]),
+    )
+    .expect("complete order key")
 }
 
 async fn dispatch_action(
@@ -434,7 +448,9 @@ async fn dst_patch_only_fields_survive_actor_replacement() {
                 table.clone(),
                 serde_json::json!({
                     "Title": "before-patch",
-                    "StableField": "preserved"
+                    "StableField": "preserved",
+                    "WorkspaceId": "ws-patch",
+                    "Path": "/before"
                 }),
                 store.clone(),
                 BackendLabel::Sim,
@@ -446,7 +462,8 @@ async fn dst_patch_only_fields_survive_actor_replacement() {
                 &actor_ref,
                 serde_json::json!({
                     "Title": "after-patch",
-                    "Priority": "High"
+                    "Priority": "High",
+                    "Path": "/after"
                 }),
                 false,
             )
@@ -458,10 +475,81 @@ async fn dst_patch_only_fields_survive_actor_replacement() {
             );
             assert_eq!(patched.state.fields["Title"], "after-patch");
             assert_eq!(patched.state.fields["Priority"], "High");
+            assert_eq!(
+                store
+                    .lookup_by_key(
+                        "default",
+                        "Order",
+                        "ws_path",
+                        &order_key_hash("ws-patch", "/before"),
+                    )
+                    .await
+                    .expect("old key lookup should succeed"),
+                None,
+                "seed {seed}: old declared-key projection was not removed"
+            );
+            assert_eq!(
+                store
+                    .lookup_by_key(
+                        "default",
+                        "Order",
+                        "ws_path",
+                        &order_key_hash("ws-patch", "/after"),
+                    )
+                    .await
+                    .expect("new key lookup should succeed"),
+                Some(entity_id.clone()),
+                "seed {seed}: PATCH did not co-commit its declared-key projection"
+            );
         }
 
-        let (_guard2, _clock2, _id_gen2) = install_deterministic_context(seed + 10_000);
-        let system = ActorSystem::new("dst-patch-only-2");
+        {
+            let (_guard2, _clock2, _id_gen2) = install_deterministic_context(seed + 10_000);
+            let system = ActorSystem::new("dst-patch-only-2");
+            let actor = EntityActor::with_persistence(
+                "Order",
+                &entity_id,
+                table.clone(),
+                serde_json::json!({}),
+                store.clone(),
+                BackendLabel::Sim,
+            )
+            .with_tenant("default");
+            let actor_ref = system.spawn(actor, format!("{entity_id}-replacement"));
+
+            let replayed = get_state(&actor_ref).await;
+            assert_eq!(
+                replayed.state.fields["Title"], "after-patch",
+                "seed {seed}: acknowledged PATCH was lost after actor replacement"
+            );
+            assert_eq!(
+                replayed.state.fields["Priority"], "High",
+                "seed {seed}: PATCH-only field was lost after actor replacement"
+            );
+            assert_eq!(replayed.state.fields["StableField"], "preserved");
+
+            let replaced =
+                update_fields(&actor_ref, serde_json::json!({"Title": "after-put"}), true).await;
+            assert!(replaced.success, "seed {seed}: PUT failed");
+            assert!(replaced.state.fields.get("Priority").is_none());
+            assert!(replaced.state.fields.get("StableField").is_none());
+            assert_eq!(
+                store
+                    .lookup_by_key(
+                        "default",
+                        "Order",
+                        "ws_path",
+                        &order_key_hash("ws-patch", "/after"),
+                    )
+                    .await
+                    .expect("removed key lookup should succeed"),
+                None,
+                "seed {seed}: PUT left a stale declared-key projection"
+            );
+        }
+
+        let (_guard3, _clock3, _id_gen3) = install_deterministic_context(seed + 20_000);
+        let system = ActorSystem::new("dst-patch-only-3");
         let actor = EntityActor::with_persistence(
             "Order",
             &entity_id,
@@ -471,18 +559,27 @@ async fn dst_patch_only_fields_survive_actor_replacement() {
             BackendLabel::Sim,
         )
         .with_tenant("default");
-        let actor_ref = system.spawn(actor, format!("{entity_id}-replacement"));
-
+        let actor_ref = system.spawn(actor, format!("{entity_id}-put-replacement"));
         let replayed = get_state(&actor_ref).await;
-        assert_eq!(
-            replayed.state.fields["Title"], "after-patch",
-            "seed {seed}: acknowledged PATCH was lost after actor replacement"
+        assert_eq!(replayed.state.fields["Title"], "after-put");
+        assert!(
+            replayed.state.fields.get("Priority").is_none(),
+            "seed {seed}: PUT replay resurrected a removed PATCH field"
         );
+        assert!(replayed.state.fields.get("StableField").is_none());
         assert_eq!(
-            replayed.state.fields["Priority"], "High",
-            "seed {seed}: PATCH-only field was lost after actor replacement"
+            store
+                .lookup_by_key(
+                    "default",
+                    "Order",
+                    "ws_path",
+                    &order_key_hash("ws-patch", "/after"),
+                )
+                .await
+                .expect("replayed removed key lookup should succeed"),
+            None,
+            "seed {seed}: stale key returned after PUT replay"
         );
-        assert_eq!(replayed.state.fields["StableField"], "preserved");
     }
 }
 
@@ -534,4 +631,132 @@ async fn dst_field_update_fails_closed_when_journal_append_fails() {
     let live = get_state(&actor_ref).await;
     assert_eq!(live.state.fields["Title"], "durable-before");
     assert_eq!(live.state.sequence_nr, sequence_before);
+}
+
+#[tokio::test]
+async fn dst_field_update_retries_after_concurrency_violation() {
+    let (_guard, _clock, _id_gen) = install_deterministic_context(18_900);
+    let store_inner = SimEventStore::no_faults(18_900);
+    let store = BoxedEventStore::new(store_inner.clone());
+    let table = order_table();
+    let entity_id = "ord-field-concurrency";
+    let persistence_id = format!("default:Order:{entity_id}");
+
+    {
+        let system = ActorSystem::new("dst-field-update-concurrency-1");
+        let actor = EntityActor::with_persistence(
+            "Order",
+            entity_id,
+            table.clone(),
+            serde_json::json!({"Title": "before-retry"}),
+            store.clone(),
+            BackendLabel::Sim,
+        )
+        .with_tenant("default");
+        let actor_ref = system.spawn(actor, entity_id);
+        let before = get_state(&actor_ref).await;
+        assert_eq!(before.state.sequence_nr, 1);
+
+        store_inner
+            .append(
+                &persistence_id,
+                1,
+                &[PersistenceEnvelope {
+                    sequence_nr: 2,
+                    event_type: "AddItem".to_string(),
+                    payload: serde_json::json!({
+                        "action": "AddItem",
+                        "from_status": "Draft",
+                        "to_status": "Draft",
+                        "timestamp": sim_now(),
+                        "params": {"ProductId": "concurrent-item"}
+                    }),
+                    metadata: EventMetadata {
+                        event_id: sim_uuid(),
+                        causation_id: sim_uuid(),
+                        correlation_id: sim_uuid(),
+                        timestamp: sim_now(),
+                        actor_id: persistence_id.clone(),
+                    },
+                }],
+            )
+            .await
+            .expect("concurrent action should advance authoritative history");
+        let response = update_fields(
+            &actor_ref,
+            serde_json::json!({"Title": "after-retry"}),
+            false,
+        )
+        .await;
+        assert!(
+            response.success,
+            "field update retry failed: {:?}",
+            response.error
+        );
+        assert_eq!(response.state.item_count, 1);
+        assert_eq!(response.state.fields["ProductId"], "concurrent-item");
+    }
+
+    let system = ActorSystem::new("dst-field-update-concurrency-2");
+    let actor = EntityActor::with_persistence(
+        "Order",
+        entity_id,
+        table,
+        serde_json::json!({}),
+        store,
+        BackendLabel::Sim,
+    )
+    .with_tenant("default");
+    let actor_ref = system.spawn(actor, "ord-field-concurrency-replacement");
+    let replayed = get_state(&actor_ref).await;
+    assert_eq!(replayed.state.fields["Title"], "after-retry");
+    assert_eq!(replayed.state.item_count, 1);
+    assert_eq!(replayed.state.fields["ProductId"], "concurrent-item");
+}
+
+#[tokio::test]
+async fn dst_reserved_field_update_event_type_cannot_be_dispatched_as_action() {
+    let (_guard, _clock, _id_gen) = install_deterministic_context(18_901);
+    let store_inner = SimEventStore::no_faults(18_901);
+    let store = BoxedEventStore::new(store_inner.clone());
+    let table = Arc::new(RwLock::new(TransitionTable::from_ioa_source(
+        r#"
+[automaton]
+name = "ReservedAction"
+states = ["Draft", "Updated"]
+initial = "Draft"
+
+[[action]]
+name = "$temper.entity.fields-updated.v1"
+kind = "input"
+from = ["Draft"]
+to = "Updated"
+"#,
+    )));
+    let system = ActorSystem::new("dst-reserved-field-update-event");
+    let actor = EntityActor::with_persistence(
+        "ReservedAction",
+        "reserved-action-1",
+        table,
+        serde_json::json!({}),
+        store,
+        BackendLabel::Sim,
+    )
+    .with_tenant("default");
+    let actor_ref = system.spawn(actor, "reserved-action-1");
+
+    let response = dispatch_action(
+        &actor_ref,
+        "$temper.entity.fields-updated.v1",
+        serde_json::json!({}),
+    )
+    .await;
+    assert!(
+        !response.success,
+        "reserved journal type must not run as an action"
+    );
+    assert_eq!(response.state.status, "Draft");
+    let journal = store_inner.dump_journal("default:ReservedAction:reserved-action-1");
+    assert_eq!(journal.len(), 1, "only the bootstrap event may be durable");
+    assert_eq!(journal[0].event_type, "Created");
 }

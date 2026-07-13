@@ -229,6 +229,9 @@ impl SimActorHandler for EntityActorHandler {
             .rules
             .iter()
             .filter(|rule| {
+                if super::validate_domain_action_name(&rule.name).is_err() {
+                    return false;
+                }
                 let state_ok = rule.from_states.is_empty()
                     || rule.from_states.iter().any(|s| s == &self.state.status);
                 if !state_ok {
@@ -309,6 +312,36 @@ mod tests {
         let result = handler.handle_message("SubmitOrder", "{}");
         assert!(result.is_err());
         assert_eq!(handler.current_status(), "Draft");
+    }
+
+    #[test]
+    fn handler_rejects_reserved_field_update_event_action() {
+        let (_guard, _clock, _id_gen) = install_deterministic_context(189);
+        let table = Arc::new(TransitionTable::from_ioa_source(
+            r#"
+[automaton]
+name = "ReservedAction"
+states = ["Draft", "Updated"]
+initial = "Draft"
+
+[[action]]
+name = "$temper.entity.fields-updated.v1"
+kind = "input"
+from = ["Draft"]
+to = "Updated"
+"#,
+        ));
+        let mut handler = EntityActorHandler::new("ReservedAction", "reserved-1", table);
+        handler.init().unwrap();
+
+        assert!(
+            handler
+                .handle_message(crate::entity_actor::FIELD_UPDATE_EVENT_TYPE, "{}")
+                .is_err()
+        );
+        assert_eq!(handler.current_status(), "Draft");
+        assert_eq!(handler.event_count(), 0);
+        assert!(handler.valid_actions().is_empty());
     }
 
     #[test]

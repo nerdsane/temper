@@ -86,7 +86,7 @@ pub trait DynEventStore: Send + Sync {
         events: &'a [PersistenceEnvelope],
         key_rows: &'a [temper_runtime::persistence::EntityKeyRow],
         vector_rows: &'a [temper_runtime::persistence::EntityVectorRow],
-        reconcile_vectors: bool,
+        reconciliation: temper_runtime::persistence::IndexReconciliation,
     ) -> EventStoreFuture<'a, Result<u64, PersistenceError>>;
 
     fn backfill_entity_vectors<'a>(
@@ -248,7 +248,7 @@ where
         events: &'a [PersistenceEnvelope],
         key_rows: &'a [temper_runtime::persistence::EntityKeyRow],
         vector_rows: &'a [temper_runtime::persistence::EntityVectorRow],
-        reconcile_vectors: bool,
+        reconciliation: temper_runtime::persistence::IndexReconciliation,
     ) -> EventStoreFuture<'a, Result<u64, PersistenceError>> {
         Box::pin(EventStore::append_with_index_rows(
             self,
@@ -257,7 +257,7 @@ where
             events,
             key_rows,
             vector_rows,
-            reconcile_vectors,
+            reconciliation,
         ))
     }
 
@@ -519,7 +519,7 @@ impl BoxedEventStore {
         events: &[PersistenceEnvelope],
         key_rows: &[temper_runtime::persistence::EntityKeyRow],
         vector_rows: &[temper_runtime::persistence::EntityVectorRow],
-        reconcile_vectors: bool,
+        reconciliation: temper_runtime::persistence::IndexReconciliation,
     ) -> Result<u64, PersistenceError> {
         self.0
             .append_with_index_rows(
@@ -528,7 +528,7 @@ impl BoxedEventStore {
                 events,
                 key_rows,
                 vector_rows,
-                reconcile_vectors,
+                reconciliation,
             )
             .await
     }

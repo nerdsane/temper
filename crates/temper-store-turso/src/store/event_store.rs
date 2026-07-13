@@ -161,7 +161,7 @@ impl EventStore for TursoEventStore {
         events: &[PersistenceEnvelope],
         _key_rows: &[temper_runtime::persistence::EntityKeyRow],
         vector_rows: &[EntityVectorRow],
-        reconcile_vectors: bool,
+        reconciliation: temper_runtime::persistence::IndexReconciliation,
     ) -> Result<u64, PersistenceError> {
         // The journal append is the durable event (keys are not maintained on Turso,
         // per the note above).
@@ -174,7 +174,7 @@ impl EventStore for TursoEventStore {
         // transient failure does not silently drop the write. On final exhaustion the
         // error is logged loudly; the partition then lags until the next backfill
         // reconcile runs. Only runs when the type declares vector paths.
-        if reconcile_vectors
+        if reconciliation.vectors
             && let Ok((tenant, entity_type, entity_id)) = parse_persistence_id_parts(persistence_id)
         {
             let total_attempts = append_max_attempts();

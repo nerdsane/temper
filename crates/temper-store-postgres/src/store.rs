@@ -63,8 +63,15 @@ impl EventStore for PostgresEventStore {
         expected_sequence: u64,
         events: &[PersistenceEnvelope],
     ) -> Result<u64, PersistenceError> {
-        self.append_with_index_rows(persistence_id, expected_sequence, events, &[], &[], false)
-            .await
+        self.append_with_index_rows(
+            persistence_id,
+            expected_sequence,
+            events,
+            &[],
+            &[],
+            temper_runtime::persistence::IndexReconciliation::default(),
+        )
+        .await
     }
 
     async fn append_with_index_rows(
@@ -74,7 +81,7 @@ impl EventStore for PostgresEventStore {
         events: &[PersistenceEnvelope],
         key_rows: &[temper_runtime::persistence::EntityKeyRow],
         vector_rows: &[EntityVectorRow],
-        reconcile_vectors: bool,
+        reconciliation: temper_runtime::persistence::IndexReconciliation,
     ) -> Result<u64, PersistenceError> {
         let (tenant, entity_type, entity_id) =
             parse_persistence_id_parts(persistence_id).map_err(PersistenceError::Storage)?;
@@ -214,21 +221,35 @@ impl EventStore for PostgresEventStore {
             .await?;
         }
 
-        // ADR-0153: co-commit the declared key-index rows in THIS transaction
-        // (uniqueness was validated above). Drop the entity's prior row for each
-        // key_name (the value may have changed), then claim the new key_hash.
-        for key in key_rows {
+        // ADR-0153/0170: co-commit the declared key-index rows in THIS transaction
+        // (uniqueness was validated above). Exact reconciliation purges every prior
+        // row even when the entity no longer has a complete declared key.
+        if reconciliation.keys {
             crate::dbm::postgres_query!(
                 "DELETE FROM entity_key_index \
-                 WHERE tenant = $1 AND entity_type = $2 AND key_name = $3 AND entity_id = $4",
+                 WHERE tenant = $1 AND entity_type = $2 AND entity_id = $3",
             )
             .bind(tenant)
             .bind(entity_type)
-            .bind(&key.key_name)
             .bind(entity_id)
             .execute(&mut *tx)
             .await
             .map_err(|e| PersistenceError::Storage(e.to_string()))?;
+        }
+        for key in key_rows {
+            if !reconciliation.keys {
+                crate::dbm::postgres_query!(
+                    "DELETE FROM entity_key_index \
+                     WHERE tenant = $1 AND entity_type = $2 AND key_name = $3 AND entity_id = $4",
+                )
+                .bind(tenant)
+                .bind(entity_type)
+                .bind(&key.key_name)
+                .bind(entity_id)
+                .execute(&mut *tx)
+                .await
+                .map_err(|e| PersistenceError::Storage(e.to_string()))?;
+            }
             crate::dbm::postgres_query!(
                 "INSERT INTO entity_key_index \
                  (tenant, entity_type, key_name, key_hash, entity_id, sequence_nr) \
@@ -251,7 +272,7 @@ impl EventStore for PostgresEventStore {
         // transition or a cleared vector/model property (empty `vector_rows`) purges
         // the stale rows instead of leaving them to rank forever. No uniqueness
         // constraint; vectors are derived ranking state.
-        if reconcile_vectors {
+        if reconciliation.vectors {
             crate::dbm::postgres_query!(
                 "DELETE FROM entity_vector_index \
                  WHERE tenant = $1 AND entity_type = $2 AND entity_id = $3",

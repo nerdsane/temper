@@ -89,6 +89,26 @@ fn entity_key_index_present_absent_and_atomic_reject() {
             Some("doc-a".to_string()),
         );
 
+        // Exact reconciliation with an empty current key set purges A's stale
+        // row in the same transaction as the replacement event.
+        store
+            .append_with_keys(
+                &pid_a,
+                1,
+                &[test_envelope("Replace", serde_json::json!({}))],
+                &[],
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            store
+                .lookup_by_key(&tenant, "Doc", "path", &key.key_hash)
+                .await
+                .unwrap(),
+            None,
+            "empty exact key set must purge the prior key row",
+        );
+
         // Clean up this test tenant's rows.
         let _ = crate::dbm::postgres_query!("DELETE FROM entity_key_index WHERE tenant = $1")
             .bind(&tenant)

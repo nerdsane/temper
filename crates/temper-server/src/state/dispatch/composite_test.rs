@@ -215,6 +215,17 @@ params = ["Reason"]
 target_entity = "Child"
 action = "Create"
 generated_from = "child"
+
+[[action]]
+name = "ApplyReservedChildAction"
+kind = "Composite"
+from = ["Active"]
+to = "Active"
+
+[[action.sub_writes]]
+target_entity = "Child"
+action = "$temper.entity.fields-updated.v1"
+generated_from = "child"
 "#;
 
 const CHILD_IOA: &str = r#"
@@ -236,6 +247,12 @@ kind = "input"
 from = ["Active"]
 to = "Deleted"
 params = []
+
+[[action]]
+name = "$temper.entity.fields-updated.v1"
+kind = "input"
+from = ["Active"]
+to = "Deleted"
 "#;
 
 const APP_IOA: &str = r#"
@@ -806,6 +823,68 @@ async fn composite_preflights_sub_write_transition_before_persisting_any_write()
         2,
         "existing target should keep only its bootstrap and original Create events"
     );
+}
+
+#[cfg(feature = "sim")]
+#[tokio::test]
+async fn composite_reserved_field_update_event_action_never_reaches_journal() {
+    let store = SimEventStore::no_faults(189);
+    let state = composite_test_state_with_store(store.clone());
+    let tenant = TenantId::default();
+    let agent = AgentContext::for_service("composite-test");
+    let persistence_id = "default:Child:child-reserved-action";
+
+    let created = state
+        .dispatch_tenant_action(
+            &tenant,
+            "Child",
+            "child-reserved-action",
+            "Create",
+            json!({"Name": "durable-before-reserved-action"}),
+            &agent,
+        )
+        .await
+        .expect("existing composite target should be created");
+    assert!(created.success);
+
+    let error = state
+        .apply_composite_integration_result(
+            &tenant,
+            "Parent",
+            "parent-reserved-action",
+            "ApplyReservedChildAction",
+            &json!({
+                "sub_writes": [{
+                    "entity_type": "Child",
+                    "entity_id": "child-reserved-action",
+                    "action": "$temper.entity.fields-updated.v1",
+                    "params": {}
+                }]
+            }),
+            &agent,
+        )
+        .await
+        .expect_err("reserved composite child action must fail before persistence")
+        .to_string();
+
+    assert!(
+        error.contains("reserved by Temper"),
+        "unexpected error: {error}"
+    );
+    assert_eq!(
+        store
+            .dump_journal(persistence_id)
+            .iter()
+            .map(|event| event.event_type.as_str())
+            .collect::<Vec<_>>(),
+        vec!["Created", "Create"],
+        "reserved child action must not append a field update event"
+    );
+    let child = state
+        .get_tenant_entity_state(&tenant, "Child", "child-reserved-action")
+        .await
+        .expect("existing child should remain readable");
+    assert_eq!(child.state.status, "Active");
 }
 
 #[cfg(feature = "sim")]

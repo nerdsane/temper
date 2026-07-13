@@ -16,6 +16,7 @@ use temper_server::registry::{
 };
 use temper_server::{ServerState, StorageStack};
 use temper_spec::csdl::parse_csdl;
+use temper_store_sim::SimFaultConfig;
 use temper_store_turso::TursoEventStore;
 use tower::ServiceExt;
 
@@ -106,6 +107,59 @@ async fn patch_json(
         .unwrap();
     let body = serde_json::from_slice(&bytes).unwrap_or(serde_json::Value::Null);
     (status, body)
+}
+
+#[tokio::test]
+async fn patch_returns_server_error_when_journal_append_fails() {
+    let (state, sim_store) = build_default_state(189, "odata-patch-append-failure");
+    let tenant = TenantId::default();
+    {
+        let mut registry = state.registry.write().unwrap();
+        registry.set_verification_status(
+            &tenant,
+            "Order",
+            VerificationStatus::Completed(EntityVerificationResult {
+                all_passed: true,
+                levels: vec![],
+                verified_at: "2026-07-13T00:00:00Z".to_string(),
+            }),
+        );
+    }
+
+    let created = dispatch(
+        &state,
+        &tenant,
+        "Order",
+        "ord-patch-append-failure",
+        "AddItem",
+        serde_json::json!({"Title": "durable-before"}),
+    )
+    .await
+    .expect("seed action should succeed");
+    assert!(created.success);
+
+    sim_store.restore_faults(SimFaultConfig {
+        write_failure_prob: 1.0,
+        ..SimFaultConfig::none()
+    });
+    let (status, body) = patch_json(
+        &state,
+        "/tdata/Orders('ord-patch-append-failure')",
+        serde_json::json!({"Title": "volatile-after"}),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::INTERNAL_SERVER_ERROR,
+        "failed journal append must not be acknowledged: {body:?}"
+    );
+
+    let current = state
+        .get_tenant_entity_state(&tenant, "Order", "ord-patch-append-failure")
+        .await
+        .expect("live entity should remain readable");
+    assert_eq!(current.state.fields["Title"], "durable-before");
+    assert_eq!(current.state.sequence_nr, created.state.sequence_nr);
 }
 
 async fn customer_json(

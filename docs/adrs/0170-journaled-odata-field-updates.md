@@ -10,6 +10,9 @@
   - `crates/temper-server/src/entity_actor/actor.rs`
   - `crates/temper-server/src/state/entity_ops.rs`
   - `crates/temper-server/src/odata/write.rs`
+  - `crates/temper-runtime/src/persistence/mod.rs`
+  - `crates/temper-store-postgres/src/store.rs`
+  - `crates/temper-store-sim/src/lib.rs`
 
 ## Context
 
@@ -42,8 +45,9 @@ the operation explicit preserves PUT replacement semantics; storing only the
 resulting object would erase the caller-visible history of how the state changed.
 
 **Why this approach**: one ordered journal remains the source of truth for
-actions, deletion, and direct OData field writes. A reserved internal event type
-cannot be confused with a declared automaton action.
+actions, deletion, and direct OData field writes. The actor rejects dispatch of
+an automaton action whose name equals the reserved event type, so ordinary action
+history cannot enter the field-update replay decoder.
 
 ### Sub-Decision 2: build a candidate state and commit it atomically
 
@@ -56,6 +60,18 @@ properties:
 2. the live actor state is replaced only after the append succeeds; and
 3. serialization, storage, and optimistic-concurrency failures leave the
    original state untouched and return a failed response.
+
+The co-commit API carries explicit `reconcile_keys` and `reconcile_vectors`
+flags. When the entity type declares keys, its candidate `key_rows` are the exact
+current set: Postgres and the simulation store delete every prior row for that
+entity before inserting the candidate rows. An empty set therefore purges stale
+keys after PUT removes key properties or deletion tombstones the entity. Stores
+that do not maintain the declared-key index continue to ignore both rows and the
+reconciliation flag.
+
+The state layer converts `EntityResponse { success: false }` into its public
+error result before OData response mapping. A failed append is therefore a 5xx,
+never an HTTP success containing an internally failed response.
 
 After append success, the actor records the event in its bounded recent history
 and runs the existing snapshot policy. Field writes consume the same bounded
@@ -98,7 +114,10 @@ maintainer later chooses to ship it.
 - PATCH merge and PUT replacement both survive actor replacement without a later
   state-machine action.
 - Persistence failure is fail-closed and leaves the actor's live fields and
-  sequence unchanged.
+  sequence unchanged, and the public OData request returns a server error.
+- PUT removal of declared-key properties purges the prior key row atomically in
+  Postgres and the deterministic simulation store.
+- The reserved event type cannot be dispatched as a domain action.
 - The deployment procedure can drain old processes before reopening the OData
   write surface; mixed old/new readers are not permitted after writer enablement.
 - Rollback tooling selects a revision containing the field-update reader after
@@ -139,7 +158,8 @@ maintainer later chooses to ship it.
 
 - Changing OData authorization or request-body validation.
 - Converting direct OData writes into user-declared automaton actions.
-- Changing the snapshot interval or persistence backend contracts.
+- Changing the snapshot interval or adding declared-key indexing to backends
+  that do not already maintain it.
 
 ## Alternatives Considered
 

@@ -19,3 +19,12 @@ pub use effects::{
 pub use sim_handler::EntityActorHandler;
 pub(crate) use snapshot_queue::SnapshotWriteQueue;
 pub use types::{EntityEvent, EntityMsg, EntityResponse, EntityState};
+
+pub(crate) const FIELD_UPDATE_EVENT_TYPE: &str = "$temper.entity.fields-updated.v1";
+
+fn validate_domain_action_name(name: &str) -> Result<(), String> {
+    if name == FIELD_UPDATE_EVENT_TYPE {
+        return Err(format!("action name '{name}' is reserved by Temper"));
+    }
+    Ok(())
+}

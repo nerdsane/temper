@@ -154,6 +154,16 @@ pub struct EntityVectorCandidate {
     pub vector: Vec<f32>,
 }
 
+/// Which derived index families must be reconciled to the exact rows supplied
+/// with an event append.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct IndexReconciliation {
+    /// Replace all declared-key rows for the entity, including with an empty set.
+    pub keys: bool,
+    /// Replace all vector rows for the entity, including with an empty set.
+    pub vectors: bool,
+}
+
 /// Trait for the event store backend (implemented by temper-store-postgres).
 /// Uses desugared async-in-trait to enforce Send bounds on futures.
 pub trait EventStore: Send + Sync + 'static {
@@ -183,14 +193,20 @@ pub trait EventStore: Send + Sync + 'static {
             events,
             key_rows,
             &[],
-            false,
+            IndexReconciliation {
+                keys: true,
+                vectors: false,
+            },
         )
     }
 
     /// Append events and co-commit BOTH declared key-index rows (ADR-0153) and
     /// derived vector-index rows (ADR-0155) in the **same transaction** as the
     /// journal append. This is the single co-commit entry point the entity actor
-    /// calls. The default ignores the index kinds and delegates to
+    /// calls. `reconcile_keys` means `key_rows` is the entity's exact current
+    /// declared-key set: the store deletes every prior row for that entity before
+    /// inserting the provided rows, including when the set is empty. The default
+    /// ignores the index kinds and delegates to
     /// [`EventStore::append`] — stores with a query plane that co-commit (postgres,
     /// sim) override it; Turso also overrides it to maintain the vector index
     /// write-behind (event first, index follows). When `reconcile_vectors` is true
@@ -206,9 +222,9 @@ pub trait EventStore: Send + Sync + 'static {
         events: &[PersistenceEnvelope],
         key_rows: &[EntityKeyRow],
         vector_rows: &[EntityVectorRow],
-        reconcile_vectors: bool,
+        reconciliation: IndexReconciliation,
     ) -> impl std::future::Future<Output = Result<u64, PersistenceError>> + Send {
-        let _ = (key_rows, vector_rows, reconcile_vectors);
+        let _ = (key_rows, vector_rows, reconciliation);
         self.append(persistence_id, expected_sequence, events)
     }
 
