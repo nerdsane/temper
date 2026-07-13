@@ -8,6 +8,31 @@ use tracing_opentelemetry::OpenTelemetrySpanExt;
 use tracing_subscriber::prelude::*;
 
 #[test]
+fn llm_content_export_defaults_to_redact_and_is_opt_in() {
+    use std::collections::BTreeMap;
+    // Fail-safe: a host built without an explicit opt-in must redact LLM
+    // content, so any construction site that forgets `.with_llm_content_export`
+    // still defaults to safe. See ADR-0166 (ARN-243).
+    let default_host = ProductionWasmHost::new(BTreeMap::new());
+    assert!(
+        !default_host.export_llm_content,
+        "host must default to redacting LLM content"
+    );
+
+    let opted_in = ProductionWasmHost::new(BTreeMap::new()).with_llm_content_export(true);
+    assert!(
+        opted_in.export_llm_content,
+        "with_llm_content_export(true) must opt in"
+    );
+
+    let opted_out = ProductionWasmHost::new(BTreeMap::new()).with_llm_content_export(false);
+    assert!(
+        !opted_out.export_llm_content,
+        "with_llm_content_export(false) must redact"
+    );
+}
+
+#[test]
 fn guest_metric_count_kind_is_counter() {
     assert!(guest_metric_is_counter_kind(Some("count")));
     assert!(guest_metric_is_counter_kind(Some("counter")));

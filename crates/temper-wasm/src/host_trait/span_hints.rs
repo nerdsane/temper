@@ -105,6 +105,12 @@ pub(crate) fn span_hint_otel_name<'a>(
 /// metadata (model, provider, token counts, ids). Content keys are redacted
 /// from host-captured span hints unless the tenant has opted into LLM content
 /// export. See ADR-0166.
+///
+/// This is a denylist over an open export surface: [`apply_span_hints`] records
+/// *every* surviving hint onto the raw OTel span. Any new `gen_ai.*` (or other)
+/// attribute that carries prompt/completion/system/tool content MUST be added
+/// here, or it will be exported unredacted. `redaction_denylist_covers_all_datadog_visible_content_fields`
+/// locks this against the Datadog-visible field set.
 pub(crate) fn is_sensitive_llm_content_attr(attr_key: &str) -> bool {
     matches!(
         attr_key,
@@ -303,6 +309,77 @@ mod redaction_tests {
         assert!(!is_sensitive_llm_content_attr("gen_ai.request.model"));
         assert!(!is_sensitive_llm_content_attr("gen_ai.usage.input_tokens"));
         assert!(!is_sensitive_llm_content_attr("tenant"));
+    }
+
+    /// Guards the denylist against the open export surface (`apply_span_hints`
+    /// records every surviving hint). Every content-bearing span field must be
+    /// denied; every metadata field Datadog shows must survive. A denylist gap
+    /// here is a leak; a false positive is over-redaction. See ADR-0166.
+    #[test]
+    fn redaction_denylist_covers_all_datadog_visible_content_fields() {
+        // Raw LLM content that reaches a span. The first five are also in the
+        // `datadog_visible_span_hint_field` allowlist; the two tool fields reach
+        // Datadog via the unconditional `set_attribute` path. All must be denied.
+        let content_fields = [
+            "gen_ai.system_instructions",
+            "gen_ai.input.messages",
+            "gen_ai.prompt",
+            "gen_ai.output.messages",
+            "gen_ai.completion",
+            "gen_ai.tool.call.arguments",
+            "gen_ai.tool.call.result",
+        ];
+        for field in content_fields {
+            assert!(
+                is_sensitive_llm_content_attr(field),
+                "content field `{field}` must be redacted (denylist gap = leak)"
+            );
+        }
+
+        // Datadog-visible metadata must never be redacted (no over-redaction),
+        // and each must be a real recognized field (guards typos in this list).
+        let metadata_fields = [
+            "gen_ai.request.model",
+            "gen_ai.response.model",
+            "gen_ai.provider.name",
+            "gen_ai.system",
+            "gen_ai.operation.name",
+            "gen_ai.request.temperature",
+            "gen_ai.request.max_tokens",
+            "gen_ai.conversation.id",
+            "gen_ai.response.finish_reasons",
+            "gen_ai.usage.input_tokens",
+            "gen_ai.usage.output_tokens",
+            "gen_ai.usage.cache_read_input_tokens",
+            "gen_ai.usage.cache_creation_input_tokens",
+            "tenant",
+            "session_id",
+            "agent_id",
+        ];
+        for field in metadata_fields {
+            assert!(
+                !is_sensitive_llm_content_attr(field),
+                "metadata field `{field}` must NOT be redacted (over-redaction)"
+            );
+            assert!(
+                datadog_visible_span_hint_field(field).is_some(),
+                "metadata field `{field}` should be a recognized Datadog-visible field"
+            );
+        }
+
+        // Every Datadog-visible content field must also be denied.
+        for field in [
+            "gen_ai.system_instructions",
+            "gen_ai.input.messages",
+            "gen_ai.prompt",
+            "gen_ai.output.messages",
+            "gen_ai.completion",
+        ] {
+            assert!(
+                datadog_visible_span_hint_field(field).is_some(),
+                "content field `{field}` should be a recognized Datadog-visible field"
+            );
+        }
     }
 
     #[test]
