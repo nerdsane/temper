@@ -16,7 +16,7 @@ use temper_runtime::ActorSystem;
 use temper_runtime::scheduler::install_deterministic_context;
 use temper_server::storage::{BackendLabel, BoxedEventStore};
 use temper_server::{EntityActor, EntityMsg, EntityResponse};
-use temper_store_sim::SimEventStore;
+use temper_store_sim::{SimEventStore, SimFaultConfig};
 
 const ORDER_IOA: &str = include_str!("../../../test-fixtures/specs/order.ioa.toml");
 const NUM_SEEDS: u64 = 100;
@@ -51,6 +51,20 @@ async fn dispatch_action(
 async fn get_state(actor_ref: &temper_runtime::actor::ActorRef<EntityMsg>) -> EntityResponse {
     actor_ref
         .ask(EntityMsg::GetState, Duration::from_secs(5))
+        .await
+        .expect("actor should respond")
+}
+
+async fn update_fields(
+    actor_ref: &temper_runtime::actor::ActorRef<EntityMsg>,
+    fields: serde_json::Value,
+    replace: bool,
+) -> EntityResponse {
+    actor_ref
+        .ask(
+            EntityMsg::UpdateFields { fields, replace },
+            Duration::from_secs(5),
+        )
         .await
         .expect("actor should respond")
 }
@@ -398,4 +412,126 @@ async fn dst_replay_preserves_data_fields() {
             "seed {seed}: fields mismatch after replay"
         );
     }
+}
+
+// =========================================================================
+// Regression: PATCH-only fields survive actor replacement
+// =========================================================================
+
+#[tokio::test]
+async fn dst_patch_only_fields_survive_actor_replacement() {
+    for seed in 0..NUM_SEEDS {
+        let (_guard, _clock, _id_gen) = install_deterministic_context(seed);
+        let store = sim_store(seed);
+        let table = order_table();
+        let entity_id = format!("ord-patch-only-{seed}");
+
+        {
+            let system = ActorSystem::new("dst-patch-only-1");
+            let actor = EntityActor::with_persistence(
+                "Order",
+                &entity_id,
+                table.clone(),
+                serde_json::json!({
+                    "Title": "before-patch",
+                    "StableField": "preserved"
+                }),
+                store.clone(),
+                BackendLabel::Sim,
+            )
+            .with_tenant("default");
+            let actor_ref = system.spawn(actor, &entity_id);
+
+            let patched = update_fields(
+                &actor_ref,
+                serde_json::json!({
+                    "Title": "after-patch",
+                    "Priority": "High"
+                }),
+                false,
+            )
+            .await;
+            assert!(
+                patched.success,
+                "seed {seed}: PATCH failed: {:?}",
+                patched.error
+            );
+            assert_eq!(patched.state.fields["Title"], "after-patch");
+            assert_eq!(patched.state.fields["Priority"], "High");
+        }
+
+        let (_guard2, _clock2, _id_gen2) = install_deterministic_context(seed + 10_000);
+        let system = ActorSystem::new("dst-patch-only-2");
+        let actor = EntityActor::with_persistence(
+            "Order",
+            &entity_id,
+            table.clone(),
+            serde_json::json!({}),
+            store.clone(),
+            BackendLabel::Sim,
+        )
+        .with_tenant("default");
+        let actor_ref = system.spawn(actor, format!("{entity_id}-replacement"));
+
+        let replayed = get_state(&actor_ref).await;
+        assert_eq!(
+            replayed.state.fields["Title"], "after-patch",
+            "seed {seed}: acknowledged PATCH was lost after actor replacement"
+        );
+        assert_eq!(
+            replayed.state.fields["Priority"], "High",
+            "seed {seed}: PATCH-only field was lost after actor replacement"
+        );
+        assert_eq!(replayed.state.fields["StableField"], "preserved");
+    }
+}
+
+// =========================================================================
+// Regression: a failed journal append cannot publish a field update
+// =========================================================================
+
+#[tokio::test]
+async fn dst_field_update_fails_closed_when_journal_append_fails() {
+    let (_guard, _clock, _id_gen) = install_deterministic_context(189);
+    let store_inner = SimEventStore::no_faults(189);
+    let store = BoxedEventStore::new(store_inner.clone());
+    let table = order_table();
+    let system = ActorSystem::new("dst-field-update-fail-closed");
+    let actor = EntityActor::with_persistence(
+        "Order",
+        "ord-field-failure",
+        table,
+        serde_json::json!({"Title": "durable-before"}),
+        store,
+        BackendLabel::Sim,
+    )
+    .with_tenant("default");
+    let actor_ref = system.spawn(actor, "ord-field-failure");
+
+    let before = get_state(&actor_ref).await;
+    assert_eq!(before.state.fields["Title"], "durable-before");
+    let sequence_before = before.state.sequence_nr;
+
+    store_inner.restore_faults(SimFaultConfig {
+        write_failure_prob: 1.0,
+        ..SimFaultConfig::none()
+    });
+
+    let response = update_fields(
+        &actor_ref,
+        serde_json::json!({"Title": "volatile-after"}),
+        false,
+    )
+    .await;
+
+    assert!(
+        !response.success,
+        "field update must not report success when its journal append fails"
+    );
+    assert_eq!(response.state.fields["Title"], "durable-before");
+    assert_eq!(response.state.sequence_nr, sequence_before);
+
+    let live = get_state(&actor_ref).await;
+    assert_eq!(live.state.fields["Title"], "durable-before");
+    assert_eq!(live.state.sequence_nr, sequence_before);
 }
