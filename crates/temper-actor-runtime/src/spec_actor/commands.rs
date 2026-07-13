@@ -122,14 +122,9 @@ impl SpecDrivenActor {
                 target_action = %rule.then.action,
                 "routing effect command"
             );
-            let message = match reaction_params(state, &rule, ctx) {
-                Some(params) => {
-                    let mut message = SpecMessage::with_params(rule.then.action, params);
-                    message.cascade_depth = cascade_depth + 1;
-                    message
-                }
-                None => SpecMessage::routed(rule.then.action, cascade_depth + 1),
-            };
+            let params = reaction_params(state, &rule, ctx);
+            let mut message = SpecMessage::with_params(rule.then.action, params);
+            message.cascade_depth = cascade_depth + 1;
             ctx.tell(&target, message).await?;
         }
         Ok(())
@@ -179,12 +174,9 @@ fn reaction_params(
     state: &SpecActorState,
     rule: &ReactionRule,
     ctx: &ActorContext,
-) -> Option<serde_json::Value> {
-    if rule.then.params.is_null() && rule.then.params_from.is_empty() {
-        return None;
-    }
+) -> serde_json::Value {
     if rule.then.params_from.is_empty() {
-        return Some(rule.then.params.clone());
+        return rule.then.params.clone();
     }
 
     let mut params = match rule.then.params.clone() {
@@ -195,7 +187,7 @@ fn reaction_params(
                 reaction = %rule.name,
                 "reaction params are not an object; skipping params_from merge"
             );
-            return Some(other);
+            return other;
         }
     };
     let source_id = ctx
@@ -221,7 +213,7 @@ fn reaction_params(
             ),
         }
     }
-    Some(serde_json::Value::Object(params))
+    serde_json::Value::Object(params)
 }
 
 fn optional_string_field<'a>(state: &'a SpecActorState, field: &str) -> Option<&'a str> {

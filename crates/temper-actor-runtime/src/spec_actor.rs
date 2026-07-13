@@ -58,14 +58,6 @@ impl SpecMessage {
             cascade_depth: 0,
         }
     }
-
-    fn routed(action: impl Into<String>, cascade_depth: u32) -> Self {
-        Self {
-            action: action.into(),
-            params: Vec::new(),
-            cascade_depth,
-        }
-    }
 }
 
 // ─── Actor state ─────────────────────────────────────────────────────────────
