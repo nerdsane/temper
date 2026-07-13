@@ -246,6 +246,10 @@ impl EventStore for TursoEventStore {
             None => 0,
         };
         if current_seq as u64 > as_of_sequence {
+            // Explicit rollback: an Immediate transaction holds the RESERVED
+            // lock, and async Drop cannot await — release it deterministically
+            // rather than deferring to libsql's synchronous drop hook.
+            tx.rollback().await.map_err(storage_error)?;
             return Ok(());
         }
         tx.execute(

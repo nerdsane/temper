@@ -503,17 +503,19 @@ impl EventStore for PostgresEventStore {
         .execute(&mut *tx)
         .await
         .map_err(|e| PersistenceError::Storage(e.to_string()))?;
-        let current_seq: Option<(i64,)> = crate::dbm::postgres_query_as!(
+        // Aggregates always return exactly one row (COALESCE'd to 0 over an
+        // empty set), so fetch_one — no optional row to consider.
+        let (current_seq,): (i64,) = crate::dbm::postgres_query_as!(
             "SELECT COALESCE(MAX(sequence_nr), 0) FROM events \
              WHERE tenant = $1 AND entity_type = $2 AND entity_id = $3",
         )
         .bind(tenant)
         .bind(entity_type)
         .bind(entity_id)
-        .fetch_optional(&mut *tx)
+        .fetch_one(&mut *tx)
         .await
         .map_err(|e| PersistenceError::Storage(e.to_string()))?;
-        if current_seq.map(|(s,)| s as u64).unwrap_or(0) > as_of_sequence {
+        if current_seq as u64 > as_of_sequence {
             tx.rollback()
                 .await
                 .map_err(|e| PersistenceError::Storage(e.to_string()))?;
