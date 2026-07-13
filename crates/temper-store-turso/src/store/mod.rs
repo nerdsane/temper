@@ -43,21 +43,28 @@ pub use field_index::QueryProjectionUpsert;
 use instrumentation::InstrumentedConnection;
 use libsql::params;
 
-/// ARN-242: the schema version this build of the store migrates to.
+/// ARN-242: a HUMAN-READABLE LABEL for the schema this build migrates to.
 ///
-/// EVERY change to the DDL in [`TursoEventStore::migrate`] (new table, new
-/// column, new index) MUST bump this, or databases already stamped at the
-/// previous version will skip it. Platform-registry DDL lives in
-/// `router.rs::migrate_platform`, OUTSIDE this ledger — bumping this constant
-/// does nothing for it; it runs every boot and must stay fail-closed.
+/// It is NOT the boot gate and is off the correctness path: the gate is
+/// `SCHEMA_FINGERPRINT` (see below), and bumping this constant alone changes
+/// nothing — the fingerprint is what decides whether a stamped database
+/// re-runs the DDL. Bump it alongside a fingerprint change to give the schema
+/// a name; never rely on it to make a migration reach existing databases.
+///
+/// Platform-registry DDL lives in `router.rs::migrate_platform`, OUTSIDE this
+/// ledger entirely; it runs every boot and must stay fail-closed.
 ///
 /// INVARIANT: every statement in the migration must be idempotent AND safe to
 /// run concurrently with another booting server. Two servers can both observe
-/// an unstamped ledger and both run the full DDL; today every statement is
-/// `CREATE … IF NOT EXISTS` or a benign-tolerated `ADD COLUMN`, and the stamp
-/// is `INSERT OR IGNORE` on the version primary key, so the race is harmless.
-/// A future version that backfills data or issues a bare `CREATE` must
-/// serialize the migration explicitly.
+/// an un-fingerprinted ledger and both run the full DDL; today every statement
+/// is `CREATE … IF NOT EXISTS` or a benign-tolerated `ADD COLUMN`, and the
+/// stamp is `INSERT OR REPLACE` on the version primary key — atomic within its
+/// statement, so concurrent stampers converge on one identical row. (REPLACE
+/// destroys the prior row for that version, which is what produces the
+/// rollback re-run caveat on `SELECT_SCHEMA_FINGERPRINT_APPLIED`.) A future
+/// version that backfills data or issues a bare `CREATE` must serialize the
+/// migration explicitly — and note the fingerprint gate is SCHEMA-shaped, so a
+/// data migration is invisible to it and needs its own gating row.
 const SCHEMA_VERSION: i64 = 1;
 /// Human-readable name recorded in the ledger for [`SCHEMA_VERSION`].
 const SCHEMA_VERSION_NAME: &str = "baseline-idempotent-ddl";
