@@ -740,15 +740,29 @@ async fn migrate_upgrades_an_existing_unstamped_database() {
 
     let conn = store.connection().expect("connection");
     let mut rows = conn
-        .query(crate::schema::SELECT_SCHEMA_VERSION, ())
+        .query(
+            "SELECT version, fingerprint FROM temper_schema_migrations \
+             ORDER BY version DESC LIMIT 1",
+            (),
+        )
         .await
         .expect("ledger query");
-    let row = rows.next().await.expect("row").expect("row");
-    let version: Option<i64> = row.get(0).expect("version");
+    let row = rows
+        .next()
+        .await
+        .expect("row")
+        .expect("the upgraded database must be re-stamped");
+    let version: i64 = row.get(0).expect("version");
+    let fingerprint: String = row.get(1).expect("fingerprint");
     assert_eq!(
         version,
-        Some(super::SCHEMA_VERSION),
+        super::SCHEMA_VERSION,
         "the upgraded database must be re-stamped at the current schema version"
+    );
+    assert_eq!(
+        fingerprint,
+        super::SCHEMA_FINGERPRINT,
+        "the upgraded database must record the current schema fingerprint (the boot gate)"
     );
 }
 
@@ -2140,5 +2154,164 @@ async fn migrate_records_schema_version_ledger() {
     assert!(
         version >= 1,
         "the ledger must record the applied schema version, got {version}"
+    );
+}
+
+/// ARN-242 contract enforcement: a stamped database executes NO DDL, so a
+/// schema change that forgets to bump `SCHEMA_VERSION` would silently never
+/// reach existing databases — the same class of silent failure this issue
+/// exists to kill, and one that no other test can catch (every other test
+/// starts from a fresh, unstamped database and always runs the full DDL).
+///
+/// This test fingerprints the schema a fresh `migrate()` produces. ANY change
+/// to the DDL breaks it, and updating `SCHEMA_FINGERPRINT` — the boot gate —
+/// is what makes the change reach stamped databases. `SCHEMA_VERSION` is a
+/// human-readable label and is off the correctness path.
+#[tokio::test]
+async fn schema_fingerprint_matches_declared_version() {
+    use sha2::{Digest, Sha256};
+
+    let store = make_store("schema-fingerprint").await;
+    let conn = store.connection().expect("connection");
+    let mut rows = conn
+        .query(
+            "SELECT type, name, COALESCE(sql, '') FROM sqlite_master \
+             WHERE name NOT LIKE 'sqlite_%' ORDER BY type, name",
+            (),
+        )
+        .await
+        .expect("read schema");
+
+    let mut hasher = Sha256::new();
+    while let Some(row) = rows.next().await.expect("schema row") {
+        let kind: String = row.get(0).expect("type");
+        let name: String = row.get(1).expect("name");
+        let sql: String = row.get(2).expect("sql");
+        hasher.update(kind.as_bytes());
+        hasher.update([0]);
+        hasher.update(name.as_bytes());
+        hasher.update([0]);
+        hasher.update(sql.as_bytes());
+        hasher.update([0]);
+    }
+    let fingerprint = format!("{:x}", hasher.finalize());
+
+    assert_eq!(
+        fingerprint,
+        super::SCHEMA_FINGERPRINT,
+        "\n\nThe Turso schema changed (or the libsql/SQLite version changed how it\n\
+         renders stored DDL).\n\
+         SCHEMA_FINGERPRINT is the BOOT GATE: until it matches, stamped databases\n\
+         re-run the DDL — so updating it is what makes your change reach them.\n\
+         Set SCHEMA_FINGERPRINT (store/mod.rs) to:\n  {fingerprint}\n\
+         and bump SCHEMA_VERSION + SCHEMA_VERSION_NAME as the human-readable label.\n"
+    );
+}
+
+/// ARN-242 (F5): the ledger table sits BEFORE the gate that governs every
+/// other table, so it must migrate ITSELF, un-gated. A database whose ledger
+/// predates the `fingerprint` column must still boot: without the ledger's own
+/// ALTER, `CREATE TABLE IF NOT EXISTS` no-ops and the very next statement (the
+/// gate SELECT) dies at prepare time with "no such column: fingerprint" — a
+/// hard boot failure, and the exact class this issue exists to kill. This also
+/// pins the pattern for every future ledger column.
+#[tokio::test]
+async fn migrate_upgrades_a_ledger_that_predates_the_fingerprint_column() {
+    let url = sqlite_test_url("ledger-pre-fingerprint");
+
+    // A database migrated by a build whose ledger had no fingerprint column.
+    {
+        let store = TursoEventStore::new(&url, None).await.expect("first boot");
+        let conn = store.connection().expect("connection");
+        conn.execute("DROP TABLE temper_schema_migrations", ())
+            .await
+            .expect("drop ledger");
+        conn.execute(
+            "CREATE TABLE temper_schema_migrations (\
+                 version INTEGER PRIMARY KEY, name TEXT NOT NULL, applied_at TEXT NOT NULL)",
+            (),
+        )
+        .await
+        .expect("recreate pre-fingerprint ledger");
+        conn.execute(
+            "INSERT INTO temper_schema_migrations (version, name, applied_at) \
+             VALUES (1, 'baseline-idempotent-ddl', datetime('now'))",
+            (),
+        )
+        .await
+        .expect("stamp it the old way");
+    }
+
+    // The new build must self-migrate the ledger and boot cleanly.
+    let store = TursoEventStore::new(&url, None)
+        .await
+        .expect("a ledger predating the fingerprint column must upgrade, not fail boot");
+
+    let conn = store.connection().expect("connection");
+    let mut rows = conn
+        .query(
+            "SELECT COUNT(*) FROM temper_schema_migrations WHERE fingerprint = ?1",
+            libsql::params![super::SCHEMA_FINGERPRINT],
+        )
+        .await
+        .expect("ledger query");
+    let row = rows.next().await.expect("row").expect("row");
+    let count: i64 = row.get(0).expect("count");
+    assert_eq!(
+        count, 1,
+        "the upgraded ledger must record the current schema fingerprint"
+    );
+}
+
+/// ARN-242 (F6): a binary rolled back to an older schema must still SKIP the
+/// DDL — the gate asks "has this database EVER been migrated to the schema I
+/// declare", so the older binary finds its own retained ledger row instead of
+/// re-running all ~98 statements on every boot for as long as the rollback
+/// lasts.
+///
+/// The skip is observed, not merely predicted: a sentinel table dropped after
+/// the first boot must NOT be recreated by the second, because a skipping
+/// `migrate()` executes no DDL at all.
+#[tokio::test]
+async fn rolled_back_binary_skips_the_ddl() {
+    let url = sqlite_test_url("rollback-skip");
+
+    // This build boots and stamps its fingerprint.
+    let store = TursoEventStore::new(&url, None).await.expect("boot");
+    let conn = store.connection().expect("connection");
+
+    // A LATER build's schema is stamped on top (higher version, different fp),
+    // simulating an upgrade that was then rolled back.
+    conn.execute(
+        "INSERT INTO temper_schema_migrations (version, name, fingerprint, applied_at) \
+         VALUES (2, 'future-schema', 'future-fingerprint', datetime('now'))",
+        (),
+    )
+    .await
+    .expect("stamp a future schema");
+
+    // Drop a table the DDL would recreate. If the rolled-back boot re-ran the
+    // DDL, this table would come back.
+    conn.execute("DROP TABLE blobs", ())
+        .await
+        .expect("drop sentinel table");
+
+    // Roll back to this build: it must find its own retained row and skip.
+    let _rolled_back = TursoEventStore::new(&url, None)
+        .await
+        .expect("rolled-back boot");
+
+    let mut rows = conn
+        .query(
+            "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'blobs'",
+            (),
+        )
+        .await
+        .expect("sentinel query");
+    let row = rows.next().await.expect("row").expect("row");
+    let recreated: i64 = row.get(0).expect("count");
+    assert_eq!(
+        recreated, 0,
+        "a rolled-back binary must SKIP the DDL (the dropped table must not be recreated)"
     );
 }

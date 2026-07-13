@@ -62,6 +62,19 @@ const SCHEMA_VERSION: i64 = 1;
 /// Human-readable name recorded in the ledger for [`SCHEMA_VERSION`].
 const SCHEMA_VERSION_NAME: &str = "baseline-idempotent-ddl";
 
+/// SHA-256 of the schema a fresh `migrate()` produces — and the BOOT GATE.
+///
+/// A stamped database re-runs the DDL whenever this declared value differs
+/// from the one recorded in its ledger, so a schema change reaches existing
+/// databases even if the author forgets to bump [`SCHEMA_VERSION`] (which is
+/// a human-readable label, off the correctness path). Updating this constant
+/// is the very act that invalidates the skip — the contract cannot be
+/// satisfied without also making the migration run.
+///
+/// `schema_fingerprint_matches_declared_version` fails on ANY DDL change and
+/// prints the new value to paste here.
+const SCHEMA_FINGERPRINT: &str = "3b8b6b18aa49eeb8fc34e47f88660f65998b136576c4ef0507b757abfb66a34d";
+
 /// Execute an idempotent `ALTER TABLE … ADD COLUMN`, tolerating ONLY the
 /// benign already-applied errors (duplicate column / already exists). Every
 /// other failure — locked database, disk errors, a shadowed table, syntax —
@@ -78,6 +91,14 @@ async fn execute_idempotent(
     conn: &InstrumentedConnection,
     stmt: &str,
 ) -> Result<(), PersistenceError> {
+    // TigerStyle pre-assertion: the precondition above is what makes the
+    // benign filter safe. Routing a CREATE through here would let a genuine
+    // object-name collision ("already exists") be swallowed — exactly the
+    // defect this function removes.
+    debug_assert!(
+        stmt.to_ascii_uppercase().contains("ADD COLUMN"),
+        "PRECONDITION: only ADD COLUMN statements may use execute_idempotent; got: {stmt}"
+    );
     match conn.execute(stmt, ()).await {
         Ok(_) => Ok(()),
         Err(e) => {
@@ -192,23 +213,31 @@ impl TursoEventStore {
                 .map_err(storage_error)?;
         }
 
+        // The ledger's own DDL runs UN-GATED, before the gate can be read — it
+        // is the one table that sits in front of the gate, so it must migrate
+        // itself (see ALTER_SCHEMA_MIGRATIONS_ADD_FINGERPRINT).
         conn.execute(schema::CREATE_SCHEMA_MIGRATIONS_TABLE, ())
             .await
             .map_err(storage_error)?;
-        let applied: i64 = {
+        execute_idempotent(&conn, schema::ALTER_SCHEMA_MIGRATIONS_ADD_FINGERPRINT).await?;
+
+        let already_applied: bool = {
             let mut rows = conn
-                .query(schema::SELECT_SCHEMA_VERSION, ())
+                .query(
+                    schema::SELECT_SCHEMA_FINGERPRINT_APPLIED,
+                    params![SCHEMA_FINGERPRINT],
+                )
                 .await
                 .map_err(storage_error)?;
-            let applied = match rows.next().await.map_err(storage_error)? {
+            let applied: i64 = match rows.next().await.map_err(storage_error)? {
                 Some(row) => row.get(0).map_err(storage_error)?,
                 None => 0,
             };
             // Drain and drop the statement so no read lock outlives the check.
             while rows.next().await.map_err(storage_error)?.is_some() {}
-            applied
+            applied != 0
         };
-        if applied >= SCHEMA_VERSION {
+        if already_applied {
             return Ok(());
         }
 
@@ -470,7 +499,7 @@ impl TursoEventStore {
         // no-op): stamp the ledger so the next boot short-circuits.
         conn.execute(
             schema::INSERT_SCHEMA_VERSION,
-            params![SCHEMA_VERSION, SCHEMA_VERSION_NAME],
+            params![SCHEMA_VERSION, SCHEMA_VERSION_NAME, SCHEMA_FINGERPRINT],
         )
         .await
         .map_err(storage_error)?;

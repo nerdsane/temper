@@ -9,8 +9,8 @@ Accepted (2026-07-12)
 ## Context
 
 `TursoEventStore::migrate()` re-ran the entire DDL script on every boot with
-no record of what had been applied, and thirteen `let _ = conn.execute(...)`
-sites discarded every ALTER failure. The intent was to tolerate benign
+no record of what had been applied, and twelve `let _ = conn.execute(...)`
+sites (nine direct, three loops — 41 ALTERs in all) discarded every failure. The intent was to tolerate benign
 duplicate-column errors on idempotent re-runs — but the pattern equally
 swallowed locked databases, disk errors, shadowed tables, and syntax errors,
 so a genuinely failed migration left a half-migrated database that the
@@ -20,15 +20,42 @@ server then served against, silently (ARN-242).
 
 1. **Fail-closed idempotent execution.** `execute_idempotent` tolerates only
    the benign already-applied errors (duplicate column / already exists);
-   everything else propagates and fails startup. All thirteen swallow sites
-   and the two bespoke match blocks route through it.
-2. **A durable version ledger.** `temper_schema_migrations (version, name,
-   applied_at)` is created first; a successful full migration run stamps
-   `SCHEMA_VERSION` (currently 1, `baseline-idempotent-ddl`). Boots where
-   the ledger already shows the current version skip the DDL entirely.
-3. **The contract:** EVERY change to the ledgered DDL must bump
-   `SCHEMA_VERSION`, or databases stamped at the previous version will skip
-   it. Platform-registry DDL lives in `router.rs::migrate_platform`, OUTSIDE
+   everything else propagates and fails startup, with the failing statement
+   in the message. All twelve former swallow sites (41 ALTERs) and the two
+   bespoke match blocks route through it, and a debug pre-assertion enforces
+   its ADD-COLUMN-only precondition — so the debug test suite passing is
+   itself proof that all 41 satisfy it.
+2. **A durable ledger, gated on a schema FINGERPRINT.**
+   `temper_schema_migrations (version, name, fingerprint, applied_at)` is
+   created first; a fully successful run stamps the declared
+   `SCHEMA_FINGERPRINT` (a SHA-256 of the schema a fresh migrate produces)
+   together with `SCHEMA_VERSION` as a human-readable label. **The boot gate
+   is the fingerprint, not the version:** a stamped database skips the DDL
+   only while its stored fingerprint equals the declared one. Updating the
+   fingerprint is therefore the very act that makes a schema change reach
+   existing databases — the contract cannot be satisfied without it. The
+   comparison is stored-constant vs declared-constant (never the live
+   schema), so a platform database's extra `migrate_platform` tables cannot
+   cause spurious re-runs.
+3. **The ledger migrates itself, un-gated.** The ledger table sits in FRONT
+   of the gate, so it can never be gated by its own fingerprint: its `CREATE`
+   and its own `ADD COLUMN`s run on every boot, through `execute_idempotent`.
+   Without this, adding any column to the ledger would make the next
+   statement — the gate SELECT — fail at prepare time with "no such column"
+   on every database whose ledger predates it: a hard boot failure, and
+   exactly the class this ADR exists to kill, reproduced inside the ledger.
+   On a fresh database the ALTER is a tolerated duplicate-column no-op, so
+   `sqlite_master` (and the fingerprint) is unchanged.
+4. **The gate asks "ever migrated to this schema", not "is the latest row
+   this schema"** (`SELECT EXISTS(… WHERE fingerprint = ?)`). A binary rolled
+   back to an older schema then finds its own retained row and skips, instead
+   of re-running the whole DDL on every boot for the duration of the
+   rollback.
+5. **The contract:** EVERY change to the ledgered DDL must update
+   `SCHEMA_FINGERPRINT` (the `schema_fingerprint_matches_declared_version`
+   test fails otherwise and prints the new value), and should bump
+   `SCHEMA_VERSION`/`SCHEMA_VERSION_NAME` as the human-readable label.
+   Correctness rests on the fingerprint alone; the version is a label. Platform-registry DDL lives in `router.rs::migrate_platform`, OUTSIDE
    the ledger — it runs every boot and must stay fail-closed; bumping the
    constant does nothing for it. **Invariant:** every migration statement
    must be idempotent AND safe to run concurrently with another booting
@@ -38,7 +65,7 @@ server then served against, silently (ARN-242).
    version primary key, so the race is harmless). A future version that
    backfills data or issues a bare `CREATE` must serialize the migration
    explicitly.
-4. **Ordering:** the ledger check runs after the connection PRAGMAs (WAL,
+6. **Ordering:** the ledger check runs after the connection PRAGMAs (WAL,
    busy_timeout) and fully drains its query rows — an undrained statement
    before WAL was configured held a read lock that deadlocked concurrent
    writers (caught by the existing projection test during development).
@@ -48,9 +75,27 @@ server then served against, silently (ARN-242).
 - A real migration failure now fails boot loudly instead of leaving a
   half-migrated schema in service; operators can read the ledger to see
   what version a database is at.
-- Stamped boots skip ~88 executed DDL statements (69 call sites, three of
-  which are loops expanding to 22 ALTERs) — the full turso test suite dropped
-  from ~33s to ~4s as a side effect of the reduced lock churn.
+- Stamped boots skip the whole DDL script — 98 executed schema statements
+  (57 direct CREATEs, 9 direct ALTERs, and 32 more from three loops), plus
+  the two ledger statements. The full turso test suite dropped from ~33s to
+  ~4s as a side effect of the reduced lock churn.
+- **A forgotten schema change cannot silently skip existing databases.** The
+  ledger's own hazard — a stamped database runs no DDL — is closed
+  structurally: the fingerprint IS the gate, so a DDL change that does not
+  update it leaves every stamped database re-running the DDL (loud, not
+  silent), and one that does update it thereby invalidates the skip. No
+  ordinary test could have caught a missed version bump: every store test
+  starts from a fresh, unstamped database.
+- The fingerprint covers `migrate()`'s DDL only — not `migrate_platform`'s,
+  which is outside the ledger by design and runs (fail-closed) every boot.
+- A libsql/SQLite upgrade that changed how stored DDL text is rendered would
+  trip the fingerprint test as a false positive; the failure message says so,
+  and following its instruction is harmless (the baseline is idempotent).
+- **Multi-tenant fleets:** in the router path a tenant whose migration fails
+  is `warn!`-and-skipped at platform boot and then fails loudly on lazy
+  connect. No half-migrated schema is served either way, but "startup fails"
+  is precise only for the single-database path — a fleet surfaces the failure
+  per tenant, on first use.
 - Pre-ledger databases run the baseline once more (idempotent) and are
   stamped; no migration is lost.
 - The version is coarse (one baseline). Future schema changes append new
@@ -67,6 +112,15 @@ server then served against, silently (ARN-242).
   version group).
 - **Keeping the swallow with logging:** a logged-but-served half-migrated
   schema is still a corrupt deployment; the failure must gate boot.
+- **Version-only gating (the first cut of this ADR):** rejected — it made
+  correctness depend on a human remembering to bump a constant that nothing
+  checked, re-creating the documented-but-unenforced shape this issue exists
+  to kill. The fingerprint gate removes the human from the correctness path.
+- **A file-based migration system (flyway/sqlx style), where the migration
+  file IS the ledger unit:** structurally forgetting-proof, but a large
+  rewrite of an imperative-Rust DDL path. The fingerprint gate gives the same
+  property at ~40 lines; file-based migrations remain the right long-term
+  direction.
 - **Serializing the migration (advisory lock / exclusive transaction):**
   unnecessary while every statement is idempotent and concurrent-safe (the
   invariant above), and it would add a cross-backend locking primitive Turso
