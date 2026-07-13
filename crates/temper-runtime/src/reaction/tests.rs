@@ -119,6 +119,27 @@ type = "SameId"
 }
 
 #[test]
+fn parse_reactions_rejects_static_and_source_param_collision() {
+    let toml = r#"
+[[reaction]]
+name = "ambiguous"
+[reaction.when]
+entity_type = "Source"
+action = "Changed"
+[reaction.then]
+entity_type = "Target"
+action = "Receive"
+params = { shared = "static" }
+params_from = { shared = "source_field" }
+[reaction.resolve_target]
+type = "SameId"
+"#;
+
+    let error = parse_reactions(toml).expect_err("ambiguous parameter source must be rejected");
+    assert!(error.contains("appears in both params and params_from"));
+}
+
+#[test]
 fn test_parse_empty() {
     assert!(parse_reactions("").unwrap().is_empty());
 }

@@ -107,6 +107,18 @@ pub(crate) struct BufferedTell {
     pub deliver_at: Option<DateTime<Utc>>,
 }
 
+impl BufferedTell {
+    pub(crate) fn new<M: prost::Message>(to: ActorHandle, message: M) -> Self {
+        Self {
+            to,
+            message_type: type_name_of::<M>(),
+            payload: message.encode_to_vec(),
+            correlation_id: None,
+            deliver_at: None,
+        }
+    }
+}
+
 /// A child actor creation buffered until the parent activation commits.
 #[derive(Debug, Clone)]
 pub(crate) struct BufferedSpawn {
@@ -245,13 +257,7 @@ impl ActorContext {
                 self.budgets.max_tells
             )));
         }
-        pending.push(BufferedTell {
-            to: to.clone(),
-            message_type: type_name_of::<M>(),
-            payload: msg.encode_to_vec(),
-            correlation_id: None,
-            deliver_at: None,
-        });
+        pending.push(BufferedTell::new(to.clone(), msg));
         Ok(())
     }
 
@@ -269,13 +275,9 @@ impl ActorContext {
                 self.budgets.max_tells
             )));
         }
-        pending.push(BufferedTell {
-            to: to.clone(),
-            message_type: type_name_of::<M>(),
-            payload: msg.encode_to_vec(),
-            correlation_id: None,
-            deliver_at: Some(deliver_at),
-        });
+        let mut tell = BufferedTell::new(to.clone(), msg);
+        tell.deliver_at = Some(deliver_at);
+        pending.push(tell);
         Ok(())
     }
 
@@ -303,16 +305,13 @@ impl ActorContext {
                     self.budgets.max_tells
                 )));
             }
-            pending.push(BufferedTell {
-                to: original
-                    .from
-                    .clone()
-                    .unwrap_or_else(|| self.self_handle.clone()),
-                message_type: type_name_of::<M>(),
-                payload: msg.encode_to_vec(),
-                correlation_id: Some(cid),
-                deliver_at: None,
-            });
+            let to = original
+                .from
+                .clone()
+                .unwrap_or_else(|| self.self_handle.clone());
+            let mut tell = BufferedTell::new(to, msg);
+            tell.correlation_id = Some(cid);
+            pending.push(tell);
         }
         Ok(())
     }

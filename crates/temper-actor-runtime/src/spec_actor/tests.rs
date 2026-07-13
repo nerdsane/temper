@@ -156,7 +156,17 @@ async fn timer_and_spawn_effects_are_buffered_for_atomic_persistence() {
     assert_eq!(spawns.len(), 1);
     assert_eq!(spawns[0].handle.namespace, "default/child-1");
     assert_eq!(spawns[0].fields["owner"], "owner-1");
-    assert!(spawns[0].initial_message.is_some());
+    assert_eq!(
+        spawns[0]
+            .initial_message
+            .as_ref()
+            .expect("spawn initial message")
+            .message_type,
+        std::any::type_name::<SpecMessage>()
+            .rsplit("::")
+            .next()
+            .expect("short message type")
+    );
 }
 
 #[tokio::test]

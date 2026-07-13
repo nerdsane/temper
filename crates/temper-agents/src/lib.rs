@@ -279,6 +279,14 @@ mod tests {
             "ToolRouter"
         );
         assert_eq!(
+            reactions.lookup("Process", "ToolCallBatchRequested", "")[0]
+                .then
+                .params_from
+                .get("tool_calls")
+                .map(String::as_str),
+            Some("tool_calls")
+        );
+        assert_eq!(
             reactions.lookup("Process", "spawn_child", "")[0]
                 .then
                 .entity_type,
@@ -291,10 +299,18 @@ mod tests {
             "WakeupSchedulerIntegration"
         );
         assert_eq!(
-            reactions.lookup("Process", "notify_parent", "")[0]
+            reactions.lookup("Process", "notify_parent", "Terminated")[0]
                 .then
                 .entity_type,
             "ChildCompletionIntegration"
+        );
+        assert_eq!(
+            reactions.lookup("Process", "notify_parent", "Terminated")[0]
+                .then
+                .params_from
+                .get("child_result")
+                .map(String::as_str),
+            Some("final_answer")
         );
     }
 }

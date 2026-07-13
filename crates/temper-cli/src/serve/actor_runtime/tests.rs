@@ -232,7 +232,7 @@ fn converts_field_and_static_target_resolvers_without_loss() {
 }
 
 #[test]
-fn rejects_every_unpreserved_rich_reaction_semantic() {
+fn preserves_reaction_params_and_rejects_remaining_unsupported_semantics() {
     let tenant = TenantId::from("alpha");
     let mut guard = server_reaction();
     guard.when.guard = Some(temper_server::trigger::ReactionGuard::StateIn {
@@ -250,11 +250,25 @@ fn rejects_every_unpreserved_rich_reaction_semantic() {
     let mut create = server_reaction();
     create.resolve_target = TargetResolver::Create;
 
+    let converted_params = actor_reaction_rule(&tenant, &params).expect("static params conversion");
+    assert_eq!(
+        converted_params.then.params,
+        serde_json::json!({"source": "runtime"})
+    );
+    let converted_params_from =
+        actor_reaction_rule(&tenant, &params_from).expect("params_from conversion");
+    assert_eq!(
+        converted_params_from
+            .then
+            .params_from
+            .get("payment_id")
+            .map(String::as_str),
+        Some("PaymentId")
+    );
+
     for (semantic, rule) in [
         ("guard", guard),
         ("principal", principal),
-        ("params", params),
-        ("params_from", params_from),
         ("create", create),
     ] {
         assert!(

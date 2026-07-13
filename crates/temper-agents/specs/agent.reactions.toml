@@ -51,6 +51,7 @@ action = "ToolCallBatchRequested"
 [reaction.then]
 entity_type = "ToolRouter"
 action = "ToolCallBatchRequested"
+params_from = { tool_calls = "tool_calls" }
 [reaction.resolve_target]
 type = "SameId"
 
@@ -64,6 +65,7 @@ action = "ToolCallBatchComplete"
 [reaction.then]
 entity_type = "Agent"
 action = "ToolCallBatchComplete"
+params_from = { tool_results = "tool_results" }
 [reaction.resolve_target]
 type = "SameId"
 
@@ -75,6 +77,7 @@ action = "ToolCallBatchFailed"
 [reaction.then]
 entity_type = "Agent"
 action = "ToolCallBatchFailed"
+params_from = { error = "error" }
 [reaction.resolve_target]
 type = "SameId"
 
@@ -138,6 +141,7 @@ action = "invoke_llm"
 [reaction.then]
 entity_type = "LlmIntegration"
 action = "invoke_llm"
+params_from = { user_prompt = "user_prompt", tool_results = "tool_results", child_result = "child_result" }
 [reaction.resolve_target]
 type = "SameId"
 
@@ -160,6 +164,7 @@ action = "execute_tool_batch"
 [reaction.then]
 entity_type = "ToolExecutorIntegration"
 action = "execute_tool_batch"
+params_from = { tool_calls = "tool_calls" }
 [reaction.resolve_target]
 type = "SameId"
 

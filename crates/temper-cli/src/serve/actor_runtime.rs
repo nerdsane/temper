@@ -303,13 +303,9 @@ fn actor_reaction_rules(
 }
 
 fn actor_reaction_rule(tenant: &TenantId, rule: &ServerReactionRule) -> Result<ActorReactionRule> {
-    if rule.when.guard.is_some()
-        || rule.principal.is_some()
-        || !rule.then.params_from.is_empty()
-        || !empty_params(&rule.then.params)
-    {
+    if rule.when.guard.is_some() || rule.principal.is_some() {
         bail!(
-            "tenant {tenant} reaction {:?} uses guarded, principal, or parameter mapping semantics that --actor-runtime postgres cannot preserve",
+            "tenant {tenant} reaction {:?} uses guarded or principal semantics that --actor-runtime postgres cannot preserve",
             rule.name
         );
     }
@@ -339,15 +335,11 @@ fn actor_reaction_rule(tenant: &TenantId, rule: &ServerReactionRule) -> Result<A
         then: ActorReactionTarget {
             entity_type: rule.then.entity_type.clone(),
             action: rule.then.action.clone(),
-            params: serde_json::Value::Null,
-            params_from: std::collections::BTreeMap::new(),
+            params: rule.then.params.clone(),
+            params_from: rule.then.params_from.clone(),
         },
         resolve_target,
     })
-}
-
-fn empty_params(params: &serde_json::Value) -> bool {
-    params.is_null() || params.as_object().is_some_and(serde_json::Map::is_empty)
 }
 
 #[cfg(test)]

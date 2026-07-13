@@ -218,6 +218,16 @@ pub fn parse_reactions(toml_str: &str) -> Result<Vec<ReactionRule>, String> {
 
     let mut rules = Vec::new();
     for r in file.reaction {
+        if let Some(params) = r.then.params.as_object() {
+            for target_param in r.then.params_from.keys() {
+                if params.contains_key(target_param) {
+                    return Err(format!(
+                        "reaction '{}': key '{target_param}' appears in both params and params_from",
+                        r.name
+                    ));
+                }
+            }
+        }
         let resolve_target = match r.resolve_target.resolver_type.as_str() {
             "SameId" | "same_id" => TargetResolver::SameId,
             "Field" | "field" => {

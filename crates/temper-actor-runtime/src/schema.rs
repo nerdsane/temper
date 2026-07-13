@@ -107,6 +107,11 @@ pub const INSERT_SCHEDULED_MESSAGE: &str = "\
     RETURNING id";
 
 /// Atomically promote the oldest due delayed messages into the FIFO mailbox.
+///
+/// The transaction-scoped advisory lock protects the complete promotion only
+/// because lock, selection, deletion, and insertion remain one SQL statement.
+/// Callers may execute this statement in autocommit mode or inside an explicit
+/// transaction, but must not split its CTE stages into separate statements.
 pub const PROMOTE_DUE_MESSAGES: &str = "\
     WITH promotion_lock AS ( \
         SELECT pg_advisory_xact_lock(hashtext('odp_temper.actor_scheduled_messages')) \

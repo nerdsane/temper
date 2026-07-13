@@ -48,24 +48,13 @@ impl SpecDrivenActor {
             .await?;
         }
 
-        if spawn_requests.len() > 8 {
-            return Err(ActorError::HandlerFailed(
-                "spawn effect budget exceeded (8 per transition)".to_string(),
-            ));
-        }
         for spawn in spawn_requests {
             let namespace = child_namespace(&ctx.self_handle().namespace, &spawn.entity_id);
             let target = ActorHandle::new(namespace, spawn.entity_type);
             let fields = serde_json::Value::Object(spawn.copied_field_values);
             let initial_message = spawn.initial_action.map(|action| {
                 let message = SpecMessage::with_params(action, fields.clone());
-                BufferedTell {
-                    to: target.clone(),
-                    message_type: "SpecMessage".to_string(),
-                    payload: prost::Message::encode_to_vec(&message),
-                    correlation_id: None,
-                    deliver_at: None,
-                }
+                BufferedTell::new(target.clone(), message)
             });
             ctx.buffer_spawn(target, fields, initial_message).await?;
         }
@@ -133,11 +122,15 @@ impl SpecDrivenActor {
                 target_action = %rule.then.action,
                 "routing effect command"
             );
-            ctx.tell(
-                &target,
-                SpecMessage::routed(rule.then.action, cascade_depth + 1),
-            )
-            .await?;
+            let message = match reaction_params(state, &rule, ctx) {
+                Some(params) => {
+                    let mut message = SpecMessage::with_params(rule.then.action, params);
+                    message.cascade_depth = cascade_depth + 1;
+                    message
+                }
+                None => SpecMessage::routed(rule.then.action, cascade_depth + 1),
+            };
+            ctx.tell(&target, message).await?;
         }
         Ok(())
     }
@@ -180,6 +173,55 @@ impl SpecDrivenActor {
             rule.then.entity_type.clone(),
         )))
     }
+}
+
+fn reaction_params(
+    state: &SpecActorState,
+    rule: &ReactionRule,
+    ctx: &ActorContext,
+) -> Option<serde_json::Value> {
+    if rule.then.params.is_null() && rule.then.params_from.is_empty() {
+        return None;
+    }
+    if rule.then.params_from.is_empty() {
+        return Some(rule.then.params.clone());
+    }
+
+    let mut params = match rule.then.params.clone() {
+        serde_json::Value::Object(params) => params,
+        serde_json::Value::Null => serde_json::Map::new(),
+        other => {
+            tracing::warn!(
+                reaction = %rule.name,
+                "reaction params are not an object; skipping params_from merge"
+            );
+            return Some(other);
+        }
+    };
+    let source_id = ctx
+        .self_handle()
+        .namespace
+        .rsplit('/')
+        .next()
+        .unwrap_or(&ctx.self_handle().namespace);
+    for (target_param, source_field) in &rule.then.params_from {
+        let value = match source_field.as_str() {
+            "Id" | "id" => Some(serde_json::Value::String(source_id.to_string())),
+            _ => state.fields.get(source_field).cloned(),
+        };
+        match value {
+            Some(value) => {
+                params.insert(target_param.clone(), value);
+            }
+            None => tracing::warn!(
+                reaction = %rule.name,
+                target_param,
+                source_field,
+                "reaction params_from source field is missing; routing partial params"
+            ),
+        }
+    }
+    Some(serde_json::Value::Object(params))
 }
 
 fn optional_string_field<'a>(state: &'a SpecActorState, field: &str) -> Option<&'a str> {

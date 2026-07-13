@@ -7,7 +7,9 @@ use std::sync::Arc;
 
 use temper_actor_runtime::spec_actor::SpecActorState;
 use temper_actor_runtime::test_utils::setup_test_pg;
-use temper_actor_runtime::{ActorSystem, SchedulerConfig, SpecMessage};
+use temper_actor_runtime::{
+    Actor, ActorContext, ActorError, ActorSystem, Message, SchedulerConfig, SpecMessage,
+};
 use temper_agents::{
     AGENT_ACTOR_TYPES, MockLlmIntegration, MockToolExecutor, register_agent_actors,
 };
@@ -26,6 +28,48 @@ async fn load_actor_state(
         .await
         .unwrap();
     serde_json::from_slice(&rows[0].get::<_, Vec<u8>>("state")).unwrap()
+}
+
+async fn load_raw_actor_state(
+    pool: &deadpool_postgres::Pool,
+    namespace: &str,
+    actor_type: &str,
+) -> Vec<u8> {
+    let client = pool.get().await.unwrap();
+    client
+        .query_one(
+            "SELECT state FROM odp_temper.actor_instances WHERE namespace = $1 AND actor_type = $2",
+            &[&namespace, &actor_type],
+        )
+        .await
+        .unwrap()
+        .get("state")
+}
+
+struct RecordingLlmIntegration;
+
+#[async_trait::async_trait]
+impl Actor for RecordingLlmIntegration {
+    fn actor_type(&self) -> &str {
+        "LlmIntegration"
+    }
+
+    async fn handle(
+        &self,
+        ctx: &ActorContext,
+        state: &mut Vec<u8>,
+        message: &Message,
+    ) -> Result<(), ActorError> {
+        if temper_agents::common::message_action(message) == "invoke_llm" {
+            *state = serde_json::to_vec(&temper_agents::common::decode_params(message))
+                .map_err(|error| ActorError::HandlerFailed(error.to_string()))?;
+            if let Some(from) = &message.from {
+                ctx.tell(from, SpecMessage::new("InferenceCompleteEndTurn"))
+                    .await?;
+            }
+        }
+        Ok(())
+    }
 }
 
 async fn run_until_quiescent(system: &ActorSystem, max_polls: usize) {
@@ -109,6 +153,52 @@ async fn test_simple_inference_chain() {
         agent_state.status
     );
     assert_eq!(agent_state.counters.get("turns"), Some(&1usize));
+}
+
+#[tokio::test]
+async fn test_process_reaction_forwards_only_declared_prompt_to_llm() {
+    let (pool, _postgres) = setup_test_pg().await;
+    let system = Arc::new(ActorSystem::new(pool.clone(), SchedulerConfig::default()));
+    register_agent_actors(&system).await.unwrap();
+    system
+        .register(Arc::new(RecordingLlmIntegration))
+        .await
+        .unwrap();
+    system.register(Arc::new(MockToolExecutor)).await.unwrap();
+
+    let namespace = format!("test/session/{}", uuid::Uuid::new_v4());
+    for actor_type in AGENT_ACTOR_TYPES {
+        system.spawn(&namespace, actor_type).await.unwrap();
+    }
+    let process = temper_actor_runtime::ActorHandle::new(namespace.clone(), "Process");
+    system
+        .tell(None, &process, SpecMessage::new("Initialize"))
+        .await
+        .unwrap();
+    run_until_quiescent(&system, 10).await;
+    system
+        .tell(
+            None,
+            &process,
+            SpecMessage::with_params(
+                "StartProcess",
+                serde_json::json!({
+                    "user_prompt": "declared prompt",
+                    "private_source_field": "must not leak",
+                }),
+            ),
+        )
+        .await
+        .unwrap();
+    run_until_quiescent(&system, 50).await;
+
+    let captured: serde_json::Value =
+        serde_json::from_slice(&load_raw_actor_state(&pool, &namespace, "LlmIntegration").await)
+            .unwrap();
+    assert_eq!(
+        captured,
+        serde_json::json!({"user_prompt": "declared prompt"})
+    );
 }
 
 #[tokio::test]

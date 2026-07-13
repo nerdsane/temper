@@ -51,6 +51,7 @@ action = "ToolCallBatchRequested"
 [reaction.then]
 entity_type = "ToolRouter"
 action = "ToolCallBatchRequested"
+params_from = { tool_calls = "tool_calls" }
 [reaction.resolve_target]
 type = "SameId"
 
@@ -64,6 +65,7 @@ action = "ToolCallBatchComplete"
 [reaction.then]
 entity_type = "Process"
 action = "ToolCallBatchComplete"
+params_from = { tool_results = "tool_results" }
 [reaction.resolve_target]
 type = "SameId"
 
@@ -75,6 +77,7 @@ action = "ToolCallBatchFailed"
 [reaction.then]
 entity_type = "Process"
 action = "ToolCallBatchFailed"
+params_from = { error = "error" }
 [reaction.resolve_target]
 type = "SameId"
 
@@ -138,6 +141,7 @@ action = "invoke_llm"
 [reaction.then]
 entity_type = "LlmIntegration"
 action = "invoke_llm"
+params_from = { user_prompt = "user_prompt", tool_results = "tool_results", child_result = "child_result" }
 [reaction.resolve_target]
 type = "SameId"
 
@@ -160,6 +164,7 @@ action = "execute_tool_batch"
 [reaction.then]
 entity_type = "ToolExecutorIntegration"
 action = "execute_tool_batch"
+params_from = { tool_calls = "tool_calls" }
 [reaction.resolve_target]
 type = "SameId"
 
@@ -184,17 +189,46 @@ action = "spawn_child"
 [reaction.then]
 entity_type = "ChildSpawnerIntegration"
 action = "spawn_child"
+params_from = { child_definition_id = "child_definition_id", child_user_prompt = "child_user_prompt", child_process_id = "child_process_id", tool_names = "tool_names" }
 [reaction.resolve_target]
 type = "SameId"
 
 [[reaction]]
-name = "process_notify_parent"
+name = "process_notify_parent_after_completion"
 [reaction.when]
 entity_type = "Process"
 action = "notify_parent"
+to_state = "Terminated"
 [reaction.then]
 entity_type = "ChildCompletionIntegration"
 action = "notify_parent_completion"
+params_from = { parent_pid = "parent_pid", child_result = "final_answer" }
+[reaction.resolve_target]
+type = "SameId"
+
+[[reaction]]
+name = "process_notify_parent_after_inference"
+[reaction.when]
+entity_type = "Process"
+action = "notify_parent"
+to_state = "Ready"
+[reaction.then]
+entity_type = "ChildCompletionIntegration"
+action = "notify_parent_completion"
+params_from = { parent_pid = "parent_pid", child_result = "response" }
+[reaction.resolve_target]
+type = "SameId"
+
+[[reaction]]
+name = "process_notify_parent_after_failure"
+[reaction.when]
+entity_type = "Process"
+action = "notify_parent"
+to_state = "Failed"
+[reaction.then]
+entity_type = "ChildCompletionIntegration"
+action = "notify_parent_completion"
+params_from = { parent_pid = "parent_pid", child_result = "error" }
 [reaction.resolve_target]
 type = "SameId"
 
@@ -208,5 +242,6 @@ action = "schedule_wakeup"
 [reaction.then]
 entity_type = "WakeupSchedulerIntegration"
 action = "schedule_wakeup"
+params_from = { sleep_seconds = "sleep_seconds" }
 [reaction.resolve_target]
 type = "SameId"
