@@ -54,10 +54,20 @@ path, where a retried lagging index write can land after a newer one.
   deploy, stale table) advances the journal without reconciling; a
   guard-skip then trusts rows that write never installed. Pre-existing,
   shared with the key index, recorded here for the record.
-- On postgres the guard runs DELETE-first and re-checks the journal under
-  the taken row locks, rolling back when it advanced — READ COMMITTED makes
-  a check-then-delete ordering non-atomic there; sim (mutex) and turso
-  (Immediate transaction) are atomic with either ordering.
+- On postgres the guard runs DELETE-first and re-checks the journal, rolling
+  back when it advanced — READ COMMITTED makes a check-then-delete ordering
+  non-atomic there; sim (mutex) and turso (Immediate transaction) are atomic
+  with either ordering. The DELETE's row locks serialize concurrent
+  reconciles ONLY when prior rows exist; in the no-prior-rows case a
+  same-model race is still caught by the index primary key (the stale INSERT
+  collides, errors, and the type is not watermarked — fail-safe), but a
+  CROSS-model live re-embed racing the window between the re-check and the
+  stale INSERT commits under a different primary key: a transient stale row
+  survives in the old model partition until the entity's next write
+  reconciles all its partitions. Narrow, self-healing, and strictly better
+  than the unguarded behavior — recorded as a known residual alongside the
+  key-backfill follow-up rather than closed with a heavier per-entity lock
+  (the direction Alternatives rejects).
 
 ## Alternatives Considered
 
