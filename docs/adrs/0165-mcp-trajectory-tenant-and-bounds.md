@@ -43,10 +43,17 @@ determine storage.
 
 ### Sub-Decision 2: Bounded capture
 
-Recorded `code` and `result` text are truncated to a per-message byte cap
-(`MAX_TRAJECTORY_TEXT_BYTES`) with an explicit truncation marker, and the number of
-recorded turns is bounded (`MAX_TRAJECTORY_TURNS`); further turns are dropped with a
-warning. The trajectory size is therefore bounded regardless of session input.
+Every guest-controlled channel that feeds the trajectory is bounded, so total size
+is bounded regardless of session input:
+- recorded `code` / `result` text → truncated to `MAX_TRAJECTORY_TEXT_BYTES` (on a
+  UTF-8 char boundary, marked);
+- the decision's `error_type` → the same truncated text (not the raw error);
+- the embedded `trajectory_actions` → capped in count (`MAX_TRAJECTORY_ACTIONS`) and
+  collapsed to a summary when serialized size exceeds the text budget;
+- the number of recorded turns → capped (`MAX_TRAJECTORY_TURNS`), further turns
+  dropped with a warning;
+- the per-session `tenants_seen` / `entity_types_seen` maps → capped in distinct
+  keys (`MAX_SEEN_KEYS`).
 
 ## Consequences
 
@@ -74,8 +81,9 @@ warning. The trajectory size is therefore bounded regardless of session input.
   client-side code-derived-tenant vector (the disclosed ARN-222 issue); binding the
   header to the authenticated principal server-side is a worthwhile companion issue.
 - The `tenants_seen` / `entity_types_seen` maps are populated from the full
-  (un-truncated) `code`; their growth is bounded by the turn cap (parsing stops once
-  turns are dropped) but a tighter per-map cap is a possible follow-up.
+  (un-truncated) `code`; their distinct-key growth is capped at `MAX_SEEN_KEYS`
+  (existing keys still increment), so a single large code blob cannot insert
+  unbounded unique keys.
 
 ## Alternatives Considered
 1. **Reject the session when code references another tenant.** Rejected: legitimate

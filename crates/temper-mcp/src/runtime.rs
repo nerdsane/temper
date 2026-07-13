@@ -22,6 +22,30 @@ const OTS_UPLOAD_RETRY_DELAY_MS: u64 = 100;
 const MAX_TRAJECTORY_TEXT_BYTES: usize = 16 * 1024;
 /// Cap on the number of turns recorded in a single trajectory.
 const MAX_TRAJECTORY_TURNS: usize = 500;
+/// Cap on the number of extracted actions embedded in a single turn's decision.
+const MAX_TRAJECTORY_ACTIONS: usize = 64;
+/// Cap on the number of distinct tenants / entity types tracked per session.
+const MAX_SEEN_KEYS: usize = 256;
+
+/// Bound the `trajectory_actions` embedded in a turn's decision. The actions are
+/// parsed from the full (untruncated) code, so both their count and total
+/// serialized size are capped, replacing the array with a summary when it would
+/// exceed the text budget — otherwise a large `temper.action(params=...)` dict
+/// bypasses the per-message cap every turn (ARN-222).
+fn bounded_trajectory_actions(mut actions: Vec<Value>) -> Value {
+    actions.truncate(MAX_TRAJECTORY_ACTIONS);
+    let value = Value::Array(actions);
+    let too_large = serde_json::to_string(&value)
+        .map(|s| s.len() > MAX_TRAJECTORY_TEXT_BYTES)
+        .unwrap_or(true);
+    if too_large {
+        return serde_json::json!({
+            "trajectory_actions_truncated": true,
+            "note": "actions omitted: serialized size exceeded the trajectory cap",
+        });
+    }
+    value
+}
 
 /// The tenant a captured trajectory is stored under. It must be the session's
 /// authenticated `identity` — never a tenant derived from the executed code, which
@@ -37,9 +61,16 @@ fn trajectory_storage_tenant<'a>(
     identity
 }
 
-/// Truncate recorded trajectory text to `MAX_TRAJECTORY_TEXT_BYTES`, appending an
-/// explicit marker, so a large submitted code blob or result can't grow the
-/// trajectory without bound (ARN-222).
+/// Increment `key`'s count in a per-session observability map, without growing the
+/// map past `MAX_SEEN_KEYS` distinct keys (existing keys always increment).
+fn bump_seen(map: &mut BTreeMap<String, usize>, key: String) {
+    if let Some(count) = map.get_mut(&key) {
+        *count += 1;
+    } else if map.len() < MAX_SEEN_KEYS {
+        map.insert(key, 1);
+    }
+}
+
 /// Largest byte index `<= max` that is a UTF-8 char boundary of `s`, so
 /// `&s[..floor_char_boundary(s, max)]` never panics on a multibyte char.
 fn floor_char_boundary(s: &str, max: usize) -> usize {
@@ -50,6 +81,9 @@ fn floor_char_boundary(s: &str, max: usize) -> usize {
     end
 }
 
+/// Truncate recorded trajectory text to `MAX_TRAJECTORY_TEXT_BYTES`, appending an
+/// explicit marker, so a large submitted code blob or result can't grow the
+/// trajectory without bound (ARN-222).
 fn truncate_trajectory_text(text: &str) -> String {
     if text.len() <= MAX_TRAJECTORY_TEXT_BYTES {
         return text.to_string();
@@ -260,15 +294,16 @@ impl RuntimeContext {
                 ));
                 ("success", OTSConsequence::success())
             }
-            Err(e) => {
+            Err(_) => {
                 builder.add_message(OTSMessage::new(
                     MessageRole::Assistant,
-                    OTSMessageContent::text(result_text),
+                    OTSMessageContent::text(result_text.clone()),
                     now,
                 ));
+                // Bound the error_type too — it is the same (already truncated) text.
                 (
                     "failure",
-                    OTSConsequence::failure().with_error_type(e.to_string()),
+                    OTSConsequence::failure().with_error_type(result_text),
                 )
             }
         };
@@ -277,7 +312,7 @@ impl RuntimeContext {
         let mut choice = OTSChoice::new(format!("execute: {}", &code[..label_end]));
         if !extracted_actions.is_empty() {
             choice = choice.with_arguments(serde_json::json!({
-                "trajectory_actions": extracted_actions,
+                "trajectory_actions": bounded_trajectory_actions(extracted_actions),
             }));
         }
 
@@ -289,17 +324,13 @@ impl RuntimeContext {
         tracing::debug!(outcome = outcome_str, "ots.trajectory.turn_recorded");
 
         for meta in extract_temper_call_metadata(code) {
+            // Cap the distinct-key growth of these observability maps so a single
+            // large code blob can't insert unbounded unique keys (ARN-222).
             if let Some(tenant) = meta.tenant {
-                self.tenants_seen
-                    .entry(tenant)
-                    .and_modify(|count| *count += 1)
-                    .or_insert(1);
+                bump_seen(&mut self.tenants_seen, tenant);
             }
             if let Some(entity_type) = meta.entity_type {
-                self.entity_types_seen
-                    .entry(entity_type)
-                    .and_modify(|count| *count += 1)
-                    .or_insert(1);
+                bump_seen(&mut self.entity_types_seen, entity_type);
             }
         }
     }
@@ -945,7 +976,71 @@ pub async fn run_stdio_server(config: McpConfig) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use axum::{Router, extract::State, http::StatusCode, routing::post};
+    use axum::{Router, extract::State, http::HeaderMap, http::StatusCode, routing::post};
+    use std::sync::Mutex;
+
+    #[test]
+    fn bounded_trajectory_actions_caps_count_and_size() {
+        // ARN-222: trajectory_actions come from the full untruncated code and must
+        // be bounded in both count and serialized size.
+        let many: Vec<Value> = (0..MAX_TRAJECTORY_ACTIONS + 50)
+            .map(|i| serde_json::json!({ "a": i }))
+            .collect();
+        assert_eq!(
+            bounded_trajectory_actions(many).as_array().map(|a| a.len()),
+            Some(MAX_TRAJECTORY_ACTIONS),
+            "action count must be capped"
+        );
+        // One action with a huge params blob collapses to a summary.
+        let huge = vec![serde_json::json!({ "params": "x".repeat(MAX_TRAJECTORY_TEXT_BYTES * 2) })];
+        assert_eq!(
+            bounded_trajectory_actions(huge).get("trajectory_actions_truncated"),
+            Some(&serde_json::json!(true)),
+            "oversized actions must collapse to a bounded summary"
+        );
+    }
+
+    #[tokio::test]
+    async fn trajectory_upload_uses_identity_tenant_header() {
+        // ARN-222 (wire-level): the trajectory must be filed under the authenticated
+        // identity even when the code referenced other tenants — a call-site guard.
+        async fn handler(
+            State(captured): State<Arc<Mutex<Option<String>>>>,
+            headers: HeaderMap,
+        ) -> StatusCode {
+            let tenant = headers
+                .get("X-Tenant-Id")
+                .and_then(|v| v.to_str().ok())
+                .map(str::to_string);
+            *captured.lock().expect("lock") = tenant;
+            StatusCode::ACCEPTED
+        }
+
+        let captured = Arc::new(Mutex::new(None));
+        let app = Router::new()
+            .route("/api/ots/trajectories", post(handler))
+            .with_state(captured.clone());
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind");
+        let addr = listener.local_addr().expect("addr");
+        tokio::spawn(async move {
+            axum::serve(listener, app).await.expect("serve");
+        });
+
+        let mut ctx = trajectory_test_ctx("my-identity");
+        ctx.base_url = format!("http://{addr}");
+        // Code referenced a foreign tenant far more than the identity.
+        ctx.tenants_seen.insert("attacker-tenant".to_string(), 99);
+        ctx.init_trajectory();
+        ctx.finalize_trajectory().await;
+
+        assert_eq!(
+            captured.lock().expect("lock").as_deref(),
+            Some("my-identity"),
+            "trajectory must be filed under the identity tenant, not a code-referenced one"
+        );
+    }
 
     #[test]
     fn trajectory_storage_tenant_uses_identity_not_code() {
