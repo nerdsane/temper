@@ -1929,6 +1929,29 @@ fn strip_private_observability_params(mut params: Value) -> Value {
     params
 }
 
+/// Callback-param keys that carry LLM *content* (prompt, completion, system
+/// prompt, and tool arguments/results) rather than safe metadata. These are the
+/// keys the telemetry sinks read — the span record, [`llm_call_wide_event`],
+/// [`submit_llmobs_llm_span`], and [`submit_llmobs_tool_spans`] — so stripping
+/// them from `callback_params` redacts content across every sink at once.
+/// Metadata keys (`_gen_ai_provider`, `_gen_ai_model`, `_gen_ai_finish_reason`,
+/// trace/span ids, token counts) are intentionally preserved. See ADR-0166.
+const LLM_CONTENT_PARAM_KEYS: [&str; 4] = [
+    "_gen_ai_input_messages",
+    "_gen_ai_output_messages",
+    "_gen_ai_system_instructions",
+    "_dd_llmobs_tool_spans",
+];
+
+/// Redact LLM content params from `callback_params` unless the tenant has opted
+/// into LLM content export. Removes only the content keys in
+/// [`LLM_CONTENT_PARAM_KEYS`]; metadata is preserved. No-op when
+/// `export_content` is true. See ADR-0166.
+fn redact_llm_content_params(_callback_params: &mut Value, _export_content: bool) {
+    // ARN-243 RED: LLM content is exported for every tenant with no per-tenant
+    // gate. The redaction is implemented in the GREEN commit.
+}
+
 fn integration_error_type(error: &str) -> String {
     let normalized = error.to_ascii_lowercase();
     if normalized.contains("rate limit") {
@@ -2098,6 +2121,60 @@ mod tests {
         assert!(stripped.get("_gen_ai_finish_reason").is_none());
         assert!(stripped.get("_gen_ai_llm_parent_span_id").is_none());
         assert!(stripped.get("_dd_llmobs_tool_spans").is_none());
+    }
+
+    #[test]
+    fn redacts_llm_content_params_for_non_opted_in_tenant() {
+        let base = json!({
+            "input_tokens": 10,
+            "output_tokens": 20,
+            "_gen_ai_provider": "anthropic",
+            "_gen_ai_model": "claude-sonnet-4-6",
+            "_gen_ai_finish_reason": "end_turn",
+            "_gen_ai_llm_parent_span_id": "parent-span",
+            "_gen_ai_input_messages": "[{\"role\":\"user\",\"content\":\"SECRET PROMPT\"}]",
+            "_gen_ai_output_messages": "[{\"role\":\"assistant\",\"content\":\"SECRET REPLY\"}]",
+            "_gen_ai_system_instructions": "SECRET SYSTEM",
+            "_dd_llmobs_tool_spans": "[{\"arguments\":\"SECRET ARGS\",\"result\":\"SECRET RESULT\"}]",
+        });
+
+        // Non-opted-in tenant: content stripped, metadata preserved.
+        let mut redacted = base.clone();
+        redact_llm_content_params(&mut redacted, false);
+        assert!(
+            redacted.get("_gen_ai_input_messages").is_none(),
+            "prompt must be redacted"
+        );
+        assert!(
+            redacted.get("_gen_ai_output_messages").is_none(),
+            "completion must be redacted"
+        );
+        assert!(
+            redacted.get("_gen_ai_system_instructions").is_none(),
+            "system prompt must be redacted"
+        );
+        assert!(
+            redacted.get("_dd_llmobs_tool_spans").is_none(),
+            "tool content must be redacted"
+        );
+        assert_eq!(redacted["input_tokens"], 10);
+        assert_eq!(redacted["output_tokens"], 20);
+        assert_eq!(redacted["_gen_ai_provider"], "anthropic");
+        assert_eq!(redacted["_gen_ai_model"], "claude-sonnet-4-6");
+        assert_eq!(redacted["_gen_ai_finish_reason"], "end_turn");
+        assert_eq!(redacted["_gen_ai_llm_parent_span_id"], "parent-span");
+
+        // Opted-in tenant: content preserved.
+        let mut exported = base.clone();
+        redact_llm_content_params(&mut exported, true);
+        assert_eq!(
+            exported["_gen_ai_input_messages"],
+            "[{\"role\":\"user\",\"content\":\"SECRET PROMPT\"}]"
+        );
+        assert_eq!(
+            exported["_dd_llmobs_tool_spans"],
+            "[{\"arguments\":\"SECRET ARGS\",\"result\":\"SECRET RESULT\"}]"
+        );
     }
 
     #[test]

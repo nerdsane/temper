@@ -100,6 +100,34 @@ pub(crate) fn span_hint_otel_name<'a>(
         .unwrap_or(Cow::Borrowed(default_name))
 }
 
+/// Whether a span-hint attribute key carries LLM *content* (prompt,
+/// completion, system prompt, or tool arguments/results) as opposed to safe
+/// metadata (model, provider, token counts, ids). Content keys are redacted
+/// from host-captured span hints unless the tenant has opted into LLM content
+/// export. See ADR-0166.
+pub(crate) fn is_sensitive_llm_content_attr(attr_key: &str) -> bool {
+    matches!(
+        attr_key,
+        "gen_ai.input.messages"
+            | "gen_ai.prompt"
+            | "gen_ai.system_instructions"
+            | "gen_ai.output.messages"
+            | "gen_ai.completion"
+            | "gen_ai.tool.call.arguments"
+            | "gen_ai.tool.call.result"
+    )
+}
+
+/// Redact LLM content attributes and response captures from host-captured span
+/// hints unless the tenant has opted into LLM content export. Removes only the
+/// sensitive content keys ([`is_sensitive_llm_content_attr`]); metadata hints
+/// (model, provider, tokens, ids, span name) are preserved. No-op when
+/// `export_content` is true. See ADR-0166.
+pub(crate) fn redact_llm_content_hints(_hints: &mut SpanHints, _export_content: bool) {
+    // ARN-243 RED: content span hints are recorded for every tenant with no
+    // per-tenant gate. The redaction is implemented in the GREEN commit.
+}
+
 pub(crate) fn datadog_visible_span_hint_field(attr_key: &str) -> Option<&'static str> {
     match attr_key {
         "tenant" => Some("tenant"),
@@ -229,4 +257,111 @@ pub(crate) fn truncate_for_span_attr(value: &str) -> String {
     out.push_str(&value[..cut]);
     out.push_str(MAX_RESPONSE_CAPTURE_TRUNCATION_SUFFIX);
     out
+}
+
+#[cfg(test)]
+mod redaction_tests {
+    use super::*;
+
+    fn content_hints() -> SpanHints {
+        SpanHints {
+            span_name: None,
+            attributes: vec![
+                ("gen_ai.request.model".to_string(), "claude".to_string()),
+                (
+                    "gen_ai.input.messages".to_string(),
+                    "SECRET PROMPT".to_string(),
+                ),
+                (
+                    "gen_ai.system_instructions".to_string(),
+                    "SECRET SYSTEM".to_string(),
+                ),
+                ("tenant".to_string(), "acme".to_string()),
+            ],
+            response_captures: vec![
+                (
+                    "gen_ai.completion".to_string(),
+                    "/content/0/text".to_string(),
+                ),
+                ("http.response.body.size".to_string(), "/size".to_string()),
+            ],
+        }
+    }
+
+    #[test]
+    fn classifies_content_vs_metadata_attrs() {
+        assert!(is_sensitive_llm_content_attr("gen_ai.input.messages"));
+        assert!(is_sensitive_llm_content_attr("gen_ai.completion"));
+        assert!(is_sensitive_llm_content_attr("gen_ai.tool.call.arguments"));
+        assert!(!is_sensitive_llm_content_attr("gen_ai.request.model"));
+        assert!(!is_sensitive_llm_content_attr("gen_ai.usage.input_tokens"));
+        assert!(!is_sensitive_llm_content_attr("tenant"));
+    }
+
+    #[test]
+    fn redacts_sensitive_content_hints_when_not_opted_in() {
+        let mut hints = content_hints();
+        redact_llm_content_hints(&mut hints, false);
+
+        // Content attributes stripped.
+        assert!(
+            hints
+                .attributes
+                .iter()
+                .all(|(k, _)| k != "gen_ai.input.messages"),
+            "prompt attr must be redacted"
+        );
+        assert!(
+            hints
+                .attributes
+                .iter()
+                .all(|(k, _)| k != "gen_ai.system_instructions"),
+            "system instructions attr must be redacted"
+        );
+        // Metadata attributes preserved.
+        assert!(
+            hints
+                .attributes
+                .iter()
+                .any(|(k, _)| k == "gen_ai.request.model"),
+            "model metadata must survive"
+        );
+        assert!(hints.attributes.iter().any(|(k, _)| k == "tenant"));
+
+        // Content capture stripped, metadata capture preserved.
+        assert!(
+            hints
+                .response_captures
+                .iter()
+                .all(|(k, _)| k != "gen_ai.completion"),
+            "completion capture must be redacted"
+        );
+        assert!(
+            hints
+                .response_captures
+                .iter()
+                .any(|(k, _)| k == "http.response.body.size"),
+            "size capture must survive"
+        );
+    }
+
+    #[test]
+    fn keeps_content_hints_when_opted_in() {
+        let mut hints = content_hints();
+        redact_llm_content_hints(&mut hints, true);
+        assert!(
+            hints
+                .attributes
+                .iter()
+                .any(|(k, _)| k == "gen_ai.input.messages"),
+            "opted-in tenant keeps prompt"
+        );
+        assert!(
+            hints
+                .response_captures
+                .iter()
+                .any(|(k, _)| k == "gen_ai.completion"),
+            "opted-in tenant keeps completion"
+        );
+    }
 }
