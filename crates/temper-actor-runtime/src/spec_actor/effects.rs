@@ -52,15 +52,12 @@ pub(crate) fn reject_unsupported_effects(table: &TransitionTable) -> Result<(), 
     Ok(())
 }
 
-fn counter_delta_from_params(params: &serde_json::Value, param: &str) -> usize {
-    params
-        .get(param)
-        .and_then(|value| match value {
-            serde_json::Value::Number(number) => number.as_u64().map(|v| v as usize),
-            serde_json::Value::String(text) => text.parse::<usize>().ok(),
-            _ => None,
-        })
-        .unwrap_or(0)
+fn counter_delta_from_params(params: &serde_json::Value, param: &str) -> Option<usize> {
+    params.get(param).and_then(|value| match value {
+        serde_json::Value::Number(number) => number.as_u64().map(|v| v as usize),
+        serde_json::Value::String(text) => text.parse::<usize>().ok(),
+        _ => None,
+    })
 }
 
 impl SpecDrivenActor {
@@ -86,8 +83,15 @@ impl SpecDrivenActor {
                 *state.counters.entry(var.clone()).or_default() += 1;
             }
             Effect::IncrementCounterByParam { var, param } => {
-                let delta = counter_delta_from_params(&state.fields, param);
-                *state.counters.entry(var.clone()).or_default() += delta;
+                match counter_delta_from_params(&state.fields, param) {
+                    Some(delta) => *state.counters.entry(var.clone()).or_default() += delta,
+                    None => tracing::warn!(
+                        actor = %self.name,
+                        counter = %var,
+                        param = %param,
+                        "increment_counter_by_param skipped: param missing or not a non-negative integer"
+                    ),
+                }
             }
             Effect::DecrementItems => {
                 let c = state.counters.entry("items".into()).or_default();
@@ -98,9 +102,18 @@ impl SpecDrivenActor {
                 *c = c.saturating_sub(1);
             }
             Effect::DecrementCounterByParam { var, param } => {
-                let delta = counter_delta_from_params(&state.fields, param);
-                let c = state.counters.entry(var.clone()).or_default();
-                *c = c.saturating_sub(delta);
+                match counter_delta_from_params(&state.fields, param) {
+                    Some(delta) => {
+                        let c = state.counters.entry(var.clone()).or_default();
+                        *c = c.saturating_sub(delta);
+                    }
+                    None => tracing::warn!(
+                        actor = %self.name,
+                        counter = %var,
+                        param = %param,
+                        "decrement_counter_by_param skipped: param missing or not a non-negative integer"
+                    ),
+                }
             }
             Effect::SetCounterFromParam { var, param } => {
                 let parsed = state.fields.get(param).and_then(|v| match v {

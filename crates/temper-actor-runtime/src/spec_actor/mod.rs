@@ -21,7 +21,7 @@ use temper_jit::table::{EvalContext, TransitionTable};
 use temper_runtime::reaction::ReactionRule;
 use temper_spec::automaton::Automaton;
 
-use crate::actor::{Actor, ActorContext, ActorError, ActorHandle, Message};
+use crate::actor::{Actor, ActorContext, ActorError, Message};
 
 mod effects;
 
