@@ -30,22 +30,32 @@ const MAX_TRAJECTORY_TURNS: usize = 500;
 /// want the cross-tenant signal, but it never determines storage.
 fn trajectory_storage_tenant<'a>(
     identity: &'a str,
-    tenants_seen: &'a BTreeMap<String, usize>,
+    _tenants_seen: &'a BTreeMap<String, usize>,
 ) -> &'a str {
-    // RED: honor the most-referenced tenant from the code (the vulnerable behavior).
-    tenants_seen
-        .iter()
-        .max_by_key(|(_, count)| *count)
-        .map(|(tenant, _)| tenant.as_str())
-        .unwrap_or(identity)
+    // Always the authenticated identity. Code content (`_tenants_seen`) is never
+    // allowed to move a trajectory into another tenant's storage.
+    identity
 }
 
 /// Truncate recorded trajectory text to `MAX_TRAJECTORY_TEXT_BYTES`, appending an
 /// explicit marker, so a large submitted code blob or result can't grow the
 /// trajectory without bound (ARN-222).
+/// Largest byte index `<= max` that is a UTF-8 char boundary of `s`, so
+/// `&s[..floor_char_boundary(s, max)]` never panics on a multibyte char.
+fn floor_char_boundary(s: &str, max: usize) -> usize {
+    let mut end = max.min(s.len());
+    while end > 0 && !s.is_char_boundary(end) {
+        end -= 1;
+    }
+    end
+}
+
 fn truncate_trajectory_text(text: &str) -> String {
-    // RED: record the text verbatim (the vulnerable behavior).
-    text.to_string()
+    if text.len() <= MAX_TRAJECTORY_TEXT_BYTES {
+        return text.to_string();
+    }
+    let end = floor_char_boundary(text, MAX_TRAJECTORY_TEXT_BYTES);
+    format!("{}…[truncated {} bytes]", &text[..end], text.len() - end)
 }
 
 /// Client identity received from the MCP `initialize` handshake.
@@ -263,7 +273,8 @@ impl RuntimeContext {
             }
         };
 
-        let mut choice = OTSChoice::new(format!("execute: {}", &code[..code.len().min(100)]));
+        let label_end = floor_char_boundary(code, 100);
+        let mut choice = OTSChoice::new(format!("execute: {}", &code[..label_end]));
         if !extracted_actions.is_empty() {
             choice = choice.with_arguments(serde_json::json!({
                 "trajectory_actions": extracted_actions,
@@ -970,6 +981,59 @@ mod tests {
         );
         // Text within the cap is recorded verbatim.
         assert_eq!(truncate_trajectory_text("hello"), "hello");
+        // A multibyte char straddling the cap must not panic and must stay valid UTF-8.
+        let multibyte = "é".repeat(MAX_TRAJECTORY_TEXT_BYTES); // 2 bytes each
+        let t = truncate_trajectory_text(&multibyte);
+        assert!(t.len() <= MAX_TRAJECTORY_TEXT_BYTES + 128);
+        assert!(t.contains("truncated"));
+    }
+
+    fn trajectory_test_ctx(identity: &str) -> RuntimeContext {
+        RuntimeContext {
+            base_url: "http://127.0.0.1:1".to_string(),
+            http: reqwest::Client::new(),
+            agent_id: None,
+            agent_type: None,
+            session_id: None,
+            api_key: None,
+            identity_tenant: identity.to_string(),
+            sandbox: temper_sandbox::runner::PersistentSandbox::new(&[("temper", "Temper", 1)]),
+            trajectory: None,
+            tenants_seen: BTreeMap::new(),
+            entity_types_seen: BTreeMap::new(),
+            turns_recorded: 0,
+        }
+    }
+
+    #[test]
+    fn turn_cap_bounds_recorded_turns() {
+        // ARN-222: the trajectory records up to MAX_TRAJECTORY_TURNS turns, then
+        // drops further turns instead of growing without bound.
+        let mut ctx = trajectory_test_ctx("t");
+        ctx.init_trajectory();
+        let ok: Result<String> = Ok("result".to_string());
+
+        ctx.record_execute_turn("code", &ok);
+        assert_eq!(ctx.turns_recorded, 1, "a turn under the cap is recorded");
+
+        ctx.turns_recorded = MAX_TRAJECTORY_TURNS;
+        ctx.record_execute_turn("code", &ok);
+        assert_eq!(
+            ctx.turns_recorded, MAX_TRAJECTORY_TURNS,
+            "a turn at the cap is dropped, not recorded"
+        );
+    }
+
+    #[test]
+    fn choice_label_does_not_panic_on_multibyte_code() {
+        // ARN-222 follow-up: the choice label slices the first 100 bytes of `code`;
+        // a multibyte char at the boundary must not crash the client.
+        let mut ctx = trajectory_test_ctx("t");
+        ctx.init_trajectory();
+        let code = "é".repeat(80); // 160 bytes; byte 100 is mid-char
+        let ok: Result<String> = Ok("ok".to_string());
+        ctx.record_execute_turn(&code, &ok); // must not panic
+        assert_eq!(ctx.turns_recorded, 1);
     }
     use std::sync::{
         Arc,

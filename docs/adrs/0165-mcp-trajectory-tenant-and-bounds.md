@@ -67,6 +67,15 @@ warning. The trajectory size is therefore bounded regardless of session input.
 - Redaction of secrets that a guest may print into a result is a separate content
   concern, tracked elsewhere. This ADR closes the tenant-attribution and unbounded
   size vectors.
+- **Server-side authorization of the trajectory ingest route.** The
+  `POST /api/ots/trajectories` handler keys storage on the `X-Tenant-Id` header
+  without validating it against the bearer principal, so a raw HTTP caller with a
+  valid token could still target another tenant's store. This fix closes the
+  client-side code-derived-tenant vector (the disclosed ARN-222 issue); binding the
+  header to the authenticated principal server-side is a worthwhile companion issue.
+- The `tenants_seen` / `entity_types_seen` maps are populated from the full
+  (un-truncated) `code`; their growth is bounded by the turn cap (parsing stops once
+  turns are dropped) but a tighter per-map cap is a possible follow-up.
 
 ## Alternatives Considered
 1. **Reject the session when code references another tenant.** Rejected: legitimate
