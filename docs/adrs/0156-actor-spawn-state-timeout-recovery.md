@@ -37,27 +37,35 @@ The task is finite and owns a temporary `ServerState` clone only until readiness
 
 **Why this approach:** actor spawn is the earliest common lifecycle boundary shared by every hydration path. Request handlers are incomplete because an entity may receive no traffic, while actor `pre_start` cannot safely own the server dispatcher.
 
-### Sub-Decision 2: Hydration is explicit, not inferred from the last event
+### Sub-Decision 2: Index-only startup activates timed entities
+
+The default CLI boot path populates the durable entity index without hydrating actors. That optimization remains in place for entity types with no `[[state_timeout]]`. For every persisted entity whose registered spec declares a timeout, index population immediately spawns the actor so Sub-Decision 1 can reconcile its current state and deadline before any request traffic.
+
+**Why this approach:** projection-backed reads do not necessarily spawn an actor, so actor-lifecycle reconciliation alone cannot uphold a no-traffic liveness promise. A timed entity carries an active scheduling obligation and therefore cannot be treated as fully dormant while the scheduler remains in-process. Selective activation preserves lazy startup for non-timed data instead of restoring eager hydration for the whole tenant.
+
+### Sub-Decision 3: Hydration is explicit, not inferred from the last event
 
 The shared timeout-arm implementation accepts an explicit hydration cause. In hydration mode it does not treat the replayed last event as a fresh state entry. Instead it:
 
 1. confirms that the current state declares a timeout;
-2. confirms the per-process sequence tracker has no live timer for this entity;
+2. atomically reserves the initial sequence only when the per-process tracker has no live timer for this entity;
 3. derives the latest state-entry or `reset_on` timestamp from replayed durable events;
 4. arms the remaining budget, or dispatches on the next runtime tick when already overdue; and
 5. uses the existing sequence and state checks to cancel stale or racing timers.
 
-A concurrent real dispatch may arm or invalidate a timer before the readiness task completes. The tracker check makes that race idempotent: hydration does nothing when a newer live timer already exists.
+A concurrent real dispatch may arm or invalidate a timer before the readiness task completes. Atomic reservation makes both orderings safe: hydration does nothing when dispatch armed first, while a later dispatch supersedes an earlier hydration reservation without either path erasing the other path's deadline.
+
+The readiness task captures both the deterministic event-clock observation and a Tokio monotonic-time anchor before it is spawned, then deducts the full queue-plus-ask elapsed time from the recovered remaining budget. Actor scheduling and readiness therefore cannot move the persisted deadline later, while paused Tokio time keeps DST replay exact.
 
 **Why this approach:** the existing code inferred hydration from “same state plus tracker sequence zero.” That inference works only after traffic arrives and can misclassify the replayed entry event as a brand-new entry with a full budget.
 
-### Sub-Decision 3: Readiness failure is bounded and observable
+### Sub-Decision 4: Readiness failure is bounded and observable
 
 The readiness ask uses the existing retry budget. Exhaustion logs a structured error with tenant, entity type, and entity ID. It does not invent state or arm a timer from incomplete replay. A later successful dispatch retains ADR-0056's fallback reconciliation path.
 
 **Why this approach:** silently dropping the lifecycle task would recreate the regression; retrying forever would create an unbounded background workload.
 
-### Sub-Decision 4: Preserve the existing legacy-snapshot fallback
+### Sub-Decision 5: Preserve the existing legacy-snapshot fallback
 
 For current snapshots and replay tails that retain the relevant entry/reset event, recovery uses the exact remaining or overdue budget. Legacy snapshots that contain no retained clock-reset event continue to receive one full timeout budget, as ADR-0056 already specifies. This is conservative: it may delay one deadline after upgrading an old snapshot, but it cannot fire earlier than the durable evidence permits. New persistent timer schema is outside this correction.
 
@@ -80,6 +88,7 @@ For current snapshots and replay tails that retain the relevant entry/reset even
 ### Positive
 
 - Declared state deadlines survive restart without depending on later request traffic.
+- Default index-only startup activates only timed entity types; non-timed entities remain lazy.
 - Eager hydration and lazy respawn use one lifecycle rule.
 - Timer dispatch continues through the complete server action path.
 - Racing hydration and real actions remain idempotent through the existing sequence tracker.
@@ -87,13 +96,15 @@ For current snapshots and replay tails that retain the relevant entry/reset even
 ### Negative
 
 - Each new actor performs one additional bounded `GetState` ask after startup.
+- Persisted timed entities consume actor and timer memory while their liveness obligation is active.
 - Timeout recovery is asynchronous with respect to registry insertion, so readiness may briefly precede timer-arm observability.
 - Legacy snapshot-only entities may receive one conservative full budget after their first upgraded hydration.
 
 ### Risks
 
 - **Readiness task exhaustion.** Mitigated by bounded retries, structured errors, and the existing post-dispatch reconciliation fallback.
-- **Duplicate timers during startup races.** Mitigated by requiring tracker sequence zero in explicit hydration mode and retaining the fire-time sequence/state checks.
+- **Timed-entity startup volume.** Bounded to entity types with declared liveness obligations; non-timed entities retain index-only lazy hydration. A future durable scheduler may avoid one resident actor per persisted instance of a timeout-declaring type.
+- **Duplicate timers during startup races.** Mitigated by atomic initial-sequence reservation and the existing fire-time sequence/state checks.
 - **Runtime task nondeterminism.** The task coordinates production actor readiness only; state mutation remains actor-serialized, time comes from `sim_now()`, and deterministic tests use a logical clock plus paused Tokio time.
 
 ### DST Compliance
@@ -106,7 +117,7 @@ For current snapshots and replay tails that retain the relevant entry/reset even
 ## Non-Goals
 
 - A separate persistent timer table.
-- A cluster-wide scheduler or proactive scan of entities that are never hydrated.
+- A continuous or cluster-wide scan beyond the existing one-time boot index scan.
 - Changing `[[state_timeout]]` syntax or liveness validation.
 - Reconstructing an exact timer anchor from legacy snapshots that contain no retained entry/reset event.
 
@@ -114,10 +125,10 @@ For current snapshots and replay tails that retain the relevant entry/reset even
 
 1. **Store `ServerState` inside every `EntityActor`** — Rejected because it creates a strong ownership cycle and couples the kernel actor to the HTTP/server aggregate.
 2. **Send timeout actions directly to the actor** — Rejected because it bypasses the shared dispatch path and its reactions, telemetry, integration behavior, and follow-on timer arming.
-3. **Re-arm only in `hydrate_from_store`** — Rejected because lazy respawn and direct actor creation paths would remain uncovered.
+3. **Re-arm only in `hydrate_from_store`** — Rejected because default boot uses index-only startup, while lazy respawn and direct actor creation paths would remain uncovered.
 4. **Wait for the next action** — Rejected because that is the current liveness failure.
 5. **Build the full durable scheduler now** — Deferred to ADR-0049's longer-term direction; it is broader than the actor-lifecycle regression.
 
 ## Rollback Policy
 
-Remove the post-spawn readiness task and explicit hydration cause. No persistent schema or event format changes are introduced, so rollback is code-only. Existing event histories and snapshots remain readable.
+Remove the post-spawn readiness task and explicit hydration cause, and restore `populate_index_from_store` to index-only behavior for every entity type. No persistent schema or event format changes are introduced, so rollback is code-only. Existing event histories and snapshots remain readable.

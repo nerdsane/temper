@@ -66,7 +66,7 @@ pprof = { version = "0.14", features = ["protobuf", "protobuf-codec"] }
 [dev-dependencies]
 tokio-test = { workspace = true }
 criterion = { workspace = true }
-tokio = { workspace = true, features = ["full"] }
+tokio = { workspace = true, features = ["full", "test-util"] }
 wiremock = { workspace = true }
 tracing-subscriber = { workspace = true }
 opentelemetry_sdk = { workspace = true }

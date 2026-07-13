@@ -352,10 +352,12 @@ impl ServerState {
             .extend(keys);
     }
 
-    /// Populate `entity_index` from the event store without spawning actors.
+    /// Populate `entity_index` from the event store, eagerly spawning only
+    /// entities whose specs declare state timeouts.
     ///
-    /// This is the memory-safe startup/list path: we discover persisted
-    /// entities while deferring actor allocation until first access.
+    /// This remains the memory-safe startup/list path for non-timed entities.
+    /// Timed entities cannot remain fully lazy because their declared liveness
+    /// transitions must be re-armed even when no request arrives after restart.
     #[instrument(skip_all, fields(otel.name = "entity.populate_index_from_store", tenant = %tenant))]
     pub async fn populate_index_from_store(&self, tenant: &TenantId) {
         let Some((store, _backend)) = self.event_journal() else {
@@ -364,6 +366,24 @@ impl ServerState {
 
         match store.list_entity_ids(tenant.as_str()).await {
             Ok(entities) => {
+                let timed_entities = match self.registry.read() {
+                    Ok(registry) => entities
+                        .iter()
+                        .filter(|(entity_type, _)| {
+                            registry
+                                .get_spec(tenant, entity_type)
+                                .is_some_and(|spec| !spec.automaton.state_timeouts.is_empty())
+                        })
+                        .cloned()
+                        .collect::<Vec<_>>(),
+                    Err(_) => {
+                        tracing::error!(
+                            tenant = %tenant,
+                            "timed entity startup skipped because the spec registry lock is poisoned"
+                        );
+                        Vec::new()
+                    }
+                };
                 {
                     let mut index = self
                         .entity_index
@@ -377,11 +397,25 @@ impl ServerState {
                             .insert(entity_id.clone());
                     }
                 } // write lock dropped before metrics call
+                for (entity_type, entity_id) in &timed_entities {
+                    if self
+                        .get_or_spawn_tenant_actor(tenant, entity_type, entity_id)
+                        .is_none()
+                    {
+                        tracing::error!(
+                            tenant = %tenant,
+                            entity_type,
+                            entity_id,
+                            "failed to spawn timed entity during startup reconciliation"
+                        );
+                    }
+                }
                 // A full-store scan is authoritative for every type it observed.
                 self.mark_types_hydrated(tenant, &entities);
                 tracing::info!(
                     tenant = %tenant,
                     count = entities.len(),
+                    timed_spawned = timed_entities.len(),
                     "populated entity index from event store"
                 );
                 runtime_metrics::record_server_state_metrics(self);
@@ -756,6 +790,11 @@ impl ServerState {
             registry.insert(key.clone(), actor_ref.clone());
             actor_ref
         };
+
+        // ADR-0156: actor spawn is the common lifecycle boundary for eager
+        // restart hydration, lazy durable loads, and passivation respawn.
+        // Reconcile the declared timeout without waiting for request traffic.
+        self.schedule_state_timeout_hydration(tenant, entity_type, entity_id, actor_ref.clone());
 
         // Track in entity index for collection queries
         {

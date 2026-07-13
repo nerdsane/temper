@@ -37,6 +37,14 @@ after_seconds = 60
 on_timeout = "TimeoutFail"
 "#;
 
+const UNTIMED_LAZY_TASK_IOA: &str = r#"
+[automaton]
+name = "LazyTask"
+states = ["Idle"]
+initial = "Idle"
+allow_indefinite_states = ["Idle"]
+"#;
+
 fn persisted_event(
     persistence_id: &str,
     sequence_nr: u64,
@@ -63,7 +71,10 @@ fn restarted_server(store: SimEventStore) -> ServerState {
         "default",
         csdl,
         CSDL_XML.to_string(),
-        &[("TimedTask", TIMED_TASK_IOA)],
+        &[
+            ("TimedTask", TIMED_TASK_IOA),
+            ("LazyTask", UNTIMED_LAZY_TASK_IOA),
+        ],
     );
 
     let system = ActorSystem::new("dst-state-timeout-restart");
@@ -72,15 +83,12 @@ fn restarted_server(store: SimEventStore) -> ServerState {
     state
 }
 
-#[tokio::test]
-async fn overdue_timeout_fires_after_restart_without_an_unrelated_dispatch() {
-    let (_guard, _clock, _ids) = install_deterministic_context(203);
-    let store = SimEventStore::no_faults(203);
-    let tenant = TenantId::default();
-    let entity_id = "timed-task-overdue";
-    let persistence_id = format!("default:TimedTask:{entity_id}");
-    let entered_running_at = sim_now() - chrono::Duration::seconds(61);
-
+async fn seed_running_entity(
+    store: &SimEventStore,
+    persistence_id: &str,
+    entity_id: &str,
+    entered_running_at: chrono::DateTime<chrono::Utc>,
+) {
     let created = EntityEvent {
         action: "Created".to_string(),
         from_status: String::new(),
@@ -99,18 +107,60 @@ async fn overdue_timeout_fires_after_restart_without_an_unrelated_dispatch() {
     };
     store
         .append(
-            &persistence_id,
+            persistence_id,
             0,
             &[
-                persisted_event(&persistence_id, 1, created),
-                persisted_event(&persistence_id, 2, started),
+                persisted_event(persistence_id, 1, created),
+                persisted_event(persistence_id, 2, started),
             ],
         )
         .await
         .expect("seed durable timed state");
+}
+
+async fn seed_lazy_entity(store: &SimEventStore, entity_id: &str) {
+    let persistence_id = format!("default:LazyTask:{entity_id}");
+    let created = EntityEvent {
+        action: "Created".to_string(),
+        from_status: String::new(),
+        to_status: "Idle".to_string(),
+        timestamp: sim_now(),
+        params: serde_json::json!({"Id": entity_id}),
+        idempotency_key: None,
+    };
+    store
+        .append(
+            &persistence_id,
+            0,
+            &[persisted_event(&persistence_id, 1, created)],
+        )
+        .await
+        .expect("seed durable non-timed state");
+}
+
+#[tokio::test]
+async fn overdue_timeout_fires_after_restart_without_an_unrelated_dispatch() {
+    let (_guard, _clock, _ids) = install_deterministic_context(203);
+    let store = SimEventStore::no_faults(203);
+    let tenant = TenantId::default();
+    let entity_id = "timed-task-overdue";
+    let persistence_id = format!("default:TimedTask:{entity_id}");
+    let entered_running_at = sim_now() - chrono::Duration::seconds(61);
+    seed_running_entity(&store, &persistence_id, entity_id, entered_running_at).await;
+    seed_lazy_entity(&store, "lazy-control").await;
 
     let state = restarted_server(store);
-    state.hydrate_from_store(&tenant).await;
+    state.populate_index_from_store(&tenant).await;
+    assert_eq!(
+        state.active_entity_count(),
+        2,
+        "index-only startup must discover timed and non-timed entities"
+    );
+    assert_eq!(
+        state.active_actor_count(),
+        1,
+        "index-only startup must activate only the persisted timed entity"
+    );
 
     let mut observed_status = String::new();
     for _ in 0..32 {
@@ -129,5 +179,77 @@ async fn overdue_timeout_fires_after_restart_without_an_unrelated_dispatch() {
     assert_eq!(
         observed_status, "TimedOut",
         "a persisted overdue state_timeout must fire after restart without waiting for unrelated action traffic"
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn budgeted_timeout_is_rearmed_after_restart_without_firing_early() {
+    let (_guard, _clock, _ids) = install_deterministic_context(204);
+    let store = SimEventStore::no_faults(204);
+    let tenant = TenantId::default();
+    let entity_id = "timed-task-budgeted";
+    let persistence_id = format!("default:TimedTask:{entity_id}");
+    let entered_running_at = sim_now() - chrono::Duration::seconds(17);
+    seed_running_entity(&store, &persistence_id, entity_id, entered_running_at).await;
+
+    let state = restarted_server(store);
+    state
+        .get_or_spawn_tenant_actor(&tenant, "TimedTask", entity_id)
+        .expect("restart spawns the durable entity actor");
+
+    // Hold the spawned actor and its readiness task off CPU for five logical
+    // seconds. The recovered timer must charge this queue/readiness interval
+    // rather than moving the durable deadline five seconds later.
+    tokio::time::advance(std::time::Duration::from_secs(5)).await;
+
+    for _ in 0..32 {
+        if state.state_timeout_tracker.pending_snapshot() == vec![("TimedTask".to_string(), 1)] {
+            break;
+        }
+        tokio::task::yield_now().await;
+    }
+
+    assert_eq!(
+        state.state_timeout_tracker.pending_snapshot(),
+        vec![("TimedTask".to_string(), 1)],
+        "restart hydration must restore one live timer for a budgeted timeout"
+    );
+    let observed = state
+        .get_tenant_entity_state(&tenant, "TimedTask", entity_id)
+        .await
+        .expect("hydrated entity remains readable");
+    assert_eq!(
+        observed.state.status, "Running",
+        "a timeout with remaining budget must not fire during hydration"
+    );
+
+    tokio::time::advance(std::time::Duration::from_millis(37_999)).await;
+    tokio::task::yield_now().await;
+    let before_deadline = state
+        .get_tenant_entity_state(&tenant, "TimedTask", entity_id)
+        .await
+        .expect("entity remains readable before the recovered deadline");
+    assert_eq!(
+        before_deadline.state.status, "Running",
+        "restart recovery must preserve the remaining timeout budget"
+    );
+
+    tokio::time::advance(std::time::Duration::from_millis(1)).await;
+    let mut observed_status = String::new();
+    for _ in 0..32 {
+        tokio::task::yield_now().await;
+        observed_status = state
+            .get_tenant_entity_state(&tenant, "TimedTask", entity_id)
+            .await
+            .expect("entity remains readable at the recovered deadline")
+            .state
+            .status;
+        if observed_status == "TimedOut" {
+            break;
+        }
+    }
+    assert_eq!(
+        observed_status, "TimedOut",
+        "the timeout must fire when its persisted remaining budget is consumed"
     );
 }

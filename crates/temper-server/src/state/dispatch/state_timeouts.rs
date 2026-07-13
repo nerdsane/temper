@@ -18,37 +18,44 @@
 //! bump once for the old state if it had a declaration. That bump renders
 //! any in-flight timer for the old state stale.
 //!
-//! Durability (ADR-0056): on every post-dispatch the arm logic also detects
-//! the **hydration case** — the entity is in a state with a declared
-//! timeout but has no live in-memory timer (seq == 0 in the tracker). In
-//! that case we reconstruct how long the entity has been in the current
-//! state from the event log (the most recent transition into
-//! `state.status`, or the most recent `reset_on` event after it), and:
+//! Durability (ADR-0056, ADR-0156): actor spawn and post-dispatch fallback
+//! reconcile the **hydration case** — the entity is in a state with a
+//! declared timeout but has no live in-memory timer. Reconciliation claims
+//! the initial sequence atomically, reconstructs how long the entity has
+//! been in the current state from the event log (the most recent transition
+//! into `state.status`, or the most recent `reset_on` event after it), and:
 //!   - if elapsed ≥ `after_seconds` → fire `on_timeout` immediately
 //!     (the entity was overdue before this process ever saw it).
 //!   - otherwise → arm a tokio timer with the remaining budget
 //!     (`after_seconds - elapsed`).
 //!
-//! This closes the gap where an orphaned entity (actor passivated or
-//! server restarted while in a timed state) would otherwise never have
-//! its timer re-armed because no state transition happened on the
-//! hydrated actor. Fully event-log-backed scheduling remains the
-//! longer-term direction; hydration re-arm is the 80%-value prefix
-//! that makes timeouts reliable across the common failure modes.
+//! This closes the gap where an orphaned entity (actor passivated or server
+//! restarted while in a timed state) would otherwise never have its timer
+//! re-armed because no state transition happened on the hydrated actor.
 
 use std::collections::{HashMap, VecDeque};
 use std::sync::Mutex;
 use std::time::Duration;
 
 use chrono::{DateTime, Utc};
+use tokio::spawn as spawn_timeout_hydration; // determinism-ok: bounded production lifecycle coordination
 use tracing::Instrument;
 
 use temper_runtime::scheduler::sim_now;
 use temper_runtime::tenant::TenantId;
 
-use crate::entity_actor::{EntityEvent, EntityResponse};
+use crate::entity_actor::{EntityEvent, EntityMsg, EntityResponse};
 
 use super::effects::PostDispatchContext;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum StateTimeoutArmCause {
+    PostDispatch,
+    Hydration {
+        observed_at: DateTime<Utc>,
+        readiness_elapsed: Duration,
+    },
+}
 
 /// Walk the event history backward to find the timestamp of the most recent
 /// "progress" signal for the given state: either the transition that entered
@@ -84,6 +91,40 @@ fn compute_state_clock_reset_ts(
         .max();
 
     Some(latest_reset_ts.unwrap_or(entry_ts))
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct HydrationDelay {
+    delay: Duration,
+    overdue: bool,
+}
+
+impl HydrationDelay {
+    fn charge_reconciliation(self, elapsed: Duration) -> Self {
+        Self {
+            delay: self.delay.saturating_sub(elapsed),
+            overdue: self.overdue || elapsed >= self.delay,
+        }
+    }
+}
+
+fn compute_hydration_delay(
+    events: &VecDeque<EntityEvent>,
+    current_state: &str,
+    reset_on: &[String],
+    budget: Duration,
+    now: DateTime<Utc>,
+) -> Option<HydrationDelay> {
+    let reset_ts = compute_state_clock_reset_ts(events, current_state, reset_on)?;
+    let elapsed = now
+        .signed_duration_since(reset_ts)
+        .to_std()
+        .unwrap_or(Duration::ZERO);
+    let overdue = elapsed >= budget;
+    Some(HydrationDelay {
+        delay: budget.saturating_sub(elapsed),
+        overdue,
+    })
 }
 
 /// Composite key identifying an entity instance inside the arm-seq tracker.
@@ -126,6 +167,18 @@ impl StateTimeoutTracker {
         let entry = map.entry(key.clone()).or_insert(0);
         *entry += 1;
         *entry
+    }
+
+    /// Claim the initial timer sequence without disturbing a timer that a
+    /// concurrent dispatch already armed.
+    fn reserve_if_unarmed(&self, key: &EntityKey) -> Option<u64> {
+        let mut map = self.seqs.lock().expect("state_timeout tracker poisoned");
+        let entry = map.entry(key.clone()).or_insert(0);
+        if *entry != 0 {
+            return None;
+        }
+        *entry = 1;
+        Some(*entry)
     }
 
     fn current(&self, key: &EntityKey) -> u64 {
@@ -190,16 +243,130 @@ impl StateTimeoutTracker {
 }
 
 impl crate::state::ServerState {
+    /// Reconcile a newly spawned actor's durable state with its declared timeout.
+    ///
+    /// The task is bounded by the normal actor-ask retry policy and ends after
+    /// hydration either succeeds or exhausts that budget. Keeping this hook on
+    /// `ServerState` avoids a strong `ServerState -> actor -> ServerState` cycle.
+    pub(crate) fn schedule_state_timeout_hydration(
+        &self,
+        tenant: &TenantId,
+        entity_type: &str,
+        entity_id: &str,
+        actor_ref: temper_runtime::actor::ActorRef<EntityMsg>,
+    ) {
+        let registry = match self.registry.read() {
+            Ok(registry) => registry,
+            Err(_) => {
+                tracing::error!(
+                    tenant = %tenant,
+                    entity_type,
+                    entity_id,
+                    "state timeout hydration skipped because the spec registry lock is poisoned"
+                );
+                return;
+            }
+        };
+        let has_declared_timeout = registry
+            .get_spec(tenant, entity_type)
+            .is_some_and(|spec| !spec.automaton.state_timeouts.is_empty());
+        drop(registry);
+        if !has_declared_timeout {
+            return;
+        }
+
+        let state = self.clone();
+        let tenant = tenant.clone();
+        let entity_type = entity_type.to_string();
+        let entity_id = entity_id.to_string();
+        let observed_at = sim_now();
+        let readiness_started_at = tokio::time::Instant::now(); // determinism-ok: paused by DST
+
+        spawn_timeout_hydration(async move {
+            let policy = state.dispatch_retry_policy();
+            let outcome = super::retry::ask_with_backoff::<_, EntityResponse, _>(
+                &actor_ref,
+                || EntityMsg::GetState,
+                &policy,
+            )
+            .await;
+            let attempts = outcome.attempts;
+            match outcome.result {
+                Ok(response) => {
+                    state.arm_state_timeouts_on_hydration(
+                        &tenant,
+                        &entity_type,
+                        &entity_id,
+                        &response,
+                        observed_at,
+                        readiness_started_at.elapsed(),
+                    );
+                }
+                Err(error) => {
+                    tracing::error!(
+                        tenant = %tenant,
+                        entity_type,
+                        entity_id,
+                        attempts,
+                        error = %error,
+                        "state timeout hydration reconciliation exhausted actor readiness budget"
+                    );
+                }
+            }
+        });
+    }
+
+    fn arm_state_timeouts_on_hydration(
+        &self,
+        tenant: &TenantId,
+        entity_type: &str,
+        entity_id: &str,
+        response: &EntityResponse,
+        observed_at: DateTime<Utc>,
+        readiness_elapsed: Duration,
+    ) {
+        let agent_ctx =
+            crate::request_context::AgentContext::for_service("state-timeout-hydration");
+        let action_params = serde_json::json!({});
+        let ctx = PostDispatchContext {
+            tenant,
+            entity_type,
+            entity_id,
+            action: "__hydrated",
+            agent_ctx: &agent_ctx,
+            dispatch_idempotency_key: None,
+            action_params: &action_params,
+            await_integration: false,
+        };
+        self.arm_state_timeouts(
+            &ctx,
+            response,
+            StateTimeoutArmCause::Hydration {
+                observed_at,
+                readiness_elapsed,
+            },
+        );
+    }
+
     /// Arm or re-arm state timers based on the just-completed transition.
     ///
     /// Invoked from `run_post_dispatch_effects`. Walks the spec's
     /// `state_timeouts`, bumps the per-entity seq appropriately, and spawns
-    /// a tokio task per armed timer. Non-durable under the MVP — timers are
-    /// lost across restarts.
+    /// a tokio task per armed timer. Actor-spawn hydration separately calls
+    /// the same scheduler to recover durable deadlines after restart.
     pub(crate) fn arm_state_timeouts_if_needed(
         &self,
         ctx: &PostDispatchContext<'_>,
         response: &EntityResponse,
+    ) {
+        self.arm_state_timeouts(ctx, response, StateTimeoutArmCause::PostDispatch);
+    }
+
+    fn arm_state_timeouts(
+        &self,
+        ctx: &PostDispatchContext<'_>,
+        response: &EntityResponse,
+        cause: StateTimeoutArmCause,
     ) {
         let registry = match self.registry.read() {
             Ok(g) => g,
@@ -222,10 +389,11 @@ impl crate::state::ServerState {
             .map(|e| e.from_status.clone())
             .unwrap_or_default();
         let state_changed = pre_state != post_state;
+        let hydrating = matches!(cause, StateTimeoutArmCause::Hydration { .. });
         let key = EntityKey::new(ctx.tenant, ctx.entity_type, ctx.entity_id);
 
         // 1. Invalidate any outstanding timer for the prior state.
-        if state_changed {
+        if state_changed && !hydrating {
             let pre_had_timeout = state_timeouts.iter().any(|st| st.state == pre_state);
             if pre_had_timeout {
                 self.state_timeout_tracker.bump(&key);
@@ -242,16 +410,18 @@ impl crate::state::ServerState {
             if st.state != post_state {
                 continue;
             }
-            let is_entry = state_changed;
-            let is_reset = !state_changed && st.reset_on.iter().any(|a| a == ctx.action);
-            // ADR-0056: hydration re-arm. If the entity is in a state with a
-            // declared timeout and this process has no live timer for it (seq
-            // == 0), treat this dispatch as the opportunity to catch up. This
-            // handles actors that hydrated from snapshot after a restart or
-            // passivation without the benefit of a state transition to arm
-            // the timer.
-            let needs_hydration_rearm =
-                !is_entry && !is_reset && self.state_timeout_tracker.current(&key) == 0;
+            let is_entry = state_changed && !hydrating;
+            let is_reset =
+                !hydrating && !state_changed && st.reset_on.iter().any(|a| a == ctx.action);
+            // ADR-0056: atomically reserve hydration ownership only when no
+            // dispatch has already armed a timer. A separate read followed by
+            // bump would let stale hydration invalidate a concurrent arm.
+            let hydration_seq = if !is_entry && !is_reset {
+                self.state_timeout_tracker.reserve_if_unarmed(&key)
+            } else {
+                None
+            };
+            let needs_hydration_rearm = hydration_seq.is_some();
             if !is_entry && !is_reset && !needs_hydration_rearm {
                 continue;
             }
@@ -273,26 +443,32 @@ impl crate::state::ServerState {
             //   and the on_timeout action fires on the next tokio tick.
             let mut delay = Duration::from_secs(st.after_seconds);
             if needs_hydration_rearm {
-                let clock_reset =
-                    compute_state_clock_reset_ts(&response.state.events, &post_state, &st.reset_on);
-                if let Some(reset_ts) = clock_reset {
-                    let now = sim_now();
-                    let elapsed = now
-                        .signed_duration_since(reset_ts)
-                        .to_std()
-                        .unwrap_or(Duration::ZERO);
-                    let budget = Duration::from_secs(st.after_seconds);
-                    let overdue = elapsed >= budget;
-                    delay = if overdue {
-                        Duration::ZERO
-                    } else {
-                        budget - elapsed
-                    };
+                let budget = Duration::from_secs(st.after_seconds);
+                let (now, readiness_elapsed) = match cause {
+                    StateTimeoutArmCause::PostDispatch => (sim_now(), Duration::ZERO),
+                    StateTimeoutArmCause::Hydration {
+                        observed_at,
+                        readiness_elapsed,
+                    } => (observed_at, readiness_elapsed),
+                };
+                if let Some(hydration) = compute_hydration_delay(
+                    &response.state.events,
+                    &post_state,
+                    &st.reset_on,
+                    budget,
+                    now,
+                ) {
+                    let hydration = hydration.charge_reconciliation(readiness_elapsed);
+                    delay = hydration.delay;
                     crate::runtime_metrics::record_state_timeout_armed_on_hydration(
                         ctx.tenant.as_str(),
                         ctx.entity_type,
                         &st.state,
-                        if overdue { "overdue" } else { "budgeted" },
+                        if hydration.overdue {
+                            "overdue"
+                        } else {
+                            "budgeted"
+                        },
                     );
                 } else {
                     // No entry event found — treat as freshly entered.
@@ -306,7 +482,7 @@ impl crate::state::ServerState {
                 }
             }
 
-            let armed_seq = self.state_timeout_tracker.bump(&key);
+            let armed_seq = hydration_seq.unwrap_or_else(|| self.state_timeout_tracker.bump(&key));
             self.state_timeout_tracker.inc_pending(ctx.entity_type);
             let params: serde_json::Value = serde_json::to_value(&st.params)
                 .unwrap_or_else(|_| serde_json::Value::Object(serde_json::Map::new()));
@@ -446,6 +622,37 @@ mod tests {
     }
 
     #[test]
+    fn dispatch_arm_wins_when_it_precedes_hydration_reconciliation() {
+        let tracker = StateTimeoutTracker::new();
+        let entity = key();
+
+        let dispatch_seq = tracker.bump(&entity);
+        assert_eq!(tracker.reserve_if_unarmed(&entity), None);
+        assert_eq!(
+            tracker.current(&entity),
+            dispatch_seq,
+            "late hydration must not invalidate the live dispatch deadline"
+        );
+    }
+
+    #[test]
+    fn dispatch_arm_supersedes_an_earlier_hydration_reservation() {
+        let tracker = StateTimeoutTracker::new();
+        let entity = key();
+
+        let hydration_seq = tracker
+            .reserve_if_unarmed(&entity)
+            .expect("hydration claims an unarmed entity");
+        let dispatch_seq = tracker.bump(&entity);
+        assert_ne!(hydration_seq, dispatch_seq);
+        assert_eq!(
+            tracker.current(&entity),
+            dispatch_seq,
+            "a real transition must retain the only current deadline"
+        );
+    }
+
+    #[test]
     fn forget_releases_entity() {
         let t = StateTimeoutTracker::new();
         let tenant = TenantId::from("t".to_string());
@@ -554,6 +761,67 @@ mod tests {
             reset.timestamp_millis(),
             100,
             "first real entry wins; subsequent self-loops don't re-enter"
+        );
+    }
+
+    #[test]
+    fn hydration_delay_seed_sweep_covers_remaining_exact_and_overdue_budgets() {
+        let budget = Duration::from_secs(60);
+        let entry = DateTime::<Utc>::from_timestamp(1_700_000_000, 0).unwrap();
+        let mut events = VecDeque::new();
+        events.push_back(EntityEvent {
+            action: "Start".to_string(),
+            from_status: "Idle".to_string(),
+            to_status: "Running".to_string(),
+            timestamp: entry,
+            params: serde_json::json!({}),
+            idempotency_key: None,
+        });
+
+        let mut saw_remaining = false;
+        let mut saw_exact = false;
+        let mut saw_overdue = false;
+        for seed in 0_u64..128 {
+            let elapsed_secs = seed.wrapping_mul(37) % 121;
+            let now = entry + chrono::Duration::seconds(elapsed_secs as i64);
+            let hydration = compute_hydration_delay(&events, "Running", &[], budget, now).unwrap();
+            assert_eq!(
+                hydration.delay,
+                budget.saturating_sub(Duration::from_secs(elapsed_secs)),
+                "seed {seed} must recover the exact remaining budget"
+            );
+            assert_eq!(hydration.overdue, elapsed_secs >= 60);
+            saw_remaining |= elapsed_secs < 60;
+            saw_exact |= elapsed_secs == 60;
+            saw_overdue |= elapsed_secs > 60;
+        }
+
+        assert!(saw_remaining, "seed sweep must cover a remaining budget");
+        assert!(saw_exact, "seed sweep must cover the exact deadline");
+        assert!(saw_overdue, "seed sweep must cover overdue recovery");
+    }
+
+    #[test]
+    fn actor_readiness_time_is_charged_against_the_durable_deadline() {
+        let recovered = HydrationDelay {
+            delay: Duration::from_secs(10),
+            overdue: false,
+        };
+
+        assert_eq!(
+            recovered.charge_reconciliation(Duration::from_secs(4)),
+            HydrationDelay {
+                delay: Duration::from_secs(6),
+                overdue: false,
+            }
+        );
+        assert_eq!(
+            recovered.charge_reconciliation(Duration::from_secs(10)),
+            HydrationDelay {
+                delay: Duration::ZERO,
+                overdue: true,
+            },
+            "readiness retries must not move a persisted deadline later"
         );
     }
 
