@@ -153,23 +153,30 @@ pub struct SpecDrivenActor {
 
 impl SpecDrivenActor {
     /// Create from an IOA TOML source + routing map.
+    ///
+    /// Fails closed (ADR-0168) if the compiled transition table uses effects
+    /// this backend cannot execute (`schedule`, `schedule_at`, `spawn`).
     pub fn from_ioa(
         ioa_source: &str,
         routing: HashMap<String, (String, String)>,
     ) -> Result<Self, String> {
         let automaton = temper_spec::parse_automaton(ioa_source)
             .map_err(|e| format!("failed to parse spec: {e}"))?;
-        Ok(Self::from_automaton(&automaton, ioa_source, routing))
+        Self::from_automaton(&automaton, ioa_source, routing)
     }
 
     /// Create from a pre-parsed Automaton + routing map.
+    ///
+    /// Returns `Err` when the table contains schedule/spawn effects that the
+    /// PG actor-runtime cannot honor (ADR-0168 / ARN-179).
     pub fn from_automaton(
         automaton: &Automaton,
         ioa_source: &str,
         routing: HashMap<String, (String, String)>,
-    ) -> Self {
+    ) -> Result<Self, String> {
         let name = automaton.automaton.name.clone();
         let table = TransitionTable::from_ioa_source(ioa_source);
+        reject_unsupported_effects(&table)?;
 
         // Build initial state from spec variables.
         let mut init_state = SpecActorState {
@@ -202,13 +209,13 @@ impl SpecDrivenActor {
             .map(|a| &*Box::leak(a.name.clone().into_boxed_str()))
             .collect();
 
-        Self {
+        Ok(Self {
             name,
             table,
             init_state,
             routing,
             subscriptions_static,
-        }
+        })
     }
 
     /// Which message types this actor accepts.
@@ -477,5 +484,129 @@ to = "Idle"
         let maps = build_routing_maps(&rules);
         assert_eq!(maps["Agent"]["PrepareContext"].0, "ContextManager");
         assert_eq!(maps["Agent"]["PrepareContext"].1, "PrepareContext");
+    }
+
+    // ─── ARN-179 durability regressions ───────────────────────────────────
+
+    const LIST_SPEC: &str = r#"
+[automaton]
+name = "ListActor"
+states = ["Idle", "Active"]
+initial = "Idle"
+
+[[state]]
+name = "tags"
+type = "list"
+initial = "[]"
+
+[[action]]
+name = "AddTag"
+kind = "input"
+from = ["Idle", "Active"]
+to = "Active"
+effect = [{ type = "list_append", var = "tags" }]
+"#;
+
+    const COUNTER_PARAM_SPEC: &str = r#"
+[automaton]
+name = "CounterActor"
+states = ["Idle", "Active"]
+initial = "Idle"
+
+[[state]]
+name = "score"
+type = "counter"
+initial = "0"
+
+[[action]]
+name = "SetScore"
+kind = "input"
+from = ["Idle", "Active"]
+to = "Active"
+effect = [{ type = "set_counter_from_param", var = "score", param = "score" }]
+"#;
+
+    const SCHEDULE_SPEC: &str = r#"
+[automaton]
+name = "TimerActor"
+states = ["Idle", "Waiting"]
+initial = "Idle"
+
+[[action]]
+name = "Arm"
+kind = "input"
+from = ["Idle"]
+to = "Waiting"
+effect = [{ type = "schedule", action = "Fire", delay_seconds = 5 }]
+
+[[action]]
+name = "Fire"
+kind = "input"
+from = ["Waiting"]
+to = "Idle"
+"#;
+
+    fn test_message(action: &str, params: serde_json::Value) -> Message {
+        use prost::Message as _;
+        let payload = SpecMessage::with_params(action, params);
+        Message {
+            id: 1,
+            from: None,
+            to: ActorHandle::new("test-ns", "TestActor"),
+            message_type: "SpecMessage".into(),
+            payload: payload.encode_to_vec(),
+            correlation_id: None,
+            created_at: chrono::Utc::now(),
+        }
+    }
+
+    fn test_ctx(actor_type: &str) -> ActorContext {
+        ActorContext::new(ActorHandle::new("test-ns", actor_type), None, None)
+    }
+
+    /// RED: ListAppend was silently dropped; durable list state stayed empty.
+    #[tokio::test]
+    async fn list_append_effect_persists_into_actor_state() {
+        let actor = SpecDrivenActor::from_ioa(LIST_SPEC, HashMap::new()).expect("parse");
+        let ctx = test_ctx("ListActor");
+        let mut state = actor.initial_state();
+        let msg = test_message("AddTag", serde_json::json!({"tags": "alpha"}));
+        actor.handle(&ctx, &mut state, &msg).await.expect("handle");
+        let s: SpecActorState = serde_json::from_slice(&state).expect("deser");
+        let tags = s.lists.get("tags").cloned().unwrap_or_default();
+        assert_eq!(
+            tags,
+            vec!["alpha".to_string()],
+            "ListAppend must append the param value into durable list state (ARN-179)"
+        );
+        assert_eq!(s.status, "Active");
+    }
+
+    /// RED: SetCounterFromParam was silently dropped; counter stayed at 0.
+    #[tokio::test]
+    async fn set_counter_from_param_persists_into_actor_state() {
+        let actor = SpecDrivenActor::from_ioa(COUNTER_PARAM_SPEC, HashMap::new()).expect("parse");
+        let ctx = test_ctx("CounterActor");
+        let mut state = actor.initial_state();
+        let msg = test_message("SetScore", serde_json::json!({"score": 42}));
+        actor.handle(&ctx, &mut state, &msg).await.expect("handle");
+        let s: SpecActorState = serde_json::from_slice(&state).expect("deser");
+        assert_eq!(
+            s.counters.get("score"),
+            Some(&42usize),
+            "SetCounterFromParam must write the param into durable counter state (ARN-179)"
+        );
+    }
+
+    /// Schedule effects must not load silently — reject at construction.
+    #[test]
+    fn schedule_effect_rejected_at_construction() {
+        match SpecDrivenActor::from_ioa(SCHEDULE_SPEC, HashMap::new()) {
+            Ok(_) => panic!("schedule effect must fail closed at construction"),
+            Err(err) => assert!(
+                err.contains("schedule") || err.contains("unsupported"),
+                "error must name the unsupported schedule effect, got: {err}"
+            ),
+        }
     }
 }
