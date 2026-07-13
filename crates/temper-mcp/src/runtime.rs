@@ -18,6 +18,36 @@ use super::protocol::dispatch_json_line;
 const OTS_UPLOAD_MAX_ATTEMPTS: u32 = 3;
 const OTS_UPLOAD_RETRY_DELAY_MS: u64 = 100;
 
+/// Per-message cap on recorded trajectory text (submitted code / execution result).
+const MAX_TRAJECTORY_TEXT_BYTES: usize = 16 * 1024;
+/// Cap on the number of turns recorded in a single trajectory.
+const MAX_TRAJECTORY_TURNS: usize = 500;
+
+/// The tenant a captured trajectory is stored under. It must be the session's
+/// authenticated `identity` — never a tenant derived from the executed code, which
+/// is attacker-controlled and would let a session file its trajectory under another
+/// tenant (ARN-222). `tenants_seen` is passed for signature stability / callers that
+/// want the cross-tenant signal, but it never determines storage.
+fn trajectory_storage_tenant<'a>(
+    identity: &'a str,
+    tenants_seen: &'a BTreeMap<String, usize>,
+) -> &'a str {
+    // RED: honor the most-referenced tenant from the code (the vulnerable behavior).
+    tenants_seen
+        .iter()
+        .max_by_key(|(_, count)| *count)
+        .map(|(tenant, _)| tenant.as_str())
+        .unwrap_or(identity)
+}
+
+/// Truncate recorded trajectory text to `MAX_TRAJECTORY_TEXT_BYTES`, appending an
+/// explicit marker, so a large submitted code blob or result can't grow the
+/// trajectory without bound (ARN-222).
+fn truncate_trajectory_text(text: &str) -> String {
+    // RED: record the text verbatim (the vulnerable behavior).
+    text.to_string()
+}
+
 /// Client identity received from the MCP `initialize` handshake.
 #[derive(Clone, Debug, Default)]
 pub(crate) struct ClientInfo {
@@ -60,6 +90,8 @@ pub(crate) struct RuntimeContext {
     tenants_seen: BTreeMap<String, usize>,
     /// Entity types observed in executed calls during this session.
     entity_types_seen: BTreeMap<String, usize>,
+    /// Number of turns recorded into the current trajectory (bounds its size).
+    turns_recorded: usize,
 }
 
 impl RuntimeContext {
@@ -90,6 +122,7 @@ impl RuntimeContext {
             trajectory: None,
             tenants_seen: BTreeMap::new(),
             entity_types_seen: BTreeMap::new(),
+            turns_recorded: 0,
         })
     }
 
@@ -170,7 +203,27 @@ impl RuntimeContext {
 
     /// Record an execute tool call as an OTS turn with a decision.
     pub(crate) fn record_execute_turn(&mut self, code: &str, result: &Result<String>) {
+        if self.trajectory.is_none() {
+            return;
+        }
+        // Bound the trajectory: drop further turns once the cap is reached (ARN-222).
+        if self.turns_recorded >= MAX_TRAJECTORY_TURNS {
+            tracing::warn!(
+                max = MAX_TRAJECTORY_TURNS,
+                "mcp trajectory turn cap reached; dropping further turns"
+            );
+            return;
+        }
+        self.turns_recorded += 1;
+
         let extracted_actions = extract_trajectory_actions_from_code(code);
+        // Bound recorded content: a large code blob or result can't grow the
+        // trajectory without limit (ARN-222).
+        let code_text = truncate_trajectory_text(code);
+        let result_text = match result {
+            Ok(text) => truncate_trajectory_text(text),
+            Err(e) => truncate_trajectory_text(&e.to_string()),
+        };
 
         let Some(ref mut builder) = self.trajectory else {
             return;
@@ -182,17 +235,17 @@ impl RuntimeContext {
         // User message: the Python code submitted
         builder.add_message(OTSMessage::new(
             MessageRole::User,
-            OTSMessageContent::text(code),
+            OTSMessageContent::text(code_text),
             now,
         ));
 
         // Decision: the execution outcome
         let (outcome_str, consequence) = match result {
-            Ok(text) => {
+            Ok(_) => {
                 // Assistant message: the execution result
                 builder.add_message(OTSMessage::new(
                     MessageRole::Assistant,
-                    OTSMessageContent::text(text),
+                    OTSMessageContent::text(result_text),
                     now,
                 ));
                 ("success", OTSConsequence::success())
@@ -200,7 +253,7 @@ impl RuntimeContext {
             Err(e) => {
                 builder.add_message(OTSMessage::new(
                     MessageRole::Assistant,
-                    OTSMessageContent::text(e.to_string()),
+                    OTSMessageContent::text(result_text),
                     now,
                 ));
                 (
@@ -325,7 +378,24 @@ impl RuntimeContext {
             .post(&url)
             .body(json)
             .header("Content-Type", "application/json")
-            .header("X-Tenant-Id", self.primary_tenant());
+            .header(
+                "X-Tenant-Id",
+                trajectory_storage_tenant(&self.identity_tenant, &self.tenants_seen),
+            );
+
+        // Surface (but don't block on) code that referenced a tenant other than the
+        // session identity — a cross-tenant-activity signal. Storage stays under the
+        // authenticated identity regardless (ARN-222).
+        for tenant in self.tenants_seen.keys() {
+            if tenant != &self.identity_tenant {
+                tracing::warn!(
+                    identity_tenant = %self.identity_tenant,
+                    referenced_tenant = %tenant,
+                    "mcp session code referenced a tenant other than its identity; \
+                     trajectory stored under the identity tenant"
+                );
+            }
+        }
 
         if let Some(primary_entity_type) = self.primary_entity_type() {
             request = request.header("X-Entity-Type", primary_entity_type);
@@ -358,15 +428,6 @@ impl RuntimeContext {
                 retryable: true,
             }),
         }
-    }
-
-    /// Most-used tenant for this session, falling back to configured identity tenant.
-    fn primary_tenant(&self) -> &str {
-        self.tenants_seen
-            .iter()
-            .max_by_key(|(_, count)| *count)
-            .map(|(tenant, _)| tenant.as_str())
-            .unwrap_or(self.identity_tenant.as_str())
     }
 
     /// Most-used entity type for this session.
@@ -874,6 +935,42 @@ pub async fn run_stdio_server(config: McpConfig) -> Result<()> {
 mod tests {
     use super::*;
     use axum::{Router, extract::State, http::StatusCode, routing::post};
+
+    #[test]
+    fn trajectory_storage_tenant_uses_identity_not_code() {
+        // ARN-222: the trajectory must be stored under the authenticated session
+        // identity, never a tenant derived from the (attacker-controlled) code.
+        let mut seen = BTreeMap::new();
+        seen.insert("other-tenant".to_string(), 5usize);
+        seen.insert("another-tenant".to_string(), 2usize);
+        assert_eq!(
+            trajectory_storage_tenant("my-identity", &seen),
+            "my-identity",
+            "code-referenced tenants must not move the trajectory off the identity"
+        );
+        assert_eq!(
+            trajectory_storage_tenant("my-identity", &BTreeMap::new()),
+            "my-identity"
+        );
+    }
+
+    #[test]
+    fn truncate_trajectory_text_bounds_large_content() {
+        // ARN-222: recorded code/result text must be bounded.
+        let big = "x".repeat(MAX_TRAJECTORY_TEXT_BYTES * 4);
+        let truncated = truncate_trajectory_text(&big);
+        assert!(
+            truncated.len() <= MAX_TRAJECTORY_TEXT_BYTES + 128,
+            "recorded text must be bounded, got {} bytes",
+            truncated.len()
+        );
+        assert!(
+            truncated.contains("truncated"),
+            "truncation must be marked in the recorded text"
+        );
+        // Text within the cap is recorded verbatim.
+        assert_eq!(truncate_trajectory_text("hello"), "hello");
+    }
     use std::sync::{
         Arc,
         atomic::{AtomicUsize, Ordering},
@@ -968,6 +1065,7 @@ await temper.create("tenant-b", "Task", {"Title": "x"})
             trajectory: None,
             tenants_seen: BTreeMap::new(),
             entity_types_seen: BTreeMap::new(),
+            turns_recorded: 0,
         };
         ctx.init_trajectory();
 
