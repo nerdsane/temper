@@ -2027,3 +2027,66 @@ async fn upsert_wasm_module_stores_metadata_only_without_db_blob() {
         "Turso store should return metadata-only rows for new WASM artifacts"
     );
 }
+
+/// ARN-242: `migrate()` must SURFACE real migration errors, not swallow them.
+///
+/// Thirteen `let _ = conn.execute(...)` sites discard every ALTER failure —
+/// intended for benign duplicate-column errors, but they equally swallow
+/// genuine ones. This poisons a DB so a swallowed ALTER fails for a REAL
+/// reason (a view shadows the `policies` table, so `ALTER TABLE policies
+/// ADD COLUMN enabled ...` cannot succeed): startup must fail loudly
+/// instead of serving against a half-migrated schema.
+#[tokio::test]
+async fn migrate_surfaces_real_alter_errors() {
+    let url = sqlite_test_url("migrate-real-error");
+
+    // Poison the DB before the store ever runs its schema: a VIEW named
+    // `policies` (CREATE TABLE IF NOT EXISTS tolerates it silently, but the
+    // ALTER on it fails with a non-duplicate-column error).
+    {
+        let db = libsql::Builder::new_local(url.trim_start_matches("file:"))
+            .build()
+            .await
+            .expect("build poison db");
+        let conn = db.connect().expect("connect poison db");
+        conn.execute("CREATE TABLE policies_backing (id TEXT)", ())
+            .await
+            .expect("backing table");
+        conn.execute(
+            "CREATE VIEW policies AS SELECT id FROM policies_backing",
+            (),
+        )
+        .await
+        .expect("shadow view");
+    }
+
+    let result = TursoEventStore::new(&url, None).await;
+    assert!(
+        result.is_err(),
+        "a migration statement failing for a real (non-duplicate-column) reason \
+         must fail startup, not be silently swallowed"
+    );
+}
+
+/// ARN-242: `migrate()` must record what it applied in a durable version
+/// ledger, so operators can see which schema a database is at and boots can
+/// short-circuit already-migrated databases.
+#[tokio::test]
+async fn migrate_records_schema_version_ledger() {
+    let store = make_store("migrate-ledger").await;
+    let conn = store.connection().expect("connection");
+    let mut rows = conn
+        .query("SELECT MAX(version) FROM temper_schema_migrations", ())
+        .await
+        .expect("the schema version ledger table must exist after migrate()");
+    let row = rows
+        .next()
+        .await
+        .expect("ledger row")
+        .expect("ledger must contain at least one applied version");
+    let version: i64 = row.get(0).expect("version column");
+    assert!(
+        version >= 1,
+        "the ledger must record the applied schema version, got {version}"
+    );
+}
