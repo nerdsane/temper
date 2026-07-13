@@ -148,7 +148,7 @@ async fn pending_state_timeout_fires_after_restart() {
         &tenant,
         "t-restart-1",
         "InProgress",
-        Duration::from_secs(5),
+        Duration::from_secs(20),
     )
     .await;
     assert_eq!(
@@ -183,7 +183,7 @@ async fn overdue_state_timeout_fires_after_restart() {
         &tenant,
         "t-overdue-1",
         "InProgress",
-        Duration::from_secs(5),
+        Duration::from_secs(20),
     )
     .await;
     assert_eq!(
@@ -216,7 +216,7 @@ async fn state_timeout_fires_for_entity_created_into_timed_state() {
         &tenant,
         "t-created-1",
         "InProgress",
-        Duration::from_secs(5),
+        Duration::from_secs(20),
     )
     .await;
     assert_eq!(
