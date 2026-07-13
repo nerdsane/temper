@@ -286,6 +286,25 @@ fn env_local_tdata_hosts() -> BTreeSet<String> {
     hosts
 }
 
+/// Tenants that have opted into exporting raw LLM content to telemetry, loaded
+/// once at startup from `TEMPER_LLM_CONTENT_EXPORT_TENANTS` (comma-separated
+/// tenant ids; the literal `*` opts in every tenant). Empty by default, so
+/// content is redacted for every tenant unless explicitly opted in. See
+/// ADR-0166.
+fn env_llm_content_export_tenants() -> BTreeSet<String> {
+    let mut tenants = BTreeSet::new();
+    let configured = std::env::var("TEMPER_LLM_CONTENT_EXPORT_TENANTS"); // determinism-ok: read once at startup
+    if let Ok(raw) = configured {
+        for item in raw.split(',') {
+            let trimmed = item.trim();
+            if !trimmed.is_empty() {
+                tenants.insert(trimmed.to_string());
+            }
+        }
+    }
+    tenants
+}
+
 fn state_cache_budget() -> usize {
     static STATE_CACHE_BUDGET: OnceLock<usize> = OnceLock::new();
     *STATE_CACHE_BUDGET.get_or_init(|| env_usize("TEMPER_STATE_CACHE_BUDGET", 10_000))
@@ -538,6 +557,12 @@ pub struct ServerState {
     /// Public hostnames owned by this process that may use in-process TData
     /// dispatch from WASM guests instead of leaving through the public edge.
     pub(crate) local_tdata_hosts: Arc<BTreeSet<String>>,
+    /// Tenants that have opted into exporting raw LLM content (prompts,
+    /// completions, system instructions, tool arguments/results) to the
+    /// telemetry backend. Loaded once from `TEMPER_LLM_CONTENT_EXPORT_TENANTS`.
+    /// Empty by default: every tenant is redacted unless explicitly opted in.
+    /// See ADR-0166.
+    pub(crate) llm_content_export_tenants: Arc<BTreeSet<String>>,
 }
 
 /// Install a one-time hook so liveness violations surfaced by temper-spec
@@ -559,6 +584,17 @@ impl ServerState {
         if let Ok(mut tenants) = self.commons_guardrail_tenants.write() {
             tenants.insert(tenant.to_string());
         }
+    }
+
+    /// Whether `tenant` may export raw LLM content (prompts, completions,
+    /// system instructions, tool arguments/results) to the telemetry backend.
+    ///
+    /// Redact-by-default: content is only exported for tenants listed in
+    /// `TEMPER_LLM_CONTENT_EXPORT_TENANTS` (or when it contains the wildcard
+    /// `*`). Every other tenant is redacted. See ADR-0166.
+    pub fn export_llm_content(&self, tenant: &str) -> bool {
+        self.llm_content_export_tenants.contains("*")
+            || self.llm_content_export_tenants.contains(tenant)
     }
 
     /// Whether commons-mode write guardrails are active for a tenant.
@@ -729,6 +765,7 @@ impl ServerState {
             http_stream_registry: Arc::new(temper_wasm::http_stream::HttpStreamRegistry::new()),
             workflow_spans: Arc::new(crate::workflow_tracing::WorkflowSpanRegistry::default()),
             local_tdata_hosts: Arc::new(env_local_tdata_hosts()),
+            llm_content_export_tenants: Arc::new(env_llm_content_export_tenants()),
         };
 
         // Pre-register built-in WASM modules (http_fetch for generic HTTP integrations).
@@ -977,6 +1014,7 @@ impl ServerState {
             http_stream_registry: Arc::new(temper_wasm::http_stream::HttpStreamRegistry::new()),
             workflow_spans: Arc::new(crate::workflow_tracing::WorkflowSpanRegistry::default()),
             local_tdata_hosts: Arc::new(env_local_tdata_hosts()),
+            llm_content_export_tenants: Arc::new(env_llm_content_export_tenants()),
         };
         state.register_builtin_wasm_modules();
         state

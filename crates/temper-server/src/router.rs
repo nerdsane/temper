@@ -367,7 +367,8 @@ async fn dispatch_matched_route(
         .unwrap_or_default();
     let host: std::sync::Arc<dyn temper_wasm::WasmHost> = std::sync::Arc::new(
         temper_wasm::ProductionWasmHost::with_shared_streams(secrets, streams.clone())
-            .with_invocation_context(ctx.clone()),
+            .with_invocation_context(ctx.clone())
+            .with_llm_content_export(state.export_llm_content(tenant_id.as_str())),
     );
 
     // Spawn task B: invoke the WASM module. Runs to completion

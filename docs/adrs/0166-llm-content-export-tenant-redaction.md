@@ -98,6 +98,13 @@ Sensitive content attrs: `gen_ai.input.messages`, `gen_ai.prompt`,
 - Tenants currently relying on content in Datadog must be added to
   `TEMPER_LLM_CONTENT_EXPORT_TENANTS` to keep it. This is the intended,
   deliberate default flip.
+- Tool-call observability (`_dd_llmobs_tool_spans`) bundles tool arguments and
+  results (content) together with tool name and duration (metadata) in a single
+  array. For non-opted-in tenants the whole array is suppressed rather than
+  field-redacted, so tool-level metadata is lost too. This errs toward less
+  export, which is the safe direction for a security default; a future
+  refinement can field-redact within each tool span if the metadata proves
+  valuable on its own.
 
 ### Risks
 - A future LLM export path built through an untouched host would redact for

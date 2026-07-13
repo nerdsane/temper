@@ -665,6 +665,9 @@ impl crate::state::ServerState {
                         .with_internal_api_base_url(internal_api_url)
                         .with_internal_api_key(internal_api_key)
                         .with_invocation_context(host_invocation_context)
+                        .with_llm_content_export(
+                            self.export_llm_content(ctx.entity_ref.tenant.as_str()),
+                        )
                         .with_text_http_interceptor(
                             local_file_interceptor
                                 .unwrap_or_else(|| Arc::new(|_, _, _, _| Box::pin(async { None }))),
@@ -985,6 +988,17 @@ impl crate::state::ServerState {
                     );
                 }
 
+                // ARN-243: redact LLM content (prompt/completion/system/tool)
+                // from the callback params unless this tenant opted into content
+                // export. Stripping here covers every downstream telemetry sink
+                // — the span record below, `llm_call_wide_event`,
+                // `submit_llmobs_llm_span`, and `submit_llmobs_tool_spans` — all
+                // of which read from these params. Metadata (tokens, model,
+                // provider, finish reason, trace ids) is preserved. See ADR-0166.
+                redact_llm_content_params(
+                    &mut result.callback_params,
+                    self.export_llm_content(ctx.entity_ref.tenant.as_str()),
+                );
                 let callback_params = &result.callback_params;
 
                 if should_record_gen_ai_span_attrs(integration.llm, callback_params) {
@@ -1359,7 +1373,8 @@ impl crate::state::ServerState {
             .with_progress_emitter(progress_emitter)
             .with_internal_api_base_url(internal_api_base_url(self))
             .with_internal_api_key(std::env::var("TEMPER_API_KEY").ok()) // determinism-ok: production host loopback config
-            .with_invocation_context(context.clone());
+            .with_invocation_context(context.clone())
+            .with_llm_content_export(self.export_llm_content(tenant.as_str()));
         if let Some(resolver) = secret_resolver {
             base_host = base_host.with_secret_resolver(resolver);
         }
@@ -1947,9 +1962,16 @@ const LLM_CONTENT_PARAM_KEYS: [&str; 4] = [
 /// into LLM content export. Removes only the content keys in
 /// [`LLM_CONTENT_PARAM_KEYS`]; metadata is preserved. No-op when
 /// `export_content` is true. See ADR-0166.
-fn redact_llm_content_params(_callback_params: &mut Value, _export_content: bool) {
-    // ARN-243 RED: LLM content is exported for every tenant with no per-tenant
-    // gate. The redaction is implemented in the GREEN commit.
+fn redact_llm_content_params(callback_params: &mut Value, export_content: bool) {
+    if export_content {
+        return;
+    }
+    let Some(object) = callback_params.as_object_mut() else {
+        return;
+    };
+    for key in LLM_CONTENT_PARAM_KEYS {
+        object.remove(key);
+    }
 }
 
 fn integration_error_type(error: &str) -> String {

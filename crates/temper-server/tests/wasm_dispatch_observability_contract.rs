@@ -27,3 +27,34 @@ fn wasm_dispatch_emits_integration_envelope_phase_spans() {
         );
     }
 }
+
+/// ARN-243 wiring contract: per-tenant LLM content redaction must run before
+/// every telemetry sink reads the callback params. A refactor that moved the
+/// strip after any sink would leak prompts/completions for non-opted-in
+/// tenants — this guards the ordering that unit tests on the helper cannot.
+/// See ADR-0166.
+#[test]
+fn llm_content_redaction_precedes_every_dispatch_sink() {
+    let src = WASM_DISPATCH_SOURCE;
+    let strip = src
+        .find("// ARN-243: redact LLM content")
+        .expect("dispatch must redact LLM content before recording telemetry");
+
+    // Every sink below reads content from `result.callback_params`; each must
+    // come after the strip so it observes the redacted map.
+    let sinks = [
+        "let callback_params = &result.callback_params;",
+        "llm_call_wide_event(",
+        "submit_llmobs_llm_span(",
+        "submit_llmobs_tool_spans(",
+    ];
+    for sink in sinks {
+        let at = src
+            .find(sink)
+            .unwrap_or_else(|| panic!("expected dispatch telemetry sink `{sink}`"));
+        assert!(
+            strip < at,
+            "LLM content redaction (byte {strip}) must precede sink `{sink}` (byte {at})"
+        );
+    }
+}

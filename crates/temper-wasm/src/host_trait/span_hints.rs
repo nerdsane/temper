@@ -123,9 +123,16 @@ pub(crate) fn is_sensitive_llm_content_attr(attr_key: &str) -> bool {
 /// sensitive content keys ([`is_sensitive_llm_content_attr`]); metadata hints
 /// (model, provider, tokens, ids, span name) are preserved. No-op when
 /// `export_content` is true. See ADR-0166.
-pub(crate) fn redact_llm_content_hints(_hints: &mut SpanHints, _export_content: bool) {
-    // ARN-243 RED: content span hints are recorded for every tenant with no
-    // per-tenant gate. The redaction is implemented in the GREEN commit.
+pub(crate) fn redact_llm_content_hints(hints: &mut SpanHints, export_content: bool) {
+    if export_content {
+        return;
+    }
+    hints
+        .attributes
+        .retain(|(key, _)| !is_sensitive_llm_content_attr(key));
+    hints
+        .response_captures
+        .retain(|(attr, _)| !is_sensitive_llm_content_attr(attr));
 }
 
 pub(crate) fn datadog_visible_span_hint_field(attr_key: &str) -> Option<&'static str> {

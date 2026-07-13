@@ -27,7 +27,7 @@ mod span_hints;
 pub(crate) use span_hints::{MAX_RESPONSE_CAPTURE_BYTES, SpanHints};
 pub(crate) use span_hints::{
     apply_response_captures, apply_span_hints, datadog_visible_span_hint_field,
-    span_hint_otel_name, split_span_hint_headers, truncate_for_span_attr,
+    redact_llm_content_hints, span_hint_otel_name, split_span_hint_headers, truncate_for_span_attr,
 };
 
 /// Host capabilities provided to WASM modules.
@@ -351,6 +351,11 @@ pub struct ProductionWasmHost {
     text_http_interceptor: Option<TextHttpInterceptorFn>,
     /// Invocation context for auto-enriching guest telemetry.
     invocation_context: Option<WasmInvocationContext>,
+    /// Whether this invocation's tenant may export raw LLM content (prompts,
+    /// completions, system instructions, tool arguments/results) captured from
+    /// guest HTTP calls to the telemetry backend. Defaults to `false` (redact);
+    /// the server sets it per tenant. See ADR-0166.
+    export_llm_content: bool,
     /// Registry of active streaming HTTP exchanges (ADR-0057).
     /// One per host instance; handle IDs are unique within the host.
     http_streams: Arc<crate::http_stream::HttpStreamRegistry>,
@@ -530,6 +535,7 @@ impl ProductionWasmHost {
             binary_http_interceptor: None,
             text_http_interceptor: None,
             invocation_context: None,
+            export_llm_content: false,
             http_streams: Arc::new(crate::http_stream::HttpStreamRegistry::new()),
         }
     }
@@ -561,6 +567,13 @@ impl ProductionWasmHost {
     /// Attach invocation context for guest telemetry auto-enrichment.
     pub fn with_invocation_context(mut self, context: WasmInvocationContext) -> Self {
         self.invocation_context = Some(context);
+        self
+    }
+
+    /// Set whether this invocation's tenant may export raw LLM content captured
+    /// from guest HTTP calls. Defaults to `false` (redact). See ADR-0166.
+    pub fn with_llm_content_export(mut self, export_content: bool) -> Self {
+        self.export_llm_content = export_content;
         self
     }
 
@@ -786,7 +799,8 @@ impl WasmHost for ProductionWasmHost {
         // `X-Temper-Span-Name` / `X-Temper-Span-Attr-*` so the resulting
         // span has a semantically meaningful name (e.g., `tool.llm_call`)
         // and attributes (e.g., `gen_ai.request.model`).
-        let (filtered_headers, span_hints) = split_span_hint_headers(headers);
+        let (filtered_headers, mut span_hints) = split_span_hint_headers(headers);
+        redact_llm_content_hints(&mut span_hints, self.export_llm_content);
         let span = tracing::info_span!(
             "wasm.host.http_call",
             otel.name = %span_hint_otel_name(&span_hints, "wasm.host.http_call"),
@@ -1014,7 +1028,8 @@ impl WasmHost for ProductionWasmHost {
     ) -> Result<(u16, Vec<u8>), String> {
         let started = Instant::now();
         // See http_call for the span-hint-header rationale (ADR-0037).
-        let (filtered_headers, span_hints) = split_span_hint_headers(headers);
+        let (filtered_headers, mut span_hints) = split_span_hint_headers(headers);
+        redact_llm_content_hints(&mut span_hints, self.export_llm_content);
         let span = tracing::info_span!(
             "wasm.host.http_call_binary",
             otel.name = %span_hint_otel_name(&span_hints, "wasm.host.http_call_binary"),
@@ -1210,7 +1225,8 @@ impl WasmHost for ProductionWasmHost {
         body: &str,
     ) -> Result<Vec<String>, String> {
         let started = Instant::now();
-        let (filtered_headers, span_hints) = split_span_hint_headers(headers);
+        let (filtered_headers, mut span_hints) = split_span_hint_headers(headers);
+        redact_llm_content_hints(&mut span_hints, self.export_llm_content);
         let span = tracing::info_span!(
             "wasm.host.connect_call",
             otel.name = %span_hint_otel_name(&span_hints, "wasm.host.connect_call"),
@@ -1600,7 +1616,8 @@ impl WasmHost for ProductionWasmHost {
         let head_tx = exchange.bridge_head_sender;
         let streams = self.http_streams.clone();
         let client = self.client.clone();
-        let (filtered_headers, span_hints) = split_span_hint_headers(&request.headers);
+        let (filtered_headers, mut span_hints) = split_span_hint_headers(&request.headers);
+        redact_llm_content_hints(&mut span_hints, self.export_llm_content);
         let span = tracing::info_span!(
             "wasm.host.http_stream",
             otel.name = %span_hint_otel_name(&span_hints, "wasm.host.http_stream"),
