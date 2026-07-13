@@ -1,6 +1,5 @@
 use super::*;
 use crate::actor::{ActorContext, ActorHandle, Message};
-use prost::Message as _;
 
 const SIMPLE_SPEC: &str = r#"
 [automaton]

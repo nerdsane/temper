@@ -5,7 +5,7 @@
 - Deciders: Temper core maintainers
 - Related:
   - ARN-179: Postgres actor-runtime silently drops half the Effect vocabulary
-  - `crates/temper-actor-runtime/src/spec_actor.rs`
+  - `crates/temper-actor-runtime/src/spec_actor/` (`mod.rs`, `effects.rs`)
   - `crates/temper-server/src/entity_actor/effects.rs` (reference implementation)
   - ARN-26 (PG-backed actor runtime lineage)
 
