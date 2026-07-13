@@ -365,18 +365,21 @@ impl PgActorActivator {
                     ))
                 })?;
             let initial_state = handler.initial_state_with_fields(spawn.fields.clone())?;
-            tx.execute(
-                schema::CREATE_ACTOR,
-                &[
-                    &spawn.handle.namespace,
-                    &spawn.handle.actor_type,
-                    &initial_state,
-                ],
-            )
-            .await
-            .map_err(|e| ActivationError::Storage(format!("flush spawn: {e}")))?;
+            let created = tx
+                .execute(
+                    schema::CREATE_ACTOR,
+                    &[
+                        &spawn.handle.namespace,
+                        &spawn.handle.actor_type,
+                        &initial_state,
+                    ],
+                )
+                .await
+                .map_err(|e| ActivationError::Storage(format!("flush spawn: {e}")))?;
 
-            if let Some(initial_message) = &spawn.initial_message {
+            if created == 1
+                && let Some(initial_message) = &spawn.initial_message
+            {
                 let from_namespace = Some(actor_handle.namespace.as_str());
                 let from_actor = Some(actor_handle.actor_type.as_str());
                 tx.execute(
