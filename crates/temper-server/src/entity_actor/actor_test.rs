@@ -672,3 +672,185 @@ effect = [
     assert_eq!(response.state.booleans.get("has_content"), Some(&true));
     assert_eq!(response.state.counters.get("version_count"), Some(&1));
 }
+
+/// ARN-189: PATCH field updates must survive actor eviction/restart.
+#[cfg(feature = "sim")]
+#[tokio::test]
+async fn patched_fields_survive_actor_restart() {
+    use std::sync::Arc;
+    use temper_store_sim::SimEventStore;
+
+    let store = Arc::new(SimEventStore::no_faults(7));
+    let entity_id = "arn189-patch-1";
+
+    let system = ActorSystem::new("sim-arn189-patch-a");
+    let actor = EntityActor::with_persistence(
+        "Order",
+        entity_id,
+        order_table(),
+        serde_json::json!({}),
+        crate::storage::BoxedEventStore::from_arc(store.clone()),
+        crate::storage::BackendLabel::Sim,
+    );
+    let actor_ref = system.spawn(actor, entity_id);
+
+    let patch: EntityResponse = actor_ref
+        .ask(
+            EntityMsg::UpdateFields {
+                fields: serde_json::json!({"Title": "persisted-title", "Priority": 3}),
+                replace: false,
+            },
+            Duration::from_secs(5),
+        )
+        .await
+        .expect("patch ask");
+    assert!(patch.success, "patch should succeed: {:?}", patch.error);
+    assert_eq!(
+        patch.state.fields.get("Title").and_then(|v| v.as_str()),
+        Some("persisted-title")
+    );
+
+    // Drop generation 1; rehydrate from journal only.
+    drop(actor_ref);
+    drop(system);
+
+    let system2 = ActorSystem::new("sim-arn189-patch-b");
+    let actor2 = EntityActor::with_persistence(
+        "Order",
+        entity_id,
+        order_table(),
+        serde_json::json!({}),
+        crate::storage::BoxedEventStore::from_arc(store),
+        crate::storage::BackendLabel::Sim,
+    );
+    let actor_ref2 = system2.spawn(actor2, entity_id);
+    let after: EntityResponse = actor_ref2
+        .ask(EntityMsg::GetState, Duration::from_secs(5))
+        .await
+        .expect("get after restart");
+    assert!(after.success);
+    assert_eq!(
+        after.state.fields.get("Title").and_then(|v| v.as_str()),
+        Some("persisted-title"),
+        "PATCH fields must survive restart (ARN-189)"
+    );
+    assert_eq!(
+        after.state.fields.get("Priority").and_then(|v| v.as_i64()),
+        Some(3)
+    );
+}
+
+/// ARN-189: PUT replace must survive restart and drop omitted fields.
+#[cfg(feature = "sim")]
+#[tokio::test]
+async fn replaced_fields_survive_actor_restart_with_replace_semantics() {
+    use std::sync::Arc;
+    use temper_store_sim::SimEventStore;
+
+    let store = Arc::new(SimEventStore::no_faults(11));
+    let entity_id = "arn189-put-1";
+
+    let system = ActorSystem::new("sim-arn189-put-a");
+    let actor = EntityActor::with_persistence(
+        "Order",
+        entity_id,
+        order_table(),
+        serde_json::json!({"Title": "old", "KeepMe": "x"}),
+        crate::storage::BoxedEventStore::from_arc(store.clone()),
+        crate::storage::BackendLabel::Sim,
+    );
+    let actor_ref = system.spawn(actor, entity_id);
+
+    let put: EntityResponse = actor_ref
+        .ask(
+            EntityMsg::UpdateFields {
+                fields: serde_json::json!({"Title": "new-only"}),
+                replace: true,
+            },
+            Duration::from_secs(5),
+        )
+        .await
+        .expect("put ask");
+    assert!(put.success, "{:?}", put.error);
+    assert_eq!(
+        put.state.fields.get("Title").and_then(|v| v.as_str()),
+        Some("new-only")
+    );
+    assert!(
+        put.state.fields.get("KeepMe").is_none(),
+        "PUT replace drops omitted fields"
+    );
+
+    drop(actor_ref);
+    drop(system);
+
+    let system2 = ActorSystem::new("sim-arn189-put-b");
+    let actor2 = EntityActor::with_persistence(
+        "Order",
+        entity_id,
+        order_table(),
+        serde_json::json!({}),
+        crate::storage::BoxedEventStore::from_arc(store),
+        crate::storage::BackendLabel::Sim,
+    );
+    let actor_ref2 = system2.spawn(actor2, entity_id);
+    let after: EntityResponse = actor_ref2
+        .ask(EntityMsg::GetState, Duration::from_secs(5))
+        .await
+        .expect("get after restart");
+    assert_eq!(
+        after.state.fields.get("Title").and_then(|v| v.as_str()),
+        Some("new-only"),
+        "PUT fields must survive restart (ARN-189)"
+    );
+    assert!(
+        after.state.fields.get("KeepMe").is_none(),
+        "PUT replace semantics must survive restart"
+    );
+}
+
+#[test]
+fn apply_field_update_merge_and_replace() {
+    let mut state = EntityState {
+        entity_type: "Order".into(),
+        entity_id: "o1".into(),
+        status: "Draft".into(),
+        item_count: 0,
+        counters: Default::default(),
+        booleans: Default::default(),
+        lists: Default::default(),
+        fields: serde_json::json!({"Title": "a", "Extra": 1}),
+        events: Default::default(),
+        total_event_count: 0,
+        events_since_snapshot: 0,
+        last_snapshot_sequence_nr: 0,
+        sequence_nr: 0,
+        processed_idempotency_keys: Default::default(),
+    };
+    crate::entity_actor::effects::apply_field_update(
+        &mut state,
+        &serde_json::json!({"Title": "b"}),
+        false,
+    );
+    assert_eq!(
+        state.fields.get("Title").and_then(|v| v.as_str()),
+        Some("b")
+    );
+    assert_eq!(state.fields.get("Extra").and_then(|v| v.as_i64()), Some(1));
+
+    crate::entity_actor::effects::apply_field_update(
+        &mut state,
+        &serde_json::json!({"Title": "c"}),
+        true,
+    );
+    assert_eq!(
+        state.fields.get("Title").and_then(|v| v.as_str()),
+        Some("c")
+    );
+    assert!(state.fields.get("Extra").is_none());
+    assert_eq!(state.fields.get("Id").and_then(|v| v.as_str()), Some("o1"));
+    assert_eq!(
+        state.fields.get("Status").and_then(|v| v.as_str()),
+        Some("Draft")
+    );
+}

@@ -19,6 +19,35 @@ use crate::blobs::{FIELD_OVERFLOW_BLOB_PREFIX, OverflowBlobWrite, blob_ref_value
 
 use super::types::{EntityEvent, EntityState, MAX_EVENTS_SINCE_SNAPSHOT};
 
+/// Journal event type for OData PATCH field merges (ARN-189 / ADR-0169).
+pub const FIELDS_UPDATED_EVENT: &str = "FieldsUpdated";
+/// Journal event type for OData PUT field replacement (ARN-189 / ADR-0169).
+pub const FIELDS_REPLACED_EVENT: &str = "FieldsReplaced";
+
+/// Apply a PATCH merge or PUT replace to `state.fields`, preserving `Id`/`Status`
+/// on replace. Shared by the live `UpdateFields` handler and journal replay.
+pub(crate) fn apply_field_update(
+    state: &mut EntityState,
+    fields: &serde_json::Value,
+    replace: bool,
+) {
+    if replace {
+        let id = state.entity_id.clone();
+        let status = state.status.clone();
+        state.fields = fields.clone();
+        if let Some(obj) = state.fields.as_object_mut() {
+            obj.insert("Id".to_string(), serde_json::Value::String(id));
+            obj.insert("Status".to_string(), serde_json::Value::String(status));
+        }
+    } else if let (Some(existing), Some(updates)) =
+        (state.fields.as_object_mut(), fields.as_object())
+    {
+        for (k, v) in updates {
+            existing.insert(k.clone(), v.clone());
+        }
+    }
+}
+
 /// A scheduled action to fire after a delay.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ScheduledAction {

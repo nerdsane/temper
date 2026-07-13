@@ -587,6 +587,35 @@ impl EntityActor {
                         break;
                     }
 
+                    // ARN-189 / ADR-0169: PATCH/PUT field updates are journaled
+                    // outside the spec action vocabulary. Re-apply via the same
+                    // helper as the live handler (PUT replace is not a merge).
+                    if env.event_type == super::effects::FIELDS_UPDATED_EVENT
+                        || env.event_type == super::effects::FIELDS_REPLACED_EVENT
+                    {
+                        match parsed_event {
+                            Ok(event) => {
+                                super::effects::apply_field_update(
+                                    state,
+                                    &event.params,
+                                    env.event_type == super::effects::FIELDS_REPLACED_EVENT,
+                                );
+                                state.push_event_bounded(event);
+                            }
+                            Err(e) => {
+                                tracing::warn!(
+                                    entity = %state.entity_id,
+                                    sequence_nr = env.sequence_nr,
+                                    event_type = %env.event_type,
+                                    error = %e,
+                                    "skipping field-update event with incompatible schema during replay"
+                                );
+                            }
+                        }
+                        state.sequence_nr = env.sequence_nr;
+                        continue;
+                    }
+
                     match parsed_event {
                         Ok(event) => {
                             // A persisted event is a historical fact: its guard
@@ -1420,25 +1449,96 @@ impl Actor for EntityActor {
                 ctx.reply(value);
             }
             EntityMsg::UpdateFields { fields, replace } => {
-                if replace {
-                    // PUT: replace all fields (preserve Id and Status)
-                    let id = state.entity_id.clone();
-                    let status = state.status.clone();
-                    state.fields = fields;
-                    if let Some(obj) = state.fields.as_object_mut() {
-                        obj.insert("Id".to_string(), serde_json::Value::String(id));
-                        obj.insert("Status".to_string(), serde_json::Value::String(status));
-                    }
-                } else {
-                    // PATCH: merge fields into existing
-                    if let (Some(existing), Some(updates)) =
-                        (state.fields.as_object_mut(), fields.as_object())
-                    {
-                        for (k, v) in updates {
-                            existing.insert(k.clone(), v.clone());
-                        }
-                    }
+                // TigerStyle: field updates append journal events (ADR-0169).
+                // Ungated they could grow the snapshot replay tail past budget.
+                if state.events_since_snapshot >= MAX_EVENTS_SINCE_SNAPSHOT {
+                    let workspace_id = event_budget_workspace_id(state);
+                    crate::event_budget_metrics::record_exhausted(
+                        &self.tenant,
+                        &state.entity_type,
+                        &state.entity_id,
+                        &workspace_id,
+                    );
+                    tracing::warn!(
+                        tenant = %self.tenant,
+                        entity_type = %state.entity_type,
+                        entity_id = %state.entity_id,
+                        replace,
+                        events_since_snapshot = state.events_since_snapshot,
+                        "Event budget exhausted (field update rejected)"
+                    );
+                    ctx.reply(EntityResponse {
+                        success: false,
+                        state: state.clone(),
+                        error: Some(format!(
+                            "Event budget exhausted ({MAX_EVENTS_SINCE_SNAPSHOT} max since snapshot)"
+                        )),
+                        custom_effects: vec![],
+                        scheduled_actions: vec![],
+                        spawn_requests: vec![],
+                        spec_governed: true,
+                    });
+                    return Ok(());
                 }
+
+                // Apply first so persist co-commits key/vector rows from NEW
+                // fields; roll back on append failure (fail-closed ARN-189).
+                let previous_fields = state.fields.clone();
+                super::effects::apply_field_update(state, &fields, replace);
+
+                let event = EntityEvent {
+                    action: if replace {
+                        super::effects::FIELDS_REPLACED_EVENT
+                    } else {
+                        super::effects::FIELDS_UPDATED_EVENT
+                    }
+                    .to_string(),
+                    from_status: state.status.clone(),
+                    to_status: state.status.clone(),
+                    timestamp: sim_now(),
+                    params: fields,
+                    idempotency_key: None,
+                };
+
+                if let (Some(store), Some(backend)) =
+                    (self.event_journal.as_ref(), self.event_backend)
+                    && let Err(e) = self
+                        .persist_event(store, backend, &self.persistence_id(), state, &event)
+                        .await
+                {
+                    state.fields = previous_fields;
+                    ctx.reply(EntityResponse {
+                        success: false,
+                        state: state.clone(),
+                        error: Some(format!("persistence failed: {e}")),
+                        custom_effects: vec![],
+                        scheduled_actions: vec![],
+                        spawn_requests: vec![],
+                        spec_governed: true,
+                    });
+                    return Ok(());
+                }
+
+                state.push_event_bounded(event);
+
+                let persistence_id = self.persistence_id();
+                if let Some(ref store) = self.event_journal
+                    && let Err(e) = Self::maybe_save_snapshot(
+                        store,
+                        self.snapshot_queue.as_ref(),
+                        &persistence_id,
+                        state,
+                    )
+                    .await
+                {
+                    tracing::warn!(
+                        entity = %state.entity_id,
+                        seq = state.sequence_nr,
+                        error = %e,
+                        "failed to persist snapshot after field update"
+                    );
+                }
+
                 ctx.reply(EntityResponse {
                     success: true,
                     state: state.clone(),
