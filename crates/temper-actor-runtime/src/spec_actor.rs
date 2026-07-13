@@ -453,14 +453,11 @@ impl SpecDrivenActor {
                 *c = c.saturating_sub(delta);
             }
             Effect::SetCounterFromParam { var, param } => {
-                let parsed = state
-                    .fields
-                    .get(param)
-                    .and_then(|v| match v {
-                        serde_json::Value::Number(n) => n.as_u64().map(|u| u as usize),
-                        serde_json::Value::String(t) => t.parse::<usize>().ok(),
-                        _ => None,
-                    });
+                let parsed = state.fields.get(param).and_then(|v| match v {
+                    serde_json::Value::Number(n) => n.as_u64().map(|u| u as usize),
+                    serde_json::Value::String(t) => t.parse::<usize>().ok(),
+                    _ => None,
+                });
                 match parsed {
                     Some(value) => {
                         state.counters.insert(var.clone(), value);
@@ -528,7 +525,8 @@ impl SpecDrivenActor {
                 }
             }
             Effect::Custom(trigger_name) => {
-                if let Some((target_type, target_action)) = self.routing.get(trigger_name.as_str()) {
+                if let Some((target_type, target_action)) = self.routing.get(trigger_name.as_str())
+                {
                     tracing::info!(actor=%self.name, trigger=%trigger_name, target=%target_type, target_action=%target_action, "routing trigger");
                     let target =
                         ActorHandle::new(ctx.self_handle().namespace.clone(), target_type.clone());
