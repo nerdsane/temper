@@ -219,14 +219,23 @@ pub trait EventStore: Send + Sync + 'static {
     /// deleted or un-embedded entity). Used by the backfill and by the Turso
     /// write-behind path. The default is a no-op (non-indexing backends); query-plane
     /// stores implement it.
+    ///
+    /// `as_of_sequence` is the journal sequence the rows were derived from
+    /// (ARN-216): the store must SKIP the reconcile when the entity's journal
+    /// has advanced past it — a newer live write co-committed newer rows, and
+    /// overwriting them with rows from a stale load would corrupt the index
+    /// right before the backfill watermark declares it complete. Pass
+    /// `u64::MAX` to force the reconcile regardless (callers that KNOW their
+    /// rows are current).
     fn backfill_entity_vectors(
         &self,
         tenant: &str,
         entity_type: &str,
         entity_id: &str,
         vector_rows: &[EntityVectorRow],
+        as_of_sequence: u64,
     ) -> impl std::future::Future<Output = Result<(), PersistenceError>> + Send {
-        let _ = (tenant, entity_type, entity_id, vector_rows);
+        let _ = (tenant, entity_type, entity_id, vector_rows, as_of_sequence);
         async { Ok(()) }
     }
 

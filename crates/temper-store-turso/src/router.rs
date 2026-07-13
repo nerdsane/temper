@@ -775,10 +775,11 @@ impl EventStore for TenantStoreRouter {
         entity_type: &str,
         entity_id: &str,
         vector_rows: &[temper_runtime::persistence::EntityVectorRow],
+        as_of_sequence: u64,
     ) -> Result<(), PersistenceError> {
         let store = self.store_for_tenant(tenant).await?;
         store
-            .backfill_entity_vectors(tenant, entity_type, entity_id, vector_rows)
+            .backfill_entity_vectors(tenant, entity_type, entity_id, vector_rows, as_of_sequence)
             .await
     }
 

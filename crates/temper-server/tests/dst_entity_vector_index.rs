@@ -220,13 +220,31 @@ async fn dst_vector_backfill_must_not_overwrite_newer_live_write() {
         .await;
 
         // BACKFILL step 1 (stale load): the rows the backfill would build
-        // from a load taken NOW — i.e. E1. (The production code parses these
-        // from the replayed state; the parse result is exactly this row.)
+        // from a load taken NOW — i.e. E1 at the current journal sequence.
+        // (The production code parses these from the replayed state; the
+        // parse result is exactly this row + this sequence.)
         let stale_rows = vec![temper_runtime::persistence::EntityVectorRow {
             decl_name: "embed".to_string(),
             model_tag: "m1".to_string(),
             vector: vec![1.0, 0.0, 0.0, 0.0],
         }];
+        let stale_seq = {
+            let actor = EntityActor::with_persistence(
+                "Item",
+                &entity_id,
+                table.clone(),
+                serde_json::json!({}),
+                store.clone(),
+                BackendLabel::Sim,
+            )
+            .with_tenant("default");
+            let actor_ref = system.spawn(actor, format!("{entity_id}-probe"));
+            let state: EntityResponse = actor_ref
+                .ask(EntityMsg::GetState, Duration::from_secs(5))
+                .await
+                .expect("state probe");
+            state.state.sequence_nr
+        };
 
         // LIVE WRITE lands between the backfill's load and its reconcile:
         // the co-commit updates the index to E2.
@@ -239,7 +257,7 @@ async fn dst_vector_backfill_must_not_overwrite_newer_live_write() {
             BackendLabel::Sim,
         )
         .with_tenant("default");
-        let actor_ref = system.spawn(actor, &format!("{entity_id}-live"));
+        let actor_ref = system.spawn(actor, format!("{entity_id}-live"));
         let e2 = serde_json::to_string(&[0.0f32, 1.0, 0.0, 0.0]).unwrap();
         let r = dispatch(
             &actor_ref,
@@ -251,7 +269,7 @@ async fn dst_vector_backfill_must_not_overwrite_newer_live_write() {
 
         // BACKFILL step 2: reconcile with the STALE rows.
         store
-            .backfill_entity_vectors("default", "Item", &entity_id, &stale_rows)
+            .backfill_entity_vectors("default", "Item", &entity_id, &stale_rows, stale_seq)
             .await
             .expect("backfill reconcile");
 

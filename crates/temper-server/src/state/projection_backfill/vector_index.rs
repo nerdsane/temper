@@ -128,7 +128,7 @@ pub(in crate::state) async fn populate_vector_index_from_snapshots(
             )
             .await
             {
-                EntityLoadOutcome::Fields(fields) => {
+                EntityLoadOutcome::Fields(fields, loaded_seq) => {
                     let Some(field_map) = fields.as_object() else {
                         skipped += 1;
                         continue;
@@ -166,6 +166,7 @@ pub(in crate::state) async fn populate_vector_index_from_snapshots(
                             entity_type,
                             entity_id,
                             &vector_rows,
+                            loaded_seq,
                         )
                         .await
                     {
@@ -179,13 +180,19 @@ pub(in crate::state) async fn populate_vector_index_from_snapshots(
                         }
                     }
                 }
-                EntityLoadOutcome::Skip => {
+                EntityLoadOutcome::Skip(loaded_seq) => {
                     // A deleted (or phantom) entity must hold no vector rows — purge
                     // any it still has so a soft-deleted entity is never ranked
                     // (reconcile with an empty row set). Harmless when there is nothing
                     // to purge.
                     if let Err(e) = store
-                        .backfill_entity_vectors(tenant.as_str(), entity_type, entity_id, &[])
+                        .backfill_entity_vectors(
+                            tenant.as_str(),
+                            entity_type,
+                            entity_id,
+                            &[],
+                            loaded_seq,
+                        )
                         .await
                     {
                         failed += 1;
