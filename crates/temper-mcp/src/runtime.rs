@@ -327,6 +327,16 @@ impl RuntimeContext {
             // Cap the distinct-key growth of these observability maps so a single
             // large code blob can't insert unbounded unique keys (ARN-222).
             if let Some(tenant) = meta.tenant {
+                // Emit the cross-tenant signal once per unique foreign tenant, when
+                // first observed — not on every upload/flush. Storage is unaffected.
+                if tenant != self.identity_tenant && !self.tenants_seen.contains_key(&tenant) {
+                    tracing::warn!(
+                        identity_tenant = %self.identity_tenant,
+                        referenced_tenant = %tenant,
+                        "mcp session code referenced a tenant other than its identity; \
+                         trajectory stored under the identity tenant"
+                    );
+                }
                 bump_seen(&mut self.tenants_seen, tenant);
             }
             if let Some(entity_type) = meta.entity_type {
@@ -424,20 +434,6 @@ impl RuntimeContext {
                 "X-Tenant-Id",
                 trajectory_storage_tenant(&self.identity_tenant, &self.tenants_seen),
             );
-
-        // Surface (but don't block on) code that referenced a tenant other than the
-        // session identity — a cross-tenant-activity signal. Storage stays under the
-        // authenticated identity regardless (ARN-222).
-        for tenant in self.tenants_seen.keys() {
-            if tenant != &self.identity_tenant {
-                tracing::warn!(
-                    identity_tenant = %self.identity_tenant,
-                    referenced_tenant = %tenant,
-                    "mcp session code referenced a tenant other than its identity; \
-                     trajectory stored under the identity tenant"
-                );
-            }
-        }
 
         if let Some(primary_entity_type) = self.primary_entity_type() {
             request = request.header("X-Entity-Type", primary_entity_type);
