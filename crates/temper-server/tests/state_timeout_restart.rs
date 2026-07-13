@@ -91,6 +91,37 @@ async fn wait_for_status(
     }
 }
 
+/// Run generation A (create one ticket) on its OWN tokio runtime and then
+/// DROP that runtime — aborting every task it spawned, including the timer
+/// the creation-arm (ARN-203) legitimately arms in generation A. This makes
+/// the "crash" real: nothing from generation A can fire afterwards, so the
+/// post-restart transition can only come from generation B's boot resume.
+fn run_and_hard_kill_generation_a(system_name: &str, db_url: &str, entity_id: &str) {
+    let system_name = system_name.to_string();
+    let db_url = db_url.to_string();
+    let entity_id = entity_id.to_string();
+    std::thread::spawn(move || {
+        let rt = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(2)
+            .enable_all()
+            .build()
+            .expect("build generation-A runtime");
+        rt.block_on(async move {
+            let tenant = TenantId::from("tenant-a".to_string());
+            let state_a = build_state(&system_name, open_store(&db_url).await);
+            let created = state_a
+                .get_or_create_tenant_entity(&tenant, "Ticket", &entity_id, serde_json::json!({}))
+                .await
+                .expect("create ticket");
+            assert_eq!(created.state.status, "Open");
+        });
+        // Hard kill: dropping the runtime aborts all spawned tasks.
+        rt.shutdown_timeout(Duration::from_millis(100));
+    })
+    .join()
+    .expect("generation A thread");
+}
+
 /// An entity that entered a timed state before a restart, with time still
 /// left on the budget, must have its timer re-armed at boot and fire on
 /// schedule — with NO post-restart dispatch to the entity.
@@ -101,17 +132,11 @@ async fn pending_state_timeout_fires_after_restart() {
     let db_url = format!("file:{}", db_path.display());
     let tenant = TenantId::from("tenant-a".to_string());
 
-    // Generation A: create the ticket; it enters the timed `Open` state.
-    {
-        let state_a = build_state("arn203-gen-a", open_store(&db_url).await);
-        let created = state_a
-            .get_or_create_tenant_entity(&tenant, "Ticket", "t-restart-1", serde_json::json!({}))
-            .await
-            .expect("create ticket");
-        assert_eq!(created.state.status, "Open");
-        // Server "crashes" here — generation A is dropped with the timer
-        // budget (1s) not yet elapsed and no timer ever armed durably.
-    }
+    // Generation A: create the ticket (entering the timed `Open` state),
+    // then hard-kill its runtime with the 1s budget not yet elapsed. The
+    // creation-arm DOES arm an in-memory timer in generation A; the hard
+    // kill aborts it, exactly like a crashed server process.
+    run_and_hard_kill_generation_a("arn203-gen-a", &db_url, "t-restart-1");
 
     // Generation B: the boot sequence `temper serve` runs for a tenant.
     let state_b = build_state("arn203-gen-b", open_store(&db_url).await);
@@ -141,14 +166,9 @@ async fn overdue_state_timeout_fires_after_restart() {
     let db_url = format!("file:{}", db_path.display());
     let tenant = TenantId::from("tenant-a".to_string());
 
-    {
-        let state_a = build_state("arn203-gen-a2", open_store(&db_url).await);
-        let created = state_a
-            .get_or_create_tenant_entity(&tenant, "Ticket", "t-overdue-1", serde_json::json!({}))
-            .await
-            .expect("create ticket");
-        assert_eq!(created.state.status, "Open");
-    }
+    // Hard-kill generation A immediately after creation, before its
+    // creation-armed timer can fire.
+    run_and_hard_kill_generation_a("arn203-gen-a2", &db_url, "t-overdue-1");
 
     // The 1s budget expires entirely while the server is "down".
     tokio::time::sleep(Duration::from_millis(1500)).await;
