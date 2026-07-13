@@ -370,6 +370,73 @@ async fn command_flush_failure_rolls_back_parent_state_cursor_and_commands() {
 }
 
 #[tokio::test]
+async fn duplicate_durable_spawn_enqueues_initial_action_once() {
+    let (_container, pool) = postgres_pool().await;
+    let system = ActorSystem::new(pool.clone(), SchedulerConfig::default());
+    register_effect_actors(&system).await;
+
+    let child_id = format!("shared-child-{}", Uuid::new_v4());
+    let child_namespace = format!("default/{child_id}");
+    for parent_id in [Uuid::new_v4(), Uuid::new_v4()] {
+        let parent = system
+            .spawn_with_fields(
+                &format!("default/{parent_id}"),
+                "EffectParent",
+                serde_json::json!({"owner": "owner-1"}),
+            )
+            .await
+            .expect("spawn parent");
+        system
+            .tell(
+                None,
+                &parent,
+                SpecMessage::with_params("Append", serde_json::json!({"entries": "durable-value"})),
+            )
+            .await
+            .expect("enqueue append");
+        assert!(system.activate_now(&parent).await.expect("activate append"));
+        system
+            .tell(
+                None,
+                &parent,
+                SpecMessage::with_params("Run", serde_json::json!({"child_id": child_id.clone()})),
+            )
+            .await
+            .expect("enqueue spawn action");
+        assert!(
+            system
+                .activate_now(&parent)
+                .await
+                .expect("activate spawn action")
+        );
+    }
+
+    let client = pool.get().await.expect("duplicate-spawn assertion client");
+    let actor_count: i64 = client
+        .query_one(
+            "SELECT COUNT(*) FROM odp_temper.actor_instances WHERE namespace = $1 AND actor_type = 'EffectChild'",
+            &[&child_namespace],
+        )
+        .await
+        .expect("count durable child actors")
+        .get(0);
+    let initial_message_count: i64 = client
+        .query_one(
+            "SELECT COUNT(*) FROM odp_temper.actor_messages WHERE namespace = $1 AND to_actor = 'EffectChild'",
+            &[&child_namespace],
+        )
+        .await
+        .expect("count durable child initial messages")
+        .get(0);
+
+    assert_eq!(actor_count, 1, "duplicate spawn must remain idempotent");
+    assert_eq!(
+        initial_message_count, 1,
+        "an existing durable child must not receive the initial action again"
+    );
+}
+
+#[tokio::test]
 async fn concurrent_timer_promoters_preserve_global_due_order() {
     let (_container, pool) = postgres_pool().await;
     let namespace = format!("timer-order/{}", Uuid::new_v4());
