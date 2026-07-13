@@ -603,6 +603,11 @@ impl EntityActor {
                                 state.push_event_bounded(event);
                             }
                             Err(e) => {
+                                crate::event_budget_metrics::record_field_update_replay_skip(
+                                    tenant,
+                                    &state.entity_type,
+                                    &state.entity_id,
+                                );
                                 tracing::warn!(
                                     entity = %state.entity_id,
                                     sequence_nr = env.sequence_nr,
@@ -1473,6 +1478,24 @@ impl Actor for EntityActor {
                         error: Some(format!(
                             "Event budget exhausted ({MAX_EVENTS_SINCE_SNAPSHOT} max since snapshot)"
                         )),
+                        custom_effects: vec![],
+                        scheduled_actions: vec![],
+                        spawn_requests: vec![],
+                        spec_governed: true,
+                    });
+                    return Ok(());
+                }
+
+                // Reject non-object bodies before mutating or journaling —
+                // otherwise a PATCH array/null would no-op with success:true
+                // and still consume the event budget (Greptile P2 on ARN-189).
+                if !fields.is_object() {
+                    ctx.reply(EntityResponse {
+                        success: false,
+                        state: state.clone(),
+                        error: Some(
+                            "field update requires a JSON object body".to_string(),
+                        ),
                         custom_effects: vec![],
                         scheduled_actions: vec![],
                         spawn_requests: vec![],

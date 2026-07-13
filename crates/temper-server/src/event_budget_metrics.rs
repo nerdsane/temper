@@ -33,3 +33,27 @@ pub fn record_exhausted(tenant: &str, entity_type: &str, entity_id: &str, worksp
         ],
     );
 }
+
+fn field_update_replay_skip_counter() -> &'static Counter<u64> {
+    static COUNTER: OnceLock<Counter<u64>> = OnceLock::new();
+    COUNTER.get_or_init(|| {
+        global::meter("temper.runtime")
+            .u64_counter("temper_entity_field_update_replay_skip_total")
+            .with_description(
+                "FieldsUpdated/FieldsReplaced journal envelopes skipped during actor replay (schema parse failure).",
+            )
+            .build()
+    })
+}
+
+/// Metric for ARN-189 replay path when a journaled field update cannot be deserialized.
+pub fn record_field_update_replay_skip(tenant: &str, entity_type: &str, entity_id: &str) {
+    field_update_replay_skip_counter().add(
+        1,
+        &[
+            KeyValue::new("tenant", tenant.to_string()),
+            KeyValue::new("entity_type", entity_type.to_string()),
+            KeyValue::new("entity_id", entity_id.to_string()),
+        ],
+    );
+}

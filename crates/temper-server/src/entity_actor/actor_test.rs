@@ -926,3 +926,49 @@ async fn field_update_with_failed_journal_append_does_not_report_success() {
         "failed update must not persist in retained actor state"
     );
 }
+
+/// ARN-189 Greptile P2: non-object PATCH body must not claim success or journal.
+#[cfg(feature = "sim")]
+#[tokio::test]
+async fn field_update_rejects_non_object_body() {
+    use std::sync::Arc;
+    use temper_store_sim::SimEventStore;
+
+    let store = Arc::new(SimEventStore::no_faults(17));
+    let entity_id = "arn189-bad-body";
+
+    let system = ActorSystem::new("sim-arn189-bad-body");
+    let actor = EntityActor::with_persistence(
+        "Order",
+        entity_id,
+        order_table(),
+        serde_json::json!({}),
+        crate::storage::BoxedEventStore::from_arc(store),
+        crate::storage::BackendLabel::Sim,
+    );
+    let actor_ref = system.spawn(actor, entity_id);
+
+    let response: EntityResponse = actor_ref
+        .ask(
+            EntityMsg::UpdateFields {
+                fields: serde_json::json!(["not", "an", "object"]),
+                replace: false,
+            },
+            Duration::from_secs(5),
+        )
+        .await
+        .unwrap();
+    assert!(
+        !response.success,
+        "non-object field update must fail: {:?}",
+        response.error
+    );
+    assert!(
+        response
+            .error
+            .as_deref()
+            .is_some_and(|e| e.contains("JSON object")),
+        "expected object-body error, got {:?}",
+        response.error
+    );
+}
