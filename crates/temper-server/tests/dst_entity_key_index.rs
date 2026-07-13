@@ -240,3 +240,95 @@ async fn dst_co_commit_atomic_on_uniqueness_reject() {
         );
     }
 }
+
+/// ARN-238: deleting an entity must RELEASE its declared-key ownership.
+///
+/// The Deleted event's co-commit recomputes key rows from the entity's fields
+/// (which still hold the key values), so the tombstoned entity keeps its
+/// `entity_key_index` rows: keyed reads resolve to a dead entity, and — the
+/// durable damage — any NEW entity claiming the same key value is rejected
+/// with a uniqueness violation forever.
+#[tokio::test]
+async fn dst_deleted_entity_releases_declared_key() {
+    for seed in 0..NUM_SEEDS {
+        let (_guard, _clock, _id) = install_deterministic_context(seed);
+        let store: BoxedEventStore = BoxedEventStore::new(SimEventStore::no_faults(seed));
+        let table = doc_table();
+        let system = ActorSystem::new("dst-keyed-delete");
+
+        // Doc A claims the key, then is deleted.
+        let id_a = format!("doc-a-{seed}");
+        let actor_a = EntityActor::with_persistence(
+            "Doc",
+            &id_a,
+            table.clone(),
+            serde_json::json!({}),
+            store.clone(),
+            BackendLabel::Sim,
+        )
+        .with_tenant("default");
+        let ref_a = system.spawn(actor_a, &id_a);
+        let r = dispatch(
+            &ref_a,
+            "Create",
+            serde_json::json!({ "WorkspaceId": "ws1", "Path": "/a.md" }),
+        )
+        .await;
+        assert!(r.success, "seed {seed}: Create A failed: {:?}", r.error);
+
+        let deleted: EntityResponse = ref_a
+            .ask(EntityMsg::Delete, Duration::from_secs(5))
+            .await
+            .expect("delete responds");
+        assert!(
+            deleted.success,
+            "seed {seed}: Delete failed: {:?}",
+            deleted.error
+        );
+
+        // 1) The dead entity must no longer own the key.
+        let owner = store
+            .lookup_by_key("default", "Doc", "path", &doc_key_hash("ws1", "/a.md"))
+            .await
+            .expect("lookup ok");
+        assert_eq!(
+            owner, None,
+            "seed {seed}: a deleted entity must release its declared key, got {owner:?}"
+        );
+
+        // 2) A new entity must be able to claim the released key value.
+        let id_b = format!("doc-b-{seed}");
+        let actor_b = EntityActor::with_persistence(
+            "Doc",
+            &id_b,
+            table.clone(),
+            serde_json::json!({}),
+            store.clone(),
+            BackendLabel::Sim,
+        )
+        .with_tenant("default");
+        let ref_b = system.spawn(actor_b, &id_b);
+        let r = dispatch(
+            &ref_b,
+            "Create",
+            serde_json::json!({ "WorkspaceId": "ws1", "Path": "/a.md" }),
+        )
+        .await;
+        assert!(
+            r.success,
+            "seed {seed}: a new entity must be able to claim a key released by deletion, got: {:?}",
+            r.error
+        );
+
+        // 3) And the key resolves to the new owner.
+        let owner = store
+            .lookup_by_key("default", "Doc", "path", &doc_key_hash("ws1", "/a.md"))
+            .await
+            .expect("lookup ok");
+        assert_eq!(
+            owner,
+            Some(id_b.clone()),
+            "seed {seed}: the key must resolve to its new living owner"
+        );
+    }
+}
