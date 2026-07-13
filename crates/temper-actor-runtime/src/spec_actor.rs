@@ -306,20 +306,16 @@ impl Actor for SpecDrivenActor {
             .filter(|m| !m.params.is_empty())
             .and_then(|m| serde_json::from_slice::<serde_json::Value>(&m.params).ok())
             .unwrap_or_else(|| serde_json::json!({}));
-        if !action_params
+        if let Some(new_fields) = action_params
             .as_object()
-            .is_some_and(serde_json::Map::is_empty)
+            .filter(|fields| !fields.is_empty())
         {
-            match (
-                actor_state.fields.as_object_mut(),
-                action_params.as_object(),
-            ) {
-                (Some(existing), Some(new_fields)) => {
-                    for (k, v) in new_fields {
-                        existing.insert(k.clone(), v.clone());
-                    }
+            if let Some(existing) = actor_state.fields.as_object_mut() {
+                for (key, value) in new_fields {
+                    existing.insert(key.clone(), value.clone());
                 }
-                _ => actor_state.fields = action_params.clone(),
+            } else {
+                actor_state.fields = serde_json::Value::Object(new_fields.clone());
             }
         }
 
