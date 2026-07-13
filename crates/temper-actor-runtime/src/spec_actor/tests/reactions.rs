@@ -38,6 +38,30 @@ from = ["Ready"]
 to = "Ready"
 "#;
 
+const NINE_SPAWN_EFFECT_SPEC: &str = r#"
+[automaton]
+name = "Spawner"
+states = ["Idle", "Done"]
+initial = "Idle"
+
+[[action]]
+name = "Run"
+kind = "input"
+from = ["Idle"]
+to = "Done"
+effect = [
+  { type = "spawn", entity_type = "Child0", entity_id_source = "child_id", store_id_in = "child_0" },
+  { type = "spawn", entity_type = "Child1", entity_id_source = "child_id", store_id_in = "child_1" },
+  { type = "spawn", entity_type = "Child2", entity_id_source = "child_id", store_id_in = "child_2" },
+  { type = "spawn", entity_type = "Child3", entity_id_source = "child_id", store_id_in = "child_3" },
+  { type = "spawn", entity_type = "Child4", entity_id_source = "child_id", store_id_in = "child_4" },
+  { type = "spawn", entity_type = "Child5", entity_id_source = "child_id", store_id_in = "child_5" },
+  { type = "spawn", entity_type = "Child6", entity_id_source = "child_id", store_id_in = "child_6" },
+  { type = "spawn", entity_type = "Child7", entity_id_source = "child_id", store_id_in = "child_7" },
+  { type = "spawn", entity_type = "Child8", entity_id_source = "child_id", store_id_in = "child_8" },
+]
+"#;
+
 fn reaction(
     name: &str,
     action: Option<&str>,
@@ -55,6 +79,8 @@ fn reaction(
         then: temper_runtime::reaction::ReactionTarget {
             entity_type: target.into(),
             action: "Receive".into(),
+            params: serde_json::Value::Null,
+            params_from: std::collections::BTreeMap::new(),
         },
         resolve_target: resolver,
     }
@@ -212,6 +238,53 @@ async fn empty_parameter_reaction_does_not_copy_source_fields() {
 }
 
 #[tokio::test]
+async fn declared_reaction_params_copy_only_named_source_fields() {
+    let mut rule = reaction(
+        "declared-params",
+        Some("Changed"),
+        None,
+        "Target",
+        TargetResolver::SameId,
+    );
+    rule.then.params = serde_json::json!({"mode": "chat"});
+    rule.then
+        .params_from
+        .insert("prompt".into(), "user_prompt".into());
+    let actor = SpecDrivenActor::from_ioa(ROUTED_EFFECT_SPEC, ReactionRegistry::from(vec![rule]))
+        .expect("routed effect spec must parse");
+    let handle = ActorHandle::new("default/source-1", "Router");
+    let context = ActorContext::new(handle.clone(), None, None);
+    let mut state = actor.initial_state();
+
+    actor
+        .handle(
+            &context,
+            &mut state,
+            &spec_message(
+                1,
+                &handle,
+                "Route",
+                serde_json::json!({
+                    "user_prompt": "durable question",
+                    "private_source_field": "must not leak",
+                }),
+            ),
+        )
+        .await
+        .expect("declared-parameter reaction must route");
+
+    let tells = context.take_pending_tells().await;
+    assert_eq!(tells.len(), 1);
+    let routed = SpecMessage::decode(tells[0].payload.as_slice()).expect("routed message");
+    let params: serde_json::Value =
+        serde_json::from_slice(&routed.params).expect("routed params must be JSON");
+    assert_eq!(
+        params,
+        serde_json::json!({"mode": "chat", "prompt": "durable question"})
+    );
+}
+
+#[tokio::test]
 async fn unresolved_field_target_preserves_successful_source_transition() {
     let actor = SpecDrivenActor::from_ioa(
         ROUTED_EFFECT_SPEC,
@@ -319,6 +392,27 @@ async fn admitted_reaction_fanout_plus_schedule_fits_command_budget() {
         context.take_pending_spawns().await.len(),
         temper_runtime::reaction::MAX_REACTIONS_PER_ACTOR * 2
     );
+}
+
+#[tokio::test]
+async fn admitted_direct_spawns_use_the_derived_activation_budget() {
+    let actor = SpecDrivenActor::from_ioa(NINE_SPAWN_EFFECT_SPEC, ReactionRegistry::new())
+        .expect("nine-spawn spec must parse");
+    let handle = ActorHandle::new("default/source-1", "Spawner");
+    let context =
+        ActorContext::new_with_budgets(handle.clone(), None, None, actor.activation_budgets());
+    let mut state = actor.initial_state();
+
+    actor
+        .handle(
+            &context,
+            &mut state,
+            &spec_message(1, &handle, "Run", serde_json::json!({"child_id": "child"})),
+        )
+        .await
+        .expect("all spec-admitted direct spawns must fit the derived budget");
+
+    assert_eq!(context.take_pending_spawns().await.len(), 9);
 }
 
 #[tokio::test]

@@ -339,6 +339,8 @@ fn actor_reaction_rule(tenant: &TenantId, rule: &ServerReactionRule) -> Result<A
         then: ActorReactionTarget {
             entity_type: rule.then.entity_type.clone(),
             action: rule.then.action.clone(),
+            params: serde_json::Value::Null,
+            params_from: std::collections::BTreeMap::new(),
         },
         resolve_target,
     })

@@ -55,6 +55,12 @@ pub struct ReactionTarget {
     pub entity_type: String,
     /// The action/message to send (e.g., "PrepareContext").
     pub action: String,
+    /// Static parameters to pass to the target action.
+    #[serde(default)]
+    pub params: serde_json::Value,
+    /// Dynamic target parameter names mapped to source actor field names.
+    #[serde(default)]
+    pub params_from: BTreeMap<String, String>,
 }
 
 /// How to resolve the target actor's namespace/ID.
@@ -186,6 +192,10 @@ struct TriggerToml {
 struct TargetToml {
     entity_type: String,
     action: String,
+    #[serde(default)]
+    params: serde_json::Value,
+    #[serde(default)]
+    params_from: BTreeMap<String, String>,
 }
 
 #[derive(Deserialize, Default)]
@@ -247,6 +257,8 @@ pub fn parse_reactions(toml_str: &str) -> Result<Vec<ReactionRule>, String> {
             then: ReactionTarget {
                 entity_type: r.then.entity_type,
                 action: r.then.action,
+                params: r.then.params,
+                params_from: r.then.params_from,
             },
             resolve_target,
         });

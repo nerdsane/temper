@@ -105,6 +105,8 @@ fn reaction_registry_preserves_declared_rule() {
         then: temper_runtime::reaction::ReactionTarget {
             entity_type: "ContextManager".into(),
             action: "PrepareContext".into(),
+            params: serde_json::Value::Null,
+            params_from: std::collections::BTreeMap::new(),
         },
         resolve_target: temper_runtime::reaction::TargetResolver::SameId,
     }];

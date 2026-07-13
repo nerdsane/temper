@@ -144,6 +144,8 @@ fn reaction(source: &str, event: &str, target: &str, action: &str) -> ReactionRu
         then: ReactionTarget {
             entity_type: target.into(),
             action: action.into(),
+            params: serde_json::Value::Null,
+            params_from: std::collections::BTreeMap::new(),
         },
         resolve_target: TargetResolver::SameId,
     }

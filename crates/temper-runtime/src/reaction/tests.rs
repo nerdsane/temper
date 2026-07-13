@@ -11,6 +11,8 @@ fn rule(from_type: &str, emit: &str, to_type: &str, to_action: &str) -> Reaction
         then: ReactionTarget {
             entity_type: to_type.to_string(),
             action: to_action.to_string(),
+            params: serde_json::Value::Null,
+            params_from: BTreeMap::new(),
         },
         resolve_target: TargetResolver::SameId,
     }
@@ -89,6 +91,31 @@ type = "SameId"
     assert_eq!(rules[0].name, "agent_requests_context");
     assert_eq!(rules[0].then.entity_type, "ContextManager");
     assert_eq!(rules[0].resolve_target, TargetResolver::SameId);
+}
+
+#[test]
+fn parse_reactions_preserves_declared_static_and_source_params() {
+    let toml = r#"
+[[reaction]]
+name = "agent_invokes_llm"
+[reaction.when]
+entity_type = "Process"
+action = "invoke_llm"
+[reaction.then]
+entity_type = "LlmIntegration"
+action = "invoke_llm"
+params = { mode = "chat" }
+params_from = { prompt = "user_prompt" }
+[reaction.resolve_target]
+type = "SameId"
+"#;
+
+    let rules = parse_reactions(toml).expect("declared reaction params must parse");
+    assert_eq!(rules[0].then.params, serde_json::json!({"mode": "chat"}));
+    assert_eq!(
+        rules[0].then.params_from.get("prompt").map(String::as_str),
+        Some("user_prompt")
+    );
 }
 
 #[test]
