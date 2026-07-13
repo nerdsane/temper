@@ -42,8 +42,14 @@ actionable error naming the action and effect type.
 ### Sub-Decision 3: Exhaustive match (no silent catch-all)
 
 `apply_effect` matches every `Effect` variant. Schedule/spawn arms are
-`unreachable!` after construction rejection (defense in depth if a table is
-built without the constructor).
+`unreachable!` after construction rejection (fail-fast if a table is built
+without the constructor).
+
+### Sub-Decision 4: Serve-path compatibility gate aligns with Sub-Decisions 1–2
+
+`temper serve --actor-runtime postgres` (`validate_actor_runtime_compatible`)
+**allows** pure state-mutation effects and **rejects** only `trigger` /
+`schedule` / `schedule_at` / `spawn` (plus legacy integrations).
 
 ## Consequences
 

@@ -265,18 +265,12 @@ fn validate_actor_runtime_compatible(
                 action.name
             );
         }
+        // ADR-0168 / ARN-179: pure state-mutation effects are implemented in
+        // SpecDrivenActor. Only timer/spawn/trigger/integration-shaped effects
+        // remain unsupported on the PG actor-runtime serve path.
         for effect in &action.effect {
             match effect {
-                Effect::Increment {
-                    amount: Some(_), ..
-                }
-                | Effect::Decrement {
-                    amount: Some(_), ..
-                }
-                | Effect::SetCounterFromParam { .. }
-                | Effect::ListAppend { .. }
-                | Effect::ListRemoveAt { .. }
-                | Effect::Trigger { .. }
+                Effect::Trigger { .. }
                 | Effect::Schedule { .. }
                 | Effect::ScheduleAt { .. }
                 | Effect::Spawn { .. } => {
@@ -286,8 +280,11 @@ fn validate_actor_runtime_compatible(
                         effect
                     );
                 }
-                Effect::Increment { amount: None, .. }
-                | Effect::Decrement { amount: None, .. }
+                Effect::Increment { .. }
+                | Effect::Decrement { .. }
+                | Effect::SetCounterFromParam { .. }
+                | Effect::ListAppend { .. }
+                | Effect::ListRemoveAt { .. }
                 | Effect::SetBool { .. }
                 | Effect::Emit { .. } => {}
             }
@@ -397,10 +394,46 @@ mod tests {
 
     #[test]
     fn rejects_unsupported_actor_effects() {
+        // Process IOA uses `trigger` integrations — still unsupported.
         let registry = registry_with("alpha", "Process", PROCESS_IOA);
         let err = collect_actor_runtime_definitions(&registry, &["Process".into()]).unwrap_err();
 
         assert!(err.to_string().contains("not yet supported"));
+    }
+
+    #[test]
+    fn allows_pure_state_effects_for_postgres_actor_runtime() {
+        // Minimal IOA with list_append + set_counter_from_param (ARN-179).
+        const IOA: &str = r#"
+[automaton]
+name = "Order"
+states = ["Draft", "Active"]
+initial = "Draft"
+
+[[state]]
+name = "tags"
+type = "list"
+initial = "[]"
+
+[[state]]
+name = "score"
+type = "counter"
+initial = "0"
+
+[[action]]
+name = "Tag"
+kind = "input"
+from = ["Draft", "Active"]
+to = "Active"
+effect = [
+  { type = "list_append", var = "tags" },
+  { type = "set_counter_from_param", var = "score", param = "score" },
+]
+"#;
+        let registry = registry_with("alpha", "Order", IOA);
+        let definitions = collect_actor_runtime_definitions(&registry, &["Order".into()])
+            .expect("pure state effects must be allowed (ADR-0168 / ARN-179)");
+        assert_eq!(definitions.definitions.len(), 1);
     }
 
     #[test]
