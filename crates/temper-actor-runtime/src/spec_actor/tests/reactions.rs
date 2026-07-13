@@ -198,7 +198,7 @@ async fn reactions_preserve_fanout_wildcards_state_filters_and_targets() {
 }
 
 #[tokio::test]
-async fn empty_parameter_reaction_does_not_copy_source_fields() {
+async fn null_parameter_reaction_preserves_null_without_copying_source_fields() {
     let actor = SpecDrivenActor::from_ioa(
         ROUTED_EFFECT_SPEC,
         ReactionRegistry::from(vec![reaction(
@@ -226,15 +226,14 @@ async fn empty_parameter_reaction_does_not_copy_source_fields() {
             ),
         )
         .await
-        .expect("empty-parameter reaction must route");
+        .expect("null-parameter reaction must route");
 
     let tells = context.take_pending_tells().await;
     assert_eq!(tells.len(), 1);
     let routed = SpecMessage::decode(tells[0].payload.as_slice()).expect("routed message");
-    assert!(
-        routed.params.is_empty(),
-        "source fields must not become target params"
-    );
+    let params: serde_json::Value =
+        serde_json::from_slice(&routed.params).expect("routed null params must remain JSON");
+    assert_eq!(params, serde_json::Value::Null);
 }
 
 #[tokio::test]
