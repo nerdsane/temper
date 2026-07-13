@@ -715,6 +715,57 @@ async fn dst_field_update_retries_after_concurrency_violation() {
 }
 
 #[tokio::test]
+async fn dst_field_update_retry_exhaustion_is_reported_distinctly() {
+    let (_guard, _clock, _id_gen) = install_deterministic_context(18_902);
+    let store_inner = SimEventStore::no_faults(18_902);
+    let store = BoxedEventStore::new(store_inner.clone());
+    let table = order_table();
+    let entity_id = "ord-field-concurrency-exhausted";
+    let persistence_id = format!("default:Order:{entity_id}");
+    let system = ActorSystem::new("dst-field-update-concurrency-exhausted");
+    let actor = EntityActor::with_persistence(
+        "Order",
+        entity_id,
+        table,
+        serde_json::json!({"Title": "durable-before"}),
+        store,
+        BackendLabel::Sim,
+    )
+    .with_tenant("default");
+    let actor_ref = system.spawn(actor, entity_id);
+
+    let before = get_state(&actor_ref).await;
+    assert_eq!(before.state.sequence_nr, 1);
+    store_inner.inject_concurrency_violations(&persistence_id, 4);
+
+    let response = update_fields(
+        &actor_ref,
+        serde_json::json!({"Title": "must-not-publish"}),
+        false,
+    )
+    .await;
+
+    assert!(!response.success, "exhausted retries must fail the caller");
+    assert_eq!(
+        response.error.as_deref(),
+        Some("field update retry budget exhausted"),
+        "retry exhaustion must remain distinguishable from a non-concurrency persistence failure"
+    );
+    assert_eq!(response.state.fields["Title"], "durable-before");
+    assert_eq!(response.state.sequence_nr, before.state.sequence_nr);
+    assert_eq!(
+        store_inner.pending_concurrency_violations(&persistence_id),
+        1,
+        "one initial attempt plus two retries must consume exactly three violations"
+    );
+    assert_eq!(
+        store_inner.dump_journal(&persistence_id).len(),
+        1,
+        "failed field updates must not append or publish speculative state"
+    );
+}
+
+#[tokio::test]
 async fn dst_reserved_field_update_event_type_cannot_be_dispatched_as_action() {
     let (_guard, _clock, _id_gen) = install_deterministic_context(18_901);
     let store_inner = SimEventStore::no_faults(18_901);
