@@ -63,8 +63,9 @@ impl EntityActor {
     ) -> Result<EntityState, String> {
         let table = self.table.read().expect("table lock poisoned").clone();
         let mut base = current.clone();
+        let mut retries_remaining = FIELD_UPDATE_RETRY_BUDGET;
 
-        for attempt in 0..=FIELD_UPDATE_RETRY_BUDGET {
+        loop {
             if !base.can_accept_event() {
                 return Err(format!(
                     "Event budget exhausted ({MAX_EVENTS_SINCE_SNAPSHOT} max since snapshot)"
@@ -98,9 +99,8 @@ impl EntityActor {
                     .await
                 {
                     Ok(_) => {}
-                    Err(PersistenceError::ConcurrencyViolation { .. })
-                        if attempt < FIELD_UPDATE_RETRY_BUDGET =>
-                    {
+                    Err(PersistenceError::ConcurrencyViolation { .. }) if retries_remaining > 0 => {
+                        retries_remaining -= 1;
                         base = recover_entity_state_from_store(
                             &self.tenant,
                             &self.entity_type,
@@ -115,6 +115,9 @@ impl EntityActor {
                         .await
                         .map_err(|error| format!("field update replay failed: {error}"))?;
                         continue;
+                    }
+                    Err(PersistenceError::ConcurrencyViolation { .. }) => {
+                        return Err("field update retry budget exhausted".to_string());
                     }
                     Err(error) => return Err(format!("persistence failed: {error}")),
                 }
@@ -139,7 +142,5 @@ impl EntityActor {
             }
             return Ok(candidate);
         }
-
-        Err("field update retry budget exhausted".to_string())
     }
 }
