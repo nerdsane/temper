@@ -159,7 +159,7 @@ async fn sweep_noop_when_all_rows_permanent() {
 }
 
 #[tokio::test]
-async fn schema_migration_is_idempotent_across_reopens() {
+async fn stamped_database_reopens_cleanly_and_preserves_blobs() {
     let dir = tempfile::tempdir().expect("tempdir");
     let db_path = dir.path().join("e2e.db");
     let url = format!("file:{}", db_path.display());
@@ -175,9 +175,10 @@ async fn schema_migration_is_idempotent_across_reopens() {
             .expect("put_blob");
     }
 
-    // Second open — migrate() runs again. The ALTER must not fail
-    // (duplicate-column error is swallowed) and the existing row must be
-    // readable.
+    // Second open — the ARN-242 ledger short-circuits: the database is already
+    // stamped at the current SCHEMA_VERSION, so migrate() skips the DDL entirely
+    // and the store opens cleanly against the existing schema; the blob written
+    // before the reopen must still be readable.
     {
         let store = TursoEventStore::new(&url, None).await.expect("second open");
         let bytes = store
