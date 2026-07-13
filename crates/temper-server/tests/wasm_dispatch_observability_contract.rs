@@ -40,8 +40,10 @@ fn llm_content_redaction_precedes_every_dispatch_sink() {
         .find("// ARN-243: redact LLM content")
         .expect("dispatch must redact LLM content before recording telemetry");
 
-    // Every sink below reads content from `result.callback_params`; each must
-    // come after the strip so it observes the redacted map.
+    // Every sink below reads content from `result.callback_params`; *every*
+    // occurrence of each must come after the strip so it observes the redacted
+    // map. Iterating all occurrences (not just the first) catches a future
+    // dispatch branch that reads the params before the strip runs.
     let sinks = [
         "let callback_params = &result.callback_params;",
         "llm_call_wide_event(",
@@ -49,12 +51,18 @@ fn llm_content_redaction_precedes_every_dispatch_sink() {
         "submit_llmobs_tool_spans(",
     ];
     for sink in sinks {
-        let at = src
-            .find(sink)
-            .unwrap_or_else(|| panic!("expected dispatch telemetry sink `{sink}`"));
-        assert!(
-            strip < at,
-            "LLM content redaction (byte {strip}) must precede sink `{sink}` (byte {at})"
-        );
+        let mut from = 0;
+        let mut found = false;
+        while let Some(rel) = src[from..].find(sink) {
+            let at = from + rel;
+            found = true;
+            assert!(
+                strip < at,
+                "LLM content redaction (byte {strip}) must precede every read of sink \
+                 `{sink}`; found an occurrence at byte {at} before the strip"
+            );
+            from = at + sink.len();
+        }
+        assert!(found, "expected dispatch telemetry sink `{sink}`");
     }
 }
