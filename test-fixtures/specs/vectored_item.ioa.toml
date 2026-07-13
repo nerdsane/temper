@@ -35,3 +35,11 @@ from = ["New"]
 to = "Ready"
 params = ["Embedding", "EmbeddingModel"]
 hint = "Create the item with its embedding vector (JSON string) and model tag."
+
+[[action]]
+name = "Reembed"
+kind = "input"
+from = ["Ready"]
+to = "Ready"
+params = ["Embedding", "EmbeddingModel"]
+hint = "Replace the item's embedding (a newer model run re-embedded it)."
