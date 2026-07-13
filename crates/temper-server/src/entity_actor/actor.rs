@@ -1493,9 +1493,7 @@ impl Actor for EntityActor {
                     ctx.reply(EntityResponse {
                         success: false,
                         state: state.clone(),
-                        error: Some(
-                            "field update requires a JSON object body".to_string(),
-                        ),
+                        error: Some("field update requires a JSON object body".to_string()),
                         custom_effects: vec![],
                         scheduled_actions: vec![],
                         spawn_requests: vec![],
