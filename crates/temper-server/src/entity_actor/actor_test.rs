@@ -854,3 +854,75 @@ fn apply_field_update_merge_and_replace() {
         Some("Draft")
     );
 }
+
+/// ARN-189: journal append failure must not acknowledge or retain the update.
+#[cfg(feature = "sim")]
+#[tokio::test]
+async fn field_update_with_failed_journal_append_does_not_report_success() {
+    use std::sync::Arc;
+    use temper_store_sim::SimEventStore;
+
+    let store = Arc::new(SimEventStore::no_faults(13));
+    let entity_id = "arn189-fail-1";
+    let pid = format!("default:Order:{entity_id}");
+
+    let system = ActorSystem::new("sim-arn189-fail");
+    let actor = EntityActor::with_persistence(
+        "Order",
+        entity_id,
+        order_table(),
+        serde_json::json!({}),
+        crate::storage::BoxedEventStore::from_arc(store.clone()),
+        crate::storage::BackendLabel::Sim,
+    );
+    let actor_ref = system.spawn(actor, entity_id);
+
+    // Bootstrap Created append succeeds first.
+    let started: EntityResponse = actor_ref
+        .ask(EntityMsg::GetState, Duration::from_secs(5))
+        .await
+        .unwrap();
+    assert!(started.success);
+
+    // Next append fails once with concurrency violation.
+    store.inject_concurrency_violations(&pid, 1);
+
+    let response: EntityResponse = actor_ref
+        .ask(
+            EntityMsg::UpdateFields {
+                fields: serde_json::json!({"Title": "never durable"}),
+                replace: false,
+            },
+            Duration::from_secs(5),
+        )
+        .await
+        .unwrap();
+    assert!(
+        !response.success,
+        "field update whose journal append failed must not claim success: {:?}",
+        response.error
+    );
+    assert!(
+        response
+            .state
+            .fields
+            .get("Title")
+            .and_then(|v| v.as_str())
+            .is_none_or(|t| t != "never durable"),
+        "failed update must not leave half-applied Title in reply state"
+    );
+
+    let retained: EntityResponse = actor_ref
+        .ask(EntityMsg::GetState, Duration::from_secs(5))
+        .await
+        .unwrap();
+    assert!(
+        retained
+            .state
+            .fields
+            .get("Title")
+            .and_then(|v| v.as_str())
+            .is_none_or(|t| t != "never durable"),
+        "failed update must not persist in retained actor state"
+    );
+}
