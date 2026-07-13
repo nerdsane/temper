@@ -691,12 +691,65 @@ async fn policy_denial_patterns_roundtrip_and_merge() {
     assert!(ids.contains(&"ISSUE-2".to_string()));
 }
 
+/// The DDL itself must be idempotent — re-running every statement against an
+/// already-migrated database must succeed. The ARN-242 ledger short-circuits
+/// a stamped database, so this clears the ledger between runs to force the
+/// full DDL to execute again (otherwise the test would assert nothing).
 #[tokio::test]
 async fn migrate_is_idempotent() {
     let store = make_store("migrate-idempotent").await;
+    let conn = store.connection().expect("connection");
 
-    store.migrate().await.unwrap();
-    store.migrate().await.unwrap();
+    for _ in 0..2 {
+        conn.execute("DELETE FROM temper_schema_migrations", ())
+            .await
+            .expect("clear ledger so the DDL actually re-runs");
+        store
+            .migrate()
+            .await
+            .expect("re-running the DDL must succeed");
+    }
+}
+
+/// ARN-242 production-upgrade path: an EXISTING, fully-migrated database that
+/// predates the ledger is unstamped. The first boot on the new build must run
+/// the whole baseline against a populated schema — every ALTER hitting a
+/// duplicate column — and the fail-closed filter must tolerate exactly those
+/// and re-stamp. This is the highest-blast-radius path of the change: if any
+/// benign error string failed to match, boot would abort for every existing
+/// deployment.
+#[tokio::test]
+async fn migrate_upgrades_an_existing_unstamped_database() {
+    let url = sqlite_test_url("migrate-unstamped-upgrade");
+
+    // Boot once: fully migrated and stamped.
+    {
+        let store = TursoEventStore::new(&url, None).await.expect("first boot");
+        let conn = store.connection().expect("connection");
+        // Simulate a pre-ledger production database: fully migrated, no stamp.
+        conn.execute("DELETE FROM temper_schema_migrations", ())
+            .await
+            .expect("unstamp");
+    }
+
+    // Second boot on the same database: the full baseline re-runs against the
+    // populated schema and must succeed.
+    let store = TursoEventStore::new(&url, None)
+        .await
+        .expect("an existing unstamped database must upgrade cleanly");
+
+    let conn = store.connection().expect("connection");
+    let mut rows = conn
+        .query(crate::schema::SELECT_SCHEMA_VERSION, ())
+        .await
+        .expect("ledger query");
+    let row = rows.next().await.expect("row").expect("row");
+    let version: Option<i64> = row.get(0).expect("version");
+    assert_eq!(
+        version,
+        Some(super::SCHEMA_VERSION),
+        "the upgraded database must be re-stamped at the current schema version"
+    );
 }
 
 /// Regression: append must be durable (readable from a fresh connection)
@@ -2044,7 +2097,7 @@ async fn migrate_surfaces_real_alter_errors() {
     // `policies` (CREATE TABLE IF NOT EXISTS tolerates it silently, but the
     // ALTER on it fails with a non-duplicate-column error).
     {
-        let db = libsql::Builder::new_local(url.trim_start_matches("file:"))
+        let db = libsql::Builder::new_local(url.strip_prefix("file:").unwrap_or(&url))
             .build()
             .await
             .expect("build poison db");
@@ -2079,12 +2132,11 @@ async fn migrate_records_schema_version_ledger() {
         .query("SELECT MAX(version) FROM temper_schema_migrations", ())
         .await
         .expect("the schema version ledger table must exist after migrate()");
-    let row = rows
-        .next()
-        .await
-        .expect("ledger row")
-        .expect("ledger must contain at least one applied version");
-    let version: i64 = row.get(0).expect("version column");
+    let row = rows.next().await.expect("ledger row").expect("ledger row");
+    // MAX() over an empty ledger returns NULL — read as Option so an empty
+    // ledger fails with the real defect ("no applied version"), not a type error.
+    let version: Option<i64> = row.get(0).expect("version column");
+    let version = version.expect("the ledger must contain an applied version");
     assert!(
         version >= 1,
         "the ledger must record the applied schema version, got {version}"
