@@ -93,6 +93,34 @@ fn test_spec_driven_actor_initial_state() {
     assert_eq!(state.counters.get("rounds"), Some(&0usize));
 }
 
+#[tokio::test]
+async fn non_object_action_params_do_not_replace_durable_fields() {
+    let actor = SpecDrivenActor::from_ioa(SIMPLE_SPEC, ReactionRegistry::new()).unwrap();
+    let handle = ActorHandle::new("default/entity-1", "TestActor");
+    let context = ActorContext::new(handle.clone(), None, None);
+    let mut actor_state: SpecActorState =
+        serde_json::from_slice(&actor.initial_state()).expect("initial actor state");
+    actor_state.fields = serde_json::json!({"durable": "keep"});
+    let mut state = serde_json::to_vec(&actor_state).expect("seeded actor state");
+
+    actor
+        .handle(
+            &context,
+            &mut state,
+            &spec_message(1, &handle, "Start", serde_json::json!(["transient"])),
+        )
+        .await
+        .expect("valid action with non-object params must transition");
+
+    let persisted: SpecActorState = serde_json::from_slice(&state).expect("persisted actor state");
+    assert_eq!(persisted.status, "Running");
+    assert_eq!(
+        persisted.fields,
+        serde_json::json!({"durable": "keep"}),
+        "non-object action params must not replace the target's durable field object"
+    );
+}
+
 #[test]
 fn reaction_registry_preserves_declared_rule() {
     let rules = vec![ReactionRule {
