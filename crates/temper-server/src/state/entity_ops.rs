@@ -757,19 +757,34 @@ impl ServerState {
             actor_ref
         };
 
-        // Track in entity index for collection queries
-        {
-            let index_key = format!("{tenant}:{entity_type}");
-            let mut index = self.entity_index.write().unwrap();
+        self.touch_actor_access(&key);
+        runtime_metrics::record_server_state_metrics(self);
+
+        Some(actor_ref)
+    }
+
+    /// Publish a validated entity state to collection discovery, or remove a
+    /// tombstone. Actor spawn alone is deliberately not a publication event:
+    /// action-backed initialization may require a transient pristine actor.
+    pub(crate) fn update_entity_index_visibility(
+        &self,
+        tenant: &TenantId,
+        entity_type: &str,
+        entity_id: &str,
+        status: &str,
+    ) {
+        let index_key = format!("{tenant}:{entity_type}");
+        let mut index = self.entity_index.write().unwrap();
+        if status == "Deleted" {
+            if let Some(ids) = index.get_mut(&index_key) {
+                ids.remove(entity_id);
+            }
+        } else {
             index
                 .entry(index_key)
                 .or_default()
                 .insert(entity_id.to_string());
         }
-        self.touch_actor_access(&key);
-        runtime_metrics::record_server_state_metrics(self);
-
-        Some(actor_ref)
     }
 
     /// Remove an entity from the index and actor registry.
@@ -972,12 +987,10 @@ impl ServerState {
         .map_err(|e| format!("Actor query failed: {e}"))?;
 
         if !response.success {
-            let index_key = format!("{tenant}:{entity_type}");
-            if let Some(ids) = self.entity_index.write().unwrap().get_mut(&index_key) {
-                ids.remove(entity_id);
-            }
             return Ok(response);
         }
+
+        self.update_entity_index_visibility(tenant, entity_type, entity_id, &response.state.status);
 
         // Broadcast entity creation event for SSE subscribers
         let seq = self.next_entity_event_sequence(tenant.as_str(), entity_type, entity_id);

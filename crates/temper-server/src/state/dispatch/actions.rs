@@ -183,18 +183,12 @@ impl crate::state::ServerState {
             .await?;
 
         if response.success {
-            let index_key = format!("{tenant}:{entity_type}");
-            let mut index = self.entity_index.write().unwrap();
-            if response.state.status == "Deleted" {
-                if let Some(ids) = index.get_mut(&index_key) {
-                    ids.remove(entity_id);
-                }
-            } else {
-                index
-                    .entry(index_key)
-                    .or_default()
-                    .insert(entity_id.to_string());
-            }
+            self.update_entity_index_visibility(
+                tenant,
+                entity_type,
+                entity_id,
+                &response.state.status,
+            );
         }
 
         // Dispatch cross-entity reactions (fire-and-forget, depth 0 = top-level)

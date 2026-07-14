@@ -428,7 +428,10 @@ async fn e2e_http_identity_resolve_exempt_from_auth() {
 /// Bearer auth: valid agent credential resolves identity on HTTP requests.
 #[tokio::test]
 async fn e2e_http_agent_credential_auth() {
-    let app = identity_test_router();
+    let mut state = identity_test_state();
+    state.api_token = Some("admin-test-key".to_string());
+    let server = state.server.clone();
+    let app = temper_platform::router::build_platform_router(state);
 
     // 1. Create AgentType (as admin)
     let response = app
@@ -469,6 +472,31 @@ async fn e2e_http_agent_credential_auth() {
     // 2. Create AgentCredential with key_hash as entity ID
     let agent_key = "tmpr_http-auth-test-key";
     let key_hash = hash_token(agent_key);
+
+    // Deterministically model a concurrent read at the actor-spawn boundary:
+    // the pristine credential actor exists, but validation/publication has not
+    // completed. Neither direct nor collection reads may discover it.
+    server
+        .get_or_spawn_tenant_actor_with_fields(
+            &TenantId::new(TEST_TENANT),
+            "AgentCredential",
+            &key_hash,
+            serde_json::json!({}),
+        )
+        .expect("credential actor should spawn");
+    let response = app
+        .clone()
+        .oneshot(
+            Request::get(format!("/tdata/AgentCredentials('{key_hash}')"))
+                .header("Authorization", "Bearer admin-test-key")
+                .header("X-Temper-Principal-Kind", "admin")
+                .header("X-Tenant-Id", TEST_TENANT)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
 
     let response = app
         .clone()
