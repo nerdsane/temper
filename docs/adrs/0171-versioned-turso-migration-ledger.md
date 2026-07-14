@@ -68,9 +68,12 @@ CREATE TABLE IF NOT EXISTS temper_schema_migrations (
 
 Each checksum is SHA-256 over the complete canonical migration definition: the
 version, name, ordered operation kinds, object identifiers, SQL, conditional
-application metadata, and every declared post-migration capability. A change to
-either mutation behavior or compatibility validation therefore changes the
-checksum. Startup validates the complete ledger before applying work:
+application metadata, and every declared post-migration capability. Capability
+manifests use an explicit versioned, length-prefixed field encoding over ordered
+maps and sets; compiler debug formatting and serializer implementation details
+never enter the durable checksum. A change to either mutation behavior or
+compatibility validation therefore changes the checksum. Startup validates the
+complete ledger before applying work:
 
 - versions must be positive, unique, contiguous, and known to this binary;
 - recorded names and checksums must exactly match the compiled catalog;
@@ -92,8 +95,9 @@ independent processes race safely: after one commits, the next observes and
 validates the recorded checksum rather than replaying the work.
 
 Local connections retain WAL and busy-timeout configuration before the runner
-starts. Remote Turso connections use the same libSQL transaction boundary but
-skip local-only PRAGMAs.
+starts. The busy handler is installed before WAL initialization so concurrent
+fresh opens can wait during journal-mode setup. Remote Turso connections use the
+same libSQL transaction boundary but skip local-only PRAGMAs.
 
 **Why this approach**: SQLite/libSQL DDL is transactional. Coupling schema work
 and its durable acknowledgement removes the partial-success state that the
@@ -113,6 +117,10 @@ remain convergent:
 - declared unique keys and foreign keys must match their ordered columns,
   targets, and actions; named indexes must match their owner, uniqueness,
   ordered key columns, collation/sort direction, and partial predicate;
+- the one legacy OTS shape that cannot add its non-constant timestamp default
+  in place is rebuilt only after exact pre-upgrade column validation; explicit
+  indexes and triggers are captured and recreated in the same transaction, while
+  unmodeled columns, unique keys, or foreign keys prevent mutation;
 - every other DDL failure propagates with migration version, name, operation,
   and object context.
 
@@ -129,8 +137,10 @@ After every migration and again after the full catalog, the runner checks all
 required object kinds; column affinity, nullability, defaults, and primary-key
 positions; unique/foreign-key semantics; named-index owners, uniqueness, key
 ordering, collation/sort direction, and predicates; and the ledger head. These
-capability declarations are part of the migration checksum. A store is returned
-from `TursoEventStore::new` only after that verification succeeds. Diagnostics
+capability declarations are part of the migration checksum. Completed catalogs
+are reverified in prefix order so drift is attributed to the earliest migration
+that owns the failed capability. A store is returned from
+`TursoEventStore::new` only after that verification succeeds. Diagnostics
 identify the migration version and the missing or incompatible capability so
 operators can repair or restore the database without waiting for a later query
 to fail.

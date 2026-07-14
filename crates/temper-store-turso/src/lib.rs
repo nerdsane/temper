@@ -6,6 +6,7 @@
 //! trait from `temper-runtime` using libSQL (Turso-compatible).
 
 mod metrics;
+mod migrations;
 mod retry;
 pub mod router;
 pub mod schema;

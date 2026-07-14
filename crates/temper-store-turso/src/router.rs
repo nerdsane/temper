@@ -21,7 +21,6 @@ use temper_runtime::persistence::{
 use temper_runtime::tenant::parse_persistence_id_parts;
 
 use crate::TursoEventStore;
-use crate::schema;
 
 /// Routes storage operations to per-tenant Turso databases.
 ///
@@ -90,9 +89,6 @@ impl TenantStoreRouter {
         local_base_dir: Option<String>,
     ) -> Result<Self, PersistenceError> {
         let platform = TursoEventStore::new(platform_url, platform_token).await?;
-
-        // Run platform-specific migrations (tenant registry + user tables).
-        Self::migrate_platform(&platform).await?;
 
         let router = Self {
             platform,
@@ -379,21 +375,6 @@ impl TenantStoreRouter {
     }
 
     // ── Private helpers ──────────────────────────────────────────────────
-
-    /// Run platform-specific schema migrations.
-    async fn migrate_platform(store: &TursoEventStore) -> Result<(), PersistenceError> {
-        let conn = store.connection().map_err(storage_error)?;
-        conn.execute(schema::CREATE_TENANT_REGISTRY_TABLE, ())
-            .await
-            .map_err(storage_error)?;
-        conn.execute(schema::CREATE_TENANT_USERS_TABLE, ())
-            .await
-            .map_err(storage_error)?;
-        conn.execute(schema::CREATE_TENANT_USERS_USER_INDEX, ())
-            .await
-            .map_err(storage_error)?;
-        Ok(())
-    }
 
     /// Load all tenant registry rows from the platform DB.
     async fn load_tenant_registry(&self) -> Result<Vec<TenantRegistryRow>, PersistenceError> {

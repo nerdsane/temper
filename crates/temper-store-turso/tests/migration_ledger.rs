@@ -32,4 +32,12 @@ async fn incompatible_schema_object_prevents_startup() {
         diagnostic.contains("tenant_installed_apps"),
         "diagnostic must name the incompatible capability: {diagnostic}"
     );
+    assert!(
+        diagnostic.contains("must be a table") && diagnostic.contains("found view"),
+        "diagnostic must explain the incompatible object kind: {diagnostic}"
+    );
+    assert!(
+        diagnostic.contains("migration 4") && diagnostic.contains("apps-platform-and-secrets"),
+        "diagnostic must identify the incompatible migration: {diagnostic}"
+    );
 }
