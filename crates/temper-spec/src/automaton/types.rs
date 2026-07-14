@@ -214,10 +214,10 @@ pub struct Action {
     pub record_parent_event: bool,
     /// Outgoing triggers fired post-commit of this action (ADR-0046).
     ///
-    /// Each trigger describes one cross-entity dispatch, WASM module
-    /// invocation, or webhook call. Triggers fire after the source action's
-    /// transition commits (fire-and-forget — failures do not roll back the
-    /// source). Kind-specific fields are validated at parse time.
+    /// Each accepted trigger describes one cross-entity dispatch, WASM module
+    /// invocation, or native adapter call. Triggers fire after the source
+    /// action's transition commits (fire-and-forget — failures do not roll back
+    /// the source). Webhook syntax is recognized but rejected by ADR-0176.
     #[serde(default, rename = "triggers")]
     pub triggers: Vec<ActionTrigger>,
     /// Composite-action Cedar gate declaration (ADR-0040).
@@ -417,16 +417,20 @@ pub struct Liveness {
 
 /// An integration declaration (external system trigger).
 ///
-/// Integrations declare that a state machine event should trigger an external
-/// action (e.g., a webhook call or WASM module invocation). They are metadata
-/// only — they do not affect state transitions or verification.
+/// Integrations declare that a state machine event should trigger external or
+/// registered custom work. WASM and adapter are built-in runtime kinds; other
+/// registered kinds remain available to custom handlers. Legacy webhook values
+/// remain deserializable for an actionable ADR-0176 validation error, but
+/// accepted automatons cannot contain them.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Integration {
     /// Integration name (e.g., "notify_fulfillment", "charge_payment").
     pub name: String,
     /// The event that triggers this integration (action name or trigger name).
     pub trigger: String,
-    /// Integration type: "webhook" or "wasm".
+    /// Integration type. `"wasm"` and `"adapter"` are built in, and registered
+    /// custom kinds may consume their own metadata. The historical `"webhook"`
+    /// value is rejected until durable delivery exists (ADR-0176).
     #[serde(rename = "type", default = "default_webhook")]
     pub integration_type: String,
     /// WASM module name (required when `type = "wasm"`).
@@ -615,8 +619,8 @@ pub enum TriggerKind {
     /// Native platform adapter execution. Optionally dispatches `on_success`
     /// / `on_failure` actions on the source entity afterwards.
     Adapter,
-    /// Outbound HTTP webhook. Optionally dispatches `on_success` / `on_failure`
-    /// actions on the source entity afterwards.
+    /// Outbound HTTP webhook syntax. Recognized for a precise validation error,
+    /// but rejected until durable delivery exists (ADR-0176).
     Webhook,
 }
 
@@ -631,8 +635,8 @@ pub enum TriggerLiveness {
     #[default]
     BestEffort,
     /// Required. The composite verifier emits a `Property::eventually` that
-    /// the target action (entity kind) or on_success action (wasm/webhook
-    /// kinds) fires following the source action. Assumes weakly-fair dispatch.
+    /// the target action (entity kind) or `on_success` action (WASM/adapter
+    /// kind) fires following the source action. Assumes weakly-fair dispatch.
     Required,
 }
 
@@ -753,17 +757,18 @@ impl TriggerGuard {
 /// An outgoing trigger declared inline on an `Action` (ADR-0046).
 ///
 /// Unifies cross-entity dispatch (former `reactions.toml`), WASM execution
-/// (former `[[integration]] type = "wasm"`), native adapters (former
-/// `[[integration]] type = "adapter"`), and outbound webhooks (former
-/// `[[integration]] type = "webhook"`) under a single `kind`-discriminated
-/// schema.
+/// (former `[[integration]] type = "wasm"`), and native adapters (former
+/// `[[integration]] type = "adapter"`) under a single `kind`-discriminated
+/// schema. The outbound-webhook shape remains deserializable so validation can
+/// report the durable-delivery requirement, but it is not currently accepted
+/// (ADR-0176).
 ///
 /// Fields are a superset across kinds; parse-time validation enforces
 /// presence per `kind`:
 /// - `Entity`: requires `target_entity` + `target_action`.
 /// - `Wasm`: requires `module`.
 /// - `Adapter`: requires `adapter` or `adapter_type`.
-/// - `Webhook`: requires `url` + `method`.
+/// - `Webhook`: rejected until the durable delivery contract in ADR-0176 exists.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct ActionTrigger {
     /// Human-readable name for logging and debugging.
@@ -851,19 +856,19 @@ pub struct ActionTrigger {
     #[serde(default)]
     pub adapter_type: Option<String>,
 
-    // ─── Webhook-kind fields ────────────────────────────────────────────
-    /// Outbound HTTP URL (required for `Webhook` kind).
+    // ─── Historical webhook-kind fields ─────────────────────────────────
+    /// Historical outbound HTTP URL syntax retained so ADR-0176 can return a
+    /// precise durability error for webhook declarations.
     #[serde(default)]
     pub url: Option<String>,
-    /// HTTP method (required for `Webhook` kind — typically POST/PUT/PATCH).
+    /// Historical HTTP method syntax retained for the ADR-0176 error path.
     #[serde(default)]
     pub method: Option<String>,
-    /// HTTP headers. Values may contain `{secret:key}` templates resolved
-    /// from tenant-scoped secret storage.
+    /// Historical HTTP headers retained for the ADR-0176 error path.
     #[serde(default)]
     pub headers: BTreeMap<String, String>,
-    /// Template for the HTTP request body. `${field}` placeholders are
-    /// resolved from the source entity's post-action fields.
+    /// Historical HTTP request-body template retained for the ADR-0176 error
+    /// path.
     #[serde(default)]
     pub body_template: Option<String>,
 }

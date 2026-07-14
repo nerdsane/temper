@@ -282,7 +282,7 @@ to = "Failed"
 }
 
 #[test]
-fn test_action_triggers_webhook_kind() {
+fn test_action_trigger_webhook_kind_reports_durable_error() {
     let spec = r#"
 [automaton]
 name = "Order"
@@ -310,18 +310,41 @@ name = "NotificationSent"
 from = ["Confirmed"]
 to = "Notified"
 "#;
-    let automaton = parse_automaton(spec).expect("webhook trigger should parse");
-    let confirm = &automaton.actions[0];
-    let trigger = &confirm.triggers[0];
-    assert_eq!(trigger.kind, TriggerKind::Webhook);
-    assert_eq!(
-        trigger.url.as_deref(),
-        Some("https://hooks.slack.com/services/xxx")
+    let err = parse_automaton(spec).expect_err("webhook trigger must be rejected");
+    let message = err.to_string();
+    assert!(message.contains("trigger 'notify_slack' on action 'ConfirmOrder'"));
+    assert!(
+        message
+            .contains("outbound IOA webhooks are unsupported until durable delivery is available")
     );
-    assert_eq!(trigger.method.as_deref(), Some("POST"));
-    assert_eq!(
-        trigger.headers.get("Content-Type").map(String::as_str),
-        Some("application/json")
+}
+
+#[test]
+fn webhook_action_trigger_is_rejected_until_delivery_is_durable() {
+    let spec = r#"
+[automaton]
+name = "Order"
+states = ["Draft", "Confirmed"]
+initial = "Draft"
+
+[[action]]
+name = "ConfirmOrder"
+from = ["Draft"]
+to = "Confirmed"
+
+[[action.triggers]]
+name = "notify_fulfillment"
+kind = "webhook"
+url = "https://example.com/orders"
+method = "POST"
+"#;
+
+    let err = parse_automaton(spec)
+        .expect_err("an outbound webhook without durable runtime support must be rejected");
+    assert!(
+        err.to_string()
+            .contains("outbound IOA webhooks are unsupported until durable delivery is available"),
+        "expected the durable-delivery validation error, got: {err}"
     );
 }
 
@@ -525,7 +548,7 @@ kind = "wasm"
 }
 
 #[test]
-fn test_webhook_trigger_requires_url_and_method() {
+fn test_webhook_rejection_precedes_webhook_field_validation() {
     let spec_no_url = r#"
 [automaton]
 name = "X"
@@ -541,11 +564,11 @@ name = "bad"
 kind = "webhook"
 method = "POST"
 "#;
+    let no_url = parse_automaton(spec_no_url).expect_err("webhook must fail before expansion");
     assert!(
-        parse_automaton(spec_no_url)
-            .expect_err("missing url must fail")
+        no_url
             .to_string()
-            .contains("url")
+            .contains("outbound IOA webhooks are unsupported until durable delivery is available")
     );
 
     let spec_no_method = r#"
@@ -563,11 +586,12 @@ name = "bad"
 kind = "webhook"
 url = "https://example.com/hook"
 "#;
+    let no_method =
+        parse_automaton(spec_no_method).expect_err("webhook must fail before expansion");
     assert!(
-        parse_automaton(spec_no_method)
-            .expect_err("missing method must fail")
+        no_method
             .to_string()
-            .contains("method")
+            .contains("outbound IOA webhooks are unsupported until durable delivery is available")
     );
 }
 
@@ -711,7 +735,7 @@ type = "same_id"
     assert!(err.to_string().contains("empty"));
 }
 
-// ─── ADR-0046: wasm/webhook expansion into integrations ─────────────────
+// ─── ADR-0046/0078/0176: supported external-trigger expansion ───────────
 
 #[test]
 fn wasm_trigger_expands_into_integration_and_effect() {
@@ -914,7 +938,7 @@ effect = '[{ type = "trigger", name = "GenerateCedarPolicy" }, { type = "trigger
 }
 
 #[test]
-fn webhook_trigger_expands_with_url_and_method_in_config() {
+fn webhook_trigger_is_rejected_before_expansion() {
     let spec = r#"
 [automaton]
 name = "Order"
@@ -941,28 +965,16 @@ name = "NotificationSent"
 from = ["Confirmed"]
 to = "Notified"
 "#;
-    let automaton = parse_automaton(spec).expect("webhook expansion should parse");
-    let ig = automaton
-        .integrations
-        .iter()
-        .find(|i| i.name == "__trigger__:ConfirmOrder:notify_slack")
-        .expect("synthesized integration");
-    assert_eq!(ig.integration_type, "webhook");
-    assert_eq!(
-        ig.config.get("url").map(String::as_str),
-        Some("https://hooks.slack.com/services/xxx")
+    let err = parse_automaton(spec).expect_err("webhook must be rejected before expansion");
+    assert!(
+        err.to_string()
+            .contains("outbound IOA webhooks are unsupported until durable delivery is available")
     );
-    assert_eq!(ig.config.get("method").map(String::as_str), Some("POST"));
-    assert_eq!(
-        ig.config.get("header.Content-Type").map(String::as_str),
-        Some("application/json")
-    );
-    assert_eq!(ig.on_success.as_deref(), Some("NotificationSent"));
 }
 
 #[test]
 fn entity_kind_trigger_does_not_synthesize_integration() {
-    // Regression: only Wasm/Webhook expand. Entity-kind triggers go
+    // Regression: only WASM/adapter triggers expand. Entity-kind triggers go
     // through the reaction dispatcher and must NOT appear as integrations.
     let spec = r#"
 [automaton]

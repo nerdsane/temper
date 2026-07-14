@@ -247,9 +247,10 @@ The reference Order automaton (`order.ioa.toml`) defines:
   `Decrement`, `Emit`).
 - **Safety invariants:** `SubmitRequiresItems`, `ShipRequiresPayment`,
   `CancelledIsFinal`, `RefundedIsFinal`.
-- **Integration declarations:** `[[integration]]` sections declare external
-  side effects (webhooks, notifications) as metadata, dispatched asynchronously
-  after transitions (see Section 4.3.1).
+- **Integration declarations:** accepted `[[integration]]` sections describe
+  WASM, native-adapter, or registered custom work dispatched after transitions.
+  Outbound webhook declarations are rejected until durable delivery exists
+  (see Section 4.3.1).
 
 The TOML serialization is parsed into an `Automaton` struct that feeds
 both the verification cascade (directly to `TemperModel` for Stateright model
@@ -338,22 +339,24 @@ with in-memory stub implementations.  Actor mailboxes currently use local
 `tokio::sync::mpsc` channels; Redis-backed implementations are planned for
 distributed deployment.
 
-### 4.3.1 Integration Engine and Outbox Pattern
+### 4.3.1 Post-Commit Integration Boundary
 
-External integrations are declared as metadata in the IOA specification
-(`[[integration]]` sections) and dispatched asynchronously after state transitions
-via the `IntegrationEngine`.  The state machine itself remains pure and
-deterministically verifiable: the verification cascade operates on transition
-rules only and ignores integration metadata.  This separation is deliberate--
-the outbox pattern ensures that side effects cannot violate state machine
-invariants because they execute *after* the transition is persisted, not
-during guard evaluation or effect application.
+Accepted IOA integration metadata selects the governed WASM runtime, a
+registered native adapter, or an application-owned custom handler.  These calls
+happen after the state transition, so network and process I/O remain outside
+deterministic transition evaluation.
 
-The dispatch flow is: `EntityActor` applies a transition, emits
-`Effect::EmitEvent`, the event is persisted to the Postgres journal, and the
-`IntegrationEngine` asynchronously dispatches to registered webhook endpoints.
-Delivery follows at-least-once semantics with configurable exponential backoff
-retry, matching the actor runtime's existing supervision backoff strategy.
+The current entity journal persists the transition but does not atomically
+persist an external-delivery intent or terminal receipt.  Consequently this is
+not described as an outbox and does not claim at-least-once delivery across a
+process failure.  The standalone `temper-platform` integration engine has a
+directly configured retry/dead-letter API, but production entity transitions do
+not feed it.
+
+ADR-0176 therefore rejects both `[[action.triggers]] kind = "webhook"` and
+legacy `[[integration]] type = "webhook"` declarations before verification.
+Webhook syntax can be accepted again only with journaled intent, replay and
+retry, stable delivery IDs, two-layer authorization, and durable outcomes.
 
 ### 4.4 Bounded Execution (TigerStyle)
 
@@ -563,10 +566,12 @@ L3 Property Tests PASSED: 1000 cases, 30 max steps
 - The guard/effect language restricts what Z3 can reason about: only
   integer counters and booleans, no arithmetic expressions or set operations.
 
-**Integration engine limitations:**
-- Webhook is the only supported transport; gRPC and message queue transports
-  are planned.
-- Delivery is at-least-once; exactly-once semantics require idempotent receivers.
+**Post-commit integration limitations:**
+- Outbound IOA webhooks are rejected until a journaled delivery runtime exists;
+  the standalone webhook engine accepts only explicitly constructed runtime
+  configuration and events.
+- The entity journal does not atomically record an external delivery intent or
+  receipt, so the platform does not claim at-least-once delivery across a crash.
 
 **Future work:** composition calculus for multi-entity verification,
 fairness-aware liveness checker, richer guard language with arithmetic.

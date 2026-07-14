@@ -3,6 +3,7 @@
 - Status: Accepted
 - Date: 2026-05-02
 - Deciders: Temper core maintainers
+- Partially superseded by: ADR-0176 (webhook expansion statement only)
 - Related:
   - ADR-0046: Unified Action Triggers
   - `crates/temper-spec/src/automaton/parser.rs`
@@ -10,7 +11,7 @@
 
 ## Context
 
-ADR-0046 made `[[action.triggers]]` the canonical way to declare action-local outgoing work. The parser currently synthesizes runtime integrations for `kind = "wasm"` and `kind = "webhook"`, while native adapter execution still depends on legacy `[[integration]] type = "adapter"` declarations.
+ADR-0046 made `[[action.triggers]]` the canonical way to declare action-local outgoing work. At the time of this decision the parser synthesized runtime integrations for `kind = "wasm"` and `kind = "webhook"`, while native adapter execution still depended on legacy `[[integration]] type = "adapter"` declarations. ADR-0176 later rejected webhook declarations because no durable runtime consumed them; the WASM comparison remains valid here.
 
 That gap leaves test and app specs unable to override an inline WASM trigger with a deterministic native adapter without falling back to older integration syntax. In the GEPA autonomous-loop test, the stale override failed to replace the inline proposer trigger, so CI attempted to execute the unregistered `gepa-proposer-agent` WASM module and transitioned the run to `Failed` before `RecordMutation`.
 

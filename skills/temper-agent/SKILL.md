@@ -256,6 +256,8 @@ kind = "wasm"
 module = "http_fetch"
 on_success = "FetchSucceeded"
 on_failure = "FetchFailed"
+
+[action.triggers.config]
 url = "https://wttr.in/{city}?format=j1"
 method = "GET"
 
@@ -530,7 +532,7 @@ await temper.install_app("project-management")
 
 **CRITICAL: Use `[automaton]` table header (NOT `automaton WeatherQuery` bare text).** Use `initial` (NOT `initial_state`).
 
-> **ADR-0046 (April 2026):** `[[integration]]` and `[[agent_trigger]]` are gone. All outgoing effects of an action — cross-entity dispatch, WASM modules, webhooks — are unified under `[[action.triggers]]` nested directly inside `[[action]]`. The `is_system → Allow` Cedar bypass is also removed: every trigger goes through Cedar with either the inherited principal or an explicit named principal.
+> **ADR-0046 / ADR-0176:** `[[agent_trigger]]` is gone. Entity, WASM, and adapter action-owned effects use `[[action.triggers]]` nested directly inside `[[action]]`; registered legacy/custom `[[integration]]` kinds remain supported. Both `kind = "webhook"` and legacy `[[integration]] type = "webhook"` are rejected until durable delivery exists. Entity-trigger actions go through Cedar with either the inherited principal or an explicit named principal.
 
 ```toml
 [automaton]
@@ -560,7 +562,7 @@ hint = "Description."   # optional
 # Name an explicit service to elevate (must match a registered AgentType).
 [[action.triggers]]
 name = "trigger_name"
-kind = "entity"               # "entity" | "wasm" | "webhook"
+kind = "entity"               # "entity" | "wasm" | "adapter"
 principal = "my-service"      # optional elevation
 target_entity = "OtherEntity"
 target_action = "DoTargetThing"
@@ -613,6 +615,8 @@ kind = "wasm"
 module = "http_fetch"
 on_success = "FetchSucceeded"   # action on this entity if module returns Ok
 on_failure = "FetchFailed"      # action on this entity on failure
+
+[action.triggers.config]
 url = "https://wttr.in/{city}?format=j1"
 method = "GET"
 ```
@@ -620,21 +624,21 @@ method = "GET"
 | Key | Required | Description |
 |-----|----------|-------------|
 | `module` | Yes | WASM module name (`http_fetch` is built-in) |
-| `url` | http_fetch | URL template (`{param}` substitution from action params) |
-| `method` | http_fetch | `GET` / `POST` / `PUT` / `DELETE` |
-| `body` | No | Request body template for POST/PUT |
+| `config.url` | http_fetch | URL template (`{param}` substitution from action params) |
+| `config.method` | http_fetch | `GET` / `POST` / `PUT` / `DELETE` |
+| `config.body` | No | Request body template for POST/PUT |
 | `on_success` | No | Action on the source entity if module returns Ok |
 | `on_failure` | No | Action on the source entity on failure |
 
 Callback actions receive `{"status_code": "200", "body": "..."}` as params.
 
-#### `kind = "webhook"` — outbound HTTP (parse-only today)
+#### `kind = "webhook"` — rejected until delivery is durable
 
-Currently parsed and expanded but **no runtime dispatcher matches it**. Until the webhook dispatcher lands, use `kind = "wasm"` with the `http_fetch` module instead.
+Do not generate `kind = "webhook"` or legacy `[[integration]] type = "webhook"`. Validation rejects both forms (including an omitted legacy `type`) with `outbound IOA webhooks are unsupported until durable delivery is available`. A direct background HTTP task would preserve the crash-loss window. Use a governed WASM/adapter integration only when its documented post-commit contract is appropriate, or use the separately configured operator `webhooks.toml` trajectory subscription.
 
 ### Principal semantics (no more `is_system` bypass)
 
-`principal` is optional. When omitted, the trigger fires under the same `SecurityContext` that invoked the source action — Cedar evaluates the target action with the inherited principal. When present, a synthetic `SecurityContext` is built with `id = "service:<name>"`, `agent_type = "<name>"`, `agentTypeVerified = true`, and `attributes.dispatched_by_trigger = true`. The named service must match a registered `AgentType` in the tenant.
+For `kind = "entity"`, `principal` is optional. When omitted, the trigger fires under the same `SecurityContext` that invoked the source action — Cedar evaluates the target action with the inherited principal. When present, a synthetic `SecurityContext` is built with `id = "service:<name>"`, `agent_type = "<name>"`, `agentTypeVerified = true`, and `attributes.dispatched_by_trigger = true`. The named service must match a registered `AgentType` in the tenant.
 
 **There is no `is_system → Allow` shortcut.** A trigger with no Cedar permit will be denied regardless of how it was dispatched. If you write a trigger that should run as a privileged service principal, you must (a) declare `principal = "<service-name>"` on the trigger, and (b) ensure that service's AgentType has Cedar policies permitting the target action.
 

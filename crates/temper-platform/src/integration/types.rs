@@ -10,7 +10,7 @@ use serde_json::Value;
 /// Configuration for a single integration endpoint.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct IntegrationConfig {
-    /// Integration name (matches the IOA `[[integration]]` name).
+    /// Caller-defined integration name used for diagnostics and dead letters.
     pub name: String,
     /// The event that triggers this integration.
     pub trigger: String,

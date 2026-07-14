@@ -10,11 +10,11 @@
 //! from a seed entity via this graph, avoiding unnecessary state-space
 //! explosion for unrelated entities.
 //!
-//! Only `kind = "entity"` triggers appear here. `kind = "wasm"` and
-//! `kind = "webhook"` triggers are opaque to joint verification (their
-//! execution is an I/O side-effect, not a state transition on another
-//! entity); their `on_success`/`on_failure` dispatches do show up as edges
-//! from the source entity to itself if the follow-up is a declared action.
+//! Only `kind = "entity"` triggers appear here. `kind = "wasm"` and `kind =
+//! "adapter"` triggers are opaque to joint verification because their execution
+//! is an I/O side-effect, not a state transition on another entity. `kind =
+//! "webhook"` declarations are rejected during IOA validation until durable
+//! delivery exists (ADR-0176), so they cannot enter this graph.
 //!
 //! Cycles are permitted (a reaction cascade can feed back) and detected;
 //! the verifier bounds cycle exploration by `MAX_TRIGGER_DEPTH = 8`.
@@ -73,9 +73,10 @@ impl TriggerGraph {
     /// Build a [`TriggerGraph`] from a slice of parsed automatons.
     ///
     /// Iterates each entity's actions; for each action's `[[action.triggers]]`
-    /// block with `kind = "entity"`, emits one edge. `kind = "wasm"` /
-    /// `kind = "webhook"` triggers are skipped (not part of joint
-    /// verification of entity state machines).
+    /// block with `kind = "entity"`, emits one edge. `kind = "wasm"` and
+    /// `kind = "adapter"` triggers are skipped (not part of joint verification
+    /// of entity state machines), while webhook triggers cannot reach this API
+    /// from a validated spec.
     pub fn from_automatons(automatons: &[&Automaton]) -> Self {
         let mut graph = TriggerGraph::default();
         for aut in automatons {
@@ -347,7 +348,7 @@ to = "Working"
     }
 
     #[test]
-    fn wasm_and_webhook_triggers_skipped() {
+    fn wasm_triggers_are_skipped() {
         let spec = r#"
 [automaton]
 name = "Order"
@@ -365,12 +366,6 @@ kind = "wasm"
 module = "stripe_charge"
 on_success = "NotifyUser"
 
-[[action.triggers]]
-name = "notify_webhook"
-kind = "webhook"
-url = "https://example.com"
-method = "POST"
-
 [[action]]
 name = "NotifyUser"
 from = ["Confirmed"]
@@ -378,8 +373,8 @@ to = "Notified"
 "#;
         let order = parse_automaton(spec).unwrap();
         let graph = TriggerGraph::from_automatons(&[&order]);
-        // wasm + webhook triggers contribute no edges; Order has no
-        // entity-kind triggers here, so outgoing should be absent.
+        // WASM triggers contribute no entity edge; Order has no entity-kind
+        // triggers here, so outgoing should be absent.
         assert!(!graph.outgoing.contains_key("Order"));
     }
 
