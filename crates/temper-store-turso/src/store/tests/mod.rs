@@ -2105,6 +2105,8 @@ async fn upsert_wasm_module_stores_metadata_only_without_db_blob() {
 /// instead of serving against a half-migrated schema.
 #[tokio::test]
 async fn migrate_surfaces_real_alter_errors() {
+    // sqlite_test_url embeds a fresh UUID — each run gets a clean file, so a
+    // prior stamp cannot short-circuit the DDL and turn this into a false pass.
     let url = sqlite_test_url("migrate-real-error");
 
     // Poison the DB before the store ever runs its schema: a VIEW named

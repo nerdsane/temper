@@ -102,7 +102,9 @@ async fn execute_idempotent(
     // benign filter safe. Routing a CREATE through here would let a genuine
     // object-name collision ("already exists") be swallowed — exactly the
     // defect this function removes.
-    debug_assert!(
+    // Release builds keep this guard: tolerating "already exists" is only safe
+    // for ADD COLUMN. A CREATE routed here would re-introduce the swallow.
+    assert!(
         stmt.to_ascii_uppercase().contains("ADD COLUMN"),
         "PRECONDITION: only ADD COLUMN statements may use execute_idempotent; got: {stmt}"
     );
