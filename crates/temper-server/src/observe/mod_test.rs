@@ -67,6 +67,51 @@ async fn test_state_with_turso() -> ServerState {
     state
 }
 
+fn feature_request_db_url() -> String {
+    static COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let id = COUNTER.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    format!(
+        "file:/tmp/temper-feature-request-test-{}-{}.db",
+        std::process::id(),
+        id,
+    )
+}
+
+async fn test_state_with_feature_request_runtime_at(db_url: &str) -> ServerState {
+    let order_csdl = parse_csdl(CSDL_XML).expect("order CSDL should parse");
+    let platform_csdl_source = include_str!("../../../temper-platform/src/specs/model.csdl.xml");
+    let platform_csdl = parse_csdl(platform_csdl_source).expect("platform CSDL should parse");
+    let feature_request_ioa =
+        include_str!("../../../temper-platform/src/specs/FeatureRequest.ioa.toml");
+    let mut registry = SpecRegistry::new();
+    registry.register_tenant(
+        "default",
+        order_csdl,
+        CSDL_XML.to_string(),
+        &[("Order", ORDER_IOA)],
+    );
+    registry.register_tenant(
+        "temper-system",
+        platform_csdl,
+        platform_csdl_source.to_string(),
+        &[("FeatureRequest", feature_request_ioa)],
+    );
+
+    let turso = TursoEventStore::new(db_url, None)
+        .await
+        .expect("create feature-request Turso db");
+    let system = ActorSystem::new("test-feature-request-runtime");
+    let mut state = ServerState::from_registry(system, registry);
+    state.set_storage_stack(StorageStack::from_turso(turso));
+    state
+}
+
+async fn test_state_with_feature_request_runtime() -> ServerState {
+    let db_url = feature_request_db_url();
+    let _ = std::fs::remove_file(db_url.strip_prefix("file:").unwrap_or(&db_url));
+    test_state_with_feature_request_runtime_at(&db_url).await
+}
+
 fn build_test_app() -> Router {
     let state = test_state_with_registry();
     Router::new()
@@ -1638,35 +1683,93 @@ async fn test_intent_evidence_returns_richer_intent_candidates() {
     assert_eq!(json["workaround_patterns"][0]["occurrences"], 1);
 }
 
+async fn persist_feature_request_evidence(state: &ServerState, index: i64) {
+    state
+        .persist_trajectory_entry(&TrajectoryEntry {
+            timestamp: (sim_now() + chrono::Duration::seconds(index)).to_rfc3339(),
+            tenant: "default".to_string(),
+            entity_type: "MissingCapability".to_string(),
+            entity_id: format!("missing-{index}"),
+            action: "GenerateReport".to_string(),
+            success: false,
+            from_status: None,
+            to_status: None,
+            error: Some("EntitySetNotFound: Report".to_string()),
+            agent_id: Some("agent-1".to_string()),
+            session_id: Some("session-1".to_string()),
+            authz_denied: None,
+            denied_resource: None,
+            denied_module: None,
+            source: Some(TrajectorySource::Platform),
+            spec_governed: Some(true),
+            agent_type: Some("swe".to_string()),
+            request_body: None,
+            intent: Some("Generate a report".to_string()),
+            matched_policy_ids: None,
+        })
+        .await
+        .expect("persist trajectory evidence");
+}
+
+#[test]
+fn feature_request_identity_is_stable_across_replay_and_explicitly_versioned() {
+    let entries = (0..3)
+        .map(|index| TrajectoryEntry {
+            timestamp: (sim_now() + chrono::Duration::seconds(index)).to_rfc3339(),
+            tenant: "default".to_string(),
+            entity_type: "MissingCapability".to_string(),
+            entity_id: format!("missing-{index}"),
+            action: "GenerateReport".to_string(),
+            success: false,
+            from_status: None,
+            to_status: None,
+            error: Some(format!("EntitySetNotFound: Report variant {index}")),
+            agent_id: Some("agent-1".to_string()),
+            session_id: Some("session-1".to_string()),
+            authz_denied: None,
+            denied_resource: None,
+            denied_module: None,
+            source: Some(TrajectorySource::Platform),
+            spec_governed: Some(true),
+            agent_type: Some("swe".to_string()),
+            request_body: None,
+            intent: Some("Generate a report".to_string()),
+            matched_policy_ids: None,
+        })
+        .collect::<Vec<_>>();
+    let generated = evolution::insight_generator::generate_feature_requests(&entries);
+    let original = generated.first().expect("feature request at threshold");
+    let mut reordered_entries = entries;
+    reordered_entries.reverse();
+    let reordered = evolution::insight_generator::generate_feature_requests(&reordered_entries);
+    let replayed = reordered
+        .first()
+        .expect("reordered feature request at threshold");
+    let tenant = TenantId::default();
+
+    let original_id = evolution::stable_feature_request_id(&tenant, "v1", original);
+    let replayed_id = evolution::stable_feature_request_id(&tenant, "v1", replayed);
+    let revised_model_id = evolution::stable_feature_request_id(&tenant, "v2", original);
+
+    assert_eq!(
+        original_id, replayed_id,
+        "evidence order must be normalized"
+    );
+    assert_eq!(
+        original.description, replayed.description,
+        "generated content must be independent of evidence arrival order",
+    );
+    assert_ne!(
+        original_id, revised_model_id,
+        "generator version changes must create explicit revisions",
+    );
+}
+
 #[tokio::test]
 async fn feature_request_get_is_a_pure_read() {
     let state = test_state_with_turso().await;
     for index in 0..3 {
-        state
-            .persist_trajectory_entry(&TrajectoryEntry {
-                timestamp: (sim_now() + chrono::Duration::seconds(index)).to_rfc3339(),
-                tenant: "default".to_string(),
-                entity_type: "MissingCapability".to_string(),
-                entity_id: format!("missing-{index}"),
-                action: "GenerateReport".to_string(),
-                success: false,
-                from_status: None,
-                to_status: None,
-                error: Some("EntitySetNotFound: Report".to_string()),
-                agent_id: Some("agent-1".to_string()),
-                session_id: Some("session-1".to_string()),
-                authz_denied: None,
-                denied_resource: None,
-                denied_module: None,
-                source: Some(TrajectorySource::Platform),
-                spec_governed: Some(true),
-                agent_type: Some("swe".to_string()),
-                request_body: None,
-                intent: Some("Generate a report".to_string()),
-                matched_policy_ids: None,
-            })
-            .await
-            .expect("persist trajectory evidence");
+        persist_feature_request_evidence(&state, index).await;
     }
 
     let store = state
@@ -1675,7 +1778,11 @@ async fn feature_request_get_is_a_pure_read() {
     let app = build_app_with_state(state);
 
     let first = observe_json(app.clone(), "/observe/evolution/feature-requests").await;
-    let second = observe_json(app, "/observe/evolution/feature-requests").await;
+    let second = observe_json(app.clone(), "/observe/evolution/feature-requests").await;
+    let (concurrent_a, concurrent_b) = tokio::join!(
+        observe_json(app.clone(), "/observe/evolution/feature-requests"),
+        observe_json(app, "/observe/evolution/feature-requests"),
+    );
 
     assert_eq!(
         first["total"], 0,
@@ -1685,6 +1792,8 @@ async fn feature_request_get_is_a_pure_read() {
         second["total"], 0,
         "repeated GET must remain side-effect free"
     );
+    assert_eq!(concurrent_a["total"], 0);
+    assert_eq!(concurrent_b["total"], 0);
     assert!(
         store
             .list_feature_requests(None)
@@ -1692,6 +1801,195 @@ async fn feature_request_get_is_a_pure_read() {
             .expect("list persisted feature requests")
             .is_empty(),
         "GET must not write the feature-request projection",
+    );
+}
+
+#[tokio::test]
+async fn sentinel_materializes_feature_requests_idempotently_by_evidence_revision() {
+    let state = test_state_with_feature_request_runtime().await;
+    for index in 0..3 {
+        persist_feature_request_evidence(&state, index).await;
+    }
+    let store = state
+        .platform_metadata_store()
+        .expect("Turso metadata store");
+    let app = build_app_with_state(state.clone());
+
+    let (first, concurrent_retry) = tokio::join!(
+        app.clone()
+            .oneshot(system_post("/api/evolution/sentinel/check", "")),
+        app.clone()
+            .oneshot(system_post("/api/evolution/sentinel/check", "")),
+    );
+    let first = first.expect("first sentinel request");
+    let concurrent_retry = concurrent_retry.expect("concurrent sentinel retry");
+    assert_eq!(first.status(), StatusCode::OK);
+    assert_eq!(concurrent_retry.status(), StatusCode::OK);
+    let first_json: serde_json::Value = serde_json::from_slice(
+        &axum::body::to_bytes(first.into_body(), 1024 * 1024)
+            .await
+            .expect("first sentinel body"),
+    )
+    .expect("first sentinel JSON");
+    let stable_id = first_json["feature_request_ids"][0]
+        .as_str()
+        .expect("stable feature-request id")
+        .to_string();
+    let concurrent_json: serde_json::Value = serde_json::from_slice(
+        &axum::body::to_bytes(concurrent_retry.into_body(), 1024 * 1024)
+            .await
+            .expect("concurrent sentinel body"),
+    )
+    .expect("concurrent sentinel JSON");
+    assert_eq!(concurrent_json["feature_request_ids"][0], stable_id);
+    let first_entity = state
+        .get_tenant_entity_state(
+            &TenantId::new("temper-system"),
+            "FeatureRequest",
+            &stable_id,
+        )
+        .await
+        .expect("first FeatureRequest entity");
+    let first_event_count = first_entity.state.events.len();
+    store
+        .update_feature_request(&stable_id, "Planned", Some("Reviewed by a human"))
+        .await
+        .expect("record human feature-request review");
+
+    let second = app
+        .clone()
+        .oneshot(system_post("/api/evolution/sentinel/check", ""))
+        .await
+        .expect("second sentinel request");
+    assert_eq!(second.status(), StatusCode::OK);
+    let second_json: serde_json::Value = serde_json::from_slice(
+        &axum::body::to_bytes(second.into_body(), 1024 * 1024)
+            .await
+            .expect("second sentinel body"),
+    )
+    .expect("second sentinel JSON");
+    assert_eq!(second_json["feature_request_ids"][0], stable_id);
+    let stable_rows = store
+        .list_feature_requests(None)
+        .await
+        .expect("list stable projection");
+    assert_eq!(stable_rows.len(), 1, "repeat must keep one projection row");
+    assert_eq!(stable_rows[0].disposition, "Planned");
+    assert_eq!(
+        stable_rows[0].developer_notes.as_deref(),
+        Some("Reviewed by a human"),
+        "materialization must preserve mutable human review state",
+    );
+    let stable_entity = state
+        .get_tenant_entity_state(
+            &TenantId::new("temper-system"),
+            "FeatureRequest",
+            &stable_id,
+        )
+        .await
+        .expect("stable FeatureRequest entity");
+    assert_eq!(
+        stable_entity.state.events.len(),
+        first_event_count,
+        "durable idempotency must suppress duplicate CreateFeatureRequest events",
+    );
+
+    persist_feature_request_evidence(&state, 3).await;
+    let revised = app
+        .oneshot(system_post("/api/evolution/sentinel/check", ""))
+        .await
+        .expect("revised sentinel request");
+    assert_eq!(revised.status(), StatusCode::OK);
+    let revised_json: serde_json::Value = serde_json::from_slice(
+        &axum::body::to_bytes(revised.into_body(), 1024 * 1024)
+            .await
+            .expect("revised sentinel body"),
+    )
+    .expect("revised sentinel JSON");
+    assert_ne!(revised_json["feature_request_ids"][0], stable_id);
+    assert_eq!(
+        store
+            .list_feature_requests(None)
+            .await
+            .expect("list revised projection")
+            .len(),
+        2,
+        "changed evidence must create an explicit new revision",
+    );
+}
+
+#[tokio::test]
+async fn sentinel_retry_after_restart_reuses_the_durable_feature_request() {
+    let db_url = feature_request_db_url();
+    let _ = std::fs::remove_file(db_url.strip_prefix("file:").unwrap_or(&db_url));
+
+    let (stable_id, event_count) = {
+        let state = test_state_with_feature_request_runtime_at(&db_url).await;
+        for index in 0..3 {
+            persist_feature_request_evidence(&state, index).await;
+        }
+        let response = build_app_with_state(state.clone())
+            .oneshot(system_post("/api/evolution/sentinel/check", ""))
+            .await
+            .expect("sentinel request before restart");
+        assert_eq!(response.status(), StatusCode::OK);
+        let json: serde_json::Value = serde_json::from_slice(
+            &axum::body::to_bytes(response.into_body(), 1024 * 1024)
+                .await
+                .expect("sentinel body before restart"),
+        )
+        .expect("sentinel JSON before restart");
+        let stable_id = json["feature_request_ids"][0]
+            .as_str()
+            .expect("stable feature-request id")
+            .to_string();
+        let entity = state
+            .get_tenant_entity_state(
+                &TenantId::new("temper-system"),
+                "FeatureRequest",
+                &stable_id,
+            )
+            .await
+            .expect("FeatureRequest before restart");
+        (stable_id, entity.state.events.len())
+    };
+
+    let restarted_state = test_state_with_feature_request_runtime_at(&db_url).await;
+    let response = build_app_with_state(restarted_state.clone())
+        .oneshot(system_post("/api/evolution/sentinel/check", ""))
+        .await
+        .expect("sentinel retry after restart");
+    assert_eq!(response.status(), StatusCode::OK);
+    let json: serde_json::Value = serde_json::from_slice(
+        &axum::body::to_bytes(response.into_body(), 1024 * 1024)
+            .await
+            .expect("sentinel body after restart"),
+    )
+    .expect("sentinel JSON after restart");
+    assert_eq!(json["feature_request_ids"][0], stable_id);
+    let rehydrated = restarted_state
+        .get_tenant_entity_state(
+            &TenantId::new("temper-system"),
+            "FeatureRequest",
+            &stable_id,
+        )
+        .await
+        .expect("rehydrated FeatureRequest");
+    assert_eq!(
+        rehydrated.state.events.len(),
+        event_count,
+        "restart retry must not append a duplicate creation event",
+    );
+    assert_eq!(
+        restarted_state
+            .platform_metadata_store()
+            .expect("Turso metadata store")
+            .list_feature_requests(None)
+            .await
+            .expect("list projections after restart")
+            .len(),
+        1,
+        "restart retry must retain one projection row",
     );
 }
 

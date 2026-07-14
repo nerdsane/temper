@@ -109,6 +109,29 @@ pub(super) async fn dispatch_system_action(
         .await
 }
 
+pub(super) async fn dispatch_system_action_idempotent(
+    state: &ServerState,
+    entity_type: &str,
+    entity_id: &str,
+    action: &str,
+    params: serde_json::Value,
+    idempotency_key: &str,
+) -> Result<crate::entity_actor::EntityResponse, String> {
+    let system_tenant = TenantId::new("temper-system");
+    let mut agent_ctx = AgentContext::for_service("evolution-engine");
+    agent_ctx.idempotency_key = Some(idempotency_key.to_string());
+    state
+        .dispatch_tenant_action(
+            &system_tenant,
+            entity_type,
+            entity_id,
+            action,
+            params,
+            &agent_ctx,
+        )
+        .await
+}
+
 pub(super) async fn dispatch_system_action_required(
     state: &ServerState,
     entity_type: &str,
