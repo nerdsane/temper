@@ -1796,6 +1796,23 @@ fn feature_request_identity_is_stable_across_replay_and_explicitly_versioned() {
     );
 }
 
+#[test]
+fn feature_request_identity_category_keys_are_explicit_and_stable() {
+    use temper_evolution::PlatformGapCategory::*;
+
+    for (category, expected) in [
+        (MissingMethod, "MissingMethod"),
+        (GovernanceBlocked, "GovernanceBlocked"),
+        (UnsupportedIntegration, "UnsupportedIntegration"),
+        (MissingCapability, "MissingCapability"),
+    ] {
+        assert_eq!(
+            evolution::stable_platform_gap_category_key(&category),
+            expected
+        );
+    }
+}
+
 #[tokio::test]
 async fn feature_request_get_is_a_pure_read() {
     let state = test_state_with_turso().await;

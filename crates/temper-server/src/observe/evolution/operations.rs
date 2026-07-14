@@ -6,7 +6,7 @@ use axum::http::{HeaderMap, StatusCode};
 use axum::response::Json;
 use axum::response::sse::{Event, KeepAlive, Sse};
 use sha2::{Digest, Sha256};
-use temper_evolution::FeatureRequestDisposition;
+use temper_evolution::{FeatureRequestDisposition, PlatformGapCategory};
 use temper_runtime::tenant::TenantId;
 use tokio_stream::StreamExt;
 use tokio_stream::wrappers::BroadcastStream;
@@ -32,6 +32,16 @@ use support::{
 };
 
 const FEATURE_REQUEST_GENERATOR_VERSION: &str = "v1";
+
+/// Return the explicit category token used in the durable feature-request identity.
+pub(crate) fn stable_platform_gap_category_key(category: &PlatformGapCategory) -> &'static str {
+    match category {
+        PlatformGapCategory::MissingMethod => "MissingMethod",
+        PlatformGapCategory::GovernanceBlocked => "GovernanceBlocked",
+        PlatformGapCategory::UnsupportedIntegration => "UnsupportedIntegration",
+        PlatformGapCategory::MissingCapability => "MissingCapability",
+    }
+}
 
 /// POST /api/evolution/sentinel/check -- trigger sentinel rule evaluation.
 ///
@@ -145,7 +155,7 @@ pub(crate) fn stable_feature_request_id(
     let identity = serde_json::json!({
         "tenant": tenant.as_str(),
         "generator_version": generator_version,
-        "category": format!("{:?}", feature_request.category),
+        "category": stable_platform_gap_category_key(&feature_request.category),
         "description": feature_request.description,
         "frequency": feature_request.frequency,
         "trajectory_refs": trajectory_refs,
