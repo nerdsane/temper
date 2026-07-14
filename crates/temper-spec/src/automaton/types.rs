@@ -9,8 +9,11 @@ use std::collections::BTreeMap;
 
 use super::field_invariant::FieldInvariant;
 
+mod deserialization;
+
 /// A complete I/O Automaton specification for a single entity type.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct Automaton {
     /// Automaton metadata.
     pub automaton: AutomatonMeta,
@@ -69,6 +72,7 @@ pub struct Automaton {
 /// O(log n) present/absent reads; the canonical key hash uses `properties` in
 /// declared order. Multiple keys on one entity are distinguished by `name`.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
 pub struct KeyDecl {
     /// Identifier for this key (the `key_name` in `entity_key_index`).
     pub name: String,
@@ -84,6 +88,7 @@ pub struct KeyDecl {
 /// exact-scan kNN through `Temper.Nearest`. `metric` is one of `cosine`, `dot`,
 /// `l2`. Multiple vector paths on one entity are distinguished by `name`.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
 pub struct VectorDecl {
     /// Identifier for this path (the `decl_name` in `entity_vector_index` and the
     /// `decl=` argument to `Temper.Nearest`).
@@ -101,9 +106,13 @@ pub struct VectorDecl {
 
 /// Automaton metadata.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct AutomatonMeta {
     /// Entity name (e.g., "Order").
     pub name: String,
+    /// Optional author-supplied schema version retained in canonical output.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub version: Option<String>,
     /// The status state space (all valid values).
     pub states: Vec<String>,
     /// Initial status value.
@@ -118,6 +127,7 @@ pub struct AutomatonMeta {
 
 /// A state variable declaration.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct StateVar {
     /// Variable name.
     pub name: String,
@@ -147,7 +157,7 @@ pub struct StateVar {
 
 /// A parameter on an action — either a plain name (defaults to string type)
 /// or a typed declaration.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize)]
 #[serde(untagged)]
 pub enum ActionParam {
     Named(String),
@@ -187,6 +197,7 @@ impl ActionParam {
 ///
 /// Each action has a precondition (guard) and effects (state changes).
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct Action {
     /// Action name (e.g., "SubmitOrder").
     pub name: String,
@@ -199,10 +210,10 @@ pub struct Action {
     /// Effect: the target state after this action fires.
     pub to: Option<String>,
     /// Additional guard conditions.
-    #[serde(default)]
+    #[serde(default, deserialize_with = "super::toml_parser::deserialize_guards")]
     pub guard: Vec<Guard>,
     /// Effects beyond state change.
-    #[serde(default)]
+    #[serde(default, deserialize_with = "super::toml_parser::deserialize_effects")]
     pub effect: Vec<Effect>,
     /// Parameters this action accepts.
     #[serde(default)]
@@ -221,7 +232,11 @@ pub struct Action {
     #[serde(default, rename = "triggers")]
     pub triggers: Vec<ActionTrigger>,
     /// Composite-action Cedar gate declaration (ADR-0040).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "super::toml_parser::deserialize_cedar_gate"
+    )]
     pub cedar_gate: Option<CompositeCedarGate>,
     /// Declared sub-write contract for Composite actions (ADR-0040).
     #[serde(default, rename = "sub_writes")]
@@ -238,6 +253,7 @@ fn default_record_parent_event() -> bool {
 
 /// The single Cedar gate evaluated for a Composite action.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
 pub struct CompositeCedarGate {
     /// Principal expression, usually `request.principal`.
     pub principal: String,
@@ -249,6 +265,7 @@ pub struct CompositeCedarGate {
 
 /// Declared write shape emitted by a Composite action.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
 pub struct SubWriteSpec {
     /// Target entity type receiving the write.
     pub target_entity: String,
@@ -261,7 +278,7 @@ pub struct SubWriteSpec {
 
 /// A guard condition (precondition predicate on pre-state).
 #[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(tag = "type")]
+#[serde(tag = "type", deny_unknown_fields)]
 pub enum Guard {
     /// Status must be one of these values.
     #[serde(rename = "state_in")]
@@ -326,7 +343,7 @@ pub enum Guard {
 }
 
 /// An effect (state change in the post-state).
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize)]
 #[serde(tag = "type")]
 pub enum Effect {
     /// Increment a counter variable.
@@ -385,6 +402,7 @@ pub enum Effect {
 
 /// A safety invariant.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct Invariant {
     /// Invariant name.
     pub name: String,
@@ -401,6 +419,7 @@ pub struct Invariant {
 /// Liveness properties assert that something "eventually happens" — a state
 /// is eventually reached, or deadlock never occurs from certain states.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct Liveness {
     /// Property name.
     pub name: String,
@@ -420,7 +439,7 @@ pub struct Liveness {
 /// Integrations declare that a state machine event should trigger an external
 /// action (e.g., a webhook call or WASM module invocation). They are metadata
 /// only — they do not affect state transitions or verification.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 pub struct Integration {
     /// Integration name (e.g., "notify_fulfillment", "charge_payment").
     pub name: String,
@@ -445,7 +464,7 @@ pub struct Integration {
     pub llm: bool,
     /// Arbitrary config passed to the WASM module at invocation time.
     /// Common keys: `url`, `method`, `headers`.
-    #[serde(flatten, default)]
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub config: BTreeMap<String, String>,
 }
 
@@ -469,6 +488,7 @@ fn default_query_param() -> String {
 /// call back into Temper, triggering entity actions. They are metadata-only
 /// — they do not affect verification.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct Webhook {
     /// Webhook name (e.g., "oauth_callback").
     pub name: String,
@@ -501,6 +521,7 @@ pub struct Webhook {
 /// Declares that another entity's status should be available in the Cedar
 /// authorization context when evaluating policies for this entity type.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ContextEntityDecl {
     /// Label for this context entity (e.g., "parent_agent").
     pub name: String,
@@ -530,6 +551,7 @@ pub struct ContextEntityDecl {
 /// and wires `state` into the target action's `from` list if it is not
 /// already present.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
 pub struct StateTimeout {
     /// The state whose entry arms the timer. Must be a declared state.
     pub state: String,
@@ -572,6 +594,7 @@ fn default_one() -> u32 {
 /// All fields are optional. A missing admission block means no gating for
 /// that entity type (backward compatible).
 #[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
 pub struct Admission {
     /// Max concurrent pending `Create` (entity-instantiation) calls per
     /// tenant. `None` = unlimited.
@@ -638,7 +661,7 @@ pub enum TriggerLiveness {
 
 /// How to resolve the target entity ID for a `kind = "entity"` trigger.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(tag = "type", rename_all = "snake_case")]
+#[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
 pub enum TargetResolver {
     /// Read the target entity ID from a field on the source entity.
     Field {
@@ -671,7 +694,7 @@ pub enum TargetResolver {
 /// (sync variants) or another entity's current state (`CrossEntityStateIn`).
 /// Guard-skipped triggers do not emit a dispatch record — they never fired.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-#[serde(tag = "type", rename_all = "snake_case")]
+#[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
 pub enum TriggerGuard {
     /// Source field equals the given JSON value.
     FieldEquals {
@@ -765,6 +788,7 @@ impl TriggerGuard {
 /// - `Adapter`: requires `adapter` or `adapter_type`.
 /// - `Webhook`: requires `url` + `method`.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(deny_unknown_fields)]
 pub struct ActionTrigger {
     /// Human-readable name for logging and debugging.
     pub name: String,
@@ -812,7 +836,7 @@ pub struct ActionTrigger {
     #[serde(default)]
     pub target_action: Option<String>,
     /// Static parameters to pass to the target action.
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "serde_json::Value::is_null")]
     pub params: serde_json::Value,
     /// Dynamic params: target-param-name → source-entity-field-name.
     ///

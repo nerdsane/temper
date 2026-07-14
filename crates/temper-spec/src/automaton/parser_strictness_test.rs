@@ -120,6 +120,22 @@ method = "POST"
 }
 
 #[test]
+fn rejects_trailing_content_in_legacy_structured_effect() {
+    let source = format!(
+        r#"{BASE_SPEC}
+[[action]]
+name = "Complete"
+from = ["Ready"]
+to = "Ready"
+effect = '''[{{ type = "emit", event = "completed" }}]
+unknown = "discarded"'''
+"#
+    );
+
+    assert_source_located_rejection(&source, "unknown");
+}
+
+#[test]
 fn rejects_duplicate_safety_declaration_names() {
     let source = format!(
         r#"{BASE_SPEC}
@@ -137,6 +153,20 @@ assert = "status \\in {{Ready}}"
     let message = error.to_string();
     assert!(message.contains("invariant"), "got: {message}");
     assert!(message.contains("status_is_valid"), "got: {message}");
+}
+
+#[test]
+fn rejects_duplicate_safety_keys() {
+    let source = format!(
+        r#"{BASE_SPEC}
+[[invariant]]
+name = "status_is_valid"
+assert = "status \\in {{Ready}}"
+assert = "status \\in {{Ready}}"
+"#
+    );
+
+    assert_source_located_rejection(&source, "duplicate key");
 }
 
 #[test]

@@ -13,7 +13,7 @@ const SPEC_ROOTS: [&str; 6] = [
 ];
 
 #[test]
-fn every_tracked_ioa_spec_parses_through_the_canonical_schema() {
+fn every_tracked_ioa_spec_parses_and_round_trips_through_the_canonical_schema() {
     let workspace = Path::new(env!("CARGO_MANIFEST_DIR"))
         .parent()
         .and_then(Path::parent)
@@ -24,15 +24,54 @@ fn every_tracked_ioa_spec_parses_through_the_canonical_schema() {
     }
     paths.sort();
     paths.dedup();
-    assert!(paths.len() >= 100, "expected the repository IOA corpus");
+    assert!(
+        paths.len() >= 130,
+        "expected the full repository IOA corpus"
+    );
 
     let mut failures = Vec::new();
     for path in paths {
         let source = fs::read_to_string(&path)
             .unwrap_or_else(|error| panic!("failed to read {}: {error}", path.display()));
-        if let Err(error) = parse_automaton_with_liveness(&source, LivenessEnforcement::WarnOnly) {
-            let relative = path.strip_prefix(workspace).unwrap_or(&path);
-            failures.push(format!("{}: {error}", relative.display()));
+        let relative = path.strip_prefix(workspace).unwrap_or(&path);
+        let parsed = match parse_automaton_with_liveness(&source, LivenessEnforcement::WarnOnly) {
+            Ok(parsed) => parsed,
+            Err(error) => {
+                failures.push(format!("{}: initial parse: {error}", relative.display()));
+                continue;
+            }
+        };
+        let canonical = match toml::to_string(&parsed) {
+            Ok(canonical) => canonical,
+            Err(error) => {
+                failures.push(format!(
+                    "{}: canonical serialization: {error}",
+                    relative.display()
+                ));
+                continue;
+            }
+        };
+        let reparsed =
+            match parse_automaton_with_liveness(&canonical, LivenessEnforcement::WarnOnly) {
+                Ok(reparsed) => reparsed,
+                Err(error) => {
+                    failures.push(format!(
+                        "{}: canonical round-trip parse: {error}",
+                        relative.display()
+                    ));
+                    continue;
+                }
+            };
+        match toml::to_string(&reparsed) {
+            Ok(reserialized) if reserialized == canonical => {}
+            Ok(_) => failures.push(format!(
+                "{}: canonical serialization changed after round trip",
+                relative.display()
+            )),
+            Err(error) => failures.push(format!(
+                "{}: canonical round-trip serialization: {error}",
+                relative.display()
+            )),
         }
     }
 

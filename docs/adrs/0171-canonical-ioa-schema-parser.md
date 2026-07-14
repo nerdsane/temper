@@ -31,9 +31,11 @@ absent from the public `parse_automaton` result.
 ### Parse the complete document exactly once
 
 `temper-spec` will deserialize the entire source directly into the canonical
-`Automaton` schema with `toml::from_str`. Section isolation and parse-again extractors
-are removed. TOML syntax and duplicate-key failures retain the source spans reported by
-the TOML deserializer.
+`Automaton` schema with `toml::from_str`. Section isolation and whole-document
+parse-again extractors are removed. TOML syntax and duplicate-key failures retain the
+source spans reported by the TOML deserializer. Supported string-form guards and
+effects remain field-local embedded languages; their compatibility decoders never
+rescan unrelated document sections.
 
 **Why this approach**: one schema and one parse result make declaration consumption
 structural. A supported declaration is represented in the AST once; malformed source
@@ -58,6 +60,10 @@ supported by field deserializers on `Action`. Structured arrays continue through
 typed `Guard` and `Effect` schemas. Existing effect aliases and string booleans remain
 accepted where the current parser accepts them, but malformed values now return an
 error rather than defaulting or being omitted.
+
+Parser-only tooling, including the pre-commit syntax gate, uses this same canonical
+schema path without requiring an unrelated CSDL model. Full verification continues to
+require and validate the CSDL model before advancing through its cascade.
 
 ## Rollout Plan
 
