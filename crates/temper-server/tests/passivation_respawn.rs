@@ -2,7 +2,9 @@
 
 mod common;
 
-use temper_runtime::persistence::{EventMetadata, EventStore, PersistenceEnvelope};
+use temper_runtime::persistence::{
+    COMPOSITE_EVENT_TYPE, EventMetadata, EventStore, PersistenceEnvelope,
+};
 use temper_runtime::scheduler::{install_deterministic_context, sim_now, sim_uuid};
 use temper_runtime::tenant::TenantId;
 use temper_store_sim::{SimEventStore, SimFaultConfig};
@@ -173,12 +175,13 @@ async fn passivation_snapshot_preserves_state_timeout_clock_anchor() {
     );
 }
 
-#[tokio::test]
-async fn legacy_snapshot_anchor_repair_survives_immediate_second_restart() {
-    let seed = 205;
+async fn assert_legacy_snapshot_anchor_repair_survives_restart(
+    seed: u64,
+    entity_id: &str,
+    with_composite_tail: bool,
+) {
     let (_guard, clock, _id_gen) = install_deterministic_context(seed);
     let sim_store = SimEventStore::no_faults(seed);
-    let entity_id = "legacy-timed-passivation";
     let actor_key = format!("default:TimedTask:{entity_id}");
     let event = |action: &str, from: &str, to: &str| PersistenceEnvelope {
         sequence_nr: 0,
@@ -232,6 +235,30 @@ async fn legacy_snapshot_anchor_repair_survives_immediate_second_restart() {
         )
         .await
         .expect("seed legacy snapshot without timeout anchor");
+    if with_composite_tail {
+        sim_store
+            .append(
+                &actor_key,
+                2,
+                &[PersistenceEnvelope {
+                    sequence_nr: 0,
+                    event_type: COMPOSITE_EVENT_TYPE.to_string(),
+                    payload: serde_json::json!({}),
+                    metadata: EventMetadata {
+                        event_id: sim_uuid(),
+                        causation_id: sim_uuid(),
+                        correlation_id: sim_uuid(),
+                        timestamp: sim_now(),
+                        actor_id: actor_key.clone(),
+                    },
+                }],
+            )
+            .await
+            .expect("seed post-snapshot composite marker");
+    }
+    let expected_sequence_nr = if with_composite_tail { 3 } else { 2 };
+    let expected_replayed_tail = if with_composite_tail { 1 } else { 0 };
+    let segments_before_repair = sim_store.dump_segments(&actor_key);
 
     let tenant = TenantId::default();
     sim_store.restore_faults(SimFaultConfig {
@@ -291,21 +318,26 @@ async fn legacy_snapshot_anchor_repair_survives_immediate_second_restart() {
         "legacy hydration establishes one conservative current anchor"
     );
     assert_eq!(
-        first_recovery.state.sequence_nr, 2,
+        first_recovery.state.sequence_nr, expected_sequence_nr,
         "legacy hydration must not append another bootstrap Created event"
+    );
+    assert_eq!(first_recovery.state.last_snapshot_sequence_nr, 2);
+    assert_eq!(
+        first_recovery.state.events_since_snapshot, expected_replayed_tail,
+        "the live replay budget must retain skipped post-snapshot envelopes"
     );
     let journal_after_recovery = sim_store
         .read_events(&actor_key, 0)
         .await
         .expect("read journal after legacy hydration");
     assert_eq!(
-        journal_after_recovery.len(),
-        2,
+        journal_after_recovery.len() as u64,
+        expected_sequence_nr,
         "legacy hydration must leave the durable journal unchanged"
     );
     assert_eq!(
         journal_after_recovery.last().map(|event| event.sequence_nr),
-        Some(2)
+        Some(expected_sequence_nr)
     );
     for _ in 0..32 {
         if first_state.state_timeout_tracker.pending_snapshot()
@@ -321,16 +353,37 @@ async fn legacy_snapshot_anchor_repair_survives_immediate_second_restart() {
         "the repaired legacy state receives one conservative timeout budget"
     );
 
-    let (_, upgraded_snapshot_bytes) = sim_store
+    let (upgraded_snapshot_sequence, upgraded_snapshot_bytes) = sim_store
         .load_snapshot(&actor_key)
         .await
         .expect("upgraded snapshot lookup succeeds")
         .expect("hydration durably rewrites the legacy snapshot before actor readiness");
+    assert_eq!(
+        upgraded_snapshot_sequence, 2,
+        "the repair must replace the loaded boundary instead of creating a new one"
+    );
     let upgraded_snapshot: serde_json::Value =
         serde_json::from_slice(&upgraded_snapshot_bytes).expect("upgraded snapshot JSON");
     assert_eq!(
         upgraded_snapshot.get("state_timeout_clock_reset_at"),
         Some(&serde_json::json!(expected_repair_at))
+    );
+    assert_eq!(
+        upgraded_snapshot.get("sequence_nr"),
+        Some(&serde_json::json!(2))
+    );
+    assert_eq!(
+        upgraded_snapshot.get("last_snapshot_sequence_nr"),
+        Some(&serde_json::json!(2))
+    );
+    assert_eq!(
+        upgraded_snapshot.get("events_since_snapshot"),
+        Some(&serde_json::json!(0))
+    );
+    assert_eq!(
+        sim_store.dump_segments(&actor_key),
+        segments_before_repair,
+        "legacy metadata repair must not rotate the existing snapshot boundary"
     );
 
     drop(first_state);
@@ -355,4 +408,22 @@ async fn legacy_snapshot_anchor_repair_survives_immediate_second_restart() {
         Some(sim_now()),
         "current snapshots must not be mistaken for legacy snapshots"
     );
+    assert_eq!(second_recovery.state.sequence_nr, expected_sequence_nr);
+    assert_eq!(second_recovery.state.last_snapshot_sequence_nr, 2);
+    assert_eq!(
+        second_recovery.state.events_since_snapshot, expected_replayed_tail,
+        "the skipped replay tail must remain bounded and replayable after another restart"
+    );
+}
+
+#[tokio::test]
+async fn legacy_snapshot_anchor_repair_survives_immediate_second_restart() {
+    assert_legacy_snapshot_anchor_repair_survives_restart(205, "legacy-timed-passivation", false)
+        .await;
+}
+
+#[tokio::test]
+async fn legacy_snapshot_anchor_repair_with_composite_tail_survives_restart() {
+    assert_legacy_snapshot_anchor_repair_survives_restart(206, "legacy-timed-composite-tail", true)
+        .await;
 }

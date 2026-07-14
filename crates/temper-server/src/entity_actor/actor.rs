@@ -730,6 +730,7 @@ impl EntityActor {
                             "snapshot tail exceeds bounded replay cap"
                         );
                     }
+                    state.events_since_snapshot = replayed_tail;
                     tracing::info!(
                         entity = %state.entity_id,
                         snapshot_loaded = loaded_snapshot,
@@ -855,20 +856,46 @@ impl Actor for EntityActor {
                 .any(|timeout| timeout.state == state.status)
         {
             state.state_timeout_clock_reset_at = Some(sim_now());
-            let snapshot = Self::serialize_snapshot_state(&state).map_err(|error| {
+            let repair_snapshot_sequence = state.last_snapshot_sequence_nr;
+            if repair_snapshot_sequence == 0 {
+                return Err(ActorError::custom(format!(
+                    "cannot persist legacy timeout-anchor repair for {}:{} without a snapshot boundary",
+                    self.entity_type, self.entity_id
+                )));
+            }
+            let replayed_tail = state.sequence_nr.saturating_sub(repair_snapshot_sequence);
+            let replayed_tail_count = usize::try_from(replayed_tail).map_err(|_| {
                 ActorError::custom(format!(
-                    "failed to encode legacy timeout-anchor repair for {}:{}: {error}",
+                    "legacy timeout-anchor replay tail is too large for {}:{} ({replayed_tail} events)",
                     self.entity_type, self.entity_id
                 ))
             })?;
+
+            // A missing anchor after replay proves that every post-snapshot
+            // envelope was skipped without mutating domain state: any parsed
+            // event updates or clears the anchor. Rewrite the loaded boundary
+            // with boundary-consistent sequence metadata and leave those
+            // skipped envelopes in the replay tail for the next restart.
+            let mut repair_snapshot_state = state.clone();
+            repair_snapshot_state.sequence_nr = repair_snapshot_sequence;
+            repair_snapshot_state.last_snapshot_sequence_nr = repair_snapshot_sequence;
+            repair_snapshot_state.events_since_snapshot = 0;
+            let snapshot =
+                Self::serialize_snapshot_state(&repair_snapshot_state).map_err(|error| {
+                    ActorError::custom(format!(
+                        "failed to encode legacy timeout-anchor repair for {}:{}: {error}",
+                        self.entity_type, self.entity_id
+                    ))
+                })?;
             let Some(store) = self.event_journal.as_ref() else {
                 return Err(ActorError::custom(format!(
                     "cannot persist legacy timeout-anchor repair for {}:{} without an event journal",
                     self.entity_type, self.entity_id
                 )));
             };
+            let persistence_id = self.persistence_id();
             store
-                .replace_snapshot(&self.persistence_id(), state.sequence_nr, &snapshot)
+                .replace_snapshot(&persistence_id, repair_snapshot_sequence, &snapshot)
                 .await
                 .map_err(|error| {
                     ActorError::custom(format!(
@@ -876,11 +903,13 @@ impl Actor for EntityActor {
                         self.entity_type, self.entity_id
                     ))
                 })?;
-            state.last_snapshot_sequence_nr = state.sequence_nr;
-            state.events_since_snapshot = 0;
+            state.last_snapshot_sequence_nr = repair_snapshot_sequence;
+            state.events_since_snapshot = replayed_tail_count;
             tracing::warn!(
                 entity = %state.entity_id,
                 state = %state.status,
+                repair_snapshot_sequence,
+                replayed_tail,
                 "durably repaired missing legacy snapshot state-timeout clock anchor"
             );
         }
