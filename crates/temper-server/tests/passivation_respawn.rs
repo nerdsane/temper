@@ -671,3 +671,66 @@ async fn snapshot_read_failure_does_not_replace_an_existing_boundary() {
         "failed hydration must not rotate existing segment metadata"
     );
 }
+
+#[tokio::test]
+async fn incompatible_journal_without_snapshot_is_not_sealed_behind_repair_boundary() {
+    let seed = 209;
+    let (_guard, _clock, _id_gen) = install_deterministic_context(seed);
+    let sim_store = SimEventStore::no_faults(seed);
+    let tenant = TenantId::default();
+    let entity_id = "legacy-initial-timed-incompatible-journal";
+    let actor_key = format!("{tenant}:InitialTimedTask:{entity_id}");
+    sim_store
+        .append(
+            &actor_key,
+            0,
+            &[PersistenceEnvelope {
+                sequence_nr: 0,
+                event_type: "LegacyUnknownEvent".to_string(),
+                payload: serde_json::json!({ "legacy_shape": true }),
+                metadata: EventMetadata {
+                    event_id: sim_uuid(),
+                    causation_id: sim_uuid(),
+                    correlation_id: sim_uuid(),
+                    timestamp: sim_now(),
+                    actor_id: actor_key.clone(),
+                },
+            }],
+        )
+        .await
+        .expect("seed an incompatible legacy event without a snapshot boundary");
+
+    let state = common::build_single_tenant_state_with_store(
+        sim_store.clone(),
+        "legacy-timeout-incompatible-journal",
+        "default",
+        &[("InitialTimedTask", INITIAL_TIMED_TASK_IOA)],
+    );
+    assert!(
+        state
+            .get_tenant_entity_state(&tenant, "InitialTimedTask", entity_id)
+            .await
+            .is_err(),
+        "hydration must fail rather than snapshot past an event the current runtime cannot replay"
+    );
+    assert!(
+        state.state_timeout_tracker.pending_snapshot().is_empty(),
+        "failed hydration must not arm a timeout"
+    );
+    assert_eq!(
+        sim_store
+            .load_snapshot(&actor_key)
+            .await
+            .expect("snapshot absence remains readable"),
+        None,
+        "an incompatible event must remain visible to a future compatible runtime"
+    );
+    assert_eq!(
+        sim_store
+            .read_events(&actor_key, 0)
+            .await
+            .expect("legacy journal remains readable")
+            .len(),
+        1
+    );
+}
