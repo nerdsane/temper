@@ -1775,6 +1775,7 @@ impl PostgresEventStore {
         Ok(rows.into_iter().map(row_to_agent_summary).collect())
     }
 
+    /// Upsert generated feature-request fields while preserving existing human review state.
     #[allow(clippy::too_many_arguments)]
     pub async fn upsert_feature_request(
         &self,
@@ -1793,8 +1794,7 @@ impl PostgresEventStore {
              VALUES ($1, $2, $3, $4, $5, $6, $7, now()) \
              ON CONFLICT (id) DO UPDATE SET \
                  category = EXCLUDED.category, description = EXCLUDED.description, frequency = EXCLUDED.frequency, \
-                 trajectory_refs = EXCLUDED.trajectory_refs, disposition = EXCLUDED.disposition, \
-                 developer_notes = EXCLUDED.developer_notes, updated_at = now()",
+                 trajectory_refs = EXCLUDED.trajectory_refs, updated_at = now()",
         )
         .bind(id)
         .bind(category)

@@ -5,6 +5,7 @@ use axum::extract::{Path, Query, State};
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::Json;
 use axum::response::sse::{Event, KeepAlive, Sse};
+use sha2::{Digest, Sha256};
 use temper_evolution::FeatureRequestDisposition;
 use temper_runtime::tenant::TenantId;
 use tokio_stream::StreamExt;
@@ -24,9 +25,11 @@ mod support;
 pub(crate) use materialize::{handle_evolution_analyze, handle_evolution_materialize};
 
 use support::{
-    create_system_entity_logged, emit_refresh_hints, next_system_entity_id, persist_alerts,
-    persist_insights, spawn_intent_discovery,
+    dispatch_system_action_idempotent, emit_refresh_hints, persist_alerts, persist_insights,
+    spawn_intent_discovery,
 };
+
+const FEATURE_REQUEST_GENERATOR_VERSION: &str = "v1";
 
 /// POST /api/evolution/sentinel/check -- trigger sentinel rule evaluation.
 ///
@@ -106,6 +109,8 @@ pub(crate) async fn handle_sentinel_check(
     tracing::Span::current().record("insights_count", insights.len());
     tracing::info!(insights_count = insights.len(), "evolution.insight");
     let insight_results = persist_insights(&state, &insights).await;
+    let feature_request_ids =
+        materialize_feature_requests(&state, &analysis_tenant, &trajectory_entries).await?;
 
     emit_refresh_hints(
         &state,
@@ -123,7 +128,101 @@ pub(crate) async fn handle_sentinel_check(
         "intent_discoveries": discovery_results,
         "insights_count": insights.len(),
         "insights": insight_results,
+        "feature_requests_count": feature_request_ids.len(),
+        "feature_request_ids": feature_request_ids,
     })))
+}
+
+pub(crate) fn stable_feature_request_id(
+    tenant: &TenantId,
+    generator_version: &str,
+    feature_request: &temper_evolution::FeatureRequestRecord,
+) -> String {
+    let mut trajectory_refs = feature_request.trajectory_refs.clone();
+    trajectory_refs.sort();
+    let identity = serde_json::json!({
+        "tenant": tenant.as_str(),
+        "generator_version": generator_version,
+        "category": format!("{:?}", feature_request.category),
+        "description": feature_request.description,
+        "frequency": feature_request.frequency,
+        "trajectory_refs": trajectory_refs,
+    });
+    format!("FR-{:x}", Sha256::digest(identity.to_string()))
+}
+
+async fn materialize_feature_requests(
+    state: &ServerState,
+    tenant: &TenantId,
+    trajectory_entries: &[crate::state::TrajectoryEntry],
+) -> Result<Vec<String>, StatusCode> {
+    let tenant_entries = trajectory_entries
+        .iter()
+        .filter(|entry| entry.tenant == tenant.as_str())
+        .cloned()
+        .collect::<Vec<_>>();
+    let generated = insight_generator::generate_feature_requests(&tenant_entries);
+    if generated.is_empty() {
+        return Ok(Vec::new());
+    }
+    let store = state
+        .platform_metadata_store()
+        .ok_or(StatusCode::SERVICE_UNAVAILABLE)?;
+    let mut materialized_ids = Vec::with_capacity(generated.len());
+
+    for feature_request in &generated {
+        let stable_id =
+            stable_feature_request_id(tenant, FEATURE_REQUEST_GENERATOR_VERSION, feature_request);
+        let category = format!("{:?}", feature_request.category);
+        let refs_json = serde_json::to_string(&feature_request.trajectory_refs)
+            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+        let disposition = match feature_request.disposition {
+            FeatureRequestDisposition::Open => "Open",
+            FeatureRequestDisposition::Acknowledged => "Acknowledged",
+            FeatureRequestDisposition::Planned => "Planned",
+            FeatureRequestDisposition::WontFix => "WontFix",
+            FeatureRequestDisposition::Resolved => "Resolved",
+        };
+        let params = serde_json::json!({
+            "category": category,
+            "description": feature_request.description,
+            "frequency": feature_request.frequency.to_string(),
+            "developer_notes": feature_request.developer_notes.clone().unwrap_or_default(),
+        });
+
+        dispatch_system_action_idempotent(
+            state,
+            "FeatureRequest",
+            &stable_id,
+            "CreateFeatureRequest",
+            params,
+            &format!("feature-request:{stable_id}"),
+        )
+        .await
+        .map_err(|error| {
+            tracing::error!(error = %error, feature_request_id = %stable_id, "failed to materialize feature request entity");
+            StatusCode::INTERNAL_SERVER_ERROR
+        })?;
+
+        store
+            .upsert_feature_request(
+                &stable_id,
+                &category,
+                &feature_request.description,
+                feature_request.frequency as i64,
+                &refs_json,
+                disposition,
+                feature_request.developer_notes.as_deref(),
+            )
+            .await
+            .map_err(|error| {
+                tracing::error!(error = %error, backend = store.backend_name(), feature_request_id = %stable_id, "failed to project feature request");
+                StatusCode::INTERNAL_SERVER_ERROR
+            })?;
+        materialized_ids.push(stable_id);
+    }
+
+    Ok(materialized_ids)
 }
 
 /// GET /observe/evolution/unmet-intents -- grouped unmet intents from trajectories.
@@ -228,51 +327,7 @@ pub(crate) async fn handle_feature_requests(
     require_observe_auth(&state, &headers, "read_evolution", "Evolution")?;
     let disposition_filter = params.get("disposition").map(String::as_str);
 
-    let trajectory_entries = state.load_trajectory_entries(1_000).await;
-
     if let Some(store) = state.platform_metadata_store() {
-        let generated = insight_generator::generate_feature_requests(&trajectory_entries);
-        for feature_request in &generated {
-            let refs_json = serde_json::to_string(&feature_request.trajectory_refs)
-                .unwrap_or_else(|_| "[]".to_string());
-            let disposition = match feature_request.disposition {
-                FeatureRequestDisposition::Open => "Open",
-                FeatureRequestDisposition::Acknowledged => "Acknowledged",
-                FeatureRequestDisposition::Planned => "Planned",
-                FeatureRequestDisposition::WontFix => "WontFix",
-                FeatureRequestDisposition::Resolved => "Resolved",
-            };
-            if let Err(error) = store
-                .upsert_feature_request(
-                    &feature_request.header.id,
-                    &format!("{:?}", feature_request.category),
-                    &feature_request.description,
-                    feature_request.frequency as i64,
-                    &refs_json,
-                    disposition,
-                    feature_request.developer_notes.as_deref(),
-                )
-                .await
-            {
-                tracing::warn!(error = %error, backend = store.backend_name(), "failed to upsert feature request");
-            }
-
-            create_system_entity_logged(
-                &state,
-                "FeatureRequest",
-                &next_system_entity_id("FR"),
-                "CreateFeatureRequest",
-                serde_json::json!({
-                    "category": format!("{:?}", feature_request.category),
-                    "description": feature_request.description,
-                    "frequency": feature_request.frequency.to_string(),
-                    "developer_notes": feature_request.developer_notes.clone().unwrap_or_default(),
-                    "legacy_record_id": feature_request.header.id,
-                }),
-            )
-            .await;
-        }
-
         return match store.list_feature_requests(disposition_filter).await {
             Ok(rows) => {
                 let feature_requests = rows

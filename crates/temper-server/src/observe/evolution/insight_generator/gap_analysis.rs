@@ -182,13 +182,20 @@ pub(crate) fn generate_feature_requests(
         });
         accum.count += 1;
         accum.timestamps.push(entry.timestamp.clone());
+        if let Some(error) = entry.error.as_ref()
+            && error < &accum.description
+        {
+            accum.description.clone_from(error);
+        }
     }
 
     let mut feature_requests = Vec::new();
-    for accum in groups.into_values() {
+    for mut accum in groups.into_values() {
         if accum.count < FEATURE_REQUEST_THRESHOLD {
             continue;
         }
+
+        accum.timestamps.sort();
 
         let category = match accum.error_pattern.as_str() {
             "EntitySetNotFound" => PlatformGapCategory::MissingCapability,

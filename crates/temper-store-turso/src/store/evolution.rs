@@ -12,7 +12,7 @@ use crate::metrics::TursoQueryTimer;
 // -----------------------------------------------------------------------
 
 impl TursoEventStore {
-    /// Upsert a feature request.
+    /// Upsert generated feature-request fields while preserving existing human review state.
     #[allow(clippy::too_many_arguments)]
     #[instrument(skip_all, fields(id, otel.name = "turso.upsert_feature_request"))]
     pub async fn upsert_feature_request(
@@ -32,7 +32,7 @@ impl TursoEventStore {
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, datetime('now')) \
              ON CONFLICT(id) DO UPDATE SET \
                  category = ?2, description = ?3, frequency = ?4, trajectory_refs = ?5, \
-                 disposition = ?6, developer_notes = ?7, updated_at = datetime('now')",
+                 updated_at = datetime('now')",
             params![id, category, description, frequency, trajectory_refs_json, disposition, developer_notes],
         )
         .await
