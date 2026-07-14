@@ -261,12 +261,72 @@ impl SimActorHandler for EntityActorHandler {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use temper_runtime::scheduler::install_deterministic_context;
+    use temper_runtime::scheduler::{install_deterministic_context, sim_now};
 
     const ORDER_IOA: &str = include_str!("../../../../test-fixtures/specs/order.ioa.toml");
 
+    const TIMED_IOA: &str = r#"
+[automaton]
+name = "TimedSimulation"
+states = ["Idle", "Running", "Done"]
+initial = "Idle"
+allow_indefinite_states = ["Idle", "Done"]
+
+[[action]]
+name = "Start"
+kind = "input"
+from = ["Idle"]
+to = "Running"
+
+[[action]]
+name = "Progress"
+kind = "input"
+from = ["Running"]
+to = "Running"
+
+[[action]]
+name = "Finish"
+kind = "input"
+from = ["Running"]
+to = "Done"
+
+[[action]]
+name = "TimeoutFail"
+kind = "internal"
+from = ["Running"]
+to = "Done"
+
+[[state_timeout]]
+state = "Running"
+after_seconds = 60
+on_timeout = "TimeoutFail"
+reset_on = ["Progress"]
+"#;
+
     fn order_table() -> Arc<TransitionTable> {
         Arc::new(TransitionTable::from_ioa_source(ORDER_IOA))
+    }
+
+    #[test]
+    fn handler_tracks_timeout_anchor_on_entry_reset_and_exit() {
+        let (_guard, clock, _id_gen) = install_deterministic_context(171);
+        let table = Arc::new(TransitionTable::from_ioa_source(TIMED_IOA));
+        let mut handler = EntityActorHandler::new("TimedSimulation", "timed-1", table);
+        handler.init().unwrap();
+
+        clock.advance();
+        let entered_at = sim_now();
+        handler.handle_message("Start", "{}").unwrap();
+        assert_eq!(handler.state.state_timeout_clock_reset_at, Some(entered_at));
+
+        clock.advance();
+        let reset_at = sim_now();
+        handler.handle_message("Progress", "{}").unwrap();
+        assert_eq!(handler.state.state_timeout_clock_reset_at, Some(reset_at));
+
+        clock.advance();
+        handler.handle_message("Finish", "{}").unwrap();
+        assert_eq!(handler.state.state_timeout_clock_reset_at, None);
     }
 
     #[test]
