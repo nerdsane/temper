@@ -707,6 +707,42 @@ mod tests {
     }
 
     #[test]
+    fn unsupported_safety_invariant_cannot_pass_cascade() {
+        let spec = r#"
+[automaton]
+name = "Workspace"
+states = ["Active"]
+initial = "Active"
+allow_indefinite_states = ["Active"]
+
+[[state]]
+name = "used_bytes"
+type = "counter"
+initial = "0"
+
+[[state]]
+name = "quota_limit"
+type = "counter"
+initial = "1"
+
+[[invariant]]
+name = "WithinQuota"
+when = ["Active"]
+assert = "used_bytes <= quota_limit"
+"#;
+
+        let result = VerificationCascade::from_ioa(spec)
+            .with_sim_seeds(1)
+            .with_prop_test_cases(1)
+            .run();
+
+        assert!(
+            !result.all_passed,
+            "unsupported safety invariants must fail closed: {result:#?}"
+        );
+    }
+
+    #[test]
     fn test_fail_fast_stops_at_first_failure() {
         // Use a spec that will fail L0 (dead guard).
         let broken_spec = r#"
