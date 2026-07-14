@@ -5,6 +5,32 @@ use std::collections::BTreeMap;
 use super::{RunRecord, SimActorResult, SimActorSystem};
 
 impl SimActorSystem {
+    pub(super) fn result_snapshot(&self) -> SimActorResult {
+        let actor_states = self
+            .actors
+            .iter()
+            .map(|(id, handler)| {
+                (
+                    id.clone(),
+                    handler.current_status(),
+                    handler.current_item_count(),
+                    handler.event_count(),
+                )
+            })
+            .collect();
+
+        SimActorResult {
+            all_invariants_held: self.violations.is_empty() && self.execution_errors.is_empty(),
+            seed: self.config.seed,
+            transitions: self.total_transitions,
+            messages: self.total_messages,
+            dropped: self.scheduler.total_dropped() as u64,
+            violations: self.violations.clone(),
+            execution_errors: self.execution_errors.clone(),
+            actor_states,
+        }
+    }
+
     /// Run random exploration and return a full [`RunRecord`] alongside the result.
     ///
     /// The record captures every transition, event, and final state. Two calls

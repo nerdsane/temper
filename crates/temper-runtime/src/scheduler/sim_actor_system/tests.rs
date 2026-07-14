@@ -138,6 +138,13 @@ fn callback_failure_is_returned_and_invalidates_random_run() {
     let retry_error = scripted.step("Job:1", "Complete", "{}").unwrap_err();
     assert!(retry_error.contains("simulation run is invalid"));
     assert_eq!(scripted.total_transitions, transitions_after_failure);
+    let tick_after_failure = scripted.clock.tick();
+    let messages_after_failure = scripted.total_messages;
+    let resumed = scripted.run_random();
+    assert!(!resumed.all_invariants_held);
+    assert_eq!(scripted.clock.tick(), tick_after_failure);
+    assert_eq!(scripted.total_transitions, transitions_after_failure);
+    assert_eq!(scripted.total_messages, messages_after_failure);
 
     let mut random = SimActorSystem::new(config);
     random.register_actor("Job:1", Box::new(CallbackFailureHandler::new()));
@@ -154,6 +161,11 @@ fn callback_failure_is_returned_and_invalidates_random_run() {
             .description
             .contains("callback rejected")
     );
+    let tick_after_random_failure = random.clock.tick();
+    let resumed_random = random.run_random();
+    assert_eq!(random.clock.tick(), tick_after_random_failure);
+    assert_eq!(resumed_random.transitions, result.transitions);
+    assert_eq!(resumed_random.messages, result.messages);
 }
 
 #[test]
@@ -239,6 +251,13 @@ fn callback_cascade_fails_when_reaction_budget_is_exhausted() {
     let retry_error = sim.step("Job:1", "Complete", "{}").unwrap_err();
     assert!(retry_error.contains("simulation run is invalid"));
     assert_eq!(sim.total_transitions, transitions_after_failure);
+    let tick_after_failure = sim.clock.tick();
+    let messages_after_failure = sim.total_messages;
+    let resumed = sim.run_random();
+    assert!(!resumed.all_invariants_held);
+    assert_eq!(sim.clock.tick(), tick_after_failure);
+    assert_eq!(sim.total_transitions, transitions_after_failure);
+    assert_eq!(sim.total_messages, messages_after_failure);
 }
 
 #[test]

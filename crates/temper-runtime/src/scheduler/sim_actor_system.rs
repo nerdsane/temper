@@ -218,6 +218,7 @@ impl SimActorSystem {
         action: &str,
         params: &str,
     ) -> Result<serde_json::Value, String> {
+        self.ensure_execution_active()?;
         self.clock.advance();
         self.total_messages += 1;
         let result = self.apply_action(actor_id, action, params)?;
@@ -350,6 +351,10 @@ impl SimActorSystem {
     /// The RNG picks actors and actions. The scheduler delays/drops/crashes.
     /// Invariants are checked after every successful transition.
     pub fn run_random(&mut self) -> SimActorResult {
+        if self.ensure_execution_active().is_err() {
+            return self.result_snapshot();
+        }
+
         'simulation: for _tick in 0..self.config.max_ticks {
             if self.actors.is_empty() {
                 break;
@@ -408,29 +413,7 @@ impl SimActorSystem {
             }
         }
 
-        let actor_states: Vec<_> = self
-            .actors
-            .iter()
-            .map(|(id, h)| {
-                (
-                    id.clone(),
-                    h.current_status(),
-                    h.current_item_count(),
-                    h.event_count(),
-                )
-            })
-            .collect();
-
-        SimActorResult {
-            all_invariants_held: self.violations.is_empty() && self.execution_errors.is_empty(),
-            seed: self.config.seed,
-            transitions: self.total_transitions,
-            messages: self.total_messages,
-            dropped: self.scheduler.total_dropped() as u64,
-            violations: self.violations.clone(),
-            execution_errors: self.execution_errors.clone(),
-            actor_states,
-        }
+        self.result_snapshot()
     }
 
     fn check_invariants(

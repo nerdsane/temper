@@ -48,6 +48,16 @@ pub struct SimExecutionError {
 }
 
 impl SimActorSystem {
+    pub(super) fn ensure_execution_active(&self) -> Result<(), String> {
+        let Some(error) = self.execution_errors.last() else {
+            return Ok(());
+        };
+        Err(format!(
+            "simulation run is invalid after execution error at tick {}: {}",
+            error.tick, error.description
+        ))
+    }
+
     pub(super) fn schedule_integration_callbacks(&mut self, actor_id: &str) {
         let Some(handler) = self.actors.get(actor_id) else {
             return;
@@ -78,17 +88,9 @@ impl SimActorSystem {
         while let Some((actor_id, callback_action)) = self.pending_integration_callbacks.pop_front()
         {
             if *reactions == self.config.reaction_budget_per_tick {
-                self.pending_integration_callbacks
-                    .push_front((actor_id.clone(), callback_action.clone()));
                 let description =
                     format!("integration callback budget exhausted after {reactions} reactions");
-                self.execution_errors.push(SimExecutionError {
-                    actor_id,
-                    action: callback_action,
-                    description: description.clone(),
-                    tick: self.clock.tick(),
-                });
-                return Err(description);
+                return self.invalidate_callback_cascade(actor_id, callback_action, description);
             }
 
             *reactions += 1;
@@ -96,15 +98,25 @@ impl SimActorSystem {
                 let description = format!(
                     "integration callback '{callback_action}' failed for '{actor_id}': {error}"
                 );
-                self.execution_errors.push(SimExecutionError {
-                    actor_id,
-                    action: callback_action,
-                    description: description.clone(),
-                    tick: self.clock.tick(),
-                });
-                return Err(description);
+                return self.invalidate_callback_cascade(actor_id, callback_action, description);
             }
         }
         Ok(())
+    }
+
+    fn invalidate_callback_cascade(
+        &mut self,
+        actor_id: String,
+        action: String,
+        description: String,
+    ) -> Result<(), String> {
+        self.pending_integration_callbacks.clear();
+        self.execution_errors.push(SimExecutionError {
+            actor_id,
+            action,
+            description: description.clone(),
+            tick: self.clock.tick(),
+        });
+        Err(description)
     }
 }
