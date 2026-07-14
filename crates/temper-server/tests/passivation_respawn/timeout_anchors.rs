@@ -1,12 +1,15 @@
 //! Timeout-anchor persistence and legacy snapshot upgrade regressions.
 
 use super::common;
+use std::collections::BTreeMap;
+use temper_runtime::ActorSystem;
 use temper_runtime::actor::SystemSignal;
 use temper_runtime::persistence::{
     COMPOSITE_EVENT_TYPE, EventMetadata, EventStore, PersistenceEnvelope,
 };
 use temper_runtime::scheduler::{install_deterministic_context, sim_now, sim_uuid};
 use temper_runtime::tenant::TenantId;
+use temper_server::{ServerState, StorageStack};
 use temper_spec::csdl::parse_csdl;
 use temper_store_sim::{SimEventStore, SimFaultConfig};
 
@@ -147,6 +150,87 @@ async fn hotswap_before_pre_start_cannot_skip_initial_timeout_hydration() {
             .collect::<Vec<_>>(),
         vec!["Created", "TimeoutFail"],
         "the pre-start hot-swap must still durably fire without a later read"
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn legacy_with_specs_initial_timeout_arms_without_spec_registry() {
+    let seed = 212;
+    let (_guard, _clock, _id_gen) = install_deterministic_context(seed);
+    let sim_store = SimEventStore::no_faults(seed);
+    let tenant = TenantId::default();
+    let entity_id = "legacy-with-specs-timeout";
+    let actor_key = format!("{tenant}:InitialTimedTask:{entity_id}");
+    let state = ServerState::with_storage_stack(
+        ActorSystem::new("legacy-with-specs-timeout"),
+        parse_csdl(common::CSDL_XML).expect("CSDL parse"),
+        common::CSDL_XML.to_string(),
+        BTreeMap::from([(
+            "InitialTimedTask".to_string(),
+            INITIAL_TIMED_TASK_IOA.to_string(),
+        )]),
+        StorageStack::from_sim(sim_store.clone(), None),
+    )
+    .expect("build the legacy single-tenant server state");
+    assert!(
+        state
+            .registry
+            .read()
+            .expect("registry lock")
+            .get_spec(&tenant, "InitialTimedTask")
+            .is_none(),
+        "with_specs must exercise the legacy transition-table fallback"
+    );
+
+    state
+        .get_or_spawn_tenant_actor(&tenant, "InitialTimedTask", entity_id)
+        .expect("spawn the legacy timed actor");
+    for _ in 0..64 {
+        tokio::task::yield_now().await;
+        if sim_store.total_events() == 1
+            && state.state_timeout_tracker.pending_snapshot()
+                == vec![("InitialTimedTask".to_string(), 1)]
+        {
+            break;
+        }
+    }
+    assert_eq!(
+        sim_store.total_events(),
+        1,
+        "legacy pre_start must commit the initial event"
+    );
+    assert_eq!(
+        state.state_timeout_tracker.pending_snapshot(),
+        vec![("InitialTimedTask".to_string(), 1)],
+        "legacy timeout declarations must arm without a SpecRegistry entry"
+    );
+
+    tokio::time::advance(std::time::Duration::from_secs(599)).await;
+    tokio::task::yield_now().await;
+    assert_eq!(
+        sim_store.total_events(),
+        1,
+        "the legacy timeout must not fire before its durable deadline"
+    );
+
+    tokio::time::advance(std::time::Duration::from_secs(1)).await;
+    for _ in 0..64 {
+        tokio::task::yield_now().await;
+        if sim_store.total_events() == 2 {
+            break;
+        }
+    }
+    let journal = sim_store
+        .read_events(&actor_key, 0)
+        .await
+        .expect("read the legacy timeout journal");
+    assert_eq!(
+        journal
+            .iter()
+            .map(|event| event.event_type.as_str())
+            .collect::<Vec<_>>(),
+        vec!["Created", "TimeoutFail"],
+        "legacy hydration must durably fire without a later entity read"
     );
 }
 
