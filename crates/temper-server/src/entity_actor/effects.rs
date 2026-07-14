@@ -58,6 +58,14 @@ pub struct ScheduleAtRequest {
     pub field: String,
 }
 
+/// Effects that require follow-up processing after state mutation completes.
+pub type AppliedEffects = (
+    Vec<String>,
+    Vec<ScheduledAction>,
+    Vec<SpawnRequest>,
+    Vec<ScheduleAtRequest>,
+);
+
 /// Maximum cross-entity lookups per transition (TigerStyle budget).
 ///
 /// Rich contracts may legitimately verify several sibling entities in one
@@ -65,6 +73,191 @@ pub struct ScheduleAtRequest {
 pub const MAX_CROSS_ENTITY_LOOKUPS: usize = 16;
 /// Maximum entity spawns per transition (TigerStyle budget).
 pub const MAX_SPAWNS_PER_TRANSITION: usize = 8;
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum RuntimeFieldKind {
+    Counter,
+    String,
+}
+
+fn runtime_field_kind(table: &TransitionTable, name: &str) -> Option<RuntimeFieldKind> {
+    table
+        .runtime_invariants
+        .iter()
+        .find_map(|invariant| match &invariant.assertion {
+            temper_spec::automaton::RuntimeAssert::StringNonEmpty { var } if var == name => {
+                Some(RuntimeFieldKind::String)
+            }
+            temper_spec::automaton::RuntimeAssert::CounterVarCompare { left, right, .. }
+                if left == name || right == name =>
+            {
+                Some(RuntimeFieldKind::Counter)
+            }
+            _ => None,
+        })
+}
+
+/// Build the canonical initial entity state shared by production, simulation,
+/// and the durable data-only creation path.
+pub(crate) fn build_initial_entity_state(
+    entity_type: &str,
+    entity_id: &str,
+    table: &TransitionTable,
+    initial_fields: &serde_json::Value,
+) -> Result<EntityState, String> {
+    use temper_jit::table::types::StateVarInitialValue;
+
+    let mut counters = std::collections::BTreeMap::new();
+    let mut booleans = std::collections::BTreeMap::new();
+    let mut declared_fields = serde_json::Map::new();
+    for (name, initial) in &table.state_var_initials {
+        match initial {
+            StateVarInitialValue::Counter(value) => {
+                counters.insert(name.clone(), *value);
+            }
+            StateVarInitialValue::Bool(value) => {
+                booleans.insert(name.clone(), *value);
+            }
+            StateVarInitialValue::String(value) => {
+                declared_fields.insert(name.clone(), serde_json::Value::String(value.clone()));
+            }
+        }
+    }
+
+    let fields = if let Some(initial) = initial_fields.as_object() {
+        for (name, value) in initial {
+            match table.state_var_initials.get(name) {
+                Some(StateVarInitialValue::Counter(_)) => {
+                    match value.as_u64().and_then(|value| usize::try_from(value).ok()) {
+                        Some(value) => {
+                            counters.insert(name.clone(), value);
+                        }
+                        None if runtime_field_kind(table, name)
+                            == Some(RuntimeFieldKind::Counter) =>
+                        {
+                            return Err(format!("runtime counter field '{name}' must be a usize"));
+                        }
+                        None => {}
+                    }
+                }
+                Some(StateVarInitialValue::Bool(_)) => {
+                    let value = value
+                        .as_bool()
+                        .ok_or_else(|| format!("declared bool field '{name}' must be boolean"))?;
+                    booleans.insert(name.clone(), value);
+                }
+                Some(StateVarInitialValue::String(_)) => {
+                    if value.as_str().is_none()
+                        && runtime_field_kind(table, name) == Some(RuntimeFieldKind::String)
+                    {
+                        return Err(format!("runtime string field '{name}' must be a string"));
+                    }
+                }
+                _ => {}
+            }
+            declared_fields.insert(name.clone(), value.clone());
+        }
+        declared_fields
+            .entry("Id".to_string())
+            .or_insert_with(|| serde_json::Value::String(entity_id.to_string()));
+        declared_fields
+            .entry("Status".to_string())
+            .or_insert_with(|| serde_json::Value::String(table.initial_state.clone()));
+        serde_json::Value::Object(declared_fields)
+    } else {
+        return Err("initial entity fields must be an object".to_string());
+    };
+
+    let item_count = counters.get("items").copied().unwrap_or(0);
+    Ok(EntityState {
+        entity_type: entity_type.to_string(),
+        entity_id: entity_id.to_string(),
+        status: table.initial_state.clone(),
+        item_count,
+        counters,
+        booleans,
+        lists: std::collections::BTreeMap::new(),
+        fields,
+        events: std::collections::VecDeque::new(),
+        total_event_count: 0,
+        events_since_snapshot: 0,
+        last_snapshot_sequence_nr: 0,
+        sequence_nr: 0,
+        processed_idempotency_keys: std::collections::BTreeMap::new(),
+    })
+}
+
+/// Synchronize direct field mutations into declared counter/boolean state.
+pub(crate) fn sync_declared_state_vars_from_fields(
+    state: &mut EntityState,
+    table: &TransitionTable,
+) -> Result<(), String> {
+    use temper_jit::table::types::StateVarInitialValue;
+
+    let fields = state
+        .fields
+        .as_object()
+        .ok_or_else(|| "entity fields must be an object".to_string())?;
+    for (name, initial) in &table.state_var_initials {
+        let Some(value) = fields.get(name) else {
+            continue;
+        };
+        match initial {
+            StateVarInitialValue::Counter(_) => {
+                let counter = value.as_u64().and_then(|value| usize::try_from(value).ok());
+                let Some(counter) = counter else {
+                    if runtime_field_kind(table, name) == Some(RuntimeFieldKind::Counter) {
+                        return Err(format!("runtime counter field '{name}' must be a usize"));
+                    }
+                    continue;
+                };
+                state.counters.insert(name.clone(), counter);
+                if name == "items" {
+                    state.item_count = counter;
+                }
+            }
+            StateVarInitialValue::Bool(_) => {
+                let boolean = value
+                    .as_bool()
+                    .ok_or_else(|| format!("declared bool field '{name}' must be boolean"))?;
+                state.booleans.insert(name.clone(), boolean);
+            }
+            StateVarInitialValue::String(_) => {}
+        }
+    }
+    Ok(())
+}
+
+/// Validate caller-supplied values for declared runtime state variables.
+///
+/// Internal overflow blob envelopes are allowed in stored state, but callers
+/// cannot submit them in creation, action, replay, or direct-update payloads.
+pub(crate) fn validate_declared_field_values(
+    values: &serde_json::Value,
+    table: &TransitionTable,
+) -> Result<(), String> {
+    let values = values
+        .as_object()
+        .ok_or_else(|| "declared field payload must be an object".to_string())?;
+    for (name, value) in values {
+        match runtime_field_kind(table, name) {
+            Some(RuntimeFieldKind::Counter) => {
+                if value
+                    .as_u64()
+                    .and_then(|value| usize::try_from(value).ok())
+                    .is_none()
+                {
+                    return Err(format!("runtime counter field '{name}' must be a usize"));
+                }
+            }
+            Some(RuntimeFieldKind::String) if value.as_str().is_none() => {
+                return Err(format!("runtime string field '{name}' must be a string"));
+            }
+            _ => {}
+        }
+    }
+    Ok(())
+}
 
 /// Build an [`EvalContext`] from current entity state.
 ///
@@ -223,6 +416,7 @@ pub fn process_action_with_xref_and_field_mode(
     cross_entity_booleans: &std::collections::BTreeMap<String, bool>,
     field_sync_mode: FieldSyncMode,
 ) -> ProcessResult {
+    let state_before_action = state.clone();
     if state.events_since_snapshot >= MAX_EVENTS_SINCE_SNAPSHOT {
         return ProcessResult {
             success: false,
@@ -260,8 +454,34 @@ pub fn process_action_with_xref_and_field_mode(
             let effective_params = normalize_ref_action_params(state, action, params);
             let params = effective_params.as_ref();
 
+            if let Err(error) = validate_declared_field_values(params, table) {
+                return ProcessResult {
+                    success: false,
+                    event: None,
+                    custom_effects: vec![],
+                    scheduled_actions: vec![],
+                    spawn_requests: vec![],
+                    overflow_blobs: vec![],
+                    error: Some(error),
+                };
+            }
+
             let (custom_effects, scheduled_actions, spawn_requests, schedule_at_requests) =
-                apply_effects(state, &transition_result.effects, params);
+                match apply_effects(state, &transition_result.effects, params) {
+                    Ok(result) => result,
+                    Err(error) => {
+                        *state = state_before_action;
+                        return ProcessResult {
+                            success: false,
+                            event: None,
+                            custom_effects: vec![],
+                            scheduled_actions: vec![],
+                            spawn_requests: vec![],
+                            overflow_blobs: vec![],
+                            error: Some(error),
+                        };
+                    }
+                };
             apply_new_state_fallback(state, &from_status, &to_status);
             let overflow_blobs = sync_fields_with_metadata(
                 state,
@@ -269,6 +489,19 @@ pub fn process_action_with_xref_and_field_mode(
                 field_sync_mode,
                 Some(&table.state_var_metadata),
             );
+
+            if let Some(error) = runtime_invariant_failure(state, table) {
+                *state = state_before_action;
+                return ProcessResult {
+                    success: false,
+                    event: None,
+                    custom_effects: vec![],
+                    scheduled_actions: vec![],
+                    spawn_requests: vec![],
+                    overflow_blobs: vec![],
+                    error: Some(error),
+                };
+            }
 
             // Resolve deferred schedule_at requests now that fields are synced
             let mut all_scheduled = scheduled_actions;
@@ -323,6 +556,40 @@ pub fn process_action_with_xref_and_field_mode(
             error: Some(format!("Unknown action: {}", action)),
         },
     }
+}
+
+pub(crate) fn runtime_invariant_failure(
+    state: &EntityState,
+    table: &TransitionTable,
+) -> Option<String> {
+    let Some(fields) = state.fields.as_object() else {
+        return (!table.runtime_invariants.is_empty()).then(|| {
+            "Action rejected because runtime safety state fields are not an object".to_string()
+        });
+    };
+    table.runtime_invariants.iter().find_map(|invariant| {
+        if invariant.enforcement_version
+            != temper_spec::automaton::RUNTIME_INVARIANT_ENFORCEMENT_VERSION
+        {
+            return Some(format!(
+                "Unsupported runtime safety contract version {} for invariant '{}'",
+                invariant.enforcement_version, invariant.name
+            ));
+        }
+        let active = invariant.when.is_empty() || invariant.when.contains(&state.status);
+        (active
+            && !temper_spec::automaton::evaluate_runtime_assert(
+                &invariant.assertion,
+                &state.counters,
+                fields,
+            ))
+        .then(|| {
+            format!(
+                "Action rejected by runtime safety invariant '{}': {:?}",
+                invariant.name, invariant.assertion
+            )
+        })
+    })
 }
 
 fn validate_ref_action_contract(
@@ -443,12 +710,7 @@ pub fn apply_effects(
     state: &mut EntityState,
     effects: &[Effect],
     params: &serde_json::Value,
-) -> (
-    Vec<String>,
-    Vec<ScheduledAction>,
-    Vec<SpawnRequest>,
-    Vec<ScheduleAtRequest>,
-) {
+) -> Result<AppliedEffects, String> {
     let mut custom_effects = Vec::new();
     let mut scheduled_actions = Vec::new();
     let mut spawn_requests = Vec::new();
@@ -460,8 +722,16 @@ pub fn apply_effects(
                 state.status = s.clone();
             }
             Effect::IncrementItems => {
-                state.item_count += 1;
-                *state.counters.entry("items".to_string()).or_default() += 1;
+                let item_count = state
+                    .item_count
+                    .checked_add(1)
+                    .ok_or_else(|| "Counter 'items' overflowed its runtime range".to_string())?;
+                let counter = state.counters.get("items").copied().unwrap_or_default();
+                let counter = counter
+                    .checked_add(1)
+                    .ok_or_else(|| "Counter 'items' overflowed its runtime range".to_string())?;
+                state.item_count = item_count;
+                state.counters.insert("items".to_string(), counter);
             }
             Effect::DecrementItems => {
                 state.item_count = state.item_count.saturating_sub(1);
@@ -469,18 +739,30 @@ pub fn apply_effects(
                 *c = c.saturating_sub(1);
             }
             Effect::IncrementCounter(var) => {
-                *state.counters.entry(var.clone()).or_default() += 1;
+                let value = state.counters.get(var).copied().unwrap_or_default();
+                let value = value
+                    .checked_add(1)
+                    .ok_or_else(|| format!("Counter '{var}' overflowed its runtime range"))?;
                 // Keep legacy item_count in sync.
                 if var == "items" {
-                    state.item_count += 1;
+                    state.item_count = state.item_count.checked_add(1).ok_or_else(|| {
+                        "Counter 'items' overflowed its runtime range".to_string()
+                    })?;
                 }
+                state.counters.insert(var.clone(), value);
             }
             Effect::IncrementCounterByParam { var, param } => {
                 let delta = counter_delta_from_params(params, param);
-                *state.counters.entry(var.clone()).or_default() += delta;
+                let value = state.counters.get(var).copied().unwrap_or_default();
+                let value = value
+                    .checked_add(delta)
+                    .ok_or_else(|| format!("Counter '{var}' overflowed its runtime range"))?;
                 if var == "items" {
-                    state.item_count += delta;
+                    state.item_count = state.item_count.checked_add(delta).ok_or_else(|| {
+                        "Counter 'items' overflowed its runtime range".to_string()
+                    })?;
                 }
+                state.counters.insert(var.clone(), value);
             }
             Effect::DecrementCounter(var) => {
                 let c = state.counters.entry(var.clone()).or_default();
@@ -649,19 +931,21 @@ pub fn apply_effects(
         }
     }
 
-    (
+    Ok((
         custom_effects,
         scheduled_actions,
         spawn_requests,
         schedule_at_requests,
-    )
+    ))
 }
 
 fn counter_delta_from_params(params: &serde_json::Value, param: &str) -> usize {
     params
         .get(param)
         .and_then(|value| match value {
-            serde_json::Value::Number(number) => number.as_u64().map(|v| v as usize),
+            serde_json::Value::Number(number) => number
+                .as_u64()
+                .and_then(|value| usize::try_from(value).ok()),
             serde_json::Value::String(text) => text.parse::<usize>().ok(),
             _ => None,
         })
@@ -944,6 +1228,193 @@ effect = [{ type = "schedule", action = "Refresh", delay_seconds = 2700 }]
         assert_eq!(result.scheduled_actions[0].delay_seconds, 2700);
     }
 
+    #[test]
+    fn counter_overflow_rejects_action_and_rolls_back_all_tentative_effects() {
+        let _guard = temper_runtime::scheduler::install_deterministic_context(213);
+        let spec = r#"
+[automaton]
+name = "Meter"
+states = ["Active"]
+initial = "Active"
+allow_indefinite_states = ["Active"]
+
+[[state]]
+name = "used"
+type = "counter"
+initial = "0"
+
+[[action]]
+name = "Consume"
+from = ["Active"]
+to = "Active"
+effect = [{ type = "increment", var = "used" }]
+"#;
+        let table = temper_jit::table::TransitionTable::from_ioa_source(spec);
+        let mut state = build_initial_entity_state("Meter", "m-1", &table, &serde_json::json!({}))
+            .expect("build initial meter state");
+        state.counters.insert("used".into(), usize::MAX);
+        let before = serde_json::to_value(&state).unwrap();
+
+        let result = process_action(&mut state, &table, "Consume", &serde_json::json!({}));
+
+        assert!(!result.success);
+        assert!(
+            result
+                .error
+                .as_deref()
+                .is_some_and(|error| error.contains("overflowed its runtime range"))
+        );
+        assert_eq!(
+            serde_json::to_value(&state).unwrap(),
+            before,
+            "overflow must not leave partial state"
+        );
+        assert!(result.event.is_none(), "rejected overflow is never durable");
+    }
+
+    #[test]
+    fn invalid_declared_initial_values_fail_instead_of_falling_back_to_defaults() {
+        let spec = r#"
+[automaton]
+name = "Meter"
+states = ["Active"]
+initial = "Active"
+allow_indefinite_states = ["Active"]
+
+[[state]]
+name = "used"
+type = "counter"
+initial = "7"
+
+[[state]]
+name = "label"
+type = "string"
+initial = "ready"
+
+[[state]]
+name = "limit"
+type = "counter"
+initial = "10"
+
+[[invariant]]
+name = "WithinLimit"
+when = ["Active"]
+assert = "used <= limit"
+
+[[invariant]]
+name = "LabelRequired"
+when = ["Active"]
+assert = "label != ''"
+"#;
+        let table = temper_jit::table::TransitionTable::from_ioa_source(spec);
+
+        let counter_error = build_initial_entity_state(
+            "Meter",
+            "m-invalid-counter",
+            &table,
+            &serde_json::json!({"used": "not-a-counter"}),
+        )
+        .expect_err("invalid counter must not retain the declared default");
+        assert!(counter_error.contains("must be a usize"));
+
+        let forged_blob_error = build_initial_entity_state(
+            "Meter",
+            "m-invalid-string",
+            &table,
+            &serde_json::json!({
+                "label": {
+                    "__temper_blob_ref": "fake",
+                    "__temper_blob_encoding": "json"
+                }
+            }),
+        )
+        .expect_err("caller-supplied blob envelope must not satisfy a declared string");
+        assert!(forged_blob_error.contains("must be a string"));
+    }
+
+    #[test]
+    fn oversized_nonempty_string_blob_ref_preserves_runtime_invariant_semantics() {
+        let _guard = temper_runtime::scheduler::install_deterministic_context(213);
+        let spec = r#"
+[automaton]
+name = "Document"
+states = ["Active"]
+initial = "Active"
+allow_indefinite_states = ["Active"]
+
+[[state]]
+name = "body"
+type = "string"
+initial = "ready"
+overflow_inline_max_bytes = 8
+
+[[invariant]]
+name = "BodyRequired"
+when = ["Active"]
+assert = "body != ''"
+
+[[action]]
+name = "Update"
+from = ["Active"]
+to = "Active"
+"#;
+        let table = temper_jit::table::TransitionTable::from_ioa_source(spec);
+        let mut state =
+            build_initial_entity_state("Document", "d-1", &table, &serde_json::json!({}))
+                .expect("build initial document state");
+
+        let forged = process_action_with_xref_and_field_mode(
+            &mut state,
+            &table,
+            "Update",
+            &serde_json::json!({
+                "body": {
+                    "__temper_blob_ref": "fake",
+                    "__temper_blob_encoding": "json"
+                }
+            }),
+            &std::collections::BTreeMap::new(),
+            FieldSyncMode::BlobRefs {
+                default_inline_max: DEFAULT_FIELD_INLINE_MAX,
+            },
+        );
+        assert!(
+            !forged.success,
+            "caller-supplied blob envelopes are not strings"
+        );
+        assert!(
+            forged
+                .error
+                .as_deref()
+                .is_some_and(|error| error.contains("must be a string"))
+        );
+
+        let result = process_action_with_xref_and_field_mode(
+            &mut state,
+            &table,
+            "Update",
+            &serde_json::json!({"body": "a durable nonempty body"}),
+            &std::collections::BTreeMap::new(),
+            FieldSyncMode::BlobRefs {
+                default_inline_max: DEFAULT_FIELD_INLINE_MAX,
+            },
+        );
+
+        assert!(
+            result.success,
+            "blob projection must preserve logical non-emptiness"
+        );
+        assert_eq!(result.overflow_blobs.len(), 1);
+        assert!(
+            state
+                .fields
+                .get("body")
+                .and_then(serde_json::Value::as_object)
+                .is_some_and(|object| object.contains_key("__temper_blob_ref"))
+        );
+        assert!(runtime_invariant_failure(&state, &table).is_none());
+    }
+
     /// Build a minimal `EntityState` for guard-error rendering tests.
     fn test_state(entity_type: &str, status: &str) -> EntityState {
         EntityState {
@@ -1058,7 +1529,7 @@ to = "Closed"
         };
 
         let (custom, scheduled, _spawns, _schedule_at) =
-            apply_effects(&mut state, &effects, &serde_json::json!({}));
+            apply_effects(&mut state, &effects, &serde_json::json!({})).unwrap();
 
         assert!(custom.is_empty());
         assert_eq!(scheduled.len(), 1);
@@ -1104,7 +1575,8 @@ to = "Closed"
                 "size_bytes": "30",
                 "released_bytes": 7,
             }),
-        );
+        )
+        .unwrap();
 
         assert_eq!(state.counters.get("used_bytes"), Some(&33));
     }

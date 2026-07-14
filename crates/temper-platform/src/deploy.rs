@@ -17,6 +17,7 @@ use temper_spec::automaton;
 use temper_spec::csdl::parse_csdl;
 use temper_store_turso::spec_content_hash;
 use temper_verify::cascade::{CascadeResult, VerificationCascade};
+use temper_verify::unsupported_invariant_errors_from_ioa;
 
 use crate::protocol::{PlatformEvent, VerifyStepStatus};
 use crate::state::PlatformState;
@@ -209,6 +210,14 @@ impl DeployPipeline {
             // and already verified in the registry.
             let content_hash = spec_content_hash(&entity.ioa_source);
             let tenant_id = TenantId::new(&input.tenant_name);
+            // Capability validation is deliberately evaluated before cached pass
+            // state. Verification artifacts created before TVE001 existed cannot
+            // make an unsupported safety claim deployable forever.
+            let capability_errors = unsupported_invariant_errors_from_ioa(&entity.ioa_source)
+                .expect("parsed deployment IOA must build a verification model");
+            let runtime_warnings =
+                temper_verify::runtime_enforcement_warnings_from_ioa(&entity.ioa_source)
+                    .expect("parsed deployment IOA must build runtime enforcement disclosures");
             let already_verified = {
                 let registry = state.registry.read().unwrap(); // ci-ok: infallible lock
                 registry
@@ -221,7 +230,26 @@ impl DeployPipeline {
                         .is_some_and(|vs| vs.is_passed())
             };
 
-            let result = if already_verified {
+            let result = if !capability_errors.is_empty() {
+                state.broadcast(PlatformEvent::VerifyStatus {
+                    tenant: input.tenant_name.clone(),
+                    level: "Invariant Capability".into(),
+                    status: VerifyStepStatus::Failed,
+                    summary: format!(
+                        "Spec {} declares {} unsupported safety invariant(s)",
+                        entity.entity_type,
+                        capability_errors.len()
+                    ),
+                });
+                CascadeResult {
+                    all_passed: false,
+                    levels: vec![],
+                    warnings: runtime_warnings,
+                    errors: capability_errors,
+                    reachable_paths: None,
+                    composite_report: None,
+                }
+            } else if already_verified {
                 tracing::info!(
                     "Spec {} unchanged (hash={}…), skipping cascade",
                     entity.entity_type,
@@ -237,7 +265,8 @@ impl DeployPipeline {
                 CascadeResult {
                     all_passed: true,
                     levels: vec![],
-                    warnings: vec![],
+                    warnings: runtime_warnings,
+                    errors: vec![],
                     reachable_paths: None,
                     composite_report: None,
                 }
@@ -472,6 +501,47 @@ to = "Done"
 kind = "internal"
 "#;
 
+    const UNSUPPORTED_TASK_IOA: &str = r#"
+[automaton]
+name = "Task"
+initial = "Open"
+states = ["Open"]
+allow_indefinite_states = ["Open"]
+
+[[state]]
+name = "used_bytes"
+type = "counter"
+initial = "0"
+
+[[state]]
+name = "quota_limit"
+type = "counter"
+initial = "1"
+
+[[invariant]]
+name = "WithinQuota"
+when = ["Open"]
+assert = "used_bytes ** quota_limit"
+"#;
+
+    const RUNTIME_ENFORCED_TASK_IOA: &str = r#"
+[automaton]
+name = "Task"
+initial = "Open"
+states = ["Open"]
+allow_indefinite_states = ["Open"]
+
+[[state]]
+name = "title"
+type = "string"
+initial = "ready"
+
+[[invariant]]
+name = "TitleRequired"
+when = ["Open"]
+assert = "title != ''"
+"#;
+
     const TASK_CSDL: &str = r#"<?xml version="1.0" encoding="UTF-8"?>
 <edmx:Edmx Version="4.0" xmlns:edmx="http://docs.oasis-open.org/odata/ns/edmx">
   <edmx:DataServices>
@@ -575,6 +645,96 @@ kind = "internal"
         assert!(entity_result.cascade.is_some());
         let cascade = entity_result.cascade.as_ref().unwrap();
         assert!(cascade.all_passed);
+    }
+
+    #[test]
+    fn unchanged_cached_pass_cannot_bypass_invariant_capability_gate() {
+        let state = PlatformState::new(None);
+        let tenant = TenantId::new("cached-tenant");
+        {
+            let mut registry = state.registry.write().unwrap();
+            registry.register_tenant(
+                tenant.clone(),
+                parse_csdl(TASK_CSDL).expect("parse CSDL"),
+                TASK_CSDL.to_string(),
+                &[("Task", UNSUPPORTED_TASK_IOA)],
+            );
+            registry.set_verification_status(
+                &tenant,
+                "Task",
+                temper_server::registry::VerificationStatus::Completed(
+                    temper_server::registry::EntityVerificationResult {
+                        all_passed: true,
+                        levels: vec![],
+                        verified_at: "before-tve001".to_string(),
+                    },
+                ),
+            );
+        }
+
+        let input = DeployInput {
+            tenant_name: "cached-tenant".into(),
+            csdl_xml: TASK_CSDL.into(),
+            entities: vec![EntitySpecSource {
+                entity_type: "Task".into(),
+                ioa_source: UNSUPPORTED_TASK_IOA.into(),
+            }],
+            wasm_modules: std::collections::BTreeMap::new(),
+        };
+        let result = DeployPipeline::verify_and_deploy(&state, &input);
+
+        assert!(!result.success);
+        let cascade = result.entity_results[0]
+            .cascade
+            .as_ref()
+            .expect("capability result");
+        assert!(!cascade.all_passed);
+        assert!(cascade.levels.is_empty());
+        assert_eq!(cascade.errors[0].code, "TVE001");
+    }
+
+    #[test]
+    fn unchanged_cached_pass_preserves_runtime_enforcement_disclosure() {
+        let state = PlatformState::new(None);
+        let tenant = TenantId::new("cached-runtime-tenant");
+        {
+            let mut registry = state.registry.write().unwrap();
+            registry.register_tenant(
+                tenant.clone(),
+                parse_csdl(TASK_CSDL).expect("parse CSDL"),
+                TASK_CSDL.to_string(),
+                &[("Task", RUNTIME_ENFORCED_TASK_IOA)],
+            );
+            registry.set_verification_status(
+                &tenant,
+                "Task",
+                temper_server::registry::VerificationStatus::Completed(
+                    temper_server::registry::EntityVerificationResult {
+                        all_passed: true,
+                        levels: vec![],
+                        verified_at: "runtime-cache".to_string(),
+                    },
+                ),
+            );
+        }
+
+        let input = DeployInput {
+            tenant_name: "cached-runtime-tenant".into(),
+            csdl_xml: TASK_CSDL.into(),
+            entities: vec![EntitySpecSource {
+                entity_type: "Task".into(),
+                ioa_source: RUNTIME_ENFORCED_TASK_IOA.into(),
+            }],
+            wasm_modules: std::collections::BTreeMap::new(),
+        };
+        let result = DeployPipeline::verify_and_deploy(&state, &input);
+
+        assert!(result.success);
+        let cascade = result.entity_results[0].cascade.as_ref().unwrap();
+        assert!(cascade.levels.is_empty(), "unchanged spec should use cache");
+        assert!(cascade.warnings.iter().any(|warning| {
+            warning.contains("TitleRequired") && warning.contains("not model-proved")
+        }));
     }
 
     #[test]

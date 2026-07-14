@@ -40,6 +40,24 @@ module = "scm_ingest_pack"
     )))
 }
 
+const DELETE_INVARIANT_IOA: &str = r#"
+[automaton]
+name = "Document"
+states = ["Active", "Deleted"]
+initial = "Active"
+allow_indefinite_states = ["Active"]
+
+[[state]]
+name = "deletion_reason"
+type = "string"
+initial = ""
+
+[[invariant]]
+name = "DeletedRequiresReason"
+when = ["Deleted"]
+assert = "deletion_reason != ''"
+"#;
+
 #[test]
 fn event_budget_workspace_id_uses_workspace_entity_id_or_field() {
     let workspace_state = EntityState {
@@ -548,6 +566,450 @@ async fn replay_skips_schema_mismatched_events() {
     assert_eq!(response.state.sequence_nr, 2);
     // Only the good event contributed to total_event_count.
     assert_eq!(response.state.total_event_count, 1);
+}
+
+/// Durable history that violates the current runtime safety contract must not
+/// hydrate into a live entity. This covers both full journal replay and the
+/// same validation applied after loading a snapshot plus its event tail.
+#[cfg(feature = "sim")]
+#[tokio::test]
+async fn replay_rejects_persisted_runtime_invariant_violation() {
+    use temper_runtime::persistence::EventStore;
+    use temper_store_sim::SimEventStore;
+
+    let table = TransitionTable::from_ioa_source(
+        r#"
+[automaton]
+name = "Goal"
+states = ["Draft", "Active"]
+initial = "Draft"
+
+[[state]]
+name = "goal"
+type = "string"
+initial = ""
+
+[[action]]
+name = "Create"
+kind = "input"
+from = ["Draft"]
+to = "Active"
+params = ["goal"]
+
+[[invariant]]
+name = "active_goal_required"
+when = ["Active"]
+assert = "goal != ''"
+"#,
+    );
+    let store = Arc::new(SimEventStore::no_faults(213));
+    let pid = "default:Goal:goal-replay-1";
+    let envelope = PersistenceEnvelope {
+        sequence_nr: 0,
+        event_type: "Create".to_string(),
+        payload: serde_json::json!({
+            "action": "Create",
+            "from_status": "Draft",
+            "to_status": "Active",
+            "timestamp": "2024-01-01T00:00:00Z",
+            "params": {"goal": ""}
+        }),
+        metadata: EventMetadata {
+            event_id: sim_uuid(),
+            causation_id: sim_uuid(),
+            correlation_id: sim_uuid(),
+            timestamp: sim_now(),
+            actor_id: pid.to_string(),
+        },
+    };
+    store.append(pid, 0, &[envelope]).await.unwrap();
+    let boxed_store = crate::storage::BoxedEventStore::from_arc(store);
+
+    let error = recover_entity_state_from_store(
+        "default",
+        "Goal",
+        "goal-replay-1",
+        &table,
+        &boxed_store,
+        crate::storage::BackendLabel::Sim,
+        &serde_json::json!({}),
+        None,
+        true,
+    )
+    .await
+    .expect_err("invalid durable history must fail hydration");
+
+    assert!(
+        error
+            .to_string()
+            .contains("persisted event violates runtime safety contract"),
+        "unexpected replay error: {error}"
+    );
+}
+
+#[cfg(feature = "sim")]
+#[tokio::test]
+async fn hydration_rejects_invalid_snapshot_before_healing_tail_event() {
+    use temper_runtime::persistence::EventStore;
+    use temper_runtime::scheduler::install_deterministic_context;
+    use temper_store_sim::SimEventStore;
+
+    let (_guard, _clock, _id_gen) = install_deterministic_context(213);
+    let source = r#"
+[automaton]
+name = "Goal"
+states = ["Active"]
+initial = "Active"
+allow_indefinite_states = ["Active"]
+
+[[state]]
+name = "goal"
+type = "string"
+initial = ""
+
+[[action]]
+name = "Update"
+kind = "input"
+from = ["Active"]
+to = "Active"
+params = ["goal"]
+
+[[invariant]]
+name = "GoalRequired"
+when = ["Active"]
+assert = "goal != ''"
+"#;
+    let table = TransitionTable::from_ioa_source(source);
+    let store = Arc::new(SimEventStore::no_faults(213));
+    let pid = "default:Goal:goal-snapshot-1";
+    let event = |action: &str, params: serde_json::Value| PersistenceEnvelope {
+        sequence_nr: 0,
+        event_type: action.to_string(),
+        payload: serde_json::json!({
+            "action": action,
+            "from_status": "Active",
+            "to_status": "Active",
+            "timestamp": "2024-01-01T00:00:00Z",
+            "params": params
+        }),
+        metadata: EventMetadata {
+            event_id: sim_uuid(),
+            causation_id: sim_uuid(),
+            correlation_id: sim_uuid(),
+            timestamp: sim_now(),
+            actor_id: pid.to_string(),
+        },
+    };
+    store
+        .append(pid, 0, &[event("Created", serde_json::json!({}))])
+        .await
+        .unwrap();
+    store
+        .append(
+            pid,
+            1,
+            &[event("Update", serde_json::json!({"goal": "healed"}))],
+        )
+        .await
+        .unwrap();
+
+    let mut invalid_snapshot = crate::entity_actor::effects::build_initial_entity_state(
+        "Goal",
+        "goal-snapshot-1",
+        &table,
+        &serde_json::json!({}),
+    )
+    .expect("build snapshot state");
+    invalid_snapshot.sequence_nr = 1;
+    invalid_snapshot.total_event_count = 1;
+    store
+        .save_snapshot(
+            pid,
+            1,
+            &serde_json::to_vec(&invalid_snapshot).expect("serialize invalid snapshot"),
+        )
+        .await
+        .unwrap();
+
+    let error = recover_entity_state_from_store(
+        "default",
+        "Goal",
+        "goal-snapshot-1",
+        &table,
+        &crate::storage::BoxedEventStore::from_arc(store),
+        crate::storage::BackendLabel::Sim,
+        &serde_json::json!({}),
+        None,
+        true,
+    )
+    .await
+    .expect_err("invalid snapshot must fail before a healing tail event");
+    assert!(
+        error
+            .to_string()
+            .contains("persisted snapshot violates runtime safety contract"),
+        "unexpected snapshot error: {error}"
+    );
+}
+
+/// Initial fields are part of the first durable entity state, so invariants
+/// active in the initial status must gate bootstrap persistence as well.
+#[cfg(feature = "sim")]
+#[tokio::test]
+async fn creation_rejects_invalid_initial_runtime_state_before_persistence() {
+    use temper_runtime::persistence::EventStore;
+    use temper_store_sim::SimEventStore;
+
+    let source = r#"
+[automaton]
+name = "ToolCall"
+states = ["Pending"]
+initial = "Pending"
+allow_indefinite_states = ["Pending"]
+
+[[state]]
+name = "agent_id"
+type = "string"
+initial = ""
+
+[[invariant]]
+name = "RequiresAgentId"
+when = ["Pending"]
+assert = "agent_id != ''"
+"#;
+    let table = Arc::new(RwLock::new(TransitionTable::from_ioa_source(source)));
+    let table_snapshot = table.read().unwrap().clone();
+    let initial_state = crate::entity_actor::effects::build_initial_entity_state(
+        "ToolCall",
+        "tc-invalid",
+        &table_snapshot,
+        &serde_json::json!({}),
+    )
+    .expect("build typed initial state");
+    let diagnostic =
+        crate::entity_actor::effects::runtime_invariant_failure(&initial_state, &table_snapshot)
+            .expect("empty agent_id must identify the blocking invariant");
+    assert!(diagnostic.contains("RequiresAgentId"));
+    let store = Arc::new(SimEventStore::no_faults(213));
+    let boxed_store = crate::storage::BoxedEventStore::from_arc(store.clone());
+    let system = ActorSystem::new("sim-runtime-invariant-create");
+    let actor = EntityActor::with_persistence(
+        "ToolCall",
+        "tc-invalid",
+        table,
+        serde_json::json!({}),
+        boxed_store,
+        crate::storage::BackendLabel::Sim,
+    );
+    let actor_ref = system.spawn(actor, "tc-invalid");
+
+    let response: Result<EntityResponse, _> = actor_ref
+        .ask(EntityMsg::GetState, Duration::from_secs(5))
+        .await;
+    let error = response.expect_err("invalid initial state must fail actor startup");
+    assert_eq!(
+        error,
+        temper_runtime::actor::ActorError::Stopped,
+        "invalid initialization must stop the actor"
+    );
+    assert!(
+        store
+            .read_events("default:ToolCall:tc-invalid", 0)
+            .await
+            .expect("read invalid entity journal")
+            .is_empty(),
+        "invalid initial state must not persist a bootstrap event"
+    );
+}
+
+#[cfg(feature = "sim")]
+#[tokio::test]
+async fn direct_field_update_cannot_bypass_runtime_invariant() {
+    let source = r#"
+[automaton]
+name = "Goal"
+states = ["Active"]
+initial = "Active"
+allow_indefinite_states = ["Active"]
+
+[[state]]
+name = "goal"
+type = "string"
+initial = ""
+
+[[invariant]]
+name = "GoalRequired"
+when = ["Active"]
+assert = "goal != ''"
+"#;
+    let table = Arc::new(RwLock::new(TransitionTable::from_ioa_source(source)));
+    let system = ActorSystem::new("sim-runtime-invariant-field-update");
+    let actor = EntityActor::new(
+        "Goal",
+        "goal-update-1",
+        table,
+        serde_json::json!({"goal": "ship safely"}),
+    );
+    let actor_ref = system.spawn(actor, "goal-update-1");
+
+    let rejected: EntityResponse = actor_ref
+        .ask(
+            EntityMsg::UpdateFields {
+                fields: serde_json::json!({"goal": ""}),
+                replace: false,
+            },
+            Duration::from_secs(5),
+        )
+        .await
+        .expect("field update reply");
+    assert!(!rejected.success);
+    assert_eq!(rejected.state.fields["goal"], "ship safely");
+    assert!(
+        rejected
+            .error
+            .as_deref()
+            .is_some_and(|error| error.contains("GoalRequired"))
+    );
+}
+
+#[cfg(feature = "sim")]
+#[tokio::test]
+async fn direct_counter_field_update_is_synchronized_and_rejected_atomically() {
+    let source = r#"
+[automaton]
+name = "Workspace"
+states = ["Active"]
+initial = "Active"
+allow_indefinite_states = ["Active"]
+
+[[state]]
+name = "used_bytes"
+type = "counter"
+initial = "0"
+
+[[state]]
+name = "quota_limit"
+type = "counter"
+initial = "10"
+
+[[invariant]]
+name = "WithinQuota"
+when = ["Active"]
+assert = "used_bytes <= quota_limit"
+"#;
+    let table = Arc::new(RwLock::new(TransitionTable::from_ioa_source(source)));
+    let system = ActorSystem::new("sim-runtime-invariant-counter-field-update");
+    let actor = EntityActor::new("Workspace", "ws-update-1", table, serde_json::json!({}));
+    let actor_ref = system.spawn(actor, "ws-update-1");
+
+    let rejected: EntityResponse = actor_ref
+        .ask(
+            EntityMsg::UpdateFields {
+                fields: serde_json::json!({"used_bytes": 11}),
+                replace: false,
+            },
+            Duration::from_secs(5),
+        )
+        .await
+        .expect("counter field update reply");
+    assert!(!rejected.success);
+    assert_eq!(rejected.state.counters.get("used_bytes"), Some(&0));
+    assert_eq!(rejected.state.counters.get("quota_limit"), Some(&10));
+}
+
+#[cfg(feature = "sim")]
+#[tokio::test]
+async fn delete_rolls_back_before_persisting_runtime_invariant_violation() {
+    use temper_runtime::persistence::EventStore;
+    use temper_runtime::scheduler::install_deterministic_context;
+    use temper_store_sim::SimEventStore;
+
+    let (_guard, _clock, _id_gen) = install_deterministic_context(213);
+    let table = Arc::new(RwLock::new(TransitionTable::from_ioa_source(
+        DELETE_INVARIANT_IOA,
+    )));
+    let store = Arc::new(SimEventStore::no_faults(213));
+    let system = ActorSystem::new("sim-runtime-invariant-delete");
+    let actor = EntityActor::with_persistence(
+        "Document",
+        "doc-delete-1",
+        table,
+        serde_json::json!({}),
+        crate::storage::BoxedEventStore::from_arc(store.clone()),
+        crate::storage::BackendLabel::Sim,
+    );
+    let actor_ref = system.spawn(actor, "doc-delete-1");
+
+    let rejected: EntityResponse = actor_ref
+        .ask(EntityMsg::Delete, Duration::from_secs(5))
+        .await
+        .expect("delete reply");
+    assert!(!rejected.success);
+    assert_eq!(rejected.state.status, "Active");
+    assert!(
+        rejected
+            .error
+            .as_deref()
+            .is_some_and(|error| error.contains("DeletedRequiresReason"))
+    );
+    let events = store
+        .read_events("default:Document:doc-delete-1", 0)
+        .await
+        .expect("read document journal");
+    assert_eq!(events.len(), 1, "only bootstrap Created may be durable");
+    assert_eq!(events[0].event_type, "Created");
+}
+
+#[cfg(feature = "sim")]
+#[tokio::test]
+async fn replay_rejects_invalid_persisted_tombstone() {
+    use temper_runtime::persistence::EventStore;
+    use temper_runtime::scheduler::install_deterministic_context;
+    use temper_store_sim::SimEventStore;
+
+    let (_guard, _clock, _id_gen) = install_deterministic_context(213);
+    let table = TransitionTable::from_ioa_source(DELETE_INVARIANT_IOA);
+    let store = Arc::new(SimEventStore::no_faults(213));
+    let pid = "default:Document:doc-tombstone-1";
+    let tombstone = PersistenceEnvelope {
+        sequence_nr: 0,
+        event_type: "Deleted".to_string(),
+        payload: serde_json::json!({
+            "action": "Deleted",
+            "from_status": "Active",
+            "to_status": "Deleted",
+            "timestamp": "2024-01-01T00:00:00Z",
+            "params": {}
+        }),
+        metadata: EventMetadata {
+            event_id: sim_uuid(),
+            causation_id: sim_uuid(),
+            correlation_id: sim_uuid(),
+            timestamp: sim_now(),
+            actor_id: pid.to_string(),
+        },
+    };
+    store.append(pid, 0, &[tombstone]).await.unwrap();
+
+    let error = recover_entity_state_from_store(
+        "default",
+        "Document",
+        "doc-tombstone-1",
+        &table,
+        &crate::storage::BoxedEventStore::from_arc(store),
+        crate::storage::BackendLabel::Sim,
+        &serde_json::json!({}),
+        None,
+        true,
+    )
+    .await
+    .expect_err("invalid tombstone must fail hydration");
+    assert!(
+        error
+            .to_string()
+            .contains("persisted tombstone violates runtime safety contract"),
+        "unexpected tombstone error: {error}"
+    );
 }
 
 /// A committed cross-entity-guarded transition must survive replay.

@@ -252,6 +252,13 @@ fn validate_actor_runtime_compatible(
     entity_type: &str,
     spec: &EntitySpec,
 ) -> Result<()> {
+    let runtime_invariants = temper_spec::automaton::compile_runtime_invariants(&spec.automaton);
+    if !runtime_invariants.is_empty() {
+        bail!(
+            "tenant {tenant} entity {entity_type} declares runtime-enforced invariants, which are not yet supported by --actor-runtime postgres"
+        );
+    }
+
     if !spec.integrations.is_empty() {
         bail!(
             "tenant {tenant} entity {entity_type} declares legacy integrations, which are not yet supported by --actor-runtime postgres"
@@ -401,6 +408,31 @@ mod tests {
         let err = collect_actor_runtime_definitions(&registry, &["Process".into()]).unwrap_err();
 
         assert!(err.to_string().contains("not yet supported"));
+    }
+
+    #[test]
+    fn rejects_runtime_enforced_invariants_on_postgres_actor_runtime() {
+        let ioa = r#"
+[automaton]
+name = "Goal"
+states = ["Active"]
+initial = "Active"
+allow_indefinite_states = ["Active"]
+
+[[state]]
+name = "goal"
+type = "string"
+initial = ""
+
+[[invariant]]
+name = "GoalRequired"
+when = ["Active"]
+assert = "goal != ''"
+"#;
+        let registry = registry_with("alpha", "Goal", ioa);
+        let error = collect_actor_runtime_definitions(&registry, &["Goal".into()]).unwrap_err();
+
+        assert!(error.to_string().contains("runtime-enforced invariants"));
     }
 
     #[test]

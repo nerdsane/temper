@@ -14,6 +14,7 @@ use temper_spec::automaton;
 use temper_spec::csdl::parse_csdl;
 use temper_store_turso::spec_content_hash;
 use temper_verify::cascade::VerificationCascade;
+use temper_verify::unsupported_invariant_errors_from_ioa;
 
 use crate::state::PlatformState;
 
@@ -140,6 +141,12 @@ fn bootstrap_tenant_specs_inner(
     for (entity_type, ioa_source) in specs {
         automaton::parse_automaton(ioa_source)
             .unwrap_or_else(|e| panic!("{label} spec {entity_type} failed to parse: {e}"));
+        let capability_errors = unsupported_invariant_errors_from_ioa(ioa_source)
+            .unwrap_or_else(|e| panic!("{label} spec {entity_type} failed to build: {e}"));
+        assert!(
+            capability_errors.is_empty(),
+            "{label} spec {entity_type} declares unsupported safety invariants: {capability_errors:?}"
+        );
     }
 
     // Hash-gated verification: only run the cascade for specs whose
@@ -769,6 +776,50 @@ initial = "Created"
                 ("Plan".to_string(), "sha256:plan".to_string()),
                 ("Task".to_string(), "sha256:task".to_string()),
             ]
+        );
+    }
+
+    #[test]
+    #[should_panic(expected = "declares unsupported safety invariants")]
+    fn cached_trusted_spec_cannot_bypass_invariant_capability_gate() {
+        let source = r#"
+[automaton]
+name = "Workspace"
+states = ["Active"]
+initial = "Active"
+allow_indefinite_states = ["Active"]
+
+[[state]]
+name = "used_bytes"
+type = "counter"
+initial = "0"
+
+[[state]]
+name = "quota_limit"
+type = "counter"
+initial = "1"
+
+[[invariant]]
+name = "WithinQuota"
+when = ["Active"]
+assert = "used_bytes ** quota_limit"
+"#;
+        let mut verified_cache = BTreeMap::new();
+        verified_cache.insert("Workspace".to_string(), (spec_content_hash(source), true));
+        let state = PlatformState::new(None);
+
+        bootstrap_tenant_specs(
+            &state,
+            "cached-tenant",
+            SYSTEM_CSDL,
+            &[("Workspace", source)],
+            BootstrapTenantSpecsOptions {
+                merge: false,
+                label: "CachedBundle",
+                verified_cache: &verified_cache,
+                cross_invariants_source: None,
+                verification_mode: BootstrapSpecVerificationMode::TrustBundle,
+            },
         );
     }
 

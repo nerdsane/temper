@@ -2,8 +2,32 @@ pub(super) fn parse_kv(line: &str) -> Option<(&str, String)> {
     let eq = line.find('=')?;
     let key = line[..eq].trim();
     let raw_value = line[eq + 1..].trim();
-    let value = raw_value.trim_matches('"').trim_matches('\'').to_string();
+    let value = parse_scalar_value(raw_value);
     Some((key, value))
+}
+
+pub(super) fn parse_scalar_value(raw_value: &str) -> String {
+    let Some(delimiter) = raw_value
+        .chars()
+        .next()
+        .filter(|ch| matches!(ch, '"' | '\''))
+    else {
+        return raw_value.to_string();
+    };
+
+    let content = &raw_value[delimiter.len_utf8()..];
+    let mut escaped = false;
+    for (offset, character) in content.char_indices() {
+        if character == delimiter && !escaped {
+            return content[..offset].to_string();
+        }
+        escaped = delimiter == '"' && character == '\\' && !escaped;
+        if character != '\\' {
+            escaped = false;
+        }
+    }
+
+    raw_value.to_string()
 }
 
 pub(super) fn parse_string_array(value: &str) -> Vec<String> {
@@ -149,7 +173,7 @@ pub(super) fn join_multiline_arrays(input: &str) -> Vec<String> {
     result
 }
 
-fn split_top_level(s: &str, delimiter: char) -> Vec<&str> {
+pub(super) fn split_top_level(s: &str, delimiter: char) -> Vec<&str> {
     let mut result = Vec::new();
     let mut start = 0;
     let mut bracket_depth = 0_i32;

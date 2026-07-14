@@ -17,6 +17,8 @@ use crate::model::{
     InvariantKind, TemperModel, TemperModelAction, TemperModelState, build_model_from_ioa,
 };
 
+mod capability;
+
 // ---------------------------------------------------------------------------
 // Public result types
 // ---------------------------------------------------------------------------
@@ -53,6 +55,9 @@ pub struct PropTestFailure {
 /// the first invariant that is violated.
 fn check_invariants(model: &TemperModel, state: &TemperModelState) -> Result<(), String> {
     for inv in &model.invariants {
+        if matches!(inv.kind, InvariantKind::Unverifiable { .. }) {
+            return Err(inv.name.clone());
+        }
         let triggered = inv.trigger_states.is_empty() || inv.trigger_states.contains(&state.status);
         if !triggered {
             continue;
@@ -116,7 +121,8 @@ fn kind_violated(
         InvariantKind::Or(parts) => parts
             .iter()
             .all(|k| kind_violated(k, required_states, model, state)),
-        InvariantKind::Unverifiable { .. } => false,
+        InvariantKind::RuntimeEnforced(_) => false,
+        InvariantKind::Unverifiable { .. } => true,
     }
 }
 
@@ -146,6 +152,9 @@ pub fn run_prop_tests_on_model(
 ) -> PropTestResult {
     let init_states = model.init_states();
     let init_state = &init_states[0];
+    if let Some(result) = capability::failure(model, init_state) {
+        return result;
+    }
 
     for case_idx in 0..num_cases {
         let mut rng_state: u64 = case_idx.wrapping_mul(6364136223846793005).wrapping_add(1);
@@ -227,6 +236,12 @@ pub fn run_prop_tests_with_shrinking_on_model(
     num_cases: u32,
     max_steps: usize,
 ) -> PropTestResult {
+    let init_states = model.init_states();
+    let init_state = init_states[0].clone();
+    if let Some(result) = capability::failure(model, &init_state) {
+        return result;
+    }
+
     let config = ProptestConfig {
         cases: num_cases,
         ..ProptestConfig::default()
@@ -234,9 +249,6 @@ pub fn run_prop_tests_with_shrinking_on_model(
 
     let mut runner = TestRunner::new(config);
     let strategy = proptest::collection::vec(0..1000usize, 0..=max_steps);
-
-    let init_states = model.init_states();
-    let init_state = init_states[0].clone();
 
     let result = runner.run(&strategy, |action_indices| {
         let mut state = init_state.clone();
@@ -460,12 +472,14 @@ mod tests {
                     trigger_states: vec![],
                     required_states: vec![],
                     kind: InvariantKind::StatusInSet,
+                    source_span: None,
                 },
                 ResolvedInvariant {
                     name: "OnlyA".to_string(),
                     trigger_states: vec!["B".to_string()],
                     required_states: vec!["A".to_string()],
                     kind: InvariantKind::Implication,
+                    source_span: None,
                 },
             ],
             liveness: vec![],

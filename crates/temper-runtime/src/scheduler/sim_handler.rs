@@ -28,6 +28,11 @@ pub struct SpecInvariant {
 /// `And(vec![BoolRequired{"migrations_ok", true}, BoolRequired{"typecheck_ok", true}])`.
 #[derive(Debug, Clone)]
 pub enum SpecAssert {
+    /// Assertion enforced atomically by the shared tentative-state contract.
+    RuntimeEnforced { enforcement_version: u32 },
+    /// An assertion outside the runtime simulation's supported typed forms.
+    /// This is retained explicitly and always fails instead of being omitted.
+    Unsupported { expression: String },
     /// A counter variable must be positive (e.g., `items > 0`).
     CounterPositive { var: String },
     /// The entity is in a terminal state — no further transitions allowed.

@@ -10,7 +10,8 @@
 //! Each level produces a pass/fail result. All levels run independently.
 
 use crate::checker::{self, VerificationResult};
-use crate::model::{self, InvariantKind, TemperModel};
+use crate::diagnostic::{InvariantCapabilityError, unsupported_invariant_errors};
+use crate::model::{self, TemperModel};
 use crate::proptest_gen::{self, PropTestResult};
 use crate::simulation::{self, SimConfig, SimulationResult};
 use crate::smt::{self, SmtResult};
@@ -86,8 +87,11 @@ pub struct CascadeResult {
     pub all_passed: bool,
     /// Per-level results.
     pub levels: Vec<LevelResult>,
-    /// Warnings about invariants that could not be verified at model level.
+    /// Non-fatal cascade enrichment warnings.
     pub warnings: Vec<String>,
+    /// Hard capability errors that prevented backend verification.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub errors: Vec<InvariantCapabilityError>,
     /// Reachable paths extracted after L1 model check (if path extraction was configured).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reachable_paths: Option<crate::paths::PathExtractionResult>,
@@ -244,8 +248,20 @@ impl VerificationCascade {
         let mut levels = Vec::new();
         let model = self.build_temper_model();
 
-        // Collect warnings for Unverifiable invariants.
-        let mut warnings = collect_unverifiable_warnings(&model);
+        let errors = unsupported_invariant_errors(&model)
+            .expect("cascade IOA model must retain invariant assertion source spans");
+        if !errors.is_empty() {
+            return CascadeResult {
+                all_passed: false,
+                levels,
+                warnings: Vec::new(),
+                errors,
+                reachable_paths: None,
+                composite_report: None,
+            };
+        }
+
+        let mut warnings = crate::diagnostic::runtime_enforcement_warnings(&model);
 
         // Level 0: SMT symbolic verification
         let l0 = self.run_symbolic_verification();
@@ -256,6 +272,7 @@ impl VerificationCascade {
                 all_passed: false,
                 levels,
                 warnings,
+                errors: Vec::new(),
                 reachable_paths: None,
                 composite_report: None,
             };
@@ -270,6 +287,7 @@ impl VerificationCascade {
                 all_passed: false,
                 levels,
                 warnings,
+                errors: Vec::new(),
                 reachable_paths: None,
                 composite_report: None,
             };
@@ -293,6 +311,7 @@ impl VerificationCascade {
                 all_passed: false,
                 levels,
                 warnings,
+                errors: Vec::new(),
                 reachable_paths,
                 composite_report: None,
             };
@@ -309,6 +328,7 @@ impl VerificationCascade {
                     composite_report: None,
                     levels,
                     warnings,
+                    errors: Vec::new(),
                     reachable_paths,
                 };
             }
@@ -332,6 +352,7 @@ impl VerificationCascade {
             all_passed,
             levels,
             warnings,
+            errors: Vec::new(),
             reachable_paths,
             composite_report,
         }
@@ -571,24 +592,6 @@ impl VerificationCascade {
     }
 }
 
-/// Collect warnings for invariants classified as `Unverifiable`.
-fn collect_unverifiable_warnings(model: &TemperModel) -> Vec<String> {
-    model
-        .invariants
-        .iter()
-        .filter_map(|inv| {
-            if let InvariantKind::Unverifiable { expression } = &inv.kind {
-                Some(format!(
-                    "invariant '{}' has unverifiable assertion '{}' — skipped at model level",
-                    inv.name, expression,
-                ))
-            } else {
-                None
-            }
-        })
-        .collect()
-}
-
 /// Build a [`CompositeCascadeReport`] from the configured scope, appending
 /// any build-time warnings (e.g. missing seed) to the cascade's warning
 /// list. Returns `None` if the plan cannot be built — the cascade still
@@ -622,11 +625,11 @@ fn build_composite_report(
 mod tests {
     use super::*;
 
-    const ORDER_IOA: &str = include_str!("../../../test-fixtures/specs/order.ioa.toml");
+    const VERIFIED_IOA: &str = include_str!("../../../test-fixtures/specs/directory.ioa.toml");
 
     #[test]
     fn test_full_cascade_passes_ioa() {
-        let cascade = VerificationCascade::from_ioa(ORDER_IOA)
+        let cascade = VerificationCascade::from_ioa(VERIFIED_IOA)
             .with_sim_seeds(5)
             .with_prop_test_cases(100);
 
@@ -640,7 +643,7 @@ mod tests {
 
     #[test]
     fn test_cascade_has_all_levels() {
-        let cascade = VerificationCascade::from_ioa(ORDER_IOA)
+        let cascade = VerificationCascade::from_ioa(VERIFIED_IOA)
             .with_sim_seeds(3)
             .with_prop_test_cases(50);
 
@@ -658,7 +661,7 @@ mod tests {
 
     #[test]
     fn test_cascade_level_summaries() {
-        let cascade = VerificationCascade::from_ioa(ORDER_IOA)
+        let cascade = VerificationCascade::from_ioa(VERIFIED_IOA)
             .with_sim_seeds(3)
             .with_prop_test_cases(50);
 
@@ -684,25 +687,36 @@ mod tests {
     }
 
     #[test]
-    fn test_cascade_warnings_for_unverifiable_invariants() {
-        let cascade = VerificationCascade::from_ioa(ORDER_IOA)
+    fn cascade_returns_structured_error_for_unverifiable_invariant() {
+        let spec = r#"
+[automaton]
+name = "Order"
+states = ["Draft", "Shipped"]
+initial = "Draft"
+
+[[invariant]]
+name = "ShipRequiresPayment"
+when = ["Shipped"]
+assert = "payment_captured"
+"#;
+        let cascade = VerificationCascade::from_ioa(spec)
             .with_sim_seeds(3)
             .with_prop_test_cases(50);
 
         let result = cascade.run();
-        // Order spec has "payment_captured" which is not a declared bool,
-        // so ShipRequiresPayment becomes Unverifiable.
+        assert!(!result.all_passed);
         assert!(
-            !result.warnings.is_empty(),
-            "Should have warnings for unverifiable invariants"
+            result.levels.is_empty(),
+            "backends must not run after capability failure"
         );
-        assert!(
-            result
-                .warnings
-                .iter()
-                .any(|w| w.contains("ShipRequiresPayment")),
-            "Should warn about ShipRequiresPayment, got: {:?}",
-            result.warnings,
+        assert!(result.warnings.is_empty());
+        let error = result.errors.first().expect("capability error");
+        assert_eq!(error.code, "TVE001");
+        assert_eq!(error.invariant, "ShipRequiresPayment");
+        assert_eq!(error.assertion, "payment_captured");
+        assert_eq!(
+            &spec[error.source_span.start.byte..error.source_span.end.byte],
+            "payment_captured"
         );
     }
 
@@ -728,7 +742,7 @@ initial = "1"
 [[invariant]]
 name = "WithinQuota"
 when = ["Active"]
-assert = "used_bytes <= quota_limit"
+assert = "used_bytes ** quota_limit"
 "#;
 
         let result = VerificationCascade::from_ioa(spec)
@@ -740,6 +754,143 @@ assert = "used_bytes <= quota_limit"
             !result.all_passed,
             "unsupported safety invariants must fail closed: {result:#?}"
         );
+        let error = result.errors.first().expect("capability error");
+        assert_eq!(error.code, "TVE001");
+        assert_eq!(error.invariant, "WithinQuota");
+        assert_eq!(error.assertion, "used_bytes ** quota_limit");
+        assert_eq!(error.source_span.start.line, 21);
+        assert_eq!(error.source_span.start.column, 11);
+        assert_eq!(
+            &spec[error.source_span.start.byte..error.source_span.end.byte],
+            "used_bytes ** quota_limit"
+        );
+        assert!(result.levels.is_empty());
+        assert!(result.warnings.is_empty());
+    }
+
+    #[test]
+    fn capability_preflight_rejects_unsupported_invariant_before_reachability() {
+        let spec = r#"
+[automaton]
+name = "UnreachableClaim"
+states = ["Active", "Unreachable"]
+initial = "Active"
+allow_indefinite_states = ["Active"]
+
+[[invariant]]
+name = "UnsupportedEvenWhenUnreachable"
+when = ["Unreachable"]
+assert = "left_counter <= right_counter"
+"#;
+
+        let result = VerificationCascade::from_ioa(spec)
+            .with_sim_seeds(0)
+            .with_prop_test_cases(0)
+            .run();
+
+        assert!(!result.all_passed);
+        assert!(result.levels.is_empty());
+        assert_eq!(result.errors.len(), 1);
+        assert_eq!(result.errors[0].invariant, "UnsupportedEvenWhenUnreachable");
+    }
+
+    #[test]
+    fn capability_preflight_rejects_undeclared_counter_references() {
+        for assertion in ["missing > 0", "missing >= 0"] {
+            let spec = format!(
+                r#"
+[automaton]
+name = "UndeclaredCounterClaim"
+states = ["Active"]
+initial = "Active"
+allow_indefinite_states = ["Active"]
+
+[[invariant]]
+name = "CounterMustBeDeclared"
+when = ["Active"]
+assert = "{assertion}"
+"#
+            );
+
+            let result = VerificationCascade::from_ioa(&spec)
+                .with_sim_seeds(0)
+                .with_prop_test_cases(0)
+                .run();
+
+            assert!(!result.all_passed, "{assertion} must fail closed");
+            assert!(result.levels.is_empty());
+            assert_eq!(result.errors.len(), 1);
+            assert_eq!(result.errors[0].code, "TVE001");
+            assert_eq!(result.errors[0].assertion, assertion);
+        }
+    }
+
+    #[test]
+    fn capability_preflight_rejects_undeclared_status_references() {
+        for (when, assertion) in [("TypoState", "true"), ("Active", "never(TypoState)")] {
+            let spec = format!(
+                r#"
+[automaton]
+name = "UndeclaredStatusClaim"
+states = ["Active"]
+initial = "Active"
+allow_indefinite_states = ["Active"]
+
+[[invariant]]
+name = "StatusMustBeDeclared"
+when = ["{when}"]
+assert = "{assertion}"
+"#
+            );
+
+            let result = VerificationCascade::from_ioa(&spec)
+                .with_sim_seeds(0)
+                .with_prop_test_cases(0)
+                .run();
+
+            assert!(
+                !result.all_passed,
+                "when={when}, assert={assertion} must fail closed"
+            );
+            assert!(result.levels.is_empty());
+            assert_eq!(result.errors.len(), 1);
+            assert_eq!(result.errors[0].code, "TVE001");
+            assert_eq!(result.errors[0].assertion, assertion);
+        }
+    }
+
+    #[test]
+    fn runtime_enforced_invariant_is_disclosed_without_claiming_model_proof() {
+        let spec = r#"
+[automaton]
+name = "Goal"
+states = ["Draft"]
+initial = "Draft"
+allow_indefinite_states = ["Draft"]
+
+[[state]]
+name = "goal"
+type = "string"
+initial = ""
+
+[[invariant]]
+name = "GoalRequired"
+when = ["Draft"]
+assert = "goal != ''"
+"#;
+        let result = VerificationCascade::from_ioa(spec)
+            .with_sim_seeds(1)
+            .with_prop_test_cases(1)
+            .run();
+
+        assert!(
+            result.all_passed,
+            "runtime contract is deployable: {result:#?}"
+        );
+        assert!(result.errors.is_empty());
+        assert!(result.warnings.iter().any(|warning| {
+            warning.contains("GoalRequired") && warning.contains("not model-proved")
+        }));
     }
 
     #[test]
@@ -779,7 +930,7 @@ guard = "count > 9"
 
     #[test]
     fn test_no_fail_fast_runs_all_levels() {
-        let cascade = VerificationCascade::from_ioa(ORDER_IOA)
+        let cascade = VerificationCascade::from_ioa(VERIFIED_IOA)
             .with_sim_seeds(3)
             .with_prop_test_cases(50);
 
@@ -848,7 +999,7 @@ to = "Authorized"
 
     #[test]
     fn cascade_without_composite_scope_has_none_report() {
-        let cascade = VerificationCascade::from_ioa(ORDER_IOA)
+        let cascade = VerificationCascade::from_ioa(VERIFIED_IOA)
             .with_sim_seeds(2)
             .with_prop_test_cases(10);
         let result = cascade.run();

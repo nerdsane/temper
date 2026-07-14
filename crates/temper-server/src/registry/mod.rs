@@ -164,6 +164,34 @@ impl SpecRegistry {
             .transpose()?;
         let relation_graph = build_relation_graph(&csdl, cross_invariants.as_ref());
 
+        // Runtime safety contracts apply to snapshots, replay tails, projected
+        // rows, and live actors. A synchronous table hot-swap cannot prove that
+        // every existing durable entity satisfies a newly introduced or changed
+        // contract. Reject that activation atomically; an explicit migration must
+        // validate state before registering the new contract.
+        if let Some(existing_config) = self.tenants.get(&tenant) {
+            for (entity_type, ioa_source) in ioa_sources {
+                let Some(existing_spec) = existing_config.entities.get(*entity_type) else {
+                    continue;
+                };
+                let automaton = automaton::parse_automaton(ioa_source).map_err(|e| {
+                    RegistryError::IoaParse {
+                        tenant: tenant_name.clone(),
+                        entity_type: (*entity_type).to_string(),
+                        source: e.to_string(),
+                    }
+                })?;
+                let incoming = automaton::compile_runtime_invariants(&automaton);
+                let current = automaton::compile_runtime_invariants(&existing_spec.automaton);
+                if incoming != current {
+                    return Err(RegistryError::RuntimeInvariantMigrationRequired {
+                        tenant: tenant_name.clone(),
+                        entity_type: (*entity_type).to_string(),
+                    });
+                }
+            }
+        }
+
         // Build entity set map from CSDL
         let mut entity_set_map = BTreeMap::new();
         for schema in &csdl.schemas {
@@ -857,6 +885,59 @@ assert = 'related(Order, OrderId).status in ["Active"]'
         assert!(
             registry.get_table(&tenant, "Task").is_some(),
             "Task exists after replace"
+        );
+    }
+
+    #[test]
+    fn hot_swap_rejects_runtime_contract_change_before_mutating_registry() {
+        const ORDER_WITH_RUNTIME_INVARIANT: &str = r#"
+[automaton]
+name = "Order"
+states = ["Draft"]
+initial = "Draft"
+allow_indefinite_states = ["Draft"]
+
+[[state]]
+name = "title"
+type = "string"
+initial = "ready"
+
+[[invariant]]
+name = "TitleRequired"
+when = ["Draft"]
+assert = "title != ''"
+"#;
+
+        let mut registry = SpecRegistry::new();
+        let (csdl, xml) = minimal_csdl();
+        registry.register_tenant("alpha", csdl, xml, &[("Order", ORDER_IOA)]);
+        let original_source = registry
+            .get_spec(&TenantId::new("alpha"), "Order")
+            .unwrap()
+            .ioa_source
+            .clone();
+
+        let (replacement_csdl, replacement_xml) = minimal_csdl();
+        let error = registry
+            .try_register_tenant(
+                "alpha",
+                replacement_csdl,
+                replacement_xml,
+                &[("Order", ORDER_WITH_RUNTIME_INVARIANT)],
+            )
+            .expect_err("runtime contract changes require an explicit durable-state migration");
+
+        assert!(matches!(
+            error,
+            RegistryError::RuntimeInvariantMigrationRequired { .. }
+        ));
+        assert_eq!(
+            registry
+                .get_spec(&TenantId::new("alpha"), "Order")
+                .unwrap()
+                .ioa_source,
+            original_source,
+            "rejected activation must leave the prior registry untouched"
         );
     }
 }

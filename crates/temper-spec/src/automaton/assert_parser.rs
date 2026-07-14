@@ -5,7 +5,7 @@
 //! (simulation handler) to ensure consistent classification.
 
 /// A comparison operator for counter assertions.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum AssertCompareOp {
     /// Greater than.
     Gt,
@@ -22,6 +22,8 @@ pub enum AssertCompareOp {
 /// A parsed assertion expression from an IOA `[[invariant]]` section.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ParsedAssert {
+    /// An assertion that is unconditionally true (`true`).
+    Always,
     /// A counter variable must be positive (`var > 0`).
     CounterPositive { var: String },
     /// The entity is in a terminal state — no further transitions allowed.
@@ -38,6 +40,14 @@ pub enum ParsedAssert {
         op: AssertCompareOp,
         value: usize,
     },
+    /// One counter must satisfy a comparison against another counter.
+    CounterVarCompare {
+        left: String,
+        op: AssertCompareOp,
+        right: String,
+    },
+    /// A declared string field must contain at least one character (`var != ''`).
+    StringNonEmpty { var: String },
     /// A bare boolean variable must be true (e.g., `payment_captured`).
     ///
     /// `expect = true` matches `name`; `expect = false` matches `!name`.
@@ -60,7 +70,7 @@ pub enum ParsedAssert {
 /// and_expr = atom ( "&&" atom )*
 /// atom    = "(" expr ")" | "!" atom | terminal
 /// terminal = counter_cmp | ordering(...) | never(...)
-///          | no_further_transitions | bare_bool
+///          | true | no_further_transitions | is_true bool | bare_bool
 /// ```
 ///
 /// # Recognized terminals
@@ -71,6 +81,8 @@ pub enum ParsedAssert {
 /// - `"never(StateName)"` → `NeverState`
 /// - `"var >= N"`, `"var <= N"`, `"var == N"`, `"var > N"`, `"var < N"` → `CounterCompare`
 /// - `"flag"` / `"!flag"` → `BoolRequired`
+/// - `"is_true flag"` → `BoolRequired`
+/// - `"true"` → `Always`
 ///
 /// # Compound expressions
 ///
@@ -78,6 +90,13 @@ pub enum ParsedAssert {
 /// - `"a || b"` → `Or(vec![a, b])`
 /// - `"a && (b || c)"` → `And(vec![a, Or(vec![b, c])])`
 pub fn parse_assert_expr(expr: &str) -> Option<ParsedAssert> {
+    if let Some(var) = expr.trim().strip_suffix("!= ''").map(str::trim)
+        && is_identifier(var)
+    {
+        return Some(ParsedAssert::StringNonEmpty {
+            var: var.to_string(),
+        });
+    }
     let tokens = tokenize(expr)?;
     let mut cursor = 0;
     let result = parse_or(&tokens, &mut cursor)?;
@@ -251,6 +270,19 @@ fn parse_terminal(tokens: &[Tok], cursor: &mut usize) -> Option<ParsedAssert> {
 
     // no_further_transitions (bare identifier).
     if let Tok::Ident(name) = &first {
+        if name == "true" {
+            *cursor += 1;
+            return Some(ParsedAssert::Always);
+        }
+
+        if name == "is_true" {
+            let Tok::Ident(var) = tokens.get(*cursor + 1)?.clone() else {
+                return None;
+            };
+            *cursor += 2;
+            return Some(ParsedAssert::BoolRequired { var, expect: true });
+        }
+
         // ordering(A, B)
         if name == "ordering" && matches!(tokens.get(*cursor + 1), Some(Tok::LParen)) {
             *cursor += 2;
@@ -290,7 +322,7 @@ fn parse_terminal(tokens: &[Tok], cursor: &mut usize) -> Option<ParsedAssert> {
             return Some(ParsedAssert::NeverState { state });
         }
 
-        // Counter comparison: "var OP N"
+        // Counter comparison: "var OP N".
         if let (Some(Tok::CmpOp(op)), Some(Tok::Number(n))) =
             (tokens.get(*cursor + 1), tokens.get(*cursor + 2))
         {
@@ -303,6 +335,16 @@ fn parse_terminal(tokens: &[Tok], cursor: &mut usize) -> Option<ParsedAssert> {
                 return Some(ParsedAssert::CounterPositive { var });
             }
             return Some(ParsedAssert::CounterCompare { var, op, value });
+        }
+        if let (Some(Tok::CmpOp(op)), Some(Tok::Ident(right))) =
+            (tokens.get(*cursor + 1), tokens.get(*cursor + 2))
+        {
+            *cursor += 3;
+            return Some(ParsedAssert::CounterVarCompare {
+                left: name.clone(),
+                op: op.clone(),
+                right: right.clone(),
+            });
         }
 
         // no_further_transitions (exactly).
@@ -324,9 +366,47 @@ fn parse_terminal(tokens: &[Tok], cursor: &mut usize) -> Option<ParsedAssert> {
     None
 }
 
+fn is_identifier(value: &str) -> bool {
+    let mut characters = value.chars();
+    characters
+        .next()
+        .is_some_and(|character| character.is_ascii_alphabetic() || character == '_')
+        && characters.all(|character| character.is_ascii_alphanumeric() || character == '_')
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn parses_production_boolean_aliases() {
+        assert_eq!(parse_assert_expr("true"), Some(ParsedAssert::Always));
+        assert_eq!(
+            parse_assert_expr("is_true ready"),
+            Some(ParsedAssert::BoolRequired {
+                var: "ready".to_string(),
+                expect: true,
+            })
+        );
+    }
+
+    #[test]
+    fn parses_runtime_enforced_production_forms() {
+        assert_eq!(
+            parse_assert_expr("used_bytes <= quota_limit"),
+            Some(ParsedAssert::CounterVarCompare {
+                left: "used_bytes".to_string(),
+                op: AssertCompareOp::Lte,
+                right: "quota_limit".to_string(),
+            })
+        );
+        assert_eq!(
+            parse_assert_expr("goal != ''"),
+            Some(ParsedAssert::StringNonEmpty {
+                var: "goal".to_string(),
+            })
+        );
+    }
 
     #[test]
     fn test_counter_positive() {

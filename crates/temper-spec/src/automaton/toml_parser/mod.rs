@@ -364,6 +364,7 @@ impl ParseState {
             name: String::new(),
             when: Vec::new(),
             assert: String::new(),
+            assert_span: None,
         });
         self.current_section = Section::Invariant;
         true
@@ -438,6 +439,7 @@ pub(super) fn parse_toml_to_automaton(input: &str) -> Result<Automaton, Automato
     }
 
     let mut automaton = state.finish(input)?;
+    attach_invariant_assert_spans(&mut automaton.invariants, input);
     // Field invariants use nested inline-table predicates that the hand-rolled
     // parser does not handle, so delegate to serde. Unlike webhooks and agent
     // triggers, parse errors are surfaced — a silently-dropped field invariant
@@ -456,6 +458,100 @@ pub(super) fn parse_toml_to_automaton(input: &str) -> Result<Automaton, Automato
     // ADR-0051: optional [admission] block.
     automaton.admission = extract_admission(input)?;
     Ok(automaton)
+}
+
+/// Attach exact source ranges to the assertion values parsed above.
+///
+/// IOA assertion values are single-line TOML strings. The hand parser strips
+/// their quotes, so this pass walks the original input and records the range of
+/// the inner expression. Ranges remain aligned with `[[invariant]]` declaration
+/// order, including repeated names or expressions.
+fn attach_invariant_assert_spans(invariants: &mut [Invariant], source: &str) {
+    let mut invariant_index = None;
+    let mut next_invariant = 0usize;
+    let mut line_start = 0usize;
+
+    for line_with_newline in source.split_inclusive('\n') {
+        let line_without_newline = line_with_newline
+            .strip_suffix('\n')
+            .unwrap_or(line_with_newline);
+        let line = line_without_newline
+            .strip_suffix('\r')
+            .unwrap_or(line_without_newline);
+        let trimmed = line.trim_start();
+
+        if trimmed.starts_with('[') {
+            if trimmed == "[[invariant]]" {
+                invariant_index = Some(next_invariant);
+                next_invariant += 1;
+            } else {
+                invariant_index = None;
+            }
+        } else if let Some(index) = invariant_index
+            && let Some(relative_span) = assertion_value_span(line)
+            && let Some(invariant) = invariants.get_mut(index)
+        {
+            let start = line_start + relative_span.start;
+            let end = line_start + relative_span.end;
+            invariant.assert_span = Some(SourceSpan {
+                start: source_position(source, start),
+                end: source_position(source, end),
+            });
+        }
+
+        line_start += line_with_newline.len();
+    }
+}
+
+fn assertion_value_span(line: &str) -> Option<std::ops::Range<usize>> {
+    let content_start = line.len() - line.trim_start().len();
+    let trimmed = &line[content_start..];
+    let (key, remainder) = trimmed.split_once('=')?;
+    if key.trim() != "assert" {
+        return None;
+    }
+
+    let value_leading = remainder.len() - remainder.trim_start().len();
+    let value = remainder.trim_start();
+    let value_start = content_start + key.len() + 1 + value_leading;
+    match value.chars().next() {
+        Some(delimiter @ ('"' | '\'')) => {
+            let quoted = &value[delimiter.len_utf8()..];
+            let quote_end = closing_quote_offset(quoted, delimiter)?;
+            Some((value_start + 1)..(value_start + 1 + quote_end))
+        }
+        _ => {
+            let value_end = value.trim_end().len();
+            Some(value_start..(value_start + value_end))
+        }
+    }
+}
+
+fn closing_quote_offset(value: &str, delimiter: char) -> Option<usize> {
+    let mut escaped = false;
+    for (offset, character) in value.char_indices() {
+        if character == delimiter && !escaped {
+            return Some(offset);
+        }
+        escaped = delimiter == '"' && character == '\\' && !escaped;
+        if character != '\\' {
+            escaped = false;
+        }
+    }
+    None
+}
+
+fn source_position(source: &str, byte: usize) -> SourcePosition {
+    debug_assert!(source.is_char_boundary(byte));
+    let prefix = &source[..byte];
+    let line = prefix.bytes().filter(|byte| *byte == b'\n').count() + 1;
+    let column = prefix
+        .rsplit_once('\n')
+        .map_or(prefix, |(_, current_line)| current_line)
+        .chars()
+        .count()
+        + 1;
+    SourcePosition { byte, line, column }
 }
 
 /// Extract `[[webhook]]` sections from TOML source via serde.
@@ -790,3 +886,7 @@ fn isolate_field_invariant_sections(source: &str) -> String {
 #[cfg(test)]
 #[path = "tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "source_span_tests.rs"]
+mod source_span_tests;

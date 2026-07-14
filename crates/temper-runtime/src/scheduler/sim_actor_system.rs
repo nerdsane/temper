@@ -655,6 +655,8 @@ fn evaluate_spec_assert(
     use super::sim_handler::{CompareOp, SpecAssert};
 
     match assert {
+        SpecAssert::RuntimeEnforced { .. } => true,
+        SpecAssert::Unsupported { .. } => false,
         SpecAssert::CounterPositive { var } => {
             if var == "items" {
                 item_count > 0

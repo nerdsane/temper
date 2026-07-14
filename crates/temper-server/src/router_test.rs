@@ -464,6 +464,11 @@ initial = "Recorded"
 name = "Body"
 type = "string"
 initial = ""
+
+[[invariant]]
+name = "BodyRequired"
+when = ["Recorded"]
+assert = "Body != ''"
 "#;
     let csdl = parse_csdl(csdl_xml).unwrap();
     let system = ActorSystem::new("test-data-only-fast-path");
@@ -704,6 +709,44 @@ async fn test_data_only_create_fast_path_declines_action_bearing_entities() {
     assert!(
         response.is_none(),
         "entities with transition rules must stay on the actor-backed create path"
+    );
+}
+
+#[tokio::test]
+async fn data_only_create_rejects_invalid_runtime_state_before_journal_or_projection_write() {
+    let state = test_state_with_data_only_ioa_and_turso().await;
+    let entity_id = "entry-invalid-runtime";
+
+    let error = state
+        .try_create_data_only_tenant_entity(
+            &TenantId::default(),
+            "LogEntry",
+            entity_id,
+            serde_json::json!({"Id": entity_id, "Body": ""}),
+        )
+        .await
+        .expect_err("empty body must fail the data-only runtime safety gate");
+    assert!(error.contains("BodyRequired"), "unexpected error: {error}");
+
+    let (journal, _) = state.event_journal().expect("turso event journal");
+    assert!(
+        journal
+            .read_events(&format!("default:LogEntry:{entity_id}"), 0)
+            .await
+            .expect("read rejected journal")
+            .is_empty(),
+        "rejected data-only creation must not append Created"
+    );
+
+    let query_plane = state.query_plane_store().expect("turso query plane");
+    let rows = query_plane
+        .load_entity_catalog_rows("default", "LogEntry", &[entity_id.to_string()])
+        .await
+        .expect("read rejected projection")
+        .expect("turso supports catalog reads");
+    assert!(
+        rows.is_empty(),
+        "rejected data-only creation must not publish a projection row"
     );
 }
 

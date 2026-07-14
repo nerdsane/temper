@@ -1,5 +1,5 @@
 use super::AutomatonParseError;
-use super::inline::{parse_inline_fields, split_inline_tables};
+use super::inline::{parse_inline_fields, parse_scalar_value, split_top_level};
 use crate::automaton::Effect;
 
 pub(super) fn parse_effect_value(
@@ -26,12 +26,18 @@ fn parse_effect_array(value: &str, effects: &mut Vec<Effect>) -> Result<(), Auto
     }
 
     let inner = &trimmed[1..trimmed.len() - 1];
-    for entry in split_inline_tables(inner) {
-        let entry = entry.trim().trim_matches('{').trim_matches('}').trim();
-        let fields = parse_inline_fields(entry);
-
-        if let Some(effect) = parse_effect_fields(&fields)? {
-            effects.push(effect);
+    for entry in split_top_level(inner, ',') {
+        let entry = entry.trim();
+        if entry.starts_with('{') {
+            let fields = parse_inline_fields(entry.trim_matches('{').trim_matches('}').trim());
+            if let Some(effect) = parse_effect_fields(&fields)? {
+                effects.push(effect);
+            }
+        } else {
+            let legacy = parse_scalar_value(entry);
+            if let Some(effect) = parse_legacy_effect(&legacy) {
+                effects.push(effect);
+            }
         }
     }
 

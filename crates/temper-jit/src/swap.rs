@@ -86,6 +86,7 @@ mod tests {
             entity_name: name.to_string(),
             states: vec!["A".into(), "B".into()],
             initial_state: "A".into(),
+            state_var_initials: Default::default(),
             keys: vec![],
             vectors: vec![],
             rules: vec![TransitionRule {
@@ -97,6 +98,7 @@ mod tests {
             }],
             state_var_metadata: Default::default(),
             composite_actions: Default::default(),
+            runtime_invariants: Default::default(),
             rule_index: Default::default(),
         };
         table.rebuild_index();

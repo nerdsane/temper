@@ -187,8 +187,10 @@ pub enum InvariantKind {
     And(Vec<InvariantKind>),
     /// Compound: at least one subexpression must hold.
     Or(Vec<InvariantKind>),
-    /// Assertion expression that cannot be verified at model level.
-    /// Surfaces as a warning in the cascade result.
+    /// Assertion enforced atomically by runtime contract version 1.
+    RuntimeEnforced(temper_spec::automaton::RuntimeAssert),
+    /// Assertion expression that cannot be represented by the verifier.
+    /// Every backend must treat this as a hard failure.
     Unverifiable { expression: String },
 }
 
@@ -203,6 +205,8 @@ pub struct ResolvedInvariant {
     pub required_states: Vec<String>,
     /// The kind of check this invariant performs.
     pub kind: InvariantKind,
+    /// Exact source range of the declared assertion, when it came from IOA.
+    pub source_span: Option<temper_spec::automaton::SourceSpan>,
 }
 
 // ---------------------------------------------------------------------------

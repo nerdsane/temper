@@ -4,12 +4,15 @@
 //! translation layer in `temper-spec`. The shared layer eliminates duplicated
 //! guard/effect translation logic between JIT and verification paths.
 
-use temper_spec::automaton::{self, Automaton, ResolvedEffect, ResolvedGuard, translate_actions};
+use temper_spec::automaton::{
+    self, Automaton, ResolvedEffect, ResolvedGuard, parse_bool_initial,
+    parse_counter_initial_usize, translate_actions,
+};
 
 use super::guard::Guard;
 use super::types::{
-    CompositeActionMetadata, CompositeCedarGate, Effect, SubWriteSpec, TransitionRule,
-    TransitionTable,
+    CompositeActionMetadata, CompositeCedarGate, Effect, StateVarInitialValue, SubWriteSpec,
+    TransitionRule, TransitionTable,
 };
 
 impl TransitionTable {
@@ -120,6 +123,21 @@ impl TransitionTable {
             entity_name: automaton.automaton.name.clone(),
             states: automaton.automaton.states.clone(),
             initial_state: automaton.automaton.initial.clone(),
+            state_var_initials: automaton
+                .state
+                .iter()
+                .filter_map(|state| {
+                    let initial = match state.var_type.as_str() {
+                        "counter" => StateVarInitialValue::Counter(parse_counter_initial_usize(
+                            &state.initial,
+                        )),
+                        "bool" => StateVarInitialValue::Bool(parse_bool_initial(&state.initial)),
+                        "string" => StateVarInitialValue::String(state.initial.clone()),
+                        _ => return None,
+                    };
+                    Some((state.name.clone(), initial))
+                })
+                .collect(),
             rules,
             keys: automaton
                 .keys
@@ -142,6 +160,7 @@ impl TransitionTable {
                 .collect(),
             state_var_metadata,
             composite_actions,
+            runtime_invariants: automaton::compile_runtime_invariants(automaton),
             rule_index,
         }
     }
@@ -449,6 +468,37 @@ effect = [{ type = "spawn", entity_type = "Session", entity_id_source = "{uuid}"
             has_spawn,
             "expected SpawnEntity with copy_fields, got: {:?}",
             rule.effects
+        );
+    }
+
+    #[test]
+    fn state_initials_use_the_shared_model_and_runtime_parsers() {
+        let spec = r#"
+[automaton]
+name = "TypedInitials"
+states = ["Ready"]
+initial = "Ready"
+allow_indefinite_states = ["Ready"]
+
+[[state]]
+name = "enabled"
+type = "bool"
+initial = "YES"
+
+[[state]]
+name = "retries"
+type = "counter"
+initial = " 3 "
+"#;
+
+        let table = TransitionTable::from_ioa_source(spec);
+        assert_eq!(
+            table.state_var_initials.get("enabled"),
+            Some(&StateVarInitialValue::Bool(true))
+        );
+        assert_eq!(
+            table.state_var_initials.get("retries"),
+            Some(&StateVarInitialValue::Counter(3))
         );
     }
 }

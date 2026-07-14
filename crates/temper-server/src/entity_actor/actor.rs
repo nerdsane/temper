@@ -125,31 +125,8 @@ impl EntityActor {
         entity_id: &str,
         table: &TransitionTable,
         initial_fields: &serde_json::Value,
-    ) -> EntityState {
-        let mut fields = initial_fields.clone();
-        if let Some(obj) = fields.as_object_mut() {
-            obj.entry("Id".to_string())
-                .or_insert(serde_json::Value::String(entity_id.to_string()));
-            obj.entry("Status".to_string())
-                .or_insert(serde_json::Value::String(table.initial_state.clone()));
-        }
-
-        EntityState {
-            entity_type: entity_type.to_string(),
-            entity_id: entity_id.to_string(),
-            status: table.initial_state.clone(),
-            item_count: 0,
-            counters: BTreeMap::new(),
-            booleans: BTreeMap::new(),
-            lists: BTreeMap::new(),
-            fields,
-            events: std::collections::VecDeque::new(),
-            total_event_count: 0,
-            events_since_snapshot: 0,
-            last_snapshot_sequence_nr: 0,
-            sequence_nr: 0,
-            processed_idempotency_keys: BTreeMap::new(),
-        }
+    ) -> Result<EntityState, String> {
+        super::effects::build_initial_entity_state(entity_type, entity_id, table, initial_fields)
     }
 
     /// Snapshot frequency in events.
@@ -520,6 +497,11 @@ impl EntityActor {
         match store.load_snapshot(persistence_id).await {
             Ok(Some((snapshot_seq, snapshot_bytes))) => {
                 if Self::apply_snapshot_bytes(state, snapshot_seq, &snapshot_bytes) {
+                    if let Some(error) = super::effects::runtime_invariant_failure(state, table) {
+                        return Err(ActorError::custom(format!(
+                            "persisted snapshot violates runtime safety contract: {error}"
+                        )));
+                    }
                     from_sequence = snapshot_seq;
                     loaded_snapshot = true;
                     tracing::info!(
@@ -582,6 +564,12 @@ impl EntityActor {
                                 serde_json::Value::String(state.status.clone()),
                             );
                         }
+                        if let Some(error) = super::effects::runtime_invariant_failure(state, table)
+                        {
+                            return Err(ActorError::custom(format!(
+                                "persisted tombstone violates runtime safety contract: {error}"
+                            )));
+                        }
                         state.push_event_bounded(tombstone);
                         state.sequence_nr = env.sequence_nr;
                         break;
@@ -601,6 +589,12 @@ impl EntityActor {
                             // longer knows this action/from-state, in which case
                             // the stored `to_status` alone carries the state.
                             let from_status = event.from_status.clone();
+                            super::effects::validate_declared_field_values(&event.params, table)
+                                .map_err(|error| {
+                                    ActorError::custom(format!(
+                                        "persisted event has invalid declared field values: {error}"
+                                    ))
+                                })?;
                             if let Some(effects) =
                                 table.replay_effects(&state.status, &event.action)
                             {
@@ -611,7 +605,12 @@ impl EntityActor {
                                     _scheduled_actions,
                                     _spawn_requests,
                                     _schedule_at_requests,
-                                ) = super::effects::apply_effects(state, &effects, &event.params);
+                                ) = super::effects::apply_effects(state, &effects, &event.params)
+                                    .map_err(|error| {
+                                    ActorError::custom(format!(
+                                        "persisted event cannot be replayed safely: {error}"
+                                    ))
+                                })?;
                             }
                             // Always honor the durably-stored target status. This
                             // is safe (status is always persisted on the event)
@@ -635,6 +634,13 @@ impl EntityActor {
                                 field_sync_mode,
                                 Some(&table.state_var_metadata),
                             );
+                            if let Some(error) =
+                                super::effects::runtime_invariant_failure(state, table)
+                            {
+                                return Err(ActorError::custom(format!(
+                                    "persisted event violates runtime safety contract: {error}"
+                                )));
+                            }
                             // Persist replayed overflow blobs so blob-ref envelopes
                             // resolve on subsequent OData reads. Content-addressed
                             // dedup makes this idempotent — if the original live
@@ -708,6 +714,13 @@ impl EntityActor {
                         "state restored from snapshot (no delta events)"
                     );
                 }
+                if (loaded_snapshot || !envelopes.is_empty())
+                    && let Some(error) = super::effects::runtime_invariant_failure(state, table)
+                {
+                    return Err(ActorError::custom(format!(
+                        "hydrated entity violates runtime safety contract: {error}"
+                    )));
+                }
             }
             Err(e) => {
                 if strict_journal_read {
@@ -750,7 +763,8 @@ pub(crate) async fn recover_entity_state_from_store(
     blob_store: Option<&crate::blob_store::BlobStore>,
     strict_journal_read: bool,
 ) -> Result<EntityState, ActorError> {
-    let mut state = EntityActor::build_initial_state(entity_type, entity_id, table, initial_fields);
+    let mut state = EntityActor::build_initial_state(entity_type, entity_id, table, initial_fields)
+        .map_err(ActorError::custom)?;
     EntityActor::replay_events(
         table,
         store,
@@ -778,7 +792,8 @@ impl Actor for EntityActor {
             &self.entity_id,
             &table,
             &self.initial_fields,
-        );
+        )
+        .map_err(ActorError::custom)?;
 
         // Replay events from Postgres to rebuild state (if persistence is configured).
         // Re-evaluates each event through the TransitionTable to reconstruct
@@ -796,6 +811,14 @@ impl Actor for EntityActor {
                 false, // hydration: keep serving on a transient journal read failure
             )
             .await?;
+        }
+
+        if state.total_event_count == 0
+            && let Some(error) = super::effects::runtime_invariant_failure(&state, &table)
+        {
+            return Err(ActorError::custom(format!(
+                "initial entity state violates runtime safety contract: {error}"
+            )));
         }
 
         // Persist a bootstrap Created event for first-time entities so initial
@@ -1420,6 +1443,21 @@ impl Actor for EntityActor {
                 ctx.reply(value);
             }
             EntityMsg::UpdateFields { fields, replace } => {
+                let table = self.table.read().expect("table lock poisoned").clone();
+                let state_before = state.clone();
+                if let Err(error) = super::effects::validate_declared_field_values(&fields, &table)
+                {
+                    ctx.reply(EntityResponse {
+                        success: false,
+                        state: state.clone(),
+                        error: Some(error),
+                        custom_effects: vec![],
+                        scheduled_actions: vec![],
+                        spawn_requests: vec![],
+                        spec_governed: true,
+                    });
+                    return Ok(());
+                }
                 if replace {
                     // PUT: replace all fields (preserve Id and Status)
                     let id = state.entity_id.clone();
@@ -1439,6 +1477,34 @@ impl Actor for EntityActor {
                         }
                     }
                 }
+                if let Err(error) =
+                    super::effects::sync_declared_state_vars_from_fields(state, &table)
+                {
+                    *state = state_before;
+                    ctx.reply(EntityResponse {
+                        success: false,
+                        state: state.clone(),
+                        error: Some(error),
+                        custom_effects: vec![],
+                        scheduled_actions: vec![],
+                        spawn_requests: vec![],
+                        spec_governed: true,
+                    });
+                    return Ok(());
+                }
+                if let Some(error) = super::effects::runtime_invariant_failure(state, &table) {
+                    *state = state_before;
+                    ctx.reply(EntityResponse {
+                        success: false,
+                        state: state.clone(),
+                        error: Some(error),
+                        custom_effects: vec![],
+                        scheduled_actions: vec![],
+                        spawn_requests: vec![],
+                        spec_governed: true,
+                    });
+                    return Ok(());
+                }
                 ctx.reply(EntityResponse {
                     success: true,
                     state: state.clone(),
@@ -1450,6 +1516,8 @@ impl Actor for EntityActor {
                 });
             }
             EntityMsg::Delete => {
+                let table = self.table.read().expect("table lock poisoned").clone();
+                let state_before = state.clone();
                 let deleted = EntityEvent {
                     action: "Deleted".to_string(),
                     from_status: state.status.clone(),
@@ -1459,12 +1527,34 @@ impl Actor for EntityActor {
                     idempotency_key: None,
                 };
 
+                state.status = deleted.to_status.clone();
+                if let Some(obj) = state.fields.as_object_mut() {
+                    obj.insert(
+                        "Status".to_string(),
+                        serde_json::Value::String(state.status.clone()),
+                    );
+                }
+                if let Some(error) = super::effects::runtime_invariant_failure(state, &table) {
+                    *state = state_before;
+                    ctx.reply(EntityResponse {
+                        success: false,
+                        state: state.clone(),
+                        error: Some(error),
+                        custom_effects: vec![],
+                        scheduled_actions: vec![],
+                        spawn_requests: vec![],
+                        spec_governed: true,
+                    });
+                    return Ok(());
+                }
+
                 if let (Some(store), Some(backend)) =
                     (self.event_journal.as_ref(), self.event_backend)
                     && let Err(e) = self
                         .persist_event(store, backend, &self.persistence_id(), state, &deleted)
                         .await
                 {
+                    *state = state_before;
                     ctx.reply(EntityResponse {
                         success: false,
                         state: state.clone(),
@@ -1475,14 +1565,6 @@ impl Actor for EntityActor {
                         spec_governed: true,
                     });
                     return Ok(());
-                }
-
-                state.status = deleted.to_status.clone();
-                if let Some(obj) = state.fields.as_object_mut() {
-                    obj.insert(
-                        "Status".to_string(),
-                        serde_json::Value::String(state.status.clone()),
-                    );
                 }
                 state.push_event_bounded(deleted);
 

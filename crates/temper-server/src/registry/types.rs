@@ -87,6 +87,8 @@ pub enum RegistryError {
         entity_type: String,
         source: String,
     },
+    /// A hot swap attempted to change a runtime safety contract without a state migration.
+    RuntimeInvariantMigrationRequired { tenant: String, entity_type: String },
 }
 
 impl std::fmt::Display for RegistryError {
@@ -108,6 +110,13 @@ impl std::fmt::Display for RegistryError {
                     "failed to parse IOA for tenant '{tenant}', entity '{entity_type}': {source}"
                 )
             }
+            Self::RuntimeInvariantMigrationRequired {
+                tenant,
+                entity_type,
+            } => write!(
+                f,
+                "cannot hot-swap runtime safety contract for tenant '{tenant}', entity '{entity_type}' without validating and migrating existing durable state"
+            ),
         }
     }
 }
