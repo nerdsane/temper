@@ -41,9 +41,13 @@ pub(super) fn transition_table_for(
 pub(super) enum EntityLoadOutcome {
     /// Loaded — index it from these fields.
     Fields(serde_json::Value),
-    /// Definitively skippable: deleted, or a phantom with no events. Correctly NOT
+    /// Definitively skippable: a phantom with no events. Correctly NOT
     /// indexed, and NOT a failure (it must not block the watermark).
     Skip,
+    /// Tombstoned (status == "Deleted"). Not indexed — and the key backfill
+    /// RELEASES any rows the dead entity still holds (ARN-238 / ADR-0172 healing
+    /// pass for deletes that predate release-on-delete).
+    Tombstoned,
     /// The entity exists (it was enumerated from the durable store) but its current
     /// state could not be loaded — no transition table to replay with, an unreadable
     /// snapshot, or a replay error. Indexing it is impossible, so the type must NOT be
@@ -82,7 +86,7 @@ pub(super) async fn load_entity_current_fields(
     .await
     {
         Err(_) => EntityLoadOutcome::LoadFailed,
-        Ok(state) if state.status == "Deleted" => EntityLoadOutcome::Skip,
+        Ok(state) if state.status == "Deleted" => EntityLoadOutcome::Tombstoned,
         Ok(state) if state.total_event_count == 0 => EntityLoadOutcome::Skip,
         Ok(state) => EntityLoadOutcome::Fields(state.fields),
     }

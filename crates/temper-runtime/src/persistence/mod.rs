@@ -92,6 +92,11 @@ pub struct EntityKeyRow {
     /// The declared key's identifier (the `[[key]]` block's `name`).
     pub key_name: String,
     /// The canonical, type-tagged hash of the key's values.
+    ///
+    /// An EMPTY hash is the RELEASE marker (ARN-238 / ADR-0172): the store drops the
+    /// entity's existing row for `key_name` and inserts nothing, so a
+    /// tombstoned entity or a fully-nulled key stops owning the value in the
+    /// same transaction as the journal append.
     pub key_hash: String,
 }
 
