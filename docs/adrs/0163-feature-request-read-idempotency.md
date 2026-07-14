@@ -56,6 +56,15 @@ developer's WontFix could be silently reset by any read racing a re-listing.
 - The frequency/description of an existing record now tracks the latest
   generation window rather than accumulating forever — which is what the
   listing already claimed to show.
+- **The gap-group key excludes tenant** — identical gaps across tenants share
+  one record. This is pre-existing grouping semantics (the accumulation map
+  always merged across tenants); the deterministic id cements it rather than
+  introducing it. Tenant-scoped grouping is a deliberate product decision to
+  take separately, not a side effect to smuggle into a duplication fix.
+- `legacy_record_id` in the entity dispatch params now equals the entity id
+  at this site (they were distinct when entity ids were minted per read).
+  The key is kept: it is the uniform convention across all six evolution
+  dispatch sites, and consumers read it generically.
 
 ## Alternatives Considered
 
