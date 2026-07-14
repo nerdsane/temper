@@ -484,6 +484,32 @@ mod tests {
     }
 
     #[test]
+    fn delayed_message_due_on_final_tick_is_delivered() {
+        let config = SimConfig {
+            seed: 1,
+            max_ticks: 2,
+            num_actors: 1,
+            max_actions_per_actor: 1,
+            max_counter: 2,
+            faults: FaultConfig {
+                message_delay_prob: 1.0,
+                max_delay_ticks: 2,
+                message_drop_prob: 0.0,
+                actor_crash_prob: 0.0,
+                actor_restart_prob: 0.0,
+            },
+        };
+
+        let result = run_simulation_from_ioa(ORDER_IOA, &config).unwrap();
+
+        assert_eq!(result.total_dropped, 0, "the message was not fault-dropped");
+        assert_eq!(
+            result.total_transitions, 1,
+            "the delivery due on the final tick must be applied exactly once"
+        );
+    }
+
+    #[test]
     fn test_simulation_is_reproducible() {
         let config = SimConfig {
             seed: 999,
