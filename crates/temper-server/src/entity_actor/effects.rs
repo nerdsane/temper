@@ -114,9 +114,11 @@ pub(crate) fn build_initial_entity_state(
         match initial {
             StateVarInitialValue::Counter(value) => {
                 counters.insert(name.clone(), *value);
+                declared_fields.insert(name.clone(), serde_json::json!(value));
             }
             StateVarInitialValue::Bool(value) => {
                 booleans.insert(name.clone(), *value);
+                declared_fields.insert(name.clone(), serde_json::Value::Bool(*value));
             }
             StateVarInitialValue::String(value) => {
                 declared_fields.insert(name.clone(), serde_json::Value::String(value.clone()));

@@ -689,13 +689,11 @@ impl crate::state::ServerState {
         // The actor response is the durable mutation boundary. Publish the
         // committed state before fallible post-dispatch effects so an effect
         // failure cannot leave durable events absent from discovery indexes.
-        if response.success || response.state.sequence_nr > 0 {
-            self.update_entity_index_visibility(
-                tenant,
-                entity_type,
-                entity_id,
-                &response.state.status,
-            );
+        if let Some(visible_status) = self
+            .visible_status_after_response(&actor_ref, &response)
+            .await
+        {
+            self.update_entity_index_visibility(tenant, entity_type, entity_id, &visible_status);
         }
 
         // Run all post-dispatch effects through the dedicated pipeline.

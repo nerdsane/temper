@@ -787,6 +787,31 @@ impl ServerState {
         }
     }
 
+    /// Resolve the collection-visible status at an actor response boundary.
+    ///
+    /// A rejected first mutation can still leave a valid pristine entity (for
+    /// example, a no-journal actor whose initial state already satisfies every
+    /// runtime invariant). Re-read only that zero-event rejection so invalid
+    /// action-backed shells stay hidden while valid bootstrap state remains
+    /// discoverable.
+    pub(crate) async fn visible_status_after_response(
+        &self,
+        actor_ref: &ActorRef<EntityMsg>,
+        response: &EntityResponse,
+    ) -> Option<String> {
+        if response.success || response.state.sequence_nr > 0 {
+            return Some(response.state.status.clone());
+        }
+
+        let policy = self.dispatch_retry_policy();
+        retry::ask_with_backoff::<_, EntityResponse, _>(actor_ref, || EntityMsg::GetState, &policy)
+            .await
+            .result
+            .ok()
+            .filter(|state| state.success)
+            .map(|state| state.state.status)
+    }
+
     /// Remove an entity from the index and actor registry.
     #[instrument(skip_all, fields(otel.name = "entity.remove_entity", tenant = %tenant, entity_type, entity_id))]
     pub fn remove_entity(&self, tenant: &TenantId, entity_type: &str, entity_id: &str) {
@@ -1374,13 +1399,11 @@ impl ServerState {
         .result
         .map_err(|e| format!("Actor update failed: {e}"))?;
 
-        if response.success || response.state.sequence_nr > 0 {
-            self.update_entity_index_visibility(
-                tenant,
-                entity_type,
-                entity_id,
-                &response.state.status,
-            );
+        if let Some(visible_status) = self
+            .visible_status_after_response(&actor_ref, &response)
+            .await
+        {
+            self.update_entity_index_visibility(tenant, entity_type, entity_id, &visible_status);
         }
 
         if response.success
@@ -1578,13 +1601,24 @@ impl ServerState {
         .await;
         match outcome.result {
             Ok(response) if response.state.status == "Deleted" => {
-                let _ = actor_ref.stop();
-                self.remove_entity(tenant, entity_type, entity_id);
+                self.stop_and_remove_entity(tenant, entity_type, entity_id);
                 false
             }
-            Ok(_) => true,
+            Ok(response) if response.success => {
+                self.update_entity_index_visibility(
+                    tenant,
+                    entity_type,
+                    entity_id,
+                    &response.state.status,
+                );
+                true
+            }
+            Ok(_) => {
+                self.stop_and_remove_entity(tenant, entity_type, entity_id);
+                false
+            }
             Err(_) => {
-                self.remove_entity(tenant, entity_type, entity_id);
+                self.stop_and_remove_entity(tenant, entity_type, entity_id);
                 false
             }
         }

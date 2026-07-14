@@ -142,7 +142,7 @@ async fn projection_replay_parity_endpoint_reports_clean_bounded_scope() {
     .await;
 
     assert_eq!(json["kind"], "query_projection_replay_parity");
-    assert_eq!(json["clean"], true);
+    assert_eq!(json["clean"], true, "{json:#}");
     assert_eq!(json["limit"], 1);
     assert_eq!(json["report"]["tenant"], "default");
     assert_eq!(json["report"]["entity_type"], "Order");
@@ -198,7 +198,10 @@ async fn projection_replay_parity_endpoint_reports_projection_drift() {
     assert_eq!(json["report"]["matched"], 0);
     assert_eq!(json["report"]["drifted"], 1);
     assert_eq!(json["report"]["drift_examples"][0]["entity_id"], entity_id);
-    assert_eq!(json["report"]["drift_examples"][0]["drift_kind"], "fields");
+    assert_eq!(
+        json["report"]["drift_examples"][0]["drift_kind"], "fields",
+        "{json:#}"
+    );
 }
 
 /// Build a POST request with admin auth headers for observe endpoints.
