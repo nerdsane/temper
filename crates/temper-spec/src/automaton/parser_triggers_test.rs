@@ -326,6 +326,35 @@ to = "Notified"
 }
 
 #[test]
+fn webhook_action_trigger_is_rejected_until_delivery_is_durable() {
+    let spec = r#"
+[automaton]
+name = "Order"
+states = ["Draft", "Confirmed"]
+initial = "Draft"
+
+[[action]]
+name = "ConfirmOrder"
+from = ["Draft"]
+to = "Confirmed"
+
+[[action.triggers]]
+name = "notify_fulfillment"
+kind = "webhook"
+url = "https://example.com/orders"
+method = "POST"
+"#;
+
+    let err = parse_automaton(spec)
+        .expect_err("an outbound webhook without durable runtime support must be rejected");
+    assert!(
+        err.to_string()
+            .contains("outbound IOA webhooks are unsupported until durable delivery is available"),
+        "expected the durable-delivery validation error, got: {err}"
+    );
+}
+
+#[test]
 fn test_action_triggers_invalid_nested_toml_fails_loud() {
     let spec = r#"
 [automaton]

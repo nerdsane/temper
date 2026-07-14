@@ -50,6 +50,52 @@ trigger = "SubmitOrder"
 }
 
 #[test]
+fn legacy_webhook_integration_is_rejected_until_delivery_is_durable() {
+    let toml = r#"
+[automaton]
+name = "Order"
+states = ["Draft"]
+initial = "Draft"
+
+[[integration]]
+name = "notify_fulfillment"
+trigger = "SubmitOrder"
+type = "webhook"
+"#;
+
+    let err = parse_automaton(toml)
+        .expect_err("a legacy outbound webhook without durable runtime support must be rejected");
+    assert!(
+        err.to_string()
+            .contains("outbound IOA webhooks are unsupported until durable delivery is available"),
+        "expected the durable-delivery validation error, got: {err}"
+    );
+}
+
+#[test]
+fn defaulted_legacy_webhook_integration_is_also_rejected() {
+    let toml = r#"
+[automaton]
+name = "Order"
+states = ["Draft"]
+initial = "Draft"
+
+[[integration]]
+name = "notify_fulfillment"
+trigger = "SubmitOrder"
+"#;
+
+    let err = parse_automaton(toml).expect_err(
+        "an omitted legacy integration type defaults to webhook and must be rejected",
+    );
+    assert!(
+        err.to_string()
+            .contains("outbound IOA webhooks are unsupported until durable delivery is available"),
+        "expected the durable-delivery validation error, got: {err}"
+    );
+}
+
+#[test]
 fn test_no_integrations_defaults_empty() {
     let automaton = parse_automaton(ORDER_IOA).expect("should parse");
     assert!(automaton.integrations.is_empty());
