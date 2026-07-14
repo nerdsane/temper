@@ -16,7 +16,10 @@ pub mod simulation;
 pub mod smt;
 
 // Re-export key types.
-pub use cascade::{ActorSimResult, CascadeLevel, CascadeResult, LevelResult, VerificationCascade};
+pub use cascade::{
+    ActorSimResult, CascadeLevel, CascadeResult, LevelResult, SourceSpan,
+    UNSUPPORTED_SAFETY_INVARIANT_CODE, UnsupportedInvariantDiagnostic, VerificationCascade,
+};
 pub use checker::{VerificationResult, check_model};
 pub use composite::{CompositePlanError, CompositeVerificationPlan};
 pub use model::{

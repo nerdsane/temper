@@ -10,9 +10,8 @@
 //! that are directly checkable on a single-entity `TemperModelState`:
 //! `StatusInSet`, `CounterPositive`, `NeverState`, `BoolRequired`,
 //! `NoReachingState`, `NoFurtherTransitions`. `Unverifiable` invariants
-//! are treated as true (the single-entity cascade issues a warning;
-//! the composite checker inherits that warning via the plan's
-//! warnings vector).
+//! fail closed (ADR-0178) — the single-entity cascade also rejects them
+//! as a capability error before deployment.
 
 use crate::model::{InvariantKind, TemperModel, TemperModelState};
 
@@ -66,7 +65,8 @@ fn evaluate_one(kind: &InvariantKind, state: &TemperModelState) -> bool {
         }
         InvariantKind::And(kinds) => kinds.iter().all(|k| evaluate_one(k, state)),
         InvariantKind::Or(kinds) => kinds.iter().any(|k| evaluate_one(k, state)),
-        InvariantKind::Unverifiable { .. } => true, // warning issued elsewhere
+        // ADR-0178: unsupported safety never holds under composite evaluation.
+        InvariantKind::Unverifiable { .. } => false,
     }
 }
 

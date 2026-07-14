@@ -163,7 +163,8 @@ fn convert_effect(effect: ResolvedEffect) -> ModelEffect {
 ///
 /// Uses [`parse_assert_expr`] from `temper-spec` as the primary classifier,
 /// then falls back to known boolean variable names. Unrecognized expressions
-/// become `Unverifiable` (with a warning) instead of silently passing.
+/// become `Unverifiable` (a hard cascade failure; ADR-0178) instead of silently
+/// passing.
 ///
 /// A `TypeInvariant` (StatusInSet) is always auto-included.
 fn resolve_invariants(automaton: &Automaton) -> Vec<ResolvedInvariant> {
@@ -469,9 +470,24 @@ guard = [{ type = "cross_entity_state", entity_type = "Child", entity_id_source 
 
     #[test]
     fn test_undeclared_bool_invariant_falls_back_to_unverifiable() {
-        // payment_captured is NOT declared as a [[state]] bool var in the spec,
-        // so "ShipRequiresPayment" falls back to Unverifiable (we can't model it).
-        let model = build_order_model();
+        // A bare identifier that is not a declared bool is not BoolRequired.
+        let src = r#"
+[automaton]
+name = "Ship"
+states = ["Draft", "Shipped"]
+initial = "Draft"
+
+[[action]]
+name = "Ship"
+from = ["Draft"]
+to = "Shipped"
+
+[[invariant]]
+name = "ShipRequiresPayment"
+when = ["Shipped"]
+assert = "payment_captured"
+"#;
+        let model = build_model_from_ioa(src, 2).unwrap();
         let ship_inv = model
             .invariants
             .iter()
@@ -484,6 +500,24 @@ guard = [{ type = "cross_entity_state", entity_type = "Child", entity_id_source 
             matches!(ship_inv.unwrap().kind, InvariantKind::Unverifiable { .. }),
             "Undeclared bool should fall back to Unverifiable"
         );
+    }
+
+    #[test]
+    fn test_order_ship_requires_payment_is_bool_required() {
+        // ORDER fixture declares payment_captured so the safety claim is model-checkable.
+        let model = build_order_model();
+        let ship_inv = model
+            .invariants
+            .iter()
+            .find(|i| i.name == "ShipRequiresPayment")
+            .expect("ShipRequiresPayment");
+        match &ship_inv.kind {
+            InvariantKind::BoolRequired { var, expect } => {
+                assert_eq!(var, "payment_captured");
+                assert!(*expect);
+            }
+            other => panic!("expected BoolRequired, got {other:?}"),
+        }
     }
 
     #[test]

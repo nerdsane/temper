@@ -79,15 +79,58 @@ pub struct LevelResult {
     pub smt: Option<SmtResult>,
 }
 
+/// Stable error code for unsupported safety-invariant diagnostics (ADR-0178).
+pub const UNSUPPORTED_SAFETY_INVARIANT_CODE: &str = "VERIFY_UNSUPPORTED_SAFETY_INVARIANT";
+
+/// Byte and 1-based line/column span into the submitted IOA document.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct SourceSpan {
+    /// Inclusive start offset in UTF-8 bytes.
+    pub start_byte: usize,
+    /// Exclusive end offset in UTF-8 bytes.
+    pub end_byte: usize,
+    /// 1-based start line.
+    pub start_line: u32,
+    /// 1-based start column (UTF-8 bytes within the line).
+    pub start_column: u32,
+    /// 1-based end line.
+    pub end_line: u32,
+    /// 1-based end column (UTF-8 bytes within the line; exclusive).
+    pub end_column: u32,
+}
+
+/// Structured diagnostic for a safety invariant the verifier cannot encode.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct UnsupportedInvariantDiagnostic {
+    /// Stable machine-readable code ([`UNSUPPORTED_SAFETY_INVARIANT_CODE`]).
+    pub code: String,
+    /// `[[invariant]]` name from the submitted document.
+    pub invariant_name: String,
+    /// Original assertion expression that could not be verified.
+    pub expression: String,
+    /// Source range of the `[[invariant]]` table in the submitted IOA, when found.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_span: Option<SourceSpan>,
+}
+
 /// The aggregate result of running the full verification cascade.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct CascadeResult {
-    /// Whether all levels passed.
+    /// Whether all levels passed **and** no unsupported safety invariants remain.
+    ///
+    /// Per ADR-0178, `all_passed` is never true when [`Self::unsupported_invariants`]
+    /// is non-empty — capability failure is independent of level exploration.
     pub all_passed: bool,
     /// Per-level results.
     pub levels: Vec<LevelResult>,
-    /// Warnings about invariants that could not be verified at model level.
+    /// Non-fatal advisory messages (e.g. composite plan build issues).
+    ///
+    /// Unsupported safety assertions are **not** warnings; see
+    /// [`Self::unsupported_invariants`].
     pub warnings: Vec<String>,
+    /// Safety invariants the verifier cannot encode (ADR-0178 hard failures).
+    #[serde(default)]
+    pub unsupported_invariants: Vec<UnsupportedInvariantDiagnostic>,
     /// Reachable paths extracted after L1 model check (if path extraction was configured).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reachable_paths: Option<crate::paths::PathExtractionResult>,
@@ -244,8 +287,22 @@ impl VerificationCascade {
         let mut levels = Vec::new();
         let model = self.build_temper_model();
 
-        // Collect warnings for Unverifiable invariants.
-        let mut warnings = collect_unverifiable_warnings(&model);
+        // ADR-0178 capability gate: unsupported safety is a hard failure,
+        // independent of reachability, seeds, or level exploration order.
+        let unsupported_invariants =
+            collect_unsupported_invariant_diagnostics(&model, &self.ioa_source);
+        let mut warnings = Vec::new();
+
+        if self.fail_fast && !unsupported_invariants.is_empty() {
+            return CascadeResult {
+                all_passed: false,
+                levels,
+                warnings,
+                unsupported_invariants,
+                reachable_paths: None,
+                composite_report: None,
+            };
+        }
 
         // Level 0: SMT symbolic verification
         let l0 = self.run_symbolic_verification();
@@ -256,6 +313,7 @@ impl VerificationCascade {
                 all_passed: false,
                 levels,
                 warnings,
+                unsupported_invariants,
                 reachable_paths: None,
                 composite_report: None,
             };
@@ -270,6 +328,7 @@ impl VerificationCascade {
                 all_passed: false,
                 levels,
                 warnings,
+                unsupported_invariants,
                 reachable_paths: None,
                 composite_report: None,
             };
@@ -293,6 +352,7 @@ impl VerificationCascade {
                 all_passed: false,
                 levels,
                 warnings,
+                unsupported_invariants,
                 reachable_paths,
                 composite_report: None,
             };
@@ -309,6 +369,7 @@ impl VerificationCascade {
                     composite_report: None,
                     levels,
                     warnings,
+                    unsupported_invariants,
                     reachable_paths,
                 };
             }
@@ -327,11 +388,13 @@ impl VerificationCascade {
             .as_ref()
             .and_then(|cfg| build_composite_report(cfg, &mut warnings));
 
-        let all_passed = levels.iter().all(|l| l.passed);
+        let levels_passed = levels.iter().all(|l| l.passed);
+        let all_passed = levels_passed && unsupported_invariants.is_empty();
         CascadeResult {
             all_passed,
             levels,
             warnings,
+            unsupported_invariants,
             reachable_paths,
             composite_report,
         }
@@ -571,22 +634,112 @@ impl VerificationCascade {
     }
 }
 
-/// Collect warnings for invariants classified as `Unverifiable`.
-fn collect_unverifiable_warnings(model: &TemperModel) -> Vec<String> {
+/// Collect structured diagnostics for invariants classified as `Unverifiable`.
+fn collect_unsupported_invariant_diagnostics(
+    model: &TemperModel,
+    ioa_source: &str,
+) -> Vec<UnsupportedInvariantDiagnostic> {
     model
         .invariants
         .iter()
         .filter_map(|inv| {
             if let InvariantKind::Unverifiable { expression } = &inv.kind {
-                Some(format!(
-                    "invariant '{}' has unverifiable assertion '{}' — skipped at model level",
-                    inv.name, expression,
-                ))
+                Some(UnsupportedInvariantDiagnostic {
+                    code: UNSUPPORTED_SAFETY_INVARIANT_CODE.to_string(),
+                    invariant_name: inv.name.clone(),
+                    expression: expression.clone(),
+                    source_span: find_invariant_source_span(ioa_source, &inv.name),
+                })
             } else {
                 None
             }
         })
         .collect()
+}
+
+/// Locate the `[[invariant]]` array-table for `name` in the submitted IOA TOML.
+///
+/// Returns the span covering the table header through the last non-empty line
+/// before the next top-level table header (`[` …). Matching is by the first
+/// `name = "…"` (or `name = '…'`) assignment inside each invariant table.
+fn find_invariant_source_span(source: &str, name: &str) -> Option<SourceSpan> {
+    let bytes = source.as_bytes();
+    let mut search_from = 0usize;
+    while let Some(rel) = source[search_from..].find("[[invariant]]") {
+        let table_start = search_from + rel;
+        let after_header = table_start + "[[invariant]]".len();
+        let next_table = source[after_header..]
+            .find("\n[")
+            .map(|i| after_header + i)
+            .unwrap_or(source.len());
+        let table_body = &source[table_start..next_table];
+        if invariant_table_name_matches(table_body, name) {
+            let end = trim_trailing_ws_end(bytes, next_table);
+            return Some(byte_range_to_source_span(source, table_start, end));
+        }
+        search_from = after_header;
+    }
+    None
+}
+
+fn invariant_table_name_matches(table_body: &str, name: &str) -> bool {
+    for line in table_body.lines() {
+        let trimmed = line.trim();
+        if let Some(rest) = trimmed.strip_prefix("name") {
+            let rest = rest.trim_start();
+            if let Some(rest) = rest.strip_prefix('=') {
+                let rest = rest.trim();
+                let value = rest
+                    .strip_prefix('"')
+                    .and_then(|s| s.strip_suffix('"'))
+                    .or_else(|| rest.strip_prefix('\'').and_then(|s| s.strip_suffix('\'')));
+                if value == Some(name) {
+                    return true;
+                }
+            }
+        }
+    }
+    false
+}
+
+fn trim_trailing_ws_end(bytes: &[u8], end: usize) -> usize {
+    let mut e = end;
+    while e > 0 && matches!(bytes[e - 1], b' ' | b'\t' | b'\n' | b'\r') {
+        e -= 1;
+    }
+    e
+}
+
+fn byte_range_to_source_span(source: &str, start_byte: usize, end_byte: usize) -> SourceSpan {
+    let (start_line, start_column) = byte_offset_to_line_col(source, start_byte);
+    let (end_line, end_column) = byte_offset_to_line_col(source, end_byte);
+    SourceSpan {
+        start_byte,
+        end_byte,
+        start_line,
+        start_column,
+        end_line,
+        end_column,
+    }
+}
+
+/// Convert a UTF-8 byte offset into 1-based line and column (byte column).
+fn byte_offset_to_line_col(source: &str, offset: usize) -> (u32, u32) {
+    let offset = offset.min(source.len());
+    let mut line = 1u32;
+    let mut col = 1u32;
+    for (i, b) in source.bytes().enumerate() {
+        if i == offset {
+            return (line, col);
+        }
+        if b == b'\n' {
+            line += 1;
+            col = 1;
+        } else {
+            col += 1;
+        }
+    }
+    (line, col)
 }
 
 /// Build a [`CompositeCascadeReport`] from the configured scope, appending
@@ -684,26 +837,171 @@ mod tests {
     }
 
     #[test]
-    fn test_cascade_warnings_for_unverifiable_invariants() {
-        let cascade = VerificationCascade::from_ioa(ORDER_IOA)
-            .with_sim_seeds(3)
-            .with_prop_test_cases(50);
+    fn test_cascade_fails_closed_on_unsupported_safety_invariant() {
+        // Counter-to-counter comparison is not in the verifier capability set
+        // (counter-to-literal only). Must fail closed independent of seeds.
+        let unsupported = r#"
+[automaton]
+name = "Workspace"
+states = ["Active", "Archived"]
+initial = "Active"
 
-        let result = cascade.run();
-        // Order spec has "payment_captured" which is not a declared bool,
-        // so ShipRequiresPayment becomes Unverifiable.
+[[state]]
+name = "used_bytes"
+type = "counter"
+initial = "0"
+
+[[state]]
+name = "quota_limit"
+type = "counter"
+initial = "0"
+
+[[action]]
+name = "Archive"
+from = ["Active"]
+to = "Archived"
+
+[[invariant]]
+name = "UsageBelowQuota"
+when = ["Active"]
+assert = "used_bytes <= quota_limit"
+"#;
+        let result = VerificationCascade::from_ioa(unsupported)
+            .with_sim_seeds(3)
+            .with_prop_test_cases(20)
+            .run();
+
         assert!(
-            !result.warnings.is_empty(),
-            "Should have warnings for unverifiable invariants"
+            !result.all_passed,
+            "unsupported safety must not report cascade success"
         );
+        assert_eq!(result.unsupported_invariants.len(), 1);
+        let diag = &result.unsupported_invariants[0];
+        assert_eq!(diag.code, UNSUPPORTED_SAFETY_INVARIANT_CODE);
+        assert_eq!(diag.invariant_name, "UsageBelowQuota");
+        assert_eq!(diag.expression, "used_bytes <= quota_limit");
+        let span = diag
+            .source_span
+            .as_ref()
+            .expect("source span for named invariant");
+        assert!(
+            span.start_byte < span.end_byte,
+            "span should cover the invariant table"
+        );
+        assert!(span.start_line >= 1);
+        let slice = &unsupported[span.start_byte..span.end_byte];
+        assert!(
+            slice.contains("UsageBelowQuota") && slice.contains("used_bytes <= quota_limit"),
+            "span should cover name and assert, got: {slice:?}"
+        );
+        // Must not be described as a soft skip warning.
         assert!(
             result
                 .warnings
                 .iter()
-                .any(|w| w.contains("ShipRequiresPayment")),
-            "Should warn about ShipRequiresPayment, got: {:?}",
-            result.warnings,
+                .all(|w| !w.contains("skipped at model level")),
+            "unsupported safety must not be warning-only: {:?}",
+            result.warnings
         );
+    }
+
+    #[test]
+    fn test_cascade_unsupported_span_multiline_and_repeated() {
+        let src = r#"
+[automaton]
+name = "Multi"
+states = ["A", "B"]
+initial = "A"
+
+[[action]]
+name = "Go"
+from = ["A"]
+to = "B"
+
+[[invariant]]
+name = "FirstBad"
+assert = "alpha <= beta"
+
+[[invariant]]
+name = "OkNever"
+assert = "never(B)"
+
+[[invariant]]
+name = "SecondBad"
+assert = "gamma + delta"
+"#;
+        let result = VerificationCascade::from_ioa(src)
+            .with_sim_seeds(1)
+            .with_prop_test_cases(5)
+            .run();
+        assert!(!result.all_passed);
+        assert_eq!(result.unsupported_invariants.len(), 2);
+        assert_eq!(result.unsupported_invariants[0].invariant_name, "FirstBad");
+        assert_eq!(result.unsupported_invariants[1].invariant_name, "SecondBad");
+        for diag in &result.unsupported_invariants {
+            let span = diag.source_span.as_ref().expect("span");
+            let slice = &src[span.start_byte..span.end_byte];
+            assert!(
+                slice.contains(&diag.invariant_name),
+                "span for {} must include its name: {slice:?}",
+                diag.invariant_name
+            );
+        }
+        // Distinct spans for the two unsupported tables.
+        let a = result.unsupported_invariants[0]
+            .source_span
+            .as_ref()
+            .unwrap();
+        let b = result.unsupported_invariants[1]
+            .source_span
+            .as_ref()
+            .unwrap();
+        assert!(a.end_byte <= b.start_byte || b.end_byte <= a.start_byte);
+    }
+
+    #[test]
+    fn test_cascade_fully_supported_spec_passes() {
+        let result = VerificationCascade::from_ioa(ORDER_IOA)
+            .with_sim_seeds(3)
+            .with_prop_test_cases(50)
+            .run();
+        assert!(
+            result.unsupported_invariants.is_empty(),
+            "ORDER fixture must be fully supported after payment_captured was declared: {:?}",
+            result.unsupported_invariants
+        );
+        assert!(
+            result.all_passed,
+            "supported ORDER cascade should pass, levels: {:?}",
+            result
+                .levels
+                .iter()
+                .map(|l| (&l.summary, l.passed))
+                .collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn test_fail_fast_stops_on_unsupported_before_levels() {
+        let unsupported = r#"
+[automaton]
+name = "Bad"
+states = ["A"]
+initial = "A"
+
+[[invariant]]
+name = "Mystery"
+assert = "not_a_real_expression(x)"
+"#;
+        let result = VerificationCascade::from_ioa(unsupported)
+            .with_fail_fast()
+            .run();
+        assert!(!result.all_passed);
+        assert!(
+            result.levels.is_empty(),
+            "fail_fast capability gate should skip level exploration"
+        );
+        assert_eq!(result.unsupported_invariants.len(), 1);
     }
 
     #[test]

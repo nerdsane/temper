@@ -408,7 +408,8 @@ fn sim_kind_violated(
         InvariantKind::Or(parts) => parts
             .iter()
             .all(|k| sim_kind_violated(k, required_states, model, state_after)),
-        InvariantKind::Unverifiable { .. } => false,
+        // ADR-0178: unsupported safety is a standing violation.
+        InvariantKind::Unverifiable { .. } => true,
     }
 }
 

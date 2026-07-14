@@ -187,8 +187,10 @@ pub enum InvariantKind {
     And(Vec<InvariantKind>),
     /// Compound: at least one subexpression must hold.
     Or(Vec<InvariantKind>),
-    /// Assertion expression that cannot be verified at model level.
-    /// Surfaces as a warning in the cascade result.
+    /// Assertion expression that the verifier cannot encode or prove.
+    ///
+    /// Per ADR-0178 this is a hard capability failure: the cascade must not
+    /// report success, and backends must not treat the declaration as holding.
     Unverifiable { expression: String },
 }
 

@@ -101,7 +101,8 @@ fn kind_holds(
         InvariantKind::Or(parts) => parts
             .iter()
             .any(|k| kind_holds(k, required_states, model, state)),
-        InvariantKind::Unverifiable { .. } => true,
+        // ADR-0178: an unsupported declaration does not hold under model check.
+        InvariantKind::Unverifiable { .. } => false,
     }
 }
 
@@ -117,6 +118,17 @@ fn check_compound_invariants(model: &TemperModel, state: &TemperModelState) -> b
         }
     }
     true
+}
+
+/// ADR-0178: any `Unverifiable` safety invariant is a standing model-check failure.
+///
+/// Capability is known before exploration; this property never holds when the
+/// model builder classified a declared assertion as unsupported.
+fn check_no_unverifiable_invariants(model: &TemperModel, _state: &TemperModelState) -> bool {
+    !model
+        .invariants
+        .iter()
+        .any(|inv| matches!(inv.kind, InvariantKind::Unverifiable { .. }))
 }
 
 /// Check all NoFurtherTransitions invariants: when status is in triggers,
@@ -434,7 +446,17 @@ impl Model for TemperModel {
             ));
         }
 
-        // Note: Unverifiable invariants generate no properties (skipped).
+        // ADR-0178: unsupported safety invariants are standing failures.
+        let has_unverifiable = self
+            .invariants
+            .iter()
+            .any(|i| matches!(i.kind, InvariantKind::Unverifiable { .. }));
+        if has_unverifiable {
+            props.push(Property::always(
+                "UnsupportedSafetyInvariants",
+                check_no_unverifiable_invariants,
+            ));
+        }
 
         // Liveness: NoDeadlock (expressed as safety: "always has actions")
         let has_no_deadlock = self

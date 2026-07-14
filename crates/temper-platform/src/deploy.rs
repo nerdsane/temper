@@ -238,6 +238,7 @@ impl DeployPipeline {
                     all_passed: true,
                     levels: vec![],
                     warnings: vec![],
+                    unsupported_invariants: vec![],
                     reachable_paths: None,
                     composite_report: None,
                 }
