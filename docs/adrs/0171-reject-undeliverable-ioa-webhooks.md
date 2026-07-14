@@ -1,6 +1,6 @@
 # ADR-0171: Reject Undeliverable IOA Webhook Integrations
 
-- Status: Proposed
+- Status: Accepted
 - Date: 2026-07-13
 - Deciders: Temper core maintainers
 - Supersedes: ADR-0046 Sub-Decision 2's webhook acceptance and known-gap
