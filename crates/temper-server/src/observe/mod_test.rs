@@ -20,7 +20,7 @@ use tracing_subscriber::registry::LookupSpan;
 use crate::registry::SpecRegistry;
 use crate::request_context::AgentContext;
 use crate::secrets::vault::SecretsVault;
-use crate::state::TrajectoryEntry;
+use crate::state::{TrajectoryEntry, TrajectorySource};
 use crate::storage::StorageStack;
 
 const CSDL_XML: &str = include_str!("../../../../test-fixtures/specs/model.csdl.xml");
@@ -1636,6 +1636,63 @@ async fn test_intent_evidence_returns_richer_intent_candidates() {
     );
     assert_eq!(candidates[0]["suggested_kind"], "workaround");
     assert_eq!(json["workaround_patterns"][0]["occurrences"], 1);
+}
+
+#[tokio::test]
+async fn feature_request_get_is_a_pure_read() {
+    let state = test_state_with_turso().await;
+    for index in 0..3 {
+        state
+            .persist_trajectory_entry(&TrajectoryEntry {
+                timestamp: (sim_now() + chrono::Duration::seconds(index)).to_rfc3339(),
+                tenant: "default".to_string(),
+                entity_type: "MissingCapability".to_string(),
+                entity_id: format!("missing-{index}"),
+                action: "GenerateReport".to_string(),
+                success: false,
+                from_status: None,
+                to_status: None,
+                error: Some("EntitySetNotFound: Report".to_string()),
+                agent_id: Some("agent-1".to_string()),
+                session_id: Some("session-1".to_string()),
+                authz_denied: None,
+                denied_resource: None,
+                denied_module: None,
+                source: Some(TrajectorySource::Platform),
+                spec_governed: Some(true),
+                agent_type: Some("swe".to_string()),
+                request_body: None,
+                intent: Some("Generate a report".to_string()),
+                matched_policy_ids: None,
+            })
+            .await
+            .expect("persist trajectory evidence");
+    }
+
+    let store = state
+        .platform_metadata_store()
+        .expect("Turso metadata store");
+    let app = build_app_with_state(state);
+
+    let first = observe_json(app.clone(), "/observe/evolution/feature-requests").await;
+    let second = observe_json(app, "/observe/evolution/feature-requests").await;
+
+    assert_eq!(
+        first["total"], 0,
+        "GET must not materialize feature requests"
+    );
+    assert_eq!(
+        second["total"], 0,
+        "repeated GET must remain side-effect free"
+    );
+    assert!(
+        store
+            .list_feature_requests(None)
+            .await
+            .expect("list persisted feature requests")
+            .is_empty(),
+        "GET must not write the feature-request projection",
+    );
 }
 
 // -- Sentinel endpoint tests --
