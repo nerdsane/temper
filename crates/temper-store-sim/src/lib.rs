@@ -685,8 +685,22 @@ impl EventStore for SimEventStore {
         entity_type: &str,
         entity_id: &str,
         vector_rows: &[EntityVectorRow],
+        as_of_sequence: u64,
     ) -> Result<(), PersistenceError> {
         let mut inner = self.inner.lock().expect("SimEventStore lock poisoned"); // ci-ok: infallible lock
+        // ARN-216 / ADR-0173: a reconcile derived from a stale load must not
+        // overwrite the newer rows a live write co-committed. Skip when the
+        // journal advanced past the load's sequence.
+        let pid = format!("{tenant}:{entity_type}:{entity_id}");
+        let current_seq = inner
+            .journals
+            .get(&pid)
+            .and_then(|j| j.last())
+            .map(|e| e.sequence_nr)
+            .unwrap_or(0);
+        if current_seq > as_of_sequence {
+            return Ok(());
+        }
         // Reconcile: drop ALL of the entity's rows, then insert the current ones.
         // Empty `vector_rows` purges the entity (deleted / un-embedded). Idempotent.
         inner.vector_index.retain(|(t, et, _, _, eid), _| {

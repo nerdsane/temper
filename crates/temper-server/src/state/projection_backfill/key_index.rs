@@ -141,7 +141,7 @@ pub(in crate::state) async fn populate_key_index_from_snapshots(
             )
             .await
             {
-                EntityLoadOutcome::Fields(fields) => {
+                EntityLoadOutcome::Fields(fields, _loaded_seq) => {
                     let Some(field_map) = fields.as_object() else {
                         skipped += 1;
                         continue;
@@ -179,7 +179,7 @@ pub(in crate::state) async fn populate_key_index_from_snapshots(
                         }
                     }
                 }
-                EntityLoadOutcome::Skip => skipped += 1,
+                EntityLoadOutcome::Skip(_) => skipped += 1,
                 EntityLoadOutcome::LoadFailed => {
                     failed += 1;
                     tracing::warn!(
