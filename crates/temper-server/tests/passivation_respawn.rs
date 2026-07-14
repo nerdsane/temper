@@ -34,6 +34,25 @@ after_seconds = 60
 on_timeout = "TimeoutFail"
 "#;
 
+const INITIAL_TIMED_TASK_IOA: &str = r#"
+[automaton]
+name = "InitialTimedTask"
+states = ["Running", "TimedOut"]
+initial = "Running"
+allow_indefinite_states = ["TimedOut"]
+
+[[action]]
+name = "TimeoutFail"
+kind = "internal"
+from = ["Running"]
+to = "TimedOut"
+
+[[state_timeout]]
+state = "Running"
+after_seconds = 60
+on_timeout = "TimeoutFail"
+"#;
+
 #[tokio::test]
 async fn passivated_actor_respawns_with_correct_state() {
     let seed = 42;
@@ -439,4 +458,122 @@ async fn legacy_snapshot_anchor_repair_survives_immediate_second_restart() {
 async fn legacy_snapshot_anchor_repair_with_composite_tail_survives_restart() {
     assert_legacy_snapshot_anchor_repair_survives_restart(206, "legacy-timed-composite-tail", true)
         .await;
+}
+
+#[tokio::test]
+async fn legacy_timeout_anchor_without_snapshot_creates_durable_boundary() {
+    let seed = 207;
+    let (_guard, clock, _id_gen) = install_deterministic_context(seed);
+    let sim_store = SimEventStore::no_faults(seed);
+    let tenant = TenantId::default();
+    let entity_id = "legacy-initial-timed-no-snapshot";
+    let actor_key = format!("{tenant}:InitialTimedTask:{entity_id}");
+    sim_store
+        .append(
+            &actor_key,
+            0,
+            &[PersistenceEnvelope {
+                sequence_nr: 0,
+                event_type: COMPOSITE_EVENT_TYPE.to_string(),
+                payload: serde_json::json!({}),
+                metadata: EventMetadata {
+                    event_id: sim_uuid(),
+                    causation_id: sim_uuid(),
+                    correlation_id: sim_uuid(),
+                    timestamp: sim_now(),
+                    actor_id: actor_key.clone(),
+                },
+            }],
+        )
+        .await
+        .expect("seed legacy composite marker without a snapshot boundary");
+
+    let expected_repair_at = sim_now();
+    let first_state = common::build_single_tenant_state_with_store(
+        sim_store.clone(),
+        "legacy-timeout-no-snapshot-first",
+        "default",
+        &[("InitialTimedTask", INITIAL_TIMED_TASK_IOA)],
+    );
+    let first_recovery = first_state
+        .get_tenant_entity_state(&tenant, "InitialTimedTask", entity_id)
+        .await
+        .expect("legacy hydration creates its first durable snapshot boundary");
+    assert_eq!(first_recovery.state.status, "Running");
+    assert_eq!(first_recovery.state.sequence_nr, 1);
+    assert_eq!(first_recovery.state.last_snapshot_sequence_nr, 1);
+    assert_eq!(first_recovery.state.events_since_snapshot, 0);
+    assert_eq!(
+        first_recovery.state.state_timeout_clock_reset_at,
+        Some(expected_repair_at)
+    );
+    assert_eq!(
+        sim_store
+            .read_events(&actor_key, 0)
+            .await
+            .expect("legacy journal remains readable")
+            .len(),
+        1,
+        "repair must create a snapshot boundary without appending a domain event"
+    );
+    let (snapshot_sequence, snapshot_bytes) = sim_store
+        .load_snapshot(&actor_key)
+        .await
+        .expect("repaired snapshot lookup succeeds")
+        .expect("repair writes the first snapshot boundary");
+    assert_eq!(snapshot_sequence, 1);
+    let snapshot: serde_json::Value =
+        serde_json::from_slice(&snapshot_bytes).expect("repaired snapshot is JSON");
+    assert_eq!(
+        snapshot.get("state_timeout_clock_reset_at"),
+        Some(&serde_json::json!(expected_repair_at))
+    );
+    assert_eq!(snapshot.get("sequence_nr"), Some(&serde_json::json!(1)));
+    assert_eq!(
+        snapshot.get("last_snapshot_sequence_nr"),
+        Some(&serde_json::json!(1))
+    );
+    assert_eq!(
+        snapshot.get("events_since_snapshot"),
+        Some(&serde_json::json!(0))
+    );
+    for _ in 0..32 {
+        if first_state.state_timeout_tracker.pending_snapshot()
+            == vec![("InitialTimedTask".to_string(), 1)]
+        {
+            break;
+        }
+        tokio::task::yield_now().await;
+    }
+    assert_eq!(
+        first_state.state_timeout_tracker.pending_snapshot(),
+        vec![("InitialTimedTask".to_string(), 1)],
+        "the repaired initial timed state receives exactly one timeout"
+    );
+
+    drop(first_state);
+    clock.advance_by(100);
+    let second_state = common::build_single_tenant_state_with_store(
+        sim_store,
+        "legacy-timeout-no-snapshot-second",
+        "default",
+        &[("InitialTimedTask", INITIAL_TIMED_TASK_IOA)],
+    );
+    let second_recovery = second_state
+        .get_tenant_entity_state(&tenant, "InitialTimedTask", entity_id)
+        .await
+        .expect("the new boundary remains readable after an immediate restart");
+    assert_eq!(
+        second_recovery.state.state_timeout_clock_reset_at,
+        Some(expected_repair_at),
+        "restart must retain the first conservative anchor"
+    );
+    assert_ne!(
+        second_recovery.state.state_timeout_clock_reset_at,
+        Some(sim_now()),
+        "restart must not refresh the timeout budget"
+    );
+    assert_eq!(second_recovery.state.sequence_nr, 1);
+    assert_eq!(second_recovery.state.last_snapshot_sequence_nr, 1);
+    assert_eq!(second_recovery.state.events_since_snapshot, 0);
 }
