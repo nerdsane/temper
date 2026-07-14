@@ -753,15 +753,20 @@ impl EntityActor {
                             state.push_event_bounded(event);
                         }
                         Err(e) => {
-                            if strict_journal_read {
+                            if strict_journal_read && !table.state_timeouts.is_empty() {
                                 return Err(ActorError::custom(format!(
-                                    "incompatible event at sequence {} for {persistence_id}: {e}",
+                                    "cannot safely replay incompatible event at sequence {} for timeout-enabled {persistence_id}: {e}",
                                     env.sequence_nr
                                 )));
                             }
                             // Schema-mismatched event: log and skip rather than panic.
-                            // This preserves entity hydration across spec evolution —
-                            // the last valid state is used and replay continues.
+                            // Journal integrity was already proven over the raw
+                            // contiguous envelopes above. A timeout-free schema can
+                            // preserve its established evolution behavior by keeping
+                            // the last valid domain state while still consuming this
+                            // durable sequence number so later appends cannot collide.
+                            // Timeout-enabled schemas fail above because an unknown
+                            // event may have entered or exited a timed state.
                             tracing::warn!(
                                 entity = %state.entity_id,
                                 event_id = %env.metadata.event_id,
