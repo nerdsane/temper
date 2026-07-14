@@ -116,6 +116,33 @@ async fn seed_running_entity(
         )
         .await
         .expect("seed durable timed state");
+
+    // Current actor snapshots intentionally omit the hot event deque, but
+    // retain the exact timeout clock anchor as dedicated scheduler metadata.
+    let snapshot = serde_json::json!({
+        "entity_type": "TimedTask",
+        "entity_id": entity_id,
+        "status": "Running",
+        "item_count": 0,
+        "counters": {},
+        "booleans": {},
+        "lists": {},
+        "fields": {"Id": entity_id, "Status": "Running"},
+        "state_timeout_clock_reset_at": entered_running_at,
+        "total_event_count": 2,
+        "events_since_snapshot": 0,
+        "last_snapshot_sequence_nr": 2,
+        "sequence_nr": 2,
+        "processed_idempotency_keys": {},
+    });
+    store
+        .save_snapshot(
+            persistence_id,
+            2,
+            &serde_json::to_vec(&snapshot).expect("snapshot serialization"),
+        )
+        .await
+        .expect("seed current snapshot with timeout anchor");
 }
 
 async fn seed_lazy_entity(store: &SimEventStore, entity_id: &str) {
@@ -139,7 +166,7 @@ async fn seed_lazy_entity(store: &SimEventStore, entity_id: &str) {
 }
 
 #[tokio::test]
-async fn overdue_timeout_fires_after_restart_without_an_unrelated_dispatch() {
+async fn overdue_snapshot_timeout_fires_after_restart_without_an_unrelated_dispatch() {
     let (_guard, _clock, _ids) = install_deterministic_context(203);
     let store = SimEventStore::no_faults(203);
     let tenant = TenantId::default();
@@ -183,7 +210,7 @@ async fn overdue_timeout_fires_after_restart_without_an_unrelated_dispatch() {
 }
 
 #[tokio::test(start_paused = true)]
-async fn budgeted_timeout_is_rearmed_after_restart_without_firing_early() {
+async fn budgeted_snapshot_timeout_is_rearmed_without_firing_early_or_late() {
     let (_guard, _clock, _ids) = install_deterministic_context(204);
     let store = SimEventStore::no_faults(204);
     let tenant = TenantId::default();

@@ -8,6 +8,7 @@
 use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
+use temper_spec::automaton::StateTimeout;
 
 use super::guard::{Guard, GuardFailure};
 
@@ -48,6 +49,9 @@ pub struct TransitionTable {
     pub states: Vec<String>,
     /// The state an entity starts in.
     pub initial_state: String,
+    /// Durable timeout declarations needed by the production actor snapshot.
+    #[serde(default)]
+    pub state_timeouts: Vec<StateTimeout>,
     /// Ordered list of transition rules.
     pub rules: Vec<TransitionRule>,
     /// ADR-0153: declared unique/alternate keys the kernel indexes for
@@ -154,6 +158,8 @@ impl<'de> Deserialize<'de> for TransitionTable {
             entity_name: String,
             states: Vec<String>,
             initial_state: String,
+            #[serde(default)]
+            state_timeouts: Vec<StateTimeout>,
             rules: Vec<TransitionRule>,
             #[serde(default)]
             state_var_metadata: BTreeMap<String, StateVarMetadata>,
@@ -170,6 +176,7 @@ impl<'de> Deserialize<'de> for TransitionTable {
             entity_name: raw.entity_name,
             states: raw.states,
             initial_state: raw.initial_state,
+            state_timeouts: raw.state_timeouts,
             rules: raw.rules,
             keys: raw.keys,
             vectors: raw.vectors,
@@ -286,6 +293,7 @@ mod tests {
             entity_name: "TestEntity".to_string(),
             states: vec!["Draft".to_string(), "Active".to_string()],
             initial_state: "Draft".to_string(),
+            state_timeouts: vec![],
             keys: vec![],
             vectors: vec![],
             rules: vec![

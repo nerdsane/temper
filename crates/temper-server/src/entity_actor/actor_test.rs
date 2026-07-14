@@ -52,6 +52,7 @@ fn event_budget_workspace_id_uses_workspace_entity_id_or_field() {
         lists: BTreeMap::new(),
         fields: serde_json::json!({"WorkspaceId": "ignored"}),
         events: std::collections::VecDeque::new(),
+        state_timeout_clock_reset_at: None,
         total_event_count: 0,
         events_since_snapshot: 0,
         last_snapshot_sequence_nr: 0,
@@ -70,6 +71,7 @@ fn event_budget_workspace_id_uses_workspace_entity_id_or_field() {
         lists: BTreeMap::new(),
         fields: serde_json::json!({"workspace_id": "ws-2"}),
         events: std::collections::VecDeque::new(),
+        state_timeout_clock_reset_at: None,
         total_event_count: 0,
         events_since_snapshot: 0,
         last_snapshot_sequence_nr: 0,
@@ -77,6 +79,164 @@ fn event_budget_workspace_id_uses_workspace_entity_id_or_field() {
         processed_idempotency_keys: BTreeMap::new(),
     };
     assert_eq!(event_budget_workspace_id(&file_state), "ws-2");
+}
+
+#[test]
+fn current_snapshot_round_trip_preserves_state_timeout_clock_anchor() {
+    let table = TransitionTable::from_ioa_source(
+        r#"
+[automaton]
+name = "TimedTask"
+states = ["Running", "TimedOut"]
+initial = "Running"
+allow_indefinite_states = ["TimedOut"]
+
+[[action]]
+name = "TimeoutFail"
+kind = "internal"
+from = ["Running"]
+to = "TimedOut"
+
+[[state_timeout]]
+state = "Running"
+after_seconds = 60
+on_timeout = "TimeoutFail"
+"#,
+    );
+    let reset_at = chrono::DateTime::<chrono::Utc>::from_timestamp(1_700_000_000, 0).unwrap();
+    let mut state = EntityActor::build_initial_state(
+        "TimedTask",
+        "snapshot-anchor",
+        &table,
+        &serde_json::json!({}),
+    );
+    let created = EntityEvent {
+        action: "Created".to_string(),
+        from_status: String::new(),
+        to_status: "Running".to_string(),
+        timestamp: reset_at,
+        params: serde_json::json!({"Id": "snapshot-anchor"}),
+        idempotency_key: None,
+    };
+    EntityActor::update_state_timeout_clock(&table, &mut state, &created);
+    state.push_event_bounded(created);
+    state.sequence_nr = 1;
+
+    let snapshot = EntityActor::serialize_snapshot_state(&state).expect("serialize snapshot");
+    let payload: serde_json::Value =
+        serde_json::from_slice(&snapshot).expect("snapshot JSON remains readable");
+    assert_eq!(
+        payload.get("state_timeout_clock_reset_at"),
+        Some(&serde_json::json!(reset_at))
+    );
+    assert!(
+        payload.get("events").is_none(),
+        "hot events remain excluded"
+    );
+
+    let mut restored = EntityActor::build_initial_state(
+        "TimedTask",
+        "snapshot-anchor",
+        &table,
+        &serde_json::json!({}),
+    );
+    assert!(EntityActor::apply_snapshot_bytes(
+        &mut restored,
+        1,
+        &snapshot
+    ));
+    assert_eq!(restored.state_timeout_clock_reset_at, Some(reset_at));
+    assert!(restored.events.is_empty());
+}
+
+#[cfg(feature = "sim")]
+#[tokio::test]
+async fn tombstone_replay_clears_state_timeout_clock_anchor() {
+    use temper_runtime::persistence::EventStore;
+    use temper_store_sim::SimEventStore;
+
+    let table = Arc::new(RwLock::new(TransitionTable::from_ioa_source(
+        r#"
+[automaton]
+name = "TimedTask"
+states = ["Running", "TimedOut"]
+initial = "Running"
+allow_indefinite_states = ["TimedOut"]
+
+[[action]]
+name = "TimeoutFail"
+kind = "internal"
+from = ["Running"]
+to = "TimedOut"
+
+[[state_timeout]]
+state = "Running"
+after_seconds = 60
+on_timeout = "TimeoutFail"
+"#,
+    )));
+    let store = Arc::new(SimEventStore::no_faults(204));
+    let persistence_id = "default:TimedTask:tombstoned";
+    let reset_at = sim_now();
+    let envelope = |event_type: &str, payload: serde_json::Value| PersistenceEnvelope {
+        sequence_nr: 0,
+        event_type: event_type.to_string(),
+        payload,
+        metadata: EventMetadata {
+            event_id: sim_uuid(),
+            causation_id: sim_uuid(),
+            correlation_id: sim_uuid(),
+            timestamp: reset_at,
+            actor_id: persistence_id.to_string(),
+        },
+    };
+    store
+        .append(
+            persistence_id,
+            0,
+            &[
+                envelope(
+                    "Created",
+                    serde_json::json!({
+                        "action": "Created",
+                        "from_status": "",
+                        "to_status": "Running",
+                        "timestamp": reset_at,
+                        "params": {}
+                    }),
+                ),
+                envelope(
+                    "Deleted",
+                    serde_json::json!({
+                        "action": "Deleted",
+                        "from_status": "Running",
+                        "to_status": "Deleted",
+                        "timestamp": reset_at,
+                        "params": {}
+                    }),
+                ),
+            ],
+        )
+        .await
+        .expect("seed tombstoned timed entity");
+
+    let actor = EntityActor::with_persistence(
+        "TimedTask",
+        "tombstoned",
+        table,
+        serde_json::json!({}),
+        crate::storage::BoxedEventStore::from_arc(store),
+        crate::storage::BackendLabel::Sim,
+    );
+    let system = ActorSystem::new("timeout-tombstone-replay");
+    let actor_ref = system.spawn(actor, "tombstoned");
+    let response: EntityResponse = actor_ref
+        .ask(EntityMsg::GetState, Duration::from_secs(1))
+        .await
+        .expect("tombstoned actor hydrates");
+
+    assert_eq!(response.state.status, "Deleted");
+    assert_eq!(response.state.state_timeout_clock_reset_at, None);
 }
 
 #[cfg(feature = "sim")]
@@ -101,6 +261,7 @@ async fn queued_snapshot_only_advances_replay_boundary_after_write_applies() {
             "Status": "Draft"
         }),
         events: std::collections::VecDeque::new(),
+        state_timeout_clock_reset_at: None,
         total_event_count: 100,
         events_since_snapshot: 100,
         last_snapshot_sequence_nr: 0,

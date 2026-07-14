@@ -115,6 +115,7 @@ mod tests {
             entity_name: "Order".into(),
             states: vec!["Draft".into(), "Submitted".into(), "Cancelled".into()],
             initial_state: "Draft".into(),
+            state_timeouts: vec![],
             keys: vec![],
             vectors: vec![],
             rules: vec![

@@ -120,6 +120,7 @@ impl TransitionTable {
             entity_name: automaton.automaton.name.clone(),
             states: automaton.automaton.states.clone(),
             initial_state: automaton.automaton.initial.clone(),
+            state_timeouts: automaton.state_timeouts.clone(),
             rules,
             keys: automaton
                 .keys
@@ -295,6 +296,40 @@ generated_from = "pack_bytes"
         assert!(!metadata.record_parent_event);
         assert_eq!(metadata.sub_writes.len(), 1);
         assert_eq!(metadata.sub_writes[0].target_entity, "Blob");
+    }
+
+    #[test]
+    fn state_timeout_metadata_is_carried_into_the_production_table() {
+        let spec = r#"
+[automaton]
+name = "TimedTask"
+states = ["Running", "TimedOut"]
+initial = "Running"
+allow_indefinite_states = ["TimedOut"]
+
+[[action]]
+name = "TimeoutFail"
+kind = "internal"
+from = ["Running"]
+to = "TimedOut"
+
+[[action]]
+name = "Heartbeat"
+kind = "input"
+from = ["Running"]
+to = "Running"
+
+[[state_timeout]]
+state = "Running"
+after_seconds = 60
+on_timeout = "TimeoutFail"
+reset_on = ["Heartbeat"]
+"#;
+
+        let table = TransitionTable::from_ioa_source(spec);
+        assert_eq!(table.state_timeouts.len(), 1);
+        assert_eq!(table.state_timeouts[0].state, "Running");
+        assert_eq!(table.state_timeouts[0].reset_on, ["Heartbeat"]);
     }
 }
 

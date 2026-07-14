@@ -64,12 +64,12 @@ enum StateTimeoutArmCause {
 /// been idle in the current state, used by the hydration re-arm path to
 /// compute remaining timeout budget.
 ///
-/// Returns `None` if no matching entry event is found in the retained window
-/// (state.events is a bounded VecDeque; older history has been snapshotted
-/// and forgotten). Callers treat `None` as "no elapsed info available" and
-/// arm with the full budget.
+/// A snapshot-carried anchor is authoritative when the bounded recent-event
+/// window no longer contains the entry event. Returns `None` only for a legacy
+/// snapshot (or fresh in-memory state) with neither source available.
 fn compute_state_clock_reset_ts(
     events: &VecDeque<EntityEvent>,
+    snapshot_reset_at: Option<DateTime<Utc>>,
     current_state: &str,
     reset_on: &[String],
 ) -> Option<DateTime<Utc>> {
@@ -78,19 +78,26 @@ fn compute_state_clock_reset_ts(
     // because recent events are at the back.
     let entry_idx = events
         .iter()
-        .rposition(|e| e.to_status == current_state && e.from_status != current_state)?;
-    let entry_ts = events[entry_idx].timestamp;
+        .rposition(|e| e.to_status == current_state && e.from_status != current_state);
+    let entry_reset_at = entry_idx.map(|entry_idx| events[entry_idx].timestamp);
+    let reset_at = match (snapshot_reset_at, entry_reset_at) {
+        (Some(snapshot), Some(entry)) => snapshot.max(entry),
+        (Some(snapshot), None) => snapshot,
+        (None, Some(entry)) => entry,
+        (None, None) => return None,
+    };
 
-    // Among events after the entry, find the latest reset_on event.
-    // Those reset the clock per ADR-0049 semantics.
+    // When the entry is in the hot tail, only later events may reset it. When
+    // the entry is represented by a snapshot anchor, every tail event is later.
+    let reset_scan_start = entry_idx.map_or(0, |entry_idx| entry_idx + 1);
     let latest_reset_ts = events
         .iter()
-        .skip(entry_idx + 1)
+        .skip(reset_scan_start)
         .filter(|e| reset_on.iter().any(|a| a == &e.action))
         .map(|e| e.timestamp)
         .max();
 
-    Some(latest_reset_ts.unwrap_or(entry_ts))
+    Some(latest_reset_ts.map_or(reset_at, |latest| reset_at.max(latest)))
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -99,23 +106,30 @@ struct HydrationDelay {
     overdue: bool,
 }
 
-impl HydrationDelay {
-    fn charge_reconciliation(self, elapsed: Duration) -> Self {
-        Self {
-            delay: self.delay.saturating_sub(elapsed),
-            overdue: self.overdue || elapsed >= self.delay,
-        }
-    }
+fn hydration_reconciled_at(
+    observed_at: DateTime<Utc>,
+    readiness_elapsed: Duration,
+) -> DateTime<Utc> {
+    let elapsed = chrono::Duration::from_std(readiness_elapsed).unwrap_or(chrono::Duration::MAX);
+    observed_at
+        .checked_add_signed(elapsed)
+        .unwrap_or(DateTime::<Utc>::MAX_UTC)
+}
+
+fn timeout_deadline(delay: Duration) -> tokio::time::Instant {
+    tokio::time::Instant::now() + delay
 }
 
 fn compute_hydration_delay(
     events: &VecDeque<EntityEvent>,
+    snapshot_reset_at: Option<DateTime<Utc>>,
     current_state: &str,
     reset_on: &[String],
     budget: Duration,
     now: DateTime<Utc>,
 ) -> Option<HydrationDelay> {
-    let reset_ts = compute_state_clock_reset_ts(events, current_state, reset_on)?;
+    let reset_ts =
+        compute_state_clock_reset_ts(events, snapshot_reset_at, current_state, reset_on)?;
     let elapsed = now
         .signed_duration_since(reset_ts)
         .to_std()
@@ -444,21 +458,21 @@ impl crate::state::ServerState {
             let mut delay = Duration::from_secs(st.after_seconds);
             if needs_hydration_rearm {
                 let budget = Duration::from_secs(st.after_seconds);
-                let (now, readiness_elapsed) = match cause {
-                    StateTimeoutArmCause::PostDispatch => (sim_now(), Duration::ZERO),
+                let now = match cause {
+                    StateTimeoutArmCause::PostDispatch => sim_now(),
                     StateTimeoutArmCause::Hydration {
                         observed_at,
                         readiness_elapsed,
-                    } => (observed_at, readiness_elapsed),
+                    } => hydration_reconciled_at(observed_at, readiness_elapsed),
                 };
                 if let Some(hydration) = compute_hydration_delay(
                     &response.state.events,
+                    response.state.state_timeout_clock_reset_at,
                     &post_state,
                     &st.reset_on,
                     budget,
                     now,
                 ) {
-                    let hydration = hydration.charge_reconciliation(readiness_elapsed);
                     delay = hydration.delay;
                     crate::runtime_metrics::record_state_timeout_armed_on_hydration(
                         ctx.tenant.as_str(),
@@ -509,6 +523,7 @@ impl crate::state::ServerState {
                 .workflow_run_id
                 .clone()
                 .unwrap_or_else(|| format!("{entity_type}:{entity_id}"));
+            let deadline = timeout_deadline(delay); // determinism-ok: paused by DST
 
             tracing::debug!(
                 tenant = %ctx.tenant,
@@ -526,7 +541,7 @@ impl crate::state::ServerState {
             tokio::spawn(async move {
                 // determinism-ok: wall-clock timer fires a side-effect action;
                 // the action itself is deterministic under DST via sim_now().
-                tokio::time::sleep(delay).await; // determinism-ok: scheduled delay
+                tokio::time::sleep_until(deadline).await; // determinism-ok: scheduled deadline
 
                 let span = tracing::info_span!(
                     "dispatch.state_timeout.fire",
@@ -684,7 +699,7 @@ mod tests {
         events.push_back(test_event("Close", "InProgress", "Closed", 3_000));
 
         // Current state Closed → clock reset == Close event timestamp.
-        let reset = compute_state_clock_reset_ts(&events, "Closed", &[]).unwrap();
+        let reset = compute_state_clock_reset_ts(&events, None, "Closed", &[]).unwrap();
         assert_eq!(reset.timestamp_millis(), 3_000);
     }
 
@@ -697,7 +712,7 @@ mod tests {
         events.push_back(test_event("OtherAction", "Executing", "Executing", 1_200));
 
         let reset_on = vec!["ProgressMade".to_string()];
-        let reset = compute_state_clock_reset_ts(&events, "Executing", &reset_on).unwrap();
+        let reset = compute_state_clock_reset_ts(&events, None, "Executing", &reset_on).unwrap();
         assert_eq!(
             reset.timestamp_millis(),
             900,
@@ -713,7 +728,7 @@ mod tests {
         events.push_back(test_event("Steer", "Executing", "Executing", 1_500));
 
         let reset_on = vec!["ProgressMade".to_string()];
-        let reset = compute_state_clock_reset_ts(&events, "Executing", &reset_on).unwrap();
+        let reset = compute_state_clock_reset_ts(&events, None, "Executing", &reset_on).unwrap();
         assert_eq!(
             reset.timestamp_millis(),
             1_000,
@@ -729,7 +744,7 @@ mod tests {
         events.push_back(test_event("Steer", "Executing", "Executing", 100));
         events.push_back(test_event("Steer", "Executing", "Executing", 200));
 
-        let reset = compute_state_clock_reset_ts(&events, "Executing", &[]);
+        let reset = compute_state_clock_reset_ts(&events, None, "Executing", &[]);
         assert!(reset.is_none(), "no entry event in window → None");
     }
 
@@ -739,7 +754,7 @@ mod tests {
         events.push_back(test_event("Create", "", "Open", 1_000));
         events.push_back(test_event("Assign", "Open", "InProgress", 2_000));
         // Query for Open, but the current state is InProgress — no match.
-        let reset = compute_state_clock_reset_ts(&events, "Open", &[]);
+        let reset = compute_state_clock_reset_ts(&events, None, "Open", &[]);
         // The events.back() is InProgress, so no entry-into-Open event
         // with from != to is in the window; the original entry at index 0
         // has from_status="" which satisfies "!= current_state", so it IS
@@ -756,7 +771,7 @@ mod tests {
         events.push_back(test_event("Steer", "Executing", "Executing", 500));
         events.push_back(test_event("Steer", "Executing", "Executing", 800));
 
-        let reset = compute_state_clock_reset_ts(&events, "Executing", &[]).unwrap();
+        let reset = compute_state_clock_reset_ts(&events, None, "Executing", &[]).unwrap();
         assert_eq!(
             reset.timestamp_millis(),
             100,
@@ -784,7 +799,8 @@ mod tests {
         for seed in 0_u64..128 {
             let elapsed_secs = seed.wrapping_mul(37) % 121;
             let now = entry + chrono::Duration::seconds(elapsed_secs as i64);
-            let hydration = compute_hydration_delay(&events, "Running", &[], budget, now).unwrap();
+            let hydration =
+                compute_hydration_delay(&events, None, "Running", &[], budget, now).unwrap();
             assert_eq!(
                 hydration.delay,
                 budget.saturating_sub(Duration::from_secs(elapsed_secs)),
@@ -802,27 +818,65 @@ mod tests {
     }
 
     #[test]
-    fn actor_readiness_time_is_charged_against_the_durable_deadline() {
-        let recovered = HydrationDelay {
-            delay: Duration::from_secs(10),
-            overdue: false,
-        };
+    fn reconciliation_charges_only_time_after_a_later_durable_entry() {
+        let observed_at = DateTime::<Utc>::from_timestamp(1_700_000_000, 0).unwrap();
+        let entered_at = observed_at + chrono::Duration::seconds(3);
+        let events = VecDeque::from([EntityEvent {
+            action: "Created".to_string(),
+            from_status: String::new(),
+            to_status: "Running".to_string(),
+            timestamp: entered_at,
+            params: serde_json::json!({}),
+            idempotency_key: None,
+        }]);
+        let reconciled_at = hydration_reconciled_at(observed_at, Duration::from_secs(5));
 
         assert_eq!(
-            recovered.charge_reconciliation(Duration::from_secs(4)),
-            HydrationDelay {
-                delay: Duration::from_secs(6),
+            compute_hydration_delay(
+                &events,
+                Some(entered_at),
+                "Running",
+                &[],
+                Duration::from_secs(60),
+                reconciled_at,
+            ),
+            Some(HydrationDelay {
+                delay: Duration::from_secs(58),
                 overdue: false,
-            }
+            }),
+            "readiness before the durable Created event must not consume its timeout budget"
         );
+    }
+
+    #[test]
+    fn snapshot_anchor_survives_an_empty_recent_event_window() {
+        let reset_at = DateTime::<Utc>::from_timestamp(1_700_000_000, 0).unwrap();
         assert_eq!(
-            recovered.charge_reconciliation(Duration::from_secs(10)),
-            HydrationDelay {
-                delay: Duration::ZERO,
-                overdue: true,
-            },
-            "readiness retries must not move a persisted deadline later"
+            compute_state_clock_reset_ts(&VecDeque::new(), Some(reset_at), "Running", &[]),
+            Some(reset_at),
+            "a current snapshot must retain the durable timeout anchor"
         );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn absolute_deadline_survives_timer_task_poll_delay() {
+        let deadline = timeout_deadline(Duration::from_secs(10));
+
+        // Model a spawned timer task that receives no CPU for four seconds.
+        tokio::time::advance(Duration::from_secs(4)).await;
+        let timer = tokio::spawn(async move { tokio::time::sleep_until(deadline).await });
+        tokio::task::yield_now().await;
+
+        tokio::time::advance(Duration::from_millis(5_999)).await;
+        tokio::task::yield_now().await;
+        assert!(
+            !timer.is_finished(),
+            "the timer must not fire before its deadline"
+        );
+        tokio::time::advance(Duration::from_millis(1)).await;
+        timer
+            .await
+            .expect("task queue time must not move the precomputed deadline later");
     }
 
     // ------------------------------------------------------------------

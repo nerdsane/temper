@@ -15,6 +15,7 @@ pub(super) fn synthetic_initial_state(
         lists: BTreeMap::new(),
         fields: serde_json::json!({ "Id": entity_id }),
         events: Default::default(),
+        state_timeout_clock_reset_at: None,
         total_event_count: 0,
         events_since_snapshot: 0,
         last_snapshot_sequence_nr: 0,

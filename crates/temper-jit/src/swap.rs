@@ -86,6 +86,7 @@ mod tests {
             entity_name: name.to_string(),
             states: vec!["A".into(), "B".into()],
             initial_state: "A".into(),
+            state_timeouts: vec![],
             keys: vec![],
             vectors: vec![],
             rules: vec![TransitionRule {

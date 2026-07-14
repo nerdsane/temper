@@ -18,7 +18,7 @@ ADR-0056 requires a timed entity to re-arm its deadline when its actor hydrates 
 
 Moving a `ServerState` clone into `EntityActor::pre_start` would let the actor call the scheduler directly, but it would also create a strong ownership cycle: `ServerState` owns the actor system and actor registry, while each actor would retain `ServerState`. Directly sending the timeout action to the entity actor is also incorrect because it bypasses the server dispatch path and its authorization, reactions, telemetry, and subsequent timeout arming.
 
-The durable fact is the entity event history. The missing operation is a lifecycle trigger that asks the existing timeout scheduler to reconcile that history as soon as a new actor becomes ready.
+The durable facts are the entity event history and the snapshot of the state rebuilt from it. The missing operations are a lifecycle trigger that asks the existing timeout scheduler to reconcile as soon as a new actor becomes ready, plus a snapshot-carried timeout clock anchor for histories whose entry/reset event is older than the hot replay tail.
 
 ## Decision
 
@@ -49,13 +49,13 @@ The shared timeout-arm implementation accepts an explicit hydration cause. In hy
 
 1. confirms that the current state declares a timeout;
 2. atomically reserves the initial sequence only when the per-process tracker has no live timer for this entity;
-3. derives the latest state-entry or `reset_on` timestamp from replayed durable events;
+3. derives the latest state-entry or `reset_on` timestamp from the snapshot-carried clock anchor and replayed durable tail;
 4. arms the remaining budget, or dispatches on the next runtime tick when already overdue; and
 5. uses the existing sequence and state checks to cancel stale or racing timers.
 
 A concurrent real dispatch may arm or invalidate a timer before the readiness task completes. Atomic reservation makes both orderings safe: hydration does nothing when dispatch armed first, while a later dispatch supersedes an earlier hydration reservation without either path erasing the other path's deadline.
 
-The readiness task captures both the deterministic event-clock observation and a Tokio monotonic-time anchor before it is spawned, then deducts the full queue-plus-ask elapsed time from the recovered remaining budget. Actor scheduling and readiness therefore cannot move the persisted deadline later, while paused Tokio time keeps DST replay exact.
+The readiness task captures both the deterministic event-clock observation and a Tokio monotonic-time anchor before it is spawned. Reconciliation advances the observation by the measured readiness interval and compares that instant directly with the durable anchor. This charges only time after the durable entry/reset event, including when first creation persists `Created` after the observation. The scheduler then creates one absolute Tokio deadline before spawning the timer task and uses `sleep_until`, so task queueing cannot move the deadline later. Paused Tokio time keeps DST replay exact.
 
 **Why this approach:** the existing code inferred hydration from “same state plus tracker sequence zero.” That inference works only after traffic arrives and can misclassify the replayed entry event as a brand-new entry with a full budget.
 
@@ -65,15 +65,17 @@ The readiness ask uses the existing retry budget. Exhaustion logs a structured e
 
 **Why this approach:** silently dropping the lifecycle task would recreate the regression; retrying forever would create an unbounded background workload.
 
-### Sub-Decision 5: Preserve the existing legacy-snapshot fallback
+### Sub-Decision 5: Persist the timeout clock anchor in current snapshots
 
-For current snapshots and replay tails that retain the relevant entry/reset event, recovery uses the exact remaining or overdue budget. Legacy snapshots that contain no retained clock-reset event continue to receive one full timeout budget, as ADR-0056 already specifies. This is conservative: it may delay one deadline after upgrading an old snapshot, but it cannot fire earlier than the durable evidence permits. New persistent timer schema is outside this correction.
+`TransitionTable` carries the verified `[[state_timeout]]` declarations into the production actor. As each durable event enters a timed state or executes a declared `reset_on` action, the actor updates one `state_timeout_clock_reset_at` value in the same state mutation. Replayed tail events advance or clear it alongside state, including tombstones. Periodic and passivation snapshots use one shared encoder that persists the timestamp while continuing to omit the bounded hot event deque. Hydration therefore recovers the exact anchor even when the entry/reset event precedes the current snapshot.
+
+Legacy snapshots that predate this optional field and have no matching event in their replay tail continue to receive one full timeout budget. This conservative compatibility fallback may delay the first deadline after upgrade, but every snapshot written by the current code preserves the anchor, so repeated restarts cannot repeatedly refresh the budget.
 
 ## Rollout Plan
 
 1. **Immediate** — ship actor-spawn reconciliation and deterministic restart coverage.
 2. **Observation** — verify hydration-arm and timeout-fire metrics during restart and passivation exercises.
-3. **Future** — if exact clock recovery from legacy snapshot-only state becomes necessary, persist a dedicated timer anchor or implement ADR-0049's event-log-backed scheduler.
+3. **Future** — if exact clock recovery from legacy snapshot-only state becomes necessary, backfill the anchor from pre-snapshot journals or implement ADR-0049's event-log-backed scheduler.
 
 ## Readiness Gates
 
@@ -98,6 +100,7 @@ For current snapshots and replay tails that retain the relevant entry/reset even
 - Each new actor performs one additional bounded `GetState` ask after startup.
 - Persisted timed entities consume actor and timer memory while their liveness obligation is active.
 - Timeout recovery is asynchronous with respect to registry insertion, so readiness may briefly precede timer-arm observability.
+- Current snapshots gain one optional timeout-anchor timestamp.
 - Legacy snapshot-only entities may receive one conservative full budget after their first upgraded hydration.
 
 ### Risks
@@ -119,7 +122,7 @@ For current snapshots and replay tails that retain the relevant entry/reset even
 - A separate persistent timer table.
 - A continuous or cluster-wide scan beyond the existing one-time boot index scan.
 - Changing `[[state_timeout]]` syntax or liveness validation.
-- Reconstructing an exact timer anchor from legacy snapshots that contain no retained entry/reset event.
+- Backfilling an exact timer anchor into legacy snapshots that contain no retained entry/reset event.
 
 ## Alternatives Considered
 
@@ -131,4 +134,4 @@ For current snapshots and replay tails that retain the relevant entry/reset even
 
 ## Rollback Policy
 
-Remove the post-spawn readiness task and explicit hydration cause, and restore `populate_index_from_store` to index-only behavior for every entity type. No persistent schema or event format changes are introduced, so rollback is code-only. Existing event histories and snapshots remain readable.
+Remove the post-spawn readiness task and explicit hydration cause, and restore `populate_index_from_store` to index-only behavior for every entity type. The snapshot anchor is an optional JSON field; older code ignores unknown fields, so rollback remains code-only and existing event histories and snapshots remain readable.

@@ -3,6 +3,7 @@
 use std::collections::{BTreeMap, VecDeque};
 use std::sync::OnceLock;
 
+use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use temper_runtime::actor::Message;
 
@@ -89,6 +90,12 @@ pub struct EntityState {
     /// Recent event log (bounded in-memory history for observability).
     #[serde(default)]
     pub events: VecDeque<EntityEvent>,
+    /// Durable clock anchor for the current state's declared timeout.
+    ///
+    /// This is persisted only in actor snapshots. It is omitted from normal
+    /// entity responses so scheduler bookkeeping does not enter the data API.
+    #[serde(default, skip_serializing)]
+    pub state_timeout_clock_reset_at: Option<DateTime<Utc>>,
     /// Total event count ever applied to this entity.
     #[serde(default)]
     pub total_event_count: usize,
@@ -220,6 +227,7 @@ mod tests {
             lists: BTreeMap::new(),
             fields: json!({"title": "Test Order"}),
             events: VecDeque::new(),
+            state_timeout_clock_reset_at: None,
             total_event_count: 0,
             events_since_snapshot: 0,
             last_snapshot_sequence_nr: 0,
@@ -267,6 +275,7 @@ mod tests {
             lists: BTreeMap::new(),
             fields: json!({}),
             events: VecDeque::new(),
+            state_timeout_clock_reset_at: None,
             total_event_count: MAX_EVENTS_SINCE_SNAPSHOT + 50,
             events_since_snapshot: 2,
             last_snapshot_sequence_nr: MAX_EVENTS_SINCE_SNAPSHOT as u64 + 48,
@@ -289,6 +298,7 @@ mod tests {
             lists: BTreeMap::new(),
             fields: json!({}),
             events: VecDeque::new(),
+            state_timeout_clock_reset_at: None,
             total_event_count: MAX_EVENTS_SINCE_SNAPSHOT,
             events_since_snapshot: MAX_EVENTS_SINCE_SNAPSHOT,
             last_snapshot_sequence_nr: 0,
@@ -329,6 +339,7 @@ mod tests {
             lists: BTreeMap::new(),
             fields: json!({}),
             events: VecDeque::new(),
+            state_timeout_clock_reset_at: None,
             total_event_count: 0,
             events_since_snapshot: 0,
             last_snapshot_sequence_nr: 0,

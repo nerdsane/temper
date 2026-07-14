@@ -144,11 +144,45 @@ impl EntityActor {
             lists: BTreeMap::new(),
             fields,
             events: std::collections::VecDeque::new(),
+            state_timeout_clock_reset_at: None,
             total_event_count: 0,
             events_since_snapshot: 0,
             last_snapshot_sequence_nr: 0,
             sequence_nr: 0,
             processed_idempotency_keys: BTreeMap::new(),
+        }
+    }
+
+    /// Advance the durable timeout clock metadata alongside the event that
+    /// changed or reset it.
+    ///
+    /// Keeping this on the actor state makes the anchor part of the same
+    /// snapshot as the state it describes. Unrelated self-loops retain the
+    /// prior anchor; leaving a timed state clears it.
+    fn update_state_timeout_clock(
+        table: &TransitionTable,
+        state: &mut EntityState,
+        event: &EntityEvent,
+    ) {
+        let Some(timeout) = table
+            .state_timeouts
+            .iter()
+            .find(|timeout| timeout.state == event.to_status)
+        else {
+            state.state_timeout_clock_reset_at = None;
+            return;
+        };
+
+        let entered_state = event.from_status != event.to_status;
+        let reset_clock = timeout
+            .reset_on
+            .iter()
+            .any(|action| action == &event.action);
+        if entered_state || reset_clock || state.state_timeout_clock_reset_at.is_none() {
+            // A legacy snapshot can lack this optional field. The first later
+            // durable event repairs the metadata conservatively, ensuring any
+            // snapshot written by current code carries an anchor thereafter.
+            state.state_timeout_clock_reset_at = Some(event.timestamp);
         }
     }
 
@@ -170,11 +204,19 @@ impl EntityActor {
     ///
     /// The stored snapshot is already a segment boundary, so its hot tail budget
     /// is reset in the payload. Lifetime sequence/count fields remain intact.
-    fn serialize_snapshot_state(state: &EntityState) -> Result<Vec<u8>, PersistenceError> {
+    pub(crate) fn serialize_snapshot_state(
+        state: &EntityState,
+    ) -> Result<Vec<u8>, PersistenceError> {
         let mut value = serde_json::to_value(state)
             .map_err(|e| PersistenceError::Serialization(e.to_string()))?;
         if let Some(obj) = value.as_object_mut() {
             obj.remove("events");
+            if let Some(reset_at) = state.state_timeout_clock_reset_at {
+                obj.insert(
+                    "state_timeout_clock_reset_at".to_string(),
+                    serde_json::json!(reset_at),
+                );
+            }
             obj.insert("events_since_snapshot".to_string(), serde_json::json!(0));
             obj.insert(
                 "last_snapshot_sequence_nr".to_string(),
@@ -582,6 +624,7 @@ impl EntityActor {
                                 serde_json::Value::String(state.status.clone()),
                             );
                         }
+                        Self::update_state_timeout_clock(table, state, &tombstone);
                         state.push_event_bounded(tombstone);
                         state.sequence_nr = env.sequence_nr;
                         break;
@@ -654,6 +697,7 @@ impl EntityActor {
                                 );
                             }
 
+                            Self::update_state_timeout_clock(table, state, &event);
                             state.push_event_bounded(event);
                         }
                         Err(e) => {
@@ -798,9 +842,29 @@ impl Actor for EntityActor {
             .await?;
         }
 
+        // A legacy snapshot may predate the dedicated timeout anchor and have
+        // no replay tail from which to reconstruct it. Establish one
+        // conservative budget at hydration so every snapshot written by the
+        // current process persists the repair; repeated restarts must not keep
+        // refreshing the fallback budget.
+        if state.sequence_nr > 0
+            && state.state_timeout_clock_reset_at.is_none()
+            && table
+                .state_timeouts
+                .iter()
+                .any(|timeout| timeout.state == state.status)
+        {
+            state.state_timeout_clock_reset_at = Some(sim_now());
+            tracing::warn!(
+                entity = %state.entity_id,
+                state = %state.status,
+                "repaired missing legacy snapshot state-timeout clock anchor"
+            );
+        }
+
         // Persist a bootstrap Created event for first-time entities so initial
         // fields are durable and replayable.
-        if self.event_journal.is_some() && state.total_event_count == 0 {
+        if self.event_journal.is_some() && state.sequence_nr == 0 {
             let created = EntityEvent {
                 action: "Created".to_string(),
                 from_status: String::new(),
@@ -821,6 +885,7 @@ impl Actor for EntityActor {
                         ))
                     })?;
             }
+            Self::update_state_timeout_clock(&table, &mut state, &created);
             state.push_event_bounded(created);
         }
 
@@ -1286,6 +1351,7 @@ impl Actor for EntityActor {
                     wide_event::emit_span(&wide);
                     wide_event::emit_metrics(&wide);
 
+                    Self::update_state_timeout_clock(&table, state, &event);
                     state.push_event_bounded(event);
 
                     let persistence_id = self.persistence_id();
@@ -1484,6 +1550,7 @@ impl Actor for EntityActor {
                         serde_json::Value::String(state.status.clone()),
                     );
                 }
+                state.state_timeout_clock_reset_at = None;
                 state.push_event_bounded(deleted);
 
                 ctx.reply(EntityResponse {

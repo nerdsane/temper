@@ -320,6 +320,7 @@ mod tests {
             lists: std::collections::BTreeMap::new(),
             fields: json!({}),
             events: std::collections::VecDeque::new(),
+            state_timeout_clock_reset_at: None,
             total_event_count: 0,
             events_since_snapshot: 0,
             last_snapshot_sequence_nr: 0,

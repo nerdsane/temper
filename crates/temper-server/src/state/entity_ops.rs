@@ -1160,6 +1160,7 @@ impl ServerState {
             lists: BTreeMap::new(),
             fields,
             events: std::collections::VecDeque::new(),
+            state_timeout_clock_reset_at: None,
             total_event_count: 0,
             events_since_snapshot: 0,
             last_snapshot_sequence_nr: 0,
@@ -1692,19 +1693,14 @@ impl ServerState {
                 && let Ok(response) = snapshot_outcome.result
                 && response.state.sequence_nr > 0
             {
-                // Snapshot excludes bounded in-memory recent event history.
-                let mut snapshot_value = match serde_json::to_value(&response.state) {
-                    Ok(v) => v,
+                let snapshot_bytes = match EntityActor::serialize_snapshot_state(&response.state) {
+                    Ok(bytes) => bytes,
                     Err(e) => {
-                        tracing::warn!(actor_key = %actor_key, error = %e, "failed to encode snapshot value");
-                        serde_json::Value::Null
+                        tracing::warn!(actor_key = %actor_key, error = %e, "failed to encode passivation snapshot");
+                        Vec::new()
                     }
                 };
-                if let Some(obj) = snapshot_value.as_object_mut() {
-                    obj.remove("events");
-                }
-                if !snapshot_value.is_null()
-                    && let Ok(snapshot_bytes) = serde_json::to_vec(&snapshot_value)
+                if !snapshot_bytes.is_empty()
                     && let Err(e) = store
                         .save_snapshot(&actor_key, response.state.sequence_nr, &snapshot_bytes)
                         .await
