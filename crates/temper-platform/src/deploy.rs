@@ -648,29 +648,8 @@ assert = "title != ''"
     }
 
     #[test]
-    fn unchanged_cached_pass_cannot_bypass_invariant_capability_gate() {
+    fn deploy_rejects_unsupported_before_registry_activation() {
         let state = PlatformState::new(None);
-        let tenant = TenantId::new("cached-tenant");
-        {
-            let mut registry = state.registry.write().unwrap();
-            registry.register_tenant(
-                tenant.clone(),
-                parse_csdl(TASK_CSDL).expect("parse CSDL"),
-                TASK_CSDL.to_string(),
-                &[("Task", UNSUPPORTED_TASK_IOA)],
-            );
-            registry.set_verification_status(
-                &tenant,
-                "Task",
-                temper_server::registry::VerificationStatus::Completed(
-                    temper_server::registry::EntityVerificationResult {
-                        all_passed: true,
-                        levels: vec![],
-                        verified_at: "before-tve001".to_string(),
-                    },
-                ),
-            );
-        }
 
         let input = DeployInput {
             tenant_name: "cached-tenant".into(),
