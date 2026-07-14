@@ -298,20 +298,33 @@ async fn assert_legacy_snapshot_anchor_repair_survives_restart(
             .is_none(),
         "failed upgrade must not report an anchor that was never persisted"
     );
-    drop(failed_state);
+    let failed_actor_uid = failed_state
+        .actor_registry
+        .read()
+        .unwrap()
+        .get(&actor_key)
+        .expect("failed actor remains observable until the next access")
+        .id()
+        .uid;
     sim_store.disable_faults();
 
-    let first_state = common::build_single_tenant_state_with_store(
-        sim_store.clone(),
-        "legacy-timeout-repair-first",
-        "default",
-        &[("TimedTask", TIMED_TASK_IOA)],
-    );
     let expected_repair_at = sim_now();
-    let first_recovery = first_state
+    let first_recovery = failed_state
         .get_tenant_entity_state(&tenant, "TimedTask", entity_id)
         .await
-        .expect("legacy snapshot hydrates");
+        .expect("the same server respawns the entity after snapshot storage recovers");
+    let recovered_actor_uid = failed_state
+        .actor_registry
+        .read()
+        .unwrap()
+        .get(&actor_key)
+        .expect("recovered actor is registered")
+        .id()
+        .uid;
+    assert_ne!(
+        recovered_actor_uid, failed_actor_uid,
+        "recovery must replace the permanently stopped actor incarnation"
+    );
     assert_eq!(
         first_recovery.state.state_timeout_clock_reset_at,
         Some(expected_repair_at),
@@ -340,7 +353,7 @@ async fn assert_legacy_snapshot_anchor_repair_survives_restart(
         Some(expected_sequence_nr)
     );
     for _ in 0..32 {
-        if first_state.state_timeout_tracker.pending_snapshot()
+        if failed_state.state_timeout_tracker.pending_snapshot()
             == vec![("TimedTask".to_string(), 1)]
         {
             break;
@@ -348,7 +361,7 @@ async fn assert_legacy_snapshot_anchor_repair_survives_restart(
         tokio::task::yield_now().await;
     }
     assert_eq!(
-        first_state.state_timeout_tracker.pending_snapshot(),
+        failed_state.state_timeout_tracker.pending_snapshot(),
         vec![("TimedTask".to_string(), 1)],
         "the repaired legacy state receives one conservative timeout budget"
     );
@@ -386,7 +399,7 @@ async fn assert_legacy_snapshot_anchor_repair_survives_restart(
         "legacy metadata repair must not rotate the existing snapshot boundary"
     );
 
-    drop(first_state);
+    drop(failed_state);
     clock.advance_by(100);
     let second_state = common::build_single_tenant_state_with_store(
         sim_store,
