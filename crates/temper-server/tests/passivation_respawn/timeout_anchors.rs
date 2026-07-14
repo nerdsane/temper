@@ -7,7 +7,22 @@ use temper_runtime::persistence::{
 };
 use temper_runtime::scheduler::{install_deterministic_context, sim_now, sim_uuid};
 use temper_runtime::tenant::TenantId;
+use temper_spec::csdl::parse_csdl;
 use temper_store_sim::{SimEventStore, SimFaultConfig};
+
+const INITIAL_UNTIMED_TASK_IOA: &str = r#"
+[automaton]
+name = "InitialTimedTask"
+states = ["Running", "TimedOut"]
+initial = "Running"
+allow_indefinite_states = ["Running", "TimedOut"]
+
+[[action]]
+name = "TimeoutFail"
+kind = "internal"
+from = ["Running"]
+to = "TimedOut"
+"#;
 
 const INITIAL_TIMED_TASK_IOA: &str = r#"
 [automaton]
@@ -52,6 +67,88 @@ state = "Running"
 after_seconds = 60
 on_timeout = "TimeoutFail"
 "#;
+
+#[tokio::test(start_paused = true)]
+async fn hotswap_before_pre_start_cannot_skip_initial_timeout_hydration() {
+    let seed = 211;
+    let (_guard, _clock, _id_gen) = install_deterministic_context(seed);
+    let sim_store = SimEventStore::no_faults(seed);
+    let tenant = TenantId::default();
+    let entity_id = "hotswap-before-pre-start";
+    let actor_key = format!("{tenant}:InitialTimedTask:{entity_id}");
+    let state = common::build_single_tenant_state_with_store(
+        sim_store.clone(),
+        "hotswap-before-pre-start",
+        "default",
+        &[("InitialTimedTask", INITIAL_UNTIMED_TASK_IOA)],
+    );
+
+    // Actor tasks cannot poll until this synchronous test body yields. Spawn
+    // under an untimed table, then replace the same live table before pre_start
+    // snapshots it. Startup therefore observes the timed definition even
+    // though spawn-time admission originally observed the untimed definition.
+    state
+        .get_or_spawn_tenant_actor(&tenant, "InitialTimedTask", entity_id)
+        .expect("spawn the actor before its first task poll");
+    {
+        let mut registry = state.registry.write().expect("registry lock");
+        let csdl = parse_csdl(common::CSDL_XML).expect("CSDL parse");
+        registry.register_tenant(
+            "default",
+            csdl,
+            common::CSDL_XML.to_string(),
+            &[("InitialTimedTask", INITIAL_TIMED_TASK_IOA)],
+        );
+    }
+
+    for _ in 0..64 {
+        tokio::task::yield_now().await;
+        if sim_store.total_events() == 1
+            && state.state_timeout_tracker.pending_snapshot()
+                == vec![("InitialTimedTask".to_string(), 1)]
+        {
+            break;
+        }
+    }
+    assert_eq!(
+        sim_store.total_events(),
+        1,
+        "pre_start must commit the initial event under the hot-swapped table"
+    );
+    assert_eq!(
+        state.state_timeout_tracker.pending_snapshot(),
+        vec![("InitialTimedTask".to_string(), 1)],
+        "a timeout added before pre_start must be hydrated without entity traffic"
+    );
+
+    tokio::time::advance(std::time::Duration::from_secs(599)).await;
+    tokio::task::yield_now().await;
+    assert_eq!(
+        sim_store.total_events(),
+        1,
+        "the hot-swapped timeout must not fire before its original deadline"
+    );
+
+    tokio::time::advance(std::time::Duration::from_secs(1)).await;
+    for _ in 0..64 {
+        tokio::task::yield_now().await;
+        if sim_store.total_events() == 2 {
+            break;
+        }
+    }
+    let journal = sim_store
+        .read_events(&actor_key, 0)
+        .await
+        .expect("read the hot-swap timeout journal");
+    assert_eq!(
+        journal
+            .iter()
+            .map(|event| event.event_type.as_str())
+            .collect::<Vec<_>>(),
+        vec!["Created", "TimeoutFail"],
+        "the pre-start hot-swap must still durably fire without a later read"
+    );
+}
 
 #[tokio::test(start_paused = true)]
 async fn slow_successful_pre_start_still_arms_initial_state_timeout() {
