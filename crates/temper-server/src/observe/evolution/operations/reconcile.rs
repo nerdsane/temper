@@ -44,7 +44,7 @@ fn is_legacy_feature_request_id(id: &str) -> bool {
     )
 }
 
-fn merged_review_state(rows: &[&FeatureRequestRow]) -> (String, Option<String>) {
+fn merged_review_state(rows: &[&FeatureRequestRow], stable_id: &str) -> (String, Option<String>) {
     let reviewed = rows
         .iter()
         .copied()
@@ -60,20 +60,44 @@ fn merged_review_state(rows: &[&FeatureRequestRow]) -> (String, Option<String>) 
         .map(|row| row.disposition.clone())
         .unwrap_or_else(|| "Open".to_string());
 
-    let mut notes = BTreeSet::new();
-    for row in rows {
+    let canonical_notes = rows
+        .iter()
+        .find(|row| row.id == stable_id)
+        .and_then(|row| row.developer_notes.clone());
+    let canonical_components = canonical_notes
+        .iter()
+        .flat_map(|notes| notes.split("\n\n"))
+        .map(str::trim)
+        .filter(|note| !note.is_empty())
+        .collect::<BTreeSet<_>>();
+    let mut legacy_components = BTreeSet::new();
+    for row in rows.iter().filter(|row| row.id != stable_id) {
         if let Some(row_notes) = row.developer_notes.as_deref() {
             for note in row_notes.split("\n\n").map(str::trim) {
-                if !note.is_empty() {
-                    notes.insert(note.to_string());
+                if !note.is_empty() && !canonical_components.contains(note) {
+                    legacy_components.insert(note.to_string());
                 }
             }
         }
     }
-    (
-        disposition,
-        (!notes.is_empty()).then(|| notes.into_iter().collect::<Vec<_>>().join("\n\n")),
-    )
+    let developer_notes = match (canonical_notes, legacy_components.is_empty()) {
+        (Some(notes), true) => Some(notes),
+        (Some(mut notes), false) => {
+            for component in legacy_components {
+                notes.push_str("\n\n");
+                notes.push_str(&component);
+            }
+            Some(notes)
+        }
+        (None, false) => Some(
+            legacy_components
+                .into_iter()
+                .collect::<Vec<_>>()
+                .join("\n\n"),
+        ),
+        (None, true) => None,
+    };
+    (disposition, developer_notes)
 }
 
 pub(super) async fn reconcile_legacy_feature_requests(
@@ -99,7 +123,7 @@ pub(super) async fn reconcile_legacy_feature_requests(
         return Ok(());
     }
 
-    let (disposition, developer_notes) = merged_review_state(&matching_rows);
+    let (disposition, developer_notes) = merged_review_state(&matching_rows, stable_id);
     let canonical_updated = store
         .update_feature_request(stable_id, &disposition, developer_notes.as_deref())
         .await

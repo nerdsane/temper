@@ -2024,7 +2024,7 @@ async fn sentinel_reconciles_only_matching_legacy_evidence_and_deduplicates_note
             report_id.as_str(),
             report,
             "Planned",
-            Some("Report note A\n\nReport note B"),
+            Some("  Report note B  \n\nReport note A"),
         ),
         (
             "FR-2026-222222222222",
@@ -2076,7 +2076,7 @@ async fn sentinel_reconciles_only_matching_legacy_evidence_and_deduplicates_note
     assert_eq!(report_row.disposition, "Planned");
     assert_eq!(
         report_row.developer_notes.as_deref(),
-        Some("Report note A\n\nReport note B"),
+        Some("  Report note B  \n\nReport note A"),
         "retrying after one legacy row was deleted must preserve canonical note bytes",
     );
     let dashboard_row = rows
