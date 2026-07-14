@@ -33,6 +33,8 @@ pub struct SimConfig {
     pub max_actions_per_actor: usize,
     /// Maximum counter value for bounded model checking.
     pub max_counter: usize,
+    /// Maximum ready messages transferred in one bounded drain batch.
+    pub message_batch_budget: usize,
     /// Fault injection configuration.
     pub faults: FaultConfig,
 }
@@ -45,6 +47,7 @@ impl Default for SimConfig {
             num_actors: 3,
             max_actions_per_actor: 20,
             max_counter: 2,
+            message_batch_budget: 1_024,
             faults: FaultConfig::none(),
         }
     }
@@ -153,12 +156,21 @@ pub fn run_multi_seed_simulation_from_ioa(
 }
 
 fn run_simulation_impl(model: &TemperModel, config: &SimConfig) -> SimulationResult {
-    let mut sched = SimScheduler::new(config.seed, config.faults.clone());
+    assert!(
+        config.message_batch_budget > 0,
+        "message batch budget must be positive"
+    );
+    let mailbox_budget = usize::try_from(config.max_ticks)
+        .expect("maximum ticks must fit the platform address space")
+        .max(1);
+    let mut sched =
+        SimScheduler::with_mailbox_budget(config.seed, config.faults.clone(), mailbox_budget);
     let mut rng = DeterministicRng::new(config.seed.wrapping_add(1));
 
     // Initialize actors
     let mut actor_states: Vec<(String, TemperModelState)> = Vec::new();
     let mut actor_action_counts: Vec<usize> = Vec::new();
+    let mut actor_in_flight_actions: Vec<usize> = Vec::new();
 
     for i in 0..config.num_actors {
         let actor_id = format!("entity-{i}");
@@ -166,11 +178,13 @@ fn run_simulation_impl(model: &TemperModel, config: &SimConfig) -> SimulationRes
         let initial = model.init_states()[0].clone();
         actor_states.push((actor_id, initial));
         actor_action_counts.push(0);
+        actor_in_flight_actions.push(0);
     }
 
     let mut violations = Vec::new();
     let mut total_transitions: u64 = 0;
     let mut total_messages: u64 = 0;
+    let mut observed_scheduler_drops = 0;
 
     // Main simulation loop
     for tick in 0..config.max_ticks {
@@ -179,66 +193,84 @@ fn run_simulation_impl(model: &TemperModel, config: &SimConfig) -> SimulationRes
         }
 
         let actor_idx = rng.next_bound(actor_states.len());
-        let (ref actor_id, ref current_state) = actor_states[actor_idx];
+        let actor_id = actor_states[actor_idx].0.clone();
+        let can_schedule = actor_action_counts[actor_idx] + actor_in_flight_actions[actor_idx]
+            < config.max_actions_per_actor
+            && sched.actor_state(&actor_id) != Some(&SimActorState::Crashed);
 
-        if actor_action_counts[actor_idx] >= config.max_actions_per_actor {
-            continue;
-        }
+        if can_schedule {
+            let mut valid_actions = Vec::new();
+            model.actions(&actor_states[actor_idx].1, &mut valid_actions);
 
-        if sched.actor_state(actor_id) == Some(&SimActorState::Crashed) {
-            continue;
-        }
-
-        let mut valid_actions = Vec::new();
-        model.actions(current_state, &mut valid_actions);
-
-        if valid_actions.is_empty() {
-            continue;
-        }
-
-        let action_idx = rng.next_bound(valid_actions.len());
-        let action = valid_actions[action_idx].clone();
-
-        let action_name = action.name.clone();
-        sched.send(
-            "sim-driver",
-            actor_id,
-            &action_name,
-            &serde_json::to_string(&action).unwrap_or_default(),
-        );
-        total_messages += 1;
-
-        let delivered = sched.tick();
-
-        for msg in &delivered {
-            let target_idx = actor_states.iter().position(|(id, _)| id == &msg.to);
-            let Some(idx) = target_idx else { continue };
-
-            let (ref target_id, ref state_before) = actor_states[idx];
-
-            let action: TemperModelAction = match serde_json::from_str(&msg.payload) {
-                Ok(a) => a,
-                Err(_) => continue,
-            };
-
-            if let Some(new_state) = model.next_state(state_before, action.clone()) {
-                check_invariants_on_state(
-                    model,
-                    target_id,
+            if !valid_actions.is_empty() {
+                let action_idx = rng.next_bound(valid_actions.len());
+                let action = valid_actions[action_idx].clone();
+                sched.send(
+                    "sim-driver",
+                    &actor_id,
                     &action.name,
-                    state_before,
-                    &new_state,
-                    tick,
-                    &mut violations,
+                    &serde_json::to_string(&action).unwrap_or_default(),
                 );
-
-                actor_states[idx].1 = new_state;
-                actor_action_counts[idx] += 1;
-                total_transitions += 1;
+                actor_in_flight_actions[actor_idx] += 1;
+                total_messages += 1;
             }
         }
 
+        // Logical time and ready delivery progress independently of whether a
+        // new action was eligible this tick.
         sched.tick();
+        for dropped in &sched.dropped_log()[observed_scheduler_drops..] {
+            if dropped.from == "sim-driver"
+                && let Some(idx) = actor_states.iter().position(|(id, _)| id == &dropped.to)
+            {
+                assert!(
+                    actor_in_flight_actions[idx] > 0,
+                    "dropped action must own a reservation"
+                );
+                actor_in_flight_actions[idx] -= 1;
+            }
+        }
+        observed_scheduler_drops = sched.dropped_log().len();
+        loop {
+            let delivered = sched.drain_ready(config.message_batch_budget);
+
+            for msg in &delivered {
+                let target_idx = actor_states.iter().position(|(id, _)| id == &msg.to);
+                let Some(idx) = target_idx else { continue };
+
+                assert!(
+                    actor_in_flight_actions[idx] > 0,
+                    "delivered action must own a reservation"
+                );
+                actor_in_flight_actions[idx] -= 1;
+
+                let (ref target_id, ref state_before) = actor_states[idx];
+
+                let action: TemperModelAction = match serde_json::from_str(&msg.payload) {
+                    Ok(a) => a,
+                    Err(_) => continue,
+                };
+
+                if let Some(new_state) = model.next_state(state_before, action.clone()) {
+                    check_invariants_on_state(
+                        model,
+                        target_id,
+                        &action.name,
+                        state_before,
+                        &new_state,
+                        tick,
+                        &mut violations,
+                    );
+
+                    actor_states[idx].1 = new_state;
+                    actor_action_counts[idx] += 1;
+                    total_transitions += 1;
+                }
+            }
+            if tick + 1 < config.max_ticks || !sched.has_ready_messages() {
+                break;
+            }
+        }
     }
 
     // Post-simulation liveness checks
@@ -413,171 +445,5 @@ fn sim_kind_violated(
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    const ORDER_IOA: &str = include_str!("../../../test-fixtures/specs/order.ioa.toml");
-
-    #[test]
-    fn test_simulation_no_faults() {
-        let config = SimConfig {
-            seed: 42,
-            max_ticks: 200,
-            num_actors: 3,
-            max_actions_per_actor: 15,
-            max_counter: 2,
-            faults: FaultConfig::none(),
-        };
-
-        let result = run_simulation_from_ioa(ORDER_IOA, &config).unwrap();
-        assert!(
-            result.all_invariants_held,
-            "No invariant violations expected without faults, got: {:?}",
-            result.violations
-        );
-        assert!(
-            result.total_transitions > 0,
-            "Should have applied some transitions"
-        );
-    }
-
-    #[test]
-    fn test_simulation_light_faults() {
-        let config = SimConfig {
-            seed: 123,
-            max_ticks: 300,
-            num_actors: 3,
-            max_actions_per_actor: 20,
-            max_counter: 2,
-            faults: FaultConfig::light(),
-        };
-
-        let result = run_simulation_from_ioa(ORDER_IOA, &config).unwrap();
-        assert!(
-            result.all_invariants_held,
-            "No invariant violations expected with light faults, got: {:?}",
-            result.violations
-        );
-    }
-
-    #[test]
-    fn test_simulation_heavy_faults() {
-        let config = SimConfig {
-            seed: 456,
-            max_ticks: 300,
-            num_actors: 5,
-            max_actions_per_actor: 15,
-            max_counter: 2,
-            faults: FaultConfig::heavy(),
-        };
-
-        let result = run_simulation_from_ioa(ORDER_IOA, &config).unwrap();
-        assert!(
-            result.all_invariants_held,
-            "Invariants must hold even under heavy faults, got: {:?}",
-            result.violations
-        );
-        assert!(
-            result.total_dropped > 0 || result.total_messages > 0,
-            "Should have processed messages"
-        );
-    }
-
-    #[test]
-    fn test_simulation_is_reproducible() {
-        let config = SimConfig {
-            seed: 999,
-            max_ticks: 100,
-            num_actors: 2,
-            max_actions_per_actor: 10,
-            max_counter: 2,
-            faults: FaultConfig::light(),
-        };
-
-        let result1 = run_simulation_from_ioa(ORDER_IOA, &config).unwrap();
-        let result2 = run_simulation_from_ioa(ORDER_IOA, &config).unwrap();
-
-        assert_eq!(
-            result1.total_transitions, result2.total_transitions,
-            "Same seed must produce same number of transitions"
-        );
-        assert_eq!(
-            result1.total_messages, result2.total_messages,
-            "Same seed must produce same number of messages"
-        );
-
-        for (i, ((id1, s1), (id2, s2))) in result1
-            .actor_final_states
-            .iter()
-            .zip(result2.actor_final_states.iter())
-            .enumerate()
-        {
-            assert_eq!(id1, id2, "Actor {i} ID mismatch");
-            assert_eq!(s1.status, s2.status, "Actor {i} status mismatch");
-            assert_eq!(s1.counters, s2.counters, "Actor {i} counters mismatch");
-        }
-    }
-
-    #[test]
-    fn test_simulation_different_seeds_diverge() {
-        let config1 = SimConfig::default().with_seed(42);
-        let config2 = SimConfig::default().with_seed(9999);
-
-        let result1 = run_simulation_from_ioa(ORDER_IOA, &config1).unwrap();
-        let result2 = run_simulation_from_ioa(ORDER_IOA, &config2).unwrap();
-
-        assert!(result1.total_transitions > 0);
-        assert!(result2.total_transitions > 0);
-    }
-
-    #[test]
-    fn test_multi_seed_simulation() {
-        let config = SimConfig {
-            seed: 1,
-            max_ticks: 100,
-            num_actors: 2,
-            max_actions_per_actor: 10,
-            max_counter: 2,
-            faults: FaultConfig::light(),
-        };
-
-        let results = run_multi_seed_simulation_from_ioa(ORDER_IOA, &config, 10).unwrap();
-        assert_eq!(results.len(), 10);
-
-        for (i, result) in results.iter().enumerate() {
-            assert!(
-                result.all_invariants_held,
-                "Seed {} failed with violations: {:?}",
-                result.seed, result.violations
-            );
-            assert_eq!(result.seed, 1 + i as u64);
-        }
-    }
-
-    #[test]
-    fn test_simulation_result_contains_final_states() {
-        let config = SimConfig {
-            seed: 77,
-            max_ticks: 50,
-            num_actors: 2,
-            max_actions_per_actor: 5,
-            max_counter: 2,
-            faults: FaultConfig::none(),
-        };
-
-        let result = run_simulation_from_ioa(ORDER_IOA, &config).unwrap();
-        assert_eq!(result.actor_final_states.len(), 2);
-
-        let model = build_model_from_ioa(ORDER_IOA, config.max_counter).unwrap();
-
-        for (id, state) in &result.actor_final_states {
-            assert!(id.starts_with("entity-"));
-            assert!(
-                model.states.contains(&state.status),
-                "Status '{}' not in spec states {:?}",
-                state.status,
-                model.states
-            );
-        }
-    }
-}
+#[path = "simulation/tests.rs"]
+mod tests;

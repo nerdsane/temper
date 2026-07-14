@@ -36,6 +36,7 @@ pub(crate) async fn handle_run_simulation(
             num_actors: 3,
             max_actions_per_actor: 20,
             max_counter: 2,
+            message_batch_budget: 1_024,
             faults: temper_runtime::scheduler::FaultConfig::light(),
         };
         temper_verify::run_simulation_from_ioa(&ioa_source, &config)
