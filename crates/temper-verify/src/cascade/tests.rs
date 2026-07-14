@@ -2,9 +2,7 @@
 
 use super::*;
 
-    use super::*;
-
-    const ORDER_IOA: &str = include_str!("../../../test-fixtures/specs/order.ioa.toml");
+    const ORDER_IOA: &str = include_str!("../../../../test-fixtures/specs/order.ioa.toml");
 
     #[test]
     fn test_full_cascade_passes_ioa() {
