@@ -49,6 +49,13 @@ async fn dispatch(
         .expect("actor should respond")
 }
 
+async fn delete(actor_ref: &temper_runtime::actor::ActorRef<EntityMsg>) -> EntityResponse {
+    actor_ref
+        .ask(EntityMsg::Delete, Duration::from_secs(5))
+        .await
+        .expect("actor should respond")
+}
+
 fn doc_key_hash(workspace: &str, path: &str) -> String {
     let mut fields = serde_json::Map::new();
     fields.insert("WorkspaceId".to_string(), serde_json::json!(workspace));
@@ -108,6 +115,90 @@ async fn dst_keyed_read_is_present_iff_entity_exists() {
         assert_eq!(
             absent, None,
             "seed {seed}: keyed read of a missing key must be absent"
+        );
+    }
+}
+
+/// Deletion must release every declared key in the same atomic commit as the
+/// tombstone. Otherwise the deleted entity remains the durable owner and a new
+/// entity cannot reclaim the logically vacant key.
+#[tokio::test]
+async fn dst_delete_releases_declared_key_for_reclaim() {
+    for seed in 0..NUM_SEEDS {
+        let (_guard, _clock, _id) = install_deterministic_context(seed);
+        let store: BoxedEventStore = BoxedEventStore::new(SimEventStore::no_faults(seed));
+        let table = doc_table();
+        let key_hash = doc_key_hash("ws1", "/reclaim.md");
+
+        let system = ActorSystem::new("dst-key-reclaim");
+        let first_id = format!("doc-first-{seed}");
+        let first = EntityActor::with_persistence(
+            "Doc",
+            &first_id,
+            table.clone(),
+            serde_json::json!({}),
+            store.clone(),
+            BackendLabel::Sim,
+        )
+        .with_tenant("default");
+        let first_ref = system.spawn(first, &first_id);
+
+        let created = dispatch(
+            &first_ref,
+            "Create",
+            serde_json::json!({ "WorkspaceId": "ws1", "Path": "/reclaim.md" }),
+        )
+        .await;
+        assert!(
+            created.success,
+            "seed {seed}: first Create failed: {:?}",
+            created.error
+        );
+
+        let deleted = delete(&first_ref).await;
+        assert!(
+            deleted.success,
+            "seed {seed}: Delete failed: {:?}",
+            deleted.error
+        );
+        assert_eq!(
+            store
+                .lookup_by_key("default", "Doc", "path", &key_hash)
+                .await
+                .expect("lookup after delete"),
+            None,
+            "seed {seed}: a tombstoned entity must release its declared key"
+        );
+
+        let second_id = format!("doc-second-{seed}");
+        let second = EntityActor::with_persistence(
+            "Doc",
+            &second_id,
+            table.clone(),
+            serde_json::json!({}),
+            store.clone(),
+            BackendLabel::Sim,
+        )
+        .with_tenant("default");
+        let second_ref = system.spawn(second, &second_id);
+        let reclaimed = dispatch(
+            &second_ref,
+            "Create",
+            serde_json::json!({ "WorkspaceId": "ws1", "Path": "/reclaim.md" }),
+        )
+        .await;
+        assert!(
+            reclaimed.success,
+            "seed {seed}: replacement Create must reclaim the deleted entity's key: {:?}",
+            reclaimed.error
+        );
+        assert_eq!(
+            store
+                .lookup_by_key("default", "Doc", "path", &key_hash)
+                .await
+                .expect("lookup after reclaim"),
+            Some(second_id),
+            "seed {seed}: the reclaimed key must resolve to the live replacement"
         );
     }
 }
