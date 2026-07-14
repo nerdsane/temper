@@ -1702,10 +1702,23 @@ async fn persist_feature_request_evidence_for_action_at(
     action: &str,
     timestamp: &str,
 ) {
+    persist_feature_request_evidence_for_tenant_action_at(
+        state, "default", index, action, timestamp,
+    )
+    .await;
+}
+
+async fn persist_feature_request_evidence_for_tenant_action_at(
+    state: &ServerState,
+    tenant: &str,
+    index: i64,
+    action: &str,
+    timestamp: &str,
+) {
     state
         .persist_trajectory_entry(&TrajectoryEntry {
             timestamp: timestamp.to_string(),
-            tenant: "default".to_string(),
+            tenant: tenant.to_string(),
             entity_type: "MissingCapability".to_string(),
             entity_id: format!("missing-{index}"),
             action: action.to_string(),
@@ -2088,6 +2101,95 @@ async fn sentinel_reconciles_only_matching_legacy_evidence_and_deduplicates_note
         dashboard_row.developer_notes.as_deref(),
         Some("Dashboard note"),
         "same-timestamp evidence from another action must not contaminate review state",
+    );
+}
+
+#[tokio::test]
+async fn sentinel_does_not_claim_tenant_ambiguous_legacy_feature_requests() {
+    let state = test_state_with_feature_request_runtime().await;
+    for index in 0..3 {
+        let timestamp = (sim_now() + chrono::Duration::seconds(index)).to_rfc3339();
+        for tenant in ["tenant-a", "tenant-b"] {
+            persist_feature_request_evidence_for_tenant_action_at(
+                &state,
+                tenant,
+                index,
+                "GenerateReport",
+                &timestamp,
+            )
+            .await;
+        }
+    }
+    let entries = state.load_trajectory_entries(100).await;
+    let tenant_a_entries = entries
+        .iter()
+        .filter(|entry| entry.tenant == "tenant-a")
+        .cloned()
+        .collect::<Vec<_>>();
+    let generated = evolution::insight_generator::generate_feature_requests(&tenant_a_entries);
+    let legacy = generated.first().expect("tenant feature request");
+    let store = state
+        .platform_metadata_store()
+        .expect("Turso metadata store");
+    for (legacy_id, notes) in [
+        ("FR-2026-aaaaaaaaaaaa", "Tenant A review"),
+        ("FR-2026-bbbbbbbbbbbb", "Tenant B review"),
+    ] {
+        store
+            .upsert_feature_request(
+                legacy_id,
+                &format!("{:?}", legacy.category),
+                &legacy.description,
+                legacy.frequency as i64,
+                &serde_json::to_string(&legacy.trajectory_refs).expect("serialize legacy refs"),
+                "Planned",
+                Some(notes),
+            )
+            .await
+            .expect("seed tenant-ambiguous legacy projection");
+    }
+
+    for tenant in ["tenant-a", "tenant-b"] {
+        let ids = evolution::materialize_feature_requests_for_test(
+            &state,
+            &TenantId::new(tenant),
+            &entries,
+        )
+        .await
+        .expect("tenant feature-request materialization");
+        assert_eq!(ids.len(), 1);
+    }
+
+    let rows = store
+        .list_feature_requests(None)
+        .await
+        .expect("list tenant-isolated feature requests");
+    assert_eq!(
+        rows.len(),
+        4,
+        "each tenant gets a canonical row while both ambiguous legacy rows remain",
+    );
+    for (legacy_id, notes) in [
+        ("FR-2026-aaaaaaaaaaaa", "Tenant A review"),
+        ("FR-2026-bbbbbbbbbbbb", "Tenant B review"),
+    ] {
+        let row = rows
+            .iter()
+            .find(|row| row.id == legacy_id)
+            .expect("ambiguous legacy row must remain");
+        assert_eq!(row.disposition, "Planned");
+        assert_eq!(row.developer_notes.as_deref(), Some(notes));
+    }
+    let canonical_rows = rows
+        .iter()
+        .filter(|row| !row.id.starts_with("FR-2026-"))
+        .collect::<Vec<_>>();
+    assert_eq!(canonical_rows.len(), 2);
+    assert!(
+        canonical_rows
+            .iter()
+            .all(|row| row.disposition == "Open" && row.developer_notes.is_none()),
+        "neither tenant may consume review state from an ambiguous legacy row",
     );
 }
 

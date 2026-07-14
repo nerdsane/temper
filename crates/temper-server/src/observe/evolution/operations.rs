@@ -231,6 +231,8 @@ async fn materialize_feature_requests(
         reconcile_legacy_feature_requests(
             store.as_ref(),
             &existing_rows,
+            tenant,
+            trajectory_entries,
             &stable_id,
             feature_request,
         )
@@ -239,6 +241,15 @@ async fn materialize_feature_requests(
     }
 
     Ok(materialized_ids)
+}
+
+#[cfg(test)]
+pub(crate) async fn materialize_feature_requests_for_test(
+    state: &ServerState,
+    tenant: &TenantId,
+    trajectory_entries: &[crate::state::TrajectoryEntry],
+) -> Result<Vec<String>, StatusCode> {
+    materialize_feature_requests(state, tenant, trajectory_entries).await
 }
 
 /// GET /observe/evolution/unmet-intents -- grouped unmet intents from trajectories.
