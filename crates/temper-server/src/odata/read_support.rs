@@ -344,11 +344,9 @@ pub(super) async fn materialize_entity_set_entities(
                     }
                     Ok(response) => {
                         tracing::debug!(
-                            error = response.error.as_deref().unwrap_or("entity state unavailable"),
-                            tenant = %tenant,
-                            entity_type = %entity_type,
+                            error = ?response.error,
                             entity_id = %id,
-                            "skipping unsuccessful entity state during OData collection materialization"
+                            "skipping unreadable entity during OData materialization"
                         );
                         None
                     }
