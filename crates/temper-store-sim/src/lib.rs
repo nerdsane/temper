@@ -32,6 +32,8 @@ pub struct SimFaultConfig {
     pub read_truncation_prob: f64,
     /// Probability of snapshot save failure.
     pub snapshot_failure_prob: f64,
+    /// Probability of snapshot load failure.
+    pub snapshot_load_failure_prob: f64,
 }
 
 impl SimFaultConfig {
@@ -42,6 +44,7 @@ impl SimFaultConfig {
             concurrency_violation_prob: 0.0,
             read_truncation_prob: 0.0,
             snapshot_failure_prob: 0.0,
+            snapshot_load_failure_prob: 0.0,
         }
     }
 
@@ -52,6 +55,7 @@ impl SimFaultConfig {
             concurrency_violation_prob: 0.02,
             read_truncation_prob: 0.01,
             snapshot_failure_prob: 0.03,
+            snapshot_load_failure_prob: 0.03,
         }
     }
 }
@@ -1039,7 +1043,13 @@ impl EventStore for SimEventStore {
         &self,
         persistence_id: &str,
     ) -> Result<Option<(u64, Vec<u8>)>, PersistenceError> {
-        let inner = self.inner.lock().expect("SimEventStore lock poisoned"); // ci-ok: infallible lock
+        let mut inner = self.inner.lock().expect("SimEventStore lock poisoned"); // ci-ok: infallible lock
+        let load_failure_prob = inner.faults.snapshot_load_failure_prob;
+        if inner.rng.chance(load_failure_prob) {
+            return Err(PersistenceError::Storage(
+                "SimEventStore: injected snapshot load failure".into(),
+            ));
+        }
         Ok(inner.snapshots.get(persistence_id).cloned())
     }
 

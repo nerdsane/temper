@@ -328,6 +328,7 @@ async fn fault_injection_produces_errors() {
         concurrency_violation_prob: 0.0,
         read_truncation_prob: 0.0,
         snapshot_failure_prob: 0.0,
+        snapshot_load_failure_prob: 0.0,
     };
     let store = SimEventStore::new(42, faults);
     let pid = "default:Order:fault-1";
