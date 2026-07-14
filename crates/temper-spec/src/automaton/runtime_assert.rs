@@ -1,6 +1,6 @@
 //! Runtime-enforced safety assertions shared by production and deterministic simulation.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use super::{AssertCompareOp, Automaton, ParsedAssert, parse_assert_expr};
 
@@ -35,11 +35,29 @@ pub struct RuntimeInvariant {
 
 /// Compile the runtime-enforced subset of an automaton's safety assertions.
 pub fn compile_runtime_invariants(automaton: &Automaton) -> Vec<RuntimeInvariant> {
+    let bool_names = declared_names(automaton, "bool");
+    let counter_names = declared_names(automaton, "counter");
+    let string_names = declared_names(automaton, "string");
+    let status_names = automaton.automaton.states.iter().cloned().collect();
+
     automaton
         .invariants
         .iter()
         .filter_map(|invariant| {
-            let assertion = match parse_assert_expr(&invariant.assert)? {
+            let parsed = parse_assert_expr(&invariant.assert)?;
+            if !parsed.is_supported_safety_assertion(
+                &bool_names,
+                &counter_names,
+                &string_names,
+                &status_names,
+            ) || !invariant
+                .when
+                .iter()
+                .all(|state| status_names.contains(state))
+            {
+                return None;
+            }
+            let assertion = match parsed {
                 ParsedAssert::StringNonEmpty { var } => RuntimeAssert::StringNonEmpty { var },
                 ParsedAssert::CounterVarCompare { left, op, right } => {
                     RuntimeAssert::CounterVarCompare { left, op, right }
@@ -53,6 +71,15 @@ pub fn compile_runtime_invariants(automaton: &Automaton) -> Vec<RuntimeInvariant
                 enforcement_version: RUNTIME_INVARIANT_ENFORCEMENT_VERSION,
             })
         })
+        .collect()
+}
+
+fn declared_names(automaton: &Automaton, var_type: &str) -> BTreeSet<String> {
+    automaton
+        .state
+        .iter()
+        .filter(|state| state.var_type == var_type)
+        .map(|state| state.name.clone())
         .collect()
 }
 

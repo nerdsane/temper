@@ -182,15 +182,6 @@ impl crate::state::ServerState {
             )
             .await?;
 
-        if response.success {
-            self.update_entity_index_visibility(
-                tenant,
-                entity_type,
-                entity_id,
-                &response.state.status,
-            );
-        }
-
         // Dispatch cross-entity reactions (fire-and-forget, depth 0 = top-level)
         if response.success {
             // A poisoned lock must not silently disable reactions: the slot
@@ -694,6 +685,18 @@ impl crate::state::ServerState {
                 return Err(DispatchError::from_actor_error(e, outcome.attempts));
             }
         };
+
+        // The actor response is the durable mutation boundary. Publish the
+        // committed state before fallible post-dispatch effects so an effect
+        // failure cannot leave durable events absent from discovery indexes.
+        if response.success || response.state.sequence_nr > 0 {
+            self.update_entity_index_visibility(
+                tenant,
+                entity_type,
+                entity_id,
+                &response.state.status,
+            );
+        }
 
         // Run all post-dispatch effects through the dedicated pipeline.
         let ctx = PostDispatchContext {

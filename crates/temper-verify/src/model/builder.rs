@@ -5,7 +5,7 @@
 //! Schedule, Spawn) are filtered out; CrossEntityState guards are kept as abstract
 //! guards so single-entity checks do not silently treat them as locally enabled.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use temper_spec::automaton::{
     Automaton, ParsedAssert, ResolvedEffect, ResolvedGuard, parse_assert_expr, parse_bool_initial,
@@ -179,53 +179,55 @@ fn resolve_invariants(automaton: &Automaton) -> Vec<ResolvedInvariant> {
     });
 
     // Collect known boolean variable names for fallback classification
-    let bool_names: Vec<&str> = automaton
+    let bool_names: BTreeSet<String> = automaton
         .state
         .iter()
         .filter(|s| s.var_type == "bool")
-        .map(|s| s.name.as_str())
+        .map(|s| s.name.clone())
         .collect();
-    let counter_names: Vec<&str> = automaton
+    let counter_names: BTreeSet<String> = automaton
         .state
         .iter()
         .filter(|state| state.var_type == "counter")
-        .map(|state| state.name.as_str())
+        .map(|state| state.name.clone())
         .collect();
-    let string_names: Vec<&str> = automaton
+    let string_names: BTreeSet<String> = automaton
         .state
         .iter()
         .filter(|state| state.var_type == "string")
-        .map(|state| state.name.as_str())
+        .map(|state| state.name.clone())
         .collect();
-    let status_names: Vec<&str> = automaton
-        .automaton
-        .states
-        .iter()
-        .map(String::as_str)
-        .collect();
+    let status_names: BTreeSet<String> = automaton.automaton.states.iter().cloned().collect();
 
     for inv in &automaton.invariants {
         let expr = inv.assert.trim();
 
-        let references_declared_trigger_states = inv
-            .when
-            .iter()
-            .all(|state| status_names.contains(&state.as_str()));
+        let references_declared_trigger_states =
+            inv.when.iter().all(|state| status_names.contains(state));
         let kind = if !references_declared_trigger_states {
             InvariantKind::Unverifiable {
                 expression: expr.to_string(),
             }
         } else {
             match parse_assert_expr(expr) {
-                Some(parsed) => translate_parsed_assert(
-                    parsed,
-                    expr,
-                    &bool_names,
-                    &counter_names,
-                    &string_names,
-                    &status_names,
-                ),
-                None => InvariantKind::Unverifiable {
+                Some(parsed)
+                    if parsed.is_supported_safety_assertion(
+                        &bool_names,
+                        &counter_names,
+                        &string_names,
+                        &status_names,
+                    ) =>
+                {
+                    translate_parsed_assert(
+                        parsed,
+                        expr,
+                        &bool_names,
+                        &counter_names,
+                        &string_names,
+                        &status_names,
+                    )
+                }
+                Some(_) | None => InvariantKind::Unverifiable {
                     expression: expr.to_string(),
                 },
             }
@@ -251,10 +253,10 @@ fn resolve_invariants(automaton: &Automaton) -> Vec<ResolvedInvariant> {
 fn translate_parsed_assert(
     parsed: ParsedAssert,
     raw: &str,
-    bool_names: &[&str],
-    counter_names: &[&str],
-    string_names: &[&str],
-    status_names: &[&str],
+    bool_names: &BTreeSet<String>,
+    counter_names: &BTreeSet<String>,
+    string_names: &BTreeSet<String>,
+    status_names: &BTreeSet<String>,
 ) -> InvariantKind {
     match try_translate(
         &parsed,
@@ -272,27 +274,25 @@ fn translate_parsed_assert(
 
 fn try_translate(
     parsed: &ParsedAssert,
-    bool_names: &[&str],
-    counter_names: &[&str],
-    string_names: &[&str],
-    status_names: &[&str],
+    bool_names: &BTreeSet<String>,
+    counter_names: &BTreeSet<String>,
+    string_names: &BTreeSet<String>,
+    status_names: &BTreeSet<String>,
 ) -> Option<InvariantKind> {
     match parsed {
         ParsedAssert::Always => Some(InvariantKind::And(Vec::new())),
-        ParsedAssert::CounterPositive { var } if counter_names.contains(&var.as_str()) => {
+        ParsedAssert::CounterPositive { var } if counter_names.contains(var) => {
             Some(InvariantKind::CounterPositive { var: var.clone() })
         }
         ParsedAssert::CounterPositive { .. } => None,
         ParsedAssert::NoFurtherTransitions => Some(InvariantKind::NoFurtherTransitions),
-        ParsedAssert::NeverState { state } if status_names.contains(&state.as_str()) => {
+        ParsedAssert::NeverState { state } if status_names.contains(state) => {
             Some(InvariantKind::NeverState {
                 state: state.clone(),
             })
         }
         ParsedAssert::NeverState { .. } => None,
-        ParsedAssert::CounterCompare { var, op, value }
-            if counter_names.contains(&var.as_str()) =>
-        {
+        ParsedAssert::CounterCompare { var, op, value } if counter_names.contains(var) => {
             Some(InvariantKind::CounterCompare {
                 var: var.clone(),
                 op: op.clone(),
@@ -301,8 +301,7 @@ fn try_translate(
         }
         ParsedAssert::CounterCompare { .. } => None,
         ParsedAssert::CounterVarCompare { left, op, right }
-            if counter_names.contains(&left.as_str())
-                && counter_names.contains(&right.as_str()) =>
+            if counter_names.contains(left) && counter_names.contains(right) =>
         {
             Some(InvariantKind::RuntimeEnforced(
                 temper_spec::automaton::RuntimeAssert::CounterVarCompare {
@@ -313,14 +312,14 @@ fn try_translate(
             ))
         }
         ParsedAssert::CounterVarCompare { .. } => None,
-        ParsedAssert::StringNonEmpty { var } if string_names.contains(&var.as_str()) => {
+        ParsedAssert::StringNonEmpty { var } if string_names.contains(var) => {
             Some(InvariantKind::RuntimeEnforced(
                 temper_spec::automaton::RuntimeAssert::StringNonEmpty { var: var.clone() },
             ))
         }
         ParsedAssert::StringNonEmpty { .. } => None,
         ParsedAssert::BoolRequired { var, expect } => {
-            if bool_names.contains(&var.as_str()) {
+            if bool_names.contains(var) {
                 Some(InvariantKind::BoolRequired {
                     var: var.clone(),
                     expect: *expect,

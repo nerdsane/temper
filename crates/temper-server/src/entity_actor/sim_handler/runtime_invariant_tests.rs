@@ -45,6 +45,67 @@ assert = "used_bytes ** quota_limit"
 }
 
 #[test]
+fn undeclared_counter_and_trigger_state_fail_closed_in_direct_simulation() {
+    let cases = [
+        (
+            "UndeclaredCounter",
+            r#"
+[automaton]
+name = "Order"
+states = ["Draft"]
+initial = "Draft"
+allow_indefinite_states = ["Draft"]
+
+[[invariant]]
+name = "UndeclaredCounter"
+when = ["Draft"]
+assert = "ghost > 0"
+"#,
+        ),
+        (
+            "UndeclaredTrigger",
+            r#"
+[automaton]
+name = "Order"
+states = ["Draft"]
+initial = "Draft"
+allow_indefinite_states = ["Draft"]
+
+[[invariant]]
+name = "UndeclaredTrigger"
+when = ["Ghost"]
+assert = "true"
+"#,
+        ),
+    ];
+
+    for (name, ioa) in cases {
+        let mut simulation = SimActorSystem::new(SimActorSystemConfig {
+            seed: 213,
+            faults: FaultConfig::none(),
+            ..SimActorSystemConfig::default()
+        });
+        let handler = EntityActorHandler::new(
+            "Order",
+            "o1",
+            Arc::new(TransitionTable::from_ioa_source(ORDER_IOA)),
+        )
+        .with_ioa_invariants(ioa);
+        simulation.register_actor("o1", Box::new(handler));
+
+        simulation.step("o1", "AddItem", "{}").expect("step order");
+
+        assert!(
+            simulation
+                .violations()
+                .iter()
+                .any(|violation| violation.description.contains(name)),
+            "{name} must be retained as an unsupported invariant violation"
+        );
+    }
+}
+
+#[test]
 fn runtime_classification_requires_matching_table_enforcement_artifact() {
     let ioa = r#"
 [automaton]

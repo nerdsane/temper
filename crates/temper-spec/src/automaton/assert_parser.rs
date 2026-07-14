@@ -4,6 +4,8 @@
 //! variants. Used by both `temper-verify` (model builder) and `temper-server`
 //! (simulation handler) to ensure consistent classification.
 
+use std::collections::BTreeSet;
+
 /// A comparison operator for counter assertions.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum AssertCompareOp {
@@ -56,6 +58,58 @@ pub enum ParsedAssert {
     And(Vec<ParsedAssert>),
     /// At least one subexpression must hold (short-circuit).
     Or(Vec<ParsedAssert>),
+}
+
+impl ParsedAssert {
+    /// Return whether every typed reference is declared and the assertion
+    /// shape is supported by the verification contract.
+    ///
+    /// Runtime-enforced leaves are supported on their own. Mixing them into a
+    /// boolean compound is not yet atomic across all verification backends and
+    /// therefore remains unsupported. Ordering assertions are likewise not in
+    /// the verified subset.
+    pub fn is_supported_safety_assertion(
+        &self,
+        bool_names: &BTreeSet<String>,
+        counter_names: &BTreeSet<String>,
+        string_names: &BTreeSet<String>,
+        status_names: &BTreeSet<String>,
+    ) -> bool {
+        match self {
+            Self::Always | Self::NoFurtherTransitions => true,
+            Self::CounterPositive { var } | Self::CounterCompare { var, .. } => {
+                counter_names.contains(var)
+            }
+            Self::CounterVarCompare { left, right, .. } => {
+                counter_names.contains(left) && counter_names.contains(right)
+            }
+            Self::StringNonEmpty { var } => string_names.contains(var),
+            Self::BoolRequired { var, .. } => bool_names.contains(var),
+            Self::NeverState { state } => status_names.contains(state),
+            Self::OrderingConstraint { .. } => false,
+            Self::And(parts) | Self::Or(parts) => {
+                !parts.iter().any(Self::contains_runtime_enforced_leaf)
+                    && parts.iter().all(|part| {
+                        part.is_supported_safety_assertion(
+                            bool_names,
+                            counter_names,
+                            string_names,
+                            status_names,
+                        )
+                    })
+            }
+        }
+    }
+
+    fn contains_runtime_enforced_leaf(&self) -> bool {
+        match self {
+            Self::CounterVarCompare { .. } | Self::StringNonEmpty { .. } => true,
+            Self::And(parts) | Self::Or(parts) => {
+                parts.iter().any(Self::contains_runtime_enforced_leaf)
+            }
+            _ => false,
+        }
+    }
 }
 
 /// Parse an assertion expression from an IOA spec into a [`ParsedAssert`].
@@ -742,5 +796,37 @@ mod tests {
     fn test_trailing_operator_returns_none() {
         assert_eq!(parse_assert_expr("a &&"), None);
         assert_eq!(parse_assert_expr("&& a"), None);
+    }
+
+    #[test]
+    fn safety_support_contract_validates_declarations_and_shape() {
+        let bools = BTreeSet::from(["ready".to_string()]);
+        let counters = BTreeSet::from(["items".to_string()]);
+        let strings = BTreeSet::from(["goal".to_string()]);
+        let statuses = BTreeSet::from(["Draft".to_string()]);
+
+        assert!(
+            parse_assert_expr("items > 0")
+                .unwrap()
+                .is_supported_safety_assertion(&bools, &counters, &strings, &statuses)
+        );
+        for unsupported in ["ghost > 0", "never(Ghost)", "ordering(Draft, Ghost)"] {
+            assert!(
+                !parse_assert_expr(unsupported)
+                    .unwrap()
+                    .is_supported_safety_assertion(&bools, &counters, &strings, &statuses),
+                "{unsupported} must remain outside the supported safety contract"
+            );
+        }
+        let compound_runtime = ParsedAssert::And(vec![
+            ParsedAssert::StringNonEmpty { var: "goal".into() },
+            ParsedAssert::BoolRequired {
+                var: "ready".into(),
+                expect: true,
+            },
+        ]);
+        assert!(
+            !compound_runtime.is_supported_safety_assertion(&bools, &counters, &strings, &statuses)
+        );
     }
 }

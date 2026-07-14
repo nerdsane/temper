@@ -6,6 +6,7 @@
 //! `EntityActor::handle()`: same `evaluate()` call, same effect application,
 //! same event recording. No async, no persistence, no telemetry.
 
+use std::collections::BTreeSet;
 use std::sync::Arc;
 
 use temper_jit::table::{EvalContext, TransitionTable};
@@ -77,22 +78,34 @@ impl EntityActorHandler {
     pub fn with_ioa_invariants(mut self, ioa_toml: &str) -> Self {
         let automaton = temper_spec::automaton::parse_automaton(ioa_toml)
             .expect("failed to parse I/O Automaton TOML for invariants");
-        let declared_bools: std::collections::BTreeSet<_> = automaton
-            .state
-            .iter()
-            .filter(|state| is_declared_bool(state))
-            .map(|state| state.name.clone())
-            .collect();
+        let declared_bools = declared_names(&automaton.state, "bool");
+        let declared_counters = declared_names(&automaton.state, "counter");
+        let declared_strings = declared_names(&automaton.state, "string");
+        let declared_statuses: BTreeSet<_> = automaton.automaton.states.iter().cloned().collect();
         let compiled_runtime = temper_spec::automaton::compile_runtime_invariants(&automaton);
 
         self.invariants = automaton
             .invariants
             .iter()
             .map(|inv| {
-                let mut assert_kind = parse_assert_expr(&inv.assert, &declared_bools)
-                    .unwrap_or_else(|| SpecAssert::Unsupported {
-                        expression: inv.assert.clone(),
-                    });
+                let references_declared_states = inv
+                    .when
+                    .iter()
+                    .all(|state| declared_statuses.contains(state));
+                let mut assert_kind = if references_declared_states {
+                    parse_assert_expr(
+                        &inv.assert,
+                        &declared_bools,
+                        &declared_counters,
+                        &declared_strings,
+                        &declared_statuses,
+                    )
+                } else {
+                    None
+                }
+                .unwrap_or_else(|| SpecAssert::Unsupported {
+                    expression: inv.assert.clone(),
+                });
                 if matches!(assert_kind, SpecAssert::RuntimeEnforced { .. }) {
                     let attached = compiled_runtime
                         .iter()
@@ -123,25 +136,32 @@ impl EntityActorHandler {
 /// that the framework cannot check automatically.
 fn parse_assert_expr(
     expr: &str,
-    declared_bools: &std::collections::BTreeSet<String>,
+    declared_bools: &BTreeSet<String>,
+    declared_counters: &BTreeSet<String>,
+    declared_strings: &BTreeSet<String>,
+    declared_statuses: &BTreeSet<String>,
 ) -> Option<SpecAssert> {
     use temper_spec::automaton::parse_assert_expr as parse;
-    translate_parsed(parse(expr)?, declared_bools)
+    let parsed = parse(expr)?;
+    if !parsed.is_supported_safety_assertion(
+        declared_bools,
+        declared_counters,
+        declared_strings,
+        declared_statuses,
+    ) {
+        return None;
+    }
+    translate_parsed(parsed)
 }
 
-fn translate_parsed(
-    parsed: temper_spec::automaton::ParsedAssert,
-    declared_bools: &std::collections::BTreeSet<String>,
-) -> Option<SpecAssert> {
+fn translate_parsed(parsed: temper_spec::automaton::ParsedAssert) -> Option<SpecAssert> {
     use temper_spec::automaton::{AssertCompareOp, ParsedAssert};
 
     match parsed {
         ParsedAssert::Always => Some(SpecAssert::And(Vec::new())),
         ParsedAssert::CounterPositive { var } => Some(SpecAssert::CounterPositive { var }),
         ParsedAssert::NoFurtherTransitions => Some(SpecAssert::NoFurtherTransitions),
-        ParsedAssert::OrderingConstraint { before, after } => {
-            Some(SpecAssert::OrderingConstraint { before, after })
-        }
+        ParsedAssert::OrderingConstraint { .. } => None,
         ParsedAssert::NeverState { state } => Some(SpecAssert::NeverState { state }),
         ParsedAssert::CounterCompare { var, op, value } => {
             let runtime_op = match op {
@@ -162,28 +182,26 @@ fn translate_parsed(
                 enforcement_version: temper_spec::automaton::RUNTIME_INVARIANT_ENFORCEMENT_VERSION,
             })
         }
-        ParsedAssert::BoolRequired { var, expect } => declared_bools
-            .contains(&var)
-            .then_some(SpecAssert::BoolRequired { var, expect }),
+        ParsedAssert::BoolRequired { var, expect } => {
+            Some(SpecAssert::BoolRequired { var, expect })
+        }
         ParsedAssert::And(parts) => {
-            let mapped: Option<Vec<_>> = parts
-                .into_iter()
-                .map(|part| translate_parsed(part, declared_bools))
-                .collect();
+            let mapped: Option<Vec<_>> = parts.into_iter().map(translate_parsed).collect();
             mapped.map(SpecAssert::And)
         }
         ParsedAssert::Or(parts) => {
-            let mapped: Option<Vec<_>> = parts
-                .into_iter()
-                .map(|part| translate_parsed(part, declared_bools))
-                .collect();
+            let mapped: Option<Vec<_>> = parts.into_iter().map(translate_parsed).collect();
             mapped.map(SpecAssert::Or)
         }
     }
 }
 
-fn is_declared_bool(state: &StateVar) -> bool {
-    state.var_type == "bool"
+fn declared_names(states: &[StateVar], var_type: &str) -> BTreeSet<String> {
+    states
+        .iter()
+        .filter(|state| state.var_type == var_type)
+        .map(|state| state.name.clone())
+        .collect()
 }
 
 impl SimActorHandler for EntityActorHandler {
@@ -260,6 +278,10 @@ impl SimActorHandler for EntityActorHandler {
 
     fn bool_field(&self, var: &str) -> Option<bool> {
         self.state.booleans.get(var).copied()
+    }
+
+    fn counter_field(&self, var: &str) -> Option<usize> {
+        self.state.counters.get(var).copied()
     }
 
     fn pending_callbacks(&self) -> Vec<String> {

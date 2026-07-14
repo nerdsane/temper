@@ -1374,6 +1374,15 @@ impl ServerState {
         .result
         .map_err(|e| format!("Actor update failed: {e}"))?;
 
+        if response.success || response.state.sequence_nr > 0 {
+            self.update_entity_index_visibility(
+                tenant,
+                entity_type,
+                entity_id,
+                &response.state.status,
+            );
+        }
+
         if response.success
             && let Some(query_plane) = self.query_plane_store()
         {

@@ -118,6 +118,14 @@ pub trait SimActorHandler: Send {
         None
     }
 
+    /// Read a counter state variable by name for invariant evaluation.
+    ///
+    /// Returns `None` when the counter is absent, which fails closed in typed
+    /// counter assertions. Default: no counter state.
+    fn counter_field(&self, _var: &str) -> Option<usize> {
+        None
+    }
+
     /// Custom effects (integration triggers) emitted by the last action.
     ///
     /// After each successful `handle_message()`, the simulation system calls

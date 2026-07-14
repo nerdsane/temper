@@ -595,7 +595,11 @@ impl SimActorSystem {
         if let Some(handler) = self.actors.get(actor_id) {
             let invariants: Vec<_> = handler.spec_invariants().to_vec();
             for inv in &invariants {
-                let triggered = inv.when.is_empty() || inv.when.iter().any(|s| s == status_after);
+                let triggered = matches!(
+                    inv.assert,
+                    super::sim_handler::SpecAssert::Unsupported { .. }
+                ) || inv.when.is_empty()
+                    || inv.when.iter().any(|s| s == status_after);
                 if !triggered {
                     continue;
                 }
@@ -658,11 +662,7 @@ fn evaluate_spec_assert(
         SpecAssert::RuntimeEnforced { .. } => true,
         SpecAssert::Unsupported { .. } => false,
         SpecAssert::CounterPositive { var } => {
-            if var == "items" {
-                item_count > 0
-            } else {
-                true // Unknown counter: not in scope for invariant checking here.
-            }
+            handler.counter_field(var).is_some_and(|value| value > 0)
         }
         SpecAssert::NoFurtherTransitions => {
             // Holds unless status_before was a terminal state in `when`.
@@ -684,7 +684,9 @@ fn evaluate_spec_assert(
         }
         SpecAssert::NeverState { state } => status_after != state.as_str(),
         SpecAssert::CounterCompare { var, op, value } => {
-            let counter_val = if var == "items" { item_count } else { 0 };
+            let Some(counter_val) = handler.counter_field(var) else {
+                return false;
+            };
             match op {
                 CompareOp::Gt => counter_val > *value,
                 CompareOp::Gte => counter_val >= *value,
