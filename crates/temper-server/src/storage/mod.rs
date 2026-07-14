@@ -34,6 +34,7 @@ use crate::platform_store::PlatformStore;
 use crate::platform_store::SimPlatformStore;
 use crate::state::trajectory::{TrajectoryEntry, TrajectorySource};
 
+mod capabilities;
 mod published_artifacts;
 mod query_plane_impls;
 mod query_plane_read;
@@ -861,122 +862,7 @@ pub trait ObserveReadStore: Send + Sync {
     ) -> Result<Vec<AgentSummary>, PersistenceError>;
 }
 
-/// Evolution engine durable metadata capability.
-#[async_trait::async_trait]
-pub trait EvolutionStore: Send + Sync {
-    #[allow(clippy::too_many_arguments)]
-    async fn upsert_feature_request(
-        &self,
-        id: &str,
-        category: &str,
-        description: &str,
-        frequency: i64,
-        trajectory_refs_json: &str,
-        disposition: &str,
-        developer_notes: Option<&str>,
-    ) -> Result<(), PersistenceError>;
-
-    async fn list_feature_requests(
-        &self,
-        disposition: Option<&str>,
-    ) -> Result<Vec<FeatureRequestRow>, PersistenceError>;
-
-    async fn update_feature_request(
-        &self,
-        id: &str,
-        disposition: &str,
-        developer_notes: Option<&str>,
-    ) -> Result<bool, PersistenceError>;
-
-    async fn insert_evolution_record(
-        &self,
-        id: &str,
-        record_type: &str,
-        status: &str,
-        created_by: &str,
-        derived_from: Option<&str>,
-        data_json: &str,
-    ) -> Result<(), PersistenceError>;
-
-    async fn get_evolution_record(
-        &self,
-        id: &str,
-    ) -> Result<Option<EvolutionRecordRow>, PersistenceError>;
-
-    async fn list_evolution_records(
-        &self,
-        record_type: Option<&str>,
-        status: Option<&str>,
-    ) -> Result<Vec<EvolutionRecordRow>, PersistenceError>;
-
-    async fn list_ranked_insights(&self) -> Result<Vec<EvolutionRecordRow>, PersistenceError>;
-}
-
-/// Design-time verification event capability.
-#[async_trait::async_trait]
-pub trait DesignTimeEventStore: Send + Sync {
-    #[allow(clippy::too_many_arguments)]
-    async fn insert_design_time_event(
-        &self,
-        kind: &str,
-        entity_type: &str,
-        tenant: &str,
-        summary: &str,
-        level: Option<&str>,
-        passed: Option<bool>,
-        step_number: Option<i64>,
-        total_steps: Option<i64>,
-    ) -> Result<(), PersistenceError>;
-
-    async fn list_design_time_events(
-        &self,
-        tenant: Option<&str>,
-        limit: i64,
-    ) -> Result<Vec<DesignTimeEventRow>, PersistenceError>;
-}
-
-/// OTS trajectory capability.
-#[async_trait::async_trait]
-pub trait OtsStore: Send + Sync {
-    async fn persist_ots_trajectory(
-        &self,
-        params: &OtsTrajectoryParams<'_>,
-    ) -> Result<(), PersistenceError>;
-
-    async fn enqueue_ots_trajectory(
-        &self,
-        params: &OtsTrajectoryParams<'_>,
-    ) -> Result<(), PersistenceError>;
-
-    async fn mark_ots_trajectory_persisted(
-        &self,
-        trajectory_id: &str,
-    ) -> Result<(), PersistenceError>;
-
-    async fn mark_ots_trajectory_failed(
-        &self,
-        trajectory_id: &str,
-        error: &str,
-    ) -> Result<(), PersistenceError>;
-
-    async fn list_queued_ots_trajectories(
-        &self,
-        limit: i64,
-    ) -> Result<Vec<OtsQueuedTrajectoryRow>, PersistenceError>;
-
-    async fn list_ots_trajectories(
-        &self,
-        tenant: &str,
-        agent_id: Option<&str>,
-        outcome: Option<&str>,
-        limit: i64,
-    ) -> Result<Vec<OtsTrajectoryRow>, PersistenceError>;
-
-    async fn get_ots_trajectory(
-        &self,
-        trajectory_id: &str,
-    ) -> Result<Option<String>, PersistenceError>;
-}
+pub use capabilities::{DesignTimeEventStore, EvolutionStore, OtsStore};
 
 /// Legacy database-backed blob capability.
 #[async_trait::async_trait]
@@ -1867,7 +1753,7 @@ impl EvolutionStore for PostgresEventStore {
         trajectory_refs_json: &str,
         disposition: &str,
         developer_notes: Option<&str>,
-    ) -> Result<(), PersistenceError> {
+    ) -> Result<bool, PersistenceError> {
         self.upsert_feature_request(
             id,
             category,
@@ -1949,7 +1835,7 @@ impl EvolutionStore for TursoEventStore {
         trajectory_refs_json: &str,
         disposition: &str,
         developer_notes: Option<&str>,
-    ) -> Result<(), PersistenceError> {
+    ) -> Result<bool, PersistenceError> {
         self.upsert_feature_request(
             id,
             category,

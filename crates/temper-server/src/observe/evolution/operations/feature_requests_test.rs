@@ -215,22 +215,40 @@ async fn repeated_get_creates_the_system_entity_exactly_once() {
         .as_str()
         .expect("feature request id")
         .to_string();
-    get_feature_requests(&state).await;
 
-    let events = state
-        .storage_stack
-        .as_ref()
-        .expect("stack")
-        .events
-        .read_events(&format!("temper-system:FeatureRequest:{id}"), 0)
-        .await
-        .expect("read entity journal");
+    let journal = |from: u64| {
+        let events = state.storage_stack.as_ref().expect("stack").events.clone();
+        let persistence_id = format!("temper-system:FeatureRequest:{id}");
+        async move {
+            events
+                .read_events(&persistence_id, from)
+                .await
+                .expect("read entity journal")
+        }
+    };
+
+    // The first GET must journal the entity UNDER THE RECORD'S ID (a fresh
+    // per-read id would leave this journal empty). A new entity journals a
+    // bootstrap Created event plus the action event, so assert non-empty
+    // rather than a count coupled to that implementation detail.
+    let after_first = journal(0).await;
+    assert!(
+        !after_first.is_empty(),
+        "the first GET must create the system entity under the record's id"
+    );
+
+    let second = get_feature_requests(&state).await;
     assert_eq!(
-        events.len(),
-        1,
-        "two GETs must leave exactly one creation event on the record's \
-         entity journal, got {} (ids minted per read would journal under \
-         fresh ids and leave this journal empty or duplicated)",
-        events.len()
+        second["feature_requests"][0]["id"].as_str(),
+        Some(id.as_str()),
+        "identity must be stable before comparing journals"
+    );
+
+    let after_second = journal(0).await;
+    assert_eq!(
+        after_second.len(),
+        after_first.len(),
+        "the second GET must not journal anything — the entity is created \
+         exactly once, on the read that first discovered the gap"
     );
 }

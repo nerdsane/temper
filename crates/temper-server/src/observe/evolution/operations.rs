@@ -27,8 +27,8 @@ mod feature_requests_test;
 pub(crate) use materialize::{handle_evolution_analyze, handle_evolution_materialize};
 
 use support::{
-    create_system_entity_logged, emit_refresh_hints, next_system_entity_id, persist_alerts,
-    persist_insights, spawn_intent_discovery,
+    create_system_entity_logged, emit_refresh_hints, persist_alerts, persist_insights,
+    spawn_intent_discovery,
 };
 
 /// POST /api/evolution/sentinel/check -- trigger sentinel rule evaluation.
@@ -245,7 +245,10 @@ pub(crate) async fn handle_feature_requests(
                 FeatureRequestDisposition::WontFix => "WontFix",
                 FeatureRequestDisposition::Resolved => "Resolved",
             };
-            if let Err(error) = store
+            // ARN-240: the record id is content-derived, so this is a true
+            // upsert; the system entity is created ONCE, on the insert that
+            // first discovered the gap, and shares the record's id.
+            let inserted = match store
                 .upsert_feature_request(
                     &feature_request.header.id,
                     &format!("{:?}", feature_request.category),
@@ -257,23 +260,29 @@ pub(crate) async fn handle_feature_requests(
                 )
                 .await
             {
-                tracing::warn!(error = %error, backend = store.backend_name(), "failed to upsert feature request");
-            }
+                Ok(inserted) => inserted,
+                Err(error) => {
+                    tracing::warn!(error = %error, backend = store.backend_name(), "failed to upsert feature request");
+                    false
+                }
+            };
 
-            create_system_entity_logged(
-                &state,
-                "FeatureRequest",
-                &next_system_entity_id("FR"),
-                "CreateFeatureRequest",
-                serde_json::json!({
-                    "category": format!("{:?}", feature_request.category),
-                    "description": feature_request.description,
-                    "frequency": feature_request.frequency.to_string(),
-                    "developer_notes": feature_request.developer_notes.clone().unwrap_or_default(),
-                    "legacy_record_id": feature_request.header.id,
-                }),
-            )
-            .await;
+            if inserted {
+                create_system_entity_logged(
+                    &state,
+                    "FeatureRequest",
+                    &feature_request.header.id,
+                    "CreateFeatureRequest",
+                    serde_json::json!({
+                        "category": format!("{:?}", feature_request.category),
+                        "description": feature_request.description,
+                        "frequency": feature_request.frequency.to_string(),
+                        "developer_notes": feature_request.developer_notes.clone().unwrap_or_default(),
+                        "legacy_record_id": feature_request.header.id,
+                    }),
+                )
+                .await;
+            }
         }
 
         return match store.list_feature_requests(disposition_filter).await {

@@ -24,20 +24,34 @@ impl TursoEventStore {
         trajectory_refs_json: &str,
         disposition: &str,
         developer_notes: Option<&str>,
-    ) -> Result<(), PersistenceError> {
+    ) -> Result<bool, PersistenceError> {
         let _query_timer = TursoQueryTimer::start("turso.upsert_feature_request");
         let conn = self.configured_connection().await?;
+        // ARN-240: disposition and developer_notes are developer-owned after
+        // creation — regeneration writes them ONLY on first insert, and the
+        // caller learns whether this insert created the record.
+        let inserted = conn
+            .execute(
+                "INSERT INTO feature_requests (id, category, description, frequency, trajectory_refs, disposition, developer_notes, updated_at) \
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, datetime('now')) \
+                 ON CONFLICT(id) DO NOTHING",
+                params![id, category, description, frequency, trajectory_refs_json, disposition, developer_notes],
+            )
+            .await
+            .map_err(storage_error)?;
+        if inserted > 0 {
+            return Ok(true);
+        }
         conn.execute(
-            "INSERT INTO feature_requests (id, category, description, frequency, trajectory_refs, disposition, developer_notes, updated_at) \
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, datetime('now')) \
-             ON CONFLICT(id) DO UPDATE SET \
+            "UPDATE feature_requests SET \
                  category = ?2, description = ?3, frequency = ?4, trajectory_refs = ?5, \
-                 disposition = ?6, developer_notes = ?7, updated_at = datetime('now')",
-            params![id, category, description, frequency, trajectory_refs_json, disposition, developer_notes],
+                 updated_at = datetime('now') \
+             WHERE id = ?1",
+            params![id, category, description, frequency, trajectory_refs_json],
         )
         .await
         .map_err(storage_error)?;
-        Ok(())
+        Ok(false)
     }
 
     /// List feature requests with optional disposition filter.

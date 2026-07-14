@@ -1785,28 +1785,45 @@ impl PostgresEventStore {
         trajectory_refs_json: &str,
         disposition: &str,
         developer_notes: Option<&str>,
-    ) -> Result<(), PersistenceError> {
+    ) -> Result<bool, PersistenceError> {
         let trajectory_refs = parse_json(trajectory_refs_json)?;
-        crate::dbm::postgres_query!(
+        // ARN-240: disposition and developer_notes are developer-owned after
+        // creation — regeneration writes them ONLY on first insert, and the
+        // caller learns whether this insert created the record.
+        let result = crate::dbm::postgres_query!(
             "INSERT INTO feature_requests \
              (id, category, description, frequency, trajectory_refs, disposition, developer_notes, updated_at) \
              VALUES ($1, $2, $3, $4, $5, $6, $7, now()) \
-             ON CONFLICT (id) DO UPDATE SET \
-                 category = EXCLUDED.category, description = EXCLUDED.description, frequency = EXCLUDED.frequency, \
-                 trajectory_refs = EXCLUDED.trajectory_refs, disposition = EXCLUDED.disposition, \
-                 developer_notes = EXCLUDED.developer_notes, updated_at = now()",
+             ON CONFLICT (id) DO NOTHING",
+        )
+        .bind(id)
+        .bind(category)
+        .bind(description)
+        .bind(frequency)
+        .bind(trajectory_refs.clone())
+        .bind(disposition)
+        .bind(developer_notes)
+        .execute(self.pool())
+        .await
+        .map_err(storage_error)?;
+        if result.rows_affected() > 0 {
+            return Ok(true);
+        }
+        crate::dbm::postgres_query!(
+            "UPDATE feature_requests SET \
+                 category = $2, description = $3, frequency = $4, \
+                 trajectory_refs = $5, updated_at = now() \
+             WHERE id = $1",
         )
         .bind(id)
         .bind(category)
         .bind(description)
         .bind(frequency)
         .bind(trajectory_refs)
-        .bind(disposition)
-        .bind(developer_notes)
         .execute(self.pool())
         .await
         .map_err(storage_error)?;
-        Ok(())
+        Ok(false)
     }
 
     pub async fn list_feature_requests(
