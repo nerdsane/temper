@@ -1,5 +1,8 @@
 //! Fail-closed timeout hydration regressions for ambiguous durable history.
 
+#[path = "timeout_failures/journal_reads.rs"]
+mod journal_reads;
+
 use super::common;
 use temper_runtime::persistence::{
     COMPOSITE_EVENT_TYPE, EventMetadata, EventStore, PersistenceEnvelope,
