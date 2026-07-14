@@ -1,4 +1,4 @@
-# ADR-0156: Actor-Spawn State-Timeout Recovery
+# ADR-0171: Actor-Spawn State-Timeout Recovery
 
 - Status: Proposed
 - Date: 2026-07-13
@@ -71,6 +71,8 @@ The readiness ask uses the existing retry budget. Exhaustion logs a structured e
 
 Legacy snapshots that predate this optional field and have no matching state-changing event in their replay tail continue to receive one full timeout budget. Before the actor becomes ready or its timer can be armed, hydration synchronously rewrites the loaded snapshot with the conservative anchor. A missing anchor after replay proves that every post-snapshot envelope was skipped without mutating domain state: every successfully parsed event updates or clears the anchor. The replacement payload therefore keeps the loaded boundary's sequence and replay-budget fields, while the live actor retains the journal head and counts the skipped envelopes as its replay tail. A dedicated replacement operation atomically updates the current snapshot and its same-sequence history record without creating or rotating an event-segment boundary. Skipped markers replay again on the next restart, now from a snapshot with the durable anchor. A failed or concurrent upgrade write fails actor startup instead of exposing a refreshable in-memory budget. This compatibility fallback may delay the first deadline after upgrade, but even an immediate second crash and restart reuses the first upgraded anchor.
 
+If a legacy timed stream has no snapshot at all, hydration creates its first snapshot boundary at the recovered journal head. Before creation it performs a fresh snapshot read: an existing boundary or a read failure stops hydration because either is distinct from confirmed absence. The event-store contract then atomically verifies that the requested sequence is still the journal head, claims absence, and creates the boundary; a concurrent snapshot or a completed append makes stale hydration fail for retry. Redis also compare-and-sets append segment metadata with a bounded retry budget, so an append that read the prior segment cannot overwrite a concurrently rotated boundary. PostgreSQL single and stable-ordered batch appends share an entity-scoped transaction advisory lock with first-boundary creation, preventing either transaction from selecting stale segment topology. Turso single-event appends perform segment selection, conditional insertion, and segment-metadata publication in one immediate transaction, so first-boundary rotation either precedes the complete append or observes its new journal head. This persists the conservative anchor without appending a domain event and leaves no replay tail below the new boundary. Existing-boundary replacement and first-boundary creation are actor-readiness work rather than background maintenance, so stores with priority admission place them ahead of low-priority snapshot traffic.
+
 ## Rollout Plan
 
 1. **Immediate** — ship actor-spawn reconciliation and deterministic restart coverage.
@@ -83,6 +85,13 @@ Legacy snapshots that predate this optional field and have no matching state-cha
 - The fixed test proves not-yet-overdue state uses its remaining budget and overdue state fires immediately.
 - A legacy snapshot regression crashes again immediately after hydration and proves the repaired anchor and journal sequence survive without passivation or another event.
 - A legacy snapshot followed by a composite journal marker repairs the loaded boundary and survives restart without appending an event or rotating segments.
+- A legacy timed journal with no snapshot creates its first durable boundary at the recovered head and reuses the same anchor after restart.
+- A snapshot-read failure fails hydration without overwriting an existing boundary or rotating its segment metadata.
+- First-boundary creation atomically rejects a concurrent or previously existing snapshot.
+- First-boundary creation rejects a recovered sequence that is no longer the exact journal head.
+- A Redis append paused on stale segment metadata neither reverts nor republishes a range already covered by a concurrent first-boundary rotation.
+- A Turso single-event append paused after segment selection commits its event and segment metadata atomically before stale first-boundary creation can proceed.
+- Snapshot-boundary replacement enters the persistence writer as actor-readiness work rather than background maintenance.
 - An injected repair failure followed by store recovery in the same server replaces the stopped actor incarnation, persists the anchor, and arms exactly one timer.
 - Randomized deterministic seeds cover elapsed times before, at, and after the deadline.
 - Actor spawn, action dispatch, and timer firing continue to use shared production code paths.
@@ -110,6 +119,7 @@ Legacy snapshots that predate this optional field and have no matching state-cha
 
 - **Readiness task exhaustion.** Mitigated by bounded retries, structured errors, stopped-incarnation replacement on the next access, and the existing post-dispatch reconciliation fallback.
 - **Legacy snapshot upgrade failure.** The synchronous anchor rewrite fails actor startup; hydration never arms a timer from an anchor that another immediate restart could forget.
+- **Snapshot absence ambiguity.** A fresh read plus atomic create-if-absent distinguishes a genuinely missing boundary from read/deserialization failure or a concurrent creator; every ambiguous outcome fails actor startup for retry.
 - **Timed-entity startup volume.** Bounded to entity types with declared liveness obligations; non-timed entities retain index-only lazy hydration. A future durable scheduler may avoid one resident actor per persisted instance of a timeout-declaring type.
 - **Duplicate timers during startup races.** Mitigated by atomic initial-sequence reservation and the existing fire-time sequence/state checks.
 - **Runtime task nondeterminism.** The task coordinates production actor readiness only; state mutation remains actor-serialized, time comes from `sim_now()`, and deterministic tests use a logical clock plus paused Tokio time.
