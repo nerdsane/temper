@@ -610,7 +610,6 @@ impl SimActorSystem {
                     &inv.when,
                     status_before,
                     status_after,
-                    item_count,
                 );
                 let violated = !passed;
 
@@ -654,7 +653,6 @@ fn evaluate_spec_assert(
     when: &[String],
     status_before: &str,
     status_after: &str,
-    item_count: usize,
 ) -> bool {
     use super::sim_handler::{CompareOp, SpecAssert};
 
@@ -698,12 +696,12 @@ fn evaluate_spec_assert(
         SpecAssert::BoolRequired { var, expect } => {
             handler.bool_field(var).unwrap_or(false) == *expect
         }
-        SpecAssert::And(parts) => parts.iter().all(|p| {
-            evaluate_spec_assert(p, handler, when, status_before, status_after, item_count)
-        }),
-        SpecAssert::Or(parts) => parts.iter().any(|p| {
-            evaluate_spec_assert(p, handler, when, status_before, status_after, item_count)
-        }),
+        SpecAssert::And(parts) => parts
+            .iter()
+            .all(|p| evaluate_spec_assert(p, handler, when, status_before, status_after)),
+        SpecAssert::Or(parts) => parts
+            .iter()
+            .any(|p| evaluate_spec_assert(p, handler, when, status_before, status_after)),
     }
 }
 
