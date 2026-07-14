@@ -8,6 +8,25 @@ use temper_runtime::scheduler::{install_deterministic_context, sim_now, sim_uuid
 use temper_runtime::tenant::TenantId;
 use temper_store_sim::{SimEventStore, SimFaultConfig};
 
+const INITIAL_TIMED_TASK_IOA: &str = r#"
+[automaton]
+name = "InitialTimedTask"
+states = ["Running", "TimedOut"]
+initial = "Running"
+allow_indefinite_states = ["TimedOut"]
+
+[[action]]
+name = "TimeoutFail"
+kind = "internal"
+from = ["Running"]
+to = "TimedOut"
+
+[[state_timeout]]
+state = "Running"
+after_seconds = 600
+on_timeout = "TimeoutFail"
+"#;
+
 const TIMED_TASK_IOA: &str = r#"
 [automaton]
 name = "TimedTask"
@@ -32,6 +51,120 @@ state = "Running"
 after_seconds = 60
 on_timeout = "TimeoutFail"
 "#;
+
+#[tokio::test(start_paused = true)]
+async fn slow_successful_pre_start_still_arms_initial_state_timeout() {
+    let seed = 209;
+    let (_guard, _clock, _id_gen) = install_deterministic_context(seed);
+    let sim_store = SimEventStore::no_faults(seed);
+    let tenant = TenantId::default();
+    let entity_id = "slow-successful-timeout-start";
+    let actor_key = format!("{tenant}:InitialTimedTask:{entity_id}");
+
+    // Hold the bootstrap append beyond the complete actor-ask retry budget.
+    // The actor remains live and eventually starts successfully, so stopped-
+    // incarnation replacement cannot recover a lost one-shot hydration task.
+    sim_store.inject_append_delay(&actor_key, std::time::Duration::from_secs(120));
+    let mut state = common::build_single_tenant_state_with_store(
+        sim_store.clone(),
+        "slow-successful-timeout-start",
+        "default",
+        &[("InitialTimedTask", INITIAL_TIMED_TASK_IOA)],
+    );
+    state.action_dispatch_timeout = std::time::Duration::from_millis(1);
+
+    let actor_ref = state
+        .get_or_spawn_tenant_actor(&tenant, "InitialTimedTask", entity_id)
+        .expect("spawn the delayed timed actor");
+    tokio::task::yield_now().await;
+
+    // Step virtual time between task turns so every timeout/backoff in the
+    // maximum supported 32-attempt policy is created and consumed while the
+    // bootstrap append remains blocked. Each attempt needs at most one 800 ms
+    // backoff turn and one 1 ms ask-timeout turn.
+    for _ in 0..70 {
+        tokio::time::advance(std::time::Duration::from_secs(1)).await;
+        tokio::task::yield_now().await;
+    }
+    assert_eq!(
+        sim_store.total_events(),
+        0,
+        "pre_start must still be waiting after the complete readiness-ask budget"
+    );
+    assert!(
+        !actor_ref.is_stopped(),
+        "a slow successful pre_start keeps its mailbox incarnation live"
+    );
+    assert!(
+        state.state_timeout_tracker.pending_snapshot().is_empty(),
+        "no timeout can be armed before the actor has recovered its state"
+    );
+
+    tokio::time::advance(std::time::Duration::from_secs(50)).await;
+    for _ in 0..32 {
+        tokio::task::yield_now().await;
+        if sim_store.total_events() == 1 {
+            break;
+        }
+    }
+    assert_eq!(
+        sim_store.total_events(),
+        1,
+        "the delayed bootstrap append must eventually complete successfully"
+    );
+
+    // The arm must appear after late readiness without any entity request.
+    for _ in 0..64 {
+        if state.state_timeout_tracker.pending_snapshot()
+            == vec![("InitialTimedTask".to_string(), 1)]
+        {
+            break;
+        }
+        tokio::task::yield_now().await;
+    }
+    assert_eq!(
+        state.state_timeout_tracker.pending_snapshot(),
+        vec![("InitialTimedTask".to_string(), 1)],
+        "late successful actor readiness must still arm exactly one initial-state timeout"
+    );
+
+    // The 120-second startup delay is charged against the original 600-second
+    // budget, leaving exactly 480 seconds after readiness. Prove the timer is
+    // neither early nor late and persists its transition before any read.
+    tokio::time::advance(std::time::Duration::from_secs(479)).await;
+    tokio::task::yield_now().await;
+    assert_eq!(
+        sim_store.total_events(),
+        1,
+        "the recovered timeout must not fire before its durable deadline"
+    );
+
+    tokio::time::advance(std::time::Duration::from_secs(1)).await;
+    for _ in 0..64 {
+        tokio::task::yield_now().await;
+        if sim_store.total_events() == 2 {
+            break;
+        }
+    }
+    let journal = sim_store
+        .read_events(&actor_key, 0)
+        .await
+        .expect("read the no-traffic timeout journal");
+    assert_eq!(
+        journal
+            .iter()
+            .map(|event| event.event_type.as_str())
+            .collect::<Vec<_>>(),
+        vec!["Created", "TimeoutFail"],
+        "late readiness must still durably fire the initial-state timeout without request traffic"
+    );
+
+    let recovered = state
+        .get_tenant_entity_state(&tenant, "InitialTimedTask", entity_id)
+        .await
+        .expect("the actor remains readable after its recovered timeout fires");
+    assert_eq!(recovered.state.status, "TimedOut");
+}
 
 #[tokio::test]
 async fn passivation_snapshot_preserves_state_timeout_clock_anchor() {
