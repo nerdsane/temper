@@ -69,7 +69,7 @@ The readiness ask uses the existing retry budget. Exhaustion logs a structured e
 
 `TransitionTable` carries the verified `[[state_timeout]]` declarations into the production actor. As each durable event enters a timed state or executes a declared `reset_on` action, the actor updates one `state_timeout_clock_reset_at` value in the same state mutation. Replayed tail events advance or clear it alongside state, including tombstones. Periodic and passivation snapshots use one shared encoder that persists the timestamp while continuing to omit the bounded hot event deque. Hydration therefore recovers the exact anchor even when the entry/reset event precedes the current snapshot.
 
-Legacy snapshots that predate this optional field and have no matching event in their replay tail continue to receive one full timeout budget. This conservative compatibility fallback may delay the first deadline after upgrade, but every snapshot written by the current code preserves the anchor, so repeated restarts cannot repeatedly refresh the budget.
+Legacy snapshots that predate this optional field and have no matching event in their replay tail continue to receive one full timeout budget. Before the actor becomes ready or its timer can be armed, hydration synchronously rewrites that snapshot at the same durable sequence with the conservative anchor. A dedicated event-store replacement operation atomically updates the current snapshot and its same-sequence history record without creating or rotating an event-segment boundary. A failed or concurrent upgrade write fails actor startup instead of exposing a refreshable in-memory budget. This compatibility fallback may delay the first deadline after upgrade, but even an immediate second crash and restart reuses the first upgraded anchor.
 
 ## Rollout Plan
 
@@ -81,6 +81,7 @@ Legacy snapshots that predate this optional field and have no matching event in 
 
 - A behavioral regression reproduces a persisted timed state remaining stuck after restart with no unrelated dispatch.
 - The fixed test proves not-yet-overdue state uses its remaining budget and overdue state fires immediately.
+- A legacy snapshot regression crashes again immediately after hydration and proves the repaired anchor and journal sequence survive without passivation or another event.
 - Randomized deterministic seeds cover elapsed times before, at, and after the deadline.
 - Actor spawn, action dispatch, and timer firing continue to use shared production code paths.
 - Full workspace tests, strict Clippy, readability, DST review, and code-quality review pass.
@@ -106,6 +107,7 @@ Legacy snapshots that predate this optional field and have no matching event in 
 ### Risks
 
 - **Readiness task exhaustion.** Mitigated by bounded retries, structured errors, and the existing post-dispatch reconciliation fallback.
+- **Legacy snapshot upgrade failure.** The synchronous anchor rewrite fails actor startup; hydration never arms a timer from an anchor that another immediate restart could forget.
 - **Timed-entity startup volume.** Bounded to entity types with declared liveness obligations; non-timed entities retain index-only lazy hydration. A future durable scheduler may avoid one resident actor per persisted instance of a timeout-declaring type.
 - **Duplicate timers during startup races.** Mitigated by atomic initial-sequence reservation and the existing fire-time sequence/state checks.
 - **Runtime task nondeterminism.** The task coordinates production actor readiness only; state mutation remains actor-serialized, time comes from `sim_now()`, and deterministic tests use a logical clock plus paused Tokio time.

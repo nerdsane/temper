@@ -344,6 +344,17 @@ async fn snapshot_save_and_load_roundtrip() {
     assert_eq!(snapshot, Some((5, b"{\"status\":\"created\"}".to_vec())));
 
     store
+        .replace_snapshot(persistence_id, 5, b"{\"status\":\"created-upgraded\"}")
+        .await
+        .unwrap();
+
+    let replacement = store.load_snapshot(persistence_id).await.unwrap();
+    assert_eq!(
+        replacement,
+        Some((5, b"{\"status\":\"created-upgraded\"}".to_vec()))
+    );
+
+    store
         .save_snapshot(persistence_id, 8, b"{\"status\":\"shipped\"}")
         .await
         .unwrap();

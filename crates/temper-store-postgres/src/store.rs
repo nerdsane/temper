@@ -889,6 +889,59 @@ impl EventStore for PostgresEventStore {
         Ok(())
     }
 
+    async fn replace_snapshot(
+        &self,
+        persistence_id: &str,
+        sequence_nr: u64,
+        snapshot: &[u8],
+    ) -> Result<(), PersistenceError> {
+        let (tenant, entity_type, entity_id) =
+            parse_persistence_id_parts(persistence_id).map_err(PersistenceError::Storage)?;
+        let mut tx = self
+            .pool
+            .begin()
+            .await
+            .map_err(|error| PersistenceError::Storage(error.to_string()))?;
+
+        let updated = crate::dbm::postgres_query!(
+            "UPDATE snapshots SET state = $5, created_at = now() \
+             WHERE tenant = $1 AND entity_type = $2 AND entity_id = $3 AND sequence_nr = $4",
+        )
+        .bind(tenant)
+        .bind(entity_type)
+        .bind(entity_id)
+        .bind(sequence_nr as i64)
+        .bind(snapshot)
+        .execute(&mut *tx)
+        .await
+        .map_err(|error| PersistenceError::Storage(error.to_string()))?;
+        if updated.rows_affected() != 1 {
+            return Err(PersistenceError::Storage(format!(
+                "cannot replace missing snapshot at sequence {sequence_nr} for {persistence_id}"
+            )));
+        }
+
+        crate::dbm::postgres_query!(
+            "INSERT INTO snapshot_history (tenant, entity_type, entity_id, sequence_nr, state) \
+             VALUES ($1, $2, $3, $4, $5) \
+             ON CONFLICT (tenant, entity_type, entity_id, sequence_nr) \
+             DO UPDATE SET state = $5, created_at = now()",
+        )
+        .bind(tenant)
+        .bind(entity_type)
+        .bind(entity_id)
+        .bind(sequence_nr as i64)
+        .bind(snapshot)
+        .execute(&mut *tx)
+        .await
+        .map_err(|error| PersistenceError::Storage(error.to_string()))?;
+
+        tx.commit()
+            .await
+            .map_err(|error| PersistenceError::Storage(error.to_string()))?;
+        Ok(())
+    }
+
     /// Load the latest snapshot for an entity.
     ///
     /// Returns `None` when no snapshot has been saved yet.

@@ -408,6 +408,18 @@ pub trait EventStore: Send + Sync + 'static {
         snapshot: &[u8],
     ) -> impl std::future::Future<Output = Result<(), PersistenceError>> + Send;
 
+    /// Replace the payload of an existing snapshot without creating another
+    /// event-segment boundary.
+    ///
+    /// The replacement must atomically update the latest snapshot and its
+    /// same-sequence history record while leaving segment metadata unchanged.
+    fn replace_snapshot(
+        &self,
+        persistence_id: &str,
+        sequence_nr: u64,
+        snapshot: &[u8],
+    ) -> impl std::future::Future<Output = Result<(), PersistenceError>> + Send;
+
     /// Load the latest snapshot.
     fn load_snapshot(
         &self,

@@ -151,6 +151,18 @@ impl EventStore for RecordingEventStore {
         Ok(())
     }
 
+    async fn replace_snapshot(
+        &self,
+        persistence_id: &str,
+        sequence_nr: u64,
+        snapshot: &[u8],
+    ) -> Result<(), PersistenceError> {
+        assert_eq!(persistence_id, "default:Ticket:t-1");
+        assert_eq!(sequence_nr, 1);
+        assert_eq!(snapshot, b"snapshot");
+        Ok(())
+    }
+
     async fn load_snapshot(
         &self,
         persistence_id: &str,

@@ -5,7 +5,7 @@ mod common;
 use temper_runtime::persistence::{EventMetadata, EventStore, PersistenceEnvelope};
 use temper_runtime::scheduler::{install_deterministic_context, sim_now, sim_uuid};
 use temper_runtime::tenant::TenantId;
-use temper_store_sim::SimEventStore;
+use temper_store_sim::{SimEventStore, SimFaultConfig};
 
 const TIMED_TASK_IOA: &str = r#"
 [automaton]
@@ -174,7 +174,7 @@ async fn passivation_snapshot_preserves_state_timeout_clock_anchor() {
 }
 
 #[tokio::test]
-async fn legacy_snapshot_anchor_repair_survives_passivation_and_second_restart() {
+async fn legacy_snapshot_anchor_repair_survives_immediate_second_restart() {
     let seed = 205;
     let (_guard, clock, _id_gen) = install_deterministic_context(seed);
     let sim_store = SimEventStore::no_faults(seed);
@@ -234,6 +234,46 @@ async fn legacy_snapshot_anchor_repair_survives_passivation_and_second_restart()
         .expect("seed legacy snapshot without timeout anchor");
 
     let tenant = TenantId::default();
+    sim_store.restore_faults(SimFaultConfig {
+        snapshot_failure_prob: 1.0,
+        ..SimFaultConfig::none()
+    });
+    let failed_state = common::build_single_tenant_state_with_store(
+        sim_store.clone(),
+        "legacy-timeout-repair-write-failure",
+        "default",
+        &[("TimedTask", TIMED_TASK_IOA)],
+    );
+    assert!(
+        failed_state
+            .get_tenant_entity_state(&tenant, "TimedTask", entity_id)
+            .await
+            .is_err(),
+        "hydration must fail instead of exposing a refreshable in-memory timeout anchor"
+    );
+    assert!(
+        failed_state
+            .state_timeout_tracker
+            .pending_snapshot()
+            .is_empty(),
+        "a failed durable repair must not arm a timeout"
+    );
+    let (_, still_legacy_snapshot_bytes) = sim_store
+        .load_snapshot(&actor_key)
+        .await
+        .expect("legacy snapshot lookup after injected write failure")
+        .expect("legacy snapshot remains present after injected write failure");
+    let still_legacy_snapshot: serde_json::Value =
+        serde_json::from_slice(&still_legacy_snapshot_bytes).expect("legacy snapshot JSON");
+    assert!(
+        still_legacy_snapshot
+            .get("state_timeout_clock_reset_at")
+            .is_none(),
+        "failed upgrade must not report an anchor that was never persisted"
+    );
+    drop(failed_state);
+    sim_store.disable_faults();
+
     let first_state = common::build_single_tenant_state_with_store(
         sim_store.clone(),
         "legacy-timeout-repair-first",
@@ -281,16 +321,11 @@ async fn legacy_snapshot_anchor_repair_survives_passivation_and_second_restart()
         "the repaired legacy state receives one conservative timeout budget"
     );
 
-    first_state.last_accessed.write().unwrap().insert(
-        actor_key.clone(),
-        sim_now() - chrono::Duration::seconds(600),
-    );
-    first_state.passivate_idle_actors().await;
     let (_, upgraded_snapshot_bytes) = sim_store
         .load_snapshot(&actor_key)
         .await
         .expect("upgraded snapshot lookup succeeds")
-        .expect("passivation rewrites the legacy snapshot");
+        .expect("hydration durably rewrites the legacy snapshot before actor readiness");
     let upgraded_snapshot: serde_json::Value =
         serde_json::from_slice(&upgraded_snapshot_bytes).expect("upgraded snapshot JSON");
     assert_eq!(
@@ -298,6 +333,7 @@ async fn legacy_snapshot_anchor_repair_survives_passivation_and_second_restart()
         Some(&serde_json::json!(expected_repair_at))
     );
 
+    drop(first_state);
     clock.advance_by(100);
     let second_state = common::build_single_tenant_state_with_store(
         sim_store,

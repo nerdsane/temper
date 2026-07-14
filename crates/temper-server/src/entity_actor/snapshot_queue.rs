@@ -318,6 +318,16 @@ mod tests {
             Ok(())
         }
 
+        async fn replace_snapshot(
+            &self,
+            _persistence_id: &str,
+            _sequence_nr: u64,
+            _snapshot: &[u8],
+        ) -> Result<(), PersistenceError> {
+            self.saves.fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        }
+
         async fn load_snapshot(
             &self,
             _persistence_id: &str,

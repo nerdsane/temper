@@ -52,11 +52,29 @@ redis.call('SADD', entities_key, entity_ref)
 return {1, new_seq}
 "#;
 
+/// Atomically replace the payload for one already-persisted snapshot boundary.
+///
+/// KEYS[1] = current snapshot key, KEYS[2] = same-sequence history key
+/// ARGV[1] = exact current snapshot record, ARGV[2] = replacement history,
+/// ARGV[3] = replacement current snapshot record
+///
+/// Returns `1` when replaced and `0` if the current snapshot changed.
+const REPLACE_SNAPSHOT_LUA: &str = r#"
+if redis.call('GET', KEYS[1]) ~= ARGV[1] then
+    return 0
+end
+
+redis.call('SET', KEYS[2], ARGV[2])
+redis.call('SET', KEYS[1], ARGV[3])
+return 1
+"#;
+
 /// Redis-backed event store.
 #[derive(Clone)]
 pub struct RedisEventStore {
     client: Arc<fred::clients::Client>,
     append_script: Script,
+    replace_snapshot_script: Script,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -100,6 +118,7 @@ impl RedisEventStore {
         Ok(Self {
             client: Arc::new(client),
             append_script: Script::from_lua(APPEND_LUA),
+            replace_snapshot_script: Script::from_lua(REPLACE_SNAPSHOT_LUA),
         })
     }
 
@@ -465,6 +484,65 @@ impl EventStore for RedisEventStore {
         Ok(())
     }
 
+    async fn replace_snapshot(
+        &self,
+        persistence_id: &str,
+        sequence_nr: u64,
+        snapshot: &[u8],
+    ) -> Result<(), PersistenceError> {
+        let (tenant, entity_type, entity_id) =
+            parse_persistence_id_parts(persistence_id).map_err(PersistenceError::Storage)?;
+        let key = Self::snapshot_key(tenant, entity_type, entity_id);
+        let Some(existing_encoded) = self
+            .client
+            .get::<Option<String>, _>(&key)
+            .await
+            .map_err(storage_error)?
+        else {
+            return Err(PersistenceError::Storage(format!(
+                "cannot replace missing snapshot at sequence {sequence_nr} for {persistence_id}"
+            )));
+        };
+        let existing: SnapshotRecord = serde_json::from_str(&existing_encoded)
+            .map_err(|error| PersistenceError::Serialization(error.to_string()))?;
+        if existing.sequence_nr != sequence_nr {
+            return Err(PersistenceError::ConcurrencyViolation {
+                expected: sequence_nr,
+                actual: existing.sequence_nr,
+            });
+        }
+
+        let replacement = SnapshotRecord {
+            sequence_nr,
+            snapshot: snapshot.to_vec(),
+        };
+        let encoded_replacement = serde_json::to_string(&replacement)
+            .map_err(|error| PersistenceError::Serialization(error.to_string()))?;
+        let history_key = Self::snapshot_history_key(tenant, entity_type, entity_id, sequence_nr);
+        let history = SnapshotHistoryRecord {
+            sequence_nr,
+            snapshot: snapshot.to_vec(),
+            created_at: chrono::Utc::now(),
+        };
+        let encoded_history = serde_json::to_string(&history)
+            .map_err(|error| PersistenceError::Serialization(error.to_string()))?;
+        let replaced: i64 = self
+            .replace_snapshot_script
+            .evalsha_with_reload(
+                &self.client,
+                vec![key, history_key],
+                vec![existing_encoded, encoded_history, encoded_replacement],
+            )
+            .await
+            .map_err(storage_error)?;
+        if replaced != 1 {
+            return Err(PersistenceError::Storage(format!(
+                "snapshot changed while replacing sequence {sequence_nr} for {persistence_id}"
+            )));
+        }
+        Ok(())
+    }
+
     async fn load_snapshot(
         &self,
         persistence_id: &str,
@@ -654,6 +732,44 @@ mod tests {
 
         let snapshot = store.load_snapshot(&pid).await.unwrap();
         assert_eq!(snapshot, Some((5, b"{\"status\":\"created\"}".to_vec())));
+
+        let (tenant, entity_type, entity_id) = parse_persistence_id_parts(&pid).unwrap();
+        let current_segment_key =
+            RedisEventStore::current_segment_key(tenant, entity_type, entity_id);
+        let segment_before: Option<String> = store.client.get(&current_segment_key).await.unwrap();
+        let current_segment = segment_before
+            .as_deref()
+            .expect("current segment index after initial snapshot")
+            .parse::<u64>()
+            .unwrap();
+        let segment_key =
+            RedisEventStore::segment_key(tenant, entity_type, entity_id, current_segment);
+        let next_segment_key =
+            RedisEventStore::segment_key(tenant, entity_type, entity_id, current_segment + 1);
+        let segment_record_before: Option<String> = store.client.get(&segment_key).await.unwrap();
+        let next_segment_before: Option<String> =
+            store.client.get(&next_segment_key).await.unwrap();
+        store
+            .replace_snapshot(&pid, 5, b"{\"status\":\"created-upgraded\"}")
+            .await
+            .unwrap();
+        assert_eq!(
+            store.load_snapshot(&pid).await.unwrap(),
+            Some((5, b"{\"status\":\"created-upgraded\"}".to_vec()))
+        );
+        let segment_after: Option<String> = store.client.get(&current_segment_key).await.unwrap();
+        assert_eq!(
+            segment_after, segment_before,
+            "same-sequence snapshot replacement must not rotate event segments"
+        );
+        let segment_record_after: Option<String> = store.client.get(&segment_key).await.unwrap();
+        let next_segment_after: Option<String> = store.client.get(&next_segment_key).await.unwrap();
+        assert_eq!(segment_record_after, segment_record_before);
+        assert_eq!(next_segment_after, next_segment_before);
+        let history_key = RedisEventStore::snapshot_history_key(tenant, entity_type, entity_id, 5);
+        let history: String = store.client.get(&history_key).await.unwrap();
+        let history: SnapshotHistoryRecord = serde_json::from_str(&history).unwrap();
+        assert_eq!(history.snapshot, b"{\"status\":\"created-upgraded\"}");
 
         // Overwrite
         store

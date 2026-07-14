@@ -710,6 +710,21 @@ impl EventStore for TenantStoreRouter {
             .await
     }
 
+    #[instrument(skip_all, fields(persistence_id, otel.name = "router.replace_snapshot"))]
+    async fn replace_snapshot(
+        &self,
+        persistence_id: &str,
+        sequence_nr: u64,
+        snapshot: &[u8],
+    ) -> Result<(), PersistenceError> {
+        let (tenant, _, _) =
+            parse_persistence_id_parts(persistence_id).map_err(PersistenceError::Storage)?;
+        let store = self.store_for_tenant(tenant).await?;
+        store
+            .replace_snapshot(persistence_id, sequence_nr, snapshot)
+            .await
+    }
+
     #[instrument(skip_all, fields(persistence_id, otel.name = "router.load_snapshot"))]
     async fn load_snapshot(
         &self,

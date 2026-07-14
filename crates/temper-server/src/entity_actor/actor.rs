@@ -855,10 +855,33 @@ impl Actor for EntityActor {
                 .any(|timeout| timeout.state == state.status)
         {
             state.state_timeout_clock_reset_at = Some(sim_now());
+            let snapshot = Self::serialize_snapshot_state(&state).map_err(|error| {
+                ActorError::custom(format!(
+                    "failed to encode legacy timeout-anchor repair for {}:{}: {error}",
+                    self.entity_type, self.entity_id
+                ))
+            })?;
+            let Some(store) = self.event_journal.as_ref() else {
+                return Err(ActorError::custom(format!(
+                    "cannot persist legacy timeout-anchor repair for {}:{} without an event journal",
+                    self.entity_type, self.entity_id
+                )));
+            };
+            store
+                .replace_snapshot(&self.persistence_id(), state.sequence_nr, &snapshot)
+                .await
+                .map_err(|error| {
+                    ActorError::custom(format!(
+                        "failed to persist legacy timeout-anchor repair for {}:{}: {error}",
+                        self.entity_type, self.entity_id
+                    ))
+                })?;
+            state.last_snapshot_sequence_nr = state.sequence_nr;
+            state.events_since_snapshot = 0;
             tracing::warn!(
                 entity = %state.entity_id,
                 state = %state.status,
-                "repaired missing legacy snapshot state-timeout clock anchor"
+                "durably repaired missing legacy snapshot state-timeout clock anchor"
             );
         }
 

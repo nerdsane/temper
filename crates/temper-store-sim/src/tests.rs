@@ -199,6 +199,49 @@ async fn snapshot_save_records_history_and_rotates_segments() {
 }
 
 #[tokio::test]
+async fn snapshot_replacement_preserves_existing_segment_boundary() {
+    let store = SimEventStore::no_faults(42);
+    let pid = "default:Order:snapshot-rewrite";
+
+    let missing = store
+        .replace_snapshot(pid, 0, b"must-not-create")
+        .await
+        .unwrap_err();
+    assert!(matches!(missing, PersistenceError::Storage(_)));
+    assert_eq!(store.load_snapshot(pid).await.unwrap(), None);
+
+    store
+        .append(
+            pid,
+            0,
+            &[test_envelope(0, "Created"), test_envelope(0, "Updated")],
+        )
+        .await
+        .unwrap();
+    store
+        .save_snapshot(pid, 2, b"legacy-snapshot")
+        .await
+        .unwrap();
+    let segments_before = store.dump_segments(pid);
+
+    store
+        .replace_snapshot(pid, 2, b"upgraded-snapshot")
+        .await
+        .unwrap();
+
+    assert_eq!(
+        store.load_snapshot(pid).await.unwrap(),
+        Some((2, b"upgraded-snapshot".to_vec()))
+    );
+    assert_eq!(store.snapshot_history_len(pid), 1);
+    assert_eq!(
+        store.snapshot_history_at(pid, 2),
+        Some(b"upgraded-snapshot".to_vec())
+    );
+    assert_eq!(store.dump_segments(pid), segments_before);
+}
+
+#[tokio::test]
 async fn load_snapshot_returns_none_when_empty() {
     let store = SimEventStore::no_faults(42);
     let snap = store

@@ -327,6 +327,16 @@ impl SimEventStore {
             .unwrap_or(0)
     }
 
+    /// Return one immutable snapshot-history payload for test assertions.
+    pub fn snapshot_history_at(&self, persistence_id: &str, sequence_nr: u64) -> Option<Vec<u8>> {
+        let inner = self.inner.lock().expect("SimEventStore lock poisoned"); // ci-ok: infallible lock
+        inner
+            .snapshot_history
+            .get(persistence_id)
+            .and_then(|history| history.get(&sequence_nr))
+            .cloned()
+    }
+
     pub fn dump_segments(&self, persistence_id: &str) -> Vec<SimEventSegment> {
         let inner = self.inner.lock().expect("SimEventStore lock poisoned"); // ci-ok: infallible lock
         inner
@@ -983,6 +993,45 @@ impl EventStore for SimEventStore {
             event_count: 0,
             sealed: false,
         });
+        Ok(())
+    }
+
+    async fn replace_snapshot(
+        &self,
+        persistence_id: &str,
+        sequence_nr: u64,
+        snapshot: &[u8],
+    ) -> Result<(), PersistenceError> {
+        let mut inner = self.inner.lock().expect("SimEventStore lock poisoned"); // ci-ok: infallible lock
+
+        let sf_prob = inner.faults.snapshot_failure_prob;
+        if inner.rng.chance(sf_prob) {
+            return Err(PersistenceError::Storage(
+                "SimEventStore: injected snapshot failure".into(),
+            ));
+        }
+
+        let Some((actual_sequence, _)) = inner.snapshots.get(persistence_id) else {
+            return Err(PersistenceError::Storage(format!(
+                "cannot replace missing snapshot at sequence {sequence_nr} for {persistence_id}"
+            )));
+        };
+        let actual_sequence = *actual_sequence;
+        if actual_sequence != sequence_nr {
+            return Err(PersistenceError::ConcurrencyViolation {
+                expected: sequence_nr,
+                actual: actual_sequence,
+            });
+        }
+
+        inner
+            .snapshots
+            .insert(persistence_id.to_string(), (sequence_nr, snapshot.to_vec()));
+        inner
+            .snapshot_history
+            .entry(persistence_id.to_string())
+            .or_default()
+            .insert(sequence_nr, snapshot.to_vec());
         Ok(())
     }
 

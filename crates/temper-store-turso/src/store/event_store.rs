@@ -594,6 +594,64 @@ impl EventStore for TursoEventStore {
         Ok(())
     }
 
+    #[instrument(skip_all, fields(persistence_id, otel.name = "turso.replace_snapshot"))]
+    async fn replace_snapshot(
+        &self,
+        persistence_id: &str,
+        sequence_nr: u64,
+        snapshot: &[u8],
+    ) -> Result<(), PersistenceError> {
+        let (tenant, entity_type, entity_id) =
+            parse_persistence_id_parts(persistence_id).map_err(PersistenceError::Storage)?;
+        let _write_permit = self
+            .acquire_write_permit("turso.replace_snapshot", WritePriority::Low)
+            .await?;
+        let conn = self.configured_connection().await?;
+        let tx = conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .await
+            .map_err(storage_error)?;
+
+        let updated = tx
+            .execute(
+                "UPDATE snapshots SET snapshot = ?5, created_at = datetime('now')
+                 WHERE tenant = ?1 AND entity_type = ?2 AND entity_id = ?3 AND sequence_nr = ?4",
+                params![
+                    tenant,
+                    entity_type,
+                    entity_id,
+                    sequence_nr as i64,
+                    snapshot.to_vec()
+                ],
+            )
+            .await
+            .map_err(storage_error)?;
+        if updated != 1 {
+            return Err(PersistenceError::Storage(format!(
+                "cannot replace missing snapshot at sequence {sequence_nr} for {persistence_id}"
+            )));
+        }
+
+        tx.execute(
+            "INSERT INTO snapshot_history (tenant, entity_type, entity_id, sequence_nr, snapshot)
+             VALUES (?1, ?2, ?3, ?4, ?5)
+             ON CONFLICT (tenant, entity_type, entity_id, sequence_nr)
+             DO UPDATE SET snapshot = excluded.snapshot, created_at = datetime('now')",
+            params![
+                tenant,
+                entity_type,
+                entity_id,
+                sequence_nr as i64,
+                snapshot.to_vec()
+            ],
+        )
+        .await
+        .map_err(storage_error)?;
+
+        tx.commit().await.map_err(storage_error)?;
+        Ok(())
+    }
+
     #[instrument(skip_all, fields(persistence_id, otel.name = "turso.load_snapshot"))]
     async fn load_snapshot(
         &self,

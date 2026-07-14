@@ -20,13 +20,13 @@ use sqlx::PgPool;
 use temper_runtime::persistence::{
     EventStore, PersistenceAppend, PersistenceAppendResult, PersistenceEnvelope, PersistenceError,
 };
-use temper_store_postgres::{PostgresEventStore, PostgresPolicyRow, PostgresTrajectoryInsert};
+use temper_store_postgres::{PostgresEventStore, PostgresTrajectoryInsert};
 use temper_store_turso::{
     ActionStats, AgentSummary, DesignTimeEventRow, EvolutionRecordRow, FeatureRequestRow,
     OtsQueuedTrajectoryRow, OtsTrajectoryParams, OtsTrajectoryRow, PolicyDenialPatternRow,
-    PolicyRow as TursoPolicyRow, TenantStoreRouter, TenantUserRow, TursoEventStore,
-    TursoTrajectoryInsert, TursoTrajectoryRow, TursoWasmInvocationInsert, TursoWasmInvocationRow,
-    TursoWasmModuleMetadataRow, UnmetIntentAggRow, store::TrajectoryStats,
+    TenantStoreRouter, TenantUserRow, TursoEventStore, TursoTrajectoryInsert, TursoTrajectoryRow,
+    TursoWasmInvocationInsert, TursoWasmInvocationRow, TursoWasmModuleMetadataRow,
+    UnmetIntentAggRow, store::TrajectoryStats,
 };
 
 use crate::platform_store::PlatformStore;
@@ -34,9 +34,11 @@ use crate::platform_store::PlatformStore;
 use crate::platform_store::SimPlatformStore;
 use crate::state::trajectory::{TrajectoryEntry, TrajectorySource};
 
+mod policy_row;
 mod published_artifacts;
 mod query_plane_impls;
 mod query_plane_read;
+pub use policy_row::PolicyStoreRow;
 pub use published_artifacts::{
     PublishedArtifactStore, PublishedArtifactStoreRow, PublishedArtifactStoreUpsert,
 };
@@ -162,6 +164,14 @@ pub trait DynEventStore: Send + Sync {
     ) -> EventStoreFuture<'a, Result<Vec<String>, PersistenceError>>;
 
     fn save_snapshot<'a>(
+        &'a self,
+        persistence_id: &'a str,
+        sequence_nr: u64,
+        snapshot: &'a [u8],
+    ) -> EventStoreFuture<'a, Result<(), PersistenceError>>;
+
+    /// Replace one existing snapshot payload without creating a new boundary.
+    fn replace_snapshot<'a>(
         &'a self,
         persistence_id: &'a str,
         sequence_nr: u64,
@@ -410,6 +420,20 @@ where
         ))
     }
 
+    fn replace_snapshot<'a>(
+        &'a self,
+        persistence_id: &'a str,
+        sequence_nr: u64,
+        snapshot: &'a [u8],
+    ) -> EventStoreFuture<'a, Result<(), PersistenceError>> {
+        Box::pin(EventStore::replace_snapshot(
+            self,
+            persistence_id,
+            sequence_nr,
+            snapshot,
+        ))
+    }
+
     fn load_snapshot<'a>(
         &'a self,
         persistence_id: &'a str,
@@ -647,6 +671,18 @@ impl BoxedEventStore {
             .await
     }
 
+    /// Replace one existing snapshot payload without creating a new boundary.
+    pub async fn replace_snapshot(
+        &self,
+        persistence_id: &str,
+        sequence_nr: u64,
+        snapshot: &[u8],
+    ) -> Result<(), PersistenceError> {
+        self.0
+            .replace_snapshot(persistence_id, sequence_nr, snapshot)
+            .await
+    }
+
     pub async fn load_snapshot(
         &self,
         persistence_id: &str,
@@ -699,46 +735,6 @@ impl BackendLabel {
             Self::Redis => "redis",
             Self::TursoRouted => "turso-routed",
             Self::Sim => "sim",
-        }
-    }
-}
-
-/// Backend-neutral row for one granular Cedar policy entry.
-#[derive(Clone, Debug)]
-pub struct PolicyStoreRow {
-    pub tenant: String,
-    pub policy_id: String,
-    pub cedar_text: String,
-    pub policy_hash: String,
-    pub created_at: String,
-    pub created_by: String,
-    pub enabled: bool,
-}
-
-impl From<TursoPolicyRow> for PolicyStoreRow {
-    fn from(row: TursoPolicyRow) -> Self {
-        Self {
-            tenant: row.tenant,
-            policy_id: row.policy_id,
-            cedar_text: row.cedar_text,
-            policy_hash: row.policy_hash,
-            created_at: row.created_at,
-            created_by: row.created_by,
-            enabled: row.enabled,
-        }
-    }
-}
-
-impl From<PostgresPolicyRow> for PolicyStoreRow {
-    fn from(row: PostgresPolicyRow) -> Self {
-        Self {
-            tenant: row.tenant,
-            policy_id: row.policy_id,
-            cedar_text: row.cedar_text,
-            policy_hash: row.policy_hash,
-            created_at: row.created_at,
-            created_by: row.created_by,
-            enabled: row.enabled,
         }
     }
 }
