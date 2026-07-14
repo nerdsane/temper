@@ -94,8 +94,17 @@ pub trait DynEventStore: Send + Sync {
         tenant: &'a str,
         entity_type: &'a str,
         entity_id: &'a str,
+        reconciliation_generation: u64,
+        observed_sequence: u64,
         vector_rows: &'a [temper_runtime::persistence::EntityVectorRow],
     ) -> EventStoreFuture<'a, Result<(), PersistenceError>>;
+
+    fn begin_vector_index_reconciliation<'a>(
+        &'a self,
+        tenant: &'a str,
+        entity_type: &'a str,
+        vector_set: &'a str,
+    ) -> EventStoreFuture<'a, Result<u64, PersistenceError>>;
 
     fn vector_candidates<'a>(
         &'a self,
@@ -113,6 +122,7 @@ pub trait DynEventStore: Send + Sync {
         &'a self,
         tenant: &'a str,
         entity_type: &'a str,
+        reconciliation_generation: u64,
         vector_set: &'a str,
     ) -> EventStoreFuture<'a, Result<(), PersistenceError>>;
 
@@ -120,6 +130,11 @@ pub trait DynEventStore: Send + Sync {
         &'a self,
         tenant: &'a str,
     ) -> EventStoreFuture<'a, Result<Vec<(String, String)>, PersistenceError>>;
+
+    fn vector_reconciliation_entity_types<'a>(
+        &'a self,
+        tenant: &'a str,
+    ) -> EventStoreFuture<'a, Result<Vec<String>, PersistenceError>>;
 
     fn vectored_entity_ids_for_type<'a>(
         &'a self,
@@ -179,6 +194,12 @@ pub trait DynEventStore: Send + Sync {
     ) -> EventStoreFuture<'a, Result<Vec<(String, String)>, PersistenceError>>;
 
     fn list_entity_ids_by_type<'a>(
+        &'a self,
+        tenant: &'a str,
+        entity_type: &'a str,
+    ) -> EventStoreFuture<'a, Result<Vec<String>, PersistenceError>>;
+
+    fn list_vector_repair_entity_ids<'a>(
         &'a self,
         tenant: &'a str,
         entity_type: &'a str,
@@ -266,6 +287,8 @@ where
         tenant: &'a str,
         entity_type: &'a str,
         entity_id: &'a str,
+        reconciliation_generation: u64,
+        observed_sequence: u64,
         vector_rows: &'a [temper_runtime::persistence::EntityVectorRow],
     ) -> EventStoreFuture<'a, Result<(), PersistenceError>> {
         Box::pin(EventStore::backfill_entity_vectors(
@@ -273,7 +296,23 @@ where
             tenant,
             entity_type,
             entity_id,
+            reconciliation_generation,
+            observed_sequence,
             vector_rows,
+        ))
+    }
+
+    fn begin_vector_index_reconciliation<'a>(
+        &'a self,
+        tenant: &'a str,
+        entity_type: &'a str,
+        vector_set: &'a str,
+    ) -> EventStoreFuture<'a, Result<u64, PersistenceError>> {
+        Box::pin(EventStore::begin_vector_index_reconciliation(
+            self,
+            tenant,
+            entity_type,
+            vector_set,
         ))
     }
 
@@ -302,12 +341,14 @@ where
         &'a self,
         tenant: &'a str,
         entity_type: &'a str,
+        reconciliation_generation: u64,
         vector_set: &'a str,
     ) -> EventStoreFuture<'a, Result<(), PersistenceError>> {
         Box::pin(EventStore::mark_vector_index_backfilled(
             self,
             tenant,
             entity_type,
+            reconciliation_generation,
             vector_set,
         ))
     }
@@ -317,6 +358,13 @@ where
         tenant: &'a str,
     ) -> EventStoreFuture<'a, Result<Vec<(String, String)>, PersistenceError>> {
         Box::pin(EventStore::vector_index_backfilled_types(self, tenant))
+    }
+
+    fn vector_reconciliation_entity_types<'a>(
+        &'a self,
+        tenant: &'a str,
+    ) -> EventStoreFuture<'a, Result<Vec<String>, PersistenceError>> {
+        Box::pin(EventStore::vector_reconciliation_entity_types(self, tenant))
     }
 
     fn vectored_entity_ids_for_type<'a>(
@@ -436,6 +484,18 @@ where
         ))
     }
 
+    fn list_vector_repair_entity_ids<'a>(
+        &'a self,
+        tenant: &'a str,
+        entity_type: &'a str,
+    ) -> EventStoreFuture<'a, Result<Vec<String>, PersistenceError>> {
+        Box::pin(EventStore::list_vector_repair_entity_ids(
+            self,
+            tenant,
+            entity_type,
+        ))
+    }
+
     fn list_entity_ids_limited<'a>(
         &'a self,
         tenant: &'a str,
@@ -538,10 +598,30 @@ impl BoxedEventStore {
         tenant: &str,
         entity_type: &str,
         entity_id: &str,
+        reconciliation_generation: u64,
+        observed_sequence: u64,
         vector_rows: &[temper_runtime::persistence::EntityVectorRow],
     ) -> Result<(), PersistenceError> {
         self.0
-            .backfill_entity_vectors(tenant, entity_type, entity_id, vector_rows)
+            .backfill_entity_vectors(
+                tenant,
+                entity_type,
+                entity_id,
+                reconciliation_generation,
+                observed_sequence,
+                vector_rows,
+            )
+            .await
+    }
+
+    pub async fn begin_vector_index_reconciliation(
+        &self,
+        tenant: &str,
+        entity_type: &str,
+        vector_set: &str,
+    ) -> Result<u64, PersistenceError> {
+        self.0
+            .begin_vector_index_reconciliation(tenant, entity_type, vector_set)
             .await
     }
 
@@ -562,10 +642,16 @@ impl BoxedEventStore {
         &self,
         tenant: &str,
         entity_type: &str,
+        reconciliation_generation: u64,
         vector_set: &str,
     ) -> Result<(), PersistenceError> {
         self.0
-            .mark_vector_index_backfilled(tenant, entity_type, vector_set)
+            .mark_vector_index_backfilled(
+                tenant,
+                entity_type,
+                reconciliation_generation,
+                vector_set,
+            )
             .await
     }
 
@@ -574,6 +660,13 @@ impl BoxedEventStore {
         tenant: &str,
     ) -> Result<Vec<(String, String)>, PersistenceError> {
         self.0.vector_index_backfilled_types(tenant).await
+    }
+
+    pub async fn vector_reconciliation_entity_types(
+        &self,
+        tenant: &str,
+    ) -> Result<Vec<String>, PersistenceError> {
+        self.0.vector_reconciliation_entity_types(tenant).await
     }
 
     pub async fn vectored_entity_ids_for_type(
@@ -667,6 +760,16 @@ impl BoxedEventStore {
         entity_type: &str,
     ) -> Result<Vec<String>, PersistenceError> {
         self.0.list_entity_ids_by_type(tenant, entity_type).await
+    }
+
+    pub async fn list_vector_repair_entity_ids(
+        &self,
+        tenant: &str,
+        entity_type: &str,
+    ) -> Result<Vec<String>, PersistenceError> {
+        self.0
+            .list_vector_repair_entity_ids(tenant, entity_type)
+            .await
     }
 
     pub async fn list_entity_ids_limited(

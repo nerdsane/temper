@@ -740,6 +740,18 @@ impl EventStore for TenantStoreRouter {
         store.list_entity_ids_by_type(tenant, entity_type).await
     }
 
+    #[instrument(skip_all, fields(tenant, entity_type, otel.name = "router.list_vector_repair_entity_ids"))]
+    async fn list_vector_repair_entity_ids(
+        &self,
+        tenant: &str,
+        entity_type: &str,
+    ) -> Result<Vec<String>, PersistenceError> {
+        let store = self.store_for_tenant(tenant).await?;
+        store
+            .list_vector_repair_entity_ids(tenant, entity_type)
+            .await
+    }
+
     // ADR-0155: forward the vector-index surface to the per-tenant store so kNN works
     // on the routed Turso deployment. (Keys deliberately fall through to the no-op
     // defaults — Turso does not maintain entity_key_index live; see event_store.rs.)
@@ -774,11 +786,33 @@ impl EventStore for TenantStoreRouter {
         tenant: &str,
         entity_type: &str,
         entity_id: &str,
+        reconciliation_generation: u64,
+        observed_sequence: u64,
         vector_rows: &[temper_runtime::persistence::EntityVectorRow],
     ) -> Result<(), PersistenceError> {
         let store = self.store_for_tenant(tenant).await?;
         store
-            .backfill_entity_vectors(tenant, entity_type, entity_id, vector_rows)
+            .backfill_entity_vectors(
+                tenant,
+                entity_type,
+                entity_id,
+                reconciliation_generation,
+                observed_sequence,
+                vector_rows,
+            )
+            .await
+    }
+
+    #[instrument(skip_all, fields(tenant, entity_type, otel.name = "router.begin_vector_index_reconciliation"))]
+    async fn begin_vector_index_reconciliation(
+        &self,
+        tenant: &str,
+        entity_type: &str,
+        vector_set: &str,
+    ) -> Result<u64, PersistenceError> {
+        let store = self.store_for_tenant(tenant).await?;
+        store
+            .begin_vector_index_reconciliation(tenant, entity_type, vector_set)
             .await
     }
 
@@ -802,11 +836,17 @@ impl EventStore for TenantStoreRouter {
         &self,
         tenant: &str,
         entity_type: &str,
+        reconciliation_generation: u64,
         vector_set: &str,
     ) -> Result<(), PersistenceError> {
         let store = self.store_for_tenant(tenant).await?;
         store
-            .mark_vector_index_backfilled(tenant, entity_type, vector_set)
+            .mark_vector_index_backfilled(
+                tenant,
+                entity_type,
+                reconciliation_generation,
+                vector_set,
+            )
             .await
     }
 
@@ -817,6 +857,15 @@ impl EventStore for TenantStoreRouter {
     ) -> Result<Vec<(String, String)>, PersistenceError> {
         let store = self.store_for_tenant(tenant).await?;
         store.vector_index_backfilled_types(tenant).await
+    }
+
+    #[instrument(skip_all, fields(tenant, otel.name = "router.vector_reconciliation_entity_types"))]
+    async fn vector_reconciliation_entity_types(
+        &self,
+        tenant: &str,
+    ) -> Result<Vec<String>, PersistenceError> {
+        let store = self.store_for_tenant(tenant).await?;
+        store.vector_reconciliation_entity_types(tenant).await
     }
 
     #[instrument(skip_all, fields(tenant, entity_type, otel.name = "router.vectored_entity_ids_for_type"))]

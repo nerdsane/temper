@@ -2,6 +2,8 @@ use std::collections::BTreeMap;
 
 use serde_json::json;
 use temper_runtime::ActorSystem;
+#[cfg(feature = "sim")]
+use temper_runtime::persistence::{EntityVectorRow, EventStore};
 use temper_spec::csdl::parse_csdl;
 #[cfg(feature = "sim")]
 use temper_store_sim::SimEventStore;
@@ -99,6 +101,8 @@ const COMPOSITE_CSDL: &str = r#"<?xml version="1.0" encoding="utf-8"?>
         <Key><PropertyRef Name="Id"/></Key>
         <Property Name="Id" Type="Edm.String" Nullable="false"/>
         <Property Name="Name" Type="Edm.String"/>
+        <Property Name="Embedding" Type="Edm.String"/>
+        <Property Name="EmbeddingModel" Type="Edm.String"/>
         <Property Name="Status" Type="Edm.String" Nullable="false"/>
       </EntityType>
       <EntityType Name="App">
@@ -223,12 +227,29 @@ name = "Child"
 states = ["Draft", "Active", "Deleted"]
 initial = "Draft"
 
+[[state]]
+name = "Embedding"
+type = "string"
+initial = ""
+
+[[state]]
+name = "EmbeddingModel"
+type = "string"
+initial = ""
+
+[[vector]]
+name = "embed"
+property = "Embedding"
+model_property = "EmbeddingModel"
+dims = 2
+metric = "cosine"
+
 [[action]]
 name = "Create"
 kind = "input"
 from = ["Draft"]
 to = "Active"
-params = ["Name"]
+params = ["Name", "Embedding", "EmbeddingModel"]
 
 [[action]]
 name = "Delete"
@@ -1408,6 +1429,107 @@ async fn composite_atomic_batch_allows_existing_sub_write_to_delete_target() {
             .map(|event| event.event_type.as_str())
             .collect::<Vec<_>>(),
         vec!["Created", "Create", "Delete"]
+    );
+}
+
+#[cfg(feature = "sim")]
+#[tokio::test]
+async fn composite_dispatch_co_commits_vector_purge_fence_before_delayed_repair() {
+    let store = SimEventStore::no_faults(46);
+    let state = composite_test_state_with_store(store.clone());
+    let tenant = TenantId::default();
+    let agent = AgentContext::for_service("composite-vector-test");
+    let child_id = "child-vector-through-composite";
+    let generation = store
+        .begin_vector_index_reconciliation("default", "Child", "v2|embed")
+        .await
+        .expect("begin vector reconciliation");
+    let stale_row = EntityVectorRow {
+        decl_name: "embed".to_string(),
+        model_tag: "m1".to_string(),
+        vector: vec![1.0, 0.0],
+    };
+
+    let created = state
+        .apply_composite_integration_result(
+            &tenant,
+            "Parent",
+            "parent-create-vector-child",
+            "CreateChild",
+            &json!({
+                "sub_writes": [{
+                    "entity_type": "Child",
+                    "entity_id": child_id,
+                    "action": "Create",
+                    "params": {
+                        "Name": "vectored child",
+                        "Embedding": "[1.0,0.0]",
+                        "EmbeddingModel": "m1"
+                    }
+                }]
+            }),
+            &agent,
+        )
+        .await
+        .expect("composite create should co-commit the vector row");
+    assert!(created);
+    assert_eq!(
+        store
+            .vector_candidates("default", "Child", "embed", "m1", 10)
+            .await
+            .expect("read composite-created vector"),
+        vec![temper_runtime::persistence::EntityVectorCandidate {
+            entity_id: child_id.to_string(),
+            vector: stale_row.vector.clone(),
+        }]
+    );
+
+    let deleted = state
+        .apply_composite_integration_result(
+            &tenant,
+            "Parent",
+            "parent-delete-vector-child",
+            "DeleteChild",
+            &json!({
+                "sub_writes": [{
+                    "entity_type": "Child",
+                    "entity_id": child_id,
+                    "action": "Delete",
+                    "params": {}
+                }]
+            }),
+            &agent,
+        )
+        .await
+        .expect("composite delete should co-commit an empty vector set and fence");
+    assert!(deleted);
+
+    // The absent target bootstrap + Create are sequences 1 and 2; Delete is 3.
+    // Resume a repair that observed the pre-delete state only after Delete commits.
+    store
+        .backfill_entity_vectors(
+            "default",
+            "Child",
+            child_id,
+            generation,
+            2,
+            std::slice::from_ref(&stale_row),
+        )
+        .await
+        .expect("the delayed lower-sequence repair is a successful no-op");
+    assert!(
+        store
+            .vector_candidates("default", "Child", "embed", "m1", 10)
+            .await
+            .expect("read post-delete vector partition")
+            .is_empty(),
+        "the real composite dispatch path must retain the sequence-3 purge fence"
+    );
+    assert_eq!(
+        store
+            .dump_journal(&format!("default:Child:{child_id}"))
+            .len(),
+        3
     );
 }
 

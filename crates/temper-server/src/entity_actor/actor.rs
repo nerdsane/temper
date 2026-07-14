@@ -362,7 +362,6 @@ impl EntityActor {
             // purged instead of being ranked forever (ADR-0155).
             let reconcile_vectors = !table.vectors.is_empty();
             let mut key_rows = Vec::new();
-            let mut vector_rows = Vec::new();
             if let Some(field_map) = state.fields.as_object() {
                 for key in &table.keys {
                     if let Some(hash) =
@@ -374,35 +373,12 @@ impl EntityActor {
                         });
                     }
                 }
-                // A soft-deleted (tombstone) entity is never indexed — it emits no
-                // vector rows, so the reconcile below PURGES any it had, even though
-                // its embedding field may still be present. Mirrors how the field-index
-                // projection removes a deleted entity.
-                let index_vectors = state.status != "Deleted";
-                for decl in table.vectors.iter().filter(|_| index_vectors) {
-                    // A vector is indexed only when its property parses to `dims`
-                    // floats AND its model tag is a non-empty string — otherwise the
-                    // path indexes nothing for this entity (like an incomplete key).
-                    let Some(vector) = field_map
-                        .get(&decl.property)
-                        .and_then(|v| crate::vector_index::parse_vector_property(v, decl.dims))
-                    else {
-                        continue;
-                    };
-                    let Some(model_tag) = field_map
-                        .get(&decl.model_property)
-                        .and_then(|v| v.as_str())
-                        .filter(|tag| !tag.is_empty())
-                    else {
-                        continue;
-                    };
-                    vector_rows.push(temper_runtime::persistence::EntityVectorRow {
-                        decl_name: decl.name.clone(),
-                        model_tag: model_tag.to_string(),
-                        vector,
-                    });
-                }
             }
+            let vector_rows = crate::vector_index::rows_for_entity_state(
+                &table.vectors,
+                &event.to_status,
+                &state.fields,
+            );
             (key_rows, vector_rows, reconcile_vectors)
         };
         let append_start = Instant::now();

@@ -15,7 +15,8 @@ use std::time::Duration;
 
 use temper_jit::table::TransitionTable;
 use temper_runtime::ActorSystem;
-use temper_runtime::scheduler::install_deterministic_context;
+use temper_runtime::persistence::{EntityVectorRow, EventMetadata, PersistenceEnvelope};
+use temper_runtime::scheduler::{install_deterministic_context, sim_now, sim_uuid};
 use temper_server::storage::{BackendLabel, BoxedEventStore};
 use temper_server::vector_index::{VectorMetric, rank_nearest};
 use temper_server::{EntityActor, EntityMsg, EntityResponse};
@@ -55,7 +56,7 @@ async fn create_item(
     entity_id: &str,
     embedding: &[f32],
     model: &str,
-) {
+) -> temper_runtime::actor::ActorRef<EntityMsg> {
     let actor = EntityActor::with_persistence(
         "Item",
         entity_id,
@@ -74,6 +75,7 @@ async fn create_item(
     )
     .await;
     assert!(r.success, "Create failed: {:?}", r.error);
+    actor_ref
 }
 
 /// The fixed corpus every seed writes. Cosine nearest to [1,0,0,0] is `a`
@@ -88,6 +90,187 @@ fn corpus() -> Vec<(&'static str, [f32; 4], &'static str)> {
         // A different model tag: must never appear in an m1 ranking.
         ("item-e", [1.0, 0.0, 0.0, 0.0], "m2"),
     ]
+}
+
+fn test_envelope(event_type: &str) -> PersistenceEnvelope {
+    PersistenceEnvelope {
+        sequence_nr: 0,
+        event_type: event_type.to_string(),
+        payload: serde_json::json!({}),
+        metadata: EventMetadata {
+            event_id: sim_uuid(),
+            causation_id: sim_uuid(),
+            correlation_id: sim_uuid(),
+            timestamp: sim_now(),
+            actor_id: "dst-vector-reconcile".to_string(),
+        },
+    }
+}
+
+/// A repair observed at N must not overwrite live N+1, and a repair observed at
+/// N+1 must not resurrect vectors purged by live N+2. Explicit deterministic
+/// schedule through the server's dynamic EventStore path, all seeds.
+#[tokio::test]
+async fn dst_delayed_vector_repair_is_sequence_monotonic() {
+    for seed in 0..NUM_SEEDS {
+        let (_guard, _clock, _id) = install_deterministic_context(seed);
+        let store = BoxedEventStore::new(SimEventStore::no_faults(seed));
+        let generation = store
+            .begin_vector_index_reconciliation("default", "Item", "v2|embed")
+            .await
+            .expect("begin vector reconciliation generation");
+        let persistence_id = format!("default:Item:item-race-{seed}");
+        let entity_id = format!("item-race-{seed}");
+        let stale_row = EntityVectorRow {
+            decl_name: "embed".to_string(),
+            model_tag: "m1".to_string(),
+            vector: vec![1.0, 0.0, 0.0, 0.0],
+        };
+        let live_row = EntityVectorRow {
+            decl_name: "embed".to_string(),
+            model_tag: "m1".to_string(),
+            vector: vec![0.0, 1.0, 0.0, 0.0],
+        };
+
+        store
+            .append_with_index_rows(
+                &persistence_id,
+                0,
+                &[test_envelope("Created")],
+                &[],
+                std::slice::from_ref(&stale_row),
+                true,
+            )
+            .await
+            .expect("append sequence 1");
+        store
+            .append_with_index_rows(
+                &persistence_id,
+                1,
+                &[test_envelope("Updated")],
+                &[],
+                std::slice::from_ref(&live_row),
+                true,
+            )
+            .await
+            .expect("append sequence 2");
+        store
+            .backfill_entity_vectors(
+                "default",
+                "Item",
+                &entity_id,
+                generation,
+                1,
+                std::slice::from_ref(&stale_row),
+            )
+            .await
+            .expect("ignore delayed sequence-1 repair");
+        assert_eq!(
+            store
+                .vector_candidates("default", "Item", "embed", "m1", 10)
+                .await
+                .expect("read live candidate")[0]
+                .vector,
+            live_row.vector.clone(),
+            "seed {seed}: delayed sequence 1 must not overwrite live sequence 2"
+        );
+
+        store
+            .append_with_index_rows(
+                &persistence_id,
+                2,
+                &[test_envelope("Deleted")],
+                &[],
+                &[],
+                true,
+            )
+            .await
+            .expect("append sequence-3 purge");
+        store
+            .backfill_entity_vectors(
+                "default",
+                "Item",
+                &entity_id,
+                generation,
+                2,
+                std::slice::from_ref(&live_row),
+            )
+            .await
+            .expect("ignore delayed sequence-2 repair");
+        assert!(
+            store
+                .vector_candidates("default", "Item", "embed", "m1", 10)
+                .await
+                .expect("read purged partition")
+                .is_empty(),
+            "seed {seed}: delayed sequence 2 must not resurrect the sequence-3 purge"
+        );
+    }
+}
+
+/// The direct/OData delete message persists before mutating the actor's in-memory
+/// status. Vector derivation must use the event's post-transition status so the
+/// journal delete and empty candidate set share one atomic append.
+#[tokio::test]
+async fn dst_direct_delete_co_commits_vector_purge_before_delayed_repair() {
+    for seed in 0..NUM_SEEDS {
+        let (_guard, _clock, _id) = install_deterministic_context(seed);
+        let store = BoxedEventStore::new(SimEventStore::no_faults(seed));
+        let generation = store
+            .begin_vector_index_reconciliation("default", "Item", "v2|embed")
+            .await
+            .expect("begin vector reconciliation generation");
+        let table = item_table();
+        let system = ActorSystem::new("dst-vector-direct-delete");
+        let entity_id = format!("item-delete-{seed}");
+        let persistence_id = format!("default:Item:{entity_id}");
+        let actor_ref = create_item(
+            &system,
+            &table,
+            &store,
+            &entity_id,
+            &[1.0, 0.0, 0.0, 0.0],
+            "m1",
+        )
+        .await;
+        let observed_sequence = store
+            .read_events(&persistence_id, 0)
+            .await
+            .expect("read pre-delete journal")
+            .last()
+            .expect("Create event exists")
+            .sequence_nr;
+        let stale_row = EntityVectorRow {
+            decl_name: "embed".to_string(),
+            model_tag: "m1".to_string(),
+            vector: vec![1.0, 0.0, 0.0, 0.0],
+        };
+
+        let deleted: EntityResponse = actor_ref
+            .ask(EntityMsg::Delete, Duration::from_secs(5))
+            .await
+            .expect("actor should respond to direct delete");
+        assert!(deleted.success, "seed {seed}: direct delete failed");
+        store
+            .backfill_entity_vectors(
+                "default",
+                "Item",
+                &entity_id,
+                generation,
+                observed_sequence,
+                std::slice::from_ref(&stale_row),
+            )
+            .await
+            .expect("delayed pre-delete repair is a successful no-op");
+        assert!(
+            store
+                .vector_candidates("default", "Item", "embed", "m1", 10)
+                .await
+                .expect("read deleted vector partition")
+                .is_empty(),
+            "seed {seed}: direct delete must purge candidates and reject delayed repair"
+        );
+    }
 }
 
 #[tokio::test]

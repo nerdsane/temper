@@ -40,10 +40,13 @@ pub(super) fn transition_table_for(
 /// same way — the distinction is the watermark soundness gate.
 pub(super) enum EntityLoadOutcome {
     /// Loaded — index it from these fields.
-    Fields(serde_json::Value),
+    Fields {
+        fields: serde_json::Value,
+        sequence_nr: u64,
+    },
     /// Definitively skippable: deleted, or a phantom with no events. Correctly NOT
     /// indexed, and NOT a failure (it must not block the watermark).
-    Skip,
+    Skip { sequence_nr: u64 },
     /// The entity exists (it was enumerated from the durable store) but its current
     /// state could not be loaded — no transition table to replay with, an unreadable
     /// snapshot, or a replay error. Indexing it is impossible, so the type must NOT be
@@ -82,9 +85,16 @@ pub(super) async fn load_entity_current_fields(
     .await
     {
         Err(_) => EntityLoadOutcome::LoadFailed,
-        Ok(state) if state.status == "Deleted" => EntityLoadOutcome::Skip,
-        Ok(state) if state.total_event_count == 0 => EntityLoadOutcome::Skip,
-        Ok(state) => EntityLoadOutcome::Fields(state.fields),
+        Ok(state) if state.status == "Deleted" => EntityLoadOutcome::Skip {
+            sequence_nr: state.sequence_nr,
+        },
+        Ok(state) if state.total_event_count == 0 => EntityLoadOutcome::Skip {
+            sequence_nr: state.sequence_nr,
+        },
+        Ok(state) => EntityLoadOutcome::Fields {
+            fields: state.fields,
+            sequence_nr: state.sequence_nr,
+        },
     }
 }
 

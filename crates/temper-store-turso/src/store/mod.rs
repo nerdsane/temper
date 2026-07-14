@@ -391,8 +391,8 @@ impl TursoEventStore {
             .await
             .map_err(storage_error)?;
 
-        // Entity vector index (ADR-0155) — declared vector paths for exact-scan kNN,
-        // maintained write-behind (the event append is followed by the index write).
+        // Entity vector index (ADR-0155/ADR-0171) — declared vector paths for
+        // exact-scan kNN, co-committed with a retained per-entity sequence fence.
         conn.execute(schema::CREATE_ENTITY_VECTOR_INDEX_TABLE, ())
             .await
             .map_err(storage_error)?;
@@ -400,6 +400,24 @@ impl TursoEventStore {
             .await
             .map_err(storage_error)?;
         conn.execute(schema::CREATE_ENTITY_VECTOR_INDEX_ENTITY, ())
+            .await
+            .map_err(storage_error)?;
+        conn.execute(schema::CREATE_ENTITY_VECTOR_INDEX_VERSION_TABLE, ())
+            .await
+            .map_err(storage_error)?;
+        if let Err(error) = conn
+            .execute(schema::ALTER_ENTITY_VECTOR_INDEX_VERSION_ADD_GENERATION, ())
+            .await
+        {
+            let message = error.to_string();
+            if !message.contains("duplicate column name") {
+                return Err(storage_error(error));
+            }
+        }
+        conn.execute(schema::CREATE_VECTOR_RECONCILIATION_GENERATION_TABLE, ())
+            .await
+            .map_err(storage_error)?;
+        conn.execute(schema::SEED_ENTITY_VECTOR_INDEX_VERSION_TABLE, ())
             .await
             .map_err(storage_error)?;
         conn.execute(schema::CREATE_VECTOR_INDEX_BACKFILL_WATERMARK, ())

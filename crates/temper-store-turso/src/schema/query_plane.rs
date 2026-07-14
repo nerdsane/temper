@@ -77,10 +77,8 @@ CREATE INDEX IF NOT EXISTS idx_eki_entity
 
 /// ADR-0155: declared vector access path — the exact-scan kNN index. One row per
 /// (declared vector path, model tag, entity). `vector` is packed little-endian
-/// f32; `model_tag` partitions the space. Unlike keys, Turso maintains this
-/// **write-behind** (the event append is followed by the index write, not
-/// co-committed) — safe because a vector row carries no uniqueness constraint; the
-/// backfill watermark gates when the index is authoritatively complete.
+/// f32; `model_tag` partitions the space. Turso co-commits these rows and their
+/// retained per-entity sequence fence with the journal append (ADR-0171).
 pub const CREATE_ENTITY_VECTOR_INDEX_TABLE: &str = "\
 CREATE TABLE IF NOT EXISTS entity_vector_index (
     tenant       TEXT NOT NULL,
@@ -103,6 +101,54 @@ CREATE INDEX IF NOT EXISTS idx_evi_partition
 pub const CREATE_ENTITY_VECTOR_INDEX_ENTITY: &str = "\
 CREATE INDEX IF NOT EXISTS idx_evi_entity
     ON entity_vector_index(tenant, entity_type, entity_id);";
+
+/// ADR-0171 retained per-entity vector reconciliation fence. This row remains even
+/// when reconciliation produces no vector rows, preventing stale resurrection.
+pub const CREATE_ENTITY_VECTOR_INDEX_VERSION_TABLE: &str = "\
+CREATE TABLE IF NOT EXISTS entity_vector_index_version (
+    tenant                    TEXT NOT NULL,
+    entity_type               TEXT NOT NULL,
+    entity_id                 TEXT NOT NULL,
+    reconciliation_generation INTEGER NOT NULL DEFAULT 0,
+    sequence_nr               INTEGER NOT NULL,
+    PRIMARY KEY (tenant, entity_type, entity_id)
+);";
+
+/// Idempotent-at-bootstrap upgrade for databases created before ADR-0171 gained
+/// declaration-set generations. Duplicate-column errors are ignored by the caller.
+pub const ALTER_ENTITY_VECTOR_INDEX_VERSION_ADD_GENERATION: &str = "\
+ALTER TABLE entity_vector_index_version
+ADD COLUMN reconciliation_generation INTEGER NOT NULL DEFAULT 0";
+
+/// Durable ordering token for overlapping declaration-set reconciliation.
+pub const CREATE_VECTOR_RECONCILIATION_GENERATION_TABLE: &str = "\
+CREATE TABLE IF NOT EXISTS entity_vector_reconciliation_generation (
+    tenant       TEXT NOT NULL,
+    entity_type  TEXT NOT NULL,
+    generation   INTEGER NOT NULL,
+    vector_set   TEXT NOT NULL,
+    PRIMARY KEY (tenant, entity_type)
+);";
+
+/// Seed the retained fence when upgrading a database that already has vector rows.
+pub const SEED_ENTITY_VECTOR_INDEX_VERSION_TABLE: &str = "\
+INSERT INTO entity_vector_index_version
+    (tenant, entity_type, entity_id, reconciliation_generation, sequence_nr)
+SELECT tenant, entity_type, entity_id, 0, MAX(sequence_nr)
+FROM entity_vector_index
+GROUP BY tenant, entity_type, entity_id
+ON CONFLICT(tenant, entity_type, entity_id)
+DO UPDATE SET
+    reconciliation_generation = MAX(
+        entity_vector_index_version.reconciliation_generation,
+        excluded.reconciliation_generation
+    ),
+    sequence_nr = CASE
+        WHEN entity_vector_index_version.reconciliation_generation
+             = excluded.reconciliation_generation
+        THEN MAX(entity_vector_index_version.sequence_nr, excluded.sequence_nr)
+        ELSE entity_vector_index_version.sequence_nr
+    END;";
 
 /// Per-(tenant, entity_type) vector-index backfill watermark (ADR-0155): records
 /// the covered vector-path set so a keyed read knows when the index is complete and

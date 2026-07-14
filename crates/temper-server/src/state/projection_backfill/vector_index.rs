@@ -1,13 +1,11 @@
-//! ADR-0155 declared-vector backfill: populate `entity_vector_index` for entities
-//! that existed before the `[[vector]]` path was declared (or, on a write-behind
-//! backend, that lag the index), and record the per-(tenant, entity_type) watermark.
+//! ADR-0171 sequence-monotonic vector-index reconciliation.
 //!
-//! Mirrors the declared-key backfill (`key_index.rs`): authoritative enumeration
-//! (registry types + `store.list_entity_ids_by_type`), strict state load, per-decl
-//! vector parse, idempotent upsert, and a watermark only when every existing entity
-//! was indexed or is definitively skippable.
+//! Every repair enumerates durable journal streams (including deleted entities),
+//! rebuilds current rows from a strict replay, and carries that replay's journal
+//! sequence into a store-level compare-and-reconcile transaction. Completion is
+//! watermarked only after every stream converges durably.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 use temper_runtime::tenant::TenantId;
 
@@ -15,111 +13,147 @@ use crate::ServerState;
 
 use super::{EntityLoadOutcome, load_entity_current_fields, transition_table_for};
 
+fn vector_backfill_work_types(
+    current_vectors: &BTreeMap<String, Vec<temper_jit::table::types::DeclaredVector>>,
+    covered: &BTreeMap<String, String>,
+    reconciliation_types: &BTreeSet<String>,
+) -> BTreeSet<String> {
+    let mut work_types: BTreeSet<String> = current_vectors
+        .iter()
+        .filter(|(_, vectors)| !vectors.is_empty())
+        .map(|(entity_type, _)| entity_type.clone())
+        .collect();
+    work_types.extend(covered.keys().cloned());
+    work_types.extend(reconciliation_types.iter().cloned());
+    work_types
+}
+
 /// Backfill `entity_vector_index` for existing entities, then record the watermark.
 ///
-/// Idempotent; entities written after the vector path was declared already maintain
-/// their vectors at write time (co-commit on postgres/sim, write-behind on turso).
-/// Runs as a cooperative background task off the boot path.
+/// Idempotent and safe alongside live writes: a rebuild observed at sequence N is
+/// ignored by the store after a live append advances that entity's fence to N+1.
 pub(in crate::state) async fn populate_vector_index_from_snapshots(
     state: &ServerState,
     tenant: &TenantId,
 ) {
+    // Acquire before reading declarations. A second local invocation therefore
+    // cannot snapshot an older table and later allocate a newer durable generation
+    // after a hot swap. The store token remains the authoritative crash/process
+    // boundary (ADR-0171).
+    let _reconciliation_guard = state.vector_reconciliation_lock.lock().await;
     let Some((store, backend)) = state.event_journal() else {
         return;
     };
 
-    // Types with a declared vector path, from the registry (os-app entities live here).
-    let vectored_types: Vec<(String, Vec<temper_jit::table::types::DeclaredVector>)> = {
+    let covered: BTreeMap<String, String> = match store
+        .vector_index_backfilled_types(tenant.as_str())
+        .await
+    {
+        Ok(types) => types.into_iter().collect(),
+        Err(error) => {
+            tracing::error!(
+                tenant = %tenant,
+                error = %error,
+                "vector index backfill: failed to load durable watermarks; reconciliation aborted"
+            );
+            return;
+        }
+    };
+    let reconciliation_types: BTreeSet<String> = match store
+        .vector_reconciliation_entity_types(tenant.as_str())
+        .await
+    {
+        Ok(types) => types.into_iter().collect(),
+        Err(error) => {
+            tracing::error!(
+                tenant = %tenant,
+                error = %error,
+                "vector index backfill: failed to load durable reconciliation types; reconciliation aborted"
+            );
+            return;
+        }
+    };
+
+    // Keep empty vector declarations in this map. A type that was previously
+    // watermarked but now declares none must still run once to purge retained rows.
+    let current_vectors: BTreeMap<String, Vec<temper_jit::table::types::DeclaredVector>> = {
         let registry = state.registry.read().unwrap();
         registry
             .entity_types(tenant)
             .into_iter()
             .filter_map(|entity_type| {
-                let table = registry.get_table(tenant, entity_type)?;
-                if table.vectors.is_empty() {
-                    None
-                } else {
-                    Some((entity_type.to_string(), table.vectors.clone()))
-                }
+                registry
+                    .get_table(tenant, entity_type)
+                    .map(|table| (entity_type.to_string(), table.vectors.clone()))
             })
             .collect()
     };
-    if vectored_types.is_empty() {
-        return;
-    }
 
-    // The covered vector-path set per type (empty map on any failure — treat as
-    // never-backfilled, which is safe: it re-indexes, never skips wrongly).
-    let covered: std::collections::BTreeMap<String, String> = store
-        .vector_index_backfilled_types(tenant.as_str())
-        .await
-        .unwrap_or_default()
-        .into_iter()
-        .collect();
+    let work_types = vector_backfill_work_types(&current_vectors, &covered, &reconciliation_types);
 
-    for (entity_type, vectors) in &vectored_types {
-        let current_set = crate::vector_index::declared_vector_set_signature(vectors);
-        // Already complete for the CURRENT declared vector-set: the write path keeps
-        // the index whole (co-commit) or write-behind + this backfill did, so skip.
-        if covered.get(entity_type).map(String::as_str) == Some(current_set.as_str()) {
+    for entity_type in work_types {
+        let vectors = current_vectors
+            .get(&entity_type)
+            .cloned()
+            .unwrap_or_default();
+        let current_set = crate::vector_index::declared_vector_set_signature(&vectors);
+        if covered.get(&entity_type).map(String::as_str) == Some(current_set.as_str()) {
             continue;
         }
-        // A watermark covering a DIFFERENT set means a vector path was declared after
-        // the first backfill; re-index every existing entity under all current paths.
-        let force_full_reindex = covered.contains_key(entity_type);
-        if force_full_reindex {
+        if let Some(previous_set) = covered.get(&entity_type) {
             tracing::info!(
-                tenant = %tenant, entity_type = %entity_type,
-                covered_set = covered.get(entity_type).map(String::as_str).unwrap_or(""),
+                tenant = %tenant,
+                entity_type = %entity_type,
+                covered_set = %previous_set,
                 current_set = %current_set,
-                "vector index backfill: declared vector-set changed — re-indexing every existing entity of this type (one-time)"
+                "vector index backfill: reconciliation signature changed; rebuilding every durable stream"
             );
         }
 
-        let entity_ids = match store
-            .list_entity_ids_by_type(tenant.as_str(), entity_type)
+        let reconciliation_generation = match store
+            .begin_vector_index_reconciliation(tenant.as_str(), &entity_type, &current_set)
             .await
         {
-            Ok(ids) => ids,
-            Err(e) => {
+            Ok(generation) => generation,
+            Err(error) => {
                 tracing::error!(
-                    tenant = %tenant, entity_type = %entity_type, error = %e,
-                    "vector index backfill: failed to enumerate entities; type not watermarked"
+                    tenant = %tenant,
+                    entity_type = %entity_type,
+                    vector_set = %current_set,
+                    error = %error,
+                    "vector index backfill: failed to begin durable reconciliation generation"
                 );
                 continue;
             }
         };
 
-        // Resumability: on a first-time backfill, skip entities already indexed. On a
-        // set change, re-index all (a newly declared path is not yet on them).
-        let already_indexed: BTreeSet<String> = if force_full_reindex {
-            BTreeSet::new()
-        } else {
-            match store
-                .vectored_entity_ids_for_type(tenant.as_str(), entity_type)
-                .await
-            {
-                Ok(ids) => ids.into_iter().collect(),
-                Err(_) => BTreeSet::new(),
+        let entity_ids = match store
+            .list_vector_repair_entity_ids(tenant.as_str(), &entity_type)
+            .await
+        {
+            Ok(ids) => ids,
+            Err(error) => {
+                tracing::error!(
+                    tenant = %tenant,
+                    entity_type = %entity_type,
+                    error = %error,
+                    "vector index backfill: failed to enumerate durable streams; type not watermarked"
+                );
+                continue;
             }
         };
 
-        let table = transition_table_for(state, tenant, entity_type);
+        let table = transition_table_for(state, tenant, &entity_type);
         let blob_store = state.blob_store_for_tenant(tenant).ok();
         let total = entity_ids.len();
-        let mut newly_indexed = 0usize;
-        let mut already = 0usize;
-        let mut skipped = 0usize;
+        let mut indexed = 0usize;
+        let mut empty = 0usize;
         let mut failed = 0usize;
 
         for entity_id in &entity_ids {
-            if already_indexed.contains(entity_id) {
-                already += 1;
-                continue;
-            }
             match load_entity_current_fields(
                 tenant,
-                entity_type,
+                &entity_type,
                 entity_id,
                 table.as_ref(),
                 &store,
@@ -128,110 +162,145 @@ pub(in crate::state) async fn populate_vector_index_from_snapshots(
             )
             .await
             {
-                EntityLoadOutcome::Fields(fields) => {
-                    let Some(field_map) = fields.as_object() else {
-                        skipped += 1;
-                        continue;
-                    };
-                    let mut vector_rows = Vec::new();
-                    for decl in vectors {
-                        let Some(vector) = field_map
-                            .get(&decl.property)
-                            .and_then(|v| crate::vector_index::parse_vector_property(v, decl.dims))
-                        else {
-                            continue;
-                        };
-                        let Some(model_tag) = field_map
-                            .get(&decl.model_property)
-                            .and_then(|v| v.as_str())
-                            .filter(|tag| !tag.is_empty())
-                        else {
-                            continue;
-                        };
-                        vector_rows.push(temper_runtime::persistence::EntityVectorRow {
-                            decl_name: decl.name.clone(),
-                            model_tag: model_tag.to_string(),
-                            vector,
-                        });
-                    }
-                    if vector_rows.is_empty() {
-                        // No usable vector on this entity yet (unembedded) — not a
-                        // failure; it is simply absent from the ranking until embedded.
-                        skipped += 1;
-                        continue;
-                    }
+                EntityLoadOutcome::Fields {
+                    fields,
+                    sequence_nr,
+                } => {
+                    let vector_rows =
+                        crate::vector_index::rows_for_entity_state(&vectors, "Active", &fields);
+
                     match store
                         .backfill_entity_vectors(
                             tenant.as_str(),
-                            entity_type,
+                            &entity_type,
                             entity_id,
+                            reconciliation_generation,
+                            sequence_nr,
                             &vector_rows,
                         )
                         .await
                     {
-                        Ok(()) => newly_indexed += 1,
-                        Err(e) => {
+                        Ok(()) if vector_rows.is_empty() => empty += 1,
+                        Ok(()) => indexed += 1,
+                        Err(error) => {
                             failed += 1;
                             tracing::warn!(
-                                error = %e, entity_type = %entity_type, entity_id = %entity_id,
-                                "vector index backfill: upsert failed"
+                                error = %error,
+                                entity_type = %entity_type,
+                                entity_id = %entity_id,
+                                sequence_nr,
+                                "vector index backfill: reconciliation failed"
                             );
                         }
                     }
                 }
-                EntityLoadOutcome::Skip => {
-                    // A deleted (or phantom) entity must hold no vector rows — purge
-                    // any it still has so a soft-deleted entity is never ranked
-                    // (reconcile with an empty row set). Harmless when there is nothing
-                    // to purge.
-                    if let Err(e) = store
-                        .backfill_entity_vectors(tenant.as_str(), entity_type, entity_id, &[])
+                EntityLoadOutcome::Skip { sequence_nr } => {
+                    if let Err(error) = store
+                        .backfill_entity_vectors(
+                            tenant.as_str(),
+                            &entity_type,
+                            entity_id,
+                            reconciliation_generation,
+                            sequence_nr,
+                            &[],
+                        )
                         .await
                     {
                         failed += 1;
                         tracing::warn!(
-                            error = %e, entity_type = %entity_type, entity_id = %entity_id,
-                            "vector index backfill: purge of deleted/phantom entity failed"
+                            error = %error,
+                            entity_type = %entity_type,
+                            entity_id = %entity_id,
+                            sequence_nr,
+                            "vector index backfill: purge reconciliation failed"
                         );
                     } else {
-                        skipped += 1;
+                        empty += 1;
                     }
                 }
                 EntityLoadOutcome::LoadFailed => {
                     failed += 1;
                     tracing::warn!(
-                        entity_type = %entity_type, entity_id = %entity_id,
-                        "vector index backfill: existing entity could not be loaded; type will NOT be watermarked"
+                        entity_type = %entity_type,
+                        entity_id = %entity_id,
+                        "vector index backfill: durable stream could not be loaded; type will not be watermarked"
                     );
                 }
             }
             tokio::task::yield_now().await;
         }
 
-        // Watermark only if nothing failed — every existing entity was indexed or is
-        // definitively skippable. Otherwise a later run resumes from the remainder.
-        if failed == 0 {
-            if let Some((store, _)) = state.event_journal()
-                && let Err(e) = store
-                    .mark_vector_index_backfilled(tenant.as_str(), entity_type, &current_set)
-                    .await
-            {
-                tracing::error!(
-                    tenant = %tenant, entity_type = %entity_type, error = %e,
-                    "vector index backfill: failed to persist watermark"
-                );
-            }
-            tracing::info!(
-                tenant = %tenant, entity_type = %entity_type, vector_set = %current_set,
-                total, newly_indexed, already, skipped,
-                "entity_vector_index backfill complete; type watermarked"
-            );
-        } else {
+        if failed != 0 {
             tracing::warn!(
-                tenant = %tenant, entity_type = %entity_type,
-                total, newly_indexed, already, skipped, failed,
-                "vector index backfill: {failed} entities unresolved; type NOT watermarked (will resume next run)"
+                tenant = %tenant,
+                entity_type = %entity_type,
+                total,
+                indexed,
+                empty,
+                failed,
+                "vector index backfill incomplete; type not watermarked"
             );
+            continue;
         }
+
+        match store
+            .mark_vector_index_backfilled(
+                tenant.as_str(),
+                &entity_type,
+                reconciliation_generation,
+                &current_set,
+            )
+            .await
+        {
+            Ok(()) => tracing::info!(
+                tenant = %tenant,
+                entity_type = %entity_type,
+                vector_set = %current_set,
+                total,
+                indexed,
+                empty,
+                "entity_vector_index reconciliation complete; type watermarked"
+            ),
+            Err(error) => tracing::error!(
+                tenant = %tenant,
+                entity_type = %entity_type,
+                error = %error,
+                "vector index backfill converged but watermark persistence failed"
+            ),
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn previously_watermarked_empty_vector_type_remains_in_work_set() {
+        let current_vectors = BTreeMap::from([("Item".to_string(), Vec::new())]);
+        let covered = BTreeMap::from([
+            (
+                "Item".to_string(),
+                "v2|embed:vector:model:2:cosine".to_string(),
+            ),
+            ("Legacy".to_string(), "v1|embed".to_string()),
+        ]);
+
+        assert_eq!(
+            vector_backfill_work_types(&current_vectors, &covered, &BTreeSet::new()),
+            BTreeSet::from(["Item".to_string(), "Legacy".to_string()])
+        );
+    }
+
+    #[test]
+    fn interrupted_empty_reconciliation_remains_in_work_set_without_a_watermark() {
+        let current_vectors = BTreeMap::from([("Item".to_string(), Vec::new())]);
+        let covered = BTreeMap::new();
+        let reconciliation_types = BTreeSet::from(["Item".to_string()]);
+
+        assert_eq!(
+            vector_backfill_work_types(&current_vectors, &covered, &reconciliation_types),
+            BTreeSet::from(["Item".to_string()])
+        );
     }
 }

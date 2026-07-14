@@ -7,6 +7,7 @@
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
 use temper_runtime::ActorSystem;
+use temper_runtime::persistence::EventStore;
 use temper_runtime::tenant::TenantId;
 use temper_server::build_router;
 use temper_server::registry::SpecRegistry;
@@ -80,7 +81,7 @@ const CSDL_XML: &str = r#"<?xml version="1.0" encoding="utf-8"?>
 </edmx:Edmx>
 "#;
 
-fn build_state() -> ServerState {
+fn build_state_with_store(system_name: &str) -> (ServerState, SimEventStore) {
     let mut registry = SpecRegistry::new();
     let csdl = parse_csdl(CSDL_XML).expect("CSDL parse");
     registry.register_tenant(
@@ -89,10 +90,15 @@ fn build_state() -> ServerState {
         CSDL_XML.to_string(),
         &[("VecItem", VEC_ITEM_IOA)],
     );
-    let system = ActorSystem::new("nearest-odata");
+    let system = ActorSystem::new(system_name);
+    let store = SimEventStore::no_faults(7);
     let mut state = ServerState::from_registry(system, registry);
-    state.set_storage_stack(StorageStack::from_sim(SimEventStore::no_faults(7), None));
-    state
+    state.set_storage_stack(StorageStack::from_sim(store.clone(), None));
+    (state, store)
+}
+
+fn build_state() -> ServerState {
+    build_state_with_store("nearest-odata").0
 }
 
 async fn create_item(
@@ -300,6 +306,37 @@ async fn nearest_applies_equality_filter_before_top_k() {
         ids,
         vec!["red-1", "red-2"],
         "only red items, ranked; blue filtered out"
+    );
+}
+
+#[tokio::test]
+async fn vector_backfill_retries_when_watermark_persistence_fails() {
+    let (state, store) = build_state_with_store("vector-watermark-failure");
+    let tenant = TenantId::from("default");
+    create_item(&state, &tenant, "item-a", &[1.0, 0.0, 0.0, 0.0], "m1").await;
+
+    store.fail_next_vector_watermarks(tenant.as_str(), "VecItem", 1);
+    state.populate_vector_index_from_snapshots(&tenant).await;
+    assert!(
+        store
+            .vector_index_backfilled_types(tenant.as_str())
+            .await
+            .expect("read vector watermark after injected failure")
+            .is_empty(),
+        "a failed durable watermark write must never advertise completion"
+    );
+
+    state.populate_vector_index_from_snapshots(&tenant).await;
+    assert_eq!(
+        store
+            .vector_index_backfilled_types(tenant.as_str())
+            .await
+            .expect("read vector watermark after retry"),
+        vec![(
+            "VecItem".to_string(),
+            "v2|embed:Embedding:EmbeddingModel:4:cosine".to_string(),
+        )],
+        "the next run must repeat reconciliation and persist the convergence claim"
     );
 }
 

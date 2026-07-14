@@ -142,6 +142,10 @@ struct SimEventStoreInner {
     /// (e.g. proving the key-index backfill treats an unreadable entity as
     /// `LoadFailed` and does not watermark its type). See `fail_next_reads`.
     pending_read_failures: BTreeMap<String, usize>,
+    /// One-shot vector-watermark write failures keyed by `(tenant, entity_type)`.
+    /// This proves that reconciliation does not advertise completion when its
+    /// durable convergence claim cannot be persisted.
+    pending_vector_watermark_failures: BTreeMap<(String, String), usize>,
     /// One-shot append delays per `persistence_id`.
     ///
     /// Used by dispatch retry tests to deterministically model "the actor
@@ -165,10 +169,86 @@ struct SimEventStoreInner {
     /// exact-scan kNN access path. Unlike the key index this has no uniqueness
     /// constraint; it is derived, rebuildable ranking state.
     vector_index: BTreeMap<(String, String, String, String, String), Vec<f32>>,
-    /// ADR-0155 backfill watermark: `(tenant, entity_type) -> vector_set` — each
-    /// completed type mapped to the sorted comma-joined declared vector-path names the
-    /// backfill covered. Mirrors `key_index_watermark`.
+    /// ADR-0171 per-entity `(reconciliation_generation, sequence_nr)` fence.
+    /// Retained even when the entity has no vector rows, so older work cannot
+    /// overwrite or resurrect them.
+    vector_index_version: BTreeMap<(String, String, String), (u64, u64)>,
+    /// ADR-0171 durable declaration-set generation and signature per type.
+    vector_reconciliation_generation: BTreeMap<(String, String), (u64, String)>,
+    /// ADR-0155/0171 backfill watermark: `(tenant, entity_type) -> vector_set` — each
+    /// completed type mapped to the revisioned full-declaration signature the
+    /// reconciliation covered. Mirrors `key_index_watermark`.
     vector_index_watermark: BTreeMap<(String, String), String>,
+}
+
+impl SimEventStoreInner {
+    fn current_vector_generation(&self, tenant: &str, entity_type: &str) -> u64 {
+        self.vector_reconciliation_generation
+            .get(&(tenant.to_string(), entity_type.to_string()))
+            .map(|(generation, _)| *generation)
+            .unwrap_or(0)
+    }
+
+    fn validate_live_vector_fence(
+        &self,
+        tenant: &str,
+        entity_type: &str,
+        entity_id: &str,
+        new_sequence: u64,
+    ) -> Result<u64, PersistenceError> {
+        let generation = self.current_vector_generation(tenant, entity_type);
+        if self
+            .vector_index_version
+            .get(&(
+                tenant.to_string(),
+                entity_type.to_string(),
+                entity_id.to_string(),
+            ))
+            .is_some_and(|(fence_generation, fence_sequence)| {
+                *fence_generation > generation
+                    || (*fence_generation == generation && *fence_sequence > new_sequence)
+            })
+        {
+            return Err(PersistenceError::Storage(format!(
+                "vector-index fence for {tenant}:{entity_type}:{entity_id} is ahead of live journal sequence {new_sequence} in reconciliation generation {generation}"
+            )));
+        }
+        Ok(generation)
+    }
+
+    fn apply_live_vector_rows(
+        &mut self,
+        tenant: &str,
+        entity_type: &str,
+        entity_id: &str,
+        generation: u64,
+        new_sequence: u64,
+        vector_rows: &[EntityVectorRow],
+    ) {
+        self.vector_index_version.insert(
+            (
+                tenant.to_string(),
+                entity_type.to_string(),
+                entity_id.to_string(),
+            ),
+            (generation, new_sequence),
+        );
+        self.vector_index.retain(|(t, et, _, _, eid), _| {
+            !(t == tenant && et == entity_type && eid == entity_id)
+        });
+        for row in vector_rows {
+            self.vector_index.insert(
+                (
+                    tenant.to_string(),
+                    entity_type.to_string(),
+                    row.decl_name.clone(),
+                    row.model_tag.clone(),
+                    entity_id.to_string(),
+                ),
+                row.vector.clone(),
+            );
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -194,10 +274,13 @@ impl SimEventStore {
                 faults,
                 pending_concurrency_violations: BTreeMap::new(),
                 pending_read_failures: BTreeMap::new(),
+                pending_vector_watermark_failures: BTreeMap::new(),
                 pending_append_delays: BTreeMap::new(),
                 key_index: BTreeMap::new(),
                 key_index_watermark: BTreeMap::new(),
                 vector_index: BTreeMap::new(),
+                vector_index_version: BTreeMap::new(),
+                vector_reconciliation_generation: BTreeMap::new(),
                 vector_index_watermark: BTreeMap::new(),
             })),
         }
@@ -236,6 +319,18 @@ impl SimEventStore {
             inner
                 .pending_read_failures
                 .insert(persistence_id.to_string(), count);
+        }
+    }
+
+    /// Make the next `count` vector-watermark writes fail for a type, then behave
+    /// normally. `count == 0` clears the deterministic injection.
+    pub fn fail_next_vector_watermarks(&self, tenant: &str, entity_type: &str, count: usize) {
+        let mut inner = self.inner.lock().expect("SimEventStore lock poisoned"); // ci-ok: infallible lock
+        let key = (tenant.to_string(), entity_type.to_string());
+        if count == 0 {
+            inner.pending_vector_watermark_failures.remove(&key);
+        } else {
+            inner.pending_vector_watermark_failures.insert(key, count);
         }
     }
 
@@ -450,6 +545,18 @@ impl EventStore for SimEventStore {
             });
         }
 
+        // Match the durable stores' live-write invariant: a repair is never
+        // allowed to claim a journal sequence that the stream has not reached.
+        // Validate before mutating the journal so a violated fence is atomic.
+        let live_vector_generation = if reconcile_vectors {
+            let (tenant, entity_type, entity_id) =
+                parse_persistence_id_parts(persistence_id).map_err(PersistenceError::Storage)?;
+            let new_sequence = expected_sequence + events.len() as u64;
+            Some(inner.validate_live_vector_fence(tenant, entity_type, entity_id, new_sequence)?)
+        } else {
+            None
+        };
+
         // ADR-0153: validate declared-key uniqueness BEFORE writing the journal, so
         // a reject is atomic — the journal must not advance on a rejected co-commit.
         // A *different* entity already holding the key is the violation.
@@ -560,26 +667,17 @@ impl EventStore for SimEventStore {
         // the current ones — so a delete transition or a cleared vector/model
         // property (empty `vector_rows`) purges the stale rows instead of leaving
         // them to rank forever. No uniqueness constraint — vectors are derived state.
-        if reconcile_vectors {
-            let mut parts = persistence_id.splitn(3, ':');
-            let tenant = parts.next().unwrap_or("");
-            let entity_type = parts.next().unwrap_or("");
-            let entity_id = parts.next().unwrap_or("");
-            inner.vector_index.retain(|(t, et, _, _, eid), _| {
-                !(t.as_str() == tenant && et.as_str() == entity_type && eid.as_str() == entity_id)
-            });
-            for row in vector_rows {
-                inner.vector_index.insert(
-                    (
-                        tenant.to_string(),
-                        entity_type.to_string(),
-                        row.decl_name.clone(),
-                        row.model_tag.clone(),
-                        entity_id.to_string(),
-                    ),
-                    row.vector.clone(),
-                );
-            }
+        if let Some(generation) = live_vector_generation {
+            let (tenant, entity_type, entity_id) =
+                parse_persistence_id_parts(persistence_id).map_err(PersistenceError::Storage)?;
+            inner.apply_live_vector_rows(
+                tenant,
+                entity_type,
+                entity_id,
+                generation,
+                new_seq,
+                vector_rows,
+            );
         }
 
         Ok(new_seq)
@@ -679,14 +777,76 @@ impl EventStore for SimEventStore {
         Ok(ids.into_iter().collect())
     }
 
+    async fn begin_vector_index_reconciliation(
+        &self,
+        tenant: &str,
+        entity_type: &str,
+        vector_set: &str,
+    ) -> Result<u64, PersistenceError> {
+        let mut inner = self.inner.lock().expect("SimEventStore lock poisoned"); // ci-ok: infallible lock
+        let key = (tenant.to_string(), entity_type.to_string());
+        let previous = inner
+            .vector_reconciliation_generation
+            .get(&key)
+            .map(|(generation, _)| *generation)
+            .unwrap_or(0);
+        let generation = previous.checked_add(1).ok_or_else(|| {
+            PersistenceError::Storage(format!(
+                "vector reconciliation generation exhausted for {tenant}:{entity_type}"
+            ))
+        })?;
+        inner
+            .vector_reconciliation_generation
+            .insert(key.clone(), (generation, vector_set.to_string()));
+        // A new generation makes the previous completion signature non-authoritative.
+        // Remove it under the same lock as the generation advance so another
+        // coordinator cannot observe the old signature and incorrectly skip.
+        inner.vector_index_watermark.remove(&key);
+        Ok(generation)
+    }
+
     async fn backfill_entity_vectors(
         &self,
         tenant: &str,
         entity_type: &str,
         entity_id: &str,
+        reconciliation_generation: u64,
+        observed_sequence: u64,
         vector_rows: &[EntityVectorRow],
     ) -> Result<(), PersistenceError> {
+        if reconciliation_generation == 0 {
+            return Err(PersistenceError::Storage(
+                "vector reconciliation generation zero is reserved for pre-reconciliation live writes"
+                    .to_string(),
+            ));
+        }
         let mut inner = self.inner.lock().expect("SimEventStore lock poisoned"); // ci-ok: infallible lock
+        let current_generation = inner.current_vector_generation(tenant, entity_type);
+        if current_generation != reconciliation_generation {
+            return Err(PersistenceError::Storage(format!(
+                "stale vector reconciliation generation {reconciliation_generation} for {tenant}:{entity_type}; current generation is {current_generation}"
+            )));
+        }
+        let version_key = (
+            tenant.to_string(),
+            entity_type.to_string(),
+            entity_id.to_string(),
+        );
+        if let Some((fence_generation, fence_sequence)) =
+            inner.vector_index_version.get(&version_key).copied()
+        {
+            if fence_generation > reconciliation_generation {
+                return Err(PersistenceError::Storage(format!(
+                    "vector-index fence generation {fence_generation} is ahead of current type generation {reconciliation_generation} for {tenant}:{entity_type}:{entity_id}"
+                )));
+            }
+            if fence_generation == reconciliation_generation && fence_sequence > observed_sequence {
+                return Ok(());
+            }
+        }
+        inner
+            .vector_index_version
+            .insert(version_key, (reconciliation_generation, observed_sequence));
         // Reconcile: drop ALL of the entity's rows, then insert the current ones.
         // Empty `vector_rows` purges the entity (deleted / un-embedded). Idempotent.
         inner.vector_index.retain(|(t, et, _, _, eid), _| {
@@ -742,13 +902,46 @@ impl EventStore for SimEventStore {
         &self,
         tenant: &str,
         entity_type: &str,
+        reconciliation_generation: u64,
         vector_set: &str,
     ) -> Result<(), PersistenceError> {
+        if reconciliation_generation == 0 {
+            return Err(PersistenceError::Storage(
+                "vector reconciliation generation zero cannot publish a watermark".to_string(),
+            ));
+        }
         let mut inner = self.inner.lock().expect("SimEventStore lock poisoned"); // ci-ok: infallible lock
-        inner.vector_index_watermark.insert(
-            (tenant.to_string(), entity_type.to_string()),
-            vector_set.to_string(),
-        );
+        let key = (tenant.to_string(), entity_type.to_string());
+        let current = inner.vector_reconciliation_generation.get(&key);
+        if current.map(|(generation, signature)| {
+            *generation == reconciliation_generation && signature == vector_set
+        }) != Some(true)
+        {
+            let current_generation = current.map(|(generation, _)| *generation).unwrap_or(0);
+            return Err(PersistenceError::Storage(format!(
+                "stale vector reconciliation generation {reconciliation_generation} for {tenant}:{entity_type}; current generation is {current_generation}"
+            )));
+        }
+        let pending = inner
+            .pending_vector_watermark_failures
+            .get(&key)
+            .copied()
+            .unwrap_or(0);
+        if pending > 0 {
+            if pending == 1 {
+                inner.pending_vector_watermark_failures.remove(&key);
+            } else {
+                inner
+                    .pending_vector_watermark_failures
+                    .insert(key, pending - 1);
+            }
+            return Err(PersistenceError::Storage(
+                "SimEventStore: injected vector watermark failure".to_string(),
+            ));
+        }
+        inner
+            .vector_index_watermark
+            .insert(key, vector_set.to_string());
         Ok(())
     }
 
@@ -763,6 +956,30 @@ impl EventStore for SimEventStore {
             .filter(|((t, _), _)| t.as_str() == tenant)
             .map(|((_, et), vector_set)| (et.clone(), vector_set.clone()))
             .collect())
+    }
+
+    async fn vector_reconciliation_entity_types(
+        &self,
+        tenant: &str,
+    ) -> Result<Vec<String>, PersistenceError> {
+        let inner = self.inner.lock().expect("SimEventStore lock poisoned"); // ci-ok: infallible lock
+        let mut types = BTreeSet::new();
+        for (stored_tenant, entity_type) in inner.vector_reconciliation_generation.keys() {
+            if stored_tenant == tenant {
+                types.insert(entity_type.clone());
+            }
+        }
+        for (stored_tenant, entity_type, _) in inner.vector_index_version.keys() {
+            if stored_tenant == tenant {
+                types.insert(entity_type.clone());
+            }
+        }
+        for (stored_tenant, entity_type, _, _, _) in inner.vector_index.keys() {
+            if stored_tenant == tenant {
+                types.insert(entity_type.clone());
+            }
+        }
+        Ok(types.into_iter().collect())
     }
 
     async fn vectored_entity_ids_for_type(
@@ -855,18 +1072,60 @@ impl EventStore for SimEventStore {
             }
         }
 
-        let mut results = Vec::with_capacity(appends.len());
+        // Validate every vector fence before mutating any journal. The later row
+        // replacement is infallible under this same lock, so journal/fence/candidates
+        // remain one atomic simulation step.
+        let mut vector_contexts = Vec::with_capacity(appends.len());
         for append in appends {
-            let journal = inner
-                .journals
-                .entry(append.persistence_id.clone())
-                .or_default();
+            if append.reconcile_vectors {
+                let (tenant, entity_type, entity_id) =
+                    parse_persistence_id_parts(&append.persistence_id)
+                        .map_err(PersistenceError::Storage)?;
+                let new_sequence = append.expected_sequence + append.events.len() as u64;
+                let generation = inner.validate_live_vector_fence(
+                    tenant,
+                    entity_type,
+                    entity_id,
+                    new_sequence,
+                )?;
+                vector_contexts.push(Some((
+                    tenant.to_string(),
+                    entity_type.to_string(),
+                    entity_id.to_string(),
+                    generation,
+                    new_sequence,
+                )));
+            } else {
+                vector_contexts.push(None);
+            }
+        }
+
+        let mut results = Vec::with_capacity(appends.len());
+        for (append, vector_context) in appends.iter().zip(vector_contexts) {
             let mut new_seq = append.expected_sequence;
-            for event in &append.events {
-                new_seq += 1;
-                let mut stored = event.clone();
-                stored.sequence_nr = new_seq;
-                journal.push(stored);
+            {
+                let journal = inner
+                    .journals
+                    .entry(append.persistence_id.clone())
+                    .or_default();
+                for event in &append.events {
+                    new_seq += 1;
+                    let mut stored = event.clone();
+                    stored.sequence_nr = new_seq;
+                    journal.push(stored);
+                }
+            }
+            if let Some((tenant, entity_type, entity_id, generation, new_sequence)) = vector_context
+            {
+                debug_assert_eq!(new_sequence, new_seq);
+                inner.apply_live_vector_rows(
+                    &tenant,
+                    &entity_type,
+                    &entity_id,
+                    generation,
+                    new_sequence,
+                    &append.vector_rows,
+                );
             }
             results.push(PersistenceAppendResult {
                 persistence_id: append.persistence_id.clone(),

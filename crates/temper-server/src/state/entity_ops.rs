@@ -481,9 +481,10 @@ impl ServerState {
         projection_backfill::populate_key_index_from_snapshots(self, tenant).await;
     }
 
-    /// ADR-0155: backfill `entity_vector_index` for pre-existing entities of every
-    /// vector-declaring type and record the watermark. Idempotent; entities written
-    /// after boot maintain their vectors inline (co-commit) or write-behind.
+    /// ADR-0155/ADR-0171: reconcile `entity_vector_index` for pre-existing entities
+    /// of every current or previously covered vector-declaring type and record the
+    /// watermark. Idempotent; entities written after boot co-commit their journal,
+    /// retained vector sequence fence, and candidate rows.
     #[instrument(skip_all, fields(otel.name = "entity.populate_vector_index", tenant = %tenant))]
     pub async fn populate_vector_index_from_snapshots(&self, tenant: &TenantId) {
         projection_backfill::populate_vector_index_from_snapshots(self, tenant).await;

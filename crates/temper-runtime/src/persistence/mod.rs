@@ -101,7 +101,7 @@ pub struct EntityKeyRow {
 /// `entity_vector_index` write one row per `(decl_name, model_tag, entity_id)`; the
 /// blob is packed little-endian f32. Unlike a key row this has no uniqueness
 /// constraint — it is derived, rebuildable ranking state.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct EntityVectorRow {
     /// The declared vector path's identifier (the `[[vector]]` block's `name`).
     pub decl_name: String,
@@ -192,8 +192,7 @@ pub trait EventStore: Send + Sync + 'static {
     /// journal append. This is the single co-commit entry point the entity actor
     /// calls. The default ignores the index kinds and delegates to
     /// [`EventStore::append`] — stores with a query plane that co-commit (postgres,
-    /// sim) override it; Turso also overrides it to maintain the vector index
-    /// write-behind (event first, index follows). When `reconcile_vectors` is true
+    /// sim, Turso) override it. When `reconcile_vectors` is true
     /// (the entity's type declares ≥1 `[[vector]]` path) the store first DELETES all
     /// of the entity's vector rows, then inserts `vector_rows` — so a delete
     /// transition or a cleared vector/model property purges the stale rows instead of
@@ -212,22 +211,56 @@ pub trait EventStore: Send + Sync + 'static {
         self.append(persistence_id, expected_sequence, events)
     }
 
+    /// Begin a declaration-set reconciliation and return its durable generation
+    /// token (ADR-0171). Every entity replacement and the final watermark write must
+    /// carry this token. Advancing the generation invalidates delayed work from an
+    /// older declaration set. Non-indexing backends reject the operation explicitly
+    /// so callers cannot advertise a false durable completion.
+    fn begin_vector_index_reconciliation(
+        &self,
+        tenant: &str,
+        entity_type: &str,
+        vector_set: &str,
+    ) -> impl std::future::Future<Output = Result<u64, PersistenceError>> + Send {
+        let _ = (tenant, entity_type, vector_set);
+        async {
+            Err(PersistenceError::Storage(
+                "vector-index reconciliation is unsupported by this event store".to_string(),
+            ))
+        }
+    }
+
     /// Reconcile the derived vector-index rows for an **existing** entity to exactly
-    /// `vector_rows` (ADR-0155), without appending a journal event: DELETE every
-    /// existing row for `(tenant, entity_type, entity_id)`, then INSERT `vector_rows`.
-    /// Idempotent, and an empty `vector_rows` PURGES the entity (used to clean up a
-    /// deleted or un-embedded entity). Used by the backfill and by the Turso
-    /// write-behind path. The default is a no-op (non-indexing backends); query-plane
-    /// stores implement it.
+    /// `vector_rows` (ADR-0171), without appending a journal event.
+    /// `reconciliation_generation` identifies the declaration set and
+    /// `observed_sequence` is the journal position from which the rows were rebuilt.
+    /// Stores reject a generation that is no longer current, and within the current
+    /// generation atomically replace rows only when the sequence is at least the
+    /// entity's retained vector-index version. A lower sequence is a successful
+    /// no-op. The version survives an empty row set, so stale work cannot resurrect a
+    /// deleted/unembedded entity. Equal-sequence replay is idempotent.
     fn backfill_entity_vectors(
         &self,
         tenant: &str,
         entity_type: &str,
         entity_id: &str,
+        reconciliation_generation: u64,
+        observed_sequence: u64,
         vector_rows: &[EntityVectorRow],
     ) -> impl std::future::Future<Output = Result<(), PersistenceError>> + Send {
-        let _ = (tenant, entity_type, entity_id, vector_rows);
-        async { Ok(()) }
+        let _ = (
+            tenant,
+            entity_type,
+            entity_id,
+            reconciliation_generation,
+            observed_sequence,
+            vector_rows,
+        );
+        async {
+            Err(PersistenceError::Storage(
+                "vector-index reconciliation is unsupported by this event store".to_string(),
+            ))
+        }
     }
 
     /// The candidate `(entity_id, vector)` rows for one vector-index partition
@@ -252,17 +285,24 @@ pub trait EventStore: Send + Sync + 'static {
     /// Record that `entity_vector_index` is **complete** for `(tenant, entity_type)`
     /// — every existing entity has had its declared vectors indexed by the backfill
     /// (ADR-0155 watermark, mirroring `mark_key_index_backfilled`). `vector_set` is
-    /// the sorted, comma-joined declared vector-path NAMES the backfill covered, so a
-    /// later declaration of an ADDITIONAL path is detected as a set change and the
-    /// type is re-indexed. Idempotent. Default no-op.
+    /// the revisioned signature of every covered vector declaration (name, property,
+    /// model property, dimensions, and metric), so any declaration change re-indexes
+    /// the type. The durable `reconciliation_generation` must still be current;
+    /// otherwise the stale completion claim is rejected. Idempotent within one
+    /// generation. Non-indexing backends reject the operation explicitly.
     fn mark_vector_index_backfilled(
         &self,
         tenant: &str,
         entity_type: &str,
+        reconciliation_generation: u64,
         vector_set: &str,
     ) -> impl std::future::Future<Output = Result<(), PersistenceError>> + Send {
-        let _ = (tenant, entity_type, vector_set);
-        async { Ok(()) }
+        let _ = (tenant, entity_type, reconciliation_generation, vector_set);
+        async {
+            Err(PersistenceError::Storage(
+                "vector-index reconciliation is unsupported by this event store".to_string(),
+            ))
+        }
     }
 
     /// The `(entity_type, vector_set)` watermarks for `tenant` — each type whose
@@ -273,6 +313,20 @@ pub trait EventStore: Send + Sync + 'static {
         tenant: &str,
     ) -> impl std::future::Future<Output = Result<Vec<(String, String)>, PersistenceError>> + Send
     {
+        let _ = tenant;
+        async { Ok(Vec::new()) }
+    }
+
+    /// Entity types with durable vector-reconciliation state for `tenant`
+    /// (ADR-0171): a generation row, retained per-entity fence, or candidate row.
+    /// Unlike completion watermarks, this state survives an interrupted
+    /// reconciliation and includes generation-zero live/legacy rows. The coordinator
+    /// uses it as a work source so remove-all declarations cannot strand candidates.
+    /// Default empty for non-indexing backends.
+    fn vector_reconciliation_entity_types(
+        &self,
+        tenant: &str,
+    ) -> impl std::future::Future<Output = Result<Vec<String>, PersistenceError>> + Send {
         let _ = tenant;
         async { Ok(Vec::new()) }
     }
@@ -288,6 +342,20 @@ pub trait EventStore: Send + Sync + 'static {
     ) -> impl std::future::Future<Output = Result<Vec<String>, PersistenceError>> + Send {
         let _ = (tenant, entity_type);
         async { Ok(Vec::new()) }
+    }
+
+    /// List every durable journal stream that a vector-index repair must reconcile
+    /// for `(tenant, entity_type)`, including deleted streams (ADR-0171). Active
+    /// entity listing deliberately excludes deletions on some backends, but repair
+    /// must retain a sequence tombstone for them so stale rows cannot survive or be
+    /// resurrected. Backends whose normal listing already includes the complete
+    /// journal set may use this default.
+    fn list_vector_repair_entity_ids(
+        &self,
+        tenant: &str,
+        entity_type: &str,
+    ) -> impl std::future::Future<Output = Result<Vec<String>, PersistenceError>> + Send {
+        self.list_entity_ids_by_type(tenant, entity_type)
     }
 
     /// Backfill declared key-index rows for an **existing** entity (ADR-0153),
@@ -481,6 +549,13 @@ pub struct PersistenceAppend {
     pub expected_sequence: u64,
     /// Events to append to this journal.
     pub events: Vec<PersistenceEnvelope>,
+    /// Complete post-transition vector rows to co-commit for this stream.
+    #[serde(default)]
+    pub vector_rows: Vec<EntityVectorRow>,
+    /// Whether this stream's type declares vectors. When true, an empty
+    /// `vector_rows` purges candidates while retaining the live-write fence.
+    #[serde(default)]
+    pub reconcile_vectors: bool,
 }
 
 /// New sequence number for one stream after an atomic batch append.

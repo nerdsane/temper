@@ -67,16 +67,20 @@ async fn append_and_read_events_roundtrip() {
 }
 
 #[tokio::test]
-async fn vector_index_write_behind_candidates_and_partitioning() {
-    // ADR-0155: Turso maintains entity_vector_index write-behind (event first, index
-    // follows). A candidate scan returns the partition's vectors in entity_id order,
-    // partitioned by model tag; a raw kNN read never sees another model's vectors.
+async fn vector_index_co_commit_candidates_and_partitioning() {
+    // ADR-0171: Turso co-commits entity_vector_index with the event journal. A
+    // candidate scan returns vectors in entity_id order, partitioned by model tag;
+    // a raw kNN read never sees another model's vectors.
     let store = make_store("vector-index").await;
     let row = |decl: &str, model: &str, v: Vec<f32>| EntityVectorRow {
         decl_name: decl.to_string(),
         model_tag: model.to_string(),
         vector: v,
     };
+    let generation = store
+        .begin_vector_index_reconciliation("t", "Item", "embed")
+        .await
+        .unwrap();
 
     store
         .append_with_index_rows(
@@ -126,7 +130,14 @@ async fn vector_index_write_behind_candidates_and_partitioning() {
 
     // Upsert: re-writing item-a's vector replaces (no duplicate row).
     store
-        .backfill_entity_vectors("t", "Item", "item-a", &[row("embed", "m1", vec![0.5, 0.5])])
+        .backfill_entity_vectors(
+            "t",
+            "Item",
+            "item-a",
+            generation,
+            1,
+            &[row("embed", "m1", vec![0.5, 0.5])],
+        )
         .await
         .unwrap();
     let candidates = store
@@ -138,7 +149,7 @@ async fn vector_index_write_behind_candidates_and_partitioning() {
 
     // Watermark roundtrip + resumable id listing.
     store
-        .mark_vector_index_backfilled("t", "Item", "embed")
+        .mark_vector_index_backfilled("t", "Item", generation, "embed")
         .await
         .unwrap();
     assert_eq!(
@@ -163,8 +174,12 @@ async fn vector_index_reconcile_purges_on_delete_and_empty_rows() {
         model_tag: "m1".to_string(),
         vector: v,
     };
+    let generation = store
+        .begin_vector_index_reconciliation("t", "Item", "embed")
+        .await
+        .unwrap();
 
-    // Write-behind reconcile with a row, then a delete transition (empty rows).
+    // Co-commit a row, then a delete transition (empty rows).
     store
         .append_with_index_rows(
             "t:Item:item-a",
@@ -207,7 +222,7 @@ async fn vector_index_reconcile_purges_on_delete_and_empty_rows() {
 
     // The explicit backfill purge (empty rows) is idempotent.
     store
-        .backfill_entity_vectors("t", "Item", "item-a", &[])
+        .backfill_entity_vectors("t", "Item", "item-a", generation, 2, &[])
         .await
         .unwrap();
     assert!(
@@ -253,6 +268,456 @@ async fn vector_index_failure_never_commits_journal_without_index() {
         result.is_err() && journal.is_empty(),
         "a rejected vector write must roll back its journal append; result={result:?}, journal_len={}",
         journal.len()
+    );
+}
+
+#[tokio::test]
+async fn pre_reconciliation_live_vector_type_remains_discoverable() {
+    let store = make_store("vector-pre-generation-discovery").await;
+    store
+        .append_with_index_rows(
+            "t:Item:item-before-generation",
+            0,
+            &[test_envelope("Created", serde_json::json!({}))],
+            &[],
+            &[EntityVectorRow {
+                decl_name: "embed".to_string(),
+                model_tag: "m1".to_string(),
+                vector: vec![1.0, 0.0],
+            }],
+            true,
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(
+        store.vector_reconciliation_entity_types("t").await.unwrap(),
+        vec!["Item".to_string()],
+        "generation-zero fences must keep remove-all reconciliation discoverable"
+    );
+}
+
+#[tokio::test]
+async fn composite_vector_index_failure_rolls_back_every_journal() {
+    let store = make_store("vector-composite-atomicity").await;
+    let conn = store.configured_connection().await.unwrap();
+    conn.execute(
+        "CREATE TRIGGER reject_composite_vector_insert \
+         BEFORE INSERT ON entity_vector_index \
+         BEGIN SELECT RAISE(ABORT, 'forced composite vector-index write failure'); END",
+        (),
+    )
+    .await
+    .unwrap();
+
+    let item_persistence_id = "t:Item:item-composite-atomic";
+    let audit_persistence_id = "t:Audit:audit-composite-atomic";
+    let result = store
+        .append_batch(&[
+            PersistenceAppend {
+                persistence_id: item_persistence_id.to_string(),
+                expected_sequence: 0,
+                events: vec![test_envelope("Created", serde_json::json!({}))],
+                vector_rows: vec![EntityVectorRow {
+                    decl_name: "embed".to_string(),
+                    model_tag: "m1".to_string(),
+                    vector: vec![1.0, 0.0],
+                }],
+                reconcile_vectors: true,
+            },
+            PersistenceAppend {
+                persistence_id: audit_persistence_id.to_string(),
+                expected_sequence: 0,
+                events: vec![test_envelope("Recorded", serde_json::json!({}))],
+                vector_rows: Vec::new(),
+                reconcile_vectors: false,
+            },
+        ])
+        .await;
+
+    assert!(result.is_err(), "the vector failure must reject the batch");
+    assert!(
+        store
+            .read_events(item_persistence_id, 0)
+            .await
+            .unwrap()
+            .is_empty(),
+        "the vector-owning journal must roll back"
+    );
+    assert!(
+        store
+            .read_events(audit_persistence_id, 0)
+            .await
+            .unwrap()
+            .is_empty(),
+        "every other journal in the composite batch must roll back"
+    );
+}
+
+#[tokio::test]
+async fn stale_vector_backfill_cannot_overwrite_or_resurrect_turso_write() {
+    let store = make_store("vector-monotonic").await;
+    let row = |v: Vec<f32>| EntityVectorRow {
+        decl_name: "embed".to_string(),
+        model_tag: "m1".to_string(),
+        vector: v,
+    };
+    let persistence_id = "t:Item:item-race";
+    let generation = store
+        .begin_vector_index_reconciliation("t", "Item", "embed")
+        .await
+        .unwrap();
+
+    store
+        .append_with_index_rows(
+            persistence_id,
+            0,
+            &[test_envelope("Created", serde_json::json!({}))],
+            &[],
+            &[row(vec![1.0, 0.0])],
+            true,
+        )
+        .await
+        .unwrap();
+    store
+        .append_with_index_rows(
+            persistence_id,
+            1,
+            &[test_envelope("Updated", serde_json::json!({}))],
+            &[],
+            &[row(vec![0.0, 1.0])],
+            true,
+        )
+        .await
+        .unwrap();
+    store
+        .backfill_entity_vectors(
+            "t",
+            "Item",
+            "item-race",
+            generation,
+            1,
+            &[row(vec![1.0, 0.0])],
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        store
+            .vector_candidates("t", "Item", "embed", "m1", 10)
+            .await
+            .unwrap()[0]
+            .vector,
+        vec![0.0, 1.0],
+        "the sequence-1 rebuild must not replace the sequence-2 live row"
+    );
+
+    store
+        .append_with_index_rows(
+            persistence_id,
+            2,
+            &[test_envelope("Deleted", serde_json::json!({}))],
+            &[],
+            &[],
+            true,
+        )
+        .await
+        .unwrap();
+    store
+        .backfill_entity_vectors(
+            "t",
+            "Item",
+            "item-race",
+            generation,
+            2,
+            &[row(vec![0.0, 1.0])],
+        )
+        .await
+        .unwrap();
+    assert!(
+        store
+            .vector_candidates("t", "Item", "embed", "m1", 10)
+            .await
+            .unwrap()
+            .is_empty(),
+        "the retained sequence-3 fence must prevent stale resurrection"
+    );
+
+    store
+        .backfill_entity_vectors("t", "Item", "item-race", generation, 3, &[])
+        .await
+        .unwrap();
+    store
+        .backfill_entity_vectors("t", "Item", "item-race", generation, 3, &[])
+        .await
+        .unwrap();
+    assert!(
+        !store
+            .list_entity_ids_by_type("t", "Item")
+            .await
+            .unwrap()
+            .iter()
+            .any(|entity_id| entity_id == "item-race"),
+        "active listing excludes the deleted stream"
+    );
+    assert!(
+        store
+            .list_vector_repair_entity_ids("t", "Item")
+            .await
+            .unwrap()
+            .iter()
+            .any(|entity_id| entity_id == "item-race"),
+        "repair enumeration must retain deleted journal streams"
+    );
+}
+
+#[tokio::test]
+async fn composite_batch_co_commits_vector_fence_before_delayed_repair() {
+    let store = make_store("vector-composite-batch").await;
+    let generation = store
+        .begin_vector_index_reconciliation("t", "Item", "embed")
+        .await
+        .unwrap();
+    let stale_row = EntityVectorRow {
+        decl_name: "embed".to_string(),
+        model_tag: "m1".to_string(),
+        vector: vec![1.0, 0.0],
+    };
+    let live_row = EntityVectorRow {
+        decl_name: "embed".to_string(),
+        model_tag: "m1".to_string(),
+        vector: vec![0.0, 1.0],
+    };
+    store
+        .append_with_index_rows(
+            "t:Item:item-batch",
+            0,
+            &[test_envelope("Created", serde_json::json!({}))],
+            &[],
+            std::slice::from_ref(&stale_row),
+            true,
+        )
+        .await
+        .unwrap();
+
+    store
+        .append_batch(&[
+            PersistenceAppend {
+                persistence_id: "t:Item:item-batch".to_string(),
+                expected_sequence: 1,
+                events: vec![test_envelope("CompositeUpdated", serde_json::json!({}))],
+                vector_rows: vec![live_row.clone()],
+                reconcile_vectors: true,
+            },
+            PersistenceAppend {
+                persistence_id: "t:Audit:audit-batch".to_string(),
+                expected_sequence: 0,
+                events: vec![test_envelope("Recorded", serde_json::json!({}))],
+                vector_rows: Vec::new(),
+                reconcile_vectors: false,
+            },
+        ])
+        .await
+        .unwrap();
+    store
+        .backfill_entity_vectors("t", "Item", "item-batch", generation, 1, &[stale_row])
+        .await
+        .unwrap();
+
+    assert_eq!(
+        store
+            .vector_candidates("t", "Item", "embed", "m1", 10)
+            .await
+            .unwrap()[0]
+            .vector,
+        live_row.vector
+    );
+    assert_eq!(
+        store
+            .read_events("t:Audit:audit-batch", 0)
+            .await
+            .unwrap()
+            .len(),
+        1
+    );
+}
+
+#[tokio::test]
+async fn newer_reconciliation_generation_rejects_older_rows_and_watermark() {
+    let store = make_store("vector-generation-order").await;
+    let old_generation = store
+        .begin_vector_index_reconciliation("t", "Item", "old")
+        .await
+        .unwrap();
+    store
+        .append_with_index_rows(
+            "t:Item:item-generation",
+            0,
+            &[test_envelope("Created", serde_json::json!({}))],
+            &[],
+            &[EntityVectorRow {
+                decl_name: "old".to_string(),
+                model_tag: "m1".to_string(),
+                vector: vec![1.0, 0.0],
+            }],
+            true,
+        )
+        .await
+        .unwrap();
+
+    let new_generation = store
+        .begin_vector_index_reconciliation("t", "Item", "new")
+        .await
+        .unwrap();
+    store
+        .backfill_entity_vectors(
+            "t",
+            "Item",
+            "item-generation",
+            new_generation,
+            1,
+            &[EntityVectorRow {
+                decl_name: "new".to_string(),
+                model_tag: "m2".to_string(),
+                vector: vec![0.0, 1.0],
+            }],
+        )
+        .await
+        .unwrap();
+    store
+        .mark_vector_index_backfilled("t", "Item", new_generation, "new")
+        .await
+        .unwrap();
+
+    assert!(
+        store
+            .backfill_entity_vectors(
+                "t",
+                "Item",
+                "item-generation",
+                old_generation,
+                1,
+                &[EntityVectorRow {
+                    decl_name: "old".to_string(),
+                    model_tag: "m1".to_string(),
+                    vector: vec![1.0, 0.0],
+                }],
+            )
+            .await
+            .is_err()
+    );
+    assert!(
+        store
+            .mark_vector_index_backfilled("t", "Item", old_generation, "old")
+            .await
+            .is_err()
+    );
+    assert_eq!(
+        store.vector_index_backfilled_types("t").await.unwrap(),
+        vec![("Item".to_string(), "new".to_string())]
+    );
+    assert!(
+        store
+            .vector_candidates("t", "Item", "old", "m1", 10)
+            .await
+            .unwrap()
+            .is_empty()
+    );
+}
+
+#[tokio::test]
+async fn beginning_reconciliation_withdraws_the_previous_completion_claim() {
+    let store = make_store("vector-generation-watermark-invalidation").await;
+    let row_a = EntityVectorRow {
+        decl_name: "embed-a".to_string(),
+        model_tag: "m1".to_string(),
+        vector: vec![1.0, 0.0],
+    };
+    let row_b = EntityVectorRow {
+        decl_name: "embed-b".to_string(),
+        model_tag: "m2".to_string(),
+        vector: vec![0.0, 1.0],
+    };
+    let first_a = store
+        .begin_vector_index_reconciliation("t", "Item", "v2|a")
+        .await
+        .unwrap();
+    store
+        .append_with_index_rows(
+            "t:Item:item-signature-race",
+            0,
+            &[test_envelope("Created", serde_json::json!({}))],
+            &[],
+            std::slice::from_ref(&row_a),
+            true,
+        )
+        .await
+        .unwrap();
+    store
+        .mark_vector_index_backfilled("t", "Item", first_a, "v2|a")
+        .await
+        .unwrap();
+
+    let generation_b = store
+        .begin_vector_index_reconciliation("t", "Item", "v2|b")
+        .await
+        .unwrap();
+    assert!(
+        store
+            .vector_index_backfilled_types("t")
+            .await
+            .unwrap()
+            .is_empty(),
+        "beginning B must atomically withdraw A's completion watermark"
+    );
+    assert_eq!(
+        store.vector_reconciliation_entity_types("t").await.unwrap(),
+        vec!["Item".to_string()],
+        "the in-progress type must remain discoverable without its watermark"
+    );
+
+    let second_a = store
+        .begin_vector_index_reconciliation("t", "Item", "v2|a")
+        .await
+        .unwrap();
+    assert!(second_a > generation_b);
+    store
+        .backfill_entity_vectors(
+            "t",
+            "Item",
+            "item-signature-race",
+            second_a,
+            1,
+            std::slice::from_ref(&row_a),
+        )
+        .await
+        .unwrap();
+    store
+        .mark_vector_index_backfilled("t", "Item", second_a, "v2|a")
+        .await
+        .unwrap();
+
+    assert!(
+        store
+            .backfill_entity_vectors(
+                "t",
+                "Item",
+                "item-signature-race",
+                generation_b,
+                1,
+                &[row_b],
+            )
+            .await
+            .is_err()
+    );
+    assert!(
+        store
+            .mark_vector_index_backfilled("t", "Item", generation_b, "v2|b")
+            .await
+            .is_err()
+    );
+    assert_eq!(
+        store.vector_index_backfilled_types("t").await.unwrap(),
+        vec![("Item".to_string(), "v2|a".to_string())]
     );
 }
 
@@ -319,6 +784,8 @@ async fn append_batch_zero_sequence_detects_existing_stream_by_unique_key() {
                 "OrderUpdated",
                 serde_json::json!({ "step": 2 }),
             )],
+            vector_rows: Vec::new(),
+            reconcile_vectors: false,
         }])
         .await
         .unwrap_err();

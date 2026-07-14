@@ -37,6 +37,11 @@ mod tests {
             include_str!("../migrations/0006_segmented_event_history.sql"),
             include_str!("../migrations/0007_installed_app_follow_policy.sql"),
             include_str!("../migrations/0008_ots_trajectory_outbox_status.sql"),
+            include_str!("../migrations/0009_entity_key_index.sql"),
+            include_str!("../migrations/0010_key_index_backfill_watermark.sql"),
+            include_str!("../migrations/0011_key_index_watermark_key_set.sql"),
+            include_str!("../migrations/0012_entity_vector_index.sql"),
+            include_str!("../migrations/0013_monotonic_vector_reconciliation.sql"),
         ]
         .join("\n")
         .to_lowercase();
@@ -53,6 +58,10 @@ mod tests {
             "event_segments",
             "snapshot_history",
             "ots_trajectories",
+            "entity_key_index",
+            "entity_vector_index",
+            "entity_vector_index_version",
+            "entity_vector_reconciliation_generation",
         ] {
             assert!(
                 migration.contains(&format!("create table if not exists {table}")),

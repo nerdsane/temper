@@ -55,8 +55,41 @@ async fn append_multiple_events() {
 }
 
 #[tokio::test]
+async fn pre_reconciliation_live_vector_type_remains_discoverable() {
+    let store = SimEventStore::no_faults(41);
+    store
+        .append_with_index_rows(
+            "default:Item:item-before-generation",
+            0,
+            &[test_envelope(0, "Created")],
+            &[],
+            &[EntityVectorRow {
+                decl_name: "embed".to_string(),
+                model_tag: "m1".to_string(),
+                vector: vec![1.0, 0.0],
+            }],
+            true,
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(
+        store
+            .vector_reconciliation_entity_types("default")
+            .await
+            .unwrap(),
+        vec!["Item".to_string()],
+        "generation-zero fences must keep remove-all reconciliation discoverable"
+    );
+}
+
+#[tokio::test]
 async fn stale_vector_backfill_does_not_overwrite_newer_live_write() {
     let store = SimEventStore::no_faults(42);
+    let generation = store
+        .begin_vector_index_reconciliation("default", "Item", "v2|embed")
+        .await
+        .unwrap();
     let persistence_id = "default:Item:item-race";
     let stale_row = EntityVectorRow {
         decl_name: "embed".to_string(),
@@ -96,7 +129,7 @@ async fn stale_vector_backfill_does_not_overwrite_newer_live_write() {
     // Model a rebuild that loaded journal sequence 1 before the live sequence-2
     // append committed, then reached the index after that append.
     store
-        .backfill_entity_vectors("default", "Item", "item-race", &[stale_row])
+        .backfill_entity_vectors("default", "Item", "item-race", generation, 1, &[stale_row])
         .await
         .unwrap();
 
@@ -108,10 +141,344 @@ async fn stale_vector_backfill_does_not_overwrite_newer_live_write() {
         candidates,
         vec![EntityVectorCandidate {
             entity_id: "item-race".to_string(),
-            vector: live_row.vector,
+            vector: live_row.vector.clone(),
         }],
         "a stale rebuild observed at sequence 1 must not overwrite the vector co-committed at sequence 2"
     );
+
+    store
+        .append_with_index_rows(
+            persistence_id,
+            2,
+            &[test_envelope(0, "Deleted")],
+            &[],
+            &[],
+            true,
+        )
+        .await
+        .unwrap();
+    store
+        .backfill_entity_vectors("default", "Item", "item-race", generation, 2, &[live_row])
+        .await
+        .unwrap();
+    assert!(
+        store
+            .vector_candidates("default", "Item", "embed", "model-v1", 10)
+            .await
+            .unwrap()
+            .is_empty(),
+        "a stale sequence-2 rebuild must not resurrect vectors purged at sequence 3"
+    );
+
+    // Equal-sequence replay is accepted and remains idempotent, including an
+    // empty tombstone that has no physical vector row.
+    store
+        .backfill_entity_vectors("default", "Item", "item-race", generation, 3, &[])
+        .await
+        .unwrap();
+    store
+        .backfill_entity_vectors("default", "Item", "item-race", generation, 3, &[])
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
+async fn newer_vector_reconciliation_generation_rejects_delayed_older_set() {
+    let store = SimEventStore::no_faults(43);
+    let persistence_id = "default:Item:item-generation";
+    let old_row = EntityVectorRow {
+        decl_name: "old-embed".to_string(),
+        model_tag: "m1".to_string(),
+        vector: vec![1.0, 0.0],
+    };
+    let new_row = EntityVectorRow {
+        decl_name: "new-embed".to_string(),
+        model_tag: "m2".to_string(),
+        vector: vec![0.0, 1.0],
+    };
+
+    let old_generation = store
+        .begin_vector_index_reconciliation("default", "Item", "v2|old-embed")
+        .await
+        .unwrap();
+    store
+        .append_with_index_rows(
+            persistence_id,
+            0,
+            &[test_envelope(0, "Created")],
+            &[],
+            std::slice::from_ref(&old_row),
+            true,
+        )
+        .await
+        .unwrap();
+
+    // The newer declaration set starts and converges from the same journal
+    // sequence before delayed work from the older invocation resumes.
+    let new_generation = store
+        .begin_vector_index_reconciliation("default", "Item", "v2|new-embed")
+        .await
+        .unwrap();
+    store
+        .backfill_entity_vectors(
+            "default",
+            "Item",
+            "item-generation",
+            new_generation,
+            1,
+            std::slice::from_ref(&new_row),
+        )
+        .await
+        .unwrap();
+    store
+        .mark_vector_index_backfilled("default", "Item", new_generation, "v2|new-embed")
+        .await
+        .unwrap();
+
+    let stale_replace = store
+        .backfill_entity_vectors(
+            "default",
+            "Item",
+            "item-generation",
+            old_generation,
+            1,
+            std::slice::from_ref(&old_row),
+        )
+        .await;
+    assert!(
+        stale_replace.is_err(),
+        "an older declaration-set generation must not replace equal-sequence rows"
+    );
+    let stale_watermark = store
+        .mark_vector_index_backfilled("default", "Item", old_generation, "v2|old-embed")
+        .await;
+    assert!(
+        stale_watermark.is_err(),
+        "an older declaration-set generation must not overwrite the newer watermark"
+    );
+    assert!(
+        store
+            .vector_candidates("default", "Item", "old-embed", "m1", 10)
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    assert_eq!(
+        store
+            .vector_candidates("default", "Item", "new-embed", "m2", 10)
+            .await
+            .unwrap(),
+        vec![EntityVectorCandidate {
+            entity_id: "item-generation".to_string(),
+            vector: new_row.vector,
+        }]
+    );
+    assert_eq!(
+        store
+            .vector_index_backfilled_types("default")
+            .await
+            .unwrap(),
+        vec![("Item".to_string(), "v2|new-embed".to_string())]
+    );
+}
+
+#[tokio::test]
+async fn beginning_reconciliation_withdraws_the_previous_completion_claim() {
+    let store = SimEventStore::no_faults(45);
+    let persistence_id = "default:Item:item-signature-race";
+    let row_a = EntityVectorRow {
+        decl_name: "embed-a".to_string(),
+        model_tag: "m1".to_string(),
+        vector: vec![1.0, 0.0],
+    };
+    let row_b = EntityVectorRow {
+        decl_name: "embed-b".to_string(),
+        model_tag: "m2".to_string(),
+        vector: vec![0.0, 1.0],
+    };
+
+    let first_a = store
+        .begin_vector_index_reconciliation("default", "Item", "v2|a")
+        .await
+        .unwrap();
+    store
+        .append_with_index_rows(
+            persistence_id,
+            0,
+            &[test_envelope(0, "Created")],
+            &[],
+            std::slice::from_ref(&row_a),
+            true,
+        )
+        .await
+        .unwrap();
+    store
+        .mark_vector_index_backfilled("default", "Item", first_a, "v2|a")
+        .await
+        .unwrap();
+
+    let generation_b = store
+        .begin_vector_index_reconciliation("default", "Item", "v2|b")
+        .await
+        .unwrap();
+    assert!(
+        store
+            .vector_index_backfilled_types("default")
+            .await
+            .unwrap()
+            .is_empty(),
+        "beginning B must atomically withdraw A's completion watermark"
+    );
+    assert_eq!(
+        store
+            .vector_reconciliation_entity_types("default")
+            .await
+            .unwrap(),
+        vec!["Item".to_string()],
+        "the in-progress type must remain discoverable without its watermark"
+    );
+
+    // A coordinator that still owns declaration set A now sees no completion
+    // claim, allocates a newer generation, and invalidates delayed B work.
+    let second_a = store
+        .begin_vector_index_reconciliation("default", "Item", "v2|a")
+        .await
+        .unwrap();
+    assert!(second_a > generation_b);
+    store
+        .backfill_entity_vectors(
+            "default",
+            "Item",
+            "item-signature-race",
+            second_a,
+            1,
+            std::slice::from_ref(&row_a),
+        )
+        .await
+        .unwrap();
+    store
+        .mark_vector_index_backfilled("default", "Item", second_a, "v2|a")
+        .await
+        .unwrap();
+
+    assert!(
+        store
+            .backfill_entity_vectors(
+                "default",
+                "Item",
+                "item-signature-race",
+                generation_b,
+                1,
+                &[row_b],
+            )
+            .await
+            .is_err()
+    );
+    assert!(
+        store
+            .mark_vector_index_backfilled("default", "Item", generation_b, "v2|b")
+            .await
+            .is_err()
+    );
+    assert_eq!(
+        store
+            .vector_index_backfilled_types("default")
+            .await
+            .unwrap(),
+        vec![("Item".to_string(), "v2|a".to_string())]
+    );
+}
+
+#[tokio::test]
+async fn composite_batch_vector_fence_rejects_delayed_repair() {
+    let store = SimEventStore::no_faults(44);
+    let persistence_id = "default:Item:item-composite";
+    let generation = store
+        .begin_vector_index_reconciliation("default", "Item", "v2|embed")
+        .await
+        .unwrap();
+    let stale_row = EntityVectorRow {
+        decl_name: "embed".to_string(),
+        model_tag: "m1".to_string(),
+        vector: vec![1.0, 0.0],
+    };
+    let live_row = EntityVectorRow {
+        decl_name: "embed".to_string(),
+        model_tag: "m1".to_string(),
+        vector: vec![0.0, 1.0],
+    };
+
+    store
+        .append_with_index_rows(
+            persistence_id,
+            0,
+            &[test_envelope(0, "Created")],
+            &[],
+            std::slice::from_ref(&stale_row),
+            true,
+        )
+        .await
+        .unwrap();
+    store
+        .append_batch(&[PersistenceAppend {
+            persistence_id: persistence_id.to_string(),
+            expected_sequence: 1,
+            events: vec![test_envelope(0, "CompositeUpdated")],
+            vector_rows: vec![live_row.clone()],
+            reconcile_vectors: true,
+        }])
+        .await
+        .unwrap();
+    store
+        .backfill_entity_vectors(
+            "default",
+            "Item",
+            "item-composite",
+            generation,
+            1,
+            std::slice::from_ref(&stale_row),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        store
+            .vector_candidates("default", "Item", "embed", "m1", 10)
+            .await
+            .unwrap()[0]
+            .vector,
+        live_row.vector.clone()
+    );
+
+    store
+        .append_batch(&[PersistenceAppend {
+            persistence_id: persistence_id.to_string(),
+            expected_sequence: 2,
+            events: vec![test_envelope(0, "CompositeDeleted")],
+            vector_rows: Vec::new(),
+            reconcile_vectors: true,
+        }])
+        .await
+        .unwrap();
+    store
+        .backfill_entity_vectors(
+            "default",
+            "Item",
+            "item-composite",
+            generation,
+            2,
+            std::slice::from_ref(&live_row),
+        )
+        .await
+        .unwrap();
+    assert!(
+        store
+            .vector_candidates("default", "Item", "embed", "m1", 10)
+            .await
+            .unwrap()
+            .is_empty(),
+        "the composite delete's sequence-3 fence must reject sequence-2 resurrection"
+    );
+    assert_eq!(store.dump_journal(persistence_id).len(), 3);
 }
 
 #[tokio::test]
@@ -122,11 +489,15 @@ async fn append_batch_commits_multiple_journals_atomically() {
             persistence_id: "default:Order:ord-a".to_string(),
             expected_sequence: 0,
             events: vec![test_envelope(0, "Created")],
+            vector_rows: Vec::new(),
+            reconcile_vectors: false,
         },
         PersistenceAppend {
             persistence_id: "default:Order:ord-b".to_string(),
             expected_sequence: 0,
             events: vec![test_envelope(0, "Created"), test_envelope(0, "Submitted")],
+            vector_rows: Vec::new(),
+            reconcile_vectors: false,
         },
     ];
 
@@ -167,11 +538,15 @@ async fn append_batch_conflict_leaves_all_journals_untouched() {
                 persistence_id: "default:Order:ord-new".to_string(),
                 expected_sequence: 0,
                 events: vec![test_envelope(0, "Created")],
+                vector_rows: Vec::new(),
+                reconcile_vectors: false,
             },
             PersistenceAppend {
                 persistence_id: "default:Order:ord-existing".to_string(),
                 expected_sequence: 0,
                 events: vec![test_envelope(0, "Submitted")],
+                vector_rows: Vec::new(),
+                reconcile_vectors: false,
             },
         ])
         .await

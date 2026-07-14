@@ -8,7 +8,7 @@ use temper_runtime::persistence::{
     unpack_f32_le,
 };
 use temper_runtime::tenant::parse_persistence_id_parts;
-use tracing::{error, instrument, warn};
+use tracing::{instrument, warn};
 
 use super::TursoEventStore;
 use super::append_config::{append_attempt_timeout, append_max_attempts};
@@ -30,6 +30,104 @@ struct PreparedEventInsert {
     expected_sequence: u64,
 }
 
+async fn current_vector_generation(
+    tx: &libsql::Transaction,
+    tenant: &str,
+    entity_type: &str,
+) -> Result<u64, PersistenceError> {
+    tx.execute(
+        "INSERT INTO entity_vector_reconciliation_generation \
+         (tenant, entity_type, generation, vector_set) VALUES (?1, ?2, 0, '') \
+         ON CONFLICT(tenant, entity_type) DO NOTHING",
+        params![tenant, entity_type],
+    )
+    .await
+    .map_err(storage_error)?;
+    let mut rows = tx
+        .query(
+            "SELECT generation FROM entity_vector_reconciliation_generation \
+             WHERE tenant = ?1 AND entity_type = ?2",
+            params![tenant, entity_type],
+        )
+        .await
+        .map_err(storage_error)?;
+    let generation = rows
+        .next()
+        .await
+        .map_err(storage_error)?
+        .ok_or_else(|| {
+            PersistenceError::Storage(format!(
+                "missing vector reconciliation generation for {tenant}:{entity_type}"
+            ))
+        })?
+        .get::<i64>(0)
+        .map_err(storage_error)?;
+    Ok(generation as u64)
+}
+
+async fn reconcile_live_vector_rows(
+    tx: &libsql::Transaction,
+    tenant: &str,
+    entity_type: &str,
+    entity_id: &str,
+    new_sequence: u64,
+    vector_rows: &[EntityVectorRow],
+) -> Result<(), PersistenceError> {
+    let generation = current_vector_generation(tx, tenant, entity_type).await?;
+    let applied = tx
+        .execute(
+            "INSERT INTO entity_vector_index_version \
+             (tenant, entity_type, entity_id, reconciliation_generation, sequence_nr) \
+             VALUES (?1, ?2, ?3, ?4, ?5) \
+             ON CONFLICT(tenant, entity_type, entity_id) DO UPDATE SET \
+                 reconciliation_generation = excluded.reconciliation_generation, \
+                 sequence_nr = excluded.sequence_nr \
+             WHERE entity_vector_index_version.reconciliation_generation < excluded.reconciliation_generation \
+                OR (entity_vector_index_version.reconciliation_generation = excluded.reconciliation_generation \
+                    AND entity_vector_index_version.sequence_nr <= excluded.sequence_nr)",
+            params![
+                tenant,
+                entity_type,
+                entity_id,
+                generation as i64,
+                new_sequence as i64
+            ],
+        )
+        .await
+        .map_err(storage_error)?;
+    if applied == 0 {
+        return Err(PersistenceError::Storage(format!(
+            "vector-index fence for {tenant}:{entity_type}:{entity_id} is ahead of live journal sequence {new_sequence} in reconciliation generation {generation}"
+        )));
+    }
+    tx.execute(
+        "DELETE FROM entity_vector_index \
+         WHERE tenant = ?1 AND entity_type = ?2 AND entity_id = ?3",
+        params![tenant, entity_type, entity_id],
+    )
+    .await
+    .map_err(storage_error)?;
+    for row in vector_rows {
+        tx.execute(
+            "INSERT INTO entity_vector_index \
+             (tenant, entity_type, decl_name, model_tag, entity_id, vector, sequence_nr) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+            params![
+                tenant,
+                entity_type,
+                row.decl_name.as_str(),
+                row.model_tag.as_str(),
+                entity_id,
+                Value::Blob(pack_f32_le(&row.vector)),
+                new_sequence as i64,
+            ],
+        )
+        .await
+        .map_err(storage_error)?;
+    }
+    Ok(())
+}
+
 impl EventStore for TursoEventStore {
     #[instrument(skip_all, fields(persistence_id, otel.name = "turso.append"))]
     async fn append(
@@ -38,77 +136,8 @@ impl EventStore for TursoEventStore {
         expected_sequence: u64,
         events: &[PersistenceEnvelope],
     ) -> Result<u64, PersistenceError> {
-        if events.is_empty() {
-            return Ok(expected_sequence);
-        }
-
-        // Retry transient Hrana BLOCKED / stream errors with backoff (ADR-0056).
-        // Each attempt is a complete append unit. Single-event appends use an
-        // atomic conditional insert; multi-event appends open a transaction.
-        // Event-store's UNIQUE (entity_type, entity_id, sequence_nr) makes
-        // retries safe — if a prior attempt partially committed before erroring,
-        // the retry's pre-check detects it as ConcurrencyViolation
-        // (non-transient, propagates to caller via normal event-store contract).
-        let attempt_timeout = append_attempt_timeout();
-        let total_attempts = append_max_attempts();
-        let mut last_err: Option<PersistenceError> = None;
-        let bypass_write_gate = events.len() == 1;
-        for attempt in 0..total_attempts {
-            if attempt > 0 {
-                tokio::time::sleep(Duration::from_millis(retry_delay_ms(attempt - 1))).await;
-            }
-            let _high_priority_marker = if bypass_write_gate {
-                Some(self.mark_high_priority_write("turso.append"))
-            } else {
-                None
-            };
-            let _write_permit = if bypass_write_gate {
-                None
-            } else {
-                Some(
-                    self.acquire_write_permit("turso.append", WritePriority::High)
-                        .await?,
-                )
-            };
-            let attempt_result = tokio::time::timeout(
-                attempt_timeout,
-                self.append_inner(persistence_id, expected_sequence, events),
-            )
+        self.append_retried(persistence_id, expected_sequence, events, None)
             .await
-            .unwrap_or_else(|_| {
-                warn!(
-                    persistence_id,
-                    attempt,
-                    timeout_ms = attempt_timeout.as_millis() as u64,
-                    "turso.append attempt timed out"
-                );
-                Err(PersistenceError::Storage(format!(
-                    "turso.append timed out after {}ms",
-                    attempt_timeout.as_millis()
-                )))
-            });
-
-            match attempt_result {
-                Ok(seq) => {
-                    if attempt > 0 {
-                        record_turso_write_retry("turso.append", attempt as u64, "succeeded");
-                    }
-                    return Ok(seq);
-                }
-                Err(err) => {
-                    let transient = match &err {
-                        PersistenceError::Storage(msg) => is_transient_write_error(msg),
-                        _ => false,
-                    };
-                    if !transient {
-                        return Err(err);
-                    }
-                    last_err = Some(err);
-                }
-            }
-        }
-        record_turso_write_retry("turso.append", total_attempts as u64, "exhausted");
-        Err(last_err.expect("retry loop captured at least one error"))
     }
 
     async fn lookup_by_key(
@@ -148,12 +177,9 @@ impl EventStore for TursoEventStore {
     // DST. Giving Turso the keyed oracle requires first implementing live co-commit
     // (completing ADR-0153 phase 2 for Turso) — tracked separately.
 
-    // ADR-0155: Turso maintains `entity_vector_index` **write-behind** — the event is
-    // appended first (with retries), then the derived vector rows follow in a separate,
-    // also-retried write. This is safe for vectors (unlike keys) because a vector row
-    // carries no uniqueness constraint and a lagging index write only makes a ranking
-    // temporarily incomplete; it can never corrupt a keyed absence. So Turso implements
-    // the full vector surface below.
+    // ADR-0171: Turso co-commits the journal, retained vector fence, and current
+    // vector rows in one immediate transaction. The single-event fast path remains
+    // available only to appends that do not reconcile vectors.
     async fn append_with_index_rows(
         &self,
         persistence_id: &str,
@@ -163,52 +189,59 @@ impl EventStore for TursoEventStore {
         vector_rows: &[EntityVectorRow],
         reconcile_vectors: bool,
     ) -> Result<u64, PersistenceError> {
-        // The journal append is the durable event (keys are not maintained on Turso,
-        // per the note above).
-        let new_seq = self
-            .append(persistence_id, expected_sequence, events)
-            .await?;
-        // Write-behind vector maintenance: reconcile the entity's rows (delete stale,
-        // insert current — an empty `vector_rows` purges a deleted/cleared entity),
-        // RETRIED like the event append rather than a warn-once one-shot, so a
-        // transient failure does not silently drop the write. On final exhaustion the
-        // error is logged loudly; the partition then lags until the next backfill
-        // reconcile runs. Only runs when the type declares vector paths.
-        if reconcile_vectors
-            && let Ok((tenant, entity_type, entity_id)) = parse_persistence_id_parts(persistence_id)
-        {
-            let total_attempts = append_max_attempts();
-            let mut last_err: Option<PersistenceError> = None;
-            for attempt in 0..total_attempts {
-                if attempt > 0 {
-                    tokio::time::sleep(Duration::from_millis(retry_delay_ms(attempt - 1))).await;
-                }
-                match self
-                    .backfill_entity_vectors(tenant, entity_type, entity_id, vector_rows)
-                    .await
-                {
-                    Ok(()) => {
-                        last_err = None;
-                        break;
-                    }
-                    Err(err) => {
-                        let transient = matches!(&err, PersistenceError::Storage(msg) if is_transient_write_error(msg));
-                        last_err = Some(err);
-                        if !transient {
-                            break;
-                        }
-                    }
-                }
-            }
-            if let Some(error) = last_err {
-                error!(
-                    persistence_id,
-                    error = %error,
-                    "turso vector-index write-behind failed after retries; partition lags until the next backfill reconcile"
-                );
-            }
+        if !reconcile_vectors {
+            return self.append(persistence_id, expected_sequence, events).await;
         }
-        Ok(new_seq)
+        self.append_retried(persistence_id, expected_sequence, events, Some(vector_rows))
+            .await
+    }
+
+    async fn begin_vector_index_reconciliation(
+        &self,
+        tenant: &str,
+        entity_type: &str,
+        vector_set: &str,
+    ) -> Result<u64, PersistenceError> {
+        let _write_permit = self
+            .acquire_write_permit(
+                "turso.begin_vector_index_reconciliation",
+                WritePriority::Low,
+            )
+            .await?;
+        let conn = self.configured_connection().await?;
+        let tx = conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .await
+            .map_err(storage_error)?;
+        tx.execute(
+            "INSERT INTO entity_vector_reconciliation_generation \
+             (tenant, entity_type, generation, vector_set) VALUES (?1, ?2, 0, '') \
+             ON CONFLICT(tenant, entity_type) DO NOTHING",
+            params![tenant, entity_type],
+        )
+        .await
+        .map_err(storage_error)?;
+        tx.execute(
+            "UPDATE entity_vector_reconciliation_generation \
+             SET generation = generation + 1, vector_set = ?3 \
+             WHERE tenant = ?1 AND entity_type = ?2",
+            params![tenant, entity_type, vector_set],
+        )
+        .await
+        .map_err(storage_error)?;
+        let generation = current_vector_generation(&tx, tenant, entity_type).await?;
+        // Beginning a new declaration set atomically withdraws the prior completion
+        // claim; otherwise a coordinator for that old signature could still see it
+        // and skip while this generation is in flight.
+        tx.execute(
+            "DELETE FROM vector_index_backfill_watermark \
+             WHERE tenant = ?1 AND entity_type = ?2",
+            params![tenant, entity_type],
+        )
+        .await
+        .map_err(storage_error)?;
+        tx.commit().await.map_err(storage_error)?;
+        Ok(generation)
     }
 
     async fn backfill_entity_vectors(
@@ -216,11 +249,16 @@ impl EventStore for TursoEventStore {
         tenant: &str,
         entity_type: &str,
         entity_id: &str,
+        reconciliation_generation: u64,
+        observed_sequence: u64,
         vector_rows: &[EntityVectorRow],
     ) -> Result<(), PersistenceError> {
-        // Reconcile: DELETE all of the entity's rows, then insert the current ones.
-        // Empty `vector_rows` purges the entity (deleted / un-embedded). Always runs
-        // the delete so a purge is honored.
+        if reconciliation_generation == 0 {
+            return Err(PersistenceError::Storage(
+                "vector reconciliation generation zero is reserved for pre-reconciliation live writes"
+                    .to_string(),
+            ));
+        }
         let _write_permit = self
             .acquire_write_permit("turso.backfill_entity_vectors", WritePriority::Low)
             .await?;
@@ -229,6 +267,60 @@ impl EventStore for TursoEventStore {
             .transaction_with_behavior(TransactionBehavior::Immediate)
             .await
             .map_err(storage_error)?;
+        let current_generation = current_vector_generation(&tx, tenant, entity_type).await?;
+        if current_generation != reconciliation_generation {
+            let _ = tx.rollback().await;
+            return Err(PersistenceError::Storage(format!(
+                "stale vector reconciliation generation {reconciliation_generation} for {tenant}:{entity_type}; current generation is {current_generation}"
+            )));
+        }
+        let applied = tx
+            .execute(
+                "INSERT INTO entity_vector_index_version \
+                 (tenant, entity_type, entity_id, reconciliation_generation, sequence_nr) \
+                 VALUES (?1, ?2, ?3, ?4, ?5) \
+                 ON CONFLICT(tenant, entity_type, entity_id) DO UPDATE SET \
+                     reconciliation_generation = excluded.reconciliation_generation, \
+                     sequence_nr = excluded.sequence_nr \
+                 WHERE entity_vector_index_version.reconciliation_generation < excluded.reconciliation_generation \
+                    OR (entity_vector_index_version.reconciliation_generation = excluded.reconciliation_generation \
+                        AND entity_vector_index_version.sequence_nr <= excluded.sequence_nr)",
+                params![
+                    tenant,
+                    entity_type,
+                    entity_id,
+                    reconciliation_generation as i64,
+                    observed_sequence as i64
+                ],
+            )
+            .await
+            .map_err(storage_error)?;
+        if applied == 0 {
+            let mut rows = tx
+                .query(
+                    "SELECT reconciliation_generation FROM entity_vector_index_version \
+                     WHERE tenant = ?1 AND entity_type = ?2 AND entity_id = ?3",
+                    params![tenant, entity_type, entity_id],
+                )
+                .await
+                .map_err(storage_error)?;
+            let fence_generation = rows
+                .next()
+                .await
+                .map_err(storage_error)?
+                .map(|row| row.get::<i64>(0).map_err(storage_error))
+                .transpose()?
+                .unwrap_or(0) as u64;
+            drop(rows);
+            if fence_generation > reconciliation_generation {
+                let _ = tx.rollback().await;
+                return Err(PersistenceError::Storage(format!(
+                    "vector-index fence generation {fence_generation} is ahead of current type generation {reconciliation_generation} for {tenant}:{entity_type}:{entity_id}"
+                )));
+            }
+            tx.commit().await.map_err(storage_error)?;
+            return Ok(());
+        }
         tx.execute(
             "DELETE FROM entity_vector_index \
              WHERE tenant = ?1 AND entity_type = ?2 AND entity_id = ?3",
@@ -240,7 +332,7 @@ impl EventStore for TursoEventStore {
             tx.execute(
                 "INSERT INTO entity_vector_index \
                  (tenant, entity_type, decl_name, model_tag, entity_id, vector, sequence_nr) \
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, 0)",
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
                 params![
                     tenant,
                     entity_type,
@@ -248,6 +340,7 @@ impl EventStore for TursoEventStore {
                     row.model_tag.as_str(),
                     entity_id,
                     Value::Blob(pack_f32_le(&row.vector)),
+                    observed_sequence as i64,
                 ],
             )
             .await
@@ -290,14 +383,54 @@ impl EventStore for TursoEventStore {
         &self,
         tenant: &str,
         entity_type: &str,
+        reconciliation_generation: u64,
         vector_set: &str,
     ) -> Result<(), PersistenceError> {
+        if reconciliation_generation == 0 {
+            return Err(PersistenceError::Storage(
+                "vector reconciliation generation zero cannot publish a watermark".to_string(),
+            ));
+        }
         let _write_permit = self
             .acquire_write_permit("turso.mark_vector_index_backfilled", WritePriority::Low)
             .await?;
         let conn = self.configured_connection().await?;
+        let tx = conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .await
+            .map_err(storage_error)?;
+        let mut generations = tx
+            .query(
+                "SELECT generation, vector_set FROM entity_vector_reconciliation_generation \
+                 WHERE tenant = ?1 AND entity_type = ?2",
+                params![tenant, entity_type],
+            )
+            .await
+            .map_err(storage_error)?;
+        let current = generations
+            .next()
+            .await
+            .map_err(storage_error)?
+            .map(|row| {
+                Ok::<_, PersistenceError>((
+                    row.get::<i64>(0).map_err(storage_error)? as u64,
+                    row.get::<String>(1).map_err(storage_error)?,
+                ))
+            })
+            .transpose()?;
+        drop(generations);
+        if current.as_ref().map(|(generation, signature)| {
+            *generation == reconciliation_generation && signature == vector_set
+        }) != Some(true)
+        {
+            let current_generation = current.map(|(generation, _)| generation).unwrap_or(0);
+            let _ = tx.rollback().await;
+            return Err(PersistenceError::Storage(format!(
+                "stale vector reconciliation generation {reconciliation_generation} for {tenant}:{entity_type}; current generation is {current_generation}"
+            )));
+        }
         let completed_at = temper_runtime::scheduler::sim_now().to_rfc3339();
-        conn.execute(
+        tx.execute(
             "INSERT INTO vector_index_backfill_watermark (tenant, entity_type, vector_set, completed_at) \
              VALUES (?1, ?2, ?3, ?4) \
              ON CONFLICT(tenant, entity_type) \
@@ -306,6 +439,7 @@ impl EventStore for TursoEventStore {
         )
         .await
         .map_err(storage_error)?;
+        tx.commit().await.map_err(storage_error)?;
         Ok(())
     }
 
@@ -331,6 +465,28 @@ impl EventStore for TursoEventStore {
         Ok(out)
     }
 
+    async fn vector_reconciliation_entity_types(
+        &self,
+        tenant: &str,
+    ) -> Result<Vec<String>, PersistenceError> {
+        let conn = self.configured_connection().await?;
+        let mut rows = conn
+            .query(
+                "SELECT entity_type FROM entity_vector_reconciliation_generation WHERE tenant = ?1 \
+                 UNION SELECT entity_type FROM entity_vector_index_version WHERE tenant = ?1 \
+                 UNION SELECT entity_type FROM entity_vector_index WHERE tenant = ?1 \
+                 ORDER BY entity_type",
+                params![tenant],
+            )
+            .await
+            .map_err(storage_error)?;
+        let mut out = Vec::new();
+        while let Some(row) = rows.next().await.map_err(storage_error)? {
+            out.push(row.get::<String>(0).map_err(storage_error)?);
+        }
+        Ok(out)
+    }
+
     async fn vectored_entity_ids_for_type(
         &self,
         tenant: &str,
@@ -352,6 +508,28 @@ impl EventStore for TursoEventStore {
         Ok(out)
     }
 
+    async fn list_vector_repair_entity_ids(
+        &self,
+        tenant: &str,
+        entity_type: &str,
+    ) -> Result<Vec<String>, PersistenceError> {
+        let conn = self.configured_connection().await?;
+        let mut rows = conn
+            .query(
+                "SELECT DISTINCT entity_id FROM events \
+                 WHERE tenant = ?1 AND entity_type = ?2 \
+                 ORDER BY entity_id",
+                params![tenant, entity_type],
+            )
+            .await
+            .map_err(storage_error)?;
+        let mut out = Vec::new();
+        while let Some(row) = rows.next().await.map_err(storage_error)? {
+            out.push(row.get::<String>(0).map_err(storage_error)?);
+        }
+        Ok(out)
+    }
+
     #[instrument(skip_all, fields(otel.name = "turso.append_batch"))]
     async fn append_batch(
         &self,
@@ -362,10 +540,13 @@ impl EventStore for TursoEventStore {
         }
         if let [append] = appends {
             let sequence_nr = self
-                .append(
+                .append_with_index_rows(
                     &append.persistence_id,
                     append.expected_sequence,
                     &append.events,
+                    &[],
+                    &append.vector_rows,
+                    append.reconcile_vectors,
                 )
                 .await?;
             return Ok(vec![PersistenceAppendResult {
@@ -740,6 +921,81 @@ impl EventStore for TursoEventStore {
 }
 
 impl TursoEventStore {
+    /// Retry one complete journal append, optionally including vector-index
+    /// reconciliation in the same transaction (ADR-0171).
+    async fn append_retried(
+        &self,
+        persistence_id: &str,
+        expected_sequence: u64,
+        events: &[PersistenceEnvelope],
+        vector_rows: Option<&[EntityVectorRow]>,
+    ) -> Result<u64, PersistenceError> {
+        if events.is_empty() && vector_rows.is_none() {
+            return Ok(expected_sequence);
+        }
+
+        let attempt_timeout = append_attempt_timeout();
+        let total_attempts = append_max_attempts();
+        let mut last_err: Option<PersistenceError> = None;
+        let bypass_write_gate = events.len() == 1 && vector_rows.is_none();
+        for attempt in 0..total_attempts {
+            if attempt > 0 {
+                tokio::time::sleep(Duration::from_millis(retry_delay_ms(attempt - 1))).await;
+            }
+            let _high_priority_marker = if bypass_write_gate {
+                Some(self.mark_high_priority_write("turso.append"))
+            } else {
+                None
+            };
+            let _write_permit = if bypass_write_gate {
+                None
+            } else {
+                Some(
+                    self.acquire_write_permit("turso.append", WritePriority::High)
+                        .await?,
+                )
+            };
+            let attempt_result = tokio::time::timeout(
+                attempt_timeout,
+                self.append_inner(persistence_id, expected_sequence, events, vector_rows),
+            )
+            .await
+            .unwrap_or_else(|_| {
+                warn!(
+                    persistence_id,
+                    attempt,
+                    timeout_ms = attempt_timeout.as_millis() as u64,
+                    "turso.append attempt timed out"
+                );
+                Err(PersistenceError::Storage(format!(
+                    "turso.append timed out after {}ms",
+                    attempt_timeout.as_millis()
+                )))
+            });
+
+            match attempt_result {
+                Ok(sequence_nr) => {
+                    if attempt > 0 {
+                        record_turso_write_retry("turso.append", attempt as u64, "succeeded");
+                    }
+                    return Ok(sequence_nr);
+                }
+                Err(err) => {
+                    let transient = match &err {
+                        PersistenceError::Storage(message) => is_transient_write_error(message),
+                        _ => false,
+                    };
+                    if !transient {
+                        return Err(err);
+                    }
+                    last_err = Some(err);
+                }
+            }
+        }
+        record_turso_write_retry("turso.append", total_attempts as u64, "exhausted");
+        Err(last_err.expect("retry loop captured at least one error"))
+    }
+
     /// List tenants with at least one persisted event.
     #[instrument(skip_all, fields(otel.name = "turso.list_event_tenants"))]
     pub async fn list_event_tenants(&self) -> Result<Vec<String>, PersistenceError> {
@@ -811,12 +1067,15 @@ impl TursoEventStore {
         persistence_id: &str,
         expected_sequence: u64,
         events: &[PersistenceEnvelope],
+        vector_rows: Option<&[EntityVectorRow]>,
     ) -> Result<u64, PersistenceError> {
-        if events.is_empty() {
+        if events.is_empty() && vector_rows.is_none() {
             return Ok(expected_sequence);
         }
 
-        if let [event] = events {
+        if vector_rows.is_none()
+            && let [event] = events
+        {
             return self
                 .append_single_event_inner(persistence_id, expected_sequence, event)
                 .await;
@@ -983,6 +1242,11 @@ impl TursoEventStore {
             .map_err(storage_error)?;
         }
 
+        if let Some(vector_rows) = vector_rows {
+            reconcile_live_vector_rows(&tx, tenant, entity_type, entity_id, new_seq, vector_rows)
+                .await?;
+        }
+
         tx.commit().await.map_err(storage_error)?;
         Ok(new_seq)
     }
@@ -1145,6 +1409,22 @@ impl TursoEventStore {
                     });
                 }
                 return Err(PersistenceError::Storage(msg));
+            }
+        }
+
+        for ((append, result), (tenant, entity_type, entity_id)) in
+            appends.iter().zip(results.iter()).zip(parsed.iter())
+        {
+            if append.reconcile_vectors {
+                reconcile_live_vector_rows(
+                    &tx,
+                    tenant,
+                    entity_type,
+                    entity_id,
+                    result.sequence_nr,
+                    &append.vector_rows,
+                )
+                .await?;
             }
         }
 

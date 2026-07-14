@@ -487,6 +487,11 @@ pub struct ServerState {
     /// between "check" and "write" while cross-actor transactions are still
     /// being built out.
     pub(crate) commons_write_guardrail_lock: Arc<tokio::sync::Mutex<()>>,
+    /// Serializes vector declaration snapshotting and durable reconciliation-
+    /// generation allocation. The store generation remains authoritative across
+    /// crashes/processes; this lock prevents an older local invocation from taking a
+    /// newer generation after a hot-swapped declaration set (ADR-0171).
+    pub(crate) vector_reconciliation_lock: Arc<tokio::sync::Mutex<()>>,
     pub secrets_vault: Option<Arc<SecretsVault>>,
     /// Broadcast channel for agent progress events (SSE subscriptions).
     /// // determinism-ok: broadcast channel for external observation only
@@ -714,6 +719,7 @@ impl ServerState {
             commons_rate_limit_buckets: Arc::new(Mutex::new(BTreeMap::new())),
             commons_storage_projection_cache: Arc::new(Mutex::new(BTreeMap::new())),
             commons_write_guardrail_lock: Arc::new(tokio::sync::Mutex::new(())),
+            vector_reconciliation_lock: Arc::new(tokio::sync::Mutex::new(())),
             secrets_vault: None,
             agent_progress_tx: Arc::new(agent_progress_tx), // determinism-ok: broadcast for external observation
             entity_event_sequences: Arc::new(Mutex::new(BTreeMap::new())),
@@ -962,6 +968,7 @@ impl ServerState {
             commons_rate_limit_buckets: Arc::new(Mutex::new(BTreeMap::new())),
             commons_storage_projection_cache: Arc::new(Mutex::new(BTreeMap::new())),
             commons_write_guardrail_lock: Arc::new(tokio::sync::Mutex::new(())),
+            vector_reconciliation_lock: Arc::new(tokio::sync::Mutex::new(())),
             secrets_vault: None,
             agent_progress_tx: Arc::new(agent_progress_tx), // determinism-ok: broadcast for external observation
             entity_event_sequences: Arc::new(Mutex::new(BTreeMap::new())),

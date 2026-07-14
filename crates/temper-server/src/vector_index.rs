@@ -11,24 +11,26 @@
 //! id. This is what makes kernel-side similarity admissible under deterministic
 //! simulation where app-side similarity never was.
 
-use temper_runtime::persistence::EntityVectorCandidate;
+use temper_runtime::persistence::{EntityVectorCandidate, EntityVectorRow};
 // The blob encoders live beside `EntityVectorRow` in temper-runtime so every store
 // and the kernel ranking share one byte layout; re-exported here for callers that
 // reach for them through the vector-index module.
 pub use temper_runtime::persistence::{pack_f32_le, unpack_f32_le};
 
-/// The stable signature of a type's declared vector-path set (ADR-0155): each path
-/// rendered as `name:property:model_property:dims:metric`, sorted by name and
-/// semicolon-joined. Recorded in the vector-index backfill watermark and compared
-/// on the next backfill, so ANY change — a new path, or an in-place edit to a
-/// path's property/model_property/dims/metric — changes the signature and re-indexes
-/// the type instead of being treated as already complete. Including `dims` matters:
-/// an edited `dims` makes every existing row the wrong length (they would be dropped
-/// at read time as corrupt), so the type must be re-embedded/reconciled. Deterministic
+/// The stable, protocol-revisioned signature of a type's declared vector-path set
+/// (ADR-0155/ADR-0171): each path is rendered as
+/// `name:property:model_property:dims:metric`, sorted by name, and semicolon-joined.
+/// Recorded in the vector-index backfill watermark and compared on the next
+/// backfill, so ANY declaration change re-indexes the type. The protocol prefix
+/// deliberately invalidates pre-ADR-0171 watermarks once, forcing every legacy row
+/// through sequence-aware reconciliation. Including `dims` matters: an edited
+/// `dims` makes every existing row the wrong length (they would be dropped at read
+/// time as corrupt), so the type must be re-embedded/reconciled. Deterministic
 /// (sorted, no map iteration). Mirrors `declared_key_set_signature`.
 pub fn declared_vector_set_signature(
     vectors: &[temper_jit::table::types::DeclaredVector],
 ) -> String {
+    const RECONCILIATION_PROTOCOL_REVISION: &str = "v2";
     let mut entries: Vec<String> = vectors
         .iter()
         .map(|v| {
@@ -39,7 +41,7 @@ pub fn declared_vector_set_signature(
         })
         .collect();
     entries.sort();
-    entries.join(";")
+    format!("{RECONCILIATION_PROTOCOL_REVISION}|{}", entries.join(";"))
 }
 
 /// The similarity metric declared on a `[[vector]]` path.
@@ -97,6 +99,43 @@ pub fn parse_vector_property(value: &serde_json::Value, dims: usize) -> Option<V
         out.push(component);
     }
     Some(out)
+}
+
+/// Derive the complete vector-index row set from one post-transition entity state.
+///
+/// This is shared by single-entity appends, composite batch appends, and background
+/// reconciliation so every journal-writing path interprets declarations identically.
+/// A deleted state always yields an empty set; callers still pass
+/// `reconcile_vectors = true` when declarations exist so that empty set purges stale
+/// candidates while retaining the entity fence (ADR-0171).
+pub(crate) fn rows_for_entity_state(
+    vectors: &[temper_jit::table::types::DeclaredVector],
+    status: &str,
+    fields: &serde_json::Value,
+) -> Vec<EntityVectorRow> {
+    if status == "Deleted" {
+        return Vec::new();
+    }
+    let Some(field_map) = fields.as_object() else {
+        return Vec::new();
+    };
+    vectors
+        .iter()
+        .filter_map(|decl| {
+            let vector = field_map
+                .get(&decl.property)
+                .and_then(|value| parse_vector_property(value, decl.dims))?;
+            let model_tag = field_map
+                .get(&decl.model_property)
+                .and_then(|value| value.as_str())
+                .filter(|tag| !tag.is_empty())?;
+            Some(EntityVectorRow {
+                decl_name: decl.name.clone(),
+                model_tag: model_tag.to_string(),
+                vector,
+            })
+        })
+        .collect()
 }
 
 /// One ranked entity plus its closeness score (higher = nearer).
@@ -211,6 +250,29 @@ mod tests {
             entity_id: id.to_string(),
             vector,
         }
+    }
+
+    #[test]
+    fn empty_vector_set_signature_is_protocol_revisioned() {
+        assert_eq!(declared_vector_set_signature(&[]), "v2|");
+    }
+
+    #[test]
+    fn remove_all_then_readd_identical_vector_changes_watermark_each_time() {
+        let declaration = temper_jit::table::types::DeclaredVector {
+            name: "embed".to_string(),
+            property: "vector".to_string(),
+            model_property: "model".to_string(),
+            dims: 2,
+            metric: "cosine".to_string(),
+        };
+        let declared = declared_vector_set_signature(std::slice::from_ref(&declaration));
+        let removed = declared_vector_set_signature(&[]);
+        let readded = declared_vector_set_signature(&[declaration]);
+
+        assert_ne!(declared, removed);
+        assert_eq!(declared, readded);
+        assert_ne!(removed, readded);
     }
 
     #[test]

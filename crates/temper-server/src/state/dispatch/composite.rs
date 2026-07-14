@@ -377,10 +377,20 @@ impl crate::state::ServerState {
         let appends = streams
             .iter()
             .filter(|(_, stream)| !stream.events.is_empty())
-            .map(|(persistence_id, stream)| PersistenceAppend {
-                persistence_id: persistence_id.clone(),
-                expected_sequence: stream.expected_sequence,
-                events: stream.events.clone(),
+            .map(|(persistence_id, stream)| {
+                let vectors = self.declared_vectors_for(tenant, &stream.entity_type);
+                let vector_rows = crate::vector_index::rows_for_entity_state(
+                    &vectors,
+                    &stream.state.status,
+                    &stream.state.fields,
+                );
+                PersistenceAppend {
+                    persistence_id: persistence_id.clone(),
+                    expected_sequence: stream.expected_sequence,
+                    events: stream.events.clone(),
+                    vector_rows,
+                    reconcile_vectors: !vectors.is_empty(),
+                }
             })
             .collect::<Vec<_>>();
         if appends.is_empty() {

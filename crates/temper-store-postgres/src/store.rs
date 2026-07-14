@@ -6,7 +6,7 @@
 
 use std::time::Instant;
 
-use sqlx::{Acquire, PgPool};
+use sqlx::{Acquire, PgPool, Postgres, Transaction};
 use temper_runtime::persistence::{
     EntityVectorCandidate, EntityVectorRow, EventMetadata, EventStore, PersistenceAppend,
     PersistenceAppendResult, PersistenceEnvelope, PersistenceError, pack_f32_le, unpack_f32_le,
@@ -40,6 +40,101 @@ impl PostgresEventStore {
     /// Return a reference to the inner pool (useful for migrations).
     pub fn pool(&self) -> &PgPool {
         &self.pool
+    }
+
+    async fn current_vector_generation_with_barrier(
+        tx: &mut Transaction<'_, Postgres>,
+        tenant: &str,
+        entity_type: &str,
+    ) -> Result<u64, PersistenceError> {
+        crate::dbm::postgres_query!(
+            "INSERT INTO entity_vector_reconciliation_generation \
+             (tenant, entity_type, generation, vector_set) VALUES ($1, $2, 0, '') \
+             ON CONFLICT (tenant, entity_type) DO NOTHING",
+        )
+        .bind(tenant)
+        .bind(entity_type)
+        .execute(&mut **tx)
+        .await
+        .map_err(|e| PersistenceError::Storage(e.to_string()))?;
+        let (generation,): (i64,) = crate::dbm::postgres_query_as!(
+            "SELECT generation FROM entity_vector_reconciliation_generation \
+             WHERE tenant = $1 AND entity_type = $2 FOR SHARE",
+        )
+        .bind(tenant)
+        .bind(entity_type)
+        .fetch_one(&mut **tx)
+        .await
+        .map_err(|e| PersistenceError::Storage(e.to_string()))?;
+        Ok(generation as u64)
+    }
+
+    async fn reconcile_live_vector_rows(
+        tx: &mut Transaction<'_, Postgres>,
+        tenant: &str,
+        entity_type: &str,
+        entity_id: &str,
+        new_sequence: u64,
+        vector_rows: &[EntityVectorRow],
+    ) -> Result<(), PersistenceError> {
+        // SHARE lets independent same-type writers proceed together, while still
+        // conflicting with the generation row's UPDATE during a new reconciliation.
+        let generation =
+            Self::current_vector_generation_with_barrier(tx, tenant, entity_type).await?;
+        let applied: Option<(i64,)> = crate::dbm::postgres_query_as!(
+            "INSERT INTO entity_vector_index_version \
+             (tenant, entity_type, entity_id, reconciliation_generation, sequence_nr) \
+             VALUES ($1, $2, $3, $4, $5) \
+             ON CONFLICT (tenant, entity_type, entity_id) DO UPDATE SET \
+                 reconciliation_generation = EXCLUDED.reconciliation_generation, \
+                 sequence_nr = EXCLUDED.sequence_nr \
+             WHERE entity_vector_index_version.reconciliation_generation < EXCLUDED.reconciliation_generation \
+                OR (entity_vector_index_version.reconciliation_generation = EXCLUDED.reconciliation_generation \
+                    AND entity_vector_index_version.sequence_nr <= EXCLUDED.sequence_nr) \
+             RETURNING sequence_nr",
+        )
+        .bind(tenant)
+        .bind(entity_type)
+        .bind(entity_id)
+        .bind(generation as i64)
+        .bind(new_sequence as i64)
+        .fetch_optional(&mut **tx)
+        .await
+        .map_err(|e| PersistenceError::Storage(e.to_string()))?;
+        if applied.is_none() {
+            return Err(PersistenceError::Storage(format!(
+                "vector-index fence for {tenant}:{entity_type}:{entity_id} is ahead of live journal sequence {new_sequence} in reconciliation generation {generation}"
+            )));
+        }
+
+        crate::dbm::postgres_query!(
+            "DELETE FROM entity_vector_index \
+             WHERE tenant = $1 AND entity_type = $2 AND entity_id = $3",
+        )
+        .bind(tenant)
+        .bind(entity_type)
+        .bind(entity_id)
+        .execute(&mut **tx)
+        .await
+        .map_err(|e| PersistenceError::Storage(e.to_string()))?;
+        for row in vector_rows {
+            crate::dbm::postgres_query!(
+                "INSERT INTO entity_vector_index \
+                 (tenant, entity_type, decl_name, model_tag, entity_id, vector, sequence_nr) \
+                 VALUES ($1, $2, $3, $4, $5, $6, $7)",
+            )
+            .bind(tenant)
+            .bind(entity_type)
+            .bind(&row.decl_name)
+            .bind(&row.model_tag)
+            .bind(entity_id)
+            .bind(pack_f32_le(&row.vector))
+            .bind(new_sequence as i64)
+            .execute(&mut **tx)
+            .await
+            .map_err(|e| PersistenceError::Storage(e.to_string()))?;
+        }
+        Ok(())
     }
 }
 
@@ -252,33 +347,15 @@ impl EventStore for PostgresEventStore {
         // the stale rows instead of leaving them to rank forever. No uniqueness
         // constraint; vectors are derived ranking state.
         if reconcile_vectors {
-            crate::dbm::postgres_query!(
-                "DELETE FROM entity_vector_index \
-                 WHERE tenant = $1 AND entity_type = $2 AND entity_id = $3",
+            Self::reconcile_live_vector_rows(
+                &mut tx,
+                tenant,
+                entity_type,
+                entity_id,
+                new_seq,
+                vector_rows,
             )
-            .bind(tenant)
-            .bind(entity_type)
-            .bind(entity_id)
-            .execute(&mut *tx)
-            .await
-            .map_err(|e| PersistenceError::Storage(e.to_string()))?;
-            for row in vector_rows {
-                crate::dbm::postgres_query!(
-                    "INSERT INTO entity_vector_index \
-                     (tenant, entity_type, decl_name, model_tag, entity_id, vector, sequence_nr) \
-                     VALUES ($1, $2, $3, $4, $5, $6, $7)",
-                )
-                .bind(tenant)
-                .bind(entity_type)
-                .bind(&row.decl_name)
-                .bind(&row.model_tag)
-                .bind(entity_id)
-                .bind(pack_f32_le(&row.vector))
-                .bind(new_seq as i64)
-                .execute(&mut *tx)
-                .await
-                .map_err(|e| PersistenceError::Storage(e.to_string()))?;
-            }
+            .await?;
         }
 
         let commit_started = Instant::now();
@@ -468,21 +545,130 @@ impl EventStore for PostgresEventStore {
         Ok(row.map(|(id,)| id))
     }
 
-    async fn backfill_entity_vectors(
+    async fn begin_vector_index_reconciliation(
         &self,
         tenant: &str,
         entity_type: &str,
-        entity_id: &str,
-        vector_rows: &[EntityVectorRow],
-    ) -> Result<(), PersistenceError> {
-        // Reconcile: DELETE all of the entity's rows, then insert the current ones.
-        // Empty `vector_rows` purges the entity (deleted / un-embedded). Always runs
-        // the delete (even for empty rows) so a purge is honored.
+        vector_set: &str,
+    ) -> Result<u64, PersistenceError> {
         let mut tx = self
             .pool
             .begin()
             .await
             .map_err(|e| PersistenceError::Storage(e.to_string()))?;
+        let (generation,): (i64,) = crate::dbm::postgres_query_as!(
+            "INSERT INTO entity_vector_reconciliation_generation \
+             (tenant, entity_type, generation, vector_set) VALUES ($1, $2, 1, $3) \
+             ON CONFLICT (tenant, entity_type) DO UPDATE SET \
+                 generation = entity_vector_reconciliation_generation.generation + 1, \
+                 vector_set = EXCLUDED.vector_set \
+             RETURNING generation",
+        )
+        .bind(tenant)
+        .bind(entity_type)
+        .bind(vector_set)
+        .fetch_one(&mut *tx)
+        .await
+        .map_err(|e| PersistenceError::Storage(e.to_string()))?;
+        // The prior signature is no longer an authoritative completion claim once
+        // a new generation starts. Invalidate it in this same transaction so a
+        // coordinator for that signature cannot observe it and incorrectly skip.
+        crate::dbm::postgres_query!(
+            "DELETE FROM vector_index_backfill_watermark \
+             WHERE tenant = $1 AND entity_type = $2",
+        )
+        .bind(tenant)
+        .bind(entity_type)
+        .execute(&mut *tx)
+        .await
+        .map_err(|e| PersistenceError::Storage(e.to_string()))?;
+        tx.commit()
+            .await
+            .map_err(|e| PersistenceError::Storage(e.to_string()))?;
+        Ok(generation as u64)
+    }
+
+    async fn backfill_entity_vectors(
+        &self,
+        tenant: &str,
+        entity_type: &str,
+        entity_id: &str,
+        reconciliation_generation: u64,
+        observed_sequence: u64,
+        vector_rows: &[EntityVectorRow],
+    ) -> Result<(), PersistenceError> {
+        if reconciliation_generation == 0 {
+            return Err(PersistenceError::Storage(
+                "vector reconciliation generation zero is reserved for pre-reconciliation live writes"
+                    .to_string(),
+            ));
+        }
+        // Lock and validate the type generation in the same transaction as the
+        // entity replacement. Beginning a newer declaration set invalidates this
+        // work before it can mutate rows.
+        let mut tx = self
+            .pool
+            .begin()
+            .await
+            .map_err(|e| PersistenceError::Storage(e.to_string()))?;
+        let current: Option<(i64,)> = crate::dbm::postgres_query_as!(
+            "SELECT generation FROM entity_vector_reconciliation_generation \
+             WHERE tenant = $1 AND entity_type = $2 FOR SHARE",
+        )
+        .bind(tenant)
+        .bind(entity_type)
+        .fetch_optional(&mut *tx)
+        .await
+        .map_err(|e| PersistenceError::Storage(e.to_string()))?;
+        let current_generation = current.map(|(generation,)| generation as u64).unwrap_or(0);
+        if current_generation != reconciliation_generation {
+            return Err(PersistenceError::Storage(format!(
+                "stale vector reconciliation generation {reconciliation_generation} for {tenant}:{entity_type}; current generation is {current_generation}"
+            )));
+        }
+
+        let applied: Option<(i64, i64)> = crate::dbm::postgres_query_as!(
+            "INSERT INTO entity_vector_index_version \
+             (tenant, entity_type, entity_id, reconciliation_generation, sequence_nr) \
+             VALUES ($1, $2, $3, $4, $5) \
+             ON CONFLICT (tenant, entity_type, entity_id) DO UPDATE SET \
+                 reconciliation_generation = EXCLUDED.reconciliation_generation, \
+                 sequence_nr = EXCLUDED.sequence_nr \
+             WHERE entity_vector_index_version.reconciliation_generation < EXCLUDED.reconciliation_generation \
+                OR (entity_vector_index_version.reconciliation_generation = EXCLUDED.reconciliation_generation \
+                    AND entity_vector_index_version.sequence_nr <= EXCLUDED.sequence_nr) \
+             RETURNING reconciliation_generation, sequence_nr",
+        )
+        .bind(tenant)
+        .bind(entity_type)
+        .bind(entity_id)
+        .bind(reconciliation_generation as i64)
+        .bind(observed_sequence as i64)
+        .fetch_optional(&mut *tx)
+        .await
+        .map_err(|e| PersistenceError::Storage(e.to_string()))?;
+        if applied.is_none() {
+            let fence: Option<(i64, i64)> = crate::dbm::postgres_query_as!(
+                "SELECT reconciliation_generation, sequence_nr \
+                 FROM entity_vector_index_version \
+                 WHERE tenant = $1 AND entity_type = $2 AND entity_id = $3",
+            )
+            .bind(tenant)
+            .bind(entity_type)
+            .bind(entity_id)
+            .fetch_optional(&mut *tx)
+            .await
+            .map_err(|e| PersistenceError::Storage(e.to_string()))?;
+            if fence.is_some_and(|(generation, _)| generation as u64 > reconciliation_generation) {
+                return Err(PersistenceError::Storage(format!(
+                    "vector-index fence generation is ahead of current type generation for {tenant}:{entity_type}:{entity_id}"
+                )));
+            }
+            tx.commit()
+                .await
+                .map_err(|e| PersistenceError::Storage(e.to_string()))?;
+            return Ok(());
+        }
         crate::dbm::postgres_query!(
             "DELETE FROM entity_vector_index \
              WHERE tenant = $1 AND entity_type = $2 AND entity_id = $3",
@@ -497,7 +683,7 @@ impl EventStore for PostgresEventStore {
             crate::dbm::postgres_query!(
                 "INSERT INTO entity_vector_index \
                  (tenant, entity_type, decl_name, model_tag, entity_id, vector, sequence_nr) \
-                 VALUES ($1, $2, $3, $4, $5, $6, 0)",
+                 VALUES ($1, $2, $3, $4, $5, $6, $7)",
             )
             .bind(tenant)
             .bind(entity_type)
@@ -505,6 +691,7 @@ impl EventStore for PostgresEventStore {
             .bind(&row.model_tag)
             .bind(entity_id)
             .bind(pack_f32_le(&row.vector))
+            .bind(observed_sequence as i64)
             .execute(&mut *tx)
             .await
             .map_err(|e| PersistenceError::Storage(e.to_string()))?;
@@ -553,13 +740,39 @@ impl EventStore for PostgresEventStore {
         &self,
         tenant: &str,
         entity_type: &str,
+        reconciliation_generation: u64,
         vector_set: &str,
     ) -> Result<(), PersistenceError> {
-        let mut conn = self
+        if reconciliation_generation == 0 {
+            return Err(PersistenceError::Storage(
+                "vector reconciliation generation zero cannot publish a watermark".to_string(),
+            ));
+        }
+        let mut tx = self
             .pool
-            .acquire()
+            .begin()
             .await
             .map_err(|e| PersistenceError::Storage(e.to_string()))?;
+        let current: Option<(i64, String)> = crate::dbm::postgres_query_as!(
+            "SELECT generation, vector_set FROM entity_vector_reconciliation_generation \
+             WHERE tenant = $1 AND entity_type = $2 FOR SHARE",
+        )
+        .bind(tenant)
+        .bind(entity_type)
+        .fetch_optional(&mut *tx)
+        .await
+        .map_err(|e| PersistenceError::Storage(e.to_string()))?;
+        if current.as_ref().map(|(generation, signature)| {
+            *generation as u64 == reconciliation_generation && signature == vector_set
+        }) != Some(true)
+        {
+            let current_generation = current
+                .map(|(generation, _)| generation as u64)
+                .unwrap_or(0);
+            return Err(PersistenceError::Storage(format!(
+                "stale vector reconciliation generation {reconciliation_generation} for {tenant}:{entity_type}; current generation is {current_generation}"
+            )));
+        }
         crate::dbm::postgres_query!(
             "INSERT INTO vector_index_backfill_watermark (tenant, entity_type, vector_set) \
              VALUES ($1, $2, $3) \
@@ -569,9 +782,12 @@ impl EventStore for PostgresEventStore {
         .bind(tenant)
         .bind(entity_type)
         .bind(vector_set)
-        .execute(&mut *conn)
+        .execute(&mut *tx)
         .await
         .map_err(|e| PersistenceError::Storage(e.to_string()))?;
+        tx.commit()
+            .await
+            .map_err(|e| PersistenceError::Storage(e.to_string()))?;
         Ok(())
     }
 
@@ -594,6 +810,23 @@ impl EventStore for PostgresEventStore {
         Ok(rows.into_iter().collect())
     }
 
+    async fn vector_reconciliation_entity_types(
+        &self,
+        tenant: &str,
+    ) -> Result<Vec<String>, PersistenceError> {
+        let rows: Vec<(String,)> = crate::dbm::postgres_query_as!(
+            "SELECT entity_type FROM entity_vector_reconciliation_generation WHERE tenant = $1 \
+             UNION SELECT entity_type FROM entity_vector_index_version WHERE tenant = $1 \
+             UNION SELECT entity_type FROM entity_vector_index WHERE tenant = $1 \
+             ORDER BY entity_type",
+        )
+        .bind(tenant)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(|e| PersistenceError::Storage(e.to_string()))?;
+        Ok(rows.into_iter().map(|(entity_type,)| entity_type).collect())
+    }
+
     async fn vectored_entity_ids_for_type(
         &self,
         tenant: &str,
@@ -611,6 +844,24 @@ impl EventStore for PostgresEventStore {
         .bind(tenant)
         .bind(entity_type)
         .fetch_all(&mut *conn)
+        .await
+        .map_err(|e| PersistenceError::Storage(e.to_string()))?;
+        Ok(rows.into_iter().map(|(entity_id,)| entity_id).collect())
+    }
+
+    async fn list_vector_repair_entity_ids(
+        &self,
+        tenant: &str,
+        entity_type: &str,
+    ) -> Result<Vec<String>, PersistenceError> {
+        let rows: Vec<(String,)> = crate::dbm::postgres_query_as!(
+            "SELECT DISTINCT entity_id FROM events \
+             WHERE tenant = $1 AND entity_type = $2 \
+             ORDER BY entity_id",
+        )
+        .bind(tenant)
+        .bind(entity_type)
+        .fetch_all(&self.pool)
         .await
         .map_err(|e| PersistenceError::Storage(e.to_string()))?;
         Ok(rows.into_iter().map(|(entity_id,)| entity_id).collect())
@@ -762,6 +1013,17 @@ impl EventStore for PostgresEventStore {
                     entity_id,
                     *segment_index,
                     new_seq,
+                )
+                .await?;
+            }
+            if append.reconcile_vectors {
+                Self::reconcile_live_vector_rows(
+                    &mut tx,
+                    tenant,
+                    entity_type,
+                    entity_id,
+                    new_seq,
+                    &append.vector_rows,
                 )
                 .await?;
             }
@@ -1210,6 +1472,168 @@ mod tests {
                     ("Order".to_string(), "ord-2".to_string()),
                     ("Task".to_string(), "task-1".to_string()),
                 ]
+            );
+        });
+    }
+
+    #[test]
+    fn vector_reconciliation_is_monotonic_and_repairs_deleted_streams() {
+        let database_url = match std::env::var("DATABASE_URL") {
+            Ok(url) => url,
+            Err(_) => {
+                eprintln!("skipping Postgres integration test: DATABASE_URL is not set");
+                return;
+            }
+        };
+
+        sqlx::test_block_on(async {
+            let pool = PgPool::connect(&database_url)
+                .await
+                .expect("connect to DATABASE_URL");
+            run_migrations(&pool).await.expect("run migrations");
+            let store = PostgresEventStore::new(pool);
+            let tenant = format!("tenant-vector-{}", uuid::Uuid::new_v4());
+            let persistence_id = format!("{tenant}:Item:item-race");
+            let row = |vector: Vec<f32>| EntityVectorRow {
+                decl_name: "embed".to_string(),
+                model_tag: "m1".to_string(),
+                vector,
+            };
+            let first_generation = store
+                .begin_vector_index_reconciliation(&tenant, "Item", "v2|a")
+                .await
+                .expect("begin vector reconciliation generation");
+            store
+                .mark_vector_index_backfilled(&tenant, "Item", first_generation, "v2|a")
+                .await
+                .expect("publish initial completion claim");
+            let superseded_generation = store
+                .begin_vector_index_reconciliation(&tenant, "Item", "v2|b")
+                .await
+                .expect("begin competing vector reconciliation generation");
+            assert!(
+                store
+                    .vector_index_backfilled_types(&tenant)
+                    .await
+                    .expect("read invalidated completion claim")
+                    .is_empty(),
+                "beginning B must atomically withdraw A's completion watermark"
+            );
+            assert_eq!(
+                store
+                    .vector_reconciliation_entity_types(&tenant)
+                    .await
+                    .expect("read durable reconciliation types"),
+                vec!["Item".to_string()],
+                "the in-progress type must remain discoverable without its watermark"
+            );
+            let generation = store
+                .begin_vector_index_reconciliation(&tenant, "Item", "embed")
+                .await
+                .expect("reclaim vector reconciliation generation");
+            assert!(generation > superseded_generation);
+            assert!(
+                store
+                    .mark_vector_index_backfilled(&tenant, "Item", superseded_generation, "v2|b",)
+                    .await
+                    .is_err(),
+                "the superseded generation must not republish its watermark"
+            );
+
+            store
+                .append_with_index_rows(
+                    &persistence_id,
+                    0,
+                    &[test_envelope("Created", serde_json::json!({}))],
+                    &[],
+                    &[row(vec![1.0, 0.0])],
+                    true,
+                )
+                .await
+                .expect("append initial vector");
+            store
+                .append_batch(&[
+                    PersistenceAppend {
+                        persistence_id: persistence_id.clone(),
+                        expected_sequence: 1,
+                        events: vec![test_envelope("CompositeUpdated", serde_json::json!({}))],
+                        vector_rows: vec![row(vec![0.0, 1.0])],
+                        reconcile_vectors: true,
+                    },
+                    PersistenceAppend {
+                        persistence_id: format!("{tenant}:Audit:audit-race"),
+                        expected_sequence: 0,
+                        events: vec![test_envelope("Recorded", serde_json::json!({}))],
+                        vector_rows: Vec::new(),
+                        reconcile_vectors: false,
+                    },
+                ])
+                .await
+                .expect("append composite live vector update");
+            store
+                .backfill_entity_vectors(
+                    &tenant,
+                    "Item",
+                    "item-race",
+                    generation,
+                    1,
+                    &[row(vec![1.0, 0.0])],
+                )
+                .await
+                .expect("ignore stale rebuild");
+            assert_eq!(
+                store
+                    .vector_candidates(&tenant, "Item", "embed", "m1", 10)
+                    .await
+                    .expect("read live vector")[0]
+                    .vector,
+                vec![0.0, 1.0]
+            );
+
+            store
+                .append_with_index_rows(
+                    &persistence_id,
+                    2,
+                    &[test_envelope("Deleted", serde_json::json!({}))],
+                    &[],
+                    &[],
+                    true,
+                )
+                .await
+                .expect("append vector purge");
+            store
+                .backfill_entity_vectors(
+                    &tenant,
+                    "Item",
+                    "item-race",
+                    generation,
+                    2,
+                    &[row(vec![0.0, 1.0])],
+                )
+                .await
+                .expect("ignore stale resurrection");
+            assert!(
+                store
+                    .vector_candidates(&tenant, "Item", "embed", "m1", 10)
+                    .await
+                    .expect("read purged vectors")
+                    .is_empty()
+            );
+            assert!(
+                !store
+                    .list_entity_ids_by_type(&tenant, "Item")
+                    .await
+                    .expect("list active entities")
+                    .iter()
+                    .any(|entity_id| entity_id == "item-race")
+            );
+            assert!(
+                store
+                    .list_vector_repair_entity_ids(&tenant, "Item")
+                    .await
+                    .expect("list repair streams")
+                    .iter()
+                    .any(|entity_id| entity_id == "item-race")
             );
         });
     }
