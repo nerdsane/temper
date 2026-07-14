@@ -21,6 +21,9 @@ use crate::state::{ObserveRefreshHint, ServerState};
 mod materialize;
 mod support;
 
+#[cfg(test)]
+mod feature_requests_test;
+
 pub(crate) use materialize::{handle_evolution_analyze, handle_evolution_materialize};
 
 use support::{
