@@ -194,14 +194,49 @@ pub(crate) fn sync_declared_state_vars_from_fields(
     state: &mut EntityState,
     table: &TransitionTable,
 ) -> Result<(), String> {
-    use temper_jit::table::types::StateVarInitialValue;
-
     let fields = state
         .fields
         .as_object()
         .ok_or_else(|| "entity fields must be an object".to_string())?;
+    sync_declared_state_vars(
+        &mut state.counters,
+        &mut state.booleans,
+        &mut state.item_count,
+        table,
+        fields,
+    )
+}
+
+/// Synchronize action parameters into declared counter/boolean state before
+/// applying effects, so effect mutations remain authoritative.
+pub(crate) fn sync_declared_state_vars_from_params(
+    state: &mut EntityState,
+    table: &TransitionTable,
+    params: &serde_json::Value,
+) -> Result<(), String> {
+    let params = params
+        .as_object()
+        .ok_or_else(|| "action params must be an object".to_string())?;
+    sync_declared_state_vars(
+        &mut state.counters,
+        &mut state.booleans,
+        &mut state.item_count,
+        table,
+        params,
+    )
+}
+
+fn sync_declared_state_vars(
+    counters: &mut std::collections::BTreeMap<String, usize>,
+    booleans: &mut std::collections::BTreeMap<String, bool>,
+    item_count: &mut usize,
+    table: &TransitionTable,
+    values: &serde_json::Map<String, serde_json::Value>,
+) -> Result<(), String> {
+    use temper_jit::table::types::StateVarInitialValue;
+
     for (name, initial) in &table.state_var_initials {
-        let Some(value) = fields.get(name) else {
+        let Some(value) = values.get(name) else {
             continue;
         };
         match initial {
@@ -213,16 +248,16 @@ pub(crate) fn sync_declared_state_vars_from_fields(
                     }
                     continue;
                 };
-                state.counters.insert(name.clone(), counter);
+                counters.insert(name.clone(), counter);
                 if name == "items" {
-                    state.item_count = counter;
+                    *item_count = counter;
                 }
             }
             StateVarInitialValue::Bool(_) => {
                 let boolean = value
                     .as_bool()
                     .ok_or_else(|| format!("declared bool field '{name}' must be boolean"))?;
-                state.booleans.insert(name.clone(), boolean);
+                booleans.insert(name.clone(), boolean);
             }
             StateVarInitialValue::String(_) => {}
         }
@@ -457,6 +492,19 @@ pub fn process_action_with_xref_and_field_mode(
             let params = effective_params.as_ref();
 
             if let Err(error) = validate_declared_field_values(params, table) {
+                return ProcessResult {
+                    success: false,
+                    event: None,
+                    custom_effects: vec![],
+                    scheduled_actions: vec![],
+                    spawn_requests: vec![],
+                    overflow_blobs: vec![],
+                    error: Some(error),
+                };
+            }
+
+            if let Err(error) = sync_declared_state_vars_from_params(state, table, params) {
+                *state = state_before_action;
                 return ProcessResult {
                     success: false,
                     event: None,

@@ -649,6 +649,82 @@ assert = "goal != ''"
 
 #[cfg(feature = "sim")]
 #[tokio::test]
+async fn declared_counter_action_param_survives_replay() {
+    use temper_runtime::persistence::EventStore;
+    use temper_runtime::scheduler::install_deterministic_context;
+    use temper_store_sim::SimEventStore;
+
+    let (_guard, _clock, _id_gen) = install_deterministic_context(213);
+    let table = TransitionTable::from_ioa_source(
+        r#"
+[automaton]
+name = "File"
+states = ["Created", "Ready"]
+initial = "Created"
+
+[[state]]
+name = "size_bytes"
+type = "counter"
+initial = "0"
+
+[[action]]
+name = "StreamUpdated"
+kind = "input"
+from = ["Created", "Ready"]
+to = "Ready"
+params = ["size_bytes"]
+"#,
+    );
+    let store = Arc::new(SimEventStore::no_faults(213));
+    let pid = "default:File:declared-counter-replay";
+    store
+        .append(
+            pid,
+            0,
+            &[PersistenceEnvelope {
+                sequence_nr: 0,
+                event_type: "StreamUpdated".to_string(),
+                payload: serde_json::json!({
+                    "action": "StreamUpdated",
+                    "from_status": "Created",
+                    "to_status": "Ready",
+                    "timestamp": "2024-01-01T00:00:00Z",
+                    "params": {"size_bytes": 42}
+                }),
+                metadata: EventMetadata {
+                    event_id: sim_uuid(),
+                    causation_id: sim_uuid(),
+                    correlation_id: sim_uuid(),
+                    timestamp: sim_now(),
+                    actor_id: pid.to_string(),
+                },
+            }],
+        )
+        .await
+        .expect("append declared counter event");
+    let boxed_store = crate::storage::BoxedEventStore::from_arc(store);
+
+    let recovered = recover_entity_state_from_store(
+        "default",
+        "File",
+        "declared-counter-replay",
+        &table,
+        &boxed_store,
+        crate::storage::BackendLabel::Sim,
+        &serde_json::json!({}),
+        None,
+        true,
+    )
+    .await
+    .expect("declared counter event must replay");
+
+    assert_eq!(recovered.counters["size_bytes"], 42);
+    assert_eq!(recovered.fields["size_bytes"], 42);
+    assert_eq!(recovered.status, "Ready");
+}
+
+#[cfg(feature = "sim")]
+#[tokio::test]
 async fn hydration_rejects_invalid_snapshot_before_healing_tail_event() {
     use temper_runtime::persistence::EventStore;
     use temper_runtime::scheduler::install_deterministic_context;

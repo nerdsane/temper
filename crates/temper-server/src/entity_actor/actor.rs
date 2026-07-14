@@ -595,6 +595,16 @@ impl EntityActor {
                                         "persisted event has invalid declared field values: {error}"
                                     ))
                                 })?;
+                            super::effects::sync_declared_state_vars_from_params(
+                                state,
+                                table,
+                                &event.params,
+                            )
+                            .map_err(|error| {
+                                ActorError::custom(format!(
+                                    "persisted event has invalid declared state values: {error}"
+                                ))
+                            })?;
                             if let Some(effects) =
                                 table.replay_effects(&state.status, &event.action)
                             {
