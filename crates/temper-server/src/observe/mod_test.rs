@@ -1684,13 +1684,31 @@ async fn test_intent_evidence_returns_richer_intent_candidates() {
 }
 
 async fn persist_feature_request_evidence(state: &ServerState, index: i64) {
+    persist_feature_request_evidence_for_action(state, index, "GenerateReport").await;
+}
+
+async fn persist_feature_request_evidence_for_action(
+    state: &ServerState,
+    index: i64,
+    action: &str,
+) {
+    let timestamp = (sim_now() + chrono::Duration::seconds(index)).to_rfc3339();
+    persist_feature_request_evidence_for_action_at(state, index, action, &timestamp).await;
+}
+
+async fn persist_feature_request_evidence_for_action_at(
+    state: &ServerState,
+    index: i64,
+    action: &str,
+    timestamp: &str,
+) {
     state
         .persist_trajectory_entry(&TrajectoryEntry {
-            timestamp: (sim_now() + chrono::Duration::seconds(index)).to_rfc3339(),
+            timestamp: timestamp.to_string(),
             tenant: "default".to_string(),
             entity_type: "MissingCapability".to_string(),
             entity_id: format!("missing-{index}"),
-            action: "GenerateReport".to_string(),
+            action: action.to_string(),
             success: false,
             from_status: None,
             to_status: None,
@@ -1814,6 +1832,27 @@ async fn sentinel_materializes_feature_requests_idempotently_by_evidence_revisio
         .platform_metadata_store()
         .expect("Turso metadata store");
     let app = build_app_with_state(state.clone());
+    let generated = evolution::insight_generator::generate_feature_requests(
+        &state.load_trajectory_entries(100).await,
+    );
+    let legacy = generated.first().expect("feature request at threshold");
+    let legacy_id = "FR-2026-0123456789ab";
+    store
+        .upsert_feature_request(
+            legacy_id,
+            &format!("{:?}", legacy.category),
+            &legacy.description,
+            legacy.frequency as i64,
+            &serde_json::to_string(&legacy.trajectory_refs).expect("serialize legacy refs"),
+            "Open",
+            None,
+        )
+        .await
+        .expect("seed legacy GET-created projection");
+    store
+        .update_feature_request(legacy_id, "Planned", Some("Reviewed before upgrade"))
+        .await
+        .expect("seed human review on legacy projection");
 
     let (first, concurrent_retry) = tokio::join!(
         app.clone()
@@ -1851,8 +1890,34 @@ async fn sentinel_materializes_feature_requests_idempotently_by_evidence_revisio
         .await
         .expect("first FeatureRequest entity");
     let first_event_count = first_entity.state.events.len();
+    let creation_event_count = first_entity
+        .state
+        .events
+        .iter()
+        .filter(|event| event.action == "CreateFeatureRequest")
+        .count();
+    assert_eq!(
+        creation_event_count, 1,
+        "concurrent materialization must append exactly one creation event",
+    );
+    let migrated_rows = store
+        .list_feature_requests(None)
+        .await
+        .expect("list reconciled legacy projection");
+    assert_eq!(
+        migrated_rows.len(),
+        1,
+        "upgrade reconciliation must replace legacy duplicates with one canonical row",
+    );
+    assert_eq!(migrated_rows[0].id, stable_id);
+    assert_eq!(migrated_rows[0].disposition, "Planned");
+    assert_eq!(
+        migrated_rows[0].developer_notes.as_deref(),
+        Some("Reviewed before upgrade"),
+        "upgrade reconciliation must preserve human review state",
+    );
     store
-        .update_feature_request(&stable_id, "Planned", Some("Reviewed by a human"))
+        .update_feature_request(&stable_id, "Planned", Some("Reviewed after migration"))
         .await
         .expect("record human feature-request review");
 
@@ -1877,7 +1942,7 @@ async fn sentinel_materializes_feature_requests_idempotently_by_evidence_revisio
     assert_eq!(stable_rows[0].disposition, "Planned");
     assert_eq!(
         stable_rows[0].developer_notes.as_deref(),
-        Some("Reviewed by a human"),
+        Some("Reviewed after migration"),
         "materialization must preserve mutable human review state",
     );
     let stable_entity = state
@@ -1915,6 +1980,114 @@ async fn sentinel_materializes_feature_requests_idempotently_by_evidence_revisio
             .len(),
         2,
         "changed evidence must create an explicit new revision",
+    );
+}
+
+#[tokio::test]
+async fn sentinel_reconciles_only_matching_legacy_evidence_and_deduplicates_notes() {
+    let state = test_state_with_feature_request_runtime().await;
+    for index in 0..3 {
+        let timestamp = (sim_now() + chrono::Duration::seconds(index)).to_rfc3339();
+        persist_feature_request_evidence_for_action_at(&state, index, "GenerateReport", &timestamp)
+            .await;
+        persist_feature_request_evidence_for_action_at(
+            &state,
+            index,
+            "ExportDashboard",
+            &timestamp,
+        )
+        .await;
+    }
+    let generated = evolution::insight_generator::generate_feature_requests(
+        &state.load_trajectory_entries(100).await,
+    );
+    assert_eq!(generated.len(), 2);
+    let report = generated
+        .iter()
+        .find(|record| record.description.contains("'GenerateReport'"))
+        .expect("report feature request");
+    let dashboard = generated
+        .iter()
+        .find(|record| record.description.contains("'ExportDashboard'"))
+        .expect("dashboard feature request");
+    assert_eq!(
+        report.trajectory_refs, dashboard.trajectory_refs,
+        "regression requires both actions to share the same evidence timestamps",
+    );
+
+    let store = state
+        .platform_metadata_store()
+        .expect("Turso metadata store");
+    let report_id = evolution::stable_feature_request_id(&TenantId::default(), "v1", report);
+    let seeds = [
+        (
+            report_id.as_str(),
+            report,
+            "Planned",
+            Some("Report note A\n\nReport note B"),
+        ),
+        (
+            "FR-2026-222222222222",
+            report,
+            "Planned",
+            Some("Report note B"),
+        ),
+        (
+            "FR-2026-333333333333",
+            dashboard,
+            "Acknowledged",
+            Some("Dashboard note"),
+        ),
+    ];
+    for (id, record, disposition, notes) in seeds {
+        store
+            .upsert_feature_request(
+                id,
+                &format!("{:?}", record.category),
+                &record.description,
+                record.frequency as i64,
+                &serde_json::to_string(&record.trajectory_refs).expect("serialize legacy refs"),
+                disposition,
+                notes,
+            )
+            .await
+            .expect("seed feature-request projection");
+    }
+
+    let response = build_app_with_state(state)
+        .oneshot(system_post("/api/evolution/sentinel/check", ""))
+        .await
+        .expect("sentinel reconciliation request");
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let rows = store
+        .list_feature_requests(None)
+        .await
+        .expect("list reconciled feature requests");
+    assert_eq!(rows.len(), 2, "each action must retain one canonical row");
+    assert!(
+        rows.iter().all(|row| !row.id.starts_with("FR-2026-")),
+        "all legacy projections must be removed",
+    );
+    let report_row = rows
+        .iter()
+        .find(|row| row.description.contains("'GenerateReport'"))
+        .expect("canonical report row");
+    assert_eq!(report_row.disposition, "Planned");
+    assert_eq!(
+        report_row.developer_notes.as_deref(),
+        Some("Report note A\n\nReport note B"),
+        "retrying after one legacy row was deleted must preserve canonical note bytes",
+    );
+    let dashboard_row = rows
+        .iter()
+        .find(|row| row.description.contains("'ExportDashboard'"))
+        .expect("canonical dashboard row");
+    assert_eq!(dashboard_row.disposition, "Acknowledged");
+    assert_eq!(
+        dashboard_row.developer_notes.as_deref(),
+        Some("Dashboard note"),
+        "same-timestamp evidence from another action must not contaminate review state",
     );
 }
 

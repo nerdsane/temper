@@ -20,10 +20,12 @@ use crate::sentinel;
 use crate::state::{ObserveRefreshHint, ServerState};
 
 mod materialize;
+mod reconcile;
 mod support;
 
 pub(crate) use materialize::{handle_evolution_analyze, handle_evolution_materialize};
 
+use reconcile::reconcile_legacy_feature_requests;
 use support::{
     dispatch_system_action_idempotent, emit_refresh_hints, persist_alerts, persist_insights,
     spawn_intent_discovery,
@@ -168,6 +170,13 @@ async fn materialize_feature_requests(
     let store = state
         .platform_metadata_store()
         .ok_or(StatusCode::SERVICE_UNAVAILABLE)?;
+    let existing_rows = store
+        .list_feature_requests(None)
+        .await
+        .map_err(|error| {
+            tracing::error!(error = %error, backend = store.backend_name(), "failed to load feature requests for reconciliation");
+            StatusCode::INTERNAL_SERVER_ERROR
+        })?;
     let mut materialized_ids = Vec::with_capacity(generated.len());
 
     for feature_request in &generated {
@@ -219,6 +228,13 @@ async fn materialize_feature_requests(
                 tracing::error!(error = %error, backend = store.backend_name(), feature_request_id = %stable_id, "failed to project feature request");
                 StatusCode::INTERNAL_SERVER_ERROR
             })?;
+        reconcile_legacy_feature_requests(
+            store.as_ref(),
+            &existing_rows,
+            &stable_id,
+            feature_request,
+        )
+        .await?;
         materialized_ids.push(stable_id);
     }
 
