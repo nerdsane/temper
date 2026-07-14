@@ -220,6 +220,43 @@ async fn vector_index_reconcile_purges_on_delete_and_empty_rows() {
 }
 
 #[tokio::test]
+async fn vector_index_failure_never_commits_journal_without_index() {
+    let store = make_store("vector-atomicity").await;
+    let conn = store.configured_connection().await.unwrap();
+    conn.execute(
+        "CREATE TRIGGER reject_vector_insert \
+         BEFORE INSERT ON entity_vector_index \
+         BEGIN SELECT RAISE(ABORT, 'forced vector-index write failure'); END",
+        (),
+    )
+    .await
+    .unwrap();
+
+    let persistence_id = "t:Item:item-atomic";
+    let result = store
+        .append_with_index_rows(
+            persistence_id,
+            0,
+            &[test_envelope("Create", serde_json::json!({}))],
+            &[],
+            &[EntityVectorRow {
+                decl_name: "embed".to_string(),
+                model_tag: "m1".to_string(),
+                vector: vec![1.0, 0.0],
+            }],
+            true,
+        )
+        .await;
+    let journal = store.read_events(persistence_id, 0).await.unwrap();
+
+    assert!(
+        result.is_err() && journal.is_empty(),
+        "a rejected vector write must roll back its journal append; result={result:?}, journal_len={}",
+        journal.len()
+    );
+}
+
+#[tokio::test]
 async fn append_with_wrong_sequence_fails_with_concurrency_violation() {
     let store = make_store("concurrency").await;
     let persistence_id = "tenant-a:Order:ord-2";

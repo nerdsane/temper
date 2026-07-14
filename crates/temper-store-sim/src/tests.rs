@@ -55,6 +55,66 @@ async fn append_multiple_events() {
 }
 
 #[tokio::test]
+async fn stale_vector_backfill_does_not_overwrite_newer_live_write() {
+    let store = SimEventStore::no_faults(42);
+    let persistence_id = "default:Item:item-race";
+    let stale_row = EntityVectorRow {
+        decl_name: "embed".to_string(),
+        model_tag: "model-v1".to_string(),
+        vector: vec![1.0, 0.0],
+    };
+
+    store
+        .append_with_index_rows(
+            persistence_id,
+            0,
+            &[test_envelope(0, "Created")],
+            &[],
+            std::slice::from_ref(&stale_row),
+            true,
+        )
+        .await
+        .unwrap();
+
+    let live_row = EntityVectorRow {
+        decl_name: "embed".to_string(),
+        model_tag: "model-v1".to_string(),
+        vector: vec![0.0, 1.0],
+    };
+    store
+        .append_with_index_rows(
+            persistence_id,
+            1,
+            &[test_envelope(0, "Updated")],
+            &[],
+            std::slice::from_ref(&live_row),
+            true,
+        )
+        .await
+        .unwrap();
+
+    // Model a rebuild that loaded journal sequence 1 before the live sequence-2
+    // append committed, then reached the index after that append.
+    store
+        .backfill_entity_vectors("default", "Item", "item-race", &[stale_row])
+        .await
+        .unwrap();
+
+    let candidates = store
+        .vector_candidates("default", "Item", "embed", "model-v1", 10)
+        .await
+        .unwrap();
+    assert_eq!(
+        candidates,
+        vec![EntityVectorCandidate {
+            entity_id: "item-race".to_string(),
+            vector: live_row.vector,
+        }],
+        "a stale rebuild observed at sequence 1 must not overwrite the vector co-committed at sequence 2"
+    );
+}
+
+#[tokio::test]
 async fn append_batch_commits_multiple_journals_atomically() {
     let store = SimEventStore::no_faults(42);
     let appends = vec![
