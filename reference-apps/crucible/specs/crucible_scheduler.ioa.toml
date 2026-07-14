@@ -25,8 +25,8 @@ hint = "Begin the heartbeat loop. Triggers the first schedule check."
 effect = [{ type = "trigger", name = "crucible_check_schedules" }]
 
 # ADR-0046: inline trigger — migrated from [[integration]] below.
-# Post-parse expansion re-synthesizes the equivalent Integration so
-# the existing WASM/webhook runtime handles execution unchanged.
+# Post-parse expansion re-synthesizes the equivalent WASM integration so
+# the governed WASM runtime handles execution unchanged.
 [[action.triggers]]
 name = "crucible_check_schedules"
 kind = "wasm"
@@ -56,8 +56,8 @@ hint = "Check cycle finished. Triggers the heartbeat wait."
 effect = [{ type = "trigger", name = "crucible_schedule_next_check" }]
 
 # ADR-0046: inline trigger — migrated from [[integration]] below.
-# Post-parse expansion re-synthesizes the equivalent Integration so
-# the existing WASM/webhook runtime handles execution unchanged.
+# Post-parse expansion re-synthesizes the equivalent WASM integration so
+# the governed WASM runtime handles execution unchanged.
 [[action.triggers]]
 name = "crucible_schedule_next_check"
 kind = "wasm"

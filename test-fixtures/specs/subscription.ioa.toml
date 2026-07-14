@@ -1,7 +1,7 @@
 # Subscription Management Entity — I/O Automaton Specification
 #
 # Models a SaaS subscription lifecycle with payment failure handling.
-# 5 states, 8 transition actions, 2 integration webhooks.
+# 5 states, 8 transition actions.
 # Tracks payment failure count and auto-renewal preference.
 
 [automaton]
@@ -99,15 +99,3 @@ assert = "no_further_transitions"
 name = "PastDueHasFailure"
 when = ["PastDue", "Suspended", "Expired"]
 assert = "payment_failures > 0"
-
-# --- Integrations ---
-
-[[integration]]
-name = "billing_webhook"
-trigger = "PaymentFailed"
-type = "webhook"
-
-[[integration]]
-name = "dunning_notice"
-trigger = "SuspendSubscription"
-type = "webhook"

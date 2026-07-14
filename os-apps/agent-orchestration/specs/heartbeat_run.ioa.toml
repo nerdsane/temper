@@ -193,13 +193,3 @@ type = "adapter"
 adapter = "{field:adapter_type}"
 on_success = "RecordResult"
 on_failure = "Fail"
-
-[[integration]]
-name = "notify_completed"
-trigger = "Complete"
-type = "webhook"
-
-[[integration]]
-name = "notify_failed"
-trigger = "Fail"
-type = "webhook"

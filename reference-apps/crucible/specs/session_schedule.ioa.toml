@@ -44,8 +44,8 @@ effect = [{ type = "trigger", name = "crucible_cron_trigger" },
           { type = "increment", var = "run_count" }]
 
 # ADR-0046: inline trigger — migrated from [[integration]] below.
-# Post-parse expansion re-synthesizes the equivalent Integration so
-# the existing WASM/webhook runtime handles execution unchanged.
+# Post-parse expansion re-synthesizes the equivalent WASM integration so
+# the governed WASM runtime handles execution unchanged.
 [[action.triggers]]
 name = "crucible_cron_trigger"
 kind = "wasm"
