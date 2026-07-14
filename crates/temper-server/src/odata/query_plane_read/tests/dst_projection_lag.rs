@@ -358,3 +358,239 @@ async fn dst_projection_lag_413_eliminated_by_keyed_index() {
         );
     }
 }
+
+/// ARN-238 restart shape: durable enumeration contains both a tombstoned former
+/// owner and the live replacement, while the query projection contains only the
+/// replacement. A declared-key filter must never materialize the tombstone from the
+/// coverage gap. Both the ordinary and `$count=true` point lookups must prefer the
+/// co-committed key index over the lagging native page, so the stale projection can
+/// neither widen the result nor inflate the count.
+#[tokio::test]
+async fn dst_tombstone_never_resolves_declared_key_after_restart() {
+    for seed in 0..DST_SEEDS {
+        let (_guard, _clock, _id) = install_deterministic_context(seed);
+        let qp = std::sync::Arc::new(SimQueryPlane::default());
+        let (state, _events) = sim_state(seed, qp.clone());
+        let tenant = TenantId::default();
+        let former_id = format!("former-{seed}");
+        let fields = serde_json::json!({
+            "Id": former_id.clone(),
+            "WorkspaceId": "ws-reclaim",
+            "Path": "/same-key"
+        });
+
+        state
+            .get_or_create_tenant_entity(&tenant, "Order", &former_id, fields.clone())
+            .await
+            .expect("create former owner");
+        state
+            .delete_tenant_entity(&tenant, "Order", &former_id)
+            .await
+            .expect("delete former owner");
+        let replacement_id = format!("replacement-{seed}");
+        state
+            .get_or_create_tenant_entity(
+                &tenant,
+                "Order",
+                &replacement_id,
+                serde_json::json!({
+                    "Id": replacement_id.clone(),
+                    "WorkspaceId": "ws-reclaim",
+                    "Path": "/same-key"
+                }),
+            )
+            .await
+            .expect("replacement reclaims key");
+
+        // Simulate restart hydration: durable enumeration sees both streams. The
+        // query plane still holds the former owner's pre-delete live row — the exact
+        // lag shape produced when projection removal is delayed or crash-lost.
+        state.populate_index_from_store(&tenant).await;
+        let stale_state = serde_json::json!({
+            "entity_type": "Order",
+            "entity_id": former_id.clone(),
+            "status": "Draft",
+            "fields": fields,
+            "sequence_nr": 1,
+        });
+        qp.upsert_projection(
+            tenant.as_str(),
+            "Order",
+            &former_id,
+            "Draft",
+            &stale_state["fields"],
+            &stale_state,
+            1,
+        )
+        .await
+        .expect("seed lagging pre-delete catalog row");
+        let security_ctx = SecurityContext::system();
+        let budget = QueryPlaneReadBudget {
+            default_page_size: 10,
+            max_entities: 10,
+        };
+        for include_count in [false, true] {
+            let options = QueryOptions {
+                filter: Some(eq_filter("ws-reclaim", "/same-key")),
+                count: include_count.then_some(true),
+                ..QueryOptions::default()
+            };
+            let result = read_entity_set_page(QueryPlaneReadRequest {
+                state: &state,
+                tenant: &tenant,
+                security_ctx: &security_ctx,
+                entity_type: "Order",
+                entity_set_name: "Orders",
+                query_options: &options,
+                budget,
+            })
+            .await;
+            let result = match result {
+                Ok(result) => result,
+                Err(_) => panic!("declared-key read remains bounded and visible"),
+            };
+            assert_eq!(
+                result.entities.len(),
+                1,
+                "seed {seed}, count={include_count}"
+            );
+            assert_eq!(
+                result.entities[0]["entity_id"], replacement_id,
+                "seed {seed}: tombstoned former owner must never resolve"
+            );
+            if include_count {
+                assert_eq!(result.count, Some(1));
+            } else {
+                assert!(result.telemetry.candidate_count <= 1);
+            }
+        }
+    }
+}
+
+/// Rollout/migration shape: an entity was keyed before ADR-0171, its delete journal
+/// event committed without exact key reconciliation, and projection removal was
+/// crash-lost. Until the v2 repair reaches this stream, neither the stale key hit nor
+/// the pre-delete live catalog row may expose the durable tombstone.
+#[tokio::test]
+async fn dst_pre_v2_stale_key_hit_never_returns_crash_lost_live_projection() {
+    for seed in 0..DST_SEEDS {
+        let (_guard, _clock, _id) = install_deterministic_context(seed);
+        let qp = std::sync::Arc::new(SimQueryPlane::default());
+        let (state, events) = sim_state(seed, qp.clone());
+        let tenant = TenantId::default();
+        let entity_id = format!("legacy-deleted-{seed}");
+        let fields = serde_json::json!({
+            "Id": entity_id.clone(),
+            "WorkspaceId": "ws-legacy",
+            "Path": "/stale-key"
+        });
+
+        state
+            .get_or_create_tenant_entity(&tenant, "Order", &entity_id, fields.clone())
+            .await
+            .expect("create pre-v2 owner");
+        let persistence_id = format!("{tenant}:Order:{entity_id}");
+        let current_sequence = events
+            .read_events(&persistence_id, 0)
+            .await
+            .expect("read pre-delete history")
+            .last()
+            .expect("create event exists")
+            .sequence_nr;
+        let timestamp = sim_now();
+        let tombstone = crate::entity_actor::EntityEvent {
+            action: "Deleted".to_string(),
+            from_status: "Draft".to_string(),
+            to_status: "Deleted".to_string(),
+            timestamp,
+            params: serde_json::json!({}),
+            idempotency_key: None,
+        };
+        // Legacy event-only append: durable delete advances, stale key row remains.
+        events
+            .append(
+                &persistence_id,
+                current_sequence,
+                &[envelope(
+                    "Deleted",
+                    serde_json::to_value(tombstone).expect("serialize tombstone"),
+                )],
+            )
+            .await
+            .expect("append legacy tombstone");
+        assert_eq!(
+            events
+                .lookup_by_key(
+                    tenant.as_str(),
+                    "Order",
+                    "ws_path",
+                    &doc_key_hash("ws-legacy", "/stale-key"),
+                )
+                .await
+                .expect("lookup stale legacy key"),
+            Some(entity_id.clone()),
+            "precondition: legacy delete left stale ownership"
+        );
+
+        // Restart the actor view, but retain the crash-lost pre-delete catalog row.
+        state.stop_and_remove_entity(&tenant, "Order", &entity_id);
+        let stale_state = serde_json::json!({
+            "entity_type": "Order",
+            "entity_id": entity_id.clone(),
+            "status": "Draft",
+            "fields": fields,
+            "sequence_nr": current_sequence,
+        });
+        qp.upsert_projection(
+            tenant.as_str(),
+            "Order",
+            &entity_id,
+            "Draft",
+            &stale_state["fields"],
+            &stale_state,
+            current_sequence,
+        )
+        .await
+        .expect("seed crash-lost live projection");
+        assert!(
+            !state
+                .key_index_backfill_complete(&tenant, "Order", "v2|ws_path")
+                .await,
+            "precondition: v2 repair has not certified this type"
+        );
+
+        let security_ctx = SecurityContext::system();
+        let budget = QueryPlaneReadBudget {
+            default_page_size: 10,
+            max_entities: 10,
+        };
+        for include_count in [false, true] {
+            let options = QueryOptions {
+                filter: Some(eq_filter("ws-legacy", "/stale-key")),
+                count: include_count.then_some(true),
+                ..QueryOptions::default()
+            };
+            let result = read_entity_set_page(QueryPlaneReadRequest {
+                state: &state,
+                tenant: &tenant,
+                security_ctx: &security_ctx,
+                entity_type: "Order",
+                entity_set_name: "Orders",
+                query_options: &options,
+                budget,
+            })
+            .await;
+            let result = match result {
+                Ok(result) => result,
+                Err(_) => panic!("migration-state read stays within the small proof budget"),
+            };
+            assert!(
+                result.entities.is_empty(),
+                "seed {seed}, count={include_count}: durable tombstone must win over stale key/catalog"
+            );
+            if include_count {
+                assert_eq!(result.count, Some(0));
+            }
+        }
+    }
+}

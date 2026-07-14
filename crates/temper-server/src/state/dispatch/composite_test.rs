@@ -2,6 +2,8 @@ use std::collections::BTreeMap;
 
 use serde_json::json;
 use temper_runtime::ActorSystem;
+#[cfg(feature = "sim")]
+use temper_runtime::persistence::EventStore;
 use temper_spec::csdl::parse_csdl;
 #[cfg(feature = "sim")]
 use temper_store_sim::SimEventStore;
@@ -222,6 +224,10 @@ const CHILD_IOA: &str = r#"
 name = "Child"
 states = ["Draft", "Active", "Deleted"]
 initial = "Draft"
+
+[[key]]
+name = "child_name"
+properties = ["Name"]
 
 [[action]]
 name = "Create"
@@ -1374,6 +1380,22 @@ async fn composite_atomic_batch_allows_existing_sub_write_to_delete_target() {
         .expect("child create should run");
     assert!(created.success);
     assert!(state.entity_exists(&tenant, "Child", child_id));
+    let child_name_hash = crate::key_index::canonical_key_hash(
+        "child_name",
+        &["Name".to_string()],
+        json!({ "Name": "temporary child" })
+            .as_object()
+            .expect("key fields object"),
+    )
+    .expect("complete child name key");
+    assert_eq!(
+        store
+            .lookup_by_key(tenant.as_str(), "Child", "child_name", &child_name_hash,)
+            .await
+            .expect("lookup created child key"),
+        Some(child_id.to_string()),
+        "precondition: normal create owns the declared key"
+    );
 
     let applied = state
         .apply_composite_integration_result(
@@ -1400,6 +1422,14 @@ async fn composite_atomic_batch_allows_existing_sub_write_to_delete_target() {
         "deleted composite sub-write target should not be reloaded as a live entity"
     );
     assert!(!state.entity_exists(&tenant, "Child", child_id));
+    assert_eq!(
+        store
+            .lookup_by_key(tenant.as_str(), "Child", "child_name", &child_name_hash,)
+            .await
+            .expect("lookup key after composite delete"),
+        None,
+        "composite delete must release declared-key ownership atomically"
+    );
 
     let child_journal = store.dump_journal(&format!("default:Child:{child_id}"));
     assert_eq!(
