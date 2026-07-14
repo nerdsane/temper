@@ -22,7 +22,7 @@ pub use id_gen::{DeterministicIdGen, RealIdGen, SimIdGen};
 pub use rng::DeterministicRng;
 pub use sim_actor_system::{
     ActorInvariantViolation, RunRecord, SimActorResult, SimActorSystem, SimActorSystemConfig,
-    SimIntegrationResponses,
+    SimExecutionError, SimIntegrationResponses,
 };
 pub use sim_handler::{CompareOp, SimActorHandler, SpecAssert, SpecInvariant};
 pub use types::{FaultConfig, SimActorState, SimMessage, SimTime};

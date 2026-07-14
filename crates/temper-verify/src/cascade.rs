@@ -453,6 +453,7 @@ impl VerificationCascade {
             num_actors: 3,
             max_actions_per_actor: 20,
             max_counter: self.max_counter,
+            message_budget_per_tick: 1_024,
             faults: FaultConfig::light(),
         };
 

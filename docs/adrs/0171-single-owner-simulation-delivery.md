@@ -25,13 +25,17 @@ These paths make deterministic simulation disagree with the delivery contract it
 
 ### One deterministic mailbox drain owns processing
 
-The scheduler exposes one budgeted drain operation. It consumes ready messages from mailboxes in `BTreeMap` actor order and FIFO order within each actor. Both the runtime actor simulator and verifier simulator process only messages returned by this consuming drain. No driver may inspect a delivery through a parallel return path.
+The scheduler exposes one budgeted drain operation. It consumes ready messages by cycling through `BTreeMap` actor order and preserving FIFO order within each actor. The cursor carries across drains so a small budget cannot permanently starve a later mailbox. Both the runtime actor simulator and verifier simulator process only messages returned by this consuming drain. No driver may inspect a delivery through a parallel return path.
 
 The drain accepts a message budget. A tick budget already bounds elapsed logical time; runtime and verifier configurations make the per-tick message budget explicit. Reaching a budget preserves undrained messages for a later tick rather than dropping them.
+
+Scheduler mailboxes also have an explicit per-actor retention budget. Drivers derive it from their maximum tick budget, which bounds the number of actions they can enqueue. Direct scheduler users receive a conservative default and fail fast if they exceed it.
 
 ### Reactions are iterative, budgeted, and fallible
 
 Integration callbacks are drained iteratively from their reaction queue under an explicit per-tick reaction budget. Callback rejection is recorded as a simulation execution error and makes the run unsuccessful. Callback dispatch does not recursively start another independent drain.
+
+In scripted mode, a primary action commits before its callbacks run. A callback error therefore reports partial completion and must not be interpreted as rollback or as permission to retry the primary action.
 
 ### Simulation success includes delivery execution
 
@@ -84,7 +88,7 @@ A successful simulation requires both invariant preservation and absence of deli
 
 ## Alternatives Considered
 
-1. **Process only the vector returned by `tick` and remove mailboxes** — Rejected because the scheduler's mailbox is the natural ownership boundary and is already required by receive/quiescence semantics.
+1. **Process only the vector returned by `tick` and remove mailboxes** — Rejected because the scheduler's mailbox is the natural ownership boundary and is required for quiescence and budget-preserving delivery.
 2. **Keep both paths and explicitly remove returned clones from mailboxes** — Rejected because clone correlation adds a compensating protocol while preserving two owners.
 3. **Let each simulator implement its own mailbox iteration** — Rejected because independent drivers can drift again and duplicate ordering/budget logic.
 
