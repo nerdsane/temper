@@ -118,6 +118,12 @@ async fn dst_boot_cycle_with_store_faults() {
             .await;
         // Dispatch may fail due to injected write faults — that's expected.
 
+        // Fault injection covers install and dispatch. Disable it before
+        // recovery and invariant reads so verification observes the complete
+        // durable journal rather than injecting a new read fault into the
+        // checker.
+        let previous_event_faults = harness.sim_event_store.disable_faults();
+
         // Restart — only successfully persisted state should be visible.
         harness.restart().await;
 
@@ -129,6 +135,10 @@ async fn dst_boot_cycle_with_store_faults() {
         assert_data_invariants(&harness).await.unwrap_or_else(|e| {
             panic!("seed {seed}: data invariants failed after store faults: {e}")
         });
+
+        harness
+            .sim_event_store
+            .restore_faults(previous_event_faults);
     }
 }
 

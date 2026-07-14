@@ -157,6 +157,102 @@ async fn concurrency_violation_on_wrong_sequence() {
 }
 
 #[tokio::test]
+async fn injected_concurrency_violations_report_the_durable_journal_head() {
+    const DETERMINISTIC_SINGLE: &str = "default:Order:deterministic-single";
+    const DETERMINISTIC_BATCH: &str = "default:Order:deterministic-batch";
+    const PROBABILISTIC_SINGLE: &str = "default:Order:probabilistic-single";
+    const PROBABILISTIC_BATCH: &str = "default:Order:probabilistic-batch";
+
+    let store = SimEventStore::no_faults(42);
+    for persistence_id in [
+        DETERMINISTIC_SINGLE,
+        DETERMINISTIC_BATCH,
+        PROBABILISTIC_SINGLE,
+        PROBABILISTIC_BATCH,
+    ] {
+        store
+            .append(persistence_id, 0, &[test_envelope(0, "Created")])
+            .await
+            .expect("seed durable journal head");
+    }
+
+    store.inject_concurrency_violations(DETERMINISTIC_SINGLE, 1);
+    let deterministic_append_error = store
+        .append(DETERMINISTIC_SINGLE, 0, &[test_envelope(0, "Duplicate")])
+        .await
+        .expect_err("deterministic single append conflict");
+    assert!(matches!(
+        deterministic_append_error,
+        PersistenceError::ConcurrencyViolation {
+            expected: 0,
+            actual: 1
+        }
+    ));
+
+    store.inject_concurrency_violations(DETERMINISTIC_BATCH, 1);
+    let deterministic_batch_error = store
+        .append_batch(&[PersistenceAppend {
+            persistence_id: DETERMINISTIC_BATCH.to_string(),
+            expected_sequence: 0,
+            events: vec![test_envelope(0, "Duplicate")],
+        }])
+        .await
+        .expect_err("deterministic batch append conflict");
+    assert!(matches!(
+        deterministic_batch_error,
+        PersistenceError::ConcurrencyViolation {
+            expected: 0,
+            actual: 1
+        }
+    ));
+
+    let faults = SimFaultConfig {
+        write_failure_prob: 0.0,
+        concurrency_violation_prob: 1.0,
+        read_truncation_prob: 0.0,
+        snapshot_failure_prob: 0.0,
+    };
+    store.restore_faults(faults);
+
+    let append_error = store
+        .append(PROBABILISTIC_SINGLE, 0, &[test_envelope(0, "Duplicate")])
+        .await
+        .expect_err("injected single append conflict");
+    assert!(matches!(
+        append_error,
+        PersistenceError::ConcurrencyViolation {
+            expected: 0,
+            actual: 1
+        }
+    ));
+
+    let batch_error = store
+        .append_batch(&[PersistenceAppend {
+            persistence_id: PROBABILISTIC_BATCH.to_string(),
+            expected_sequence: 0,
+            events: vec![test_envelope(0, "Duplicate")],
+        }])
+        .await
+        .expect_err("injected batch append conflict");
+    assert!(matches!(
+        batch_error,
+        PersistenceError::ConcurrencyViolation {
+            expected: 0,
+            actual: 1
+        }
+    ));
+
+    for persistence_id in [
+        DETERMINISTIC_SINGLE,
+        DETERMINISTIC_BATCH,
+        PROBABILISTIC_SINGLE,
+        PROBABILISTIC_BATCH,
+    ] {
+        assert_eq!(store.dump_journal(persistence_id).len(), 1);
+    }
+}
+
+#[tokio::test]
 async fn snapshot_save_and_load() {
     let store = SimEventStore::no_faults(42);
     let pid = "default:Order:ord-4";

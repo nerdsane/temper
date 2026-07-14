@@ -74,6 +74,11 @@ impl EntityActor {
         let mut retries_remaining = FIELD_UPDATE_RETRY_BUDGET;
 
         loop {
+            if base.status == "Deleted" {
+                return Err(FieldUpdateCommitError::Rejected(
+                    "deleted entity cannot be updated".to_string(),
+                ));
+            }
             if !base.can_accept_event() {
                 return Err(FieldUpdateCommitError::Rejected(format!(
                     "Event budget exhausted ({MAX_EVENTS_SINCE_SNAPSHOT} max since snapshot)"

@@ -171,6 +171,15 @@ struct SimEventStoreInner {
     vector_index_watermark: BTreeMap<(String, String), String>,
 }
 
+fn journal_head(inner: &SimEventStoreInner, persistence_id: &str) -> u64 {
+    inner
+        .journals
+        .get(persistence_id)
+        .and_then(|journal| journal.last())
+        .map(|event| event.sequence_nr)
+        .unwrap_or(0)
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SimEventSegment {
     pub segment_index: u64,
@@ -208,10 +217,9 @@ impl SimEventStore {
     /// normally.
     ///
     /// Use this for retry-path tests where the probabilistic fault injection
-    /// in `SimFaultConfig` would be flaky. Each injected violation reports
-    /// `actual = expected_sequence` (the journal has not actually moved), so
-    /// any callers with post-replay sequence assertions still hold after the
-    /// retry replays back to the same spot.
+    /// in `SimFaultConfig` would be flaky. Each injected violation reports the
+    /// current durable journal head as `actual`, matching a real store's
+    /// optimistic-concurrency contract.
     pub fn inject_concurrency_violations(&self, persistence_id: &str, count: u64) {
         let mut inner = self.inner.lock().expect("SimEventStore lock poisoned"); // ci-ok: infallible lock
         if count == 0 {
@@ -403,11 +411,8 @@ impl EventStore for SimEventStore {
         // Deterministic one-shot injection (see `inject_concurrency_violations`).
         // Consumes one counter per call; falls back to normal flow once drained.
         //
-        // The reported `actual` equals `expected_sequence` — the journal has
-        // not actually moved, so an authoritative replay will land back at
-        // `expected_sequence`. Any code that asserts
-        // `post_replay_sequence >= actual` still holds without this injection
-        // lying about journal state.
+        // The reported `actual` is the current durable journal head, matching
+        // the optimistic-concurrency contract even for an injected conflict.
         let pending_cv = inner
             .pending_concurrency_violations
             .get(persistence_id)
@@ -423,7 +428,7 @@ impl EventStore for SimEventStore {
             }
             return Err(PersistenceError::ConcurrencyViolation {
                 expected: expected_sequence,
-                actual: expected_sequence,
+                actual: journal_head(&inner, persistence_id),
             });
         }
 
@@ -432,7 +437,7 @@ impl EventStore for SimEventStore {
         if inner.rng.chance(cv_prob) {
             return Err(PersistenceError::ConcurrencyViolation {
                 expected: expected_sequence,
-                actual: expected_sequence.wrapping_add(1),
+                actual: journal_head(&inner, persistence_id),
             });
         }
 
@@ -833,7 +838,7 @@ impl EventStore for SimEventStore {
                 }
                 return Err(PersistenceError::ConcurrencyViolation {
                     expected: append.expected_sequence,
-                    actual: append.expected_sequence,
+                    actual: journal_head(&inner, &append.persistence_id),
                 });
             }
         }
@@ -845,7 +850,7 @@ impl EventStore for SimEventStore {
             let first = &appends[0];
             return Err(PersistenceError::ConcurrencyViolation {
                 expected: first.expected_sequence,
-                actual: first.expected_sequence.wrapping_add(1),
+                actual: journal_head(&inner, &first.persistence_id),
             });
         }
         let wf_prob = inner.faults.write_failure_prob;

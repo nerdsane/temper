@@ -1105,9 +1105,11 @@ impl Actor for EntityActor {
                                         state,
                                         &self.tenant,
                                         self.blob_store.as_ref(),
-                                        // Actor hydration keeps the lenient "start
-                                        // fresh on read error" behavior (unchanged).
-                                        false,
+                                        // Retry decisions must use a complete
+                                        // authoritative tail; a partial recovery
+                                        // must trigger supervision instead of
+                                        // re-evaluating from stale state.
+                                        true,
                                     )
                                     .await?;
 
@@ -1471,6 +1473,19 @@ impl Actor for EntityActor {
                 });
             }
             EntityMsg::Delete => {
+                if state.status == "Deleted" {
+                    ctx.reply(EntityResponse {
+                        success: true,
+                        state: state.clone(),
+                        error: None,
+                        custom_effects: vec![],
+                        scheduled_actions: vec![],
+                        spawn_requests: vec![],
+                        spec_governed: true,
+                    });
+                    return Ok(());
+                }
+
                 let deleted = EntityEvent {
                     action: "Deleted".to_string(),
                     from_status: state.status.clone(),
@@ -1480,10 +1495,29 @@ impl Actor for EntityActor {
                     idempotency_key: None,
                 };
 
+                // Build the tombstone before persistence so key/vector
+                // reconciliation is derived from the exact state being
+                // committed. Publish it only after the journal append succeeds.
+                let mut tombstone = state.clone();
+                tombstone.status = deleted.to_status.clone();
+                if let Some(obj) = tombstone.fields.as_object_mut() {
+                    obj.insert(
+                        "Status".to_string(),
+                        serde_json::Value::String(tombstone.status.clone()),
+                    );
+                }
+                tombstone.push_event_bounded(deleted.clone());
+
                 if let (Some(store), Some(backend)) =
                     (self.event_journal.as_ref(), self.event_backend)
                     && let Err(e) = self
-                        .persist_event(store, backend, &self.persistence_id(), state, &deleted)
+                        .persist_event(
+                            store,
+                            backend,
+                            &self.persistence_id(),
+                            &mut tombstone,
+                            &deleted,
+                        )
                         .await
                 {
                     ctx.reply(EntityResponse {
@@ -1498,14 +1532,7 @@ impl Actor for EntityActor {
                     return Ok(());
                 }
 
-                state.status = deleted.to_status.clone();
-                if let Some(obj) = state.fields.as_object_mut() {
-                    obj.insert(
-                        "Status".to_string(),
-                        serde_json::Value::String(state.status.clone()),
-                    );
-                }
-                state.push_event_bounded(deleted);
+                *state = tombstone;
 
                 ctx.reply(EntityResponse {
                     success: true,
