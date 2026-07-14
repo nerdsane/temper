@@ -134,6 +134,10 @@ fn callback_failure_is_returned_and_invalidates_random_run() {
     let error = scripted.step("Job:1", "Start", "{}").unwrap_err();
     assert!(error.contains("callback rejected"));
     assert_eq!(scripted.execution_errors().len(), 1);
+    let transitions_after_failure = scripted.total_transitions;
+    let retry_error = scripted.step("Job:1", "Complete", "{}").unwrap_err();
+    assert!(retry_error.contains("simulation run is invalid"));
+    assert_eq!(scripted.total_transitions, transitions_after_failure);
 
     let mut random = SimActorSystem::new(config);
     random.register_actor("Job:1", Box::new(CallbackFailureHandler::new()));
@@ -231,6 +235,10 @@ fn callback_cascade_fails_when_reaction_budget_is_exhausted() {
     let error = sim.step("Job:1", "Start", "{}").unwrap_err();
     assert!(error.contains("budget exhausted after 2 reactions"));
     assert_eq!(sim.execution_errors().len(), 1);
+    let transitions_after_failure = sim.total_transitions;
+    let retry_error = sim.step("Job:1", "Complete", "{}").unwrap_err();
+    assert!(retry_error.contains("simulation run is invalid"));
+    assert_eq!(sim.total_transitions, transitions_after_failure);
 }
 
 #[test]
