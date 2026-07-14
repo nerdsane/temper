@@ -3,7 +3,7 @@
 pub(crate) mod insight_generator;
 mod operations;
 #[cfg(test)]
-pub(crate) use operations::stable_feature_request_id;
+pub(crate) use operations::{materialize_feature_requests_for_test, stable_feature_request_id};
 mod records_detail;
 mod records_list;
 mod trajectories;

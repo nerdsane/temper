@@ -4,7 +4,10 @@ use std::collections::BTreeSet;
 
 use axum::http::StatusCode;
 use temper_evolution::FeatureRequestRecord;
+use temper_runtime::tenant::TenantId;
 use temper_store_turso::FeatureRequestRow;
+
+use crate::state::TrajectoryEntry;
 
 fn normalized_trajectory_refs(raw: &str) -> Option<Vec<String>> {
     let mut refs = serde_json::from_str::<Vec<String>>(raw).ok()?;
@@ -42,6 +45,32 @@ fn is_legacy_feature_request_id(id: &str) -> bool {
                 && suffix.len() == 12
                 && suffix.chars().all(|character| character.is_ascii_hexdigit())
     )
+}
+
+fn legacy_evidence_belongs_unambiguously_to_tenant(
+    row: &FeatureRequestRow,
+    tenant: &TenantId,
+    trajectory_entries: &[TrajectoryEntry],
+) -> bool {
+    let Some(refs) = normalized_trajectory_refs(&row.trajectory_refs) else {
+        return false;
+    };
+    let expected_refs = refs.iter().map(String::as_str).collect::<BTreeSet<_>>();
+    if expected_refs.is_empty() {
+        return false;
+    }
+
+    let mut matched_refs = BTreeSet::new();
+    let mut source_tenants = BTreeSet::new();
+    for entry in trajectory_entries {
+        if expected_refs.contains(entry.timestamp.as_str()) {
+            matched_refs.insert(entry.timestamp.as_str());
+            source_tenants.insert(entry.tenant.as_str());
+        }
+    }
+    matched_refs == expected_refs
+        && source_tenants.len() == 1
+        && source_tenants.contains(tenant.as_str())
 }
 
 fn merged_review_state(rows: &[&FeatureRequestRow], stable_id: &str) -> (String, Option<String>) {
@@ -103,6 +132,8 @@ fn merged_review_state(rows: &[&FeatureRequestRow], stable_id: &str) -> (String,
 pub(super) async fn reconcile_legacy_feature_requests(
     store: &dyn crate::storage::MetadataStore,
     existing_rows: &[FeatureRequestRow],
+    tenant: &TenantId,
+    trajectory_entries: &[TrajectoryEntry],
     stable_id: &str,
     feature_request: &FeatureRequestRecord,
 ) -> Result<(), StatusCode> {
@@ -110,7 +141,9 @@ pub(super) async fn reconcile_legacy_feature_requests(
     let matching_rows = existing_rows
         .iter()
         .filter(|row| {
-            (row.id == stable_id || is_legacy_feature_request_id(&row.id))
+            let is_owned_legacy = is_legacy_feature_request_id(&row.id)
+                && legacy_evidence_belongs_unambiguously_to_tenant(row, tenant, trajectory_entries);
+            (row.id == stable_id || is_owned_legacy)
                 && is_same_evidence_revision(row, &category, feature_request)
         })
         .collect::<Vec<_>>();
