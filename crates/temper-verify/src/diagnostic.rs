@@ -89,6 +89,8 @@ pub(crate) fn unsupported_invariant_errors(
 
 #[cfg(test)]
 mod tests {
+    use crate::VerificationCascade;
+
     const UNSUPPORTED_IOA: &str = r#"
 [automaton]
 name = "Workspace"
@@ -149,5 +151,70 @@ assert = "used_bytes ** quota_limit"
 
         let property_tests = crate::proptest_gen::run_prop_tests_from_ioa(UNSUPPORTED_IOA, 0, 0);
         assert!(!property_tests.passed);
+    }
+
+    #[test]
+    fn capability_preflight_rejects_undeclared_counter_references() {
+        for assertion in ["missing > 0", "missing >= 0"] {
+            let spec = format!(
+                r#"
+[automaton]
+name = "UndeclaredCounterClaim"
+states = ["Active"]
+initial = "Active"
+allow_indefinite_states = ["Active"]
+
+[[invariant]]
+name = "CounterMustBeDeclared"
+when = ["Active"]
+assert = "{assertion}"
+"#
+            );
+
+            let result = VerificationCascade::from_ioa(&spec)
+                .with_sim_seeds(0)
+                .with_prop_test_cases(0)
+                .run();
+
+            assert!(!result.all_passed, "{assertion} must fail closed");
+            assert!(result.levels.is_empty());
+            assert_eq!(result.errors.len(), 1);
+            assert_eq!(result.errors[0].code, "TVE001");
+            assert_eq!(result.errors[0].assertion, assertion);
+        }
+    }
+
+    #[test]
+    fn capability_preflight_rejects_undeclared_status_references() {
+        for (when, assertion) in [("TypoState", "true"), ("Active", "never(TypoState)")] {
+            let spec = format!(
+                r#"
+[automaton]
+name = "UndeclaredStatusClaim"
+states = ["Active"]
+initial = "Active"
+allow_indefinite_states = ["Active"]
+
+[[invariant]]
+name = "StatusMustBeDeclared"
+when = ["{when}"]
+assert = "{assertion}"
+"#
+            );
+
+            let result = VerificationCascade::from_ioa(&spec)
+                .with_sim_seeds(0)
+                .with_prop_test_cases(0)
+                .run();
+
+            assert!(
+                !result.all_passed,
+                "when={when}, assert={assertion} must fail closed"
+            );
+            assert!(result.levels.is_empty());
+            assert_eq!(result.errors.len(), 1);
+            assert_eq!(result.errors[0].code, "TVE001");
+            assert_eq!(result.errors[0].assertion, assertion);
+        }
     }
 }

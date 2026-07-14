@@ -318,6 +318,10 @@ generated_from = "pack_bytes"
 }
 
 #[cfg(test)]
+#[path = "builder_initial_tests.rs"]
+mod builder_initial_tests;
+
+#[cfg(test)]
 mod cross_entity_tests {
     use super::*;
     use crate::EvalContext;
@@ -468,37 +472,6 @@ effect = [{ type = "spawn", entity_type = "Session", entity_id_source = "{uuid}"
             has_spawn,
             "expected SpawnEntity with copy_fields, got: {:?}",
             rule.effects
-        );
-    }
-
-    #[test]
-    fn state_initials_use_the_shared_model_and_runtime_parsers() {
-        let spec = r#"
-[automaton]
-name = "TypedInitials"
-states = ["Ready"]
-initial = "Ready"
-allow_indefinite_states = ["Ready"]
-
-[[state]]
-name = "enabled"
-type = "bool"
-initial = "YES"
-
-[[state]]
-name = "retries"
-type = "counter"
-initial = " 3 "
-"#;
-
-        let table = TransitionTable::from_ioa_source(spec);
-        assert_eq!(
-            table.state_var_initials.get("enabled"),
-            Some(&StateVarInitialValue::Bool(true))
-        );
-        assert_eq!(
-            table.state_var_initials.get("retries"),
-            Some(&StateVarInitialValue::Counter(3))
         );
     }
 }
