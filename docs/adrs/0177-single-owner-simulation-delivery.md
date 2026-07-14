@@ -1,6 +1,6 @@
 # ADR-0177: Single-owner simulation delivery
 
-- Status: Proposed
+- Status: Accepted
 - Date: 2026-07-14
 - Deciders: Temper core maintainers
 - Related:

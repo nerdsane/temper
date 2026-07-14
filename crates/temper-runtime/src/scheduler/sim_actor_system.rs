@@ -331,7 +331,12 @@ impl SimActorSystem {
             .unwrap_or_default()
     }
 
-    /// Whether there are any violations.
+    /// Whether any spec-invariant violations were recorded.
+    ///
+    /// This reflects only invariant-check failures. For the full simulation
+    /// health gate (invariants **and** callback/delivery errors) use
+    /// [`execution_errors`](Self::execution_errors) in addition, or inspect
+    /// [`SimActorResult::all_invariants_held`] from a [`run_random`](Self::run_random) call.
     pub fn has_violations(&self) -> bool {
         !self.violations.is_empty()
     }
@@ -355,7 +360,7 @@ impl SimActorSystem {
             return self.result_snapshot();
         }
 
-        'simulation: for _tick in 0..self.config.max_ticks {
+        'simulation: for tick in 0..self.config.max_ticks {
             if self.actors.is_empty() {
                 break;
             }
@@ -407,7 +412,7 @@ impl SimActorSystem {
                 if self.deliver_integration_callbacks(&mut reactions).is_err() {
                     break 'simulation;
                 }
-                if _tick + 1 < self.config.max_ticks || !self.scheduler.has_ready_messages() {
+                if tick + 1 < self.config.max_ticks || !self.scheduler.has_ready_messages() {
                     break;
                 }
             }
