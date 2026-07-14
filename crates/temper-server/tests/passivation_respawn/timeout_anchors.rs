@@ -1,6 +1,7 @@
 //! Timeout-anchor persistence and legacy snapshot upgrade regressions.
 
 use super::common;
+use temper_runtime::actor::SystemSignal;
 use temper_runtime::persistence::{
     COMPOSITE_EVENT_TYPE, EventMetadata, EventStore, PersistenceEnvelope,
 };
@@ -163,6 +164,112 @@ async fn slow_successful_pre_start_still_arms_initial_state_timeout() {
         .get_tenant_entity_state(&tenant, "InitialTimedTask", entity_id)
         .await
         .expect("the actor remains readable after its recovered timeout fires");
+    assert_eq!(recovered.state.status, "TimedOut");
+}
+
+#[tokio::test(start_paused = true)]
+async fn queued_restarts_cannot_overtake_timeout_hydration_handshake() {
+    const QUEUED_RESTART_BUDGET: usize = 320;
+
+    let seed = 210;
+    let (_guard, _clock, _id_gen) = install_deterministic_context(seed);
+    let sim_store = SimEventStore::no_faults(seed);
+    let tenant = TenantId::default();
+    let entity_id = "queued-restarts-timeout-start";
+    let actor_key = format!("{tenant}:InitialTimedTask:{entity_id}");
+
+    sim_store.inject_append_delay(&actor_key, std::time::Duration::from_secs(120));
+    let mut state = common::build_single_tenant_state_with_store(
+        sim_store.clone(),
+        "queued-restarts-timeout-start",
+        "default",
+        &[("InitialTimedTask", INITIAL_TIMED_TASK_IOA)],
+    );
+    state.action_dispatch_timeout = std::time::Duration::from_millis(1);
+
+    let actor_ref = state
+        .get_or_spawn_tenant_actor(&tenant, "InitialTimedTask", entity_id)
+        .expect("spawn the delayed timed actor");
+
+    // Queue lifecycle work before either spawned task gets a turn. A readiness
+    // signal that merely wakes a later hydration ask lets these restarts run
+    // first and consume every ask attempt while the actor remains live.
+    for _ in 0..QUEUED_RESTART_BUDGET {
+        actor_ref
+            .signal(SystemSignal::Restart)
+            .expect("the bounded mailbox accepts the restart workload");
+    }
+    tokio::task::yield_now().await;
+
+    tokio::time::advance(std::time::Duration::from_secs(120)).await;
+    for _ in 0..32 {
+        tokio::task::yield_now().await;
+        if sim_store.total_events() == 1 {
+            break;
+        }
+    }
+    assert_eq!(
+        sim_store.total_events(),
+        1,
+        "the delayed initial-state event must commit before reconciliation"
+    );
+
+    // One restart is consumed per virtual-time step. This workload exceeds
+    // the maximum 32-attempt ask schedule while staying below the fixed 1,000
+    // message mailbox budget.
+    for _ in 0..QUEUED_RESTART_BUDGET {
+        tokio::time::advance(std::time::Duration::from_secs(1)).await;
+        tokio::task::yield_now().await;
+    }
+    for _ in 0..64 {
+        tokio::task::yield_now().await;
+    }
+
+    assert!(
+        !actor_ref.is_stopped(),
+        "queued restarts must leave the actor incarnation live"
+    );
+    assert_eq!(
+        state.state_timeout_tracker.pending_snapshot(),
+        vec![("InitialTimedTask".to_string(), 1)],
+        "startup reconciliation must be ordered ahead of already-queued mailbox work"
+    );
+
+    // The original deadline remains t=600: 120 seconds in initial startup and
+    // 320 seconds draining restarts leave 160 seconds. Prove the transition is
+    // durable before any entity request can provide a fallback reconciliation.
+    tokio::time::advance(std::time::Duration::from_secs(159)).await;
+    tokio::task::yield_now().await;
+    assert_eq!(
+        sim_store.total_events(),
+        1,
+        "queued lifecycle work must not move the original timeout deadline"
+    );
+
+    tokio::time::advance(std::time::Duration::from_secs(1)).await;
+    for _ in 0..64 {
+        tokio::task::yield_now().await;
+        if sim_store.total_events() == 2 {
+            break;
+        }
+    }
+    let journal = sim_store
+        .read_events(&actor_key, 0)
+        .await
+        .expect("read the no-traffic timeout journal");
+    assert_eq!(
+        journal
+            .iter()
+            .map(|event| event.event_type.as_str())
+            .collect::<Vec<_>>(),
+        vec!["Created", "TimeoutFail"],
+        "queued restarts must not prevent the durable timeout transition"
+    );
+
+    let recovered = state
+        .get_tenant_entity_state(&tenant, "InitialTimedTask", entity_id)
+        .await
+        .expect("the actor remains readable after its durable timeout");
     assert_eq!(recovered.state.status, "TimedOut");
 }
 
