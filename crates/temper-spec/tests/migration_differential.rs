@@ -245,6 +245,36 @@ fn read_current(repo_root: &Path, path: &str) -> String {
         .unwrap_or_else(|e| panic!("read {}: {e}", full_path.display()))
 }
 
+/// Remove only declarations that the retired hand parser silently overwrote.
+///
+/// The migration differential compares integration behavior in historical
+/// files. Two of those snapshots contain unrelated duplicate declarations
+/// that the canonical parser must reject, so the fixture repair removes the
+/// overwritten copy while leaving the integration under test unchanged.
+fn repair_strict_historical_fixture(path: &str, source: String) -> String {
+    match path {
+        "os-apps/evolution/evolution_run.ioa.toml" => source.replacen(
+            "temper_api_key = \"{secret:temper_api_key}\"\ntemper_api_key = \"{secret:temper_api_key}\"",
+            "temper_api_key = \"{secret:temper_api_key}\"",
+            1,
+        ),
+        "os-apps/temper-agent/specs/temper_agent.ioa.toml" => {
+            const DUPLICATE: &str = "[[state]]\nname = \"temper_api_url\"\ntype = \"string\"\ninitial = \"http://127.0.0.1:3000\"\n";
+            let first = source
+                .find(DUPLICATE)
+                .expect("historical fixture must contain the first state declaration");
+            let second = source[first + DUPLICATE.len()..]
+                .find(DUPLICATE)
+                .map(|offset| first + DUPLICATE.len() + offset)
+                .expect("historical fixture must contain the duplicate state declaration");
+            let mut repaired = source;
+            repaired.replace_range(second..second + DUPLICATE.len(), "");
+            repaired
+        }
+        _ => source,
+    }
+}
+
 /// Integrations intentionally dropped (not just migrated) after the initial
 /// conversion. These are expected to be missing from the post-migration spec
 /// — the differential treats their absence as correct, not a regression.
@@ -430,7 +460,7 @@ fn all_migrations_preserve_integrations() {
         };
         checked += 1;
 
-        let old_src = git_show(&repo_root, sha, path);
+        let old_src = repair_strict_historical_fixture(path, git_show(&repo_root, sha, path));
         let new_src = read_current(&repo_root, path);
 
         let old = match parse_automaton(&old_src) {

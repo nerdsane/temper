@@ -999,6 +999,166 @@ type = "same_id"
     assert!(!has_synthesized_effect);
 }
 
+#[test]
+fn canonical_external_trigger_round_trip_is_idempotent() {
+    let spec = r#"
+[automaton]
+name = "Job"
+states = ["Ready"]
+initial = "Ready"
+
+[[action]]
+name = "Run"
+from = ["Ready"]
+
+[[action.triggers]]
+name = "worker"
+kind = "wasm"
+module = "worker"
+
+[action.triggers.config]
+name = "config-name"
+trigger = "config-trigger"
+type = "config-type"
+module = "config-module"
+on_success = "config-on-success"
+on_failure = "config-on-failure"
+llm = "config-llm"
+"#;
+
+    let parsed = parse_automaton(spec).expect("external trigger should parse");
+    let canonical = toml::to_string(&parsed).expect("parsed automaton should serialize");
+    let reparsed = parse_automaton(&canonical).expect("canonical automaton should reparse");
+    assert_eq!(
+        reparsed
+            .integrations
+            .iter()
+            .filter(|integration| integration.name == "__trigger__:Run:worker")
+            .count(),
+        1,
+        "canonical reparse must not duplicate a synthesized integration"
+    );
+    let integration = reparsed
+        .integrations
+        .iter()
+        .find(|integration| integration.name == "__trigger__:Run:worker")
+        .expect("synthesized integration must survive the round trip");
+    for (key, expected) in [
+        ("name", "config-name"),
+        ("trigger", "config-trigger"),
+        ("type", "config-type"),
+        ("module", "config-module"),
+        ("on_success", "config-on-success"),
+        ("on_failure", "config-on-failure"),
+        ("llm", "config-llm"),
+    ] {
+        assert_eq!(
+            integration.config.get(key).map(String::as_str),
+            Some(expected),
+            "reserved-looking config key `{key}` must remain config"
+        );
+    }
+    assert_eq!(
+        toml::to_string(&reparsed).expect("reparsed automaton should serialize"),
+        canonical,
+        "canonical serialization must be stable"
+    );
+}
+
+#[test]
+fn authored_integration_cannot_conflict_with_synthesized_trigger_record() {
+    let spec = r#"
+[automaton]
+name = "Job"
+states = ["Ready"]
+initial = "Ready"
+
+[[action]]
+name = "Run"
+from = ["Ready"]
+
+[[action.triggers]]
+name = "worker"
+kind = "wasm"
+module = "worker"
+
+[[integration]]
+name = "__trigger__:Run:worker"
+trigger = "__trigger__:Run:worker"
+type = "wasm"
+module = "different-worker"
+"#;
+
+    let error = parse_automaton(spec)
+        .expect_err("an authored integration must not shadow a synthesized trigger record");
+    assert!(error.to_string().contains("conflicts"), "got: {error}");
+}
+
+#[test]
+fn authored_integration_cannot_shadow_synthesized_trigger_dispatch_key() {
+    let spec = r#"
+[automaton]
+name = "Job"
+states = ["Ready"]
+initial = "Ready"
+
+[[action]]
+name = "Run"
+from = ["Ready"]
+
+[[action.triggers]]
+name = "worker"
+kind = "wasm"
+module = "worker"
+
+[[integration]]
+name = "different-name"
+trigger = "__trigger__:Run:worker"
+type = "wasm"
+module = "shadow-worker"
+"#;
+
+    let error = parse_automaton(spec)
+        .expect_err("an authored integration must not shadow a synthesized dispatch key");
+    assert!(error.to_string().contains("conflicts"), "got: {error}");
+}
+
+#[test]
+fn canonical_integration_cannot_hide_later_trigger_dispatch_conflict() {
+    let spec = r#"
+[automaton]
+name = "Job"
+states = ["Ready"]
+initial = "Ready"
+
+[[action]]
+name = "Run"
+from = ["Ready"]
+
+[[action.triggers]]
+name = "worker"
+kind = "wasm"
+module = "worker"
+
+[[integration]]
+name = "__trigger__:Run:worker"
+trigger = "__trigger__:Run:worker"
+type = "wasm"
+module = "worker"
+
+[[integration]]
+name = "different-name"
+trigger = "__trigger__:Run:worker"
+type = "wasm"
+module = "shadow-worker"
+"#;
+
+    let error = parse_automaton(spec).expect_err(
+        "an exact canonical integration must not hide a later conflicting dispatch key",
+    );
+    assert!(error.to_string().contains("conflicts"), "got: {error}");
+}
+
 // test_agent_trigger_section_does_not_overwrite_previous_action removed —
 // ADR-0046 deleted the [[agent_trigger]] section. The equivalent
 // invariant ([[action.triggers]] body doesn't leak into action fields) is

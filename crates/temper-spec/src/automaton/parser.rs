@@ -3,8 +3,8 @@
 //! Also provides conversion to the existing TemperModel and TransitionTable
 //! formats, so the verification cascade and runtime work unchanged.
 //!
-//! The hand-rolled TOML parser lives in [`super::toml_parser`] to keep this
-//! module focused on the public API and validation logic.
+//! The schema-backed TOML parser (ADR-0179) lives in [`super::toml_parser`] so
+//! this module can remain focused on the public API and validation logic.
 
 use super::toml_parser;
 use super::types::*;
@@ -276,7 +276,32 @@ fn expand_external_action_triggers(automaton: &mut Automaton) -> Result<(), Auto
             }
         }
     }
-    automaton.integrations.extend(synthesized);
+    for candidate in synthesized {
+        let mut matching_count = 0;
+        let mut identical_count = 0;
+        for integration in &automaton.integrations {
+            if integration.name == candidate.name || integration.trigger == candidate.trigger {
+                matching_count += 1;
+                if integration == &candidate {
+                    identical_count += 1;
+                }
+            }
+        }
+        match (matching_count, identical_count) {
+            (1, 1) => {
+                // Canonical serialization includes synthesized integrations.
+                // Treat the identical record as already expanded so a
+                // parse/serialize/parse round trip is idempotent.
+            }
+            (0, 0) => automaton.integrations.push(candidate),
+            _ => {
+                return Err(AutomatonParseError::Validation(format!(
+                    "integration name or trigger conflicts with the canonical action-trigger record '{}'",
+                    candidate.trigger
+                )));
+            }
+        }
+    }
     Ok(())
 }
 
@@ -526,7 +551,121 @@ fn format_effects(effects: &[Effect]) -> String {
         .join(" /\\ ")
 }
 
+fn validate_unique_names<'a, I>(kind: &str, names: I) -> Result<(), AutomatonParseError>
+where
+    I: IntoIterator<Item = &'a str>,
+{
+    let mut seen = std::collections::BTreeSet::new();
+    for name in names {
+        if name.trim().is_empty() {
+            return Err(AutomatonParseError::Validation(format!(
+                "{kind} name must not be empty"
+            )));
+        }
+        if !seen.insert(name) {
+            return Err(AutomatonParseError::Validation(format!(
+                "{kind} '{name}' declared twice"
+            )));
+        }
+    }
+    Ok(())
+}
+
 fn validate(automaton: &Automaton) -> Result<(), AutomatonParseError> {
+    if automaton.automaton.name.trim().is_empty() {
+        return Err(AutomatonParseError::Validation(
+            "automaton name must not be empty".to_string(),
+        ));
+    }
+    if automaton.automaton.states.is_empty() {
+        return Err(AutomatonParseError::Validation(
+            "automaton must declare at least one state".to_string(),
+        ));
+    }
+
+    validate_unique_names(
+        "automaton state",
+        automaton.automaton.states.iter().map(String::as_str),
+    )?;
+    validate_unique_names(
+        "state variable",
+        automaton.state.iter().map(|state| state.name.as_str()),
+    )?;
+    validate_unique_names(
+        "action",
+        automaton.actions.iter().map(|action| action.name.as_str()),
+    )?;
+    validate_unique_names(
+        "invariant",
+        automaton
+            .invariants
+            .iter()
+            .map(|invariant| invariant.name.as_str()),
+    )?;
+    validate_unique_names(
+        "liveness property",
+        automaton
+            .liveness
+            .iter()
+            .map(|property| property.name.as_str()),
+    )?;
+    validate_unique_names(
+        "integration",
+        automaton
+            .integrations
+            .iter()
+            .map(|integration| integration.name.as_str()),
+    )?;
+    validate_unique_names(
+        "webhook",
+        automaton
+            .webhooks
+            .iter()
+            .map(|webhook| webhook.name.as_str()),
+    )?;
+    validate_unique_names(
+        "context entity",
+        automaton
+            .context_entities
+            .iter()
+            .map(|context| context.name.as_str()),
+    )?;
+    validate_unique_names(
+        "field invariant",
+        automaton
+            .field_invariants
+            .iter()
+            .map(|invariant| invariant.name.as_str()),
+    )?;
+    validate_unique_names("key", automaton.keys.iter().map(|key| key.name.as_str()))?;
+    validate_unique_names(
+        "vector path",
+        automaton.vectors.iter().map(|vector| vector.name.as_str()),
+    )?;
+
+    for action in &automaton.actions {
+        validate_unique_names(
+            &format!("parameter on action '{}'", action.name),
+            action.params.iter().map(ActionParam::name),
+        )?;
+    }
+    for invariant in &automaton.invariants {
+        if invariant.assert.trim().is_empty() {
+            return Err(AutomatonParseError::Validation(format!(
+                "invariant '{}' must declare a non-empty assertion",
+                invariant.name
+            )));
+        }
+    }
+    for property in &automaton.liveness {
+        if property.reaches.is_empty() && property.has_actions != Some(true) {
+            return Err(AutomatonParseError::Validation(format!(
+                "liveness property '{}' must declare non-empty reaches or has_actions = true",
+                property.name
+            )));
+        }
+    }
+
     // 1. Initial state must be in the states list.
     if !automaton
         .automaton
@@ -665,14 +804,7 @@ fn validate_vector_decls(automaton: &Automaton) -> Result<(), AutomatonParseErro
     const METRICS: [&str; 3] = ["cosine", "dot", "l2"];
     let state_var_names: std::collections::BTreeSet<&str> =
         automaton.state.iter().map(|sv| sv.name.as_str()).collect();
-    let mut seen_names: std::collections::BTreeSet<&str> = std::collections::BTreeSet::new();
     for vec_decl in &automaton.vectors {
-        if !seen_names.insert(vec_decl.name.as_str()) {
-            return Err(AutomatonParseError::Validation(format!(
-                "vector path '{}' declared twice",
-                vec_decl.name
-            )));
-        }
         if !state_var_names.contains(vec_decl.property.as_str()) {
             return Err(AutomatonParseError::Validation(format!(
                 "vector path '{}' references undeclared property state variable '{}'",

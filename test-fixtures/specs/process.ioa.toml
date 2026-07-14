@@ -11,12 +11,6 @@ states = [
 ]
 initial = "Created"
 
-[automaton.timeouts]
-BlockedInference = "120s"
-BlockedToolCall = "60s"
-BlockedCompaction = "30s"
-BlockedApproval = "3600s"
-
 [[state]]
 name = "turns"
 type = "counter"
@@ -191,6 +185,26 @@ kind = "input"
 from = ["BlockedInference", "BlockedToolCall", "BlockedApproval", "BlockedCompaction"]
 to = "Failed"
 effect = [{ type = "trigger", name = "notify_parent" }]
+
+[[state_timeout]]
+state = "BlockedInference"
+after_seconds = 120
+on_timeout = "TimeoutExpired"
+
+[[state_timeout]]
+state = "BlockedToolCall"
+after_seconds = 60
+on_timeout = "TimeoutExpired"
+
+[[state_timeout]]
+state = "BlockedCompaction"
+after_seconds = 30
+on_timeout = "TimeoutExpired"
+
+[[state_timeout]]
+state = "BlockedApproval"
+after_seconds = 3600
+on_timeout = "TimeoutExpired"
 
 # ─── Integrations ─────────────────────────────────────────────────────────────
 

@@ -12,6 +12,22 @@ fn test_parse_order_automaton() {
 }
 
 #[test]
+fn test_automaton_version_round_trips() {
+    let spec = r#"
+[automaton]
+name = "Versioned"
+version = "1.0.0"
+states = ["Active"]
+initial = "Active"
+"#;
+
+    let parsed = parse_automaton(spec).expect("versioned automaton should parse");
+    let canonical = toml::to_string(&parsed).expect("versioned automaton should serialize");
+    assert!(canonical.contains("version = \"1.0.0\""));
+    parse_automaton(&canonical).expect("canonical versioned automaton should reparse");
+}
+
+#[test]
 fn test_actions_parsed() {
     let automaton = parse_automaton(ORDER_IOA).unwrap();
     let names: Vec<&str> = automaton

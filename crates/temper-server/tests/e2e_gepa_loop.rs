@@ -3,7 +3,7 @@
 //!
 //! Proves the full GEPA cycle works by:
 //! 1. Installing PM skill on a test tenant
-//! 2. Simulating agent failures (Reassign action doesn't exist on Issue)
+//! 2. Simulating agent failures (TransferAssignment action doesn't exist on Issue)
 //! 3. Running sentinel check → ots_trajectory_failure_cluster fires
 //! 4. Creating EvolutionRun entity, driving it through the full state machine
 //! 5. Using GEPA primitives (replay, scoring, Pareto frontier) on the mutation
@@ -251,7 +251,7 @@ async fn e2e_gepa_sentinel_detects_failure_cluster() {
         .expect("PM skill should install");
     assert!(types.contains(&"Issue".to_string()));
 
-    // Attempt "Reassign" on Issue — this action doesn't exist in the spec.
+    // Attempt "TransferAssignment" on Issue — this action doesn't exist in the spec.
     // Each attempt should fail and be recorded in the trajectory log.
     let mut failure_count = 0;
     for i in 0..6 {
@@ -260,13 +260,16 @@ async fn e2e_gepa_sentinel_detects_failure_cluster() {
                 TENANT,
                 "Issue",
                 &format!("issue-{i}"),
-                "Reassign",
+                "TransferAssignment",
                 serde_json::json!({"NewAssigneeId": "agent-2"}),
             )
             .await;
         match r {
             Ok(resp) => {
-                assert!(!resp.success, "Reassign should fail — action not in spec");
+                assert!(
+                    !resp.success,
+                    "TransferAssignment should fail — action not in spec"
+                );
                 failure_count += 1;
             }
             Err(_) => {
@@ -275,7 +278,10 @@ async fn e2e_gepa_sentinel_detects_failure_cluster() {
             }
         }
     }
-    assert_eq!(failure_count, 6, "Should have 6 failed Reassign attempts");
+    assert_eq!(
+        failure_count, 6,
+        "Should have 6 failed TransferAssignment attempts"
+    );
 
     // Build trajectory entries matching what the server would record.
     let trajectory_entries: Vec<temper_server::state::TrajectoryEntry> = (0..6)
@@ -284,7 +290,7 @@ async fn e2e_gepa_sentinel_detects_failure_cluster() {
             tenant: TENANT.to_string(),
             entity_type: "Issue".to_string(),
             entity_id: format!("issue-{i}"),
-            action: "Reassign".to_string(),
+            action: "TransferAssignment".to_string(),
             success: false,
             from_status: Some("Backlog".to_string()),
             to_status: None,
@@ -411,7 +417,7 @@ async fn e2e_gepa_evolution_run_full_lifecycle() {
             evo_id,
             "RecordDataset",
             serde_json::json!({
-                "DatasetJson": "{\"triplets\":[{\"input\":\"Reassign\",\"output\":\"error\",\"feedback\":\"add action\"}]}"
+                "DatasetJson": "{\"triplets\":[{\"input\":\"TransferAssignment\",\"output\":\"error\",\"feedback\":\"add action\"}]}"
             }),
         )
         .await
@@ -427,8 +433,8 @@ async fn e2e_gepa_evolution_run_full_lifecycle() {
             evo_id,
             "RecordMutation",
             serde_json::json!({
-                "MutatedSpecSource": "mutated spec with Reassign",
-                "MutationSummary": "Added Reassign action to Issue"
+                "MutatedSpecSource": "mutated spec with TransferAssignment",
+                "MutationSummary": "Added TransferAssignment action to Issue"
             }),
         )
         .await
@@ -668,7 +674,7 @@ async fn e2e_gepa_sentinel_monitor_lifecycle() {
             sentinel_id,
             "AlertsFound",
             serde_json::json!({
-                "AlertDetails": "6 Reassign failures on Issue",
+                "AlertDetails": "6 TransferAssignment failures on Issue",
                 "SuggestedTarget": "project-management/Issue"
             }),
         )
@@ -733,15 +739,15 @@ async fn e2e_gepa_sentinel_monitor_lifecycle() {
 async fn e2e_gepa_algorithm_primitives_integrated() {
     use temper_evolution::gepa::*;
 
-    // --- Step 1: Build replay results for original spec (missing Reassign) ---
+    // --- Step 1: Build replay results for original spec (missing TransferAssignment) ---
     let mut replay_original = ReplayResult::new();
     // 5 successful actions.
     for _ in 0..5 {
         replay_original.record_success();
     }
-    // 5 failures — Reassign not found.
+    // 5 failures — TransferAssignment not found.
     for _ in 0..5 {
-        replay_original.record_unknown_action("Reassign", "InProgress");
+        replay_original.record_unknown_action("TransferAssignment", "InProgress");
     }
     assert_eq!(replay_original.actions_attempted, 10);
     assert_eq!(replay_original.succeeded, 5);
@@ -786,14 +792,14 @@ async fn e2e_gepa_algorithm_primitives_integrated() {
     );
     for i in 0..5 {
         let triplet = ReflectiveTriplet::new(
-            format!("Agent attempted Reassign on issue-{i} in InProgress state"),
-            "Error: action 'Reassign' not found in spec".into(),
-            "Add Reassign action: from=[InProgress] to=InProgress, with guard requiring assignee_set".into(),
+            format!("Agent attempted TransferAssignment on issue-{i} in InProgress state"),
+            "Error: action 'TransferAssignment' not found in spec".into(),
+            "Add TransferAssignment action: from=[InProgress] to=InProgress, with guard requiring assignee_set".into(),
             0.0,
             format!("traj-{i}"),
         )
         .with_entity_type("Issue".into())
-        .with_action("Reassign".into());
+        .with_action("TransferAssignment".into());
         dataset.add_triplet(triplet);
     }
 
@@ -801,12 +807,12 @@ async fn e2e_gepa_algorithm_primitives_integrated() {
     assert_eq!(dataset.success_count(), 0);
 
     let llm_prompt = dataset.format_for_llm();
-    assert!(llm_prompt.contains("Reassign"));
+    assert!(llm_prompt.contains("TransferAssignment"));
     assert!(llm_prompt.contains("5 failures"));
 
-    // --- Step 6: Simulate mutation — "LLM" proposes spec with Reassign ---
+    // --- Step 6: Simulate mutation — "LLM" proposes spec with TransferAssignment ---
     let mut replay_mutated = ReplayResult::new();
-    // All 10 actions now succeed (including the 5 Reassigns).
+    // All 10 actions now succeed (including the 5 TransferAssignment attempts).
     for _ in 0..10 {
         replay_mutated.record_success();
     }
@@ -827,14 +833,14 @@ async fn e2e_gepa_algorithm_primitives_integrated() {
     // --- Step 8: Mutated candidate dominates original ---
     let mut candidate_mutated = Candidate::new(
         "c1".into(),
-        "mutated issue spec with Reassign".into(),
+        "mutated issue spec with TransferAssignment".into(),
         "project-management".into(),
         "Issue".into(),
         1,
         now,
     )
     .with_parent("c0".into())
-    .with_mutation_summary("Added Reassign action from InProgress to InProgress".into());
+    .with_mutation_summary("Added TransferAssignment action from InProgress to InProgress".into());
 
     for (obj, score) in scores_mutated.into_map() {
         candidate_mutated.set_score(obj, score);
@@ -870,53 +876,53 @@ async fn e2e_gepa_algorithm_primitives_integrated() {
 }
 
 // =========================================================================
-// Phase 6: Hot-deploy mutated spec and verify Reassign works
+// Phase 6: Hot-deploy mutated spec and verify TransferAssignment works
 // =========================================================================
 
-/// Proves: after hot-deploying a mutated Issue spec (with Reassign action),
-/// the previously-failing Reassign action now succeeds through the platform.
+/// Proves: after hot-deploying a mutated Issue spec (with TransferAssignment action),
+/// the previously-failing TransferAssignment action now succeeds through the platform.
 #[tokio::test]
 async fn e2e_gepa_hotdeploy_and_verify() {
     let (_guard, _clock, _id_gen) = install_deterministic_context(46);
     let harness = SimPlatformHarness::no_faults(46);
 
-    // Install PM skill (Issue spec WITHOUT Reassign).
+    // Install PM skill (Issue spec WITHOUT TransferAssignment).
     harness
         .install_app(TENANT, "project-management")
         .await
         .expect("PM skill should install");
 
-    // Verify Reassign fails on a fresh Issue.
+    // Verify TransferAssignment fails on a fresh Issue.
     let r = harness
         .dispatch(
             TENANT,
             "Issue",
             "issue-hotdeploy-1",
-            "Reassign",
+            "TransferAssignment",
             serde_json::json!({"NewAssigneeId": "agent-2"}),
         )
         .await;
     if let Ok(resp) = &r {
         assert!(
             !resp.success,
-            "Reassign should fail before hot-deploy: {:?}",
+            "TransferAssignment should fail before hot-deploy: {:?}",
             resp.error
         );
     }
 
-    // Now create a mutated Issue spec that adds Reassign.
-    // We take the original and add a Reassign action.
+    // Now create a mutated Issue spec that adds TransferAssignment.
+    // We take the original and add a TransferAssignment action.
     let mutated_issue_spec =
         include_str!("../../../os-apps/project-management/specs/issue.ioa.toml").to_string()
             + r#"
 
 [[action]]
-name = "Reassign"
+name = "TransferAssignment"
 kind = "input"
 from = ["Backlog", "Triage", "Todo", "InProgress", "InReview", "Planning", "Planned"]
 guard = "is_true assignee_set"
 params = ["NewAssigneeId"]
-hint = "Reassign the issue to a different implementer."
+hint = "Transfer the issue to a different implementer."
 "#;
 
     // Verify the mutated spec parses (L0 check).
@@ -952,7 +958,7 @@ hint = "Reassign the issue to a different implementer."
             .expect("hot-deploy should succeed");
     }
 
-    // Now Reassign should work on an Issue that has an assignee set.
+    // Now TransferAssignment should work on an Issue that has an assignee set.
     // Create a fresh Issue (starts in Backlog), then Assign to set assignee_set=true.
     let r = harness
         .dispatch(
@@ -966,26 +972,26 @@ hint = "Reassign the issue to a different implementer."
         .expect("Assign should succeed");
     assert!(r.success, "Assign failed: {:?}", r.error);
 
-    // NOW: Reassign should succeed because the mutated spec has it
+    // NOW: TransferAssignment should succeed because the mutated spec has it
     // (self-loop on Backlog with guard is_true assignee_set).
     let r = harness
         .dispatch(
             TENANT,
             "Issue",
             "issue-hotdeploy-2",
-            "Reassign",
+            "TransferAssignment",
             serde_json::json!({"NewAssigneeId": "agent-2"}),
         )
         .await
-        .expect("Reassign should succeed after hot-deploy");
+        .expect("TransferAssignment should succeed after hot-deploy");
     assert!(
         r.success,
-        "Reassign should succeed after hot-deploy: {:?}",
+        "TransferAssignment should succeed after hot-deploy: {:?}",
         r.error
     );
     assert_eq!(
         r.state.status, "Backlog",
-        "Reassign is a self-loop, issue stays in Backlog"
+        "TransferAssignment is a self-loop, issue stays in Backlog"
     );
 }
 
@@ -1011,18 +1017,18 @@ async fn e2e_gepa_full_loop() {
         .expect("evolution skill should install");
     harness.register_inline_spec(TENANT, "EvolutionRun", EVOLUTION_RUN_IOA_NO_INTEGRATIONS);
 
-    // --- Step 2: Simulate 6 Reassign failures ---
+    // --- Step 2: Simulate 6 TransferAssignment failures ---
     for i in 0..6 {
         let _r = harness
             .dispatch(
                 TENANT,
                 "Issue",
                 &format!("loop-issue-{i}"),
-                "Reassign",
+                "TransferAssignment",
                 serde_json::json!({"NewAssigneeId": "agent-x"}),
             )
             .await;
-        // All should fail — Reassign doesn't exist.
+        // All should fail — TransferAssignment doesn't exist.
     }
 
     // --- Step 3: Sentinel detects the cluster ---
@@ -1032,7 +1038,7 @@ async fn e2e_gepa_full_loop() {
             tenant: TENANT.to_string(),
             entity_type: "Issue".to_string(),
             entity_id: format!("loop-issue-{i}"),
-            action: "Reassign".to_string(),
+            action: "TransferAssignment".to_string(),
             success: false,
             from_status: Some("Backlog".to_string()),
             to_status: None,
@@ -1084,7 +1090,7 @@ async fn e2e_gepa_full_loop() {
             "s1",
             "AlertsFound",
             serde_json::json!({
-                "AlertDetails": "6 Reassign failures on Issue",
+                "AlertDetails": "6 TransferAssignment failures on Issue",
                 "SuggestedTarget": "project-management/Issue"
             }),
         )
@@ -1130,7 +1136,10 @@ async fn e2e_gepa_full_loop() {
         ),
         (
             "RecordMutation",
-            serde_json::json!({"MutatedSpecSource": "spec with Reassign", "MutationSummary": "Added Reassign"}),
+            serde_json::json!({
+                "MutatedSpecSource": "spec with TransferAssignment",
+                "MutationSummary": "Added TransferAssignment"
+            }),
         ),
         (
             "RecordVerificationPass",
@@ -1173,12 +1182,12 @@ async fn e2e_gepa_full_loop() {
             + r#"
 
 [[action]]
-name = "Reassign"
+name = "TransferAssignment"
 kind = "input"
 from = ["Backlog", "Triage", "Todo", "InProgress", "InReview", "Planning", "Planned"]
 guard = "is_true assignee_set"
 params = ["NewAssigneeId"]
-hint = "Reassign the issue to a different implementer."
+hint = "Transfer the issue to a different implementer."
 "#;
 
     {
@@ -1218,8 +1227,8 @@ hint = "Reassign the issue to a different implementer."
     assert!(r.success);
     assert_eq!(r.state.status, "Completed");
 
-    // --- Step 7: Replay — Reassign now succeeds ---
-    // Create a fresh issue, Assign to set assignee_set=true, then Reassign.
+    // --- Step 7: Replay — TransferAssignment now succeeds ---
+    // Create a fresh issue, Assign to set assignee_set=true, then TransferAssignment.
     let r = harness
         .dispatch(
             TENANT,
@@ -1232,32 +1241,32 @@ hint = "Reassign the issue to a different implementer."
         .unwrap();
     assert!(r.success, "Assign failed: {:?}", r.error);
 
-    // The moment of truth: Reassign should NOW succeed after evolution hot-deploy.
+    // The moment of truth: TransferAssignment should NOW succeed after evolution hot-deploy.
     let r = harness
         .dispatch(
             TENANT,
             "Issue",
             "loop-retry-1",
-            "Reassign",
+            "TransferAssignment",
             serde_json::json!({"NewAssigneeId": "agent-2"}),
         )
         .await
-        .expect("Reassign should succeed after evolution hot-deploy");
+        .expect("TransferAssignment should succeed after evolution hot-deploy");
     assert!(
         r.success,
-        "Reassign MUST succeed after GEPA evolution and hot-deploy: {:?}",
+        "TransferAssignment MUST succeed after GEPA evolution and hot-deploy: {:?}",
         r.error
     );
     assert_eq!(
         r.state.status, "Backlog",
-        "Reassign self-loop keeps Backlog"
+        "TransferAssignment self-loop keeps Backlog"
     );
 
     // --- Step 8: Verify GEPA primitives agree ---
     use temper_evolution::gepa::*;
 
     let mut replay = ReplayResult::new();
-    // All 5 Reassign attempts now succeed.
+    // All 5 TransferAssignment attempts now succeed.
     for _ in 0..5 {
         replay.record_success();
     }
@@ -1383,7 +1392,7 @@ to = "Done"
         let trajectory_actions = serde_json::json!([
             {"action": "StartWork", "params": {}},
             {"action": "Complete", "params": {}},
-            {"action": "Reassign", "params": {"NewAssigneeId": "agent-x"}}
+            {"action": "TransferAssignment", "params": {"NewAssigneeId": "agent-x"}}
         ]);
 
         let r = state
@@ -1530,7 +1539,7 @@ fn e2e_gepa_full_autonomous_loop_with_adapter() {
 # In production, Claude reads the reflective dataset (failure traces) and
 # proposes a minimal IOA spec edit. Here we return a deterministic mutation.
 cat <<'MOCK_OUTPUT'
-{{"MutatedSpecSource": "[automaton]\nname = \"TestIssue\"\nstates = [\"Backlog\", \"InProgress\", \"Done\"]\ninitial = \"Backlog\"\n\n[[action]]\nname = \"StartWork\"\nkind = \"input\"\nfrom = [\"Backlog\"]\nto = \"InProgress\"\n\n[[action]]\nname = \"Complete\"\nkind = \"input\"\nfrom = [\"InProgress\"]\nto = \"Done\"\n\n[[action]]\nname = \"Reassign\"\nkind = \"input\"\nfrom = [\"Backlog\", \"InProgress\"]\nto = \"InProgress\"\nparams = [\"NewAssigneeId\"]\n", "MutationSummary": "Added Reassign action to TestIssue spec based on trajectory failure analysis"}}
+{{"MutatedSpecSource": "[automaton]\nname = \"TestIssue\"\nstates = [\"Backlog\", \"InProgress\", \"Done\"]\ninitial = \"Backlog\"\n\n[[action]]\nname = \"StartWork\"\nkind = \"input\"\nfrom = [\"Backlog\"]\nto = \"InProgress\"\n\n[[action]]\nname = \"Complete\"\nkind = \"input\"\nfrom = [\"InProgress\"]\nto = \"Done\"\n\n[[action]]\nname = \"TransferAssignment\"\nkind = \"input\"\nfrom = [\"Backlog\", \"InProgress\"]\nto = \"InProgress\"\nparams = [\"NewAssigneeId\"]\n", "MutationSummary": "Added TransferAssignment action to TestIssue spec based on trajectory failure analysis"}}
 MOCK_OUTPUT
 "#
         )
@@ -1679,7 +1688,7 @@ to = "Done"
         let trajectory_actions = serde_json::json!([
             {"action": "StartWork", "params": {}},
             {"action": "Complete", "params": {}},
-            {"action": "Reassign", "params": {"NewAssigneeId": "agent-x"}}
+            {"action": "TransferAssignment", "params": {"NewAssigneeId": "agent-x"}}
         ]);
 
         let r = state
