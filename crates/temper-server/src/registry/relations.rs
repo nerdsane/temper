@@ -92,10 +92,11 @@ fn nav_target_entity(type_name: &str) -> String {
 
 /// Synthesize a `ReactionRule` from an `[[action.triggers]]` entry (ADR-0046).
 ///
-/// Returns `None` for `kind = "wasm"` and `kind = "webhook"` triggers — those
-/// are handled by a separate runtime path in a later slice. Returns `Some`
-/// for `kind = "entity"` triggers, translating the declaration into the
-/// existing reaction machinery, including the declared trigger principal.
+/// Returns `None` for non-entity triggers. WASM and adapter triggers use the
+/// integration runtime; webhook triggers cannot reach registry synthesis from
+/// a validated IOA spec (ADR-0171). Returns `Some` for `kind = "entity"`
+/// triggers, translating the declaration into the existing reaction machinery,
+/// including the declared trigger principal.
 ///
 /// Guard translation: `TriggerGuard` and `ReactionGuard` are structurally
 /// identical enums living in different crates (spec vs server layer). The
@@ -105,8 +106,7 @@ pub(super) fn synthesize_action_trigger_reaction(
     source_action: &str,
     trigger: &ActionTrigger,
 ) -> Option<ReactionRule> {
-    // Only entity-kind triggers map to ReactionRules. Wasm / Webhook
-    // triggers have a different runtime (deferred to a later slice).
+    // Only entity-kind triggers map to ReactionRules.
     if trigger.kind != TriggerKind::Entity {
         return None;
     }

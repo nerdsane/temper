@@ -1,11 +1,11 @@
-//! Integration engine: outbox-pattern event-driven integrations.
+//! Directly configured webhook integration engine.
 //!
-//! Integrations are declared in IOA specs via `[[integration]]` sections and
-//! dispatched asynchronously after state transitions. The state machine remains
-//! pure and deterministically verifiable — external calls happen out-of-band.
-//!
-//! Permanently failed deliveries are routed to a dead-letter queue for
-//! later inspection or manual replay.
+//! Callers construct an [`IntegrationRegistry`] from [`IntegrationConfig`] values
+//! and explicitly submit [`IntegrationEvent`] values. Production entity actors do
+//! not populate this registry from IOA declarations or feed transitions into it.
+//! The queue and dead-letter queue are in memory, not a durable outbox; outbound
+//! IOA webhooks are therefore rejected until journaled delivery is available.
+//! Retry and dead-letter behavior remains available to direct API callers.
 
 pub mod dead_letter;
 pub mod engine;

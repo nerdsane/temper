@@ -5,6 +5,7 @@
 - Accepted: 2026-04-24
 - Deciders: Temper core maintainers
 - Supersedes: ADR-0045 (specifically its Sub-Decision 5 — "Keep reactions separate from actions")
+- Partially superseded by: ADR-0171 (outbound webhook acceptance and expansion only)
 - Related:
   - ADR-0015: Agent OS Cross-Entity Primitives (cross-entity guards at the action layer)
   - ADR-0045: Reactions as a First-Class App Primitive (superseded by this ADR in its Sub-Decision 5)
@@ -72,11 +73,16 @@ One primitive covers all outgoing effects. Deletes `[[integration]]` and `reacti
 
 - `kind = "entity"` — cross-entity action dispatch (former reactions, former `[[agent_trigger]]`). **Runtime: fully wired.**
 - `kind = "wasm"` — WASM module execution (former `[[integration]] type = "wasm"`). **Runtime: fully wired.**
-- `kind = "webhook"` — outbound HTTP (former `[[integration]] type = "webhook"`). **Runtime: NOT yet wired — parse + expand only.** See Known Gaps below.
+- `kind = "webhook"` — outbound HTTP syntax. **Rejected by ADR-0171 until durable delivery exists.**
 
-Kind-specific fields are validated at parse time: `Entity` requires `target_entity` + `target_action`; `Wasm` requires `module`; `Webhook` requires `url` + `method`. `on_success` / `on_failure` apply to `Wasm` and `Webhook` kinds and name entity actions on the source entity to dispatch after module/HTTP execution.
+Kind-specific fields are validated at parse time: `Entity` requires `target_entity` + `target_action`; `Wasm` requires `module`. `on_success` / `on_failure` apply to accepted external trigger kinds and name entity actions on the source entity to dispatch after execution.
 
-**Known gap — `kind = "webhook"` is parse-only.** The expander synthesizes an `Integration { integration_type: "webhook", … }` record and appends a `trigger` effect to the source action, but no runtime dispatcher matches `integration_type == "webhook"`. Only `wasm` (`crates/temper-server/src/state/dispatch/wasm.rs:200`) and `adapter` (`crates/temper-server/src/state/dispatch/adapter.rs:96`) are dispatched today. Declaring `kind = "webhook"` with a real URL in a spec will silently install but never fire HTTP. Outbound webhook delivery today goes through the separate `WebhookDispatcher` + root-level `webhooks.toml` path (`crates/temper-server/src/webhooks/dispatcher.rs`), which keys on `TrajectoryEntry` matches rather than action-trigger dispatch. A follow-up ADR will add `crates/temper-server/src/state/dispatch/webhook.rs` (parallel to `wasm.rs`) to close this gap and collapse the two webhook paths.
+**Webhook boundary (superseded by ADR-0171).** The historical runtime follow-up
+did not land. Validation now rejects both
+`[[action.triggers]] kind = "webhook"` and legacy `[[integration]] type =
+"webhook"` declarations until a journaled delivery runtime exists. The
+operator-configured `webhooks.toml` trajectory subscription remains a separate
+surface and is not an action trigger.
 
 **Why not a separate `kind = "agent"`**: "agent" means different things in different apps. The platform's generic `Agent` entity (states Idle → Assigned → Working → Completed) fits the `[[agent_trigger]]` spawn-and-auto-start pattern. But `paw-agent`'s `Agent` entity is a persistent team-member identity (Created → Active → Archived) with no spawn semantics. Katagami and paw-foresight have no "agent" concept at all. A `kind = "agent"` primitive would force every agent-like entity into the platform's Agent shape. Instead, spawning any agent uses `kind = "entity"` targeting whichever agent entity is registered in the tenant, and the "auto-start on Assign" behavior is expressed as a self-trigger on the target agent's own spec (see Sub-Decision 7). This generalizes across the platform's Agent, paw-agent's Agent, and any app-defined agent entity.
 
@@ -122,7 +128,7 @@ New module `crates/temper-verify/src/composite/`. `CompositeTemperModel` impleme
 
 Composition scope is determined by the reachability set of the trigger graph rooted at the entity being verified. Entities with no incoming or outgoing triggers verify in isolation (fast path, single-entity model unchanged).
 
-`kind = "wasm"` and `kind = "webhook"` triggers are modeled symbolically during verification — the WASM execution / HTTP call is opaque — but their `on_success` / `on_failure` dispatches participate in joint verification like any other entity-kind trigger.
+`kind = "wasm"` triggers are modeled symbolically during verification — the WASM execution is opaque — but their `on_success` / `on_failure` dispatches participate in joint verification like any other entity-kind trigger. Webhook triggers are rejected before verification (ADR-0171).
 
 **Why this shape**: Stateright's `Model` trait is pluggable; composition is a wrapper, not a rewrite. The BFS checker (`checker.rs:43-46`) is model-agnostic. Reuse of `TemperModel` as the building block keeps the single-entity fast path intact and scopes the new complexity to `composite/`. Symbolic handling of external I/O keeps verification tractable without pretending to verify opaque module behavior.
 
@@ -162,7 +168,7 @@ Callers that spawn an Agent just create + assign it with `kind = "entity"` + `re
 
 ### Sub-Decision 8: Minimal liveness hook
 
-`ActionTrigger` carries `liveness: TriggerLiveness` with variants `None | BestEffort | Required`, defaulting to `BestEffort`. When `Required`, the composite verifier adds a `Property::eventually` assertion that the target action (entity-kind) or on_success action (wasm/webhook-kind) fires following the source action.
+`ActionTrigger` carries `liveness: TriggerLiveness` with variants `None | BestEffort | Required`, defaulting to `BestEffort`. When `Required`, the composite verifier adds a `Property::eventually` assertion that the target action (entity-kind) or on_success action (WASM/adapter kind) fires following the source action.
 
 Fairness assumptions are weakly fair for the dispatcher (implicit). No window bounds, no expression DSL, no `within_ms` annotations — those are deferred to a future ADR if apps request them.
 

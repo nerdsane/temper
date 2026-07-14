@@ -1,10 +1,10 @@
 //! Integration engine tests.
 //!
 //! Covers the full integration pipeline:
-//! - IOA specs with `[[integration]]` sections parse correctly
-//! - IntegrationRegistry lookups match parsed spec integrations
+//! - supported IOA `[[integration]]` sections still verify
+//! - IntegrationRegistry lookups match directly supplied engine configuration
 //! - WebhookDispatcher delivers events to a live mock server (wiremock)
-//! - Verification cascade still passes for specs with integrations
+//! - Verification cascade still passes for specs with supported integrations
 //! - IntegrationEngine background task dispatches via channel
 
 use std::collections::BTreeMap;
@@ -60,45 +60,46 @@ to = "Shipped"
 [[integration]]
 name = "notify_fulfillment"
 trigger = "SubmitOrder"
-type = "webhook"
+type = "wasm"
+module = "notify_fulfillment"
 
 [[integration]]
 name = "charge_payment"
 trigger = "ConfirmOrder"
-type = "webhook"
+type = "wasm"
+module = "charge_payment"
 
 [[integration]]
 name = "notify_shipping"
 trigger = "ShipOrder"
-type = "webhook"
+type = "wasm"
+module = "notify_shipping"
 "#;
 
 // -----------------------------------------------------------------------
-// Parser → Registry integration
+// Direct engine configuration
 // -----------------------------------------------------------------------
 
 #[test]
-fn parsed_integrations_populate_registry() {
-    let automaton = parse_automaton(ORDER_IOA_WITH_INTEGRATIONS).expect("should parse");
-    assert_eq!(automaton.integrations.len(), 3);
-
-    // Build IntegrationConfigs from parsed Integration structs (production would
-    // read deployment config; here we synthesize configs from the spec).
-    let configs: Vec<IntegrationConfig> = automaton
-        .integrations
-        .iter()
-        .map(|ig| IntegrationConfig {
-            name: ig.name.clone(),
-            trigger: ig.trigger.clone(),
-            webhook: WebhookConfig {
-                url: format!("https://example.com/{}", ig.name),
-                method: "POST".to_string(),
-                headers: BTreeMap::new(),
-                timeout_ms: 5000,
-            },
-            retry: RetryPolicy::default(),
-        })
-        .collect();
+fn direct_configs_populate_registry() {
+    let configs: Vec<IntegrationConfig> = [
+        ("notify_fulfillment", "SubmitOrder"),
+        ("charge_payment", "ConfirmOrder"),
+        ("notify_shipping", "ShipOrder"),
+    ]
+    .into_iter()
+    .map(|(name, trigger)| IntegrationConfig {
+        name: name.to_string(),
+        trigger: trigger.to_string(),
+        webhook: WebhookConfig {
+            url: format!("https://example.com/{name}"),
+            method: "POST".to_string(),
+            headers: BTreeMap::new(),
+            timeout_ms: 5000,
+        },
+        retry: RetryPolicy::default(),
+    })
+    .collect();
 
     let registry = IntegrationRegistry::from_configs(configs);
     assert_eq!(registry.len(), 3);
@@ -123,12 +124,12 @@ fn parsed_integrations_populate_registry() {
 }
 
 #[test]
-fn spec_with_integrations_in_entity_spec() {
+fn supported_integrations_remain_in_entity_spec_metadata() {
     let automaton = parse_automaton(ORDER_IOA_WITH_INTEGRATIONS).expect("should parse");
     // Ensure the automaton itself carries integration metadata
     assert_eq!(automaton.integrations[0].name, "notify_fulfillment");
     assert_eq!(automaton.integrations[0].trigger, "SubmitOrder");
-    assert_eq!(automaton.integrations[0].integration_type, "webhook");
+    assert_eq!(automaton.integrations[0].integration_type, "wasm");
     assert_eq!(automaton.integrations[1].name, "charge_payment");
     assert_eq!(automaton.integrations[2].name, "notify_shipping");
 }
@@ -352,7 +353,7 @@ async fn engine_process_event_skips_unmatched() {
 }
 
 // -----------------------------------------------------------------------
-// Verification cascade: specs with [[integration]] still pass
+// Verification cascade: specs with supported [[integration]] still pass
 // -----------------------------------------------------------------------
 
 #[test]

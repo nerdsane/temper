@@ -202,7 +202,8 @@ effect = [{ type = "trigger", name = "run_wasm" }, { type = "schedule", action =
 [[integration]]
 name = "run_wasm"
 trigger = "run_wasm"
-type = "webhook"
+type = "wasm"
+module = "test_module"
 "#;
     let automaton = parse_automaton(spec).unwrap();
     let actions = translate_actions(&automaton);

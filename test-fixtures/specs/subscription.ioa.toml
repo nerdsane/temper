@@ -99,15 +99,3 @@ assert = "no_further_transitions"
 name = "PastDueHasFailure"
 when = ["PastDue", "Suspended", "Expired"]
 assert = "payment_failures > 0"
-
-# --- Integrations ---
-
-[[integration]]
-name = "billing_webhook"
-trigger = "PaymentFailed"
-type = "webhook"
-
-[[integration]]
-name = "dunning_notice"
-trigger = "SuspendSubscription"
-type = "webhook"

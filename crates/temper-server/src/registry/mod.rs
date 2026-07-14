@@ -373,8 +373,8 @@ impl SpecRegistry {
         for (tenant, config) in &self.tenants {
             let mut rules = config.reactions.clone();
             // ADR-0046: synthesize reaction rules from [[action.triggers]]
-            // entity-kind blocks on every entity's actions. Wasm/Webhook
-            // kinds are handled by a separate runtime path.
+            // entity-kind blocks on every entity's actions. WASM/adapter
+            // kinds are handled by separate runtime paths; webhooks are rejected.
             for (entity_type, spec) in &config.entities {
                 for action in &spec.automaton.actions {
                     for trigger in &action.triggers {

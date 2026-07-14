@@ -6,7 +6,8 @@ use super::types::IntegrationConfig;
 
 /// Maps trigger event names to integration configurations.
 ///
-/// Built once from the tenant's specs at registration time.
+/// Built explicitly by a caller from directly supplied runtime configuration.
+/// Production entity registration does not populate it from IOA specs.
 #[derive(Debug, Clone, Default)]
 pub struct IntegrationRegistry {
     /// Maps event name to list of integrations triggered by that event.

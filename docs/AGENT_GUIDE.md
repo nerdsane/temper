@@ -14,7 +14,7 @@ This document is the primary reference for LLM agents building applications with
 6. [Running the Server](#6-running-the-server)
 7. [Authorization (Cedar ABAC)](#7-authorization)
 8. [Observability — Telemetry as Views](#8-observability--telemetry-as-views)
-9. [Integration Engine (External System Webhooks)](#9-integration-engine)
+9. [Post-Commit Integrations](#9-post-commit-integrations)
 10. [Evolution Engine (How the System Improves)](#10-evolution-engine)
 11. [Trajectory Intelligence (How You Optimize Agents)](#11-trajectory-intelligence)
 12. [JIT Optimization (Hot-Swap Without Redeploy)](#12-jit-optimization)
@@ -347,7 +347,7 @@ with a full `EvalContext` containing counters and booleans:
 1. Find matching rule by action name
 2. Check `from_states` guard (is current status valid for this action?)
 3. Check additional guards (`CounterMin`, `BoolTrue`, compound `And`)
-4. If guards pass: apply effects (`SetState`, `IncrementCounter`, `SetBool`, `EmitEvent`, `Custom`), record event. `EmitEvent` feeds the Integration Engine for external webhooks (see [Section 9](#9-integration-engine)).
+4. If guards pass: apply effects (`SetState`, `IncrementCounter`, `SetBool`, `EmitEvent`, `Custom`) and record the event. `EmitEvent` is surfaced as a runtime effect; outbound IOA webhooks are rejected until durable delivery exists (see [Section 9](#9-post-commit-integrations)).
 5. If guards fail: return 409 Conflict with error message
 
 **Critical**: `TransitionTable::from_ioa_source(ioa_toml)` is the sole production constructor. The TLA+ code path has been fully removed.
@@ -579,64 +579,54 @@ Evolution records reference these as portable SQL. Swapping providers doesn't br
 
 ---
 
-## 9. Integration Engine
+## 9. Post-Commit Integrations
 
-Two mechanisms fire work after an action commits:
+Supported action-owned post-commit work has four forms:
 
-- **Cross-entity reactions** — in-system choreography (another entity's action). Declarative TOML, no code. Fire-and-forget, bounded cascade, deterministic under `SimReactionSystem`. Use reactions when both source and target are Temper entities. See [`docs/reactions.md`](reactions.md) for the full reference and [ADR-0045](adrs/0045-reactions-first-class-app-primitive.md) for the design.
-- **WASM integrations** — out-of-system work (external HTTP, LLM calls, third-party APIs). Described below. Use integrations when you need computation, I/O beyond the Temper cluster, or explicit retry / timeout semantics.
+- **Entity triggers** dispatch another Temper entity action through the bounded
+  reaction machinery.
+- **WASM triggers/integrations** execute a registered module through the
+  governed WASM host.
+- **Adapter triggers/integrations** invoke a registered native adapter.
+- **Registered custom integrations/effects** use an application-owned handler
+  with an explicit runtime contract.
 
-Integrations follow the **Outbox Pattern**: the state machine stays pure and deterministically verifiable; external calls happen out-of-band. `[[integration]]` declarations in IOA TOML are metadata — they don't affect state transitions or verification.
+Operator-configured `webhooks.toml` subscriptions are a separate trajectory
+notification surface. They are not IOA action triggers.
 
-### Spec Syntax
+### Outbound IOA Webhooks
 
-Declare integrations alongside your automaton:
-
-```toml
-[[integration]]
-name = "notify_fulfillment"
-trigger = "SubmitOrder"
-type = "webhook"
-```
-
-The `trigger` names an action. When that action fires, the integration engine picks it up asynchronously.
-
-### Runtime Architecture
-
-```
-Entity Actor transition
-  → Effect::EmitEvent("SubmitOrder")
-  → mpsc channel
-  → IntegrationEngine (background tokio task)
-  → IntegrationRegistry.lookup("SubmitOrder")
-  → WebhookDispatcher.dispatch(config, event)
-```
-
-- **`IntegrationRegistry`** maps trigger event names to `IntegrationConfig` entries (built once at tenant registration from specs + deployment config).
-- **`WebhookDispatcher`** handles HTTP dispatch with configurable timeout and retry with exponential backoff.
-- **`IntegrationEngine`** runs as a background tokio task, receives `IntegrationEvent` messages via an `mpsc` channel, and dispatches to all registered webhooks for each trigger concurrently.
-
-### Deployment Configuration
-
-Webhook URLs are deployment-specific and live outside the IOA spec. See `reference-apps/ecommerce/integration.toml`:
+Outbound webhook declarations are rejected by validation:
 
 ```toml
-[[webhook]]
+[[action.triggers]]
 name = "notify_fulfillment"
+kind = "webhook"
 url = "https://fulfillment.example.com/orders"
 method = "POST"
-timeout_ms = 5000
-max_retries = 3
 ```
 
-Each entry specifies the HTTP endpoint, method, timeout, and retry policy.
+The legacy `[[integration]] type = "webhook"` form is also rejected, including
+an omitted `type` (which historically defaulted to webhook). Both return:
 
-### Key Design Decisions
+```text
+outbound IOA webhooks are unsupported until durable delivery is available
+```
 
-- **Not inline in the state machine.** Integrations are side effects, not transitions. The verification cascade (L0-L3) works on the pure state machine unchanged.
-- **At-least-once delivery.** Trigger events originate from the Postgres event journal, so they survive crashes.
-- **Retry with exponential backoff.** Configurable per integration via `RetryPolicy`.
-- **DST-safe.** Deterministic simulation ignores `EmitEvent` effects — no HTTP calls during testing.
+This prevents verification and installation from certifying work that the
+runtime would silently drop. Do not replace the error with a warning or a direct
+HTTP background task. ADR-0171 requires a future implementation to atomically
+journal delivery intent with the source transition, recover unfinished work on
+replay, use a stable delivery ID, apply trigger and egress authorization
+separately, and persist terminal outcomes.
+
+### Standalone Platform Engine
+
+`temper_platform::integration::IntegrationEngine` remains a directly configured
+library API with retry and dead-letter behavior. The production entity actor
+does not feed it IOA transition events, and its in-memory queue is not an
+outbox. Tests and callers construct `IntegrationConfig` directly; parsed IOA
+webhook declarations are not an ingestion path.
 
 ---
 
@@ -919,7 +909,7 @@ any of these causes silent failures that are hard to diagnose after the fact.
 - [ ] `model.csdl.xml` entity types match IOA spec names and states
 - [ ] Cedar policies exist for each entity type in `specs/policies/`
 - [ ] No warnings from L0 SMT (dead guards, unreachable states)
-- [ ] If specs contain `[[integration]]` sections, `integration.toml` exists with webhook URLs and retry config
+- [ ] Every `[[integration]]` type has a registered runtime consumer; outbound IOA webhooks are rejected by ADR-0171
 
 **Persistence (events survive restart):**
 - [ ] `DATABASE_URL` is set and points to a running Postgres instance
@@ -981,7 +971,7 @@ any of these causes silent failures that are hard to diagnose after the fact.
 | Putting guards inline in action params | Guards are separate from action parameters | Use `guard = "items > 0"` for preconditions, `params = [...]` for action inputs |
 | Deploying without `DATABASE_URL` | Server runs fine but events are lost on restart — silent data loss | Always set `DATABASE_URL`, verify "Postgres connected" in startup log |
 | Not querying Postgres after first deploy | No way to know if persistence is actually working | Run `SELECT COUNT(*) FROM events` after dispatching actions |
-| Putting webhook calls inside state machine guards or effects | Breaks deterministic verification, introduces network into the transition | Use `[[integration]]` declarations — external calls happen out-of-band via the Integration Engine |
+| Declaring an outbound IOA webhook | No durable runtime consumes it, so validation rejects it | Use a supported WASM/adapter integration or an operator `webhooks.toml` subscription with its documented contract |
 
 ---
 

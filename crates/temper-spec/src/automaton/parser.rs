@@ -10,6 +10,9 @@ use super::toml_parser;
 use super::types::*;
 use crate::tlaplus::{Invariant as TlaInvariant, StateMachine, Transition};
 
+const OUTBOUND_IOA_WEBHOOK_UNSUPPORTED: &str =
+    "outbound IOA webhooks are unsupported until durable delivery is available";
+
 /// Errors from parsing an automaton specification.
 #[derive(Debug, thiserror::Error)]
 pub enum AutomatonParseError {
@@ -72,24 +75,26 @@ pub fn parse_automaton_with_liveness(
     // ADR-0049: wire each state_timeout's `state` into the target action's
     // `from` list so the action is actually enabled from that state.
     wire_state_timeout_from_states(&mut automaton);
-    // ADR-0046/0078: expand `[[action.triggers]]` external integration blocks
+    // ADR-0046/0078/0171: expand supported `[[action.triggers]]` external
+    // integration blocks
     // into synthesized `[[integration]]` entries + action effects so the
-    // existing WASM/adapter/webhook runtime picks them up without needing a parallel
+    // existing WASM/adapter runtime picks them up without needing a parallel
     // dispatch path. Entity-kind triggers are handled separately by the
-    // reaction dispatcher.
+    // reaction dispatcher; webhook triggers are rejected during validation.
     expand_external_action_triggers(&mut automaton)?;
     // ADR-0050: enforce (or warn on) liveness coverage.
     check_liveness_coverage(&automaton, mode)?;
     Ok(automaton)
 }
 
-/// ADR-0046/0078: translate external `[[action.triggers]]` declarations into
+/// ADR-0046/0078/0171: translate supported external `[[action.triggers]]`
+/// declarations into
 /// the existing `[[integration]]` + `Effect::Trigger` runtime. For each such
 /// trigger, synthesizes:
 ///
 /// 1. A new `Integration` appended to `automaton.integrations` with
-///    fields copied from the trigger (module / adapter / url / method /
-///    config / on_success / on_failure).
+///    fields copied from the trigger (module / adapter / config /
+///    on_success / on_failure).
 /// 2. A `trigger` effect on the source action so the transition table
 ///    emits a `custom_effect` that the runtime's integration dispatcher
 ///    picks up by name.
@@ -120,10 +125,7 @@ fn expand_external_action_triggers(automaton: &mut Automaton) -> Result<(), Auto
         std::collections::BTreeMap::new();
     for action in &automaton.actions {
         for trigger in &action.triggers {
-            if matches!(
-                trigger.kind,
-                TriggerKind::Wasm | TriggerKind::Adapter | TriggerKind::Webhook
-            ) {
+            if matches!(trigger.kind, TriggerKind::Wasm | TriggerKind::Adapter) {
                 inline_trigger_owners
                     .entry(trigger.name.clone())
                     .or_default()
@@ -136,12 +138,7 @@ fn expand_external_action_triggers(automaton: &mut Automaton) -> Result<(), Auto
         let local_inline_trigger_names: std::collections::BTreeSet<String> = action
             .triggers
             .iter()
-            .filter(|trigger| {
-                matches!(
-                    trigger.kind,
-                    TriggerKind::Wasm | TriggerKind::Adapter | TriggerKind::Webhook
-                )
-            })
+            .filter(|trigger| matches!(trigger.kind, TriggerKind::Wasm | TriggerKind::Adapter))
             .map(|trigger| trigger.name.clone())
             .collect();
 
@@ -184,10 +181,7 @@ fn expand_external_action_triggers(automaton: &mut Automaton) -> Result<(), Auto
             })
             .collect();
         for trigger in &action.triggers {
-            if !matches!(
-                trigger.kind,
-                TriggerKind::Wasm | TriggerKind::Adapter | TriggerKind::Webhook
-            ) {
+            if !matches!(trigger.kind, TriggerKind::Wasm | TriggerKind::Adapter) {
                 continue;
             }
             let synth_name = synthesized_trigger_name(&action.name, &trigger.name);
@@ -237,42 +231,7 @@ fn expand_external_action_triggers(automaton: &mut Automaton) -> Result<(), Auto
                         config,
                     });
                 }
-                TriggerKind::Webhook => {
-                    // ADR-0046 known gap: we synthesize the Integration record
-                    // but no runtime dispatcher keys on integration_type ==
-                    // "webhook" today (only "wasm" via wasm.rs:200 and
-                    // "adapter" via adapter.rs:96). A spec-declared webhook
-                    // trigger parses and installs but never fires HTTP. Real
-                    // outbound webhook delivery currently runs through
-                    // temper-server's separate WebhookDispatcher + webhooks.toml
-                    // path. A follow-up will add state/dispatch/webhook.rs
-                    // and collapse the two paths. The config-flattening below
-                    // stays so the Integration record is immediately usable
-                    // once that dispatcher lands.
-                    let mut config = trigger.config.clone();
-                    if let Some(url) = &trigger.url {
-                        config.insert("url".to_string(), url.clone());
-                    }
-                    if let Some(method) = &trigger.method {
-                        config.insert("method".to_string(), method.clone());
-                    }
-                    for (k, v) in &trigger.headers {
-                        config.insert(format!("header.{k}"), v.clone());
-                    }
-                    if let Some(body) = &trigger.body_template {
-                        config.insert("body_template".to_string(), body.clone());
-                    }
-                    synthesized.push(Integration {
-                        name: synth_name.clone(),
-                        trigger: synth_name.clone(),
-                        integration_type: "webhook".to_string(),
-                        module: None,
-                        on_success: trigger.on_success.clone(),
-                        on_failure: trigger.on_failure.clone(),
-                        llm: false,
-                        config,
-                    });
-                }
+                TriggerKind::Webhook => return Err(unsupported_webhook_trigger(action, trigger)),
             }
         }
     }
@@ -559,9 +518,16 @@ fn validate(automaton: &Automaton) -> Result<(), AutomatonParseError> {
         }
     }
 
-    // 3. Validate WASM integrations.
+    // 3. Validate supported integrations. ADR-0171 rejects legacy outbound
+    //    webhooks before verification, JIT construction, or runtime dispatch.
     let action_names: Vec<&str> = automaton.actions.iter().map(|a| a.name.as_str()).collect();
     for ig in &automaton.integrations {
+        if ig.integration_type == "webhook" {
+            return Err(AutomatonParseError::Validation(format!(
+                "integration '{}': {OUTBOUND_IOA_WEBHOOK_UNSUPPORTED}",
+                ig.name
+            )));
+        }
         if ig.integration_type == "wasm" {
             if ig.module.is_none() {
                 return Err(AutomatonParseError::Validation(format!(
@@ -705,11 +671,12 @@ fn validate_vector_decls(automaton: &Automaton) -> Result<(), AutomatonParseErro
 ///
 /// Checks performed (parse-time, per-entity — cross-entity checks like
 /// target-action existence happen at registry load time):
-/// - Kind-specific required fields present.
+/// - Webhook declarations are rejected until durable delivery exists.
+/// - Kind-specific required fields present for accepted kinds.
 /// - `to_state` (if set) is a declared state.
 /// - Trigger guard nesting depth ≤ `MAX_TRIGGER_GUARD_DEPTH`.
 /// - `params` and `params_from` keys must not collide.
-/// - For `Wasm`/`Adapter`/`Webhook` kinds: `on_success`/`on_failure` reference
+/// - For `Wasm`/`Adapter` kinds: `on_success`/`on_failure` reference
 ///   actions declared on the same source entity.
 /// - Trigger names within a single action must be unique.
 fn validate_action_triggers(
@@ -775,18 +742,7 @@ fn validate_action_triggers(
                     }
                 }
                 TriggerKind::Webhook => {
-                    if trigger.url.as_deref().is_none_or(str::is_empty) {
-                        return Err(AutomatonParseError::Validation(format!(
-                            "trigger '{}' on action '{}' is kind=\"webhook\" but missing 'url'",
-                            trigger.name, action.name
-                        )));
-                    }
-                    if trigger.method.as_deref().is_none_or(str::is_empty) {
-                        return Err(AutomatonParseError::Validation(format!(
-                            "trigger '{}' on action '{}' is kind=\"webhook\" but missing 'method'",
-                            trigger.name, action.name
-                        )));
-                    }
+                    return Err(unsupported_webhook_trigger(action, trigger));
                 }
             }
 
@@ -801,7 +757,7 @@ fn validate_action_triggers(
             }
 
             // on_success / on_failure must reference actions declared on this
-            // source entity (they dispatch on the source after module/HTTP).
+            // source entity (they dispatch on the source after external work).
             if let Some(ref cb) = trigger.on_success
                 && !action_names.contains(&cb.as_str())
             {
@@ -846,6 +802,13 @@ fn validate_action_triggers(
     }
 
     Ok(())
+}
+
+fn unsupported_webhook_trigger(action: &Action, trigger: &ActionTrigger) -> AutomatonParseError {
+    AutomatonParseError::Validation(format!(
+        "trigger '{}' on action '{}': {OUTBOUND_IOA_WEBHOOK_UNSUPPORTED}",
+        trigger.name, action.name
+    ))
 }
 
 #[cfg(test)]

@@ -2,7 +2,7 @@ use super::super::*;
 use super::ORDER_IOA;
 
 #[test]
-fn test_integration_section_parsed() {
+fn supported_integration_sections_parse() {
     let toml = r#"
 [automaton]
 name = "Order"
@@ -15,38 +15,35 @@ from = ["Draft"]
 to = "Submitted"
 
 [[integration]]
-name = "notify_fulfillment"
+name = "run_fulfillment"
 trigger = "SubmitOrder"
-type = "webhook"
+type = "wasm"
+module = "fulfillment"
 
 [[integration]]
-name = "charge_payment"
+name = "record_payment"
 trigger = "ConfirmOrder"
-type = "webhook"
+type = "adapter"
+adapter = "payment-ledger"
 "#;
     let automaton = parse_automaton(toml).expect("should parse");
     assert_eq!(automaton.integrations.len(), 2);
-    assert_eq!(automaton.integrations[0].name, "notify_fulfillment");
+    assert_eq!(automaton.integrations[0].name, "run_fulfillment");
     assert_eq!(automaton.integrations[0].trigger, "SubmitOrder");
-    assert_eq!(automaton.integrations[0].integration_type, "webhook");
-    assert_eq!(automaton.integrations[1].name, "charge_payment");
-}
-
-#[test]
-fn test_integration_default_type() {
-    let toml = r#"
-[automaton]
-name = "Order"
-states = ["Draft", "Submitted"]
-initial = "Draft"
-
-[[integration]]
-name = "notify"
-trigger = "SubmitOrder"
-"#;
-    let automaton = parse_automaton(toml).expect("should parse");
-    assert_eq!(automaton.integrations.len(), 1);
-    assert_eq!(automaton.integrations[0].integration_type, "webhook");
+    assert_eq!(automaton.integrations[0].integration_type, "wasm");
+    assert_eq!(
+        automaton.integrations[0].module.as_deref(),
+        Some("fulfillment")
+    );
+    assert_eq!(automaton.integrations[1].name, "record_payment");
+    assert_eq!(automaton.integrations[1].integration_type, "adapter");
+    assert_eq!(
+        automaton.integrations[1]
+            .config
+            .get("adapter")
+            .map(String::as_str),
+        Some("payment-ledger")
+    );
 }
 
 #[test]
@@ -85,9 +82,8 @@ name = "notify_fulfillment"
 trigger = "SubmitOrder"
 "#;
 
-    let err = parse_automaton(toml).expect_err(
-        "an omitted legacy integration type defaults to webhook and must be rejected",
-    );
+    let err = parse_automaton(toml)
+        .expect_err("an omitted legacy integration type defaults to webhook and must be rejected");
     assert!(
         err.to_string()
             .contains("outbound IOA webhooks are unsupported until durable delivery is available"),
@@ -113,12 +109,7 @@ initial = "Submitted"
 name = "ChargePayment"
 from = ["Submitted"]
 to = "ChargePending"
-effect = "trigger charge_payment"
-
-[[integration]]
-name = "charge_payment"
-trigger = "charge_payment"
-type = "webhook"
+effect = "trigger ChargePaymentEffect"
 
 [[action]]
 name = "ChargeSucceeded"
@@ -140,7 +131,7 @@ to = "PaymentFailed"
         .unwrap();
     assert_eq!(charge.effect.len(), 1);
     match &charge.effect[0] {
-        Effect::Trigger { name } => assert_eq!(name, "charge_payment"),
+        Effect::Trigger { name } => assert_eq!(name, "ChargePaymentEffect"),
         other => panic!("expected Trigger effect, got: {other:?}"),
     }
 }
