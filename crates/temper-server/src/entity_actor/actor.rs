@@ -48,6 +48,8 @@ use super::types::{
 
 mod field_updates;
 
+use field_updates::FieldUpdateCommitError;
+
 const FIELD_UPDATE_RETRY_BUDGET: usize = 2;
 
 fn event_budget_workspace_id(state: &EntityState) -> String {
@@ -513,11 +515,9 @@ impl EntityActor {
         state: &mut EntityState,
         tenant: &str,
         blob_store: Option<&crate::blob_store::BlobStore>,
-        // When true, a journal read failure PROPAGATES as an error instead of being
-        // swallowed ("start fresh"). The key-index backfill needs this: it must
-        // distinguish "entity genuinely has no events" from "could not read the
-        // journal", or it would watermark a type while a present entity is unkeyed
-        // (a wrong-absent bug). Actor hydration keeps the lenient default (false).
+        // When true, a journal read failure propagates as an error instead of being
+        // swallowed ("start fresh"). Callers that publish or retry from recovered
+        // state require strict reads so they cannot act on an incomplete journal.
         strict_journal_read: bool,
     ) -> Result<(), ActorError> {
         let replay_start = Instant::now(); // determinism-ok: wall-clock for production replay duration metric only
@@ -766,11 +766,10 @@ impl EntityActor {
 
 /// Rebuild an entity's current state from its snapshot + event tail.
 ///
-/// `strict_journal_read`: when true, a journal read failure PROPAGATES as an error
-/// instead of being swallowed into a "start fresh"/stale state. The key-index backfill
-/// passes `true` so it can tell "no events" apart from "could not read the journal" —
-/// keying decisions and the per-type watermark depend on that distinction (ADR-0153
-/// soundness gate). Actor hydration passes `false` (keep serving on a transient read).
+/// `strict_journal_read`: when true, a journal read failure propagates as an error
+/// instead of being swallowed into a "start fresh"/stale state. Actor startup,
+/// field-update recovery, and key-index backfill require strict reads because each
+/// publishes a decision based on the recovered state.
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn recover_entity_state_from_store(
     tenant: &str,
@@ -826,7 +825,9 @@ impl Actor for EntityActor {
                 backend,
                 &self.initial_fields,
                 self.blob_store.as_ref(),
-                false, // hydration: keep serving on a transient journal read failure
+                // Startup must not publish snapshot or initial state unless the
+                // complete committed journal tail was replayed.
+                true,
             )
             .await?;
         }
@@ -1456,7 +1457,8 @@ impl Actor for EntityActor {
                 let committed = self.commit_field_update(state, &fields, replace).await;
                 let (success, error) = match committed {
                     Ok(()) => (true, None),
-                    Err(error) => (false, Some(error)),
+                    Err(FieldUpdateCommitError::Rejected(error)) => (false, Some(error)),
+                    Err(FieldUpdateCommitError::Recovery(error)) => return Err(error),
                 };
                 ctx.reply(EntityResponse {
                     success,

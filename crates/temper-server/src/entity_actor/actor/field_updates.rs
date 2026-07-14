@@ -1,5 +1,13 @@
 use super::*;
 
+/// Terminal outcomes from a durable PATCH or PUT attempt.
+pub(super) enum FieldUpdateCommitError {
+    /// The mutation was rejected without making the actor unsafe to continue.
+    Rejected(String),
+    /// Authoritative recovery failed, so supervision must rebuild the actor.
+    Recovery(ActorError),
+}
+
 impl EntityActor {
     fn apply_field_update(
         state: &mut EntityState,
@@ -60,20 +68,21 @@ impl EntityActor {
         state: &mut EntityState,
         fields: &serde_json::Value,
         replace: bool,
-    ) -> Result<(), String> {
+    ) -> Result<(), FieldUpdateCommitError> {
         let table = self.table.read().expect("table lock poisoned").clone();
         let mut base = state.clone();
         let mut retries_remaining = FIELD_UPDATE_RETRY_BUDGET;
 
         loop {
             if !base.can_accept_event() {
-                return Err(format!(
+                return Err(FieldUpdateCommitError::Rejected(format!(
                     "Event budget exhausted ({MAX_EVENTS_SINCE_SNAPSHOT} max since snapshot)"
-                ));
+                )));
             }
 
             let mut candidate = base.clone();
-            Self::apply_field_update(&mut candidate, fields, replace).map_err(str::to_string)?;
+            Self::apply_field_update(&mut candidate, fields, replace)
+                .map_err(|error| FieldUpdateCommitError::Rejected(error.to_string()))?;
             let event = EntityEvent {
                 action: FIELD_UPDATE_EVENT_TYPE.to_string(),
                 from_status: candidate.status.clone(),
@@ -99,10 +108,7 @@ impl EntityActor {
                     .await
                 {
                     Ok(_) => {}
-                    Err(PersistenceError::ConcurrencyViolation { actual, .. })
-                        if retries_remaining > 0 =>
-                    {
-                        retries_remaining -= 1;
+                    Err(PersistenceError::ConcurrencyViolation { actual, .. }) => {
                         base = recover_entity_state_from_store(
                             &self.tenant,
                             &self.entity_type,
@@ -115,20 +121,30 @@ impl EntityActor {
                             true,
                         )
                         .await
-                        .map_err(|error| format!("field update replay failed: {error}"))?;
-                        debug_assert!(
-                            base.sequence_nr >= actual,
-                            "POSTCONDITION: field update replay under-reached authoritative sequence \
-                             (base.sequence_nr={} < actual={actual})",
-                            base.sequence_nr
-                        );
+                        .map_err(FieldUpdateCommitError::Recovery)?;
+                        if base.sequence_nr < actual {
+                            return Err(FieldUpdateCommitError::Recovery(ActorError::custom(
+                                format!(
+                                    "field update replay under-reached authoritative sequence \
+                                     (base.sequence_nr={} < actual={actual})",
+                                    base.sequence_nr
+                                ),
+                            )));
+                        }
                         *state = base.clone();
+                        if retries_remaining == 0 {
+                            return Err(FieldUpdateCommitError::Rejected(
+                                "field update retry budget exhausted".to_string(),
+                            ));
+                        }
+                        retries_remaining -= 1;
                         continue;
                     }
-                    Err(PersistenceError::ConcurrencyViolation { .. }) => {
-                        return Err("field update retry budget exhausted".to_string());
+                    Err(error) => {
+                        return Err(FieldUpdateCommitError::Rejected(format!(
+                            "persistence failed: {error}"
+                        )));
                     }
-                    Err(error) => return Err(format!("persistence failed: {error}")),
                 }
             }
 

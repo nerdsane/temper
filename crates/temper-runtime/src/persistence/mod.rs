@@ -409,7 +409,11 @@ pub trait EventStore: Send + Sync + 'static {
         appends: &[PersistenceAppend],
     ) -> impl std::future::Future<Output = Result<Vec<PersistenceAppendResult>, PersistenceError>> + Send;
 
-    /// Read events from the journal, starting after the given sequence number.
+    /// Read the complete ordered journal tail after the given sequence number.
+    ///
+    /// A backend that cannot deliver the complete tail visible to this read,
+    /// including one that detects a truncated or partial response, must return
+    /// an error rather than a successful prefix.
     fn read_events(
         &self,
         persistence_id: &str,

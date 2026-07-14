@@ -28,7 +28,7 @@ pub struct SimFaultConfig {
     pub write_failure_prob: f64,
     /// Probability of a spurious concurrency violation on `append()`.
     pub concurrency_violation_prob: f64,
-    /// Probability of truncating journal on `read_events()`.
+    /// Probability of detecting an incomplete journal read on `read_events()`.
     pub read_truncation_prob: f64,
     /// Probability of snapshot save failure.
     pub snapshot_failure_prob: f64,
@@ -916,17 +916,24 @@ impl EventStore for SimEventStore {
             None => return Ok(Vec::new()),
         };
 
-        let mut events: Vec<PersistenceEnvelope> = journal
+        let events: Vec<PersistenceEnvelope> = journal
             .iter()
             .filter(|e| e.sequence_nr > from_sequence)
             .cloned()
             .collect();
 
-        // Fault injection: truncate the returned events.
+        // Fault injection: model a backend detecting that it received only a
+        // proper prefix. EventStore requires a complete tail or an error, so a
+        // detected truncation must never be returned as successful history.
         let rt_prob = inner.faults.read_truncation_prob;
-        if !events.is_empty() && inner.rng.chance(rt_prob) {
+        if events.len() > 1 && inner.rng.chance(rt_prob) {
             let truncate_at = (inner.rng.next_u64() as usize) % events.len();
-            events.truncate(truncate_at.max(1));
+            let prefix_len = truncate_at.max(1);
+            return Err(PersistenceError::Storage(format!(
+                "SimEventStore: incomplete journal read for {persistence_id} \
+                 ({prefix_len} of {} tail events)",
+                events.len()
+            )));
         }
 
         Ok(events)

@@ -66,7 +66,15 @@ An optimistic-concurrency retry first recovers the latest durable entity state.
 That authoritative history becomes the actor's live state even when a later
 retry fails or exhausts its budget; only the uncommitted PATCH/PUT fields are
 discarded. This prevents a rejected field update from making the actor continue
-serving an older view than its own journal.
+serving an older view than its own journal. Every concurrency result, including
+the terminal exhausted attempt, is followed by strict recovery through the
+reported `actual` sequence before the actor returns the failed mutation. If that
+recovery cannot prove the complete journal tail, the handler fails and actor
+supervision rebuilds state; startup replay is also strict, so neither the old
+incarnation nor its replacement can serve known-stale state. The event-store
+contract defines a read as the complete ordered tail or an error; a detected
+partial response is never a successful replay. Deterministic truncation faults
+therefore exercise the same fail-closed path as a production read failure.
 
 The co-commit API carries explicit `reconcile_keys` and `reconcile_vectors`
 flags. When the entity type declares keys, its candidate `key_rows` are the exact
@@ -124,7 +132,10 @@ maintainer later chooses to ship it.
   sequence unchanged when no newer durable history exists, and the public OData
   request returns a server error.
 - Retry exhaustion retains any unrelated durable history recovered after a
-  concurrency conflict without publishing the rejected PATCH/PUT fields.
+  concurrency conflict, including the writer that wins the final attempt,
+  without publishing the rejected PATCH/PUT fields.
+- A failed authoritative retry read fails the actor message and supervision
+  replays the journal before the actor serves another state response.
 - PUT removal of declared-key properties purges the prior key row atomically in
   Postgres and the deterministic simulation store.
 - The reserved event type cannot be dispatched as a domain action.
