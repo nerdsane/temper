@@ -29,8 +29,8 @@ pub struct SimActorSystemConfig {
     pub faults: FaultConfig,
     /// Maximum actions per actor in random mode.
     pub max_actions_per_actor: usize,
-    /// Maximum ready messages transferred from scheduler mailboxes per tick.
-    pub message_budget_per_tick: usize,
+    /// Maximum ready messages transferred in one bounded drain batch.
+    pub message_batch_budget: usize,
     /// Maximum integration callbacks executed in one deterministic cascade.
     pub reaction_budget_per_tick: usize,
 }
@@ -42,7 +42,7 @@ impl Default for SimActorSystemConfig {
             max_ticks: 500,
             faults: FaultConfig::light(),
             max_actions_per_actor: 50,
-            message_budget_per_tick: 1_024,
+            message_batch_budget: 1_024,
             reaction_budget_per_tick: 1_024,
         }
     }
@@ -137,8 +137,8 @@ impl SimActorSystem {
     /// Create a new simulation system with the given config.
     pub fn new(config: SimActorSystemConfig) -> Self {
         assert!(
-            config.message_budget_per_tick > 0,
-            "message budget per tick must be positive"
+            config.message_batch_budget > 0,
+            "message batch budget must be positive"
         );
         assert!(
             config.reaction_budget_per_tick > 0,
@@ -219,7 +219,7 @@ impl SimActorSystem {
         self.clock.advance();
         self.total_messages += 1;
         let result = self.apply_action(actor_id, action, params)?;
-        self.deliver_integration_callbacks()?;
+        self.deliver_integration_callbacks(&mut 0)?;
         Ok(result)
     }
 
@@ -389,22 +389,21 @@ impl SimActorSystem {
                 }
             }
             self.observed_scheduler_drops = self.scheduler.dropped_log().len();
-            let delivered = self
-                .scheduler
-                .drain_ready(self.config.message_budget_per_tick);
-
-            // Process delivered messages
-            for msg in &delivered {
-                let in_flight = self.random_in_flight_actions.get_mut(&msg.to).unwrap(); // ci-ok: driver targets registered actors
-                assert!(*in_flight > 0, "delivered action must own a reservation");
-                *in_flight -= 1;
-                // Delayed actions can become invalid after intervening state
-                // changes, so regular action rejection is an explored outcome.
-                let _ = self.apply_action(&msg.to, &msg.msg_type, &msg.payload);
-            }
-
-            if self.deliver_integration_callbacks().is_err() {
-                break 'simulation;
+            let mut reactions = 0;
+            loop {
+                let delivered = self.scheduler.drain_ready(self.config.message_batch_budget);
+                for msg in &delivered {
+                    let in_flight = self.random_in_flight_actions.get_mut(&msg.to).unwrap(); // ci-ok: driver targets registered actors
+                    assert!(*in_flight > 0, "delivered action must own a reservation");
+                    *in_flight -= 1;
+                    let _ = self.apply_action(&msg.to, &msg.msg_type, &msg.payload);
+                }
+                if self.deliver_integration_callbacks(&mut reactions).is_err() {
+                    break 'simulation;
+                }
+                if _tick + 1 < self.config.max_ticks || !self.scheduler.has_ready_messages() {
+                    break;
+                }
             }
         }
 

@@ -27,13 +27,13 @@ These paths make deterministic simulation disagree with the delivery contract it
 
 The scheduler exposes one budgeted drain operation. It consumes ready messages by cycling through `BTreeMap` actor order and preserving FIFO order within each actor. The cursor carries across drains so a small budget cannot permanently starve a later mailbox. Both the runtime actor simulator and verifier simulator process only messages returned by this consuming drain. No driver may inspect a delivery through a parallel return path.
 
-The drain accepts a message budget. A tick budget already bounds elapsed logical time; runtime and verifier configurations make the per-tick message budget explicit. Reaching a budget preserves undrained messages for a later tick rather than dropping them.
+The drain accepts a message batch budget. A tick budget already bounds elapsed logical time; runtime and verifier configurations make the maximum transfer per drain call explicit. Reaching a batch budget preserves undrained messages in scheduler ownership rather than dropping them. Ordinary ticks perform one batch; the terminal tick repeats bounded batches until every message already due at that logical time is consumed. The ready-mailbox retention budget bounds that final flush without advancing time or admitting new actions.
 
 Scheduler mailboxes also have an explicit per-actor retention budget. Drivers derive it from their maximum tick budget, which bounds the number of actions they can enqueue. Direct scheduler users receive a conservative default and fail fast if they exceed it.
 
 ### Reactions are iterative, budgeted, and fallible
 
-Integration callbacks are drained iteratively from their reaction queue under an explicit per-tick reaction budget. Callback rejection is recorded as a simulation execution error and makes the run unsuccessful. Callback dispatch does not recursively start another independent drain.
+Integration callbacks are drained iteratively from their reaction queue under an explicit per-tick reaction budget shared by every message batch in that tick, including terminal-flush batches. Callback rejection is recorded as a simulation execution error and makes the run unsuccessful. Callback dispatch does not recursively start another independent drain.
 
 In scripted mode, a primary action commits before its callbacks run. A callback error therefore reports partial completion and must not be interpreted as rollback or as permission to retry the primary action.
 
@@ -67,7 +67,7 @@ A successful simulation requires both invariant preservation and absence of deli
 ### Negative
 
 - Callers that used the vector returned by `tick` must migrate to the consuming drain.
-- A per-tick budget can defer ready work to a later tick; callers must size budgets for their explored workload.
+- A small message batch budget requires more bounded drain calls on the terminal tick, but cannot discard work already due at the simulation horizon.
 
 ### Risks
 

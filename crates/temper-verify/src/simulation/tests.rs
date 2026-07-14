@@ -10,7 +10,7 @@ fn test_simulation_no_faults() {
         num_actors: 3,
         max_actions_per_actor: 15,
         max_counter: 2,
-        message_budget_per_tick: 1_024,
+        message_batch_budget: 1_024,
         faults: FaultConfig::none(),
     };
 
@@ -34,7 +34,7 @@ fn test_simulation_light_faults() {
         num_actors: 3,
         max_actions_per_actor: 20,
         max_counter: 2,
-        message_budget_per_tick: 1_024,
+        message_batch_budget: 1_024,
         faults: FaultConfig::light(),
     };
 
@@ -54,7 +54,7 @@ fn test_simulation_heavy_faults() {
         num_actors: 5,
         max_actions_per_actor: 15,
         max_counter: 2,
-        message_budget_per_tick: 1_024,
+        message_batch_budget: 1_024,
         faults: FaultConfig::heavy(),
     };
 
@@ -78,7 +78,7 @@ fn delayed_message_due_on_final_tick_is_delivered() {
         num_actors: 1,
         max_actions_per_actor: 1,
         max_counter: 2,
-        message_budget_per_tick: 1,
+        message_batch_budget: 1,
         faults: FaultConfig {
             message_delay_prob: 1.0,
             max_delay_ticks: 2,
@@ -102,6 +102,34 @@ fn delayed_message_due_on_final_tick_is_delivered() {
 }
 
 #[test]
+fn final_tick_drains_every_due_message_when_batch_exceeds_budget() {
+    let config = SimConfig {
+        seed: 3,
+        max_ticks: 2,
+        num_actors: 1,
+        max_actions_per_actor: 2,
+        max_counter: 2,
+        message_batch_budget: 1,
+        faults: FaultConfig {
+            message_delay_prob: 1.0,
+            max_delay_ticks: 2,
+            message_drop_prob: 0.0,
+            actor_crash_prob: 0.0,
+            actor_restart_prob: 0.0,
+        },
+    };
+
+    let result = run_simulation_from_ioa(ORDER_IOA, &config).unwrap();
+
+    assert_eq!(result.total_dropped, 0);
+    assert_eq!(result.total_messages, 2);
+    assert_eq!(
+        result.total_transitions, 2,
+        "every message due on the final tick must leave scheduler ownership"
+    );
+}
+
+#[test]
 fn test_simulation_is_reproducible() {
     let config = SimConfig {
         seed: 999,
@@ -109,7 +137,7 @@ fn test_simulation_is_reproducible() {
         num_actors: 2,
         max_actions_per_actor: 10,
         max_counter: 2,
-        message_budget_per_tick: 1_024,
+        message_batch_budget: 1_024,
         faults: FaultConfig::light(),
     };
 
@@ -157,7 +185,7 @@ fn test_multi_seed_simulation() {
         num_actors: 2,
         max_actions_per_actor: 10,
         max_counter: 2,
-        message_budget_per_tick: 1_024,
+        message_batch_budget: 1_024,
         faults: FaultConfig::light(),
     };
 
@@ -182,7 +210,7 @@ fn test_simulation_result_contains_final_states() {
         num_actors: 2,
         max_actions_per_actor: 5,
         max_counter: 2,
-        message_budget_per_tick: 1_024,
+        message_batch_budget: 1_024,
         faults: FaultConfig::none(),
     };
 

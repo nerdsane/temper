@@ -261,6 +261,11 @@ impl SimScheduler {
             .and_then(VecDeque::pop_front)
     }
 
+    /// Return whether any actor mailbox owns a ready message.
+    pub fn has_ready_messages(&self) -> bool {
+        self.mailboxes.values().any(|mailbox| !mailbox.is_empty())
+    }
+
     /// Check if the simulation has no more pending messages.
     pub fn is_quiescent(&self) -> bool {
         self.pending.is_empty() && self.mailboxes.values().all(|q| q.is_empty())

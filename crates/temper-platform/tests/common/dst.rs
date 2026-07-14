@@ -17,7 +17,7 @@ pub fn new_sim(
         max_ticks,
         faults,
         max_actions_per_actor,
-        message_budget_per_tick: 1_024,
+        message_batch_budget: 1_024,
         reaction_budget_per_tick: 1_024,
     })
 }

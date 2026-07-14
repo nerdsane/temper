@@ -33,8 +33,8 @@ pub struct SimConfig {
     pub max_actions_per_actor: usize,
     /// Maximum counter value for bounded model checking.
     pub max_counter: usize,
-    /// Maximum ready messages transferred from scheduler mailboxes per tick.
-    pub message_budget_per_tick: usize,
+    /// Maximum ready messages transferred in one bounded drain batch.
+    pub message_batch_budget: usize,
     /// Fault injection configuration.
     pub faults: FaultConfig,
 }
@@ -47,7 +47,7 @@ impl Default for SimConfig {
             num_actors: 3,
             max_actions_per_actor: 20,
             max_counter: 2,
-            message_budget_per_tick: 1_024,
+            message_batch_budget: 1_024,
             faults: FaultConfig::none(),
         }
     }
@@ -157,8 +157,8 @@ pub fn run_multi_seed_simulation_from_ioa(
 
 fn run_simulation_impl(model: &TemperModel, config: &SimConfig) -> SimulationResult {
     assert!(
-        config.message_budget_per_tick > 0,
-        "message budget per tick must be positive"
+        config.message_batch_budget > 0,
+        "message batch budget must be positive"
     );
     let mailbox_budget = usize::try_from(config.max_ticks)
         .expect("maximum ticks must fit the platform address space")
@@ -231,39 +231,44 @@ fn run_simulation_impl(model: &TemperModel, config: &SimConfig) -> SimulationRes
             }
         }
         observed_scheduler_drops = sched.dropped_log().len();
-        let delivered = sched.drain_ready(config.message_budget_per_tick);
+        loop {
+            let delivered = sched.drain_ready(config.message_batch_budget);
 
-        for msg in &delivered {
-            let target_idx = actor_states.iter().position(|(id, _)| id == &msg.to);
-            let Some(idx) = target_idx else { continue };
+            for msg in &delivered {
+                let target_idx = actor_states.iter().position(|(id, _)| id == &msg.to);
+                let Some(idx) = target_idx else { continue };
 
-            assert!(
-                actor_in_flight_actions[idx] > 0,
-                "delivered action must own a reservation"
-            );
-            actor_in_flight_actions[idx] -= 1;
-
-            let (ref target_id, ref state_before) = actor_states[idx];
-
-            let action: TemperModelAction = match serde_json::from_str(&msg.payload) {
-                Ok(a) => a,
-                Err(_) => continue,
-            };
-
-            if let Some(new_state) = model.next_state(state_before, action.clone()) {
-                check_invariants_on_state(
-                    model,
-                    target_id,
-                    &action.name,
-                    state_before,
-                    &new_state,
-                    tick,
-                    &mut violations,
+                assert!(
+                    actor_in_flight_actions[idx] > 0,
+                    "delivered action must own a reservation"
                 );
+                actor_in_flight_actions[idx] -= 1;
 
-                actor_states[idx].1 = new_state;
-                actor_action_counts[idx] += 1;
-                total_transitions += 1;
+                let (ref target_id, ref state_before) = actor_states[idx];
+
+                let action: TemperModelAction = match serde_json::from_str(&msg.payload) {
+                    Ok(a) => a,
+                    Err(_) => continue,
+                };
+
+                if let Some(new_state) = model.next_state(state_before, action.clone()) {
+                    check_invariants_on_state(
+                        model,
+                        target_id,
+                        &action.name,
+                        state_before,
+                        &new_state,
+                        tick,
+                        &mut violations,
+                    );
+
+                    actor_states[idx].1 = new_state;
+                    actor_action_counts[idx] += 1;
+                    total_transitions += 1;
+                }
+            }
+            if tick + 1 < config.max_ticks || !sched.has_ready_messages() {
+                break;
             }
         }
     }

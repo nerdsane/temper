@@ -71,11 +71,13 @@ impl SimActorSystem {
         }
     }
 
-    pub(super) fn deliver_integration_callbacks(&mut self) -> Result<(), String> {
-        let mut reactions = 0;
+    pub(super) fn deliver_integration_callbacks(
+        &mut self,
+        reactions: &mut usize,
+    ) -> Result<(), String> {
         while let Some((actor_id, callback_action)) = self.pending_integration_callbacks.pop_front()
         {
-            if reactions == self.config.reaction_budget_per_tick {
+            if *reactions == self.config.reaction_budget_per_tick {
                 self.pending_integration_callbacks
                     .push_front((actor_id.clone(), callback_action.clone()));
                 let description =
@@ -89,7 +91,7 @@ impl SimActorSystem {
                 return Err(description);
             }
 
-            reactions += 1;
+            *reactions += 1;
             if let Err(error) = self.apply_action(&actor_id, &callback_action, "{}") {
                 let description = format!(
                     "integration callback '{callback_action}' failed for '{actor_id}': {error}"

@@ -81,7 +81,7 @@ fn sim_config() -> SimActorSystemConfig {
         max_ticks: 100,
         faults: FaultConfig::none(),
         max_actions_per_actor: 20,
-        message_budget_per_tick: 1_024,
+        message_batch_budget: 1_024,
         reaction_budget_per_tick: 1_024,
     }
 }
