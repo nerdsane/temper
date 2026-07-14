@@ -1625,9 +1625,14 @@ impl ServerState {
 
     /// Passivate actors that have been idle longer than the configured timeout.
     ///
-    /// Keeps `entity_index` entries intact so future accesses can lazy-spawn.
+    /// Keeps `entity_index` entries intact so durable actors can lazy-spawn.
+    /// In-memory-only actors cannot be reconstructed and therefore remain live.
     #[instrument(skip_all, fields(otel.name = "entity.passivate_idle_actors"))]
     pub async fn passivate_idle_actors(&self) {
+        let Some((_store, _backend)) = self.event_journal() else {
+            return;
+        };
+
         let timeout_secs = actor_idle_timeout_secs();
         let cutoff = sim_now() - chrono::Duration::seconds(timeout_secs);
 
@@ -1657,48 +1662,34 @@ impl ServerState {
 
         let mut passivated = 0usize;
         let policy = self.dispatch_retry_policy();
-        let journal = self.event_journal();
         for (actor_key, actor_ref) in candidates {
             // ADR-0048: retry transient failures so passivation is not skipped
             // by a single AskTimeout under load.
-            let snapshot_outcome = retry::ask_with_backoff::<_, EntityResponse, _>(
+            let passivation_outcome = retry::ask_with_backoff::<_, EntityResponse, _>(
                 &actor_ref,
-                || EntityMsg::GetState,
+                || EntityMsg::Passivate,
                 &policy,
             )
             .await;
-            if let Some((store, _backend)) = journal.as_ref()
-                && let Ok(response) = snapshot_outcome.result
-                && response.state.sequence_nr > 0
-            {
-                // Snapshot excludes bounded in-memory recent event history.
-                let mut snapshot_value = match serde_json::to_value(&response.state) {
-                    Ok(v) => v,
-                    Err(e) => {
-                        tracing::warn!(actor_key = %actor_key, error = %e, "failed to encode snapshot value");
-                        serde_json::Value::Null
-                    }
-                };
-                if let Some(obj) = snapshot_value.as_object_mut() {
-                    obj.remove("events");
-                }
-                if !snapshot_value.is_null()
-                    && let Ok(snapshot_bytes) = serde_json::to_vec(&snapshot_value)
-                    && let Err(e) = store
-                        .save_snapshot(&actor_key, response.state.sequence_nr, &snapshot_bytes)
-                        .await
-                {
+            match passivation_outcome.result {
+                Ok(response) if response.success => {}
+                Ok(response) => {
                     tracing::warn!(
                         actor_key = %actor_key,
-                        seq = response.state.sequence_nr,
-                        error = %e,
-                        "failed to save snapshot during passivation"
+                        error = ?response.error,
+                        "actor declined passivation; retaining actor"
                     );
+                    continue;
+                }
+                Err(error) => {
+                    tracing::warn!(actor_key = %actor_key, %error, "failed to passivate actor; retaining actor");
+                    continue;
                 }
             }
 
-            let _ = actor_ref.stop();
-
+            // The actor stopped itself immediately after replying, before its
+            // mailbox could admit another mutation. Removing only the same UID
+            // avoids racing a concurrent lazy respawn.
             let removed = {
                 let Ok(mut registry) = self.actor_registry.write() else {
                     continue;
@@ -1714,16 +1705,18 @@ impl ServerState {
                 }
             };
 
-            if removed {
-                if let Ok(mut last_accessed) = self.last_accessed.write() {
-                    last_accessed.remove(&actor_key);
-                }
-                // Evict the state cache entry so stale status doesn't linger.
-                if let Ok(mut cache) = self.entity_state_cache.lock() {
-                    cache.pop(&actor_key);
-                }
-                passivated += 1;
+            if !removed {
+                continue;
             }
+
+            if let Ok(mut last_accessed) = self.last_accessed.write() {
+                last_accessed.remove(&actor_key);
+            }
+            // Evict the state cache entry so stale status doesn't linger.
+            if let Ok(mut cache) = self.entity_state_cache.lock() {
+                cache.pop(&actor_key);
+            }
+            passivated += 1;
         }
 
         if passivated > 0 {

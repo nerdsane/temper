@@ -102,6 +102,10 @@ impl<A: Actor> ActorCell<A> {
                                 break 'message_loop false;
                             }
                         }
+                        if ctx.stop_requested {
+                            rx.close();
+                            break 'message_loop false;
+                        }
                     }
                     Envelope::Ask { msg, reply } => {
                         ctx.reply_channel = Some(reply);
@@ -118,6 +122,10 @@ impl<A: Actor> ActorCell<A> {
                             }
                         }
                         ctx.reply_channel = None;
+                        if ctx.stop_requested {
+                            rx.close();
+                            break 'message_loop false;
+                        }
                     }
                     Envelope::Signal(signal) => match signal {
                         SystemSignal::Stop | SystemSignal::PoisonPill => {

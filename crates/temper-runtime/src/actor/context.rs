@@ -20,6 +20,9 @@ pub struct ActorContext<A: Actor> {
     /// Children spawned by this actor.
     pub(crate) children: HashMap<String, Box<dyn Any + Send>>, // determinism-ok: key-based lookup only; iteration order not observed
 
+    /// Whether the actor should stop after the current message finishes.
+    pub(crate) stop_requested: bool,
+
     _phantom: std::marker::PhantomData<A>,
 }
 
@@ -29,6 +32,7 @@ impl<A: Actor> ActorContext<A> {
             id,
             reply_channel: None,
             children: HashMap::new(), // determinism-ok: map order is not used
+            stop_requested: false,
             _phantom: std::marker::PhantomData,
         }
     }
@@ -58,6 +62,17 @@ impl<A: Actor> ActorContext<A> {
         self.reply_channel.is_some()
     }
 
+    /// Reply to the current ask and stop after the handler returns.
+    ///
+    /// The stop is requested only if the reply is delivered. This lets callers
+    /// retry a timed-out operation without leaving the actor stopped behind a
+    /// stale registry reference.
+    pub fn reply_and_stop<R: Send + 'static>(&mut self, response: R) {
+        if let Some(tx) = self.reply_channel.take() {
+            self.stop_requested = tx.send(Ok(Box::new(response))).is_ok();
+        }
+    }
+
     /// Register a child actor ref (for supervision tracking).
     pub fn register_child<M: Message>(&mut self, name: &str, child: ActorRef<M>) {
         self.children.insert(name.to_string(), Box::new(child));
@@ -68,5 +83,75 @@ impl<A: Actor> ActorContext<A> {
         self.children
             .get(name)
             .and_then(|boxed| boxed.downcast_ref::<ActorRef<M>>())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::supervision::SupervisionStrategy;
+
+    struct TestActor;
+
+    #[derive(Debug)]
+    struct TestMsg;
+
+    impl Message for TestMsg {}
+
+    impl Actor for TestActor {
+        type Msg = TestMsg;
+        type State = ();
+
+        async fn pre_start(
+            &self,
+            _ctx: &mut ActorContext<Self>,
+        ) -> Result<Self::State, ActorError> {
+            Ok(())
+        }
+
+        async fn handle(
+            &self,
+            _msg: TestMsg,
+            _state: &mut Self::State,
+            _ctx: &mut ActorContext<Self>,
+        ) -> Result<(), ActorError> {
+            Ok(())
+        }
+
+        fn supervision_strategy(&self) -> SupervisionStrategy {
+            SupervisionStrategy::Stop
+        }
+
+        async fn post_stop(&self, _state: Self::State, _ctx: &mut ActorContext<Self>) {}
+    }
+
+    #[test]
+    fn reply_and_stop_requires_a_live_ask_receiver() {
+        let id = ActorId::new("test", "test/reply-and-stop");
+        let mut ctx = ActorContext::<TestActor>::new(id);
+        let (reply, receiver) = oneshot::channel();
+        ctx.reply_channel = Some(reply);
+        drop(receiver);
+
+        ctx.reply_and_stop("done");
+
+        assert!(!ctx.stop_requested);
+    }
+
+    #[test]
+    fn reply_and_stop_requests_stop_after_delivery() {
+        let id = ActorId::new("test", "test/reply-and-stop");
+        let mut ctx = ActorContext::<TestActor>::new(id);
+        let (reply, mut receiver) = oneshot::channel();
+        ctx.reply_channel = Some(reply);
+
+        ctx.reply_and_stop("done");
+
+        assert!(ctx.stop_requested);
+        let response = receiver
+            .try_recv()
+            .expect("reply should be delivered")
+            .expect("reply should succeed");
+        assert_eq!(*response.downcast::<&str>().expect("reply type"), "done");
     }
 }

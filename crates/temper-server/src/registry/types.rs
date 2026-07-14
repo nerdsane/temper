@@ -87,6 +87,12 @@ pub enum RegistryError {
         entity_type: String,
         source: String,
     },
+    /// An IOA declares safety invariants outside the supported contract.
+    UnsupportedSafetyInvariants {
+        tenant: String,
+        entity_type: String,
+        invariants: Vec<String>,
+    },
     /// A hot swap attempted to change a runtime safety contract without a state migration.
     RuntimeInvariantMigrationRequired { tenant: String, entity_type: String },
 }
@@ -110,6 +116,15 @@ impl std::fmt::Display for RegistryError {
                     "failed to parse IOA for tenant '{tenant}', entity '{entity_type}': {source}"
                 )
             }
+            Self::UnsupportedSafetyInvariants {
+                tenant,
+                entity_type,
+                invariants,
+            } => write!(
+                f,
+                "cannot activate IOA for tenant '{tenant}', entity '{entity_type}': unsupported safety invariants: {}",
+                invariants.join(", ")
+            ),
             Self::RuntimeInvariantMigrationRequired {
                 tenant,
                 entity_type,

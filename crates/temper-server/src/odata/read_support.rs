@@ -301,7 +301,7 @@ pub(super) async fn materialize_entity_set_entities(
                     .get_tenant_entity_state(&tenant, &entity_type, &id)
                     .await
                 {
-                    Ok(response) => {
+                    Ok(response) if response.success => {
                         if response.state.status != "Deleted"
                             && let Some(query_plane) = state.query_plane_store()
                         {
@@ -341,6 +341,16 @@ pub(super) async fn materialize_entity_set_entities(
                             );
                         }
                         Some(entity)
+                    }
+                    Ok(response) => {
+                        tracing::debug!(
+                            error = response.error.as_deref().unwrap_or("entity state unavailable"),
+                            tenant = %tenant,
+                            entity_type = %entity_type,
+                            entity_id = %id,
+                            "skipping unsuccessful entity state during OData collection materialization"
+                        );
+                        None
                     }
                     Err(error) => {
                         tracing::debug!(

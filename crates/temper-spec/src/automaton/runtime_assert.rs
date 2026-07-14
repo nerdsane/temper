@@ -4,6 +4,36 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use super::{AssertCompareOp, Automaton, ParsedAssert, parse_assert_expr};
 
+struct SafetyDeclarations {
+    bool_names: BTreeSet<String>,
+    counter_names: BTreeSet<String>,
+    string_names: BTreeSet<String>,
+    status_names: BTreeSet<String>,
+}
+
+impl SafetyDeclarations {
+    fn from_automaton(automaton: &Automaton) -> Self {
+        Self {
+            bool_names: declared_names(automaton, "bool"),
+            counter_names: declared_names(automaton, "counter"),
+            string_names: declared_names(automaton, "string"),
+            status_names: automaton.automaton.states.iter().cloned().collect(),
+        }
+    }
+
+    fn supports(&self, when: &[String], assertion: &str) -> bool {
+        when.iter().all(|state| self.status_names.contains(state))
+            && parse_assert_expr(assertion).is_some_and(|parsed| {
+                parsed.is_supported_safety_assertion(
+                    &self.bool_names,
+                    &self.counter_names,
+                    &self.string_names,
+                    &self.status_names,
+                )
+            })
+    }
+}
+
 /// Version of the atomic runtime-invariant enforcement contract.
 pub const RUNTIME_INVARIANT_ENFORCEMENT_VERSION: u32 = 1;
 
@@ -35,26 +65,14 @@ pub struct RuntimeInvariant {
 
 /// Compile the runtime-enforced subset of an automaton's safety assertions.
 pub fn compile_runtime_invariants(automaton: &Automaton) -> Vec<RuntimeInvariant> {
-    let bool_names = declared_names(automaton, "bool");
-    let counter_names = declared_names(automaton, "counter");
-    let string_names = declared_names(automaton, "string");
-    let status_names = automaton.automaton.states.iter().cloned().collect();
+    let declarations = SafetyDeclarations::from_automaton(automaton);
 
     automaton
         .invariants
         .iter()
         .filter_map(|invariant| {
             let parsed = parse_assert_expr(&invariant.assert)?;
-            if !parsed.is_supported_safety_assertion(
-                &bool_names,
-                &counter_names,
-                &string_names,
-                &status_names,
-            ) || !invariant
-                .when
-                .iter()
-                .all(|state| status_names.contains(state))
-            {
+            if !declarations.supports(&invariant.when, &invariant.assert) {
                 return None;
             }
             let assertion = match parsed {
@@ -71,6 +89,21 @@ pub fn compile_runtime_invariants(automaton: &Automaton) -> Vec<RuntimeInvariant
                 enforcement_version: RUNTIME_INVARIANT_ENFORCEMENT_VERSION,
             })
         })
+        .collect()
+}
+
+/// Return every declared safety invariant that cannot be enforced by the
+/// shared verification/runtime capability contract.
+///
+/// Registry activation uses this dependency-light preflight so unsupported
+/// specs cannot become live even when higher verification layers are bypassed.
+pub fn unsupported_safety_invariant_names(automaton: &Automaton) -> Vec<String> {
+    let declarations = SafetyDeclarations::from_automaton(automaton);
+    automaton
+        .invariants
+        .iter()
+        .filter(|invariant| !declarations.supports(&invariant.when, &invariant.assert))
+        .map(|invariant| invariant.name.clone())
         .collect()
 }
 

@@ -1453,6 +1453,75 @@ impl Actor for EntityActor {
                     spec_governed: true,
                 });
             }
+            EntityMsg::Passivate => {
+                let Some(store) = self.event_journal.as_ref() else {
+                    ctx.reply(EntityResponse {
+                        success: false,
+                        state: state.clone(),
+                        error: Some("in-memory entity cannot be passivated".to_string()),
+                        custom_effects: vec![],
+                        scheduled_actions: vec![],
+                        spawn_requests: vec![],
+                        spec_governed: true,
+                    });
+                    return Ok(());
+                };
+                if state.sequence_nr == 0 {
+                    ctx.reply(EntityResponse {
+                        success: false,
+                        state: state.clone(),
+                        error: Some(
+                            "entity has no durable event and cannot be reconstructed".to_string(),
+                        ),
+                        custom_effects: vec![],
+                        scheduled_actions: vec![],
+                        spawn_requests: vec![],
+                        spec_governed: true,
+                    });
+                    return Ok(());
+                }
+
+                let snapshot = match Self::serialize_snapshot_state(state) {
+                    Ok(snapshot) => snapshot,
+                    Err(error) => {
+                        ctx.reply(EntityResponse {
+                            success: false,
+                            state: state.clone(),
+                            error: Some(format!("failed to encode passivation snapshot: {error}")),
+                            custom_effects: vec![],
+                            scheduled_actions: vec![],
+                            spawn_requests: vec![],
+                            spec_governed: true,
+                        });
+                        return Ok(());
+                    }
+                };
+                if let Err(error) = store
+                    .save_snapshot(&self.persistence_id(), state.sequence_nr, &snapshot)
+                    .await
+                {
+                    ctx.reply(EntityResponse {
+                        success: false,
+                        state: state.clone(),
+                        error: Some(format!("failed to save passivation snapshot: {error}")),
+                        custom_effects: vec![],
+                        scheduled_actions: vec![],
+                        spawn_requests: vec![],
+                        spec_governed: true,
+                    });
+                    return Ok(());
+                }
+
+                ctx.reply_and_stop(EntityResponse {
+                    success: true,
+                    state: state.clone(),
+                    error: None,
+                    custom_effects: vec![],
+                    scheduled_actions: vec![],
+                    spawn_requests: vec![],
+                    spec_governed: true,
+                });
+            }
             EntityMsg::GetField { field } => {
                 let table = self.table.read().expect("table lock poisoned").clone();
                 if state.total_event_count == 0

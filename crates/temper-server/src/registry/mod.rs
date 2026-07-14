@@ -152,6 +152,24 @@ impl SpecRegistry {
     ) -> Result<(), RegistryError> {
         let tenant = tenant.into();
         let tenant_name = tenant.to_string();
+        let mut parsed_automata = BTreeMap::new();
+        for (entity_type, ioa_source) in ioa_sources {
+            let parsed =
+                automaton::parse_automaton(ioa_source).map_err(|e| RegistryError::IoaParse {
+                    tenant: tenant_name.clone(),
+                    entity_type: (*entity_type).to_string(),
+                    source: e.to_string(),
+                })?;
+            let unsupported = automaton::unsupported_safety_invariant_names(&parsed);
+            if !unsupported.is_empty() {
+                return Err(RegistryError::UnsupportedSafetyInvariants {
+                    tenant: tenant_name.clone(),
+                    entity_type: (*entity_type).to_string(),
+                    invariants: unsupported,
+                });
+            }
+            parsed_automata.insert((*entity_type).to_string(), parsed);
+        }
         let cross_invariants = cross_invariants_source
             .as_ref()
             .filter(|s| !s.trim().is_empty())
@@ -170,18 +188,15 @@ impl SpecRegistry {
         // contract. Reject that activation atomically; an explicit migration must
         // validate state before registering the new contract.
         if let Some(existing_config) = self.tenants.get(&tenant) {
-            for (entity_type, ioa_source) in ioa_sources {
+            for (entity_type, _) in ioa_sources {
                 let Some(existing_spec) = existing_config.entities.get(*entity_type) else {
                     continue;
                 };
-                let automaton = automaton::parse_automaton(ioa_source).map_err(|e| {
-                    RegistryError::IoaParse {
-                        tenant: tenant_name.clone(),
-                        entity_type: (*entity_type).to_string(),
-                        source: e.to_string(),
-                    }
-                })?;
-                let incoming = automaton::compile_runtime_invariants(&automaton);
+                let incoming = automaton::compile_runtime_invariants(
+                    parsed_automata
+                        .get(*entity_type)
+                        .expect("incoming automaton preflighted"),
+                );
                 let current = automaton::compile_runtime_invariants(&existing_spec.automaton);
                 if incoming != current {
                     return Err(RegistryError::RuntimeInvariantMigrationRequired {
@@ -240,13 +255,10 @@ impl SpecRegistry {
             }
 
             for (entity_type, ioa_source) in ioa_sources {
-                let automaton = automaton::parse_automaton(ioa_source).map_err(|e| {
-                    RegistryError::IoaParse {
-                        tenant: tenant_name.clone(),
-                        entity_type: (*entity_type).to_string(),
-                        source: e.to_string(),
-                    }
-                })?;
+                let automaton = parsed_automata
+                    .get(*entity_type)
+                    .expect("incoming automaton preflighted")
+                    .clone();
                 let table = TransitionTable::from_automaton(&automaton);
                 let integrations = automaton.integrations.clone();
 
@@ -307,13 +319,10 @@ impl SpecRegistry {
             // First registration: create new TenantConfig.
             let mut entities = BTreeMap::new();
             for (entity_type, ioa_source) in ioa_sources {
-                let automaton = automaton::parse_automaton(ioa_source).map_err(|e| {
-                    RegistryError::IoaParse {
-                        tenant: tenant_name.clone(),
-                        entity_type: (*entity_type).to_string(),
-                        source: e.to_string(),
-                    }
-                })?;
+                let automaton = parsed_automata
+                    .get(*entity_type)
+                    .expect("incoming automaton preflighted")
+                    .clone();
                 let table = TransitionTable::from_automaton(&automaton);
                 let integrations = automaton.integrations.clone();
                 entities.insert(
@@ -694,6 +703,60 @@ mod tests {
           </edmx:DataServices>
         </edmx:Edmx>"#;
         (parse_csdl(xml).unwrap(), xml.to_string())
+    }
+
+    fn unsupported_order_ioa() -> String {
+        format!(
+            r#"{ORDER_IOA}
+
+[[invariant]]
+name = "UnsupportedRegistrySafety"
+when = ["Draft"]
+assert = "ghost ** quota"
+"#
+        )
+    }
+
+    #[test]
+    fn first_registration_rejects_unsupported_safety_invariants_atomically() {
+        let mut registry = SpecRegistry::new();
+        let (csdl, xml) = minimal_csdl();
+        let unsupported = unsupported_order_ioa();
+
+        let error = registry
+            .try_register_tenant("alpha", csdl, xml, &[("Order", &unsupported)])
+            .expect_err("unsupported safety must not become live");
+
+        assert!(matches!(
+            error,
+            RegistryError::UnsupportedSafetyInvariants { .. }
+        ));
+        assert!(registry.get_tenant(&TenantId::new("alpha")).is_none());
+    }
+
+    #[test]
+    fn hot_swap_rejects_unsupported_safety_before_mutating_live_spec() {
+        let mut registry = SpecRegistry::new();
+        let (csdl, xml) = minimal_csdl();
+        registry.register_tenant("alpha", csdl, xml, &[("Order", ORDER_IOA)]);
+        let unsupported = unsupported_order_ioa();
+        let (replacement_csdl, replacement_xml) = minimal_csdl();
+
+        let error = registry
+            .try_register_tenant(
+                "alpha",
+                replacement_csdl,
+                replacement_xml,
+                &[("Order", &unsupported)],
+            )
+            .expect_err("unsupported hot swap must be rejected");
+
+        assert!(matches!(
+            error,
+            RegistryError::UnsupportedSafetyInvariants { .. }
+        ));
+        let current = registry.get_tenant(&TenantId::new("alpha")).unwrap();
+        assert_eq!(current.entities["Order"].ioa_source, ORDER_IOA);
     }
 
     #[test]
