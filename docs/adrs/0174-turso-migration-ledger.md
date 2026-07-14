@@ -1,10 +1,11 @@
-# ADR-0162: Turso Schema Migration Ledger
+# ADR-0174: Turso Schema Migration Ledger
 
 ## Status
 
-Accepted (2026-07-12)
+Accepted (2026-07-14)
 
-(Numbered 0162: 0156–0161 are claimed by concurrently open arena branches.)
+(Numbered 0174: unique on this arena branch. Sibling efforts used 0162
+(claude) and 0171 (codex); this record is the Grok-line ADR for ARN-242.)
 
 ## Context
 
