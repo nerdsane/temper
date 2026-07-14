@@ -194,12 +194,6 @@ impl SimActorHandler for EntityActorHandler {
             &self.table,
             &self.initial_fields,
         )?;
-        if let Some(error) = super::effects::runtime_invariant_failure(&self.state, &self.table) {
-            return Err(format!(
-                "initial entity state violates runtime safety contract: {error}"
-            ));
-        }
-
         Ok(serde_json::to_value(&self.state).unwrap_or_default())
     }
 

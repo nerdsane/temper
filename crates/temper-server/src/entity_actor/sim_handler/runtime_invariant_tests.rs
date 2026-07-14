@@ -142,6 +142,12 @@ name = "agent_id"
 type = "string"
 initial = ""
 
+[[action]]
+name = "Initialize"
+kind = "input"
+from = ["Pending"]
+params = ["agent_id"]
+
 [[invariant]]
 name = "RequiresAgentId"
 when = ["Pending"]
@@ -150,10 +156,14 @@ assert = "agent_id != ''"
     let (_guard, _clock, _id_gen) = install_deterministic_context(213);
     let table = Arc::new(TransitionTable::from_ioa_source(ioa));
     let mut invalid = EntityActorHandler::new("ToolCall", "tc-invalid", table.clone());
-    let error = invalid
+    invalid
         .init()
-        .expect_err("empty initial fields must violate RequiresAgentId");
-    assert!(error.contains("RequiresAgentId"));
+        .expect("action-backed pristine state must await initialization");
+    assert_eq!(invalid.event_count(), 0);
+    invalid
+        .handle_message("Initialize", r#"{"agent_id":"agent-1"}"#)
+        .expect("initializing action establishes runtime safety");
+    assert_eq!(invalid.event_count(), 1);
 
     let mut valid = EntityActorHandler::new("ToolCall", "tc-valid", table)
         .with_initial_fields(serde_json::json!({"agent_id": "agent-1"}));

@@ -971,6 +971,14 @@ impl ServerState {
         .result
         .map_err(|e| format!("Actor query failed: {e}"))?;
 
+        if !response.success {
+            let index_key = format!("{tenant}:{entity_type}");
+            if let Some(ids) = self.entity_index.write().unwrap().get_mut(&index_key) {
+                ids.remove(entity_id);
+            }
+            return Ok(response);
+        }
+
         // Broadcast entity creation event for SSE subscribers
         let seq = self.next_entity_event_sequence(tenant.as_str(), entity_type, entity_id);
         let change = EntityStateChange {

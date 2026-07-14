@@ -485,6 +485,29 @@ async fn e2e_http_agent_credential_auth() {
         .unwrap();
     assert_eq!(response.status(), StatusCode::CREATED);
 
+    let response = app
+        .clone()
+        .oneshot(
+            Request::get("/tdata/AgentCredentials")
+                .header("Authorization", "Bearer admin-test-key")
+                .header("X-Temper-Principal-Kind", "admin")
+                .header("X-Tenant-Id", TEST_TENANT)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let collection = body_json(response).await;
+    assert!(
+        !collection["value"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .any(|item| item["entity_id"] == key_hash),
+        "uninitialized credential must not be query-visible"
+    );
+
     // Issue the credential
     let response = app
         .clone()
@@ -506,6 +529,37 @@ async fn e2e_http_agent_credential_auth() {
     assert_eq!(response.status(), StatusCode::OK);
     let json = body_json(response).await;
     assert_eq!(json["status"], "Active");
+
+    let mut initialized = None;
+    for _ in 0..50 {
+        let response = app
+            .clone()
+            .oneshot(
+                Request::get("/tdata/AgentCredentials")
+                    .header("Authorization", "Bearer admin-test-key")
+                    .header("X-Temper-Principal-Kind", "admin")
+                    .header("X-Tenant-Id", TEST_TENANT)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let collection = body_json(response).await;
+        initialized = collection["value"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .find(|item| item["entity_id"] == key_hash)
+            .cloned();
+        if initialized.is_some() {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
+    let initialized = initialized.expect("initialized credential must become query-visible");
+    assert_eq!(initialized["status"], "Active");
+    assert_eq!(initialized["fields"]["agent_type_id"], "http-cc-type");
 
     // 3. Use the agent credential as Bearer token — should be accepted
     let response = app

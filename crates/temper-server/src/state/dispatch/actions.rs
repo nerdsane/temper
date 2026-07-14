@@ -182,6 +182,21 @@ impl crate::state::ServerState {
             )
             .await?;
 
+        if response.success {
+            let index_key = format!("{tenant}:{entity_type}");
+            let mut index = self.entity_index.write().unwrap();
+            if response.state.status == "Deleted" {
+                if let Some(ids) = index.get_mut(&index_key) {
+                    ids.remove(entity_id);
+                }
+            } else {
+                index
+                    .entry(index_key)
+                    .or_default()
+                    .insert(entity_id.to_string());
+            }
+        }
+
         // Dispatch cross-entity reactions (fire-and-forget, depth 0 = top-level)
         if response.success {
             // A poisoned lock must not silently disable reactions: the slot
