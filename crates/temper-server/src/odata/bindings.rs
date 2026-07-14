@@ -223,7 +223,14 @@ pub(super) async fn dispatch_bound_action(
         .into_response();
     }
 
-    let current_fields = current_state.state.fields.clone();
+    let mut prospective_fields = current_state.state.fields.clone();
+    if let (Some(fields), Some(params)) =
+        (prospective_fields.as_object_mut(), body_json.as_object())
+    {
+        for (name, value) in params {
+            fields.insert(name.clone(), value.clone());
+        }
+    }
     if let Err(resp) = run_write_prechecks(
         state,
         tenant,
@@ -231,7 +238,7 @@ pub(super) async fn dispatch_bound_action(
         key_str,
         action,
         "bound_action",
-        &current_fields,
+        &prospective_fields,
     )
     .await
     {

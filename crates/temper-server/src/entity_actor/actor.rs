@@ -813,17 +813,19 @@ impl Actor for EntityActor {
             .await?;
         }
 
-        if state.total_event_count == 0
-            && let Some(error) = super::effects::runtime_invariant_failure(&state, &table)
-        {
-            return Err(ActorError::custom(format!(
-                "initial entity state violates runtime safety contract: {error}"
-            )));
-        }
+        let initial_invariant_failure = (state.total_event_count == 0)
+            .then(|| super::effects::runtime_invariant_failure(&state, &table))
+            .flatten();
 
         // Persist a bootstrap Created event for first-time entities so initial
-        // fields are durable and replayable.
-        if self.event_journal.is_some() && state.total_event_count == 0 {
+        // fields are durable and replayable. Some action-backed specs use the
+        // first action to establish invariants that intentionally do not hold
+        // in the pristine initial state. Keep that transient state out of the
+        // journal; the first successful action persists the first valid state.
+        if self.event_journal.is_some()
+            && state.total_event_count == 0
+            && initial_invariant_failure.is_none()
+        {
             let created = EntityEvent {
                 action: "Created".to_string(),
                 from_status: String::new(),
@@ -1424,6 +1426,23 @@ impl Actor for EntityActor {
                 );
             }
             EntityMsg::GetState => {
+                let table = self.table.read().expect("table lock poisoned").clone();
+                if state.total_event_count == 0
+                    && let Some(error) = super::effects::runtime_invariant_failure(state, &table)
+                {
+                    ctx.reply(EntityResponse {
+                        success: false,
+                        state: state.clone(),
+                        error: Some(format!(
+                            "entity requires an initializing action before it is readable: {error}"
+                        )),
+                        custom_effects: vec![],
+                        scheduled_actions: vec![],
+                        spawn_requests: vec![],
+                        spec_governed: true,
+                    });
+                    return Ok(());
+                }
                 ctx.reply(EntityResponse {
                     success: true,
                     state: state.clone(),
@@ -1435,6 +1454,13 @@ impl Actor for EntityActor {
                 });
             }
             EntityMsg::GetField { field } => {
+                let table = self.table.read().expect("table lock poisoned").clone();
+                if state.total_event_count == 0
+                    && super::effects::runtime_invariant_failure(state, &table).is_some()
+                {
+                    ctx.reply(serde_json::Value::Null);
+                    return Ok(());
+                }
                 let value = state
                     .fields
                     .get(&field)
@@ -1444,6 +1470,22 @@ impl Actor for EntityActor {
             }
             EntityMsg::UpdateFields { fields, replace } => {
                 let table = self.table.read().expect("table lock poisoned").clone();
+                if state.total_event_count == 0
+                    && let Some(error) = super::effects::runtime_invariant_failure(state, &table)
+                {
+                    ctx.reply(EntityResponse {
+                        success: false,
+                        state: state.clone(),
+                        error: Some(format!(
+                            "entity requires an initializing action before direct updates: {error}"
+                        )),
+                        custom_effects: vec![],
+                        scheduled_actions: vec![],
+                        spawn_requests: vec![],
+                        spec_governed: true,
+                    });
+                    return Ok(());
+                }
                 let state_before = state.clone();
                 if let Err(error) = super::effects::validate_declared_field_values(&fields, &table)
                 {

@@ -752,11 +752,12 @@ assert = "goal != ''"
     );
 }
 
-/// Initial fields are part of the first durable entity state, so invariants
-/// active in the initial status must gate bootstrap persistence as well.
+/// An action-backed entity may use its first action to establish invariants
+/// that intentionally do not hold in the spec's pristine initial state. That
+/// transient state must remain unreadable and must never become durable.
 #[cfg(feature = "sim")]
 #[tokio::test]
-async fn creation_rejects_invalid_initial_runtime_state_before_persistence() {
+async fn creation_requires_initializing_action_before_persistence() {
     use temper_runtime::persistence::EventStore;
     use temper_store_sim::SimEventStore;
 
@@ -771,6 +772,12 @@ allow_indefinite_states = ["Pending"]
 name = "agent_id"
 type = "string"
 initial = ""
+
+[[action]]
+name = "Initialize"
+kind = "input"
+from = ["Pending"]
+params = ["agent_id"]
 
 [[invariant]]
 name = "RequiresAgentId"
@@ -803,14 +810,13 @@ assert = "agent_id != ''"
     );
     let actor_ref = system.spawn(actor, "tc-invalid");
 
-    let response: Result<EntityResponse, _> = actor_ref
+    let response: EntityResponse = actor_ref
         .ask(EntityMsg::GetState, Duration::from_secs(5))
-        .await;
-    let error = response.expect_err("invalid initial state must fail actor startup");
-    assert_eq!(
-        error,
-        temper_runtime::actor::ActorError::Stopped,
-        "invalid initialization must stop the actor"
+        .await
+        .expect("uninitialized actor must remain available for initialization");
+    assert!(
+        !response.success,
+        "uninitialized state must not be readable"
     );
     assert!(
         store
@@ -820,6 +826,32 @@ assert = "agent_id != ''"
             .is_empty(),
         "invalid initial state must not persist a bootstrap event"
     );
+
+    let response: EntityResponse = actor_ref
+        .ask(
+            EntityMsg::Action {
+                name: "Initialize".to_string(),
+                params: serde_json::json!({"agent_id": "agent-1"}),
+                cross_entity_booleans: std::collections::BTreeMap::new(),
+                idempotency_key: None,
+            },
+            Duration::from_secs(5),
+        )
+        .await
+        .expect("initializing action must be accepted");
+    assert!(
+        response.success,
+        "initializing action must establish safety"
+    );
+    assert_eq!(response.state.fields["agent_id"], "agent-1");
+    let events = store
+        .read_events("default:ToolCall:tc-invalid", 0)
+        .await
+        .expect("read initialized entity journal");
+    assert_eq!(events.len(), 1, "only the valid initialization is durable");
+    let event: crate::entity_actor::EntityEvent =
+        serde_json::from_value(events[0].payload.clone()).expect("decode initialization event");
+    assert_eq!(event.action, "Initialize");
 }
 
 #[cfg(feature = "sim")]
