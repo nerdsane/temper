@@ -97,6 +97,18 @@ impl TursoEventStore {
         Ok(affected > 0)
     }
 
+    /// Delete an obsolete feature-request projection after canonical reconciliation.
+    #[instrument(skip_all, fields(id, otel.name = "turso.delete_feature_request"))]
+    pub async fn delete_feature_request(&self, id: &str) -> Result<bool, PersistenceError> {
+        let _query_timer = TursoQueryTimer::start("turso.delete_feature_request");
+        let conn = self.configured_connection().await?;
+        let affected = conn
+            .execute("DELETE FROM feature_requests WHERE id = ?1", params![id])
+            .await
+            .map_err(storage_error)?;
+        Ok(affected > 0)
+    }
+
     // -----------------------------------------------------------------------
     // Evolution record CRUD
     // -----------------------------------------------------------------------

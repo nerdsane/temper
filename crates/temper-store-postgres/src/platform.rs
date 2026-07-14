@@ -1845,6 +1845,16 @@ impl PostgresEventStore {
         Ok(result.rows_affected() > 0)
     }
 
+    /// Delete an obsolete feature-request projection after canonical reconciliation.
+    pub async fn delete_feature_request(&self, id: &str) -> Result<bool, PersistenceError> {
+        let result = crate::dbm::postgres_query!("DELETE FROM feature_requests WHERE id = $1")
+            .bind(id)
+            .execute(self.pool())
+            .await
+            .map_err(storage_error)?;
+        Ok(result.rows_affected() > 0)
+    }
+
     pub async fn insert_evolution_record(
         &self,
         id: &str,
