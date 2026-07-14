@@ -364,6 +364,61 @@ async fn snapshot_save_and_load_roundtrip() {
 }
 
 #[tokio::test]
+async fn snapshot_replacement_is_readiness_priority() {
+    let mut store = make_store("snapshot-replacement-priority").await;
+    let persistence_id = "tenant-a:Order:ord-readiness";
+    store
+        .save_snapshot(persistence_id, 1, b"{\"status\":\"legacy\"}")
+        .await
+        .expect("seed legacy snapshot");
+
+    store.write_gate = std::sync::Arc::new(tokio::sync::Semaphore::new(1));
+    let held_gate = store
+        .write_gate
+        .clone()
+        .acquire_owned()
+        .await
+        .expect("hold the only write lane");
+    let replacement_store = store.clone();
+    let replacement = tokio::spawn(async move {
+        replacement_store
+            .replace_snapshot(persistence_id, 1, b"{\"status\":\"legacy-repaired\"}")
+            .await
+    });
+
+    for _ in 0..32 {
+        if store
+            .high_priority_write_waiters
+            .load(std::sync::atomic::Ordering::Acquire)
+            == 1
+        {
+            break;
+        }
+        tokio::task::yield_now().await;
+    }
+    assert_eq!(
+        store
+            .high_priority_write_waiters
+            .load(std::sync::atomic::Ordering::Acquire),
+        1,
+        "snapshot replacement blocks actor readiness and must queue ahead of background writes"
+    );
+
+    drop(held_gate);
+    replacement
+        .await
+        .expect("replacement task completes")
+        .expect("snapshot replacement succeeds");
+    assert_eq!(
+        store
+            .load_snapshot(persistence_id)
+            .await
+            .expect("load repaired snapshot"),
+        Some((1, b"{\"status\":\"legacy-repaired\"}".to_vec()))
+    );
+}
+
+#[tokio::test]
 async fn list_entity_ids_returns_distinct_pairs() {
     let store = make_store("entity-list").await;
 
