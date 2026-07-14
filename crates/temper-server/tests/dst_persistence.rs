@@ -766,6 +766,87 @@ async fn dst_field_update_retry_exhaustion_is_reported_distinctly() {
 }
 
 #[tokio::test]
+async fn dst_field_update_retry_exhaustion_keeps_recovered_history() {
+    let (_guard, _clock, _id_gen) = install_deterministic_context(18_903);
+    let store_inner = SimEventStore::no_faults(18_903);
+    let store = BoxedEventStore::new(store_inner.clone());
+    let table = order_table();
+    let entity_id = "ord-field-recovered-on-exhaustion";
+    let persistence_id = format!("default:Order:{entity_id}");
+    let system = ActorSystem::new("dst-field-recovered-on-exhaustion");
+    let actor = EntityActor::with_persistence(
+        "Order",
+        entity_id,
+        table,
+        serde_json::json!({"Title": "durable-before"}),
+        store,
+        BackendLabel::Sim,
+    )
+    .with_tenant("default");
+    let actor_ref = system.spawn(actor, entity_id);
+
+    let before = get_state(&actor_ref).await;
+    assert_eq!(before.state.sequence_nr, 1);
+    store_inner
+        .append(
+            &persistence_id,
+            1,
+            &[PersistenceEnvelope {
+                sequence_nr: 2,
+                event_type: "AddItem".to_string(),
+                payload: serde_json::json!({
+                    "action": "AddItem",
+                    "from_status": "Draft",
+                    "to_status": "Draft",
+                    "timestamp": sim_now(),
+                    "params": {"ProductId": "concurrent-item"}
+                }),
+                metadata: EventMetadata {
+                    event_id: sim_uuid(),
+                    causation_id: sim_uuid(),
+                    correlation_id: sim_uuid(),
+                    timestamp: sim_now(),
+                    actor_id: persistence_id.clone(),
+                },
+            }],
+        )
+        .await
+        .expect("concurrent action should advance authoritative history");
+    store_inner.inject_concurrency_violations(&persistence_id, 3);
+
+    let response = update_fields(
+        &actor_ref,
+        serde_json::json!({"Title": "must-not-publish"}),
+        false,
+    )
+    .await;
+
+    assert!(!response.success, "exhausted retries must fail the PATCH");
+    assert_eq!(
+        response.error.as_deref(),
+        Some("field update retry budget exhausted")
+    );
+    assert_eq!(
+        response.state.sequence_nr, 2,
+        "the actor must retain the authoritative sequence recovered during retry"
+    );
+    assert_eq!(response.state.item_count, 1);
+    assert_eq!(response.state.fields["ProductId"], "concurrent-item");
+    assert_eq!(response.state.fields["Title"], "durable-before");
+
+    let live = get_state(&actor_ref).await;
+    assert_eq!(live.state.sequence_nr, 2);
+    assert_eq!(live.state.item_count, 1);
+    assert_eq!(live.state.fields["ProductId"], "concurrent-item");
+    assert_eq!(live.state.fields["Title"], "durable-before");
+    assert_eq!(
+        store_inner.dump_journal(&persistence_id).len(),
+        2,
+        "the failed PATCH must not append speculative history"
+    );
+}
+
+#[tokio::test]
 async fn dst_reserved_field_update_event_type_cannot_be_dispatched_as_action() {
     let (_guard, _clock, _id_gen) = install_deterministic_context(18_901);
     let store_inner = SimEventStore::no_faults(18_901);
