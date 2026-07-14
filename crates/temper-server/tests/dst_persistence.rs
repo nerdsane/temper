@@ -7,13 +7,16 @@
 //!
 //! FoundationDB pattern: same code, simulated I/O.
 
-use std::collections::BTreeMap;
-use std::sync::{Arc, RwLock};
+use std::collections::{BTreeMap, VecDeque};
+use std::sync::{Arc, Mutex, RwLock};
 use std::time::Duration;
 
 use temper_jit::table::TransitionTable;
 use temper_runtime::ActorSystem;
-use temper_runtime::persistence::{EventMetadata, EventStore, PersistenceEnvelope};
+use temper_runtime::persistence::{
+    EntityKeyRow, EntityVectorRow, EventMetadata, EventStore, IndexReconciliation,
+    PersistenceAppend, PersistenceAppendResult, PersistenceEnvelope, PersistenceError,
+};
 use temper_runtime::scheduler::{install_deterministic_context, sim_now, sim_uuid};
 use temper_server::key_index::canonical_key_hash;
 use temper_server::storage::{BackendLabel, BoxedEventStore};
@@ -29,6 +32,158 @@ fn order_table() -> Arc<RwLock<TransitionTable>> {
 
 fn sim_store(seed: u64) -> BoxedEventStore {
     BoxedEventStore::new(SimEventStore::no_faults(seed))
+}
+
+#[derive(Clone)]
+struct ConflictBeforeAppendStore {
+    inner: SimEventStore,
+    conflicts: Arc<Mutex<BTreeMap<String, VecDeque<PersistenceEnvelope>>>>,
+}
+
+impl ConflictBeforeAppendStore {
+    fn new(seed: u64) -> Self {
+        Self {
+            inner: SimEventStore::no_faults(seed),
+            conflicts: Arc::new(Mutex::new(BTreeMap::new())),
+        }
+    }
+
+    fn queue_conflicts(&self, persistence_id: &str, events: Vec<PersistenceEnvelope>) {
+        self.conflicts
+            .lock()
+            .expect("conflict script lock poisoned")
+            .insert(persistence_id.to_string(), events.into());
+    }
+
+    fn scripted_conflict(&self, persistence_id: &str) -> Option<PersistenceEnvelope> {
+        let mut conflicts = self
+            .conflicts
+            .lock()
+            .expect("conflict script lock poisoned");
+        let event = conflicts.get_mut(persistence_id)?.pop_front();
+        if conflicts
+            .get(persistence_id)
+            .is_some_and(VecDeque::is_empty)
+        {
+            conflicts.remove(persistence_id);
+        }
+        event
+    }
+}
+
+impl EventStore for ConflictBeforeAppendStore {
+    async fn append(
+        &self,
+        persistence_id: &str,
+        expected_sequence: u64,
+        events: &[PersistenceEnvelope],
+    ) -> Result<u64, PersistenceError> {
+        self.inner
+            .append(persistence_id, expected_sequence, events)
+            .await
+    }
+
+    async fn append_with_index_rows(
+        &self,
+        persistence_id: &str,
+        expected_sequence: u64,
+        events: &[PersistenceEnvelope],
+        key_rows: &[EntityKeyRow],
+        vector_rows: &[EntityVectorRow],
+        reconciliation: IndexReconciliation,
+    ) -> Result<u64, PersistenceError> {
+        if let Some(conflict) = self.scripted_conflict(persistence_id) {
+            let actual = self
+                .inner
+                .append(persistence_id, expected_sequence, &[conflict])
+                .await?;
+            return Err(PersistenceError::ConcurrencyViolation {
+                expected: expected_sequence,
+                actual,
+            });
+        }
+        self.inner
+            .append_with_index_rows(
+                persistence_id,
+                expected_sequence,
+                events,
+                key_rows,
+                vector_rows,
+                reconciliation,
+            )
+            .await
+    }
+
+    async fn append_batch(
+        &self,
+        appends: &[PersistenceAppend],
+    ) -> Result<Vec<PersistenceAppendResult>, PersistenceError> {
+        self.inner.append_batch(appends).await
+    }
+
+    async fn read_events(
+        &self,
+        persistence_id: &str,
+        from_sequence: u64,
+    ) -> Result<Vec<PersistenceEnvelope>, PersistenceError> {
+        self.inner.read_events(persistence_id, from_sequence).await
+    }
+
+    async fn save_snapshot(
+        &self,
+        persistence_id: &str,
+        sequence_nr: u64,
+        snapshot: &[u8],
+    ) -> Result<(), PersistenceError> {
+        self.inner
+            .save_snapshot(persistence_id, sequence_nr, snapshot)
+            .await
+    }
+
+    async fn load_snapshot(
+        &self,
+        persistence_id: &str,
+    ) -> Result<Option<(u64, Vec<u8>)>, PersistenceError> {
+        self.inner.load_snapshot(persistence_id).await
+    }
+
+    async fn list_entity_ids(
+        &self,
+        tenant: &str,
+    ) -> Result<Vec<(String, String)>, PersistenceError> {
+        self.inner.list_entity_ids(tenant).await
+    }
+
+    async fn list_entity_ids_by_type(
+        &self,
+        tenant: &str,
+        entity_type: &str,
+    ) -> Result<Vec<String>, PersistenceError> {
+        self.inner
+            .list_entity_ids_by_type(tenant, entity_type)
+            .await
+    }
+}
+
+fn concurrent_add_item(persistence_id: &str, product_id: &str) -> PersistenceEnvelope {
+    PersistenceEnvelope {
+        sequence_nr: 0,
+        event_type: "AddItem".to_string(),
+        payload: serde_json::json!({
+            "action": "AddItem",
+            "from_status": "Draft",
+            "to_status": "Draft",
+            "timestamp": sim_now(),
+            "params": {"ProductId": product_id}
+        }),
+        metadata: EventMetadata {
+            event_id: sim_uuid(),
+            causation_id: sim_uuid(),
+            correlation_id: sim_uuid(),
+            timestamp: sim_now(),
+            actor_id: persistence_id.to_string(),
+        },
+    }
 }
 
 fn order_key_hash(workspace: &str, path: &str) -> String {
@@ -844,6 +999,132 @@ async fn dst_field_update_retry_exhaustion_keeps_recovered_history() {
         2,
         "the failed PATCH must not append speculative history"
     );
+}
+
+#[tokio::test]
+async fn dst_field_update_retry_exhaustion_recovers_the_final_real_writer() {
+    let seed = 18_904;
+    let (_guard, _clock, _id_gen) = install_deterministic_context(seed);
+    let scripted_store = ConflictBeforeAppendStore::new(seed);
+    let store_inner = scripted_store.inner.clone();
+    let store = BoxedEventStore::new(scripted_store.clone());
+    let table = order_table();
+    let entity_id = "ord-field-final-real-writer";
+    let persistence_id = format!("default:Order:{entity_id}");
+    let system = ActorSystem::new("dst-field-final-real-writer");
+    let actor = EntityActor::with_persistence(
+        "Order",
+        entity_id,
+        table,
+        serde_json::json!({"Title": "durable-before"}),
+        store,
+        BackendLabel::Sim,
+    )
+    .with_tenant("default");
+    let actor_ref = system.spawn(actor, entity_id);
+
+    let before = get_state(&actor_ref).await;
+    assert_eq!(before.state.sequence_nr, 1);
+    scripted_store.queue_conflicts(
+        &persistence_id,
+        vec![
+            concurrent_add_item(&persistence_id, "concurrent-item-1"),
+            concurrent_add_item(&persistence_id, "concurrent-item-2"),
+            concurrent_add_item(&persistence_id, "concurrent-item-3"),
+        ],
+    );
+
+    let response = update_fields(
+        &actor_ref,
+        serde_json::json!({"Title": "must-not-publish"}),
+        false,
+    )
+    .await;
+
+    assert!(!response.success, "exhausted retries must fail the PATCH");
+    assert_eq!(
+        response.error.as_deref(),
+        Some("field update retry budget exhausted")
+    );
+    assert_eq!(
+        response.state.sequence_nr, 4,
+        "the exhausted response must include the writer that won the final attempt"
+    );
+    assert_eq!(response.state.item_count, 3);
+    assert_eq!(response.state.fields["ProductId"], "concurrent-item-3");
+    assert_eq!(response.state.fields["Title"], "durable-before");
+
+    let live = get_state(&actor_ref).await;
+    assert_eq!(live.state.sequence_nr, 4);
+    assert_eq!(live.state.item_count, 3);
+    assert_eq!(live.state.fields["ProductId"], "concurrent-item-3");
+    assert_eq!(live.state.fields["Title"], "durable-before");
+    assert_eq!(
+        store_inner.dump_journal(&persistence_id).len(),
+        4,
+        "only the three real concurrent writers may follow Created"
+    );
+}
+
+#[tokio::test]
+async fn dst_field_update_recovery_read_failure_restarts_before_serving_state() {
+    let seed = 18_905;
+    let (_guard, _clock, _id_gen) = install_deterministic_context(seed);
+    let scripted_store = ConflictBeforeAppendStore::new(seed);
+    let store_inner = scripted_store.inner.clone();
+    let store = BoxedEventStore::new(scripted_store.clone());
+    let table = order_table();
+    let entity_id = "ord-field-recovery-read-failure";
+    let persistence_id = format!("default:Order:{entity_id}");
+    let system = ActorSystem::new("dst-field-recovery-read-failure");
+    let actor = EntityActor::with_persistence(
+        "Order",
+        entity_id,
+        table,
+        serde_json::json!({"Title": "durable-before"}),
+        store,
+        BackendLabel::Sim,
+    )
+    .with_tenant("default");
+    let actor_ref = system.spawn(actor, entity_id);
+
+    let before = get_state(&actor_ref).await;
+    assert_eq!(before.state.sequence_nr, 1);
+    scripted_store.queue_conflicts(
+        &persistence_id,
+        vec![concurrent_add_item(
+            &persistence_id,
+            "concurrent-item-after-read-failure",
+        )],
+    );
+    store_inner.fail_next_reads(&persistence_id, 1);
+
+    let update = actor_ref
+        .ask::<EntityResponse>(
+            EntityMsg::UpdateFields {
+                fields: serde_json::json!({"Title": "must-not-publish"}),
+                replace: false,
+            },
+            Duration::from_secs(5),
+        )
+        .await;
+    assert!(
+        update.is_err(),
+        "failed authoritative recovery must fail the actor message so stale state cannot remain live"
+    );
+
+    let recovered = get_state(&actor_ref).await;
+    assert_eq!(
+        recovered.state.sequence_nr, 2,
+        "the restarted actor must replay the real writer before serving state"
+    );
+    assert_eq!(recovered.state.item_count, 1);
+    assert_eq!(
+        recovered.state.fields["ProductId"],
+        "concurrent-item-after-read-failure"
+    );
+    assert_eq!(recovered.state.fields["Title"], "durable-before");
+    assert_eq!(store_inner.dump_journal(&persistence_id).len(), 2);
 }
 
 #[tokio::test]
