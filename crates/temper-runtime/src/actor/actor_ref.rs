@@ -126,6 +126,11 @@ impl<M: Message> ActorRef<M> {
     pub fn mailbox_capacity(&self) -> usize {
         self.sender.capacity()
     }
+
+    /// Return whether this actor incarnation can no longer receive messages.
+    pub fn is_stopped(&self) -> bool {
+        self.sender.is_closed()
+    }
 }
 
 impl<M: Message> Clone for ActorRef<M> {

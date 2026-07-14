@@ -71,6 +71,11 @@ impl<M: Message> MailboxSender<M> {
         self.capacity.saturating_sub(self.inner.capacity())
     }
 
+    /// Return whether the actor-side mailbox receiver has closed.
+    pub fn is_closed(&self) -> bool {
+        self.inner.is_closed()
+    }
+
     /// Mailbox utilization as a fraction in [0.0, 1.0].
     pub fn utilization(&self) -> f64 {
         if self.capacity == 0 {
@@ -162,7 +167,9 @@ mod tests {
     #[tokio::test]
     async fn test_mailbox_closed_on_receiver_drop() {
         let (tx, rx) = mailbox::<TestMsg>(10);
+        assert!(!tx.is_closed());
         drop(rx);
+        assert!(tx.is_closed());
         let result = tx.send(Envelope::Tell(TestMsg("orphan".into())));
         assert!(result.is_err());
         assert_eq!(result.unwrap_err(), ActorError::SendFailed);

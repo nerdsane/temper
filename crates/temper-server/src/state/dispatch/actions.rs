@@ -422,7 +422,10 @@ impl crate::state::ServerState {
             let existed = self
                 .actor_registry
                 .read()
-                .map(|reg| reg.contains_key(&actor_key))
+                .map(|reg| {
+                    reg.get(&actor_key)
+                        .is_some_and(|actor_ref| !actor_ref.is_stopped())
+                })
                 .unwrap_or(false);
             let Some(ar) = self.get_or_spawn_tenant_actor(tenant, entity_type, entity_id) else {
                 return Err(DispatchError::Internal(format!(

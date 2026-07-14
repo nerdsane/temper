@@ -729,7 +729,9 @@ impl ServerState {
         // Fast-path: check actor registry under read lock.
         {
             let registry = self.actor_registry.read().unwrap();
-            if let Some(actor_ref) = registry.get(&key) {
+            if let Some(actor_ref) = registry.get(&key)
+                && !actor_ref.is_stopped()
+            {
                 self.touch_actor_access(&key);
                 return Some(actor_ref.clone());
             }
@@ -783,8 +785,17 @@ impl ServerState {
         // the same (tenant, entity_type, entity_id) key.
         let actor_ref = {
             let mut registry = self.actor_registry.write().unwrap();
-            if let Some(existing) = registry.get(&key) {
+            if let Some(existing) = registry.get(&key)
+                && !existing.is_stopped()
+            {
                 return Some(existing.clone());
+            }
+            if let Some(stopped) = registry.get(&key) {
+                tracing::warn!(
+                    actor_key = %key,
+                    actor_uid = %stopped.id().uid,
+                    "replacing stopped actor registry entry"
+                );
             }
             let actor_ref = self.actor_system.spawn(actor, &key);
             registry.insert(key.clone(), actor_ref.clone());

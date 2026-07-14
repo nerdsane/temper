@@ -59,11 +59,11 @@ The readiness task captures both the deterministic event-clock observation and a
 
 **Why this approach:** the existing code inferred hydration from “same state plus tracker sequence zero.” That inference works only after traffic arrives and can misclassify the replayed entry event as a brand-new entry with a full budget.
 
-### Sub-Decision 4: Readiness failure is bounded and observable
+### Sub-Decision 4: Readiness failure is bounded, observable, and recoverable
 
-The readiness ask uses the existing retry budget. Exhaustion logs a structured error with tenant, entity type, and entity ID. It does not invent state or arm a timer from incomplete replay. A later successful dispatch retains ADR-0056's fallback reconciliation path.
+The readiness ask uses the existing retry budget. Exhaustion logs a structured error with tenant, entity type, and entity ID. It does not invent state or arm a timer from incomplete replay. An actor that permanently fails startup closes its mailbox; the entity registry treats only an open mailbox as a live incarnation. The next access atomically replaces a stopped registry entry under the existing spawn lock, re-runs hydration, and schedules timeout reconciliation. Concurrent callers still converge on one live actor.
 
-**Why this approach:** silently dropping the lifecycle task would recreate the regression; retrying forever would create an unbounded background workload.
+**Why this approach:** silently dropping the lifecycle task would recreate the regression; retrying forever would create an unbounded background workload; retaining a stopped actor reference would make a transient persistence failure permanent until process restart.
 
 ### Sub-Decision 5: Persist the timeout clock anchor in current snapshots
 
@@ -83,6 +83,7 @@ Legacy snapshots that predate this optional field and have no matching state-cha
 - The fixed test proves not-yet-overdue state uses its remaining budget and overdue state fires immediately.
 - A legacy snapshot regression crashes again immediately after hydration and proves the repaired anchor and journal sequence survive without passivation or another event.
 - A legacy snapshot followed by a composite journal marker repairs the loaded boundary and survives restart without appending an event or rotating segments.
+- An injected repair failure followed by store recovery in the same server replaces the stopped actor incarnation, persists the anchor, and arms exactly one timer.
 - Randomized deterministic seeds cover elapsed times before, at, and after the deadline.
 - Actor spawn, action dispatch, and timer firing continue to use shared production code paths.
 - Full workspace tests, strict Clippy, readability, DST review, and code-quality review pass.
@@ -107,7 +108,7 @@ Legacy snapshots that predate this optional field and have no matching state-cha
 
 ### Risks
 
-- **Readiness task exhaustion.** Mitigated by bounded retries, structured errors, and the existing post-dispatch reconciliation fallback.
+- **Readiness task exhaustion.** Mitigated by bounded retries, structured errors, stopped-incarnation replacement on the next access, and the existing post-dispatch reconciliation fallback.
 - **Legacy snapshot upgrade failure.** The synchronous anchor rewrite fails actor startup; hydration never arms a timer from an anchor that another immediate restart could forget.
 - **Timed-entity startup volume.** Bounded to entity types with declared liveness obligations; non-timed entities retain index-only lazy hydration. A future durable scheduler may avoid one resident actor per persisted instance of a timeout-declaring type.
 - **Duplicate timers during startup races.** Mitigated by atomic initial-sequence reservation and the existing fire-time sequence/state checks.
