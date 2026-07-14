@@ -15,6 +15,8 @@ use super::{DeterministicRng, FaultConfig, SimScheduler};
 mod invariant_eval;
 use invariant_eval::evaluate_spec_assert;
 mod callbacks;
+mod random_budget;
+use random_budget::{release, reserve};
 mod recording;
 pub use callbacks::{SimExecutionError, SimIntegrationResponses};
 
@@ -246,7 +248,10 @@ impl SimActorSystem {
         if result.is_ok() {
             let tick = self.clock.tick();
 
-            let count = self.action_counts.get_mut(actor_id).unwrap(); // ci-ok: actor always in action_counts
+            let count = self
+                .action_counts
+                .get_mut(actor_id)
+                .expect("registered actor");
             *count += 1;
             self.total_transitions += 1;
 
@@ -364,7 +369,7 @@ impl SimActorSystem {
                 .unwrap_or(0);
             if completed + in_flight < self.config.max_actions_per_actor {
                 let valid = {
-                    let handler = self.actors.get(&actor_id).unwrap(); // ci-ok: actor_id from self.actors.keys()
+                    let handler = self.actors.get(&actor_id).expect("selected actor");
                     handler.valid_actions()
                 };
 
@@ -372,7 +377,7 @@ impl SimActorSystem {
                     let action_idx = self.rng.next_bound(valid.len());
                     let action = valid[action_idx].clone();
                     self.scheduler.send("sim-driver", &actor_id, &action, "{}");
-                    *self.random_in_flight_actions.get_mut(&actor_id).unwrap() += 1; // ci-ok: registered with actor
+                    reserve(&mut self.random_in_flight_actions, &actor_id);
                     self.total_messages += 1;
                 }
             }
@@ -383,9 +388,7 @@ impl SimActorSystem {
             self.clock.advance();
             for dropped in &self.scheduler.dropped_log()[self.observed_scheduler_drops..] {
                 if dropped.from == "sim-driver" {
-                    let in_flight = self.random_in_flight_actions.get_mut(&dropped.to).unwrap(); // ci-ok: driver targets registered actors
-                    assert!(*in_flight > 0, "dropped action must own a reservation");
-                    *in_flight -= 1;
+                    release(&mut self.random_in_flight_actions, &dropped.to, "dropped");
                 }
             }
             self.observed_scheduler_drops = self.scheduler.dropped_log().len();
@@ -393,9 +396,7 @@ impl SimActorSystem {
             loop {
                 let delivered = self.scheduler.drain_ready(self.config.message_batch_budget);
                 for msg in &delivered {
-                    let in_flight = self.random_in_flight_actions.get_mut(&msg.to).unwrap(); // ci-ok: driver targets registered actors
-                    assert!(*in_flight > 0, "delivered action must own a reservation");
-                    *in_flight -= 1;
+                    release(&mut self.random_in_flight_actions, &msg.to, "delivered");
                     let _ = self.apply_action(&msg.to, &msg.msg_type, &msg.payload);
                 }
                 if self.deliver_integration_callbacks(&mut reactions).is_err() {

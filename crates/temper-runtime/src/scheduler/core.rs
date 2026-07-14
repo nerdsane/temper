@@ -167,7 +167,7 @@ impl SimScheduler {
         // Deliver all messages due at or before current time
         while let Some(msg) = self.pending.peek() {
             if msg.deliver_at <= self.current_time {
-                let msg = self.pending.pop().unwrap(); // ci-ok: guarded by peek() above
+                let msg = self.pending.pop().expect("pending message was peeked");
                 let to = msg.to.clone();
 
                 // Check if target actor is running
@@ -235,7 +235,10 @@ impl SimScheduler {
         let mut empty_mailboxes_seen = 0;
         while ready.len() < message_budget && empty_mailboxes_seen < actor_ids.len() {
             let actor_id = &actor_ids[index];
-            let mailbox = self.mailboxes.get_mut(actor_id).unwrap(); // ci-ok: id came from keys
+            let mailbox = self
+                .mailboxes
+                .get_mut(actor_id)
+                .expect("actor id came from mailbox keys");
             if let Some(message) = mailbox.pop_front() {
                 ready.push(message);
                 empty_mailboxes_seen = 0;
