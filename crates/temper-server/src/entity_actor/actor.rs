@@ -1455,10 +1455,7 @@ impl Actor for EntityActor {
             EntityMsg::UpdateFields { fields, replace } => {
                 let committed = self.commit_field_update(state, &fields, replace).await;
                 let (success, error) = match committed {
-                    Ok(committed) => {
-                        *state = committed;
-                        (true, None)
-                    }
+                    Ok(()) => (true, None),
                     Err(error) => (false, Some(error)),
                 };
                 ctx.reply(EntityResponse {

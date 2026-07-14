@@ -59,7 +59,14 @@ properties:
    fields, so projections match the committed entity state;
 2. the live actor state is replaced only after the append succeeds; and
 3. serialization, storage, and optimistic-concurrency failures leave the
-   original state untouched and return a failed response.
+   caller's speculative PATCH/PUT fields unpublished and return a failed
+   response.
+
+An optimistic-concurrency retry first recovers the latest durable entity state.
+That authoritative history becomes the actor's live state even when a later
+retry fails or exhausts its budget; only the uncommitted PATCH/PUT fields are
+discarded. This prevents a rejected field update from making the actor continue
+serving an older view than its own journal.
 
 The co-commit API carries explicit `reconcile_keys` and `reconcile_vectors`
 flags. When the entity type declares keys, its candidate `key_rows` are the exact
@@ -114,7 +121,10 @@ maintainer later chooses to ship it.
 - PATCH merge and PUT replacement both survive actor replacement without a later
   state-machine action.
 - Persistence failure is fail-closed and leaves the actor's live fields and
-  sequence unchanged, and the public OData request returns a server error.
+  sequence unchanged when no newer durable history exists, and the public OData
+  request returns a server error.
+- Retry exhaustion retains any unrelated durable history recovered after a
+  concurrency conflict without publishing the rejected PATCH/PUT fields.
 - PUT removal of declared-key properties purges the prior key row atomically in
   Postgres and the deterministic simulation store.
 - The reserved event type cannot be dispatched as a domain action.

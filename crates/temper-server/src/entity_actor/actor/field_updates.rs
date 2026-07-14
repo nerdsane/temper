@@ -57,12 +57,12 @@ impl EntityActor {
     /// Persist and publish one PATCH or PUT field mutation.
     pub(super) async fn commit_field_update(
         &self,
-        current: &EntityState,
+        state: &mut EntityState,
         fields: &serde_json::Value,
         replace: bool,
-    ) -> Result<EntityState, String> {
+    ) -> Result<(), String> {
         let table = self.table.read().expect("table lock poisoned").clone();
-        let mut base = current.clone();
+        let mut base = state.clone();
         let mut retries_remaining = FIELD_UPDATE_RETRY_BUDGET;
 
         loop {
@@ -99,7 +99,9 @@ impl EntityActor {
                     .await
                 {
                     Ok(_) => {}
-                    Err(PersistenceError::ConcurrencyViolation { .. }) if retries_remaining > 0 => {
+                    Err(PersistenceError::ConcurrencyViolation { actual, .. })
+                        if retries_remaining > 0 =>
+                    {
                         retries_remaining -= 1;
                         base = recover_entity_state_from_store(
                             &self.tenant,
@@ -114,6 +116,13 @@ impl EntityActor {
                         )
                         .await
                         .map_err(|error| format!("field update replay failed: {error}"))?;
+                        debug_assert!(
+                            base.sequence_nr >= actual,
+                            "POSTCONDITION: field update replay under-reached authoritative sequence \
+                             (base.sequence_nr={} < actual={actual})",
+                            base.sequence_nr
+                        );
+                        *state = base.clone();
                         continue;
                     }
                     Err(PersistenceError::ConcurrencyViolation { .. }) => {
@@ -140,7 +149,8 @@ impl EntityActor {
                     "failed to persist snapshot after field update"
                 );
             }
-            return Ok(candidate);
+            *state = candidate;
+            return Ok(());
         }
     }
 }
