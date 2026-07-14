@@ -84,7 +84,6 @@ entity_param = "state"
 [webhook.extract]
 code = "query.code"
 
-[[invariant]]
-name = "DisconnectedIsRecoverable"
-when = ["Disconnected"]
-assert = "ordering(Disconnected, Expired)"
+# Removed unverifiable safety claim `ordering(Disconnected, Expired)` (ARN-213 /
+# ADR-0178). Path recoverability is not a state invariant the cascade can encode;
+# `ordering(...)` previously passed as a soft Unverifiable skip.
