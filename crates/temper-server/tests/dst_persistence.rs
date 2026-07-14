@@ -1128,6 +1128,87 @@ async fn dst_field_update_recovery_read_failure_restarts_before_serving_state() 
 }
 
 #[tokio::test]
+async fn dst_field_update_restart_rejects_a_successful_looking_journal_prefix() {
+    let seed = 18_906;
+    let (_guard, _clock, _id_gen) = install_deterministic_context(seed);
+    let scripted_store = ConflictBeforeAppendStore::new(seed);
+    let store_inner = scripted_store.inner.clone();
+    let store = BoxedEventStore::new(scripted_store.clone());
+    let table = order_table();
+    let entity_id = "ord-field-restart-truncated-tail";
+    let persistence_id = format!("default:Order:{entity_id}");
+    let system = ActorSystem::new("dst-field-restart-truncated-tail");
+    let actor = EntityActor::with_persistence(
+        "Order",
+        entity_id,
+        table.clone(),
+        serde_json::json!({"Title": "durable-before"}),
+        store.clone(),
+        BackendLabel::Sim,
+    )
+    .with_tenant("default");
+    let actor_ref = system.spawn(actor, entity_id);
+
+    let before = get_state(&actor_ref).await;
+    assert_eq!(before.state.sequence_nr, 1);
+    scripted_store.queue_conflicts(
+        &persistence_id,
+        vec![concurrent_add_item(
+            &persistence_id,
+            "concurrent-item-before-prefix",
+        )],
+    );
+    store_inner.restore_faults(SimFaultConfig {
+        read_truncation_prob: 1.0,
+        ..SimFaultConfig::none()
+    });
+    store_inner.fail_next_reads(&persistence_id, 1);
+
+    let update = actor_ref
+        .ask::<EntityResponse>(
+            EntityMsg::UpdateFields {
+                fields: serde_json::json!({"Title": "must-not-publish"}),
+                replace: false,
+            },
+            Duration::from_secs(5),
+        )
+        .await;
+    assert!(
+        update.is_err(),
+        "the explicit recovery failure must enter actor supervision"
+    );
+
+    let stale = actor_ref
+        .ask::<EntityResponse>(EntityMsg::GetState, Duration::from_secs(5))
+        .await;
+    assert!(
+        stale.is_err(),
+        "supervision must not publish a successful-looking prefix as current state"
+    );
+
+    store_inner.disable_faults();
+    let replacement = EntityActor::with_persistence(
+        "Order",
+        entity_id,
+        table,
+        serde_json::json!({"Title": "durable-before"}),
+        store,
+        BackendLabel::Sim,
+    )
+    .with_tenant("default");
+    let replacement_ref = system.spawn(replacement, "replacement-after-truncated-tail");
+    let recovered = get_state(&replacement_ref).await;
+    assert_eq!(recovered.state.sequence_nr, 2);
+    assert_eq!(recovered.state.item_count, 1);
+    assert_eq!(
+        recovered.state.fields["ProductId"],
+        "concurrent-item-before-prefix"
+    );
+    assert_eq!(recovered.state.fields["Title"], "durable-before");
+    assert_eq!(store_inner.dump_journal(&persistence_id).len(), 2);
+}
+
+#[tokio::test]
 async fn dst_reserved_field_update_event_type_cannot_be_dispatched_as_action() {
     let (_guard, _clock, _id_gen) = install_deterministic_context(18_901);
     let store_inner = SimEventStore::no_faults(18_901);
