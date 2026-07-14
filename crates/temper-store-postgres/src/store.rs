@@ -8,8 +8,9 @@ use std::time::Instant;
 
 use sqlx::{Acquire, PgPool};
 use temper_runtime::persistence::{
-    EntityVectorCandidate, EntityVectorRow, EventMetadata, EventStore, PersistenceAppend,
-    PersistenceAppendResult, PersistenceEnvelope, PersistenceError, pack_f32_le, unpack_f32_le,
+    EntityVectorCandidate, EntityVectorRow, EventMetadata, EventStore, JournalRead,
+    PersistenceAppend, PersistenceAppendResult, PersistenceEnvelope, PersistenceError, pack_f32_le,
+    unpack_f32_le,
 };
 use temper_runtime::tenant::parse_persistence_id_parts;
 
@@ -798,36 +799,94 @@ impl EventStore for PostgresEventStore {
         persistence_id: &str,
         from_sequence: u64,
     ) -> Result<Vec<PersistenceEnvelope>, PersistenceError> {
+        self.read_events_with_head(persistence_id, from_sequence)
+            .await
+            .map(|read| read.events)
+    }
+
+    async fn read_events_with_head(
+        &self,
+        persistence_id: &str,
+        from_sequence: u64,
+    ) -> Result<JournalRead, PersistenceError> {
         let (tenant, entity_type, entity_id) =
             parse_persistence_id_parts(persistence_id).map_err(PersistenceError::Storage)?;
 
-        let rows: Vec<(i64, String, serde_json::Value, serde_json::Value)> =
-            crate::dbm::postgres_query_as!(
-                "SELECT sequence_nr, event_type, payload, metadata \
-             FROM events \
-             WHERE tenant = $1 AND entity_type = $2 AND entity_id = $3 AND sequence_nr > $4 \
-             ORDER BY sequence_nr ASC",
-            )
-            .bind(tenant)
-            .bind(entity_type)
-            .bind(entity_id)
-            .bind(from_sequence as i64)
-            .fetch_all(&self.pool)
-            .await
-            .map_err(|e| PersistenceError::Storage(e.to_string()))?;
+        type JournalRow = (
+            Option<i64>,
+            Option<String>,
+            Option<serde_json::Value>,
+            Option<serde_json::Value>,
+            i64,
+        );
+        let rows: Vec<JournalRow> = crate::dbm::postgres_query_as!(
+            "WITH journal_head AS ( \
+                 SELECT COALESCE(MAX(sequence_nr), 0)::BIGINT AS sequence_nr \
+                 FROM events \
+                 WHERE tenant = $1 AND entity_type = $2 AND entity_id = $3 \
+             ), tail AS ( \
+                 SELECT sequence_nr, event_type, payload, metadata \
+                 FROM events \
+                 WHERE tenant = $1 AND entity_type = $2 AND entity_id = $3 \
+                   AND sequence_nr > $4 \
+             ) \
+             SELECT tail.sequence_nr, tail.event_type, tail.payload, tail.metadata, \
+                    journal_head.sequence_nr \
+             FROM journal_head \
+             LEFT JOIN tail ON TRUE \
+             ORDER BY tail.sequence_nr ASC",
+        )
+        .bind(tenant)
+        .bind(entity_type)
+        .bind(entity_id)
+        .bind(from_sequence as i64)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(|error| PersistenceError::Storage(error.to_string()))?;
 
-        rows.into_iter()
-            .map(|(seq, event_type, payload, meta_json)| {
-                let metadata: EventMetadata = serde_json::from_value(meta_json)
-                    .map_err(|e| PersistenceError::Serialization(e.to_string()))?;
-                Ok(PersistenceEnvelope {
-                    sequence_nr: seq as u64,
-                    event_type,
-                    payload,
-                    metadata,
-                })
-            })
-            .collect()
+        let journal_head_sequence_nr = rows
+            .first()
+            .ok_or_else(|| {
+                PersistenceError::Storage(format!(
+                    "journal head query returned no row for {persistence_id}"
+                ))
+            })?
+            .4
+            .try_into()
+            .map_err(|_| {
+                PersistenceError::Storage(format!("journal head is negative for {persistence_id}"))
+            })?;
+        let mut events = Vec::with_capacity(rows.len());
+        for (sequence_nr, event_type, payload, metadata, _) in rows {
+            match (sequence_nr, event_type, payload, metadata) {
+                (Some(sequence_nr), Some(event_type), Some(payload), Some(metadata)) => {
+                    let sequence_nr = sequence_nr.try_into().map_err(|_| {
+                        PersistenceError::Storage(format!(
+                            "journal sequence is negative for {persistence_id}"
+                        ))
+                    })?;
+                    let metadata: EventMetadata = serde_json::from_value(metadata)
+                        .map_err(|error| PersistenceError::Serialization(error.to_string()))?;
+                    events.push(PersistenceEnvelope {
+                        sequence_nr,
+                        event_type,
+                        payload,
+                        metadata,
+                    });
+                }
+                (None, None, None, None) => {}
+                _ => {
+                    return Err(PersistenceError::Serialization(format!(
+                        "journal query returned a partial event row for {persistence_id}"
+                    )));
+                }
+            }
+        }
+
+        Ok(JournalRead {
+            events,
+            journal_head_sequence_nr,
+        })
     }
 
     /// Save (upsert) a snapshot for the given entity.
@@ -893,6 +952,7 @@ impl EventStore for PostgresEventStore {
         &self,
         persistence_id: &str,
         sequence_nr: u64,
+        expected_snapshot: &[u8],
         snapshot: &[u8],
     ) -> Result<(), PersistenceError> {
         let (tenant, entity_type, entity_id) =
@@ -905,19 +965,21 @@ impl EventStore for PostgresEventStore {
 
         let updated = crate::dbm::postgres_query!(
             "UPDATE snapshots SET state = $5, created_at = now() \
-             WHERE tenant = $1 AND entity_type = $2 AND entity_id = $3 AND sequence_nr = $4",
+             WHERE tenant = $1 AND entity_type = $2 AND entity_id = $3 \
+               AND sequence_nr = $4 AND state = $6",
         )
         .bind(tenant)
         .bind(entity_type)
         .bind(entity_id)
         .bind(sequence_nr as i64)
         .bind(snapshot)
+        .bind(expected_snapshot)
         .execute(&mut *tx)
         .await
         .map_err(|error| PersistenceError::Storage(error.to_string()))?;
         if updated.rows_affected() != 1 {
             return Err(PersistenceError::Storage(format!(
-                "cannot replace missing snapshot at sequence {sequence_nr} for {persistence_id}"
+                "snapshot changed or is missing at sequence {sequence_nr} for {persistence_id}"
             )));
         }
 
@@ -1167,6 +1229,125 @@ mod tests {
         assert!(parse_pid("tenant:Order:").is_err());
         assert!(parse_pid(":abc").is_err());
         assert!(parse_pid("Order:").is_err());
+    }
+
+    #[test]
+    fn snapshot_replacement_rejects_stale_same_boundary_writer() {
+        type SegmentShape = (i64, i64, Option<i64>, Option<i64>, i64);
+
+        let database_url = match std::env::var("DATABASE_URL") {
+            Ok(url) => url,
+            Err(_) => return,
+        };
+
+        sqlx::test_block_on(async {
+            let pool = PgPool::connect(&database_url)
+                .await
+                .expect("connect to DATABASE_URL");
+            run_migrations(&pool).await.expect("run migrations");
+            let store = PostgresEventStore::new(pool.clone());
+            let tenant = format!("tenant-snapshot-cas-{}", uuid::Uuid::new_v4());
+            let persistence_id = format!("{tenant}:Order:concurrent-repair");
+
+            store
+                .append(
+                    &persistence_id,
+                    0,
+                    &[
+                        test_envelope("Created", serde_json::json!({})),
+                        test_envelope("Updated", serde_json::json!({})),
+                    ],
+                )
+                .await
+                .expect("seed snapshot boundary events");
+            let read = store
+                .read_events_with_head(&persistence_id, 1)
+                .await
+                .expect("read tail and durable journal head");
+            assert_eq!(read.journal_head_sequence_nr, 2);
+            assert_eq!(read.events.len(), 1);
+            assert_eq!(read.events[0].sequence_nr, 2);
+            store
+                .save_snapshot(&persistence_id, 2, b"legacy-snapshot")
+                .await
+                .expect("seed legacy boundary");
+            let segments_before: Vec<SegmentShape> =
+                crate::dbm::postgres_query_as!(
+                    "SELECT segment_index, start_sequence_nr, end_sequence_nr, \
+                            snapshot_sequence, event_count \
+                     FROM event_segments \
+                     WHERE tenant = $1 AND entity_type = 'Order' AND entity_id = 'concurrent-repair' \
+                     ORDER BY segment_index",
+                )
+                .bind(&tenant)
+                .fetch_all(&pool)
+                .await
+                .expect("read segment metadata before replacement");
+            store
+                .replace_snapshot(&persistence_id, 2, b"legacy-snapshot", b"first-repair")
+                .await
+                .expect("first repair claims the legacy boundary");
+            let stale_repair = store
+                .replace_snapshot(
+                    &persistence_id,
+                    2,
+                    b"legacy-snapshot",
+                    b"stale-second-repair",
+                )
+                .await
+                .expect_err("a stale same-boundary writer must lose");
+
+            assert!(matches!(stale_repair, PersistenceError::Storage(_)));
+            assert_eq!(
+                store.load_snapshot(&persistence_id).await.unwrap(),
+                Some((2, b"first-repair".to_vec())),
+                "the winning repair must not be overwritten"
+            );
+            let history: (Vec<u8>,) = crate::dbm::postgres_query_as!(
+                "SELECT state FROM snapshot_history \
+                 WHERE tenant = $1 AND entity_type = 'Order' \
+                   AND entity_id = 'concurrent-repair' AND sequence_nr = 2",
+            )
+            .bind(&tenant)
+            .fetch_one(&pool)
+            .await
+            .expect("read replacement history payload");
+            assert_eq!(history.0, b"first-repair");
+            let segments_after: Vec<SegmentShape> =
+                crate::dbm::postgres_query_as!(
+                    "SELECT segment_index, start_sequence_nr, end_sequence_nr, \
+                            snapshot_sequence, event_count \
+                     FROM event_segments \
+                     WHERE tenant = $1 AND entity_type = 'Order' AND entity_id = 'concurrent-repair' \
+                     ORDER BY segment_index",
+                )
+                .bind(&tenant)
+                .fetch_all(&pool)
+                .await
+                .expect("read segment metadata after replacement");
+            assert_eq!(segments_after, segments_before);
+
+            crate::dbm::postgres_query!("DELETE FROM snapshots WHERE tenant = $1")
+                .bind(&tenant)
+                .execute(&pool)
+                .await
+                .expect("delete test snapshot");
+            crate::dbm::postgres_query!("DELETE FROM snapshot_history WHERE tenant = $1")
+                .bind(&tenant)
+                .execute(&pool)
+                .await
+                .expect("delete test snapshot history");
+            crate::dbm::postgres_query!("DELETE FROM event_segments WHERE tenant = $1")
+                .bind(&tenant)
+                .execute(&pool)
+                .await
+                .expect("delete test event segments");
+            crate::dbm::postgres_query!("DELETE FROM events WHERE tenant = $1")
+                .bind(&tenant)
+                .execute(&pool)
+                .await
+                .expect("delete test events");
+        });
     }
 
     #[test]

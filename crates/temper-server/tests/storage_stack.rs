@@ -2,8 +2,8 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use temper_runtime::persistence::{
-    EventMetadata, EventStore, PersistenceAppend, PersistenceAppendResult, PersistenceEnvelope,
-    PersistenceError,
+    EventMetadata, EventStore, JournalRead, PersistenceAppend, PersistenceAppendResult,
+    PersistenceEnvelope, PersistenceError,
 };
 use temper_server::state::TrajectoryEntry;
 use temper_server::storage::{
@@ -139,6 +139,17 @@ impl EventStore for RecordingEventStore {
         Ok(vec![test_envelope(1)])
     }
 
+    async fn read_events_with_head(
+        &self,
+        persistence_id: &str,
+        from_sequence: u64,
+    ) -> Result<JournalRead, PersistenceError> {
+        Ok(JournalRead {
+            events: self.read_events(persistence_id, from_sequence).await?,
+            journal_head_sequence_nr: 1,
+        })
+    }
+
     async fn save_snapshot(
         &self,
         persistence_id: &str,
@@ -155,10 +166,12 @@ impl EventStore for RecordingEventStore {
         &self,
         persistence_id: &str,
         sequence_nr: u64,
+        expected_snapshot: &[u8],
         snapshot: &[u8],
     ) -> Result<(), PersistenceError> {
         assert_eq!(persistence_id, "default:Ticket:t-1");
         assert_eq!(sequence_nr, 1);
+        assert_eq!(expected_snapshot, b"snapshot");
         assert_eq!(snapshot, b"snapshot");
         Ok(())
     }

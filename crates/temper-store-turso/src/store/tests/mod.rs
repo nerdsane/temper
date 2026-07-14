@@ -58,12 +58,24 @@ async fn append_and_read_events_roundtrip() {
 
     assert_eq!(new_seq, 2);
 
-    let events = store.read_events(persistence_id, 0).await.unwrap();
+    let read = store
+        .read_events_with_head(persistence_id, 0)
+        .await
+        .unwrap();
+    assert_eq!(read.journal_head_sequence_nr, 2);
+    let events = read.events;
     assert_eq!(events.len(), 2);
     assert_eq!(events[0].sequence_nr, 1);
     assert_eq!(events[1].sequence_nr, 2);
     assert_eq!(events[0].event_type, "OrderCreated");
     assert_eq!(events[1].event_type, "OrderApproved");
+
+    let empty_tail = store
+        .read_events_with_head(persistence_id, 2)
+        .await
+        .unwrap();
+    assert_eq!(empty_tail.journal_head_sequence_nr, 2);
+    assert!(empty_tail.events.is_empty());
 }
 
 #[tokio::test]
@@ -343,8 +355,37 @@ async fn snapshot_save_and_load_roundtrip() {
     let snapshot = store.load_snapshot(persistence_id).await.unwrap();
     assert_eq!(snapshot, Some((5, b"{\"status\":\"created\"}".to_vec())));
 
+    let conn = store.configured_connection().await.unwrap();
+    let mut segment_rows = conn
+        .query(
+            "SELECT segment_index, start_sequence_nr, end_sequence_nr, \
+                    snapshot_sequence, event_count \
+             FROM event_segments \
+             WHERE tenant = ?1 AND entity_type = ?2 AND entity_id = ?3 \
+             ORDER BY segment_index",
+            params!["tenant-a", "Order", "ord-3"],
+        )
+        .await
+        .unwrap();
+    let mut segments_before = Vec::new();
+    while let Some(row) = segment_rows.next().await.unwrap() {
+        segments_before.push((
+            row.get::<i64>(0).unwrap(),
+            row.get::<i64>(1).unwrap(),
+            row.get::<Option<i64>>(2).unwrap(),
+            row.get::<Option<i64>>(3).unwrap(),
+            row.get::<i64>(4).unwrap(),
+        ));
+    }
+    drop(segment_rows);
+
     store
-        .replace_snapshot(persistence_id, 5, b"{\"status\":\"created-upgraded\"}")
+        .replace_snapshot(
+            persistence_id,
+            5,
+            b"{\"status\":\"created\"}",
+            b"{\"status\":\"created-upgraded\"}",
+        )
         .await
         .unwrap();
 
@@ -353,6 +394,60 @@ async fn snapshot_save_and_load_roundtrip() {
         replacement,
         Some((5, b"{\"status\":\"created-upgraded\"}".to_vec()))
     );
+
+    let stale_replacement = store
+        .replace_snapshot(
+            persistence_id,
+            5,
+            b"{\"status\":\"created\"}",
+            b"{\"status\":\"stale-overwrite\"}",
+        )
+        .await
+        .expect_err("a stale same-boundary writer must lose");
+    assert!(matches!(stale_replacement, PersistenceError::Storage(_)));
+    assert_eq!(
+        store.load_snapshot(persistence_id).await.unwrap(),
+        Some((5, b"{\"status\":\"created-upgraded\"}".to_vec()))
+    );
+    let mut history_rows = conn
+        .query(
+            "SELECT snapshot FROM snapshot_history \
+             WHERE tenant = ?1 AND entity_type = ?2 AND entity_id = ?3 AND sequence_nr = 5",
+            params!["tenant-a", "Order", "ord-3"],
+        )
+        .await
+        .unwrap();
+    let history = history_rows
+        .next()
+        .await
+        .unwrap()
+        .expect("replacement history row")
+        .get::<Vec<u8>>(0)
+        .unwrap();
+    assert_eq!(history, b"{\"status\":\"created-upgraded\"}");
+    drop(history_rows);
+    let mut segment_rows = conn
+        .query(
+            "SELECT segment_index, start_sequence_nr, end_sequence_nr, \
+                    snapshot_sequence, event_count \
+             FROM event_segments \
+             WHERE tenant = ?1 AND entity_type = ?2 AND entity_id = ?3 \
+             ORDER BY segment_index",
+            params!["tenant-a", "Order", "ord-3"],
+        )
+        .await
+        .unwrap();
+    let mut segments_after = Vec::new();
+    while let Some(row) = segment_rows.next().await.unwrap() {
+        segments_after.push((
+            row.get::<i64>(0).unwrap(),
+            row.get::<i64>(1).unwrap(),
+            row.get::<Option<i64>>(2).unwrap(),
+            row.get::<Option<i64>>(3).unwrap(),
+            row.get::<i64>(4).unwrap(),
+        ));
+    }
+    assert_eq!(segments_after, segments_before);
 
     store
         .save_snapshot(persistence_id, 8, b"{\"status\":\"shipped\"}")
@@ -382,7 +477,12 @@ async fn snapshot_replacement_is_readiness_priority() {
     let replacement_store = store.clone();
     let replacement = tokio::spawn(async move {
         replacement_store
-            .replace_snapshot(persistence_id, 1, b"{\"status\":\"legacy-repaired\"}")
+            .replace_snapshot(
+                persistence_id,
+                1,
+                b"{\"status\":\"legacy\"}",
+                b"{\"status\":\"legacy-repaired\"}",
+            )
             .await
     });
 

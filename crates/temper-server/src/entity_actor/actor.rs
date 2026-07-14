@@ -29,7 +29,7 @@ use temper_jit::table::{Effect, TransitionTable};
 use temper_observe::wide_event;
 use temper_runtime::actor::{Actor, ActorContext, ActorError};
 use temper_runtime::persistence::{
-    COMPOSITE_EVENT_TYPE, EventMetadata, PersistenceEnvelope, PersistenceError,
+    COMPOSITE_EVENT_TYPE, EventMetadata, JournalRead, PersistenceEnvelope, PersistenceError,
 };
 use temper_runtime::scheduler::{sim_now, sim_uuid};
 
@@ -159,7 +159,7 @@ impl EntityActor {
     /// Keeping this on the actor state makes the anchor part of the same
     /// snapshot as the state it describes. Unrelated self-loops retain the
     /// prior anchor; leaving a timed state clears it.
-    fn update_state_timeout_clock(
+    pub(super) fn update_state_timeout_clock(
         table: &TransitionTable,
         state: &mut EntityState,
         event: &EntityEvent,
@@ -184,6 +184,43 @@ impl EntityActor {
             // snapshot written by current code carries an anchor thereafter.
             state.state_timeout_clock_reset_at = Some(event.timestamp);
         }
+    }
+
+    fn validate_journal_read(
+        persistence_id: &str,
+        from_sequence: u64,
+        read: &JournalRead,
+    ) -> Result<(), ActorError> {
+        if read.journal_head_sequence_nr < from_sequence {
+            return Err(ActorError::custom(format!(
+                "journal head {} precedes replay boundary {from_sequence} for {persistence_id}",
+                read.journal_head_sequence_nr
+            )));
+        }
+
+        let mut observed_sequence = from_sequence;
+        for event in &read.events {
+            let expected_sequence = observed_sequence.checked_add(1).ok_or_else(|| {
+                ActorError::custom(format!(
+                    "journal sequence overflow after {observed_sequence} for {persistence_id}"
+                ))
+            })?;
+            if event.sequence_nr != expected_sequence {
+                return Err(ActorError::custom(format!(
+                    "journal replay gap for {persistence_id}: expected {expected_sequence}, got {}",
+                    event.sequence_nr
+                )));
+            }
+            observed_sequence = event.sequence_nr;
+        }
+
+        if observed_sequence != read.journal_head_sequence_nr {
+            return Err(ActorError::custom(format!(
+                "incomplete journal replay for {persistence_id}: stopped at {observed_sequence}, captured head is {}",
+                read.journal_head_sequence_nr
+            )));
+        }
+        Ok(())
     }
 
     /// Snapshot frequency in events.
@@ -547,29 +584,34 @@ impl EntityActor {
         tenant: &str,
         blob_store: Option<&crate::blob_store::BlobStore>,
         // When true, a journal read failure PROPAGATES as an error instead of being
-        // swallowed ("start fresh"). The key-index backfill needs this: it must
-        // distinguish "entity genuinely has no events" from "could not read the
-        // journal", or it would watermark a type while a present entity is unkeyed
-        // (a wrong-absent bug). Actor hydration keeps the lenient default (false).
+        // swallowed ("start fresh"). Actor hydration and concurrency recovery
+        // require strict reads because exposing snapshot state without proving the
+        // journal tail was replayed can lose a committed transition. Background
+        // diagnostics may opt into lenient reads when they never publish state.
         strict_journal_read: bool,
-    ) -> Result<(), ActorError> {
+    ) -> Result<Option<(u64, Vec<u8>)>, ActorError> {
         let replay_start = Instant::now(); // determinism-ok: wall-clock for production replay duration metric only
         let persistence_id = format!("{tenant}:{}:{}", state.entity_type, state.entity_id);
         let persistence_id = persistence_id.as_str();
         let mut from_sequence = 0;
-        let mut loaded_snapshot = false;
+        let mut loaded_snapshot = None;
 
         match store.load_snapshot(persistence_id).await {
             Ok(Some((snapshot_seq, snapshot_bytes))) => {
                 if Self::apply_snapshot_bytes(state, snapshot_seq, &snapshot_bytes) {
                     from_sequence = snapshot_seq;
-                    loaded_snapshot = true;
+                    loaded_snapshot = Some((snapshot_seq, snapshot_bytes));
                     tracing::info!(
                         entity = %state.entity_id,
                         seq = snapshot_seq,
                         "loaded snapshot before replay"
                     );
                 } else {
+                    if strict_journal_read {
+                        return Err(ActorError::custom(format!(
+                            "failed to deserialize snapshot at sequence {snapshot_seq} for {persistence_id}"
+                        )));
+                    }
                     tracing::warn!(
                         entity = %state.entity_id,
                         seq = snapshot_seq,
@@ -579,6 +621,11 @@ impl EntityActor {
             }
             Ok(None) => {}
             Err(e) => {
+                if strict_journal_read {
+                    return Err(ActorError::custom(format!(
+                        "failed to load snapshot for {persistence_id}: {e}"
+                    )));
+                }
                 tracing::warn!(
                     entity = %state.entity_id,
                     error = %e,
@@ -587,8 +634,13 @@ impl EntityActor {
             }
         }
 
-        match store.read_events(persistence_id, from_sequence).await {
-            Ok(envelopes) => {
+        match store
+            .read_events_with_head(persistence_id, from_sequence)
+            .await
+        {
+            Ok(read) => {
+                Self::validate_journal_read(persistence_id, from_sequence, &read)?;
+                let envelopes = read.events;
                 if envelopes.len() > MAX_EVENTS_SINCE_SNAPSHOT {
                     return Err(ActorError::custom(format!(
                         "snapshot tail replay budget exceeded for {}:{} ({} > {} events since snapshot)",
@@ -701,6 +753,12 @@ impl EntityActor {
                             state.push_event_bounded(event);
                         }
                         Err(e) => {
+                            if strict_journal_read {
+                                return Err(ActorError::custom(format!(
+                                    "incompatible event at sequence {} for {persistence_id}: {e}",
+                                    env.sequence_nr
+                                )));
+                            }
                             // Schema-mismatched event: log and skip rather than panic.
                             // This preserves entity hydration across spec evolution —
                             // the last valid state is used and replay continues.
@@ -733,7 +791,7 @@ impl EntityActor {
                     state.events_since_snapshot = replayed_tail;
                     tracing::info!(
                         entity = %state.entity_id,
-                        snapshot_loaded = loaded_snapshot,
+                        snapshot_loaded = loaded_snapshot.is_some(),
                         replayed = envelopes.len(),
                         status = %state.status,
                         seq = state.sequence_nr,
@@ -744,7 +802,7 @@ impl EntityActor {
                         booleans = ?state.booleans,
                         "state rebuilt from event journal via TransitionTable"
                     );
-                } else if loaded_snapshot {
+                } else if loaded_snapshot.is_some() {
                     tracing::info!(
                         entity = %state.entity_id,
                         seq = state.sequence_nr,
@@ -772,17 +830,17 @@ impl EntityActor {
             tenant,
             &state.entity_type,
         );
-        Ok(())
+        Ok(loaded_snapshot)
     }
 }
 
 /// Rebuild an entity's current state from its snapshot + event tail.
 ///
-/// `strict_journal_read`: when true, a journal read failure PROPAGATES as an error
-/// instead of being swallowed into a "start fresh"/stale state. The key-index backfill
-/// passes `true` so it can tell "no events" apart from "could not read the journal" —
-/// keying decisions and the per-type watermark depend on that distinction (ADR-0153
-/// soundness gate). Actor hydration passes `false` (keep serving on a transient read).
+/// `strict_journal_read`: when true, a journal read failure propagates as an error
+/// instead of being swallowed into a "start fresh"/stale state. Actor hydration,
+/// concurrency recovery, and key-index backfill require strict reads because each
+/// publishes a decision based on the recovered state. Background diagnostics may
+/// remain lenient when a partial replay is only reported as an observation.
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn recover_entity_state_from_store(
     tenant: &str,
@@ -796,7 +854,7 @@ pub(crate) async fn recover_entity_state_from_store(
     strict_journal_read: bool,
 ) -> Result<EntityState, ActorError> {
     let mut state = EntityActor::build_initial_state(entity_type, entity_id, table, initial_fields);
-    EntityActor::replay_events(
+    let _loaded_snapshot = EntityActor::replay_events(
         table,
         store,
         backend,
@@ -828,20 +886,22 @@ impl Actor for EntityActor {
         // Replay events from Postgres to rebuild state (if persistence is configured).
         // Re-evaluates each event through the TransitionTable to reconstruct
         // all state variables (status, counters, booleans) — not just item_count.
-        if let (Some(store), Some(backend)) = (self.event_journal.as_ref(), self.event_backend) {
-            state = recover_entity_state_from_store(
-                &self.tenant,
-                &self.entity_type,
-                &self.entity_id,
+        let loaded_snapshot = if let (Some(store), Some(backend)) =
+            (self.event_journal.as_ref(), self.event_backend)
+        {
+            Self::replay_events(
                 &table,
                 store,
                 backend,
-                &self.initial_fields,
+                &mut state,
+                &self.tenant,
                 self.blob_store.as_ref(),
-                false, // hydration: keep serving on a transient journal read failure
+                true,
             )
-            .await?;
-        }
+            .await?
+        } else {
+            None
+        };
 
         // A legacy snapshot may predate the dedicated timeout anchor and have
         // no replay tail from which to reconstruct it. Establish one
@@ -894,8 +954,29 @@ impl Actor for EntityActor {
                 )));
             };
             let persistence_id = self.persistence_id();
+            let Some((loaded_snapshot_sequence, expected_snapshot)) = loaded_snapshot.as_ref()
+            else {
+                return Err(ActorError::custom(format!(
+                    "cannot replace legacy timeout-anchor snapshot for {}:{} without the loaded boundary payload",
+                    self.entity_type, self.entity_id
+                )));
+            };
+            if *loaded_snapshot_sequence != repair_snapshot_sequence {
+                return Err(ActorError::custom(format!(
+                    "legacy timeout-anchor boundary changed for {}:{} (loaded {}, repairing {})",
+                    self.entity_type,
+                    self.entity_id,
+                    loaded_snapshot_sequence,
+                    repair_snapshot_sequence
+                )));
+            }
             store
-                .replace_snapshot(&persistence_id, repair_snapshot_sequence, &snapshot)
+                .replace_snapshot(
+                    &persistence_id,
+                    repair_snapshot_sequence,
+                    expected_snapshot,
+                    &snapshot,
+                )
                 .await
                 .map_err(|error| {
                     ActorError::custom(format!(
@@ -1188,9 +1269,9 @@ impl Actor for EntityActor {
                                         state,
                                         &self.tenant,
                                         self.blob_store.as_ref(),
-                                        // Actor hydration keeps the lenient "start
-                                        // fresh on read error" behavior (unchanged).
-                                        false,
+                                        // A retry must not re-run the action from
+                                        // state that may be missing a committed tail.
+                                        true,
                                     )
                                     .await?;
 

@@ -61,7 +61,7 @@ The readiness task captures both the deterministic event-clock observation and a
 
 ### Sub-Decision 4: Readiness failure is bounded, observable, and recoverable
 
-The readiness ask uses the existing retry budget. Exhaustion logs a structured error with tenant, entity type, and entity ID. It does not invent state or arm a timer from incomplete replay. An actor that permanently fails startup closes its mailbox; the entity registry treats only an open mailbox as a live incarnation. The next access atomically replaces a stopped registry entry under the existing spawn lock, re-runs hydration, and schedules timeout reconciliation. Concurrent callers still converge on one live actor.
+The readiness ask uses the existing retry budget. Actor startup and optimistic-concurrency recovery treat every journal-tail read as strict: a read failure stops that incarnation instead of publishing snapshot state whose committed tail is unknown. Exhaustion logs a structured error with tenant, entity type, and entity ID. It does not invent state or arm a timer from incomplete replay. An actor that permanently fails startup closes its mailbox; the entity registry treats only an open mailbox as a live incarnation. The next access atomically replaces a stopped registry entry under the existing spawn lock, re-runs hydration, and schedules timeout reconciliation. Concurrent callers still converge on one live actor.
 
 **Why this approach:** silently dropping the lifecycle task would recreate the regression; retrying forever would create an unbounded background workload; retaining a stopped actor reference would make a transient persistence failure permanent until process restart.
 
@@ -69,9 +69,17 @@ The readiness ask uses the existing retry budget. Exhaustion logs a structured e
 
 `TransitionTable` carries the verified `[[state_timeout]]` declarations into the production actor. As each durable event enters a timed state or executes a declared `reset_on` action, the actor updates one `state_timeout_clock_reset_at` value in the same state mutation. Replayed tail events advance or clear it alongside state, including tombstones. Periodic and passivation snapshots use one shared encoder that persists the timestamp while continuing to omit the bounded hot event deque. Hydration therefore recovers the exact anchor even when the entry/reset event precedes the current snapshot.
 
-Legacy snapshots that predate this optional field and have no matching state-changing event in their replay tail continue to receive one full timeout budget. Before the actor becomes ready or its timer can be armed, hydration synchronously rewrites the loaded snapshot with the conservative anchor. A missing anchor after replay proves that every post-snapshot envelope was skipped without mutating domain state: every successfully parsed event updates or clears the anchor. The replacement payload therefore keeps the loaded boundary's sequence and replay-budget fields, while the live actor retains the journal head and counts the skipped envelopes as its replay tail. A dedicated replacement operation atomically updates the current snapshot and its same-sequence history record without creating or rotating an event-segment boundary. Skipped markers replay again on the next restart, now from a snapshot with the durable anchor. A failed or concurrent upgrade write fails actor startup instead of exposing a refreshable in-memory budget. This compatibility fallback may delay the first deadline after upgrade, but even an immediate second crash and restart reuses the first upgraded anchor.
+Legacy snapshots that predate this optional field and have no matching state-changing event in their replay tail continue to receive one full timeout budget. Before the actor becomes ready or its timer can be armed, hydration synchronously rewrites the loaded snapshot with the conservative anchor. A missing anchor after a successful strict replay proves that every post-snapshot envelope was skipped without mutating domain state: every successfully parsed event updates or clears the anchor. The replacement payload therefore keeps the loaded boundary's sequence and replay-budget fields, while the live actor retains the journal head and counts the skipped envelopes as its replay tail. Replay returns the exact snapshot payload it loaded; a dedicated compare-and-replace operation accepts that payload as the expected value and atomically updates the current snapshot and its same-sequence history record without creating or rotating an event-segment boundary. Two replicas that loaded the same legacy boundary can therefore race, but only one replacement can succeed. Skipped markers replay again on the next restart, now from a snapshot with the durable anchor. A failed or concurrent upgrade write fails actor startup instead of exposing a refreshable in-memory budget. This compatibility fallback may delay the first deadline after upgrade, but even an immediate second crash and restart reuses the first upgraded anchor.
 
 If replay reaches a positive journal sequence but still cannot reconstruct an anchor, hydration requires an existing snapshot boundary for the conservative repair. A journal-only history in that condition may contain only a composite marker or an envelope written by a schema version that a future compatible runtime can replay. Creating a snapshot at the journal head would permanently hide those facts. Startup therefore leaves the journal and snapshot absence unchanged, arms no timeout, and returns an observable actor-start error until a compatible runtime or explicit migration supplies a trustworthy boundary. Journal-only histories with a replayable entry or reset event remain valid because replay reconstructs their exact anchor without creating a boundary. Existing-boundary replacement remains actor-readiness work rather than background maintenance, so stores with priority admission place it ahead of low-priority snapshot traffic.
+
+### Sub-Decision 6: Prove journal-tail completeness against an atomic head
+
+A successful event query does not by itself prove that every committed envelope was returned: a contiguous prefix can look valid while hiding a later transition. The persistence boundary therefore exposes a journal-tail read together with the durable head sequence captured from the same logical store snapshot. Postgres and Turso use one common-table-expression query, Redis uses one Lua script over the sequence key and event list, and Sim captures both values under its deterministic store lock before applying read-truncation faults.
+
+Actor replay requires the returned tail to start immediately after the snapshot boundary, remain contiguous, and end exactly at the captured head. Any gap, prefix truncation, or head preceding the snapshot is a hydration error before state can become ready, a timeout can be armed, or a legacy snapshot can be repaired. This completeness check is unconditional; the older lenient-read option applies only to explicit backend errors in observation-oriented callers, never to a read that proves itself structurally incomplete.
+
+**Why this approach:** a second, independent head query would race a concurrent append and could not prove which journal view the tail represented. Capturing the head and tail in one database statement, Redis script, or simulation lock gives every backend the same durable replay contract.
 
 ## Rollout Plan
 
@@ -88,6 +96,9 @@ If replay reaches a positive journal sequence but still cannot reconstruct an an
 - A legacy timed journal with no reconstructable anchor and no snapshot fails hydration cleanly, arms no timer, and remains fully replayable after repeated restart attempts.
 - An incompatible no-snapshot envelope remains visible to a future compatible runtime.
 - A snapshot-read failure fails hydration without overwriting an existing boundary or rotating its segment metadata.
+- A journal-tail read failure fails hydration without rewriting a stale snapshot or arming its timeout.
+- A successful-looking truncated journal prefix fails hydration because it does not reach the atomically captured durable head.
+- Two repairs that loaded the same legacy boundary have one winner; the stale writer cannot overwrite that anchor.
 - Snapshot-boundary replacement enters the persistence writer as actor-readiness work rather than background maintenance.
 - An injected repair failure followed by store recovery in the same server replaces the stopped actor incarnation, persists the anchor, and arms exactly one timer.
 - Randomized deterministic seeds cover elapsed times before, at, and after the deadline.
@@ -110,6 +121,7 @@ If replay reaches a positive journal sequence but still cannot reconstruct an an
 - Persisted timed entities consume actor and timer memory while their liveness obligation is active.
 - Timeout recovery is asynchronous with respect to registry insertion, so readiness may briefly precede timer-arm observability.
 - Current snapshots gain one optional timeout-anchor timestamp.
+- Hydration uses a head-bearing journal read instead of an event vector alone.
 - Legacy snapshot-only entities may receive one conservative full budget after their first upgraded hydration.
 - Legacy journal-only timed entities whose replay cannot reconstruct an anchor require a compatible migration before they can hydrate.
 
@@ -118,6 +130,9 @@ If replay reaches a positive journal sequence but still cannot reconstruct an an
 - **Readiness task exhaustion.** Mitigated by bounded retries, structured errors, stopped-incarnation replacement on the next access, and the existing post-dispatch reconciliation fallback.
 - **Legacy snapshot upgrade failure.** The synchronous anchor rewrite fails actor startup; hydration never arms a timer from an anchor that another immediate restart could forget.
 - **Missing or unreadable snapshot boundary.** Timeout-anchor repair requires a successfully loaded existing boundary. Missing, unreadable, or otherwise ambiguous boundaries fail actor startup without changing durable history, so a compatible runtime or migration can reconstruct it later.
+- **Unreadable journal tail.** Actor hydration and concurrency recovery use strict reads; a transient failure stops the incarnation and leaves both snapshot and timer state unchanged until a bounded retry can replay the full tail.
+- **Incomplete journal tail.** Replay validates contiguous sequences through the head captured by the same store operation, so a successful-looking prefix cannot publish stale state or authorize snapshot repair.
+- **Concurrent legacy repair.** Replacement compares both the loaded sequence and exact payload in the backend transaction/script, so only the first replica can claim a legacy boundary.
 - **Timed-entity startup volume.** Bounded to entity types with declared liveness obligations; non-timed entities retain index-only lazy hydration. A future durable scheduler may avoid one resident actor per persisted instance of a timeout-declaring type.
 - **Duplicate timers during startup races.** Mitigated by atomic initial-sequence reservation and the existing fire-time sequence/state checks.
 - **Runtime task nondeterminism.** The task coordinates production actor readiness only; state mutation remains actor-serialized, time comes from `sim_now()`, and deterministic tests use a logical clock plus paused Tokio time.
@@ -125,6 +140,7 @@ If replay reaches a positive journal sequence but still cannot reconstruct an an
 ### DST Compliance
 
 - The restart regression uses `SimEventStore`, deterministic IDs, a logical `sim_now()` clock, and paused Tokio time.
+- Deterministic truncation faults retain the pre-fault journal head, proving actor hydration rejects an incomplete prefix.
 - Randomized scenarios are seed-derived and assert the same state and timer outcomes for the same seed.
 - No filesystem, network, wall-clock, or random source is introduced into state mutation.
 - The readiness `tokio::spawn` is a bounded production lifecycle task; it does not execute state-machine mutation outside the actor.
@@ -144,6 +160,7 @@ If replay reaches a positive journal sequence but still cannot reconstruct an an
 4. **Wait for the next action** — Rejected because that is the current liveness failure.
 5. **Build the full durable scheduler now** — Deferred to ADR-0049's longer-term direction; it is broader than the actor-lifecycle regression.
 6. **Create a first snapshot at a recovered no-anchor journal head** — Rejected because partial replay can skip durable envelopes; sealing the resulting state behind a new boundary would make those facts unreplayable.
+7. **Read the journal head in a second call** — Rejected because an append between the tail and head queries would make their completeness relationship ambiguous; the proof must come from one logical store snapshot.
 
 ## Rollback Policy
 

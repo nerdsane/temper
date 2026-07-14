@@ -180,6 +180,7 @@ impl SimActorHandler for EntityActorHandler {
         self.state.events_since_snapshot = 0;
         self.state.last_snapshot_sequence_nr = 0;
         self.state.sequence_nr = 0;
+        self.state.state_timeout_clock_reset_at = None;
         self.state.fields = serde_json::json!({
             "Id": self.state.entity_id,
             "Status": self.state.status,
@@ -202,6 +203,11 @@ impl SimActorHandler for EntityActorHandler {
             self.last_custom_effects = result.custom_effects;
             self.last_scheduled_actions = result.scheduled_actions;
             if let Some(event) = result.event {
+                super::EntityActor::update_state_timeout_clock(
+                    &self.table,
+                    &mut self.state,
+                    &event,
+                );
                 self.state.push_event_bounded(event);
             }
             Ok(serde_json::to_value(&self.state).unwrap_or_default())
@@ -323,6 +329,13 @@ reset_on = ["Progress"]
         let reset_at = sim_now();
         handler.handle_message("Progress", "{}").unwrap();
         assert_eq!(handler.state.state_timeout_clock_reset_at, Some(reset_at));
+
+        handler.init().unwrap();
+        assert_eq!(handler.state.state_timeout_clock_reset_at, None);
+
+        clock.advance();
+        handler.handle_message("Start", "{}").unwrap();
+        assert_eq!(handler.state.state_timeout_clock_reset_at, Some(sim_now()));
 
         clock.advance();
         handler.handle_message("Finish", "{}").unwrap();

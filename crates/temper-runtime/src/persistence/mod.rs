@@ -400,6 +400,17 @@ pub trait EventStore: Send + Sync + 'static {
         from_sequence: u64,
     ) -> impl std::future::Future<Output = Result<Vec<PersistenceEnvelope>, PersistenceError>> + Send;
 
+    /// Read a journal tail and its durable head from one logical store snapshot.
+    ///
+    /// `journal_head_sequence_nr` must describe the same view that produced
+    /// `events`. Callers can therefore reject a successful-looking prefix that
+    /// does not reach the captured head.
+    fn read_events_with_head(
+        &self,
+        persistence_id: &str,
+        from_sequence: u64,
+    ) -> impl std::future::Future<Output = Result<JournalRead, PersistenceError>> + Send;
+
     /// Save a state snapshot.
     fn save_snapshot(
         &self,
@@ -408,15 +419,18 @@ pub trait EventStore: Send + Sync + 'static {
         snapshot: &[u8],
     ) -> impl std::future::Future<Output = Result<(), PersistenceError>> + Send;
 
-    /// Replace the payload of an existing snapshot without creating another
-    /// event-segment boundary.
+    /// Compare and replace the payload of an existing snapshot without
+    /// creating another event-segment boundary.
     ///
-    /// The replacement must atomically update the latest snapshot and its
-    /// same-sequence history record while leaving segment metadata unchanged.
+    /// The replacement succeeds only when both the sequence and payload still
+    /// equal `expected_snapshot`. It must atomically update the latest snapshot
+    /// and its same-sequence history record while leaving segment metadata
+    /// unchanged. A mismatched payload is a concurrent writer and must fail.
     fn replace_snapshot(
         &self,
         persistence_id: &str,
         sequence_nr: u64,
+        expected_snapshot: &[u8],
         snapshot: &[u8],
     ) -> impl std::future::Future<Output = Result<(), PersistenceError>> + Send;
 
@@ -482,6 +496,15 @@ pub struct PersistenceEnvelope {
     pub payload: serde_json::Value,
     /// Event metadata (causation, correlation, timestamp).
     pub metadata: EventMetadata,
+}
+
+/// One journal tail plus the durable head captured from the same store view.
+#[derive(Debug, Clone)]
+pub struct JournalRead {
+    /// Events whose sequence is greater than the requested starting sequence.
+    pub events: Vec<PersistenceEnvelope>,
+    /// Highest durable sequence number in the journal at read time.
+    pub journal_head_sequence_nr: u64,
 }
 
 /// One stream append inside an atomic multi-journal append.

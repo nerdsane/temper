@@ -39,7 +39,7 @@ async fn snapshot_replacement_preserves_existing_segment_boundary() {
     let pid = "default:Order:snapshot-rewrite";
 
     let missing = store
-        .replace_snapshot(pid, 0, b"must-not-create")
+        .replace_snapshot(pid, 0, b"must-not-exist", b"must-not-create")
         .await
         .unwrap_err();
     assert!(matches!(missing, PersistenceError::Storage(_)));
@@ -60,7 +60,7 @@ async fn snapshot_replacement_preserves_existing_segment_boundary() {
     let segments_before = store.dump_segments(pid);
 
     store
-        .replace_snapshot(pid, 2, b"upgraded-snapshot")
+        .replace_snapshot(pid, 2, b"legacy-snapshot", b"upgraded-snapshot")
         .await
         .unwrap();
 
@@ -86,11 +86,11 @@ async fn snapshot_replacement_rejects_a_stale_same_boundary_writer() {
         .expect("seed legacy boundary");
 
     store
-        .replace_snapshot(pid, 2, b"first-repair")
+        .replace_snapshot(pid, 2, b"legacy-snapshot", b"first-repair")
         .await
         .expect("first repair claims the legacy boundary");
     let stale_repair = store
-        .replace_snapshot(pid, 2, b"stale-second-repair")
+        .replace_snapshot(pid, 2, b"legacy-snapshot", b"stale-second-repair")
         .await
         .expect_err("a second writer that loaded the legacy boundary must lose");
 

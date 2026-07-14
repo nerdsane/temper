@@ -18,11 +18,12 @@ use std::time::Duration;
 
 use sqlx::PgPool;
 use temper_runtime::persistence::{
-    EventStore, PersistenceAppend, PersistenceAppendResult, PersistenceEnvelope, PersistenceError,
+    EventStore, JournalRead, PersistenceAppend, PersistenceAppendResult, PersistenceEnvelope,
+    PersistenceError,
 };
 use temper_store_postgres::{PostgresEventStore, PostgresTrajectoryInsert};
 use temper_store_turso::{
-    ActionStats, AgentSummary, DesignTimeEventRow, EvolutionRecordRow, FeatureRequestRow,
+    AgentSummary, DesignTimeEventRow, EvolutionRecordRow, FeatureRequestRow,
     OtsQueuedTrajectoryRow, OtsTrajectoryParams, OtsTrajectoryRow, PolicyDenialPatternRow,
     TenantStoreRouter, TenantUserRow, TursoEventStore, TursoTrajectoryInsert, TursoTrajectoryRow,
     TursoWasmInvocationInsert, TursoWasmInvocationRow, TursoWasmModuleMetadataRow,
@@ -35,10 +36,12 @@ use crate::platform_store::SimPlatformStore;
 use crate::state::trajectory::{TrajectoryEntry, TrajectorySource};
 
 mod policy_row;
+mod postgres_conversions;
 mod published_artifacts;
 mod query_plane_impls;
 mod query_plane_read;
 pub use policy_row::PolicyStoreRow;
+use postgres_conversions::*;
 pub use published_artifacts::{
     PublishedArtifactStore, PublishedArtifactStoreRow, PublishedArtifactStoreUpsert,
 };
@@ -72,6 +75,13 @@ pub trait DynEventStore: Send + Sync {
         persistence_id: &'a str,
         from_sequence: u64,
     ) -> EventStoreFuture<'a, Result<Vec<PersistenceEnvelope>, PersistenceError>>;
+
+    /// Read a journal tail and its head from the same logical store snapshot.
+    fn read_events_with_head<'a>(
+        &'a self,
+        persistence_id: &'a str,
+        from_sequence: u64,
+    ) -> EventStoreFuture<'a, Result<JournalRead, PersistenceError>>;
 
     fn append_with_keys<'a>(
         &'a self,
@@ -170,11 +180,12 @@ pub trait DynEventStore: Send + Sync {
         snapshot: &'a [u8],
     ) -> EventStoreFuture<'a, Result<(), PersistenceError>>;
 
-    /// Replace one existing snapshot payload without creating a new boundary.
+    /// Compare and replace one existing snapshot without creating a new boundary.
     fn replace_snapshot<'a>(
         &'a self,
         persistence_id: &'a str,
         sequence_nr: u64,
+        expected_snapshot: &'a [u8],
         snapshot: &'a [u8],
     ) -> EventStoreFuture<'a, Result<(), PersistenceError>>;
 
@@ -233,6 +244,18 @@ where
         from_sequence: u64,
     ) -> EventStoreFuture<'a, Result<Vec<PersistenceEnvelope>, PersistenceError>> {
         Box::pin(EventStore::read_events(self, persistence_id, from_sequence))
+    }
+
+    fn read_events_with_head<'a>(
+        &'a self,
+        persistence_id: &'a str,
+        from_sequence: u64,
+    ) -> EventStoreFuture<'a, Result<JournalRead, PersistenceError>> {
+        Box::pin(EventStore::read_events_with_head(
+            self,
+            persistence_id,
+            from_sequence,
+        ))
     }
 
     fn append_with_keys<'a>(
@@ -424,12 +447,14 @@ where
         &'a self,
         persistence_id: &'a str,
         sequence_nr: u64,
+        expected_snapshot: &'a [u8],
         snapshot: &'a [u8],
     ) -> EventStoreFuture<'a, Result<(), PersistenceError>> {
         Box::pin(EventStore::replace_snapshot(
             self,
             persistence_id,
             sequence_nr,
+            expected_snapshot,
             snapshot,
         ))
     }
@@ -522,6 +547,17 @@ impl BoxedEventStore {
         from_sequence: u64,
     ) -> Result<Vec<PersistenceEnvelope>, PersistenceError> {
         self.0.read_events(persistence_id, from_sequence).await
+    }
+
+    /// Read a journal tail and its head from the same logical store snapshot.
+    pub async fn read_events_with_head(
+        &self,
+        persistence_id: &str,
+        from_sequence: u64,
+    ) -> Result<JournalRead, PersistenceError> {
+        self.0
+            .read_events_with_head(persistence_id, from_sequence)
+            .await
     }
 
     pub async fn append_with_keys(
@@ -671,15 +707,16 @@ impl BoxedEventStore {
             .await
     }
 
-    /// Replace one existing snapshot payload without creating a new boundary.
+    /// Compare and replace one existing snapshot without creating a new boundary.
     pub async fn replace_snapshot(
         &self,
         persistence_id: &str,
         sequence_nr: u64,
+        expected_snapshot: &[u8],
         snapshot: &[u8],
     ) -> Result<(), PersistenceError> {
         self.0
-            .replace_snapshot(persistence_id, sequence_nr, snapshot)
+            .replace_snapshot(persistence_id, sequence_nr, expected_snapshot, snapshot)
             .await
     }
 
@@ -2454,203 +2491,6 @@ impl WasmInvocationStore for TursoEventStore {
         limit: i64,
     ) -> Result<Vec<TursoWasmInvocationRow>, PersistenceError> {
         self.load_recent_wasm_invocations(limit).await
-    }
-}
-
-fn pg_trajectory_to_turso(row: temper_store_postgres::PostgresTrajectoryRow) -> TursoTrajectoryRow {
-    TursoTrajectoryRow {
-        tenant: row.tenant,
-        entity_type: row.entity_type,
-        entity_id: row.entity_id,
-        action: row.action,
-        success: row.success,
-        from_status: row.from_status,
-        to_status: row.to_status,
-        error: row.error,
-        agent_id: row.agent_id,
-        session_id: row.session_id,
-        authz_denied: row.authz_denied,
-        denied_resource: row.denied_resource,
-        denied_module: row.denied_module,
-        source: row.source,
-        spec_governed: row.spec_governed,
-        created_at: row.created_at,
-        request_body: row.request_body,
-        intent: row.intent,
-        matched_policy_ids: row.matched_policy_ids,
-    }
-}
-
-fn pg_unmet_to_turso(row: temper_store_postgres::PostgresUnmetIntentAggRow) -> UnmetIntentAggRow {
-    UnmetIntentAggRow {
-        entity_type: row.entity_type,
-        action: row.action,
-        error: row.error,
-        count: row.count,
-        first_seen: row.first_seen,
-        last_seen: row.last_seen,
-    }
-}
-
-fn pg_stats_to_turso(stats: temper_store_postgres::PostgresTrajectoryStats) -> TrajectoryStats {
-    TrajectoryStats {
-        total: stats.total,
-        success_count: stats.success_count,
-        error_count: stats.error_count,
-        success_rate: stats.success_rate,
-        by_action: stats
-            .by_action
-            .into_iter()
-            .map(|(name, action)| {
-                (
-                    name,
-                    ActionStats {
-                        total: action.total,
-                        success: action.success,
-                        error: action.error,
-                    },
-                )
-            })
-            .collect(),
-        failed_intents: stats
-            .failed_intents
-            .into_iter()
-            .map(pg_trajectory_to_turso)
-            .collect(),
-    }
-}
-
-fn pg_agent_summary_to_turso(row: temper_store_postgres::PostgresAgentSummary) -> AgentSummary {
-    AgentSummary {
-        agent_id: row.agent_id,
-        total_actions: row.total_actions,
-        success_count: row.success_count,
-        error_count: row.error_count,
-        denial_count: row.denial_count,
-        success_rate: row.success_rate,
-        last_active_at: row.last_active_at,
-    }
-}
-
-fn pg_feature_request_to_turso(
-    row: temper_store_postgres::PostgresFeatureRequestRow,
-) -> FeatureRequestRow {
-    FeatureRequestRow {
-        id: row.id,
-        category: row.category,
-        description: row.description,
-        frequency: row.frequency,
-        trajectory_refs: row.trajectory_refs,
-        disposition: row.disposition,
-        developer_notes: row.developer_notes,
-        created_at: row.created_at,
-        updated_at: row.updated_at,
-    }
-}
-
-fn pg_evolution_record_to_turso(
-    row: temper_store_postgres::PostgresEvolutionRecordRow,
-) -> EvolutionRecordRow {
-    EvolutionRecordRow {
-        id: row.id,
-        record_type: row.record_type,
-        status: row.status,
-        created_by: row.created_by,
-        derived_from: row.derived_from,
-        data: row.data,
-        timestamp: row.timestamp,
-    }
-}
-
-fn pg_design_time_event_to_turso(
-    row: temper_store_postgres::PostgresDesignTimeEventRow,
-) -> DesignTimeEventRow {
-    DesignTimeEventRow {
-        id: row.id,
-        kind: row.kind,
-        entity_type: row.entity_type,
-        tenant: row.tenant,
-        summary: row.summary,
-        level: row.level,
-        passed: row.passed,
-        step_number: row.step_number,
-        total_steps: row.total_steps,
-        created_at: row.created_at,
-    }
-}
-
-fn pg_ots_to_turso(row: temper_store_postgres::PostgresOtsTrajectoryRow) -> OtsTrajectoryRow {
-    OtsTrajectoryRow {
-        trajectory_id: row.trajectory_id,
-        tenant: row.tenant,
-        agent_id: row.agent_id,
-        session_id: row.session_id,
-        outcome: row.outcome,
-        turn_count: row.turn_count,
-        persistence_status: row.persistence_status,
-        persist_attempts: row.persist_attempts,
-        last_error: row.last_error,
-        created_at: row.created_at,
-        updated_at: row.updated_at,
-    }
-}
-
-fn pg_queued_ots_to_turso(
-    row: temper_store_postgres::PostgresQueuedOtsTrajectoryRow,
-) -> OtsQueuedTrajectoryRow {
-    OtsQueuedTrajectoryRow {
-        trajectory_id: row.trajectory_id,
-        tenant: row.tenant,
-        agent_id: row.agent_id,
-        session_id: row.session_id,
-        outcome: row.outcome,
-        turn_count: row.turn_count,
-        data: row.data,
-        persist_attempts: row.persist_attempts,
-    }
-}
-
-fn pg_denial_pattern_to_turso(
-    row: temper_store_postgres::PostgresPolicyDenialPatternRow,
-) -> PolicyDenialPatternRow {
-    PolicyDenialPatternRow {
-        tenant: row.tenant,
-        agent_type: row.agent_type,
-        action: row.action,
-        resource_type: row.resource_type,
-        count: row.count,
-        first_seen: row.first_seen,
-        last_seen: row.last_seen,
-        distinct_resource_ids_json: row.distinct_resource_ids_json,
-    }
-}
-
-fn pg_wasm_metadata_to_turso(
-    row: temper_store_postgres::PostgresWasmModuleMetadataRow,
-) -> TursoWasmModuleMetadataRow {
-    TursoWasmModuleMetadataRow {
-        tenant: row.tenant,
-        module_name: row.module_name,
-        sha256_hash: row.sha256_hash,
-        size_bytes: row.size_bytes,
-        updated_at: row.updated_at,
-    }
-}
-
-fn pg_wasm_invocation_to_turso(
-    row: temper_store_postgres::PostgresWasmInvocationRow,
-) -> TursoWasmInvocationRow {
-    TursoWasmInvocationRow {
-        tenant: row.tenant,
-        entity_type: row.entity_type,
-        entity_id: row.entity_id,
-        module_name: row.module_name,
-        trigger_action: row.trigger_action,
-        callback_action: row.callback_action,
-        success: row.success,
-        error: row.error,
-        duration_ms: row.duration_ms,
-        created_at: row.created_at,
     }
 }
 

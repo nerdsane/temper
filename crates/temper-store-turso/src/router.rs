@@ -15,8 +15,8 @@ use tokio::sync::RwLock;
 use tracing::{info, instrument, warn};
 
 use temper_runtime::persistence::{
-    EventStore, PersistenceAppend, PersistenceAppendResult, PersistenceEnvelope, PersistenceError,
-    storage_error,
+    EventStore, JournalRead, PersistenceAppend, PersistenceAppendResult, PersistenceEnvelope,
+    PersistenceError, storage_error,
 };
 use temper_runtime::tenant::parse_persistence_id_parts;
 
@@ -695,6 +695,20 @@ impl EventStore for TenantStoreRouter {
         store.read_events(persistence_id, from_sequence).await
     }
 
+    #[instrument(skip_all, fields(persistence_id, otel.name = "router.read_events_with_head"))]
+    async fn read_events_with_head(
+        &self,
+        persistence_id: &str,
+        from_sequence: u64,
+    ) -> Result<JournalRead, PersistenceError> {
+        let (tenant, _, _) =
+            parse_persistence_id_parts(persistence_id).map_err(PersistenceError::Storage)?;
+        let store = self.store_for_tenant(tenant).await?;
+        store
+            .read_events_with_head(persistence_id, from_sequence)
+            .await
+    }
+
     #[instrument(skip_all, fields(persistence_id, otel.name = "router.save_snapshot"))]
     async fn save_snapshot(
         &self,
@@ -715,13 +729,14 @@ impl EventStore for TenantStoreRouter {
         &self,
         persistence_id: &str,
         sequence_nr: u64,
+        expected_snapshot: &[u8],
         snapshot: &[u8],
     ) -> Result<(), PersistenceError> {
         let (tenant, _, _) =
             parse_persistence_id_parts(persistence_id).map_err(PersistenceError::Storage)?;
         let store = self.store_for_tenant(tenant).await?;
         store
-            .replace_snapshot(persistence_id, sequence_nr, snapshot)
+            .replace_snapshot(persistence_id, sequence_nr, expected_snapshot, snapshot)
             .await
     }
 

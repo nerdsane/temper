@@ -268,7 +268,7 @@ mod tests {
     use super::*;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use temper_runtime::persistence::{
-        EventStore, PersistenceAppend, PersistenceAppendResult, PersistenceEnvelope,
+        EventStore, JournalRead, PersistenceAppend, PersistenceAppendResult, PersistenceEnvelope,
         PersistenceError,
     };
 
@@ -308,6 +308,17 @@ mod tests {
             Ok(Vec::new())
         }
 
+        async fn read_events_with_head(
+            &self,
+            _persistence_id: &str,
+            from_sequence: u64,
+        ) -> Result<JournalRead, PersistenceError> {
+            Ok(JournalRead {
+                events: Vec::new(),
+                journal_head_sequence_nr: from_sequence,
+            })
+        }
+
         async fn save_snapshot(
             &self,
             _persistence_id: &str,
@@ -322,6 +333,7 @@ mod tests {
             &self,
             _persistence_id: &str,
             _sequence_nr: u64,
+            _expected_snapshot: &[u8],
             _snapshot: &[u8],
         ) -> Result<(), PersistenceError> {
             self.saves.fetch_add(1, Ordering::SeqCst);

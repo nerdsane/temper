@@ -29,10 +29,16 @@ async fn append_and_read_roundtrip() {
         .unwrap();
     assert_eq!(new_seq, 1);
 
-    let events = store.read_events(pid, 0).await.unwrap();
+    let read = store.read_events_with_head(pid, 0).await.unwrap();
+    assert_eq!(read.journal_head_sequence_nr, 1);
+    let events = read.events;
     assert_eq!(events.len(), 1);
     assert_eq!(events[0].sequence_nr, 1);
     assert_eq!(events[0].event_type, "Created");
+
+    let empty_tail = store.read_events_with_head(pid, 1).await.unwrap();
+    assert_eq!(empty_tail.journal_head_sequence_nr, 1);
+    assert!(empty_tail.events.is_empty());
 }
 
 #[tokio::test]

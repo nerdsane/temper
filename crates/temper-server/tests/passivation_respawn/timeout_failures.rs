@@ -2,6 +2,8 @@
 
 #[path = "timeout_failures/journal_reads.rs"]
 mod journal_reads;
+#[path = "timeout_failures/strict_replay.rs"]
+mod strict_replay;
 
 use super::common;
 use temper_runtime::persistence::{

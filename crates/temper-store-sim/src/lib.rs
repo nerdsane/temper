@@ -13,8 +13,8 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use temper_runtime::persistence::{
-    EntityVectorCandidate, EntityVectorRow, EventStore, PersistenceAppend, PersistenceAppendResult,
-    PersistenceEnvelope, PersistenceError,
+    EntityVectorCandidate, EntityVectorRow, EventStore, JournalRead, PersistenceAppend,
+    PersistenceAppendResult, PersistenceEnvelope, PersistenceError,
 };
 use temper_runtime::tenant::parse_persistence_id_parts;
 
@@ -896,6 +896,16 @@ impl EventStore for SimEventStore {
         persistence_id: &str,
         from_sequence: u64,
     ) -> Result<Vec<PersistenceEnvelope>, PersistenceError> {
+        self.read_events_with_head(persistence_id, from_sequence)
+            .await
+            .map(|read| read.events)
+    }
+
+    async fn read_events_with_head(
+        &self,
+        persistence_id: &str,
+        from_sequence: u64,
+    ) -> Result<JournalRead, PersistenceError> {
         let mut inner = self.inner.lock().expect("SimEventStore lock poisoned"); // ci-ok: infallible lock
 
         // Deterministic injected read failure (see `fail_next_reads`).
@@ -911,9 +921,15 @@ impl EventStore for SimEventStore {
         }
 
         let journal = match inner.journals.get(persistence_id) {
-            Some(j) => j,
-            None => return Ok(Vec::new()),
+            Some(journal) => journal,
+            None => {
+                return Ok(JournalRead {
+                    events: Vec::new(),
+                    journal_head_sequence_nr: 0,
+                });
+            }
         };
+        let journal_head_sequence_nr = journal.last().map(|event| event.sequence_nr).unwrap_or(0);
 
         let mut events: Vec<PersistenceEnvelope> = journal
             .iter()
@@ -928,7 +944,10 @@ impl EventStore for SimEventStore {
             events.truncate(truncate_at.max(1));
         }
 
-        Ok(events)
+        Ok(JournalRead {
+            events,
+            journal_head_sequence_nr,
+        })
     }
 
     async fn save_snapshot(
@@ -1004,6 +1023,7 @@ impl EventStore for SimEventStore {
         &self,
         persistence_id: &str,
         sequence_nr: u64,
+        expected_snapshot: &[u8],
         snapshot: &[u8],
     ) -> Result<(), PersistenceError> {
         let mut inner = self.inner.lock().expect("SimEventStore lock poisoned"); // ci-ok: infallible lock
@@ -1015,7 +1035,7 @@ impl EventStore for SimEventStore {
             ));
         }
 
-        let Some((actual_sequence, _)) = inner.snapshots.get(persistence_id) else {
+        let Some((actual_sequence, actual_snapshot)) = inner.snapshots.get(persistence_id) else {
             return Err(PersistenceError::Storage(format!(
                 "cannot replace missing snapshot at sequence {sequence_nr} for {persistence_id}"
             )));
@@ -1026,6 +1046,11 @@ impl EventStore for SimEventStore {
                 expected: sequence_nr,
                 actual: actual_sequence,
             });
+        }
+        if actual_snapshot.as_slice() != expected_snapshot {
+            return Err(PersistenceError::Storage(format!(
+                "snapshot changed while replacing sequence {sequence_nr} for {persistence_id}"
+            )));
         }
 
         inner

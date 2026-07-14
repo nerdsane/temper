@@ -16,8 +16,8 @@ use fred::prelude::*;
 use fred::types::scripts::Script;
 use serde::{Deserialize, Serialize};
 use temper_runtime::persistence::{
-    EventStore, PersistenceAppend, PersistenceAppendResult, PersistenceEnvelope, PersistenceError,
-    storage_error,
+    EventStore, JournalRead, PersistenceAppend, PersistenceAppendResult, PersistenceEnvelope,
+    PersistenceError, storage_error,
 };
 use temper_runtime::tenant::parse_persistence_id_parts;
 
@@ -52,10 +52,20 @@ redis.call('SADD', entities_key, entity_ref)
 return {1, new_seq}
 "#;
 
+/// Atomically publish one snapshot as both the current value and its history row.
+///
+/// KEYS[1] = current snapshot key, KEYS[2] = same-sequence history key
+/// ARGV[1] = current snapshot record, ARGV[2] = history record
+const SAVE_SNAPSHOT_LUA: &str = r#"
+redis.call('SET', KEYS[2], ARGV[2])
+redis.call('SET', KEYS[1], ARGV[1])
+return 1
+"#;
+
 /// Atomically replace the payload for one already-persisted snapshot boundary.
 ///
 /// KEYS[1] = current snapshot key, KEYS[2] = same-sequence history key
-/// ARGV[1] = exact current snapshot record, ARGV[2] = replacement history,
+/// ARGV[1] = exact raw current snapshot record, ARGV[2] = replacement history,
 /// ARGV[3] = replacement current snapshot record
 ///
 /// Returns `1` when replaced and `0` if the current snapshot changed.
@@ -69,12 +79,29 @@ redis.call('SET', KEYS[1], ARGV[3])
 return 1
 "#;
 
+/// Read the durable head and requested tail atomically.
+///
+/// KEYS[1] = sequence key, KEYS[2] = events list
+/// ARGV[1] = zero-based list index corresponding to `from_sequence`
+///
+/// Returns the head as the first string followed by serialized events.
+const READ_EVENTS_WITH_HEAD_LUA: &str = r#"
+local result = {tostring(redis.call('GET', KEYS[1]) or '0')}
+local events = redis.call('LRANGE', KEYS[2], tonumber(ARGV[1]), -1)
+for _, event in ipairs(events) do
+    table.insert(result, event)
+end
+return result
+"#;
+
 /// Redis-backed event store.
 #[derive(Clone)]
 pub struct RedisEventStore {
     client: Arc<fred::clients::Client>,
     append_script: Script,
+    read_events_with_head_script: Script,
     replace_snapshot_script: Script,
+    save_snapshot_script: Script,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -118,7 +145,9 @@ impl RedisEventStore {
         Ok(Self {
             client: Arc::new(client),
             append_script: Script::from_lua(APPEND_LUA),
+            read_events_with_head_script: Script::from_lua(READ_EVENTS_WITH_HEAD_LUA),
             replace_snapshot_script: Script::from_lua(REPLACE_SNAPSHOT_LUA),
+            save_snapshot_script: Script::from_lua(SAVE_SNAPSHOT_LUA),
         })
     }
 
@@ -355,28 +384,55 @@ impl EventStore for RedisEventStore {
         persistence_id: &str,
         from_sequence: u64,
     ) -> Result<Vec<PersistenceEnvelope>, PersistenceError> {
+        self.read_events_with_head(persistence_id, from_sequence)
+            .await
+            .map(|read| read.events)
+    }
+
+    async fn read_events_with_head(
+        &self,
+        persistence_id: &str,
+        from_sequence: u64,
+    ) -> Result<JournalRead, PersistenceError> {
         let (tenant, entity_type, entity_id) =
             parse_persistence_id_parts(persistence_id).map_err(PersistenceError::Storage)?;
+        let seq_key = Self::seq_key(tenant, entity_type, entity_id);
         let events_key = Self::events_key(tenant, entity_type, entity_id);
 
         // Events are stored via RPUSH with sequential indices starting at 0.
         // Event at index i has sequence_nr = i + 1.
         // To read events with sequence_nr > from_sequence, start at index from_sequence.
-        let start_index = from_sequence as i64;
-        let encoded_events: Vec<String> = self
-            .client
-            .lrange(&events_key, start_index, -1)
+        let encoded_read: Vec<String> = self
+            .read_events_with_head_script
+            .evalsha_with_reload(
+                &self.client,
+                vec![seq_key, events_key],
+                vec![from_sequence.to_string()],
+            )
             .await
             .map_err(storage_error)?;
+        let (head, encoded_events) = encoded_read.split_first().ok_or_else(|| {
+            PersistenceError::Storage(format!(
+                "journal read returned no head for {persistence_id}"
+            ))
+        })?;
+        let journal_head_sequence_nr = head.parse::<u64>().map_err(|error| {
+            PersistenceError::Serialization(format!(
+                "invalid journal head for {persistence_id}: {error}"
+            ))
+        })?;
 
         let mut out = Vec::with_capacity(encoded_events.len());
         for encoded in encoded_events {
-            let env: PersistenceEnvelope = serde_json::from_str(&encoded)
+            let env: PersistenceEnvelope = serde_json::from_str(encoded)
                 .map_err(|e| PersistenceError::Serialization(e.to_string()))?;
             out.push(env);
         }
         out.sort_by_key(|e| e.sequence_nr);
-        Ok(out)
+        Ok(JournalRead {
+            events: out,
+            journal_head_sequence_nr,
+        })
     }
 
     async fn save_snapshot(
@@ -394,12 +450,6 @@ impl EventStore for RedisEventStore {
         };
         let encoded = serde_json::to_string(&record)
             .map_err(|e| PersistenceError::Serialization(e.to_string()))?;
-        let _: () = self
-            .client
-            .set(&key, encoded, None, None, false)
-            .await
-            .map_err(storage_error)?;
-
         let history_key = Self::snapshot_history_key(tenant, entity_type, entity_id, sequence_nr);
         let history = SnapshotHistoryRecord {
             sequence_nr,
@@ -408,11 +458,16 @@ impl EventStore for RedisEventStore {
         };
         let encoded_history = serde_json::to_string(&history)
             .map_err(|e| PersistenceError::Serialization(e.to_string()))?;
-        let _: () = self
-            .client
-            .set(&history_key, encoded_history, None, None, false)
+        let saved: i64 = self
+            .save_snapshot_script
+            .evalsha_with_reload(
+                &self.client,
+                vec![key, history_key],
+                vec![encoded, encoded_history],
+            )
             .await
             .map_err(storage_error)?;
+        debug_assert_eq!(saved, 1, "snapshot save script must report one write");
 
         let current_segment_key = Self::current_segment_key(tenant, entity_type, entity_id);
         let current_segment_raw: Option<String> = self
@@ -488,28 +543,24 @@ impl EventStore for RedisEventStore {
         &self,
         persistence_id: &str,
         sequence_nr: u64,
+        expected_snapshot: &[u8],
         snapshot: &[u8],
     ) -> Result<(), PersistenceError> {
         let (tenant, entity_type, entity_id) =
             parse_persistence_id_parts(persistence_id).map_err(PersistenceError::Storage)?;
         let key = Self::snapshot_key(tenant, entity_type, entity_id);
-        let Some(existing_encoded) = self
-            .client
-            .get::<Option<String>, _>(&key)
-            .await
-            .map_err(storage_error)?
-        else {
-            return Err(PersistenceError::Storage(format!(
+        let current_encoded: Option<String> = self.client.get(&key).await.map_err(storage_error)?;
+        let current_encoded = current_encoded.ok_or_else(|| {
+            PersistenceError::Storage(format!(
                 "cannot replace missing snapshot at sequence {sequence_nr} for {persistence_id}"
-            )));
-        };
-        let existing: SnapshotRecord = serde_json::from_str(&existing_encoded)
+            ))
+        })?;
+        let current: SnapshotRecord = serde_json::from_str(&current_encoded)
             .map_err(|error| PersistenceError::Serialization(error.to_string()))?;
-        if existing.sequence_nr != sequence_nr {
-            return Err(PersistenceError::ConcurrencyViolation {
-                expected: sequence_nr,
-                actual: existing.sequence_nr,
-            });
+        if current.sequence_nr != sequence_nr || current.snapshot != expected_snapshot {
+            return Err(PersistenceError::Storage(format!(
+                "snapshot changed while replacing sequence {sequence_nr} for {persistence_id}"
+            )));
         }
 
         let replacement = SnapshotRecord {
@@ -531,7 +582,7 @@ impl EventStore for RedisEventStore {
             .evalsha_with_reload(
                 &self.client,
                 vec![key, history_key],
-                vec![existing_encoded, encoded_history, encoded_replacement],
+                vec![current_encoded, encoded_history, encoded_replacement],
             )
             .await
             .map_err(storage_error)?;
@@ -602,6 +653,10 @@ impl EventStore for RedisEventStore {
 }
 
 #[cfg(test)]
+#[path = "event_store_snapshot_test.rs"]
+mod snapshot_test;
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use temper_runtime::persistence::EventMetadata;
@@ -662,7 +717,9 @@ mod tests {
         assert_eq!(new_seq, 2);
 
         // Read all events
-        let events = store.read_events(&pid, 0).await.unwrap();
+        let read = store.read_events_with_head(&pid, 0).await.unwrap();
+        assert_eq!(read.journal_head_sequence_nr, 2);
+        let events = read.events;
         assert_eq!(events.len(), 2);
         assert_eq!(events[0].sequence_nr, 1);
         assert_eq!(events[1].sequence_nr, 2);
@@ -670,10 +727,11 @@ mod tests {
         assert_eq!(events[1].event_type, "OrderApproved");
 
         // Partial read (from_sequence = 1 should skip event 1)
-        let partial = store.read_events(&pid, 1).await.unwrap();
-        assert_eq!(partial.len(), 1);
-        assert_eq!(partial[0].sequence_nr, 2);
-        assert_eq!(partial[0].event_type, "OrderApproved");
+        let partial = store.read_events_with_head(&pid, 1).await.unwrap();
+        assert_eq!(partial.journal_head_sequence_nr, 2);
+        assert_eq!(partial.events.len(), 1);
+        assert_eq!(partial.events[0].sequence_nr, 2);
+        assert_eq!(partial.events[0].event_type, "OrderApproved");
     }
 
     #[tokio::test]
@@ -750,9 +808,29 @@ mod tests {
         let next_segment_before: Option<String> =
             store.client.get(&next_segment_key).await.unwrap();
         store
-            .replace_snapshot(&pid, 5, b"{\"status\":\"created-upgraded\"}")
+            .replace_snapshot(
+                &pid,
+                5,
+                b"{\"status\":\"created\"}",
+                b"{\"status\":\"created-upgraded\"}",
+            )
             .await
             .unwrap();
+        assert_eq!(
+            store.load_snapshot(&pid).await.unwrap(),
+            Some((5, b"{\"status\":\"created-upgraded\"}".to_vec()))
+        );
+
+        let stale_replacement = store
+            .replace_snapshot(
+                &pid,
+                5,
+                b"{\"status\":\"created\"}",
+                b"{\"status\":\"stale-overwrite\"}",
+            )
+            .await
+            .expect_err("a stale same-boundary writer must lose");
+        assert!(matches!(stale_replacement, PersistenceError::Storage(_)));
         assert_eq!(
             store.load_snapshot(&pid).await.unwrap(),
             Some((5, b"{\"status\":\"created-upgraded\"}".to_vec()))

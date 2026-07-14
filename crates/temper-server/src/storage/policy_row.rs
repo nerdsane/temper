@@ -4,12 +4,19 @@ use temper_store_turso::PolicyRow as TursoPolicyRow;
 /// Backend-neutral row for one granular Cedar policy entry.
 #[derive(Clone, Debug)]
 pub struct PolicyStoreRow {
+    /// Tenant that owns the policy.
     pub tenant: String,
+    /// Stable policy identifier within the tenant.
     pub policy_id: String,
+    /// Cedar policy source text.
     pub cedar_text: String,
+    /// Content hash used for policy version checks.
     pub policy_hash: String,
+    /// Backend-provided creation timestamp.
     pub created_at: String,
+    /// Principal that created the policy.
     pub created_by: String,
+    /// Whether the policy participates in authorization decisions.
     pub enabled: bool,
 }
 
