@@ -1,4 +1,5 @@
 use std::fmt;
+use std::marker::PhantomData;
 use std::time::Duration;
 
 use tokio::sync::oneshot;
@@ -40,6 +41,19 @@ pub struct ActorRef<M: Message> {
     pub(crate) id: ActorId,
 }
 
+/// Reply handle for an ask that has already been admitted to an actor mailbox.
+///
+/// [`crate::system::ActorSystem::spawn_with_first_ask`] returns this handle
+/// after synchronously placing the ask in a fresh actor's mailbox. Waiting has
+/// no independent wall-clock timeout because the handle is coupled to actor
+/// startup: it resolves after the first message is handled, or with
+/// [`ActorError::Stopped`] when startup permanently fails and drops the reply
+/// channel.
+pub struct PendingAsk<R> {
+    receiver: oneshot::Receiver<Result<Box<dyn std::any::Any + Send>, ActorError>>,
+    response: PhantomData<R>,
+}
+
 /// Unique identifier for an actor instance.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct ActorId {
@@ -78,22 +92,26 @@ impl<M: Message> ActorRef<M> {
     /// Send a message and wait for a typed response.
     /// Times out after the specified duration.
     pub async fn ask<R: Send + 'static>(&self, msg: M, timeout: Duration) -> Result<R, ActorError> {
+        let pending = self.enqueue_ask(msg)?;
+
+        tokio::time::timeout(timeout, pending.receive())
+            .await
+            .map_err(|_| ActorError::AskTimeout(timeout))?
+    }
+
+    /// Admit an ask synchronously and return its pending reply handle.
+    pub(crate) fn enqueue_ask<R: Send + 'static>(
+        &self,
+        msg: M,
+    ) -> Result<PendingAsk<R>, ActorError> {
         let (tx, rx) = oneshot::channel();
 
         self.sender.send(Envelope::Ask { msg, reply: tx })?;
 
-        let result = tokio::time::timeout(timeout, rx)
-            .await
-            .map_err(|_| ActorError::AskTimeout(timeout))?
-            .map_err(|_| ActorError::Stopped)?;
-
-        match result {
-            Ok(boxed) => boxed
-                .downcast::<R>()
-                .map(|b| *b)
-                .map_err(|_| ActorError::custom("ask reply type mismatch")),
-            Err(e) => Err(e),
-        }
+        Ok(PendingAsk {
+            receiver: rx,
+            response: PhantomData,
+        })
     }
 
     /// Send a system signal to the actor.
@@ -130,6 +148,20 @@ impl<M: Message> ActorRef<M> {
     /// Return whether this actor incarnation can no longer receive messages.
     pub fn is_stopped(&self) -> bool {
         self.sender.is_closed()
+    }
+}
+
+impl<R: Send + 'static> PendingAsk<R> {
+    /// Wait for the already-enqueued actor reply.
+    pub async fn receive(self) -> Result<R, ActorError> {
+        let result = self.receiver.await.map_err(|_| ActorError::Stopped)?;
+        match result {
+            Ok(boxed) => boxed
+                .downcast::<R>()
+                .map(|response| *response)
+                .map_err(|_| ActorError::custom("ask reply type mismatch")),
+            Err(error) => Err(error),
+        }
     }
 }
 

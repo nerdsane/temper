@@ -783,7 +783,7 @@ impl ServerState {
         // Slow-path: atomically re-check and spawn under write lock.
         // This prevents duplicate actors when concurrent requests race to create
         // the same (tenant, entity_type, entity_id) key.
-        let actor_ref = {
+        let (actor_ref, timeout_hydration) = {
             let mut registry = self.actor_registry.write().unwrap();
             if let Some(existing) = registry.get(&key)
                 && !existing.is_stopped()
@@ -797,15 +797,30 @@ impl ServerState {
                     "replacing stopped actor registry entry"
                 );
             }
-            let actor_ref = self.actor_system.spawn(actor, &key);
+            let (actor_ref, timeout_hydration) = match self
+                .actor_system
+                .spawn_with_first_ask::<_, EntityResponse>(actor, &key, EntityMsg::GetState)
+            {
+                Ok(spawned) => spawned,
+                Err(error) => {
+                    tracing::error!(
+                        tenant = %tenant,
+                        entity_type,
+                        entity_id,
+                        error = %error,
+                        "actor spawn failed to admit startup reconciliation"
+                    );
+                    return None;
+                }
+            };
             registry.insert(key.clone(), actor_ref.clone());
-            actor_ref
+            (actor_ref, timeout_hydration)
         };
 
         // ADR-0171: actor spawn is the common lifecycle boundary for eager
         // restart hydration, lazy durable loads, and passivation respawn.
         // Reconcile the declared timeout without waiting for request traffic.
-        self.schedule_state_timeout_hydration(tenant, entity_type, entity_id, actor_ref.clone());
+        self.schedule_state_timeout_hydration(tenant, entity_type, entity_id, timeout_hydration);
 
         // Track in entity index for collection queries
         {

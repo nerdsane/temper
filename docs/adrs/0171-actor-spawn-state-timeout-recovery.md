@@ -9,6 +9,8 @@
   - ADR-0050: Mandatory liveness coverage for non-terminal states
   - ADR-0056: Durable state timeouts and silent-exit prevention
   - ADR-0028: Memory-bounded lazy hydration and passivation
+  - `crates/temper-runtime/src/actor/actor_ref.rs`
+  - `crates/temper-runtime/src/actor/cell.rs`
   - `crates/temper-server/src/state/entity_ops.rs`
   - `crates/temper-server/src/state/dispatch/state_timeouts.rs`
 
@@ -24,7 +26,9 @@ The durable facts are the entity event history and the snapshot of the state reb
 
 ### Sub-Decision 1: Every new actor spawn schedules timeout reconciliation
 
-Immediately after `ServerState` inserts a newly spawned entity actor into the registry, it starts one bounded readiness task. The task asks the actor for its hydrated state using the existing bounded retry policy, then calls the state-timeout scheduler in explicit hydration mode.
+Before `ServerState` publishes any newly spawned actor in its registry, `ActorSystem::spawn_with_first_ask` synchronously admits one `GetState` ask to the fresh actor's empty mailbox. The method returns both the `ActorRef` and a `PendingAsk` reply handle only after that admission succeeds. Callers may enqueue later application or lifecycle traffic while `pre_start` is still pending, but FIFO mailbox order guarantees that `ActorCell` processes the hydration read before that traffic. A reconciliation task awaits the already-admitted reply, then calls the state-timeout scheduler in explicit hydration mode. The timeout decision is made from the current table after that ordered read, rather than sampled before actor startup, so a live table swap cannot make admission stale.
+
+The first ask consumes exactly one slot in the actor's fixed mailbox budget. It has no independent response timeout: its reply channel is coupled to the same startup lifecycle, so a slow but successful `pre_start` retains the reconciliation, while permanent startup failure drops the channel and reports `ActorError::Stopped`. No speculative asks or retry messages are queued. The timeout clock observation is captured before awaiting the reply so startup and the first state read remain charged against the original durable deadline. Untimed actors complete the same ordered lifecycle handshake and then require no timer.
 
 This hook applies uniformly to:
 
@@ -33,7 +37,7 @@ This hook applies uniformly to:
 - respawn after idle passivation; and
 - first creation of an entity whose initial state declares a timeout.
 
-The task is finite and owns a temporary `ServerState` clone only until readiness is resolved. `EntityActor` does not retain `ServerState`, so no ownership cycle is introduced.
+The task owns a temporary `ServerState` clone only until the actor replies to its first message, permanently stops, or remains inside the same unresolved `pre_start` call. `EntityActor` does not retain `ServerState`, so no ownership cycle is introduced. An unresolved startup cannot safely schedule a domain timeout because it has not established a trustworthy current state; the companion reconciliation task adds one reply receiver and no repeated work while it waits on that same lifecycle boundary.
 
 **Why this approach:** actor spawn is the earliest common lifecycle boundary shared by every hydration path. Request handlers are incomplete because an entity may receive no traffic, while actor `pre_start` cannot safely own the server dispatcher.
 
@@ -47,6 +51,8 @@ The default CLI boot path populates the durable entity index without hydrating a
 
 The shared timeout-arm implementation accepts an explicit hydration cause. In hydration mode it does not treat the replayed last event as a fresh state entry. Instead it:
 
+Timeout declarations resolve from the same effective runtime source as actor spawn: the tenant registry's current table first, then the legacy single-tenant transition table. Registry precedence is preserved even when its current table has no declarations.
+
 1. confirms that the current state declares a timeout;
 2. atomically reserves the initial sequence only when the per-process tracker has no live timer for this entity;
 3. derives the latest state-entry or `reset_on` timestamp from the snapshot-carried clock anchor and replayed durable tail;
@@ -59,11 +65,11 @@ The readiness task captures both the deterministic event-clock observation and a
 
 **Why this approach:** the existing code inferred hydration from “same state plus tracker sequence zero.” That inference works only after traffic arrives and can misclassify the replayed entry event as a brand-new entry with a full budget.
 
-### Sub-Decision 4: Readiness failure is bounded, observable, and recoverable
+### Sub-Decision 4: Startup reconciliation is ordered, observable, and recoverable
 
-The readiness ask uses the existing retry budget. Actor startup and optimistic-concurrency recovery treat every journal-tail read as strict: a read failure stops that incarnation instead of publishing snapshot state whose committed tail is unknown. Exhaustion logs a structured error with tenant, entity type, and entity ID. It does not invent state or arm a timer from incomplete replay. An actor that permanently fails startup closes its mailbox; the entity registry treats only an open mailbox as a live incarnation. The next access atomically replaces a stopped registry entry under the existing spawn lock, re-runs hydration, and schedules timeout reconciliation. Concurrent callers still converge on one live actor.
+The first mailbox ask is the startup reconciliation barrier. Actor startup and optimistic-concurrency recovery treat every journal-tail read as strict: a read failure follows supervision and eventually drops the ask reply and closes the mailbox if the incarnation cannot start. The server logs that failure with tenant, entity type, and entity ID; it does not invent state or arm a timer from incomplete replay. An actor that permanently fails startup closes its mailbox; the entity registry treats only an open mailbox as a live incarnation. The next access atomically replaces a stopped registry entry under the existing spawn lock, re-runs hydration, and schedules timeout reconciliation. Concurrent callers still converge on one live actor.
 
-**Why this approach:** silently dropping the lifecycle task would recreate the regression; retrying forever would create an unbounded background workload; retaining a stopped actor reference would make a transient persistence failure permanent until process restart.
+**Why this approach:** readiness asks are not lifecycle probes. Their response budgets can expire while `pre_start` is still making valid progress, leaving a live actor that starts after every probe has been discarded. A readiness notification alone is also insufficient: the actor can consume already-queued restart or application messages before the awakened task admits its state read, recreating the same exhaustion gap. Synchronous first-message admission makes readiness and mailbox ordering one atomic publication contract.
 
 ### Sub-Decision 5: Persist the timeout clock anchor in current snapshots
 
@@ -101,6 +107,10 @@ Actor replay requires the returned tail to start immediately after the snapshot 
 - Two repairs that loaded the same legacy boundary have one winner; the stale writer cannot overwrite that anchor.
 - Snapshot-boundary replacement enters the persistence writer as actor-readiness work rather than background maintenance.
 - An injected repair failure followed by store recovery in the same server replaces the stopped actor incarnation, persists the anchor, and arms exactly one timer.
+- A slow but successful `pre_start` that outlasts the maximum readiness-ask schedule still arms exactly one timer without request traffic, charges startup time against the original deadline, and durably fires the timeout action.
+- A bounded queue of restart signals submitted immediately after spawn cannot overtake the first hydration read, exhaust reconciliation, or move the durable timeout deadline.
+- A live untimed-to-timed table swap before `pre_start` cannot invalidate startup reconciliation or lose the initial-state deadline.
+- Legacy `with_specs` actors arm and durably fire initial-state timeouts without a `SpecRegistry` entry.
 - Randomized deterministic seeds cover elapsed times before, at, and after the deadline.
 - Actor spawn, action dispatch, and timer firing continue to use shared production code paths.
 - Full workspace tests, strict Clippy, readability, DST review, and code-quality review pass.
@@ -117,7 +127,7 @@ Actor replay requires the returned tail to start immediately after the snapshot 
 
 ### Negative
 
-- Each new actor performs one additional bounded `GetState` ask after startup.
+- Each new actor reserves one mailbox slot for its first `GetState` ask and retains one reply receiver until startup reconciliation completes.
 - Persisted timed entities consume actor and timer memory while their liveness obligation is active.
 - Timeout recovery is asynchronous with respect to registry insertion, so readiness may briefly precede timer-arm observability.
 - Current snapshots gain one optional timeout-anchor timestamp.
@@ -127,7 +137,8 @@ Actor replay requires the returned tail to start immediately after the snapshot 
 
 ### Risks
 
-- **Readiness task exhaustion.** Mitigated by bounded retries, structured errors, stopped-incarnation replacement on the next access, and the existing post-dispatch reconciliation fallback.
+- **Startup never completes.** The reconciliation task waits on the same unresolved lifecycle boundary and retains one reply receiver, one bounded mailbox slot, and its temporary state handle, but emits no repeated asks. A trustworthy domain timeout cannot be derived until startup establishes current state; permanently failed startup closes the reply and enables stopped-incarnation replacement.
+- **First state read fails.** `EntityMsg::GetState` is an in-memory, infallible actor operation after successful startup. A handler or actor stop still propagates through the reply channel and is logged instead of arming from invented state.
 - **Legacy snapshot upgrade failure.** The synchronous anchor rewrite fails actor startup; hydration never arms a timer from an anchor that another immediate restart could forget.
 - **Missing or unreadable snapshot boundary.** Timeout-anchor repair requires a successfully loaded existing boundary. Missing, unreadable, or otherwise ambiguous boundaries fail actor startup without changing durable history, so a compatible runtime or migration can reconstruct it later.
 - **Unreadable journal tail.** Actor hydration and concurrency recovery use strict reads; a transient failure stops the incarnation and leaves both snapshot and timer state unchanged until a bounded retry can replay the full tail.
@@ -143,7 +154,7 @@ Actor replay requires the returned tail to start immediately after the snapshot 
 - Deterministic truncation faults retain the pre-fault journal head, proving actor hydration rejects an incomplete prefix.
 - Randomized scenarios are seed-derived and assert the same state and timer outcomes for the same seed.
 - No filesystem, network, wall-clock, or random source is introduced into state mutation.
-- The readiness `tokio::spawn` is a bounded production lifecycle task; it does not execute state-machine mutation outside the actor.
+- The readiness `tokio::spawn` awaits one first-mailbox reply and emits no probe loop; it does not execute state-machine mutation outside the actor.
 
 ## Non-Goals
 
@@ -161,6 +172,7 @@ Actor replay requires the returned tail to start immediately after the snapshot 
 5. **Build the full durable scheduler now** — Deferred to ADR-0049's longer-term direction; it is broader than the actor-lifecycle regression.
 6. **Create a first snapshot at a recovered no-anchor journal head** — Rejected because partial replay can skip durable envelopes; sealing the resulting state behind a new boundary would make those facts unreplayable.
 7. **Read the journal head in a second call** — Rejected because an append between the tail and head queries would make their completeness relationship ambiguous; the proof must come from one logical store snapshot.
+8. **Publish a readiness watch before submitting `GetState`** — Rejected because readiness and mailbox admission are separate scheduler turns. Traffic queued during slow startup can run first, restart the actor, and exhaust every later hydration ask while the same incarnation remains live.
 
 ## Rollback Policy
 

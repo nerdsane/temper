@@ -38,13 +38,13 @@ use std::sync::Mutex;
 use std::time::Duration;
 
 use chrono::{DateTime, Utc};
-use tokio::spawn as spawn_timeout_hydration; // determinism-ok: bounded production lifecycle coordination
+use tokio::spawn as spawn_timeout_hydration; // determinism-ok: one bounded task per actor startup lifecycle
 use tracing::Instrument;
 
 use temper_runtime::scheduler::sim_now;
 use temper_runtime::tenant::TenantId;
 
-use crate::entity_actor::{EntityEvent, EntityMsg, EntityResponse};
+use crate::entity_actor::{EntityEvent, EntityResponse};
 
 use super::effects::PostDispatchContext;
 
@@ -266,36 +266,19 @@ impl StateTimeoutTracker {
 impl crate::state::ServerState {
     /// Reconcile a newly spawned actor's durable state with its declared timeout.
     ///
-    /// The task is bounded by the normal actor-ask retry policy and ends after
-    /// hydration either succeeds or exhausts that budget. Keeping this hook on
-    /// `ServerState` avoids a strong `ServerState -> actor -> ServerState` cycle.
+    /// The state read is synchronously admitted as the new actor's first
+    /// mailbox message before its [`temper_runtime::actor::ActorRef`] is
+    /// published. This task awaits that lifecycle-coupled reply, so neither
+    /// slow startup nor already-queued application traffic can overtake or
+    /// exhaust reconciliation. Keeping this hook on `ServerState` avoids a
+    /// strong `ServerState -> actor -> ServerState` cycle.
     pub(crate) fn schedule_state_timeout_hydration(
         &self,
         tenant: &TenantId,
         entity_type: &str,
         entity_id: &str,
-        actor_ref: temper_runtime::actor::ActorRef<EntityMsg>,
+        startup_state: temper_runtime::actor::PendingAsk<EntityResponse>,
     ) {
-        let registry = match self.registry.read() {
-            Ok(registry) => registry,
-            Err(_) => {
-                tracing::error!(
-                    tenant = %tenant,
-                    entity_type,
-                    entity_id,
-                    "state timeout hydration skipped because the spec registry lock is poisoned"
-                );
-                return;
-            }
-        };
-        let has_declared_timeout = registry
-            .get_spec(tenant, entity_type)
-            .is_some_and(|spec| !spec.automaton.state_timeouts.is_empty());
-        drop(registry);
-        if !has_declared_timeout {
-            return;
-        }
-
         let state = self.clone();
         let tenant = tenant.clone();
         let entity_type = entity_type.to_string();
@@ -304,15 +287,7 @@ impl crate::state::ServerState {
         let readiness_started_at = tokio::time::Instant::now(); // determinism-ok: paused by DST
 
         spawn_timeout_hydration(async move {
-            let policy = state.dispatch_retry_policy();
-            let outcome = super::retry::ask_with_backoff::<_, EntityResponse, _>(
-                &actor_ref,
-                || EntityMsg::GetState,
-                &policy,
-            )
-            .await;
-            let attempts = outcome.attempts;
-            match outcome.result {
+            match startup_state.receive().await {
                 Ok(response) => {
                     state.arm_state_timeouts_on_hydration(
                         &tenant,
@@ -328,9 +303,8 @@ impl crate::state::ServerState {
                         tenant = %tenant,
                         entity_type,
                         entity_id,
-                        attempts,
                         error = %error,
-                        "state timeout hydration reconciliation exhausted actor readiness budget"
+                        "state timeout hydration actor stopped before startup reconciliation"
                     );
                 }
             }
@@ -389,18 +363,21 @@ impl crate::state::ServerState {
         response: &EntityResponse,
         cause: StateTimeoutArmCause,
     ) {
-        let registry = match self.registry.read() {
-            Ok(g) => g,
-            Err(_) => return,
-        };
-        let Some(spec) = registry.get_spec(ctx.tenant, ctx.entity_type) else {
+        let table = {
+            let registry = match self.registry.read() {
+                Ok(registry) => registry,
+                Err(_) => return,
+            };
+            registry.get_table(ctx.tenant, ctx.entity_type)
+        }
+        .or_else(|| self.transition_tables.get(ctx.entity_type).cloned());
+        let Some(table) = table else {
             return;
         };
-        if spec.automaton.state_timeouts.is_empty() {
+        if table.state_timeouts.is_empty() {
             return;
         }
-        let state_timeouts = spec.automaton.state_timeouts.clone();
-        drop(registry);
+        let state_timeouts = table.state_timeouts.clone();
 
         let post_state = response.state.status.clone();
         let pre_state = response
