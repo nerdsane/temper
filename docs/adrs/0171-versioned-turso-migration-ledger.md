@@ -82,6 +82,10 @@ complete ledger before applying work:
 - a later recorded version with an earlier gap is corruption and prevents
   readiness.
 
+Ledger DDL comparison is quote-aware and format-insensitive, so punctuation
+spacing and comments do not make an otherwise identical ledger incompatible,
+while SQL token boundaries and quoted literal values remain exact.
+
 **Why this approach**: version alone cannot detect a historical migration that
 was edited in place. Checksums make the append-only rule executable.
 
@@ -89,10 +93,13 @@ was edited in place. Checksums make the append-only rule executable.
 
 For each pending version, the runner starts an immediate transaction, rereads
 that version's ledger row inside the transaction, applies the migration, verifies
-the migration's schema capabilities, inserts the ledger row, and commits. Any
-error rolls back both DDL and ledger insertion. The in-transaction reread lets
-independent processes race safely: after one commits, the next observes and
-validates the recorded checksum rather than replaying the work.
+the migration's schema capabilities, inserts exactly one ledger row, rereads and
+validates that retained row, and commits. Any error rolls back both DDL and ledger
+insertion. Ledger triggers are incompatible because the system ledger is the
+durability boundary, not an extension point. Final readiness requires the exact
+catalog length and head rather than accepting a valid prefix. The in-transaction
+reread lets independent processes race safely: after one commits, the next
+observes and validates the recorded checksum rather than replaying the work.
 
 Local connections retain WAL and busy-timeout configuration before the runner
 starts. The busy handler is installed before WAL initialization so concurrent
@@ -110,17 +117,38 @@ remain convergent:
 
 - tables and indexes use idempotent creation after confirming that an existing
   object of the same name has the required object kind and declared semantics;
-- a column is added only when `pragma_table_info` proves it is absent;
+- a column is added only when `pragma_table_xinfo` proves it is absent, including
+  hidden generated columns whose declarations reuse a catalog column name;
 - an existing required column is accepted without issuing `ALTER TABLE` only
   when its declared type affinity, nullability, default expression, and primary
   key ordinal match;
-- declared unique keys and foreign keys must match their ordered columns,
-  targets, and actions; named indexes must match their owner, uniqueness,
-  ordered key columns, collation/sort direction, and partial predicate;
+- unexpected columns are accepted only when they are visible, nullable, have no
+  default expression, are not part of the primary key, and do not shadow SQLite
+  row identifiers, which proves that existing runtime inserts can continue to
+  omit them without evaluating database code;
+- unique keys and foreign keys are exact sets; unique-key capabilities retain
+  ordered columns, partial status, and normalized predicates so a partial index
+  cannot masquerade as the full uniqueness required by the runtime; predicate
+  keyword case, comments, and punctuation spacing are normalized without
+  changing quoted literals or token boundaries;
+- table SQL restriction features (`CHECK`, column `COLLATE`, generated columns,
+  conflict and foreign-key deferral clauses, `AUTOINCREMENT`, `STRICT`, and
+  `WITHOUT ROWID`) must exactly match the catalog capability; named indexes must
+  match their owner, uniqueness, ordered key columns, collation/sort direction,
+  and partial predicate;
 - the one legacy OTS shape that cannot add its non-constant timestamp default
   in place is rebuilt only after exact pre-upgrade column validation; explicit
   indexes and triggers are captured and recreated in the same transaction, while
-  unmodeled columns, unique keys, or foreign keys prevent mutation;
+  unmodeled columns, unique keys, foreign keys, or table restrictions prevent
+  mutation; an already-updated OTS shape passes the same exact column and table
+  restriction validation before reconciliation is treated as complete;
+- the legacy OTS primary-key index must have the canonical ordered columns,
+  ascending direction, and binary collation, and every legal user-table name is
+  scanned for inbound foreign keys before the old table can be dropped; an
+  already-current OTS table is not rejected for safe inbound references because
+  no destructive rebuild occurs;
+- column discovery uses SQLite's extended table introspection so generated
+  columns are visible even when their declaration uses short-form `AS (...)`;
 - every other DDL failure propagates with migration version, name, operation,
   and object context.
 
@@ -135,11 +163,12 @@ message, determines whether an operation is already complete.
 
 After every migration and again after the full catalog, the runner checks all
 required object kinds; column affinity, nullability, defaults, and primary-key
-positions; unique/foreign-key semantics; named-index owners, uniqueness, key
-ordering, collation/sort direction, and predicates; and the ledger head. These
-capability declarations are part of the migration checksum. Completed catalogs
-are reverified in prefix order so drift is attributed to the earliest migration
-that owns the failed capability. A store is returned from
+positions; omission safety of unexpected columns; exact unique/foreign-key and
+table-restriction semantics; named-index owners, uniqueness, key ordering,
+collation/sort direction, and predicates; and the ledger head. These capability
+declarations are part of the migration checksum. Completed catalogs are
+reverified in prefix order so drift is attributed to the earliest migration that
+owns the failed capability. A store is returned from
 `TursoEventStore::new` only after that verification succeeds. Diagnostics
 identify the migration version and the missing or incompatible capability so
 operators can repair or restore the database without waiting for a later query
@@ -166,6 +195,9 @@ can serve the current data paths.
 - Every catalog prefix upgrades to the current head and a second startup is a
   no-op.
 - A legacy no-ledger database and representative partial legacy schemas converge.
+- Restrictive extra columns, unique keys, foreign keys, and table modifiers fail
+  before their owning version is recorded, while nullable column extensions stay
+  compatible with canonical runtime inserts.
 - Injected DDL/permission failure rolls back the active version and prevents
   `TursoEventStore::new` from returning a store.
 - A checksum mismatch, ledger gap, or newer schema version prevents readiness

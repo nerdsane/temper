@@ -3,7 +3,7 @@ use sha2::{Digest, Sha256};
 use super::ots_rebuild::OTS_REBUILD_DEFINITION;
 use crate::schema;
 
-pub(super) const VALIDATION_MANIFEST_VERSION: &str = "length-prefixed-schema-snapshot-v3";
+pub(super) const VALIDATION_MANIFEST_VERSION: &str = "length-prefixed-schema-snapshot-v9";
 
 #[derive(Clone, Copy, Debug)]
 pub(super) enum MigrationStep {
@@ -55,6 +55,12 @@ impl Migration {
                         hash_part(&mut hasher, column.default.unwrap_or("<none>").as_bytes());
                         hash_part(&mut hasher, &column.primary_key_position.to_be_bytes());
                     }
+                    let column = definition.updated_at_column;
+                    hash_part(&mut hasher, column.name.as_bytes());
+                    hash_part(&mut hasher, column.affinity.as_bytes());
+                    hash_part(&mut hasher, &[u8::from(column.not_null)]);
+                    hash_part(&mut hasher, column.default.unwrap_or("<none>").as_bytes());
+                    hash_part(&mut hasher, &column.primary_key_position.to_be_bytes());
                     for sequence in definition.forbidden_table_sql_sequences {
                         hash_part(&mut hasher, &(sequence.len() as u64).to_be_bytes());
                         for token in *sequence {
@@ -403,13 +409,13 @@ mod tests {
     use super::super::runner::expected_checksums;
 
     const RELEASED_CHECKSUMS: &[&str] = &[
-        "45e45eb7d5a81d2382fc04b08f041753a7929d28380bb6800a6857c4f94758be",
-        "e75625bdf2545ab397580f7ac5e1d926872198f8ebe3ae9a178d1a49e30cf663",
-        "6a517aa711b33e0497c8c139d48cee5de9ca10b39783cb97431ac036a17de85d",
-        "c600c5407bf866e62bc071a2209913fa9c533399bf0b40602252aeda2112bd9d",
-        "ddc573525a3df1bec5ccfd4ae9f2d93a24c90410ecb801383a2fcef02015c005",
-        "67e4590b101e15cefff6e1a75b31f217a4e7cc36d1361237bdad40e7546ae8b7",
-        "000d6833874eb0b086b2994ddd6eacf9f01dbc504bd8e188534a6743bbe61486",
+        "bc3765371d09a6ae4113d73298c23ab8b63b679fa7aa2dada7ba72f09244fb9d",
+        "9c13edbfc3ca521449f4ebde32e79e967da7993f9331152a271cf437a92f520a",
+        "8798d6e47ca9e9828c5ca90c34a80870327c9a6c7613ba3dfb5ac8325c3b89a8",
+        "1625be914785f3b89565660b9741329aa5d224159be246767bdc37949daa01a2",
+        "50b6a7469348f7d6d4d75008b0905f4a570d7446df21eb8cc14a8b66452d5a5e",
+        "cb4088753b59728cc43b40d2a24a245271642d1250406bf468fcb08ff2416241",
+        "e57e9d30aa45bdbc928deb2b2b685ba46a57a51d9185e3eadccb3e16889cc4d5",
     ];
 
     #[tokio::test]

@@ -4,16 +4,9 @@ use libsql::{Builder, Connection, TransactionBehavior, params};
 use temper_runtime::persistence::PersistenceError;
 
 use super::catalog::{MIGRATIONS, Migration, MigrationStep};
+use super::ledger::{CREATE_MIGRATION_LEDGER, validate_ledger_schema};
 use super::ots_rebuild::rebuild_ots_trajectories;
 use super::schema_snapshot::{SchemaSnapshot, capture_schema, verify_schema};
-
-const CREATE_MIGRATION_LEDGER: &str = "\
-CREATE TABLE IF NOT EXISTS temper_schema_migrations (
-    version INTEGER PRIMARY KEY CHECK (version > 0),
-    name TEXT NOT NULL UNIQUE,
-    checksum TEXT NOT NULL CHECK (length(checksum) = 64),
-    applied_at TEXT NOT NULL DEFAULT (datetime('now'))
-);";
 
 #[derive(Clone, Copy, Debug, Default)]
 pub(super) struct FaultInjection {
@@ -73,11 +66,9 @@ async fn run_migrations(
         .await?;
     }
 
-    validate_ledger_rows(
-        &load_ledger(connection).await?,
-        catalog,
-        &expected_migrations,
-    )?;
+    let final_ledger = load_ledger(connection).await?;
+    validate_ledger_rows(&final_ledger, catalog, &expected_migrations)?;
+    require_ledger_length(&final_ledger, catalog.len(), "after migration run")?;
     for (migration, expected) in catalog.iter().zip(&expected_migrations) {
         verify_schema(connection, &expected.snapshot)
             .await
@@ -153,7 +144,7 @@ async fn apply_migration(
         verify_schema(&transaction, &expected.snapshot)
             .await
             .map_err(|error| migration_context(migration, "verify schema", error))?;
-        transaction
+        let inserted = transaction
             .execute(
                 "INSERT INTO temper_schema_migrations (version, name, checksum)
                  VALUES (?1, ?2, ?3)",
@@ -173,6 +164,19 @@ async fn apply_migration(
                     error,
                 )
             })?;
+        if inserted != 1 {
+            return Err(PersistenceError::Storage(format!(
+                "Turso migration ledger insert for version {} ({}) affected {inserted} rows; expected 1",
+                migration.version, migration.name
+            )));
+        }
+        let retained_ledger = load_ledger(&transaction).await?;
+        validate_ledger_rows(&retained_ledger, catalog, expected_migrations)?;
+        require_ledger_length(
+            &retained_ledger,
+            migration_index + 1,
+            &format!("after recording migration {}", migration.version),
+        )?;
         Ok(())
     }
     .await;
@@ -279,7 +283,7 @@ pub(super) async fn table_columns(
     connection: &Connection,
     table: &str,
 ) -> Result<BTreeSet<String>, PersistenceError> {
-    let pragma = format!("PRAGMA table_info({})", quote_identifier(table));
+    let pragma = format!("PRAGMA table_xinfo({})", quote_identifier(table));
     let mut rows = connection
         .query(&pragma, ())
         .await
@@ -347,41 +351,6 @@ pub(super) async fn expected_checksums() -> Result<Vec<String>, PersistenceError
         .into_iter()
         .map(|migration| migration.checksum)
         .collect())
-}
-
-async fn validate_ledger_schema(connection: &Connection) -> Result<(), PersistenceError> {
-    let kind = schema_object_kind(connection, "temper_schema_migrations").await?;
-    if kind.as_deref() != Some("table") {
-        return Err(PersistenceError::Storage(format!(
-            "Turso migration ledger capability must be a table, found {}",
-            kind.as_deref().unwrap_or("no schema object")
-        )));
-    }
-
-    let mut rows = connection
-        .query(
-            "SELECT sql FROM sqlite_schema WHERE type = 'table' AND name = 'temper_schema_migrations'",
-            (),
-        )
-        .await
-        .map_err(|error| migration_sql_error("inspect migration-ledger schema", error))?;
-    let actual = rows
-        .next()
-        .await
-        .map_err(|error| migration_sql_error("read migration-ledger schema", error))?
-        .ok_or_else(|| {
-            PersistenceError::Storage("Turso migration ledger table is missing".to_string())
-        })?
-        .get::<String>(0)
-        .map_err(|error| migration_sql_error("decode migration-ledger schema", error))?;
-    if normalize_ddl(&actual) != normalize_ddl(CREATE_MIGRATION_LEDGER) {
-        return Err(PersistenceError::Storage(format!(
-            "Turso migration ledger has incompatible schema: expected {}, found {}",
-            normalize_ddl(CREATE_MIGRATION_LEDGER),
-            normalize_ddl(&actual)
-        )));
-    }
-    Ok(())
 }
 
 async fn load_ledger(connection: &Connection) -> Result<Vec<LedgerRow>, PersistenceError> {
@@ -469,13 +438,18 @@ fn validate_ledger_rows(
     Ok(())
 }
 
-fn normalize_ddl(sql: &str) -> String {
-    sql.trim_end_matches(';')
-        .split_whitespace()
-        .collect::<Vec<_>>()
-        .join(" ")
-        .to_ascii_lowercase()
-        .replace("create table if not exists", "create table")
+fn require_ledger_length(
+    ledger: &[LedgerRow],
+    expected: usize,
+    context: &str,
+) -> Result<(), PersistenceError> {
+    if ledger.len() == expected {
+        return Ok(());
+    }
+    Err(PersistenceError::Storage(format!(
+        "Turso migration ledger is incomplete {context}: expected {expected} rows, found {}",
+        ledger.len()
+    )))
 }
 
 fn quote_identifier(identifier: &str) -> String {

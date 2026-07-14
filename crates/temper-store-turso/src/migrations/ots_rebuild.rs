@@ -5,7 +5,7 @@ use temper_runtime::persistence::PersistenceError;
 
 use super::catalog::Migration;
 use super::runner::{execute_step, schema_object_kind};
-use super::schema_snapshot::{normalize_default, type_affinity};
+use super::schema_snapshot::{IndexColumn, index_columns, normalize_default, type_affinity};
 use super::schema_sql::contains_sequence;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -23,6 +23,7 @@ pub(super) struct OtsRebuildDefinition {
     pub table: &'static str,
     pub temporary_table: &'static str,
     pub required_columns: &'static [OtsColumnDefinition],
+    pub updated_at_column: OtsColumnDefinition,
     pub forbidden_table_sql_sequences: &'static [&'static [&'static str]],
     pub schema_tables_query: &'static str,
     pub dependent_objects_query: &'static str,
@@ -47,6 +48,9 @@ const REQUIRED_COLUMNS: &[OtsColumnDefinition] = &[
     column("created_at", "TEXT", true, Some("datetime('now')"), 0),
 ];
 
+const UPDATED_AT_COLUMN: OtsColumnDefinition =
+    column("updated_at", "TEXT", true, Some("datetime('now')"), 0);
+
 const fn column(
     name: &'static str,
     affinity: &'static str,
@@ -64,10 +68,11 @@ const fn column(
 }
 
 pub(super) const OTS_REBUILD_DEFINITION: OtsRebuildDefinition = OtsRebuildDefinition {
-    algorithm_version: "preserve-dependent-schema-v3",
+    algorithm_version: "preserve-dependent-schema-v7-current-inbound",
     table: "ots_trajectories",
     temporary_table: "__temper_migration_ots_trajectories",
     required_columns: REQUIRED_COLUMNS,
+    updated_at_column: UPDATED_AT_COLUMN,
     forbidden_table_sql_sequences: &[
         &["CHECK"],
         &["COLLATE"],
@@ -78,7 +83,7 @@ pub(super) const OTS_REBUILD_DEFINITION: OtsRebuildDefinition = OtsRebuildDefini
         &["WITHOUT", "ROWID"],
     ],
     schema_tables_query: "SELECT name FROM sqlite_schema
-        WHERE type = 'table' AND name NOT LIKE 'sqlite_%' ORDER BY name",
+        WHERE type = 'table' AND name NOT GLOB 'sqlite_*' ORDER BY name",
     dependent_objects_query: "SELECT type, name, sql FROM sqlite_schema
         WHERE tbl_name = ?1 AND type IN ('index', 'trigger') AND sql IS NOT NULL
         ORDER BY type, name",
@@ -115,6 +120,7 @@ struct ObservedColumn {
     not_null: bool,
     default: Option<String>,
     primary_key_position: i64,
+    hidden: i64,
 }
 
 #[derive(Debug)]
@@ -131,12 +137,12 @@ pub(super) async fn rebuild_ots_trajectories(
 ) -> Result<(), PersistenceError> {
     let definition = &OTS_REBUILD_DEFINITION;
     let columns = table_columns(connection, migration, definition.table).await?;
-    if columns.contains_key("updated_at") {
+    let already_updated = columns.contains_key(definition.updated_at_column.name);
+    validate_columns(migration, definition, &columns, already_updated)?;
+    validate_no_table_constraints(connection, migration, definition, !already_updated).await?;
+    if already_updated {
         return Ok(());
     }
-
-    validate_columns(migration, definition, &columns)?;
-    validate_no_table_constraints(connection, migration, definition).await?;
     let dependent_objects = dependent_objects(connection, migration, definition).await?;
 
     if schema_object_kind(connection, definition.temporary_table)
@@ -180,7 +186,7 @@ async fn table_columns(
     migration: &Migration,
     table: &str,
 ) -> Result<BTreeMap<String, ObservedColumn>, PersistenceError> {
-    let pragma = format!("PRAGMA table_info({})", quote_identifier(table));
+    let pragma = format!("PRAGMA table_xinfo({})", quote_identifier(table));
     let mut rows = connection
         .query(&pragma, ())
         .await
@@ -211,6 +217,9 @@ async fn table_columns(
                 primary_key_position: row.get::<i64>(5).map_err(|error| {
                     inspection_error(migration, "decode OTS primary key", error)
                 })?,
+                hidden: row.get::<i64>(6).map_err(|error| {
+                    inspection_error(migration, "decode OTS hidden-column flag", error)
+                })?,
             },
         );
     }
@@ -221,28 +230,35 @@ fn validate_columns(
     migration: &Migration,
     definition: &OtsRebuildDefinition,
     actual: &BTreeMap<String, ObservedColumn>,
+    already_updated: bool,
 ) -> Result<(), PersistenceError> {
-    if actual.len() != definition.required_columns.len() {
-        let expected = definition
-            .required_columns
+    let mut expected = definition.required_columns.to_vec();
+    let shape = if already_updated {
+        expected.push(definition.updated_at_column);
+        "current"
+    } else {
+        "pre-upgrade"
+    };
+    if actual.len() != expected.len() {
+        let expected_names = expected
             .iter()
             .map(|column| column.name)
             .collect::<Vec<_>>();
         return Err(compatibility_error(
             migration,
             format!(
-                "table '{}' must contain exactly the pre-upgrade columns {expected:?}; found {:?}",
+                "table '{}' must contain exactly the {shape} columns {expected_names:?}; found {:?}",
                 definition.table,
                 actual.keys().collect::<Vec<_>>()
             ),
         ));
     }
-    for expected in definition.required_columns {
+    for expected in expected {
         let Some(observed) = actual.get(expected.name) else {
             return Err(compatibility_error(
                 migration,
                 format!(
-                    "table '{}' is missing required pre-upgrade column '{}'",
+                    "table '{}' is missing required {shape} column '{}'",
                     definition.table, expected.name
                 ),
             ));
@@ -252,12 +268,13 @@ fn validate_columns(
             not_null: expected.not_null,
             default: expected.default.map(str::to_string),
             primary_key_position: expected.primary_key_position,
+            hidden: 0,
         };
         if observed != &expected_observed {
             return Err(compatibility_error(
                 migration,
                 format!(
-                    "table '{}' column '{}' has incompatible pre-upgrade semantics: expected {expected_observed:?}, found {observed:?}",
+                    "table '{}' column '{}' has incompatible {shape} semantics: expected {expected_observed:?}, found {observed:?}",
                     definition.table, expected.name
                 ),
             ));
@@ -270,6 +287,7 @@ async fn validate_no_table_constraints(
     connection: &Connection,
     migration: &Migration,
     definition: &OtsRebuildDefinition,
+    reject_inbound_references: bool,
 ) -> Result<(), PersistenceError> {
     let table = definition.table;
     let mut table_rows = connection
@@ -309,13 +327,31 @@ async fn validate_no_table_constraints(
         .await
         .map_err(|error| inspection_error(migration, "read OTS index", error))?
     {
+        let name = row
+            .get::<String>(1)
+            .map_err(|error| inspection_error(migration, "decode OTS index name", error))?;
+        let unique = row
+            .get::<i64>(2)
+            .map_err(|error| inspection_error(migration, "decode OTS unique flag", error))?
+            != 0;
         let origin = row
             .get::<String>(3)
             .map_err(|error| inspection_error(migration, "decode OTS index origin", error))?;
-        if origin == "u" {
+        if unique && origin == "pk" {
+            let actual = index_columns(connection, &name).await?;
+            let expected = expected_primary_key(definition);
+            if actual != expected {
+                return Err(compatibility_error(
+                    migration,
+                    format!(
+                        "table '{table}' has incompatible primary key semantics: expected {expected:?}, found {actual:?}"
+                    ),
+                ));
+            }
+        } else if unique {
             return Err(compatibility_error(
                 migration,
-                format!("table '{table}' has an unsupported legacy unique constraint"),
+                format!("table '{table}' has an unsupported legacy unique restriction"),
             ));
         }
     }
@@ -338,6 +374,10 @@ async fn validate_no_table_constraints(
         ));
     }
     drop(foreign_keys);
+
+    if !reject_inbound_references {
+        return Ok(());
+    }
 
     let mut tables = connection
         .query(definition.schema_tables_query, ())
@@ -384,6 +424,23 @@ async fn validate_no_table_constraints(
         }
     }
     Ok(())
+}
+
+fn expected_primary_key(definition: &OtsRebuildDefinition) -> Vec<IndexColumn> {
+    let mut columns = definition
+        .required_columns
+        .iter()
+        .filter(|column| column.primary_key_position > 0)
+        .collect::<Vec<_>>();
+    columns.sort_by_key(|column| column.primary_key_position);
+    columns
+        .into_iter()
+        .map(|column| IndexColumn {
+            name: Some(column.name.to_string()),
+            descending: false,
+            collation: Some("binary".to_string()),
+        })
+        .collect()
 }
 
 async fn dependent_objects(

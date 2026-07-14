@@ -3,12 +3,16 @@ use std::collections::{BTreeMap, BTreeSet};
 use libsql::Connection;
 use temper_runtime::persistence::PersistenceError;
 
+use super::schema_sql::{predicate_after_where, restricted_table_semantics};
+pub(super) use super::schema_verify::verify_schema;
+
 #[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
 pub(super) struct ColumnCapability {
     pub affinity: String,
     pub not_null: bool,
     pub default: Option<String>,
     pub primary_key_position: i64,
+    pub hidden: i64,
 }
 
 #[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
@@ -30,11 +34,19 @@ pub(super) struct ForeignKeyPart {
     pub match_kind: String,
 }
 
+#[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
+pub(super) struct UniqueKeyCapability {
+    pub partial: bool,
+    pub columns: Vec<IndexColumn>,
+    pub predicate: Option<String>,
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(super) struct TableCapability {
     pub columns: BTreeMap<String, ColumnCapability>,
-    pub unique_keys: BTreeSet<Vec<IndexColumn>>,
+    pub unique_keys: BTreeSet<UniqueKeyCapability>,
     pub foreign_keys: BTreeSet<ForeignKeyPart>,
+    pub restricted_semantics: BTreeSet<String>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -75,76 +87,6 @@ pub(super) async fn capture_schema(
     }
 
     Ok(SchemaSnapshot { tables, indexes })
-}
-
-pub(super) async fn verify_schema(
-    connection: &Connection,
-    expected: &SchemaSnapshot,
-) -> Result<(), PersistenceError> {
-    for (table_name, expected_table) in &expected.tables {
-        let kind = object_kind(connection, table_name).await?;
-        if kind.as_deref() != Some("table") {
-            return Err(compatibility_error(format!(
-                "capability '{table_name}' must be a table, found {}",
-                kind.as_deref().unwrap_or("no schema object")
-            )));
-        }
-        let actual = table_capability(connection, table_name).await?;
-        verify_table(table_name, expected_table, &actual)?;
-    }
-
-    for (index_name, expected_index) in &expected.indexes {
-        let kind = object_kind(connection, index_name).await?;
-        if kind.as_deref() != Some("index") {
-            return Err(compatibility_error(format!(
-                "capability '{index_name}' must be an index, found {}",
-                kind.as_deref().unwrap_or("no schema object")
-            )));
-        }
-        let actual = index_capability(connection, index_name).await?;
-        if &actual != expected_index {
-            return Err(compatibility_error(format!(
-                "index '{index_name}' has incompatible semantics: expected {expected_index:?}, found {actual:?}"
-            )));
-        }
-    }
-
-    Ok(())
-}
-
-fn verify_table(
-    name: &str,
-    expected: &TableCapability,
-    actual: &TableCapability,
-) -> Result<(), PersistenceError> {
-    for (column_name, expected_column) in &expected.columns {
-        let Some(actual_column) = actual.columns.get(column_name) else {
-            return Err(compatibility_error(format!(
-                "table '{name}' is missing required column '{column_name}'"
-            )));
-        };
-        if actual_column != expected_column {
-            return Err(compatibility_error(format!(
-                "table '{name}' column '{column_name}' has incompatible semantics: expected {expected_column:?}, found {actual_column:?}"
-            )));
-        }
-    }
-
-    for unique_key in &expected.unique_keys {
-        if !actual.unique_keys.contains(unique_key) {
-            return Err(compatibility_error(format!(
-                "table '{name}' is missing required unique key {unique_key:?}"
-            )));
-        }
-    }
-    for foreign_key in &expected.foreign_keys {
-        if !actual.foreign_keys.contains(foreign_key) {
-            return Err(compatibility_error(format!(
-                "table '{name}' is missing required foreign key {foreign_key:?}"
-            )));
-        }
-    }
-    Ok(())
 }
 
 async fn object_names(
@@ -198,7 +140,7 @@ async fn named_index_names(connection: &Connection) -> Result<Vec<String>, Persi
     Ok(names)
 }
 
-async fn object_kind(
+pub(super) async fn object_kind(
     connection: &Connection,
     name: &str,
 ) -> Result<Option<String>, PersistenceError> {
@@ -220,11 +162,11 @@ async fn object_kind(
     .transpose()
 }
 
-async fn table_capability(
+pub(super) async fn table_capability(
     connection: &Connection,
     table: &str,
 ) -> Result<TableCapability, PersistenceError> {
-    let pragma = format!("PRAGMA table_info({})", quote_identifier(table));
+    let pragma = format!("PRAGMA table_xinfo({})", quote_identifier(table));
     let mut rows = connection
         .query(&pragma, ())
         .await
@@ -256,6 +198,9 @@ async fn table_capability(
                 primary_key_position: row
                     .get::<i64>(5)
                     .map_err(|error| query_error("decode primary-key position", error))?,
+                hidden: row
+                    .get::<i64>(6)
+                    .map_err(|error| query_error("decode hidden-column flag", error))?,
             },
         );
     }
@@ -265,41 +210,91 @@ async fn table_capability(
         columns,
         unique_keys: unique_keys(connection, table).await?,
         foreign_keys: foreign_keys(connection, table).await?,
+        restricted_semantics: restricted_table_semantics(
+            &table_definition(connection, table).await?,
+        ),
     })
+}
+
+async fn table_definition(
+    connection: &Connection,
+    table: &str,
+) -> Result<String, PersistenceError> {
+    let mut rows = connection
+        .query(
+            "SELECT sql FROM sqlite_schema WHERE type = 'table' AND name = ?1",
+            [table],
+        )
+        .await
+        .map_err(|error| query_error("inspect table definition", error))?;
+    rows.next()
+        .await
+        .map_err(|error| query_error("read table definition", error))?
+        .ok_or_else(|| compatibility_error(format!("required table '{table}' is missing")))?
+        .get::<String>(0)
+        .map_err(|error| query_error("decode table definition", error))
 }
 
 async fn unique_keys(
     connection: &Connection,
     table: &str,
-) -> Result<BTreeSet<Vec<IndexColumn>>, PersistenceError> {
+) -> Result<BTreeSet<UniqueKeyCapability>, PersistenceError> {
     let pragma = format!("PRAGMA index_list({})", quote_identifier(table));
     let mut rows = connection
         .query(&pragma, ())
         .await
         .map_err(|error| query_error("inspect table indexes", error))?;
-    let mut names = Vec::new();
+    let mut indexes = Vec::new();
     while let Some(row) = rows
         .next()
         .await
         .map_err(|error| query_error("read table index", error))?
     {
-        let origin = row
-            .get::<String>(3)
-            .map_err(|error| query_error("decode index origin", error))?;
-        if origin == "u" {
-            names.push(
+        let unique = row
+            .get::<i64>(2)
+            .map_err(|error| query_error("decode unique-index flag", error))?
+            != 0;
+        if unique {
+            indexes.push((
                 row.get::<String>(1)
                     .map_err(|error| query_error("decode unique-index name", error))?,
-            );
+                row.get::<i64>(4)
+                    .map_err(|error| query_error("decode partial-index flag", error))?
+                    != 0,
+            ));
         }
     }
     drop(rows);
 
     let mut keys = BTreeSet::new();
-    for name in names {
-        keys.insert(index_columns(connection, &name).await?);
+    for (name, partial) in indexes {
+        let definition = index_definition(connection, &name).await?;
+        keys.insert(UniqueKeyCapability {
+            partial,
+            columns: index_columns(connection, &name).await?,
+            predicate: definition.as_deref().and_then(predicate_after_where),
+        });
     }
     Ok(keys)
+}
+
+async fn index_definition(
+    connection: &Connection,
+    index: &str,
+) -> Result<Option<String>, PersistenceError> {
+    let mut rows = connection
+        .query(
+            "SELECT sql FROM sqlite_schema WHERE type = 'index' AND name = ?1",
+            [index],
+        )
+        .await
+        .map_err(|error| query_error("inspect unique-index definition", error))?;
+    rows.next()
+        .await
+        .map_err(|error| query_error("read unique-index definition", error))?
+        .ok_or_else(|| compatibility_error(format!("unique index '{index}' is missing")))?
+        .get::<Option<String>>(0)
+        .map_err(|error| query_error("decode unique-index definition", error))
 }
 
 async fn foreign_keys(
@@ -347,7 +342,7 @@ async fn foreign_keys(
     Ok(keys)
 }
 
-async fn index_capability(
+pub(super) async fn index_capability(
     connection: &Connection,
     index: &str,
 ) -> Result<IndexCapability, PersistenceError> {
@@ -406,11 +401,11 @@ async fn index_capability(
         unique,
         partial,
         columns: index_columns(connection, index).await?,
-        predicate: index_predicate(&sql),
+        predicate: predicate_after_where(&sql),
     })
 }
 
-async fn index_columns(
+pub(super) async fn index_columns(
     connection: &Connection,
     index: &str,
 ) -> Result<Vec<IndexColumn>, PersistenceError> {
@@ -471,16 +466,6 @@ pub(super) fn normalize_default(value: &str) -> String {
     normalized.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
-fn index_predicate(sql: &str) -> Option<String> {
-    let normalized = sql.split_whitespace().collect::<Vec<_>>().join(" ");
-    let upper = normalized.to_ascii_uppercase();
-    upper.find(" WHERE ").map(|offset| {
-        normalized[offset + " WHERE ".len()..]
-            .trim_end_matches(';')
-            .to_string()
-    })
-}
-
 fn quote_identifier(identifier: &str) -> String {
     format!("\"{}\"", identifier.replace('"', "\"\""))
 }
@@ -491,7 +476,7 @@ fn query_error(context: &str, error: libsql::Error) -> PersistenceError {
     ))
 }
 
-fn compatibility_error(message: String) -> PersistenceError {
+pub(super) fn compatibility_error(message: String) -> PersistenceError {
     PersistenceError::Storage(format!(
         "Turso schema compatibility check failed: {message}"
     ))
