@@ -71,7 +71,7 @@ The readiness ask uses the existing retry budget. Exhaustion logs a structured e
 
 Legacy snapshots that predate this optional field and have no matching state-changing event in their replay tail continue to receive one full timeout budget. Before the actor becomes ready or its timer can be armed, hydration synchronously rewrites the loaded snapshot with the conservative anchor. A missing anchor after replay proves that every post-snapshot envelope was skipped without mutating domain state: every successfully parsed event updates or clears the anchor. The replacement payload therefore keeps the loaded boundary's sequence and replay-budget fields, while the live actor retains the journal head and counts the skipped envelopes as its replay tail. A dedicated replacement operation atomically updates the current snapshot and its same-sequence history record without creating or rotating an event-segment boundary. Skipped markers replay again on the next restart, now from a snapshot with the durable anchor. A failed or concurrent upgrade write fails actor startup instead of exposing a refreshable in-memory budget. This compatibility fallback may delay the first deadline after upgrade, but even an immediate second crash and restart reuses the first upgraded anchor.
 
-If a legacy timed stream has no snapshot at all, hydration creates its first snapshot boundary at the recovered journal head. Before creation it performs a fresh snapshot read: an existing boundary or a read failure stops hydration because either is distinct from confirmed absence. The event-store contract then atomically verifies that the requested sequence is still the journal head, claims absence, and creates the boundary; a concurrent snapshot or a completed append makes stale hydration fail for retry. Redis also compare-and-sets append segment metadata with a bounded retry budget, so an append that read the prior segment cannot overwrite a concurrently rotated boundary. PostgreSQL single and stable-ordered batch appends share an entity-scoped transaction advisory lock with first-boundary creation, preventing either transaction from selecting stale segment topology. Turso single-event appends perform segment selection, conditional insertion, and segment-metadata publication in one immediate transaction, so first-boundary rotation either precedes the complete append or observes its new journal head. This persists the conservative anchor without appending a domain event and leaves no replay tail below the new boundary. Existing-boundary replacement and first-boundary creation are actor-readiness work rather than background maintenance, so stores with priority admission place them ahead of low-priority snapshot traffic.
+If replay reaches a positive journal sequence but still cannot reconstruct an anchor, hydration requires an existing snapshot boundary for the conservative repair. A journal-only history in that condition may contain only a composite marker or an envelope written by a schema version that a future compatible runtime can replay. Creating a snapshot at the journal head would permanently hide those facts. Startup therefore leaves the journal and snapshot absence unchanged, arms no timeout, and returns an observable actor-start error until a compatible runtime or explicit migration supplies a trustworthy boundary. Journal-only histories with a replayable entry or reset event remain valid because replay reconstructs their exact anchor without creating a boundary. Existing-boundary replacement remains actor-readiness work rather than background maintenance, so stores with priority admission place it ahead of low-priority snapshot traffic.
 
 ## Rollout Plan
 
@@ -85,12 +85,9 @@ If a legacy timed stream has no snapshot at all, hydration creates its first sna
 - The fixed test proves not-yet-overdue state uses its remaining budget and overdue state fires immediately.
 - A legacy snapshot regression crashes again immediately after hydration and proves the repaired anchor and journal sequence survive without passivation or another event.
 - A legacy snapshot followed by a composite journal marker repairs the loaded boundary and survives restart without appending an event or rotating segments.
-- A legacy timed journal with no snapshot creates its first durable boundary at the recovered head and reuses the same anchor after restart.
+- A legacy timed journal with no reconstructable anchor and no snapshot fails hydration cleanly, arms no timer, and remains fully replayable after repeated restart attempts.
+- An incompatible no-snapshot envelope remains visible to a future compatible runtime.
 - A snapshot-read failure fails hydration without overwriting an existing boundary or rotating its segment metadata.
-- First-boundary creation atomically rejects a concurrent or previously existing snapshot.
-- First-boundary creation rejects a recovered sequence that is no longer the exact journal head.
-- A Redis append paused on stale segment metadata neither reverts nor republishes a range already covered by a concurrent first-boundary rotation.
-- A Turso single-event append paused after segment selection commits its event and segment metadata atomically before stale first-boundary creation can proceed.
 - Snapshot-boundary replacement enters the persistence writer as actor-readiness work rather than background maintenance.
 - An injected repair failure followed by store recovery in the same server replaces the stopped actor incarnation, persists the anchor, and arms exactly one timer.
 - Randomized deterministic seeds cover elapsed times before, at, and after the deadline.
@@ -114,12 +111,13 @@ If a legacy timed stream has no snapshot at all, hydration creates its first sna
 - Timeout recovery is asynchronous with respect to registry insertion, so readiness may briefly precede timer-arm observability.
 - Current snapshots gain one optional timeout-anchor timestamp.
 - Legacy snapshot-only entities may receive one conservative full budget after their first upgraded hydration.
+- Legacy journal-only timed entities whose replay cannot reconstruct an anchor require a compatible migration before they can hydrate.
 
 ### Risks
 
 - **Readiness task exhaustion.** Mitigated by bounded retries, structured errors, stopped-incarnation replacement on the next access, and the existing post-dispatch reconciliation fallback.
 - **Legacy snapshot upgrade failure.** The synchronous anchor rewrite fails actor startup; hydration never arms a timer from an anchor that another immediate restart could forget.
-- **Snapshot absence ambiguity.** A fresh read plus atomic create-if-absent distinguishes a genuinely missing boundary from read/deserialization failure or a concurrent creator; every ambiguous outcome fails actor startup for retry.
+- **Missing or unreadable snapshot boundary.** Timeout-anchor repair requires a successfully loaded existing boundary. Missing, unreadable, or otherwise ambiguous boundaries fail actor startup without changing durable history, so a compatible runtime or migration can reconstruct it later.
 - **Timed-entity startup volume.** Bounded to entity types with declared liveness obligations; non-timed entities retain index-only lazy hydration. A future durable scheduler may avoid one resident actor per persisted instance of a timeout-declaring type.
 - **Duplicate timers during startup races.** Mitigated by atomic initial-sequence reservation and the existing fire-time sequence/state checks.
 - **Runtime task nondeterminism.** The task coordinates production actor readiness only; state mutation remains actor-serialized, time comes from `sim_now()`, and deterministic tests use a logical clock plus paused Tokio time.
@@ -145,6 +143,7 @@ If a legacy timed stream has no snapshot at all, hydration creates its first sna
 3. **Re-arm only in `hydrate_from_store`** — Rejected because default boot uses index-only startup, while lazy respawn and direct actor creation paths would remain uncovered.
 4. **Wait for the next action** — Rejected because that is the current liveness failure.
 5. **Build the full durable scheduler now** — Deferred to ADR-0049's longer-term direction; it is broader than the actor-lifecycle regression.
+6. **Create a first snapshot at a recovered no-anchor journal head** — Rejected because partial replay can skip durable envelopes; sealing the resulting state behind a new boundary would make those facts unreplayable.
 
 ## Rollback Policy
 

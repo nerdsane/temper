@@ -18,7 +18,7 @@
 //! bump once for the old state if it had a declaration. That bump renders
 //! any in-flight timer for the old state stale.
 //!
-//! Durability (ADR-0056, ADR-0156): actor spawn and post-dispatch fallback
+//! Durability (ADR-0056, ADR-0171): actor spawn and post-dispatch fallback
 //! reconcile the **hydration case** — the entity is in a state with a
 //! declared timeout but has no live in-memory timer. Reconciliation claims
 //! the initial sequence atomically, reconstructs how long the entity has
@@ -33,7 +33,7 @@
 //! restarted while in a timed state) would otherwise never have its timer
 //! re-armed because no state transition happened on the hydrated actor.
 
-use std::collections::{HashMap, VecDeque};
+use std::collections::{BTreeMap, VecDeque};
 use std::sync::Mutex;
 use std::time::Duration;
 
@@ -117,7 +117,7 @@ fn hydration_reconciled_at(
 }
 
 fn timeout_deadline(delay: Duration) -> tokio::time::Instant {
-    tokio::time::Instant::now() + delay
+    tokio::time::Instant::now() + delay // determinism-ok: paused by DST
 }
 
 fn compute_hydration_delay(
@@ -142,7 +142,7 @@ fn compute_hydration_delay(
 }
 
 /// Composite key identifying an entity instance inside the arm-seq tracker.
-#[derive(Debug, Clone, Hash, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 struct EntityKey {
     tenant: String,
     entity_type: String,
@@ -165,10 +165,10 @@ impl EntityKey {
 /// against current and drop the fire when they diverge.
 #[derive(Default, Debug)]
 pub struct StateTimeoutTracker {
-    seqs: Mutex<HashMap<EntityKey, u64>>,
+    seqs: Mutex<BTreeMap<EntityKey, u64>>,
     /// ADR-0049: per-entity-type count of armed-but-unfired timers.
     /// Emitted as `temper_scheduler_pending_timers` by the canary loop.
-    pending_by_type: Mutex<HashMap<String, u64>>,
+    pending_by_type: Mutex<BTreeMap<String, u64>>,
 }
 
 impl StateTimeoutTracker {
@@ -185,12 +185,19 @@ impl StateTimeoutTracker {
 
     /// Claim the initial timer sequence without disturbing a timer that a
     /// concurrent dispatch already armed.
+    ///
+    /// Both a first standalone dispatch and a hydration reservation use
+    /// sequence `1`, but the mutex makes the two cases exclusive. If hydration
+    /// reserves first, the dispatch's subsequent [`Self::bump`] returns `2`
+    /// and invalidates the hydration timer. If dispatch bumps first, this
+    /// method observes the non-zero sequence and declines the reservation.
     fn reserve_if_unarmed(&self, key: &EntityKey) -> Option<u64> {
         let mut map = self.seqs.lock().expect("state_timeout tracker poisoned");
         let entry = map.entry(key.clone()).or_insert(0);
         if *entry != 0 {
             return None;
         }
+        debug_assert_eq!(*entry, 0, "only an unarmed timer can be reserved");
         *entry = 1;
         Some(*entry)
     }

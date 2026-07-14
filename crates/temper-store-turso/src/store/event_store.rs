@@ -604,7 +604,7 @@ impl EventStore for TursoEventStore {
         let (tenant, entity_type, entity_id) =
             parse_persistence_id_parts(persistence_id).map_err(PersistenceError::Storage)?;
         let _write_permit = self
-            .acquire_write_permit("turso.replace_snapshot", WritePriority::Low)
+            .acquire_write_permit("turso.replace_snapshot", WritePriority::High)
             .await?;
         let conn = self.configured_connection().await?;
         let tx = conn
