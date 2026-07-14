@@ -385,6 +385,18 @@ impl ServerState {
                     "populated entity index from event store"
                 );
                 runtime_metrics::record_server_state_metrics(self);
+
+                // ARN-203: pending state timeouts must survive a restart.
+                // Now that the index knows every entity, re-arm timers for
+                // entities sitting in timed states, in the background so
+                // boot is not blocked on hydrating them.
+                let state = self.clone();
+                let tenant_for_resume = tenant.clone();
+                super::dispatch::state_timeouts::spawn_timer_task(async move {
+                    state
+                        .resume_pending_state_timeouts(&tenant_for_resume)
+                        .await;
+                });
             }
             Err(e) => {
                 tracing::error!(
@@ -644,6 +656,17 @@ impl ServerState {
                         "hydrated entities from event store"
                     );
                     runtime_metrics::record_server_state_metrics(self);
+
+                    // ARN-203: same boot-time timeout resume as
+                    // populate_index_from_store — eager hydration is the
+                    // other tenant boot path.
+                    let state = self.clone();
+                    let tenant_for_resume = tenant.clone();
+                    super::dispatch::state_timeouts::spawn_timer_task(async move {
+                        state
+                            .resume_pending_state_timeouts(&tenant_for_resume)
+                            .await;
+                    });
                 }
                 Err(e) => {
                     tracing::error!(
@@ -994,6 +1017,23 @@ impl ServerState {
             serde_json::to_value(&change).unwrap_or_default(),
         );
         let _ = self.event_tx.send(change);
+
+        // ARN-203: an entity created into a timed INITIAL state has no
+        // dispatch to arm its timer — without this, on_timeout would never
+        // fire for an untouched entity. Idempotent: entities with a live
+        // timer (tracker seq > 0) are skipped, so repeated get-or-create
+        // calls do not stack timers.
+        let declarations = self.state_timeout_declarations(tenant, entity_type);
+        if !declarations.is_empty() {
+            self.arm_untracked_state_timeouts(
+                tenant,
+                entity_type,
+                entity_id,
+                &response,
+                &declarations,
+                &crate::request_context::AgentContext::for_service("timeout-scheduler"),
+            );
+        }
 
         if let Some(query_plane) = self.query_plane_store() {
             let status = response.state.status.clone();
