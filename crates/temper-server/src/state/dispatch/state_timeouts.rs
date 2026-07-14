@@ -700,6 +700,27 @@ mod tests {
         assert_eq!(t.size(), 0);
     }
 
+    #[test]
+    fn bump_if_zero_cas_is_idempotent() {
+        let t = StateTimeoutTracker::new();
+        let k = key();
+        assert_eq!(t.bump_if_zero(&k), Some(1), "first untracked arm wins");
+        assert_eq!(t.bump_if_zero(&k), None, "second untracked arm loses");
+        assert_eq!(t.current(&k), 1);
+    }
+
+    #[test]
+    fn bump_if_zero_loses_after_dispatch_bump() {
+        let t = StateTimeoutTracker::new();
+        let k = key();
+        assert_eq!(t.bump(&k), 1);
+        assert_eq!(
+            t.bump_if_zero(&k),
+            None,
+            "boot/create CAS must not re-arm over a live dispatch arm"
+        );
+    }
+
     // --- compute_state_clock_reset_ts (ADR-0056 hydration-re-arm helper) ---
 
     fn test_event(action: &str, from: &str, to: &str, ts_ms_after_epoch: i64) -> EntityEvent {

@@ -142,6 +142,13 @@ async fn pending_state_timeout_fires_after_restart() {
     let state_b = build_state("arn203-gen-b", open_store(&db_url).await);
     state_b.populate_index_from_store(&tenant).await;
 
+    // Gen-B must own the transition: still Open right after boot resume arm.
+    let boot = state_b
+        .get_tenant_entity_state(&tenant, "Ticket", "t-restart-1")
+        .await
+        .expect("load after boot");
+    assert_eq!(boot.state.status, "Open", "restart must leave entity Open before resume fires");
+
     // No dispatch to the entity. The pending timeout alone must fire.
     let status = wait_for_status(
         &state_b,
@@ -174,21 +181,33 @@ async fn overdue_state_timeout_fires_after_restart() {
     tokio::time::sleep(Duration::from_millis(1500)).await;
 
     let state_b = build_state("arn203-gen-b2", open_store(&db_url).await);
+    let boot_start = std::time::Instant::now();
     state_b.populate_index_from_store(&tenant).await;
 
-    // Overdue at boot: the fire should happen promptly, well within one
-    // fresh budget (which would indicate the clock was wrongly reset).
+    let boot = state_b
+        .get_tenant_entity_state(&tenant, "Ticket", "t-overdue-1")
+        .await
+        .expect("load after boot");
+    assert_eq!(boot.state.status, "Open", "overdue entity still Open right after boot");
+
+    // Overdue: must fire promptly (≪ full 1s budget). Cap wait at 800ms so a
+    // full-budget re-arm regression fails instead of silently passing.
     let status = wait_for_status(
         &state_b,
         &tenant,
         "t-overdue-1",
         "InProgress",
-        Duration::from_secs(20),
+        Duration::from_millis(800),
     )
     .await;
+    let elapsed = boot_start.elapsed();
     assert_eq!(
         status, "InProgress",
         "an overdue state timeout must fire at boot, not wait another full budget or never fire"
+    );
+    assert!(
+        elapsed < Duration::from_millis(800),
+        "overdue fire took {elapsed:?}; expected remaining budget ~0 (≪ 1s)"
     );
 }
 
