@@ -1,6 +1,7 @@
 # RFC-0002: First-Class Authorization for Temper Apps
 
-- Status: Draft
+- Status: Proposed — the Option B direction was decided 2026-07-11 (ARN-255);
+  this document becomes Accepted when it merges after review
 - Date: 2026-07-11
 - Authors: Claude Code, with product direction from the human director
 - Related:
@@ -142,16 +143,20 @@ resolution to three shapes, all producing a verified `SecurityContext`:
 
 With these in place, the self-declared `x-temper-principal-*` /
 `x-temper-agent-type` headers are removed from the protocol, completing what
-ADR-0033 specified and ARN-170's ingress work began. A request with no
-verified credential resolves to an anonymous principal that can reach only
-whatever policies explicitly permit anonymously. This deliberately revises
-ADR-0033's "no token = 401" posture: once headers are gone the kernel needs a
-defined identity for credential-less requests, and apps with public read
-surfaces (a catalog page, a published design language) need a way to serve
-them without handing the front end a privileged key. An anonymous principal
-governed by explicit Cedar permits is one way to provide that; whether
-generated policies include anonymous read permits per entity, or apps instead
-mint a public-reader service credential, is an open question below.
+ADR-0033 specified and ARN-170's ingress work began (the Rollout section
+stages that removal behind an explicit gate).
+
+For requests with no credential at all, this RFC proposes a future revision
+of ADR-0033's "no token = 401" posture: an anonymous principal that can reach
+only whatever policies explicitly permit anonymously. The motivation is apps
+with public read surfaces (a catalog page, a published design language) that
+should not need a privileged key in the front end to serve them. Whether that
+lands as anonymous read permits in generated policies or as a public-reader
+service credential is Open Question 2, and **credential-less requests keep
+returning 401 until that question is resolved** — no rollout step below
+changes the credential-less behavior. During the whole rollout, existing
+public pages keep working because they authenticate with the shared key,
+which remains a valid credential until step 4 retires it.
 
 ### 3. Member roles as principal attributes
 
@@ -230,21 +235,31 @@ to stamp.
 
 ## Rollout
 
-Ordered by dependency; step numbers match ARN-255. Steps 1 and 2 ship
-together (see the coordination note); steps 3 and 4 each land value on their
-own.
+Ordered by dependency; step numbers match ARN-255. Every step is additive
+and lands value on its own. The one breaking change in the whole plan —
+removing header-derived principals — is not a step of its own; it rides
+inside step 1 behind the explicit gate described there, so correctness never
+depends on two deploys landing simultaneously.
 
 1. **Kernel verifies tokens.** Extend the resolver to validate JWTs from
    allowlisted per-tenant issuers (interim Option A: katagami.ai's existing
-   authorization server is the first allowlisted issuer). Self-declared
-   principal headers are dropped in the same change.
-   *Coordination:* ARN-170 (PR #343) closes the header-trust path the
-   Katagami MCP adapter currently depends on for its contributor stamp, so
-   step 2 must land together with the header removal — otherwise contributor
-   enforcement silently disappears.
+   authorization server is the first allowlisted issuer). This is additive:
+   header-derived principals keep working while it lands.
+   *Header-removal gate:* the header-trust path is removed only after (a)
+   step 2 is deployed and (b) request telemetry shows zero
+   header-authenticated traffic over an agreed observation window. Until
+   both hold, the removal change does not merge — record the gate as a
+   blocking checklist item on the removal PR itself, referencing the step 2
+   deploy. This interacts with ARN-170 (PR #343), which closes the same
+   header-trust path for privileged principals: the Katagami MCP adapter
+   depends on that path for its contributor stamp, so the same gate applies
+   to the ARN-170 edge before it can drop `x-temper-agent-type` handling —
+   otherwise contributor enforcement silently disappears in the window
+   between the two deploys.
 2. **Katagami MCP adapter forwards tokens.** The adapter passes the caller's
-   JWT through instead of swapping to the shared key. The contributor boundary
-   becomes kernel-enforced.
+   JWT through instead of swapping to the shared key. Deployable as soon as
+   step 1's verification is live, while headers still work — the boundary
+   moves from adapter discipline to kernel enforcement with no gap.
 3. **Human token exchange + Member roles.** Kernel exchange endpoint; Member
    spec promoted to the platform; katagami.ai server actions call with
    per-user tokens; `KATAGAMI_OWNER_SUBS` retires. Unblocks ARN-248 (personal
@@ -255,6 +270,10 @@ own.
    Katagami's hand-written permit-all files are migrated to spec declarations
    in the same pass (they are the proof that the sugar covers a real app);
    ARN-163's MCP resource server points at the platform AS.
+   *Prerequisite:* ARN-230's fail-open fallback is fixed and verified first —
+   a failed or missing tenant policy load must fail closed. Shipping
+   default-deny generation on top of a permit-all fallback would silently
+   reopen every action the spec intended to deny whenever a load fails.
 
 ## Consequences
 
