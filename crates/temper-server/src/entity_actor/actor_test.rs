@@ -951,6 +951,7 @@ assert = "payment_captured"
     .expect("build snapshot state");
     corrupted.booleans.insert("payment_captured".into(), false);
     corrupted.fields["payment_captured"] = serde_json::json!(false);
+    corrupted.fields["Receipt"] = serde_json::json!("durable-user-data");
     corrupted.sequence_nr = 1;
     corrupted.total_event_count = 1;
     store
@@ -978,6 +979,69 @@ assert = "payment_captured"
 
     assert!(recovered.booleans["payment_captured"]);
     assert_eq!(recovered.fields["payment_captured"], true);
+    assert_eq!(recovered.fields["Receipt"], "durable-user-data");
+    assert_eq!(recovered.sequence_nr, 0);
+}
+
+#[cfg(feature = "sim")]
+#[tokio::test]
+async fn malformed_legacy_snapshot_cannot_inject_data_or_terminal_status() {
+    use temper_runtime::persistence::EventStore;
+    use temper_runtime::scheduler::install_deterministic_context;
+    use temper_store_sim::SimEventStore;
+
+    let (_guard, _clock, _id_gen) = install_deterministic_context(213);
+    let table = TransitionTable::from_ioa_source(
+        r#"
+[automaton]
+name = "Payment"
+states = ["Active"]
+initial = "Active"
+allow_indefinite_states = ["Active"]
+
+[[state]]
+name = "payment_captured"
+type = "bool"
+initial = "true"
+
+[[invariant]]
+name = "PaymentCaptured"
+when = ["Active"]
+assert = "payment_captured"
+"#,
+    );
+    let store = Arc::new(SimEventStore::no_faults(213));
+    let pid = "default:Payment:malformed-legacy-snapshot";
+    store
+        .save_snapshot(
+            pid,
+            1,
+            &serde_json::to_vec(&serde_json::json!({
+                "status": "Deleted",
+                "fields": {"Receipt": "injected"}
+            }))
+            .expect("serialize malformed snapshot"),
+        )
+        .await
+        .expect("save malformed snapshot");
+
+    let recovered = recover_entity_state_from_store(
+        "default",
+        "Payment",
+        "malformed-legacy-snapshot",
+        &table,
+        &crate::storage::BoxedEventStore::from_arc(store),
+        crate::storage::BackendLabel::Sim,
+        &serde_json::json!({}),
+        None,
+        true,
+    )
+    .await
+    .expect("malformed snapshot must be ignored in favor of canonical state");
+
+    assert_eq!(recovered.status, "Active");
+    assert!(recovered.fields.get("Receipt").is_none());
+    assert!(recovered.booleans["payment_captured"]);
     assert_eq!(recovered.sequence_nr, 0);
 }
 

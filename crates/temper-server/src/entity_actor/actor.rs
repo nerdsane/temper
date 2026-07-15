@@ -53,6 +53,15 @@ struct ReplayOptions<'a> {
     initial_fields: &'a serde_json::Value,
 }
 
+enum SnapshotApplication {
+    Applied,
+    DataOnly {
+        fields: serde_json::Map<String, serde_json::Value>,
+        terminal_status: Option<String>,
+    },
+    Rejected,
+}
+
 fn event_budget_workspace_id(state: &EntityState) -> String {
     if state.entity_type == "Workspace" {
         return state.entity_id.clone();
@@ -195,19 +204,25 @@ impl EntityActor {
     }
 
     /// Attempt to load actor state from snapshot payload bytes.
+    ///
+    /// A legacy snapshot, or a valid snapshot bound to an older table, cannot
+    /// establish a replay boundary for model-protected state. Its ordinary
+    /// data fields are still durable user data, though, and may predate event
+    /// payload field synchronization. Preserve only those unprotected fields
+    /// while rebuilding status and logical state from the complete journal.
     fn apply_snapshot_bytes(
         state: &mut EntityState,
         sequence_nr: u64,
         bytes: &[u8],
         table: &TransitionTable,
-    ) -> bool {
+    ) -> SnapshotApplication {
         let mut value = match serde_json::from_slice::<serde_json::Value>(bytes) {
             Ok(v) => v,
-            Err(_) => return false,
+            Err(_) => return SnapshotApplication::Rejected,
         };
         let (contract, checksum, safety_contract) = {
             let Some(obj) = value.as_object_mut() else {
-                return false;
+                return SnapshotApplication::Rejected;
             };
             (
                 obj.remove("__temper_snapshot_contract"),
@@ -216,35 +231,33 @@ impl EntityActor {
             )
         };
         let has_contract = contract.as_ref().and_then(serde_json::Value::as_u64) == Some(1);
-        if !table.model_protected_state_vars.is_empty() && !has_contract {
-            return false;
-        }
         if has_contract {
             let Some(expected) = checksum.as_ref().and_then(serde_json::Value::as_str) else {
-                return false;
+                return SnapshotApplication::Rejected;
             };
             let Ok(canonical) = serde_json::to_vec(&value) else {
-                return false;
+                return SnapshotApplication::Rejected;
             };
             if format!("{:x}", Sha256::digest(canonical)) != expected {
-                return false;
+                return SnapshotApplication::Rejected;
+            }
+            if value.get("sequence_nr").and_then(serde_json::Value::as_u64) != Some(sequence_nr) {
+                return SnapshotApplication::Rejected;
             }
             let Ok(expected_contract) = Self::snapshot_safety_contract(table) else {
-                return false;
+                return SnapshotApplication::Rejected;
             };
             if safety_contract.as_ref().and_then(serde_json::Value::as_str)
                 != Some(expected_contract.as_str())
             {
-                return false;
+                return Self::snapshot_data_only(&value, table, state);
             }
         }
-        if has_contract
-            && value.get("sequence_nr").and_then(serde_json::Value::as_u64) != Some(sequence_nr)
-        {
-            return false;
+        if !table.model_protected_state_vars.is_empty() && !has_contract {
+            return Self::snapshot_data_only(&value, table, state);
         }
         let Some(obj) = value.as_object_mut() else {
-            return false;
+            return SnapshotApplication::Rejected;
         };
 
         // Snapshot intentionally excludes in-memory recent history.
@@ -267,9 +280,54 @@ impl EntityActor {
                 restored.events_since_snapshot = 0;
                 restored.last_snapshot_sequence_nr = sequence_nr;
                 *state = restored;
-                true
+                SnapshotApplication::Applied
             }
-            Err(_) => false,
+            Err(_) => SnapshotApplication::Rejected,
+        }
+    }
+
+    fn unprotected_snapshot_fields(
+        snapshot: &serde_json::Value,
+        table: &TransitionTable,
+    ) -> serde_json::Map<String, serde_json::Value> {
+        snapshot
+            .get("fields")
+            .and_then(serde_json::Value::as_object)
+            .map(|fields| {
+                fields
+                    .iter()
+                    .filter(|(name, _)| {
+                        *name != "Id"
+                            && *name != "Status"
+                            && !table.model_protected_state_vars.contains(*name)
+                    })
+                    .map(|(name, value)| (name.clone(), value.clone()))
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    fn snapshot_data_only(
+        snapshot: &serde_json::Value,
+        table: &TransitionTable,
+        expected: &EntityState,
+    ) -> SnapshotApplication {
+        let Ok(restored) = serde_json::from_value::<EntityState>(snapshot.clone()) else {
+            return SnapshotApplication::Rejected;
+        };
+        if restored.entity_type != expected.entity_type || restored.entity_id != expected.entity_id
+        {
+            return SnapshotApplication::Rejected;
+        }
+        let terminal_status = (restored.status == "Deleted").then_some(restored.status);
+        SnapshotApplication::DataOnly {
+            fields: Self::unprotected_snapshot_fields(
+                &serde_json::json!({
+                    "fields": restored.fields,
+                }),
+                table,
+            ),
+            terminal_status,
         }
     }
 
@@ -578,28 +636,49 @@ impl EntityActor {
         .map_err(ActorError::custom)?;
         let mut from_sequence = 0;
         let mut loaded_snapshot = false;
+        let mut used_snapshot_data = false;
+        let mut snapshot_terminal_status = None;
 
         match store.load_snapshot(persistence_id).await {
             Ok(Some((snapshot_seq, snapshot_bytes))) => {
-                if Self::apply_snapshot_bytes(state, snapshot_seq, &snapshot_bytes, table) {
-                    if let Some(error) = super::effects::runtime_invariant_failure(state, table) {
-                        return Err(ActorError::custom(format!(
-                            "persisted snapshot violates runtime safety contract: {error}"
-                        )));
+                match Self::apply_snapshot_bytes(state, snapshot_seq, &snapshot_bytes, table) {
+                    SnapshotApplication::Applied => {
+                        if let Some(error) = super::effects::runtime_invariant_failure(state, table)
+                        {
+                            return Err(ActorError::custom(format!(
+                                "persisted snapshot violates runtime safety contract: {error}"
+                            )));
+                        }
+                        from_sequence = snapshot_seq;
+                        loaded_snapshot = true;
+                        tracing::info!(
+                            entity = %state.entity_id,
+                            seq = snapshot_seq,
+                            "loaded snapshot before replay"
+                        );
                     }
-                    from_sequence = snapshot_seq;
-                    loaded_snapshot = true;
-                    tracing::info!(
-                        entity = %state.entity_id,
-                        seq = snapshot_seq,
-                        "loaded snapshot before replay"
-                    );
-                } else {
-                    tracing::warn!(
-                        entity = %state.entity_id,
-                        seq = snapshot_seq,
-                        "failed to deserialize snapshot, falling back to full replay"
-                    );
+                    SnapshotApplication::DataOnly {
+                        fields,
+                        terminal_status,
+                    } => {
+                        if let Some(current_fields) = state.fields.as_object_mut() {
+                            current_fields.extend(fields);
+                        }
+                        used_snapshot_data = true;
+                        snapshot_terminal_status = terminal_status;
+                        tracing::warn!(
+                            entity = %state.entity_id,
+                            seq = snapshot_seq,
+                            "snapshot cannot establish a safety boundary; preserving unprotected data fields and replaying the full journal"
+                        );
+                    }
+                    SnapshotApplication::Rejected => {
+                        tracing::warn!(
+                            entity = %state.entity_id,
+                            seq = snapshot_seq,
+                            "failed to deserialize snapshot, falling back to full replay"
+                        );
+                    }
                 }
             }
             Ok(None) => {}
@@ -809,7 +888,16 @@ impl EntityActor {
                         "state restored from snapshot (no delta events)"
                     );
                 }
-                if (loaded_snapshot || !envelopes.is_empty())
+                if let Some(terminal_status) = snapshot_terminal_status {
+                    state.status = terminal_status.clone();
+                    if let Some(fields) = state.fields.as_object_mut() {
+                        fields.insert(
+                            "Status".to_string(),
+                            serde_json::Value::String(terminal_status),
+                        );
+                    }
+                }
+                if (loaded_snapshot || used_snapshot_data || !envelopes.is_empty())
                     && let Some(error) = super::effects::runtime_invariant_failure(state, table)
                 {
                     return Err(ActorError::custom(format!(
