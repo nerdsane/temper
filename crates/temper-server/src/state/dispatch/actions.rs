@@ -707,7 +707,11 @@ impl crate::state::ServerState {
             action_params: &action_params,
             await_integration,
         };
-        let response = self.run_post_dispatch_effects(&ctx, response).await;
+        // Post-dispatch integrations can synchronously dispatch a callback.
+        // Keep that nested future on the heap so blocking WASM callbacks do
+        // not accumulate the full dispatch state machine on the Tokio worker
+        // stack.
+        let response = Box::pin(self.run_post_dispatch_effects(&ctx, response)).await;
         if response.success
             && let Some(ref idem_key) = idempotency_key
         {
