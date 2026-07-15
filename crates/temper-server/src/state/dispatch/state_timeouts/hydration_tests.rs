@@ -1,6 +1,47 @@
 //! Focused tests for durable timeout hydration helpers and arm races.
 
 use super::*;
+use crate::entity_actor::EntityState;
+use crate::registry::SpecRegistry;
+use crate::request_context::AgentContext;
+use crate::state::ServerState;
+use temper_runtime::ActorSystem;
+use temper_runtime::scheduler::install_deterministic_context;
+use temper_spec::csdl::parse_csdl;
+
+const TICKET_CSDL: &str = include_str!("../../../../../../test-fixtures/specs/model.csdl.xml");
+
+const TICKET_WITH_RESET_TIMEOUT_IOA: &str = r#"
+[automaton]
+name = "Ticket"
+states = ["Open", "InProgress", "Closed"]
+initial = "Open"
+allow_indefinite_states = ["InProgress", "Closed"]
+
+[[action]]
+name = "Reopen"
+kind = "input"
+from = ["Closed"]
+to = "Open"
+
+[[action]]
+name = "Heartbeat"
+kind = "input"
+from = ["Open"]
+to = "Open"
+
+[[action]]
+name = "AssignAgent"
+kind = "internal"
+from = ["Open"]
+to = "InProgress"
+
+[[state_timeout]]
+state = "Open"
+after_seconds = 60
+on_timeout = "AssignAgent"
+reset_on = ["Heartbeat"]
+"#;
 
 fn key() -> EntityKey {
     EntityKey {
@@ -107,6 +148,103 @@ fn reconciliation_charges_only_time_after_a_later_durable_entry() {
             overdue: false,
         }),
         "readiness before the durable Created event must not consume its timeout budget"
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn delayed_post_dispatch_entry_and_reset_keep_the_durable_deadline() {
+    let (_guard, _clock, _ids) = install_deterministic_context(214);
+    let tenant = TenantId::default();
+    let mut registry = SpecRegistry::new();
+    registry.register_tenant(
+        tenant.as_str(),
+        parse_csdl(TICKET_CSDL).expect("CSDL parses"),
+        TICKET_CSDL.to_string(),
+        &[("Ticket", TICKET_WITH_RESET_TIMEOUT_IOA)],
+    );
+    let state =
+        ServerState::from_registry(ActorSystem::new("post-dispatch-durable-deadline"), registry);
+    let agent_ctx = AgentContext::for_service("timeout-scheduler-test");
+    let action_params = serde_json::json!({});
+    let durable_anchor = sim_now() - chrono::Duration::seconds(20);
+
+    let response = |entity_id: &str, action: &str, from_status: &str| EntityResponse {
+        success: true,
+        state: EntityState {
+            entity_type: "Ticket".to_string(),
+            entity_id: entity_id.to_string(),
+            status: "Open".to_string(),
+            item_count: 0,
+            counters: BTreeMap::new(),
+            booleans: BTreeMap::new(),
+            lists: BTreeMap::new(),
+            fields: serde_json::json!({"Id": entity_id, "Status": "Open"}),
+            events: VecDeque::from([EntityEvent {
+                action: action.to_string(),
+                from_status: from_status.to_string(),
+                to_status: "Open".to_string(),
+                timestamp: durable_anchor,
+                params: serde_json::json!({}),
+                idempotency_key: None,
+            }]),
+            state_timeout_clock_reset_at: Some(durable_anchor),
+            total_event_count: 1,
+            events_since_snapshot: 1,
+            last_snapshot_sequence_nr: 0,
+            sequence_nr: 1,
+            processed_idempotency_keys: BTreeMap::new(),
+        },
+        error: None,
+        custom_effects: Vec::new(),
+        scheduled_actions: Vec::new(),
+        spawn_requests: Vec::new(),
+        spec_governed: true,
+    };
+
+    for (entity_id, action, from_status) in [
+        ("delayed-entry", "Reopen", "Closed"),
+        ("delayed-reset", "Heartbeat", "Open"),
+    ] {
+        let ctx = PostDispatchContext {
+            tenant: &tenant,
+            entity_type: "Ticket",
+            entity_id,
+            action,
+            agent_ctx: &agent_ctx,
+            dispatch_idempotency_key: None,
+            action_params: &action_params,
+            await_integration: false,
+        };
+        state.arm_state_timeouts_if_needed(&ctx, &response(entity_id, action, from_status));
+    }
+
+    assert_eq!(
+        state.state_timeout_tracker.pending_snapshot(),
+        vec![("Ticket".to_string(), 2)],
+        "both delayed post-dispatch paths must arm one timer"
+    );
+
+    // The durable entry/reset happened 20 seconds before post-dispatch
+    // arming, so only 40 seconds remain from the declared 60-second budget.
+    tokio::time::advance(Duration::from_millis(39_999)).await;
+    tokio::task::yield_now().await;
+    assert_eq!(
+        state.state_timeout_tracker.pending_snapshot(),
+        vec![("Ticket".to_string(), 2)],
+        "neither deadline may fire early"
+    );
+
+    tokio::time::advance(Duration::from_millis(1)).await;
+    for _ in 0..64 {
+        tokio::task::yield_now().await;
+        if state.state_timeout_tracker.pending_snapshot() == vec![("Ticket".to_string(), 0)] {
+            break;
+        }
+    }
+    assert_eq!(
+        state.state_timeout_tracker.pending_snapshot(),
+        vec![("Ticket".to_string(), 0)],
+        "entry and reset timers must consume post-event persistence/effect time instead of granting a fresh full budget"
     );
 }
 
