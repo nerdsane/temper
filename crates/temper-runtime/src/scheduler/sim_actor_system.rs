@@ -707,6 +707,188 @@ fn evaluate_spec_assert(
 mod tests {
     use super::*;
 
+    // ── ARN-236: delayed-message ownership properties ─────────────────────
+    //
+    // Scheduler::tick() both enqueues a due message into the target mailbox
+    // AND returns a clone; the drivers process the returned clones and never
+    // drain mailboxes, and each loop iteration ends with a bare tick() whose
+    // returned deliveries are discarded. Consequences these tests pin:
+    // processed messages remain queued forever, deliveries surfaced only by
+    // the trailing tick are never applied, and a failing integration
+    // callback still yields a green run.
+
+    /// Accepts every action, counts applications, and (optionally) emits a
+    /// callback trigger whose configured action always fails.
+    struct CountingHandler {
+        applications: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+        emit_trigger: bool,
+        fired: bool,
+    }
+
+    impl SimActorHandler for CountingHandler {
+        fn init(&mut self) -> Result<serde_json::Value, String> {
+            Ok(serde_json::json!({"status": "Ready"}))
+        }
+        fn handle_message(
+            &mut self,
+            action: &str,
+            _params: &str,
+        ) -> Result<serde_json::Value, String> {
+            if action == "AlwaysFails" {
+                return Err("callback action rejected".to_string());
+            }
+            self.applications
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            if self.emit_trigger {
+                self.fired = true;
+            }
+            Ok(serde_json::json!({"status": "Ready"}))
+        }
+        fn current_status(&self) -> String {
+            "Ready".to_string()
+        }
+        fn current_item_count(&self) -> usize {
+            0
+        }
+        fn event_count(&self) -> usize {
+            self.applications.load(std::sync::atomic::Ordering::SeqCst)
+        }
+        fn valid_actions(&self) -> Vec<String> {
+            vec!["Step".to_string()]
+        }
+        fn events_json(&self) -> serde_json::Value {
+            serde_json::json!([])
+        }
+        fn pending_callbacks(&self) -> Vec<String> {
+            if self.fired {
+                vec!["boom_trigger".to_string()]
+            } else {
+                Vec::new()
+            }
+        }
+    }
+
+    fn counting_system(
+        seed: u64,
+        faults: FaultConfig,
+    ) -> (
+        SimActorSystem,
+        std::sync::Arc<std::sync::atomic::AtomicUsize>,
+    ) {
+        let applications = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let config = SimActorSystemConfig {
+            seed,
+            max_ticks: 200,
+            faults,
+            max_actions_per_actor: 30,
+        };
+        let mut system = SimActorSystem::new(config);
+        system.register_actor(
+            "counter",
+            Box::new(CountingHandler {
+                applications: applications.clone(),
+                emit_trigger: false,
+                fired: false,
+            }),
+        );
+        (system, applications)
+    }
+
+    /// No processed message may remain queued: after a run, every mailbox is
+    /// empty and the scheduler is quiescent.
+    #[test]
+    fn arn236_no_processed_message_remains_queued() {
+        let faults = FaultConfig {
+            message_delay_prob: 0.0,
+            max_delay_ticks: 0,
+            message_drop_prob: 0.0,
+            actor_crash_prob: 0.0,
+            actor_restart_prob: 0.0,
+        };
+        let (mut system, _applications) = counting_system(7, faults);
+        let result = system.run_random();
+        assert!(result.messages > 0, "the run must exercise messages");
+
+        assert_eq!(
+            system.scheduler.mailbox_depth("counter"),
+            0,
+            "a processed message must not remain queued in its mailbox \
+             (single-ownership: applied messages are consumed, not cloned)"
+        );
+        assert!(
+            system.scheduler.is_quiescent(),
+            "after a fault-free run every delivered message must be consumed"
+        );
+    }
+
+    /// Every scheduled message is applied exactly once — deliveries surfaced
+    /// by the loop's trailing tick must not be silently discarded. With
+    /// message delays (no drops, no crashes), every sent message is
+    /// eventually due, so applications must equal sends across all seeds.
+    #[test]
+    fn arn236_every_scheduled_message_is_applied_exactly_once() {
+        for seed in 0..50u64 {
+            let faults = FaultConfig {
+                message_delay_prob: 0.5,
+                max_delay_ticks: 8,
+                message_drop_prob: 0.0,
+                actor_crash_prob: 0.0,
+                actor_restart_prob: 0.0,
+            };
+            let (mut system, applications) = counting_system(seed, faults);
+            let result = system.run_random();
+            let applied = applications.load(std::sync::atomic::Ordering::SeqCst);
+            assert_eq!(
+                applied as u64, result.messages,
+                "seed {seed}: every scheduled message must be applied exactly \
+                 once ({} sent, {applied} applied) — a delivery surfaced only \
+                 by the trailing tick must not be discarded, and none may \
+                 apply twice",
+                result.messages
+            );
+        }
+    }
+
+    /// A failing integration callback must fail the run, not vanish.
+    #[test]
+    fn arn236_callback_failure_is_part_of_the_simulation_result() {
+        let applications = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let config = SimActorSystemConfig {
+            seed: 11,
+            max_ticks: 50,
+            faults: FaultConfig {
+                message_delay_prob: 0.0,
+                max_delay_ticks: 0,
+                message_drop_prob: 0.0,
+                actor_crash_prob: 0.0,
+                actor_restart_prob: 0.0,
+            },
+            max_actions_per_actor: 3,
+        };
+        let mut system = SimActorSystem::new(config);
+        system.set_integration_responses(SimIntegrationResponses::new().on_trigger(
+            "counter",
+            "boom_trigger",
+            "AlwaysFails",
+        ));
+        system.register_actor(
+            "counter",
+            Box::new(CountingHandler {
+                applications: applications.clone(),
+                emit_trigger: true,
+                fired: false,
+            }),
+        );
+
+        let result = system.run_random();
+        assert!(
+            !result.all_invariants_held || !result.violations.is_empty(),
+            "a rejected integration callback must surface in the simulation \
+             result — a green run that silently discarded a callback failure \
+             does not faithfully exercise the schedule"
+        );
+    }
+
     #[test]
     fn integration_responses_empty_returns_none() {
         let responses = SimIntegrationResponses::new();
