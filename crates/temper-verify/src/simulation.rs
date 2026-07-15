@@ -181,20 +181,25 @@ fn run_simulation_impl(model: &TemperModel, config: &SimConfig) -> SimulationRes
         actor_action_counts.push(0);
     }
 
-    let mut violations = Vec::new();
-    let mut total_transitions: u64 = 0;
+    let mut run = ModelRunState {
+        actor_states,
+        actor_action_counts,
+        violations: Vec::new(),
+        total_transitions: 0,
+        visited_statuses,
+    };
     let mut total_messages: u64 = 0;
 
     // Main simulation loop
     for tick in 0..config.max_ticks {
-        if actor_states.is_empty() {
+        if run.actor_states.is_empty() {
             break;
         }
 
-        let actor_idx = rng.next_bound(actor_states.len());
-        let (ref actor_id, ref current_state) = actor_states[actor_idx];
+        let actor_idx = rng.next_bound(run.actor_states.len());
+        let (ref actor_id, ref current_state) = run.actor_states[actor_idx];
 
-        if actor_action_counts[actor_idx] >= config.max_actions_per_actor {
+        if run.actor_action_counts[actor_idx] >= config.max_actions_per_actor {
             continue;
         }
 
@@ -228,16 +233,7 @@ fn run_simulation_impl(model: &TemperModel, config: &SimConfig) -> SimulationRes
         let delivered = sched.drain_ready();
 
         for msg in &delivered {
-            apply_to_model(
-                model,
-                &mut actor_states,
-                &mut actor_action_counts,
-                &mut violations,
-                &mut total_transitions,
-                tick,
-                msg,
-                &mut visited_statuses,
-            );
+            apply_to_model(model, &mut run, tick, msg);
         }
     }
 
@@ -251,33 +247,24 @@ fn run_simulation_impl(model: &TemperModel, config: &SimConfig) -> SimulationRes
         tick += 1;
         sched.tick();
         for msg in &sched.drain_ready() {
-            apply_to_model(
-                model,
-                &mut actor_states,
-                &mut actor_action_counts,
-                &mut violations,
-                &mut total_transitions,
-                tick,
-                msg,
-                &mut visited_statuses,
-            );
+            apply_to_model(model, &mut run, tick, msg);
         }
     }
 
     // Post-simulation liveness checks
     let liveness_violations =
-        check_liveness_post_simulation(model, &actor_states, &visited_statuses);
+        check_liveness_post_simulation(model, &run.actor_states, &run.visited_statuses);
 
     SimulationResult {
-        all_invariants_held: violations.is_empty(),
+        all_invariants_held: run.violations.is_empty(),
         ticks: config.max_ticks.min(sched.current_time()),
-        total_transitions,
+        total_transitions: run.total_transitions,
         total_messages,
         total_dropped: sched.total_dropped() as u64,
-        violations,
+        violations: run.violations,
         liveness_violations,
         seed: config.seed,
-        actor_final_states: actor_states,
+        actor_final_states: run.actor_states,
     }
 }
 
@@ -348,25 +335,36 @@ fn check_liveness_post_simulation(
     violations
 }
 
+/// Mutable per-run simulation state shared by the driver loop, the flush,
+/// and the post-simulation checks (ARN-236).
+struct ModelRunState {
+    /// Current state per actor.
+    actor_states: Vec<(String, TemperModelState)>,
+    /// Applied-action count per actor (parallel to `actor_states`).
+    actor_action_counts: Vec<usize>,
+    /// Invariant violations found so far.
+    violations: Vec<InvariantViolation>,
+    /// Total successful transitions.
+    total_transitions: u64,
+    /// Statuses each actor has ever been in — the eventually-visited data
+    /// `reaches` liveness checks against.
+    visited_statuses: BTreeMap<String, BTreeSet<String>>,
+}
+
 /// Apply one drained message to the model: parse the action, advance the
 /// target actor's state, check invariants, and update counters. The
 /// exactly-once application step shared by the driver loop and the flush
 /// (ARN-236).
-#[allow(clippy::too_many_arguments)]
 fn apply_to_model(
     model: &TemperModel,
-    actor_states: &mut [(String, TemperModelState)],
-    actor_action_counts: &mut [usize],
-    violations: &mut Vec<InvariantViolation>,
-    total_transitions: &mut u64,
+    run: &mut ModelRunState,
     tick: u64,
     msg: &temper_runtime::scheduler::SimMessage,
-    visited_statuses: &mut BTreeMap<String, BTreeSet<String>>,
 ) {
-    let target_idx = actor_states.iter().position(|(id, _)| id == &msg.to);
+    let target_idx = run.actor_states.iter().position(|(id, _)| id == &msg.to);
     let Some(idx) = target_idx else { return };
 
-    let (ref target_id, ref state_before) = actor_states[idx];
+    let (ref target_id, ref state_before) = run.actor_states[idx];
 
     let action: TemperModelAction = match serde_json::from_str(&msg.payload) {
         Ok(a) => a,
@@ -381,16 +379,16 @@ fn apply_to_model(
             state_before,
             &new_state,
             tick,
-            violations,
+            &mut run.violations,
         );
 
-        actor_states[idx].1 = new_state;
-        visited_statuses
-            .entry(actor_states[idx].0.clone())
+        run.actor_states[idx].1 = new_state;
+        run.visited_statuses
+            .entry(run.actor_states[idx].0.clone())
             .or_default()
-            .insert(actor_states[idx].1.status.clone());
-        actor_action_counts[idx] += 1;
-        *total_transitions += 1;
+            .insert(run.actor_states[idx].1.status.clone());
+        run.actor_action_counts[idx] += 1;
+        run.total_transitions += 1;
     }
 }
 

@@ -229,6 +229,11 @@ impl SimScheduler {
     }
 
     /// Run until quiescent or max ticks reached. Returns total ticks.
+    ///
+    /// With enqueue-only `tick` (ARN-236) nothing drains inside this loop,
+    /// so once any message is enqueued it terminates via the tick bound,
+    /// never via quiescence. Its callers (scheduler unit tests) drain via
+    /// [`Self::receive`]/[`Self::drain_ready`] after it returns.
     pub fn run_until_quiescent(&mut self, max_ticks: u64) -> u64 {
         for _ in 0..max_ticks {
             if self.is_quiescent() {
