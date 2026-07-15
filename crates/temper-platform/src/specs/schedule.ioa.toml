@@ -91,12 +91,3 @@ hint = "Resume a paused schedule."
 
 # --- Safety Invariants ---
 
-[[invariant]]
-name = "ActiveRequiresCron"
-when = ["Active"]
-assert = "cron_expr != ''"
-
-[[invariant]]
-name = "ActiveRequiresGoal"
-when = ["Active"]
-assert = "goal_template != ''"

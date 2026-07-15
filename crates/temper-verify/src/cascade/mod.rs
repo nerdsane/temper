@@ -19,10 +19,10 @@ use temper_runtime::scheduler::FaultConfig;
 
 mod diagnostics;
 
-pub use diagnostics::{
-    SourceSpan, UnsupportedInvariantDiagnostic, UNSUPPORTED_SAFETY_INVARIANT_CODE,
-};
 use diagnostics::collect_unsupported_invariant_diagnostics;
+pub use diagnostics::{
+    SourceSpan, UNSUPPORTED_SAFETY_INVARIANT_CODE, UnsupportedInvariantDiagnostic,
+};
 
 /// Result of an actor simulation level (Level 2b).
 ///

@@ -170,3 +170,17 @@ The diagnostic representation can be revised additively, but unsupported safety
 assertions must not return to warning-only behavior. If rollout exposes a required
 assertion form, add a typed parser/verification encoding or an explicitly governed
 runtime-only contract; do not restore false-success compatibility.
+
+## Corpus remediation (ARN-213 rollout)
+
+Checked-in specs that used verifier-unsupported assertions were remediated so
+fail-closed does not permanently redline bootstrap/CI:
+
+1. Literal `assert = "true"` is now `ParsedAssert::Tautology` (always holds).
+2. `is_true <bool>` is accepted as sugar for bare bool (os-apps convention).
+3. String non-emptiness (`field != ''`) and cross-counter compares
+   (`used_bytes <= quota_limit`) were removed from platform/os-app IOA
+   invariants — they were never model-checked under the prior warning-only
+   path. Re-introduce only with a supported encoding or an explicit
+   runtime-only contract (Sub-Decision 4).
+

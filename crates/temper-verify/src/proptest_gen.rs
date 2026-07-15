@@ -117,6 +117,7 @@ fn kind_violated(
             .iter()
             .all(|k| kind_violated(k, required_states, model, state)),
         // ADR-0178: unsupported safety is a standing violation.
+        InvariantKind::Tautology => false,
         InvariantKind::Unverifiable { .. } => true,
     }
 }

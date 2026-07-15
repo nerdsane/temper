@@ -101,6 +101,7 @@ fn kind_holds(
         InvariantKind::Or(parts) => parts
             .iter()
             .any(|k| kind_holds(k, required_states, model, state)),
+        InvariantKind::Tautology => true,
         // ADR-0178: an unsupported declaration does not hold under model check.
         InvariantKind::Unverifiable { .. } => false,
     }

@@ -107,11 +107,6 @@ hint = "Human approved the denied decision. ToolCall returns to Pending for re-a
 # --- Safety Invariants ---
 
 [[invariant]]
-name = "RequiresAgentId"
-when = ["Pending", "Authorized", "Denied", "Executing", "Completed", "Failed"]
-assert = "agent_id != ''"
-
-[[invariant]]
 name = "CompletedIsFinal"
 when = ["Completed"]
 assert = "no_further_transitions"

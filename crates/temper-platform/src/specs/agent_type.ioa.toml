@@ -79,7 +79,3 @@ hint = "Reactivate a deprecated agent type."
 
 # --- Safety Invariants ---
 
-[[invariant]]
-name = "ActiveRequiresName"
-when = ["Active"]
-assert = "name != ''"

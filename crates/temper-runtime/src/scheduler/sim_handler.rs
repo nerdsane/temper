@@ -32,6 +32,8 @@ pub enum SpecAssert {
     CounterPositive { var: String },
     /// The entity is in a terminal state — no further transitions allowed.
     NoFurtherTransitions,
+    /// Literal `true` — always holds.
+    Tautology,
     /// State A must have been visited before state B in event history.
     /// Expressed as: `ordering(A, B)` — "A precedes B".
     OrderingConstraint { before: String, after: String },

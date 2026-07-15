@@ -124,6 +124,7 @@ fn translate_parsed(
     match parsed {
         ParsedAssert::CounterPositive { var } => Some(SpecAssert::CounterPositive { var }),
         ParsedAssert::NoFurtherTransitions => Some(SpecAssert::NoFurtherTransitions),
+        ParsedAssert::Tautology => Some(SpecAssert::Tautology),
         ParsedAssert::OrderingConstraint { before, after } => {
             Some(SpecAssert::OrderingConstraint { before, after })
         }

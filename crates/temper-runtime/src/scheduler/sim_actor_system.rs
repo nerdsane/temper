@@ -666,6 +666,7 @@ fn evaluate_spec_assert(
             // Holds unless status_before was a terminal state in `when`.
             !when.iter().any(|s| s == status_before)
         }
+        SpecAssert::Tautology => true,
         SpecAssert::OrderingConstraint { before, after } => {
             if status_after == after.as_str() {
                 let events = handler.events_json();

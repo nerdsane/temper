@@ -66,6 +66,7 @@ fn evaluate_one(kind: &InvariantKind, state: &TemperModelState) -> bool {
         InvariantKind::And(kinds) => kinds.iter().all(|k| evaluate_one(k, state)),
         InvariantKind::Or(kinds) => kinds.iter().any(|k| evaluate_one(k, state)),
         // ADR-0178: unsupported safety never holds under composite evaluation.
+        InvariantKind::Tautology => true,
         InvariantKind::Unverifiable { .. } => false,
     }
 }

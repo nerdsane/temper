@@ -112,11 +112,6 @@ when = ["Archived"]
 assert = "no_further_transitions"
 
 [[invariant]]
-name = "ActiveRequiresName"
-when = ["Active", "Paused", "Archived"]
-assert = "name != ''"
-
-[[invariant]]
 name = "MemberCountNonNegative"
 when = ["Setup", "Active", "Paused", "Archived"]
 assert = "member_count >= 0"

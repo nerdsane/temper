@@ -227,6 +227,7 @@ fn try_translate(parsed: &ParsedAssert, bool_names: &[&str]) -> Option<Invariant
             Some(InvariantKind::CounterPositive { var: var.clone() })
         }
         ParsedAssert::NoFurtherTransitions => Some(InvariantKind::NoFurtherTransitions),
+        ParsedAssert::Tautology => Some(InvariantKind::Tautology),
         ParsedAssert::NeverState { state } => Some(InvariantKind::NeverState {
             state: state.clone(),
         }),

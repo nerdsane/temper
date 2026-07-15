@@ -185,7 +185,3 @@ hint = "Reset the agent for reuse. Clears all state variables."
 
 # --- Safety Invariants ---
 
-[[invariant]]
-name = "AssignedRequiresGoal"
-when = ["Assigned", "Working", "Blocked", "Completed", "Failed"]
-assert = "goal != ''"

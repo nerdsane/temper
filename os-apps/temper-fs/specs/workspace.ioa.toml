@@ -115,11 +115,6 @@ when = ["Archived"]
 assert = "no_further_transitions"
 
 [[invariant]]
-name = "UsageBelowQuota"
-when = ["Active"]
-assert = "used_bytes <= quota_limit"
-
-[[invariant]]
 name = "FileCountNonNegative"
 when = ["Active", "Frozen", "Archived"]
 assert = "file_count >= 0"

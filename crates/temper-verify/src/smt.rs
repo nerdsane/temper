@@ -248,6 +248,7 @@ fn check_invariant_induction(model: &TemperModel, max_counter: usize) -> Vec<(St
                     // simulation (proptest_gen/simulation) catches violations.
                     true
                 }
+                InvariantKind::Tautology => true,
                 InvariantKind::Unverifiable { .. } => {
                     // ADR-0178: unsupported safety is not proved.
                     false
@@ -303,6 +304,7 @@ fn kind_inductive_smt(
             .all(|p| kind_inductive_smt(model, trigger_states, p, max_counter)),
         InvariantKind::Or(_) => true,
         // ADR-0178: unsupported safety is not proved.
+        InvariantKind::Tautology => true,
         InvariantKind::Unverifiable { .. } => false,
     }
 }

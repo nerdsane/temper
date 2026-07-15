@@ -26,6 +26,8 @@ pub enum ParsedAssert {
     CounterPositive { var: String },
     /// The entity is in a terminal state — no further transitions allowed.
     NoFurtherTransitions,
+    /// Literal `true` — always holds (used for trivial / marker invariants).
+    Tautology,
     /// State A must have been visited before state B in event history.
     /// Expressed as: `ordering(A, B)`.
     OrderingConstraint { before: String, after: String },
@@ -311,6 +313,22 @@ fn parse_terminal(tokens: &[Tok], cursor: &mut usize) -> Option<ParsedAssert> {
             return Some(ParsedAssert::NoFurtherTransitions);
         }
 
+        // Literal true — always holds.
+        if name == "true" {
+            *cursor += 1;
+            return Some(ParsedAssert::Tautology);
+        }
+
+        // is_true <bool_var> — same as bare bool (IOA sugar used in os-apps).
+        if name == "is_true" {
+            let var = match tokens.get(*cursor + 1) {
+                Some(Tok::Ident(s)) => s.clone(),
+                _ => return None,
+            };
+            *cursor += 2;
+            return Some(ParsedAssert::BoolRequired { var, expect: true });
+        }
+
         // Bare boolean identifier.
         *cursor += 1;
         return Some(ParsedAssert::BoolRequired {
@@ -349,6 +367,22 @@ mod tests {
         assert_eq!(
             parse_assert_expr("no_further_transitions"),
             Some(ParsedAssert::NoFurtherTransitions)
+        );
+    }
+
+    #[test]
+    fn test_tautology_literal_true() {
+        assert_eq!(parse_assert_expr("true"), Some(ParsedAssert::Tautology));
+    }
+
+    #[test]
+    fn test_is_true_sugar() {
+        assert_eq!(
+            parse_assert_expr("is_true has_evidence"),
+            Some(ParsedAssert::BoolRequired {
+                var: "has_evidence".to_string(),
+                expect: true,
+            })
         );
     }
 

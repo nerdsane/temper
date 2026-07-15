@@ -166,11 +166,16 @@ pub enum InvariantKind {
     /// Status must be in a known set of states (TypeInvariant).
     StatusInSet,
     /// When status is in trigger_states, a counter must be > 0.
-    CounterPositive { var: String },
+    CounterPositive {
+        var: String,
+    },
     /// When status is in trigger_states, a boolean must match `expect`.
     ///
     /// `expect = true` encodes `flag`; `expect = false` encodes `!flag`.
-    BoolRequired { var: String, expect: bool },
+    BoolRequired {
+        var: String,
+        expect: bool,
+    },
     /// When status is in trigger_states, no transitions should be enabled.
     NoFurtherTransitions,
     /// When status is in trigger_states, status must also be in required_states.
@@ -182,7 +187,9 @@ pub enum InvariantKind {
         value: usize,
     },
     /// The entity should never be in this state.
-    NeverState { state: String },
+    NeverState {
+        state: String,
+    },
     /// Compound: all subexpressions must hold.
     And(Vec<InvariantKind>),
     /// Compound: at least one subexpression must hold.
@@ -191,7 +198,11 @@ pub enum InvariantKind {
     ///
     /// Per ADR-0178 this is a hard capability failure: the cascade must not
     /// report success, and backends must not treat the declaration as holding.
-    Unverifiable { expression: String },
+    /// Literal `true` — always holds under model check.
+    Tautology,
+    Unverifiable {
+        expression: String,
+    },
 }
 
 /// A safety invariant resolved for runtime checking.
