@@ -1,5 +1,5 @@
 use super::*;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::time::Duration;
 use temper_jit::table::TransitionTable;
 use temper_runtime::ActorSystem;
@@ -1711,6 +1711,113 @@ assert = "items > 0 && payment_captured"
             before_state
         );
     }
+}
+
+#[cfg(feature = "sim")]
+#[tokio::test]
+async fn guard_only_model_state_cannot_make_proved_unsafe_action_reachable() {
+    use temper_runtime::scheduler::install_deterministic_context;
+    use temper_store_sim::SimEventStore;
+
+    let (_guard, _clock, _id_gen) = install_deterministic_context(213);
+    let source = r#"
+[automaton]
+name = "GuardClosure"
+states = ["Active"]
+initial = "Active"
+allow_indefinite_states = ["Active"]
+
+[[state]]
+name = "safe"
+type = "bool"
+initial = "true"
+
+[[state]]
+name = "unlock"
+type = "bool"
+initial = "false"
+
+[[action]]
+name = "BreakSafety"
+kind = "input"
+from = ["Active"]
+to = "Active"
+guard = [{ type = "is_true", var = "unlock" }]
+effect = [{ type = "set_bool", var = "safe", value = "false" }]
+
+[[invariant]]
+name = "AlwaysSafe"
+when = ["Active"]
+assert = "safe"
+"#;
+    let table = Arc::new(RwLock::new(TransitionTable::from_ioa_source(source)));
+    assert_eq!(
+        table.read().unwrap().model_protected_state_vars,
+        BTreeSet::from(["safe".to_string(), "unlock".to_string()])
+    );
+    let store = Arc::new(SimEventStore::no_faults(213));
+    let system = ActorSystem::new("sim-model-guard-closure");
+    let actor = EntityActor::with_persistence(
+        "GuardClosure",
+        "guard-closure-1",
+        table,
+        serde_json::json!({"unlock": true}),
+        crate::storage::BoxedEventStore::from_arc(store.clone()),
+        crate::storage::BackendLabel::Sim,
+    );
+    let actor_ref = system.spawn(actor, "guard-closure-1");
+
+    let created: EntityResponse = actor_ref
+        .ask(EntityMsg::GetState, Duration::from_secs(5))
+        .await
+        .expect("created state");
+    assert!(created.state.booleans["safe"]);
+    assert!(!created.state.booleans["unlock"]);
+
+    let patch: EntityResponse = actor_ref
+        .ask(
+            EntityMsg::UpdateFields {
+                fields: serde_json::json!({"unlock": true}),
+                replace: false,
+            },
+            Duration::from_secs(5),
+        )
+        .await
+        .expect("patch reply");
+    assert!(!patch.success);
+    assert!(!patch.state.booleans["unlock"]);
+
+    let action: EntityResponse = actor_ref
+        .ask(
+            EntityMsg::Action {
+                name: "BreakSafety".to_string(),
+                params: serde_json::json!({}),
+                cross_entity_booleans: BTreeMap::new(),
+                idempotency_key: None,
+            },
+            Duration::from_secs(5),
+        )
+        .await
+        .expect("guarded action reply");
+    assert!(!action.success);
+    assert!(action.state.booleans["safe"]);
+    assert!(!action.state.booleans["unlock"]);
+
+    let recovered = recover_entity_state_from_store(
+        "default",
+        "GuardClosure",
+        "guard-closure-1",
+        &TransitionTable::from_ioa_source(source),
+        &crate::storage::BoxedEventStore::from_arc(store),
+        crate::storage::BackendLabel::Sim,
+        &serde_json::json!({}),
+        None,
+        true,
+    )
+    .await
+    .expect("proved state must replay inside the model state space");
+    assert!(recovered.booleans["safe"]);
+    assert!(!recovered.booleans["unlock"]);
 }
 
 #[cfg(feature = "sim")]

@@ -113,44 +113,28 @@ pub fn unsupported_safety_invariant_names(automaton: &Automaton) -> Vec<String> 
 /// Caller payloads must not mutate these variables directly. Their values are
 /// changed only by modeled transition effects, keeping production execution
 /// and replay within the state space proved by the verification backends.
+/// Protection covers the complete logical model state whenever any invariant
+/// depends on model reachability: guard-only variables can otherwise make a
+/// transition reachable in production that was unreachable during proof.
 pub fn model_protected_state_var_names(automaton: &Automaton) -> BTreeSet<String> {
     let declarations = SafetyDeclarations::from_automaton(automaton);
-    let mut protected = BTreeSet::new();
-    for invariant in &automaton.invariants {
-        let Some(parsed) = parse_assert_expr(&invariant.assert) else {
-            continue;
-        };
-        if !parsed.is_supported_safety_assertion(
-            &declarations.bool_names,
-            &declarations.counter_names,
-            &declarations.string_names,
-            &declarations.status_names,
-        ) {
-            continue;
-        }
-        collect_model_protected_names(&parsed, &mut protected);
-    }
-    protected
-}
-
-fn collect_model_protected_names(assertion: &ParsedAssert, protected: &mut BTreeSet<String>) {
-    match assertion {
-        ParsedAssert::CounterPositive { var }
-        | ParsedAssert::CounterCompare { var, .. }
-        | ParsedAssert::BoolRequired { var, .. } => {
-            protected.insert(var.clone());
-        }
-        ParsedAssert::And(parts) | ParsedAssert::Or(parts) => {
-            for part in parts {
-                collect_model_protected_names(part, protected);
-            }
-        }
-        ParsedAssert::Always
-        | ParsedAssert::NoFurtherTransitions
-        | ParsedAssert::OrderingConstraint { .. }
-        | ParsedAssert::NeverState { .. }
-        | ParsedAssert::CounterVarCompare { .. }
-        | ParsedAssert::StringNonEmpty { .. } => {}
+    let has_model_proved_invariant = automaton.invariants.iter().any(|invariant| {
+        declarations.supports(&invariant.when, &invariant.assert)
+            && parse_assert_expr(&invariant.assert).is_some_and(|assertion| {
+                !matches!(
+                    assertion,
+                    ParsedAssert::StringNonEmpty { .. } | ParsedAssert::CounterVarCompare { .. }
+                )
+            })
+    });
+    if has_model_proved_invariant {
+        declarations
+            .bool_names
+            .union(&declarations.counter_names)
+            .cloned()
+            .collect()
+    } else {
+        BTreeSet::new()
     }
 }
 
