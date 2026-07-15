@@ -5,7 +5,7 @@
 //!
 //! Guard conditions and their evaluation live in [`super::guard`].
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use serde::{Deserialize, Serialize};
 
@@ -80,6 +80,9 @@ pub struct TransitionTable {
     pub composite_actions: BTreeMap<String, CompositeActionMetadata>,
     /// Safety assertions enforced atomically against tentative runtime state.
     pub runtime_invariants: Vec<temper_spec::automaton::RuntimeInvariant>,
+    /// Counter and boolean variables governed by model-proved transition
+    /// effects. Caller payloads cannot directly mutate these variables.
+    pub model_protected_state_vars: BTreeSet<String>,
     /// Pre-built index: action name → indices into `rules`.
     ///
     /// Eliminates the O(N) linear scan + Vec allocation in [`evaluate_ctx()`].
@@ -176,6 +179,7 @@ impl<'de> Deserialize<'de> for TransitionTable {
             #[serde(default)]
             composite_actions: BTreeMap<String, CompositeActionMetadata>,
             runtime_invariants: Vec<temper_spec::automaton::RuntimeInvariant>,
+            model_protected_state_vars: BTreeSet<String>,
             #[serde(default)]
             keys: Vec<DeclaredKey>,
             #[serde(default)]
@@ -194,6 +198,7 @@ impl<'de> Deserialize<'de> for TransitionTable {
             state_var_metadata: raw.state_var_metadata,
             composite_actions: raw.composite_actions,
             runtime_invariants: raw.runtime_invariants,
+            model_protected_state_vars: raw.model_protected_state_vars,
             rule_index: BTreeMap::new(),
         };
         table.rebuild_index();
@@ -334,6 +339,7 @@ mod tests {
             state_var_metadata: BTreeMap::new(),
             composite_actions: BTreeMap::new(),
             runtime_invariants: Vec::new(),
+            model_protected_state_vars: BTreeSet::new(),
             rule_index: BTreeMap::new(),
         };
         table.rebuild_index();

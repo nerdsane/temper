@@ -161,6 +161,7 @@ impl TransitionTable {
             state_var_metadata,
             composite_actions,
             runtime_invariants: automaton::compile_runtime_invariants(automaton),
+            model_protected_state_vars: automaton::model_protected_state_var_names(automaton),
             rule_index,
         }
     }

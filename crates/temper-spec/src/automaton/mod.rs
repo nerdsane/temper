@@ -39,7 +39,8 @@ pub use parser::{
 };
 pub use runtime_assert::{
     RUNTIME_INVARIANT_ENFORCEMENT_VERSION, RuntimeAssert, RuntimeInvariant,
-    compile_runtime_invariants, evaluate_runtime_assert, unsupported_safety_invariant_names,
+    compile_runtime_invariants, evaluate_runtime_assert, model_protected_state_var_names,
+    unsupported_safety_invariant_names,
 };
 pub use translate::{ResolvedAction, ResolvedEffect, ResolvedGuard, translate_actions};
 pub use trigger_graph::{TriggerEdge, TriggerGraph};

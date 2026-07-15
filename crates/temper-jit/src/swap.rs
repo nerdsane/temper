@@ -99,6 +99,7 @@ mod tests {
             state_var_metadata: Default::default(),
             composite_actions: Default::default(),
             runtime_invariants: Default::default(),
+            model_protected_state_vars: Default::default(),
             rule_index: Default::default(),
         };
         table.rebuild_index();

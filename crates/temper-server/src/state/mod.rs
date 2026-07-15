@@ -848,8 +848,17 @@ impl ServerState {
         let mut state = Self::new(system, csdl, csdl_xml);
         let mut tables = BTreeMap::new();
         for (entity_type, ioa_source) in &ioa_sources {
-            let table = TransitionTable::try_from_ioa_source(ioa_source)
+            let automaton = temper_spec::automaton::parse_automaton(ioa_source)
                 .map_err(|e| format!("entity '{entity_type}': {e}"))?;
+            let unsupported =
+                temper_spec::automaton::unsupported_safety_invariant_names(&automaton);
+            if !unsupported.is_empty() {
+                return Err(format!(
+                    "entity '{entity_type}': unsupported safety invariants: {}",
+                    unsupported.join(", ")
+                ));
+            }
+            let table = TransitionTable::from_automaton(&automaton);
             tables.insert(entity_type.clone(), Arc::new(table));
         }
         state.transition_tables = Arc::new(tables);
@@ -1435,7 +1444,73 @@ impl ServerState {
 
 #[cfg(test)]
 mod tests {
-    use super::normalize_local_tdata_host;
+    use super::{ServerState, normalize_local_tdata_host};
+    use temper_runtime::ActorSystem;
+    use temper_spec::csdl::parse_csdl;
+
+    const UNSUPPORTED_IOA: &str = r#"
+[automaton]
+name = "Order"
+states = ["Draft"]
+initial = "Draft"
+allow_indefinite_states = ["Draft"]
+
+[[invariant]]
+name = "UnsupportedLegacySafety"
+when = ["Draft"]
+assert = "used_bytes ** quota_limit"
+"#;
+
+    fn legacy_constructor_inputs() -> (
+        temper_spec::csdl::CsdlDocument,
+        String,
+        std::collections::BTreeMap<String, String>,
+    ) {
+        let xml = include_str!("../../../../test-fixtures/specs/model.csdl.xml");
+        let csdl = parse_csdl(xml).expect("test CSDL");
+        let specs = [("Order".to_string(), UNSUPPORTED_IOA.to_string())]
+            .into_iter()
+            .collect();
+        (csdl, xml.to_string(), specs)
+    }
+
+    #[test]
+    fn legacy_in_memory_constructor_rejects_unsupported_safety() {
+        let (csdl, xml, specs) = legacy_constructor_inputs();
+        let error = match ServerState::with_specs(
+            ActorSystem::new("unsupported-legacy-memory"),
+            csdl,
+            xml,
+            specs,
+        ) {
+            Ok(_) => panic!("unsupported safety must not activate"),
+            Err(error) => error,
+        };
+        assert!(error.contains("Order"));
+        assert!(error.contains("UnsupportedLegacySafety"));
+    }
+
+    #[cfg(feature = "sim")]
+    #[test]
+    fn legacy_persisted_constructor_rejects_unsupported_safety() {
+        let (csdl, xml, specs) = legacy_constructor_inputs();
+        let stack = crate::storage::StorageStack::from_sim(
+            temper_store_sim::SimEventStore::no_faults(213),
+            None,
+        );
+        let error = match ServerState::with_storage_stack(
+            ActorSystem::new("unsupported-legacy-persisted"),
+            csdl,
+            xml,
+            specs,
+            stack,
+        ) {
+            Ok(_) => panic!("unsupported safety must not activate with persistence"),
+            Err(error) => error,
+        };
+        assert!(error.contains("Order"));
+        assert!(error.contains("UnsupportedLegacySafety"));
+    }
 
     #[test]
     fn normalize_local_tdata_host_accepts_urls_domains_and_ports() {

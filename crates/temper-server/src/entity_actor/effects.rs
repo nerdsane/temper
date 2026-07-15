@@ -132,7 +132,9 @@ pub(crate) fn build_initial_entity_state(
                 Some(StateVarInitialValue::Counter(_)) => {
                     match value.as_u64().and_then(|value| usize::try_from(value).ok()) {
                         Some(value) => {
-                            counters.insert(name.clone(), value);
+                            if !table.model_protected_state_vars.contains(name) {
+                                counters.insert(name.clone(), value);
+                            }
                         }
                         None if runtime_field_kind(table, name)
                             == Some(RuntimeFieldKind::Counter) =>
@@ -146,7 +148,9 @@ pub(crate) fn build_initial_entity_state(
                     let value = value
                         .as_bool()
                         .ok_or_else(|| format!("declared bool field '{name}' must be boolean"))?;
-                    booleans.insert(name.clone(), value);
+                    if !table.model_protected_state_vars.contains(name) {
+                        booleans.insert(name.clone(), value);
+                    }
                 }
                 Some(StateVarInitialValue::String(_)) => {
                     if value.as_str().is_none()
@@ -156,6 +160,12 @@ pub(crate) fn build_initial_entity_state(
                     }
                 }
                 _ => {}
+            }
+            if table.model_protected_state_vars.contains(name) {
+                // Model-proved counters and booleans start from the declared
+                // initial state. Caller fields remain available to a modeled
+                // Create action, but cannot rewrite logical state directly.
+                continue;
             }
             declared_fields.insert(name.clone(), value.clone());
         }
@@ -204,7 +214,18 @@ pub(crate) fn sync_declared_state_vars_from_fields(
         &mut state.item_count,
         table,
         fields,
-    )
+        DeclaredStateSyncMode::DirectFields,
+    )?;
+    if let Some(fields) = state.fields.as_object_mut() {
+        for name in &table.model_protected_state_vars {
+            if let Some(value) = state.counters.get(name) {
+                fields.insert(name.clone(), serde_json::json!(value));
+            } else if let Some(value) = state.booleans.get(name) {
+                fields.insert(name.clone(), serde_json::json!(value));
+            }
+        }
+    }
+    Ok(())
 }
 
 /// Synchronize action parameters into declared counter/boolean state before
@@ -223,7 +244,14 @@ pub(crate) fn sync_declared_state_vars_from_params(
         &mut state.item_count,
         table,
         params,
+        DeclaredStateSyncMode::ActionParams,
     )
+}
+
+#[derive(Clone, Copy)]
+enum DeclaredStateSyncMode {
+    ActionParams,
+    DirectFields,
 }
 
 fn sync_declared_state_vars(
@@ -232,6 +260,7 @@ fn sync_declared_state_vars(
     item_count: &mut usize,
     table: &TransitionTable,
     values: &serde_json::Map<String, serde_json::Value>,
+    mode: DeclaredStateSyncMode,
 ) -> Result<(), String> {
     use temper_jit::table::types::StateVarInitialValue;
 
@@ -239,6 +268,27 @@ fn sync_declared_state_vars(
         let Some(value) = values.get(name) else {
             continue;
         };
+        if table.model_protected_state_vars.contains(name) {
+            if matches!(mode, DeclaredStateSyncMode::ActionParams) {
+                // Preserve the parameter as an input to explicit modeled
+                // effects, but never treat its name as an implicit assignment.
+                continue;
+            }
+            let changed = match initial {
+                StateVarInitialValue::Counter(_) => {
+                    value.as_u64().and_then(|value| usize::try_from(value).ok())
+                        != counters.get(name).copied()
+                }
+                StateVarInitialValue::Bool(_) => value.as_bool() != booleans.get(name).copied(),
+                StateVarInitialValue::String(_) => false,
+            };
+            if changed {
+                return Err(format!(
+                    "declared state field '{name}' is controlled by verified transition effects"
+                ));
+            }
+            continue;
+        }
         match initial {
             StateVarInitialValue::Counter(_) => {
                 let counter = value.as_u64().and_then(|value| usize::try_from(value).ok());

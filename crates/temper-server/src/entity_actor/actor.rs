@@ -25,6 +25,7 @@ use std::collections::BTreeMap;
 use std::sync::{Arc, OnceLock, RwLock};
 use std::time::Instant;
 
+use sha2::{Digest, Sha256};
 use temper_jit::table::{Effect, TransitionTable};
 use temper_observe::wide_event;
 use temper_runtime::actor::{Actor, ActorContext, ActorError};
@@ -44,6 +45,13 @@ use super::types::{
     EntityEvent, EntityMsg, EntityResponse, EntityState, MAX_EVENTS_SINCE_SNAPSHOT,
     MAX_ITEMS_PER_ENTITY,
 };
+
+struct ReplayOptions<'a> {
+    tenant: &'a str,
+    blob_store: Option<&'a crate::blob_store::BlobStore>,
+    strict_journal_read: bool,
+    initial_fields: &'a serde_json::Value,
+}
 
 fn event_budget_workspace_id(state: &EntityState) -> String {
     if state.entity_type == "Workspace" {
@@ -147,7 +155,16 @@ impl EntityActor {
     ///
     /// The stored snapshot is already a segment boundary, so its hot tail budget
     /// is reset in the payload. Lifetime sequence/count fields remain intact.
-    fn serialize_snapshot_state(state: &EntityState) -> Result<Vec<u8>, PersistenceError> {
+    fn snapshot_safety_contract(table: &TransitionTable) -> Result<String, PersistenceError> {
+        let contract = serde_json::to_vec(table)
+            .map_err(|e| PersistenceError::Serialization(e.to_string()))?;
+        Ok(format!("{:x}", Sha256::digest(contract)))
+    }
+
+    fn serialize_snapshot_state(
+        state: &EntityState,
+        table: &TransitionTable,
+    ) -> Result<Vec<u8>, PersistenceError> {
         let mut value = serde_json::to_value(state)
             .map_err(|e| PersistenceError::Serialization(e.to_string()))?;
         if let Some(obj) = value.as_object_mut() {
@@ -158,15 +175,74 @@ impl EntityActor {
                 serde_json::json!(state.sequence_nr),
             );
         }
+        let canonical = serde_json::to_vec(&value)
+            .map_err(|e| PersistenceError::Serialization(e.to_string()))?;
+        if let Some(obj) = value.as_object_mut() {
+            obj.insert(
+                "__temper_snapshot_contract".to_string(),
+                serde_json::json!(1),
+            );
+            obj.insert(
+                "__temper_snapshot_sha256".to_string(),
+                serde_json::Value::String(format!("{:x}", Sha256::digest(canonical))),
+            );
+            obj.insert(
+                "__temper_snapshot_safety_contract".to_string(),
+                serde_json::Value::String(Self::snapshot_safety_contract(table)?),
+            );
+        }
         serde_json::to_vec(&value).map_err(|e| PersistenceError::Serialization(e.to_string()))
     }
 
     /// Attempt to load actor state from snapshot payload bytes.
-    fn apply_snapshot_bytes(state: &mut EntityState, sequence_nr: u64, bytes: &[u8]) -> bool {
+    fn apply_snapshot_bytes(
+        state: &mut EntityState,
+        sequence_nr: u64,
+        bytes: &[u8],
+        table: &TransitionTable,
+    ) -> bool {
         let mut value = match serde_json::from_slice::<serde_json::Value>(bytes) {
             Ok(v) => v,
             Err(_) => return false,
         };
+        let (contract, checksum, safety_contract) = {
+            let Some(obj) = value.as_object_mut() else {
+                return false;
+            };
+            (
+                obj.remove("__temper_snapshot_contract"),
+                obj.remove("__temper_snapshot_sha256"),
+                obj.remove("__temper_snapshot_safety_contract"),
+            )
+        };
+        let has_contract = contract.as_ref().and_then(serde_json::Value::as_u64) == Some(1);
+        if !table.model_protected_state_vars.is_empty() && !has_contract {
+            return false;
+        }
+        if has_contract {
+            let Some(expected) = checksum.as_ref().and_then(serde_json::Value::as_str) else {
+                return false;
+            };
+            let Ok(canonical) = serde_json::to_vec(&value) else {
+                return false;
+            };
+            if format!("{:x}", Sha256::digest(canonical)) != expected {
+                return false;
+            }
+            let Ok(expected_contract) = Self::snapshot_safety_contract(table) else {
+                return false;
+            };
+            if safety_contract.as_ref().and_then(serde_json::Value::as_str)
+                != Some(expected_contract.as_str())
+            {
+                return false;
+            }
+        }
+        if has_contract
+            && value.get("sequence_nr").and_then(serde_json::Value::as_u64) != Some(sequence_nr)
+        {
+            return false;
+        }
         let Some(obj) = value.as_object_mut() else {
             return false;
         };
@@ -420,6 +496,7 @@ impl EntityActor {
         snapshot_queue: Option<&Arc<SnapshotWriteQueue>>,
         persistence_id: &str,
         state: &mut EntityState,
+        table: &TransitionTable,
     ) -> Result<(), PersistenceError> {
         if state.sequence_nr == 0 {
             return Ok(());
@@ -443,7 +520,7 @@ impl EntityActor {
             return Ok(());
         }
 
-        let snapshot = Self::serialize_snapshot_state(state)?;
+        let snapshot = Self::serialize_snapshot_state(state, table)?;
         if let Some(queue) = snapshot_queue {
             match queue.enqueue(persistence_id.to_string(), state.sequence_nr, snapshot) {
                 SnapshotEnqueueOutcome::Enqueued
@@ -479,24 +556,32 @@ impl EntityActor {
         store: &BoxedEventStore,
         backend: BackendLabel,
         state: &mut EntityState,
-        tenant: &str,
-        blob_store: Option<&crate::blob_store::BlobStore>,
-        // When true, a journal read failure PROPAGATES as an error instead of being
-        // swallowed ("start fresh"). The key-index backfill needs this: it must
-        // distinguish "entity genuinely has no events" from "could not read the
-        // journal", or it would watermark a type while a present entity is unkeyed
-        // (a wrong-absent bug). Actor hydration keeps the lenient default (false).
-        strict_journal_read: bool,
+        options: ReplayOptions<'_>,
     ) -> Result<(), ActorError> {
+        let ReplayOptions {
+            tenant,
+            blob_store,
+            strict_journal_read,
+            initial_fields,
+        } = options;
         let replay_start = Instant::now(); // determinism-ok: wall-clock for production replay duration metric only
         let persistence_id = format!("{tenant}:{}:{}", state.entity_type, state.entity_id);
         let persistence_id = persistence_id.as_str();
+        let entity_type = state.entity_type.clone();
+        let entity_id = state.entity_id.clone();
+        *state = super::effects::build_initial_entity_state(
+            &entity_type,
+            &entity_id,
+            table,
+            initial_fields,
+        )
+        .map_err(ActorError::custom)?;
         let mut from_sequence = 0;
         let mut loaded_snapshot = false;
 
         match store.load_snapshot(persistence_id).await {
             Ok(Some((snapshot_seq, snapshot_bytes))) => {
-                if Self::apply_snapshot_bytes(state, snapshot_seq, &snapshot_bytes) {
+                if Self::apply_snapshot_bytes(state, snapshot_seq, &snapshot_bytes, table) {
                     if let Some(error) = super::effects::runtime_invariant_failure(state, table) {
                         return Err(ActorError::custom(format!(
                             "persisted snapshot violates runtime safety contract: {error}"
@@ -780,9 +865,12 @@ pub(crate) async fn recover_entity_state_from_store(
         store,
         backend,
         &mut state,
-        tenant,
-        blob_store,
-        strict_journal_read,
+        ReplayOptions {
+            tenant,
+            blob_store,
+            strict_journal_read,
+            initial_fields,
+        },
     )
     .await?;
     Ok(state)
@@ -1104,11 +1192,15 @@ impl Actor for EntityActor {
                                         store,
                                         backend,
                                         state,
-                                        &self.tenant,
-                                        self.blob_store.as_ref(),
-                                        // Actor hydration keeps the lenient "start
-                                        // fresh on read error" behavior (unchanged).
-                                        false,
+                                        ReplayOptions {
+                                            tenant: &self.tenant,
+                                            blob_store: self.blob_store.as_ref(),
+                                            // Retry must fail closed: continuing from a
+                                            // reset or truncated replay can overwrite a
+                                            // concurrent writer with regressed state.
+                                            strict_journal_read: true,
+                                            initial_fields: &self.initial_fields,
+                                        },
                                     )
                                     .await?;
 
@@ -1117,12 +1209,12 @@ impl Actor for EntityActor {
                                     // reported. Reaching further is fine (a
                                     // later writer may have appended during
                                     // our own round trip).
-                                    debug_assert!(
-                                        state.sequence_nr >= last_actual,
-                                        "POSTCONDITION: replay under-reached authoritative sequence \
-                                         (state.sequence_nr={} < last_actual={last_actual})",
-                                        state.sequence_nr
-                                    );
+                                    if state.sequence_nr < last_actual {
+                                        return Err(ActorError::custom(format!(
+                                            "concurrency retry replay under-reached authoritative sequence: {} < {last_actual}",
+                                            state.sequence_nr
+                                        )));
+                                    }
 
                                     // Refresh baselines so postconditions hold
                                     // against the replayed state, not the
@@ -1330,6 +1422,7 @@ impl Actor for EntityActor {
                             self.snapshot_queue.as_ref(),
                             &persistence_id,
                             state,
+                            &table,
                         )
                         .await
                     {
@@ -1464,6 +1557,7 @@ impl Actor for EntityActor {
                 });
             }
             EntityMsg::Passivate => {
+                let table = self.table.read().expect("table lock poisoned").clone();
                 let Some(store) = self.event_journal.as_ref() else {
                     ctx.reply(EntityResponse {
                         success: false,
@@ -1491,7 +1585,7 @@ impl Actor for EntityActor {
                     return Ok(());
                 }
 
-                let snapshot = match Self::serialize_snapshot_state(state) {
+                let snapshot = match Self::serialize_snapshot_state(state, &table) {
                     Ok(snapshot) => snapshot,
                     Err(error) => {
                         ctx.reply(EntityResponse {

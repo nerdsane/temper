@@ -106,6 +106,7 @@ async fn queued_snapshot_only_advances_replay_boundary_after_write_applies() {
     let boxed_store = crate::storage::BoxedEventStore::from_arc(store);
     let snapshot_queue = SnapshotWriteQueue::start(boxed_store.clone());
     let persistence_id = "default:Order:queued-snapshot-1";
+    let table = TransitionTable::from_ioa_source(ORDER_IOA);
     let mut state = EntityState {
         entity_type: "Order".to_string(),
         entity_id: "queued-snapshot-1".to_string(),
@@ -131,6 +132,7 @@ async fn queued_snapshot_only_advances_replay_boundary_after_write_applies() {
         Some(&snapshot_queue),
         persistence_id,
         &mut state,
+        &table,
     )
     .await
     .expect("snapshot enqueue should succeed");
@@ -155,6 +157,7 @@ async fn queued_snapshot_only_advances_replay_boundary_after_write_applies() {
         Some(&snapshot_queue),
         persistence_id,
         &mut state,
+        &table,
     )
     .await
     .expect("snapshot boundary observation should succeed");
@@ -725,6 +728,88 @@ params = ["size_bytes"]
 
 #[cfg(feature = "sim")]
 #[tokio::test]
+async fn modeled_effect_can_consume_protected_action_param_during_replay() {
+    use temper_runtime::persistence::EventStore;
+    use temper_runtime::scheduler::install_deterministic_context;
+    use temper_store_sim::SimEventStore;
+
+    let (_guard, _clock, _id_gen) = install_deterministic_context(213);
+    let table = TransitionTable::from_ioa_source(
+        r#"
+[automaton]
+name = "Cart"
+states = ["Active"]
+initial = "Active"
+allow_indefinite_states = ["Active"]
+
+[[state]]
+name = "items"
+type = "counter"
+initial = "1"
+
+[[action]]
+name = "Update"
+kind = "input"
+from = ["Active"]
+to = "Active"
+params = ["items"]
+effect = [{ type = "set_counter_from_param", var = "items", param = "items" }]
+
+[[invariant]]
+name = "HasItems"
+when = ["Active"]
+assert = "items > 0"
+"#,
+    );
+    let store = Arc::new(SimEventStore::no_faults(213));
+    let pid = "default:Cart:protected-replay";
+    store
+        .append(
+            pid,
+            0,
+            &[PersistenceEnvelope {
+                sequence_nr: 0,
+                event_type: "Update".to_string(),
+                payload: serde_json::json!({
+                    "action": "Update",
+                    "from_status": "Active",
+                    "to_status": "Active",
+                    "timestamp": "2024-01-01T00:00:00Z",
+                    "params": {"items": 2}
+                }),
+                metadata: EventMetadata {
+                    event_id: sim_uuid(),
+                    causation_id: sim_uuid(),
+                    correlation_id: sim_uuid(),
+                    timestamp: sim_now(),
+                    actor_id: pid.to_string(),
+                },
+            }],
+        )
+        .await
+        .expect("append protected event");
+    let boxed_store = crate::storage::BoxedEventStore::from_arc(store);
+
+    let recovered = recover_entity_state_from_store(
+        "default",
+        "Cart",
+        "protected-replay",
+        &table,
+        &boxed_store,
+        crate::storage::BackendLabel::Sim,
+        &serde_json::json!({}),
+        None,
+        true,
+    )
+    .await
+    .expect("modeled effect must replay protected state");
+
+    assert_eq!(recovered.counters["items"], 2);
+    assert_eq!(recovered.fields["items"], 2);
+}
+
+#[cfg(feature = "sim")]
+#[tokio::test]
 async fn hydration_rejects_invalid_snapshot_before_healing_tail_event() {
     use temper_runtime::persistence::EventStore;
     use temper_runtime::scheduler::install_deterministic_context;
@@ -826,6 +911,390 @@ assert = "goal != ''"
             .contains("persisted snapshot violates runtime safety contract"),
         "unexpected snapshot error: {error}"
     );
+}
+
+#[cfg(feature = "sim")]
+#[tokio::test]
+async fn model_protected_snapshot_is_rebuilt_from_authoritative_history() {
+    use temper_runtime::persistence::EventStore;
+    use temper_runtime::scheduler::install_deterministic_context;
+    use temper_store_sim::SimEventStore;
+
+    let (_guard, _clock, _id_gen) = install_deterministic_context(213);
+    let table = TransitionTable::from_ioa_source(
+        r#"
+[automaton]
+name = "Payment"
+states = ["Active"]
+initial = "Active"
+allow_indefinite_states = ["Active"]
+
+[[state]]
+name = "payment_captured"
+type = "bool"
+initial = "true"
+
+[[invariant]]
+name = "PaymentCaptured"
+when = ["Active"]
+assert = "payment_captured"
+"#,
+    );
+    let store = Arc::new(SimEventStore::no_faults(213));
+    let pid = "default:Payment:protected-snapshot";
+    let mut corrupted = crate::entity_actor::effects::build_initial_entity_state(
+        "Payment",
+        "protected-snapshot",
+        &table,
+        &serde_json::json!({}),
+    )
+    .expect("build snapshot state");
+    corrupted.booleans.insert("payment_captured".into(), false);
+    corrupted.fields["payment_captured"] = serde_json::json!(false);
+    corrupted.sequence_nr = 1;
+    corrupted.total_event_count = 1;
+    store
+        .save_snapshot(
+            pid,
+            1,
+            &serde_json::to_vec(&corrupted).expect("serialize corrupted snapshot"),
+        )
+        .await
+        .expect("save corrupted snapshot");
+
+    let recovered = recover_entity_state_from_store(
+        "default",
+        "Payment",
+        "protected-snapshot",
+        &table,
+        &crate::storage::BoxedEventStore::from_arc(store),
+        crate::storage::BackendLabel::Sim,
+        &serde_json::json!({}),
+        None,
+        true,
+    )
+    .await
+    .expect("protected state must rebuild without trusting snapshot values");
+
+    assert!(recovered.booleans["payment_captured"]);
+    assert_eq!(recovered.fields["payment_captured"], true);
+    assert_eq!(recovered.sequence_nr, 0);
+}
+
+#[cfg(feature = "sim")]
+#[tokio::test]
+async fn contracted_protected_snapshot_remains_a_bounded_replay_boundary() {
+    use temper_runtime::persistence::EventStore;
+    use temper_runtime::scheduler::install_deterministic_context;
+    use temper_store_sim::SimEventStore;
+
+    let (_guard, _clock, _id_gen) = install_deterministic_context(213);
+    let table = TransitionTable::from_ioa_source(
+        r#"
+[automaton]
+name = "Payment"
+states = ["Active"]
+initial = "Active"
+allow_indefinite_states = ["Active"]
+
+[[state]]
+name = "payment_captured"
+type = "bool"
+initial = "true"
+
+[[invariant]]
+name = "PaymentCaptured"
+when = ["Active"]
+assert = "payment_captured"
+"#,
+    );
+    let store = Arc::new(SimEventStore::no_faults(213));
+    let pid = "default:Payment:protected-snapshot-boundary";
+    let mut snapshot = crate::entity_actor::effects::build_initial_entity_state(
+        "Payment",
+        "protected-snapshot-boundary",
+        &table,
+        &serde_json::json!({}),
+    )
+    .expect("build snapshot state");
+    snapshot.sequence_nr = (MAX_EVENTS_SINCE_SNAPSHOT as u64) + 1;
+    snapshot.total_event_count = MAX_EVENTS_SINCE_SNAPSHOT + 1;
+    let snapshot_bytes =
+        EntityActor::serialize_snapshot_state(&snapshot, &table).expect("snapshot");
+    store
+        .save_snapshot(pid, snapshot.sequence_nr, &snapshot_bytes)
+        .await
+        .expect("save contracted snapshot");
+
+    let recovered = recover_entity_state_from_store(
+        "default",
+        "Payment",
+        "protected-snapshot-boundary",
+        &table,
+        &crate::storage::BoxedEventStore::from_arc(store),
+        crate::storage::BackendLabel::Sim,
+        &serde_json::json!({}),
+        None,
+        true,
+    )
+    .await
+    .expect("contracted snapshot must avoid unbounded full replay");
+
+    assert_eq!(recovered.sequence_nr, snapshot.sequence_nr);
+    assert!(recovered.booleans["payment_captured"]);
+}
+
+#[cfg(feature = "sim")]
+#[tokio::test]
+async fn contracted_snapshot_sequence_mismatch_falls_back_to_full_replay() {
+    use temper_runtime::persistence::EventStore;
+    use temper_runtime::scheduler::install_deterministic_context;
+    use temper_store_sim::SimEventStore;
+
+    let (_guard, _clock, _id_gen) = install_deterministic_context(213);
+    let table = TransitionTable::from_ioa_source(
+        r#"
+[automaton]
+name = "Payment"
+states = ["Active"]
+initial = "Active"
+allow_indefinite_states = ["Active"]
+
+[[state]]
+name = "payment_captured"
+type = "bool"
+initial = "true"
+
+[[invariant]]
+name = "PaymentCaptured"
+when = ["Active"]
+assert = "payment_captured"
+"#,
+    );
+    let store = Arc::new(SimEventStore::no_faults(213));
+    let pid = "default:Payment:snapshot-sequence-mismatch";
+    let mut snapshot = crate::entity_actor::effects::build_initial_entity_state(
+        "Payment",
+        "snapshot-sequence-mismatch",
+        &table,
+        &serde_json::json!({}),
+    )
+    .expect("build snapshot state");
+    snapshot.sequence_nr = 5;
+    snapshot.total_event_count = 5;
+    let snapshot_bytes =
+        EntityActor::serialize_snapshot_state(&snapshot, &table).expect("snapshot");
+    store
+        .save_snapshot(pid, 6, &snapshot_bytes)
+        .await
+        .expect("save mismatched snapshot row");
+
+    let recovered = recover_entity_state_from_store(
+        "default",
+        "Payment",
+        "snapshot-sequence-mismatch",
+        &table,
+        &crate::storage::BoxedEventStore::from_arc(store),
+        crate::storage::BackendLabel::Sim,
+        &serde_json::json!({}),
+        None,
+        true,
+    )
+    .await
+    .expect("mismatched boundary must fall back to full history");
+
+    assert_eq!(recovered.sequence_nr, 0);
+    assert!(recovered.booleans["payment_captured"]);
+}
+
+#[cfg(feature = "sim")]
+#[tokio::test]
+async fn snapshot_from_weaker_safety_contract_is_not_a_replay_boundary() {
+    use temper_runtime::persistence::EventStore;
+    use temper_runtime::scheduler::install_deterministic_context;
+    use temper_store_sim::SimEventStore;
+
+    let (_guard, _clock, _id_gen) = install_deterministic_context(213);
+    let old_table = TransitionTable::from_ioa_source(
+        r#"
+[automaton]
+name = "Payment"
+states = ["Active"]
+initial = "Active"
+allow_indefinite_states = ["Active"]
+
+[[state]]
+name = "payment_captured"
+type = "bool"
+initial = "true"
+"#,
+    );
+    let new_table = TransitionTable::from_ioa_source(
+        r#"
+[automaton]
+name = "Payment"
+states = ["Active"]
+initial = "Active"
+allow_indefinite_states = ["Active"]
+
+[[state]]
+name = "payment_captured"
+type = "bool"
+initial = "true"
+
+[[invariant]]
+name = "PaymentCaptured"
+when = ["Active"]
+assert = "payment_captured"
+"#,
+    );
+    let store = Arc::new(SimEventStore::no_faults(213));
+    let pid = "default:Payment:weaker-snapshot-contract";
+    let mut old_snapshot = crate::entity_actor::effects::build_initial_entity_state(
+        "Payment",
+        "weaker-snapshot-contract",
+        &old_table,
+        &serde_json::json!({"payment_captured": false}),
+    )
+    .expect("build old snapshot state");
+    assert!(!old_snapshot.booleans["payment_captured"]);
+    old_snapshot.sequence_nr = 5;
+    old_snapshot.total_event_count = 5;
+    let snapshot_bytes =
+        EntityActor::serialize_snapshot_state(&old_snapshot, &old_table).expect("old snapshot");
+    store
+        .save_snapshot(pid, 5, &snapshot_bytes)
+        .await
+        .expect("save old contracted snapshot");
+
+    let recovered = recover_entity_state_from_store(
+        "default",
+        "Payment",
+        "weaker-snapshot-contract",
+        &new_table,
+        &crate::storage::BoxedEventStore::from_arc(store),
+        crate::storage::BackendLabel::Sim,
+        &serde_json::json!({}),
+        None,
+        true,
+    )
+    .await
+    .expect("contract mismatch must replay authoritative history");
+
+    assert_eq!(recovered.sequence_nr, 0);
+    assert!(recovered.booleans["payment_captured"]);
+}
+
+#[cfg(feature = "sim")]
+#[tokio::test]
+async fn full_replay_resets_materialized_protected_state_before_effects() {
+    use temper_runtime::persistence::EventStore;
+    use temper_runtime::scheduler::install_deterministic_context;
+    use temper_store_sim::SimEventStore;
+
+    let (_guard, _clock, _id_gen) = install_deterministic_context(213);
+    let table = TransitionTable::from_ioa_source(
+        r#"
+[automaton]
+name = "Counter"
+states = ["Active"]
+initial = "Active"
+allow_indefinite_states = ["Active"]
+
+[[state]]
+name = "count"
+type = "counter"
+initial = "1"
+
+[[action]]
+name = "Increment"
+kind = "input"
+from = ["Active"]
+to = "Active"
+effect = [{ type = "increment", var = "count" }]
+
+[[invariant]]
+name = "PositiveCount"
+when = ["Active"]
+assert = "count > 0"
+"#,
+    );
+    let store = Arc::new(SimEventStore::no_faults(213));
+    let pid = "default:Counter:retry-reset";
+    store
+        .append(
+            pid,
+            0,
+            &[PersistenceEnvelope {
+                sequence_nr: 0,
+                event_type: "Increment".to_string(),
+                payload: serde_json::json!({
+                    "action": "Increment",
+                    "from_status": "Active",
+                    "to_status": "Active",
+                    "timestamp": "2024-01-01T00:00:00Z",
+                    "params": {}
+                }),
+                metadata: EventMetadata {
+                    event_id: sim_uuid(),
+                    causation_id: sim_uuid(),
+                    correlation_id: sim_uuid(),
+                    timestamp: sim_now(),
+                    actor_id: pid.to_string(),
+                },
+            }],
+        )
+        .await
+        .expect("append increment");
+    let mut materialized = crate::entity_actor::effects::build_initial_entity_state(
+        "Counter",
+        "retry-reset",
+        &table,
+        &serde_json::json!({}),
+    )
+    .expect("build materialized state");
+    materialized.counters.insert("count".into(), 2);
+    materialized.fields["count"] = serde_json::json!(2);
+
+    EntityActor::replay_events(
+        &table,
+        &crate::storage::BoxedEventStore::from_arc(store.clone()),
+        crate::storage::BackendLabel::Sim,
+        &mut materialized,
+        ReplayOptions {
+            tenant: "default",
+            blob_store: None,
+            strict_journal_read: true,
+            initial_fields: &serde_json::json!({}),
+        },
+    )
+    .await
+    .expect("full replay");
+
+    assert_eq!(materialized.counters["count"], 2);
+    assert_eq!(materialized.fields["count"], 2);
+
+    store.fail_next_reads(pid, 1);
+    let error = EntityActor::replay_events(
+        &table,
+        &crate::storage::BoxedEventStore::from_arc(store),
+        crate::storage::BackendLabel::Sim,
+        &mut materialized,
+        ReplayOptions {
+            tenant: "default",
+            blob_store: None,
+            strict_journal_read: true,
+            initial_fields: &serde_json::json!({}),
+        },
+    )
+    .await
+    .expect_err("strict retry replay must fail closed on journal read failure");
+    assert!(
+        error
+            .to_string()
+            .contains("failed to read events for replay")
+    );
+    assert_eq!(materialized.counters["count"], 1);
 }
 
 /// An action-backed entity may use its first action to establish invariants
@@ -1023,6 +1492,161 @@ assert = "used_bytes <= quota_limit"
     assert!(!rejected.success);
     assert_eq!(rejected.state.counters.get("used_bytes"), Some(&0));
     assert_eq!(rejected.state.counters.get("quota_limit"), Some(&10));
+}
+
+#[cfg(feature = "sim")]
+#[tokio::test]
+async fn model_protected_action_param_does_not_implicitly_mutate_state() {
+    use temper_runtime::persistence::EventStore;
+    use temper_runtime::scheduler::install_deterministic_context;
+    use temper_store_sim::SimEventStore;
+
+    let (_guard, _clock, _id_gen) = install_deterministic_context(213);
+    let source = r#"
+[automaton]
+name = "Payment"
+states = ["Active"]
+initial = "Active"
+allow_indefinite_states = ["Active"]
+
+[[state]]
+name = "payment_captured"
+type = "bool"
+initial = "true"
+
+[[action]]
+name = "Update"
+kind = "input"
+from = ["Active"]
+to = "Active"
+params = ["payment_captured"]
+
+[[invariant]]
+name = "PaymentCaptured"
+when = ["Active"]
+assert = "payment_captured"
+"#;
+    let table = Arc::new(RwLock::new(TransitionTable::from_ioa_source(source)));
+    let store = Arc::new(SimEventStore::no_faults(213));
+    let boxed_store = crate::storage::BoxedEventStore::from_arc(store.clone());
+    let system = ActorSystem::new("sim-model-protected-action");
+    let actor = EntityActor::with_persistence(
+        "Payment",
+        "payment-1",
+        table,
+        serde_json::json!({"payment_captured": false}),
+        boxed_store,
+        crate::storage::BackendLabel::Sim,
+    );
+    let actor_ref = system.spawn(actor, "payment-1");
+    let before: EntityResponse = actor_ref
+        .ask(EntityMsg::GetState, Duration::from_secs(5))
+        .await
+        .expect("initial state");
+    assert!(before.state.booleans["payment_captured"]);
+    assert_eq!(before.state.fields["payment_captured"], true);
+    let initial_events = store
+        .read_events("default:Payment:payment-1", 0)
+        .await
+        .expect("initial journal");
+
+    let response: EntityResponse = actor_ref
+        .ask(
+            EntityMsg::Action {
+                name: "Update".to_string(),
+                params: serde_json::json!({"payment_captured": false}),
+                cross_entity_booleans: BTreeMap::new(),
+                idempotency_key: None,
+            },
+            Duration::from_secs(5),
+        )
+        .await
+        .expect("action reply");
+
+    assert!(response.success);
+    assert_eq!(response.state.status, before.state.status);
+    assert_eq!(response.state.counters, before.state.counters);
+    assert_eq!(response.state.booleans, before.state.booleans);
+    assert_eq!(response.state.fields, before.state.fields);
+    let after_events = store
+        .read_events("default:Payment:payment-1", 0)
+        .await
+        .expect("journal after rejection");
+    assert_eq!(after_events.len(), initial_events.len() + 1);
+
+    let replay_table = TransitionTable::from_ioa_source(source);
+    let recovered = recover_entity_state_from_store(
+        "default",
+        "Payment",
+        "payment-1",
+        &replay_table,
+        &crate::storage::BoxedEventStore::from_arc(store),
+        crate::storage::BackendLabel::Sim,
+        &serde_json::json!({}),
+        None,
+        true,
+    )
+    .await
+    .expect("protected no-op parameter must replay");
+    assert!(recovered.booleans["payment_captured"]);
+    assert_eq!(recovered.fields["payment_captured"], true);
+}
+
+#[cfg(feature = "sim")]
+#[tokio::test]
+async fn model_protected_patch_rolls_back_bool_and_literal_counter_state() {
+    let source = r#"
+[automaton]
+name = "Payment"
+states = ["Active"]
+initial = "Active"
+allow_indefinite_states = ["Active"]
+
+[[state]]
+name = "items"
+type = "counter"
+initial = "1"
+
+[[state]]
+name = "payment_captured"
+type = "bool"
+initial = "true"
+
+[[invariant]]
+name = "ReadyToSettle"
+when = ["Active"]
+assert = "items > 0 && payment_captured"
+"#;
+    let table = Arc::new(RwLock::new(TransitionTable::from_ioa_source(source)));
+    let system = ActorSystem::new("sim-model-protected-patch");
+    let actor = EntityActor::new("Payment", "payment-2", table, serde_json::json!({}));
+    let actor_ref = system.spawn(actor, "payment-2");
+    let before: EntityResponse = actor_ref
+        .ask(EntityMsg::GetState, Duration::from_secs(5))
+        .await
+        .expect("initial state");
+    let before_state = serde_json::to_value(&before.state).expect("serialize initial state");
+
+    for fields in [
+        serde_json::json!({"payment_captured": false}),
+        serde_json::json!({"items": 0}),
+    ] {
+        let rejected: EntityResponse = actor_ref
+            .ask(
+                EntityMsg::UpdateFields {
+                    fields,
+                    replace: false,
+                },
+                Duration::from_secs(5),
+            )
+            .await
+            .expect("patch reply");
+        assert!(!rejected.success);
+        assert_eq!(
+            serde_json::to_value(&rejected.state).expect("serialize rejected state"),
+            before_state
+        );
+    }
 }
 
 #[cfg(feature = "sim")]
