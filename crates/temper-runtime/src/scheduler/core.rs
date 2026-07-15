@@ -135,14 +135,23 @@ impl SimScheduler {
         });
     }
 
-    /// Advance one tick: deliver all messages due at current_time + 1.
-    /// Returns the messages delivered this tick.
-    pub fn tick(&mut self) -> Vec<SimMessage> {
+    /// Advance one tick: enqueue all messages due at the new current time
+    /// into their target mailboxes.
+    ///
+    /// ARN-236 single-ownership contract: `tick` advances logical time and
+    /// enqueues ONLY — it does not hand deliveries to the caller. The one
+    /// consumption path is [`Self::drain_ready`] (or [`Self::receive`] for a
+    /// single actor), which REMOVES messages from mailboxes. A message is
+    /// therefore owned by exactly one place at every instant: the pending
+    /// queue, a mailbox, or the consumer that drained it. (Previously `tick`
+    /// both enqueued and returned clones; drivers processed the clones,
+    /// mailboxes grew forever, and deliveries surfaced by a discarded tick
+    /// were lost.)
+    pub fn tick(&mut self) {
         self.current_time += 1;
         self.ticks += 1;
-        let mut delivered_this_tick = Vec::new();
 
-        // Deliver all messages due at or before current time
+        // Enqueue all messages due at or before current time
         while let Some(msg) = self.pending.peek() {
             if msg.deliver_at <= self.current_time {
                 let msg = self.pending.pop().unwrap(); // ci-ok: guarded by peek() above
@@ -152,9 +161,8 @@ impl SimScheduler {
                 let actor_state = self.actor_states.get(&to).cloned();
                 match actor_state {
                     Some(SimActorState::Running) => {
-                        self.mailboxes.entry(to).or_default().push_back(msg.clone());
-                        delivered_this_tick.push(msg.clone());
-                        self.delivered.push(msg);
+                        self.delivered.push(msg.clone());
+                        self.mailboxes.entry(to).or_default().push_back(msg);
                     }
                     Some(SimActorState::Crashed) => {
                         // Actor is crashed — message is lost (or could be re-queued)
@@ -175,7 +183,7 @@ impl SimScheduler {
             }
         }
 
-        // Maybe crash an actor after delivery
+        // Maybe crash an actor after enqueue
         if self.rng.chance(self.fault_config.actor_crash_prob) {
             let running: Vec<String> = self
                 .actor_states
@@ -189,8 +197,25 @@ impl SimScheduler {
                     .insert(running[idx].clone(), SimActorState::Crashed);
             }
         }
+    }
 
-        delivered_this_tick
+    /// Remove and return every queued message, in deterministic order
+    /// (actor id order, FIFO within each mailbox).
+    ///
+    /// This is the single delivery-consumption path for drivers (ARN-236):
+    /// a drained message has left the scheduler entirely and is applied by
+    /// the caller exactly once.
+    ///
+    /// `drain_ready` does not consult `actor_states`: a driver that ticks
+    /// several times before draining would apply messages to actors that
+    /// crashed after enqueue. Both current drivers drain immediately after
+    /// every tick, so the drained set is exactly that tick's enqueues.
+    pub fn drain_ready(&mut self) -> Vec<SimMessage> {
+        let mut ready = Vec::new();
+        for queue in self.mailboxes.values_mut() {
+            ready.extend(queue.drain(..));
+        }
+        ready
     }
 
     /// Take the next message from an actor's mailbox.

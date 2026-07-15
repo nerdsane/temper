@@ -208,37 +208,45 @@ fn run_simulation_impl(model: &TemperModel, config: &SimConfig) -> SimulationRes
         );
         total_messages += 1;
 
-        let delivered = sched.tick();
+        sched.tick();
+
+        // Single-ownership delivery (ARN-236): drain_ready removes messages
+        // from mailboxes; each is applied to the model exactly once.
+        let delivered = sched.drain_ready();
 
         for msg in &delivered {
-            let target_idx = actor_states.iter().position(|(id, _)| id == &msg.to);
-            let Some(idx) = target_idx else { continue };
-
-            let (ref target_id, ref state_before) = actor_states[idx];
-
-            let action: TemperModelAction = match serde_json::from_str(&msg.payload) {
-                Ok(a) => a,
-                Err(_) => continue,
-            };
-
-            if let Some(new_state) = model.next_state(state_before, action.clone()) {
-                check_invariants_on_state(
-                    model,
-                    target_id,
-                    &action.name,
-                    state_before,
-                    &new_state,
-                    tick,
-                    &mut violations,
-                );
-
-                actor_states[idx].1 = new_state;
-                actor_action_counts[idx] += 1;
-                total_transitions += 1;
-            }
+            apply_to_model(
+                model,
+                &mut actor_states,
+                &mut actor_action_counts,
+                &mut violations,
+                &mut total_transitions,
+                tick,
+                msg,
+            );
         }
+    }
 
+    // Flush the schedule: delay faults can push deliveries past the last
+    // loop iteration. Budgeted; every flushed message runs through the same
+    // exactly-once path (previously a bare tick() discarded them — ARN-236).
+    let mut flush_budget = config.max_ticks;
+    let mut tick = config.max_ticks.saturating_sub(1);
+    while !sched.is_quiescent() && flush_budget > 0 {
+        flush_budget -= 1;
+        tick += 1;
         sched.tick();
+        for msg in &sched.drain_ready() {
+            apply_to_model(
+                model,
+                &mut actor_states,
+                &mut actor_action_counts,
+                &mut violations,
+                &mut total_transitions,
+                tick,
+                msg,
+            );
+        }
     }
 
     // Post-simulation liveness checks
@@ -312,6 +320,47 @@ fn check_liveness_post_simulation(
     }
 
     violations
+}
+
+/// Apply one drained message to the model: parse the action, advance the
+/// target actor's state, check invariants, and update counters. The
+/// exactly-once application step shared by the driver loop and the flush
+/// (ARN-236).
+#[allow(clippy::too_many_arguments)]
+fn apply_to_model(
+    model: &TemperModel,
+    actor_states: &mut [(String, TemperModelState)],
+    actor_action_counts: &mut [usize],
+    violations: &mut Vec<InvariantViolation>,
+    total_transitions: &mut u64,
+    tick: u64,
+    msg: &temper_runtime::scheduler::SimMessage,
+) {
+    let target_idx = actor_states.iter().position(|(id, _)| id == &msg.to);
+    let Some(idx) = target_idx else { return };
+
+    let (ref target_id, ref state_before) = actor_states[idx];
+
+    let action: TemperModelAction = match serde_json::from_str(&msg.payload) {
+        Ok(a) => a,
+        Err(_) => return,
+    };
+
+    if let Some(new_state) = model.next_state(state_before, action.clone()) {
+        check_invariants_on_state(
+            model,
+            target_id,
+            &action.name,
+            state_before,
+            &new_state,
+            tick,
+            violations,
+        );
+
+        actor_states[idx].1 = new_state;
+        actor_action_counts[idx] += 1;
+        *total_transitions += 1;
+    }
 }
 
 /// Check invariants on a state using the model's resolved invariants.

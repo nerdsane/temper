@@ -17,7 +17,7 @@ use super::clock::{LogicalClock, SimClock};
 use super::context::{SimContextGuard, install_sim_context};
 use super::id_gen::DeterministicIdGen;
 use super::sim_handler::SimActorHandler;
-use super::{DeterministicRng, FaultConfig, SimScheduler};
+use super::{DeterministicRng, FaultConfig, SimMessage, SimScheduler};
 
 /// Configures how integration callbacks are delivered in simulation.
 ///
@@ -355,6 +355,49 @@ impl SimActorSystem {
     // Random Mode
     // ===================================================================
 
+    /// Apply one drained message to its actor: run the handler, record the
+    /// transition, check invariants, and schedule integration callbacks.
+    /// The exactly-once application step of the ARN-236 ownership model.
+    fn apply_delivered_message(&mut self, msg: &SimMessage) {
+        if let Some(handler) = self.actors.get_mut(&msg.to) {
+            let status_before = handler.current_status();
+
+            match handler.handle_message(&msg.msg_type, &msg.payload) {
+                Ok(_) => {
+                    let status_after = handler.current_status();
+                    let item_count = handler.current_item_count();
+                    let tick = self.clock.tick();
+                    *self.action_counts.get_mut(&msg.to).unwrap() += 1; // ci-ok: actor always in action_counts
+                    self.total_transitions += 1;
+
+                    // Record the transition
+                    self.recorded_transitions.push((
+                        tick,
+                        msg.to.clone(),
+                        msg.msg_type.clone(),
+                        status_before.clone(),
+                        status_after.clone(),
+                    ));
+
+                    self.check_invariants(
+                        &msg.to,
+                        &msg.msg_type,
+                        &status_before,
+                        &status_after,
+                        item_count,
+                        tick,
+                    );
+
+                    // Schedule integration callbacks for any custom effects
+                    self.schedule_integration_callbacks(&msg.to);
+                }
+                Err(_) => {
+                    // Action failed — expected for invalid transitions
+                }
+            }
+        }
+    }
+
     /// Run random exploration with fault injection.
     ///
     /// The RNG picks actors and actions. The scheduler delays/drops/crashes.
@@ -394,57 +437,38 @@ impl SimActorSystem {
             self.scheduler.send("sim-driver", &actor_id, &action, "{}");
             self.total_messages += 1;
 
-            let delivered = self.scheduler.tick();
+            self.scheduler.tick();
             self.clock.advance();
 
-            // Process delivered messages
+            // Single-ownership delivery (ARN-236): drain_ready removes the
+            // messages from their mailboxes; each is applied exactly once.
+            let delivered = self.scheduler.drain_ready();
             for msg in &delivered {
-                if let Some(handler) = self.actors.get_mut(&msg.to) {
-                    let status_before = handler.current_status();
-
-                    match handler.handle_message(&msg.msg_type, &msg.payload) {
-                        Ok(_) => {
-                            let status_after = handler.current_status();
-                            let item_count = handler.current_item_count();
-                            let tick = self.clock.tick();
-                            *self.action_counts.get_mut(&msg.to).unwrap() += 1; // ci-ok: actor always in action_counts
-                            self.total_transitions += 1;
-
-                            // Record the transition
-                            self.recorded_transitions.push((
-                                tick,
-                                msg.to.clone(),
-                                msg.msg_type.clone(),
-                                status_before.clone(),
-                                status_after.clone(),
-                            ));
-
-                            self.check_invariants(
-                                &msg.to,
-                                &msg.msg_type,
-                                &status_before,
-                                &status_after,
-                                item_count,
-                                tick,
-                            );
-
-                            // Schedule integration callbacks for any custom effects
-                            self.schedule_integration_callbacks(&msg.to);
-                        }
-                        Err(_) => {
-                            // Action failed — expected for invalid transitions
-                        }
-                    }
-                }
+                self.apply_delivered_message(msg);
             }
 
             // Deliver any pending integration callbacks
             if !self.pending_integration_callbacks.is_empty() {
                 self.deliver_integration_callbacks();
             }
+        }
 
-            // Drain any remaining scheduled messages
+        // Flush the schedule: delay faults can push deliveries past the last
+        // driver iteration. Budgeted (never unbounded), and every flushed
+        // message goes through the same exactly-once drain path — previously
+        // a bare tick() discarded these deliveries entirely (ARN-236).
+        let mut flush_budget = self.config.max_ticks;
+        while !self.scheduler.is_quiescent() && flush_budget > 0 {
+            flush_budget -= 1;
             self.scheduler.tick();
+            self.clock.advance();
+            let delivered = self.scheduler.drain_ready();
+            for msg in &delivered {
+                self.apply_delivered_message(msg);
+            }
+            if !self.pending_integration_callbacks.is_empty() {
+                self.deliver_integration_callbacks();
+            }
         }
 
         let actor_states: Vec<_> = self
@@ -569,12 +593,32 @@ impl SimActorSystem {
     }
 
     /// Deliver any pending integration callbacks by executing them as actions.
+    ///
+    /// A rejected callback is part of the simulation result (ARN-236): the
+    /// configured callback action failing to apply means the simulated
+    /// integration contract is broken, and the run must say so rather than
+    /// stay green.
     fn deliver_integration_callbacks(&mut self) {
         let callbacks: Vec<(String, String)> =
             self.pending_integration_callbacks.drain(..).collect();
         for (actor_id, callback_action) in callbacks {
             // Execute the callback as a regular step (this checks invariants too)
-            let _ = self.step(&actor_id, &callback_action, "{}");
+            if let Err(error) = self.step(&actor_id, &callback_action, "{}") {
+                let tick = self.clock.tick();
+                let status = self
+                    .actors
+                    .get(&actor_id)
+                    .map(|h| h.current_status())
+                    .unwrap_or_default();
+                self.violations.push(ActorInvariantViolation {
+                    actor_id,
+                    action: callback_action,
+                    status_before: status.clone(),
+                    status_after: status,
+                    description: format!("integration callback rejected: {error}"),
+                    tick,
+                });
+            }
         }
     }
 
@@ -705,6 +749,8 @@ fn evaluate_spec_assert(
 
 #[cfg(test)]
 mod tests {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
     use super::*;
 
     // ── ARN-236: delayed-message ownership properties ─────────────────────
@@ -720,7 +766,7 @@ mod tests {
     /// Accepts every action, counts applications, and (optionally) emits a
     /// callback trigger whose configured action always fails.
     struct CountingHandler {
-        applications: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+        applications: Arc<AtomicUsize>,
         emit_trigger: bool,
         fired: bool,
     }
@@ -737,8 +783,7 @@ mod tests {
             if action == "AlwaysFails" {
                 return Err("callback action rejected".to_string());
             }
-            self.applications
-                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            self.applications.fetch_add(1, Ordering::SeqCst);
             if self.emit_trigger {
                 self.fired = true;
             }
@@ -751,7 +796,7 @@ mod tests {
             0
         }
         fn event_count(&self) -> usize {
-            self.applications.load(std::sync::atomic::Ordering::SeqCst)
+            self.applications.load(Ordering::SeqCst)
         }
         fn valid_actions(&self) -> Vec<String> {
             vec!["Step".to_string()]
@@ -768,14 +813,8 @@ mod tests {
         }
     }
 
-    fn counting_system(
-        seed: u64,
-        faults: FaultConfig,
-    ) -> (
-        SimActorSystem,
-        std::sync::Arc<std::sync::atomic::AtomicUsize>,
-    ) {
-        let applications = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    fn counting_system(seed: u64, faults: FaultConfig) -> (SimActorSystem, Arc<AtomicUsize>) {
+        let applications = Arc::new(AtomicUsize::new(0));
         let config = SimActorSystemConfig {
             seed,
             max_ticks: 200,
@@ -798,14 +837,7 @@ mod tests {
     /// empty and the scheduler is quiescent.
     #[test]
     fn arn236_no_processed_message_remains_queued() {
-        let faults = FaultConfig {
-            message_delay_prob: 0.0,
-            max_delay_ticks: 0,
-            message_drop_prob: 0.0,
-            actor_crash_prob: 0.0,
-            actor_restart_prob: 0.0,
-        };
-        let (mut system, _applications) = counting_system(7, faults);
+        let (mut system, _applications) = counting_system(7, FaultConfig::none());
         let result = system.run_random();
         assert!(result.messages > 0, "the run must exercise messages");
 
@@ -837,7 +869,7 @@ mod tests {
             };
             let (mut system, applications) = counting_system(seed, faults);
             let result = system.run_random();
-            let applied = applications.load(std::sync::atomic::Ordering::SeqCst);
+            let applied = applications.load(Ordering::SeqCst);
             assert_eq!(
                 applied as u64, result.messages,
                 "seed {seed}: every scheduled message must be applied exactly \
@@ -852,17 +884,11 @@ mod tests {
     /// A failing integration callback must fail the run, not vanish.
     #[test]
     fn arn236_callback_failure_is_part_of_the_simulation_result() {
-        let applications = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let applications = Arc::new(AtomicUsize::new(0));
         let config = SimActorSystemConfig {
             seed: 11,
             max_ticks: 50,
-            faults: FaultConfig {
-                message_delay_prob: 0.0,
-                max_delay_ticks: 0,
-                message_drop_prob: 0.0,
-                actor_crash_prob: 0.0,
-                actor_restart_prob: 0.0,
-            },
+            faults: FaultConfig::none(),
             max_actions_per_actor: 3,
         };
         let mut system = SimActorSystem::new(config);
