@@ -12,11 +12,13 @@ use crate::storage::{
 };
 
 mod config;
+mod projection_repair;
 mod select_projection;
 mod shadow;
 
 use config::{catalog_fast_read_enabled, entity_set_materialization_concurrency};
 pub(super) use config::{odata_default_page_size, odata_max_entities};
+use projection_repair::remove_deleted_projection;
 use select_projection::catalog_row_to_selected_entity_body;
 #[cfg(test)]
 pub(super) use select_projection::catalog_select_projection_fields;
@@ -245,22 +247,20 @@ pub(super) async fn materialize_entity_set_entities(
     entity_type: &str,
     entity_set_name: &str,
     entity_ids: &[String],
-    prefer_catalog: bool,
+    allow_catalog: bool,
     selected_catalog_fields: Option<&[String]>,
 ) -> MaterializedEntitySet {
     let selected_catalog_fields_owned = selected_catalog_fields.map(Vec::from);
-    let mut catalog_hits: BTreeMap<String, EntityCatalogRow> =
-        if should_read_catalog_for_materialization(prefer_catalog) {
-            match selected_catalog_fields {
-                Some(select) => {
-                    try_load_selected_catalog_rows(state, tenant, entity_type, entity_ids, select)
-                        .await
-                }
-                None => try_load_catalog_rows(state, tenant, entity_type, entity_ids).await,
+    let mut catalog_hits: BTreeMap<String, EntityCatalogRow> = if allow_catalog {
+        match selected_catalog_fields {
+            Some(select) => {
+                try_load_selected_catalog_rows(state, tenant, entity_type, entity_ids, select).await
             }
-        } else {
-            BTreeMap::new()
-        };
+            None => try_load_catalog_rows(state, tenant, entity_type, entity_ids).await,
+        }
+    } else {
+        BTreeMap::new()
+    };
     let mut shadow_budget = CatalogShadowReadBudget::for_entity_set();
 
     let concurrency = entity_set_materialization_concurrency();
@@ -285,6 +285,10 @@ pub(super) async fn materialize_entity_set_entities(
             let selected_catalog_fields = selected_catalog_fields_owned.clone();
             async move {
                 if let Some(row) = catalog_row {
+                    if row.status == "Deleted" {
+                        remove_deleted_projection(&state, &tenant, &entity_type, &id).await;
+                        return None;
+                    }
                     let mut entity = match selected_catalog_fields.as_deref() {
                         Some(select) => catalog_row_to_selected_entity_body(
                             &entity_type,
@@ -301,10 +305,12 @@ pub(super) async fn materialize_entity_set_entities(
                     .get_tenant_entity_state(&tenant, &entity_type, &id)
                     .await
                 {
+                    Ok(response) if response.state.status == "Deleted" => {
+                        remove_deleted_projection(&state, &tenant, &entity_type, &id).await;
+                        None
+                    }
                     Ok(response) => {
-                        if response.state.status != "Deleted"
-                            && let Some(query_plane) = state.query_plane_store()
-                        {
+                        if let Some(query_plane) = state.query_plane_store() {
                             let fields = state.query_projection_fields(
                                 &tenant,
                                 &entity_type,

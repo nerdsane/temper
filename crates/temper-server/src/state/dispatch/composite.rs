@@ -374,15 +374,28 @@ impl crate::state::ServerState {
         }
         let stage_ms = stage_started_at.map(|started| started.elapsed().as_millis() as u64);
 
-        let appends = streams
+        let mut appends = Vec::with_capacity(streams.len());
+        for (persistence_id, stream) in streams
             .iter()
             .filter(|(_, stream)| !stream.events.is_empty())
-            .map(|(persistence_id, stream)| PersistenceAppend {
+        {
+            let table = self.transition_table_for_dispatch(tenant, &stream.entity_type)?;
+            let reconcile_keys = !table.keys.is_empty();
+            let key_set_signature = crate::key_index::declared_key_set_signature(&table.keys);
+            let key_rows = crate::key_index::derive_entity_key_rows(
+                &table.keys,
+                &stream.state.fields,
+                stream.state.status != "Deleted",
+            );
+            appends.push(PersistenceAppend {
                 persistence_id: persistence_id.clone(),
                 expected_sequence: stream.expected_sequence,
                 events: stream.events.clone(),
-            })
-            .collect::<Vec<_>>();
+                key_rows,
+                reconcile_keys,
+                key_set_signature: Some(key_set_signature),
+            });
+        }
         if appends.is_empty() {
             return Ok(true);
         }

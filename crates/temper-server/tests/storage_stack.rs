@@ -196,6 +196,9 @@ async fn boxed_event_store_delegates_through_object_safe_adapter() {
                 persistence_id: "default:Ticket:t-1".to_string(),
                 expected_sequence: 0,
                 events: events.clone(),
+                key_rows: Vec::new(),
+                reconcile_keys: false,
+                key_set_signature: None,
             }])
             .await
             .expect("append batch through dyn adapter"),
@@ -237,6 +240,13 @@ async fn boxed_event_store_delegates_through_object_safe_adapter() {
             .list_entity_ids_by_type("default", "Ticket")
             .await
             .expect("list by type through dyn adapter"),
+        vec!["t-1".to_string()]
+    );
+    assert_eq!(
+        store
+            .list_entity_ids_for_key_reconciliation("default", "Ticket")
+            .await
+            .expect("list key-reconciliation owners through dyn adapter"),
         vec!["t-1".to_string()]
     );
     assert_eq!(

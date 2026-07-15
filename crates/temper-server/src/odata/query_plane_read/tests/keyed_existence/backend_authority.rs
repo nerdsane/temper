@@ -20,7 +20,7 @@ async fn non_authoritative_turso_backfill_never_marks_key_index_complete() {
 
     assert!(
         !state
-            .key_index_backfill_complete(&tenant, "Order", "v2|ws_path")
+            .key_index_backfill_complete(&tenant, "Order", super::super::ORDER_KEY_SET_SIGNATURE)
             .await,
         "a backend without co-committed exact key reconciliation must remain scan-safe"
     );

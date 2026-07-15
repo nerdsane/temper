@@ -1,5 +1,7 @@
 //! Entity lifecycle methods for ServerState (spawn, query, delete, index).
 
+mod key_index_coverage;
+
 use std::collections::BTreeMap;
 use std::sync::{Arc, OnceLock, RwLock};
 use std::time::Instant;
@@ -7,7 +9,9 @@ use std::time::Instant;
 use tracing::{Instrument, instrument};
 
 use temper_observe::wide_event;
-use temper_runtime::persistence::{EventMetadata, PersistenceEnvelope, PersistenceError};
+use temper_runtime::persistence::{
+    EventMetadata, IndexReconciliation, PersistenceEnvelope, PersistenceError,
+};
 use temper_runtime::scheduler::{sim_now, sim_uuid};
 use temper_runtime::tenant::TenantId;
 
@@ -487,101 +491,6 @@ impl ServerState {
     #[instrument(skip_all, fields(otel.name = "entity.populate_vector_index", tenant = %tenant))]
     pub async fn populate_vector_index_from_snapshots(&self, tenant: &TenantId) {
         projection_backfill::populate_vector_index_from_snapshots(self, tenant).await;
-    }
-
-    /// Hydrate the per-tenant `entity_key_index` watermark cache once from the durable
-    /// watermark (ADR-0153). Safe to call repeatedly; conservative on any failure (leaves
-    /// the type uncovered → a keyed miss falls back to the scan, never a wrong "absent").
-    async fn ensure_key_index_watermarks_loaded(&self, tenant: &TenantId) {
-        let already_loaded = self
-            .key_index_watermarks_loaded
-            .read()
-            .expect("key index watermarks-loaded lock poisoned")
-            .contains(tenant.as_str());
-        if already_loaded {
-            return;
-        }
-        if let Some((store, _)) = self.event_journal() {
-            if let Ok(types) = store.key_index_backfilled_types(tenant.as_str()).await {
-                let mut cache = self
-                    .key_index_backfilled
-                    .write()
-                    .expect("key index backfilled lock poisoned");
-                for (et, key_set) in types {
-                    cache.insert(format!("{tenant}:{et}"), key_set);
-                }
-            }
-            // Mark loaded even if the query errored: an error means "no authority
-            // yet", which is the safe scan-fallback state, and a completing
-            // backfill sets the cache entry directly via `mark_key_index_backfilled`.
-            self.key_index_watermarks_loaded
-                .write()
-                .expect("key index watermarks-loaded lock poisoned")
-                .insert(tenant.to_string());
-        }
-    }
-
-    /// The declared key-set the `entity_key_index` backfill covered for `(tenant,
-    /// entity_type)`, or `None` if the type was never backfilled. The value is the
-    /// sorted comma-joined declared key names (see [`declared_key_set_signature`]).
-    pub(crate) async fn key_index_backfill_covered_key_set(
-        &self,
-        tenant: &TenantId,
-        entity_type: &str,
-    ) -> Option<String> {
-        self.ensure_key_index_watermarks_loaded(tenant).await;
-        self.key_index_backfilled
-            .read()
-            .expect("key index backfilled lock poisoned")
-            .get(&format!("{tenant}:{entity_type}"))
-            .cloned()
-    }
-
-    /// Whether `entity_key_index` is complete for `(tenant, entity_type)` under the
-    /// CURRENT declared key-set — the ADR-0153 backfill watermark, made key-set aware
-    /// (ARN-68). True only when the covered key-set equals `current_key_set`, so a
-    /// keyed read MISS is authoritative absence only once EVERY currently-declared key
-    /// is backfilled; a newly-declared key reads as incomplete (scan-safe) until it is
-    /// re-keyed. Conservative on any failure (returns false → keyed miss falls back to
-    /// the scan, never a wrong "absent").
-    pub(crate) async fn key_index_backfill_complete(
-        &self,
-        tenant: &TenantId,
-        entity_type: &str,
-        current_key_set: &str,
-    ) -> bool {
-        self.key_index_backfill_covered_key_set(tenant, entity_type)
-            .await
-            .as_deref()
-            == Some(current_key_set)
-    }
-
-    /// Record (durably + in the read-path cache) that `entity_key_index` is complete
-    /// for `(tenant, entity_type)` covering exactly `key_set` (the sorted comma-joined
-    /// declared key names). Called by the backfill once it has keyed every existing
-    /// entity of the type, so subsequent keyed misses resolve to absence without
-    /// scanning (ADR-0153). Overwrites any stale key-set from an earlier declaration.
-    pub(crate) async fn mark_key_index_backfilled(
-        &self,
-        tenant: &TenantId,
-        entity_type: &str,
-        key_set: &str,
-    ) {
-        if let Some((store, _)) = self.event_journal()
-            && let Err(e) = store
-                .mark_key_index_backfilled(tenant.as_str(), entity_type, key_set)
-                .await
-        {
-            tracing::error!(
-                tenant = %tenant, entity_type, error = %e,
-                "failed to persist key-index backfill watermark"
-            );
-            return;
-        }
-        self.key_index_backfilled
-            .write()
-            .expect("key index backfilled lock poisoned")
-            .insert(format!("{tenant}:{entity_type}"), key_set.to_string());
     }
 
     /// Compare durable projection rows with authoritative state rebuilt by event replay.
@@ -1091,7 +1000,7 @@ impl ServerState {
             .read()
             .expect("transition table lock poisoned")
             .clone();
-        if !table.rules.is_empty() {
+        if !table.rules.is_empty() || !table.vectors.is_empty() {
             return Ok(None);
         }
 
@@ -1156,6 +1065,9 @@ impl ServerState {
         created_projection_state.sequence_nr = 1;
         created_projection_state.push_event_bounded(created.clone());
         let projection_state = self.query_projection_state(&created_projection_state);
+        let reconcile_keys = !table.keys.is_empty();
+        let key_set_signature = crate::key_index::declared_key_set_signature(&table.keys);
+        let key_rows = crate::key_index::derive_entity_key_rows(&table.keys, &state.fields, true);
         if let Some(native_store) = self.data_only_create_store() {
             let operation = "native_create";
             let source = "data_only_create_fast_path";
@@ -1177,6 +1089,9 @@ impl ServerState {
                     fields: &projection_fields,
                     state: &projection_state,
                     event: &envelope,
+                    key_rows: &key_rows,
+                    reconcile_keys,
+                    key_set_signature: &key_set_signature,
                 })
                 .instrument(native_span)
                 .await
@@ -1225,11 +1140,26 @@ impl ServerState {
         } else {
             let append_started_at = Instant::now(); // determinism-ok: production-only append wait metric
             let append_result = store
-                .append(&persistence_id, state.sequence_nr, &[envelope])
+                .append_with_index_rows(
+                    &persistence_id,
+                    state.sequence_nr,
+                    &[envelope],
+                    &key_rows,
+                    &[],
+                    IndexReconciliation {
+                        keys: reconcile_keys,
+                        key_set_signature: Some(key_set_signature),
+                        vectors: false,
+                    },
+                )
                 .await;
             runtime_metrics::record_event_store_append_wait(
                 backend.as_str(),
-                "append",
+                if reconcile_keys {
+                    "append_with_keys"
+                } else {
+                    "append"
+                },
                 append_started_at.elapsed(),
             );
             match append_result {
@@ -1344,6 +1274,7 @@ impl ServerState {
         entity_id: &str,
         fields: serde_json::Value,
         replace: bool,
+        idempotency_key: Option<String>,
     ) -> Result<EntityResponse, String> {
         let actor_ref = self
             .get_or_spawn_tenant_actor(tenant, entity_type, entity_id)
@@ -1353,11 +1284,14 @@ impl ServerState {
 
         let policy = self.dispatch_retry_policy();
         let fields_for_retry = fields;
+        let idempotency_key =
+            idempotency_key.unwrap_or_else(|| format!("field-update:{}", sim_uuid()));
         let response = retry::ask_with_backoff::<_, EntityResponse, _>(
             &actor_ref,
             || EntityMsg::UpdateFields {
                 fields: fields_for_retry.clone(),
                 replace,
+                idempotency_key: idempotency_key.clone(),
             },
             &policy,
         )
@@ -1365,9 +1299,14 @@ impl ServerState {
         .result
         .map_err(|e| format!("Actor update failed: {e}"))?;
 
-        if response.success
-            && let Some(query_plane) = self.query_plane_store()
-        {
+        if !response.success {
+            return Err(response
+                .error
+                .clone()
+                .unwrap_or_else(|| "field update was rejected".to_string()));
+        }
+
+        if let Some(query_plane) = self.query_plane_store() {
             let status = response.state.status.clone();
             let fields = self.query_projection_fields(tenant, entity_type, &response.state.fields);
             let projected_state = self.query_projection_state(&response.state);

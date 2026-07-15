@@ -15,8 +15,8 @@ use tokio::sync::RwLock;
 use tracing::{info, instrument, warn};
 
 use temper_runtime::persistence::{
-    EventStore, PersistenceAppend, PersistenceAppendResult, PersistenceEnvelope, PersistenceError,
-    storage_error,
+    EventStore, IndexReconciliation, PersistenceAppend, PersistenceAppendResult,
+    PersistenceEnvelope, PersistenceError, storage_error,
 };
 use temper_runtime::tenant::parse_persistence_id_parts;
 
@@ -751,7 +751,7 @@ impl EventStore for TenantStoreRouter {
         events: &[PersistenceEnvelope],
         key_rows: &[temper_runtime::persistence::EntityKeyRow],
         vector_rows: &[temper_runtime::persistence::EntityVectorRow],
-        reconcile_vectors: bool,
+        reconciliation: IndexReconciliation,
     ) -> Result<u64, PersistenceError> {
         let (tenant, _, _) =
             parse_persistence_id_parts(persistence_id).map_err(PersistenceError::Storage)?;
@@ -763,7 +763,7 @@ impl EventStore for TenantStoreRouter {
                 events,
                 key_rows,
                 vector_rows,
-                reconcile_vectors,
+                reconciliation,
             )
             .await
     }

@@ -27,9 +27,10 @@ use temper_odata::query::types::{
 };
 
 use super::scan;
+use super::types::QueryPlaneReadAuthorization;
 use super::{
     QueryPlaneReadBudget, QueryPlaneReadError, QueryPlaneReadRequest, QueryPlaneReadResult,
-    read_entity_set_page,
+    read_entity_set_page_with_authorization,
 };
 use crate::query_eval::resolve_property;
 
@@ -296,6 +297,26 @@ fn and_filter(base: Option<FilterExpr>, keyset: FilterExpr) -> FilterExpr {
 pub(in crate::odata) async fn read_entity_set_from_query_plane(
     request: QueryPlaneReadRequest<'_>,
 ) -> Result<QueryPlaneReadResult, QueryPlaneReadError> {
+    read_entity_set_with_authorization(request, QueryPlaneReadAuthorization::CallerScoped).await
+}
+
+/// Resolve an entity identity through the same fenced planner without adding
+/// collection/row authorization. The enclosing entity GET authorizes the returned
+/// body against the caller exactly once.
+pub(in crate::odata) async fn read_entity_set_for_internal_resolution(
+    request: QueryPlaneReadRequest<'_>,
+) -> Result<QueryPlaneReadResult, QueryPlaneReadError> {
+    read_entity_set_with_authorization(
+        request,
+        QueryPlaneReadAuthorization::InternalIdentityResolution,
+    )
+    .await
+}
+
+async fn read_entity_set_with_authorization(
+    request: QueryPlaneReadRequest<'_>,
+    authorization: QueryPlaneReadAuthorization,
+) -> Result<QueryPlaneReadResult, QueryPlaneReadError> {
     let query_options = request.query_options;
     let page_size = request.budget.requested_top(query_options);
     let order = canonical_pagination_order(query_options.orderby.as_deref());
@@ -354,7 +375,7 @@ pub(in crate::odata) async fn read_entity_set_from_query_plane(
         budget: page_budget,
         ..request
     };
-    let mut result = read_entity_set_page(page_request).await?;
+    let mut result = read_entity_set_page_with_authorization(page_request, authorization).await?;
 
     // Telemetry is recorded against the original request shape, not the rewritten
     // page read (which strips `$select` and adds the keyset filter).

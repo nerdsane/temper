@@ -4,12 +4,15 @@
 //! `UNIQUE (entity_type, entity_id, sequence_nr)` constraint to enforce
 //! optimistic concurrency on appends.
 
+mod key_index;
+
 use std::time::Instant;
 
 use sqlx::{Acquire, PgPool};
 use temper_runtime::persistence::{
-    EntityVectorCandidate, EntityVectorRow, EventMetadata, EventStore, PersistenceAppend,
-    PersistenceAppendResult, PersistenceEnvelope, PersistenceError, pack_f32_le, unpack_f32_le,
+    EntityKeyLookup, EntityVectorCandidate, EntityVectorRow, EventMetadata, EventStore,
+    IndexReconciliation, PersistenceAppend, PersistenceAppendResult, PersistenceEnvelope,
+    PersistenceError, pack_f32_le, unpack_f32_le,
 };
 use temper_runtime::tenant::parse_persistence_id_parts;
 
@@ -18,6 +21,10 @@ use crate::metrics::{
     record_postgres_transaction_begin_duration, record_postgres_transaction_commit_duration,
 };
 use crate::segments;
+
+pub(crate) use key_index::{
+    event_stream_lock_key, lock_event_stream, lock_key_contract, reconcile_key_contract_state,
+};
 
 const EVENT_APPEND_OPERATION: &str = "event_append";
 
@@ -48,6 +55,10 @@ impl PostgresEventStore {
 // ---------------------------------------------------------------------------
 
 impl EventStore for PostgresEventStore {
+    fn supports_authoritative_key_index(&self) -> bool {
+        true
+    }
+
     /// Append one or more events to the journal.
     ///
     /// Events are inserted with consecutive sequence numbers starting from
@@ -63,8 +74,15 @@ impl EventStore for PostgresEventStore {
         expected_sequence: u64,
         events: &[PersistenceEnvelope],
     ) -> Result<u64, PersistenceError> {
-        self.append_with_index_rows(persistence_id, expected_sequence, events, &[], &[], false)
-            .await
+        self.append_with_index_rows(
+            persistence_id,
+            expected_sequence,
+            events,
+            &[],
+            &[],
+            IndexReconciliation::default(),
+        )
+        .await
     }
 
     async fn append_with_index_rows(
@@ -74,7 +92,7 @@ impl EventStore for PostgresEventStore {
         events: &[PersistenceEnvelope],
         key_rows: &[temper_runtime::persistence::EntityKeyRow],
         vector_rows: &[EntityVectorRow],
-        reconcile_vectors: bool,
+        reconciliation: IndexReconciliation,
     ) -> Result<u64, PersistenceError> {
         let (tenant, entity_type, entity_id) =
             parse_persistence_id_parts(persistence_id).map_err(PersistenceError::Storage)?;
@@ -119,6 +137,10 @@ impl EventStore for PostgresEventStore {
             }
         };
 
+        lock_key_contract(&mut tx, tenant, entity_type).await?;
+        let lock_key = event_stream_lock_key(tenant, entity_type, entity_id);
+        lock_event_stream(&mut tx, &lock_key).await?;
+
         let row: Option<(i64,)> = crate::dbm::postgres_query_as!(
             "SELECT COALESCE(MAX(sequence_nr), 0) FROM events \
              WHERE tenant = $1 AND entity_type = $2 AND entity_id = $3",
@@ -142,27 +164,37 @@ impl EventStore for PostgresEventStore {
         // ADR-0153: validate declared-key uniqueness BEFORE writing the journal so
         // a reject is atomic (the journal does not advance). A different entity
         // already holding the key is the violation (reject + surface).
-        for key in key_rows {
-            let holder: Option<(String,)> = crate::dbm::postgres_query_as!(
-                "SELECT entity_id FROM entity_key_index \
-                 WHERE tenant = $1 AND entity_type = $2 AND key_name = $3 AND key_hash = $4",
-            )
-            .bind(tenant)
-            .bind(entity_type)
-            .bind(&key.key_name)
-            .bind(&key.key_hash)
-            .fetch_optional(&mut *tx)
-            .await
-            .map_err(|e| PersistenceError::Storage(e.to_string()))?;
-            if let Some((existing,)) = holder
-                && existing != entity_id
-            {
-                return Err(PersistenceError::Storage(format!(
-                    "duplicate declared key '{}' for {entity_type}: held by {existing}",
-                    key.key_name
-                )));
+        if reconciliation.keys {
+            for key in key_rows {
+                let holder: Option<(String,)> = crate::dbm::postgres_query_as!(
+                    "SELECT entity_id FROM entity_key_index \
+                     WHERE tenant = $1 AND entity_type = $2 AND key_name = $3 AND key_hash = $4",
+                )
+                .bind(tenant)
+                .bind(entity_type)
+                .bind(&key.key_name)
+                .bind(&key.key_hash)
+                .fetch_optional(&mut *tx)
+                .await
+                .map_err(|e| PersistenceError::Storage(e.to_string()))?;
+                if let Some((existing,)) = holder
+                    && existing != entity_id
+                {
+                    return Err(PersistenceError::Storage(format!(
+                        "duplicate declared key '{}' for {entity_type}: held by {existing}",
+                        key.key_name
+                    )));
+                }
             }
         }
+
+        reconcile_key_contract_state(
+            &mut tx,
+            tenant,
+            entity_type,
+            reconciliation.key_set_signature.as_deref(),
+        )
+        .await?;
 
         let segment_index =
             segments::open_segment_for_append(&mut tx, tenant, entity_type, entity_id, current_seq)
@@ -214,44 +246,46 @@ impl EventStore for PostgresEventStore {
             .await?;
         }
 
-        // ADR-0153: co-commit the declared key-index rows in THIS transaction
-        // (uniqueness was validated above). Drop the entity's prior row for each
-        // key_name (the value may have changed), then claim the new key_hash.
-        for key in key_rows {
+        // ADR-0153/0171: co-commit the entity's EXACT declared key set in THIS
+        // transaction (uniqueness was validated above). Empty current rows release
+        // every prior claim; deleting by entity also removes rows for declarations
+        // that no longer exist.
+        if reconciliation.keys {
             crate::dbm::postgres_query!(
                 "DELETE FROM entity_key_index \
-                 WHERE tenant = $1 AND entity_type = $2 AND key_name = $3 AND entity_id = $4",
+                 WHERE tenant = $1 AND entity_type = $2 AND entity_id = $3",
             )
             .bind(tenant)
             .bind(entity_type)
-            .bind(&key.key_name)
             .bind(entity_id)
             .execute(&mut *tx)
             .await
             .map_err(|e| PersistenceError::Storage(e.to_string()))?;
-            crate::dbm::postgres_query!(
-                "INSERT INTO entity_key_index \
-                 (tenant, entity_type, key_name, key_hash, entity_id, sequence_nr) \
-                 VALUES ($1, $2, $3, $4, $5, $6)",
-            )
-            .bind(tenant)
-            .bind(entity_type)
-            .bind(&key.key_name)
-            .bind(&key.key_hash)
-            .bind(entity_id)
-            .bind(new_seq as i64)
-            .execute(&mut *tx)
-            .await
-            .map_err(|e| PersistenceError::Storage(e.to_string()))?;
+            for key in key_rows {
+                crate::dbm::postgres_query!(
+                    "INSERT INTO entity_key_index \
+                     (tenant, entity_type, key_name, key_hash, entity_id, sequence_nr) \
+                     VALUES ($1, $2, $3, $4, $5, $6)",
+                )
+                .bind(tenant)
+                .bind(entity_type)
+                .bind(&key.key_name)
+                .bind(&key.key_hash)
+                .bind(entity_id)
+                .bind(new_seq as i64)
+                .execute(&mut *tx)
+                .await
+                .map_err(|e| PersistenceError::Storage(e.to_string()))?;
+            }
         }
 
         // ADR-0155: co-commit the derived vector-index rows in THIS transaction.
-        // When the entity's type declares vector paths (`reconcile_vectors`), DELETE
+        // When the entity's type declares vector paths (`reconciliation.vectors`), DELETE
         // all of the entity's rows first, then insert the current ones — so a delete
         // transition or a cleared vector/model property (empty `vector_rows`) purges
         // the stale rows instead of leaving them to rank forever. No uniqueness
         // constraint; vectors are derived ranking state.
-        if reconcile_vectors {
+        if reconciliation.vectors {
             crate::dbm::postgres_query!(
                 "DELETE FROM entity_vector_index \
                  WHERE tenant = $1 AND entity_type = $2 AND entity_id = $3",
@@ -305,72 +339,18 @@ impl EventStore for PostgresEventStore {
         tenant: &str,
         entity_type: &str,
         entity_id: &str,
+        expected_sequence: u64,
         key_rows: &[temper_runtime::persistence::EntityKeyRow],
     ) -> Result<(), PersistenceError> {
-        if key_rows.is_empty() {
-            return Ok(());
-        }
-        let mut tx = self
-            .pool
-            .begin()
-            .await
-            .map_err(|e| PersistenceError::Storage(e.to_string()))?;
-        for key in key_rows {
-            // A different entity already holding this key is a pre-existing data
-            // conflict — log and skip (don't fail the whole backfill on one row;
-            // the conflict surfaces via the metric and a keyed read still resolves
-            // to whoever currently holds it).
-            let holder: Option<(String,)> = crate::dbm::postgres_query_as!(
-                "SELECT entity_id FROM entity_key_index \
-                 WHERE tenant = $1 AND entity_type = $2 AND key_name = $3 AND key_hash = $4",
-            )
-            .bind(tenant)
-            .bind(entity_type)
-            .bind(&key.key_name)
-            .bind(&key.key_hash)
-            .fetch_optional(&mut *tx)
-            .await
-            .map_err(|e| PersistenceError::Storage(e.to_string()))?;
-            if let Some((existing,)) = &holder
-                && existing != entity_id
-            {
-                tracing::warn!(
-                    tenant, entity_type, entity_id, existing,
-                    key_name = %key.key_name,
-                    "entity_key_index backfill: declared-key conflict; skipping"
-                );
-                continue;
-            }
-            crate::dbm::postgres_query!(
-                "DELETE FROM entity_key_index \
-                 WHERE tenant = $1 AND entity_type = $2 AND key_name = $3 AND entity_id = $4",
-            )
-            .bind(tenant)
-            .bind(entity_type)
-            .bind(&key.key_name)
-            .bind(entity_id)
-            .execute(&mut *tx)
-            .await
-            .map_err(|e| PersistenceError::Storage(e.to_string()))?;
-            crate::dbm::postgres_query!(
-                "INSERT INTO entity_key_index \
-                 (tenant, entity_type, key_name, key_hash, entity_id, sequence_nr) \
-                 VALUES ($1, $2, $3, $4, $5, 0) \
-                 ON CONFLICT (tenant, entity_type, key_name, key_hash) DO NOTHING",
-            )
-            .bind(tenant)
-            .bind(entity_type)
-            .bind(&key.key_name)
-            .bind(&key.key_hash)
-            .bind(entity_id)
-            .execute(&mut *tx)
-            .await
-            .map_err(|e| PersistenceError::Storage(e.to_string()))?;
-        }
-        tx.commit()
-            .await
-            .map_err(|e| PersistenceError::Storage(e.to_string()))?;
-        Ok(())
+        key_index::backfill_entity_keys(
+            &self.pool,
+            tenant,
+            entity_type,
+            entity_id,
+            expected_sequence,
+            key_rows,
+        )
+        .await
     }
 
     async fn mark_key_index_backfilled(
@@ -379,45 +359,48 @@ impl EventStore for PostgresEventStore {
         entity_type: &str,
         key_set: &str,
     ) -> Result<(), PersistenceError> {
-        let mut conn = self
-            .pool
-            .acquire()
-            .await
-            .map_err(|e| PersistenceError::Storage(e.to_string()))?;
-        // Upsert the covered key-set: a re-key after a key-set change must OVERWRITE the
-        // stale set (not DO NOTHING) so `complete` reflects the keys actually assigned.
-        crate::dbm::postgres_query!(
-            "INSERT INTO key_index_backfill_watermark (tenant, entity_type, key_set) \
-             VALUES ($1, $2, $3) \
-             ON CONFLICT (tenant, entity_type) \
-             DO UPDATE SET key_set = EXCLUDED.key_set, completed_at = now()",
-        )
-        .bind(tenant)
-        .bind(entity_type)
-        .bind(key_set)
-        .execute(&mut *conn)
-        .await
-        .map_err(|e| PersistenceError::Storage(e.to_string()))?;
-        Ok(())
+        key_index::mark_backfilled(&self.pool, tenant, entity_type, key_set).await
     }
 
     async fn key_index_backfilled_types(
         &self,
         tenant: &str,
     ) -> Result<Vec<(String, String)>, PersistenceError> {
-        let mut conn = self
-            .pool
-            .acquire()
-            .await
-            .map_err(|e| PersistenceError::Storage(e.to_string()))?;
-        let rows: Vec<(String, String)> = crate::dbm::postgres_query_as!(
-            "SELECT entity_type, key_set FROM key_index_backfill_watermark WHERE tenant = $1",
+        key_index::backfilled_types(&self.pool, tenant).await
+    }
+
+    async fn key_index_reconciliation_revision(
+        &self,
+        tenant: &str,
+        entity_type: &str,
+    ) -> Result<u64, PersistenceError> {
+        key_index::reconciliation_revision(&self.pool, tenant, entity_type).await
+    }
+
+    async fn begin_key_index_backfill(
+        &self,
+        tenant: &str,
+        entity_type: &str,
+        key_set: &str,
+    ) -> Result<u64, PersistenceError> {
+        key_index::begin_backfill(&self.pool, tenant, entity_type, key_set).await
+    }
+
+    async fn mark_key_index_backfilled_if_revision(
+        &self,
+        tenant: &str,
+        entity_type: &str,
+        key_set: &str,
+        expected_revision: u64,
+    ) -> Result<bool, PersistenceError> {
+        key_index::mark_backfilled_if_revision(
+            &self.pool,
+            tenant,
+            entity_type,
+            key_set,
+            expected_revision,
         )
-        .bind(tenant)
-        .fetch_all(&mut *conn)
         .await
-        .map_err(|e| PersistenceError::Storage(e.to_string()))?;
-        Ok(rows.into_iter().collect())
     }
 
     async fn keyed_entity_ids_for_type(
@@ -425,21 +408,7 @@ impl EventStore for PostgresEventStore {
         tenant: &str,
         entity_type: &str,
     ) -> Result<Vec<String>, PersistenceError> {
-        let mut conn = self
-            .pool
-            .acquire()
-            .await
-            .map_err(|e| PersistenceError::Storage(e.to_string()))?;
-        let rows: Vec<(String,)> = crate::dbm::postgres_query_as!(
-            "SELECT DISTINCT entity_id FROM entity_key_index \
-             WHERE tenant = $1 AND entity_type = $2",
-        )
-        .bind(tenant)
-        .bind(entity_type)
-        .fetch_all(&mut *conn)
-        .await
-        .map_err(|e| PersistenceError::Storage(e.to_string()))?;
-        Ok(rows.into_iter().map(|(entity_id,)| entity_id).collect())
+        key_index::keyed_entity_ids(&self.pool, tenant, entity_type).await
     }
 
     async fn lookup_by_key(
@@ -449,23 +418,20 @@ impl EventStore for PostgresEventStore {
         key_name: &str,
         key_hash: &str,
     ) -> Result<Option<String>, PersistenceError> {
-        let mut conn = self
-            .pool
-            .acquire()
-            .await
-            .map_err(|e| PersistenceError::Storage(e.to_string()))?;
-        let row: Option<(String,)> = crate::dbm::postgres_query_as!(
-            "SELECT entity_id FROM entity_key_index \
-             WHERE tenant = $1 AND entity_type = $2 AND key_name = $3 AND key_hash = $4",
-        )
-        .bind(tenant)
-        .bind(entity_type)
-        .bind(key_name)
-        .bind(key_hash)
-        .fetch_optional(&mut *conn)
-        .await
-        .map_err(|e| PersistenceError::Storage(e.to_string()))?;
-        Ok(row.map(|(id,)| id))
+        Ok(self
+            .lookup_by_key_with_sequence(tenant, entity_type, key_name, key_hash)
+            .await?
+            .map(|lookup| lookup.entity_id))
+    }
+
+    async fn lookup_by_key_with_sequence(
+        &self,
+        tenant: &str,
+        entity_type: &str,
+        key_name: &str,
+        key_hash: &str,
+    ) -> Result<Option<EntityKeyLookup>, PersistenceError> {
+        key_index::lookup(&self.pool, tenant, entity_type, key_name, key_hash).await
     }
 
     async fn backfill_entity_vectors(
@@ -618,8 +584,8 @@ impl EventStore for PostgresEventStore {
 
     /// Atomically append to multiple entity journals in one PostgreSQL
     /// transaction. Used as the storage foundation for cross-actor Composite
-    /// transactions: every stream's optimistic-concurrency check must pass
-    /// before any event is inserted.
+    /// transactions: every stream's optimistic-concurrency and final declared-key
+    /// set must validate before any event is inserted.
     async fn append_batch(
         &self,
         appends: &[PersistenceAppend],
@@ -628,11 +594,32 @@ impl EventStore for PostgresEventStore {
             return Ok(Vec::new());
         }
 
-        let mut seen = std::collections::BTreeSet::new();
+        let mut lock_keys = std::collections::BTreeSet::new();
+        let mut type_contracts = std::collections::BTreeMap::new();
         for append in appends {
-            if !seen.insert(append.persistence_id.as_str()) {
+            if !append.reconcile_keys && !append.key_rows.is_empty() {
                 return Err(PersistenceError::Storage(format!(
-                    "duplicate persistence_id '{}' in append_batch",
+                    "append_batch stream '{}' supplied key rows without exact reconciliation",
+                    append.persistence_id
+                )));
+            }
+            let (tenant, entity_type, entity_id) =
+                parse_persistence_id_parts(&append.persistence_id)
+                    .map_err(PersistenceError::Storage)?;
+            let type_key = (tenant.to_string(), entity_type.to_string());
+            if let Some(existing) = type_contracts.get(&type_key) {
+                if existing != &append.key_set_signature {
+                    return Err(PersistenceError::Storage(format!(
+                        "append_batch supplied inconsistent key contracts for {tenant}:{entity_type}"
+                    )));
+                }
+            } else {
+                type_contracts.insert(type_key, append.key_set_signature.clone());
+            }
+            let lock_key = event_stream_lock_key(tenant, entity_type, entity_id);
+            if !lock_keys.insert(lock_key) {
+                return Err(PersistenceError::Storage(format!(
+                    "duplicate persistence stream '{}' in append_batch",
                     append.persistence_id
                 )));
             }
@@ -678,6 +665,13 @@ impl EventStore for PostgresEventStore {
             }
         };
 
+        for (tenant, entity_type) in type_contracts.keys() {
+            lock_key_contract(&mut tx, tenant, entity_type).await?;
+        }
+        for lock_key in &lock_keys {
+            lock_event_stream(&mut tx, lock_key).await?;
+        }
+
         let mut parsed = Vec::with_capacity(appends.len());
         for append in appends {
             let (tenant, entity_type, entity_id) =
@@ -716,6 +710,62 @@ impl EventStore for PostgresEventStore {
                 entity_id.to_string(),
                 segment_index,
             ));
+        }
+
+        for ((tenant, entity_type), signature) in &type_contracts {
+            reconcile_key_contract_state(&mut tx, tenant, entity_type, signature.as_deref())
+                .await?;
+        }
+
+        // ADR-0171: batch writes use the same exact declared-key contract as normal
+        // actor appends. Delete every participating entity's old rows first so an
+        // atomic batch may transfer ownership, then install each final set. This is
+        // deliberately before journal insertion; any uniqueness error rolls the
+        // entire transaction back without advancing any stream.
+        for (append, (tenant, entity_type, entity_id, _)) in appends.iter().zip(parsed.iter()) {
+            if !append.reconcile_keys {
+                continue;
+            }
+            crate::dbm::postgres_query!(
+                "DELETE FROM entity_key_index \
+                 WHERE tenant = $1 AND entity_type = $2 AND entity_id = $3",
+            )
+            .bind(tenant)
+            .bind(entity_type)
+            .bind(entity_id)
+            .execute(&mut *tx)
+            .await
+            .map_err(|e| PersistenceError::Storage(e.to_string()))?;
+        }
+        for (append, (tenant, entity_type, entity_id, _)) in appends.iter().zip(parsed.iter()) {
+            if !append.reconcile_keys {
+                continue;
+            }
+            let final_sequence = append
+                .expected_sequence
+                .checked_add(append.events.len() as u64)
+                .ok_or_else(|| {
+                    PersistenceError::Storage(format!(
+                        "append_batch sequence overflow for '{}'",
+                        append.persistence_id
+                    ))
+                })?;
+            for key in &append.key_rows {
+                crate::dbm::postgres_query!(
+                    "INSERT INTO entity_key_index \
+                     (tenant, entity_type, key_name, key_hash, entity_id, sequence_nr) \
+                     VALUES ($1, $2, $3, $4, $5, $6)",
+                )
+                .bind(tenant)
+                .bind(entity_type)
+                .bind(&key.key_name)
+                .bind(&key.key_hash)
+                .bind(entity_id)
+                .bind(final_sequence as i64)
+                .execute(&mut *tx)
+                .await
+                .map_err(|e| PersistenceError::Storage(e.to_string()))?;
+            }
         }
 
         let mut results = Vec::with_capacity(appends.len());
@@ -980,6 +1030,38 @@ impl EventStore for PostgresEventStore {
                      AND d.event_type = 'Deleted' \
                  ) \
              ) ids \
+             ORDER BY entity_id",
+        )
+        .bind(tenant)
+        .bind(entity_type)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(|e| PersistenceError::Storage(e.to_string()))?;
+
+        Ok(rows)
+    }
+
+    async fn list_entity_ids_for_key_reconciliation(
+        &self,
+        tenant: &str,
+        entity_type: &str,
+    ) -> Result<Vec<String>, PersistenceError> {
+        // Repair authority is deliberately broader than live query enumeration:
+        // deleted streams can retain pre-v3 rows, while interrupted/manual legacy
+        // writes can leave key rows whose journal no longer exists. Both owners
+        // must replay (or classify as a phantom) and receive an exact empty set
+        // before the type can be watermarked.
+        let rows: Vec<String> = crate::dbm::postgres_query_scalar!(
+            "SELECT entity_id \
+             FROM ( \
+               SELECT DISTINCT e.entity_id \
+               FROM events e \
+               WHERE e.tenant = $1 AND e.entity_type = $2 \
+               UNION \
+               SELECT DISTINCT k.entity_id \
+               FROM entity_key_index k \
+               WHERE k.tenant = $1 AND k.entity_type = $2 \
+             ) repair_ids \
              ORDER BY entity_id",
         )
         .bind(tenant)

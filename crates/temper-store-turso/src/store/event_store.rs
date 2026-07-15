@@ -3,9 +3,9 @@
 use libsql::{TransactionBehavior, Value, params, params_from_iter};
 use std::time::Duration;
 use temper_runtime::persistence::{
-    EntityVectorCandidate, EntityVectorRow, EventMetadata, EventStore, PersistenceAppend,
-    PersistenceAppendResult, PersistenceEnvelope, PersistenceError, pack_f32_le, storage_error,
-    unpack_f32_le,
+    EntityVectorCandidate, EntityVectorRow, EventMetadata, EventStore, IndexReconciliation,
+    PersistenceAppend, PersistenceAppendResult, PersistenceEnvelope, PersistenceError, pack_f32_le,
+    storage_error, unpack_f32_le,
 };
 use temper_runtime::tenant::parse_persistence_id_parts;
 use tracing::{error, instrument, warn};
@@ -139,14 +139,15 @@ impl EventStore for TursoEventStore {
 
     // NOTE (ADR-0153): Turso intentionally does NOT implement `backfill_entity_keys`,
     // `mark_key_index_backfilled`, or `key_index_backfilled_types` — it keeps the
-    // no-op/empty trait defaults. Turso never co-commits key rows (it does not override
-    // `append_with_keys`), so its `entity_key_index` is never maintained on write. A
-    // store that does not maintain the index live must NEVER become authoritative for
-    // absence: backfilling or watermarking it would let a keyed miss wrongly read a
-    // present entity as absent (or serve a stale keyed hit). Postgres (the current
-    // query-plane backend) co-commits and is authoritative; the sim store does too for
-    // DST. Giving Turso the keyed oracle requires first implementing live co-commit
-    // (completing ADR-0153 phase 2 for Turso) — tracked separately.
+    // no-op/empty trait defaults and reports the default non-authoritative capability.
+    // Turso never co-commits key rows, so its `entity_key_index` is never maintained
+    // on write. A store that does not maintain the index live must NEVER become
+    // authoritative for absence: backfilling or watermarking it would let a keyed
+    // miss wrongly read a present entity as absent (or serve a stale keyed hit).
+    // Postgres (the current query-plane backend) co-commits and is authoritative; the
+    // sim store does too for DST. Giving Turso the keyed oracle requires first
+    // implementing live co-commit (completing ADR-0153 phase 2 for Turso) — tracked
+    // separately.
 
     // ADR-0155: Turso maintains `entity_vector_index` **write-behind** — the event is
     // appended first (with retries), then the derived vector rows follow in a separate,
@@ -161,7 +162,7 @@ impl EventStore for TursoEventStore {
         events: &[PersistenceEnvelope],
         _key_rows: &[temper_runtime::persistence::EntityKeyRow],
         vector_rows: &[EntityVectorRow],
-        reconcile_vectors: bool,
+        reconciliation: IndexReconciliation,
     ) -> Result<u64, PersistenceError> {
         // The journal append is the durable event (keys are not maintained on Turso,
         // per the note above).
@@ -174,7 +175,7 @@ impl EventStore for TursoEventStore {
         // transient failure does not silently drop the write. On final exhaustion the
         // error is logged loudly; the partition then lags until the next backfill
         // reconcile runs. Only runs when the type declares vector paths.
-        if reconcile_vectors
+        if reconciliation.vectors
             && let Ok((tenant, entity_type, entity_id)) = parse_persistence_id_parts(persistence_id)
         {
             let total_attempts = append_max_attempts();

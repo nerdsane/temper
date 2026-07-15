@@ -1,6 +1,8 @@
 use std::sync::{Arc, RwLock};
 
-use temper_runtime::persistence::{EventMetadata, PersistenceEnvelope, PersistenceError};
+use temper_runtime::persistence::{
+    EventMetadata, IndexReconciliation, PersistenceEnvelope, PersistenceError,
+};
 use temper_runtime::scheduler::{sim_now, sim_uuid};
 
 use crate::entity_actor::{EntityEvent, EntityResponse, EntityState, process_action_with_xref};
@@ -148,7 +150,28 @@ impl ServerState {
             .map(|(idx, event)| synthetic_envelope(&persistence_id, (idx + 1) as u64, event))
             .collect::<Result<Vec<_>, _>>()?;
 
-        match store.append(&persistence_id, 0, &envelopes).await {
+        let reconcile_keys = !table.keys.is_empty();
+        let key_rows = crate::key_index::derive_entity_key_rows(
+            &table.keys,
+            &state.fields,
+            state.status != "Deleted",
+        );
+        let key_set_signature = crate::key_index::declared_key_set_signature(&table.keys);
+        match store
+            .append_with_index_rows(
+                &persistence_id,
+                0,
+                &envelopes,
+                &key_rows,
+                &[],
+                IndexReconciliation {
+                    keys: reconcile_keys,
+                    key_set_signature: Some(key_set_signature),
+                    vectors: false,
+                },
+            )
+            .await
+        {
             Ok(sequence_nr) => state.sequence_nr = sequence_nr,
             Err(PersistenceError::ConcurrencyViolation { .. }) => {
                 return Err(FileStreamContentError::ActionRejected(format!(

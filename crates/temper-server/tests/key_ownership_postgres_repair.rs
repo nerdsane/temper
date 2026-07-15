@@ -1,4 +1,4 @@
-//! Real-Postgres regression for pre-v2 deleted and orphaned key owners.
+//! Real-Postgres regression for pre-v3 deleted and orphaned key owners.
 
 use temper_runtime::ActorSystem;
 use temper_runtime::persistence::{EventMetadata, EventStore, PersistenceEnvelope};
@@ -13,6 +13,26 @@ use temper_store_postgres::PostgresEventStore;
 
 const CSDL_XML: &str = include_str!("../../../test-fixtures/specs/model.csdl.xml");
 const DOC_IOA: &str = include_str!("../../../test-fixtures/specs/keyed_doc.ioa.toml");
+const DATA_ONLY_DOC_IOA: &str = r#"
+[automaton]
+name = "Doc"
+states = ["Ready"]
+initial = "Ready"
+
+[[state]]
+name = "WorkspaceId"
+type = "string"
+initial = ""
+
+[[state]]
+name = "Path"
+type = "string"
+initial = ""
+
+[[key]]
+name = "path"
+properties = ["WorkspaceId", "Path"]
+"#;
 
 fn key_hash(workspace: &str, path: &str) -> String {
     canonical_key_hash(
@@ -25,18 +45,21 @@ fn key_hash(workspace: &str, path: &str) -> String {
     .expect("complete key")
 }
 
-fn server_with_postgres(tenant: &TenantId, store: PostgresEventStore) -> ServerState {
+fn server_with_postgres_spec(
+    tenant: &TenantId,
+    store: PostgresEventStore,
+    ioa: &'static str,
+) -> ServerState {
     let csdl = parse_csdl(CSDL_XML).expect("CSDL parse");
     let mut registry = SpecRegistry::new();
-    registry.register_tenant(
-        tenant.as_str(),
-        csdl,
-        CSDL_XML.to_string(),
-        &[("Doc", DOC_IOA)],
-    );
+    registry.register_tenant(tenant.as_str(), csdl, CSDL_XML.to_string(), &[("Doc", ioa)]);
     let mut state = ServerState::from_registry(ActorSystem::new("arn238-pg-repair"), registry);
     state.set_storage_stack(StorageStack::from_postgres(store));
     state
+}
+
+fn server_with_postgres(tenant: &TenantId, store: PostgresEventStore) -> ServerState {
+    server_with_postgres_spec(tenant, store, DOC_IOA)
 }
 
 /// A type cannot receive a complete watermark while stale rows owned by a deleted
@@ -103,7 +126,7 @@ async fn postgres_backfill_purges_deleted_and_orphaned_key_owners_before_waterma
             }],
         )
         .await
-        .expect("append pre-v2 event-only tombstone");
+        .expect("append pre-v3 event-only tombstone");
 
     let orphan_hash = key_hash("ws", "/orphan");
     sqlx::query(
@@ -167,6 +190,72 @@ async fn postgres_backfill_purges_deleted_and_orphaned_key_owners_before_waterma
             .await
             .expect("reclaimed lookup"),
         Some("replacement".to_string())
+    );
+}
+
+/// The native PostgreSQL data-only optimization must claim a declared key in the
+/// same transaction as its first event and projection. A conflicting claim rolls
+/// all three writes back.
+#[tokio::test]
+async fn postgres_native_data_only_create_co_commits_declared_keys() {
+    let database_url = match std::env::var("DATABASE_URL") {
+        Ok(url) => url,
+        Err(_) => return,
+    };
+    let pool = sqlx::PgPool::connect(&database_url)
+        .await
+        .expect("connect to Postgres");
+    temper_store_postgres::migration::run_migrations(&pool)
+        .await
+        .expect("run Postgres migrations");
+    let store = PostgresEventStore::new(pool);
+    let tenant = TenantId::new(format!("arn238-data-only-pg-{}", sim_uuid()));
+    let state = server_with_postgres_spec(&tenant, store.clone(), DATA_ONLY_DOC_IOA);
+    let hash = key_hash("ws", "/native");
+
+    let created = state
+        .try_create_data_only_tenant_entity(
+            &tenant,
+            "Doc",
+            "native-a",
+            serde_json::json!({"WorkspaceId": "ws", "Path": "/native"}),
+        )
+        .await
+        .expect("native data-only create result")
+        .expect("eligible native data-only create");
+    assert!(created.success);
+    assert_eq!(
+        store
+            .lookup_by_key(tenant.as_str(), "Doc", "path", &hash)
+            .await
+            .expect("native key lookup"),
+        Some("native-a".to_string())
+    );
+
+    let duplicate = state
+        .try_create_data_only_tenant_entity(
+            &tenant,
+            "Doc",
+            "native-b",
+            serde_json::json!({"WorkspaceId": "ws", "Path": "/native"}),
+        )
+        .await;
+    assert!(duplicate.is_err(), "a duplicate native claim must fail");
+    assert!(
+        store
+            .read_events(&format!("{tenant}:Doc:native-b"), 0)
+            .await
+            .expect("duplicate journal read")
+            .is_empty(),
+        "the conflicting native transaction must not insert an event"
+    );
+    assert_eq!(
+        store
+            .lookup_by_key(tenant.as_str(), "Doc", "path", &hash)
+            .await
+            .expect("owner after duplicate"),
+        Some("native-a".to_string()),
+        "the rejected transaction must preserve the original owner"
     );
 }
 

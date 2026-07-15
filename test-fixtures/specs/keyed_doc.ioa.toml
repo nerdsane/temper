@@ -30,3 +30,11 @@ from = ["New"]
 to = "Ready"
 params = ["WorkspaceId", "Path"]
 hint = "Create the doc with its workspace + path (its declared key)."
+
+[[action]]
+name = "Rekey"
+kind = "input"
+from = ["Ready"]
+to = "Ready"
+params = ["WorkspaceId", "Path"]
+hint = "Replace the doc's declared-key fields."

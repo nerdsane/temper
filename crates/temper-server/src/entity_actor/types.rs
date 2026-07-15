@@ -57,6 +57,9 @@ pub enum EntityMsg {
     UpdateFields {
         fields: serde_json::Value,
         replace: bool,
+        /// Request-stable token used to deduplicate dispatch retries after a
+        /// durable append succeeds but the actor reply is lost or delayed.
+        idempotency_key: String,
     },
     /// Delete this entity.
     Delete,

@@ -29,7 +29,7 @@ use temper_jit::table::{Effect, TransitionTable};
 use temper_observe::wide_event;
 use temper_runtime::actor::{Actor, ActorContext, ActorError};
 use temper_runtime::persistence::{
-    COMPOSITE_EVENT_TYPE, EventMetadata, PersistenceEnvelope, PersistenceError,
+    COMPOSITE_EVENT_TYPE, EventMetadata, IndexReconciliation, PersistenceEnvelope, PersistenceError,
 };
 use temper_runtime::scheduler::{sim_now, sim_uuid};
 
@@ -44,6 +44,20 @@ use super::types::{
     EntityEvent, EntityMsg, EntityResponse, EntityState, MAX_EVENTS_SINCE_SNAPSHOT,
     MAX_ITEMS_PER_ENTITY,
 };
+
+mod field_updates;
+
+use field_updates::{
+    FIELD_UPDATE_EVENT_TYPE, FIELD_UPDATE_SCHEMA, FIELDS_PATCHED_EVENT_TYPE,
+    FIELDS_REPLACED_EVENT_TYPE, PersistedFieldUpdate,
+};
+
+struct PersistencePayload<'a> {
+    event_type: &'a str,
+    payload: serde_json::Value,
+    timestamp: chrono::DateTime<chrono::Utc>,
+    to_status: &'a str,
+}
 
 fn event_budget_workspace_id(state: &EntityState) -> String {
     if state.entity_type == "Workspace" {
@@ -336,15 +350,44 @@ impl EntityActor {
     ) -> Result<u64, PersistenceError> {
         let payload = serde_json::to_value(event)
             .map_err(|e| PersistenceError::Serialization(e.to_string()))?;
+        self.persist_payload(
+            store,
+            backend,
+            persistence_id,
+            state,
+            PersistencePayload {
+                event_type: &event.action,
+                payload,
+                timestamp: event.timestamp,
+                to_status: &event.to_status,
+            },
+        )
+        .await
+    }
+
+    async fn persist_payload(
+        &self,
+        store: &BoxedEventStore,
+        backend: BackendLabel,
+        persistence_id: &str,
+        state: &mut EntityState,
+        input: PersistencePayload<'_>,
+    ) -> Result<u64, PersistenceError> {
+        let PersistencePayload {
+            event_type,
+            payload,
+            timestamp,
+            to_status,
+        } = input;
         let envelope = PersistenceEnvelope {
             sequence_nr: state.sequence_nr + 1,
-            event_type: event.action.clone(),
+            event_type: event_type.to_string(),
             payload,
             metadata: EventMetadata {
                 event_id: sim_uuid(),
                 causation_id: sim_uuid(),
                 correlation_id: sim_uuid(),
-                timestamp: event.timestamp,
+                timestamp,
                 actor_id: persistence_id.to_string(),
             },
         };
@@ -354,32 +397,28 @@ impl EntityActor {
         // ADR-0153/0155: derive the declared key rows AND the vector-index rows from
         // the new state and co-commit them with the journal append, so a keyed read
         // is correct without a scan and a kNN read reflects the write deterministically.
-        let (key_rows, vector_rows, reconcile_vectors) = {
+        let (key_rows, vector_rows, reconciliation) = {
             let table = self.table.read().expect("table lock poisoned");
+            // A keyed type owns exact reconciliation even when its current row set
+            // is empty (delete, all-null, or otherwise unkeyable). Special Delete
+            // persists the tombstone before mutating `state.status`, so the event's
+            // target status is the authoritative deletion signal here.
+            let reconcile_keys = !table.keys.is_empty();
+            let index_entity = to_status != "Deleted";
             // The type declares vector paths → the store reconciles this entity's
             // vector rows (delete stale + insert current) even when no row is emitted
             // this write (a delete transition or a cleared property), so stale rows are
             // purged instead of being ranked forever (ADR-0155).
             let reconcile_vectors = !table.vectors.is_empty();
-            let mut key_rows = Vec::new();
+            let key_rows =
+                crate::key_index::derive_entity_key_rows(&table.keys, &state.fields, index_entity);
             let mut vector_rows = Vec::new();
             if let Some(field_map) = state.fields.as_object() {
-                for key in &table.keys {
-                    if let Some(hash) =
-                        crate::key_index::canonical_key_hash(&key.name, &key.properties, field_map)
-                    {
-                        key_rows.push(temper_runtime::persistence::EntityKeyRow {
-                            key_name: key.name.clone(),
-                            key_hash: hash,
-                        });
-                    }
-                }
                 // A soft-deleted (tombstone) entity is never indexed — it emits no
                 // vector rows, so the reconcile below PURGES any it had, even though
                 // its embedding field may still be present. Mirrors how the field-index
                 // projection removes a deleted entity.
-                let index_vectors = state.status != "Deleted";
-                for decl in table.vectors.iter().filter(|_| index_vectors) {
+                for decl in table.vectors.iter().filter(|_| index_entity) {
                     // A vector is indexed only when its property parses to `dims`
                     // floats AND its model tag is a non-empty string — otherwise the
                     // path indexes nothing for this entity (like an incomplete key).
@@ -403,7 +442,17 @@ impl EntityActor {
                     });
                 }
             }
-            (key_rows, vector_rows, reconcile_vectors)
+            (
+                key_rows,
+                vector_rows,
+                IndexReconciliation {
+                    keys: reconcile_keys,
+                    key_set_signature: Some(crate::key_index::declared_key_set_signature(
+                        &table.keys,
+                    )),
+                    vectors: reconcile_vectors,
+                },
+            )
         };
         let append_start = Instant::now();
         let result = store
@@ -413,7 +462,7 @@ impl EntityActor {
                 &[envelope],
                 &key_rows,
                 &vector_rows,
-                reconcile_vectors,
+                reconciliation,
             )
             .await;
         crate::runtime_metrics::record_event_store_append_wait(
@@ -558,6 +607,36 @@ impl EntityActor {
                 }
                 for env in &envelopes {
                     if env.event_type == COMPOSITE_EVENT_TYPE {
+                        state.sequence_nr = env.sequence_nr;
+                        continue;
+                    }
+
+                    if env.event_type == FIELD_UPDATE_EVENT_TYPE
+                        && let Ok(update) =
+                            serde_json::from_value::<PersistedFieldUpdate>(env.payload.clone())
+                        && update.schema == FIELD_UPDATE_SCHEMA
+                    {
+                        let status = state.status.clone();
+                        Self::apply_field_update(state, &update.fields, update.replace).map_err(
+                            |error| {
+                                ActorError::custom(format!(
+                                    "failed to replay {} for {}:{}: {error}",
+                                    env.event_type, state.entity_type, state.entity_id
+                                ))
+                            },
+                        )?;
+                        state.push_event_bounded(EntityEvent {
+                            action: if update.replace {
+                                FIELDS_REPLACED_EVENT_TYPE.to_string()
+                            } else {
+                                FIELDS_PATCHED_EVENT_TYPE.to_string()
+                            },
+                            from_status: status.clone(),
+                            to_status: status,
+                            timestamp: env.metadata.timestamp,
+                            params: update.fields,
+                            idempotency_key: update.idempotency_key,
+                        });
                         state.sequence_nr = env.sequence_nr;
                         continue;
                     }
@@ -1419,35 +1498,13 @@ impl Actor for EntityActor {
                     .unwrap_or(serde_json::Value::Null);
                 ctx.reply(value);
             }
-            EntityMsg::UpdateFields { fields, replace } => {
-                if replace {
-                    // PUT: replace all fields (preserve Id and Status)
-                    let id = state.entity_id.clone();
-                    let status = state.status.clone();
-                    state.fields = fields;
-                    if let Some(obj) = state.fields.as_object_mut() {
-                        obj.insert("Id".to_string(), serde_json::Value::String(id));
-                        obj.insert("Status".to_string(), serde_json::Value::String(status));
-                    }
-                } else {
-                    // PATCH: merge fields into existing
-                    if let (Some(existing), Some(updates)) =
-                        (state.fields.as_object_mut(), fields.as_object())
-                    {
-                        for (k, v) in updates {
-                            existing.insert(k.clone(), v.clone());
-                        }
-                    }
-                }
-                ctx.reply(EntityResponse {
-                    success: true,
-                    state: state.clone(),
-                    error: None,
-                    custom_effects: vec![],
-                    scheduled_actions: vec![],
-                    spawn_requests: vec![],
-                    spec_governed: true,
-                });
+            EntityMsg::UpdateFields {
+                fields,
+                replace,
+                idempotency_key,
+            } => {
+                self.handle_field_update(state, fields, replace, idempotency_key, ctx)
+                    .await?;
             }
             EntityMsg::Delete => {
                 let deleted = EntityEvent {

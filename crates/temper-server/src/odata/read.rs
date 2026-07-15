@@ -20,9 +20,9 @@ use super::common::{
     check_has_stream_or_400, extract_key, extract_tenant, has_expand_options, resolve_entity_type,
     resolve_value_parent, tenant_csdl_xml, tenant_entity_sets,
 };
-use super::filter_sql;
 use super::query_plane_read::{
-    QueryPlaneReadBudget, QueryPlaneReadRequest, read_entity_set_from_query_plane,
+    QueryPlaneReadBudget, QueryPlaneReadError, QueryPlaneReadRequest,
+    read_entity_set_for_internal_resolution, read_entity_set_from_query_plane,
 };
 use super::read_support::{
     record_entity_set_not_found, resolve_entity_set_name, try_load_entity_body_from_catalog,
@@ -35,7 +35,6 @@ use crate::query_eval::{expand_entity, select_fields};
 use crate::request_context::extract_agent_context;
 use crate::response::{ODataResponse, ODataStreamResponse, ODataXmlResponse, odata_error};
 use crate::state::ServerState;
-use crate::storage::{QueryFieldIndexOrder, QueryFieldIndexOrderDirection};
 
 /// Recursively resolve an OData path to its parent entity's
 /// (entity_type, entity_id, entity_set_name).
@@ -303,76 +302,51 @@ async fn try_resolve_composite_entity_key(
     tenant: &TenantId,
     entity_type: &str,
     key_pairs: &[(String, String)],
-) -> Option<String> {
-    // ADR-0153 fast path: if the key is a declared `[[key]]`, probe
-    // `entity_key_index` (O(log n), present/absent) instead of the candidate
-    // scan. On a miss we fall through to the scan, which still covers
-    // pre-backfill entities — a safe additive fast path until #324's scan is
-    // retired behind the backfill gate.
-    // Composite-key URL addressing delivers string values; carry them typed so
-    // `resolve_query_to_key` hashes them the same way the write side does.
-    let typed_pairs: Vec<(String, serde_json::Value)> = key_pairs
-        .iter()
-        .map(|(k, v)| (k.clone(), serde_json::Value::String(v.clone())))
-        .collect();
-    // Resolve declared keys via the registry-aware path (os-app entities live in
-    // the per-tenant registry, not `transition_tables`).
-    let keys = state.declared_keys_for(tenant, entity_type);
-    if let Some((key_name, key_hash)) = crate::key_index::resolve_query_to_key(&keys, &typed_pairs)
-        && let Some((store, _)) = state.event_journal()
-        && let Ok(Some(entity_id)) = store
-            .lookup_by_key(tenant.as_str(), entity_type, &key_name, &key_hash)
-            .await
-    {
-        return Some(entity_id);
-    }
-
-    let query_plane = state.query_plane_store()?;
-    let filter = composite_key_filter(key_pairs)?;
-    let translated = filter_sql::try_translate_candidate_filter(&filter)?;
-    let order_by = [QueryFieldIndexOrder {
-        field_name: "entity_id".to_string(),
-        direction: QueryFieldIndexOrderDirection::Asc,
-    }];
-    let page = match query_plane
-        .query_field_index_page(
-            tenant.as_str(),
-            entity_type,
-            &translated.where_clause,
-            translated.params,
-            &order_by,
-            0,
-            2,
-            false,
-        )
-        .await
-    {
-        Ok(Some(page)) => page,
-        Ok(None) => return None,
-        Err(error) => {
-            tracing::warn!(
-                error = %error,
-                tenant = %tenant,
-                entity_type,
-                "composite OData key lookup failed; falling back to direct key"
-            );
-            return None;
-        }
+) -> Result<Option<ResolvedEntityRequest>, QueryPlaneReadError> {
+    // Use the entity-set exact-key contract for both ownership resolution and
+    // journal-backed materialization. Keeping the proven body with the resolved
+    // ID prevents a same-contract ownership transfer from racing a second load.
+    let Some(filter) = composite_key_filter(key_pairs) else {
+        return Ok(None);
     };
+    let query_options = QueryOptions {
+        filter: Some(filter),
+        top: Some(2),
+        ..QueryOptions::default()
+    };
+    let entity_set_name = resolve_entity_set_name(state, tenant, entity_type);
+    // Composite URL resolution is an internal identity lookup, not a collection
+    // read. Requiring the caller's `list` permission here would make an entity GET
+    // stricter solely because its key is composite. The resolved body still passes
+    // through the caller-scoped entity `read` authorization in `build_entity_body`.
+    let resolution_security_ctx = SecurityContext::system();
+    let result = read_entity_set_for_internal_resolution(QueryPlaneReadRequest {
+        state,
+        tenant,
+        security_ctx: &resolution_security_ctx,
+        entity_type,
+        entity_set_name: &entity_set_name,
+        query_options: &query_options,
+        budget: QueryPlaneReadBudget::from_config(),
+    })
+    .await?;
+    let [entity] = result.entities.as_slice() else {
+        return Ok(None);
+    };
+    Ok(entity
+        .get("Id")
+        .or_else(|| entity.get("entity_id"))
+        .or_else(|| entity.get("fields").and_then(|fields| fields.get("Id")))
+        .and_then(serde_json::Value::as_str)
+        .map(|entity_id| ResolvedEntityRequest {
+            entity_id: entity_id.to_string(),
+            authoritative_body: Some(entity.clone()),
+        }))
+}
 
-    match page.entity_ids.as_slice() {
-        [entity_id] => Some(entity_id.clone()),
-        [] => None,
-        _ => {
-            tracing::warn!(
-                tenant = %tenant,
-                entity_type,
-                match_count = page.entity_ids.len(),
-                "composite OData key lookup was ambiguous; falling back to direct key"
-            );
-            None
-        }
-    }
+struct ResolvedEntityRequest {
+    entity_id: String,
+    authoritative_body: Option<serde_json::Value>,
 }
 
 async fn resolve_entity_request_key(
@@ -380,13 +354,21 @@ async fn resolve_entity_request_key(
     tenant: &TenantId,
     entity_type: &str,
     key: &KeyValue,
-) -> String {
+) -> Result<ResolvedEntityRequest, QueryPlaneReadError> {
     match key {
-        KeyValue::Single(_) => extract_key(key),
+        KeyValue::Single(_) => Ok(ResolvedEntityRequest {
+            entity_id: extract_key(key),
+            authoritative_body: None,
+        }),
         KeyValue::Composite(pairs) => {
-            try_resolve_composite_entity_key(state, tenant, entity_type, pairs)
-                .await
-                .unwrap_or_else(|| extract_key(key))
+            Ok(
+                try_resolve_composite_entity_key(state, tenant, entity_type, pairs)
+                    .await?
+                    .unwrap_or_else(|| ResolvedEntityRequest {
+                        entity_id: extract_key(key),
+                        authoritative_body: None,
+                    }),
+            )
         }
     }
 }
@@ -423,7 +405,12 @@ async fn apply_entity_query_options(
     Ok(body)
 }
 
-struct EntityBodyOptions<'a> {
+struct EntityBodyRequest<'a> {
+    entity_type: &'a str,
+    set_name: &'a str,
+    key: &'a str,
+    security_ctx: &'a SecurityContext,
+    authoritative_body: Option<serde_json::Value>,
     context: String,
     odata_id: Option<String>,
     query_options: &'a QueryOptions,
@@ -435,25 +422,48 @@ struct EntityBodyOptions<'a> {
 async fn build_entity_body(
     state: &ServerState,
     tenant: &TenantId,
-    entity_type: &str,
-    set_name: &str,
-    key: &str,
-    security_ctx: &SecurityContext,
-    options: EntityBodyOptions<'_>,
+    request: EntityBodyRequest<'_>,
 ) -> Result<serde_json::Value, Response> {
-    let mut state_json =
-        load_authorized_entity_body(state, tenant, entity_type, set_name, key, security_ctx)
-            .await?;
+    let mut state_json = if let Some(body) = request.authoritative_body {
+        authorize_read(
+            state,
+            tenant,
+            request.security_ctx,
+            READ_ACTION,
+            request.entity_type,
+            request.key,
+            &body,
+        )
+        .map_err(|response| *response)?;
+        body
+    } else {
+        load_authorized_entity_body(
+            state,
+            tenant,
+            request.entity_type,
+            request.set_name,
+            request.key,
+            request.security_ctx,
+        )
+        .await?
+    };
     if let Some(obj) = state_json.as_object_mut() {
         obj.remove("@odata.id");
     }
-    let mut body = annotate_entity(state_json, options.context, options.odata_id);
+    let mut body = annotate_entity(state_json, request.context, request.odata_id);
 
-    if options.enrich {
-        enrich_entity_response(&mut body, entity_type, set_name, key, state, tenant);
+    if request.enrich {
+        enrich_entity_response(
+            &mut body,
+            request.entity_type,
+            request.set_name,
+            request.key,
+            state,
+            tenant,
+        );
     }
 
-    if let Some(name) = options.function
+    if let Some(name) = request.function
         && let Some(obj) = body.as_object_mut()
     {
         obj.insert("@odata.function".to_string(), serde_json::json!(name));
@@ -461,12 +471,12 @@ async fn build_entity_body(
 
     apply_entity_query_options(
         body,
-        entity_type,
+        request.entity_type,
         state,
         tenant,
-        security_ctx,
-        options.query_options,
-        options.select_before_expand,
+        request.security_ctx,
+        request.query_options,
+        request.select_before_expand,
     )
     .await
 }
@@ -850,9 +860,18 @@ async fn handle_entity(
         Some(t) => t,
         None => return entity_set_not_found_response(state, tenant, set_name).await,
     };
-    let key_str = resolve_entity_request_key(state, tenant, &entity_type, key).await;
+    let resolved = match resolve_entity_request_key(state, tenant, &entity_type, key).await {
+        Ok(resolved) => resolved,
+        Err(error) => {
+            error.record_telemetry(&tracing::Span::current());
+            return error.into_response();
+        }
+    };
+    let key_str = resolved.entity_id;
+    let authoritative_body = resolved.authoritative_body;
 
-    if state.is_pg_actor_backed(tenant, &entity_type)
+    if authoritative_body.is_none()
+        && state.is_pg_actor_backed(tenant, &entity_type)
         && let Some(actor_sys) = &state.pg_actor_system
     {
         let namespace = format!("{tenant}/{key_str}");
@@ -906,11 +925,12 @@ async fn handle_entity(
     match build_entity_body(
         state,
         tenant,
-        &entity_type,
-        set_name,
-        &key_str,
-        security_ctx,
-        EntityBodyOptions {
+        EntityBodyRequest {
+            entity_type: &entity_type,
+            set_name,
+            key: &key_str,
+            security_ctx,
+            authoritative_body,
             context: format!("$metadata#{set_name}/$entity"),
             odata_id: Some(format!("{set_name}('{key_str}')")),
             query_options,
@@ -1080,11 +1100,12 @@ async fn handle_navigation_entity(
     match build_entity_body(
         state,
         tenant,
-        &target_type,
-        &target_set,
-        &key_str,
-        security_ctx,
-        EntityBodyOptions {
+        EntityBodyRequest {
+            entity_type: &target_type,
+            set_name: &target_set,
+            key: &key_str,
+            security_ctx,
+            authoritative_body: None,
             context: format!("$metadata#{target_set}/$entity"),
             odata_id: Some(format!("{target_set}('{key_str}')")),
             query_options,
@@ -1140,11 +1161,12 @@ async fn handle_bound_function(
     match build_entity_body(
         state,
         tenant,
-        &entity_type,
-        &parent_set,
-        &parent_key,
-        security_ctx,
-        EntityBodyOptions {
+        EntityBodyRequest {
+            entity_type: &entity_type,
+            set_name: &parent_set,
+            key: &parent_key,
+            security_ctx,
+            authoritative_body: None,
             context: format!("$metadata#{entity_type}"),
             odata_id: None,
             query_options,
@@ -1411,3 +1433,7 @@ mod next_link_tests {
         assert_eq!(link.matches("skiptoken").count(), 1);
     }
 }
+
+#[cfg(all(test, feature = "sim"))]
+#[path = "read_tests/key_contract.rs"]
+mod key_contract_tests;

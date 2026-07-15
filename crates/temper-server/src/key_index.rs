@@ -13,6 +13,7 @@
 
 use sha2::{Digest, Sha256};
 use temper_jit::table::types::DeclaredKey;
+use temper_runtime::persistence::EntityKeyRow;
 
 /// Separates `key_name` from the value list.
 const UNIT_SEP: u8 = 0x1F;
@@ -27,15 +28,62 @@ const TAG_BOOL: u8 = b'B';
 /// `ParentId`), tagged so it can never collide with the empty string.
 const TAG_NULL: u8 = b'0';
 
-/// The stable signature of a type's declared key-set: the sorted, comma-joined key
-/// NAMES. Recorded in the key-index backfill watermark and compared on read, so that
-/// declaring an ADDITIONAL key (a changed signature) re-keys the type instead of being
-/// treated as already complete, and a keyed read only trusts absence once the full
-/// current key-set is backfilled (ARN-68). Deterministic (sorted, no map iteration).
+/// Changes whenever key-row derivation/reconciliation semantics change. Including
+/// it in the durable coverage signature forces a one-time authoritative repair of
+/// rows created under an older contract (ADR-0171).
+const KEY_INDEX_DERIVATION_VERSION: &str = "v3";
+
+/// The stable signature of the key derivation contract and a type's declared key-set:
+/// a version prefix plus every sorted declaration's name and ordered property list.
+/// Length prefixes keep the encoding unambiguous even if future identifiers contain
+/// punctuation. Recorded in the backfill watermark and compared on read, so a name,
+/// property, property-order, or semantics change re-keys the type. Deterministic
+/// (sorted declarations, declared property order, no map iteration).
 pub fn declared_key_set_signature(keys: &[DeclaredKey]) -> String {
-    let mut names: Vec<&str> = keys.iter().map(|key| key.name.as_str()).collect();
-    names.sort();
-    names.join(",")
+    let mut declarations = keys.iter().collect::<Vec<_>>();
+    declarations.sort_by(|left, right| {
+        left.name
+            .cmp(&right.name)
+            .then_with(|| left.properties.cmp(&right.properties))
+    });
+
+    let mut encoded = String::from(KEY_INDEX_DERIVATION_VERSION);
+    for key in declarations {
+        encoded.push('|');
+        encoded.push_str(&key.name.len().to_string());
+        encoded.push(':');
+        encoded.push_str(&key.name);
+        encoded.push('[');
+        for property in &key.properties {
+            encoded.push_str(&property.len().to_string());
+            encoded.push(':');
+            encoded.push_str(property);
+        }
+        encoded.push(']');
+    }
+    encoded
+}
+
+/// Derive an entity's complete current declared-key row set from authoritative
+/// post-transition fields. `index_entity = false` produces the exact empty set for
+/// a tombstone. Shared by ordinary actor appends and atomic composite batches so the
+/// two write paths cannot diverge on null, rename, or delete semantics (ADR-0171).
+pub(crate) fn derive_entity_key_rows(
+    keys: &[DeclaredKey],
+    fields: &serde_json::Value,
+    index_entity: bool,
+) -> Vec<EntityKeyRow> {
+    let Some(field_map) = fields.as_object().filter(|_| index_entity) else {
+        return Vec::new();
+    };
+    keys.iter()
+        .filter_map(|key| {
+            canonical_key_hash(&key.name, &key.properties, field_map).map(|key_hash| EntityKeyRow {
+                key_name: key.name.clone(),
+                key_hash,
+            })
+        })
+        .collect()
 }
 
 /// Canonical `key_hash` for a declared key's values, or `None` when the key is

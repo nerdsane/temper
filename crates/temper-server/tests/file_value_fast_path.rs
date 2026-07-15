@@ -4,6 +4,7 @@ use sha2::{Digest, Sha256};
 use temper_runtime::ActorSystem;
 use temper_runtime::persistence::EventStore;
 use temper_runtime::tenant::TenantId;
+use temper_server::key_index::canonical_key_hash;
 use temper_server::registry::SpecRegistry;
 use temper_server::registry::{EntityLevelSummary, EntityVerificationResult, VerificationStatus};
 use temper_server::request_context::AgentContext;
@@ -11,6 +12,7 @@ use temper_server::state::IndexedFileStreamRead;
 use temper_server::storage::StorageStack;
 use temper_server::{ServerState, build_router};
 use temper_spec::csdl::parse_csdl;
+use temper_store_sim::SimEventStore;
 use temper_store_turso::TursoEventStore;
 use tower::ServiceExt;
 
@@ -106,6 +108,10 @@ name = "version_count"
 type = "counter"
 initial = "0"
 
+[[key]]
+name = "workspace_path"
+properties = ["workspace_id", "path"]
+
 [[action]]
 name = "Create"
 kind = "input"
@@ -128,6 +134,17 @@ effect = [
   { type = "set_bool", var = "has_content", value = "true" },
 ]
 "#;
+
+fn file_path_key_hash(workspace_id: &str, path: &str) -> String {
+    canonical_key_hash(
+        "workspace_path",
+        &["workspace_id".to_string(), "path".to_string()],
+        serde_json::json!({"workspace_id": workspace_id, "path": path})
+            .as_object()
+            .expect("file key fields"),
+    )
+    .expect("complete File declared key")
+}
 
 const FILE_IOA: &str = r#"
 [automaton]
@@ -159,6 +176,10 @@ initial = "0"
 name = "version_count"
 type = "counter"
 initial = "0"
+
+[[key]]
+name = "workspace_path"
+properties = ["workspace_id", "path"]
 
 [[action]]
 name = "Create"
@@ -215,6 +236,21 @@ async fn build_turso_file_state(test_name: &str) -> (ServerState, TursoEventStor
     );
     let mut state = ServerState::from_registry(ActorSystem::new(test_name), registry);
     state.set_storage_stack(StorageStack::from_turso(store.clone()));
+    (state, store)
+}
+
+fn build_sim_file_state(test_name: &str) -> (ServerState, SimEventStore) {
+    let store = SimEventStore::no_faults(238);
+    let mut registry = SpecRegistry::new();
+    let csdl = parse_csdl(FILE_CSDL_XML).expect("file CSDL should parse");
+    registry.register_tenant(
+        "default",
+        csdl,
+        FILE_CSDL_XML.to_string(),
+        &[("File", FILE_IOA)],
+    );
+    let mut state = ServerState::from_registry(ActorSystem::new(test_name), registry);
+    state.set_storage_stack(StorageStack::from_sim(store.clone(), None));
     (state, store)
 }
 
@@ -301,6 +337,75 @@ async fn create_file_with_initial_stream_content_projects_only_ready_content() {
         }
     );
     assert_local_blob(data_dir.path(), &expected_hash, body).await;
+}
+
+#[tokio::test]
+async fn create_file_with_initial_stream_content_co_commits_declared_key() {
+    let (mut state, store) = build_sim_file_state("atomic-initial-content-key");
+    let tenant = TenantId::default();
+    let data_dir = tempfile::tempdir().expect("temp data dir");
+    state.data_dir = data_dir.path().to_path_buf();
+    let body = b"keyed atomic File value";
+
+    state
+        .create_file_with_initial_stream_content(
+            &tenant,
+            "fl-atomic-keyed",
+            serde_json::json!({
+                "name": "atomic.md",
+                "path": "/atomic.md",
+                "directory_id": "dir-root",
+                "workspace_id": "ws-root",
+                "mime_type": "text/markdown",
+            }),
+            body,
+            "text/markdown",
+            &AgentContext::for_service("test-writer"),
+        )
+        .await
+        .expect("keyed initial-content create");
+    assert_eq!(
+        store
+            .lookup_by_key(
+                "default",
+                "File",
+                "workspace_path",
+                &file_path_key_hash("ws-root", "/atomic.md"),
+            )
+            .await
+            .expect("initial-content key lookup"),
+        Some("fl-atomic-keyed".to_string()),
+        "the synthetic initial-content path must co-commit declared-key ownership"
+    );
+
+    let duplicate = state
+        .create_file_with_initial_stream_content(
+            &tenant,
+            "fl-atomic-duplicate",
+            serde_json::json!({
+                "name": "duplicate.md",
+                "path": "/atomic.md",
+                "directory_id": "dir-root",
+                "workspace_id": "ws-root",
+                "mime_type": "text/markdown",
+            }),
+            b"duplicate bytes",
+            "text/markdown",
+            &AgentContext::for_service("test-writer"),
+        )
+        .await;
+    assert!(
+        duplicate.is_err(),
+        "a duplicate File declared key must be rejected"
+    );
+    assert!(
+        store
+            .read_events("default:File:fl-atomic-duplicate", 0)
+            .await
+            .expect("duplicate File journal read")
+            .is_empty(),
+        "a rejected synthetic create must leave no durable File events"
+    );
 }
 
 #[tokio::test]

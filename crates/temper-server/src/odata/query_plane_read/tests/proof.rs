@@ -5,8 +5,9 @@ use super::*;
 /// `entity_key_index` — a bounded candidate (no full-type scan → the budget that
 /// raises the 413 can never trip). Gated on DATABASE_URL; unique tenant; cleans up.
 ///
-/// Proves `keyed_candidate_ids` composes the verified pieces against a live DB:
-/// real `append_with_keys` co-commit → real `lookup_by_key` → bounded `[id]`.
+/// Proves `resolve_keyed_candidates` composes the verified pieces against a live
+/// DB: real `append_with_keys` co-commit → v3 watermark → real `lookup_by_key`
+/// → bounded `[id]`.
 #[test]
 fn keyed_filter_resolves_to_bounded_candidate_on_postgres() {
     use temper_runtime::persistence::{
@@ -83,6 +84,9 @@ fn keyed_filter_resolves_to_bounded_candidate_on_postgres() {
             )
             .await
             .expect("co-commit key row");
+        state
+            .mark_key_index_backfilled(&tenant, "Order", ORDER_KEY_SET_SIGNATURE)
+            .await;
 
         // AMPLIFICATION BOUND (ADR-0148 not regressed): the synchronous co-commit
         // wrote exactly K=1 key row and ZERO broad-index rows. The S-wide
@@ -146,11 +150,14 @@ fn keyed_filter_resolves_to_bounded_candidate_on_postgres() {
                 max_entities: 10,
             },
         };
-        assert_eq!(
-            keyed_candidate_ids(&request).await,
-            Some(vec![target_id.to_string()]),
-            "a $filter matching the declared key must resolve to the bounded single id via entity_key_index"
-        );
+        match resolve_keyed_candidates(&request).await {
+            KeyedCandidateResolution::Authoritative(proof) => {
+                assert_eq!(proof.owner(), Some(target_id));
+            }
+            other => {
+                panic!("a declared-key filter must resolve through entity_key_index, got {other:?}")
+            }
+        }
 
         // CONTROL: a non-key filter does not resolve -> None (falls back to scan).
         let non_key = QueryOptions {
@@ -168,14 +175,14 @@ fn keyed_filter_resolves_to_bounded_candidate_on_postgres() {
             ..request
         };
         assert_eq!(
-            keyed_candidate_ids(&control).await,
-            None,
+            resolve_keyed_candidates(&control).await,
+            KeyedCandidateResolution::NotApplicable,
             "a non-key filter must decline the keyed fast path"
         );
 
         // ABSENT key: a declared-key filter for a key NO entity holds resolves to a
-        // keyed MISS. Pre-backfill that returns None (fall back to scan), NOT an
-        // authoritative empty — a missing key row may be a not-yet-backfilled entity.
+        // keyed MISS. Once the v3 watermark covers the current declaration, that
+        // miss is an authoritative empty candidate set.
         let absent = QueryOptions {
             filter: Some(FilterExpr::BinaryOp {
                 left: Box::new(FilterExpr::BinaryOp {
@@ -198,11 +205,14 @@ fn keyed_filter_resolves_to_bounded_candidate_on_postgres() {
             query_options: &absent,
             ..request
         };
-        assert_eq!(
-            keyed_candidate_ids(&absent_req).await,
-            None,
-            "a keyed miss must decline to scan fallback pre-backfill (not authoritative-empty)"
-        );
+        match resolve_keyed_candidates(&absent_req).await {
+            KeyedCandidateResolution::Authoritative(proof) => {
+                assert_eq!(proof.owner(), None);
+            }
+            other => panic!(
+                "a keyed miss must be authoritative after the current v3 watermark, got {other:?}"
+            ),
+        }
 
         // Clean up this run's rows.
         let _ = sqlx::query("DELETE FROM entity_key_index WHERE tenant = $1")
@@ -216,10 +226,11 @@ fn keyed_filter_resolves_to_bounded_candidate_on_postgres() {
     });
 }
 
-/// ADR-0153 boundary: the keyed fast path engages ONLY for a pure-equality filter
-/// that is exactly a declared `[[key]]`. Every other shape must decline (return
-/// None) so the read falls back to the existing scan/pushdown path — no behavior
-/// change, no false hit. No DB needed: all these decline before any store call.
+/// ADR-0153/0171 boundary: key ownership applies only to a pure-equality filter
+/// that is exactly a declared `[[key]]`. Non-key filter shapes decline. Query
+/// modifiers such as `$orderby` and `$count` do not change ownership: they retain
+/// the exact-key authority boundary and honor their semantics over the bounded
+/// zero-or-one result. No DB is needed for these shape checks.
 #[tokio::test]
 async fn keyed_fast_path_declines_non_key_shapes() {
     let mut state = build_order_state("query-plane-keyed-decline");
@@ -299,18 +310,6 @@ async fn keyed_fast_path_declines_non_key_shapes() {
                 ..QueryOptions::default()
             },
         ),
-        // $orderby present (a point read has no ordering to honor)
-        (
-            "with_orderby",
-            QueryOptions {
-                filter: Some(and(eq("WorkspaceId", "ws"), eq("Path", "/a"))),
-                orderby: Some(vec![OrderByClause {
-                    property: "Path".to_string(),
-                    direction: OrderDirection::Asc,
-                }]),
-                ..QueryOptions::default()
-            },
-        ),
     ];
 
     for (name, query_options) in &cases {
@@ -324,9 +323,41 @@ async fn keyed_fast_path_declines_non_key_shapes() {
             budget,
         };
         assert_eq!(
-            keyed_candidate_ids(&request).await,
-            None,
+            resolve_keyed_candidates(&request).await,
+            KeyedCandidateResolution::NotApplicable,
             "keyed fast path must decline shape '{name}' (falls back to scan/pushdown)"
+        );
+    }
+
+    let exact_key_with_modifiers = [
+        QueryOptions {
+            filter: Some(and(eq("WorkspaceId", "ws"), eq("Path", "/a"))),
+            orderby: Some(vec![OrderByClause {
+                property: "Path".to_string(),
+                direction: OrderDirection::Asc,
+            }]),
+            ..QueryOptions::default()
+        },
+        QueryOptions {
+            filter: Some(and(eq("WorkspaceId", "ws"), eq("Path", "/a"))),
+            count: Some(true),
+            ..QueryOptions::default()
+        },
+    ];
+    for query_options in &exact_key_with_modifiers {
+        let request = QueryPlaneReadRequest {
+            state: &state,
+            tenant: &tenant,
+            security_ctx: &security_ctx,
+            entity_type: "Order",
+            entity_set_name: "Orders",
+            query_options,
+            budget,
+        };
+        assert_eq!(
+            resolve_keyed_candidates(&request).await,
+            KeyedCandidateResolution::NeedsAuthoritativeScan,
+            "exact-key modifiers must preserve the ownership authority boundary"
         );
     }
 }
@@ -819,6 +850,9 @@ async fn file_point_lookup_with_status_ne_uses_lossless_equality_candidates() {
         }
         Err(QueryPlaneReadError::InvalidContinuation) => {
             panic!("no $skiptoken was supplied")
+        }
+        Err(QueryPlaneReadError::KeyOwnershipUnstable) => {
+            panic!("file point lookup ownership should remain stable")
         }
     };
 

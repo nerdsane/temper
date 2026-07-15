@@ -10,6 +10,26 @@ use crate::state::ServerState;
 
 use super::super::read_support::{odata_default_page_size, odata_max_entities};
 
+/// Authorization boundary for one query-plane execution.
+///
+/// Ordinary entity-set reads enforce collection `list` plus per-row `read`.
+/// Composite-key identity resolution is an internal lookup whose returned body
+/// is authorized exactly once by the enclosing entity GET.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(in crate::odata::query_plane_read) enum QueryPlaneReadAuthorization {
+    /// Enforce the caller's collection and row authorization throughout the query.
+    CallerScoped,
+    /// Resolve an identity internally before the enclosing GET authorizes its body.
+    InternalIdentityResolution,
+}
+
+impl QueryPlaneReadAuthorization {
+    /// Return whether this execution must enforce the caller's query-plane checks.
+    pub(in crate::odata::query_plane_read) fn enforces_caller(self) -> bool {
+        self == Self::CallerScoped
+    }
+}
+
 /// Explicit budgets for one OData query-plane read.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(in crate::odata) struct QueryPlaneReadBudget {
@@ -223,6 +243,10 @@ pub(in crate::odata) enum QueryPlaneReadError {
     AuthorizationDenied(Box<Response>),
     /// The read would exceed the bounded candidate proof budget.
     QueryTooLarge { telemetry: QueryPlaneReadTelemetry },
+    /// Ownership changed during every bounded lookup/materialization retry.
+    /// Returning an entity or an empty set would not have a stable ownership
+    /// proof, so the caller receives a retryable response instead.
+    KeyOwnershipUnstable,
     /// The `$skiptoken` continuation could not be decoded for this request —
     /// malformed, or its key count does not match the request's ordering.
     InvalidContinuation,
@@ -233,6 +257,7 @@ impl QueryPlaneReadError {
         match self {
             Self::AuthorizationDenied(_) => {}
             Self::QueryTooLarge { telemetry, .. } => telemetry.record(span),
+            Self::KeyOwnershipUnstable => {}
             Self::InvalidContinuation => {}
         }
     }
@@ -244,6 +269,12 @@ impl QueryPlaneReadError {
                 StatusCode::PAYLOAD_TOO_LARGE,
                 "QueryTooLarge",
                 "This query requires evaluating more candidate entities than the bounded OData read budget permits. Use a narrower filter or a smaller page/count request.",
+            )
+            .into_response(),
+            Self::KeyOwnershipUnstable => odata_error(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "KeyOwnershipUnstable",
+                "Declared-key ownership changed while this read was materialized. Retry the request.",
             )
             .into_response(),
             Self::InvalidContinuation => odata_error(

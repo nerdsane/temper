@@ -7,7 +7,8 @@ use super::{
     base_telemetry, budget_rejection, materialize_filter_and_authorize_ids,
 };
 use crate::odata::query_plane_read::types::{
-    QueryPlaneFallbackReason, QueryPlaneReadRequest, QueryPlaneReadStrategy,
+    QueryPlaneFallbackReason, QueryPlaneReadAuthorization, QueryPlaneReadRequest,
+    QueryPlaneReadStrategy,
 };
 use crate::storage::{QueryFieldIndexOrder, QueryFieldIndexOrderDirection, QueryFieldIndexPage};
 
@@ -141,6 +142,7 @@ pub(in crate::odata::query_plane_read) async fn try_native_page_read(
     request: &QueryPlaneReadRequest<'_>,
     plan: NativeCandidatePagePlan,
     coverage: QueryPlaneCoverageReport,
+    authorization: QueryPlaneReadAuthorization,
 ) -> Option<Result<CandidateScanResult, QueryPlaneReadError>> {
     let requested_top = request.budget.requested_top(request.query_options);
     let skip = request.query_options.skip.unwrap_or(0);
@@ -202,9 +204,14 @@ pub(in crate::odata::query_plane_read) async fn try_native_page_read(
         }
 
         let page_len = page.entity_ids.len();
-        let authorized =
-            materialize_filter_and_authorize_ids(request, &page.entity_ids, true, &mut counters)
-                .await;
+        let authorized = materialize_filter_and_authorize_ids(
+            request,
+            &page.entity_ids,
+            true,
+            &mut counters,
+            authorization,
+        )
+        .await;
         for entity in authorized {
             let index = authorized_seen;
             authorized_seen += 1;

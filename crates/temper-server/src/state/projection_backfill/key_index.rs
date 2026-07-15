@@ -1,8 +1,6 @@
 //! ADR-0153 declared-key backfill: key `entity_key_index` for pre-existing entities
-//! and record the per-(tenant, entity_type) watermark, so a keyed read MISS can mean
-//! authoritative absence (retiring #324's full-type scan — the 413, ARN-68).
-
-use std::collections::BTreeSet;
+//! and record the per-(tenant, entity_type) watermark, so keyed hits and misses can
+//! be authoritative (retiring #324's full-type scan — the 413, ARN-68).
 
 use temper_runtime::tenant::TenantId;
 
@@ -13,17 +11,19 @@ use super::{EntityLoadOutcome, load_entity_current_fields, transition_table_for}
 /// Backfill `entity_key_index` for existing entities, then record the watermark.
 ///
 /// Enumeration is authoritative: keyed types come from the registry and their entity
-/// ids from `store.list_entity_ids_by_type`. It must NOT read `state.entity_index`,
+/// ids from `store.list_entity_ids_for_key_reconciliation`. This repair-specific
+/// enumeration includes deleted journal streams and key-index-only phantoms. It must
+/// NOT read `state.entity_index`,
 /// which is populated only when an actor spawns (lazy) and is therefore near-empty at
 /// boot — the original bug that left ~0 of N entities keyed.
 ///
 /// Robustness at scale (tenants hold 10k–100k+ entities of a keyed type):
-/// - **Resumable**: already-keyed entities are skipped (the costly step is loading
-///   each entity's state), so a re-run after a partial pass only processes the
-///   remainder instead of re-loading all N.
+/// - **Repairing**: every incomplete type is fully replayed. Merely having a key row
+///   is not proof that the row is current, so a partial or pre-ADR-0171 index is never
+///   trusted as a resumability checkpoint.
 /// - **Sound**: a type is watermarked only if EVERY existing entity was either keyed
 ///   or is definitively skippable (deleted/phantom). One entity that exists but
-///   cannot be loaded fails the type — it is not watermarked, and keyed misses keep
+///   cannot be loaded fails the type — it is not watermarked, and keyed queries keep
 ///   scanning (correct, just not bounded) until the data issue is resolved. The
 ///   failing `entity_id`s are logged so the integrity problem is visible.
 /// - **Cooperative**: yields between entities and runs as a background task, so the
@@ -39,6 +39,14 @@ pub(in crate::state) async fn populate_key_index_from_snapshots(
     let Some((store, backend)) = state.event_journal() else {
         return;
     };
+    if !store.supports_authoritative_key_index() {
+        tracing::debug!(
+            tenant = %tenant,
+            ?backend,
+            "key index backfill skipped: backend does not maintain authoritative declared keys"
+        );
+        return;
+    }
 
     // Keyed entity types from the registry — the authoritative record of what is
     // installed for this tenant (os-app entities live here, not in transition_tables).
@@ -68,28 +76,36 @@ pub(in crate::state) async fn populate_key_index_from_snapshots(
         if covered.as_deref() == Some(current_key_set.as_str()) {
             continue;
         }
-        // A watermark that covered a DIFFERENT key-set means a key was declared after
-        // the first backfill (e.g. Directory `ws_path` added after `name_parent`):
-        // existing entities are keyed for the old keys but NOT the new one. Since
-        // `keyed_entity_ids_for_type` is per-entity (any key), the resumability skip
-        // would wrongly skip them, so force a full re-key that re-loads and re-keys
-        // every entity under all currently-declared keys (idempotent upsert).
-        let force_full_rekey = covered.is_some();
-        if force_full_rekey {
-            // One-time on the boot that first sees a changed key-set (incl. the 0011
-            // migration, which stamps every existing watermark's key_set to ''). Logged
-            // so this expected full-reload of the type is distinguishable in Datadog from
-            // a pathology.
-            tracing::info!(
-                tenant = %tenant, entity_type = %entity_type,
-                covered_key_set = covered.as_deref().unwrap_or(""),
-                current_key_set = %current_key_set,
-                "key index backfill: declared key-set changed — re-keying every existing entity of this type (one-time)"
-            );
-        }
+        // No matching watermark means the index is not authoritative. This includes
+        // first boot, an interrupted prior pass, and a derivation-contract upgrade.
+        // Existing rows can therefore be stale or incomplete and must never be used
+        // to skip replay. Reconcile every entity before recording the v3 signature.
+        tracing::info!(
+            tenant = %tenant, entity_type = %entity_type,
+            covered_key_set = covered.as_deref().unwrap_or(""),
+            current_key_set = %current_key_set,
+            "key index backfill: incomplete declared-key signature — reconciling every existing entity"
+        );
+
+        // Establish the target contract BEFORE replay starts. Any live writer still
+        // using a different spec signature now advances the revision, so the final
+        // compare-and-set cannot certify rows repaired across that mixed contract.
+        let repair_revision = match store
+            .begin_key_index_backfill(tenant.as_str(), entity_type, &current_key_set)
+            .await
+        {
+            Ok(revision) => revision,
+            Err(e) => {
+                tracing::error!(
+                    tenant = %tenant, entity_type = %entity_type, error = %e,
+                    "key index backfill: failed to establish target contract; type not watermarked"
+                );
+                continue;
+            }
+        };
 
         let entity_ids = match store
-            .list_entity_ids_by_type(tenant.as_str(), entity_type)
+            .list_entity_ids_for_key_reconciliation(tenant.as_str(), entity_type)
             .await
         {
             Ok(ids) => ids,
@@ -102,34 +118,14 @@ pub(in crate::state) async fn populate_key_index_from_snapshots(
             }
         };
 
-        // Resumability: on a FIRST-TIME backfill, skip entities already keyed (avoids
-        // re-loading their state). On a key-set change we must re-key already-keyed
-        // entities with the new key, so process all.
-        let already_keyed: BTreeSet<String> = if force_full_rekey {
-            BTreeSet::new()
-        } else {
-            match store
-                .keyed_entity_ids_for_type(tenant.as_str(), entity_type)
-                .await
-            {
-                Ok(ids) => ids.into_iter().collect(),
-                Err(_) => BTreeSet::new(), // cannot resume → process all (correct, slower)
-            }
-        };
-
         let table = transition_table_for(state, tenant, entity_type);
         let blob_store = state.blob_store_for_tenant(tenant).ok();
         let total = entity_ids.len();
         let mut newly_keyed = 0usize;
-        let mut already = 0usize;
         let mut skipped = 0usize;
         let mut failed = 0usize;
 
         for entity_id in &entity_ids {
-            if already_keyed.contains(entity_id) {
-                already += 1;
-                continue;
-            }
             match load_entity_current_fields(
                 tenant,
                 entity_type,
@@ -141,34 +137,39 @@ pub(in crate::state) async fn populate_key_index_from_snapshots(
             )
             .await
             {
-                EntityLoadOutcome::Fields(fields) => {
-                    let Some(field_map) = fields.as_object() else {
-                        skipped += 1;
-                        continue;
-                    };
+                EntityLoadOutcome::Fields {
+                    fields,
+                    sequence_nr,
+                } => {
                     let mut key_rows = Vec::new();
-                    for key in keys {
-                        if let Some(hash) = crate::key_index::canonical_key_hash(
-                            &key.name,
-                            &key.properties,
-                            field_map,
-                        ) {
-                            key_rows.push(temper_runtime::persistence::EntityKeyRow {
-                                key_name: key.name.clone(),
-                                key_hash: hash,
-                            });
+                    if let Some(field_map) = fields.as_object() {
+                        for key in keys {
+                            if let Some(hash) = crate::key_index::canonical_key_hash(
+                                &key.name,
+                                &key.properties,
+                                field_map,
+                            ) {
+                                key_rows.push(temper_runtime::persistence::EntityKeyRow {
+                                    key_name: key.name.clone(),
+                                    key_hash: hash,
+                                });
+                            }
                         }
                     }
-                    if key_rows.is_empty() {
-                        // No resolvable key (all key components absent/null) — the
-                        // entity is not addressable by this key, so skipping is sound.
-                        skipped += 1;
-                        continue;
-                    }
+                    // Exact reconciliation is required even when no current row is
+                    // resolvable (all-null/non-scalar): an empty set purges any stale
+                    // ownership left by the previous derivation contract.
                     match store
-                        .backfill_entity_keys(tenant.as_str(), entity_type, entity_id, &key_rows)
+                        .backfill_entity_keys(
+                            tenant.as_str(),
+                            entity_type,
+                            entity_id,
+                            sequence_nr,
+                            &key_rows,
+                        )
                         .await
                     {
+                        Ok(()) if key_rows.is_empty() => skipped += 1,
                         Ok(()) => newly_keyed += 1,
                         Err(e) => {
                             failed += 1;
@@ -179,7 +180,28 @@ pub(in crate::state) async fn populate_key_index_from_snapshots(
                         }
                     }
                 }
-                EntityLoadOutcome::Skip => skipped += 1,
+                EntityLoadOutcome::Skip { sequence_nr } => {
+                    // Deleted and phantom streams must own no key rows. Reconcile an
+                    // empty set so a stale pre-ADR-0171 claim is repaired.
+                    if let Err(e) = store
+                        .backfill_entity_keys(
+                            tenant.as_str(),
+                            entity_type,
+                            entity_id,
+                            sequence_nr,
+                            &[],
+                        )
+                        .await
+                    {
+                        failed += 1;
+                        tracing::warn!(
+                            error = %e, entity_type = %entity_type, entity_id = %entity_id,
+                            "key index backfill: purge of deleted/phantom entity failed"
+                        );
+                    } else {
+                        skipped += 1;
+                    }
+                }
                 EntityLoadOutcome::LoadFailed => {
                     failed += 1;
                     tracing::warn!(
@@ -192,22 +214,38 @@ pub(in crate::state) async fn populate_key_index_from_snapshots(
         }
 
         // Watermark only if nothing failed — every existing entity was keyed or is
-        // definitively skippable. Otherwise keyed misses keep scanning (sound), and a
-        // later boot resumes from the remainder.
+        // definitively skippable. Otherwise keyed queries keep scanning (sound), and a
+        // later boot retries the full type from authoritative state.
         if failed == 0 {
-            state
-                .mark_key_index_backfilled(tenant, entity_type, &current_key_set)
-                .await;
-            tracing::info!(
-                tenant = %tenant, entity_type = %entity_type, key_set = %current_key_set,
-                total, newly_keyed, already, skipped,
-                "entity_key_index backfill complete; type watermarked"
-            );
+            match state
+                .mark_key_index_backfilled_if_revision(
+                    tenant,
+                    entity_type,
+                    &current_key_set,
+                    repair_revision,
+                )
+                .await
+            {
+                Ok(true) => tracing::info!(
+                    tenant = %tenant, entity_type = %entity_type, key_set = %current_key_set,
+                    total, newly_keyed, skipped, repair_revision,
+                    "entity_key_index backfill complete; type watermarked"
+                ),
+                Ok(false) => tracing::warn!(
+                    tenant = %tenant, entity_type = %entity_type, key_set = %current_key_set,
+                    repair_revision,
+                    "key index backfill: live key contract changed during repair; type NOT watermarked"
+                ),
+                Err(e) => tracing::error!(
+                    tenant = %tenant, entity_type = %entity_type, error = %e,
+                    "key index backfill: failed to publish fenced watermark"
+                ),
+            }
         } else {
             tracing::warn!(
                 tenant = %tenant, entity_type = %entity_type,
-                total, newly_keyed, already, skipped, failed,
-                "key index backfill: {failed} entities unresolved; type NOT watermarked (keyed misses keep scanning; will resume next run)"
+                total, newly_keyed, skipped, failed,
+                "key index backfill: {failed} entities unresolved; type NOT watermarked (keyed queries keep scanning; will retry the full type next run)"
             );
         }
     }

@@ -24,6 +24,8 @@ mod proof;
 
 const CSDL_XML: &str = include_str!("../../../../../test-fixtures/specs/model.csdl.xml");
 const ORDER_IOA: &str = include_str!("../../../../../test-fixtures/specs/order.ioa.toml");
+const ORDER_KEY_SET_SIGNATURE: &str = "v3|7:ws_path[11:WorkspaceId4:Path]";
+const DIRECTORY_KEY_SET_SIGNATURE: &str = "v3|11:name_parent[4:Name11:WorkspaceId8:ParentId]";
 
 fn build_order_state(system_name: &str) -> ServerState {
     let csdl = parse_csdl(CSDL_XML).expect("CSDL should parse");
@@ -248,6 +250,9 @@ async fn row_authorized_count_over_budget_returns_413() {
         }
         QueryPlaneReadError::InvalidContinuation => {
             panic!("no $skiptoken was supplied")
+        }
+        QueryPlaneReadError::KeyOwnershipUnstable => {
+            panic!("this non-keyed count does not use declared-key ownership")
         }
     }
 }

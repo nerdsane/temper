@@ -102,3 +102,47 @@ async fn retry_after_dropped_reply_replays_success_response_and_runs_effects_wit
         "post-dispatch effects from the successful Start transition must arm the state_timeout"
     );
 }
+
+#[tokio::test]
+async fn field_update_retry_after_post_commit_timeout_appends_once() {
+    let (_guard, _clock, _ids) = install_deterministic_context(238);
+    let (state, sim_store) = build_state_with_sim_store(238);
+    let tenant = TenantId::default();
+    let entity_id = "timed-task-field-update";
+    let persistence_id = format!("default:TimedTask:{entity_id}");
+
+    state
+        .get_or_create_tenant_entity(
+            &tenant,
+            "TimedTask",
+            entity_id,
+            serde_json::json!({"Id": entity_id, "Title": "before"}),
+        )
+        .await
+        .expect("entity creation succeeds");
+
+    // The sim store commits before consuming this one-shot delay. The first ask
+    // therefore times out after durability but before the actor can reply; the
+    // dispatch retry must reuse one token and observe the committed update.
+    sim_store.inject_append_delay(&persistence_id, Duration::from_millis(25));
+
+    let response = state
+        .update_tenant_entity_fields(
+            &tenant,
+            "TimedTask",
+            entity_id,
+            serde_json::json!({"Title": "after"}),
+            false,
+            Some("patch-post-commit-timeout".to_string()),
+        )
+        .await
+        .expect("retry should return the committed field update");
+
+    assert!(response.success);
+    assert_eq!(response.state.fields["Title"], "after");
+    assert_eq!(
+        sim_store.dump_journal(&persistence_id).len(),
+        2,
+        "Create plus exactly one private field-update event must be durable"
+    );
+}

@@ -330,9 +330,12 @@ async fn dst_projection_lag_413_eliminated_by_keyed_index() {
             "seed {seed}: same keyed filter shape with NO key row must still 413 (pre-backfill scan fallback)"
         );
 
-        // GREEN (the fix): the SAME workspace + budget + lag, but the $filter is
-        // exactly the declared key and the co-committed key row exists. The keyed
-        // fast path bounds the candidate set to the single id -> no scan -> 200.
+        // GREEN (the fix): certify that the complete current repair covers this key
+        // declaration. The SAME workspace + budget + lag can now trust the
+        // co-committed hit and bound the candidate set to one id -> no scan -> 200.
+        state
+            .mark_key_index_backfilled(&tenant, "Order", ORDER_KEY_SET_SIGNATURE)
+            .await;
         let keyed = QueryOptions {
             filter: Some(eq_filter(ws, target_path)),
             ..QueryOptions::default()
@@ -406,6 +409,9 @@ async fn dst_tombstone_never_resolves_declared_key_after_restart() {
         // query plane still holds the former owner's pre-delete live row — the exact
         // lag shape produced when projection removal is delayed or crash-lost.
         state.populate_index_from_store(&tenant).await;
+        state
+            .mark_key_index_backfilled(&tenant, "Order", ORDER_KEY_SET_SIGNATURE)
+            .await;
         let stale_state = serde_json::json!({
             "entity_type": "Order",
             "entity_id": former_id.clone(),
@@ -429,10 +435,16 @@ async fn dst_tombstone_never_resolves_declared_key_after_restart() {
             default_page_size: 10,
             max_entities: 10,
         };
-        for include_count in [false, true] {
+        for (include_count, include_orderby) in [(false, false), (true, false), (false, true)] {
             let options = QueryOptions {
                 filter: Some(eq_filter("ws-reclaim", "/same-key")),
                 count: include_count.then_some(true),
+                orderby: include_orderby.then(|| {
+                    vec![OrderByClause {
+                        property: "Path".to_string(),
+                        direction: OrderDirection::Desc,
+                    }]
+                }),
                 ..QueryOptions::default()
             };
             let result = read_entity_set_page(QueryPlaneReadRequest {
@@ -452,7 +464,7 @@ async fn dst_tombstone_never_resolves_declared_key_after_restart() {
             assert_eq!(
                 result.entities.len(),
                 1,
-                "seed {seed}, count={include_count}"
+                "seed {seed}, count={include_count}, orderby={include_orderby}"
             );
             assert_eq!(
                 result.entities[0]["entity_id"], replacement_id,
@@ -469,7 +481,7 @@ async fn dst_tombstone_never_resolves_declared_key_after_restart() {
 
 /// Rollout/migration shape: an entity was keyed before ADR-0171, its delete journal
 /// event committed without exact key reconciliation, and projection removal was
-/// crash-lost. Until the v2 repair reaches this stream, neither the stale key hit nor
+/// crash-lost. Until the v3 repair reaches this stream, neither the stale key hit nor
 /// the pre-delete live catalog row may expose the durable tombstone.
 #[tokio::test]
 async fn dst_pre_v2_stale_key_hit_never_returns_crash_lost_live_projection() {
@@ -488,7 +500,7 @@ async fn dst_pre_v2_stale_key_hit_never_returns_crash_lost_live_projection() {
         state
             .get_or_create_tenant_entity(&tenant, "Order", &entity_id, fields.clone())
             .await
-            .expect("create pre-v2 owner");
+            .expect("create pre-v3 owner");
         let persistence_id = format!("{tenant}:Order:{entity_id}");
         let current_sequence = events
             .read_events(&persistence_id, 0)
@@ -554,9 +566,9 @@ async fn dst_pre_v2_stale_key_hit_never_returns_crash_lost_live_projection() {
         .expect("seed crash-lost live projection");
         assert!(
             !state
-                .key_index_backfill_complete(&tenant, "Order", "v2|ws_path")
+                .key_index_backfill_complete(&tenant, "Order", ORDER_KEY_SET_SIGNATURE)
                 .await,
-            "precondition: v2 repair has not certified this type"
+            "precondition: v3 repair has not certified this type"
         );
 
         let security_ctx = SecurityContext::system();
@@ -564,10 +576,16 @@ async fn dst_pre_v2_stale_key_hit_never_returns_crash_lost_live_projection() {
             default_page_size: 10,
             max_entities: 10,
         };
-        for include_count in [false, true] {
+        for (include_count, include_orderby) in [(false, false), (true, false), (false, true)] {
             let options = QueryOptions {
                 filter: Some(eq_filter("ws-legacy", "/stale-key")),
                 count: include_count.then_some(true),
+                orderby: include_orderby.then(|| {
+                    vec![OrderByClause {
+                        property: "Path".to_string(),
+                        direction: OrderDirection::Asc,
+                    }]
+                }),
                 ..QueryOptions::default()
             };
             let result = read_entity_set_page(QueryPlaneReadRequest {
@@ -586,7 +604,7 @@ async fn dst_pre_v2_stale_key_hit_never_returns_crash_lost_live_projection() {
             };
             assert!(
                 result.entities.is_empty(),
-                "seed {seed}, count={include_count}: durable tombstone must win over stale key/catalog"
+                "seed {seed}, count={include_count}, orderby={include_orderby}: durable tombstone must win over stale key/catalog"
             );
             if include_count {
                 assert_eq!(result.count, Some(0));

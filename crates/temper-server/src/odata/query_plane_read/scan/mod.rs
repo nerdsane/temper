@@ -9,8 +9,9 @@ use temper_odata::query::types::QueryOptions;
 use super::super::authz::{READ_ACTION, authorize_read, entity_id_from_body};
 use super::super::read_support::materialize_entity_set_entities;
 use super::types::{
-    QueryPlaneCoverageReport, QueryPlaneFallbackReason, QueryPlaneReadBudget, QueryPlaneReadError,
-    QueryPlaneReadRequest, QueryPlaneReadStrategy, QueryPlaneReadTelemetry,
+    QueryPlaneCoverageReport, QueryPlaneFallbackReason, QueryPlaneReadAuthorization,
+    QueryPlaneReadBudget, QueryPlaneReadError, QueryPlaneReadRequest, QueryPlaneReadStrategy,
+    QueryPlaneReadTelemetry,
 };
 use crate::query_eval::apply_query_options;
 use crate::storage::QueryFieldIndexOrder;
@@ -148,18 +149,23 @@ pub(super) fn budget_rejection(
     }
 }
 
-fn is_authorized_entity(request: &QueryPlaneReadRequest<'_>, entity: &serde_json::Value) -> bool {
+fn is_authorized_entity(
+    request: &QueryPlaneReadRequest<'_>,
+    entity: &serde_json::Value,
+    authorization: QueryPlaneReadAuthorization,
+) -> bool {
     entity_id_from_body(entity).is_some_and(|entity_id| {
-        authorize_read(
-            request.state,
-            request.tenant,
-            request.security_ctx,
-            READ_ACTION,
-            request.entity_type,
-            entity_id,
-            entity,
-        )
-        .is_ok()
+        !authorization.enforces_caller()
+            || authorize_read(
+                request.state,
+                request.tenant,
+                request.security_ctx,
+                READ_ACTION,
+                request.entity_type,
+                entity_id,
+                entity,
+            )
+            .is_ok()
     })
 }
 
@@ -174,8 +180,9 @@ pub(super) fn apply_select_only(
 pub(super) async fn materialize_and_authorize_ids(
     request: &QueryPlaneReadRequest<'_>,
     entity_ids: &[String],
-    prefer_catalog: bool,
+    allow_catalog: bool,
     counters: &mut ScanCounters,
+    authorization: QueryPlaneReadAuthorization,
 ) -> Vec<serde_json::Value> {
     counters.candidate_count += entity_ids.len();
     let materialized = materialize_entity_set_entities(
@@ -184,7 +191,7 @@ pub(super) async fn materialize_and_authorize_ids(
         request.entity_type,
         request.entity_set_name,
         entity_ids,
-        prefer_catalog,
+        allow_catalog,
         None,
     )
     .await;
@@ -194,15 +201,16 @@ pub(super) async fn materialize_and_authorize_ids(
     materialized
         .entities
         .into_iter()
-        .filter(|entity| is_authorized_entity(request, entity))
+        .filter(|entity| is_authorized_entity(request, entity, authorization))
         .collect()
 }
 
 pub(super) async fn materialize_filter_and_authorize_ids(
     request: &QueryPlaneReadRequest<'_>,
     entity_ids: &[String],
-    prefer_catalog: bool,
+    allow_catalog: bool,
     counters: &mut ScanCounters,
+    authorization: QueryPlaneReadAuthorization,
 ) -> Vec<serde_json::Value> {
     counters.candidate_count += entity_ids.len();
     let materialized = materialize_entity_set_entities(
@@ -211,7 +219,7 @@ pub(super) async fn materialize_filter_and_authorize_ids(
         request.entity_type,
         request.entity_set_name,
         entity_ids,
-        prefer_catalog,
+        allow_catalog,
         None,
     )
     .await;
@@ -231,6 +239,6 @@ pub(super) async fn materialize_filter_and_authorize_ids(
 
     entities
         .into_iter()
-        .filter(|entity| is_authorized_entity(request, entity))
+        .filter(|entity| is_authorized_entity(request, entity, authorization))
         .collect()
 }

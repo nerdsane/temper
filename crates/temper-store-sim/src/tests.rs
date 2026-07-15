@@ -1,5 +1,5 @@
 use super::*;
-use temper_runtime::persistence::EventMetadata;
+use temper_runtime::persistence::{EntityKeyRow, EventMetadata};
 
 fn test_envelope(seq: u64, event_type: &str) -> PersistenceEnvelope {
     PersistenceEnvelope {
@@ -62,11 +62,17 @@ async fn append_batch_commits_multiple_journals_atomically() {
             persistence_id: "default:Order:ord-a".to_string(),
             expected_sequence: 0,
             events: vec![test_envelope(0, "Created")],
+            key_rows: Vec::new(),
+            reconcile_keys: false,
+            key_set_signature: None,
         },
         PersistenceAppend {
             persistence_id: "default:Order:ord-b".to_string(),
             expected_sequence: 0,
             events: vec![test_envelope(0, "Created"), test_envelope(0, "Submitted")],
+            key_rows: Vec::new(),
+            reconcile_keys: false,
+            key_set_signature: None,
         },
     ];
 
@@ -107,11 +113,17 @@ async fn append_batch_conflict_leaves_all_journals_untouched() {
                 persistence_id: "default:Order:ord-new".to_string(),
                 expected_sequence: 0,
                 events: vec![test_envelope(0, "Created")],
+                key_rows: Vec::new(),
+                reconcile_keys: false,
+                key_set_signature: None,
             },
             PersistenceAppend {
                 persistence_id: "default:Order:ord-existing".to_string(),
                 expected_sequence: 0,
                 events: vec![test_envelope(0, "Submitted")],
+                key_rows: Vec::new(),
+                reconcile_keys: false,
+                key_set_signature: None,
             },
         ])
         .await
@@ -129,6 +141,138 @@ async fn append_batch_conflict_leaves_all_journals_untouched() {
         store.dump_journal("default:Order:ord-existing").len(),
         1,
         "conflicting stream must keep its original journal only"
+    );
+}
+
+#[tokio::test]
+async fn append_batch_reconciles_keys_and_rolls_back_conflicting_claims() {
+    let store = SimEventStore::no_faults(42);
+    let owner_pid = "default:Doc:doc-owner";
+    let claimant_pid = "default:Doc:doc-claimant";
+    let claimed_key = EntityKeyRow {
+        key_name: "path".to_string(),
+        key_hash: "shared-path".to_string(),
+    };
+
+    store
+        .append_with_keys(
+            owner_pid,
+            0,
+            &[test_envelope(0, "Created")],
+            std::slice::from_ref(&claimed_key),
+        )
+        .await
+        .unwrap();
+
+    store
+        .append_batch(&[
+            PersistenceAppend {
+                persistence_id: owner_pid.to_string(),
+                expected_sequence: 1,
+                events: vec![test_envelope(0, "Deleted")],
+                key_rows: Vec::new(),
+                reconcile_keys: true,
+                key_set_signature: Some("v3:path".to_string()),
+            },
+            PersistenceAppend {
+                persistence_id: claimant_pid.to_string(),
+                expected_sequence: 0,
+                events: vec![test_envelope(0, "Created")],
+                key_rows: vec![claimed_key.clone()],
+                reconcile_keys: true,
+                key_set_signature: Some("v3:path".to_string()),
+            },
+        ])
+        .await
+        .expect("one atomic batch may release and reclaim the same key");
+    assert_eq!(
+        store
+            .lookup_by_key("default", "Doc", "path", &claimed_key.key_hash)
+            .await
+            .unwrap(),
+        Some("doc-claimant".to_string())
+    );
+    assert_eq!(store.dump_journal(owner_pid).len(), 2);
+    assert_eq!(store.dump_journal(claimant_pid).len(), 1);
+
+    let unrelated_key = EntityKeyRow {
+        key_name: "path".to_string(),
+        key_hash: "unrelated-path".to_string(),
+    };
+    let rejected = store
+        .append_batch(&[
+            PersistenceAppend {
+                persistence_id: "default:Doc:doc-unrelated".to_string(),
+                expected_sequence: 0,
+                events: vec![test_envelope(0, "Created")],
+                key_rows: vec![unrelated_key.clone()],
+                reconcile_keys: true,
+                key_set_signature: Some("v3:path".to_string()),
+            },
+            PersistenceAppend {
+                persistence_id: "default:Doc:doc-conflict".to_string(),
+                expected_sequence: 0,
+                events: vec![test_envelope(0, "Created")],
+                key_rows: vec![claimed_key.clone()],
+                reconcile_keys: true,
+                key_set_signature: Some("v3:path".to_string()),
+            },
+        ])
+        .await;
+    assert!(
+        rejected.is_err(),
+        "an occupied final key must reject the batch"
+    );
+    assert!(
+        store.dump_journal("default:Doc:doc-unrelated").is_empty(),
+        "a later key conflict must roll back an earlier stream"
+    );
+    assert!(store.dump_journal("default:Doc:doc-conflict").is_empty());
+    assert_eq!(
+        store
+            .lookup_by_key("default", "Doc", "path", &unrelated_key.key_hash)
+            .await
+            .unwrap(),
+        None,
+        "the rejected batch must not publish any key rows"
+    );
+    assert_eq!(
+        store
+            .lookup_by_key("default", "Doc", "path", &claimed_key.key_hash)
+            .await
+            .unwrap(),
+        Some("doc-claimant".to_string()),
+        "the prior owner must survive a rejected batch"
+    );
+}
+
+#[tokio::test]
+async fn key_reconciliation_enumeration_includes_key_only_orphans() {
+    let store = SimEventStore::no_faults(42);
+    let orphan = EntityKeyRow {
+        key_name: "path".to_string(),
+        key_hash: "orphan-path".to_string(),
+    };
+    store
+        .backfill_entity_keys("default", "Doc", "orphan-owner", 0, &[orphan])
+        .await
+        .expect("seed key-only orphan");
+
+    assert!(
+        store
+            .list_entity_ids_by_type("default", "Doc")
+            .await
+            .expect("journal enumeration")
+            .is_empty(),
+        "the orphan intentionally has no journal"
+    );
+    assert_eq!(
+        store
+            .list_entity_ids_for_key_reconciliation("default", "Doc")
+            .await
+            .expect("repair enumeration"),
+        vec!["orphan-owner".to_string()],
+        "exact repair must see derived owners even when their journal is absent"
     );
 }
 

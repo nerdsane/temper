@@ -1,7 +1,9 @@
 use super::*;
 use crate::migration::run_migrations;
 use sqlx::PgPool;
-use temper_runtime::persistence::{EntityKeyRow, EventStore};
+use temper_runtime::persistence::{
+    EntityKeyRow, EventStore, IndexReconciliation, PersistenceAppend,
+};
 
 fn test_envelope(event_type: &str, payload: serde_json::Value) -> PersistenceEnvelope {
     PersistenceEnvelope {
@@ -89,6 +91,185 @@ fn entity_key_index_present_absent_and_atomic_reject() {
             Some("doc-a".to_string()),
         );
 
+        // Exact empty reconciliation co-commits the tombstone and releases A's key.
+        store
+            .append_with_keys(
+                &pid_a,
+                1,
+                &[test_envelope("Deleted", serde_json::json!({}))],
+                &[],
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            store
+                .lookup_by_key(&tenant, "Doc", "path", &key.key_hash)
+                .await
+                .unwrap(),
+            None,
+        );
+
+        // B and C concurrently race to reclaim the vacant key. PostgreSQL's real
+        // transaction path must commit exactly one and leave the loser's journal
+        // unchanged.
+        let pid_c = format!("{tenant}:Doc:doc-c");
+        let b_events = [test_envelope("Create", serde_json::json!({}))];
+        let c_events = [test_envelope("Create", serde_json::json!({}))];
+        let (b_result, c_result) = futures::join!(
+            store.append_with_keys(&pid_b, 0, &b_events, std::slice::from_ref(&key)),
+            store.append_with_keys(&pid_c, 0, &c_events, std::slice::from_ref(&key))
+        );
+        assert_ne!(b_result.is_ok(), c_result.is_ok());
+        let (winner_id, winner_pid, loser_pid) = if b_result.is_ok() {
+            ("doc-b", &pid_b, &pid_c)
+        } else {
+            ("doc-c", &pid_c, &pid_b)
+        };
+        assert_eq!(
+            store
+                .lookup_by_key(&tenant, "Doc", "path", &key.key_hash)
+                .await
+                .unwrap(),
+            Some(winner_id.to_string()),
+        );
+        assert!(store.read_events(loser_pid, 0).await.unwrap().is_empty());
+
+        // Interleaving fence: a repair derived from sequence 1 cannot overwrite the
+        // winner's live sequence-2 rename.
+        let renamed_key = EntityKeyRow {
+            key_name: "path".to_string(),
+            key_hash: format!("renamed-{}", uuid::Uuid::new_v4()),
+        };
+        store
+            .append_with_keys(
+                winner_pid,
+                1,
+                &[test_envelope("Rekey", serde_json::json!({}))],
+                std::slice::from_ref(&renamed_key),
+            )
+            .await
+            .unwrap();
+        let stale = store
+            .backfill_entity_keys(&tenant, "Doc", winner_id, 1, std::slice::from_ref(&key))
+            .await;
+        assert!(matches!(
+            stale,
+            Err(PersistenceError::ConcurrencyViolation {
+                expected: 1,
+                actual: 2
+            })
+        ));
+        assert_eq!(
+            store
+                .lookup_by_key(&tenant, "Doc", "path", &key.key_hash)
+                .await
+                .unwrap(),
+            None
+        );
+        assert_eq!(
+            store
+                .lookup_by_key(&tenant, "Doc", "path", &renamed_key.key_hash)
+                .await
+                .unwrap(),
+            Some(winner_id.to_string())
+        );
+
+        // Composite batches obey the same exact-key contract. Deleting the
+        // current owner and creating its replacement in one batch transfers the
+        // key atomically, independent of append order.
+        let transfer_pid = format!("{tenant}:Doc:doc-transfer");
+        store
+            .append_batch(&[
+                PersistenceAppend {
+                    persistence_id: transfer_pid.clone(),
+                    expected_sequence: 0,
+                    events: vec![test_envelope("Create", serde_json::json!({}))],
+                    key_rows: vec![renamed_key.clone()],
+                    reconcile_keys: true,
+                    key_set_signature: Some("v3:path".to_string()),
+                },
+                PersistenceAppend {
+                    persistence_id: winner_pid.clone(),
+                    expected_sequence: 2,
+                    events: vec![test_envelope("Deleted", serde_json::json!({}))],
+                    key_rows: Vec::new(),
+                    reconcile_keys: true,
+                    key_set_signature: Some("v3:path".to_string()),
+                },
+            ])
+            .await
+            .expect("batch delete and reclaim must commit atomically");
+        assert_eq!(
+            store
+                .lookup_by_key(&tenant, "Doc", "path", &renamed_key.key_hash)
+                .await
+                .unwrap(),
+            Some("doc-transfer".to_string())
+        );
+
+        // A conflict in a later stream rolls back every journal and key row in
+        // the transaction, including an otherwise-valid earlier claim.
+        let unrelated_key = EntityKeyRow {
+            key_name: "path".to_string(),
+            key_hash: format!("unrelated-{}", uuid::Uuid::new_v4()),
+        };
+        let unrelated_pid = format!("{tenant}:Doc:doc-unrelated");
+        let conflict_pid = format!("{tenant}:Doc:doc-conflict");
+        let rejected = store
+            .append_batch(&[
+                PersistenceAppend {
+                    persistence_id: unrelated_pid.clone(),
+                    expected_sequence: 0,
+                    events: vec![test_envelope("Create", serde_json::json!({}))],
+                    key_rows: vec![unrelated_key.clone()],
+                    reconcile_keys: true,
+                    key_set_signature: Some("v3:path".to_string()),
+                },
+                PersistenceAppend {
+                    persistence_id: conflict_pid.clone(),
+                    expected_sequence: 0,
+                    events: vec![test_envelope("Create", serde_json::json!({}))],
+                    key_rows: vec![renamed_key.clone()],
+                    reconcile_keys: true,
+                    key_set_signature: Some("v3:path".to_string()),
+                },
+            ])
+            .await;
+        assert!(
+            rejected.is_err(),
+            "occupied final key must reject the batch"
+        );
+        assert!(
+            store
+                .read_events(&unrelated_pid, 0)
+                .await
+                .unwrap()
+                .is_empty()
+        );
+        assert!(
+            store
+                .read_events(&conflict_pid, 0)
+                .await
+                .unwrap()
+                .is_empty()
+        );
+        assert_eq!(
+            store
+                .lookup_by_key(&tenant, "Doc", "path", &unrelated_key.key_hash)
+                .await
+                .unwrap(),
+            None,
+            "rejected batch must not publish earlier key rows"
+        );
+        assert_eq!(
+            store
+                .lookup_by_key(&tenant, "Doc", "path", &renamed_key.key_hash)
+                .await
+                .unwrap(),
+            Some("doc-transfer".to_string()),
+            "rejected batch must preserve the committed owner"
+        );
+
         // Clean up this test tenant's rows.
         let _ = crate::dbm::postgres_query!("DELETE FROM entity_key_index WHERE tenant = $1")
             .bind(&tenant)
@@ -101,10 +282,9 @@ fn entity_key_index_present_absent_and_atomic_reject() {
     });
 }
 
-/// ADR-0153 backfill robustness: the real postgres store honors the backfill
-/// primitives the resumable, watermark-gated backfill relies on —
-/// `backfill_entity_keys` (no journal event), `keyed_entity_ids_for_type` (resume:
-/// which entities are already keyed), and the watermark round-trip
+/// ADR-0153/0171 backfill robustness: the real postgres store honors exact,
+/// sequence-fenced repair, conflict-before-mutation, index inspection, and the
+/// watermark round-trip
 /// (`mark_key_index_backfilled` / `key_index_backfilled_types`, table from migration
 /// 0010). Gated on DATABASE_URL; isolated by a unique tenant.
 #[test]
@@ -126,11 +306,17 @@ fn key_index_backfill_and_watermark_methods_round_trip_on_postgres() {
 
         // Backfill (no journal event) keys a pre-existing entity — the root case.
         store
-            .backfill_entity_keys(&tenant, "Directory", "dir-root", std::slice::from_ref(&key))
+            .backfill_entity_keys(
+                &tenant,
+                "Directory",
+                "dir-root",
+                0,
+                std::slice::from_ref(&key),
+            )
             .await
             .unwrap();
 
-        // Resumability source: the entity now shows as already-keyed for the type.
+        // Index inspection reports the repaired entity as keyed for the type.
         assert_eq!(
             store
                 .keyed_entity_ids_for_type(&tenant, "Directory")
@@ -145,6 +331,44 @@ fn key_index_backfill_and_watermark_methods_round_trip_on_postgres() {
                 .await
                 .unwrap(),
             Some("dir-root".to_string()),
+        );
+
+        // A second historical stream deriving the same current claim makes an exact
+        // repair incomplete. It must fail (and therefore block the caller's
+        // watermark), never silently skip the row and report success.
+        let conflict = store
+            .backfill_entity_keys(
+                &tenant,
+                "Directory",
+                "dir-conflict",
+                0,
+                std::slice::from_ref(&key),
+            )
+            .await;
+        assert!(matches!(
+            conflict,
+            Err(temper_runtime::persistence::PersistenceError::Storage(_))
+        ));
+        assert_eq!(
+            store
+                .lookup_by_key(&tenant, "Directory", "name_parent", &key.key_hash)
+                .await
+                .unwrap(),
+            Some("dir-root".to_string()),
+            "failed repair preserves the established owner"
+        );
+
+        // Empty exact backfill is a repair operation, not a no-op.
+        store
+            .backfill_entity_keys(&tenant, "Directory", "dir-root", 0, &[])
+            .await
+            .unwrap();
+        assert_eq!(
+            store
+                .lookup_by_key(&tenant, "Directory", "name_parent", &key.key_hash)
+                .await
+                .unwrap(),
+            None,
         );
 
         // Watermark round-trip: not set until marked, then present for that type only.
@@ -183,6 +407,73 @@ fn key_index_backfill_and_watermark_methods_round_trip_on_postgres() {
             vec![("Directory".to_string(), "name_parent,ws_path".to_string())],
         );
 
+        // Establishing a new target happens before replay and withholds the old
+        // watermark. A live write under a different signature advances the contract,
+        // so the stale repair cannot publish even though the write matched the
+        // contract that existed before repair began.
+        let target_signature = "v3:directory-target";
+        let target_revision = store
+            .begin_key_index_backfill(&tenant, "Directory", target_signature)
+            .await
+            .unwrap();
+        assert!(
+            store
+                .key_index_backfilled_types(&tenant)
+                .await
+                .unwrap()
+                .is_empty()
+        );
+        let live_pid = format!("{tenant}:Directory:dir-live-race");
+        store
+            .append_with_index_rows(
+                &live_pid,
+                0,
+                &[test_envelope("Create", serde_json::json!({}))],
+                &[],
+                &[],
+                IndexReconciliation {
+                    keys: true,
+                    key_set_signature: Some("v3:directory-old".to_string()),
+                    vectors: false,
+                },
+            )
+            .await
+            .unwrap();
+        assert!(
+            !store
+                .mark_key_index_backfilled_if_revision(
+                    &tenant,
+                    "Directory",
+                    target_signature,
+                    target_revision,
+                )
+                .await
+                .unwrap(),
+            "a mixed-contract live write must fence stale watermark publication"
+        );
+        assert!(
+            store
+                .key_index_backfilled_types(&tenant)
+                .await
+                .unwrap()
+                .is_empty()
+        );
+        let fresh_revision = store
+            .begin_key_index_backfill(&tenant, "Directory", target_signature)
+            .await
+            .unwrap();
+        assert!(
+            store
+                .mark_key_index_backfilled_if_revision(
+                    &tenant,
+                    "Directory",
+                    target_signature,
+                    fresh_revision,
+                )
+                .await
+                .unwrap()
+        );
+
         let _ = crate::dbm::postgres_query!("DELETE FROM entity_key_index WHERE tenant = $1")
             .bind(&tenant)
             .execute(&pool)
@@ -193,6 +484,11 @@ fn key_index_backfill_and_watermark_methods_round_trip_on_postgres() {
         .bind(&tenant)
         .execute(&pool)
         .await;
+        let _ =
+            crate::dbm::postgres_query!("DELETE FROM key_index_contract_state WHERE tenant = $1")
+                .bind(&tenant)
+                .execute(&pool)
+                .await;
     });
 }
 

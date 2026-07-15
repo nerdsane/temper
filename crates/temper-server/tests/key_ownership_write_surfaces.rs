@@ -9,7 +9,7 @@ use temper_jit::table::TransitionTable;
 use temper_jit::table::types::DeclaredKey;
 use temper_runtime::ActorSystem;
 use temper_runtime::persistence::PersistenceError;
-use temper_runtime::scheduler::install_deterministic_context;
+use temper_runtime::scheduler::{install_deterministic_context, sim_uuid};
 use temper_runtime::tenant::TenantId;
 use temper_server::key_index::{canonical_key_hash, declared_key_set_signature};
 use temper_server::registry::SpecRegistry;
@@ -19,6 +19,11 @@ use temper_server::storage::{
 use temper_server::{EntityActor, EntityMsg, EntityResponse, ServerState};
 use temper_spec::csdl::parse_csdl;
 use temper_store_sim::SimEventStore;
+
+#[path = "key_ownership_write_surfaces/field_update_recovery.rs"]
+mod field_update_recovery;
+#[path = "key_ownership_write_surfaces/key_contract_aba.rs"]
+mod key_contract_aba;
 
 const CSDL_XML: &str = include_str!("../../../test-fixtures/specs/model.csdl.xml");
 const DOC_IOA: &str = include_str!("../../../test-fixtures/specs/keyed_doc.ioa.toml");
@@ -42,7 +47,6 @@ initial = ""
 name = "path"
 properties = ["WorkspaceId", "Path"]
 "#;
-
 fn doc_key_hash(workspace: &str, path: &str) -> String {
     canonical_key_hash(
         "path",
@@ -80,7 +84,11 @@ async fn update(
 ) -> EntityResponse {
     actor
         .ask(
-            EntityMsg::UpdateFields { fields, replace },
+            EntityMsg::UpdateFields {
+                fields,
+                replace,
+                idempotency_key: format!("test-field-update:{}", sim_uuid()),
+            },
             Duration::from_secs(5),
         )
         .await

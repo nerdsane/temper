@@ -6,10 +6,12 @@
 //! `directory_root_souls_scenario_on_postgres` (gated on `DATABASE_URL`).
 
 use super::*;
-use temper_runtime::persistence::EventStore;
+use temper_runtime::persistence::{EventMetadata, EventStore, PersistenceEnvelope};
 use temper_store_sim::{SimEventStore, SimFaultConfig};
 
 mod backend_authority;
+mod contract_race;
+mod ownership_race;
 
 #[test]
 fn declared_keys_resolve_from_registry_not_just_transition_tables() {
@@ -54,6 +56,21 @@ fn build_order_state_with_sim(system_name: &str) -> (ServerState, SimEventStore)
     let mut state = build_order_state(system_name);
     state.set_storage_stack(StorageStack::from_sim(store.clone(), None));
     (state, store)
+}
+
+async fn current_sequence(
+    store: &SimEventStore,
+    tenant: &TenantId,
+    entity_type: &str,
+    entity_id: &str,
+) -> u64 {
+    store
+        .read_events(&format!("{tenant}:{entity_type}:{entity_id}"), 0)
+        .await
+        .expect("journal is readable")
+        .last()
+        .map(|event| event.sequence_nr)
+        .unwrap_or(0)
 }
 
 const DIRECTORY_IOA: &str =
@@ -159,15 +176,52 @@ async fn seed_dir(
         .expect("create directory");
 }
 
+/// Journal a Directory through the legacy non-key-co-committing path. This models
+/// durable duplicates written before declared-key enforcement existed; current actor
+/// writes correctly reject the same duplicate and therefore cannot seed this repair
+/// scenario themselves.
+fn legacy_directory_create(
+    name: &str,
+    path: &str,
+    workspace: &str,
+    parent: Option<&str>,
+) -> PersistenceEnvelope {
+    let mut payload = serde_json::Map::new();
+    payload.insert("Name".to_string(), serde_json::json!(name));
+    payload.insert("Path".to_string(), serde_json::json!(path));
+    payload.insert("WorkspaceId".to_string(), serde_json::json!(workspace));
+    if let Some(parent) = parent {
+        payload.insert("ParentId".to_string(), serde_json::json!(parent));
+    }
+    let timestamp = temper_runtime::scheduler::sim_now();
+    PersistenceEnvelope {
+        sequence_nr: 0,
+        event_type: "Create".to_string(),
+        payload: serde_json::json!({
+            "action": "Create",
+            "from_status": "Active",
+            "to_status": "Active",
+            "timestamp": timestamp,
+            "params": serde_json::Value::Object(payload),
+        }),
+        metadata: EventMetadata {
+            event_id: sim_uuid(),
+            causation_id: sim_uuid(),
+            correlation_id: sim_uuid(),
+            timestamp,
+            actor_id: "legacy-directory-writer".to_string(),
+        },
+    }
+}
+
 /// THE souls-scenario proof, with the REAL Directory spec/key and the duplicate-root
 /// case that misled the prod read. End-to-end through the real read path:
 ///   1. > budget directories incl. a root (absent ParentId) + DUPLICATE roots (same
 ///      key) + subdirs → a non-keyed root lookup scans > budget and 413s (the bug).
-///   2. The backfill keys the root (absent ParentId → null), correctly skips the
-///      duplicate roots as key-conflicts (not failures), and watermarks Directory.
-///   3. Post-backfill: a NEW workspace's root lookup resolves to authoritative-absent
-///      (empty, NO 413) — so `ensure_dirs` creates the root and the soul write
-///      proceeds; and the existing workspace's root lookup resolves (keyed hit).
+///   2. The backfill keys one root (absent ParentId → null), surfaces the historical
+///      duplicates as conflicts, and withholds the authoritative watermark.
+///   3. Both a new workspace miss and an existing stale/incomplete hit remain
+///      scan-safe (and over budget) until operators repair the invalid duplicates.
 #[tokio::test]
 async fn directory_root_lookup_souls_scenario_with_real_key_and_duplicates() {
     let (state, store) = build_dir_state_with_sim("dir-souls");
@@ -178,8 +232,16 @@ async fn directory_root_lookup_souls_scenario_with_real_key_and_duplicates() {
     // Workspace wsA: a real root (no ParentId), TWO duplicate roots (same key), and
     // enough subdirs that the total Directory count exceeds the scan budget below.
     seed_dir(&state, &agent_ctx, "wsA-root", "/", "/", "wsA", None).await;
-    seed_dir(&state, &agent_ctx, "wsA-root-dup1", "/", "/", "wsA", None).await;
-    seed_dir(&state, &agent_ctx, "wsA-root-dup2", "/", "/", "wsA", None).await;
+    for duplicate in ["wsA-root-dup1", "wsA-root-dup2"] {
+        store
+            .append(
+                &format!("{tenant}:Directory:{duplicate}"),
+                0,
+                &[legacy_directory_create("/", "/", "wsA", None)],
+            )
+            .await
+            .expect("seed legacy duplicate root");
+    }
     for i in 0..12 {
         seed_dir(
             &state,
@@ -224,16 +286,16 @@ async fn directory_root_lookup_souls_scenario_with_real_key_and_duplicates() {
         Err(_) => panic!("expected QueryTooLarge before watermark, got another error"),
     }
 
-    // (2) Backfill: clear the lazy index (fresh-boot), run it, confirm the real root
-    // is keyed, the duplicates collided (still watermarked), and the type is watermarked.
+    // (2) Backfill: clear the lazy index (fresh-boot), run it, confirm one real root
+    // is keyed but the duplicate conflict prevents a false-complete watermark.
     state.entity_index.write().unwrap().clear();
     state.entity_index_hydrated.write().unwrap().clear();
     state.populate_key_index_from_snapshots(&tenant).await;
     assert!(
-        state
-            .key_index_backfill_complete(&tenant, "Directory", "name_parent")
+        !state
+            .key_index_backfill_complete(&tenant, "Directory", DIRECTORY_KEY_SET_SIGNATURE)
             .await,
-        "Directory must watermark — duplicate roots are key-conflict skips, not failures"
+        "historical duplicate claims must block authoritative absence"
     );
     assert!(
         store
@@ -249,9 +311,9 @@ async fn directory_root_lookup_souls_scenario_with_real_key_and_duplicates() {
         "the wsA root (absent ParentId) must be keyed"
     );
 
-    // (3a) The souls case: a NEW workspace (no root) → authoritative-absent → empty,
-    // NO 413. This is what lets ensure_dirs create the root and the soul write proceed.
-    let r = match read_entity_set_page(QueryPlaneReadRequest {
+    // (3a) A NEW workspace miss remains scan-safe. This small Sim query is over the
+    // configured proof budget, so it rejects instead of claiming false absence.
+    match read_entity_set_page(QueryPlaneReadRequest {
         state: &state,
         tenant: &tenant,
         security_ctx: &security_ctx,
@@ -262,21 +324,16 @@ async fn directory_root_lookup_souls_scenario_with_real_key_and_duplicates() {
     })
     .await
     {
-        Ok(r) => r,
-        Err(_) => panic!("no 413 once watermarked — keyed miss must be authoritative absence"),
-    };
-    assert!(
-        r.entities.is_empty(),
-        "a workspace with no root resolves to absent"
-    );
-    assert_eq!(
-        r.telemetry.fallback_reason,
-        QueryPlaneFallbackReason::KeyedAbsence
-    );
+        Err(QueryPlaneReadError::QueryTooLarge { .. }) => {}
+        Ok(_) => panic!("duplicate-conflicted type must not claim authoritative absence"),
+        Err(_) => panic!("expected scan-safe QueryTooLarge after conflict"),
+    }
 
-    // (3b) An existing workspace's root lookup resolves (hits the one keyed root,
-    // despite the duplicates) — no 413, returns exactly one root.
-    let r = match read_entity_set_page(QueryPlaneReadRequest {
+    // (3b) An existing row is not enough to prove ownership while duplicate
+    // conflicts withhold the v3 watermark. The hit must take the same
+    // authoritative scan and reject honestly rather than trust a potentially stale
+    // pre-v3 claim.
+    match read_entity_set_page(QueryPlaneReadRequest {
         state: &state,
         tenant: &tenant,
         security_ctx: &security_ctx,
@@ -287,14 +344,10 @@ async fn directory_root_lookup_souls_scenario_with_real_key_and_duplicates() {
     })
     .await
     {
-        Ok(r) => r,
-        Err(_) => panic!("existing root must resolve without 413"),
-    };
-    assert_eq!(
-        r.entities.len(),
-        1,
-        "wsA root lookup resolves to the keyed root"
-    );
+        Err(QueryPlaneReadError::QueryTooLarge { .. }) => {}
+        Ok(_) => panic!("an incomplete keyed hit must not bypass the proof budget"),
+        Err(_) => panic!("expected scan-safe QueryTooLarge for incomplete hit"),
+    }
 }
 
 /// Seed a Directory on a Postgres-backed state under an explicit tenant (the PG souls
@@ -331,9 +384,9 @@ async fn pg_seed_dir(
 /// event store AND the query-plane), gated on `DATABASE_URL`; unique tenant for
 /// isolation. Same shape as the sim proof, but against the actual backend so the keyed
 /// index, the `key_index_backfill_watermark` table, and the materialization run as they
-/// do in production: the 413 reproduces, the backfill watermarks despite duplicate
-/// roots, a NEW workspace's root lookup is authoritative-absent (empty, NO 413 — the
-/// soul write's exact path), and the existing absent-`ParentId` root resolves.
+/// do in production: the backfill detects duplicate claims and withholds authority,
+/// both a new workspace miss and an existing absent-`ParentId` hit remain scan-safe
+/// until the duplicate conflict is repaired.
 #[test]
 fn directory_root_souls_scenario_on_postgres() {
     use temper_runtime::scheduler::sim_uuid as runtime_sim_uuid;
@@ -371,22 +424,16 @@ fn directory_root_souls_scenario_on_postgres() {
             ("/", "/", "wsA", None),
         )
         .await;
-        pg_seed_dir(
-            &state,
-            &tenant,
-            &agent_ctx,
-            "wsA-root-d1",
-            ("/", "/", "wsA", None),
-        )
-        .await;
-        pg_seed_dir(
-            &state,
-            &tenant,
-            &agent_ctx,
-            "wsA-root-d2",
-            ("/", "/", "wsA", None),
-        )
-        .await;
+        for duplicate in ["wsA-root-d1", "wsA-root-d2"] {
+            store
+                .append(
+                    &format!("{tenant}:Directory:{duplicate}"),
+                    0,
+                    &[legacy_directory_create("/", "/", "wsA", None)],
+                )
+                .await
+                .expect("seed legacy duplicate root");
+        }
         for i in 0..12 {
             pg_seed_dir(
                 &state,
@@ -415,13 +462,9 @@ fn directory_root_souls_scenario_on_postgres() {
             filter: Some(dir_root_filter("wsA")),
             ..QueryOptions::default()
         };
-        // (1) Pre-watermark: a NEW workspace's root lookup misses. Historically this
-        // scanned 15 > budget → 413 (the original prod failure). The ARN-68 empty-list
-        // gap reconcile now bounds it: roots have NO ParentId field-index row, so they
-        // form the (small) coverage gap, get materialized, and `ParentId eq null`
-        // matches none for wsB → a bounded EMPTY answer instead of the 413. Were the
-        // gap larger than the budget (prod's 1688 duplicate roots), the 413 would
-        // remain — the keyed path below stays the authoritative fix for roots.
+        // (1) Pre-watermark: a NEW workspace's root lookup misses. A recognized
+        // exact-key query cannot use the asynchronous coverage-gap shortcut before
+        // v3 certification; the authoritative journal proof is 15 > budget → 413.
         match read_entity_set_page(QueryPlaneReadRequest {
             state: &state,
             tenant: &tenant,
@@ -433,21 +476,19 @@ fn directory_root_souls_scenario_on_postgres() {
         })
         .await
         {
-            Ok(result) => assert!(
-                result.entities.is_empty(),
-                "wsB has no root; the bounded gap reconcile must return empty"
-            ),
-            Err(_) => panic!("the gap reconcile must bound the pre-watermark root miss"),
+            Err(QueryPlaneReadError::QueryTooLarge { .. }) => {}
+            Ok(_) => panic!("pre-v3 root miss must not trust projection coverage"),
+            Err(_) => panic!("expected QueryTooLarge before the watermark"),
         }
 
-        // (2) Backfill on real Postgres → Directory watermarked (duplicate roots are
-        // key-conflict skips, not failures), and the absent-ParentId root is keyed.
+        // (2) Backfill on real Postgres → one absent-ParentId root is keyed, but the
+        // historical duplicate claims block the complete watermark.
         state.populate_key_index_from_snapshots(&tenant).await;
         assert!(
-            state
-                .key_index_backfill_complete(&tenant, "Directory", "name_parent")
+            !state
+                .key_index_backfill_complete(&tenant, "Directory", DIRECTORY_KEY_SET_SIGNATURE)
                 .await,
-            "Directory must watermark on Postgres despite duplicate roots"
+            "Directory must remain non-authoritative until duplicates are repaired"
         );
         assert!(
             store
@@ -463,9 +504,10 @@ fn directory_root_souls_scenario_on_postgres() {
             "the wsA root (absent ParentId) is keyed on Postgres"
         );
 
-        // (3a) The soul-write path: a NEW workspace (no root) → authoritative-absent →
-        // empty, NO 413 → ensure_dirs creates the root and the soul write proceeds.
-        let r = match read_entity_set_page(QueryPlaneReadRequest {
+        // (3a) A recognized exact-key miss bypasses the asynchronous projection.
+        // Since duplicate conflicts withheld v3 authority and the journal proof is
+        // larger than the budget, the safe answer is 413 rather than false absence.
+        match read_entity_set_page(QueryPlaneReadRequest {
             state: &state,
             tenant: &tenant,
             security_ctx: &security_ctx,
@@ -476,20 +518,15 @@ fn directory_root_souls_scenario_on_postgres() {
         })
         .await
         {
-            Ok(r) => r,
-            Err(_) => panic!("no 413 once watermarked — keyed miss is authoritative absence"),
-        };
-        assert!(
-            r.entities.is_empty(),
-            "a workspace with no root resolves to absent"
-        );
-        assert_eq!(
-            r.telemetry.fallback_reason,
-            QueryPlaneFallbackReason::KeyedAbsence
-        );
+            Err(QueryPlaneReadError::QueryTooLarge { .. }) => {}
+            Ok(_) => panic!("conflicted backfill must not authorize key-index absence"),
+            Err(_) => panic!("expected scan-safe QueryTooLarge after conflict"),
+        }
 
-        // (3b) The existing absent-ParentId root resolves (no 413, exactly one).
-        let r = match read_entity_set_page(QueryPlaneReadRequest {
+        // (3b) The existing row is equally non-authoritative before v3. Trusting
+        // it would let a stale legacy claim bypass replay, so it must also honor
+        // the authoritative proof budget.
+        match read_entity_set_page(QueryPlaneReadRequest {
             state: &state,
             tenant: &tenant,
             security_ctx: &security_ctx,
@@ -500,14 +537,10 @@ fn directory_root_souls_scenario_on_postgres() {
         })
         .await
         {
-            Ok(r) => r,
-            Err(_) => panic!("existing root must resolve without 413"),
-        };
-        assert_eq!(
-            r.entities.len(),
-            1,
-            "wsA root resolves to the keyed root on Postgres"
-        );
+            Err(QueryPlaneReadError::QueryTooLarge { .. }) => {}
+            Ok(_) => panic!("an incomplete keyed hit must not bypass the proof budget"),
+            Err(_) => panic!("expected scan-safe QueryTooLarge for incomplete hit"),
+        }
     });
 }
 
@@ -759,7 +792,7 @@ async fn key_index_backfill_keys_store_entities_absent_from_the_lazy_index() {
     // Enumerated from the store and keyed both entities, and watermarked the type.
     assert!(
         state
-            .key_index_backfill_complete(&tenant, "Order", "ws_path")
+            .key_index_backfill_complete(&tenant, "Order", ORDER_KEY_SET_SIGNATURE)
             .await,
         "Order must be watermarked after a clean backfill"
     );
@@ -775,12 +808,11 @@ async fn key_index_backfill_keys_store_entities_absent_from_the_lazy_index() {
     }
 }
 
-/// Robustness (ADR-0153): the backfill is RESUMABLE — already-keyed entities are
-/// skipped (not re-loaded), so a re-run after a partial pass only processes the
-/// remainder instead of re-loading all N. Pre-key one entity directly, then run the
-/// backfill, and confirm it completes + watermarks with both entities keyed.
+/// Robustness (ADR-0153/0171): an incomplete index cannot trust an existing row as
+/// proof that an entity is current. Pre-key one entity directly, then run the exact
+/// full pass and confirm it completes + watermarks with both entities keyed.
 #[tokio::test]
-async fn key_index_backfill_skips_already_keyed_entities_and_still_watermarks() {
+async fn key_index_backfill_reconciles_existing_rows_and_still_watermarks() {
     let (state, store) = build_order_state_with_sim("key-backfill-resume");
     let tenant = TenantId::default();
     let agent_ctx = AgentContext::for_service("resume-test");
@@ -810,11 +842,13 @@ async fn key_index_backfill_skips_already_keyed_entities_and_still_watermarks() 
             .expect("snap");
     }
     // Pre-key ord-a directly (a prior partial pass / co-commit already keyed it).
+    let ord_a_sequence = current_sequence(&store, &tenant, "Order", "ord-a").await;
     store
         .backfill_entity_keys(
             tenant.as_str(),
             "Order",
             "ord-a",
+            ord_a_sequence,
             &[temper_runtime::persistence::EntityKeyRow {
                 key_name: "ws_path".to_string(),
                 key_hash: ws_path_hash("ws1", "/a"),
@@ -825,10 +859,10 @@ async fn key_index_backfill_skips_already_keyed_entities_and_still_watermarks() 
 
     state.populate_key_index_from_snapshots(&tenant).await;
 
-    // ord-a was skipped via the already-keyed set; ord-b keyed fresh; type watermarked.
+    // Both entities were reconciled from replayed state, then the type was watermarked.
     assert!(
         state
-            .key_index_backfill_complete(&tenant, "Order", "ws_path")
+            .key_index_backfill_complete(&tenant, "Order", ORDER_KEY_SET_SIGNATURE)
             .await
     );
     for (ws, path) in [("ws1", "/a"), ("ws1", "/b")] {
@@ -842,10 +876,11 @@ async fn key_index_backfill_skips_already_keyed_entities_and_still_watermarks() 
     }
 }
 
-/// Soundness (ADR-0153): a DELETED entity is correctly skipped (not keyed) and does
-/// NOT block the watermark — only entities that exist-but-cannot-load do. A deleted
-/// entity alongside a live one: the type still watermarks, the live one is keyed, the
-/// deleted one is not.
+/// Repair + soundness (ADR-0153/0171): even with NO prior watermark, a full pass
+/// purges stale rows from both a deleted entity and a live entity whose current key
+/// is all-null. An interrupted/pre-v3 index may already contain rows, but row presence
+/// is not trusted as coverage. Neither entity blocks the watermark; the live keyed
+/// entity remains addressable.
 #[tokio::test]
 async fn key_index_backfill_skips_deleted_entities_without_blocking_watermark() {
     let (state, store) = build_order_state_with_sim("key-backfill-deleted");
@@ -880,11 +915,65 @@ async fn key_index_backfill_skips_deleted_entities_without_blocking_watermark() 
             .expect("snap");
     }
 
+    state
+        .dispatch_tenant_action(
+            &tenant,
+            "Order",
+            "ord-null",
+            "Create",
+            serde_json::json!({}),
+            &agent_ctx,
+        )
+        .await
+        .expect("create all-null entity");
+    let null_snap = serde_json::json!({
+        "entity_type": "Order", "entity_id": "ord-null", "status": "Draft", "item_count": 0,
+        "fields": { "Id": "ord-null", "WorkspaceId": null, "Path": null },
+    });
+    store
+        .save_snapshot(
+            &format!("{tenant}:Order:ord-null"),
+            1,
+            &serde_json::to_vec(&null_snap).unwrap(),
+        )
+        .await
+        .expect("all-null snap");
+
+    let deleted_stale = ws_path_hash("ws1", "/del");
+    let all_null_stale = ws_path_hash("ws-old", "/old");
+    for (entity_id, key_hash) in [
+        ("ord-del", deleted_stale.clone()),
+        ("ord-null", all_null_stale.clone()),
+    ] {
+        let sequence_nr = current_sequence(&store, &tenant, "Order", entity_id).await;
+        store
+            .backfill_entity_keys(
+                tenant.as_str(),
+                "Order",
+                entity_id,
+                sequence_nr,
+                &[temper_runtime::persistence::EntityKeyRow {
+                    key_name: "ws_path".to_string(),
+                    key_hash,
+                }],
+            )
+            .await
+            .expect("seed stale pre-v3 row");
+    }
+    assert!(
+        store
+            .key_index_backfilled_types(tenant.as_str())
+            .await
+            .unwrap()
+            .is_empty(),
+        "precondition: stale rows exist without a completed watermark"
+    );
+
     state.populate_key_index_from_snapshots(&tenant).await;
 
     assert!(
         state
-            .key_index_backfill_complete(&tenant, "Order", "ws_path")
+            .key_index_backfill_complete(&tenant, "Order", ORDER_KEY_SET_SIGNATURE)
             .await,
         "a deleted entity must not block the watermark"
     );
@@ -903,16 +992,19 @@ async fn key_index_backfill_skips_deleted_entities_without_blocking_watermark() 
     );
     assert!(
         store
-            .lookup_by_key(
-                tenant.as_str(),
-                "Order",
-                "ws_path",
-                &ws_path_hash("ws1", "/del")
-            )
+            .lookup_by_key(tenant.as_str(), "Order", "ws_path", &deleted_stale)
             .await
             .unwrap()
             .is_none(),
         "deleted entity is not keyed"
+    );
+    assert_eq!(
+        store
+            .lookup_by_key(tenant.as_str(), "Order", "ws_path", &all_null_stale)
+            .await
+            .unwrap(),
+        None,
+        "all-null current state must purge its stale prior key"
     );
 }
 
@@ -955,7 +1047,7 @@ async fn key_index_backfill_loadfailed_entity_blocks_watermark_then_resumes() {
     state.populate_key_index_from_snapshots(&tenant).await;
     assert!(
         !state
-            .key_index_backfill_complete(&tenant, "Order", "ws_path")
+            .key_index_backfill_complete(&tenant, "Order", ORDER_KEY_SET_SIGNATURE)
             .await,
         "an unloadable entity must block the watermark"
     );
@@ -977,7 +1069,7 @@ async fn key_index_backfill_loadfailed_entity_blocks_watermark_then_resumes() {
     state.populate_key_index_from_snapshots(&tenant).await;
     assert!(
         state
-            .key_index_backfill_complete(&tenant, "Order", "ws_path")
+            .key_index_backfill_complete(&tenant, "Order", ORDER_KEY_SET_SIGNATURE)
             .await,
         "backfill must resume and watermark once the read succeeds"
     );
@@ -1038,7 +1130,7 @@ async fn keyed_miss_returns_empty_without_scan_413_once_watermarked() {
 
     // Watermark Order → a keyed miss is now authoritative absence.
     state
-        .mark_key_index_backfilled(&tenant, "Order", "ws_path")
+        .mark_key_index_backfilled(&tenant, "Order", ORDER_KEY_SET_SIGNATURE)
         .await;
 
     let result = match read_entity_set_page(QueryPlaneReadRequest {
@@ -1079,9 +1171,9 @@ async fn key_index_backfill_rekeys_existing_entities_when_a_key_is_added() {
     // Two orders that ALREADY have a key row under an OLDER key name, and whose
     // ws_path-valued fields live in the snapshot — the exact prod shape: entities keyed
     // under an earlier declaration (here `old_key`), the new key (`ws_path`) not yet
-    // assigned. The old-key rows put them in `keyed_entity_ids_for_type`, so the
-    // per-entity resumability skip WOULD skip them — this is what `force_full_rekey`
-    // must bypass. Without the bypass this test fails (ws_path never gets assigned).
+    // assigned. The old-key rows put them in `keyed_entity_ids_for_type`, proving why
+    // row presence cannot be treated as complete coverage. Without a full exact pass,
+    // ws_path would never be assigned.
     for (eid, ws, path) in [("ord-rk-0", "ws1", "/a"), ("ord-rk-1", "ws1", "/b")] {
         state
             .dispatch_tenant_action(
@@ -1106,12 +1198,14 @@ async fn key_index_backfill_rekeys_existing_entities_when_a_key_is_added() {
             )
             .await
             .expect("seed snapshot");
-        // Key it under the OLD key only (so it appears already-keyed for resumability).
+        // Key it under the OLD key only (so row presence cannot be mistaken for
+        // complete coverage of the new declaration).
         store
             .backfill_entity_keys(
                 tenant.as_str(),
                 "Order",
                 eid,
+                current_sequence(&store, &tenant, "Order", eid).await,
                 &[temper_runtime::persistence::EntityKeyRow {
                     key_name: "old_key".to_string(),
                     key_hash: format!("old-hash-{eid}"),
@@ -1132,19 +1226,19 @@ async fn key_index_backfill_rekeys_existing_entities_when_a_key_is_added() {
     // INCOMPLETE for ws_path — a ws_path miss falls back to the scan, never a wrong absent.
     assert!(
         !state
-            .key_index_backfill_complete(&tenant, "Order", "ws_path")
+            .key_index_backfill_complete(&tenant, "Order", ORDER_KEY_SET_SIGNATURE)
             .await,
         "a stale watermark covering a different key-set must read as incomplete for the new key"
     );
-    // The entities ARE already-keyed (under old_key) — so the resumability skip would
-    // exclude them; only force_full_rekey re-processes them.
+    // The entities ARE already-keyed (under old_key), but row presence cannot exclude
+    // them from an incomplete type's exact repair.
     assert!(
         !store
             .keyed_entity_ids_for_type(tenant.as_str(), "Order")
             .await
             .unwrap()
             .is_empty(),
-        "precondition: entities appear already-keyed (old_key), so the resume-skip would skip them"
+        "precondition: entities already have rows under old_key"
     );
     assert!(
         store
@@ -1160,13 +1254,13 @@ async fn key_index_backfill_rekeys_existing_entities_when_a_key_is_added() {
         "precondition: not yet keyed for the newly-added ws_path key"
     );
 
-    // Re-run the backfill: covered != current declared → force-full re-key of every
+    // Re-run the backfill: covered != current declared → exact full repair of every
     // existing entity, then re-watermark with the current key-set.
     state.populate_key_index_from_snapshots(&tenant).await;
 
     assert!(
         state
-            .key_index_backfill_complete(&tenant, "Order", "ws_path")
+            .key_index_backfill_complete(&tenant, "Order", ORDER_KEY_SET_SIGNATURE)
             .await,
         "after the re-key the type is complete for the current declared key-set"
     );
@@ -1184,20 +1278,21 @@ async fn key_index_backfill_rekeys_existing_entities_when_a_key_is_added() {
 }
 
 #[test]
-fn declared_key_set_signature_is_sorted_and_joined() {
+fn declared_key_set_signature_is_versioned_sorted_and_complete() {
     use temper_jit::table::types::DeclaredKey;
     let key = |name: &str| DeclaredKey {
         name: name.to_string(),
         properties: vec!["WorkspaceId".to_string(), "Path".to_string()],
     };
-    // Order-independent, comma-joined, sorted by name.
+    // Versioned, declaration-order independent, and complete through each ordered
+    // property list.
     assert_eq!(
         crate::key_index::declared_key_set_signature(&[key("ws_path"), key("name_parent")]),
-        "name_parent,ws_path"
+        "v3|11:name_parent[11:WorkspaceId4:Path]|7:ws_path[11:WorkspaceId4:Path]"
     );
-    assert_eq!(crate::key_index::declared_key_set_signature(&[]), "");
+    assert_eq!(crate::key_index::declared_key_set_signature(&[]), "v3");
     assert_eq!(
         crate::key_index::declared_key_set_signature(&[key("only")]),
-        "only"
+        "v3|4:only[11:WorkspaceId4:Path]"
     );
 }

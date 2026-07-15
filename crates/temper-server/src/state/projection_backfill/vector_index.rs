@@ -128,7 +128,7 @@ pub(in crate::state) async fn populate_vector_index_from_snapshots(
             )
             .await
             {
-                EntityLoadOutcome::Fields(fields) => {
+                EntityLoadOutcome::Fields { fields, .. } => {
                     let Some(field_map) = fields.as_object() else {
                         skipped += 1;
                         continue;
@@ -179,7 +179,7 @@ pub(in crate::state) async fn populate_vector_index_from_snapshots(
                         }
                     }
                 }
-                EntityLoadOutcome::Skip => {
+                EntityLoadOutcome::Skip { .. } => {
                     // A deleted (or phantom) entity must hold no vector rows — purge
                     // any it still has so a soft-deleted entity is never ranked
                     // (reconcile with an empty row set). Harmless when there is nothing

@@ -56,10 +56,21 @@ async fn delete(actor_ref: &temper_runtime::actor::ActorRef<EntityMsg>) -> Entit
         .expect("actor should respond")
 }
 
+async fn get_state(actor_ref: &temper_runtime::actor::ActorRef<EntityMsg>) -> EntityResponse {
+    actor_ref
+        .ask(EntityMsg::GetState, Duration::from_secs(5))
+        .await
+        .expect("actor should respond")
+}
+
 fn doc_key_hash(workspace: &str, path: &str) -> String {
+    doc_key_hash_values(serde_json::json!(workspace), serde_json::json!(path))
+}
+
+fn doc_key_hash_values(workspace: serde_json::Value, path: serde_json::Value) -> String {
     let mut fields = serde_json::Map::new();
-    fields.insert("WorkspaceId".to_string(), serde_json::json!(workspace));
-    fields.insert("Path".to_string(), serde_json::json!(path));
+    fields.insert("WorkspaceId".to_string(), workspace);
+    fields.insert("Path".to_string(), path);
     canonical_key_hash(
         "path",
         &["WorkspaceId".to_string(), "Path".to_string()],
@@ -170,35 +181,180 @@ async fn dst_delete_releases_declared_key_for_reclaim() {
             "seed {seed}: a tombstoned entity must release its declared key"
         );
 
-        let second_id = format!("doc-second-{seed}");
-        let second = EntityActor::with_persistence(
+        drop(first_ref);
+        drop(system);
+
+        // Recreate the actor system and recover the deleted stream. Tombstone state
+        // and released ownership must both survive replay, not just the live actor.
+        let restarted = ActorSystem::new("dst-key-reclaim-restarted");
+        let recovered = EntityActor::with_persistence(
             "Doc",
-            &second_id,
+            &first_id,
             table.clone(),
             serde_json::json!({}),
             store.clone(),
             BackendLabel::Sim,
         )
         .with_tenant("default");
-        let second_ref = system.spawn(second, &second_id);
-        let reclaimed = dispatch(
-            &second_ref,
-            "Create",
-            serde_json::json!({ "WorkspaceId": "ws1", "Path": "/reclaim.md" }),
-        )
-        .await;
-        assert!(
-            reclaimed.success,
-            "seed {seed}: replacement Create must reclaim the deleted entity's key: {:?}",
-            reclaimed.error
+        let recovered_ref = restarted.spawn(recovered, &first_id);
+        let recovered_state = get_state(&recovered_ref).await;
+        assert_eq!(recovered_state.state.status, "Deleted");
+        assert_eq!(
+            store
+                .lookup_by_key("default", "Doc", "path", &key_hash)
+                .await
+                .expect("lookup after recovery"),
+            None,
+            "seed {seed}: replay must not restore tombstoned ownership"
         );
+
+        // Two replacements race for the now-vacant key. The store must serialize
+        // uniqueness so exactly one journal advances beyond its bootstrap event.
+        let left_id = format!("doc-left-{seed}");
+        let right_id = format!("doc-right-{seed}");
+        let spawn_replacement = |entity_id: &str| {
+            restarted.spawn(
+                EntityActor::with_persistence(
+                    "Doc",
+                    entity_id,
+                    table.clone(),
+                    serde_json::json!({}),
+                    store.clone(),
+                    BackendLabel::Sim,
+                )
+                .with_tenant("default"),
+                entity_id,
+            )
+        };
+        let left = spawn_replacement(&left_id);
+        let right = spawn_replacement(&right_id);
+        let params = serde_json::json!({ "WorkspaceId": "ws1", "Path": "/reclaim.md" });
+        let (left_result, right_result) = tokio::join!(
+            dispatch(&left, "Create", params.clone()),
+            dispatch(&right, "Create", params)
+        );
+        assert_ne!(left_result.success, right_result.success);
+        let (winner, loser) = if left_result.success {
+            (&left_id, &right_id)
+        } else {
+            (&right_id, &left_id)
+        };
         assert_eq!(
             store
                 .lookup_by_key("default", "Doc", "path", &key_hash)
                 .await
                 .expect("lookup after reclaim"),
-            Some(second_id),
+            Some(winner.clone()),
             "seed {seed}: the reclaimed key must resolve to the live replacement"
+        );
+        assert_eq!(
+            store
+                .read_events(&format!("default:Doc:{loser}"), 0)
+                .await
+                .unwrap()
+                .len(),
+            1,
+            "seed {seed}: losing journal must retain only its bootstrap event"
+        );
+    }
+}
+
+/// Every persisted re-key replaces the entity's complete ownership set: old
+/// values disappear, partial-null composite values remain indexable, and an
+/// all-null composite releases ownership rather than leaving its prior row.
+#[tokio::test]
+async fn dst_rekey_reconciles_rename_partial_null_and_all_null() {
+    for seed in 0..NUM_SEEDS {
+        let (_guard, _clock, _id) = install_deterministic_context(seed);
+        let store: BoxedEventStore = BoxedEventStore::new(SimEventStore::no_faults(seed));
+        let table = doc_table();
+        let entity_id = format!("doc-rekey-{seed}");
+        let system = ActorSystem::new("dst-key-rekey");
+        let actor = EntityActor::with_persistence(
+            "Doc",
+            &entity_id,
+            table,
+            serde_json::json!({}),
+            store.clone(),
+            BackendLabel::Sim,
+        )
+        .with_tenant("default");
+        let actor_ref = system.spawn(actor, &entity_id);
+
+        let created = dispatch(
+            &actor_ref,
+            "Create",
+            serde_json::json!({ "WorkspaceId": "ws1", "Path": "/old.md" }),
+        )
+        .await;
+        assert!(created.success, "seed {seed}: Create failed");
+
+        let renamed = dispatch(
+            &actor_ref,
+            "Rekey",
+            serde_json::json!({ "WorkspaceId": "ws1", "Path": "/new.md" }),
+        )
+        .await;
+        assert!(renamed.success, "seed {seed}: string rename failed");
+        assert_eq!(
+            store
+                .lookup_by_key("default", "Doc", "path", &doc_key_hash("ws1", "/old.md"))
+                .await
+                .unwrap(),
+            None,
+            "seed {seed}: rename must release the old key"
+        );
+        assert_eq!(
+            store
+                .lookup_by_key("default", "Doc", "path", &doc_key_hash("ws1", "/new.md"))
+                .await
+                .unwrap(),
+            Some(entity_id.clone()),
+            "seed {seed}: rename must claim the new key"
+        );
+
+        let partial_null = dispatch(
+            &actor_ref,
+            "Rekey",
+            serde_json::json!({ "WorkspaceId": "ws1", "Path": null }),
+        )
+        .await;
+        assert!(
+            partial_null.success,
+            "seed {seed}: partial-null re-key failed"
+        );
+        let partial_hash = doc_key_hash_values(serde_json::json!("ws1"), serde_json::Value::Null);
+        assert_eq!(
+            store
+                .lookup_by_key("default", "Doc", "path", &doc_key_hash("ws1", "/new.md"))
+                .await
+                .unwrap(),
+            None,
+            "seed {seed}: partial-null re-key must release the prior string key"
+        );
+        assert_eq!(
+            store
+                .lookup_by_key("default", "Doc", "path", &partial_hash)
+                .await
+                .unwrap(),
+            Some(entity_id.clone()),
+            "seed {seed}: partial-null composite key remains indexable"
+        );
+
+        let all_null = dispatch(
+            &actor_ref,
+            "Rekey",
+            serde_json::json!({ "WorkspaceId": null, "Path": null }),
+        )
+        .await;
+        assert!(all_null.success, "seed {seed}: all-null re-key failed");
+        assert_eq!(
+            store
+                .lookup_by_key("default", "Doc", "path", &partial_hash)
+                .await
+                .unwrap(),
+            None,
+            "seed {seed}: all-null key must release the entity's final claim"
         );
     }
 }
@@ -235,12 +391,12 @@ async fn dst_backfill_makes_pre_existing_entity_keyed_findable() {
             key_hash: key_hash.clone(),
         }];
         store
-            .backfill_entity_keys("default", "Doc", &format!("doc-pre-{seed}"), &rows)
+            .backfill_entity_keys("default", "Doc", &format!("doc-pre-{seed}"), 1, &rows)
             .await
             .unwrap();
         // Idempotent: a second backfill is a no-op-equivalent.
         store
-            .backfill_entity_keys("default", "Doc", &format!("doc-pre-{seed}"), &rows)
+            .backfill_entity_keys("default", "Doc", &format!("doc-pre-{seed}"), 1, &rows)
             .await
             .unwrap();
 

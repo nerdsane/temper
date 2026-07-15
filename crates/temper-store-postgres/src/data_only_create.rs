@@ -3,7 +3,7 @@
 use std::time::Instant;
 
 use sqlx::Acquire;
-use temper_runtime::persistence::{PersistenceEnvelope, PersistenceError};
+use temper_runtime::persistence::{EntityKeyRow, PersistenceEnvelope, PersistenceError};
 
 use crate::PostgresEventStore;
 use crate::metrics::{
@@ -12,6 +12,9 @@ use crate::metrics::{
     record_postgres_transaction_begin_duration, record_postgres_transaction_commit_duration,
 };
 use crate::platform::{canonical_projection_status, json_hash, scalar_index_fields, storage_error};
+use crate::store::{
+    event_stream_lock_key, lock_event_stream, lock_key_contract, reconcile_key_contract_state,
+};
 
 const DATA_ONLY_CREATE_OPERATION: &str = "data_only_create";
 
@@ -66,10 +69,50 @@ impl PostgresEventStore {
         state: &serde_json::Value,
         event: &PersistenceEnvelope,
     ) -> Result<u64, PersistenceError> {
+        self.create_data_only_entity_native_with_state_and_keys(
+            tenant,
+            entity_type,
+            entity_id,
+            status,
+            fields,
+            state,
+            event,
+            &[],
+            false,
+            None,
+        )
+        .await
+    }
+
+    /// Atomically insert the first data-only event, query projection, and exact
+    /// declared-key ownership set.
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "native data-only create storage boundary"
+    )]
+    pub async fn create_data_only_entity_native_with_state_and_keys(
+        &self,
+        tenant: &str,
+        entity_type: &str,
+        entity_id: &str,
+        status: &str,
+        fields: &serde_json::Value,
+        state: &serde_json::Value,
+        event: &PersistenceEnvelope,
+        key_rows: &[EntityKeyRow],
+        reconcile_keys: bool,
+        key_set_signature: Option<&str>,
+    ) -> Result<u64, PersistenceError> {
         assert_eq!(
             event.sequence_nr, 1,
             "native data-only create requires first event sequence"
         );
+        if !reconcile_keys && !key_rows.is_empty() {
+            return Err(PersistenceError::Storage(
+                "native data-only create supplied key rows without exact reconciliation"
+                    .to_string(),
+            ));
+        }
         let status = canonical_projection_status(status, state);
         let projection_hash = json_hash(fields);
         let (new_index, indexed_fields, skipped_fields) = scalar_index_fields(fields);
@@ -119,6 +162,36 @@ impl PostgresEventStore {
                 return Err(storage_error(e));
             }
         };
+
+        lock_key_contract(&mut tx, tenant, entity_type).await?;
+        let lock_key = event_stream_lock_key(tenant, entity_type, entity_id);
+        lock_event_stream(&mut tx, &lock_key).await?;
+
+        if reconcile_keys {
+            for key in key_rows {
+                let holder: Option<(String,)> = crate::dbm::postgres_query_as!(
+                    "SELECT entity_id FROM entity_key_index \
+                     WHERE tenant = $1 AND entity_type = $2 AND key_name = $3 AND key_hash = $4",
+                )
+                .bind(tenant)
+                .bind(entity_type)
+                .bind(&key.key_name)
+                .bind(&key.key_hash)
+                .fetch_optional(&mut *tx)
+                .await
+                .map_err(storage_error)?;
+                if let Some((existing,)) = holder
+                    && existing != entity_id
+                {
+                    return Err(PersistenceError::Storage(format!(
+                        "duplicate declared key '{}' for {entity_type}: held by {existing}",
+                        key.key_name
+                    )));
+                }
+            }
+        }
+
+        reconcile_key_contract_state(&mut tx, tenant, entity_type, key_set_signature).await?;
 
         let metadata_json = serde_json::to_value(&event.metadata)
             .map_err(|e| PersistenceError::Serialization(e.to_string()))?;
@@ -189,6 +262,34 @@ impl PostgresEventStore {
             .execute(&mut *tx)
             .await
             .map_err(storage_error)?;
+        }
+
+        if reconcile_keys {
+            crate::dbm::postgres_query!(
+                "DELETE FROM entity_key_index \
+                 WHERE tenant = $1 AND entity_type = $2 AND entity_id = $3",
+            )
+            .bind(tenant)
+            .bind(entity_type)
+            .bind(entity_id)
+            .execute(&mut *tx)
+            .await
+            .map_err(storage_error)?;
+            for key in key_rows {
+                crate::dbm::postgres_query!(
+                    "INSERT INTO entity_key_index \
+                     (tenant, entity_type, key_name, key_hash, entity_id, sequence_nr) \
+                     VALUES ($1, $2, $3, $4, $5, 1)",
+                )
+                .bind(tenant)
+                .bind(entity_type)
+                .bind(&key.key_name)
+                .bind(&key.key_hash)
+                .bind(entity_id)
+                .execute(&mut *tx)
+                .await
+                .map_err(storage_error)?;
+            }
         }
 
         let commit_started = Instant::now();

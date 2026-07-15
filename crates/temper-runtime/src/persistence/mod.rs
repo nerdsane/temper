@@ -1,5 +1,15 @@
 use serde::{Deserialize, Serialize};
 
+mod batch;
+mod index;
+mod types;
+pub use batch::{PersistenceAppend, PersistenceAppendResult};
+pub use index::{
+    EntityKeyLookup, EntityKeyRow, EntityVectorCandidate, EntityVectorRow, IndexReconciliation,
+    pack_f32_le, unpack_f32_le,
+};
+pub use types::{PersistenceEnvelope, PersistenceError, storage_error};
+
 /// Event type used for the parent-journal record of a Composite action.
 ///
 /// Concrete sub-write events remain the state-changing events on their target
@@ -83,80 +93,17 @@ pub trait PersistentActor: Send + 'static {
     }
 }
 
-/// A declared-key row to co-commit with an append (ADR-0153). The entity claims
-/// `key_hash` for `key_name`; the store writes it into `entity_key_index` in the
-/// same transaction as the journal append, giving the read plane an `O(log n)`
-/// present/absent probe (the negative-existence access path, ARN-68).
-#[derive(Debug, Clone)]
-pub struct EntityKeyRow {
-    /// The declared key's identifier (the `[[key]]` block's `name`).
-    pub key_name: String,
-    /// The canonical, type-tagged hash of the key's values.
-    pub key_hash: String,
-}
-
-/// A derived vector-index row to co-commit with an append (ADR-0155). Parsed from
-/// the entity's post-transition state for one declared `[[vector]]` path: the
-/// float vector and the model tag that partitions its space. Stores that maintain
-/// `entity_vector_index` write one row per `(decl_name, model_tag, entity_id)`; the
-/// blob is packed little-endian f32. Unlike a key row this has no uniqueness
-/// constraint — it is derived, rebuildable ranking state.
-#[derive(Debug, Clone, PartialEq)]
-pub struct EntityVectorRow {
-    /// The declared vector path's identifier (the `[[vector]]` block's `name`).
-    pub decl_name: String,
-    /// The model tag that partitions this vector's space (only same-tag vectors
-    /// are ever compared).
-    pub model_tag: String,
-    /// The float vector, exactly `dims` long.
-    pub vector: Vec<f32>,
-}
-
-/// Pack an `f32` slice to little-endian bytes — the `entity_vector_index` blob
-/// encoding shared by every backend (ADR-0155). Kept here beside [`EntityVectorRow`]
-/// so the stores and the kernel ranking agree on the byte layout.
-pub fn pack_f32_le(vector: &[f32]) -> Vec<u8> {
-    let mut bytes = Vec::with_capacity(vector.len() * 4);
-    for value in vector {
-        bytes.extend_from_slice(&value.to_le_bytes());
-    }
-    bytes
-}
-
-/// Unpack little-endian bytes back to `f32`. `None` if the byte length is not a
-/// multiple of 4, or if any component is not finite (both signal a corrupt blob),
-/// so a bad row is skipped rather than panicking or feeding a `NaN`/`inf` into the
-/// kNN ranking — where a `NaN` would sort ahead of every real score.
-pub fn unpack_f32_le(bytes: &[u8]) -> Option<Vec<f32>> {
-    if !bytes.len().is_multiple_of(4) {
-        return None;
-    }
-    let mut out = Vec::with_capacity(bytes.len() / 4);
-    for chunk in bytes.chunks_exact(4) {
-        let value = f32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]);
-        if !value.is_finite() {
-            return None;
-        }
-        out.push(value);
-    }
-    Some(out)
-}
-
-/// One candidate row returned from the vector index for a kNN read (ADR-0155):
-/// an entity and its packed vector for one `(tenant, type, decl, model_tag)`
-/// partition. The kernel — not the store — computes the metric over these in the
-/// store-supplied (entity-id) order, so ranking is identical across backends.
-#[derive(Debug, Clone, PartialEq)]
-pub struct EntityVectorCandidate {
-    /// The entity holding this vector.
-    pub entity_id: String,
-    /// The float vector, exactly `dims` long.
-    pub vector: Vec<f32>,
-}
-
 /// Trait for the event store backend (implemented by temper-store-postgres).
 /// Uses desugared async-in-trait to enforce Send bounds on futures.
 pub trait EventStore: Send + Sync + 'static {
+    /// Whether this backend maintains declared-key rows exactly on every live write,
+    /// can repair them from replay, and persists coverage watermarks. Only such a
+    /// backend may answer keyed hits/misses as an authoritative ownership oracle.
+    /// Defaults to false so no-op index methods can never create false authority.
+    fn supports_authoritative_key_index(&self) -> bool {
+        false
+    }
+
     /// Append events to the journal.
     fn append(
         &self,
@@ -166,10 +113,11 @@ pub trait EventStore: Send + Sync + 'static {
     ) -> impl std::future::Future<Output = Result<u64, PersistenceError>> + Send;
 
     /// Append events and co-commit declared key-index rows (ADR-0153) in the
-    /// **same transaction** as the journal append. A thin forwarder to
-    /// [`EventStore::append_with_index_rows`] with no vector rows and no vector
-    /// reconcile, so callers that only maintain keys are unchanged. The co-commit
-    /// logic lives in `append_with_index_rows`, which query-plane backends override.
+    /// **same transaction** as the journal append. `key_rows` is the entity's exact
+    /// current key set, including an empty set after delete or key removal. A thin
+    /// forwarder to [`EventStore::append_with_index_rows`] with key reconciliation
+    /// enabled and no vector rows. The co-commit logic lives in
+    /// `append_with_index_rows`, which query-plane backends override.
     fn append_with_keys(
         &self,
         persistence_id: &str,
@@ -183,7 +131,11 @@ pub trait EventStore: Send + Sync + 'static {
             events,
             key_rows,
             &[],
-            false,
+            IndexReconciliation {
+                keys: true,
+                key_set_signature: None,
+                vectors: false,
+            },
         )
     }
 
@@ -193,12 +145,14 @@ pub trait EventStore: Send + Sync + 'static {
     /// calls. The default ignores the index kinds and delegates to
     /// [`EventStore::append`] — stores with a query plane that co-commit (postgres,
     /// sim) override it; Turso also overrides it to maintain the vector index
-    /// write-behind (event first, index follows). When `reconcile_vectors` is true
-    /// (the entity's type declares ≥1 `[[vector]]` path) the store first DELETES all
-    /// of the entity's vector rows, then inserts `vector_rows` — so a delete
-    /// transition or a cleared vector/model property purges the stale rows instead of
-    /// leaving them to be ranked forever. The sequence and atomicity contract is
-    /// identical to `append`.
+    /// write-behind (event first, index follows). When `reconciliation.keys` is true
+    /// (the entity's type declares ≥1 `[[key]]`) the store validates every current
+    /// claim, then DELETES all prior key rows for the entity and inserts `key_rows` in
+    /// the journal transaction. Empty rows therefore release ownership. Likewise,
+    /// when `reconciliation.vectors` is true (the entity's type declares ≥1
+    /// `[[vector]]` path) the store first DELETES all of the entity's vector rows,
+    /// then inserts `vector_rows`. The sequence and atomicity contract is identical
+    /// to `append`.
     fn append_with_index_rows(
         &self,
         persistence_id: &str,
@@ -206,9 +160,9 @@ pub trait EventStore: Send + Sync + 'static {
         events: &[PersistenceEnvelope],
         key_rows: &[EntityKeyRow],
         vector_rows: &[EntityVectorRow],
-        reconcile_vectors: bool,
+        reconciliation: IndexReconciliation,
     ) -> impl std::future::Future<Output = Result<u64, PersistenceError>> + Send {
-        let _ = (key_rows, vector_rows, reconcile_vectors);
+        let _ = (key_rows, vector_rows, reconciliation);
         self.append(persistence_id, expected_sequence, events)
     }
 
@@ -290,20 +244,24 @@ pub trait EventStore: Send + Sync + 'static {
         async { Ok(Vec::new()) }
     }
 
-    /// Backfill declared key-index rows for an **existing** entity (ADR-0153),
-    /// without appending a journal event. Idempotent: re-running yields the same
-    /// rows. Used to populate `entity_key_index` for entities written before the
-    /// declared key existed, so a keyed read can authoritatively prove absence
-    /// (the per-tenant backfill watermark gates #324's retirement). The default
-    /// is a no-op (non-indexing backends); query-plane stores upsert the rows.
+    /// Reconcile declared key-index rows for an **existing** entity (ADR-0153,
+    /// ADR-0171), without appending a journal event: when the journal is still at
+    /// `expected_sequence`, DELETE every existing row for `(tenant, entity_type,
+    /// entity_id)`, then INSERT `key_rows`. Idempotent, and an empty set purges stale
+    /// ownership for deleted or currently unkeyable entities. A concurrent journal
+    /// advance fails with [`PersistenceError::ConcurrencyViolation`] instead of
+    /// allowing replayed state to overwrite newer live ownership. Used to populate
+    /// and repair `entity_key_index` before a keyed read can treat absence as
+    /// authoritative. The default is a no-op (non-indexing backends).
     fn backfill_entity_keys(
         &self,
         tenant: &str,
         entity_type: &str,
         entity_id: &str,
+        expected_sequence: u64,
         key_rows: &[EntityKeyRow],
     ) -> impl std::future::Future<Output = Result<(), PersistenceError>> + Send {
-        let _ = (tenant, entity_type, entity_id, key_rows);
+        let _ = (tenant, entity_type, entity_id, expected_sequence, key_rows);
         async { Ok(()) }
     }
 
@@ -323,11 +281,35 @@ pub trait EventStore: Send + Sync + 'static {
         async { Ok(None) }
     }
 
+    /// Resolve a declared-key owner together with its co-committed journal
+    /// generation. Authoritative backends override this from the same row used
+    /// by [`EventStore::lookup_by_key`]. The compatibility default preserves
+    /// non-authoritative/custom stores while assigning generation zero.
+    fn lookup_by_key_with_sequence(
+        &self,
+        tenant: &str,
+        entity_type: &str,
+        key_name: &str,
+        key_hash: &str,
+    ) -> impl std::future::Future<Output = Result<Option<EntityKeyLookup>, PersistenceError>> + Send
+    {
+        async move {
+            self.lookup_by_key(tenant, entity_type, key_name, key_hash)
+                .await
+                .map(|owner| {
+                    owner.map(|entity_id| EntityKeyLookup {
+                        entity_id,
+                        sequence_nr: 0,
+                    })
+                })
+        }
+    }
+
     /// Record that `entity_key_index` is **complete** for `(tenant, entity_type)`
     /// — every existing entity of that type has been keyed by the backfill
-    /// (ADR-0153 watermark). Once set, a keyed read MISS is authoritative absence,
-    /// which retires the full-type reconcile scan (#324) for that type: the read
-    /// plane can answer "not found" without scanning. Idempotent.
+    /// (ADR-0153/0171 watermark). Only once set may a keyed read trust an indexed
+    /// hit or miss. A miss is then authoritative absence, retiring the full-type
+    /// reconcile scan (#324) for that type. Idempotent.
     ///
     /// **Soundness invariant — only override this on a backend that co-commits key
     /// rows on EVERY write** (i.e. overrides [`EventStore::append_with_keys`]). The
@@ -340,10 +322,9 @@ pub trait EventStore: Send + Sync + 'static {
     /// just not bounded). Postgres co-commits and overrides this; the sim store does
     /// too for DST. The default is a no-op.
     ///
-    /// `key_set` is the sorted, comma-joined declared key NAMES the backfill just
-    /// covered. It is recorded so a later declaration of an ADDITIONAL key is detected
-    /// as a key-set change (the recorded set no longer equals the current one) and the
-    /// type is re-keyed, instead of being wrongly treated as already complete.
+    /// `key_set` is the derivation-contract version plus every sorted declaration's
+    /// name and ordered properties. It is recorded so either a definition change or
+    /// a reconciliation-semantics upgrade forces a complete repair pass.
     fn mark_key_index_backfilled(
         &self,
         tenant: &str,
@@ -355,10 +336,10 @@ pub trait EventStore: Send + Sync + 'static {
     }
 
     /// The `(entity_type, key_set)` watermarks for `tenant` — each type whose
-    /// `entity_key_index` backfill is complete, paired with the sorted comma-joined
-    /// declared key names it covered. The read plane caches these so a keyed miss on a
-    /// type resolves to authoritative absence ONLY when the covered key-set still equals
-    /// the currently-declared one. Default empty (no backend authority → scan-safe).
+    /// `entity_key_index` backfill is complete, paired with the versioned declared-key
+    /// signature it covered. The read plane caches these so a keyed hit or miss is
+    /// authoritative ONLY when the covered signature still equals the current one.
+    /// Default empty (no backend authority → scan-safe).
     fn key_index_backfilled_types(
         &self,
         tenant: &str,
@@ -368,12 +349,56 @@ pub trait EventStore: Send + Sync + 'static {
         async { Ok(Vec::new()) }
     }
 
+    /// Monotonic revision of the live declared-key contract for one type. It changes
+    /// whenever a durable write uses a different key signature. Backfill captures
+    /// this before replay and conditionally publishes its watermark against it, so a
+    /// concurrent spec/write interleaving cannot certify a stale repair.
+    fn key_index_reconciliation_revision(
+        &self,
+        tenant: &str,
+        entity_type: &str,
+    ) -> impl std::future::Future<Output = Result<u64, PersistenceError>> + Send {
+        let _ = (tenant, entity_type);
+        async { Ok(0) }
+    }
+
+    /// Establish `key_set` as the target contract before a full backfill starts and
+    /// return its monotonic revision. This invalidates older coverage up front. A
+    /// concurrent live write under a different signature must then advance the
+    /// revision, causing the final conditional watermark publication to fail.
+    fn begin_key_index_backfill(
+        &self,
+        tenant: &str,
+        entity_type: &str,
+        key_set: &str,
+    ) -> impl std::future::Future<Output = Result<u64, PersistenceError>> + Send {
+        let _ = (tenant, entity_type, key_set);
+        async { Ok(0) }
+    }
+
+    /// Publish a coverage watermark only if the type's live key-contract revision is
+    /// still `expected_revision` AND its signature is still `key_set`. Returns false
+    /// when a concurrent write changed either; callers must leave the type scan-safe
+    /// and retry a full repair.
+    fn mark_key_index_backfilled_if_revision(
+        &self,
+        tenant: &str,
+        entity_type: &str,
+        key_set: &str,
+        expected_revision: u64,
+    ) -> impl std::future::Future<Output = Result<bool, PersistenceError>> + Send {
+        let _ = expected_revision;
+        async move {
+            self.mark_key_index_backfilled(tenant, entity_type, key_set)
+                .await?;
+            Ok(true)
+        }
+    }
+
     /// The `entity_id`s that already have at least one `entity_key_index` row for
-    /// `(tenant, entity_type)`. Lets the backfill **resume** cheaply: it skips
-    /// already-keyed entities (the expensive part is loading each entity's state),
-    /// so a re-run after a partial pass only processes the remainder instead of
-    /// re-loading all N. Default empty (no resumption — a backend without the index
-    /// re-processes everything, which is correct, just not incremental).
+    /// `(tenant, entity_type)`. Retained for index inspection and backend conformance;
+    /// exact ADR-0171 repair does not use presence as proof of completeness because
+    /// an existing row may itself be stale. Default empty.
     fn keyed_entity_ids_for_type(
         &self,
         tenant: &str,
@@ -385,9 +410,10 @@ pub trait EventStore: Send + Sync + 'static {
 
     /// Atomically append events to multiple journals.
     ///
-    /// Backends must either commit every append in `appends`, or commit none.
-    /// This is the storage primitive composite actions need before they can
-    /// persist cross-actor sub-writes as one physical unit.
+    /// Backends must either commit every append in `appends`, or commit none. For
+    /// each item whose `reconcile_keys` is true, its `key_rows` are the exact final
+    /// declared-key set and must change atomically with every journal in the batch.
+    /// This is the storage primitive composite actions use for one physical unit.
     fn append_batch(
         &self,
         appends: &[PersistenceAppend],
@@ -427,6 +453,20 @@ pub trait EventStore: Send + Sync + 'static {
         entity_type: &str,
     ) -> impl std::future::Future<Output = Result<Vec<String>, PersistenceError>> + Send;
 
+    /// List every stream or derived-key owner that must participate in exact key
+    /// reconciliation for one `(tenant, entity_type)`. Unlike normal live-entity
+    /// enumeration, this includes deleted journal streams and key-index-only
+    /// phantoms so repair can purge their stale ownership before watermarking.
+    /// Backends without a separate authoritative key index inherit the ordinary
+    /// type enumeration.
+    fn list_entity_ids_for_key_reconciliation(
+        &self,
+        tenant: &str,
+        entity_type: &str,
+    ) -> impl std::future::Future<Output = Result<Vec<String>, PersistenceError>> + Send {
+        self.list_entity_ids_by_type(tenant, entity_type)
+    }
+
     /// List at most `limit` authoritative `(entity_type, entity_id)` pairs for
     /// a tenant, optionally scoped to one entity type.
     ///
@@ -457,58 +497,4 @@ pub trait EventStore: Send + Sync + 'static {
             Ok(entities)
         }
     }
-}
-
-/// A persisted event with metadata.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct PersistenceEnvelope {
-    /// Monotonic sequence number within the entity's journal.
-    pub sequence_nr: u64,
-    /// Fully qualified event type name.
-    pub event_type: String,
-    /// Serialized event payload.
-    pub payload: serde_json::Value,
-    /// Event metadata (causation, correlation, timestamp).
-    pub metadata: EventMetadata,
-}
-
-/// One stream append inside an atomic multi-journal append.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct PersistenceAppend {
-    /// Persistence ID in the form `{tenant}:{entity_type}:{entity_id}`.
-    pub persistence_id: String,
-    /// Optimistic-concurrency sequence expected before this append.
-    pub expected_sequence: u64,
-    /// Events to append to this journal.
-    pub events: Vec<PersistenceEnvelope>,
-}
-
-/// New sequence number for one stream after an atomic batch append.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct PersistenceAppendResult {
-    /// Persistence ID that was appended.
-    pub persistence_id: String,
-    /// New highest sequence number for this journal.
-    pub sequence_nr: u64,
-}
-
-/// Errors that can occur during event persistence operations.
-#[derive(Debug, thiserror::Error)]
-pub enum PersistenceError {
-    /// Optimistic concurrency check failed (another writer appended first).
-    #[error("optimistic concurrency violation: expected sequence {expected}, got {actual}")]
-    ConcurrencyViolation { expected: u64, actual: u64 },
-
-    /// Event serialization or deserialization failed.
-    #[error("serialization error: {0}")]
-    Serialization(String),
-
-    /// Underlying storage backend returned an error.
-    #[error("storage error: {0}")]
-    Storage(String),
-}
-
-/// Convert backend-specific errors into [`PersistenceError::Storage`].
-pub fn storage_error(err: impl std::fmt::Display) -> PersistenceError {
-    PersistenceError::Storage(err.to_string())
 }
