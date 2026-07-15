@@ -102,8 +102,7 @@ fn hydration_delay_seed_sweep_covers_remaining_exact_and_overdue_budgets() {
     for seed in 0_u64..128 {
         let elapsed_secs = seed.wrapping_mul(37) % 121;
         let now = entry + chrono::Duration::seconds(elapsed_secs as i64);
-        let hydration =
-            compute_hydration_delay(&events, None, "Running", &[], budget, now).unwrap();
+        let hydration = compute_timeout_delay(&events, None, "Running", &[], budget, now).unwrap();
         assert_eq!(
             hydration.delay,
             budget.saturating_sub(Duration::from_secs(elapsed_secs)),
@@ -135,7 +134,7 @@ fn reconciliation_charges_only_time_after_a_later_durable_entry() {
     let reconciled_at = hydration_reconciled_at(observed_at, Duration::from_secs(5));
 
     assert_eq!(
-        compute_hydration_delay(
+        compute_timeout_delay(
             &events,
             Some(entered_at),
             "Running",
@@ -143,7 +142,7 @@ fn reconciliation_charges_only_time_after_a_later_durable_entry() {
             Duration::from_secs(60),
             reconciled_at,
         ),
-        Some(HydrationDelay {
+        Some(TimeoutDelay {
             delay: Duration::from_secs(58),
             overdue: false,
         }),

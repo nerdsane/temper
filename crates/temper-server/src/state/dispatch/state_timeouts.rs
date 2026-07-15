@@ -101,7 +101,7 @@ fn compute_state_clock_reset_ts(
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct HydrationDelay {
+struct TimeoutDelay {
     delay: Duration,
     overdue: bool,
 }
@@ -120,14 +120,14 @@ fn timeout_deadline(delay: Duration) -> tokio::time::Instant {
     tokio::time::Instant::now() + delay // determinism-ok: paused by DST
 }
 
-fn compute_hydration_delay(
+fn compute_timeout_delay(
     events: &VecDeque<EntityEvent>,
     snapshot_reset_at: Option<DateTime<Utc>>,
     current_state: &str,
     reset_on: &[String],
     budget: Duration,
     now: DateTime<Utc>,
-) -> Option<HydrationDelay> {
+) -> Option<TimeoutDelay> {
     let reset_ts =
         compute_state_clock_reset_ts(events, snapshot_reset_at, current_state, reset_on)?;
     let elapsed = now
@@ -135,7 +135,7 @@ fn compute_hydration_delay(
         .to_std()
         .unwrap_or(Duration::ZERO);
     let overdue = elapsed >= budget;
-    Some(HydrationDelay {
+    Some(TimeoutDelay {
         delay: budget.saturating_sub(elapsed),
         overdue,
     })
@@ -432,37 +432,35 @@ impl crate::state::ServerState {
                 );
             }
 
-            // Determine the fire delay.
+            // Determine the fire delay from the durable entry/reset anchor.
             //
-            // - Entry / reset / fresh-process cases: the full budget.
-            // - Hydration re-arm: budget minus elapsed time since the entity
-            //   entered the current state (or the most recent `reset_on`
-            //   event, whichever is later). If elapsed >= budget, delay is 0
-            //   and the on_timeout action fires on the next tokio tick.
-            let mut delay = Duration::from_secs(st.after_seconds);
+            // Entry, reset, and hydration all share one absolute durable
+            // deadline. This charges persistence and preceding post-dispatch
+            // work instead of granting a fresh budget when arming runs late.
+            let budget = Duration::from_secs(st.after_seconds);
+            let now = match cause {
+                StateTimeoutArmCause::PostDispatch => sim_now(),
+                StateTimeoutArmCause::Hydration {
+                    observed_at,
+                    readiness_elapsed,
+                } => hydration_reconciled_at(observed_at, readiness_elapsed),
+            };
+            let timeout = compute_timeout_delay(
+                &response.state.events,
+                response.state.state_timeout_clock_reset_at,
+                &post_state,
+                &st.reset_on,
+                budget,
+                now,
+            );
+            let delay = timeout.map_or(budget, |timeout| timeout.delay);
             if needs_hydration_rearm {
-                let budget = Duration::from_secs(st.after_seconds);
-                let now = match cause {
-                    StateTimeoutArmCause::PostDispatch => sim_now(),
-                    StateTimeoutArmCause::Hydration {
-                        observed_at,
-                        readiness_elapsed,
-                    } => hydration_reconciled_at(observed_at, readiness_elapsed),
-                };
-                if let Some(hydration) = compute_hydration_delay(
-                    &response.state.events,
-                    response.state.state_timeout_clock_reset_at,
-                    &post_state,
-                    &st.reset_on,
-                    budget,
-                    now,
-                ) {
-                    delay = hydration.delay;
+                if let Some(timeout) = timeout {
                     crate::runtime_metrics::record_state_timeout_armed_on_hydration(
                         ctx.tenant.as_str(),
                         ctx.entity_type,
                         &st.state,
-                        if hydration.overdue {
+                        if timeout.overdue {
                             "overdue"
                         } else {
                             "budgeted"
