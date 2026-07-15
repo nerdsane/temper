@@ -9,6 +9,8 @@ use super::*;
 use temper_runtime::persistence::EventStore;
 use temper_store_sim::{SimEventStore, SimFaultConfig};
 
+mod backend_authority;
+
 #[test]
 fn declared_keys_resolve_from_registry_not_just_transition_tables() {
     // ARN-68 root cause: runtime-installed os-app entities (File, Directory, …)
