@@ -211,7 +211,8 @@ pub(in crate::state) async fn populate_key_index_from_snapshots(
                         // A write with at least one real hash is a claim; a
                         // release-only write is a heal — kept separate so the
                         // completion log's newly_keyed stays an honest claim count.
-                        Ok(()) if any_hash => newly_keyed += 1,
+                        Ok(()) if any_hash && !was_already_keyed => newly_keyed += 1,
+                        Ok(()) if any_hash => already += 1,
                         Ok(()) => healed += 1,
                         Err(e) => {
                             failed += 1;
