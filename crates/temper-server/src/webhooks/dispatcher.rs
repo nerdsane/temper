@@ -252,14 +252,22 @@ impl WebhookDispatcher {
             }
         }
 
+        // Default Content-Type only when the integration did not declare its
+        // own — RequestBuilder::header APPENDS, so setting it unconditionally
+        // would send two Content-Type headers when a `header.Content-Type`
+        // config key exists.
+        let has_content_type = headers
+            .iter()
+            .any(|(k, _)| k.eq_ignore_ascii_case("content-type"));
+
         let client = client.clone();
         let name = integration.name.clone();
         tokio::spawn(async move {
             // determinism-ok: fire-and-forget webhook side-effect; no simulation-visible state touched
-            let mut builder = client
-                .request(method, &url)
-                .header("Content-Type", "application/json")
-                .body(payload);
+            let mut builder = client.request(method, &url).body(payload);
+            if !has_content_type {
+                builder = builder.header("Content-Type", "application/json");
+            }
             for (k, v) in &headers {
                 builder = builder.header(k.as_str(), v.as_str());
             }
