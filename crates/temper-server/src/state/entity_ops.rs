@@ -371,8 +371,9 @@ impl ServerState {
                         .iter()
                         .filter(|(entity_type, _)| {
                             registry
-                                .get_spec(tenant, entity_type)
-                                .is_some_and(|spec| !spec.automaton.state_timeouts.is_empty())
+                                .get_table(tenant, entity_type)
+                                .or_else(|| self.transition_tables.get(entity_type).cloned())
+                                .is_some_and(|table| !table.state_timeouts.is_empty())
                         })
                         .cloned()
                         .collect::<Vec<_>>(),
