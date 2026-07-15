@@ -159,6 +159,14 @@ impl SpecDrivenActor {
                     let idx = idx as usize;
                     if idx < list.len() {
                         list.remove(idx);
+                    } else {
+                        tracing::warn!(
+                            actor = %self.name,
+                            list = %var,
+                            index = idx,
+                            list_len = list.len(),
+                            "list_remove_at skipped: index out of bounds"
+                        );
                     }
                 } else {
                     tracing::warn!(
