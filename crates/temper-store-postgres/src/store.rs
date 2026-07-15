@@ -515,7 +515,8 @@ impl EventStore for PostgresEventStore {
         .fetch_one(&mut *tx)
         .await
         .map_err(|e| PersistenceError::Storage(e.to_string()))?;
-        if current_seq as u64 > as_of_sequence {
+        let current_seq_u64 = u64::try_from(current_seq).unwrap_or(0);
+        if current_seq_u64 > as_of_sequence {
             tx.rollback()
                 .await
                 .map_err(|e| PersistenceError::Storage(e.to_string()))?;
