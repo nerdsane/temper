@@ -768,7 +768,7 @@ mod tests {
     struct CountingHandler {
         applications: Arc<AtomicUsize>,
         emit_trigger: bool,
-        fired: bool,
+        fired: std::cell::Cell<bool>,
     }
 
     impl SimActorHandler for CountingHandler {
@@ -785,7 +785,7 @@ mod tests {
             }
             self.applications.fetch_add(1, Ordering::SeqCst);
             if self.emit_trigger {
-                self.fired = true;
+                self.fired.set(true);
             }
             Ok(serde_json::json!({"status": "Ready"}))
         }
@@ -805,7 +805,7 @@ mod tests {
             serde_json::json!([])
         }
         fn pending_callbacks(&self) -> Vec<String> {
-            if self.fired {
+            if self.fired.take() {
                 vec!["boom_trigger".to_string()]
             } else {
                 Vec::new()
@@ -827,7 +827,7 @@ mod tests {
             Box::new(CountingHandler {
                 applications: applications.clone(),
                 emit_trigger: false,
-                fired: false,
+                fired: std::cell::Cell::new(false),
             }),
         );
         (system, applications)
@@ -902,7 +902,7 @@ mod tests {
             Box::new(CountingHandler {
                 applications: applications.clone(),
                 emit_trigger: true,
-                fired: false,
+                fired: std::cell::Cell::new(false),
             }),
         );
 
