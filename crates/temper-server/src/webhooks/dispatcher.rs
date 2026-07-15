@@ -6,6 +6,8 @@
 
 use std::collections::BTreeMap;
 
+use temper_spec::automaton::Integration;
+
 use crate::state::TrajectoryEntry;
 
 /// Configuration for a single webhook endpoint.
@@ -154,6 +156,127 @@ impl WebhookDispatcher {
         }
     }
 
+    /// Fire a spec-declared webhook integration (ARN-227).
+    ///
+    /// `[[integration]]` blocks with `type = "webhook"` — including the
+    /// records the parser synthesizes from `[[action.triggers]]` webhook
+    /// blocks (ADR-0046) — are executed here after their trigger action
+    /// commits. The config contract matches what the parser writes:
+    /// - `url` (required; a missing url is a warn — the L0 gap of accepting
+    ///   it is noted in ADR-0164),
+    /// - `method` (default POST),
+    /// - `body_template` / `payload_template`: the request body, with
+    ///   `${...}` trajectory variables and `${field}` entity-field
+    ///   placeholders expanded (default body: a JSON object of the
+    ///   transition),
+    /// - `header.{Name}` keys: sent as HTTP header `Name`. The caller
+    ///   resolves `{secret:key}` templates in config values BEFORE calling
+    ///   (the same `resolve_secret_templates` pass the wasm/adapter paths
+    ///   use); a header value still carrying an unresolved `{secret:`
+    ///   template is dropped with a warning rather than leaked to the
+    ///   remote host.
+    /// - Any other config key is ignored (debug-logged), never sent.
+    ///
+    /// Fire-and-forget with the same never-block-the-action semantics as
+    /// `webhooks.toml` dispatch; fires only for successful actions.
+    pub fn dispatch_spec_integration(
+        client: &reqwest::Client,
+        integration: &Integration,
+        resolved_config: &BTreeMap<String, String>,
+        entry: &TrajectoryEntry,
+        entity_fields: &serde_json::Value,
+    ) {
+        if !entry.success {
+            return;
+        }
+        let Some(url) = resolved_config.get("url").cloned() else {
+            tracing::warn!(
+                integration = %integration.name,
+                trigger = %integration.trigger,
+                "webhook integration has no url; nothing to call"
+            );
+            return;
+        };
+
+        let method = resolved_config
+            .get("method")
+            .map(|m| m.to_ascii_uppercase())
+            .unwrap_or_else(|| "POST".to_string());
+        let method =
+            reqwest::Method::from_bytes(method.as_bytes()).unwrap_or(reqwest::Method::POST);
+
+        let template = resolved_config
+            .get("body_template")
+            .or_else(|| resolved_config.get("payload_template"));
+        let payload = match template {
+            Some(template) => {
+                let expanded = expand_template(template, entry);
+                expand_entity_fields(&expanded, entity_fields)
+            }
+            None => serde_json::json!({
+                "tenant": entry.tenant,
+                "entity_type": entry.entity_type,
+                "entity_id": entry.entity_id,
+                "action": entry.action,
+                "from_status": entry.from_status,
+                "to_status": entry.to_status,
+                "integration": integration.name,
+            })
+            .to_string(),
+        };
+
+        let mut headers: Vec<(String, String)> = Vec::new();
+        for (key, value) in resolved_config {
+            if matches!(
+                key.as_str(),
+                "url" | "method" | "payload_template" | "body_template"
+            ) {
+                continue;
+            }
+            if let Some(header_name) = key.strip_prefix("header.") {
+                if value.contains("{secret:") {
+                    tracing::warn!(
+                        integration = %integration.name,
+                        header = %header_name,
+                        "webhook header value carries an unresolved secret template; header dropped"
+                    );
+                    continue;
+                }
+                headers.push((header_name.to_string(), value.clone()));
+            } else {
+                tracing::debug!(
+                    integration = %integration.name,
+                    key = %key,
+                    "unknown webhook integration config key ignored"
+                );
+            }
+        }
+
+        let client = client.clone();
+        let name = integration.name.clone();
+        tokio::spawn(async move {
+            // determinism-ok: fire-and-forget webhook side-effect; no simulation-visible state touched
+            let mut builder = client
+                .request(method, &url)
+                .header("Content-Type", "application/json")
+                .body(payload);
+            for (k, v) in &headers {
+                builder = builder.header(k.as_str(), v.as_str());
+            }
+            match builder.send().await {
+                Ok(resp) if resp.status().is_success() => {
+                    tracing::debug!(integration = %name, url = %url, status = %resp.status(), "spec webhook integration dispatched");
+                }
+                Ok(resp) => {
+                    tracing::warn!(integration = %name, url = %url, status = %resp.status(), "spec webhook integration returned non-success status");
+                }
+                Err(e) => {
+                    tracing::warn!(integration = %name, url = %url, error = %e, "spec webhook integration dispatch failed");
+                }
+            }
+        });
+    }
+
     /// Returns `true` if the config should fire for the given trajectory entry.
     fn matches(&self, config: &WebhookConfig, entry: &TrajectoryEntry) -> bool {
         if config.on_success_only && !entry.success {
@@ -192,6 +315,28 @@ fn expand_env_vars(s: &str) -> String {
         // Advance past the replacement to avoid infinite loops if replacement
         // itself contains `${` (edge case, but safe to skip).
         cursor = abs_start + replacement.len();
+    }
+    result
+}
+
+/// Expand `${field}` placeholders from the entity's post-action fields
+/// (ADR-0046 `body_template` contract). Unknown placeholders are left
+/// verbatim; non-string values render as JSON.
+fn expand_entity_fields(template: &str, fields: &serde_json::Value) -> String {
+    let Some(map) = fields.as_object() else {
+        return template.to_string();
+    };
+    let mut result = template.to_string();
+    for (key, value) in map {
+        let placeholder = format!("${{{key}}}");
+        if !result.contains(&placeholder) {
+            continue;
+        }
+        let rendered = match value {
+            serde_json::Value::String(s) => s.clone(),
+            other => other.to_string(),
+        };
+        result = result.replace(&placeholder, &rendered);
     }
     result
 }

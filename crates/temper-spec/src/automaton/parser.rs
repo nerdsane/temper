@@ -238,17 +238,12 @@ fn expand_external_action_triggers(automaton: &mut Automaton) -> Result<(), Auto
                     });
                 }
                 TriggerKind::Webhook => {
-                    // ADR-0046 known gap: we synthesize the Integration record
-                    // but no runtime dispatcher keys on integration_type ==
-                    // "webhook" today (only "wasm" via wasm.rs:200 and
-                    // "adapter" via adapter.rs:96). A spec-declared webhook
-                    // trigger parses and installs but never fires HTTP. Real
-                    // outbound webhook delivery currently runs through
-                    // temper-server's separate WebhookDispatcher + webhooks.toml
-                    // path. A follow-up will add state/dispatch/webhook.rs
-                    // and collapse the two paths. The config-flattening below
-                    // stays so the Integration record is immediately usable
-                    // once that dispatcher lands.
+                    // ARN-227: these synthesized records are executed by
+                    // temper-server's spec webhook dispatch (fire_webhooks →
+                    // dispatch_spec_integration), which honors this exact
+                    // config flattening: `url`, `method`, `header.{name}`
+                    // keys (with `{secret:key}` values resolved at dispatch),
+                    // and `body_template`.
                     let mut config = trigger.config.clone();
                     if let Some(url) = &trigger.url {
                         config.insert("url".to_string(), url.clone());

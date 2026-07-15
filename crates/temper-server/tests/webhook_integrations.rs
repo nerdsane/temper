@@ -231,3 +231,93 @@ url = "{url}"
         "an integration must fire only for its declared trigger action"
     );
 }
+
+/// ADR-0046 trigger-synthesized webhook integrations (from `[[action.triggers]]`
+/// blocks) carry `header.{Name}` and `body_template` config keys. The
+/// dispatcher must honor that contract: `header.X-Api-Key` becomes the HTTP
+/// header `X-Api-Key` (not a literal "header.x-api-key"), and `body_template`
+/// becomes the request body with `${...}` variables expanded — never a header.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn trigger_synthesized_webhook_honors_header_and_body_contract() {
+    let (url, captured) = capturing_listener().await;
+
+    let spec_toml = format!(
+        r#"
+[automaton]
+name = "Order"
+states = ["Draft", "Submitted"]
+initial = "Draft"
+
+[[action]]
+name = "SubmitOrder"
+kind = "input"
+from = ["Draft"]
+to = "Submitted"
+hint = "Submit the order."
+
+[[action.triggers]]
+name = "notify"
+kind = "webhook"
+url = "{url}"
+method = "POST"
+body_template = "order ${{entity_id}} moved to ${{to_status}}"
+
+[action.triggers.headers]
+X-Api-Key = "test-key-123"
+"#
+    );
+
+    let mut registry = SpecRegistry::new();
+    let csdl = temper_spec::parse_csdl(ORDER_CSDL).expect("csdl parses");
+    registry.register_tenant(
+        "arn227",
+        csdl,
+        ORDER_CSDL.to_string(),
+        &[("Order", &spec_toml)],
+    );
+
+    let system = ActorSystem::new("arn227-synth-test");
+    let state = ServerState::from_registry(system, registry);
+    let tenant = TenantId::new("arn227");
+
+    let response = state
+        .dispatch_tenant_action(
+            &tenant,
+            "Order",
+            "ord-9",
+            "SubmitOrder",
+            serde_json::json!({}),
+            &AgentContext::for_service("arn227-test"),
+        )
+        .await
+        .expect("dispatch succeeds");
+    assert!(response.success);
+
+    let mut request = None;
+    for _ in 0..100 {
+        if let Some(r) = captured.lock().await.clone() {
+            request = Some(r);
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    let request = request.expect("the trigger-synthesized webhook must fire");
+
+    let request_lower = request.to_lowercase();
+    assert!(
+        request_lower.contains("x-api-key: test-key-123"),
+        "header.X-Api-Key must arrive as the header X-Api-Key, got: {request}"
+    );
+    assert!(
+        !request_lower.contains("header.x-api-key"),
+        "the header.-prefixed config key must never be sent literally, got: {request}"
+    );
+    assert!(
+        !request_lower.contains("body_template:"),
+        "body_template must never be sent as a header, got: {request}"
+    );
+    assert!(
+        request.contains("order ord-9 moved to Submitted"),
+        "body_template must become the expanded request body, got: {request}"
+    );
+}

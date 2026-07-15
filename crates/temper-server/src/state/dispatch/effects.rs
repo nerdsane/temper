@@ -426,32 +426,91 @@ impl crate::state::ServerState {
             .send(crate::state::ObserveRefreshHint::Agents);
     }
 
+    /// Build the trajectory entry webhook dispatch renders templates from.
+    fn trajectory_entry_for_webhooks(
+        &self,
+        ctx: &PostDispatchContext<'_>,
+        response: &EntityResponse,
+    ) -> TrajectoryEntry {
+        TrajectoryEntry {
+            timestamp: sim_now().to_rfc3339(),
+            tenant: ctx.tenant.to_string(),
+            entity_type: ctx.entity_type.to_string(),
+            entity_id: ctx.entity_id.to_string(),
+            action: ctx.action.to_string(),
+            success: response.success,
+            from_status: response.state.events.back().map(|e| e.from_status.clone()),
+            to_status: Some(response.state.status.clone()),
+            error: response.error.clone(),
+            agent_id: ctx.agent_ctx.agent_id.clone(),
+            session_id: ctx.agent_ctx.session_id.clone(),
+            authz_denied: None,
+            denied_resource: None,
+            denied_module: None,
+            source: Some(TrajectorySource::Entity),
+            spec_governed: None,
+            agent_type: ctx.agent_ctx.agent_type.clone(),
+            request_body: None,
+            intent: ctx.agent_ctx.intent.clone(),
+            matched_policy_ids: None,
+        }
+    }
+
     /// Fire webhooks for the trajectory entry (non-blocking).
     pub(crate) fn fire_webhooks(&self, ctx: &PostDispatchContext<'_>, response: &EntityResponse) {
+        // ARN-227: spec-declared webhook integrations fire here, matching the
+        // action name or any custom effect it produced — a superset of the
+        // wasm path's trigger semantics (wasm fires only on custom effects).
+        // They execute regardless of whether a webhooks.toml dispatcher is
+        // configured.
+        let spec_webhooks: Vec<temper_spec::automaton::Integration> = {
+            // Poison-tolerant read: this is a fire-and-forget side path, and
+            // a poisoned registry lock must not panic the dispatch response.
+            let registry = self
+                .registry
+                .read()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            registry
+                .get_spec(ctx.tenant, ctx.entity_type)
+                .map(|spec| {
+                    spec.integrations
+                        .iter()
+                        .filter(|ig| {
+                            ig.integration_type == "webhook"
+                                && (ig.trigger == ctx.action
+                                    || response.custom_effects.contains(&ig.trigger))
+                        })
+                        .cloned()
+                        .collect()
+                })
+                .unwrap_or_default()
+        };
+        if !spec_webhooks.is_empty() {
+            let entry = self.trajectory_entry_for_webhooks(ctx, response);
+            for integration in &spec_webhooks {
+                // The same secret-template resolution the wasm and adapter
+                // integration paths apply (ADR-0046 `{secret:key}` headers).
+                let resolved_config = match self.secrets_vault.as_ref() {
+                    Some(vault) => crate::secrets::template::resolve_secret_templates(
+                        &integration.config,
+                        vault,
+                        &ctx.tenant.to_string(),
+                    ),
+                    None => integration.config.clone(),
+                };
+                crate::webhooks::WebhookDispatcher::dispatch_spec_integration(
+                    &self.spec_webhook_client,
+                    integration,
+                    &resolved_config,
+                    &entry,
+                    &response.state.fields,
+                );
+            }
+        }
+
         if let Some(ref dispatcher) = self.webhook_dispatcher {
             let dispatcher = Arc::clone(dispatcher);
-            let entry = TrajectoryEntry {
-                timestamp: sim_now().to_rfc3339(),
-                tenant: ctx.tenant.to_string(),
-                entity_type: ctx.entity_type.to_string(),
-                entity_id: ctx.entity_id.to_string(),
-                action: ctx.action.to_string(),
-                success: response.success,
-                from_status: response.state.events.back().map(|e| e.from_status.clone()),
-                to_status: Some(response.state.status.clone()),
-                error: response.error.clone(),
-                agent_id: ctx.agent_ctx.agent_id.clone(),
-                session_id: ctx.agent_ctx.session_id.clone(),
-                authz_denied: None,
-                denied_resource: None,
-                denied_module: None,
-                source: Some(TrajectorySource::Entity),
-                spec_governed: None,
-                agent_type: ctx.agent_ctx.agent_type.clone(),
-                request_body: None,
-                intent: ctx.agent_ctx.intent.clone(),
-                matched_policy_ids: None,
-            };
+            let entry = self.trajectory_entry_for_webhooks(ctx, response);
             let from_status = entry.from_status.as_deref().unwrap_or("unknown");
             let to_status = entry.to_status.as_deref().unwrap_or("unknown");
             let outcome = if entry.success { "succeeded" } else { "failed" };
