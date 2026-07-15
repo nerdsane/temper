@@ -142,12 +142,17 @@ pub(crate) fn stable_feature_request_id(
 ) -> String {
     let mut trajectory_refs = feature_request.trajectory_refs.clone();
     trajectory_refs.sort();
+    let category = match feature_request.category {
+        temper_evolution::PlatformGapCategory::MissingMethod => "missing_method",
+        temper_evolution::PlatformGapCategory::GovernanceBlocked => "governance_blocked",
+        temper_evolution::PlatformGapCategory::UnsupportedIntegration => "unsupported_integration",
+        temper_evolution::PlatformGapCategory::MissingCapability => "missing_capability",
+    };
     let identity = serde_json::json!({
         "tenant": tenant.as_str(),
         "generator_version": generator_version,
-        "category": format!("{:?}", feature_request.category),
+        "category": category,
         "description": feature_request.description,
-        "frequency": feature_request.frequency,
         "trajectory_refs": trajectory_refs,
     });
     format!("FR-{:x}", Sha256::digest(identity.to_string()))
