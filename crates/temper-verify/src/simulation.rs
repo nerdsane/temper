@@ -9,6 +9,8 @@
 //! - Any failure is reproducible by replaying the same seed
 //! - Specification invariants are checked after every transition
 
+use std::collections::{BTreeMap, BTreeSet};
+
 use temper_runtime::scheduler::{DeterministicRng, FaultConfig, SimActorState, SimScheduler};
 
 use stateright::Model;
@@ -159,11 +161,22 @@ fn run_simulation_impl(model: &TemperModel, config: &SimConfig) -> SimulationRes
     // Initialize actors
     let mut actor_states: Vec<(String, TemperModelState)> = Vec::new();
     let mut actor_action_counts: Vec<usize> = Vec::new();
+    // Statuses each actor has EVER been in (ARN-236): liveness `reaches` is
+    // an eventually-visited property along the trace, not a state-at-horizon
+    // property — a cyclic spec (Resolve → Reopen) satisfies "eventually
+    // resolved" the moment it visits a target, wherever the random walk
+    // happens to stop. (The pre-fix final-state check only passed because
+    // lost trailing deliveries biased where traces ended.)
+    let mut visited_statuses: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
 
     for i in 0..config.num_actors {
         let actor_id = format!("entity-{i}");
         sched.register_actor(&actor_id);
         let initial = model.init_states()[0].clone();
+        visited_statuses
+            .entry(actor_id.clone())
+            .or_default()
+            .insert(model.initial_status.clone());
         actor_states.push((actor_id, initial));
         actor_action_counts.push(0);
     }
@@ -223,6 +236,7 @@ fn run_simulation_impl(model: &TemperModel, config: &SimConfig) -> SimulationRes
                 &mut total_transitions,
                 tick,
                 msg,
+                &mut visited_statuses,
             );
         }
     }
@@ -245,12 +259,14 @@ fn run_simulation_impl(model: &TemperModel, config: &SimConfig) -> SimulationRes
                 &mut total_transitions,
                 tick,
                 msg,
+                &mut visited_statuses,
             );
         }
     }
 
     // Post-simulation liveness checks
-    let liveness_violations = check_liveness_post_simulation(model, &actor_states);
+    let liveness_violations =
+        check_liveness_post_simulation(model, &actor_states, &visited_statuses);
 
     SimulationResult {
         all_invariants_held: violations.is_empty(),
@@ -273,6 +289,7 @@ fn run_simulation_impl(model: &TemperModel, config: &SimConfig) -> SimulationRes
 fn check_liveness_post_simulation(
     model: &TemperModel,
     actor_states: &[(String, TemperModelState)],
+    visited_statuses: &BTreeMap<String, BTreeSet<String>>,
 ) -> Vec<LivenessViolation> {
     let mut violations = Vec::new();
 
@@ -300,15 +317,24 @@ fn check_liveness_post_simulation(
                     if targets.is_empty() {
                         continue;
                     }
-                    // If the actor started from a "from" state, it should have
-                    // reached a target state by the end of simulation.
+                    // Eventually-visited along the trace (ARN-236): the actor
+                    // satisfies `reaches` the moment it has EVER been in a
+                    // target status. Checking only the horizon final state
+                    // wrongly flags cyclic specs (Resolve -> Reopen) whose
+                    // random walk stops mid-cycle — and only ever passed
+                    // before because lost trailing deliveries biased where
+                    // traces ended.
                     let started_from = from.is_empty() || from.contains(&model.initial_status);
-                    if started_from && !targets.contains(&final_state.status) {
+                    let visited_target = visited_statuses
+                        .get(actor_id)
+                        .is_some_and(|seen| targets.iter().any(|t| seen.contains(t)));
+                    if started_from && !visited_target {
                         violations.push(LivenessViolation {
                             actor_id: actor_id.clone(),
                             property: live.name.clone(),
                             description: format!(
-                                "actor did not reach target states {:?}, stuck at '{}'",
+                                "actor never reached target states {:?} at any point in the \
+                                 trace, ending at '{}'",
                                 targets, final_state.status
                             ),
                             final_state: final_state.clone(),
@@ -335,6 +361,7 @@ fn apply_to_model(
     total_transitions: &mut u64,
     tick: u64,
     msg: &temper_runtime::scheduler::SimMessage,
+    visited_statuses: &mut BTreeMap<String, BTreeSet<String>>,
 ) {
     let target_idx = actor_states.iter().position(|(id, _)| id == &msg.to);
     let Some(idx) = target_idx else { return };
@@ -358,6 +385,10 @@ fn apply_to_model(
         );
 
         actor_states[idx].1 = new_state;
+        visited_statuses
+            .entry(actor_states[idx].0.clone())
+            .or_default()
+            .insert(actor_states[idx].1.status.clone());
         actor_action_counts[idx] += 1;
         *total_transitions += 1;
     }
@@ -466,6 +497,112 @@ mod tests {
     use super::*;
 
     const ORDER_IOA: &str = include_str!("../../../test-fixtures/specs/order.ioa.toml");
+
+    /// Cyclic spec: Resolve moves to the target, Reopen leaves it again.
+    /// `reaches` liveness must be satisfied by EVER visiting the target,
+    /// wherever the bounded random walk happens to stop (ARN-236).
+    const CYCLIC_IOA: &str = r#"
+[automaton]
+name = "Loop"
+states = ["Open", "Resolved"]
+initial = "Open"
+
+[[action]]
+name = "Resolve"
+kind = "input"
+from = ["Open"]
+to = "Resolved"
+hint = "Resolve it."
+
+[[action]]
+name = "Reopen"
+kind = "input"
+from = ["Resolved"]
+to = "Open"
+hint = "Reopen it."
+
+[[liveness]]
+name = "EventuallyResolved"
+from = ["Open"]
+reaches = ["Resolved"]
+"#;
+
+    /// The target status exists but no action ever moves into it: the
+    /// `reaches` property is genuinely unreachable and must still violate.
+    const UNREACHABLE_IOA: &str = r#"
+[automaton]
+name = "Stuck"
+states = ["Open", "Parked", "Resolved"]
+initial = "Open"
+
+[[action]]
+name = "Park"
+kind = "input"
+from = ["Open"]
+to = "Parked"
+hint = "Park it."
+
+[[action]]
+name = "Unpark"
+kind = "input"
+from = ["Parked"]
+to = "Open"
+hint = "Unpark it."
+
+[[liveness]]
+name = "EventuallyResolved"
+from = ["Open"]
+reaches = ["Resolved"]
+"#;
+
+    fn liveness_config(seed: u64) -> SimConfig {
+        SimConfig {
+            seed,
+            max_ticks: 200,
+            num_actors: 2,
+            max_actions_per_actor: 20,
+            max_counter: 2,
+            faults: FaultConfig::none(),
+        }
+    }
+
+    /// ARN-236: a cyclic model that VISITS the target mid-trace satisfies
+    /// `reaches`, even when the walk stops outside the target.
+    #[test]
+    fn reaches_liveness_satisfied_by_ever_visiting_the_target() {
+        for seed in [7u64, 21, 99] {
+            let result = run_simulation_from_ioa(CYCLIC_IOA, &liveness_config(seed)).unwrap();
+            assert!(
+                result.total_transitions > 0,
+                "seed {seed}: the walk must actually move"
+            );
+            let reaches_violations: Vec<_> = result
+                .liveness_violations
+                .iter()
+                .filter(|v| v.property == "EventuallyResolved")
+                .collect();
+            assert!(
+                reaches_violations.is_empty(),
+                "seed {seed}: a trace that visited the target must satisfy \
+                 `reaches`, got: {reaches_violations:?}"
+            );
+        }
+    }
+
+    /// ARN-236 (the not-weakened direction): a target no action can ever
+    /// enter must still violate `reaches`.
+    #[test]
+    fn reaches_liveness_still_fails_when_target_is_never_visited() {
+        let result = run_simulation_from_ioa(UNREACHABLE_IOA, &liveness_config(7)).unwrap();
+        assert!(
+            result
+                .liveness_violations
+                .iter()
+                .any(|v| v.property == "EventuallyResolved"),
+            "a genuinely unreachable target must still violate, got: {:?}",
+            result.liveness_violations
+        );
+    }
 
     #[test]
     fn test_simulation_no_faults() {

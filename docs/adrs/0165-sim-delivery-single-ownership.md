@@ -56,6 +56,15 @@ claimed to.
   now applied (that is the point). Seeds produce different — now correct —
   transition sequences than before; recorded-run comparisons across this
   change are not byte-compatible, which is expected for a semantics fix.
+- **L2 `reaches` liveness is now eventually-visited along the trace, not
+  final-state-at-horizon.** The corrected traces exposed that the old check
+  wrongly flagged cyclic specs (the Ticket fixture's Resolve → Reopen cycle
+  "failed" TicketEventuallyResolved whenever the random walk stopped
+  mid-cycle) — it had only ever passed because lost trailing deliveries
+  biased where traces ended. Each actor now records every status it visits;
+  `reaches` is satisfied the moment a target status was ever visited. Specs
+  that genuinely never reach a target still fail, and `no_deadlock`
+  liveness is unchanged.
 - `Scheduler::run_until_quiescent` keeps its shape (tick in a bounded loop),
   but with tick enqueue-only nothing drains during it — once anything is
   enqueued it degrades to "tick `max_ticks` times" and terminates via the
