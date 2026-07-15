@@ -100,6 +100,7 @@ fn run_and_hard_kill_generation_a(system_name: &str, db_url: &str, entity_id: &s
     let system_name = system_name.to_string();
     let db_url = db_url.to_string();
     let entity_id = entity_id.to_string();
+    // determinism-ok: test-only hard-kill of generation-A runtime; not production sim path
     std::thread::spawn(move || {
         let rt = tokio::runtime::Builder::new_multi_thread()
             .worker_threads(2)
@@ -147,7 +148,10 @@ async fn pending_state_timeout_fires_after_restart() {
         .get_tenant_entity_state(&tenant, "Ticket", "t-restart-1")
         .await
         .expect("load after boot");
-    assert_eq!(boot.state.status, "Open", "restart must leave entity Open before resume fires");
+    assert_eq!(
+        boot.state.status, "Open",
+        "restart must leave entity Open before resume fires"
+    );
 
     // No dispatch to the entity. The pending timeout alone must fire.
     let status = wait_for_status(
@@ -188,7 +192,10 @@ async fn overdue_state_timeout_fires_after_restart() {
         .get_tenant_entity_state(&tenant, "Ticket", "t-overdue-1")
         .await
         .expect("load after boot");
-    assert_eq!(boot.state.status, "Open", "overdue entity still Open right after boot");
+    assert_eq!(
+        boot.state.status, "Open",
+        "overdue entity still Open right after boot"
+    );
 
     // Overdue: must fire promptly (≪ full 1s budget). Cap wait at 800ms so a
     // full-budget re-arm regression fails instead of silently passing.
