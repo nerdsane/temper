@@ -247,6 +247,101 @@ async fn delayed_post_dispatch_entry_and_reset_keep_the_durable_deadline() {
     );
 }
 
+#[tokio::test(start_paused = true)]
+async fn reverse_ordered_reset_callbacks_keep_the_newest_durable_deadline() {
+    let (_guard, _clock, _ids) = install_deterministic_context(215);
+    let tenant = TenantId::default();
+    let mut registry = SpecRegistry::new();
+    registry.register_tenant(
+        tenant.as_str(),
+        parse_csdl(TICKET_CSDL).expect("CSDL parses"),
+        TICKET_CSDL.to_string(),
+        &[("Ticket", TICKET_WITH_RESET_TIMEOUT_IOA)],
+    );
+    let state = ServerState::from_registry(ActorSystem::new("reverse-reset-deadline"), registry);
+    let agent_ctx = AgentContext::for_service("timeout-scheduler-test");
+    let action_params = serde_json::json!({});
+    let now = sim_now();
+    let older_anchor = now - chrono::Duration::seconds(20);
+    let newer_anchor = now - chrono::Duration::seconds(10);
+
+    let response = |sequence_nr: u64, durable_anchor: DateTime<Utc>| EntityResponse {
+        success: true,
+        state: EntityState {
+            entity_type: "Ticket".to_string(),
+            entity_id: "reverse-reset".to_string(),
+            status: "Open".to_string(),
+            item_count: 0,
+            counters: BTreeMap::new(),
+            booleans: BTreeMap::new(),
+            lists: BTreeMap::new(),
+            fields: serde_json::json!({"Id": "reverse-reset", "Status": "Open"}),
+            events: VecDeque::from([EntityEvent {
+                action: "Heartbeat".to_string(),
+                from_status: "Open".to_string(),
+                to_status: "Open".to_string(),
+                timestamp: durable_anchor,
+                params: serde_json::json!({}),
+                idempotency_key: None,
+            }]),
+            state_timeout_clock_reset_at: Some(durable_anchor),
+            total_event_count: sequence_nr as usize,
+            events_since_snapshot: 1,
+            last_snapshot_sequence_nr: sequence_nr - 1,
+            sequence_nr,
+            processed_idempotency_keys: BTreeMap::new(),
+        },
+        error: None,
+        custom_effects: Vec::new(),
+        scheduled_actions: Vec::new(),
+        spawn_requests: Vec::new(),
+        spec_governed: true,
+    };
+    let ctx = PostDispatchContext {
+        tenant: &tenant,
+        entity_type: "Ticket",
+        entity_id: "reverse-reset",
+        action: "Heartbeat",
+        agent_ctx: &agent_ctx,
+        dispatch_idempotency_key: None,
+        action_params: &action_params,
+        await_integration: false,
+    };
+
+    // Both transitions committed in actor order, but the newer response's
+    // post-dispatch effects completed first. The late older callback must not
+    // supersede the already-armed durable deadline.
+    state.arm_state_timeouts_if_needed(&ctx, &response(11, newer_anchor));
+    state.arm_state_timeouts_if_needed(&ctx, &response(10, older_anchor));
+
+    assert_eq!(
+        state.state_timeout_tracker.pending_snapshot(),
+        vec![("Ticket".to_string(), 1)],
+        "the stale reset callback must be rejected instead of arming a second timer"
+    );
+
+    tokio::time::advance(Duration::from_secs(40)).await;
+    tokio::task::yield_now().await;
+    assert_eq!(
+        state.state_timeout_tracker.pending_snapshot(),
+        vec![("Ticket".to_string(), 1)],
+        "the older durable anchor must not fire ten seconds before the newest reset deadline"
+    );
+
+    tokio::time::advance(Duration::from_secs(10)).await;
+    for _ in 0..64 {
+        tokio::task::yield_now().await;
+        if state.state_timeout_tracker.pending_snapshot() == vec![("Ticket".to_string(), 0)] {
+            break;
+        }
+    }
+    assert_eq!(
+        state.state_timeout_tracker.pending_snapshot(),
+        vec![("Ticket".to_string(), 0)],
+        "the single accepted timer must complete at the newest durable reset deadline"
+    );
+}
+
 #[test]
 fn snapshot_anchor_survives_an_empty_recent_event_window() {
     let reset_at = DateTime::<Utc>::from_timestamp(1_700_000_000, 0).unwrap();
