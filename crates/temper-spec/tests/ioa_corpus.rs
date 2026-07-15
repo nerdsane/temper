@@ -83,8 +83,11 @@ fn every_tracked_ioa_spec_parses_and_round_trips_through_the_canonical_schema() 
 }
 
 fn collect_ioa_specs(root: &Path, paths: &mut Vec<PathBuf>) {
-    let mut entries = fs::read_dir(root)
-        .unwrap_or_else(|error| panic!("failed to read {}: {error}", root.display()))
+    // Missing roots are skipped so optional app trees do not panic the corpus.
+    let Ok(read_dir) = fs::read_dir(root) else {
+        return;
+    };
+    let mut entries = read_dir
         .map(|entry| entry.expect("directory entry must be readable"))
         .collect::<Vec<_>>();
     entries.sort_by_key(|entry| entry.path());
