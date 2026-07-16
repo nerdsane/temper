@@ -51,6 +51,7 @@ impl EntityActorHandler {
             fields: serde_json::json!({}),
             events: std::collections::VecDeque::new(),
             state_timeout_clock_reset_at: None,
+            state_timeout_clock_reset_version: None,
             total_event_count: 0,
             events_since_snapshot: 0,
             last_snapshot_sequence_nr: 0,
@@ -181,6 +182,7 @@ impl SimActorHandler for EntityActorHandler {
         self.state.last_snapshot_sequence_nr = 0;
         self.state.sequence_nr = 0;
         self.state.state_timeout_clock_reset_at = None;
+        self.state.state_timeout_clock_reset_version = None;
         self.state.fields = serde_json::json!({
             "Id": self.state.entity_id,
             "Status": self.state.status,
@@ -324,22 +326,27 @@ reset_on = ["Progress"]
         let entered_at = sim_now();
         handler.handle_message("Start", "{}").unwrap();
         assert_eq!(handler.state.state_timeout_clock_reset_at, Some(entered_at));
+        assert_eq!(handler.state.state_timeout_clock_reset_version, Some(1));
 
         clock.advance();
         let reset_at = sim_now();
         handler.handle_message("Progress", "{}").unwrap();
         assert_eq!(handler.state.state_timeout_clock_reset_at, Some(reset_at));
+        assert_eq!(handler.state.state_timeout_clock_reset_version, Some(2));
 
         handler.init().unwrap();
         assert_eq!(handler.state.state_timeout_clock_reset_at, None);
+        assert_eq!(handler.state.state_timeout_clock_reset_version, None);
 
         clock.advance();
         handler.handle_message("Start", "{}").unwrap();
         assert_eq!(handler.state.state_timeout_clock_reset_at, Some(sim_now()));
+        assert_eq!(handler.state.state_timeout_clock_reset_version, Some(1));
 
         clock.advance();
         handler.handle_message("Finish", "{}").unwrap();
         assert_eq!(handler.state.state_timeout_clock_reset_at, None);
+        assert_eq!(handler.state.state_timeout_clock_reset_version, None);
     }
 
     #[test]

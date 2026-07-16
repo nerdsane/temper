@@ -4,7 +4,8 @@ use tokio::sync::Semaphore;
 use tracing::{Instrument, instrument};
 use tracing_opentelemetry::OpenTelemetrySpanExt;
 
-use crate::entity_actor::{EntityMsg, EntityResponse};
+use crate::entity_actor::types::STATE_TIMEOUT_PRECONDITION_MISMATCH;
+use crate::entity_actor::{EntityMsg, EntityResponse, StateTimeoutPrecondition};
 use crate::request_context::{AgentContext, remote_parent_context};
 use crate::state::trajectory::{TrajectoryEntry, TrajectorySource};
 use temper_runtime::scheduler::{sim_now, sim_uuid};
@@ -16,6 +17,10 @@ use super::{DispatchCommand, DispatchError, DispatchExtOptions, record_workflow_
 use crate::state::admission::AdmissionOutcome;
 
 const DEFAULT_BACKGROUND_REACTION_MAX_CONCURRENCY: usize = 64;
+
+fn is_state_timeout_cancellation(is_state_timeout_dispatch: bool, error: Option<&str>) -> bool {
+    is_state_timeout_dispatch && error == Some(STATE_TIMEOUT_PRECONDITION_MISMATCH)
+}
 
 struct BackgroundReactionDispatch {
     dispatcher: Arc<crate::trigger::ReactionDispatcher>,
@@ -152,6 +157,27 @@ impl crate::state::ServerState {
         &self,
         cmd: DispatchCommand<'_>,
     ) -> Result<EntityResponse, DispatchError> {
+        self.dispatch_typed_with_timeout_precondition(cmd, None)
+            .await
+    }
+
+    /// Dispatch an internally scheduled state timeout with an actor-atomic
+    /// state/clock condition. A stale timer returns a benign unsuccessful
+    /// response without running post-dispatch effects or reactions.
+    pub(crate) async fn dispatch_state_timeout_action(
+        &self,
+        cmd: DispatchCommand<'_>,
+        precondition: StateTimeoutPrecondition,
+    ) -> Result<EntityResponse, DispatchError> {
+        self.dispatch_typed_with_timeout_precondition(cmd, Some(precondition))
+            .await
+    }
+
+    async fn dispatch_typed_with_timeout_precondition(
+        &self,
+        cmd: DispatchCommand<'_>,
+        timeout_precondition: Option<StateTimeoutPrecondition>,
+    ) -> Result<EntityResponse, DispatchError> {
         let DispatchCommand {
             tenant,
             entity_type,
@@ -179,6 +205,7 @@ impl crate::state::ServerState {
                 params,
                 agent_ctx,
                 await_integration,
+                timeout_precondition,
             )
             .await?;
 
@@ -338,7 +365,9 @@ impl crate::state::ServerState {
         params: serde_json::Value,
         agent_ctx: &AgentContext,
         await_integration: bool,
+        timeout_precondition: Option<StateTimeoutPrecondition>,
     ) -> Result<EntityResponse, DispatchError> {
+        let is_state_timeout_dispatch = timeout_precondition.is_some();
         let explicit_workflow_context = agent_ctx.workflow_run_id.is_some()
             || agent_ctx.workflow_root_entity_type.is_some()
             || agent_ctx.workflow_root_entity_id.is_some();
@@ -542,6 +571,7 @@ impl crate::state::ServerState {
                     params: params_for_retry.clone(),
                     cross_entity_booleans: cross_for_retry.clone(),
                     idempotency_key: idempotency_key.clone(),
+                    state_timeout_precondition: timeout_precondition.clone(),
                 },
                 &policy,
             )
@@ -689,7 +719,6 @@ impl crate::state::ServerState {
             }
         };
 
-        // Run all post-dispatch effects through the dedicated pipeline.
         let ctx = PostDispatchContext {
             tenant,
             entity_type,
@@ -700,6 +729,19 @@ impl crate::state::ServerState {
             action_params: &action_params,
             await_integration,
         };
+
+        // A stale state-timeout condition is an expected cancellation, not a
+        // failed user intent. Its response is nevertheless the authoritative
+        // actor state and may be the first time this process observes a reset
+        // committed by another replica. Reconcile only timeout ownership from
+        // it; keep the cancelled action out of trajectories, integrations,
+        // projections, reactions, and other post-dispatch effects.
+        if is_state_timeout_cancellation(is_state_timeout_dispatch, response.error.as_deref()) {
+            self.arm_state_timeouts_if_needed(&ctx, &response);
+            return Ok(response);
+        }
+
+        // Run all post-dispatch effects through the dedicated pipeline.
         let response = self.run_post_dispatch_effects(&ctx, response).await;
         if response.success
             && let Some(ref idem_key) = idempotency_key
@@ -726,5 +768,22 @@ impl crate::state::ServerState {
         }
 
         Ok(response)
+    }
+}
+
+#[cfg(test)]
+mod timeout_cancellation_tests {
+    use super::*;
+
+    #[test]
+    fn matching_domain_error_is_not_a_normal_dispatch_cancellation() {
+        assert!(!is_state_timeout_cancellation(
+            false,
+            Some(STATE_TIMEOUT_PRECONDITION_MISMATCH),
+        ));
+        assert!(is_state_timeout_cancellation(
+            true,
+            Some(STATE_TIMEOUT_PRECONDITION_MISMATCH),
+        ));
     }
 }

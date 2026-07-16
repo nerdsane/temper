@@ -9,14 +9,18 @@
 //! - **Reset signal** — the action that fired is listed in the declaration's
 //!   `reset_on` while the entity is in the declared state.
 //!
-//! Cancellation is sequence-based. Every arm bumps a per-entity counter in
-//! [`StateTimeoutTracker`] and captures the post-bump value. When the timer
-//! fires, it re-reads the current counter; any mismatch means a newer arm
-//! (or a state change) invalidated this one, so the fire is a no-op.
+//! Cancellation is generation-based and ordered by the actor's committed event
+//! order (durable sequence for journaled actors, total event count otherwise).
+//! A post-dispatch callback can advance [`StateTimeoutTracker`] only when its
+//! response is newer than the last accepted response. Every accepted arm
+//! captures the new generation. When the timer fires, its action carries the
+//! armed state and durable reset anchor into the actor; the actor validates both
+//! atomically before applying the transition.
 //!
 //! Cancellation on state exit is implicit: before arming a new timer, we
-//! bump once for the old state if it had a declaration. That bump renders
-//! any in-flight timer for the old state stale.
+//! advance ownership once for the transition. That advance renders any
+//! in-flight timer for the old state stale and, when the destination is timed,
+//! owns the replacement timer without a second generation change.
 //!
 //! Durability (ADR-0056, ADR-0171): actor spawn and post-dispatch fallback
 //! reconcile the **hydration case** — the entity is in a state with a
@@ -44,9 +48,10 @@ use tracing::Instrument;
 use temper_runtime::scheduler::sim_now;
 use temper_runtime::tenant::TenantId;
 
-use crate::entity_actor::{EntityEvent, EntityResponse};
+use crate::entity_actor::types::STATE_TIMEOUT_PRECONDITION_MISMATCH;
+use crate::entity_actor::{EntityEvent, EntityResponse, EntityState, StateTimeoutPrecondition};
 
-use super::effects::PostDispatchContext;
+use super::{DispatchCommand, effects::PostDispatchContext};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum StateTimeoutArmCause {
@@ -141,7 +146,15 @@ fn compute_timeout_delay(
     })
 }
 
-/// Composite key identifying an entity instance inside the arm-seq tracker.
+fn timeout_response_order(state: &EntityState) -> u64 {
+    if state.sequence_nr != 0 {
+        state.sequence_nr
+    } else {
+        u64::try_from(state.total_event_count).unwrap_or(u64::MAX)
+    }
+}
+
+/// Composite key identifying an entity instance inside the ownership tracker.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 struct EntityKey {
     tenant: String,
@@ -161,14 +174,24 @@ impl EntityKey {
 
 /// In-memory cancellation counter keyed by entity instance.
 ///
-/// Each arm increments and captures the new value; firings compare captured
-/// against current and drop the fire when they diverge.
+/// Each accepted committed response increments and captures a generation;
+/// firings compare the captured generation against the current owner and drop
+/// the fire when they diverge. Journal sequence numbers make persisted response
+/// acceptance monotonic; in-memory actors use their total applied event count.
 #[derive(Default, Debug)]
 pub struct StateTimeoutTracker {
-    seqs: Mutex<BTreeMap<EntityKey, u64>>,
+    owners: Mutex<BTreeMap<EntityKey, StateTimeoutOwner>>,
     /// ADR-0049: per-entity-type count of armed-but-unfired timers.
     /// Emitted as `temper_scheduler_pending_timers` by the canary loop.
     pending_by_type: Mutex<BTreeMap<String, u64>>,
+}
+
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+struct StateTimeoutOwner {
+    generation: u64,
+    event_order: u64,
+    reset_at: Option<DateTime<Utc>>,
+    reset_version: Option<u64>,
 }
 
 impl StateTimeoutTracker {
@@ -176,38 +199,74 @@ impl StateTimeoutTracker {
         Self::default()
     }
 
-    fn bump(&self, key: &EntityKey) -> u64 {
-        let mut map = self.seqs.lock().expect("state_timeout tracker poisoned");
-        let entry = map.entry(key.clone()).or_insert(0);
-        *entry += 1;
-        *entry
-    }
-
-    /// Claim the initial timer sequence without disturbing a timer that a
-    /// concurrent dispatch already armed.
+    /// Advance timeout ownership for a strictly newer committed response.
     ///
-    /// Both a first standalone dispatch and a hydration reservation use
-    /// sequence `1`, but the mutex makes the two cases exclusive. If hydration
-    /// reserves first, the dispatch's subsequent [`Self::bump`] returns `2`
-    /// and invalidates the hydration timer. If dispatch bumps first, this
-    /// method observes the non-zero sequence and declines the reservation.
-    fn reserve_if_unarmed(&self, key: &EntityKey) -> Option<u64> {
-        let mut map = self.seqs.lock().expect("state_timeout tracker poisoned");
-        let entry = map.entry(key.clone()).or_insert(0);
-        if *entry != 0 {
+    /// Actor transitions commit in sequence order, but post-dispatch effects
+    /// may complete out of order. Rejecting older or duplicate callbacks keeps
+    /// a stale response from cancelling the timer for a newer reset.
+    fn advance_if_fresh(
+        &self,
+        key: &EntityKey,
+        event_order: u64,
+        reset_at: Option<DateTime<Utc>>,
+        reset_version: Option<u64>,
+    ) -> Option<u64> {
+        let mut map = self.owners.lock().expect("state_timeout tracker poisoned");
+        let owner = map.entry(key.clone()).or_default();
+        if owner.generation != 0 && event_order <= owner.event_order {
             return None;
         }
-        debug_assert_eq!(*entry, 0, "only an unarmed timer can be reserved");
-        *entry = 1;
-        Some(*entry)
+        owner.generation = owner
+            .generation
+            .checked_add(1)
+            .expect("state timeout generation overflow");
+        owner.event_order = event_order;
+        owner.reset_at = reset_at;
+        owner.reset_version = reset_version;
+        Some(owner.generation)
     }
 
-    fn current(&self, key: &EntityKey) -> u64 {
-        self.seqs
+    /// Observe a newer response and arm only when ownership is missing or its
+    /// durable clock anchor changed.
+    ///
+    /// This handles hydration/dispatch races and repairs the fresh in-memory
+    /// fallback: the initial timed state has no anchor, then its first event
+    /// establishes one. Unrelated callbacks with an unchanged anchor merely
+    /// advance the monotonic observation order and keep the existing deadline.
+    fn reconcile_if_fresh(
+        &self,
+        key: &EntityKey,
+        event_order: u64,
+        reset_at: Option<DateTime<Utc>>,
+        reset_version: Option<u64>,
+    ) -> Option<u64> {
+        let mut map = self.owners.lock().expect("state_timeout tracker poisoned");
+        let owner = map.entry(key.clone()).or_default();
+        if owner.generation != 0 && event_order <= owner.event_order {
+            return None;
+        }
+        let needs_arm = owner.generation == 0
+            || owner.reset_at != reset_at
+            || owner.reset_version != reset_version;
+        owner.event_order = event_order;
+        if !needs_arm {
+            return None;
+        }
+        owner.generation = owner
+            .generation
+            .checked_add(1)
+            .expect("state timeout generation overflow");
+        owner.reset_at = reset_at;
+        owner.reset_version = reset_version;
+        Some(owner.generation)
+    }
+
+    fn current_generation(&self, key: &EntityKey) -> u64 {
+        self.owners
             .lock()
             .expect("state_timeout tracker poisoned")
             .get(key)
-            .copied()
+            .map(|owner| owner.generation)
             .unwrap_or(0)
     }
 
@@ -248,7 +307,7 @@ impl StateTimeoutTracker {
     pub fn forget(&self, tenant: &TenantId, entity_type: &str, entity_id: &str) {
         let key = EntityKey::new(tenant, entity_type, entity_id);
         let _ = self
-            .seqs
+            .owners
             .lock()
             .expect("state_timeout tracker poisoned")
             .remove(&key);
@@ -256,7 +315,7 @@ impl StateTimeoutTracker {
 
     #[cfg(test)]
     fn size(&self) -> usize {
-        self.seqs
+        self.owners
             .lock()
             .expect("state_timeout tracker poisoned")
             .len()
@@ -346,9 +405,9 @@ impl crate::state::ServerState {
     /// Arm or re-arm state timers based on the just-completed transition.
     ///
     /// Invoked from `run_post_dispatch_effects`. Walks the spec's
-    /// `state_timeouts`, bumps the per-entity seq appropriately, and spawns
-    /// a tokio task per armed timer. Actor-spawn hydration separately calls
-    /// the same scheduler to recover durable deadlines after restart.
+    /// `state_timeouts`, advances monotonic per-entity ownership, and spawns a
+    /// tokio task per armed timer. Actor-spawn hydration separately calls the
+    /// same scheduler to recover durable deadlines after restart.
     pub(crate) fn arm_state_timeouts_if_needed(
         &self,
         ctx: &PostDispatchContext<'_>,
@@ -389,21 +448,51 @@ impl crate::state::ServerState {
         let state_changed = pre_state != post_state;
         let hydrating = matches!(cause, StateTimeoutArmCause::Hydration { .. });
         let key = EntityKey::new(ctx.tenant, ctx.entity_type, ctx.entity_id);
+        let post_has_timeout = state_timeouts.iter().any(|st| st.state == post_state);
+        let pre_had_timeout = state_timeouts.iter().any(|st| st.state == pre_state);
+        let event_order = timeout_response_order(&response.state);
+        let armed_reset_at = state_timeouts
+            .iter()
+            .find(|st| st.state == post_state)
+            .and_then(|st| {
+                compute_state_clock_reset_ts(
+                    &response.state.events,
+                    response.state.state_timeout_clock_reset_at,
+                    &post_state,
+                    &st.reset_on,
+                )
+            });
+        let armed_reset_version = response.state.state_timeout_clock_reset_version;
 
-        // 1. Invalidate any outstanding timer for the prior state.
-        if state_changed && !hydrating {
-            let pre_had_timeout = state_timeouts.iter().any(|st| st.state == pre_state);
-            if pre_had_timeout {
-                self.state_timeout_tracker.bump(&key);
-                crate::runtime_metrics::record_state_timeout_cancelled(
-                    ctx.tenant.as_str(),
-                    ctx.entity_type,
-                    &pre_state,
-                );
-            }
-        }
+        // A state change invalidates the prior timer and, when the destination
+        // is timed, owns its replacement with the same generation. Advancing
+        // once per durable response also rejects out-of-order callbacks.
+        let transition_generation =
+            if state_changed && !hydrating && (pre_had_timeout || post_has_timeout) {
+                let Some(generation) = self.state_timeout_tracker.advance_if_fresh(
+                    &key,
+                    event_order,
+                    armed_reset_at,
+                    armed_reset_version,
+                ) else {
+                    return;
+                };
+                if pre_had_timeout {
+                    crate::runtime_metrics::record_state_timeout_cancelled(
+                        ctx.tenant.as_str(),
+                        ctx.entity_type,
+                        &pre_state,
+                    );
+                }
+                if !post_has_timeout {
+                    return;
+                }
+                Some(generation)
+            } else {
+                None
+            };
 
-        // 2. Arm timers for any matching state_timeout declaration.
+        // Arm timers for the matching destination declaration.
         for st in &state_timeouts {
             if st.state != post_state {
                 continue;
@@ -411,18 +500,36 @@ impl crate::state::ServerState {
             let is_entry = state_changed && !hydrating;
             let is_reset =
                 !hydrating && !state_changed && st.reset_on.iter().any(|a| a == ctx.action);
-            // ADR-0056: atomically reserve hydration ownership only when no
-            // dispatch has already armed a timer. A separate read followed by
-            // bump would let stale hydration invalidate a concurrent arm.
-            let hydration_seq = if !is_entry && !is_reset {
-                self.state_timeout_tracker.reserve_if_unarmed(&key)
+            let (armed_seq, needs_hydration_rearm) = if is_entry {
+                let Some(generation) = transition_generation else {
+                    continue;
+                };
+                (generation, false)
+            } else if is_reset {
+                let Some(generation) = self.state_timeout_tracker.advance_if_fresh(
+                    &key,
+                    event_order,
+                    armed_reset_at,
+                    armed_reset_version,
+                ) else {
+                    // Post-dispatch effects can finish out of order. An older
+                    // reset must not supersede a newer durable response.
+                    continue;
+                };
+                (generation, false)
             } else {
-                None
+                // ADR-0056: reserve reconciliation ownership only when no
+                // dispatch or hydration path has already armed a timer.
+                let Some(generation) = self.state_timeout_tracker.reconcile_if_fresh(
+                    &key,
+                    event_order,
+                    armed_reset_at,
+                    armed_reset_version,
+                ) else {
+                    continue;
+                };
+                (generation, true)
             };
-            let needs_hydration_rearm = hydration_seq.is_some();
-            if !is_entry && !is_reset && !needs_hydration_rearm {
-                continue;
-            }
             if is_reset {
                 crate::runtime_metrics::record_state_timeout_reset(
                     ctx.tenant.as_str(),
@@ -478,7 +585,6 @@ impl crate::state::ServerState {
                 }
             }
 
-            let armed_seq = hydration_seq.unwrap_or_else(|| self.state_timeout_tracker.bump(&key));
             self.state_timeout_tracker.inc_pending(ctx.entity_type);
             let params: serde_json::Value = serde_json::to_value(&st.params)
                 .unwrap_or_else(|_| serde_json::Value::Object(serde_json::Map::new()));
@@ -538,44 +644,44 @@ impl crate::state::ServerState {
                 );
 
                 async move {
-                    // Sequence-based cancellation check. A newer arm (or a
-                    // state change that bumped the seq on exit) renders
-                    // this timer a no-op.
-                    if tracker.current(&key_for_task) != armed_seq {
+                    // Generation cancellation check. A newer accepted durable
+                    // response renders this timer a no-op.
+                    if tracker.current_generation(&key_for_task) != armed_seq {
                         tracker.dec_pending(&entity_type_for_dec);
                         return;
                     }
 
-                    // Secondary check: confirm the entity is still in the
-                    // target state. Covers races where the entity left and
-                    // re-entered the same state with a new seq greater than
-                    // this one (in which case the tracker seq would differ,
-                    // already caught above). This is defense in depth.
-                    match state
-                        .get_tenant_entity_state(&tenant, &entity_type, &entity_id)
-                        .await
-                    {
-                        Ok(current) if current.state.status == target_state => {
-                            crate::runtime_metrics::record_state_timeout_fired(
-                                tenant.as_str(),
-                                &entity_type,
-                                &target_state,
-                                &target_action,
-                            );
-                            let _ = state
-                                .dispatch_tenant_action(
-                                    &tenant,
-                                    &entity_type,
-                                    &entity_id,
-                                    &target_action,
-                                    params,
-                                    &agent_ctx,
-                                )
-                                .await;
-                        }
-                        _ => {
-                            // State changed or fetch failed — nothing to do.
-                        }
+                    let result = state
+                        .dispatch_state_timeout_action(
+                            DispatchCommand {
+                                tenant: &tenant,
+                                entity_type: &entity_type,
+                                entity_id: &entity_id,
+                                action: &target_action,
+                                params,
+                                agent_ctx: &agent_ctx,
+                                await_integration: false,
+                                await_reactions: true,
+                            },
+                            StateTimeoutPrecondition {
+                                expected_state: target_state.clone(),
+                                expected_reset_at: armed_reset_at,
+                                expected_reset_version: armed_reset_version,
+                            },
+                        )
+                        .await;
+                    if !matches!(
+                        result,
+                        Ok(ref response)
+                            if response.error.as_deref()
+                                == Some(STATE_TIMEOUT_PRECONDITION_MISMATCH)
+                    ) {
+                        crate::runtime_metrics::record_state_timeout_fired(
+                            tenant.as_str(),
+                            &entity_type,
+                            &target_state,
+                            &target_action,
+                        );
                     }
                     tracker.dec_pending(&entity_type_for_dec);
                 }
@@ -600,33 +706,50 @@ mod tests {
     }
 
     #[test]
-    fn bump_returns_monotonically_increasing_seq() {
+    fn fresh_durable_responses_advance_monotonic_generations() {
         let t = StateTimeoutTracker::new();
         let k = key();
-        assert_eq!(t.current(&k), 0, "initial seq is 0");
-        assert_eq!(t.bump(&k), 1);
-        assert_eq!(t.bump(&k), 2);
-        assert_eq!(t.bump(&k), 3);
-        assert_eq!(t.current(&k), 3);
+        assert_eq!(t.current_generation(&k), 0, "initial generation is 0");
+        assert_eq!(t.advance_if_fresh(&k, 7, None, None), Some(1));
+        assert_eq!(t.advance_if_fresh(&k, 8, None, None), Some(2));
+        assert_eq!(t.advance_if_fresh(&k, 9, None, None), Some(3));
+        assert_eq!(t.current_generation(&k), 3);
     }
 
     #[test]
-    fn per_entity_seqs_are_independent() {
+    fn stale_or_duplicate_durable_responses_cannot_advance_ownership() {
+        let t = StateTimeoutTracker::new();
+        let k = key();
+        assert_eq!(t.advance_if_fresh(&k, 11, None, None), Some(1));
+        assert_eq!(t.advance_if_fresh(&k, 10, None, None), None);
+        assert_eq!(t.advance_if_fresh(&k, 11, None, None), None);
+        assert_eq!(t.current_generation(&k), 1);
+    }
+
+    #[test]
+    fn per_entity_owners_are_independent() {
         let t = StateTimeoutTracker::new();
         let a = EntityKey::new(&TenantId::from("t".to_string()), "E", "a");
         let b = EntityKey::new(&TenantId::from("t".to_string()), "E", "b");
-        assert_eq!(t.bump(&a), 1);
-        assert_eq!(t.bump(&a), 2);
-        assert_eq!(t.bump(&b), 1, "b's seq is independent of a's");
-        assert_eq!(t.current(&a), 2);
-        assert_eq!(t.current(&b), 1);
+        assert_eq!(t.advance_if_fresh(&a, 1, None, None), Some(1));
+        assert_eq!(t.advance_if_fresh(&a, 2, None, None), Some(2));
+        assert_eq!(
+            t.advance_if_fresh(&b, 1, None, None),
+            Some(1),
+            "b's owner is independent of a's"
+        );
+        assert_eq!(t.current_generation(&a), 2);
+        assert_eq!(t.current_generation(&b), 1);
     }
 
     #[test]
     fn forget_releases_entity() {
         let t = StateTimeoutTracker::new();
         let tenant = TenantId::from("t".to_string());
-        t.bump(&EntityKey::new(&tenant, "E", "x"));
+        assert_eq!(
+            t.advance_if_fresh(&EntityKey::new(&tenant, "E", "x"), 1, None, None),
+            Some(1)
+        );
         assert_eq!(t.size(), 1);
         t.forget(&tenant, "E", "x");
         assert_eq!(t.size(), 0);

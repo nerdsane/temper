@@ -31,10 +31,17 @@ kind = "internal"
 from = ["Running"]
 to = "TimedOut"
 
+[[action]]
+name = "Heartbeat"
+kind = "input"
+from = ["Running"]
+to = "Running"
+
 [[state_timeout]]
 state = "Running"
 after_seconds = 60
 on_timeout = "TimeoutFail"
+reset_on = ["Heartbeat"]
 "#;
 
 const UNTIMED_LAZY_TASK_IOA: &str = r#"
@@ -129,6 +136,7 @@ async fn seed_running_entity(
         "lists": {},
         "fields": {"Id": entity_id, "Status": "Running"},
         "state_timeout_clock_reset_at": entered_running_at,
+        "state_timeout_clock_reset_version": 2,
         "total_event_count": 2,
         "events_since_snapshot": 0,
         "last_snapshot_sequence_nr": 2,
@@ -143,6 +151,104 @@ async fn seed_running_entity(
         )
         .await
         .expect("seed current snapshot with timeout anchor");
+}
+
+#[tokio::test(start_paused = true)]
+async fn replayed_remote_reset_replaces_the_cancelled_local_deadline() {
+    let (_guard, clock, _ids) = install_deterministic_context(221);
+    let store = SimEventStore::no_faults(221);
+    let tenant = TenantId::default();
+    let entity_id = "timed-task-remote-reset";
+    let persistence_id = format!("default:TimedTask:{entity_id}");
+    let entered_running_at = sim_now();
+    seed_running_entity(&store, &persistence_id, entity_id, entered_running_at).await;
+
+    let state = restarted_server(store.clone());
+    state.populate_index_from_store(&tenant).await;
+    for _ in 0..64 {
+        if state.state_timeout_tracker.pending_snapshot() == vec![("TimedTask".to_string(), 1)] {
+            break;
+        }
+        tokio::task::yield_now().await;
+    }
+    assert_eq!(
+        state.state_timeout_tracker.pending_snapshot(),
+        vec![("TimedTask".to_string(), 1)]
+    );
+
+    tokio::time::advance(std::time::Duration::from_secs(20)).await;
+    clock.advance_by(200);
+    let reset_at = sim_now();
+    let heartbeat = EntityEvent {
+        action: "Heartbeat".to_string(),
+        from_status: "Running".to_string(),
+        to_status: "Running".to_string(),
+        timestamp: reset_at,
+        params: serde_json::json!({}),
+        idempotency_key: None,
+    };
+    store
+        .append(
+            &persistence_id,
+            2,
+            &[persisted_event(&persistence_id, 3, heartbeat)],
+        )
+        .await
+        .expect("competing replica commits a same-state reset");
+
+    tokio::time::advance(std::time::Duration::from_secs(40)).await;
+    clock.advance_by(400);
+    for _ in 0..128 {
+        tokio::task::yield_now().await;
+        let current = state
+            .get_tenant_entity_state(&tenant, "TimedTask", entity_id)
+            .await
+            .expect("timed entity remains readable");
+        if current.state.sequence_nr == 3
+            && current.state.status == "Running"
+            && state.state_timeout_tracker.pending_snapshot() == vec![("TimedTask".to_string(), 1)]
+        {
+            break;
+        }
+    }
+    let reconciled = state
+        .get_tenant_entity_state(&tenant, "TimedTask", entity_id)
+        .await
+        .expect("remote reset is replayed at the old deadline");
+    assert_eq!(reconciled.state.status, "Running");
+    assert_eq!(reconciled.state.sequence_nr, 3);
+    assert_eq!(
+        reconciled.state.state_timeout_clock_reset_at,
+        Some(reset_at)
+    );
+    assert_eq!(reconciled.state.state_timeout_clock_reset_version, Some(3));
+    assert_eq!(
+        state.state_timeout_tracker.pending_snapshot(),
+        vec![("TimedTask".to_string(), 1)],
+        "the stale local fire must hand ownership to the replayed remote reset"
+    );
+
+    tokio::time::advance(std::time::Duration::from_secs(20)).await;
+    clock.advance_by(200);
+    for _ in 0..128 {
+        tokio::task::yield_now().await;
+        if state.state_timeout_tracker.pending_snapshot() == vec![("TimedTask".to_string(), 0)] {
+            break;
+        }
+    }
+    let timed_out = state
+        .get_tenant_entity_state(&tenant, "TimedTask", entity_id)
+        .await
+        .expect("replacement deadline completes");
+    assert_eq!(timed_out.state.status, "TimedOut");
+    assert_eq!(timed_out.state.sequence_nr, 4);
+    assert_eq!(
+        store
+            .dump_journal(&persistence_id)
+            .last()
+            .map(|event| event.event_type.as_str()),
+        Some("TimeoutFail")
+    );
 }
 
 async fn seed_lazy_entity(store: &SimEventStore, entity_id: &str) {

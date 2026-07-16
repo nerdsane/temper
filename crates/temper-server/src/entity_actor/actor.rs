@@ -42,8 +42,19 @@ use super::effects::{
 use super::snapshot_queue::{SnapshotEnqueueOutcome, SnapshotWriteQueue};
 use super::types::{
     EntityEvent, EntityMsg, EntityResponse, EntityState, MAX_EVENTS_SINCE_SNAPSHOT,
-    MAX_ITEMS_PER_ENTITY,
+    MAX_ITEMS_PER_ENTITY, STATE_TIMEOUT_PRECONDITION_MISMATCH, StateTimeoutPrecondition,
 };
+
+fn state_timeout_precondition_is_stale(
+    state: &EntityState,
+    precondition: Option<&StateTimeoutPrecondition>,
+) -> bool {
+    precondition.is_some_and(|precondition| {
+        state.status != precondition.expected_state
+            || state.state_timeout_clock_reset_at != precondition.expected_reset_at
+            || state.state_timeout_clock_reset_version != precondition.expected_reset_version
+    })
+}
 
 fn event_budget_workspace_id(state: &EntityState) -> String {
     if state.entity_type == "Workspace" {
@@ -145,6 +156,7 @@ impl EntityActor {
             fields,
             events: std::collections::VecDeque::new(),
             state_timeout_clock_reset_at: None,
+            state_timeout_clock_reset_version: None,
             total_event_count: 0,
             events_since_snapshot: 0,
             last_snapshot_sequence_nr: 0,
@@ -170,6 +182,7 @@ impl EntityActor {
             .find(|timeout| timeout.state == event.to_status)
         else {
             state.state_timeout_clock_reset_at = None;
+            state.state_timeout_clock_reset_version = None;
             return;
         };
 
@@ -178,11 +191,25 @@ impl EntityActor {
             .reset_on
             .iter()
             .any(|action| action == &event.action);
+        let next_total_event = u64::try_from(state.total_event_count)
+            .unwrap_or(u64::MAX)
+            .checked_add(1)
+            .expect("state timeout clock version overflow");
+        let event_version = if state.sequence_nr != 0 {
+            state.sequence_nr
+        } else {
+            next_total_event
+        };
         if entered_state || reset_clock || state.state_timeout_clock_reset_at.is_none() {
             // A legacy snapshot can lack this optional field. The first later
             // durable event repairs the metadata conservatively, ensuring any
             // snapshot written by current code carries an anchor thereafter.
             state.state_timeout_clock_reset_at = Some(event.timestamp);
+            state.state_timeout_clock_reset_version = Some(event_version);
+        } else if state.state_timeout_clock_reset_version.is_none() {
+            // Preserve an existing durable deadline while assigning a unique
+            // clock identity to snapshots written before this companion field.
+            state.state_timeout_clock_reset_version = Some(event_version);
         }
     }
 
@@ -252,6 +279,12 @@ impl EntityActor {
                 obj.insert(
                     "state_timeout_clock_reset_at".to_string(),
                     serde_json::json!(reset_at),
+                );
+            }
+            if let Some(reset_version) = state.state_timeout_clock_reset_version {
+                obj.insert(
+                    "state_timeout_clock_reset_version".to_string(),
+                    serde_json::json!(reset_version),
                 );
             }
             obj.insert("events_since_snapshot".to_string(), serde_json::json!(0));
@@ -655,6 +688,12 @@ impl EntityActor {
                         state.sequence_nr = env.sequence_nr;
                         continue;
                     }
+                    // Make the current committed envelope identity visible to
+                    // timeout-clock and idempotency metadata before applying
+                    // the event. Snapshot lifetime counts can legitimately lag
+                    // journal sequence numbers (for example after composite
+                    // markers), so the previous sequence is not a safe version.
+                    state.sequence_nr = env.sequence_nr;
 
                     let parsed_event = serde_json::from_value::<EntityEvent>(env.payload.clone());
 
@@ -678,7 +717,6 @@ impl EntityActor {
                         }
                         Self::update_state_timeout_clock(table, state, &tombstone);
                         state.push_event_bounded(tombstone);
-                        state.sequence_nr = env.sequence_nr;
                         break;
                     }
 
@@ -778,7 +816,6 @@ impl EntityActor {
                             tracing::warn!(tenant = %tenant, entity_type = %state.entity_type, "event replay error");
                         }
                     }
-                    state.sequence_nr = env.sequence_nr;
                 }
                 if !envelopes.is_empty() {
                     let replayed_tail = state
@@ -914,13 +951,13 @@ impl Actor for EntityActor {
         // current process persists the repair; repeated restarts must not keep
         // refreshing the fallback budget.
         if state.sequence_nr > 0
-            && state.state_timeout_clock_reset_at.is_none()
+            && (state.state_timeout_clock_reset_at.is_none()
+                || state.state_timeout_clock_reset_version.is_none())
             && table
                 .state_timeouts
                 .iter()
                 .any(|timeout| timeout.state == state.status)
         {
-            state.state_timeout_clock_reset_at = Some(sim_now());
             let repair_snapshot_sequence = state.last_snapshot_sequence_nr;
             if repair_snapshot_sequence == 0 {
                 return Err(ActorError::custom(format!(
@@ -935,6 +972,14 @@ impl Actor for EntityActor {
                     self.entity_type, self.entity_id
                 ))
             })?;
+            if state.state_timeout_clock_reset_at.is_none() {
+                state.state_timeout_clock_reset_at = Some(sim_now());
+            }
+            state.state_timeout_clock_reset_version = Some(if state.sequence_nr != 0 {
+                state.sequence_nr
+            } else {
+                u64::try_from(state.total_event_count).unwrap_or(u64::MAX)
+            });
 
             // A missing anchor after replay proves that every post-snapshot
             // envelope was skipped without mutating domain state: any parsed
@@ -1042,6 +1087,7 @@ impl Actor for EntityActor {
                 params,
                 cross_entity_booleans,
                 idempotency_key,
+                state_timeout_precondition,
             } => {
                 // Capture start time for span duration (DST-safe: sim_now()
                 // returns logical clock in simulation, wall clock in production).
@@ -1088,6 +1134,24 @@ impl Actor for EntityActor {
                         state: response_state,
                         error: None,
                         custom_effects,
+                        scheduled_actions: vec![],
+                        spawn_requests: vec![],
+                        spec_governed: true,
+                    });
+                    return Ok(());
+                }
+
+                // State-timeout actions carry the state and durable clock
+                // anchor observed when their timer was armed. Check both
+                // inside the actor, immediately before transition evaluation,
+                // so a newer reset queued ahead of this message makes the old
+                // timeout a benign no-op instead of an early transition.
+                if state_timeout_precondition_is_stale(state, state_timeout_precondition.as_ref()) {
+                    ctx.reply(EntityResponse {
+                        success: false,
+                        state: state.clone(),
+                        error: Some(STATE_TIMEOUT_PRECONDITION_MISMATCH.to_string()),
+                        custom_effects: vec![],
                         scheduled_actions: vec![],
                         spawn_requests: vec![],
                         spec_governed: true,
@@ -1297,6 +1361,26 @@ impl Actor for EntityActor {
                                     // pre-race snapshot.
                                     state_before = state.clone();
                                     event_count_before = state.total_event_count;
+
+                                    // The initial condition and transition
+                                    // evaluation happened against speculative
+                                    // state that just lost an optimistic race.
+                                    // A competing replica may have committed a
+                                    // reset in that gap. Revalidate against the
+                                    // authoritative replay before evaluating or
+                                    // persisting the timeout action again.
+                                    if state_timeout_precondition_is_stale(
+                                        state,
+                                        state_timeout_precondition.as_ref(),
+                                    ) {
+                                        retry_final = Some((
+                                            crate::runtime_metrics::ConcurrencyRetryOutcome::ActionIllegal,
+                                            Some(
+                                                STATE_TIMEOUT_PRECONDITION_MISMATCH.to_string(),
+                                            ),
+                                        ));
+                                        break;
+                                    }
 
                                     // Re-evaluate the action against the caught-up
                                     // state. It may now fail (entity reached a
@@ -1689,6 +1773,7 @@ impl Actor for EntityActor {
                     );
                 }
                 state.state_timeout_clock_reset_at = None;
+                state.state_timeout_clock_reset_version = None;
                 state.push_event_bounded(deleted);
 
                 ctx.reply(EntityResponse {

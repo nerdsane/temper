@@ -590,6 +590,10 @@ async fn passivation_snapshot_preserves_state_timeout_clock_anchor() {
         .state
         .state_timeout_clock_reset_at
         .expect("live transition records the durable timeout anchor");
+    let reset_version = started
+        .state
+        .state_timeout_clock_reset_version
+        .expect("live transition records the durable timeout version");
 
     state.last_accessed.write().unwrap().insert(
         actor_key.clone(),
@@ -609,6 +613,10 @@ async fn passivation_snapshot_preserves_state_timeout_clock_anchor() {
         Some(&serde_json::json!(reset_at)),
         "passivation must use the same timeout-aware snapshot encoder"
     );
+    assert_eq!(
+        snapshot.get("state_timeout_clock_reset_version"),
+        Some(&serde_json::json!(reset_version))
+    );
     assert!(snapshot.get("events").is_none());
 
     let recovered = state
@@ -619,6 +627,11 @@ async fn passivation_snapshot_preserves_state_timeout_clock_anchor() {
         recovered.state.state_timeout_clock_reset_at,
         Some(reset_at),
         "respawn must restore the exact passivation snapshot anchor"
+    );
+    assert_eq!(
+        recovered.state.state_timeout_clock_reset_version,
+        Some(reset_version),
+        "respawn must restore the exact passivation snapshot clock identity"
     );
 }
 
@@ -745,6 +758,12 @@ async fn assert_legacy_snapshot_anchor_repair_survives_restart(
             .is_none(),
         "failed upgrade must not report an anchor that was never persisted"
     );
+    assert!(
+        still_legacy_snapshot
+            .get("state_timeout_clock_reset_version")
+            .is_none(),
+        "failed upgrade must not report a clock version that was never persisted"
+    );
     let failed_actor_uid = failed_state
         .actor_registry
         .read()
@@ -776,6 +795,11 @@ async fn assert_legacy_snapshot_anchor_repair_survives_restart(
         first_recovery.state.state_timeout_clock_reset_at,
         Some(expected_repair_at),
         "legacy hydration establishes one conservative current anchor"
+    );
+    assert_eq!(
+        first_recovery.state.state_timeout_clock_reset_version,
+        Some(expected_sequence_nr),
+        "legacy hydration establishes one durable clock identity"
     );
     assert_eq!(
         first_recovery.state.sequence_nr, expected_sequence_nr,
@@ -829,6 +853,10 @@ async fn assert_legacy_snapshot_anchor_repair_survives_restart(
         Some(&serde_json::json!(expected_repair_at))
     );
     assert_eq!(
+        upgraded_snapshot.get("state_timeout_clock_reset_version"),
+        Some(&serde_json::json!(expected_sequence_nr))
+    );
+    assert_eq!(
         upgraded_snapshot.get("sequence_nr"),
         Some(&serde_json::json!(2))
     );
@@ -862,6 +890,11 @@ async fn assert_legacy_snapshot_anchor_repair_survives_restart(
         second_recovery.state.state_timeout_clock_reset_at,
         Some(expected_repair_at),
         "the second restart must retain the first repair instead of refreshing the budget"
+    );
+    assert_eq!(
+        second_recovery.state.state_timeout_clock_reset_version,
+        Some(expected_sequence_nr),
+        "the second restart must retain the first repaired clock identity"
     );
     assert_ne!(
         second_recovery.state.state_timeout_clock_reset_at,

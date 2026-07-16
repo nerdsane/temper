@@ -31,6 +31,12 @@ from = ["Open"]
 to = "Open"
 
 [[action]]
+name = "Observe"
+kind = "input"
+from = ["Open"]
+to = "Open"
+
+[[action]]
 name = "AssignAgent"
 kind = "internal"
 from = ["Open"]
@@ -51,15 +57,106 @@ fn key() -> EntityKey {
     }
 }
 
+async fn wait_for_ticket_pending(state: &ServerState, expected: u64) {
+    for _ in 0..128 {
+        tokio::task::yield_now().await;
+        if state.state_timeout_tracker.pending_snapshot() == vec![("Ticket".to_string(), expected)]
+        {
+            return;
+        }
+    }
+    assert_eq!(
+        state.state_timeout_tracker.pending_snapshot(),
+        vec![("Ticket".to_string(), expected)]
+    );
+}
+
+async fn assert_in_memory_fallback_rearm(action: &str, seed: u64, entity_id: &str) {
+    let (_guard, clock, _ids) = install_deterministic_context(seed);
+    let tenant = TenantId::default();
+    let mut registry = SpecRegistry::new();
+    registry.register_tenant(
+        tenant.as_str(),
+        parse_csdl(TICKET_CSDL).expect("CSDL parses"),
+        TICKET_CSDL.to_string(),
+        &[("Ticket", TICKET_WITH_RESET_TIMEOUT_IOA)],
+    );
+    let state = ServerState::from_registry(ActorSystem::new(entity_id), registry);
+    let initial = state
+        .get_tenant_entity_state(&tenant, "Ticket", entity_id)
+        .await
+        .expect("initial timed actor starts");
+    assert_eq!(
+        initial.state.sequence_nr, 0,
+        "no event journal is configured"
+    );
+    assert_eq!(initial.state.total_event_count, 0);
+    assert_eq!(initial.state.state_timeout_clock_reset_at, None);
+    assert_eq!(initial.state.state_timeout_clock_reset_version, None);
+    wait_for_ticket_pending(&state, 1).await;
+
+    tokio::time::advance(Duration::from_secs(20)).await;
+    clock.advance_by(200);
+    let response = state
+        .dispatch_tenant_action(
+            &tenant,
+            "Ticket",
+            entity_id,
+            action,
+            serde_json::json!({}),
+            &AgentContext::for_service("timeout-scheduler-test"),
+        )
+        .await
+        .expect("same-state action applies");
+    assert!(response.success);
+    assert_eq!(response.state.sequence_nr, 0);
+    assert_eq!(response.state.total_event_count, 1);
+    assert_eq!(response.state.state_timeout_clock_reset_version, Some(1));
+    wait_for_ticket_pending(&state, 2).await;
+
+    tokio::time::advance(Duration::from_secs(40)).await;
+    clock.advance_by(400);
+    wait_for_ticket_pending(&state, 1).await;
+    let before_new_deadline = state
+        .get_tenant_entity_state(&tenant, "Ticket", entity_id)
+        .await
+        .expect("entity remains readable at the superseded deadline");
+    assert_eq!(
+        before_new_deadline.state.status, "Open",
+        "the hydrated fallback deadline must not fire after the clock is established"
+    );
+
+    tokio::time::advance(Duration::from_secs(20)).await;
+    clock.advance_by(200);
+    wait_for_ticket_pending(&state, 0).await;
+    let after_new_deadline = state
+        .get_tenant_entity_state(&tenant, "Ticket", entity_id)
+        .await
+        .expect("entity remains readable after timeout");
+    assert_eq!(after_new_deadline.state.status, "InProgress");
+}
+
+#[tokio::test(start_paused = true)]
+async fn in_memory_reset_replaces_the_hydrated_fallback_deadline() {
+    assert_in_memory_fallback_rearm("Heartbeat", 217, "in-memory-reset").await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn first_unrelated_event_reconciles_the_missing_in_memory_anchor() {
+    assert_in_memory_fallback_rearm("Observe", 218, "in-memory-anchor-repair").await;
+}
+
 #[test]
 fn dispatch_arm_wins_when_it_precedes_hydration_reconciliation() {
     let tracker = StateTimeoutTracker::new();
     let entity = key();
 
-    let dispatch_seq = tracker.bump(&entity);
-    assert_eq!(tracker.reserve_if_unarmed(&entity), None);
+    let dispatch_seq = tracker
+        .advance_if_fresh(&entity, 2, None, None)
+        .expect("new dispatch claims timeout ownership");
+    assert_eq!(tracker.reconcile_if_fresh(&entity, 1, None, None), None);
     assert_eq!(
-        tracker.current(&entity),
+        tracker.current_generation(&entity),
         dispatch_seq,
         "late hydration must not invalidate the live dispatch deadline"
     );
@@ -71,12 +168,14 @@ fn dispatch_arm_supersedes_an_earlier_hydration_reservation() {
     let entity = key();
 
     let hydration_seq = tracker
-        .reserve_if_unarmed(&entity)
+        .reconcile_if_fresh(&entity, 1, None, None)
         .expect("hydration claims an unarmed entity");
-    let dispatch_seq = tracker.bump(&entity);
+    let dispatch_seq = tracker
+        .advance_if_fresh(&entity, 2, None, None)
+        .expect("newer dispatch supersedes hydration");
     assert_ne!(hydration_seq, dispatch_seq);
     assert_eq!(
-        tracker.current(&entity),
+        tracker.current_generation(&entity),
         dispatch_seq,
         "a real transition must retain the only current deadline"
     );
@@ -187,6 +286,7 @@ async fn delayed_post_dispatch_entry_and_reset_keep_the_durable_deadline() {
                 idempotency_key: None,
             }]),
             state_timeout_clock_reset_at: Some(durable_anchor),
+            state_timeout_clock_reset_version: Some(1),
             total_event_count: 1,
             events_since_snapshot: 1,
             last_snapshot_sequence_nr: 0,
@@ -285,6 +385,7 @@ async fn reverse_ordered_reset_callbacks_keep_the_newest_durable_deadline() {
                 idempotency_key: None,
             }]),
             state_timeout_clock_reset_at: Some(durable_anchor),
+            state_timeout_clock_reset_version: Some(sequence_nr),
             total_event_count: sequence_nr as usize,
             events_since_snapshot: 1,
             last_snapshot_sequence_nr: sequence_nr - 1,

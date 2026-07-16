@@ -16,12 +16,40 @@ use std::time::Duration;
 
 use temper_jit::table::TransitionTable;
 use temper_runtime::ActorSystem;
-use temper_runtime::scheduler::install_deterministic_context;
+use temper_runtime::persistence::{EventMetadata, EventStore, PersistenceEnvelope};
+use temper_runtime::scheduler::{install_deterministic_context, sim_now, sim_uuid};
+use temper_server::entity_actor::StateTimeoutPrecondition;
 use temper_server::storage::{BackendLabel, BoxedEventStore};
 use temper_server::{EntityActor, EntityMsg, EntityResponse};
 use temper_store_sim::SimEventStore;
 
 const ORDER_IOA: &str = include_str!("../../../test-fixtures/specs/order.ioa.toml");
+
+const TIMED_IOA: &str = r#"
+[automaton]
+name = "TimedTask"
+states = ["Running", "TimedOut"]
+initial = "Running"
+allow_indefinite_states = ["TimedOut"]
+
+[[action]]
+name = "Heartbeat"
+kind = "input"
+from = ["Running"]
+to = "Running"
+
+[[action]]
+name = "TimeoutFail"
+kind = "internal"
+from = ["Running"]
+to = "TimedOut"
+
+[[state_timeout]]
+state = "Running"
+after_seconds = 60
+on_timeout = "TimeoutFail"
+reset_on = ["Heartbeat"]
+"#;
 
 fn order_table() -> Arc<RwLock<TransitionTable>> {
     Arc::new(RwLock::new(TransitionTable::from_ioa_source(ORDER_IOA)))
@@ -45,6 +73,7 @@ async fn dispatch_action(
                 params,
                 cross_entity_booleans: BTreeMap::new(),
                 idempotency_key: None,
+                state_timeout_precondition: None,
             },
             Duration::from_secs(5),
         )
@@ -230,4 +259,99 @@ async fn dst_retry_succeeds_after_one_violation_many_seeds() {
             "seed {seed}: journal = Create + successful AddItem"
         );
     }
+}
+
+#[tokio::test]
+async fn stale_timeout_is_rejected_after_concurrency_replay_observes_a_reset() {
+    let seed = 220;
+    let (_guard, _clock, _id_gen) = install_deterministic_context(seed);
+    let (store, sim) = sim_store_with_handle(seed);
+    let table = Arc::new(RwLock::new(TransitionTable::from_ioa_source(TIMED_IOA)));
+    let entity_id = "timeout-reset-race";
+    let persistence_id = format!("default:TimedTask:{entity_id}");
+    let actor = EntityActor::with_persistence(
+        "TimedTask",
+        entity_id,
+        table,
+        serde_json::json!({}),
+        store,
+        BackendLabel::Sim,
+    )
+    .with_tenant("default");
+    let system = ActorSystem::new("timeout-concurrency-replay");
+    let actor_ref = system.spawn(actor, entity_id);
+    wait_ready(&actor_ref).await;
+
+    let before: EntityResponse = actor_ref
+        .ask(EntityMsg::GetState, Duration::from_secs(5))
+        .await
+        .expect("timed actor is ready");
+    let reset_at = before
+        .state
+        .state_timeout_clock_reset_at
+        .expect("bootstrap Created event established the timeout clock");
+    let reset_version = before
+        .state
+        .state_timeout_clock_reset_version
+        .expect("bootstrap Created event established the timeout version");
+    assert_eq!(before.state.sequence_nr, 1);
+
+    sim.append(
+        &persistence_id,
+        1,
+        &[PersistenceEnvelope {
+            sequence_nr: 0,
+            event_type: "Heartbeat".to_string(),
+            payload: serde_json::json!({
+                "action": "Heartbeat",
+                "from_status": "Running",
+                "to_status": "Running",
+                "timestamp": reset_at,
+                "params": {}
+            }),
+            metadata: EventMetadata {
+                event_id: sim_uuid(),
+                causation_id: sim_uuid(),
+                correlation_id: sim_uuid(),
+                timestamp: sim_now(),
+                actor_id: persistence_id.clone(),
+            },
+        }],
+    )
+    .await
+    .expect("a competing replica commits the reset");
+
+    let response: EntityResponse = actor_ref
+        .ask(
+            EntityMsg::Action {
+                name: "TimeoutFail".to_string(),
+                params: serde_json::json!({}),
+                cross_entity_booleans: BTreeMap::new(),
+                idempotency_key: None,
+                state_timeout_precondition: Some(StateTimeoutPrecondition {
+                    expected_state: "Running".to_string(),
+                    expected_reset_at: Some(reset_at),
+                    expected_reset_version: Some(reset_version),
+                }),
+            },
+            Duration::from_secs(5),
+        )
+        .await
+        .expect("stale timeout receives a benign replay-aware response");
+
+    assert!(!response.success);
+    assert_eq!(
+        response.error.as_deref(),
+        Some("state timeout precondition no longer matches")
+    );
+    assert_eq!(response.state.status, "Running");
+    assert_eq!(response.state.sequence_nr, 2);
+    assert_eq!(response.state.state_timeout_clock_reset_at, Some(reset_at));
+    assert_eq!(response.state.state_timeout_clock_reset_version, Some(2));
+    let journal = sim.dump_journal(&persistence_id);
+    assert_eq!(journal.len(), 2);
+    assert_eq!(
+        journal.last().map(|event| event.event_type.as_str()),
+        Some("Heartbeat")
+    );
 }

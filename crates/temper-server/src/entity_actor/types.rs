@@ -21,6 +21,25 @@ pub const MAX_ITEMS_PER_ENTITY: usize = 1_000;
 /// Maximum durable idempotency keys retained per entity.
 pub const MAX_DURABLE_IDEMPOTENCY_KEYS_PER_ENTITY: usize = 1_000;
 
+/// Internal condition attached to a state-timeout action.
+///
+/// The actor evaluates this against its current state in the same mailbox turn
+/// as the action. A timeout armed for an older state or clock anchor therefore
+/// cannot race a newer reset and execute after that reset commits.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StateTimeoutPrecondition {
+    /// State for which the timeout was armed.
+    pub expected_state: String,
+    /// Durable entry/reset timestamp captured when the timeout was armed.
+    pub expected_reset_at: Option<DateTime<Utc>>,
+    /// Monotonic event version that last changed or established the clock.
+    pub expected_reset_version: Option<u64>,
+}
+
+/// Actor response marker for a state-timeout action whose condition is stale.
+pub(crate) const STATE_TIMEOUT_PRECONDITION_MISMATCH: &str =
+    "state timeout precondition no longer matches";
+
 /// Number of recent events retained in memory per entity.
 ///
 /// Controlled by `TEMPER_RECENT_EVENTS_BUDGET` (default 50).
@@ -49,6 +68,9 @@ pub enum EntityMsg {
         /// Covers the race where a dispatch-layer retry produces a second
         /// in-flight ask after the first one already processed.
         idempotency_key: Option<String>,
+        /// Actor-atomic guard used only by internally scheduled state-timeout
+        /// actions. Ordinary dispatches leave this unset.
+        state_timeout_precondition: Option<StateTimeoutPrecondition>,
     },
     /// Get the current entity state.
     GetState,
@@ -96,6 +118,13 @@ pub struct EntityState {
     /// entity responses so scheduler bookkeeping does not enter the data API.
     #[serde(default, skip_serializing)]
     pub state_timeout_clock_reset_at: Option<DateTime<Utc>>,
+    /// Durable event version that established the current timeout clock.
+    ///
+    /// Timestamps alone are not unique under deterministic logical time. This
+    /// companion value changes on every state entry or `reset_on` event and is
+    /// persisted in snapshots while remaining outside normal API responses.
+    #[serde(default, skip_serializing)]
+    pub state_timeout_clock_reset_version: Option<u64>,
     /// Total event count ever applied to this entity.
     #[serde(default)]
     pub total_event_count: usize,
@@ -228,6 +257,7 @@ mod tests {
             fields: json!({"title": "Test Order"}),
             events: VecDeque::new(),
             state_timeout_clock_reset_at: None,
+            state_timeout_clock_reset_version: None,
             total_event_count: 0,
             events_since_snapshot: 0,
             last_snapshot_sequence_nr: 0,
@@ -276,6 +306,7 @@ mod tests {
             fields: json!({}),
             events: VecDeque::new(),
             state_timeout_clock_reset_at: None,
+            state_timeout_clock_reset_version: None,
             total_event_count: MAX_EVENTS_SINCE_SNAPSHOT + 50,
             events_since_snapshot: 2,
             last_snapshot_sequence_nr: MAX_EVENTS_SINCE_SNAPSHOT as u64 + 48,
@@ -299,6 +330,7 @@ mod tests {
             fields: json!({}),
             events: VecDeque::new(),
             state_timeout_clock_reset_at: None,
+            state_timeout_clock_reset_version: None,
             total_event_count: MAX_EVENTS_SINCE_SNAPSHOT,
             events_since_snapshot: MAX_EVENTS_SINCE_SNAPSHOT,
             last_snapshot_sequence_nr: 0,
@@ -340,6 +372,7 @@ mod tests {
             fields: json!({}),
             events: VecDeque::new(),
             state_timeout_clock_reset_at: None,
+            state_timeout_clock_reset_version: None,
             total_event_count: 0,
             events_since_snapshot: 0,
             last_snapshot_sequence_nr: 0,
