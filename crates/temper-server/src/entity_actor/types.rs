@@ -245,6 +245,17 @@ mod tests {
     use serde_json::json;
 
     #[test]
+    fn entity_message_respects_the_mailbox_stack_budget() {
+        const ENTITY_MSG_STACK_BUDGET_BYTES: usize = 160;
+
+        let message_size = std::mem::size_of::<EntityMsg>();
+        assert!(
+            message_size <= ENTITY_MSG_STACK_BUDGET_BYTES,
+            "EntityMsg uses {message_size} bytes, exceeding the {ENTITY_MSG_STACK_BUDGET_BYTES}-byte stack budget"
+        );
+    }
+
+    #[test]
     fn entity_state_round_trip() {
         let state = EntityState {
             entity_type: "Order".to_string(),
