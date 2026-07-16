@@ -42,6 +42,37 @@ fn background_reaction_semaphore() -> Arc<Semaphore> {
 }
 
 impl crate::state::ServerState {
+    /// Erase the recursive core-dispatch future used by inline integration
+    /// callbacks so nested post-dispatch effects stay heap-backed and bounded.
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "preserves the established core-dispatch call contract while erasing its future"
+    )]
+    pub(crate) fn dispatch_tenant_action_core<'a>(
+        &'a self,
+        tenant: &'a TenantId,
+        entity_type: &'a str,
+        entity_id: &'a str,
+        action: &'a str,
+        params: serde_json::Value,
+        agent_ctx: &'a AgentContext,
+        await_integration: bool,
+        timeout_precondition: Option<StateTimeoutPrecondition>,
+    ) -> std::pin::Pin<
+        Box<dyn std::future::Future<Output = Result<EntityResponse, DispatchError>> + Send + 'a>,
+    > {
+        Box::pin(self.dispatch_tenant_action_core_inner(
+            tenant,
+            entity_type,
+            entity_id,
+            action,
+            params,
+            agent_ctx,
+            await_integration,
+            timeout_precondition,
+        ))
+    }
+
     /// Dispatch an action using the unified command object.
     ///
     /// This is the preferred entry point. The command struct makes all
@@ -356,7 +387,7 @@ impl crate::state::ServerState {
         success = tracing::field::Empty,
         error_msg = tracing::field::Empty,
     ))]
-    pub(crate) async fn dispatch_tenant_action_core(
+    async fn dispatch_tenant_action_core_inner(
         &self,
         tenant: &TenantId,
         entity_type: &str,
@@ -571,7 +602,7 @@ impl crate::state::ServerState {
                     params: params_for_retry.clone(),
                     cross_entity_booleans: cross_for_retry.clone(),
                     idempotency_key: idempotency_key.clone(),
-                    state_timeout_precondition: timeout_precondition.clone(),
+                    state_timeout_precondition: timeout_precondition.clone().map(Box::new),
                 },
                 &policy,
             )
@@ -741,8 +772,15 @@ impl crate::state::ServerState {
             return Ok(response);
         }
 
-        // Run all post-dispatch effects through the dedicated pipeline.
-        let response = self.run_post_dispatch_effects(&ctx, response).await;
+        // Inline WASM and adapter callbacks re-enter core dispatch while the
+        // outer effects pipeline is still awaited. Erasing this future keeps
+        // each nested effects state machine heap-backed instead of embedding
+        // another copy in its caller, bounding the poll stack without changing
+        // the awaited ordering.
+        let post_dispatch: std::pin::Pin<
+            Box<dyn std::future::Future<Output = EntityResponse> + Send + '_>,
+        > = Box::pin(self.run_post_dispatch_effects(&ctx, response));
+        let response = post_dispatch.await;
         if response.success
             && let Some(ref idem_key) = idempotency_key
         {

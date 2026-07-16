@@ -328,11 +328,11 @@ async fn stale_timeout_is_rejected_after_concurrency_replay_observes_a_reset() {
                 params: serde_json::json!({}),
                 cross_entity_booleans: BTreeMap::new(),
                 idempotency_key: None,
-                state_timeout_precondition: Some(StateTimeoutPrecondition {
+                state_timeout_precondition: Some(Box::new(StateTimeoutPrecondition {
                     expected_state: "Running".to_string(),
                     expected_reset_at: Some(reset_at),
                     expected_reset_version: Some(reset_version),
-                }),
+                })),
             },
             Duration::from_secs(5),
         )

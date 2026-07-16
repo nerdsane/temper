@@ -1146,7 +1146,8 @@ impl Actor for EntityActor {
                 // inside the actor, immediately before transition evaluation,
                 // so a newer reset queued ahead of this message makes the old
                 // timeout a benign no-op instead of an early transition.
-                if state_timeout_precondition_is_stale(state, state_timeout_precondition.as_ref()) {
+                if state_timeout_precondition_is_stale(state, state_timeout_precondition.as_deref())
+                {
                     ctx.reply(EntityResponse {
                         success: false,
                         state: state.clone(),
@@ -1371,7 +1372,7 @@ impl Actor for EntityActor {
                                     // persisting the timeout action again.
                                     if state_timeout_precondition_is_stale(
                                         state,
-                                        state_timeout_precondition.as_ref(),
+                                        state_timeout_precondition.as_deref(),
                                     ) {
                                         retry_final = Some((
                                             crate::runtime_metrics::ConcurrencyRetryOutcome::ActionIllegal,

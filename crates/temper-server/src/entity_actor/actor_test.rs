@@ -398,11 +398,13 @@ reset_on = ["Progress"]
                 params: serde_json::json!({}),
                 cross_entity_booleans: BTreeMap::new(),
                 idempotency_key: None,
-                state_timeout_precondition: Some(crate::entity_actor::StateTimeoutPrecondition {
-                    expected_state: "Running".into(),
-                    expected_reset_at: Some(reset_at),
-                    expected_reset_version: Some(100),
-                }),
+                state_timeout_precondition: Some(Box::new(
+                    crate::entity_actor::StateTimeoutPrecondition {
+                        expected_state: "Running".into(),
+                        expected_reset_at: Some(reset_at),
+                        expected_reset_version: Some(100),
+                    },
+                )),
             },
             Duration::from_secs(1),
         )
@@ -548,11 +550,13 @@ async fn dst_timeout_precondition_rejects_a_same_timestamp_newer_reset() {
                 params: serde_json::json!({}),
                 cross_entity_booleans: BTreeMap::new(),
                 idempotency_key: None,
-                state_timeout_precondition: Some(crate::entity_actor::StateTimeoutPrecondition {
-                    expected_state: "Open".into(),
-                    expected_reset_at: first.state.state_timeout_clock_reset_at,
-                    expected_reset_version: first.state.state_timeout_clock_reset_version,
-                }),
+                state_timeout_precondition: Some(Box::new(
+                    crate::entity_actor::StateTimeoutPrecondition {
+                        expected_state: "Open".into(),
+                        expected_reset_at: first.state.state_timeout_clock_reset_at,
+                        expected_reset_version: first.state.state_timeout_clock_reset_version,
+                    },
+                )),
             },
             Duration::from_secs(1),
         )

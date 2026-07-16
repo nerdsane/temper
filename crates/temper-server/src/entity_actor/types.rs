@@ -69,8 +69,9 @@ pub enum EntityMsg {
         /// in-flight ask after the first one already processed.
         idempotency_key: Option<String>,
         /// Actor-atomic guard used only by internally scheduled state-timeout
-        /// actions. Ordinary dispatches leave this unset.
-        state_timeout_precondition: Option<StateTimeoutPrecondition>,
+        /// actions. It is boxed so this rare metadata does not enlarge every
+        /// actor mailbox value. Ordinary dispatches leave this unset.
+        state_timeout_precondition: Option<Box<StateTimeoutPrecondition>>,
     },
     /// Get the current entity state.
     GetState,
