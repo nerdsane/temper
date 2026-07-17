@@ -45,13 +45,16 @@ use chrono::{DateTime, Utc};
 use tokio::spawn as spawn_timeout_hydration; // determinism-ok: one bounded task per actor startup lifecycle
 use tracing::Instrument;
 
-use temper_runtime::scheduler::sim_now;
+use temper_runtime::scheduler::{sim_now, sim_uuid};
 use temper_runtime::tenant::TenantId;
 
 use crate::entity_actor::types::STATE_TIMEOUT_PRECONDITION_MISMATCH;
 use crate::entity_actor::{EntityEvent, EntityResponse, EntityState, StateTimeoutPrecondition};
 
-use super::{DispatchCommand, effects::PostDispatchContext};
+use super::{DispatchCommand, DispatchError, effects::PostDispatchContext};
+
+const STATE_TIMEOUT_RETRY_INITIAL_DELAY: Duration = Duration::from_millis(100);
+const STATE_TIMEOUT_RETRY_MAX_DELAY: Duration = Duration::from_secs(30);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum StateTimeoutArmCause {
@@ -123,6 +126,20 @@ fn hydration_reconciled_at(
 
 fn timeout_deadline(delay: Duration) -> tokio::time::Instant {
     tokio::time::Instant::now() + delay // determinism-ok: paused by DST
+}
+
+fn state_timeout_retry_delay(failure_count: u32, retry_after_ms: Option<u64>) -> Duration {
+    debug_assert!(failure_count > 0, "retry delay requires a prior failure");
+    let shift = failure_count.saturating_sub(1).min(9);
+    let multiplier = 1_u32 << shift;
+    let exponential = STATE_TIMEOUT_RETRY_INITIAL_DELAY
+        .checked_mul(multiplier)
+        .unwrap_or(STATE_TIMEOUT_RETRY_MAX_DELAY)
+        .min(STATE_TIMEOUT_RETRY_MAX_DELAY);
+    let requested = Duration::from_millis(retry_after_ms.unwrap_or(0));
+    exponential
+        .max(requested)
+        .min(STATE_TIMEOUT_RETRY_MAX_DELAY)
 }
 
 fn compute_timeout_delay(
@@ -451,17 +468,11 @@ impl crate::state::ServerState {
         let post_has_timeout = state_timeouts.iter().any(|st| st.state == post_state);
         let pre_had_timeout = state_timeouts.iter().any(|st| st.state == pre_state);
         let event_order = timeout_response_order(&response.state);
-        let armed_reset_at = state_timeouts
-            .iter()
-            .find(|st| st.state == post_state)
-            .and_then(|st| {
-                compute_state_clock_reset_ts(
-                    &response.state.events,
-                    response.state.state_timeout_clock_reset_at,
-                    &post_state,
-                    &st.reset_on,
-                )
-            });
+        // The durable event history determines the deadline below, but the
+        // actor's actual clock fields are the identity validated atomically at
+        // dispatch. Keeping those concerns separate lets hydration reconcile a
+        // table hot-swap even when startup committed under the prior table.
+        let armed_reset_at = response.state.state_timeout_clock_reset_at;
         let armed_reset_version = response.state.state_timeout_clock_reset_version;
 
         // A state change invalidates the prior timer and, when the destination
@@ -598,10 +609,16 @@ impl crate::state::ServerState {
             let target_action = st.on_timeout.clone();
             let mut agent_ctx = ctx.agent_ctx.clone();
             // The timer is a distinct internal dispatch. Preserve caller
-            // attribution and authority, but never reuse the request key that
-            // entered or reset the timed state: actor deduplication is scoped
-            // to entity + key and would swallow the timeout action itself.
-            agent_ctx.idempotency_key = None;
+            // attribution and authority, replace the initiating request key,
+            // and retain the replacement across every delivery attempt.
+            agent_ctx.idempotency_key = Some(format!(
+                "state-timeout:{}:{}:{}:{}:{}",
+                ctx.tenant,
+                ctx.entity_type,
+                ctx.entity_id,
+                st.on_timeout,
+                sim_uuid()
+            ));
             let key_for_task = key.clone();
             let entity_type_for_dec = ctx.entity_type.to_string();
             let workflow_root_entity_type = agent_ctx
@@ -656,37 +673,97 @@ impl crate::state::ServerState {
                         return;
                     }
 
-                    let result = state
-                        .dispatch_state_timeout_action(
-                            DispatchCommand {
-                                tenant: &tenant,
-                                entity_type: &entity_type,
-                                entity_id: &entity_id,
-                                action: &target_action,
-                                params,
-                                agent_ctx: &agent_ctx,
-                                await_integration: false,
-                                await_reactions: true,
-                            },
-                            StateTimeoutPrecondition {
-                                expected_state: target_state.clone(),
-                                expected_reset_at: armed_reset_at,
-                                expected_reset_version: armed_reset_version,
-                            },
-                        )
-                        .await;
-                    if !matches!(
-                        result,
-                        Ok(ref response)
-                            if response.error.as_deref()
-                                == Some(STATE_TIMEOUT_PRECONDITION_MISMATCH)
-                    ) {
-                        crate::runtime_metrics::record_state_timeout_fired(
-                            tenant.as_str(),
-                            &entity_type,
-                            &target_state,
-                            &target_action,
-                        );
+                    let mut failure_count = 0_u32;
+                    loop {
+                        if tracker.current_generation(&key_for_task) != armed_seq {
+                            break;
+                        }
+
+                        let result = state
+                            .dispatch_state_timeout_action(
+                                DispatchCommand {
+                                    tenant: &tenant,
+                                    entity_type: &entity_type,
+                                    entity_id: &entity_id,
+                                    action: &target_action,
+                                    params: params.clone(),
+                                    agent_ctx: &agent_ctx,
+                                    await_integration: false,
+                                    await_reactions: true,
+                                },
+                                StateTimeoutPrecondition {
+                                    expected_state: target_state.clone(),
+                                    expected_reset_at: armed_reset_at,
+                                    expected_reset_version: armed_reset_version,
+                                },
+                            )
+                            .await;
+
+                        let retry_after_ms = match result {
+                            Ok(ref response)
+                                if response.error.as_deref()
+                                    == Some(STATE_TIMEOUT_PRECONDITION_MISMATCH) =>
+                            {
+                                break;
+                            }
+                            Ok(ref response) if response.success => {
+                                crate::runtime_metrics::record_state_timeout_fired(
+                                    tenant.as_str(),
+                                    &entity_type,
+                                    &target_state,
+                                    &target_action,
+                                );
+                                break;
+                            }
+                            Ok(response) => {
+                                failure_count = failure_count.saturating_add(1);
+                                let delay = state_timeout_retry_delay(failure_count, None);
+                                tracing::warn!(
+                                    tenant = %tenant,
+                                    entity_type,
+                                    entity_id,
+                                    target_state,
+                                    target_action,
+                                    failure_count,
+                                    retry_delay_ms = u64::try_from(delay.as_millis())
+                                        .unwrap_or(u64::MAX),
+                                    error = response.error.as_deref().unwrap_or("unsuccessful response"),
+                                    "state timeout delivery returned unsuccessfully; retaining ownership and retrying"
+                                );
+                                None
+                            }
+                            Err(error) => {
+                                failure_count = failure_count.saturating_add(1);
+                                let retry_after_ms = match &error {
+                                    DispatchError::Deferred { retry_after_ms } => {
+                                        Some(*retry_after_ms)
+                                    }
+                                    _ => None,
+                                };
+                                let delay =
+                                    state_timeout_retry_delay(failure_count, retry_after_ms);
+                                tracing::warn!(
+                                    tenant = %tenant,
+                                    entity_type,
+                                    entity_id,
+                                    target_state,
+                                    target_action,
+                                    failure_count,
+                                    retry_delay_ms = u64::try_from(delay.as_millis())
+                                        .unwrap_or(u64::MAX),
+                                    error = %error,
+                                    "state timeout delivery failed; retaining ownership and retrying"
+                                );
+                                retry_after_ms
+                            }
+                        };
+
+                        if tracker.current_generation(&key_for_task) != armed_seq {
+                            break;
+                        }
+                        let retry_delay =
+                            state_timeout_retry_delay(failure_count, retry_after_ms);
+                        tokio::time::sleep_until(timeout_deadline(retry_delay)).await; // determinism-ok: bounded retry deadline
                     }
                     tracker.dec_pending(&entity_type_for_dec);
                 }

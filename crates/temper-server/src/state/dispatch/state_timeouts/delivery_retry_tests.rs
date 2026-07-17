@@ -3,9 +3,9 @@
 use super::*;
 use crate::registry::SpecRegistry;
 use crate::request_context::AgentContext;
-use crate::state::ServerState;
 use crate::state::admission::AdmissionOutcome;
 use crate::state::dispatch::effects::PostDispatchContext;
+use crate::state::{AdmissionPermit, ServerState};
 use temper_runtime::ActorSystem;
 use temper_runtime::scheduler::install_deterministic_context;
 use temper_runtime::tenant::TenantId;
@@ -36,6 +36,12 @@ kind = "input"
 from = ["Open"]
 to = "InProgress"
 
+[[action]]
+name = "Close"
+kind = "input"
+from = ["Open"]
+to = "Closed"
+
 [[state_timeout]]
 state = "Open"
 after_seconds = 1
@@ -48,10 +54,7 @@ queue_depth = 1
 queue_timeout_seconds = 0
 "#;
 
-#[tokio::test(start_paused = true)]
-async fn deferred_timeout_delivery_retries_without_traffic_or_restart() {
-    let seed = 51;
-    let (_guard, _clock, _id_gen) = install_deterministic_context(seed);
+async fn setup_blocked_timeout(entity_id: &str) -> (ServerState, TenantId, AdmissionPermit) {
     let csdl = parse_csdl(TICKET_CSDL).expect("CSDL parses");
     let mut registry = SpecRegistry::new();
     registry.register_tenant(
@@ -60,7 +63,10 @@ async fn deferred_timeout_delivery_retries_without_traffic_or_restart() {
         TICKET_CSDL.to_string(),
         &[("Ticket", TICKET_WITH_ADMITTED_TIMEOUT_IOA)],
     );
-    let state = ServerState::from_registry(ActorSystem::new("timeout-delivery-retry"), registry);
+    let state = ServerState::from_registry(
+        ActorSystem::new(format!("timeout-delivery-retry-{entity_id}")),
+        registry,
+    );
     let tenant = TenantId::default();
 
     let admission = state
@@ -76,18 +82,13 @@ async fn deferred_timeout_delivery_retries_without_traffic_or_restart() {
     };
 
     let created = state
-        .get_or_create_tenant_entity(
-            &tenant,
-            "Ticket",
-            "retry-after-deferred",
-            serde_json::json!({}),
-        )
+        .get_or_create_tenant_entity(&tenant, "Ticket", entity_id, serde_json::json!({}))
         .await
         .expect("create the timed ticket");
     assert_eq!(created.state.status, "Open");
 
     let response = state
-        .get_tenant_entity_state(&tenant, "Ticket", "retry-after-deferred")
+        .get_tenant_entity_state(&tenant, "Ticket", entity_id)
         .await
         .expect("read the initial state");
     let agent_ctx = AgentContext::for_service("timeout-delivery-retry");
@@ -95,7 +96,7 @@ async fn deferred_timeout_delivery_retries_without_traffic_or_restart() {
     let ctx = PostDispatchContext {
         tenant: &tenant,
         entity_type: "Ticket",
-        entity_id: "retry-after-deferred",
+        entity_id,
         action: "__Created",
         agent_ctx: &agent_ctx,
         dispatch_idempotency_key: None,
@@ -108,6 +109,15 @@ async fn deferred_timeout_delivery_retries_without_traffic_or_restart() {
         vec![("Ticket".to_string(), 1)],
         "one timeout must own the durable deadline"
     );
+
+    (state, tenant, held_permit)
+}
+
+#[tokio::test(start_paused = true)]
+async fn deferred_timeout_delivery_retries_without_traffic_or_restart() {
+    let seed = 51;
+    let (_guard, _clock, _id_gen) = install_deterministic_context(seed);
+    let (state, tenant, held_permit) = setup_blocked_timeout("retry-after-deferred").await;
 
     tokio::time::advance(Duration::from_secs(1)).await;
     for _ in 0..32 {
@@ -140,5 +150,72 @@ async fn deferred_timeout_delivery_retries_without_traffic_or_restart() {
             .count(),
         1,
         "retrying the timeout must commit exactly one transition"
+    );
+    let timeout_key = after
+        .state
+        .events
+        .iter()
+        .find(|event| event.action == "AssignAgent")
+        .and_then(|event| event.idempotency_key.as_deref())
+        .expect("timeout transition carries its internal idempotency key");
+    assert!(
+        timeout_key.starts_with("state-timeout:"),
+        "timeout retries must use a distinct internal request identity"
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn newer_transition_cancels_a_timeout_waiting_to_retry() {
+    let seed = 52;
+    let (_guard, _clock, _id_gen) = install_deterministic_context(seed);
+    let (state, tenant, held_permit) = setup_blocked_timeout("cancel-deferred-retry").await;
+
+    tokio::time::advance(Duration::from_secs(1)).await;
+    for _ in 0..32 {
+        tokio::task::yield_now().await;
+    }
+
+    let agent_ctx = AgentContext::for_service("timeout-retry-cancellation");
+    let closed = state
+        .dispatch(DispatchCommand {
+            tenant: &tenant,
+            entity_type: "Ticket",
+            entity_id: "cancel-deferred-retry",
+            action: "Close",
+            params: serde_json::json!({}),
+            agent_ctx: &agent_ctx,
+            await_integration: false,
+            await_reactions: true,
+        })
+        .await
+        .expect("the newer transition must succeed");
+    assert!(closed.success);
+    assert_eq!(closed.state.status, "Closed");
+
+    drop(held_permit);
+    tokio::time::advance(Duration::from_secs(5)).await;
+    for _ in 0..64 {
+        tokio::task::yield_now().await;
+    }
+
+    let after = state
+        .get_tenant_entity_state(&tenant, "Ticket", "cancel-deferred-retry")
+        .await
+        .expect("observe the state after the stale retry wakes");
+    assert_eq!(after.state.status, "Closed");
+    assert_eq!(
+        after
+            .state
+            .events
+            .iter()
+            .filter(|event| event.action == "AssignAgent")
+            .count(),
+        0,
+        "a stale delivery retry must not fire after ownership advances"
+    );
+    assert_eq!(
+        state.state_timeout_tracker.pending_snapshot(),
+        vec![("Ticket".to_string(), 0)],
+        "the cancelled retry must release its pending metric"
     );
 }
