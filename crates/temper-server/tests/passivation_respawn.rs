@@ -5,6 +5,8 @@ mod common;
 mod timeout_anchors;
 #[path = "passivation_respawn/timeout_failures.rs"]
 mod timeout_failures;
+#[path = "passivation_respawn/timeout_hotswap_deadline.rs"]
+mod timeout_hotswap_deadline;
 
 use temper_runtime::persistence::EventStore;
 use temper_runtime::scheduler::{install_deterministic_context, sim_now};

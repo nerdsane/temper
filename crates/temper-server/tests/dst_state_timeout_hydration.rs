@@ -10,6 +10,9 @@ use temper_server::{ServerState, StorageStack};
 use temper_spec::csdl::parse_csdl;
 use temper_store_sim::SimEventStore;
 
+#[path = "dst_state_timeout_hydration/authority.rs"]
+mod authority;
+
 const CSDL_XML: &str = include_str!("../../../test-fixtures/specs/model.csdl.xml");
 
 const TIMED_TASK_IOA: &str = r#"
