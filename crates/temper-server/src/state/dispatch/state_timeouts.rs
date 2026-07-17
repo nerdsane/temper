@@ -596,7 +596,12 @@ impl crate::state::ServerState {
             let entity_id = ctx.entity_id.to_string();
             let target_state = st.state.clone();
             let target_action = st.on_timeout.clone();
-            let agent_ctx = ctx.agent_ctx.clone();
+            let mut agent_ctx = ctx.agent_ctx.clone();
+            // The timer is a distinct internal dispatch. Preserve caller
+            // attribution and authority, but never reuse the request key that
+            // entered or reset the timed state: actor deduplication is scoped
+            // to entity + key and would swallow the timeout action itself.
+            agent_ctx.idempotency_key = None;
             let key_for_task = key.clone();
             let entity_type_for_dec = ctx.entity_type.to_string();
             let workflow_root_entity_type = agent_ctx
