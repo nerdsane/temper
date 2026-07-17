@@ -270,6 +270,21 @@ impl SimEventStore {
             .push_back(delay);
     }
 
+    /// Return how many deterministic append delays remain queued for an actor.
+    ///
+    /// Fault campaigns use this to synchronize after an append has consumed
+    /// its delay and entered the controlled persistence window.
+    pub fn pending_append_delays(&self, persistence_id: &str) -> usize {
+        let inner = self
+            .inner
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        inner
+            .pending_append_delays
+            .get(persistence_id)
+            .map_or(0, VecDeque::len)
+    }
+
     /// Create a SimEventStore with no fault injection.
     pub fn no_faults(seed: u64) -> Self {
         Self::new(seed, SimFaultConfig::none())

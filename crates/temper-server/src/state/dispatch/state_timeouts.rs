@@ -702,6 +702,10 @@ impl crate::state::ServerState {
 mod hydration_tests;
 
 #[cfg(test)]
+#[path = "state_timeouts/delivery_retry_tests.rs"]
+mod delivery_retry_tests;
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use temper_runtime::tenant::TenantId;

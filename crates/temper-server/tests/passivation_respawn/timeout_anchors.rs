@@ -154,6 +154,101 @@ async fn hotswap_before_pre_start_cannot_skip_initial_timeout_hydration() {
 }
 
 #[tokio::test(start_paused = true)]
+async fn hotswap_after_pre_start_table_snapshot_uses_actor_clock_identity() {
+    let seed = 214;
+    let (_guard, _clock, _id_gen) = install_deterministic_context(seed);
+    let sim_store = SimEventStore::no_faults(seed);
+    let tenant = TenantId::default();
+    let entity_id = "hotswap-after-table-snapshot";
+    let actor_key = format!("{tenant}:InitialTimedTask:{entity_id}");
+    let state = common::build_single_tenant_state_with_store(
+        sim_store.clone(),
+        "hotswap-after-table-snapshot",
+        "default",
+        &[("InitialTimedTask", INITIAL_UNTIMED_TASK_IOA)],
+    );
+
+    // pre_start snapshots the untimed table before its bootstrap append. Hold
+    // that append so the hot-swap lands strictly after the snapshot but before
+    // startup publishes the recovered state to timeout hydration.
+    sim_store.inject_append_delay(&actor_key, std::time::Duration::from_secs(120));
+    state
+        .get_or_spawn_tenant_actor(&tenant, "InitialTimedTask", entity_id)
+        .expect("spawn the actor under the untimed table");
+    for _ in 0..64 {
+        tokio::task::yield_now().await;
+        if sim_store.pending_append_delays(&actor_key) == 0 {
+            break;
+        }
+    }
+    assert_eq!(
+        sim_store.pending_append_delays(&actor_key),
+        0,
+        "the delayed append must start after pre_start captured its table"
+    );
+    assert_eq!(
+        sim_store.total_events(),
+        0,
+        "the bootstrap event must remain inside the controlled append window"
+    );
+
+    {
+        let mut registry = state.registry.write().expect("registry lock");
+        let csdl = parse_csdl(common::CSDL_XML).expect("CSDL parse");
+        registry.register_tenant(
+            "default",
+            csdl,
+            common::CSDL_XML.to_string(),
+            &[("InitialTimedTask", INITIAL_TIMED_TASK_IOA)],
+        );
+    }
+
+    tokio::time::advance(std::time::Duration::from_secs(120)).await;
+    for _ in 0..64 {
+        tokio::task::yield_now().await;
+        if sim_store.total_events() == 1
+            && state.state_timeout_tracker.pending_snapshot()
+                == vec![("InitialTimedTask".to_string(), 1)]
+        {
+            break;
+        }
+    }
+    assert_eq!(
+        state.state_timeout_tracker.pending_snapshot(),
+        vec![("InitialTimedTask".to_string(), 1)],
+        "hydration must arm the newly introduced timeout without entity traffic"
+    );
+
+    tokio::time::advance(std::time::Duration::from_secs(479)).await;
+    tokio::task::yield_now().await;
+    assert_eq!(
+        sim_store.total_events(),
+        1,
+        "the hot-swapped timeout must retain the Created-event deadline"
+    );
+
+    tokio::time::advance(std::time::Duration::from_secs(1)).await;
+    for _ in 0..64 {
+        tokio::task::yield_now().await;
+        if sim_store.total_events() == 2 {
+            break;
+        }
+    }
+    let journal = sim_store
+        .read_events(&actor_key, 0)
+        .await
+        .expect("read the post-snapshot hot-swap journal");
+    assert_eq!(
+        journal
+            .iter()
+            .map(|event| event.event_type.as_str())
+            .collect::<Vec<_>>(),
+        vec!["Created", "TimeoutFail"],
+        "a post-snapshot hot-swap must still fire exactly one durable timeout"
+    );
+}
+
+#[tokio::test(start_paused = true)]
 async fn legacy_with_specs_initial_timeout_arms_without_spec_registry() {
     let seed = 212;
     let (_guard, _clock, _id_gen) = install_deterministic_context(seed);
