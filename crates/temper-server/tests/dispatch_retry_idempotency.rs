@@ -102,3 +102,61 @@ async fn retry_after_dropped_reply_replays_success_response_and_runs_effects_wit
         "post-dispatch effects from the successful Start transition must arm the state_timeout"
     );
 }
+
+#[tokio::test(start_paused = true)]
+async fn explicit_idempotency_key_does_not_swallow_state_timeout() {
+    let (_guard, _clock, _ids) = install_deterministic_context(49);
+    let (state, _sim_store) = build_state_with_sim_store(49);
+    let tenant = TenantId::default();
+    let entity_id = "timed-task-explicit-idempotency";
+
+    state
+        .get_or_create_tenant_entity(
+            &tenant,
+            "TimedTask",
+            entity_id,
+            serde_json::json!({"Id": entity_id}),
+        )
+        .await
+        .expect("entity creation succeeds");
+
+    let mut agent_ctx = AgentContext::for_service("idempotent-caller");
+    agent_ctx.idempotency_key = Some("start-request-1".to_string());
+    let started = state
+        .dispatch_tenant_action(
+            &tenant,
+            "TimedTask",
+            entity_id,
+            "Start",
+            serde_json::json!({}),
+            &agent_ctx,
+        )
+        .await
+        .expect("Start succeeds with an explicit idempotency key");
+    assert_eq!(started.state.status, "Running");
+    assert!(
+        started
+            .state
+            .processed_idempotency_keys
+            .contains_key("start-request-1"),
+        "the initiating action must retain its caller idempotency key"
+    );
+
+    tokio::time::advance(Duration::from_secs(60)).await;
+    for _ in 0..20 {
+        tokio::task::yield_now().await;
+    }
+
+    let timed_out = state
+        .get_tenant_entity_state(&tenant, "TimedTask", entity_id)
+        .await
+        .expect("timed entity remains readable");
+    assert_eq!(
+        timed_out.state.status, "TimedOut",
+        "the internal timeout must not be deduplicated against the caller's Start request"
+    );
+    assert_eq!(
+        timed_out.state.sequence_nr, 3,
+        "Created, Start, and TimeoutFail must each commit exactly once"
+    );
+}
