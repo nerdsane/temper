@@ -267,6 +267,13 @@ async fn stale_timeout_is_rejected_after_concurrency_replay_observes_a_reset() {
     let (_guard, _clock, _id_gen) = install_deterministic_context(seed);
     let (store, sim) = sim_store_with_handle(seed);
     let table = Arc::new(RwLock::new(TransitionTable::from_ioa_source(TIMED_IOA)));
+    let expected_timeout = table
+        .read()
+        .expect("table lock")
+        .state_timeouts
+        .first()
+        .expect("timed table has a declaration")
+        .clone();
     let entity_id = "timeout-reset-race";
     let persistence_id = format!("default:TimedTask:{entity_id}");
     let actor = EntityActor::with_persistence(
@@ -329,6 +336,7 @@ async fn stale_timeout_is_rejected_after_concurrency_replay_observes_a_reset() {
                 cross_entity_booleans: BTreeMap::new(),
                 idempotency_key: None,
                 state_timeout_precondition: Some(Box::new(StateTimeoutPrecondition {
+                    expected_timeout,
                     expected_state: "Running".to_string(),
                     expected_reset_at: Some(reset_at),
                     expected_reset_version: Some(reset_version),

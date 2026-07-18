@@ -152,9 +152,12 @@ fn dispatch_arm_wins_when_it_precedes_hydration_reconciliation() {
     let entity = key();
 
     let dispatch_seq = tracker
-        .advance_if_fresh(&entity, 2, None, None)
+        .advance_if_fresh(&entity, 2, None, None, None)
         .expect("new dispatch claims timeout ownership");
-    assert_eq!(tracker.reconcile_if_fresh(&entity, 1, None, None), None);
+    assert_eq!(
+        tracker.reconcile_if_fresh(&entity, 1, None, None, None),
+        None
+    );
     assert_eq!(
         tracker.current_generation(&entity),
         dispatch_seq,
@@ -168,10 +171,10 @@ fn dispatch_arm_supersedes_an_earlier_hydration_reservation() {
     let entity = key();
 
     let hydration_seq = tracker
-        .reconcile_if_fresh(&entity, 1, None, None)
+        .reconcile_if_fresh(&entity, 1, None, None, None)
         .expect("hydration claims an unarmed entity");
     let dispatch_seq = tracker
-        .advance_if_fresh(&entity, 2, None, None)
+        .advance_if_fresh(&entity, 2, None, None, None)
         .expect("newer dispatch supersedes hydration");
     assert_ne!(hydration_seq, dispatch_seq);
     assert_eq!(

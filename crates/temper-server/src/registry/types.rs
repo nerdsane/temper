@@ -180,6 +180,8 @@ pub struct EntitySpec {
     pub integrations: Vec<Integration>,
     /// Hot-swappable transition table controller.
     pub(super) swap: Arc<SwapController>,
+    /// Version signal used by live timeout tasks to observe table changes.
+    pub(super) table_version_tx: tokio::sync::watch::Sender<u64>,
     /// Raw IOA TOML source (for invariant parsing, display, etc.).
     pub ioa_source: String,
 }
@@ -210,6 +212,11 @@ impl EntitySpec {
     /// Get the [`SwapController`] for hot-swap operations.
     pub fn swap_controller(&self) -> &Arc<SwapController> {
         &self.swap
+    }
+
+    /// Subscribe to hot-swap version changes for this entity type.
+    pub(super) fn subscribe_table_versions(&self) -> tokio::sync::watch::Receiver<u64> {
+        self.table_version_tx.subscribe()
     }
 }
 

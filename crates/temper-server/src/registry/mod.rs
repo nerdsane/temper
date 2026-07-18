@@ -13,7 +13,7 @@ use std::sync::{Arc, RwLock};
 
 use tracing::instrument;
 
-use temper_jit::swap::SwapController;
+use temper_jit::swap::{SwapController, SwapResult};
 use temper_jit::table::TransitionTable;
 use temper_runtime::tenant::TenantId;
 use temper_spec::FieldInvariant;
@@ -225,6 +225,9 @@ impl SpecRegistry {
                 if let Some(existing_spec) = existing_config.entities.get_mut(*entity_type) {
                     // Hot-swap: write new table into the SAME RwLock that actors hold.
                     let result = existing_spec.swap_controller().swap(table);
+                    if let SwapResult::Success { new_version, .. } = &result {
+                        existing_spec.table_version_tx.send_replace(*new_version);
+                    }
                     tracing::info!(
                         entity_type,
                         ?result,
@@ -236,12 +239,14 @@ impl SpecRegistry {
                     existing_spec.ioa_source = ioa_source.to_string();
                 } else {
                     // New entity type — create fresh EntitySpec.
+                    let (table_version_tx, _) = tokio::sync::watch::channel(1);
                     existing_config.entities.insert(
                         entity_type.to_string(),
                         EntitySpec {
                             automaton,
                             integrations,
                             swap: Arc::new(SwapController::new(table)),
+                            table_version_tx,
                             ioa_source: ioa_source.to_string(),
                         },
                     );
@@ -252,9 +257,18 @@ impl SpecRegistry {
                 // Replace mode: remove entities no longer in the spec set.
                 let new_entity_types: std::collections::BTreeSet<String> =
                     ioa_sources.iter().map(|(t, _)| t.to_string()).collect();
-                existing_config
-                    .entities
-                    .retain(|k, _| new_entity_types.contains(k));
+                existing_config.entities.retain(|entity_type, spec| {
+                    let retain = new_entity_types.contains(entity_type);
+                    if !retain {
+                        let removal_version = spec
+                            .swap_controller()
+                            .version()
+                            .checked_add(1)
+                            .expect("transition table version overflow");
+                        spec.table_version_tx.send_replace(removal_version);
+                    }
+                    retain
+                });
             }
 
             // Rebuild webhook route index.
@@ -288,12 +302,14 @@ impl SpecRegistry {
                 })?;
                 let table = TransitionTable::from_automaton(&automaton);
                 let integrations = automaton.integrations.clone();
+                let (table_version_tx, _) = tokio::sync::watch::channel(1);
                 entities.insert(
                     entity_type.to_string(),
                     EntitySpec {
                         automaton,
                         integrations,
                         swap: Arc::new(SwapController::new(table)),
+                        table_version_tx,
                         ioa_source: ioa_source.to_string(),
                     },
                 );
@@ -423,6 +439,18 @@ impl SpecRegistry {
             .get(tenant)
             .and_then(|tc| tc.entities.get(entity_type))
             .map(|es| es.swap_controller().current())
+    }
+
+    /// Subscribe to transition-table version changes for an entity type.
+    pub(crate) fn subscribe_table_versions(
+        &self,
+        tenant: &TenantId,
+        entity_type: &str,
+    ) -> Option<tokio::sync::watch::Receiver<u64>> {
+        self.tenants
+            .get(tenant)
+            .and_then(|tc| tc.entities.get(entity_type))
+            .map(EntitySpec::subscribe_table_versions)
     }
 
     /// Look up the entity type name for an entity set in a tenant.

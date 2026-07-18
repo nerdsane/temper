@@ -46,11 +46,16 @@ use super::types::{
 };
 
 fn state_timeout_precondition_is_stale(
+    table: &TransitionTable,
     state: &EntityState,
     precondition: Option<&StateTimeoutPrecondition>,
 ) -> bool {
     precondition.is_some_and(|precondition| {
-        state.status != precondition.expected_state
+        !table
+            .state_timeouts
+            .iter()
+            .any(|timeout| timeout == &precondition.expected_timeout)
+            || state.status != precondition.expected_state
             || state.state_timeout_clock_reset_at != precondition.expected_reset_at
             || state.state_timeout_clock_reset_version != precondition.expected_reset_version
     })
@@ -131,6 +136,28 @@ pub struct EntityActor {
 }
 
 impl EntityActor {
+    fn retained_state_timeout_reset_at(
+        state: &EntityState,
+        timeout: &temper_spec::automaton::StateTimeout,
+    ) -> Option<chrono::DateTime<chrono::Utc>> {
+        let entry_idx = state.events.iter().rposition(|event| {
+            event.to_status == timeout.state && event.from_status != timeout.state
+        });
+        let mut reset_at = entry_idx.map(|idx| state.events[idx].timestamp);
+        let scan_from = entry_idx.map_or(0, |idx| idx + 1);
+        for event in state.events.iter().skip(scan_from) {
+            if event.to_status == timeout.state
+                && timeout
+                    .reset_on
+                    .iter()
+                    .any(|action| action == &event.action)
+            {
+                reset_at = Some(reset_at.map_or(event.timestamp, |at| at.max(event.timestamp)));
+            }
+        }
+        reset_at
+    }
+
     fn build_initial_state(
         entity_type: &str,
         entity_id: &str,
@@ -200,11 +227,17 @@ impl EntityActor {
         } else {
             next_total_event
         };
-        if entered_state || reset_clock || state.state_timeout_clock_reset_at.is_none() {
-            // A legacy snapshot can lack this optional field. The first later
-            // durable event repairs the metadata conservatively, ensuring any
-            // snapshot written by current code carries an anchor thereafter.
+        if entered_state || reset_clock {
             state.state_timeout_clock_reset_at = Some(event.timestamp);
+            state.state_timeout_clock_reset_version = Some(event_version);
+        } else if state.state_timeout_clock_reset_at.is_none() {
+            // A table may gain a timeout after actor startup captured its
+            // prior definition. Preserve a retained durable entry/reset
+            // timestamp instead of moving the deadline to this unrelated
+            // event. If the bounded tail has no such fact, retain the legacy
+            // conservative fallback of establishing one fresh budget now.
+            state.state_timeout_clock_reset_at =
+                Self::retained_state_timeout_reset_at(state, timeout).or(Some(event.timestamp));
             state.state_timeout_clock_reset_version = Some(event_version);
         } else if state.state_timeout_clock_reset_version.is_none() {
             // Preserve an existing durable deadline while assigning a unique
@@ -1146,8 +1179,11 @@ impl Actor for EntityActor {
                 // inside the actor, immediately before transition evaluation,
                 // so a newer reset queued ahead of this message makes the old
                 // timeout a benign no-op instead of an early transition.
-                if state_timeout_precondition_is_stale(state, state_timeout_precondition.as_deref())
-                {
+                if state_timeout_precondition_is_stale(
+                    &table,
+                    state,
+                    state_timeout_precondition.as_deref(),
+                ) {
                     ctx.reply(EntityResponse {
                         success: false,
                         state: state.clone(),
@@ -1228,6 +1264,7 @@ impl Actor for EntityActor {
                 // retry can replace them with values re-evaluated against the
                 // caught-up state. The downstream telemetry and reply use
                 // whichever pair last succeeded in persist.
+                let mut committed_table = table.clone();
                 let mut result = process_action_with_xref_and_field_mode(
                     state,
                     &table,
@@ -1328,12 +1365,23 @@ impl Actor for EntityActor {
                                 while retry_idx < MAX_RETRIES {
                                     retry_idx += 1;
 
+                                    // One live table snapshot governs the
+                                    // complete retry attempt: authoritative
+                                    // replay, exact timeout revalidation,
+                                    // transition evaluation, and the eventual
+                                    // timeout-clock update. Mixing the original
+                                    // action table with a post-swap retry table
+                                    // can produce state that a fresh replay
+                                    // cannot reproduce.
+                                    let retry_table =
+                                        self.table.read().expect("table lock poisoned").clone();
+
                                     // Rollback speculative state.
                                     *state = state_before.clone();
 
                                     // Catch up to the authoritative sequence.
                                     Self::replay_events(
-                                        &table,
+                                        &retry_table,
                                         store,
                                         backend,
                                         state,
@@ -1367,10 +1415,13 @@ impl Actor for EntityActor {
                                     // evaluation happened against speculative
                                     // state that just lost an optimistic race.
                                     // A competing replica may have committed a
-                                    // reset in that gap. Revalidate against the
-                                    // authoritative replay before evaluating or
-                                    // persisting the timeout action again.
+                                    // reset or a hot-swap may have replaced the
+                                    // declaration in that gap. Revalidate both
+                                    // authoritative state and the exact live
+                                    // declaration before evaluating or
+                                    // persisting another attempt.
                                     if state_timeout_precondition_is_stale(
+                                        &retry_table,
                                         state,
                                         state_timeout_precondition.as_deref(),
                                     ) {
@@ -1390,7 +1441,7 @@ impl Actor for EntityActor {
                                     // dropping the caller.
                                     let retry_result = process_action_with_xref_and_field_mode(
                                         state,
-                                        &table,
+                                        &retry_table,
                                         &name,
                                         &params,
                                         &cross_entity_booleans,
@@ -1455,6 +1506,7 @@ impl Actor for EntityActor {
                                             // downstream telemetry and reply.
                                             event = retry_event;
                                             result = retry_result;
+                                            committed_table = retry_table;
                                             retry_final = Some((
                                                 crate::runtime_metrics::ConcurrencyRetryOutcome::Success,
                                                 None,
@@ -1574,7 +1626,7 @@ impl Actor for EntityActor {
                     wide_event::emit_span(&wide);
                     wide_event::emit_metrics(&wide);
 
-                    Self::update_state_timeout_clock(&table, state, &event);
+                    Self::update_state_timeout_clock(&committed_table, state, &event);
                     state.push_event_bounded(event);
 
                     let persistence_id = self.persistence_id();
@@ -1597,7 +1649,7 @@ impl Actor for EntityActor {
 
                     // TigerStyle: Assert postconditions after every transition.
                     debug_assert!(
-                        table.states.contains(&state.status),
+                        committed_table.states.contains(&state.status),
                         "POSTCONDITION: status '{}' not in valid states after {}",
                         state.status,
                         name
@@ -1805,3 +1857,7 @@ impl Actor for EntityActor {
 #[cfg(test)]
 #[path = "actor_test.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "actor_timeout_clock_tests.rs"]
+mod timeout_clock_tests;

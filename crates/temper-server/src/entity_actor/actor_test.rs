@@ -370,6 +370,14 @@ reset_on = ["Progress"]
         .await
         .expect("append same-timestamp reset after snapshot");
 
+    let expected_timeout = table
+        .read()
+        .expect("table lock")
+        .state_timeouts
+        .first()
+        .expect("timed table has a declaration")
+        .clone();
+
     let actor = EntityActor::with_persistence(
         "TimedTask",
         "replay-reset-version",
@@ -400,6 +408,7 @@ reset_on = ["Progress"]
                 idempotency_key: None,
                 state_timeout_precondition: Some(Box::new(
                     crate::entity_actor::StateTimeoutPrecondition {
+                        expected_timeout,
                         expected_state: "Running".into(),
                         expected_reset_at: Some(reset_at),
                         expected_reset_version: Some(100),
@@ -509,10 +518,18 @@ async fn dst_entity_starts_in_initial_state() {
 async fn dst_timeout_precondition_rejects_a_same_timestamp_newer_reset() {
     let (_guard, _clock, _ids) = temper_runtime::scheduler::install_deterministic_context(216);
     let system = ActorSystem::new("timeout-precondition");
+    let table = timed_table();
+    let expected_timeout = table
+        .read()
+        .expect("table lock")
+        .state_timeouts
+        .first()
+        .expect("timed table has a declaration")
+        .clone();
     let actor = EntityActor::new(
         "TimedTicket",
         "same-timestamp-reset",
-        timed_table(),
+        table,
         serde_json::json!({}),
     );
     let actor_ref = system.spawn(actor, "same-timestamp-reset");
@@ -552,6 +569,7 @@ async fn dst_timeout_precondition_rejects_a_same_timestamp_newer_reset() {
                 idempotency_key: None,
                 state_timeout_precondition: Some(Box::new(
                     crate::entity_actor::StateTimeoutPrecondition {
+                        expected_timeout,
                         expected_state: "Open".into(),
                         expected_reset_at: first.state.state_timeout_clock_reset_at,
                         expected_reset_version: first.state.state_timeout_clock_reset_version,

@@ -55,7 +55,7 @@ on_timeout = "TimeoutFail"
 #[tokio::test(start_paused = true)]
 async fn unrelated_event_after_post_snapshot_hotswap_preserves_original_deadline() {
     let seed = 215;
-    let (_guard, _clock, _id_gen) = install_deterministic_context(seed);
+    let (_guard, clock, _id_gen) = install_deterministic_context(seed);
     let sim_store = SimEventStore::no_faults(seed);
     let tenant = TenantId::default();
     let entity_id = "hotswap-unrelated-event";
@@ -93,6 +93,7 @@ async fn unrelated_event_after_post_snapshot_hotswap_preserves_original_deadline
         );
     }
 
+    clock.advance_by(1_200);
     tokio::time::advance(std::time::Duration::from_secs(120)).await;
     for _ in 0..64 {
         tokio::task::yield_now().await;
@@ -109,6 +110,7 @@ async fn unrelated_event_after_post_snapshot_hotswap_preserves_original_deadline
         vec![("InitialTimedTask".to_string(), 1)]
     );
 
+    clock.advance_by(2_400);
     tokio::time::advance(std::time::Duration::from_secs(240)).await;
     let observed = common::dispatch(
         &state,
@@ -123,6 +125,7 @@ async fn unrelated_event_after_post_snapshot_hotswap_preserves_original_deadline
     assert!(observed.success);
     assert_eq!(observed.state.status, "Running");
 
+    clock.advance_by(2_390);
     tokio::time::advance(std::time::Duration::from_secs(239)).await;
     tokio::task::yield_now().await;
     assert_eq!(
@@ -131,6 +134,7 @@ async fn unrelated_event_after_post_snapshot_hotswap_preserves_original_deadline
         "the unrelated event must not make the original timeout fire early"
     );
 
+    clock.advance_by(10);
     tokio::time::advance(std::time::Duration::from_secs(1)).await;
     for _ in 0..64 {
         tokio::task::yield_now().await;

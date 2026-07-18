@@ -21,6 +21,11 @@
 //! advance ownership once for the transition. That advance renders any
 //! in-flight timer for the old state stale and, when the destination is timed,
 //! owns the replacement timer without a second generation change.
+//! Ownership includes the exact timeout declaration. Registry-backed tasks
+//! subscribe to ordered table-version changes so declaration replacement or
+//! removal reconciles immediately, including while delivery is retrying.
+//! Every live and hydrated timer executes under the same named internal
+//! service principal and inherits only caller observability context.
 //!
 //! Durability (ADR-0056, ADR-0171): actor spawn and post-dispatch fallback
 //! reconcile the **hydration case** — the entity is in a state with a
@@ -47,6 +52,7 @@ use tracing::Instrument;
 
 use temper_runtime::scheduler::{sim_now, sim_uuid};
 use temper_runtime::tenant::TenantId;
+use temper_spec::automaton::StateTimeout;
 
 use crate::entity_actor::types::STATE_TIMEOUT_PRECONDITION_MISMATCH;
 use crate::entity_actor::{EntityEvent, EntityResponse, EntityState, StateTimeoutPrecondition};
@@ -55,6 +61,7 @@ use super::{DispatchCommand, DispatchError, effects::PostDispatchContext};
 
 const STATE_TIMEOUT_RETRY_INITIAL_DELAY: Duration = Duration::from_millis(100);
 const STATE_TIMEOUT_RETRY_MAX_DELAY: Duration = Duration::from_secs(30);
+const STATE_TIMEOUT_SERVICE: &str = "state-timeout-hydration";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum StateTimeoutArmCause {
@@ -189,6 +196,17 @@ impl EntityKey {
     }
 }
 
+struct StateTimeoutWatch<'a> {
+    key: &'a EntityKey,
+    armed_generation: u64,
+    tenant: &'a TenantId,
+    entity_type: &'a str,
+    entity_id: &'a str,
+    target_state: &'a str,
+    expected_timeout: &'a StateTimeout,
+    agent_ctx: &'a crate::request_context::AgentContext,
+}
+
 /// In-memory cancellation counter keyed by entity instance.
 ///
 /// Each accepted committed response increments and captures a generation;
@@ -201,14 +219,17 @@ pub struct StateTimeoutTracker {
     /// ADR-0049: per-entity-type count of armed-but-unfired timers.
     /// Emitted as `temper_scheduler_pending_timers` by the canary loop.
     pending_by_type: Mutex<BTreeMap<String, u64>>,
+    #[cfg(test)]
+    reconciliation_failures: Mutex<u64>,
 }
 
-#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
 struct StateTimeoutOwner {
     generation: u64,
     event_order: u64,
     reset_at: Option<DateTime<Utc>>,
     reset_version: Option<u64>,
+    declaration: Option<StateTimeout>,
 }
 
 impl StateTimeoutTracker {
@@ -227,10 +248,15 @@ impl StateTimeoutTracker {
         event_order: u64,
         reset_at: Option<DateTime<Utc>>,
         reset_version: Option<u64>,
+        declaration: Option<&StateTimeout>,
     ) -> Option<u64> {
         let mut map = self.owners.lock().expect("state_timeout tracker poisoned");
         let owner = map.entry(key.clone()).or_default();
-        if owner.generation != 0 && event_order <= owner.event_order {
+        let declaration_changed = owner.declaration.as_ref() != declaration;
+        if owner.generation != 0
+            && (event_order < owner.event_order
+                || (event_order == owner.event_order && !declaration_changed))
+        {
             return None;
         }
         owner.generation = owner
@@ -240,6 +266,7 @@ impl StateTimeoutTracker {
         owner.event_order = event_order;
         owner.reset_at = reset_at;
         owner.reset_version = reset_version;
+        owner.declaration = declaration.cloned();
         Some(owner.generation)
     }
 
@@ -256,15 +283,17 @@ impl StateTimeoutTracker {
         event_order: u64,
         reset_at: Option<DateTime<Utc>>,
         reset_version: Option<u64>,
+        declaration: Option<&StateTimeout>,
     ) -> Option<u64> {
         let mut map = self.owners.lock().expect("state_timeout tracker poisoned");
         let owner = map.entry(key.clone()).or_default();
-        if owner.generation != 0 && event_order <= owner.event_order {
+        if owner.generation != 0 && event_order < owner.event_order {
             return None;
         }
         let needs_arm = owner.generation == 0
             || owner.reset_at != reset_at
-            || owner.reset_version != reset_version;
+            || owner.reset_version != reset_version
+            || owner.declaration.as_ref() != declaration;
         owner.event_order = event_order;
         if !needs_arm {
             return None;
@@ -275,7 +304,55 @@ impl StateTimeoutTracker {
             .expect("state timeout generation overflow");
         owner.reset_at = reset_at;
         owner.reset_version = reset_version;
+        owner.declaration = declaration.cloned();
         Some(owner.generation)
+    }
+
+    /// Invalidate a declaration removed from the current table without
+    /// requiring another domain event. The generation bump cancels any task
+    /// still waiting or retrying under the prior declaration.
+    fn invalidate_if_fresh(
+        &self,
+        key: &EntityKey,
+        event_order: u64,
+        reset_at: Option<DateTime<Utc>>,
+        reset_version: Option<u64>,
+    ) -> bool {
+        let mut map = self.owners.lock().expect("state_timeout tracker poisoned");
+        let Some(owner) = map.get_mut(key) else {
+            return false;
+        };
+        if owner.declaration.is_none() || event_order < owner.event_order {
+            return false;
+        }
+        owner.generation = owner
+            .generation
+            .checked_add(1)
+            .expect("state timeout generation overflow");
+        owner.event_order = event_order;
+        owner.reset_at = reset_at;
+        owner.reset_version = reset_version;
+        owner.declaration = None;
+        true
+    }
+
+    /// Invalidate only the owner captured by a particular task. This closes
+    /// the check-then-act race between a task observing its generation and a
+    /// concurrent reconciliation advancing ownership.
+    fn invalidate_generation_if_current(&self, key: &EntityKey, armed_generation: u64) -> bool {
+        let mut map = self.owners.lock().expect("state_timeout tracker poisoned");
+        let Some(owner) = map.get_mut(key) else {
+            return false;
+        };
+        if owner.generation != armed_generation {
+            return false;
+        }
+        owner.generation = owner
+            .generation
+            .checked_add(1)
+            .expect("state timeout generation overflow");
+        owner.declaration = None;
+        true
     }
 
     fn current_generation(&self, key: &EntityKey) -> u64 {
@@ -285,6 +362,25 @@ impl StateTimeoutTracker {
             .get(key)
             .map(|owner| owner.generation)
             .unwrap_or(0)
+    }
+
+    #[cfg(test)]
+    fn record_reconciliation_failure(&self) {
+        let mut failures = self
+            .reconciliation_failures
+            .lock()
+            .expect("state_timeout tracker poisoned");
+        *failures = failures
+            .checked_add(1)
+            .expect("state timeout reconciliation failure counter overflow");
+    }
+
+    #[cfg(test)]
+    fn reconciliation_failure_count(&self) -> u64 {
+        *self
+            .reconciliation_failures
+            .lock()
+            .expect("state_timeout tracker poisoned")
     }
 
     /// Increment the pending-timer count for `entity_type`. Called at arm.
@@ -396,8 +492,7 @@ impl crate::state::ServerState {
         observed_at: DateTime<Utc>,
         readiness_elapsed: Duration,
     ) {
-        let agent_ctx =
-            crate::request_context::AgentContext::for_service("state-timeout-hydration");
+        let agent_ctx = crate::request_context::AgentContext::for_service(STATE_TIMEOUT_SERVICE);
         let action_params = serde_json::json!({});
         let ctx = PostDispatchContext {
             tenant,
@@ -433,26 +528,221 @@ impl crate::state::ServerState {
         self.arm_state_timeouts(ctx, response, StateTimeoutArmCause::PostDispatch);
     }
 
+    fn current_state_timeout_declaration(
+        &self,
+        tenant: &TenantId,
+        entity_type: &str,
+        target_state: &str,
+    ) -> Option<StateTimeout> {
+        let registry_table = self
+            .registry
+            .read()
+            .expect("registry lock poisoned")
+            .get_table(tenant, entity_type);
+        registry_table
+            .or_else(|| self.transition_tables.get(entity_type).cloned())
+            .and_then(|table| {
+                table
+                    .state_timeouts
+                    .iter()
+                    .find(|timeout| timeout.state == target_state)
+                    .cloned()
+            })
+    }
+
+    async fn reconcile_state_timeout_after_table_change(
+        &self,
+        tenant: &TenantId,
+        entity_type: &str,
+        entity_id: &str,
+        agent_ctx: &crate::request_context::AgentContext,
+    ) -> Result<(), String> {
+        let response = self
+            .get_tenant_entity_state(tenant, entity_type, entity_id)
+            .await?;
+        let action_params = serde_json::json!({});
+        let ctx = PostDispatchContext {
+            tenant,
+            entity_type,
+            entity_id,
+            action: "__table_changed",
+            agent_ctx,
+            dispatch_idempotency_key: None,
+            action_params: &action_params,
+            await_integration: false,
+        };
+        self.arm_state_timeouts_if_needed(&ctx, &response);
+        Ok(())
+    }
+
+    async fn reconcile_state_timeout_declaration_until_current(
+        &self,
+        table_versions: &mut tokio::sync::watch::Receiver<u64>,
+        sender_closed: &mut bool,
+        watch: &StateTimeoutWatch<'_>,
+    ) -> bool {
+        let mut failure_count = 0_u32;
+        loop {
+            if self.state_timeout_tracker.current_generation(watch.key) != watch.armed_generation {
+                return false;
+            }
+
+            match self.current_state_timeout_declaration(
+                watch.tenant,
+                watch.entity_type,
+                watch.target_state,
+            ) {
+                Some(current) if current == *watch.expected_timeout => return true,
+                None => {
+                    let _ = self
+                        .state_timeout_tracker
+                        .invalidate_generation_if_current(watch.key, watch.armed_generation);
+                    return false;
+                }
+                Some(_) => {}
+            }
+
+            let reconcile_error = self
+                .reconcile_state_timeout_after_table_change(
+                    watch.tenant,
+                    watch.entity_type,
+                    watch.entity_id,
+                    watch.agent_ctx,
+                )
+                .await
+                .err();
+            #[cfg(test)]
+            if reconcile_error.is_some() {
+                self.state_timeout_tracker.record_reconciliation_failure();
+            }
+            if self.state_timeout_tracker.current_generation(watch.key) != watch.armed_generation {
+                return false;
+            }
+
+            match self.current_state_timeout_declaration(
+                watch.tenant,
+                watch.entity_type,
+                watch.target_state,
+            ) {
+                Some(current) if current == *watch.expected_timeout => return true,
+                None => {
+                    let _ = self
+                        .state_timeout_tracker
+                        .invalidate_generation_if_current(watch.key, watch.armed_generation);
+                    return false;
+                }
+                Some(_) => {}
+            }
+
+            failure_count = failure_count.saturating_add(1);
+            let retry_delay = state_timeout_retry_delay(failure_count, None);
+            tracing::warn!(
+                tenant = %watch.tenant,
+                entity_type = watch.entity_type,
+                entity_id = watch.entity_id,
+                failure_count,
+                error = reconcile_error.as_deref().unwrap_or("ownership did not advance"),
+                retry_delay_ms = retry_delay.as_millis() as u64,
+                "state timeout table reconciliation will retry"
+            );
+            let retry_deadline = timeout_deadline(retry_delay);
+            if *sender_closed {
+                tokio::time::sleep_until(retry_deadline).await; // determinism-ok: bounded reconciliation retry
+                continue;
+            }
+
+            tokio::select! { // determinism-ok: ordered reconciliation retry and version signal
+                biased;
+                changed = table_versions.changed() => {
+                    *sender_closed = changed.is_err();
+                }
+                _ = tokio::time::sleep_until(retry_deadline) => {} // determinism-ok: bounded reconciliation retry
+            }
+        }
+    }
+
+    async fn wait_for_state_timeout_deadline(
+        &self,
+        table_versions: Option<&mut tokio::sync::watch::Receiver<u64>>,
+        deadline: tokio::time::Instant,
+        watch: &StateTimeoutWatch<'_>,
+    ) -> bool {
+        let Some(table_versions) = table_versions else {
+            tokio::time::sleep_until(deadline).await; // determinism-ok: scheduled deadline
+            return true;
+        };
+
+        loop {
+            tokio::select! { // determinism-ok: ordered timer and table-version signal
+                biased;
+                _ = tokio::time::sleep_until(deadline) => { // determinism-ok: scheduled deadline
+                    return true;
+                }
+                changed = table_versions.changed() => {
+                    let mut sender_closed = changed.is_err();
+                    if self.state_timeout_tracker.current_generation(watch.key)
+                        != watch.armed_generation
+                    {
+                        return false;
+                    }
+                    let current_declaration = self.current_state_timeout_declaration(
+                        watch.tenant,
+                        watch.entity_type,
+                        watch.target_state,
+                    );
+                    if current_declaration.as_ref() == Some(watch.expected_timeout) {
+                        if sender_closed {
+                            tokio::time::sleep_until(deadline).await; // determinism-ok: scheduled deadline
+                            return true;
+                        }
+                        continue;
+                    }
+                    if !self
+                        .reconcile_state_timeout_declaration_until_current(
+                            table_versions,
+                            &mut sender_closed,
+                            watch,
+                        )
+                        .await
+                    {
+                        return false;
+                    }
+                    if sender_closed {
+                        tokio::time::sleep_until(deadline).await; // determinism-ok: scheduled deadline
+                        return true;
+                    }
+                }
+            }
+        }
+    }
+
     fn arm_state_timeouts(
         &self,
         ctx: &PostDispatchContext<'_>,
         response: &EntityResponse,
         cause: StateTimeoutArmCause,
     ) {
-        let table = {
+        let (registry_table, table_versions) = {
             let registry = match self.registry.read() {
                 Ok(registry) => registry,
                 Err(_) => return,
             };
-            registry.get_table(ctx.tenant, ctx.entity_type)
-        }
-        .or_else(|| self.transition_tables.get(ctx.entity_type).cloned());
+            (
+                registry.get_table(ctx.tenant, ctx.entity_type),
+                registry.subscribe_table_versions(ctx.tenant, ctx.entity_type),
+            )
+        };
+        let table = registry_table.or_else(|| self.transition_tables.get(ctx.entity_type).cloned());
         let Some(table) = table else {
+            let key = EntityKey::new(ctx.tenant, ctx.entity_type, ctx.entity_id);
+            let _ = self.state_timeout_tracker.invalidate_if_fresh(
+                &key,
+                timeout_response_order(&response.state),
+                response.state.state_timeout_clock_reset_at,
+                response.state.state_timeout_clock_reset_version,
+            );
             return;
         };
-        if table.state_timeouts.is_empty() {
-            return;
-        }
         let state_timeouts = table.state_timeouts.clone();
 
         let post_state = response.state.status.clone();
@@ -465,7 +755,8 @@ impl crate::state::ServerState {
         let state_changed = pre_state != post_state;
         let hydrating = matches!(cause, StateTimeoutArmCause::Hydration { .. });
         let key = EntityKey::new(ctx.tenant, ctx.entity_type, ctx.entity_id);
-        let post_has_timeout = state_timeouts.iter().any(|st| st.state == post_state);
+        let post_timeout = state_timeouts.iter().find(|st| st.state == post_state);
+        let post_has_timeout = post_timeout.is_some();
         let pre_had_timeout = state_timeouts.iter().any(|st| st.state == pre_state);
         let event_order = timeout_response_order(&response.state);
         // The durable event history determines the deadline below, but the
@@ -474,6 +765,26 @@ impl crate::state::ServerState {
         // table hot-swap even when startup committed under the prior table.
         let armed_reset_at = response.state.state_timeout_clock_reset_at;
         let armed_reset_version = response.state.state_timeout_clock_reset_version;
+
+        // A hot-swap can remove the current state's declaration without a
+        // domain transition. Invalidate the captured declaration at the same
+        // durable event order so an already-armed or retrying task terminates.
+        if !post_has_timeout {
+            let invalidated = self.state_timeout_tracker.invalidate_if_fresh(
+                &key,
+                event_order,
+                armed_reset_at,
+                armed_reset_version,
+            );
+            if invalidated && state_changed && pre_had_timeout {
+                crate::runtime_metrics::record_state_timeout_cancelled(
+                    ctx.tenant.as_str(),
+                    ctx.entity_type,
+                    &pre_state,
+                );
+            }
+            return;
+        }
 
         // A state change invalidates the prior timer and, when the destination
         // is timed, owns its replacement with the same generation. Advancing
@@ -485,6 +796,7 @@ impl crate::state::ServerState {
                     event_order,
                     armed_reset_at,
                     armed_reset_version,
+                    post_timeout,
                 ) else {
                     return;
                 };
@@ -494,9 +806,6 @@ impl crate::state::ServerState {
                         ctx.entity_type,
                         &pre_state,
                     );
-                }
-                if !post_has_timeout {
-                    return;
                 }
                 Some(generation)
             } else {
@@ -522,6 +831,7 @@ impl crate::state::ServerState {
                     event_order,
                     armed_reset_at,
                     armed_reset_version,
+                    Some(st),
                 ) else {
                     // Post-dispatch effects can finish out of order. An older
                     // reset must not supersede a newer durable response.
@@ -536,6 +846,7 @@ impl crate::state::ServerState {
                     event_order,
                     armed_reset_at,
                     armed_reset_version,
+                    Some(st),
                 ) else {
                     continue;
                 };
@@ -607,10 +918,16 @@ impl crate::state::ServerState {
             let entity_id = ctx.entity_id.to_string();
             let target_state = st.state.clone();
             let target_action = st.on_timeout.clone();
-            let mut agent_ctx = ctx.agent_ctx.clone();
-            // The timer is a distinct internal dispatch. Preserve caller
-            // attribution and authority, replace the initiating request key,
-            // and retain the replacement across every delivery attempt.
+            let expected_timeout = st.clone();
+            let mut table_versions_for_task = table_versions.clone();
+            let mut agent_ctx = crate::request_context::AgentContext::for_service_inheriting(
+                STATE_TIMEOUT_SERVICE,
+                ctx.agent_ctx,
+            );
+            // The timer is a distinct internal dispatch with stable service
+            // authority. Preserve only caller observability, replace the
+            // initiating request key, and retain that replacement across every
+            // delivery attempt.
             agent_ctx.idempotency_key = Some(format!(
                 "state-timeout:{}:{}:{}:{}:{}",
                 ctx.tenant,
@@ -651,7 +968,29 @@ impl crate::state::ServerState {
             tokio::spawn(async move {
                 // determinism-ok: wall-clock timer fires a side-effect action;
                 // the action itself is deterministic under DST via sim_now().
-                tokio::time::sleep_until(deadline).await; // determinism-ok: scheduled deadline
+                let deadline_reached = {
+                    let watch = StateTimeoutWatch {
+                        key: &key_for_task,
+                        armed_generation: armed_seq,
+                        tenant: &tenant,
+                        entity_type: &entity_type,
+                        entity_id: &entity_id,
+                        target_state: &target_state,
+                        expected_timeout: &expected_timeout,
+                        agent_ctx: &agent_ctx,
+                    };
+                    state
+                        .wait_for_state_timeout_deadline(
+                            table_versions_for_task.as_mut(),
+                            deadline,
+                            &watch,
+                        )
+                        .await
+                };
+                if !deadline_reached {
+                    tracker.dec_pending(&entity_type_for_dec);
+                    return;
+                }
 
                 let span = tracing::info_span!(
                     "dispatch.state_timeout.fire",
@@ -692,6 +1031,7 @@ impl crate::state::ServerState {
                                     await_reactions: true,
                                 },
                                 StateTimeoutPrecondition {
+                                    expected_timeout: expected_timeout.clone(),
                                     expected_state: target_state.clone(),
                                     expected_reset_at: armed_reset_at,
                                     expected_reset_version: armed_reset_version,
@@ -763,7 +1103,28 @@ impl crate::state::ServerState {
                         }
                         let retry_delay =
                             state_timeout_retry_delay(failure_count, retry_after_ms);
-                        tokio::time::sleep_until(timeout_deadline(retry_delay)).await; // determinism-ok: bounded retry deadline
+                        let retry_deadline_reached = {
+                            let watch = StateTimeoutWatch {
+                                key: &key_for_task,
+                                armed_generation: armed_seq,
+                                tenant: &tenant,
+                                entity_type: &entity_type,
+                                entity_id: &entity_id,
+                                target_state: &target_state,
+                                expected_timeout: &expected_timeout,
+                                agent_ctx: &agent_ctx,
+                            };
+                            state
+                                .wait_for_state_timeout_deadline(
+                                table_versions_for_task.as_mut(),
+                                timeout_deadline(retry_delay),
+                                    &watch,
+                            )
+                            .await
+                        };
+                        if !retry_deadline_reached {
+                            break;
+                        }
                     }
                     tracker.dec_pending(&entity_type_for_dec);
                 }
@@ -783,6 +1144,10 @@ mod hydration_tests;
 mod delivery_retry_tests;
 
 #[cfg(test)]
+#[path = "state_timeouts/declaration_hotswap_tests.rs"]
+mod declaration_hotswap_tests;
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use temper_runtime::tenant::TenantId;
@@ -796,9 +1161,9 @@ mod tests {
         let t = StateTimeoutTracker::new();
         let k = key();
         assert_eq!(t.current_generation(&k), 0, "initial generation is 0");
-        assert_eq!(t.advance_if_fresh(&k, 7, None, None), Some(1));
-        assert_eq!(t.advance_if_fresh(&k, 8, None, None), Some(2));
-        assert_eq!(t.advance_if_fresh(&k, 9, None, None), Some(3));
+        assert_eq!(t.advance_if_fresh(&k, 7, None, None, None), Some(1));
+        assert_eq!(t.advance_if_fresh(&k, 8, None, None, None), Some(2));
+        assert_eq!(t.advance_if_fresh(&k, 9, None, None, None), Some(3));
         assert_eq!(t.current_generation(&k), 3);
     }
 
@@ -806,9 +1171,9 @@ mod tests {
     fn stale_or_duplicate_durable_responses_cannot_advance_ownership() {
         let t = StateTimeoutTracker::new();
         let k = key();
-        assert_eq!(t.advance_if_fresh(&k, 11, None, None), Some(1));
-        assert_eq!(t.advance_if_fresh(&k, 10, None, None), None);
-        assert_eq!(t.advance_if_fresh(&k, 11, None, None), None);
+        assert_eq!(t.advance_if_fresh(&k, 11, None, None, None), Some(1));
+        assert_eq!(t.advance_if_fresh(&k, 10, None, None, None), None);
+        assert_eq!(t.advance_if_fresh(&k, 11, None, None, None), None);
         assert_eq!(t.current_generation(&k), 1);
     }
 
@@ -817,10 +1182,10 @@ mod tests {
         let t = StateTimeoutTracker::new();
         let a = EntityKey::new(&TenantId::from("t".to_string()), "E", "a");
         let b = EntityKey::new(&TenantId::from("t".to_string()), "E", "b");
-        assert_eq!(t.advance_if_fresh(&a, 1, None, None), Some(1));
-        assert_eq!(t.advance_if_fresh(&a, 2, None, None), Some(2));
+        assert_eq!(t.advance_if_fresh(&a, 1, None, None, None), Some(1));
+        assert_eq!(t.advance_if_fresh(&a, 2, None, None, None), Some(2));
         assert_eq!(
-            t.advance_if_fresh(&b, 1, None, None),
+            t.advance_if_fresh(&b, 1, None, None, None),
             Some(1),
             "b's owner is independent of a's"
         );
@@ -833,7 +1198,7 @@ mod tests {
         let t = StateTimeoutTracker::new();
         let tenant = TenantId::from("t".to_string());
         assert_eq!(
-            t.advance_if_fresh(&EntityKey::new(&tenant, "E", "x"), 1, None, None),
+            t.advance_if_fresh(&EntityKey::new(&tenant, "E", "x"), 1, None, None, None,),
             Some(1)
         );
         assert_eq!(t.size(), 1);

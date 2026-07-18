@@ -6,6 +6,7 @@ use std::sync::OnceLock;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use temper_runtime::actor::Message;
+use temper_spec::automaton::StateTimeout;
 
 // TigerStyle: Fixed resource budgets. No unbounded growth.
 // These are hard limits, not suggestions. Violations are assertion failures.
@@ -23,11 +24,13 @@ pub const MAX_DURABLE_IDEMPOTENCY_KEYS_PER_ENTITY: usize = 1_000;
 
 /// Internal condition attached to a state-timeout action.
 ///
-/// The actor evaluates this against its current state in the same mailbox turn
-/// as the action. A timeout armed for an older state or clock anchor therefore
-/// cannot race a newer reset and execute after that reset commits.
+/// The actor evaluates this against its current table and state in the same
+/// mailbox turn as the action. A timeout armed for an older declaration,
+/// state, or clock anchor therefore cannot execute after a hot-swap or reset.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StateTimeoutPrecondition {
+    /// Exact timeout declaration captured when the timer was armed.
+    pub expected_timeout: StateTimeout,
     /// State for which the timeout was armed.
     pub expected_state: String,
     /// Durable entry/reset timestamp captured when the timeout was armed.
