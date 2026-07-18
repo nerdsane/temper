@@ -1,4 +1,4 @@
-# ADR-0031: Temper-Native Agent — Spec-Driven Agent Loop via IOA + WASM
+# ADR-0156: Temper-Native Agent — Spec-Driven Agent Loop via IOA + WASM
 
 - Status: Accepted
 - Date: 2026-03-16

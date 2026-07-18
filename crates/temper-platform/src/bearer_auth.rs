@@ -74,7 +74,7 @@ pub async fn bearer_auth_check(
         .as_ref()
         .is_some_and(|expected| constant_time_eq(token.as_bytes(), expected.as_bytes()));
 
-    // ADR-0043 guest override path: internal loopback callers may present the
+    // ADR-0165 guest override path: internal loopback callers may present the
     // platform API key while explicitly declaring the principal they are acting
     // as. Preserve those headers instead of collapsing the request into the
     // bootstrapped operator credential.

@@ -137,7 +137,7 @@ fn metrics() -> &'static RuntimeMetrics {
                 .with_description(
                     "WASM integration dispatches that fell back to the default timeout because the \
                      spec did not set `timeout_secs`. Apps firing this frequently should wire an \
-                     explicit timeout in their integration config. See ADR-0045.",
+                     explicit timeout in their integration config. See ADR-0167.",
                 )
                 .build(),
             entity_concurrency_retry_total: meter
@@ -146,7 +146,7 @@ fn metrics() -> &'static RuntimeMetrics {
                     "Entity-actor persist attempts that hit an optimistic concurrency conflict \
                      and either recovered, exhausted the retry budget, or found the action no \
                      longer legal after replay. Treat sustained activity as a canary for an \
-                     unknown scheduler race — not a retry budget to raise. See ADR-0046.",
+                     unknown scheduler race — not a retry budget to raise. See ADR-0168.",
                 )
                 .build(),
             entity_concurrency_retry_attempts: meter
@@ -154,7 +154,7 @@ fn metrics() -> &'static RuntimeMetrics {
                 .with_description(
                     "Number of persist attempts a single action consumed before success or \
                      exhaustion. Value of 1 is the no-retry happy path; anything higher is a \
-                     canary. See ADR-0046.",
+                     canary. See ADR-0168.",
                 )
                 .build(),
             dispatch_ask_attempts: meter
@@ -522,7 +522,7 @@ pub fn record_process_resident_memory_bytes(bytes: u64) {
 /// Record a WASM integration dispatch that fell back to the default timeout
 /// because the integration spec did not set `timeout_secs`.
 ///
-/// See ADR-0045.
+/// See ADR-0167.
 pub fn record_wasm_default_timeout_used(tenant: &str, entity_type: &str, module: &str) {
     metrics().wasm_integration_default_timeout_used_total.add(
         1,
@@ -536,7 +536,7 @@ pub fn record_wasm_default_timeout_used(tenant: &str, entity_type: &str, module:
 
 /// Possible outcomes for an entity-actor concurrency retry cycle.
 ///
-/// See ADR-0046.
+/// See ADR-0168.
 #[derive(Debug, Clone, Copy)]
 pub enum ConcurrencyRetryOutcome {
     /// The action persisted successfully (possibly after one or more retries).
@@ -562,7 +562,7 @@ impl ConcurrencyRetryOutcome {
 /// Record the outcome of an entity-actor concurrency retry cycle plus the
 /// number of attempts consumed. Attempts is 1-based (1 = no retries).
 ///
-/// See ADR-0046.
+/// See ADR-0168.
 pub fn record_entity_concurrency_retry(
     entity_type: &str,
     outcome: ConcurrencyRetryOutcome,

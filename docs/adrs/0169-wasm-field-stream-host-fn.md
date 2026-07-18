@@ -1,4 +1,4 @@
-# ADR-0046: WASM Host Function for Blob-Ref Field Reads
+# ADR-0169: WASM Host Function for Blob-Ref Field Reads
 
 > **Implementation note:** the shipped host function is `host_read_field(field_name_ptr, field_name_len, buf_ptr, buf_len) -> i32`, a direct memory-buffer write matching the `host_get_context` pattern. The ADR text below references an earlier stream-based draft (`host_read_field_stream`) — that shape was dropped during implementation because Temper's host has no stream-read-back primitive (streams are one-way: host → HTTP / hash / cache, never into WASM memory). The behavioral contract (plain vs. blob-ref resolution, return codes `-1`/`-2`/`-3`, inline-ceiling split, pre-fetched `blob_cache`) is identical; only the byte transport changes. Return shape matches `host_get_context`: if `needed > buf_len` the caller resizes and retries.
 
@@ -8,7 +8,7 @@
 - Supersedes: —
 - Related:
   - ADR-0040: Blob-Backed Overflow for Large Entity Field Values
-  - ADR-0045: Field-Overflow Inline Ceiling
+  - ADR-0166: Field-Overflow Inline Ceiling
   - `crates/temper-wasm/src/engine/host_functions.rs`
   - `crates/temper-wasm/src/stream.rs`
   - `crates/temper-server/src/state/dispatch/wasm.rs`
@@ -18,7 +18,7 @@
 
 ## Context
 
-ADR-0040 introduced blob-backed field overflow for oversize entity values. OData reads hydrate blob refs transparently via `hydrate_blob_refs_in_value` (`temper-server/src/blobs.rs:131`). ADR-0045 raised the inline ceiling to 128KB so that the common-case oversize field (Session.user_message et al.) stays inline and is directly readable by WASM guests.
+ADR-0040 introduced blob-backed field overflow for oversize entity values. OData reads hydrate blob refs transparently via `hydrate_blob_refs_in_value` (`temper-server/src/blobs.rs:131`). ADR-0166 raised the inline ceiling to 128KB so that the common-case oversize field (Session.user_message et al.) stays inline and is directly readable by WASM guests.
 
 That still leaves the > ceiling case: any field whose serialized value exceeds `DEFAULT_FIELD_INLINE_MAX` (128KB) lives in `fields` as a `{"__temper_blob_ref": "...", "__temper_blob_size": N, "__temper_blob_encoding": "json"}` reference object. The OData path resolves these automatically; the WASM invocation context path does not. `crates/temper-server/src/state/dispatch/wasm.rs` serializes `entity_state` straight into `WasmInvocationContext` with no hydration pass, so a WASM module that reads `fields["big_output"].as_str()` sees the ref envelope, not the bytes.
 
@@ -105,7 +105,7 @@ Module authors don't branch: one call site, correct behavior either way. This is
 
 ## Rollout Plan
 
-1. **Phase 1 (landed — ADR-0045)** — inline ceiling raised; paw-agent consumers unaware of blob refs.
+1. **Phase 1 (landed — ADR-0166)** — inline ceiling raised; paw-agent consumers unaware of blob refs.
 2. **Phase 2 (this ADR)** — host function + SDK helpers + dispatcher prefetch. Infrastructure only; no consumer migrated yet. Ships behind the ADR with tests only.
 3. **Phase 3 (separate, OpenPaw)** — `workspace_provisioner` and `llm_caller` migrated to `ctx.read_field_string`. Unblocks openpaw#58 for the > 128KB tail.
 
@@ -147,7 +147,7 @@ Module authors don't branch: one call site, correct behavior either way. This is
 ## Alternatives Considered
 
 1. **Transparent hydration at handoff.** Walk and inline every blob ref before the WASM call. Simplest possible API (module code unchanged). Rejected because an unbounded field size becomes an unbounded context size — exactly the pathology the ceiling was designed to prevent. Leaves no path for > 128KB fields except the ceiling itself.
-2. **Pure stream host function with no ceiling-gated prefetch.** Every oversize field read requires an explicit host call, including ones that would have fit under a reasonable ceiling. More consistent, but 9 existing WASM modules would need to branch on ref-vs-plain for every field read. ADR-0045 + this hybrid keeps the churn at two modules (migrated in Phase 3).
+2. **Pure stream host function with no ceiling-gated prefetch.** Every oversize field read requires an explicit host call, including ones that would have fit under a reasonable ceiling. More consistent, but 9 existing WASM modules would need to branch on ref-vs-plain for every field read. ADR-0166 + this hybrid keeps the churn at two modules (migrated in Phase 3).
 3. **Make the host function async via `block_on`.** Avoids the prefetch step. Rejected because `spawn_blocking` runs the wasmtime task on a thread without a tokio runtime handle, and installing one inside the sandbox violates DST's single-threaded-simulation rule.
 4. **Chunked read API (`host_read_field_chunk(field, offset, len)`).** Useful for very-large payloads. Deferred — the current API is strictly simpler and can compose with chunking later by layering on the SDK side without a new host function.
 

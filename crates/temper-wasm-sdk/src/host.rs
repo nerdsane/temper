@@ -146,7 +146,7 @@ unsafe extern "C" {
     /// blob-ref envelopes. Returns bytes written, needed size if > buf_len,
     /// -1 if field not found, -2 if blob ref pre-fetch missing, -3 on error.
     ///
-    /// See ADR-0046.
+    /// See ADR-0169.
     pub fn host_read_field(
         field_name_ptr: i32,
         field_name_len: i32,

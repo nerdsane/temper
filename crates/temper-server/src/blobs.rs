@@ -127,7 +127,7 @@ pub(crate) async fn hydrate_blob_refs_in_value(store: &BlobStore, value: &mut Va
 /// `BTreeMap` of blob keys to bytes for refs at or above the ceiling (the
 /// "deferred" set). Callers that hand `value` off to a WASM guest forward
 /// the deferred map as `blob_cache` so guests can resolve oversize fields
-/// via `host_read_field_stream`. See ADR-0046.
+/// via `host_read_field_stream`. See ADR-0169.
 #[cfg(test)]
 pub(crate) async fn hydrate_blob_refs_in_value_with_ceiling(
     store: &BlobStore,
@@ -365,7 +365,7 @@ mod tests {
 
     /// End-to-end: ceiling-aware hydration inlines small blob refs and defers
     /// large ones into the returned map. This is the WASM-dispatch path from
-    /// ADR-0046.
+    /// ADR-0169.
     #[tokio::test]
     async fn hydrate_with_ceiling_inlines_small_and_defers_large() {
         let (store, _dir) = open_store().await;
@@ -425,7 +425,7 @@ mod tests {
     /// Per-field `overflow_inline_max_bytes` in the spec overrides the mode
     /// default. Declaring a 1024-byte ceiling forces a 4KB field into the
     /// overflow path even though the default 128KB ceiling would keep it
-    /// inline. ADR-0045 Phase 4b.
+    /// inline. ADR-0166 Phase 4b.
     #[tokio::test]
     async fn per_field_inline_max_override_forces_overflow() {
         use crate::entity_actor::effects::sync_fields_with_metadata;

@@ -1,4 +1,4 @@
-# ADR-0057: Native Immutable File Read Plane for TemperFS
+# ADR-0170: Native Immutable File Read Plane for TemperFS
 
 - Status: Accepted
 - Date: 2026-04-23

@@ -1,4 +1,4 @@
-//! DST tests for the ADR-0046 optimistic-concurrency retry path.
+//! DST tests for the ADR-0168 optimistic-concurrency retry path.
 //!
 //! Uses `SimEventStore::inject_concurrency_violations` to deterministically
 //! queue `ConcurrencyViolation` errors on specific append calls, then verifies
@@ -8,7 +8,7 @@
 //! 2. Violations for every attempt → retry budget exhausts cleanly and the
 //!    caller sees a distinct error.
 //!
-//! These tests cover ADR-0046 Rollout Phase 0 "DST race test" follow-up.
+//! These tests cover ADR-0168 Rollout Phase 0 "DST race test" follow-up.
 
 use std::collections::BTreeMap;
 use std::sync::{Arc, RwLock};
@@ -201,7 +201,7 @@ async fn dst_retry_exhausts_under_sustained_violation() {
 //
 // The single-violation success path should hold across many seeds. This
 // catches any hidden wall-clock ordering assumption and is the DST "race
-// coverage" ask from ADR-0046 Rollout Phase 0.
+// coverage" ask from ADR-0168 Rollout Phase 0.
 #[tokio::test]
 async fn dst_retry_succeeds_after_one_violation_many_seeds() {
     for seed in 0..25u64 {

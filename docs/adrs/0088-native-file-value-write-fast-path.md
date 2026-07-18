@@ -4,7 +4,7 @@
 - Date: 2026-05-15
 - Deciders: Temper core maintainers
 - Related:
-  - ADR-0057: Native immutable file read plane
+  - ADR-0170: Native immutable file read plane
   - ADR-0063: Object store for blob bytes
   - ADR-0081: Latency observability acceleration program
   - ADR-0083: Trace budget and fanout summarization

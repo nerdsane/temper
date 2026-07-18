@@ -1,4 +1,4 @@
-# ADR-0040: Segmented Event History And Bounded Replay
+# ADR-0162: Segmented Event History And Bounded Replay
 
 ## Status
 

@@ -39,7 +39,7 @@ enum Section {
     /// skips the body; triggers are extracted via serde in the second pass
     /// and merged into their action by name.
     ActionTrigger,
-    /// ADR-0040: nested composite-action metadata blocks. Hand-rolled parser
+    /// ADR-0161: nested composite-action metadata blocks. Hand-rolled parser
     /// skips the body; metadata is extracted via serde in the second pass.
     CompositeActionMetadata,
 }
@@ -191,7 +191,7 @@ impl ParseState {
             "name" => state_var.name = value.to_string(),
             "type" => state_var.var_type = value.to_string(),
             "initial" => state_var.initial = value.to_string(),
-            // ADR-0045 / ADR-0047: per-field overflow knobs.
+            // ADR-0166 / ADR-0047: per-field overflow knobs.
             "overflow_inline_max_bytes" => {
                 if let Ok(v) = value.parse::<usize>() {
                     state_var.overflow_inline_max_bytes = Some(v);
@@ -521,7 +521,7 @@ struct ParsedCompositeActionMetadata {
 }
 
 /// Extract nested `[[action.cedar_gate]]` and `[[action.sub_writes]]`
-/// sections via serde (ADR-0040).
+/// sections via serde (ADR-0161).
 fn extract_action_composite_metadata(
     source: &str,
 ) -> Result<std::collections::BTreeMap<String, ParsedCompositeActionMetadata>, AutomatonParseError>

@@ -4,7 +4,7 @@
 - Date: 2026-05-18
 - Deciders: Temper core maintainers
 - Related:
-  - ADR-0083: WASM Host Span Hint Datadog Fields
+  - ADR-0175: WASM Host Span Hint Datadog Fields
   - ADR-0086: WASM Host Boundary Observability
   - ADR-0087: WASM Guest Observability Host API
   - ADR-0099: Local WASM TData Host Path

@@ -4,8 +4,8 @@
 - Date: 2026-04-17
 - Deciders: Temper core maintainers
 - Related:
-  - ADR-0033 (tenant-database-isolation.md): tenant model this ADR reuses
-  - ADR-0045 (wasm-default-timeout.md): module-specific gate precedent
+  - ADR-0160 (tenant-database-isolation.md): tenant model this ADR reuses
+  - ADR-0167 (wasm-default-timeout.md): module-specific gate precedent
   - ADR-0048: Dispatch retry (runs after admission grants)
   - `crates/temper-server/src/state/mod.rs:217` (existing per-tenant entity index)
   - `crates/temper-server/src/state/admission.rs` (new)

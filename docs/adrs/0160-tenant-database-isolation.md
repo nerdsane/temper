@@ -1,4 +1,4 @@
-# ADR-0033: Tenant Database Isolation + Turso Secrets
+# ADR-0160: Tenant Database Isolation + Turso Secrets
 
 - Status: Accepted
 - Date: 2026-03-17

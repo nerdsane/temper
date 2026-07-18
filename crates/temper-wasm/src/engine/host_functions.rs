@@ -232,7 +232,7 @@ struct HostHttpBatchResponse {
 
 /// Resolve an entity-state field against the invocation context JSON and the
 /// per-invocation blob cache. Plain strings come back as UTF-8 bytes (unquoted);
-/// blob-ref envelopes come back as the decoded blob payload. See ADR-0046.
+/// blob-ref envelopes come back as the decoded blob payload. See ADR-0169.
 pub(crate) fn resolve_field_bytes(
     context_json: &str,
     blob_cache: &BTreeMap<String, Vec<u8>>,
@@ -1307,7 +1307,7 @@ pub(super) fn link_host_functions(linker: &mut Linker<HostState>) -> Result<(), 
     //     -2                       — field is a blob ref; pre-fetch did not populate blob_cache.
     //     -3                       — generic host error (memory access, JSON parse).
     //
-    // See ADR-0046.
+    // See ADR-0169.
     linker
         .func_wrap(
             "env",

@@ -1,3 +1,10 @@
+<!--
+Numbering: assign the next ADR the number (highest existing ADR number + 1).
+Check the current maximum first, e.g. `ls docs/adrs/ | sort | tail`.
+Duplicate numbers are forbidden — one number, one decision. Never reuse a
+number, even for a superseded or deleted ADR.
+-->
+
 # ADR-NNNN: Title
 
 - Status: Proposed | Accepted | Superseded | Deprecated

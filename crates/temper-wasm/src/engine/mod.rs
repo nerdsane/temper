@@ -189,7 +189,7 @@ pub(crate) struct HostState {
     /// `context_json`. Populated by the dispatcher before the invocation
     /// enters the blocking WASM thread, so `host_read_field_stream` can resolve
     /// blob refs synchronously. Keyed by blob key (e.g.
-    /// `field-overflow/sha256/<hex>.json`). See ADR-0046.
+    /// `field-overflow/sha256/<hex>.json`). See ADR-0169.
     pub(crate) blob_cache: BTreeMap<String, Vec<u8>>,
     /// Guest-created observability spans scoped to this invocation.
     pub(crate) guest_spans: GuestSpanRegistry,
@@ -343,7 +343,7 @@ impl WasmEngine {
     }
 
     /// Invoke a cached WASM module with pre-fetched blob-ref bytes available to
-    /// the guest via `host_read_field_stream`. See ADR-0046.
+    /// the guest via `host_read_field_stream`. See ADR-0169.
     ///
     /// `blob_cache` maps blob keys (e.g. `field-overflow/sha256/<hex>.json`) to
     /// their decoded bytes. Keys correspond to oversize blob refs present in

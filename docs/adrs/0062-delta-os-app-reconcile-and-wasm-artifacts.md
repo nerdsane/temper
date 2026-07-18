@@ -6,8 +6,8 @@
 - Related:
   - ADR-0027: OS App Catalog
   - ADR-0029: Temper Filesystem
-  - ADR-0032: Platform Store Trait and Sim Platform DST
-  - ADR-0057: Native Immutable File Read Plane
+  - ADR-0158: Platform Store Trait and Sim Platform DST
+  - ADR-0170: Native Immutable File Read Plane
   - ADR-0060: Bounded Warm Restart and Digest-Aware App Reconcile
   - `crates/temper-platform/src/os_apps/reconcile.rs`
   - `crates/temper-platform/src/os_apps/mod.rs`

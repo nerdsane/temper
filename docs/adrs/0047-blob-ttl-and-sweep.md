@@ -6,14 +6,14 @@
 - Supersedes: —
 - Related:
   - ADR-0040: Blob-Backed Overflow for Large Entity Field Values
-  - ADR-0045: Field-Overflow Inline Ceiling
-  - ADR-0046: WASM Host Function for Blob-Ref Field Reads
+  - ADR-0166: Field-Overflow Inline Ceiling
+  - ADR-0169: WASM Host Function for Blob-Ref Field Reads
   - `crates/temper-store-turso/src/schema.rs` (blobs table)
   - `crates/temper-store-turso/src/store/blobs.rs` (`put_blob`, new `put_blob_with_ttl`, `sweep_expired_blobs`)
 
 ## Context
 
-ADR-0040 introduced content-addressed overflow blobs for oversize entity fields. ADR-0045 raised the inline ceiling to 128KB. ADR-0046 plumbed blob-ref bytes into the WASM invocation context. The combined system is functionally correct but has no lifecycle policy — every blob written to `field-overflow/sha256/...` lives forever.
+ADR-0040 introduced content-addressed overflow blobs for oversize entity fields. ADR-0166 raised the inline ceiling to 128KB. ADR-0169 plumbed blob-ref bytes into the WASM invocation context. The combined system is functionally correct but has no lifecycle policy — every blob written to `field-overflow/sha256/...` lives forever.
 
 The growth model is "one row per unique large value". Content-addressed dedupe helps, but across a paw-agent deployment that processes many distinct large payloads (judge inputs, tool-call dumps, web_fetch results once Phase 5 migrates off File entities), the `blobs` table grows without bound. Long-running production tenants already see multi-GB blob tables in practice.
 

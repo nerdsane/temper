@@ -1,4 +1,4 @@
-# ADR-0081: LLMObs Agent Workflow Hierarchy
+# ADR-0171: LLMObs Agent Workflow Hierarchy
 
 - Status: Accepted
 - Date: 2026-05-12

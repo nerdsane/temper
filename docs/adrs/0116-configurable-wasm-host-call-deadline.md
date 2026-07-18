@@ -4,7 +4,7 @@
 - Date: 2026-05-21
 - Deciders: Temper core maintainers
 - Related:
-  - ADR-0045: WASM default timeout
+  - ADR-0167: WASM default timeout
   - ADR-0086: WASM host boundary observability
   - `crates/temper-wasm/src/engine/host_functions.rs`
   - `crates/temper-wasm/src/engine/mod.rs`

@@ -250,7 +250,7 @@ impl SecurityContext {
         self
     }
 
-    /// Attach ADR-0040 action-context provenance to the principal entity.
+    /// Attach ADR-0161 action-context provenance to the principal entity.
     ///
     /// Cedar policies can then match on `principal.action_context`, for
     /// example `principal.action_context == "composite:Apps.Fork"`.

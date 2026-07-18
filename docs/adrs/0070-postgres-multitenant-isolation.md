@@ -4,7 +4,7 @@
 - Date: 2026-04-29
 - Deciders: Temper core maintainers
 - Related:
-  - ADR-0033: tenant isolation
+  - ADR-0160: tenant isolation
   - ADR-0065: Postgres Platform Store and Canonical Schema
   - ADR-0066: StorageStack Backend Selection
   - `crates/temper-store-postgres/src/schema.rs`
