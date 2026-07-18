@@ -289,6 +289,103 @@ async fn dst_old_contract_live_write_fences_new_contract_backfill() {
     }
 }
 
+/// A contract fence applies to every repaired row, not only final watermark
+/// publication. A writer on another stream can advance the type contract while the
+/// repaired entity's journal sequence remains unchanged; the stale pass must not
+/// replace that entity's current-contract ownership.
+#[tokio::test]
+async fn dst_cross_stream_contract_change_fences_repair_rows() {
+    for seed in [15] {
+        let (_guard, _clock, _id) = install_deterministic_context(seed);
+        let store = SimEventStore::no_faults(seed);
+        let stable_pid = "default:Doc:doc-stable";
+        let current_contract = "v3:current-contract";
+        let stale_contract = "v3:stale-contract";
+        let current_row = key("current_path", "stable-current");
+        let stale_row = key("legacy_path", "stable-stale");
+
+        store
+            .append_with_index_rows(
+                stable_pid,
+                0,
+                &[envelope("Create")],
+                std::slice::from_ref(&current_row),
+                &[],
+                IndexReconciliation {
+                    keys: true,
+                    key_set_signature: Some(current_contract.to_string()),
+                    vectors: false,
+                },
+            )
+            .await
+            .unwrap();
+
+        // The stale pass replays doc-stable at sequence 1 under its target contract.
+        let stale_revision = store
+            .begin_key_index_backfill("default", "Doc", stale_contract)
+            .await
+            .unwrap();
+
+        // A different stream moves the type back to the current contract. The
+        // doc-stable sequence is still 1, so an entity-only sequence fence cannot
+        // detect this interleaving.
+        store
+            .append_with_index_rows(
+                "default:Doc:doc-live",
+                0,
+                &[envelope("Create")],
+                &[key("current_path", "live-current")],
+                &[],
+                IndexReconciliation {
+                    keys: true,
+                    key_set_signature: Some(current_contract.to_string()),
+                    vectors: false,
+                },
+            )
+            .await
+            .unwrap();
+
+        let stale = store
+            .backfill_entity_keys(
+                "default",
+                "Doc",
+                "doc-stable",
+                1,
+                std::slice::from_ref(&stale_row),
+            )
+            .await;
+        assert!(
+            matches!(
+                stale,
+                Err(PersistenceError::ConcurrencyViolation { expected, actual })
+                    if expected == stale_revision && actual > stale_revision
+            ),
+            "seed {seed}: a cross-stream contract change must reject stale repair rows; got {stale:?}"
+        );
+        assert_eq!(
+            store
+                .lookup_by_key(
+                    "default",
+                    "Doc",
+                    &current_row.key_name,
+                    &current_row.key_hash,
+                )
+                .await
+                .unwrap(),
+            Some("doc-stable".to_string()),
+            "seed {seed}: rejected stale repair must preserve current-contract ownership"
+        );
+        assert_eq!(
+            store
+                .lookup_by_key("default", "Doc", &stale_row.key_name, &stale_row.key_hash,)
+                .await
+                .unwrap(),
+            None,
+            "seed {seed}: rejected stale repair must not install obsolete ownership"
+        );
+    }
+}
+
 /// Historical streams can predate declared-key enforcement. If two live streams
 /// replay to the same claim, exact repair cannot represent both and must fail closed:
 /// preserving the existing owner while preventing the caller from certifying a
