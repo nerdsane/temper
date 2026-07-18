@@ -156,9 +156,9 @@ fn callback_failure_is_returned_and_invalidates_random_run() {
         result.messages, 1,
         "the delayed action owns one reservation"
     );
-    assert_eq!(result.execution_errors.len(), 1);
+    assert_eq!(random.execution_errors().len(), 1);
     assert!(
-        result.execution_errors[0]
+        random.execution_errors()[0]
             .description
             .contains("callback rejected")
     );
@@ -221,9 +221,9 @@ fn final_tick_batches_share_one_reaction_budget() {
     assert!(!result.all_invariants_held);
     assert_eq!(result.messages, 2);
     assert_eq!(result.transitions, 3);
-    assert_eq!(result.execution_errors.len(), 1);
+    assert_eq!(sim.execution_errors().len(), 1);
     assert!(
-        result.execution_errors[0]
+        sim.execution_errors()[0]
             .description
             .contains("budget exhausted after 1 reactions")
     );

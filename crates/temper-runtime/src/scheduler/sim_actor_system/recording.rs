@@ -26,7 +26,6 @@ impl SimActorSystem {
             messages: self.total_messages,
             dropped: self.scheduler.total_dropped() as u64,
             violations: self.violations.clone(),
-            execution_errors: self.execution_errors.clone(),
             actor_states,
         }
     }

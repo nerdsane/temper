@@ -95,8 +95,6 @@ pub struct SimActorResult {
     pub dropped: u64,
     /// Invariant violations found.
     pub violations: Vec<ActorInvariantViolation>,
-    /// Callback or driver failures that invalidate the run.
-    pub execution_errors: Vec<SimExecutionError>,
     /// Final state per actor: (actor_id, status, item_count, event_count).
     pub actor_states: Vec<(String, String, usize, usize)>,
 }
