@@ -1,5 +1,5 @@
 use super::*;
-use temper_runtime::persistence::{EntityKeyRow, EventMetadata};
+use temper_runtime::persistence::{EntityKeyRow, EventMetadata, KeyIndexBackfillFence};
 
 fn test_envelope(seq: u64, event_type: &str) -> PersistenceEnvelope {
     PersistenceEnvelope {
@@ -253,8 +253,23 @@ async fn key_reconciliation_enumeration_includes_key_only_orphans() {
         key_name: "path".to_string(),
         key_hash: "orphan-path".to_string(),
     };
+    let repair_signature = "v3:path";
+    let repair_revision = store
+        .begin_key_index_backfill("default", "Doc", repair_signature)
+        .await
+        .expect("begin orphan repair contract");
     store
-        .backfill_entity_keys("default", "Doc", "orphan-owner", 0, &[orphan])
+        .backfill_entity_keys(
+            "default",
+            "Doc",
+            "orphan-owner",
+            0,
+            KeyIndexBackfillFence {
+                key_set_signature: repair_signature,
+                contract_revision: repair_revision,
+            },
+            &[orphan],
+        )
         .await
         .expect("seed key-only orphan");
 

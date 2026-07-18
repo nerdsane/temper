@@ -6,7 +6,7 @@ mod types;
 pub use batch::{PersistenceAppend, PersistenceAppendResult};
 pub use index::{
     EntityKeyLookup, EntityKeyRow, EntityVectorCandidate, EntityVectorRow, IndexReconciliation,
-    pack_f32_le, unpack_f32_le,
+    KeyIndexBackfillFence, pack_f32_le, unpack_f32_le,
 };
 pub use types::{PersistenceEnvelope, PersistenceError, storage_error};
 
@@ -245,23 +245,34 @@ pub trait EventStore: Send + Sync + 'static {
     }
 
     /// Reconcile declared key-index rows for an **existing** entity (ADR-0153,
-    /// ADR-0171), without appending a journal event: when the journal is still at
-    /// `expected_sequence`, DELETE every existing row for `(tenant, entity_type,
-    /// entity_id)`, then INSERT `key_rows`. Idempotent, and an empty set purges stale
-    /// ownership for deleted or currently unkeyable entities. A concurrent journal
-    /// advance fails with [`PersistenceError::ConcurrencyViolation`] instead of
-    /// allowing replayed state to overwrite newer live ownership. Used to populate
-    /// and repair `entity_key_index` before a keyed read can treat absence as
-    /// authoritative. The default is a no-op (non-indexing backends).
+    /// ADR-0171), without appending a journal event. The store first validates that
+    /// `contract_fence` still identifies the tenant/type contract under which replay
+    /// derived `key_rows`, then validates `expected_sequence`. Only while both fences
+    /// hold does it DELETE every existing
+    /// row for `(tenant, entity_type, entity_id)` and INSERT `key_rows`. Idempotent,
+    /// and an empty set purges stale ownership for deleted or currently unkeyable
+    /// entities. A concurrent type-contract change fails with
+    /// [`PersistenceError::KeyContractChanged`]; a concurrent journal advance fails
+    /// with [`PersistenceError::ConcurrencyViolation`]. Used to populate and repair
+    /// `entity_key_index` before a keyed read can treat absence as authoritative. The
+    /// default is a no-op (non-indexing backends).
     fn backfill_entity_keys(
         &self,
         tenant: &str,
         entity_type: &str,
         entity_id: &str,
         expected_sequence: u64,
+        contract_fence: KeyIndexBackfillFence<'_>,
         key_rows: &[EntityKeyRow],
     ) -> impl std::future::Future<Output = Result<(), PersistenceError>> + Send {
-        let _ = (tenant, entity_type, entity_id, expected_sequence, key_rows);
+        let _ = (
+            tenant,
+            entity_type,
+            entity_id,
+            expected_sequence,
+            contract_fence,
+            key_rows,
+        );
         async { Ok(()) }
     }
 

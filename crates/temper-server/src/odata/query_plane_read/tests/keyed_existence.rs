@@ -6,7 +6,9 @@
 //! `directory_root_souls_scenario_on_postgres` (gated on `DATABASE_URL`).
 
 use super::*;
-use temper_runtime::persistence::{EventMetadata, EventStore, PersistenceEnvelope};
+use temper_runtime::persistence::{
+    EventMetadata, EventStore, KeyIndexBackfillFence, PersistenceEnvelope,
+};
 use temper_store_sim::{SimEventStore, SimFaultConfig};
 
 mod backend_authority;
@@ -843,12 +845,20 @@ async fn key_index_backfill_reconciles_existing_rows_and_still_watermarks() {
     }
     // Pre-key ord-a directly (a prior partial pass / co-commit already keyed it).
     let ord_a_sequence = current_sequence(&store, &tenant, "Order", "ord-a").await;
+    let repair_revision = store
+        .begin_key_index_backfill(tenant.as_str(), "Order", ORDER_KEY_SET_SIGNATURE)
+        .await
+        .expect("begin pre-key repair");
     store
         .backfill_entity_keys(
             tenant.as_str(),
             "Order",
             "ord-a",
             ord_a_sequence,
+            KeyIndexBackfillFence {
+                key_set_signature: ORDER_KEY_SET_SIGNATURE,
+                contract_revision: repair_revision,
+            },
             &[temper_runtime::persistence::EntityKeyRow {
                 key_name: "ws_path".to_string(),
                 key_hash: ws_path_hash("ws1", "/a"),
@@ -941,6 +951,11 @@ async fn key_index_backfill_skips_deleted_entities_without_blocking_watermark() 
 
     let deleted_stale = ws_path_hash("ws1", "/del");
     let all_null_stale = ws_path_hash("ws-old", "/old");
+    let stale_signature = "pre-v3:ws_path";
+    let stale_revision = store
+        .begin_key_index_backfill(tenant.as_str(), "Order", stale_signature)
+        .await
+        .expect("begin stale-row fixture contract");
     for (entity_id, key_hash) in [
         ("ord-del", deleted_stale.clone()),
         ("ord-null", all_null_stale.clone()),
@@ -952,6 +967,10 @@ async fn key_index_backfill_skips_deleted_entities_without_blocking_watermark() 
                 "Order",
                 entity_id,
                 sequence_nr,
+                KeyIndexBackfillFence {
+                    key_set_signature: stale_signature,
+                    contract_revision: stale_revision,
+                },
                 &[temper_runtime::persistence::EntityKeyRow {
                     key_name: "ws_path".to_string(),
                     key_hash,
@@ -1200,12 +1219,21 @@ async fn key_index_backfill_rekeys_existing_entities_when_a_key_is_added() {
             .expect("seed snapshot");
         // Key it under the OLD key only (so row presence cannot be mistaken for
         // complete coverage of the new declaration).
+        let old_signature = "old_key";
+        let old_revision = store
+            .begin_key_index_backfill(tenant.as_str(), "Order", old_signature)
+            .await
+            .expect("begin old-key fixture contract");
         store
             .backfill_entity_keys(
                 tenant.as_str(),
                 "Order",
                 eid,
                 current_sequence(&store, &tenant, "Order", eid).await,
+                KeyIndexBackfillFence {
+                    key_set_signature: old_signature,
+                    contract_revision: old_revision,
+                },
                 &[temper_runtime::persistence::EntityKeyRow {
                     key_name: "old_key".to_string(),
                     key_hash: format!("old-hash-{eid}"),

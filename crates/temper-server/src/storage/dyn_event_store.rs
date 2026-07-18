@@ -183,6 +183,7 @@ where
         entity_type: &'a str,
         entity_id: &'a str,
         expected_sequence: u64,
+        contract_fence: temper_runtime::persistence::KeyIndexBackfillFence<'a>,
         key_rows: &'a [temper_runtime::persistence::EntityKeyRow],
     ) -> EventStoreFuture<'a, Result<(), PersistenceError>> {
         Box::pin(EventStore::backfill_entity_keys(
@@ -191,6 +192,7 @@ where
             entity_type,
             entity_id,
             expected_sequence,
+            contract_fence,
             key_rows,
         ))
     }

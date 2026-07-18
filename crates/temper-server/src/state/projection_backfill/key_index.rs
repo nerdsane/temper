@@ -165,6 +165,10 @@ pub(in crate::state) async fn populate_key_index_from_snapshots(
                             entity_type,
                             entity_id,
                             sequence_nr,
+                            temper_runtime::persistence::KeyIndexBackfillFence {
+                                key_set_signature: &current_key_set,
+                                contract_revision: repair_revision,
+                            },
                             &key_rows,
                         )
                         .await
@@ -189,6 +193,10 @@ pub(in crate::state) async fn populate_key_index_from_snapshots(
                             entity_type,
                             entity_id,
                             sequence_nr,
+                            temper_runtime::persistence::KeyIndexBackfillFence {
+                                key_set_signature: &current_key_set,
+                                contract_revision: repair_revision,
+                            },
                             &[],
                         )
                         .await

@@ -110,15 +110,17 @@ not a best-effort projection.
 
 ### Backfill uses the same exact reconciliation primitive
 
-`backfill_entity_keys` is defined as sequence-fenced exact reconciliation: the caller
-passes the journal sequence that produced the replayed state; only if the stream is
-still at that sequence does the store delete all existing rows for the entity and
-insert the supplied current rows, including an empty set. Postgres serializes this
-check and repair with normal and batch journal appends through a per-stream advisory
-transaction lock. Sim performs the same check under its deterministic store lock. A
-live write that advances the stream after replay therefore makes the repair fail with
-an optimistic-concurrency error instead of letting stale state overwrite the newer
-key set. The next full pass retries from current state.
+`backfill_entity_keys` is defined as type-contract- and sequence-fenced exact
+reconciliation: the caller passes the key-set signature and monotonic contract
+revision captured before replay, plus the journal sequence that produced the replayed
+state. Only while both fences still hold does the store delete all existing rows for
+the entity and insert the supplied current rows, including an empty set. Postgres
+acquires the tenant/type contract lock before the per-stream advisory transaction
+lock, validates signature and revision in the same transaction, then validates the
+stream sequence before mutation. Sim performs both checks under its deterministic
+store lock. A live write on either the same stream or a different stream of the type
+therefore makes a stale repair fail instead of letting stale state overwrite the
+newer key set. The next full pass retries from current state.
 
 A current claim already held by another live stream is not a skippable row. Both
 authoritative stores reject the repair before mutation, the caller records the entity
@@ -146,10 +148,13 @@ Before replay begins, backfill establishes its target signature under the type l
 this invalidates any older watermark and returns the revision to fence. Every live
 write atomically reconciles its own signature with that state. A different signature
 advances the revision and removes coverage, including remove/re-add and A → B → A
-cycles. Final publication succeeds only when both the revision and target signature
-still match. Establishing the target before replay matters: otherwise a live write
-using the old signature could occur during a new-signature repair without changing
-the previously captured revision.
+cycles. Every per-entity repair and final publication succeeds only when both the
+revision and target signature still match. Establishing the target before replay
+matters: otherwise a live write using the old signature could occur during a
+new-signature repair without changing the previously captured revision. Fencing each
+row mutation also matters: rejecting only final publication cannot roll back stale
+rows already committed earlier in the pass after another entity advanced the type
+contract.
 
 **Why this approach**: a backend-specific data migration cannot reconstruct current
 event-sourced state safely. The existing authoritative backfill already can; a
@@ -201,8 +206,8 @@ authoritative and uses budgeted journal/actor materialization.
 - Seeded actor/store DST proves delete and all-null release ownership across restart.
 - Composite delete/reclaim, partial-null, and rename cases prove exact final-row
   replacement and atomic ownership transfer.
-- Fault, concurrent reclaim, stale-backfill fencing, retry, and replay cases prove
-  journal/key atomicity.
+- Fault, concurrent reclaim, same-stream and cross-stream stale-backfill fencing,
+  retry, and replay cases prove journal/key atomicity.
 - A target-contract race and A → no-key → A cycle prove old signatures cannot regain
   coverage through an ABA-equivalent watermark.
 - Real Postgres coverage proves empty reconciliation, rollback, concurrent reclaim,
@@ -242,8 +247,8 @@ authoritative and uses budgeted journal/actor materialization.
 - Per-stream Postgres appends take an advisory transaction lock so a background repair
   and a live write cannot cross after the replay-sequence check.
 - Authoritative Postgres writes also take a tenant/type contract lock before their
-  stream lock; backfill target establishment and final publication take that same
-  contract lock.
+  stream lock; backfill target establishment, every repair-row transaction, and final
+  publication take that same contract lock.
 - Historical duplicate live claims prevent the keyed type from becoming authoritative
   until the invalid durable data is repaired.
 - Before v3 repair completes, recognized key queries may require a bounded full-type

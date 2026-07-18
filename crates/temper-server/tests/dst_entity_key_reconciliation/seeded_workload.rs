@@ -159,17 +159,23 @@ async fn run_reconciliation_workload(seed: u64) -> ReconciliationTrace {
                 "Doc",
                 "dst-workload",
                 stale_sequence,
+                KeyIndexBackfillFence {
+                    key_set_signature: contract_b,
+                    contract_revision: first_repair_revision,
+                },
                 &stale_rows,
             )
             .await;
-        assert!(matches!(
-            stale,
-            Err(PersistenceError::ConcurrencyViolation {
-                expected: 1,
-                actual: 2
-            })
-        ));
         if old_contract_writer {
+            assert!(matches!(
+                stale,
+                Err(PersistenceError::KeyContractChanged {
+                    expected_revision,
+                    actual_revision,
+                    ..
+                }) if expected_revision == first_repair_revision
+                    && actual_revision > first_repair_revision
+            ));
             assert!(
                 !store
                     .mark_key_index_backfilled_if_revision(
@@ -181,6 +187,14 @@ async fn run_reconciliation_workload(seed: u64) -> ReconciliationTrace {
                     .await
                     .expect("mixed-contract publication check")
             );
+        } else {
+            assert!(matches!(
+                stale,
+                Err(PersistenceError::ConcurrencyViolation {
+                    expected: 1,
+                    actual: 2
+                })
+            ));
         }
     } else {
         assert_eq!(
@@ -207,7 +221,17 @@ async fn run_reconciliation_workload(seed: u64) -> ReconciliationTrace {
         .await
         .expect("begin converging contract-B repair");
     store
-        .backfill_entity_keys("default", "Doc", "dst-workload", 2, &final_rows)
+        .backfill_entity_keys(
+            "default",
+            "Doc",
+            "dst-workload",
+            2,
+            KeyIndexBackfillFence {
+                key_set_signature: contract_b,
+                contract_revision: final_revision,
+            },
+            &final_rows,
+        )
         .await
         .expect("latest-sequence repair converges");
     assert!(

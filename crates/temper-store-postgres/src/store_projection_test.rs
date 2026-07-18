@@ -2,7 +2,7 @@ use super::*;
 use crate::migration::run_migrations;
 use sqlx::PgPool;
 use temper_runtime::persistence::{
-    EntityKeyRow, EventStore, IndexReconciliation, PersistenceAppend,
+    EntityKeyRow, EventStore, IndexReconciliation, KeyIndexBackfillFence, PersistenceAppend,
 };
 
 fn test_envelope(event_type: &str, payload: serde_json::Value) -> PersistenceEnvelope {
@@ -149,8 +149,23 @@ fn entity_key_index_present_absent_and_atomic_reject() {
             )
             .await
             .unwrap();
+        let repair_signature = "v3:path";
+        let repair_revision = store
+            .begin_key_index_backfill(&tenant, "Doc", repair_signature)
+            .await
+            .unwrap();
         let stale = store
-            .backfill_entity_keys(&tenant, "Doc", winner_id, 1, std::slice::from_ref(&key))
+            .backfill_entity_keys(
+                &tenant,
+                "Doc",
+                winner_id,
+                1,
+                KeyIndexBackfillFence {
+                    key_set_signature: repair_signature,
+                    contract_revision: repair_revision,
+                },
+                std::slice::from_ref(&key),
+            )
             .await;
         assert!(matches!(
             stale,
@@ -303,6 +318,11 @@ fn key_index_backfill_and_watermark_methods_round_trip_on_postgres() {
             key_name: "name_parent".to_string(),
             key_hash: format!("root-{}", uuid::Uuid::new_v4()),
         };
+        let repair_signature = "name_parent";
+        let repair_revision = store
+            .begin_key_index_backfill(&tenant, "Directory", repair_signature)
+            .await
+            .unwrap();
 
         // Backfill (no journal event) keys a pre-existing entity — the root case.
         store
@@ -311,6 +331,10 @@ fn key_index_backfill_and_watermark_methods_round_trip_on_postgres() {
                 "Directory",
                 "dir-root",
                 0,
+                KeyIndexBackfillFence {
+                    key_set_signature: repair_signature,
+                    contract_revision: repair_revision,
+                },
                 std::slice::from_ref(&key),
             )
             .await
@@ -342,6 +366,10 @@ fn key_index_backfill_and_watermark_methods_round_trip_on_postgres() {
                 "Directory",
                 "dir-conflict",
                 0,
+                KeyIndexBackfillFence {
+                    key_set_signature: repair_signature,
+                    contract_revision: repair_revision,
+                },
                 std::slice::from_ref(&key),
             )
             .await;
@@ -360,7 +388,17 @@ fn key_index_backfill_and_watermark_methods_round_trip_on_postgres() {
 
         // Empty exact backfill is a repair operation, not a no-op.
         store
-            .backfill_entity_keys(&tenant, "Directory", "dir-root", 0, &[])
+            .backfill_entity_keys(
+                &tenant,
+                "Directory",
+                "dir-root",
+                0,
+                KeyIndexBackfillFence {
+                    key_set_signature: repair_signature,
+                    contract_revision: repair_revision,
+                },
+                &[],
+            )
             .await
             .unwrap();
         assert_eq!(
@@ -412,6 +450,26 @@ fn key_index_backfill_and_watermark_methods_round_trip_on_postgres() {
         // so the stale repair cannot publish even though the write matched the
         // contract that existed before repair began.
         let target_signature = "v3:directory-target";
+        let stable_pid = format!("{tenant}:Directory:dir-stable-race");
+        let current_contract_row = EntityKeyRow {
+            key_name: "current_path".to_string(),
+            key_hash: format!("current-{}", uuid::Uuid::new_v4()),
+        };
+        store
+            .append_with_index_rows(
+                &stable_pid,
+                0,
+                &[test_envelope("Create", serde_json::json!({}))],
+                std::slice::from_ref(&current_contract_row),
+                &[],
+                IndexReconciliation {
+                    keys: true,
+                    key_set_signature: Some(target_signature.to_string()),
+                    vectors: false,
+                },
+            )
+            .await
+            .unwrap();
         let target_revision = store
             .begin_key_index_backfill(&tenant, "Directory", target_signature)
             .await
@@ -439,6 +497,57 @@ fn key_index_backfill_and_watermark_methods_round_trip_on_postgres() {
             )
             .await
             .unwrap();
+        let obsolete_row = EntityKeyRow {
+            key_name: "legacy_path".to_string(),
+            key_hash: format!("legacy-{}", uuid::Uuid::new_v4()),
+        };
+        let stale_repair = store
+            .backfill_entity_keys(
+                &tenant,
+                "Directory",
+                "dir-stable-race",
+                1,
+                KeyIndexBackfillFence {
+                    key_set_signature: target_signature,
+                    contract_revision: target_revision,
+                },
+                std::slice::from_ref(&obsolete_row),
+            )
+            .await;
+        assert!(matches!(
+            stale_repair,
+            Err(PersistenceError::KeyContractChanged {
+                expected_revision,
+                actual_revision,
+                ..
+            }) if expected_revision == target_revision && actual_revision > target_revision
+        ));
+        assert_eq!(
+            store
+                .lookup_by_key(
+                    &tenant,
+                    "Directory",
+                    &current_contract_row.key_name,
+                    &current_contract_row.key_hash,
+                )
+                .await
+                .unwrap(),
+            Some("dir-stable-race".to_string()),
+            "cross-stream contract fence must preserve current rows"
+        );
+        assert_eq!(
+            store
+                .lookup_by_key(
+                    &tenant,
+                    "Directory",
+                    &obsolete_row.key_name,
+                    &obsolete_row.key_hash,
+                )
+                .await
+                .unwrap(),
+            None,
+            "cross-stream contract fence must reject obsolete rows"
+        );
         assert!(
             !store
                 .mark_key_index_backfilled_if_revision(

@@ -23,6 +23,20 @@ pub enum PersistenceError {
     /// Optimistic concurrency check failed (another writer appended first).
     #[error("optimistic concurrency violation: expected sequence {expected}, got {actual}")]
     ConcurrencyViolation { expected: u64, actual: u64 },
+    /// A key-index repair was derived under a type contract that is no longer current.
+    #[error(
+        "key contract changed: expected '{expected_signature}' at revision {expected_revision}, got {actual_signature:?} at revision {actual_revision}"
+    )]
+    KeyContractChanged {
+        /// Signature used to derive the attempted repair rows.
+        expected_signature: String,
+        /// Contract revision captured before replay began.
+        expected_revision: u64,
+        /// Signature current when the repair acquired the type fence.
+        actual_signature: Option<String>,
+        /// Contract revision current when the repair acquired the type fence.
+        actual_revision: u64,
+    },
     /// Event serialization or deserialization failed.
     #[error("serialization error: {0}")]
     Serialization(String),

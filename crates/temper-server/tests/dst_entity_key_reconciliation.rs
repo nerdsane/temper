@@ -1,8 +1,8 @@
 //! DST for ADR-0171 exact declared-key reconciliation under failure and retry.
 
 use temper_runtime::persistence::{
-    EntityKeyRow, EventMetadata, EventStore, IndexReconciliation, PersistenceEnvelope,
-    PersistenceError,
+    EntityKeyRow, EventMetadata, EventStore, IndexReconciliation, KeyIndexBackfillFence,
+    PersistenceEnvelope, PersistenceError,
 };
 use temper_runtime::scheduler::{install_deterministic_context, sim_now, sim_uuid};
 use temper_store_sim::SimEventStore;
@@ -159,12 +159,21 @@ async fn dst_stale_backfill_cannot_overwrite_newer_live_ownership() {
             )
             .await
             .unwrap();
+        let repair_signature = "v3:path";
+        let repair_revision = store
+            .begin_key_index_backfill("default", "Doc", repair_signature)
+            .await
+            .unwrap();
         let stale = store
             .backfill_entity_keys(
                 "default",
                 "Doc",
                 "doc-race",
                 1,
+                KeyIndexBackfillFence {
+                    key_set_signature: repair_signature,
+                    contract_revision: repair_revision,
+                },
                 std::slice::from_ref(&old_path),
             )
             .await;
@@ -200,6 +209,10 @@ async fn dst_stale_backfill_cannot_overwrite_newer_live_ownership() {
                 "Doc",
                 "doc-race",
                 2,
+                KeyIndexBackfillFence {
+                    key_set_signature: repair_signature,
+                    contract_revision: repair_revision,
+                },
                 std::slice::from_ref(&new_path),
             )
             .await
@@ -351,14 +364,21 @@ async fn dst_cross_stream_contract_change_fences_repair_rows() {
                 "Doc",
                 "doc-stable",
                 1,
+                KeyIndexBackfillFence {
+                    key_set_signature: stale_contract,
+                    contract_revision: stale_revision,
+                },
                 std::slice::from_ref(&stale_row),
             )
             .await;
         assert!(
             matches!(
                 stale,
-                Err(PersistenceError::ConcurrencyViolation { expected, actual })
-                    if expected == stale_revision && actual > stale_revision
+                Err(PersistenceError::KeyContractChanged {
+                    expected_revision,
+                    actual_revision,
+                    ..
+                }) if expected_revision == stale_revision && actual_revision > stale_revision
             ),
             "seed {seed}: a cross-stream contract change must reject stale repair rows; got {stale:?}"
         );
@@ -413,6 +433,11 @@ async fn dst_conflicting_backfill_claim_fails_without_partial_mutation() {
             .append("default:Doc:legacy-duplicate", 0, &[envelope("Create")])
             .await
             .unwrap();
+        let repair_signature = "v3:path";
+        let repair_revision = store
+            .begin_key_index_backfill("default", "Doc", repair_signature)
+            .await
+            .unwrap();
 
         let conflict = store
             .backfill_entity_keys(
@@ -420,6 +445,10 @@ async fn dst_conflicting_backfill_claim_fails_without_partial_mutation() {
                 "Doc",
                 "legacy-duplicate",
                 1,
+                KeyIndexBackfillFence {
+                    key_set_signature: repair_signature,
+                    contract_revision: repair_revision,
+                },
                 std::slice::from_ref(&claimed),
             )
             .await;

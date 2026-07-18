@@ -1,7 +1,9 @@
 //! PostgreSQL key-ownership reconciliation and coverage fencing.
 
 use sqlx::PgPool;
-use temper_runtime::persistence::{EntityKeyLookup, EntityKeyRow, PersistenceError};
+use temper_runtime::persistence::{
+    EntityKeyLookup, EntityKeyRow, KeyIndexBackfillFence, PersistenceError,
+};
 
 const UNKNOWN_KEY_SET_SIGNATURE: &str = "<unknown>";
 
@@ -121,12 +123,43 @@ pub(super) async fn backfill_entity_keys(
     entity_type: &str,
     entity_id: &str,
     expected_sequence: u64,
+    contract_fence: KeyIndexBackfillFence<'_>,
     key_rows: &[EntityKeyRow],
 ) -> Result<(), PersistenceError> {
     let mut tx = pool
         .begin()
         .await
         .map_err(|e| PersistenceError::Storage(e.to_string()))?;
+    // Preserve the global lock order used by live appends and batches: the type
+    // contract fence is always acquired before an entity stream fence.
+    lock_key_contract(&mut tx, tenant, entity_type).await?;
+    let current_contract: Option<(String, i64)> = crate::dbm::postgres_query_as!(
+        "SELECT key_set, revision FROM key_index_contract_state \
+         WHERE tenant = $1 AND entity_type = $2 FOR UPDATE",
+    )
+    .bind(tenant)
+    .bind(entity_type)
+    .fetch_optional(&mut *tx)
+    .await
+    .map_err(|e| PersistenceError::Storage(e.to_string()))?;
+    let actual_revision = current_contract
+        .as_ref()
+        .map(|(_, revision)| *revision as u64)
+        .unwrap_or(0);
+    if !matches!(
+        current_contract,
+        Some((ref signature, revision))
+            if signature == contract_fence.key_set_signature
+                && revision as u64 == contract_fence.contract_revision
+    ) {
+        return Err(PersistenceError::KeyContractChanged {
+            expected_signature: contract_fence.key_set_signature.to_string(),
+            expected_revision: contract_fence.contract_revision,
+            actual_signature: current_contract.map(|(signature, _)| signature),
+            actual_revision,
+        });
+    }
+
     let lock_key = event_stream_lock_key(tenant, entity_type, entity_id);
     lock_event_stream(&mut tx, &lock_key).await?;
 

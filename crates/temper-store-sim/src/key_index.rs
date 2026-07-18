@@ -2,7 +2,9 @@
 
 use std::collections::BTreeSet;
 
-use temper_runtime::persistence::{EntityKeyLookup, EntityKeyRow, PersistenceError};
+use temper_runtime::persistence::{
+    EntityKeyLookup, EntityKeyRow, KeyIndexBackfillFence, PersistenceError,
+};
 use temper_runtime::tenant::parse_persistence_id_parts;
 
 use super::SimEventStoreInner;
@@ -49,8 +51,29 @@ pub(super) fn backfill_entity_keys(
     entity_type: &str,
     entity_id: &str,
     expected_sequence: u64,
+    contract_fence: KeyIndexBackfillFence<'_>,
     key_rows: &[EntityKeyRow],
 ) -> Result<(), PersistenceError> {
+    let type_key = (tenant.to_string(), entity_type.to_string());
+    let current_contract = inner.key_index_contract.get(&type_key).cloned();
+    let actual_revision = current_contract
+        .as_ref()
+        .map(|(_, revision)| *revision)
+        .unwrap_or(0);
+    if !matches!(
+        current_contract,
+        Some((ref signature, revision))
+            if signature == contract_fence.key_set_signature
+                && revision == contract_fence.contract_revision
+    ) {
+        return Err(PersistenceError::KeyContractChanged {
+            expected_signature: contract_fence.key_set_signature.to_string(),
+            expected_revision: contract_fence.contract_revision,
+            actual_signature: current_contract.map(|(signature, _)| signature),
+            actual_revision,
+        });
+    }
+
     let persistence_id = format!("{tenant}:{entity_type}:{entity_id}");
     let current_sequence = inner
         .journals

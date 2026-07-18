@@ -16,7 +16,9 @@ use std::time::Duration;
 
 use temper_jit::table::TransitionTable;
 use temper_runtime::ActorSystem;
-use temper_runtime::persistence::{EntityKeyRow, EventMetadata, EventStore, PersistenceEnvelope};
+use temper_runtime::persistence::{
+    EntityKeyRow, EventMetadata, EventStore, KeyIndexBackfillFence, PersistenceEnvelope,
+};
 use temper_runtime::scheduler::{install_deterministic_context, sim_now, sim_uuid};
 use temper_server::key_index::canonical_key_hash;
 use temper_server::storage::{BackendLabel, BoxedEventStore};
@@ -390,13 +392,38 @@ async fn dst_backfill_makes_pre_existing_entity_keyed_findable() {
             key_name: "path".to_string(),
             key_hash: key_hash.clone(),
         }];
+        let repair_signature = "v3:path";
+        let repair_revision = store
+            .begin_key_index_backfill("default", "Doc", repair_signature)
+            .await
+            .unwrap();
         store
-            .backfill_entity_keys("default", "Doc", &format!("doc-pre-{seed}"), 1, &rows)
+            .backfill_entity_keys(
+                "default",
+                "Doc",
+                &format!("doc-pre-{seed}"),
+                1,
+                KeyIndexBackfillFence {
+                    key_set_signature: repair_signature,
+                    contract_revision: repair_revision,
+                },
+                &rows,
+            )
             .await
             .unwrap();
         // Idempotent: a second backfill is a no-op-equivalent.
         store
-            .backfill_entity_keys("default", "Doc", &format!("doc-pre-{seed}"), 1, &rows)
+            .backfill_entity_keys(
+                "default",
+                "Doc",
+                &format!("doc-pre-{seed}"),
+                1,
+                KeyIndexBackfillFence {
+                    key_set_signature: repair_signature,
+                    contract_revision: repair_revision,
+                },
+                &rows,
+            )
             .await
             .unwrap();
 

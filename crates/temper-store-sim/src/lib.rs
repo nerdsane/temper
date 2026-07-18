@@ -623,6 +623,7 @@ impl EventStore for SimEventStore {
         entity_type: &str,
         entity_id: &str,
         expected_sequence: u64,
+        contract_fence: temper_runtime::persistence::KeyIndexBackfillFence<'_>,
         key_rows: &[temper_runtime::persistence::EntityKeyRow],
     ) -> Result<(), PersistenceError> {
         let mut inner = self.inner.lock().expect("SimEventStore lock poisoned"); // ci-ok: infallible lock
@@ -632,6 +633,7 @@ impl EventStore for SimEventStore {
             entity_type,
             entity_id,
             expected_sequence,
+            contract_fence,
             key_rows,
         )
     }

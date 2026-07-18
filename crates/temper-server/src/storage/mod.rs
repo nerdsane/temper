@@ -155,6 +155,7 @@ pub trait DynEventStore: Send + Sync {
         entity_type: &'a str,
         entity_id: &'a str,
         expected_sequence: u64,
+        contract_fence: temper_runtime::persistence::KeyIndexBackfillFence<'a>,
         key_rows: &'a [temper_runtime::persistence::EntityKeyRow],
     ) -> EventStoreFuture<'a, Result<(), PersistenceError>>;
 
@@ -408,10 +409,18 @@ impl BoxedEventStore {
         entity_type: &str,
         entity_id: &str,
         expected_sequence: u64,
+        contract_fence: temper_runtime::persistence::KeyIndexBackfillFence<'_>,
         key_rows: &[temper_runtime::persistence::EntityKeyRow],
     ) -> Result<(), PersistenceError> {
         self.0
-            .backfill_entity_keys(tenant, entity_type, entity_id, expected_sequence, key_rows)
+            .backfill_entity_keys(
+                tenant,
+                entity_type,
+                entity_id,
+                expected_sequence,
+                contract_fence,
+                key_rows,
+            )
             .await
     }
 
