@@ -41,6 +41,14 @@ pub(super) async fn migrate_prefix(
     run_migrations(connection, &MIGRATIONS[..migration_count], fault).await
 }
 
+#[cfg(test)]
+pub(super) async fn migrate_catalog(
+    connection: &Connection,
+    catalog: &[Migration],
+) -> Result<(), PersistenceError> {
+    run_migrations(connection, catalog, FaultInjection::default()).await
+}
+
 async fn run_migrations(
     connection: &Connection,
     catalog: &[Migration],

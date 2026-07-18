@@ -3,6 +3,8 @@ use libsql::{Builder, Connection};
 use super::catalog::MIGRATIONS;
 use super::runner::migrate;
 
+mod runtime_extensions;
+
 #[tokio::test]
 async fn unexpected_required_column_prevents_ledgering_and_preserves_table() {
     let (_directory, connection) = temporary_connection("required-column").await;
