@@ -40,7 +40,7 @@ struct ModelReachabilitySemantics {
     actions: Vec<ModelActionSemantics>,
     invariant_trigger_states: BTreeSet<String>,
     terminal_states: BTreeSet<String>,
-    has_global_invariant: bool,
+    has_global_terminal_invariant: bool,
 }
 
 impl ModelReachabilitySemantics {
@@ -84,7 +84,7 @@ impl ModelReachabilitySemantics {
         action: &ModelActionSemantics,
         current: &Self,
     ) -> bool {
-        if self.has_global_invariant
+        if self.has_global_terminal_invariant
             || !action.effects.is_empty()
             || action.from_states.is_empty()
             || !action
@@ -108,7 +108,6 @@ impl ModelReachabilitySemantics {
 
         self.status_values.contains(target)
             && !current.status_values.contains(target)
-            && !self.has_global_invariant
             && !self.invariant_trigger_states.contains(target)
     }
 }
@@ -158,12 +157,7 @@ fn model_reachability_semantics(spec: &automaton::Automaton) -> ModelReachabilit
     let terminal_states = spec
         .invariants
         .iter()
-        .filter(|invariant| {
-            matches!(
-                automaton::parse_assert_expr(&invariant.assert),
-                Some(automaton::ParsedAssert::NoFurtherTransitions)
-            )
-        })
+        .filter(|invariant| assertion_requires_no_further_transitions(&invariant.assert))
         .flat_map(|invariant| invariant.when.iter().cloned())
         .collect();
     ModelReachabilitySemantics {
@@ -173,11 +167,27 @@ fn model_reachability_semantics(spec: &automaton::Automaton) -> ModelReachabilit
         actions,
         invariant_trigger_states,
         terminal_states,
-        has_global_invariant: spec
-            .invariants
-            .iter()
-            .any(|invariant| invariant.when.is_empty()),
+        has_global_terminal_invariant: spec.invariants.iter().any(|invariant| {
+            invariant.when.is_empty()
+                && assertion_requires_no_further_transitions(&invariant.assert)
+        }),
     }
+}
+
+fn assertion_requires_no_further_transitions(assertion: &str) -> bool {
+    fn contains_terminal(assertion: &automaton::ParsedAssert) -> bool {
+        match assertion {
+            automaton::ParsedAssert::NoFurtherTransitions => true,
+            automaton::ParsedAssert::And(parts) | automaton::ParsedAssert::Or(parts) => {
+                parts.iter().any(contains_terminal)
+            }
+            _ => false,
+        }
+    }
+
+    automaton::parse_assert_expr(assertion)
+        .as_ref()
+        .is_some_and(contains_terminal)
 }
 
 fn normalized_model_guard(guard: automaton::ResolvedGuard) -> automaton::ResolvedGuard {

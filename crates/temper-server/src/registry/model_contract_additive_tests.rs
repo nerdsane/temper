@@ -84,6 +84,34 @@ to = "Archived"
 }
 
 #[test]
+fn hot_swap_allows_effect_free_self_loop_under_global_state_invariant() {
+    let original = EXTENSIBLE_IOA.replace("when = [\"Active\"]", "when = []");
+    let incoming = format!(
+        r#"{original}
+
+[[action]]
+name = "ConfirmSafe"
+kind = "input"
+from = ["Active"]
+to = "Active"
+"#
+    );
+    let mut registry = SpecRegistry::new();
+    let (csdl, xml) = minimal_csdl();
+    registry.register_tenant("alpha", csdl, xml, &[("Order", &original)]);
+
+    let (replacement_csdl, replacement_xml) = minimal_csdl();
+    registry
+        .try_register_tenant(
+            "alpha",
+            replacement_csdl,
+            replacement_xml,
+            &[("Order", &incoming)],
+        )
+        .expect("an effect-free self-loop preserves a global state invariant");
+}
+
+#[test]
 fn hot_swap_rejects_unsafe_unique_additive_action_before_mutating_registry() {
     let unsafe_extension = format!(
         r#"{EXTENSIBLE_IOA}
@@ -168,6 +196,58 @@ to = "Stopped"
         &incoming,
         "global invariants forbid unverified additive actions",
     );
+}
+
+#[test]
+fn hot_swap_rejects_action_under_compound_global_terminal_invariant() {
+    assert_terminal_addition_rejected(
+        &[],
+        "safe && no_further_transitions",
+        "compound global terminal assertions remain terminal",
+    );
+}
+
+#[test]
+fn hot_swap_rejects_action_under_compound_scoped_terminal_invariant() {
+    assert_terminal_addition_rejected(
+        &["Stopped"],
+        "safe || no_further_transitions",
+        "compound scoped terminal assertions fail closed",
+    );
+}
+
+fn assert_terminal_addition_rejected(when: &[&str], assertion: &str, reason: &str) {
+    let when = serde_json::to_string(when).unwrap();
+    let original = format!(
+        r#"
+[automaton]
+name = "Order"
+states = ["Stopped"]
+initial = "Stopped"
+allow_indefinite_states = ["Stopped"]
+
+[[state]]
+name = "safe"
+type = "bool"
+initial = "true"
+
+[[invariant]]
+name = "Terminal"
+when = {when}
+assert = "{assertion}"
+"#
+    );
+    let incoming = format!(
+        r#"{original}
+
+[[action]]
+name = "Restart"
+kind = "input"
+from = ["Stopped"]
+to = "Stopped"
+"#
+    );
+    assert_swap_rejected(&original, &incoming, reason);
 }
 
 #[test]
