@@ -108,8 +108,9 @@ fn config_default_values() {
     assert_eq!(config.seed, 42);
     assert_eq!(config.max_ticks, 500);
     assert_eq!(config.max_actions_per_actor, 50);
-    assert_eq!(config.message_batch_budget, 1_024);
-    assert_eq!(config.reaction_budget_per_tick, 1_024);
+    let sim = SimActorSystem::new(config);
+    assert_eq!(sim.message_batch_budget, 1_024);
+    assert_eq!(sim.reaction_budget_per_tick, 1_024);
 }
 
 #[test]
@@ -123,12 +124,11 @@ fn callback_failure_is_returned_and_invalidates_random_run() {
             ..FaultConfig::none()
         },
         max_actions_per_actor: 1,
-        message_batch_budget: 1,
-        reaction_budget_per_tick: 1,
     };
     let responses = SimIntegrationResponses::new().on_trigger("Job", "integration", "Callback");
 
     let mut scripted = SimActorSystem::new(config.clone());
+    scripted.set_execution_budgets(1, 1);
     scripted.register_actor("Job:1", Box::new(CallbackFailureHandler::new()));
     scripted.set_integration_responses(responses.clone());
     let error = scripted.step("Job:1", "Start", "{}").unwrap_err();
@@ -147,6 +147,7 @@ fn callback_failure_is_returned_and_invalidates_random_run() {
     assert_eq!(scripted.total_messages, messages_after_failure);
 
     let mut random = SimActorSystem::new(config);
+    random.set_execution_budgets(1, 1);
     random.register_actor("Job:1", Box::new(CallbackFailureHandler::new()));
     random.set_integration_responses(responses);
     let result = random.run_random();
@@ -179,10 +180,9 @@ fn final_tick_drains_every_due_message_when_batch_exceeds_budget() {
             ..FaultConfig::none()
         },
         max_actions_per_actor: 2,
-        message_batch_budget: 1,
-        reaction_budget_per_tick: 1,
     };
     let mut sim = SimActorSystem::new(config);
+    sim.set_execution_budgets(1, 1);
     sim.register_actor("Job:1", Box::new(CallbackFailureHandler::new()));
 
     let result = sim.run_random();
@@ -206,10 +206,9 @@ fn final_tick_batches_share_one_reaction_budget() {
             ..FaultConfig::none()
         },
         max_actions_per_actor: 2,
-        message_batch_budget: 1,
-        reaction_budget_per_tick: 1,
     };
     let mut sim = SimActorSystem::new(config);
+    sim.set_execution_budgets(1, 1);
     sim.register_actor("Job:1", Box::new(CallbackFailureHandler::new()));
     sim.set_integration_responses(SimIntegrationResponses::new().on_trigger(
         "Job",
@@ -232,11 +231,9 @@ fn final_tick_batches_share_one_reaction_budget() {
 
 #[test]
 fn callback_cascade_fails_when_reaction_budget_is_exhausted() {
-    let config = SimActorSystemConfig {
-        reaction_budget_per_tick: 2,
-        ..Default::default()
-    };
+    let config = SimActorSystemConfig::default();
     let mut sim = SimActorSystem::new(config);
+    sim.set_execution_budgets(1_024, 2);
     sim.register_actor("Job:1", Box::new(CallbackFailureHandler::new()));
     sim.set_integration_responses(SimIntegrationResponses::new().on_trigger(
         "Job",

@@ -2,6 +2,19 @@ use super::*;
 
 const ORDER_IOA: &str = include_str!("../../../../test-fixtures/specs/order.ioa.toml");
 
+fn run_with_message_batch_budget(
+    ioa_toml: &str,
+    config: &SimConfig,
+    message_batch_budget: usize,
+) -> Result<SimulationResult, String> {
+    let model = build_model_from_ioa(ioa_toml, config.max_counter)?;
+    Ok(run_simulation_impl_with_message_batch_budget(
+        &model,
+        config,
+        message_batch_budget,
+    ))
+}
+
 #[test]
 fn test_simulation_no_faults() {
     let config = SimConfig {
@@ -10,7 +23,6 @@ fn test_simulation_no_faults() {
         num_actors: 3,
         max_actions_per_actor: 15,
         max_counter: 2,
-        message_batch_budget: 1_024,
         faults: FaultConfig::none(),
     };
 
@@ -34,7 +46,6 @@ fn test_simulation_light_faults() {
         num_actors: 3,
         max_actions_per_actor: 20,
         max_counter: 2,
-        message_batch_budget: 1_024,
         faults: FaultConfig::light(),
     };
 
@@ -54,7 +65,6 @@ fn test_simulation_heavy_faults() {
         num_actors: 5,
         max_actions_per_actor: 15,
         max_counter: 2,
-        message_batch_budget: 1_024,
         faults: FaultConfig::heavy(),
     };
 
@@ -78,7 +88,6 @@ fn delayed_message_due_on_final_tick_is_delivered() {
         num_actors: 1,
         max_actions_per_actor: 1,
         max_counter: 2,
-        message_batch_budget: 1,
         faults: FaultConfig {
             message_delay_prob: 1.0,
             max_delay_ticks: 2,
@@ -88,7 +97,7 @@ fn delayed_message_due_on_final_tick_is_delivered() {
         },
     };
 
-    let result = run_simulation_from_ioa(ORDER_IOA, &config).unwrap();
+    let result = run_with_message_batch_budget(ORDER_IOA, &config, 1).unwrap();
 
     assert_eq!(result.total_dropped, 0, "the message was not fault-dropped");
     assert_eq!(
@@ -109,7 +118,6 @@ fn final_tick_drains_every_due_message_when_batch_exceeds_budget() {
         num_actors: 1,
         max_actions_per_actor: 2,
         max_counter: 2,
-        message_batch_budget: 1,
         faults: FaultConfig {
             message_delay_prob: 1.0,
             max_delay_ticks: 2,
@@ -119,7 +127,7 @@ fn final_tick_drains_every_due_message_when_batch_exceeds_budget() {
         },
     };
 
-    let result = run_simulation_from_ioa(ORDER_IOA, &config).unwrap();
+    let result = run_with_message_batch_budget(ORDER_IOA, &config, 1).unwrap();
 
     assert_eq!(result.total_dropped, 0);
     assert_eq!(result.total_messages, 2);
@@ -137,7 +145,6 @@ fn test_simulation_is_reproducible() {
         num_actors: 2,
         max_actions_per_actor: 10,
         max_counter: 2,
-        message_batch_budget: 1_024,
         faults: FaultConfig::light(),
     };
 
@@ -185,7 +192,6 @@ fn test_multi_seed_simulation() {
         num_actors: 2,
         max_actions_per_actor: 10,
         max_counter: 2,
-        message_batch_budget: 1_024,
         faults: FaultConfig::light(),
     };
 
@@ -210,7 +216,6 @@ fn test_simulation_result_contains_final_states() {
         num_actors: 2,
         max_actions_per_actor: 5,
         max_counter: 2,
-        message_batch_budget: 1_024,
         faults: FaultConfig::none(),
     };
 

@@ -407,8 +407,6 @@ fn random_order_no_faults() {
         max_ticks: 200,
         faults: FaultConfig::none(),
         max_actions_per_actor: 30,
-        message_batch_budget: 1_024,
-        reaction_budget_per_tick: 1_024,
     };
     let mut sim = SimActorSystem::new(config);
 
@@ -438,8 +436,6 @@ fn random_all_entities_light_faults() {
         max_ticks: 300,
         faults: FaultConfig::light(),
         max_actions_per_actor: 30,
-        message_batch_budget: 1_024,
-        reaction_budget_per_tick: 1_024,
     };
     let mut sim = SimActorSystem::new(config);
 
@@ -479,8 +475,6 @@ fn random_all_entities_heavy_faults() {
         max_ticks: 500,
         faults: FaultConfig::heavy(),
         max_actions_per_actor: 30,
-        message_batch_budget: 1_024,
-        reaction_budget_per_tick: 1_024,
     };
     let mut sim = SimActorSystem::new(config);
 
@@ -523,8 +517,6 @@ fn run_determinism_trial(seed: u64) -> Vec<(String, String, usize, usize)> {
         max_ticks: 300,
         faults: FaultConfig::light(),
         max_actions_per_actor: 30,
-        message_batch_budget: 1_024,
-        reaction_budget_per_tick: 1_024,
     };
     let mut sim = SimActorSystem::new(config);
 
@@ -590,8 +582,6 @@ fn multi_seed_sweep_all_entities() {
             max_ticks: 100,
             faults: FaultConfig::light(),
             max_actions_per_actor: 20,
-            message_batch_budget: 1_024,
-            reaction_budget_per_tick: 1_024,
         };
         let mut sim = SimActorSystem::new(config);
 

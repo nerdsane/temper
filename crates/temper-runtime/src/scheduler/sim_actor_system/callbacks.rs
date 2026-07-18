@@ -87,7 +87,7 @@ impl SimActorSystem {
     ) -> Result<(), String> {
         while let Some((actor_id, callback_action)) = self.pending_integration_callbacks.pop_front()
         {
-            if *reactions == self.config.reaction_budget_per_tick {
+            if *reactions == self.reaction_budget_per_tick {
                 let description =
                     format!("integration callback budget exhausted after {reactions} reactions");
                 return self.invalidate_callback_cascade(actor_id, callback_action, description);

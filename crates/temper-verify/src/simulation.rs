@@ -11,6 +11,8 @@
 
 use temper_runtime::scheduler::{DeterministicRng, FaultConfig, SimActorState, SimScheduler};
 
+const DEFAULT_MESSAGE_BATCH_BUDGET: usize = 1_024;
+
 use stateright::Model;
 
 use temper_spec::automaton::AssertCompareOp;
@@ -33,8 +35,6 @@ pub struct SimConfig {
     pub max_actions_per_actor: usize,
     /// Maximum counter value for bounded model checking.
     pub max_counter: usize,
-    /// Maximum ready messages transferred in one bounded drain batch.
-    pub message_batch_budget: usize,
     /// Fault injection configuration.
     pub faults: FaultConfig,
 }
@@ -47,7 +47,6 @@ impl Default for SimConfig {
             num_actors: 3,
             max_actions_per_actor: 20,
             max_counter: 2,
-            message_batch_budget: 1_024,
             faults: FaultConfig::none(),
         }
     }
@@ -156,8 +155,16 @@ pub fn run_multi_seed_simulation_from_ioa(
 }
 
 fn run_simulation_impl(model: &TemperModel, config: &SimConfig) -> SimulationResult {
+    run_simulation_impl_with_message_batch_budget(model, config, DEFAULT_MESSAGE_BATCH_BUDGET)
+}
+
+fn run_simulation_impl_with_message_batch_budget(
+    model: &TemperModel,
+    config: &SimConfig,
+    message_batch_budget: usize,
+) -> SimulationResult {
     assert!(
-        config.message_batch_budget > 0,
+        message_batch_budget > 0,
         "message batch budget must be positive"
     );
     let mailbox_budget = usize::try_from(config.max_ticks)
@@ -232,7 +239,7 @@ fn run_simulation_impl(model: &TemperModel, config: &SimConfig) -> SimulationRes
         }
         observed_scheduler_drops = sched.dropped_log().len();
         loop {
-            let delivered = sched.drain_ready(config.message_batch_budget);
+            let delivered = sched.drain_ready(message_batch_budget);
 
             for msg in &delivered {
                 let target_idx = actor_states.iter().position(|(id, _)| id == &msg.to);

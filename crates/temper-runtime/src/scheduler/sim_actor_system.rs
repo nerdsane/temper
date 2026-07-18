@@ -20,6 +20,9 @@ use random_budget::{release, reserve};
 mod recording;
 pub use callbacks::{SimExecutionError, SimIntegrationResponses};
 
+const DEFAULT_MESSAGE_BATCH_BUDGET: usize = 1_024;
+const DEFAULT_REACTION_BUDGET_PER_TICK: usize = 1_024;
+
 /// Configuration for a [`SimActorSystem`] run.
 #[derive(Debug, Clone)]
 pub struct SimActorSystemConfig {
@@ -31,10 +34,6 @@ pub struct SimActorSystemConfig {
     pub faults: FaultConfig,
     /// Maximum actions per actor in random mode.
     pub max_actions_per_actor: usize,
-    /// Maximum ready messages transferred in one bounded drain batch.
-    pub message_batch_budget: usize,
-    /// Maximum integration callbacks executed in one deterministic cascade.
-    pub reaction_budget_per_tick: usize,
 }
 
 impl Default for SimActorSystemConfig {
@@ -44,8 +43,6 @@ impl Default for SimActorSystemConfig {
             max_ticks: 500,
             faults: FaultConfig::light(),
             max_actions_per_actor: 50,
-            message_batch_budget: 1_024,
-            reaction_budget_per_tick: 1_024,
         }
     }
 }
@@ -111,6 +108,8 @@ pub type InvariantChecker = Box<dyn Fn(&str, &str, &str, usize) -> Option<String
 /// seed-controlled scheduler fault injection.
 pub struct SimActorSystem {
     config: SimActorSystemConfig,
+    message_batch_budget: usize,
+    reaction_budget_per_tick: usize,
     actors: BTreeMap<String, Box<dyn SimActorHandler>>,
     action_counts: BTreeMap<String, usize>,
     random_in_flight_actions: BTreeMap<String, usize>,
@@ -138,14 +137,6 @@ pub struct SimActorSystem {
 impl SimActorSystem {
     /// Create a new simulation system with the given config.
     pub fn new(config: SimActorSystemConfig) -> Self {
-        assert!(
-            config.message_batch_budget > 0,
-            "message batch budget must be positive"
-        );
-        assert!(
-            config.reaction_budget_per_tick > 0,
-            "reaction budget per tick must be positive"
-        );
         let clock = Arc::new(LogicalClock::new());
         let id_gen = Arc::new(DeterministicIdGen::new(config.seed));
         let guard = install_sim_context(clock.clone(), id_gen.clone());
@@ -158,6 +149,8 @@ impl SimActorSystem {
 
         Self {
             config,
+            message_batch_budget: DEFAULT_MESSAGE_BATCH_BUDGET,
+            reaction_budget_per_tick: DEFAULT_REACTION_BUDGET_PER_TICK,
             actors: BTreeMap::new(),
             action_counts: BTreeMap::new(),
             random_in_flight_actions: BTreeMap::new(),
@@ -177,6 +170,24 @@ impl SimActorSystem {
             integration_responses: SimIntegrationResponses::new(),
             pending_integration_callbacks: VecDeque::new(),
         }
+    }
+
+    /// Override bounded message-drain and integration-reaction budgets.
+    pub fn set_execution_budgets(
+        &mut self,
+        message_batch_budget: usize,
+        reaction_budget_per_tick: usize,
+    ) {
+        assert!(
+            message_batch_budget > 0,
+            "message batch budget must be positive"
+        );
+        assert!(
+            reaction_budget_per_tick > 0,
+            "reaction budget per tick must be positive"
+        );
+        self.message_batch_budget = message_batch_budget;
+        self.reaction_budget_per_tick = reaction_budget_per_tick;
     }
 
     /// Register an actor handler.
@@ -399,7 +410,7 @@ impl SimActorSystem {
             self.observed_scheduler_drops = self.scheduler.dropped_log().len();
             let mut reactions = 0;
             loop {
-                let delivered = self.scheduler.drain_ready(self.config.message_batch_budget);
+                let delivered = self.scheduler.drain_ready(self.message_batch_budget);
                 for msg in &delivered {
                     release(&mut self.random_in_flight_actions, &msg.to, "delivered");
                     let _ = self.apply_action(&msg.to, &msg.msg_type, &msg.payload);
