@@ -7,6 +7,8 @@
 
 mod model_contract;
 #[cfg(test)]
+mod model_contract_additive_tests;
+#[cfg(test)]
 mod model_contract_tests;
 mod relations;
 pub mod types;
