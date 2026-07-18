@@ -7,6 +7,30 @@ use tracing::instrument;
 use super::TursoEventStore;
 use crate::metrics::TursoQueryTimer;
 
+/// SQL used to persist a completed OTS trajectory.
+pub(crate) const PERSIST_OTS_TRAJECTORY_SQL: &str = "INSERT OR REPLACE INTO ots_trajectories \
+    (trajectory_id, tenant, agent_id, session_id, outcome, turn_count, data, persistence_status, persist_attempts, last_error, created_at, updated_at) \
+    VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, 'persisted', 0, NULL, datetime('now'), datetime('now'))";
+
+/// SQL used to enqueue or refresh an OTS trajectory for background persistence.
+pub(crate) const ENQUEUE_OTS_TRAJECTORY_SQL: &str = "INSERT INTO ots_trajectories \
+    (trajectory_id, tenant, agent_id, session_id, outcome, turn_count, data, persistence_status, persist_attempts, last_error, created_at, updated_at) \
+    VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, 'queued', 0, NULL, datetime('now'), datetime('now')) \
+    ON CONFLICT(trajectory_id) DO UPDATE SET \
+       tenant = excluded.tenant, agent_id = excluded.agent_id, session_id = excluded.session_id, \
+       outcome = excluded.outcome, turn_count = excluded.turn_count, data = excluded.data, \
+       persistence_status = 'queued', last_error = NULL, updated_at = datetime('now')";
+
+/// SQL used to mark an OTS trajectory as durably persisted.
+pub(crate) const MARK_OTS_TRAJECTORY_PERSISTED_SQL: &str = "UPDATE ots_trajectories \
+    SET persistence_status = 'persisted', last_error = NULL, updated_at = datetime('now') \
+    WHERE trajectory_id = ?1";
+
+/// SQL used to mark an OTS trajectory as failed after a persistence attempt.
+pub(crate) const MARK_OTS_TRAJECTORY_FAILED_SQL: &str = "UPDATE ots_trajectories \
+    SET persistence_status = 'failed', persist_attempts = persist_attempts + 1, last_error = ?2, updated_at = datetime('now') \
+    WHERE trajectory_id = ?1";
+
 /// Row returned by OTS trajectory list queries (metadata only, not full data).
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct OtsTrajectoryRow {
@@ -61,9 +85,7 @@ impl TursoEventStore {
         let _timer = TursoQueryTimer::start("turso.persist_ots_trajectory");
         let conn = self.connection()?;
         conn.execute(
-            "INSERT OR REPLACE INTO ots_trajectories \
-             (trajectory_id, tenant, agent_id, session_id, outcome, turn_count, data, persistence_status, persist_attempts, last_error, created_at, updated_at) \
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, 'persisted', 0, NULL, datetime('now'), datetime('now'))",
+            PERSIST_OTS_TRAJECTORY_SQL,
             params![
                 p.trajectory_id.to_string(),
                 p.tenant.to_string(),
@@ -92,13 +114,7 @@ impl TursoEventStore {
         let _timer = TursoQueryTimer::start("turso.enqueue_ots_trajectory");
         let conn = self.connection()?;
         conn.execute(
-            "INSERT INTO ots_trajectories \
-             (trajectory_id, tenant, agent_id, session_id, outcome, turn_count, data, persistence_status, persist_attempts, last_error, created_at, updated_at) \
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, 'queued', 0, NULL, datetime('now'), datetime('now')) \
-             ON CONFLICT(trajectory_id) DO UPDATE SET \
-                tenant = excluded.tenant, agent_id = excluded.agent_id, session_id = excluded.session_id, \
-                outcome = excluded.outcome, turn_count = excluded.turn_count, data = excluded.data, \
-                persistence_status = 'queued', last_error = NULL, updated_at = datetime('now')",
+            ENQUEUE_OTS_TRAJECTORY_SQL,
             params![
                 p.trajectory_id.to_string(),
                 p.tenant.to_string(),
@@ -122,9 +138,7 @@ impl TursoEventStore {
         let _timer = TursoQueryTimer::start("turso.mark_ots_trajectory_persisted");
         let conn = self.connection()?;
         conn.execute(
-            "UPDATE ots_trajectories \
-             SET persistence_status = 'persisted', last_error = NULL, updated_at = datetime('now') \
-             WHERE trajectory_id = ?1",
+            MARK_OTS_TRAJECTORY_PERSISTED_SQL,
             params![trajectory_id.to_string()],
         )
         .await
@@ -141,9 +155,7 @@ impl TursoEventStore {
         let _timer = TursoQueryTimer::start("turso.mark_ots_trajectory_failed");
         let conn = self.connection()?;
         conn.execute(
-            "UPDATE ots_trajectories \
-             SET persistence_status = 'failed', persist_attempts = persist_attempts + 1, last_error = ?2, updated_at = datetime('now') \
-             WHERE trajectory_id = ?1",
+            MARK_OTS_TRAJECTORY_FAILED_SQL,
             params![trajectory_id.to_string(), error.to_string()],
         )
         .await

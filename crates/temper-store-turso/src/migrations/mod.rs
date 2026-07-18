@@ -9,8 +9,10 @@ mod ots_rebuild;
 mod ots_rebuild_tests;
 mod runner;
 mod schema_manifest;
+mod schema_ots_probe;
 mod schema_snapshot;
 mod schema_sql;
+mod schema_trigger;
 mod schema_verify;
 #[cfg(test)]
 mod schema_verify_tests;

@@ -77,10 +77,10 @@ async fn run_migrations(
     let final_ledger = load_ledger(connection).await?;
     validate_ledger_rows(&final_ledger, catalog, &expected_migrations)?;
     require_ledger_length(&final_ledger, catalog.len(), "after migration run")?;
-    for (migration, expected) in catalog.iter().zip(&expected_migrations) {
+    if let Some((migration, expected)) = catalog.last().zip(expected_migrations.last()) {
         verify_schema(connection, &expected.snapshot)
             .await
-            .map_err(|error| migration_context(migration, "verify catalog schema", error))?;
+            .map_err(|error| migration_context(migration, "verify catalog head schema", error))?;
     }
     Ok(())
 }

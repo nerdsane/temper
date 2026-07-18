@@ -354,7 +354,7 @@ async fn semantic_index_drift_prevents_readiness() {
         diagnostic.contains("incompatible semantics"),
         "{diagnostic}"
     );
-    assert!(diagnostic.contains("migration 1"), "{diagnostic}");
+    assert!(diagnostic.contains("migration 7"), "{diagnostic}");
 }
 
 #[test]

@@ -3,7 +3,7 @@ use sha2::{Digest, Sha256};
 use super::ots_rebuild::OTS_REBUILD_DEFINITION;
 use crate::schema;
 
-pub(super) const VALIDATION_MANIFEST_VERSION: &str = "length-prefixed-schema-snapshot-v9";
+pub(super) const VALIDATION_MANIFEST_VERSION: &str = "length-prefixed-schema-snapshot-v10";
 
 #[derive(Clone, Copy, Debug)]
 pub(super) enum MigrationStep {
@@ -409,13 +409,13 @@ mod tests {
     use super::super::runner::expected_checksums;
 
     const RELEASED_CHECKSUMS: &[&str] = &[
-        "bc3765371d09a6ae4113d73298c23ab8b63b679fa7aa2dada7ba72f09244fb9d",
-        "9c13edbfc3ca521449f4ebde32e79e967da7993f9331152a271cf437a92f520a",
-        "8798d6e47ca9e9828c5ca90c34a80870327c9a6c7613ba3dfb5ac8325c3b89a8",
-        "1625be914785f3b89565660b9741329aa5d224159be246767bdc37949daa01a2",
-        "50b6a7469348f7d6d4d75008b0905f4a570d7446df21eb8cc14a8b66452d5a5e",
-        "cb4088753b59728cc43b40d2a24a245271642d1250406bf468fcb08ff2416241",
-        "e57e9d30aa45bdbc928deb2b2b685ba46a57a51d9185e3eadccb3e16889cc4d5",
+        "0faf57ca6c414632c350bbbf5b95f557b103dfaea0de3810310653ce4908e8b4",
+        "c3bc40f106b6fd792d62771499fa5309fed1cf15fc5446ccc68bf231c6b4e654",
+        "6eb72e709229fb024023a252d436c97a09921a6514879c9379c5a220cef09fe4",
+        "a32934ee3488239bfd3c1caca3e58612de45a0d4df403021c1970714e399125e",
+        "aae44c52176a0a9e5751d8a8300b0b56bba0de3964c7b66f02d58c70b0e13890",
+        "1f3d7a48d01d62afd067abbcfebd9d7f6e986c9733de831805a26cf7768b62a6",
+        "ae6952c1187610e1ec69ece56452023a3de01a85b1a8da9ee5b92789f65cc737",
     ];
 
     #[tokio::test]

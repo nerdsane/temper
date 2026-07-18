@@ -4,6 +4,7 @@ use libsql::Connection;
 use temper_runtime::persistence::PersistenceError;
 
 use super::schema_sql::{predicate_after_where, restricted_table_semantics};
+use super::schema_trigger::{TriggerCapability, capture_triggers};
 pub(super) use super::schema_verify::verify_schema;
 
 #[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
@@ -62,6 +63,7 @@ pub(super) struct IndexCapability {
 pub(super) struct SchemaSnapshot {
     pub tables: BTreeMap<String, TableCapability>,
     pub indexes: BTreeMap<String, IndexCapability>,
+    pub triggers: BTreeMap<String, TriggerCapability>,
 }
 
 impl SchemaSnapshot {
@@ -86,7 +88,11 @@ pub(super) async fn capture_schema(
         indexes.insert(name.clone(), index_capability(connection, &name).await?);
     }
 
-    Ok(SchemaSnapshot { tables, indexes })
+    Ok(SchemaSnapshot {
+        tables,
+        indexes,
+        triggers: capture_triggers(connection, None).await?,
+    })
 }
 
 async fn object_names(
@@ -96,7 +102,7 @@ async fn object_names(
     let mut rows = connection
         .query(
             "SELECT name FROM sqlite_schema
-             WHERE type = ?1 AND name NOT LIKE 'sqlite_%'
+             WHERE type = ?1 AND name NOT GLOB 'sqlite_*'
              ORDER BY name",
             [object_type],
         )
@@ -120,7 +126,7 @@ async fn named_index_names(connection: &Connection) -> Result<Vec<String>, Persi
     let mut rows = connection
         .query(
             "SELECT name FROM sqlite_schema
-             WHERE type = 'index' AND sql IS NOT NULL AND name NOT LIKE 'sqlite_%'
+             WHERE type = 'index' AND sql IS NOT NULL AND name NOT GLOB 'sqlite_*'
              ORDER BY name",
             (),
         )

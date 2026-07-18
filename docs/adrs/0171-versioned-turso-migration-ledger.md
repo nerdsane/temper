@@ -135,7 +135,20 @@ remain convergent:
   conflict and foreign-key deferral clauses, `AUTOINCREMENT`, `STRICT`, and
   `WITHOUT ROWID`) must exactly match the catalog capability; named indexes must
   match their owner, uniqueness, ordered key columns, collation/sort direction,
-  and partial predicate;
+  and partial predicate; additional indexes on catalog-owned tables are accepted
+  only when they are non-unique, non-partial, use visible columns rather than
+  expressions, and use built-in collations, so runtime writes do not execute
+  unverified predicates, expressions, or extension code;
+- triggers are inventoried as normalized, owner-scoped capabilities; an
+  undeclared trigger on a catalog-owned table prevents readiness, except for
+  legacy OTS triggers that the existing rebuild contract deliberately preserves;
+  those triggers must pass rollback-only probes using the same SQL as production
+  persisted writes, queued inserts/conflict updates, and failed/persisted status
+  transitions on every startup, and both probe rows and trigger side effects are
+  rolled back;
+- schema inventory excludes only SQLite's literal reserved `sqlite_` prefix;
+  legal user objects such as `sqliteX...` remain subject to the same trigger and
+  index compatibility rules;
 - the one legacy OTS shape that cannot add its non-constant timestamp default
   in place is rebuilt only after exact pre-upgrade column validation; explicit
   indexes and triggers are captured and recreated in the same transaction, while
@@ -161,16 +174,19 @@ message, determines whether an operation is already complete.
 
 ### Sub-Decision 5: Readiness includes final capability verification
 
-After every migration and again after the full catalog, the runner checks all
+After every migration and again at the full-catalog head, the runner checks all
 required object kinds; column affinity, nullability, defaults, and primary-key
 positions; omission safety of unexpected columns; exact unique/foreign-key and
 table-restriction semantics; named-index owners, uniqueness, key ordering,
-collation/sort direction, and predicates; and the ledger head. These capability
-declarations are part of the migration checksum. Completed catalogs are
-reverified in prefix order so drift is attributed to the earliest migration that
-owns the failed capability. A store is returned from
+collation/sort direction, and predicates; trigger ownership and normalized
+definitions; executable extension policy; and the ledger head. These capability
+declarations are part of the migration checksum. Each pending migration verifies
+its cumulative prefix before its ledger row commits. Final readiness verifies
+only the current catalog-head snapshot: later append-only migrations are allowed
+to evolve capabilities introduced by earlier versions without making those
+historical prefix snapshots incompatible with the declared head. A store is returned from
 `TursoEventStore::new` only after that verification succeeds. Diagnostics
-identify the migration version and the missing or incompatible capability so
+identify the catalog head and the missing or incompatible capability so
 operators can repair or restore the database without waiting for a later query
 to fail.
 
@@ -198,6 +214,11 @@ can serve the current data paths.
 - Restrictive extra columns, unique keys, foreign keys, and table modifiers fail
   before their owning version is recorded, while nullable column extensions stay
   compatible with canonical runtime inserts.
+- Undeclared triggers and executable expression/partial indexes fail before
+  readiness and remain unmodified; plain non-unique indexes and rollback-probed
+  legacy OTS triggers retain their supported behavior.
+- A later migration can tighten a table introduced by an earlier version,
+  commit its ledger row, and pass replay against the declared catalog head.
 - Injected DDL/permission failure rolls back the active version and prevents
   `TursoEventStore::new` from returning a store.
 - A checksum mismatch, ledger gap, or newer schema version prevents readiness

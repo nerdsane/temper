@@ -7,10 +7,18 @@ use crate::migrations::runner::{migrate, migrate_catalog};
 const TIGHTEN_EVENTS_STEPS: &[MigrationStep] = &[MigrationStep::Sql(
     "ALTER TABLE events ADD COLUMN required_value TEXT NOT NULL DEFAULT 'x'",
 )];
+const DECLARED_TRIGGER_STEPS: &[MigrationStep] = &[MigrationStep::Sql(
+    "CREATE TRIGGER catalog_events_audit AFTER INSERT ON events BEGIN SELECT 1; END",
+)];
 
 #[tokio::test]
 async fn later_migration_can_tighten_an_earlier_owned_table() {
     let (_directory, connection) = temporary_connection("later-table-tightening").await;
+    migrate(&connection)
+        .await
+        .expect("install released catalog");
+    assert_eq!(ledger_count(&connection).await, MIGRATIONS.len() as i64);
+
     let mut catalog = MIGRATIONS.to_vec();
     catalog.push(Migration {
         version: 8,
@@ -62,6 +70,140 @@ async fn unexpected_trigger_prevents_ledgering_and_is_preserved() {
 }
 
 #[tokio::test]
+async fn sqlite_x_named_trigger_cannot_bypass_inventory() {
+    let (_directory, connection) = temporary_connection("sqlite-x-trigger").await;
+    create_events(&connection, None, None).await;
+    connection
+        .execute(
+            "CREATE TRIGGER sqliteXreject_events BEFORE INSERT ON events
+             BEGIN SELECT RAISE(FAIL, 'blocked'); END",
+            (),
+        )
+        .await
+        .expect("create legally named blocking trigger");
+
+    let error = migrate(&connection)
+        .await
+        .expect_err("a sqliteX-prefixed trigger must still prevent readiness");
+    let diagnostic = error.to_string();
+    assert!(diagnostic.contains("migration 1"), "{diagnostic}");
+    assert!(diagnostic.contains("sqliteXreject_events"), "{diagnostic}");
+    assert_eq!(
+        schema_kind(&connection, "sqliteXreject_events")
+            .await
+            .as_deref(),
+        Some("trigger")
+    );
+    assert_eq!(ledger_count(&connection).await, 0);
+}
+
+#[tokio::test]
+async fn blocking_legacy_ots_trigger_fails_the_runtime_write_probe() {
+    let (_directory, connection) = temporary_connection("blocking-ots-trigger").await;
+    migrate(&connection).await.expect("install current catalog");
+    connection
+        .execute(
+            "CREATE TRIGGER reject_ots_insert AFTER INSERT ON ots_trajectories
+             BEGIN SELECT RAISE(FAIL, 'blocked'); END",
+            (),
+        )
+        .await
+        .expect("create blocking OTS trigger");
+    let before = trigger_sql(&connection, "reject_ots_insert").await;
+
+    let error = migrate(&connection)
+        .await
+        .expect_err("a trigger that rejects canonical OTS writes must prevent readiness");
+    let diagnostic = error.to_string();
+    assert!(diagnostic.contains("migration 7"), "{diagnostic}");
+    assert!(diagnostic.contains("reject_ots_insert"), "{diagnostic}");
+    assert!(
+        diagnostic.contains("production persist/enqueue/status-transition probe"),
+        "{diagnostic}"
+    );
+    assert_eq!(trigger_sql(&connection, "reject_ots_insert").await, before);
+    assert_eq!(ledger_count(&connection).await, MIGRATIONS.len() as i64);
+}
+
+#[tokio::test]
+async fn queued_only_ots_trigger_fails_the_production_write_probe() {
+    let (_directory, connection) = temporary_connection("queued-ots-trigger").await;
+    migrate(&connection).await.expect("install current catalog");
+    connection
+        .execute(
+            "CREATE TRIGGER reject_queued_ots BEFORE INSERT ON ots_trajectories
+             WHEN NEW.persistence_status = 'queued'
+             BEGIN SELECT RAISE(FAIL, 'queued blocked'); END",
+            (),
+        )
+        .await
+        .expect("create queued-only OTS trigger");
+
+    let error = migrate(&connection)
+        .await
+        .expect_err("the probe must exercise the production queued insert path");
+    let diagnostic = error.to_string();
+    assert!(diagnostic.contains("migration 7"), "{diagnostic}");
+    assert!(diagnostic.contains("reject_queued_ots"), "{diagnostic}");
+    assert!(
+        diagnostic.contains("probe OTS enqueue insert"),
+        "{diagnostic}"
+    );
+    assert_eq!(ledger_count(&connection).await, MIGRATIONS.len() as i64);
+}
+
+#[tokio::test]
+async fn benign_legacy_ots_trigger_probe_has_no_durable_side_effects() {
+    let (_directory, connection) = temporary_connection("benign-ots-trigger").await;
+    migrate(&connection).await.expect("install current catalog");
+    connection
+        .execute(
+            "CREATE TABLE ots_probe_audit (trajectory_id TEXT PRIMARY KEY)",
+            (),
+        )
+        .await
+        .expect("create OTS audit table");
+    connection
+        .execute(
+            "CREATE TRIGGER audit_ots_insert AFTER INSERT ON ots_trajectories
+             BEGIN
+                INSERT INTO ots_probe_audit (trajectory_id) VALUES (NEW.trajectory_id);
+             END",
+            (),
+        )
+        .await
+        .expect("create benign OTS trigger");
+
+    migrate(&connection)
+        .await
+        .expect("a canonical-write-compatible OTS trigger must remain supported");
+    assert_eq!(
+        scalar_i64(&connection, "SELECT COUNT(*) FROM ots_probe_audit").await,
+        0,
+        "the validation probe and its trigger side effects must roll back"
+    );
+
+    connection
+        .execute(
+            "INSERT INTO ots_trajectories (trajectory_id, tenant, agent_id, data)
+             VALUES ('runtime-trajectory', 'tenant-a', 'agent-a', '{}')",
+            (),
+        )
+        .await
+        .expect("runtime write through validated OTS trigger");
+    assert_eq!(
+        scalar_i64(
+            &connection,
+            "SELECT COUNT(*) FROM ots_probe_audit
+             WHERE trajectory_id = 'runtime-trajectory'",
+        )
+        .await,
+        1
+    );
+    assert_eq!(ledger_count(&connection).await, MIGRATIONS.len() as i64);
+}
+
+#[tokio::test]
 async fn unexpected_expression_index_prevents_ledgering_and_is_preserved() {
     let (_directory, connection) = temporary_connection("unexpected-expression-index").await;
     create_events(&connection, None, None).await;
@@ -85,6 +227,37 @@ async fn unexpected_expression_index_prevents_ledgering_and_is_preserved() {
     );
     assert_eq!(
         schema_kind(&connection, "events_unexpected_expression")
+            .await
+            .as_deref(),
+        Some("index")
+    );
+    assert_eq!(ledger_count(&connection).await, 0);
+}
+
+#[tokio::test]
+async fn sqlite_x_named_expression_index_cannot_bypass_inventory() {
+    let (_directory, connection) = temporary_connection("sqlite-x-expression-index").await;
+    create_events(&connection, None, None).await;
+    connection
+        .execute(
+            "CREATE INDEX sqliteXevents_expression
+             ON events(json_extract(payload, 'invalid-path'))",
+            (),
+        )
+        .await
+        .expect("create legally named expression index");
+
+    let error = migrate(&connection)
+        .await
+        .expect_err("a sqliteX-prefixed expression index must prevent readiness");
+    let diagnostic = error.to_string();
+    assert!(diagnostic.contains("migration 1"), "{diagnostic}");
+    assert!(
+        diagnostic.contains("sqliteXevents_expression"),
+        "{diagnostic}"
+    );
+    assert_eq!(
+        schema_kind(&connection, "sqliteXevents_expression")
             .await
             .as_deref(),
         Some("index")
@@ -148,6 +321,65 @@ async fn plain_non_unique_index_extension_remains_compatible() {
         .await
         .expect("canonical runtime insert with plain index extension");
     assert_eq!(ledger_count(&connection).await, MIGRATIONS.len() as i64);
+}
+
+#[tokio::test]
+async fn declared_trigger_mismatch_and_absence_prevent_replay() {
+    let (_directory, connection) = temporary_connection("declared-trigger").await;
+    migrate(&connection)
+        .await
+        .expect("install released catalog");
+    let mut catalog = MIGRATIONS.to_vec();
+    catalog.push(Migration {
+        version: 8,
+        name: "declare-events-trigger",
+        steps: DECLARED_TRIGGER_STEPS,
+    });
+    migrate_catalog(&connection, &catalog)
+        .await
+        .expect("install declared trigger migration");
+
+    connection
+        .execute("DROP TRIGGER catalog_events_audit", ())
+        .await
+        .expect("drop declared trigger");
+    connection
+        .execute(
+            "CREATE TRIGGER catalog_events_audit AFTER DELETE ON events BEGIN SELECT 1; END",
+            (),
+        )
+        .await
+        .expect("install mismatched trigger definition");
+    let mismatch = migrate_catalog(&connection, &catalog)
+        .await
+        .expect_err("a changed declared trigger must prevent readiness");
+    let mismatch_diagnostic = mismatch.to_string();
+    assert!(
+        mismatch_diagnostic.contains("migration 8"),
+        "{mismatch_diagnostic}"
+    );
+    assert!(
+        mismatch_diagnostic.contains("incompatible semantics"),
+        "{mismatch_diagnostic}"
+    );
+
+    connection
+        .execute("DROP TRIGGER catalog_events_audit", ())
+        .await
+        .expect("remove mismatched trigger");
+    let missing = migrate_catalog(&connection, &catalog)
+        .await
+        .expect_err("a missing declared trigger must prevent readiness");
+    let missing_diagnostic = missing.to_string();
+    assert!(
+        missing_diagnostic.contains("migration 8"),
+        "{missing_diagnostic}"
+    );
+    assert!(
+        missing_diagnostic.contains("missing required trigger"),
+        "{missing_diagnostic}"
+    );
+    assert_eq!(ledger_count(&connection).await, 8);
 }
 
 async fn trigger_sql(connection: &Connection, trigger: &str) -> String {

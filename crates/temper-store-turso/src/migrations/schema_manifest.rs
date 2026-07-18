@@ -1,11 +1,13 @@
 use super::schema_snapshot::{IndexColumn, SchemaSnapshot};
 use super::schema_sql::RESTRICTED_TABLE_SEQUENCES;
-use super::schema_verify::EXTRA_COLUMN_POLICY;
+use super::schema_verify::{EXTRA_COLUMN_POLICY, EXTRA_INDEX_POLICY, TRIGGER_POLICY};
 
 pub(super) fn canonical_manifest(snapshot: &SchemaSnapshot) -> String {
     let mut manifest = String::new();
     part(&mut manifest, "temper-schema-capability-manifest-v1");
     part(&mut manifest, EXTRA_COLUMN_POLICY);
+    part(&mut manifest, EXTRA_INDEX_POLICY);
+    part(&mut manifest, TRIGGER_POLICY);
     count(&mut manifest, RESTRICTED_TABLE_SEQUENCES.len());
     for (name, sequence) in RESTRICTED_TABLE_SEQUENCES {
         part(&mut manifest, name);
@@ -60,6 +62,13 @@ pub(super) fn canonical_manifest(snapshot: &SchemaSnapshot) -> String {
         boolean(&mut manifest, index.partial);
         index_columns(&mut manifest, &index.columns);
         optional(&mut manifest, index.predicate.as_deref());
+    }
+
+    count(&mut manifest, snapshot.triggers.len());
+    for (trigger_name, trigger) in &snapshot.triggers {
+        part(&mut manifest, trigger_name);
+        part(&mut manifest, &trigger.table);
+        part(&mut manifest, &trigger.definition);
     }
     manifest
 }
