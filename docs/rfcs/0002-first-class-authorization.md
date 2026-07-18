@@ -5,7 +5,7 @@
 - Date: 2026-07-11
 - Authors: Claude Code, with product direction from the human director
 - Related:
-  - ADR-0033: Platform-Assigned Agent Identity (cite by name; three ADRs share the 0033 number)
+  - ADR-0033: Platform-Assigned Agent Identity
   - ADR-0004: Cedar Authorization for Agents
   - ADR-0032: Granular Cedar Policy Storage
   - Linear: ARN-255 (this effort), ARN-163 (platform MCP surface), ARN-170 (ingress auth edge), ARN-151 (contributor identity), ARN-145 (Member roles), ARN-248 (personal spaces), ARN-230 (permit-all fallback)
@@ -137,6 +137,15 @@ resolution to three shapes, all producing a verified `SecurityContext`:
   `Customer::"<sub>"`. The exchange endpoint verifies the upstream identity
   (issuer allowlisted per tenant, standard OIDC ID-token validation) and loads
   principal attributes from the tenant's Member entity (see 3).
+
+  Human sessions are revocable everywhere at once (decided 2026-07-14): each
+  Member carries an `auth_generation` counter, every human token embeds the
+  value current at issuance, and verification rejects tokens carrying an
+  older generation — the same liveness pattern (and the same short-TTL cache)
+  the MCP adapter already uses for agent grant checks. "Sign out everywhere"
+  bumps the counter, invalidating every outstanding token for that human on
+  every device within the cache window. Agent tokens already behave this way
+  through grant revocation.
 - **Registered service credentials** (existing ADR-0033 path): the curation
   pipeline, SSR readers, and other app services each get their own
   `AgentCredential` instead of sharing the global key.
@@ -327,9 +336,9 @@ depends on two deploys landing simultaneously.
 2. **Anonymous read.** Public catalog pages currently read through the shared
    key. Should anonymous principals get read permits in generated policies,
    or should apps mint a public-reader service credential?
-3. **Customer credential revocation.** Human tokens are short-lived; is that
-   sufficient, or does the platform need a per-human revocation list
-   (sign-out-everywhere) from day one?
-4. **Numbering collision hygiene.** Three ADRs share number 0033; policy work
-   here will add ADRs — fix the numbering scheme before this effort's ADRs
-   land.
+
+Two earlier open questions have been resolved: humans get
+sign-out-everywhere revocation from day one (decided 2026-07-14; mechanism in
+Design section 2), and the ADR numbering collisions are being fixed in a
+separate renumbering change so this effort's ADRs can land on unique
+numbers.
