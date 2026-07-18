@@ -12,6 +12,8 @@ use temper_store_sim::SimEventStore;
 
 #[path = "dst_state_timeout_hydration/authority.rs"]
 mod authority;
+#[path = "dst_state_timeout_hydration/reset_on_hotswap.rs"]
+mod reset_on_hotswap;
 
 const CSDL_XML: &str = include_str!("../../../test-fixtures/specs/model.csdl.xml");
 
