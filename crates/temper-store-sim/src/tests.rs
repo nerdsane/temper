@@ -247,7 +247,7 @@ async fn append_batch_reconciles_keys_and_rolls_back_conflicting_claims() {
 }
 
 #[tokio::test]
-async fn key_reconciliation_enumeration_includes_key_only_orphans() {
+async fn key_reconciliation_includes_snapshot_and_key_only_owners() {
     let store = SimEventStore::no_faults(42);
     let orphan = EntityKeyRow {
         key_name: "path".to_string(),
@@ -267,27 +267,80 @@ async fn key_reconciliation_enumeration_includes_key_only_orphans() {
             KeyIndexBackfillFence {
                 key_set_signature: repair_signature,
                 contract_revision: repair_revision,
+                expected_entity_live: false,
             },
             &[orphan],
         )
         .await
         .expect("seed key-only orphan");
+    store
+        .save_snapshot("default:Doc:snapshot-only", 5, b"snapshot-only")
+        .await
+        .expect("seed snapshot-only owner");
 
-    assert!(
+    assert_eq!(
         store
             .list_entity_ids_by_type("default", "Doc")
             .await
-            .expect("journal enumeration")
-            .is_empty(),
-        "the orphan intentionally has no journal"
+            .expect("live durable enumeration"),
+        vec!["snapshot-only".to_string()],
+        "snapshot-only state is live while a key-only orphan is not"
     );
     assert_eq!(
         store
             .list_entity_ids_for_key_reconciliation("default", "Doc")
             .await
             .expect("repair enumeration"),
-        vec!["orphan-owner".to_string()],
-        "exact repair must see derived owners even when their journal is absent"
+        vec!["orphan-owner".to_string(), "snapshot-only".to_string()],
+        "exact repair must see snapshot and derived owners without journals"
+    );
+
+    let snapshot_key = EntityKeyRow {
+        key_name: "path".to_string(),
+        key_hash: "snapshot-path".to_string(),
+    };
+    let stale = store
+        .backfill_entity_keys(
+            "default",
+            "Doc",
+            "snapshot-only",
+            0,
+            KeyIndexBackfillFence {
+                key_set_signature: repair_signature,
+                contract_revision: repair_revision,
+                expected_entity_live: true,
+            },
+            std::slice::from_ref(&snapshot_key),
+        )
+        .await;
+    assert!(matches!(
+        stale,
+        Err(PersistenceError::ConcurrencyViolation {
+            expected: 0,
+            actual: 5
+        })
+    ));
+    store
+        .backfill_entity_keys(
+            "default",
+            "Doc",
+            "snapshot-only",
+            5,
+            KeyIndexBackfillFence {
+                key_set_signature: repair_signature,
+                contract_revision: repair_revision,
+                expected_entity_live: true,
+            },
+            std::slice::from_ref(&snapshot_key),
+        )
+        .await
+        .expect("repair snapshot-only owner at durable sequence");
+    assert_eq!(
+        store
+            .lookup_by_key("default", "Doc", "path", "snapshot-path")
+            .await
+            .expect("snapshot-only lookup"),
+        Some("snapshot-only".to_string())
     );
 }
 
@@ -417,6 +470,59 @@ async fn read_events_from_sequence() {
     assert_eq!(events.len(), 2);
     assert_eq!(events[0].sequence_nr, 2);
     assert_eq!(events[1].sequence_nr, 3);
+}
+
+#[tokio::test]
+async fn terminal_tombstone_lookup_is_not_fault_truncated() {
+    let store = SimEventStore::new(
+        43,
+        SimFaultConfig {
+            write_failure_prob: 0.0,
+            concurrency_violation_prob: 0.0,
+            read_truncation_prob: 1.0,
+            snapshot_failure_prob: 0.0,
+        },
+    );
+    let pid = "default:Order:tombstone-fault";
+    let mut deleted = test_envelope(0, "Delete");
+    deleted.payload = serde_json::json!({
+        "action": "Delete",
+        "from_status": "Draft",
+        "to_status": "Deleted"
+    });
+    store
+        .append(pid, 0, &[test_envelope(0, "Create"), deleted])
+        .await
+        .unwrap();
+
+    assert_eq!(store.read_events(pid, 0).await.unwrap().len(), 1);
+    assert_eq!(
+        store.terminal_tombstone_sequence(pid).await.unwrap(),
+        Some(2)
+    );
+}
+
+#[tokio::test]
+async fn snapshot_only_writer_invalidates_inflight_key_coverage() {
+    let store = SimEventStore::no_faults(44);
+    let signature = "v4:path";
+    let revision = store
+        .begin_key_index_backfill("default", "Doc", signature)
+        .await
+        .unwrap();
+
+    store
+        .save_snapshot("default:Doc:snapshot-only", 1, b"snapshot-only")
+        .await
+        .unwrap();
+
+    assert!(
+        !store
+            .mark_key_index_backfilled_if_revision("default", "Doc", signature, revision)
+            .await
+            .unwrap(),
+        "an entity created after enumeration must reject stale coverage publication"
+    );
 }
 
 #[tokio::test]

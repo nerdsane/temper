@@ -1,5 +1,7 @@
 //! Real-Postgres regression for pre-v3 deleted and orphaned key owners.
 
+use axum::body::Body;
+use axum::http::{Request, StatusCode};
 use temper_runtime::ActorSystem;
 use temper_runtime::persistence::{EventMetadata, EventStore, PersistenceEnvelope};
 use temper_runtime::scheduler::{sim_now, sim_uuid};
@@ -7,11 +9,28 @@ use temper_runtime::tenant::TenantId;
 use temper_server::entity_actor::EntityEvent;
 use temper_server::key_index::{canonical_key_hash, declared_key_set_signature};
 use temper_server::registry::SpecRegistry;
-use temper_server::{ServerState, StorageStack};
+use temper_server::{ServerState, StorageStack, build_router};
 use temper_spec::csdl::parse_csdl;
 use temper_store_postgres::PostgresEventStore;
+use tower::ServiceExt;
 
-const CSDL_XML: &str = include_str!("../../../test-fixtures/specs/model.csdl.xml");
+const CSDL_XML: &str = r#"<?xml version="1.0" encoding="utf-8"?>
+<edmx:Edmx Version="4.0" xmlns:edmx="http://docs.oasis-open.org/odata/ns/edmx">
+  <edmx:DataServices>
+    <Schema Namespace="Temper.Arn238" xmlns="http://docs.oasis-open.org/odata/ns/edm">
+      <EntityType Name="Doc">
+        <Key><PropertyRef Name="Id"/></Key>
+        <Property Name="Id" Type="Edm.String" Nullable="false"/>
+        <Property Name="Status" Type="Edm.String"/>
+        <Property Name="WorkspaceId" Type="Edm.String"/>
+        <Property Name="Path" Type="Edm.String"/>
+      </EntityType>
+      <EntityContainer Name="Container">
+        <EntitySet Name="Docs" EntityType="Temper.Arn238.Doc"/>
+      </EntityContainer>
+    </Schema>
+  </edmx:DataServices>
+</edmx:Edmx>"#;
 const DOC_IOA: &str = include_str!("../../../test-fixtures/specs/keyed_doc.ioa.toml");
 const DATA_ONLY_DOC_IOA: &str = r#"
 [automaton]
@@ -60,6 +79,30 @@ fn server_with_postgres_spec(
 
 fn server_with_postgres(tenant: &TenantId, store: PostgresEventStore) -> ServerState {
     server_with_postgres_spec(tenant, store, DOC_IOA)
+}
+
+async fn read_migrated_doc_by_key(
+    state: &ServerState,
+    tenant: &TenantId,
+) -> (StatusCode, serde_json::Value) {
+    let response = build_router(state.clone())
+        .oneshot(
+            Request::builder()
+                .uri(
+                    "/tdata/Docs?$filter=WorkspaceId%20eq%20%27ws%27%20and%20Path%20eq%20%27%2Fmigrated%27",
+                )
+                .header("x-tenant-id", tenant.as_str())
+                .body(Body::empty())
+                .expect("catalog-only keyed request"),
+        )
+        .await
+        .expect("catalog-only keyed response");
+    let status = response.status();
+    let bytes = axum::body::to_bytes(response.into_body(), 1_000_000)
+        .await
+        .expect("catalog-only keyed response bytes");
+    let body = serde_json::from_slice(&bytes).expect("catalog-only keyed response JSON");
+    (status, body)
 }
 
 /// A type cannot receive a complete watermark while stale rows owned by a deleted
@@ -127,6 +170,33 @@ async fn postgres_backfill_purges_deleted_and_orphaned_key_owners_before_waterma
         )
         .await
         .expect("append pre-v3 event-only tombstone");
+    let stale_snapshot = serde_json::json!({
+        "entity_type": "Doc",
+        "entity_id": deleted_id,
+        "status": "New",
+        "item_count": 0,
+        "total_event_count": sequence_nr + 2,
+        "fields": {"WorkspaceId": "ws", "Path": "/reclaim"},
+    });
+    store
+        .save_snapshot(
+            &persistence_id,
+            sequence_nr + 2,
+            &serde_json::to_vec(&stale_snapshot).expect("serialize stale snapshot"),
+        )
+        .await
+        .expect("seed newer stale live snapshot");
+    store
+        .upsert_query_projection(
+            tenant.as_str(),
+            "Doc",
+            deleted_id,
+            "New",
+            &serde_json::json!({"WorkspaceId": "ws", "Path": "/reclaim"}),
+            sequence_nr + 3,
+        )
+        .await
+        .expect("seed newest stale live catalog row");
 
     let orphan_hash = key_hash("ws", "/orphan");
     sqlx::query(
@@ -230,6 +300,13 @@ async fn postgres_backfill_reconstructs_catalog_only_owner_before_watermark() {
         "precondition: migrated owner has no journal"
     );
 
+    let (pre_repair_status, pre_repair_body) = read_migrated_doc_by_key(&state, &tenant).await;
+    assert_eq!(pre_repair_status, StatusCode::OK);
+    assert_eq!(
+        pre_repair_body["value"][0]["entity_id"], owner_id,
+        "scan-safe reads must materialize catalog-only migration owners before coverage"
+    );
+
     state.populate_key_index_from_snapshots(&tenant).await;
 
     assert_eq!(
@@ -251,6 +328,13 @@ async fn postgres_backfill_reconstructs_catalog_only_owner_before_watermark() {
         "coverage may publish only after the catalog-only owner is indexed"
     );
 
+    let (post_repair_status, post_repair_body) = read_migrated_doc_by_key(&state, &tenant).await;
+    assert_eq!(post_repair_status, StatusCode::OK);
+    assert_eq!(
+        post_repair_body["value"][0]["entity_id"], owner_id,
+        "the fenced key hit must materialize the exact catalog generation"
+    );
+
     let duplicate = state
         .get_or_create_tenant_entity(
             &tenant,
@@ -262,6 +346,50 @@ async fn postgres_backfill_reconstructs_catalog_only_owner_before_watermark() {
     assert!(
         duplicate.is_err(),
         "the reconstructed durable owner must reject a duplicate claim"
+    );
+}
+
+/// A legacy field-index row proves that an entity exists but does not contain a
+/// complete state object from which every declared key component can be derived.
+/// Repair must keep reads scan-safe by withholding coverage instead of certifying
+/// that the partial row owns no key.
+#[tokio::test]
+async fn postgres_backfill_withholds_watermark_for_field_index_only_entity() {
+    let database_url = match std::env::var("DATABASE_URL") {
+        Ok(url) => url,
+        Err(_) => return,
+    };
+    let pool = sqlx::PgPool::connect(&database_url)
+        .await
+        .expect("connect to Postgres");
+    temper_store_postgres::migration::run_migrations(&pool)
+        .await
+        .expect("run Postgres migrations");
+    let store = PostgresEventStore::new(pool.clone());
+    let tenant = TenantId::new(format!("arn238-field-only-pg-{}", sim_uuid()));
+    let state = server_with_postgres(&tenant, store.clone());
+
+    sqlx::query(
+        "INSERT INTO entity_field_index \
+         (tenant, entity_type, entity_id, field_name, field_value, status) \
+         VALUES ($1, 'Doc', 'partial-owner', 'WorkspaceId', 'ws', 'New')",
+    )
+    .bind(tenant.as_str())
+    .execute(&pool)
+    .await
+    .expect("seed field-index-only compatibility row");
+
+    state.populate_key_index_from_snapshots(&tenant).await;
+
+    let table = TransitionTableForTest::doc();
+    let signature = declared_key_set_signature(&table.keys);
+    assert!(
+        !store
+            .key_index_backfilled_types(tenant.as_str())
+            .await
+            .expect("watermarks")
+            .contains(&("Doc".to_string(), signature)),
+        "a field-index-only entity cannot be reconstructed and must block coverage"
     );
 }
 

@@ -134,6 +134,35 @@ async fn dst_retry_succeeds_after_one_violation() {
     assert_eq!(sim.dump_journal(&persistence_id).len(), 2);
 }
 
+/// Catch-up must rebuild from a clean initial state. Replaying the existing
+/// pre-race actor state would apply the first non-idempotent `AddItem` twice.
+#[tokio::test]
+async fn dst_retry_does_not_reapply_preexisting_effects() {
+    let seed = 8;
+    let (_guard, _clock, _id_gen) = install_deterministic_context(seed);
+    let (store, sim) = sim_store_with_handle(seed);
+    let table = order_table();
+    let entity_id = "ord-retry-existing-effect";
+    let persistence_id = format!("default:Order:{entity_id}");
+
+    let system = ActorSystem::new("dst-retry-existing-effect");
+    let actor_ref = spawn_order(&system, table, store, entity_id);
+    wait_ready(&actor_ref).await;
+    let first = dispatch_action(&actor_ref, "AddItem", serde_json::json!({})).await;
+    assert!(first.success);
+    assert_eq!(first.state.item_count, 1);
+
+    sim.inject_concurrency_violations(&persistence_id, 1);
+    let retried = dispatch_action(&actor_ref, "AddItem", serde_json::json!({})).await;
+
+    assert!(retried.success, "retry failed: {:?}", retried.error);
+    assert_eq!(
+        retried.state.item_count, 2,
+        "the preexisting AddItem effect must be replayed exactly once"
+    );
+    assert_eq!(sim.dump_journal(&persistence_id).len(), 3);
+}
+
 // -------------------------------------------------------------------------
 // Test 2: Retry budget exhausts cleanly under sustained violation.
 // -------------------------------------------------------------------------

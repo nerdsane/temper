@@ -99,3 +99,82 @@ fn catalog_writer_waits_for_exact_repair_stream_fence() {
             .expect("catalog writer resumes after fence release");
     });
 }
+
+#[test]
+fn snapshot_only_writer_invalidates_inflight_key_coverage() {
+    let database_url = match std::env::var("DATABASE_URL") {
+        Ok(url) => url,
+        Err(_) => return,
+    };
+    sqlx::test_block_on(async {
+        let pool = sqlx::PgPool::connect(&database_url)
+            .await
+            .expect("connect to Postgres");
+        temper_store_postgres::migration::run_migrations(&pool)
+            .await
+            .expect("run Postgres migrations");
+        let store = PostgresEventStore::new(pool);
+        let tenant = format!("arn238-snapshot-coverage-{}", sim_uuid());
+        let signature = "v4:path";
+        let revision = store
+            .begin_key_index_backfill(&tenant, "Doc", signature)
+            .await
+            .expect("begin key repair");
+
+        store
+            .save_snapshot(&format!("{tenant}:Doc:snapshot-only"), 1, b"snapshot-only")
+            .await
+            .expect("write newly enumerated snapshot owner");
+
+        assert!(
+            !store
+                .mark_key_index_backfilled_if_revision(&tenant, "Doc", signature, revision)
+                .await
+                .expect("conditionally publish coverage"),
+            "a snapshot-only owner created after enumeration must reject publication"
+        );
+    });
+}
+
+#[test]
+fn catalog_only_writer_invalidates_inflight_key_coverage() {
+    let database_url = match std::env::var("DATABASE_URL") {
+        Ok(url) => url,
+        Err(_) => return,
+    };
+    sqlx::test_block_on(async {
+        let pool = sqlx::PgPool::connect(&database_url)
+            .await
+            .expect("connect to Postgres");
+        temper_store_postgres::migration::run_migrations(&pool)
+            .await
+            .expect("run Postgres migrations");
+        let store = PostgresEventStore::new(pool);
+        let tenant = format!("arn238-catalog-coverage-{}", sim_uuid());
+        let signature = "v4:path";
+        let revision = store
+            .begin_key_index_backfill(&tenant, "Doc", signature)
+            .await
+            .expect("begin key repair");
+
+        store
+            .upsert_query_projection(
+                &tenant,
+                "Doc",
+                "catalog-only",
+                "Ready",
+                &serde_json::json!({"WorkspaceId": "ws", "Path": "/catalog-only"}),
+                1,
+            )
+            .await
+            .expect("write newly enumerated catalog owner");
+
+        assert!(
+            !store
+                .mark_key_index_backfilled_if_revision(&tenant, "Doc", signature, revision)
+                .await
+                .expect("conditionally publish coverage"),
+            "a catalog-only owner created after enumeration must reject publication"
+        );
+    });
+}

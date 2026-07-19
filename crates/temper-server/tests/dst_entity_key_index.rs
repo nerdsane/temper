@@ -261,6 +261,106 @@ async fn dst_delete_releases_declared_key_for_reclaim() {
     }
 }
 
+/// Retried delivery after a successful tombstone append is idempotent. A duplicate
+/// terminal suffix would make replay stop below the store's durable high-water and
+/// leave exact repair unable to publish coverage.
+#[tokio::test]
+async fn dst_retried_delete_does_not_append_a_terminal_suffix() {
+    let seed = 238;
+    let (_guard, _clock, _id) = install_deterministic_context(seed);
+    let sim = SimEventStore::no_faults(seed);
+    let store = BoxedEventStore::new(sim.clone());
+    let table = doc_table();
+    let entity_id = "doc-retried-delete";
+    let persistence_id = format!("default:Doc:{entity_id}");
+    let system = ActorSystem::new("dst-retried-delete");
+    let actor_ref = system.spawn(
+        EntityActor::with_persistence(
+            "Doc",
+            entity_id,
+            table.clone(),
+            serde_json::json!({}),
+            store.clone(),
+            BackendLabel::Sim,
+        )
+        .with_tenant("default"),
+        entity_id,
+    );
+    assert!(
+        dispatch(
+            &actor_ref,
+            "Create",
+            serde_json::json!({"WorkspaceId": "ws", "Path": "/retry-delete"}),
+        )
+        .await
+        .success
+    );
+    let sequence_before_delete = sim
+        .dump_journal(&persistence_id)
+        .last()
+        .expect("created history")
+        .sequence_nr;
+    let first_delete = delete(&actor_ref).await;
+    assert!(first_delete.success);
+    assert_eq!(first_delete.state.sequence_nr, sequence_before_delete + 1);
+    let second_delete = delete(&actor_ref).await;
+    assert!(
+        second_delete.success,
+        "retry should be an idempotent success"
+    );
+    assert_eq!(
+        sim.dump_journal(&persistence_id).len(),
+        (sequence_before_delete + 1) as usize,
+        "the durable prefix plus exactly one terminal event"
+    );
+    drop(actor_ref);
+    drop(system);
+
+    let restarted_system = ActorSystem::new("dst-retried-delete-restart");
+    let restarted = restarted_system.spawn(
+        EntityActor::with_persistence(
+            "Doc",
+            entity_id,
+            table,
+            serde_json::json!({}),
+            store.clone(),
+            BackendLabel::Sim,
+        )
+        .with_tenant("default"),
+        "doc-retried-delete-restarted",
+    );
+    let recovered = get_state(&restarted).await.state;
+    assert_eq!(recovered.status, "Deleted");
+    assert_eq!(recovered.sequence_nr, sequence_before_delete + 1);
+
+    let signature = "v4:path";
+    let revision = store
+        .begin_key_index_backfill("default", "Doc", signature)
+        .await
+        .expect("begin exact repair");
+    store
+        .backfill_entity_keys(
+            "default",
+            "Doc",
+            entity_id,
+            recovered.sequence_nr,
+            KeyIndexBackfillFence {
+                key_set_signature: signature,
+                contract_revision: revision,
+                expected_entity_live: false,
+            },
+            &[],
+        )
+        .await
+        .expect("deleted stream must remain repairable");
+    assert!(
+        store
+            .mark_key_index_backfilled_if_revision("default", "Doc", signature, revision)
+            .await
+            .expect("publish repaired coverage")
+    );
+}
+
 /// Every persisted re-key replaces the entity's complete ownership set: old
 /// values disappear, partial-null composite values remain indexable, and an
 /// all-null composite releases ownership rather than leaving its prior row.
@@ -406,6 +506,7 @@ async fn dst_backfill_makes_pre_existing_entity_keyed_findable() {
                 KeyIndexBackfillFence {
                     key_set_signature: repair_signature,
                     contract_revision: repair_revision,
+                    expected_entity_live: true,
                 },
                 &rows,
             )
@@ -421,6 +522,7 @@ async fn dst_backfill_makes_pre_existing_entity_keyed_findable() {
                 KeyIndexBackfillFence {
                     key_set_signature: repair_signature,
                     contract_revision: repair_revision,
+                    expected_entity_live: true,
                 },
                 &rows,
             )
