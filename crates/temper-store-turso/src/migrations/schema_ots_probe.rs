@@ -101,6 +101,37 @@ async fn probe_ots_trigger_writes(connection: &Connection) -> Result<(), Persist
 
     connection
         .execute(
+            PERSIST_OTS_TRAJECTORY_SQL,
+            params![
+                persisted_id.clone(),
+                OTS_PROBE_TENANT.to_string(),
+                OTS_PROBE_AGENT.to_string(),
+                "persist-replacement-session".to_string(),
+                "persist-replacement-outcome".to_string(),
+                2_i64,
+                "{\"stage\":\"persist-replacement\"}".to_string(),
+            ],
+        )
+        .await
+        .map_err(|error| schema_query_error("probe OTS persisted replacement", error))?;
+    require_ots_probe_state(
+        connection,
+        &persisted_id,
+        expected_ots_probe_state(
+            "persist-replacement-session",
+            "persist-replacement-outcome",
+            2,
+            "{\"stage\":\"persist-replacement\"}",
+            "persisted",
+            0,
+            None,
+        ),
+        "persist replacement",
+    )
+    .await?;
+
+    connection
+        .execute(
             ENQUEUE_OTS_TRAJECTORY_SQL,
             params![
                 queued_id.clone(),

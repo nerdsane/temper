@@ -146,9 +146,10 @@ remain convergent:
   semantics and normalized before capability comparison, so alternate casing in
   an `ON` clause cannot evade inventory, ledger protection, or OTS preservation;
   those triggers must pass rollback-only probes using the same SQL as production
-  persisted writes, queued inserts/conflict updates, and failed/persisted status
-  transitions on every startup, and both probe rows and trigger side effects are
-  rolled back;
+  fresh and existing-row `INSERT OR REPLACE` persisted writes, queued
+  inserts/conflict updates, and failed/persisted status transitions on every
+  startup; each resulting row is verified, and both probe rows and trigger side
+  effects are rolled back;
 - schema inventory excludes only SQLite's literal reserved `sqlite_` prefix;
   legal user objects such as `sqliteX...` remain subject to the same trigger and
   index compatibility rules;
