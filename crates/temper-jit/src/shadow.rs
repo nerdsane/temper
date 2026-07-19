@@ -113,6 +113,7 @@ mod tests {
     fn base_table() -> TransitionTable {
         let mut table = TransitionTable {
             entity_name: "Order".into(),
+            spec_declaration_fingerprint: None,
             states: vec!["Draft".into(), "Submitted".into(), "Cancelled".into()],
             initial_state: "Draft".into(),
             keys: vec![],

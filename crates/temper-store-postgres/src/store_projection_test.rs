@@ -798,6 +798,119 @@ fn native_data_only_create_inserts_event_catalog_and_index_atomically() {
 }
 
 #[test]
+fn native_data_only_create_rejects_a_stale_fingerprint_before_any_insert() {
+    let database_url = match std::env::var("DATABASE_URL") {
+        Ok(url) => url,
+        Err(_) => return,
+    };
+
+    sqlx::test_block_on(async {
+        let pool = PgPool::connect(&database_url).await.unwrap();
+        run_migrations(&pool).await.unwrap();
+        let store = PostgresEventStore::new(pool.clone());
+        let tenant = format!("tenant-native-fingerprint-{}", uuid::Uuid::new_v4());
+        let entity_type = "SessionEntry";
+        let entity_id = "entry-stale";
+        let ioa_a = "[automaton]\nname = \"SessionEntry\"\n# declaration-a\n";
+        let ioa_b = "[automaton]\nname = \"SessionEntry\"\n# declaration-b\n";
+        let fingerprint_a = spec_content_fingerprint(ioa_a);
+        let fingerprint_b = spec_content_fingerprint(ioa_b);
+        let csdl = "<Schema Namespace=\"Temper.Tests\" />";
+        store
+            .upsert_spec(&tenant, entity_type, ioa_a, csdl, &fingerprint_a)
+            .await
+            .unwrap();
+        store
+            .upsert_spec(&tenant, entity_type, ioa_b, csdl, &fingerprint_b)
+            .await
+            .unwrap();
+
+        let fields = serde_json::json!({"Id": entity_id, "Content": "stale"});
+        let state = serde_json::json!({
+            "entity_type": entity_type,
+            "entity_id": entity_id,
+            "status": "Active",
+            "fields": fields,
+            "sequence_nr": 1
+        });
+        let mut envelope = test_envelope("Created", fields.clone());
+        envelope.sequence_nr = 1;
+
+        let rejected = store
+            .create_data_only_entity_native_with_state(
+                &tenant,
+                entity_type,
+                entity_id,
+                "Active",
+                &fields,
+                &state,
+                &envelope,
+                Some(&fingerprint_a),
+            )
+            .await
+            .expect_err("declaration A must not write after declaration B is authoritative");
+        assert!(matches!(
+            rejected,
+            PersistenceError::Storage(message)
+                if message.contains("stale spec declaration fingerprint")
+        ));
+
+        let event_count: i64 = crate::dbm::postgres_query_scalar!(
+            "SELECT COUNT(*)::bigint FROM events \
+             WHERE tenant = $1 AND entity_type = $2 AND entity_id = $3",
+        )
+        .bind(&tenant)
+        .bind(entity_type)
+        .bind(entity_id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        let catalog_count: i64 = crate::dbm::postgres_query_scalar!(
+            "SELECT COUNT(*)::bigint FROM entity_catalog \
+             WHERE tenant = $1 AND entity_type = $2 AND entity_id = $3",
+        )
+        .bind(&tenant)
+        .bind(entity_type)
+        .bind(entity_id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        let index_count: i64 = crate::dbm::postgres_query_scalar!(
+            "SELECT COUNT(*)::bigint FROM entity_field_index \
+             WHERE tenant = $1 AND entity_type = $2 AND entity_id = $3",
+        )
+        .bind(&tenant)
+        .bind(entity_type)
+        .bind(entity_id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(
+            (event_count, catalog_count, index_count),
+            (0, 0, 0),
+            "fingerprint validation must precede journal and projection writes"
+        );
+
+        assert_eq!(
+            store
+                .create_data_only_entity_native_with_state(
+                    &tenant,
+                    entity_type,
+                    entity_id,
+                    "Active",
+                    &fields,
+                    &state,
+                    &envelope,
+                    Some(&fingerprint_b),
+                )
+                .await
+                .expect("the authoritative declaration may create the entity"),
+            1
+        );
+    });
+}
+
+#[test]
 fn upsert_query_projection_advances_sequence_without_rewriting_unchanged_index() {
     let database_url = match std::env::var("DATABASE_URL") {
         Ok(url) => url,

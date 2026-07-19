@@ -62,6 +62,7 @@ mod tests {
             "entity_vector_index",
             "entity_vector_index_version",
             "entity_vector_reconciliation_generation",
+            "spec_declaration_authority",
         ] {
             assert!(
                 migration.contains(&format!("create table if not exists {table}")),
@@ -109,6 +110,97 @@ mod tests {
         assert!(
             !migration_six.contains("entity_catalog"),
             "entity_catalog state must not reuse migration version 0006"
+        );
+    }
+
+    #[test]
+    fn migration_thirteen_is_tenant_scoped_and_always_withdraws_stale_watermarks() {
+        let migration =
+            include_str!("../migrations/0013_monotonic_vector_reconciliation.sql").to_lowercase();
+        for table in [
+            "entity_vector_index_version",
+            "entity_vector_reconciliation_generation",
+            "spec_declaration_authority",
+        ] {
+            assert!(
+                migration.contains(&format!("alter table {table} enable row level security")),
+                "migration 0013 must enable RLS for {table}"
+            );
+            assert!(
+                migration.contains(&format!(
+                    "drop policy if exists tenant_isolation on {table}"
+                )),
+                "migration 0013 tenant policy must be idempotent for {table}"
+            );
+            assert!(
+                migration.contains(&format!("create policy tenant_isolation on {table}")),
+                "migration 0013 must create tenant isolation for {table}"
+            );
+        }
+
+        let authority_trigger = migration
+            .split("create or replace function advance_spec_declaration_authority()")
+            .nth(1)
+            .expect("migration 0013 declaration authority trigger")
+            .split("drop trigger if exists specs_declaration_authority_insert")
+            .next()
+            .expect("migration 0013 declaration authority function body");
+        assert!(
+            authority_trigger.contains("delete from vector_index_backfill_watermark"),
+            "every durable declaration change must withdraw the completion watermark"
+        );
+        assert!(
+            !authority_trigger.contains("if found then"),
+            "watermark withdrawal must not depend on an existing generation row"
+        );
+        assert!(
+            migration.contains(
+                "add column if not exists declaration_fingerprint text not null default ''"
+            ),
+            "declaration authority must retain the exact persisted fingerprint"
+        );
+        assert!(
+            migration.contains(
+                "select tenant, entity_type, greatest(version::bigint, 1), ioa_source, content_hash, true"
+            ),
+            "legacy authority seeding must prefer the specs content hash"
+        );
+        assert!(
+            authority_trigger.contains("authority_fingerprint := new.content_hash"),
+            "spec triggers must copy the catalog fingerprint into declaration authority"
+        );
+        assert!(
+            authority_trigger.contains("authority_fingerprint := 'absent:v1'"),
+            "spec deletion must leave an explicit declaration tombstone fingerprint"
+        );
+        assert!(
+            migration.contains("after update of ioa_source, content_hash on specs"),
+            "content-hash-only catalog updates must advance declaration authority"
+        );
+        assert!(
+            authority_trigger.contains("pg_advisory_xact_lock"),
+            "spec mutation must serialize with first-writer authority bootstrap"
+        );
+
+        let tombstone_function = migration
+            .split("create or replace function tombstone_spec_declaration_authority(")
+            .nth(1)
+            .expect("migration 0013 compatibility-authority tombstone function");
+        assert!(
+            tombstone_function.contains("delete from specs"),
+            "the tombstone entry point must cover persisted catalogs"
+        );
+        assert!(
+            tombstone_function.contains("on conflict (tenant, entity_type) do update set"),
+            "the tombstone entry point must cover first-writer authority without a catalog"
+        );
+        assert!(
+            tombstone_function.contains("where spec_declaration_authority.present"),
+            "repeating an existing tombstone must be idempotent"
+        );
+        assert!(
+            tombstone_function.contains("delete from vector_index_backfill_watermark"),
+            "tombstoning first-writer authority must withdraw completion"
         );
     }
 

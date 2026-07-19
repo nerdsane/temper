@@ -1,6 +1,7 @@
 use axum::extract::State;
 use axum::http::StatusCode;
 use axum::response::Json;
+use temper_runtime::tenant::TenantId;
 use temper_spec::automaton::LintSeverity;
 use temper_spec::cross_invariant::{
     CrossInvariantLintSeverity, lint_cross_invariants, parse_cross_invariants,
@@ -184,16 +185,60 @@ pub(crate) async fn handle_load_dir(
         return build_ndjson_response(StatusCode::BAD_REQUEST, lines);
     }
 
-    // Persist loaded specs first when Postgres is configured.
-    let csdl_xml_for_db = csdl_xml.clone();
-    for (entity_type, ioa_source) in &ioa_sources {
-        state
-            .upsert_spec_source(&body.tenant, entity_type, ioa_source, &csdl_xml_for_db)
-            .await
-            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
-    }
-    state
-        .upsert_tenant_constraints(&body.tenant, cross_invariants_toml.as_deref())
+    // Keep this server's durable catalog mutation and registry publication in
+    // one serialized operation. SQL backends additionally take a tenant-scoped
+    // transaction lock shared by every replica and the CLI boot path.
+    let catalog_update_guard = state.spec_catalog_update_lock.lock().await;
+
+    let tenant_id = TenantId::from(body.tenant.as_str());
+    let incoming_entity_types = ioa_sources.keys().cloned().collect::<Vec<_>>();
+    let incoming = ioa_sources
+        .keys()
+        .map(String::as_str)
+        .collect::<std::collections::BTreeSet<_>>();
+    let (had_registry_config, additional_removed_entity_types) = {
+        let registry = state.registry.read().map_err(|error| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("registry lock poisoned: {error}"),
+            )
+        })?;
+        let had_registry_config = registry.get_tenant(&tenant_id).is_some();
+        let mut existing = registry
+            .entity_types(&tenant_id)
+            .into_iter()
+            .map(str::to_string)
+            .collect::<std::collections::BTreeSet<_>>();
+        if !had_registry_config {
+            existing.extend(state.transition_tables.keys().cloned());
+        }
+        let additional_removed_entity_types = if body.merge {
+            Vec::new()
+        } else {
+            existing
+                .into_iter()
+                .filter(|entity_type| !incoming.contains(entity_type.as_str()))
+                .collect()
+        };
+        (had_registry_config, additional_removed_entity_types)
+    };
+    let preserved_incoming_actors = if had_registry_config {
+        state.ready_actor_identities_for_types(&tenant_id, &incoming_entity_types)
+    } else {
+        std::collections::BTreeMap::new()
+    };
+
+    // Persist the incoming committed set, omissions, constraints, and Sim
+    // declaration authority before publishing the in-memory registry.
+    let removed_entity_types = state
+        .persist_spec_catalog_update(
+            &body.tenant,
+            &ioa_sources,
+            &csdl_xml,
+            &additional_removed_entity_types,
+            !body.merge,
+            cross_invariants_toml.as_deref(),
+        )
         .await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
 
@@ -202,9 +247,37 @@ pub(crate) async fn handle_load_dir(
         .iter()
         .map(|(k, v)| (k.as_str(), v.as_str()))
         .collect();
+    let replaced_entity_types = removed_entity_types
+        .iter()
+        .cloned()
+        .chain(incoming_entity_types.iter().cloned())
+        .collect::<std::collections::BTreeSet<_>>()
+        .into_iter()
+        .collect::<Vec<_>>();
 
+    let actor_publication_guard = state.actor_spec_publication_lock.write().map_err(|error| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("actor/spec publication lock poisoned: {error}"),
+        )
+    })?;
+    // Existing actors share the registry's table lock and hot-swap in place.
+    // Preserve those ready incarnations, but evict actors inserted after the snapshot: their
+    // pre_start captured the old declaration after durable authority advanced.
+    // A first tenant publication preserves nothing because fallback tables use
+    // different locks. Removed types are never in the preserved incoming set.
+    state.evict_type_actors_except(
+        &tenant_id,
+        &replaced_entity_types,
+        &preserved_incoming_actors,
+    );
     {
-        let mut registry = state.registry.write().unwrap(); // ci-ok: infallible lock
+        let mut registry = state.registry.write().map_err(|error| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("registry lock poisoned: {error}"),
+            )
+        })?;
         registry
             .try_register_tenant_with_reactions_and_constraints(
                 body.tenant.as_str(),
@@ -222,7 +295,12 @@ pub(crate) async fn handle_load_dir(
                 )
             })?;
     }
+    drop(actor_publication_guard);
     state.rebuild_reaction_dispatcher();
+    drop(catalog_update_guard);
+    state
+        .populate_vector_index_from_snapshots(&TenantId::from(body.tenant.as_str()))
+        .await;
 
     if !state.data_dir.as_os_str().is_empty() {
         let registry_path = state.data_dir.join("specs-registry.json");

@@ -205,6 +205,44 @@ impl ServerState {
             .map_err(|e| format!("registry lock poisoned: {e}"))
     }
 
+    /// Resolve a transition-table snapshot with tenant-aware legacy fallback.
+    ///
+    /// Once a tenant exists in the registry, that tenant config is authoritative:
+    /// an omitted type must not reappear through the boot-time compatibility map.
+    pub(crate) fn transition_table_for_tenant(
+        &self,
+        tenant: &TenantId,
+        entity_type: &str,
+    ) -> Result<Option<Arc<temper_jit::table::TransitionTable>>, String> {
+        let registry = self
+            .registry
+            .read()
+            .map_err(|error| format!("registry lock poisoned: {error}"))?;
+        if registry.get_tenant(tenant).is_some() {
+            return Ok(registry.get_table(tenant, entity_type));
+        }
+        Ok(self.transition_tables.get(entity_type).cloned())
+    }
+
+    /// Resolve the live transition-table lock with tenant-aware legacy fallback.
+    pub(crate) fn transition_table_live_for_tenant(
+        &self,
+        tenant: &TenantId,
+        entity_type: &str,
+    ) -> Result<Option<Arc<RwLock<temper_jit::table::TransitionTable>>>, String> {
+        let registry = self
+            .registry
+            .read()
+            .map_err(|error| format!("registry lock poisoned: {error}"))?;
+        if registry.get_tenant(tenant).is_some() {
+            return Ok(registry.get_table_live(tenant, entity_type));
+        }
+        Ok(self
+            .transition_tables
+            .get(entity_type)
+            .map(|table| Arc::new(RwLock::new((**table).clone()))))
+    }
+
     /// Returns `true` when dispatch should be allowed for the entity type.
     ///
     /// This includes both tenant-scoped specs and legacy single-tenant
@@ -214,8 +252,9 @@ impl ServerState {
         tenant: &TenantId,
         entity_type: &str,
     ) -> Result<bool, String> {
-        Ok(self.has_registered_spec(tenant, entity_type)?
-            || self.transition_tables.contains_key(entity_type))
+        Ok(self
+            .transition_table_for_tenant(tenant, entity_type)?
+            .is_some())
     }
 
     /// Declared `[[key]]` set for a `(tenant, entity_type)` (ADR-0153), resolved
@@ -236,14 +275,8 @@ impl ServerState {
         // Fail fast on a poisoned registry lock rather than silently falling through
         // to `transition_tables` — a silent fallback would re-introduce exactly the
         // ARN-68 bug (registry-installed keys not found → keyed path disabled → scan).
-        {
-            let registry = self.registry.read().expect("registry lock poisoned");
-            if let Some(table) = registry.get_table(tenant, entity_type) {
-                return table.keys.clone();
-            }
-        }
-        self.transition_tables
-            .get(entity_type)
+        self.transition_table_for_tenant(tenant, entity_type)
+            .expect("registry lock poisoned")
             .map(|table| table.keys.clone())
             .unwrap_or_default()
     }
@@ -258,14 +291,8 @@ impl ServerState {
         tenant: &TenantId,
         entity_type: &str,
     ) -> Vec<temper_jit::table::types::DeclaredVector> {
-        {
-            let registry = self.registry.read().expect("registry lock poisoned");
-            if let Some(table) = registry.get_table(tenant, entity_type) {
-                return table.vectors.clone();
-            }
-        }
-        self.transition_tables
-            .get(entity_type)
+        self.transition_table_for_tenant(tenant, entity_type)
+            .expect("registry lock poisoned")
             .map(|table| table.vectors.clone())
             .unwrap_or_default()
     }
@@ -481,7 +508,7 @@ impl ServerState {
         projection_backfill::populate_key_index_from_snapshots(self, tenant).await;
     }
 
-    /// ADR-0155/ADR-0171: reconcile `entity_vector_index` for pre-existing entities
+    /// ADR-0155/ADR-0181: reconcile `entity_vector_index` for pre-existing entities
     /// of every current or previously covered vector-declaring type and record the
     /// watermark. Idempotent; entities written after boot co-commit their journal,
     /// retained vector sequence fence, and candidate rows.
@@ -692,6 +719,16 @@ impl ServerState {
         initial_fields: serde_json::Value,
     ) -> Option<ActorRef<EntityMsg>> {
         let key = format!("{tenant}:{entity_type}:{entity_id}");
+        let _publication_guard = self
+            .actor_spec_publication_lock
+            .read()
+            .expect("actor spec publication lock poisoned");
+
+        // Resolve governance before consulting the actor cache. A removed type
+        // must not keep an orphan actor reachable through the fast path.
+        let table = self
+            .transition_table_live_for_tenant(tenant, entity_type)
+            .ok()??;
 
         // Fast-path: check actor registry under read lock.
         {
@@ -701,21 +738,6 @@ impl ServerState {
                 return Some(actor_ref.clone());
             }
         }
-
-        // Look up live transition table reference: try SpecRegistry first,
-        // fall back to legacy map (wrapped in a fresh RwLock for compat).
-        let table = {
-            let reg = self.registry.read().unwrap();
-            reg.get_table_live(tenant, entity_type)
-        }
-        .or_else(|| {
-            // Legacy single-tenant: wrap the static Arc<TransitionTable> in a
-            // new RwLock. Hot-swap doesn't apply to legacy mode, but the actor
-            // API is uniform. One clone per entity spawn (cheap).
-            self.transition_tables
-                .get(entity_type)
-                .map(|t| Arc::new(RwLock::new((**t).clone())))
-        })?;
 
         // Build actor instance (spawn guarded below to avoid duplicate races).
         // ADR-0048 sub-decision 5: every actor gets the shared idempotency
@@ -797,6 +819,82 @@ impl ServerState {
             }
         }
         runtime_metrics::record_server_state_metrics(self);
+    }
+
+    /// Snapshot ready actor incarnations for the specified tenant/type set.
+    #[cfg(feature = "observe")]
+    pub(crate) fn ready_actor_identities_for_types(
+        &self,
+        tenant: &TenantId,
+        entity_types: &[String],
+    ) -> BTreeMap<String, uuid::Uuid> {
+        let prefixes = entity_types
+            .iter()
+            .map(|entity_type| format!("{tenant}:{entity_type}:"))
+            .collect::<Vec<_>>();
+        self.actor_registry
+            .read()
+            .expect("actor registry lock poisoned during spec replacement")
+            .iter()
+            .filter(|(key, actor)| {
+                actor.is_ready() && prefixes.iter().any(|prefix| key.starts_with(prefix))
+            })
+            .map(|(key, actor)| (key.clone(), actor.id().uid))
+            .collect()
+    }
+
+    /// Stop matching actors except keys known to predate durable publication.
+    #[cfg(feature = "observe")]
+    pub(crate) fn evict_type_actors_except(
+        &self,
+        tenant: &TenantId,
+        entity_types: &[String],
+        preserved_actors: &BTreeMap<String, uuid::Uuid>,
+    ) {
+        if entity_types.is_empty() {
+            return;
+        }
+        let prefixes = entity_types
+            .iter()
+            .map(|entity_type| format!("{tenant}:{entity_type}:"))
+            .collect::<Vec<_>>();
+        let removed = {
+            let mut actors = self
+                .actor_registry
+                .write()
+                .expect("actor registry lock poisoned during spec replacement");
+            let keys = actors
+                .iter()
+                .filter(|(key, actor)| {
+                    let preserved = preserved_actors
+                        .get(key.as_str())
+                        .is_some_and(|uid| *uid == actor.id().uid && actor.is_ready());
+                    !preserved && prefixes.iter().any(|prefix| key.starts_with(prefix))
+                })
+                .map(|(key, _)| key.clone())
+                .collect::<Vec<_>>();
+            keys.into_iter()
+                .filter_map(|key| actors.remove(&key).map(|actor| (key, actor)))
+                .collect::<Vec<_>>()
+        };
+        let mut last_accessed = self
+            .last_accessed
+            .write()
+            .expect("actor access registry lock poisoned during spec replacement");
+        for (key, _) in &removed {
+            last_accessed.remove(key);
+        }
+        drop(last_accessed);
+        for (key, actor) in removed {
+            if let Err(error) = actor.stop() {
+                tracing::warn!(
+                    tenant = %tenant,
+                    actor_key = %key,
+                    error = ?error,
+                    "removed-type actor failed to stop after eviction"
+                );
+            }
+        }
     }
 
     /// Stop and evict an entity actor plus its in-memory indexes.
@@ -1076,15 +1174,7 @@ impl ServerState {
             return Ok(None);
         }
 
-        let table = {
-            let reg = self.registry.read().unwrap();
-            reg.get_table_live(tenant, entity_type)
-        }
-        .or_else(|| {
-            self.transition_tables
-                .get(entity_type)
-                .map(|t| Arc::new(RwLock::new((**t).clone())))
-        });
+        let table = self.transition_table_live_for_tenant(tenant, entity_type)?;
         let Some(table_ref) = table else {
             return Ok(None);
         };
@@ -1092,7 +1182,10 @@ impl ServerState {
             .read()
             .expect("transition table lock poisoned")
             .clone();
-        if !table.rules.is_empty() {
+        // Vector rows and their declaration fence must be co-committed with the
+        // event journal. The native data-only shortcut does not expose that
+        // contract, so vector-declaring types use the normal EntityActor path.
+        if !table.rules.is_empty() || !table.vectors.is_empty() {
             return Ok(None);
         }
 
@@ -1153,6 +1246,19 @@ impl ServerState {
         };
 
         let projection_fields = self.query_projection_fields(tenant, entity_type, &state.fields);
+        let mut key_rows = Vec::new();
+        if let Some(field_map) = state.fields.as_object() {
+            for key in &table.keys {
+                if let Some(key_hash) =
+                    crate::key_index::canonical_key_hash(&key.name, &key.properties, field_map)
+                {
+                    key_rows.push(temper_runtime::persistence::EntityKeyRow {
+                        key_name: key.name.clone(),
+                        key_hash,
+                    });
+                }
+            }
+        }
         let mut created_projection_state = state.clone();
         created_projection_state.sequence_nr = 1;
         created_projection_state.push_event_bounded(created.clone());
@@ -1178,6 +1284,7 @@ impl ServerState {
                     fields: &projection_fields,
                     state: &projection_state,
                     event: &envelope,
+                    spec_declaration_fingerprint: table.spec_declaration_fingerprint.as_deref(),
                 })
                 .instrument(native_span)
                 .await
@@ -1226,7 +1333,17 @@ impl ServerState {
         } else {
             let append_started_at = Instant::now(); // determinism-ok: production-only append wait metric
             let append_result = store
-                .append(&persistence_id, state.sequence_nr, &[envelope])
+                .append_with_index_rows(
+                    &persistence_id,
+                    state.sequence_nr,
+                    &[envelope],
+                    crate::storage::AppendIndexRows {
+                        key_rows: &key_rows,
+                        vector_rows: &[],
+                        reconcile_vectors: false,
+                        spec_declaration_fingerprint: table.spec_declaration_fingerprint.as_deref(),
+                    },
+                )
                 .await;
             runtime_metrics::record_event_store_append_wait(
                 backend.as_str(),

@@ -52,51 +52,32 @@ pub(super) async fn upsert_loaded_specs_to_postgres(
     tenant: &str,
     loaded: &LoadedTenantSpecs,
 ) -> Result<()> {
-    for (entity_type, ioa_source) in &loaded.ioa_sources {
-        sqlx::query(
-            "INSERT INTO specs \
-             (tenant, entity_type, ioa_source, csdl_xml, version, verified, verification_status, updated_at) \
-             VALUES ($1, $2, $3, $4, 1, false, 'pending', now()) \
-             ON CONFLICT (tenant, entity_type) DO UPDATE SET \
-                 ioa_source = EXCLUDED.ioa_source, \
-                 csdl_xml = EXCLUDED.csdl_xml, \
-                 version = specs.version + 1, \
-                 verified = false, \
-                 verification_status = 'pending', \
-                 levels_passed = NULL, \
-                 levels_total = NULL, \
-                 verification_result = NULL, \
-                 updated_at = now()",
+    let fingerprints = loaded
+        .ioa_sources
+        .iter()
+        .map(|(entity_type, ioa_source)| {
+            (
+                entity_type.as_str(),
+                ioa_source.as_str(),
+                temper_store_turso::spec_content_hash(ioa_source),
+            )
+        })
+        .collect::<Vec<_>>();
+    let specs = fingerprints
+        .iter()
+        .map(|(entity_type, source, fingerprint)| (*entity_type, *source, fingerprint.as_str()))
+        .collect::<Vec<_>>();
+    PostgresEventStore::new(pool.clone())
+        .persist_spec_catalog_update(
+            tenant,
+            &specs,
+            &loaded.csdl_xml,
+            &[],
+            true,
+            loaded.cross_invariants_toml.as_deref(),
         )
-        .bind(tenant)
-        .bind(entity_type)
-        .bind(ioa_source)
-        .bind(&loaded.csdl_xml)
-        .execute(pool)
         .await
-        .with_context(|| format!("Failed to persist spec {tenant}/{entity_type}"))?;
-    }
-    if let Some(source) = loaded.cross_invariants_toml.as_deref() {
-        sqlx::query(
-            "INSERT INTO tenant_constraints (tenant, cross_invariants_toml, version, updated_at) \
-             VALUES ($1, $2, 1, now()) \
-             ON CONFLICT (tenant) DO UPDATE SET \
-                 cross_invariants_toml = EXCLUDED.cross_invariants_toml, \
-                 version = tenant_constraints.version + 1, \
-                 updated_at = now()",
-        )
-        .bind(tenant)
-        .bind(source)
-        .execute(pool)
-        .await
-        .with_context(|| format!("Failed to persist tenant constraints for {tenant}"))?;
-    } else {
-        sqlx::query("DELETE FROM tenant_constraints WHERE tenant = $1")
-            .bind(tenant)
-            .execute(pool)
-            .await
-            .with_context(|| format!("Failed to clear tenant constraints for {tenant}"))?;
-    }
+        .with_context(|| format!("Failed to persist spec catalog for {tenant} in Postgres"))?;
     Ok(())
 }
 
@@ -110,26 +91,32 @@ pub(super) async fn upsert_loaded_specs_to_turso(
     tenant: &str,
     loaded: &LoadedTenantSpecs,
 ) -> Result<()> {
-    for (entity_type, ioa_source) in &loaded.ioa_sources {
-        let hash = temper_store_turso::spec_content_hash(ioa_source);
-        turso
-            .upsert_spec(tenant, entity_type, ioa_source, &loaded.csdl_xml, &hash)
-            .await
-            .with_context(|| format!("Failed to persist spec {tenant}/{entity_type} in Turso"))?;
-    }
-    if let Some(source) = loaded.cross_invariants_toml.as_deref() {
-        turso
-            .upsert_tenant_constraints(tenant, source)
-            .await
-            .with_context(|| {
-                format!("Failed to persist tenant constraints for {tenant} in Turso")
-            })?;
-    } else {
-        turso
-            .delete_tenant_constraints(tenant)
-            .await
-            .with_context(|| format!("Failed to clear tenant constraints for {tenant} in Turso"))?;
-    }
+    let fingerprints = loaded
+        .ioa_sources
+        .iter()
+        .map(|(entity_type, ioa_source)| {
+            (
+                entity_type.as_str(),
+                ioa_source.as_str(),
+                temper_store_turso::spec_content_hash(ioa_source),
+            )
+        })
+        .collect::<Vec<_>>();
+    let specs = fingerprints
+        .iter()
+        .map(|(entity_type, source, fingerprint)| (*entity_type, *source, fingerprint.as_str()))
+        .collect::<Vec<_>>();
+    turso
+        .persist_spec_catalog_update(
+            tenant,
+            &specs,
+            &loaded.csdl_xml,
+            &[],
+            true,
+            loaded.cross_invariants_toml.as_deref(),
+        )
+        .await
+        .with_context(|| format!("Failed to persist spec catalog for {tenant} in Turso"))?;
     if let Some(policy_text) = loaded.cedar_policy_text.as_deref() {
         turso
             .save_policy(tenant, "primary", policy_text, "system")

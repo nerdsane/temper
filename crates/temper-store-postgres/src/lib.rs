@@ -22,6 +22,7 @@ pub mod schema;
 mod schema_event_history;
 mod segments;
 mod selected_catalog;
+mod spec_catalog;
 pub mod store;
 
 pub use metrics::init_metrics;

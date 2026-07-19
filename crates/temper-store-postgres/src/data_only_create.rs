@@ -47,6 +47,7 @@ impl PostgresEventStore {
             fields,
             &state,
             event,
+            None,
         )
         .await
     }
@@ -65,6 +66,7 @@ impl PostgresEventStore {
         fields: &serde_json::Value,
         state: &serde_json::Value,
         event: &PersistenceEnvelope,
+        spec_declaration_fingerprint: Option<&str>,
     ) -> Result<u64, PersistenceError> {
         assert_eq!(
             event.sequence_nr, 1,
@@ -119,6 +121,10 @@ impl PostgresEventStore {
                 return Err(storage_error(e));
             }
         };
+
+        if let Some(fingerprint) = spec_declaration_fingerprint {
+            Self::validate_live_spec_declaration(&mut tx, tenant, entity_type, fingerprint).await?;
+        }
 
         let metadata_json = serde_json::to_value(&event.metadata)
             .map_err(|e| PersistenceError::Serialization(e.to_string()))?;

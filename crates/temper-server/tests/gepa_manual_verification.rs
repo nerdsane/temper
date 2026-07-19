@@ -683,31 +683,10 @@ hint = "Reassign the issue to a different implementer."
         Err(e) => println!("  Mutated spec: PARSE FAILED — {e}"),
     }
 
-    // Hot-deploy via registry merge
-    {
-        let mut registry = harness.platform_state.registry.write().unwrap(); // ci-ok: infallible lock
-        let tenant_id = temper_runtime::tenant::TenantId::new(TENANT);
-        let existing_csdl = registry
-            .get_tenant(&tenant_id)
-            .expect("tenant")
-            .csdl
-            .as_ref()
-            .clone();
-        let csdl_xml = temper_spec::csdl::emit_csdl_xml(&existing_csdl);
-        let deploy_result = registry.try_register_tenant_with_reactions_and_constraints(
-            tenant_id,
-            existing_csdl,
-            csdl_xml,
-            &[("Issue", &mutated_spec)],
-            Vec::new(),
-            None,
-            true,
-        );
-        match &deploy_result {
-            Ok(()) => println!("  Hot-deploy: SUCCESS"),
-            Err(e) => println!("  Hot-deploy: FAILED — {e}"),
-        }
-    }
+    // Hot-deploy through the same test primitive used by the behavioral
+    // suite so durable declaration authority precedes registry publication.
+    harness.register_inline_spec(TENANT, "Issue", &mutated_spec);
+    println!("  Hot-deploy: SUCCESS");
 
     // Assign first (to satisfy guard is_true assignee_set)
     let r = harness

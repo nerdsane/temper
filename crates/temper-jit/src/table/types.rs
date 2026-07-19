@@ -44,6 +44,13 @@ pub struct DeclaredVector {
 pub struct TransitionTable {
     /// The entity this table governs (e.g. "Order").
     pub entity_name: String,
+    /// SHA-256 fingerprint of the IOA source compiled into this table.
+    ///
+    /// Tables built directly from an already-parsed automaton may not have a
+    /// source fingerprint. Persistent entity writes require tables built from
+    /// IOA source so stores can reject stale-replica index rows atomically.
+    #[serde(default)]
+    pub spec_declaration_fingerprint: Option<String>,
     /// All valid state values.
     pub states: Vec<String>,
     /// The state an entity starts in.
@@ -152,6 +159,8 @@ impl<'de> Deserialize<'de> for TransitionTable {
         #[derive(Deserialize)]
         struct TransitionTableRaw {
             entity_name: String,
+            #[serde(default)]
+            spec_declaration_fingerprint: Option<String>,
             states: Vec<String>,
             initial_state: String,
             rules: Vec<TransitionRule>,
@@ -168,6 +177,7 @@ impl<'de> Deserialize<'de> for TransitionTable {
         let raw = TransitionTableRaw::deserialize(deserializer)?;
         let mut table = TransitionTable {
             entity_name: raw.entity_name,
+            spec_declaration_fingerprint: raw.spec_declaration_fingerprint,
             states: raw.states,
             initial_state: raw.initial_state,
             rules: raw.rules,
@@ -284,6 +294,7 @@ mod tests {
     fn rebuild_index_groups_by_name() {
         let mut table = TransitionTable {
             entity_name: "TestEntity".to_string(),
+            spec_declaration_fingerprint: None,
             states: vec!["Draft".to_string(), "Active".to_string()],
             initial_state: "Draft".to_string(),
             keys: vec![],

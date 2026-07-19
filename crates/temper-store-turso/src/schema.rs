@@ -1,6 +1,6 @@
 //! SQLite-compatible schema for the Turso/libSQL event store.
-
-mod query_plane;
+pub(crate) mod declaration_authority;
+pub(crate) mod query_plane;
 
 pub use crate::schema_event_history::{
     ALTER_EVENTS_ADD_SEGMENT_INDEX, CREATE_EVENT_SEGMENTS_OPEN_INDEX, CREATE_EVENT_SEGMENTS_TABLE,

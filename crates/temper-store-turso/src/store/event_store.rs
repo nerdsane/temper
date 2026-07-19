@@ -18,6 +18,7 @@ use crate::metrics::record_turso_write_retry;
 use crate::retry::{is_transient_write_error, retry_delay_ms};
 
 const APPEND_BATCH_INSERT_CHUNK_ROWS: usize = 400;
+const ABSENT_DECLARATION_FINGERPRINT: &str = "absent:v1";
 
 struct PreparedEventInsert {
     tenant: String,
@@ -63,6 +64,79 @@ async fn current_vector_generation(
         .get::<i64>(0)
         .map_err(storage_error)?;
     Ok(generation as u64)
+}
+
+async fn validate_spec_declaration_fingerprint(
+    tx: &libsql::Transaction,
+    tenant: &str,
+    entity_type: &str,
+    reconcile_vectors: bool,
+    spec_declaration_fingerprint: Option<&str>,
+) -> Result<(), PersistenceError> {
+    let Some(provided_fingerprint) = spec_declaration_fingerprint else {
+        if reconcile_vectors {
+            return Err(PersistenceError::Storage(format!(
+                "vector reconciliation append requires a spec declaration fingerprint for {tenant}:{entity_type}"
+            )));
+        }
+        return Ok(());
+    };
+    if provided_fingerprint.is_empty() {
+        return Err(PersistenceError::Storage(format!(
+            "live append requires a nonempty spec declaration fingerprint for {tenant}:{entity_type}"
+        )));
+    }
+
+    // Compatibility constructors can supply verified in-memory specs over a
+    // truly empty store. Establish first-writer authority atomically only when
+    // neither a durable catalog row nor a tombstone/authority row exists. Once
+    // either exists, normal catalog mutation is the sole authority.
+    tx.execute(
+        "INSERT INTO spec_declaration_authority \
+         (tenant, entity_type, revision, ioa_source, declaration_fingerprint, present) \
+         SELECT ?1, ?2, 1, '', ?3, 1 \
+         WHERE NOT EXISTS ( \
+             SELECT 1 FROM specs WHERE tenant = ?1 AND entity_type = ?2 \
+         ) \
+         ON CONFLICT(tenant, entity_type) DO NOTHING",
+        params![tenant, entity_type, provided_fingerprint],
+    )
+    .await
+    .map_err(storage_error)?;
+
+    let mut rows = tx
+        .query(
+            "SELECT ioa_source, declaration_fingerprint, present FROM spec_declaration_authority \
+             WHERE tenant = ?1 AND entity_type = ?2",
+            params![tenant, entity_type],
+        )
+        .await
+        .map_err(storage_error)?;
+    let authority = rows.next().await.map_err(storage_error)?.ok_or_else(|| {
+        PersistenceError::Storage(format!(
+            "missing durable spec declaration authority for {tenant}:{entity_type}"
+        ))
+    })?;
+    let ioa_source = authority.get::<String>(0).map_err(storage_error)?;
+    let stored_fingerprint = authority.get::<String>(1).map_err(storage_error)?;
+    let present = authority.get::<i64>(2).map_err(storage_error)? != 0;
+    drop(rows);
+
+    let authoritative_fingerprint = if present {
+        if stored_fingerprint.is_empty() {
+            crate::spec_content_hash(&ioa_source)
+        } else {
+            stored_fingerprint
+        }
+    } else {
+        ABSENT_DECLARATION_FINGERPRINT.to_string()
+    };
+    if authoritative_fingerprint != provided_fingerprint {
+        return Err(PersistenceError::Storage(format!(
+            "stale vector declaration fingerprint for {tenant}:{entity_type}"
+        )));
+    }
+    Ok(())
 }
 
 async fn reconcile_live_vector_rows(
@@ -136,7 +210,7 @@ impl EventStore for TursoEventStore {
         expected_sequence: u64,
         events: &[PersistenceEnvelope],
     ) -> Result<u64, PersistenceError> {
-        self.append_retried(persistence_id, expected_sequence, events, None)
+        self.append_retried(persistence_id, expected_sequence, events, None, None)
             .await
     }
 
@@ -177,9 +251,10 @@ impl EventStore for TursoEventStore {
     // DST. Giving Turso the keyed oracle requires first implementing live co-commit
     // (completing ADR-0153 phase 2 for Turso) — tracked separately.
 
-    // ADR-0171: Turso co-commits the journal, retained vector fence, and current
+    // ADR-0181: Turso co-commits the journal, retained vector fence, and current
     // vector rows in one immediate transaction. The single-event fast path remains
-    // available only to appends that do not reconcile vectors.
+    // available only to appends that neither reconcile vectors nor carry a spec
+    // declaration fingerprint requiring transactional validation.
     async fn append_with_index_rows(
         &self,
         persistence_id: &str,
@@ -188,12 +263,20 @@ impl EventStore for TursoEventStore {
         _key_rows: &[temper_runtime::persistence::EntityKeyRow],
         vector_rows: &[EntityVectorRow],
         reconcile_vectors: bool,
+        spec_declaration_fingerprint: Option<&str>,
     ) -> Result<u64, PersistenceError> {
-        if !reconcile_vectors {
+        if !reconcile_vectors && spec_declaration_fingerprint.is_none() {
             return self.append(persistence_id, expected_sequence, events).await;
         }
-        self.append_retried(persistence_id, expected_sequence, events, Some(vector_rows))
-            .await
+        let vector_rows = reconcile_vectors.then_some(vector_rows);
+        self.append_retried(
+            persistence_id,
+            expected_sequence,
+            events,
+            vector_rows,
+            spec_declaration_fingerprint,
+        )
+        .await
     }
 
     async fn begin_vector_index_reconciliation(
@@ -201,7 +284,14 @@ impl EventStore for TursoEventStore {
         tenant: &str,
         entity_type: &str,
         vector_set: &str,
+        declaration_revision: u64,
+        declaration_fingerprint: &str,
     ) -> Result<u64, PersistenceError> {
+        if declaration_revision == 0 || declaration_fingerprint.is_empty() {
+            return Err(PersistenceError::Storage(format!(
+                "vector declaration revision must be nonzero and fingerprinted for {tenant}:{entity_type}"
+            )));
+        }
         let _write_permit = self
             .acquire_write_permit(
                 "turso.begin_vector_index_reconciliation",
@@ -213,26 +303,171 @@ impl EventStore for TursoEventStore {
             .transaction_with_behavior(TransactionBehavior::Immediate)
             .await
             .map_err(storage_error)?;
-        tx.execute(
+
+        validate_spec_declaration_fingerprint(
+            &tx,
+            tenant,
+            entity_type,
+            true,
+            Some(declaration_fingerprint),
+        )
+        .await?;
+
+        // The authority row survives hard spec deletion. Spec triggers advance it
+        // and fence existing vector work within the same immediate transaction.
+        let mut authority_rows = tx
+            .query(
+                "SELECT revision, ioa_source, declaration_fingerprint, present \
+                 FROM spec_declaration_authority \
+                 WHERE tenant = ?1 AND entity_type = ?2",
+                params![tenant, entity_type],
+            )
+            .await
+            .map_err(storage_error)?;
+        let authority = authority_rows
+            .next()
+            .await
+            .map_err(storage_error)?
+            .ok_or_else(|| {
+                PersistenceError::Storage(format!(
+                    "missing durable spec declaration authority for {tenant}:{entity_type}"
+                ))
+            })?;
+        let authoritative_revision = authority.get::<i64>(0).map_err(storage_error)?;
+        let ioa_source = authority.get::<String>(1).map_err(storage_error)?;
+        let authority_fingerprint = authority.get::<String>(2).map_err(storage_error)?;
+        let present = authority.get::<i64>(3).map_err(storage_error)? != 0;
+        drop(authority_rows);
+        let stored_fingerprint = if present {
+            if authority_fingerprint.is_empty() {
+                crate::spec_content_hash(&ioa_source)
+            } else {
+                authority_fingerprint
+            }
+        } else {
+            ABSENT_DECLARATION_FINGERPRINT.to_string()
+        };
+        if stored_fingerprint != declaration_fingerprint {
+            return Err(PersistenceError::Storage(format!(
+                "stale vector declaration fingerprint for {tenant}:{entity_type}"
+            )));
+        }
+        let authoritative_revision = u64::try_from(authoritative_revision).map_err(|_| {
+            PersistenceError::Storage(format!(
+                "invalid durable spec revision for {tenant}:{entity_type}"
+            ))
+        })?;
+        let stored_revision = i64::try_from(authoritative_revision).map_err(|_| {
+            PersistenceError::Storage(format!(
+                "vector declaration revision exhausted for {tenant}:{entity_type}"
+            ))
+        })?;
+
+        let inserted = tx
+            .execute(
             "INSERT INTO entity_vector_reconciliation_generation \
-             (tenant, entity_type, generation, vector_set) VALUES (?1, ?2, 0, '') \
+             (tenant, entity_type, generation, declaration_revision, declaration_fingerprint, vector_set) \
+             VALUES (?1, ?2, 1, ?3, ?4, ?5) \
              ON CONFLICT(tenant, entity_type) DO NOTHING",
-            params![tenant, entity_type],
+            params![
+                tenant,
+                entity_type,
+                stored_revision,
+                declaration_fingerprint,
+                vector_set
+            ],
         )
         .await
         .map_err(storage_error)?;
+        if inserted == 1 {
+            tx.execute(
+                "DELETE FROM vector_index_backfill_watermark \
+                 WHERE tenant = ?1 AND entity_type = ?2",
+                params![tenant, entity_type],
+            )
+            .await
+            .map_err(storage_error)?;
+            tx.commit().await.map_err(storage_error)?;
+            return Ok(1);
+        }
+
+        let mut current_rows = tx
+            .query(
+                "SELECT generation, declaration_revision, declaration_fingerprint, vector_set \
+                 FROM entity_vector_reconciliation_generation \
+                 WHERE tenant = ?1 AND entity_type = ?2",
+                params![tenant, entity_type],
+            )
+            .await
+            .map_err(storage_error)?;
+        let current = current_rows
+            .next()
+            .await
+            .map_err(storage_error)?
+            .ok_or_else(|| {
+                PersistenceError::Storage(format!(
+                    "missing vector reconciliation generation for {tenant}:{entity_type}"
+                ))
+            })?;
+        let generation = current.get::<i64>(0).map_err(storage_error)?;
+        let current_revision = current.get::<i64>(1).map_err(storage_error)?;
+        let current_fingerprint = current.get::<String>(2).map_err(storage_error)?;
+        let current_set = current.get::<String>(3).map_err(storage_error)?;
+        drop(current_rows);
+
+        let current_revision = u64::try_from(current_revision).map_err(|_| {
+            PersistenceError::Storage(format!(
+                "invalid vector declaration revision for {tenant}:{entity_type}"
+            ))
+        })?;
+        if authoritative_revision < current_revision {
+            return Err(PersistenceError::Storage(format!(
+                "vector reconciliation revision {current_revision} exceeds declaration authority {authoritative_revision} for {tenant}:{entity_type}"
+            )));
+        }
+        if authoritative_revision == current_revision {
+            if current_fingerprint == declaration_fingerprint && current_set == vector_set {
+                tx.commit().await.map_err(storage_error)?;
+                return u64::try_from(generation).map_err(|_| {
+                    PersistenceError::Storage(format!(
+                        "invalid vector reconciliation generation for {tenant}:{entity_type}"
+                    ))
+                });
+            }
+            if !current_fingerprint.is_empty() || !current_set.is_empty() {
+                return Err(PersistenceError::Storage(format!(
+                    "conflicting vector declaration at revision {authoritative_revision} for {tenant}:{entity_type}"
+                )));
+            }
+        }
+
+        let next_generation = if authoritative_revision == current_revision {
+            generation
+        } else {
+            generation.checked_add(1).ok_or_else(|| {
+                PersistenceError::Storage(format!(
+                    "vector reconciliation generation exhausted for {tenant}:{entity_type}"
+                ))
+            })?
+        };
         tx.execute(
             "UPDATE entity_vector_reconciliation_generation \
-             SET generation = generation + 1, vector_set = ?3 \
+             SET generation = ?3, declaration_revision = ?4, \
+                 declaration_fingerprint = ?5, vector_set = ?6 \
              WHERE tenant = ?1 AND entity_type = ?2",
-            params![tenant, entity_type, vector_set],
+            params![
+                tenant,
+                entity_type,
+                next_generation,
+                stored_revision,
+                declaration_fingerprint,
+                vector_set
+            ],
         )
         .await
         .map_err(storage_error)?;
-        let generation = current_vector_generation(&tx, tenant, entity_type).await?;
-        // Beginning a new declaration set atomically withdraws the prior completion
-        // claim; otherwise a coordinator for that old signature could still see it
-        // and skip while this generation is in flight.
+        // Claiming a trigger-advanced or upgraded revision withdraws any legacy
+        // completion claim. An exact retry returned above leaves it intact.
         tx.execute(
             "DELETE FROM vector_index_backfill_watermark \
              WHERE tenant = ?1 AND entity_type = ?2",
@@ -241,7 +476,11 @@ impl EventStore for TursoEventStore {
         .await
         .map_err(storage_error)?;
         tx.commit().await.map_err(storage_error)?;
-        Ok(generation)
+        u64::try_from(next_generation).map_err(|_| {
+            PersistenceError::Storage(format!(
+                "invalid vector reconciliation generation for {tenant}:{entity_type}"
+            ))
+        })
     }
 
     async fn backfill_entity_vectors(
@@ -547,6 +786,7 @@ impl EventStore for TursoEventStore {
                     &[],
                     &append.vector_rows,
                     append.reconcile_vectors,
+                    append.spec_declaration_fingerprint.as_deref(),
                 )
                 .await?;
             return Ok(vec![PersistenceAppendResult {
@@ -922,22 +1162,24 @@ impl EventStore for TursoEventStore {
 
 impl TursoEventStore {
     /// Retry one complete journal append, optionally including vector-index
-    /// reconciliation in the same transaction (ADR-0171).
+    /// reconciliation in the same transaction (ADR-0181).
     async fn append_retried(
         &self,
         persistence_id: &str,
         expected_sequence: u64,
         events: &[PersistenceEnvelope],
         vector_rows: Option<&[EntityVectorRow]>,
+        spec_declaration_fingerprint: Option<&str>,
     ) -> Result<u64, PersistenceError> {
-        if events.is_empty() && vector_rows.is_none() {
+        if events.is_empty() && vector_rows.is_none() && spec_declaration_fingerprint.is_none() {
             return Ok(expected_sequence);
         }
 
         let attempt_timeout = append_attempt_timeout();
         let total_attempts = append_max_attempts();
         let mut last_err: Option<PersistenceError> = None;
-        let bypass_write_gate = events.len() == 1 && vector_rows.is_none();
+        let bypass_write_gate =
+            events.len() == 1 && vector_rows.is_none() && spec_declaration_fingerprint.is_none();
         for attempt in 0..total_attempts {
             if attempt > 0 {
                 tokio::time::sleep(Duration::from_millis(retry_delay_ms(attempt - 1))).await;
@@ -957,7 +1199,13 @@ impl TursoEventStore {
             };
             let attempt_result = tokio::time::timeout(
                 attempt_timeout,
-                self.append_inner(persistence_id, expected_sequence, events, vector_rows),
+                self.append_inner(
+                    persistence_id,
+                    expected_sequence,
+                    events,
+                    vector_rows,
+                    spec_declaration_fingerprint,
+                ),
             )
             .await
             .unwrap_or_else(|_| {
@@ -1068,12 +1316,14 @@ impl TursoEventStore {
         expected_sequence: u64,
         events: &[PersistenceEnvelope],
         vector_rows: Option<&[EntityVectorRow]>,
+        spec_declaration_fingerprint: Option<&str>,
     ) -> Result<u64, PersistenceError> {
-        if events.is_empty() && vector_rows.is_none() {
+        if events.is_empty() && vector_rows.is_none() && spec_declaration_fingerprint.is_none() {
             return Ok(expected_sequence);
         }
 
         if vector_rows.is_none()
+            && spec_declaration_fingerprint.is_none()
             && let [event] = events
         {
             return self
@@ -1088,6 +1338,19 @@ impl TursoEventStore {
             .transaction_with_behavior(TransactionBehavior::Immediate)
             .await
             .map_err(storage_error)?;
+
+        validate_spec_declaration_fingerprint(
+            &tx,
+            tenant,
+            entity_type,
+            vector_rows.is_some(),
+            spec_declaration_fingerprint,
+        )
+        .await?;
+        if events.is_empty() && vector_rows.is_none() {
+            tx.commit().await.map_err(storage_error)?;
+            return Ok(expected_sequence);
+        }
 
         let select_start = std::time::Instant::now();
         let rows_result = tx
@@ -1276,6 +1539,15 @@ impl TursoEventStore {
             let (tenant, entity_type, entity_id) =
                 parse_persistence_id_parts(&append.persistence_id)
                     .map_err(PersistenceError::Storage)?;
+
+            validate_spec_declaration_fingerprint(
+                &tx,
+                tenant,
+                entity_type,
+                append.reconcile_vectors,
+                append.spec_declaration_fingerprint.as_deref(),
+            )
+            .await?;
 
             if append.expected_sequence == 0 && !append.events.is_empty() {
                 parsed.push((

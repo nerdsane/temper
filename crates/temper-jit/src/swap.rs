@@ -84,6 +84,7 @@ mod tests {
     fn dummy_table(name: &str) -> TransitionTable {
         let mut table = TransitionTable {
             entity_name: name.to_string(),
+            spec_declaration_fingerprint: None,
             states: vec!["A".into(), "B".into()],
             initial_state: "A".into(),
             keys: vec![],

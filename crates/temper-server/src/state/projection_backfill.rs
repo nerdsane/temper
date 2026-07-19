@@ -21,18 +21,11 @@ pub(super) fn transition_table_for(
     tenant: &TenantId,
     entity_type: &str,
 ) -> Option<temper_jit::TransitionTable> {
-    {
-        let registry = state.registry.read().unwrap();
-        registry
-            .get_table_live(tenant, entity_type)
-            .map(|table| table.read().expect("table lock poisoned").clone())
-    }
-    .or_else(|| {
-        state
-            .transition_tables
-            .get(entity_type)
-            .map(|table| (**table).clone())
-    })
+    state
+        .transition_table_for_tenant(tenant, entity_type)
+        .ok()
+        .flatten()
+        .map(|table| (*table).clone())
 }
 
 /// Outcome of loading one entity's current state for an index backfill (ADR-0153,
@@ -42,6 +35,7 @@ pub(super) enum EntityLoadOutcome {
     /// Loaded — index it from these fields.
     Fields {
         fields: serde_json::Value,
+        status: String,
         sequence_nr: u64,
     },
     /// Definitively skippable: deleted, or a phantom with no events. Correctly NOT
@@ -93,6 +87,7 @@ pub(super) async fn load_entity_current_fields(
         },
         Ok(state) => EntityLoadOutcome::Fields {
             fields: state.fields,
+            status: state.status,
             sequence_nr: state.sequence_nr,
         },
     }

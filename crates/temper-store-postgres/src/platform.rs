@@ -1094,7 +1094,7 @@ impl PostgresEventStore {
         tenant: &str,
         entity_type: &str,
     ) -> Result<(), PersistenceError> {
-        crate::dbm::postgres_query!("DELETE FROM specs WHERE tenant = $1 AND entity_type = $2")
+        crate::dbm::postgres_query!("SELECT tombstone_spec_declaration_authority($1, $2)",)
             .bind(tenant)
             .bind(entity_type)
             .execute(self.pool())

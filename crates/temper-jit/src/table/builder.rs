@@ -4,6 +4,7 @@
 //! translation layer in `temper-spec`. The shared layer eliminates duplicated
 //! guard/effect translation logic between JIT and verification paths.
 
+use sha2::{Digest, Sha256};
 use temper_spec::automaton::{self, Automaton, ResolvedEffect, ResolvedGuard, translate_actions};
 
 use super::guard::Guard;
@@ -21,7 +22,11 @@ impl TransitionTable {
     pub fn try_from_ioa_source(ioa_toml: &str) -> Result<Self, String> {
         let automaton = automaton::parse_automaton(ioa_toml)
             .map_err(|e| format!("failed to parse I/O Automaton TOML: {e}"))?;
-        Ok(Self::from_automaton(&automaton))
+        let mut table = Self::from_automaton(&automaton);
+        let mut hasher = Sha256::new();
+        hasher.update(ioa_toml.as_bytes());
+        table.spec_declaration_fingerprint = Some(format!("{:x}", hasher.finalize()));
+        Ok(table)
     }
 
     /// Build a TransitionTable from I/O Automaton TOML source.
@@ -118,6 +123,7 @@ impl TransitionTable {
 
         TransitionTable {
             entity_name: automaton.automaton.name.clone(),
+            spec_declaration_fingerprint: None,
             states: automaton.automaton.states.clone(),
             initial_state: automaton.automaton.initial.clone(),
             rules,

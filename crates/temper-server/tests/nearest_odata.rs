@@ -4,10 +4,13 @@
 //! and assert the OData list shape, ranking order, per-row `@temper.score`, and
 //! self-exclusion.
 
+use std::collections::BTreeMap;
+
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
 use temper_runtime::ActorSystem;
 use temper_runtime::persistence::EventStore;
+use temper_runtime::scheduler::sim_uuid;
 use temper_runtime::tenant::TenantId;
 use temper_server::build_router;
 use temper_server::registry::SpecRegistry;
@@ -15,6 +18,7 @@ use temper_server::request_context::AgentContext;
 use temper_server::{ServerState, StorageStack};
 use temper_spec::csdl::parse_csdl;
 use temper_store_sim::SimEventStore;
+use temper_store_turso::TursoEventStore;
 use tower::ServiceExt;
 
 const VEC_ITEM_IOA: &str = r#"
@@ -337,6 +341,40 @@ async fn vector_backfill_retries_when_watermark_persistence_fails() {
             "v2|embed:Embedding:EmbeddingModel:4:cosine".to_string(),
         )],
         "the next run must repeat reconciliation and persist the convergence claim"
+    );
+}
+
+#[tokio::test]
+async fn compatibility_storage_constructor_bootstraps_fresh_store_authority() {
+    let db_path = std::env::temp_dir().join(format!(
+        "temper-vector-compat-constructor-{}.db",
+        sim_uuid()
+    ));
+    let db_url = format!("file:{}", db_path.display());
+    let store = TursoEventStore::new(&db_url, None)
+        .await
+        .expect("create local Turso store");
+    let state = ServerState::with_storage_stack(
+        ActorSystem::new("vector-compat-constructor"),
+        parse_csdl(CSDL_XML).expect("CSDL parse"),
+        CSDL_XML.to_string(),
+        BTreeMap::from([("VecItem".to_string(), VEC_ITEM_IOA.to_string())]),
+        StorageStack::from_turso(store.clone()),
+    )
+    .expect("construct compatibility server state");
+    let tenant = TenantId::default();
+    create_item(&state, &tenant, "item-a", &[1.0, 0.0, 0.0, 0.0], "m1").await;
+    state.populate_vector_index_from_snapshots(&tenant).await;
+
+    assert_eq!(
+        store
+            .vector_index_backfilled_types("default")
+            .await
+            .expect("read vector completion"),
+        vec![(
+            "VecItem".to_string(),
+            "v2|embed:Embedding:EmbeddingModel:4:cosine".to_string(),
+        )]
     );
 }
 

@@ -391,7 +391,7 @@ impl TursoEventStore {
             .await
             .map_err(storage_error)?;
 
-        // Entity vector index (ADR-0155/ADR-0171) — declared vector paths for
+        // Entity vector index (ADR-0155/ADR-0181) — declared vector paths for
         // exact-scan kNN, co-committed with a retained per-entity sequence fence.
         conn.execute(schema::CREATE_ENTITY_VECTOR_INDEX_TABLE, ())
             .await
@@ -417,12 +417,55 @@ impl TursoEventStore {
         conn.execute(schema::CREATE_VECTOR_RECONCILIATION_GENERATION_TABLE, ())
             .await
             .map_err(storage_error)?;
+        for statement in [
+            schema::query_plane::ALTER_VECTOR_RECONCILIATION_ADD_DECLARATION_REVISION,
+            schema::query_plane::ALTER_VECTOR_RECONCILIATION_ADD_DECLARATION_FINGERPRINT,
+        ] {
+            if let Err(error) = conn.execute(statement, ()).await {
+                let message = error.to_string();
+                if !message.contains("duplicate column name") {
+                    return Err(storage_error(error));
+                }
+            }
+        }
         conn.execute(schema::SEED_ENTITY_VECTOR_INDEX_VERSION_TABLE, ())
             .await
             .map_err(storage_error)?;
         conn.execute(schema::CREATE_VECTOR_INDEX_BACKFILL_WATERMARK, ())
             .await
             .map_err(storage_error)?;
+        conn.execute(
+            schema::declaration_authority::CREATE_SPEC_DECLARATION_AUTHORITY_TABLE,
+            (),
+        )
+        .await
+        .map_err(storage_error)?;
+        if let Err(error) = conn
+            .execute(
+                schema::declaration_authority::ALTER_SPEC_DECLARATION_AUTHORITY_ADD_FINGERPRINT,
+                (),
+            )
+            .await
+        {
+            let message = error.to_string();
+            if !message.contains("duplicate column name") {
+                return Err(storage_error(error));
+            }
+        }
+        // DDL is transactional in SQLite/libSQL. Holding the immediate write
+        // transaction across seed + trigger replacement prevents another replica
+        // from mutating `specs` in a drop/create gap during concurrent startup.
+        let authority_tx = conn
+            .transaction_with_behavior(libsql::TransactionBehavior::Immediate)
+            .await
+            .map_err(storage_error)?;
+        for statement in schema::declaration_authority::DECLARATION_AUTHORITY_STATEMENTS {
+            authority_tx
+                .execute(statement, ())
+                .await
+                .map_err(storage_error)?;
+        }
+        authority_tx.commit().await.map_err(storage_error)?;
 
         Ok(())
     }

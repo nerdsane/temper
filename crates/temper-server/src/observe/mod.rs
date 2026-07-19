@@ -231,3 +231,7 @@ pub fn build_observe_router() -> Router<ServerState> {
 #[cfg(test)]
 #[path = "mod_test.rs"]
 mod tests;
+
+#[cfg(all(test, feature = "sim"))]
+#[path = "load_dir_reconciliation_test.rs"]
+mod load_dir_reconciliation_tests;

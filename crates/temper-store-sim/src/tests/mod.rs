@@ -57,6 +57,7 @@ async fn append_multiple_events() {
 #[tokio::test]
 async fn pre_reconciliation_live_vector_type_remains_discoverable() {
     let store = SimEventStore::no_faults(41);
+    store.persist_spec_declaration("default", "Item", "rev-pre");
     store
         .append_with_index_rows(
             "default:Item:item-before-generation",
@@ -69,6 +70,7 @@ async fn pre_reconciliation_live_vector_type_remains_discoverable() {
                 vector: vec![1.0, 0.0],
             }],
             true,
+            Some("rev-pre"),
         )
         .await
         .unwrap();
@@ -86,8 +88,9 @@ async fn pre_reconciliation_live_vector_type_remains_discoverable() {
 #[tokio::test]
 async fn stale_vector_backfill_does_not_overwrite_newer_live_write() {
     let store = SimEventStore::no_faults(42);
+    store.persist_spec_declaration("default", "Item", "rev-1");
     let generation = store
-        .begin_vector_index_reconciliation("default", "Item", "v2|embed")
+        .begin_vector_index_reconciliation("default", "Item", "v2|embed", 1, "rev-1")
         .await
         .unwrap();
     let persistence_id = "default:Item:item-race";
@@ -105,6 +108,7 @@ async fn stale_vector_backfill_does_not_overwrite_newer_live_write() {
             &[],
             std::slice::from_ref(&stale_row),
             true,
+            Some("rev-1"),
         )
         .await
         .unwrap();
@@ -122,6 +126,7 @@ async fn stale_vector_backfill_does_not_overwrite_newer_live_write() {
             &[],
             std::slice::from_ref(&live_row),
             true,
+            Some("rev-1"),
         )
         .await
         .unwrap();
@@ -154,6 +159,7 @@ async fn stale_vector_backfill_does_not_overwrite_newer_live_write() {
             &[],
             &[],
             true,
+            Some("rev-1"),
         )
         .await
         .unwrap();
@@ -197,8 +203,9 @@ async fn newer_vector_reconciliation_generation_rejects_delayed_older_set() {
         vector: vec![0.0, 1.0],
     };
 
+    store.persist_spec_declaration("default", "Item", "rev-old");
     let old_generation = store
-        .begin_vector_index_reconciliation("default", "Item", "v2|old-embed")
+        .begin_vector_index_reconciliation("default", "Item", "v2|old-embed", 1, "rev-old")
         .await
         .unwrap();
     store
@@ -209,14 +216,16 @@ async fn newer_vector_reconciliation_generation_rejects_delayed_older_set() {
             &[],
             std::slice::from_ref(&old_row),
             true,
+            Some("rev-old"),
         )
         .await
         .unwrap();
 
     // The newer declaration set starts and converges from the same journal
     // sequence before delayed work from the older invocation resumes.
+    store.persist_spec_declaration("default", "Item", "rev-new");
     let new_generation = store
-        .begin_vector_index_reconciliation("default", "Item", "v2|new-embed")
+        .begin_vector_index_reconciliation("default", "Item", "v2|new-embed", 2, "rev-new")
         .await
         .unwrap();
     store
@@ -283,7 +292,7 @@ async fn newer_vector_reconciliation_generation_rejects_delayed_older_set() {
 }
 
 #[tokio::test]
-async fn beginning_reconciliation_withdraws_the_previous_completion_claim() {
+async fn stale_declaration_cannot_reclaim_generation_after_newer_set_completes() {
     let store = SimEventStore::no_faults(45);
     let persistence_id = "default:Item:item-signature-race";
     let row_a = EntityVectorRow {
@@ -297,8 +306,9 @@ async fn beginning_reconciliation_withdraws_the_previous_completion_claim() {
         vector: vec![0.0, 1.0],
     };
 
+    store.persist_spec_declaration("default", "Item", "rev-a");
     let first_a = store
-        .begin_vector_index_reconciliation("default", "Item", "v2|a")
+        .begin_vector_index_reconciliation("default", "Item", "v2|a", 1, "rev-a")
         .await
         .unwrap();
     store
@@ -309,6 +319,7 @@ async fn beginning_reconciliation_withdraws_the_previous_completion_claim() {
             &[],
             std::slice::from_ref(&row_a),
             true,
+            Some("rev-a"),
         )
         .await
         .unwrap();
@@ -317,8 +328,9 @@ async fn beginning_reconciliation_withdraws_the_previous_completion_claim() {
         .await
         .unwrap();
 
+    store.persist_spec_declaration("default", "Item", "rev-b");
     let generation_b = store
-        .begin_vector_index_reconciliation("default", "Item", "v2|b")
+        .begin_vector_index_reconciliation("default", "Item", "v2|b", 2, "rev-b")
         .await
         .unwrap();
     assert!(
@@ -338,54 +350,293 @@ async fn beginning_reconciliation_withdraws_the_previous_completion_claim() {
         "the in-progress type must remain discoverable without its watermark"
     );
 
-    // A coordinator that still owns declaration set A now sees no completion
-    // claim, allocates a newer generation, and invalidates delayed B work.
-    let second_a = store
-        .begin_vector_index_reconciliation("default", "Item", "v2|a")
+    let stale_live = store
+        .append_with_index_rows(
+            persistence_id,
+            1,
+            &[test_envelope(0, "StaleReplicaUpdated")],
+            &[],
+            std::slice::from_ref(&row_a),
+            true,
+            Some("rev-a"),
+        )
+        .await;
+    assert!(
+        stale_live.is_err(),
+        "a stale replica must not advance the journal with rows from declaration A"
+    );
+    assert_eq!(store.dump_journal(persistence_id).len(), 1);
+
+    store
+        .append_with_index_rows(
+            persistence_id,
+            1,
+            &[test_envelope(0, "CurrentReplicaUpdated")],
+            &[],
+            std::slice::from_ref(&row_b),
+            true,
+            Some("rev-b"),
+        )
         .await
         .unwrap();
-    assert!(second_a > generation_b);
+
     store
         .backfill_entity_vectors(
             "default",
             "Item",
             "item-signature-race",
-            second_a,
+            generation_b,
             1,
-            std::slice::from_ref(&row_a),
+            std::slice::from_ref(&row_b),
         )
         .await
         .unwrap();
     store
-        .mark_vector_index_backfilled("default", "Item", second_a, "v2|a")
+        .mark_vector_index_backfilled("default", "Item", generation_b, "v2|b")
         .await
         .unwrap();
 
+    // A stale replica still holding declaration set A must not obtain a later
+    // generation after the authoritative B revision has completed.
+    let stale_a = store
+        .begin_vector_index_reconciliation("default", "Item", "v2|a", 1, "rev-a")
+        .await;
     assert!(
-        store
-            .backfill_entity_vectors(
-                "default",
-                "Item",
-                "item-signature-race",
-                generation_b,
-                1,
-                &[row_b],
-            )
-            .await
-            .is_err()
-    );
-    assert!(
-        store
-            .mark_vector_index_backfilled("default", "Item", generation_b, "v2|b")
-            .await
-            .is_err()
+        stale_a.is_err(),
+        "an older declaration revision must not reclaim authority by arriving last"
     );
     assert_eq!(
         store
             .vector_index_backfilled_types("default")
             .await
             .unwrap(),
-        vec![("Item".to_string(), "v2|a".to_string())]
+        vec![("Item".to_string(), "v2|b".to_string())]
+    );
+    assert_eq!(
+        store
+            .vector_candidates("default", "Item", "embed-b", "m2", 10)
+            .await
+            .unwrap(),
+        vec![EntityVectorCandidate {
+            entity_id: "item-signature-race".to_string(),
+            vector: row_b.vector,
+        }]
+    );
+}
+
+#[tokio::test]
+async fn caller_local_revision_cannot_override_durable_declaration_authority() {
+    let store = SimEventStore::no_faults(48);
+    store.persist_spec_declaration("default", "Item", "rev-a");
+    let generation_a = store
+        .begin_vector_index_reconciliation("default", "Item", "v2|a", 1, "rev-a")
+        .await
+        .unwrap();
+    store
+        .mark_vector_index_backfilled("default", "Item", generation_a, "v2|a")
+        .await
+        .unwrap();
+
+    store.persist_spec_declaration("default", "Item", "rev-b");
+    let generation_b = store
+        .begin_vector_index_reconciliation("default", "Item", "v2|b", 1, "rev-b")
+        .await
+        .unwrap();
+    store
+        .mark_vector_index_backfilled("default", "Item", generation_b, "v2|b")
+        .await
+        .unwrap();
+
+    let stale = store
+        .begin_vector_index_reconciliation("default", "Item", "v2|a", u64::MAX, "rev-a")
+        .await;
+    assert!(
+        stale.is_err(),
+        "even a maximal caller-local revision must not replace persisted B authority"
+    );
+    assert_eq!(
+        store
+            .vector_index_backfilled_types("default")
+            .await
+            .unwrap(),
+        vec![("Item".to_string(), "v2|b".to_string())]
+    );
+}
+
+#[tokio::test]
+async fn fresh_reconciliation_ignores_maximal_caller_revision() {
+    let store = SimEventStore::no_faults(52);
+    let first_generation = store
+        .begin_vector_index_reconciliation("default", "Item", "v2|a", u64::MAX, "rev-a")
+        .await
+        .expect("bootstrap fresh declaration authority");
+    assert_eq!(first_generation, 1);
+
+    let next_revision = store.persist_spec_declaration("default", "Item", "rev-b");
+    assert_eq!(
+        next_revision, 2,
+        "durable authority must start at revision one"
+    );
+    assert!(
+        store
+            .begin_vector_index_reconciliation("default", "Item", "v2|a", 1, "rev-a")
+            .await
+            .is_err(),
+        "the next persisted declaration must fence the fresh generation"
+    );
+    assert_eq!(
+        store
+            .begin_vector_index_reconciliation("default", "Item", "v2|b", 1, "rev-b")
+            .await
+            .expect("begin next declaration"),
+        2
+    );
+}
+
+#[tokio::test]
+async fn rejected_single_append_does_not_publish_bootstrapped_authority() {
+    let store = SimEventStore::no_faults(49);
+    let claimed_key = temper_runtime::persistence::EntityKeyRow {
+        key_name: "external-id".to_string(),
+        key_hash: "shared-key".to_string(),
+    };
+    store
+        .append_with_index_rows(
+            "default:Item:owner",
+            0,
+            &[test_envelope(0, "Created")],
+            std::slice::from_ref(&claimed_key),
+            &[],
+            false,
+            None,
+        )
+        .await
+        .unwrap();
+
+    let rejected = store
+        .append_with_index_rows(
+            "default:Item:contender",
+            0,
+            &[test_envelope(0, "Created")],
+            std::slice::from_ref(&claimed_key),
+            &[],
+            true,
+            Some("rev-a"),
+        )
+        .await;
+    assert!(rejected.is_err(), "duplicate key must reject the append");
+    assert!(store.dump_journal("default:Item:contender").is_empty());
+    assert!(
+        store
+            .vector_reconciliation_entity_types("default")
+            .await
+            .unwrap()
+            .is_empty(),
+        "a rejected append must not leak a generation-zero work row"
+    );
+
+    let generation = store
+        .begin_vector_index_reconciliation("default", "Item", "v2|b", 1, "rev-b")
+        .await
+        .expect("the rejected rev-a bootstrap must not become durable authority");
+    assert_eq!(generation, 1);
+}
+
+#[tokio::test]
+async fn rejected_batch_does_not_publish_bootstrapped_authority() {
+    let store = SimEventStore::no_faults(50);
+    let rejected = store
+        .append_batch(&[
+            PersistenceAppend {
+                persistence_id: "default:Item:first".to_string(),
+                expected_sequence: 0,
+                events: vec![test_envelope(0, "Created")],
+                vector_rows: Vec::new(),
+                reconcile_vectors: true,
+                spec_declaration_fingerprint: Some("rev-a".to_string()),
+            },
+            PersistenceAppend {
+                persistence_id: "malformed".to_string(),
+                expected_sequence: 0,
+                events: vec![test_envelope(0, "Created")],
+                vector_rows: Vec::new(),
+                reconcile_vectors: true,
+                spec_declaration_fingerprint: Some("rev-a".to_string()),
+            },
+        ])
+        .await;
+    assert!(
+        rejected.is_err(),
+        "malformed second stream must abort the batch"
+    );
+    assert!(store.dump_journal("default:Item:first").is_empty());
+    assert!(store.dump_journal("malformed").is_empty());
+    assert!(
+        store
+            .vector_reconciliation_entity_types("default")
+            .await
+            .unwrap()
+            .is_empty(),
+        "an aborted batch must not leak authority-derived work"
+    );
+
+    let generation = store
+        .begin_vector_index_reconciliation("default", "Item", "v2|b", 1, "rev-b")
+        .await
+        .expect("the aborted rev-a batch must not become durable authority");
+    assert_eq!(generation, 1);
+}
+
+#[tokio::test]
+async fn deleted_declaration_reconciliation_resumes_after_store_restart() {
+    let store = SimEventStore::no_faults(46);
+    store.persist_spec_declaration("default", "Item", "rev-a");
+    let present_generation = store
+        .begin_vector_index_reconciliation("default", "Item", "v2|embed", 1, "rev-a")
+        .await
+        .unwrap();
+    store
+        .mark_vector_index_backfilled("default", "Item", present_generation, "v2|embed")
+        .await
+        .unwrap();
+
+    store.persist_spec_declaration("default", "Item", "absent:v1");
+    let absent_generation = store
+        .begin_vector_index_reconciliation("default", "Item", "v2|", 2, "absent:v1")
+        .await
+        .unwrap();
+    assert!(absent_generation > present_generation);
+    assert!(
+        store
+            .vector_index_backfilled_types("default")
+            .await
+            .unwrap()
+            .is_empty(),
+        "starting the deletion purge must withdraw the old watermark"
+    );
+
+    // A reopened handle retains durable authority while a rebuilt process-local
+    // registry restarts its diagnostic revision at one.
+    let restarted = store.clone();
+    drop(store);
+    let resumed_generation = restarted
+        .begin_vector_index_reconciliation("default", "Item", "v2|", 1, "absent:v1")
+        .await
+        .unwrap();
+    assert_eq!(resumed_generation, absent_generation);
+    restarted
+        .mark_vector_index_backfilled("default", "Item", resumed_generation, "v2|")
+        .await
+        .unwrap();
+
+    restarted.persist_spec_declaration("default", "Item", "rev-a");
+    let readded_generation = restarted
+        .begin_vector_index_reconciliation("default", "Item", "v2|embed", 3, "rev-a")
+        .await
+        .unwrap();
+    assert!(
+        readded_generation > resumed_generation,
+        "an identical declaration re-add must remain a newer authority revision"
     );
 }
 
@@ -393,8 +644,9 @@ async fn beginning_reconciliation_withdraws_the_previous_completion_claim() {
 async fn composite_batch_vector_fence_rejects_delayed_repair() {
     let store = SimEventStore::no_faults(44);
     let persistence_id = "default:Item:item-composite";
+    store.persist_spec_declaration("default", "Item", "rev-1");
     let generation = store
-        .begin_vector_index_reconciliation("default", "Item", "v2|embed")
+        .begin_vector_index_reconciliation("default", "Item", "v2|embed", 1, "rev-1")
         .await
         .unwrap();
     let stale_row = EntityVectorRow {
@@ -416,6 +668,7 @@ async fn composite_batch_vector_fence_rejects_delayed_repair() {
             &[],
             std::slice::from_ref(&stale_row),
             true,
+            Some("rev-1"),
         )
         .await
         .unwrap();
@@ -426,6 +679,7 @@ async fn composite_batch_vector_fence_rejects_delayed_repair() {
             events: vec![test_envelope(0, "CompositeUpdated")],
             vector_rows: vec![live_row.clone()],
             reconcile_vectors: true,
+            spec_declaration_fingerprint: Some("rev-1".to_string()),
         }])
         .await
         .unwrap();
@@ -456,6 +710,7 @@ async fn composite_batch_vector_fence_rejects_delayed_repair() {
             events: vec![test_envelope(0, "CompositeDeleted")],
             vector_rows: Vec::new(),
             reconcile_vectors: true,
+            spec_declaration_fingerprint: Some("rev-1".to_string()),
         }])
         .await
         .unwrap();
@@ -491,6 +746,7 @@ async fn append_batch_commits_multiple_journals_atomically() {
             events: vec![test_envelope(0, "Created")],
             vector_rows: Vec::new(),
             reconcile_vectors: false,
+            spec_declaration_fingerprint: None,
         },
         PersistenceAppend {
             persistence_id: "default:Order:ord-b".to_string(),
@@ -498,6 +754,7 @@ async fn append_batch_commits_multiple_journals_atomically() {
             events: vec![test_envelope(0, "Created"), test_envelope(0, "Submitted")],
             vector_rows: Vec::new(),
             reconcile_vectors: false,
+            spec_declaration_fingerprint: None,
         },
     ];
 
@@ -540,6 +797,7 @@ async fn append_batch_conflict_leaves_all_journals_untouched() {
                 events: vec![test_envelope(0, "Created")],
                 vector_rows: Vec::new(),
                 reconcile_vectors: false,
+                spec_declaration_fingerprint: None,
             },
             PersistenceAppend {
                 persistence_id: "default:Order:ord-existing".to_string(),
@@ -547,6 +805,7 @@ async fn append_batch_conflict_leaves_all_journals_untouched() {
                 events: vec![test_envelope(0, "Submitted")],
                 vector_rows: Vec::new(),
                 reconcile_vectors: false,
+                spec_declaration_fingerprint: None,
             },
         ])
         .await
@@ -565,6 +824,109 @@ async fn append_batch_conflict_leaves_all_journals_untouched() {
         1,
         "conflicting stream must keep its original journal only"
     );
+}
+
+#[tokio::test]
+async fn append_batch_preflight_reports_exact_sequence_without_consuming_fault() {
+    let store = SimEventStore::no_faults(42);
+    let existing = "default:Order:ord-batch-existing";
+    let new = "default:Order:ord-batch-new";
+    store
+        .append(
+            existing,
+            0,
+            &[test_envelope(0, "Created"), test_envelope(0, "Submitted")],
+        )
+        .await
+        .unwrap();
+    store.inject_concurrency_violations(existing, 1);
+
+    let error = store
+        .append_batch(&[
+            PersistenceAppend {
+                persistence_id: new.to_string(),
+                expected_sequence: 0,
+                events: vec![test_envelope(0, "Created")],
+                vector_rows: Vec::new(),
+                reconcile_vectors: false,
+                spec_declaration_fingerprint: None,
+            },
+            PersistenceAppend {
+                persistence_id: existing.to_string(),
+                expected_sequence: 99,
+                events: vec![test_envelope(0, "Duplicate")],
+                vector_rows: Vec::new(),
+                reconcile_vectors: false,
+                spec_declaration_fingerprint: None,
+            },
+        ])
+        .await
+        .expect_err("stale batch must fail before consuming its injected fault");
+    assert!(matches!(
+        error,
+        PersistenceError::ConcurrencyViolation {
+            expected: 99,
+            actual: 2
+        }
+    ));
+    assert_eq!(store.pending_concurrency_violations(existing), 1);
+    assert!(store.dump_journal(new).is_empty());
+    assert_eq!(store.dump_journal(existing).len(), 2);
+
+    let injected = store
+        .append_batch(&[PersistenceAppend {
+            persistence_id: existing.to_string(),
+            expected_sequence: 2,
+            events: vec![test_envelope(0, "Injected")],
+            vector_rows: Vec::new(),
+            reconcile_vectors: false,
+            spec_declaration_fingerprint: None,
+        }])
+        .await
+        .expect_err("the preserved injected fault must reject the next valid batch");
+    assert!(matches!(
+        injected,
+        PersistenceError::ConcurrencyViolation {
+            expected: 2,
+            actual: 2
+        }
+    ));
+    assert_eq!(store.pending_concurrency_violations(existing), 0);
+    assert_eq!(store.dump_journal(existing).len(), 2);
+}
+
+#[tokio::test]
+async fn probabilistic_append_batch_reports_unchanged_durable_sequence() {
+    let store = SimEventStore::new(
+        42,
+        SimFaultConfig {
+            write_failure_prob: 0.0,
+            concurrency_violation_prob: 1.0,
+            read_truncation_prob: 0.0,
+            snapshot_failure_prob: 0.0,
+        },
+    );
+    let persistence_id = "default:Order:probabilistic-batch-conflict";
+
+    let error = store
+        .append_batch(&[PersistenceAppend {
+            persistence_id: persistence_id.to_string(),
+            expected_sequence: 0,
+            events: vec![test_envelope(0, "Created")],
+            vector_rows: Vec::new(),
+            reconcile_vectors: false,
+            spec_declaration_fingerprint: None,
+        }])
+        .await
+        .expect_err("probabilistic concurrency fault must reject the batch");
+    assert!(matches!(
+        error,
+        PersistenceError::ConcurrencyViolation {
+            expected: 0,
+            actual: 0
+        }
+    ));
+    assert!(store.dump_journal(persistence_id).is_empty());
 }
 
 #[tokio::test]
@@ -589,6 +951,35 @@ async fn concurrency_violation_on_wrong_sequence() {
             actual: 1
         }
     ));
+}
+
+#[tokio::test]
+async fn injected_concurrency_violation_reports_durable_sequence() {
+    let store = SimEventStore::new(
+        42,
+        SimFaultConfig {
+            write_failure_prob: 0.0,
+            concurrency_violation_prob: 1.0,
+            read_truncation_prob: 0.0,
+            snapshot_failure_prob: 0.0,
+        },
+    );
+    let pid = "default:Order:injected-conflict";
+
+    let error = store
+        .append(pid, 0, &[test_envelope(0, "Created")])
+        .await
+        .expect_err("injected concurrency violation should reject the append");
+
+    match error {
+        PersistenceError::ConcurrencyViolation { expected, actual } => assert_eq!(
+            (expected, actual),
+            (0, 0),
+            "the reported authoritative sequence must match the unchanged journal"
+        ),
+        other => panic!("unexpected injected error: {other}"),
+    }
+    assert!(store.dump_journal(pid).is_empty());
 }
 
 #[tokio::test]

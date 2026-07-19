@@ -488,10 +488,19 @@ pub struct ServerState {
     /// being built out.
     pub(crate) commons_write_guardrail_lock: Arc<tokio::sync::Mutex<()>>,
     /// Serializes vector declaration snapshotting and durable reconciliation-
-    /// generation allocation. The store generation remains authoritative across
-    /// crashes/processes; this lock prevents an older local invocation from taking a
-    /// newer generation after a hot-swapped declaration set (ADR-0171).
+    /// generation allocation. The durable declaration revision and store generation
+    /// remain authoritative across crashes/processes; this short critical section
+    /// prevents an older local snapshot from beginning after a hot swap (ADR-0181).
     pub(crate) vector_reconciliation_lock: Arc<tokio::sync::Mutex<()>>,
+    /// Serializes durable spec-catalog mutation with registry publication.
+    ///
+    /// Without this lock, concurrent full replacements can each compute omissions
+    /// from the same old registry and leave storage and memory with different truth.
+    #[cfg(feature = "observe")]
+    pub(crate) spec_catalog_update_lock: Arc<tokio::sync::Mutex<()>>,
+    /// Serializes actor table capture/insertion with spec publication and
+    /// removed-type actor eviction.
+    pub(crate) actor_spec_publication_lock: Arc<RwLock<()>>,
     pub secrets_vault: Option<Arc<SecretsVault>>,
     /// Broadcast channel for agent progress events (SSE subscriptions).
     /// // determinism-ok: broadcast channel for external observation only
@@ -720,6 +729,9 @@ impl ServerState {
             commons_storage_projection_cache: Arc::new(Mutex::new(BTreeMap::new())),
             commons_write_guardrail_lock: Arc::new(tokio::sync::Mutex::new(())),
             vector_reconciliation_lock: Arc::new(tokio::sync::Mutex::new(())),
+            #[cfg(feature = "observe")]
+            spec_catalog_update_lock: Arc::new(tokio::sync::Mutex::new(())),
+            actor_spec_publication_lock: Arc::new(RwLock::new(())),
             secrets_vault: None,
             agent_progress_tx: Arc::new(agent_progress_tx), // determinism-ok: broadcast for external observation
             entity_event_sequences: Arc::new(Mutex::new(BTreeMap::new())),
@@ -851,14 +863,28 @@ impl ServerState {
         csdl_xml: String,
         ioa_sources: BTreeMap<String, String>,
     ) -> Result<Self, String> {
-        let mut state = Self::new(system, csdl, csdl_xml);
-        let mut tables = BTreeMap::new();
-        for (entity_type, ioa_source) in &ioa_sources {
-            let table = TransitionTable::try_from_ioa_source(ioa_source)
-                .map_err(|e| format!("entity '{entity_type}': {e}"))?;
-            tables.insert(entity_type.clone(), Arc::new(table));
+        let tenant = TenantId::default();
+        let ioa_refs = ioa_sources
+            .iter()
+            .map(|(entity_type, ioa_source)| (entity_type.as_str(), ioa_source.as_str()))
+            .collect::<Vec<_>>();
+        let mut registry = SpecRegistry::new();
+        registry
+            .try_register_tenant(tenant.clone(), csdl.clone(), csdl_xml.clone(), &ioa_refs)
+            .map_err(|error| error.to_string())?;
+        for entity_type in ioa_sources.keys() {
+            registry.remove_verification_status(&tenant, entity_type);
         }
+        let tables = registry
+            .get_tenant(&tenant)
+            .ok_or_else(|| "default tenant registration did not produce a config".to_string())?
+            .entities
+            .iter()
+            .map(|(entity_type, spec)| (entity_type.clone(), spec.table()))
+            .collect();
+        let mut state = Self::new(system, csdl, csdl_xml);
         state.transition_tables = Arc::new(tables);
+        state.registry = Arc::new(RwLock::new(registry));
         Ok(state)
     }
 
@@ -969,6 +995,9 @@ impl ServerState {
             commons_storage_projection_cache: Arc::new(Mutex::new(BTreeMap::new())),
             commons_write_guardrail_lock: Arc::new(tokio::sync::Mutex::new(())),
             vector_reconciliation_lock: Arc::new(tokio::sync::Mutex::new(())),
+            #[cfg(feature = "observe")]
+            spec_catalog_update_lock: Arc::new(tokio::sync::Mutex::new(())),
+            actor_spec_publication_lock: Arc::new(RwLock::new(())),
             secrets_vault: None,
             agent_progress_tx: Arc::new(agent_progress_tx), // determinism-ok: broadcast for external observation
             entity_event_sequences: Arc::new(Mutex::new(BTreeMap::new())),

@@ -1,0 +1,16 @@
+[automaton]
+name = "Item"
+states = ["New", "Ready"]
+initial = "New"
+
+[[state]]
+name = "Title"
+type = "string"
+initial = ""
+
+[[action]]
+name = "Create"
+kind = "input"
+from = ["New"]
+to = "Ready"
+params = ["Title"]

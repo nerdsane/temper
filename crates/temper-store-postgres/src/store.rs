@@ -6,6 +6,7 @@
 
 use std::time::Instant;
 
+use sha2::{Digest, Sha256};
 use sqlx::{Acquire, PgPool, Postgres, Transaction};
 use temper_runtime::persistence::{
     EntityVectorCandidate, EntityVectorRow, EventMetadata, EventStore, PersistenceAppend,
@@ -20,6 +21,13 @@ use crate::metrics::{
 use crate::segments;
 
 const EVENT_APPEND_OPERATION: &str = "event_append";
+const ABSENT_DECLARATION_FINGERPRINT: &str = "absent:v1";
+
+fn spec_content_fingerprint(ioa_source: &str) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(ioa_source.as_bytes());
+    format!("{:x}", hasher.finalize())
+}
 
 /// A PostgreSQL-backed event store.
 ///
@@ -40,6 +48,161 @@ impl PostgresEventStore {
     /// Return a reference to the inner pool (useful for migrations).
     pub fn pool(&self) -> &PgPool {
         &self.pool
+    }
+
+    /// Entity types that a source-of-truth replacement must account for.
+    ///
+    /// Includes uncommitted catalog rows and compatibility authority created
+    /// without a catalog row.
+    pub async fn spec_replacement_entity_types(
+        &self,
+        tenant: &str,
+    ) -> Result<Vec<String>, PersistenceError> {
+        crate::dbm::postgres_query_scalar!(
+            "SELECT entity_type FROM specs WHERE tenant = $1 \
+             UNION \
+             SELECT entity_type FROM spec_declaration_authority \
+             WHERE tenant = $1 AND present = true \
+             ORDER BY entity_type",
+        )
+        .bind(tenant)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(|error| PersistenceError::Storage(error.to_string()))
+    }
+
+    async fn spec_declaration_authority_with_barrier(
+        tx: &mut Transaction<'_, Postgres>,
+        tenant: &str,
+        entity_type: &str,
+    ) -> Result<Option<(u64, String)>, PersistenceError> {
+        // This lock is held through commit. Spec mutation takes an exclusive lock
+        // on the same authority row, so a writer cannot validate declaration A and
+        // then co-commit A-derived vector rows after declaration B becomes durable.
+        let authority: Option<(i64, String, String, bool)> = crate::dbm::postgres_query_as!(
+            "SELECT revision, ioa_source, declaration_fingerprint, present \
+             FROM spec_declaration_authority \
+             WHERE tenant = $1 AND entity_type = $2 FOR SHARE",
+        )
+        .bind(tenant)
+        .bind(entity_type)
+        .fetch_optional(&mut **tx)
+        .await
+        .map_err(|e| PersistenceError::Storage(e.to_string()))?;
+        let Some((revision, ioa_source, declaration_fingerprint, present)) = authority else {
+            return Ok(None);
+        };
+        let revision = u64::try_from(revision).map_err(|_| {
+            PersistenceError::Storage(format!(
+                "invalid durable spec revision for {tenant}:{entity_type}"
+            ))
+        })?;
+        let fingerprint = if present {
+            if declaration_fingerprint.is_empty() {
+                spec_content_fingerprint(&ioa_source)
+            } else {
+                declaration_fingerprint
+            }
+        } else {
+            ABSENT_DECLARATION_FINGERPRINT.to_string()
+        };
+        Ok(Some((revision, fingerprint)))
+    }
+
+    async fn bootstrap_live_spec_declaration_if_absent(
+        tx: &mut Transaction<'_, Postgres>,
+        tenant: &str,
+        entity_type: &str,
+        supplied_fingerprint: &str,
+    ) -> Result<(), PersistenceError> {
+        // Compatibility constructors can have an in-memory transition table but
+        // no persisted spec catalog. The per-type transaction lock serializes
+        // racing first writers: one inserts its fingerprint, while every loser
+        // observes and validates against that committed winner below. A catalog
+        // row or retained tombstone prevents this insert and cannot be overwritten.
+        crate::dbm::postgres_query!(
+            "SELECT pg_advisory_xact_lock( \
+                 hashtextextended($1 || ':' || $2, 0) \
+             )",
+        )
+        .bind(tenant)
+        .bind(entity_type)
+        .execute(&mut **tx)
+        .await
+        .map_err(|e| PersistenceError::Storage(e.to_string()))?;
+        crate::dbm::postgres_query!(
+            "INSERT INTO spec_declaration_authority \
+             (tenant, entity_type, revision, ioa_source, declaration_fingerprint, present) \
+             SELECT $1, $2, 1, '', $3, true \
+             WHERE NOT EXISTS ( \
+                 SELECT 1 FROM specs WHERE tenant = $1 AND entity_type = $2 \
+             ) \
+             ON CONFLICT (tenant, entity_type) DO NOTHING",
+        )
+        .bind(tenant)
+        .bind(entity_type)
+        .bind(supplied_fingerprint)
+        .execute(&mut **tx)
+        .await
+        .map_err(|e| PersistenceError::Storage(e.to_string()))?;
+        Ok(())
+    }
+
+    async fn spec_declaration_with_compat_bootstrap(
+        tx: &mut Transaction<'_, Postgres>,
+        tenant: &str,
+        entity_type: &str,
+        supplied_fingerprint: &str,
+    ) -> Result<(u64, String), PersistenceError> {
+        if let Some(authority) =
+            Self::spec_declaration_authority_with_barrier(tx, tenant, entity_type).await?
+        {
+            return Ok(authority);
+        }
+
+        // Only the truly empty compatibility path takes the exclusive advisory
+        // lock. The insert rechecks catalog/authority after the lock is acquired;
+        // normal writers retain only the shared authority-row lock through commit.
+        Self::bootstrap_live_spec_declaration_if_absent(
+            tx,
+            tenant,
+            entity_type,
+            supplied_fingerprint,
+        )
+        .await?;
+        Self::spec_declaration_authority_with_barrier(tx, tenant, entity_type)
+            .await?
+            .ok_or_else(|| {
+                PersistenceError::Storage(format!(
+                    "missing durable spec declaration authority for {tenant}:{entity_type}"
+                ))
+            })
+    }
+
+    pub(crate) async fn validate_live_spec_declaration(
+        tx: &mut Transaction<'_, Postgres>,
+        tenant: &str,
+        entity_type: &str,
+        supplied_fingerprint: &str,
+    ) -> Result<(), PersistenceError> {
+        if supplied_fingerprint.is_empty() {
+            return Err(PersistenceError::Storage(format!(
+                "live append requires a nonempty spec declaration fingerprint for {tenant}:{entity_type}"
+            )));
+        }
+        let (_, authoritative_fingerprint) = Self::spec_declaration_with_compat_bootstrap(
+            tx,
+            tenant,
+            entity_type,
+            supplied_fingerprint,
+        )
+        .await?;
+        if authoritative_fingerprint != supplied_fingerprint {
+            return Err(PersistenceError::Storage(format!(
+                "stale spec declaration fingerprint for {tenant}:{entity_type}"
+            )));
+        }
+        Ok(())
     }
 
     async fn current_vector_generation_with_barrier(
@@ -158,8 +321,16 @@ impl EventStore for PostgresEventStore {
         expected_sequence: u64,
         events: &[PersistenceEnvelope],
     ) -> Result<u64, PersistenceError> {
-        self.append_with_index_rows(persistence_id, expected_sequence, events, &[], &[], false)
-            .await
+        self.append_with_index_rows(
+            persistence_id,
+            expected_sequence,
+            events,
+            &[],
+            &[],
+            false,
+            None,
+        )
+        .await
     }
 
     async fn append_with_index_rows(
@@ -170,6 +341,7 @@ impl EventStore for PostgresEventStore {
         key_rows: &[temper_runtime::persistence::EntityKeyRow],
         vector_rows: &[EntityVectorRow],
         reconcile_vectors: bool,
+        spec_declaration_fingerprint: Option<&str>,
     ) -> Result<u64, PersistenceError> {
         let (tenant, entity_type, entity_id) =
             parse_persistence_id_parts(persistence_id).map_err(PersistenceError::Storage)?;
@@ -213,6 +385,15 @@ impl EventStore for PostgresEventStore {
                 return Err(PersistenceError::Storage(e.to_string()));
             }
         };
+
+        if reconcile_vectors && spec_declaration_fingerprint.is_none() {
+            return Err(PersistenceError::Storage(format!(
+                "vector reconciliation append requires a spec declaration fingerprint for {tenant}:{entity_type}"
+            )));
+        }
+        if let Some(fingerprint) = spec_declaration_fingerprint {
+            Self::validate_live_spec_declaration(&mut tx, tenant, entity_type, fingerprint).await?;
+        }
 
         let row: Option<(i64,)> = crate::dbm::postgres_query_as!(
             "SELECT COALESCE(MAX(sequence_nr), 0) FROM events \
@@ -550,29 +731,149 @@ impl EventStore for PostgresEventStore {
         tenant: &str,
         entity_type: &str,
         vector_set: &str,
+        declaration_revision: u64,
+        declaration_fingerprint: &str,
     ) -> Result<u64, PersistenceError> {
+        if declaration_revision == 0 || declaration_fingerprint.is_empty() {
+            return Err(PersistenceError::Storage(format!(
+                "vector declaration revision must be nonzero and fingerprinted for {tenant}:{entity_type}"
+            )));
+        }
         let mut tx = self
             .pool
             .begin()
             .await
             .map_err(|e| PersistenceError::Storage(e.to_string()))?;
-        let (generation,): (i64,) = crate::dbm::postgres_query_as!(
+
+        // The authority row survives hard spec deletion. Its trigger advances the
+        // revision and fences existing work in the same transaction as every IOA
+        // mutation, including delete/re-add.
+        let (authoritative_revision, stored_fingerprint) =
+            Self::spec_declaration_with_compat_bootstrap(
+                &mut tx,
+                tenant,
+                entity_type,
+                declaration_fingerprint,
+            )
+            .await?;
+        if stored_fingerprint != declaration_fingerprint {
+            return Err(PersistenceError::Storage(format!(
+                "stale vector declaration fingerprint for {tenant}:{entity_type}"
+            )));
+        }
+        let stored_revision = i64::try_from(authoritative_revision).map_err(|_| {
+            PersistenceError::Storage(format!(
+                "vector declaration revision exhausted for {tenant}:{entity_type}"
+            ))
+        })?;
+
+        let inserted: Option<(i64,)> = crate::dbm::postgres_query_as!(
             "INSERT INTO entity_vector_reconciliation_generation \
-             (tenant, entity_type, generation, vector_set) VALUES ($1, $2, 1, $3) \
-             ON CONFLICT (tenant, entity_type) DO UPDATE SET \
-                 generation = entity_vector_reconciliation_generation.generation + 1, \
-                 vector_set = EXCLUDED.vector_set \
+             (tenant, entity_type, generation, declaration_revision, declaration_fingerprint, vector_set) \
+             VALUES ($1, $2, 1, $3, $4, $5) \
+             ON CONFLICT (tenant, entity_type) DO NOTHING \
              RETURNING generation",
         )
         .bind(tenant)
         .bind(entity_type)
+        .bind(stored_revision)
+        .bind(declaration_fingerprint)
         .bind(vector_set)
+        .fetch_optional(&mut *tx)
+        .await
+        .map_err(|e| PersistenceError::Storage(e.to_string()))?;
+        if let Some((generation,)) = inserted {
+            crate::dbm::postgres_query!(
+                "DELETE FROM vector_index_backfill_watermark \
+                 WHERE tenant = $1 AND entity_type = $2",
+            )
+            .bind(tenant)
+            .bind(entity_type)
+            .execute(&mut *tx)
+            .await
+            .map_err(|e| PersistenceError::Storage(e.to_string()))?;
+            tx.commit()
+                .await
+                .map_err(|e| PersistenceError::Storage(e.to_string()))?;
+            return u64::try_from(generation).map_err(|_| {
+                PersistenceError::Storage(format!(
+                    "invalid vector reconciliation generation for {tenant}:{entity_type}"
+                ))
+            });
+        }
+
+        let (generation, current_revision, current_fingerprint, current_set): (
+            i64,
+            i64,
+            String,
+            String,
+        ) = crate::dbm::postgres_query_as!(
+            "SELECT generation, declaration_revision, declaration_fingerprint, vector_set \
+             FROM entity_vector_reconciliation_generation \
+             WHERE tenant = $1 AND entity_type = $2 FOR UPDATE",
+        )
+        .bind(tenant)
+        .bind(entity_type)
         .fetch_one(&mut *tx)
         .await
         .map_err(|e| PersistenceError::Storage(e.to_string()))?;
-        // The prior signature is no longer an authoritative completion claim once
-        // a new generation starts. Invalidate it in this same transaction so a
-        // coordinator for that signature cannot observe it and incorrectly skip.
+
+        let current_revision = u64::try_from(current_revision).map_err(|_| {
+            PersistenceError::Storage(format!(
+                "invalid vector declaration revision for {tenant}:{entity_type}"
+            ))
+        })?;
+        if authoritative_revision < current_revision {
+            return Err(PersistenceError::Storage(format!(
+                "vector reconciliation revision {current_revision} exceeds declaration authority {authoritative_revision} for {tenant}:{entity_type}"
+            )));
+        }
+        if authoritative_revision == current_revision {
+            if current_fingerprint == declaration_fingerprint && current_set == vector_set {
+                tx.commit()
+                    .await
+                    .map_err(|e| PersistenceError::Storage(e.to_string()))?;
+                return u64::try_from(generation).map_err(|_| {
+                    PersistenceError::Storage(format!(
+                        "invalid vector reconciliation generation for {tenant}:{entity_type}"
+                    ))
+                });
+            }
+            if !current_fingerprint.is_empty() || !current_set.is_empty() {
+                return Err(PersistenceError::Storage(format!(
+                    "conflicting vector declaration at revision {authoritative_revision} for {tenant}:{entity_type}"
+                )));
+            }
+        }
+
+        // Spec triggers already advance the generation and leave an empty claim.
+        // The fallback increment covers upgraded generation-zero/live-write rows.
+        let next_generation = if authoritative_revision == current_revision {
+            generation
+        } else {
+            generation.checked_add(1).ok_or_else(|| {
+                PersistenceError::Storage(format!(
+                    "vector reconciliation generation exhausted for {tenant}:{entity_type}"
+                ))
+            })?
+        };
+        crate::dbm::postgres_query!(
+            "UPDATE entity_vector_reconciliation_generation \
+             SET generation = $3, declaration_revision = $4, \
+                 declaration_fingerprint = $5, vector_set = $6 \
+             WHERE tenant = $1 AND entity_type = $2",
+        )
+        .bind(tenant)
+        .bind(entity_type)
+        .bind(next_generation)
+        .bind(stored_revision)
+        .bind(declaration_fingerprint)
+        .bind(vector_set)
+        .execute(&mut *tx)
+        .await
+        .map_err(|e| PersistenceError::Storage(e.to_string()))?;
+        // Claiming a trigger-advanced or upgraded revision withdraws any legacy
+        // completion claim. An exact retry returned above leaves it intact.
         crate::dbm::postgres_query!(
             "DELETE FROM vector_index_backfill_watermark \
              WHERE tenant = $1 AND entity_type = $2",
@@ -585,7 +886,11 @@ impl EventStore for PostgresEventStore {
         tx.commit()
             .await
             .map_err(|e| PersistenceError::Storage(e.to_string()))?;
-        Ok(generation as u64)
+        u64::try_from(next_generation).map_err(|_| {
+            PersistenceError::Storage(format!(
+                "invalid vector reconciliation generation for {tenant}:{entity_type}"
+            ))
+        })
     }
 
     async fn backfill_entity_vectors(
@@ -880,12 +1185,32 @@ impl EventStore for PostgresEventStore {
         }
 
         let mut seen = std::collections::BTreeSet::new();
+        let mut declaration_fingerprints = std::collections::BTreeMap::new();
         for append in appends {
             if !seen.insert(append.persistence_id.as_str()) {
                 return Err(PersistenceError::Storage(format!(
                     "duplicate persistence_id '{}' in append_batch",
                     append.persistence_id
                 )));
+            }
+            if append.reconcile_vectors && append.spec_declaration_fingerprint.is_none() {
+                return Err(PersistenceError::Storage(format!(
+                    "vector reconciliation append requires a spec declaration fingerprint for '{}'",
+                    append.persistence_id
+                )));
+            }
+            if let Some(fingerprint) = append.spec_declaration_fingerprint.as_deref() {
+                let (tenant, entity_type, _) = parse_persistence_id_parts(&append.persistence_id)
+                    .map_err(PersistenceError::Storage)?;
+                let key = (tenant.to_string(), entity_type.to_string());
+                if let Some(existing) = declaration_fingerprints.get(&key)
+                    && existing != fingerprint
+                {
+                    return Err(PersistenceError::Storage(format!(
+                        "conflicting spec declaration fingerprints in append_batch for {tenant}:{entity_type}"
+                    )));
+                }
+                declaration_fingerprints.insert(key, fingerprint.to_string());
             }
         }
 
@@ -928,6 +1253,13 @@ impl EventStore for PostgresEventStore {
                 return Err(PersistenceError::Storage(e.to_string()));
             }
         };
+
+        // Lock authority rows in deterministic tenant/type order before checking
+        // or mutating any journal. Keeping these SHARE locks through commit makes
+        // the complete batch atomic with respect to spec declaration changes.
+        for ((tenant, entity_type), fingerprint) in &declaration_fingerprints {
+            Self::validate_live_spec_declaration(&mut tx, tenant, entity_type, fingerprint).await?;
+        }
 
         let mut parsed = Vec::with_capacity(appends.len());
         for append in appends {
@@ -1306,6 +1638,14 @@ impl EventStore for PostgresEventStore {
 mod projection_tests;
 
 #[cfg(test)]
+#[path = "store_declaration_authority_test.rs"]
+mod declaration_authority_tests;
+
+#[cfg(test)]
+#[path = "store_vector_reconciliation_test.rs"]
+mod vector_reconciliation_tests;
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use crate::migration::run_migrations;
@@ -1383,7 +1723,7 @@ mod tests {
         let database_url = match std::env::var("DATABASE_URL") {
             Ok(url) => url,
             Err(_) => {
-                eprintln!("skipping Postgres integration test: DATABASE_URL is not set");
+                tracing::warn!("skipping Postgres integration test: DATABASE_URL is not set");
                 return;
             }
         };
@@ -1472,168 +1812,6 @@ mod tests {
                     ("Order".to_string(), "ord-2".to_string()),
                     ("Task".to_string(), "task-1".to_string()),
                 ]
-            );
-        });
-    }
-
-    #[test]
-    fn vector_reconciliation_is_monotonic_and_repairs_deleted_streams() {
-        let database_url = match std::env::var("DATABASE_URL") {
-            Ok(url) => url,
-            Err(_) => {
-                eprintln!("skipping Postgres integration test: DATABASE_URL is not set");
-                return;
-            }
-        };
-
-        sqlx::test_block_on(async {
-            let pool = PgPool::connect(&database_url)
-                .await
-                .expect("connect to DATABASE_URL");
-            run_migrations(&pool).await.expect("run migrations");
-            let store = PostgresEventStore::new(pool);
-            let tenant = format!("tenant-vector-{}", uuid::Uuid::new_v4());
-            let persistence_id = format!("{tenant}:Item:item-race");
-            let row = |vector: Vec<f32>| EntityVectorRow {
-                decl_name: "embed".to_string(),
-                model_tag: "m1".to_string(),
-                vector,
-            };
-            let first_generation = store
-                .begin_vector_index_reconciliation(&tenant, "Item", "v2|a")
-                .await
-                .expect("begin vector reconciliation generation");
-            store
-                .mark_vector_index_backfilled(&tenant, "Item", first_generation, "v2|a")
-                .await
-                .expect("publish initial completion claim");
-            let superseded_generation = store
-                .begin_vector_index_reconciliation(&tenant, "Item", "v2|b")
-                .await
-                .expect("begin competing vector reconciliation generation");
-            assert!(
-                store
-                    .vector_index_backfilled_types(&tenant)
-                    .await
-                    .expect("read invalidated completion claim")
-                    .is_empty(),
-                "beginning B must atomically withdraw A's completion watermark"
-            );
-            assert_eq!(
-                store
-                    .vector_reconciliation_entity_types(&tenant)
-                    .await
-                    .expect("read durable reconciliation types"),
-                vec!["Item".to_string()],
-                "the in-progress type must remain discoverable without its watermark"
-            );
-            let generation = store
-                .begin_vector_index_reconciliation(&tenant, "Item", "embed")
-                .await
-                .expect("reclaim vector reconciliation generation");
-            assert!(generation > superseded_generation);
-            assert!(
-                store
-                    .mark_vector_index_backfilled(&tenant, "Item", superseded_generation, "v2|b",)
-                    .await
-                    .is_err(),
-                "the superseded generation must not republish its watermark"
-            );
-
-            store
-                .append_with_index_rows(
-                    &persistence_id,
-                    0,
-                    &[test_envelope("Created", serde_json::json!({}))],
-                    &[],
-                    &[row(vec![1.0, 0.0])],
-                    true,
-                )
-                .await
-                .expect("append initial vector");
-            store
-                .append_batch(&[
-                    PersistenceAppend {
-                        persistence_id: persistence_id.clone(),
-                        expected_sequence: 1,
-                        events: vec![test_envelope("CompositeUpdated", serde_json::json!({}))],
-                        vector_rows: vec![row(vec![0.0, 1.0])],
-                        reconcile_vectors: true,
-                    },
-                    PersistenceAppend {
-                        persistence_id: format!("{tenant}:Audit:audit-race"),
-                        expected_sequence: 0,
-                        events: vec![test_envelope("Recorded", serde_json::json!({}))],
-                        vector_rows: Vec::new(),
-                        reconcile_vectors: false,
-                    },
-                ])
-                .await
-                .expect("append composite live vector update");
-            store
-                .backfill_entity_vectors(
-                    &tenant,
-                    "Item",
-                    "item-race",
-                    generation,
-                    1,
-                    &[row(vec![1.0, 0.0])],
-                )
-                .await
-                .expect("ignore stale rebuild");
-            assert_eq!(
-                store
-                    .vector_candidates(&tenant, "Item", "embed", "m1", 10)
-                    .await
-                    .expect("read live vector")[0]
-                    .vector,
-                vec![0.0, 1.0]
-            );
-
-            store
-                .append_with_index_rows(
-                    &persistence_id,
-                    2,
-                    &[test_envelope("Deleted", serde_json::json!({}))],
-                    &[],
-                    &[],
-                    true,
-                )
-                .await
-                .expect("append vector purge");
-            store
-                .backfill_entity_vectors(
-                    &tenant,
-                    "Item",
-                    "item-race",
-                    generation,
-                    2,
-                    &[row(vec![0.0, 1.0])],
-                )
-                .await
-                .expect("ignore stale resurrection");
-            assert!(
-                store
-                    .vector_candidates(&tenant, "Item", "embed", "m1", 10)
-                    .await
-                    .expect("read purged vectors")
-                    .is_empty()
-            );
-            assert!(
-                !store
-                    .list_entity_ids_by_type(&tenant, "Item")
-                    .await
-                    .expect("list active entities")
-                    .iter()
-                    .any(|entity_id| entity_id == "item-race")
-            );
-            assert!(
-                store
-                    .list_vector_repair_entity_ids(&tenant, "Item")
-                    .await
-                    .expect("list repair streams")
-                    .iter()
-                    .any(|entity_id| entity_id == "item-race")
             );
         });
     }
@@ -1764,7 +1942,7 @@ mod tests {
         let database_url = match std::env::var("DATABASE_URL") {
             Ok(url) => url,
             Err(_) => {
-                eprintln!("skipping Postgres integration test: DATABASE_URL is not set");
+                tracing::warn!("skipping Postgres integration test: DATABASE_URL is not set");
                 return;
             }
         };

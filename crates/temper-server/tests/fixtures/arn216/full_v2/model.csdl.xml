@@ -1,0 +1,22 @@
+<?xml version="1.0" encoding="utf-8"?>
+<edmx:Edmx Version="4.0" xmlns:edmx="http://docs.oasis-open.org/odata/ns/edmx">
+  <edmx:DataServices>
+    <Schema Namespace="Temper.Arn216" xmlns="http://docs.oasis-open.org/odata/ns/edm">
+      <EntityType Name="Item">
+        <Key><PropertyRef Name="Id"/></Key>
+        <Property Name="Id" Type="Edm.String" Nullable="false"/>
+        <Property Name="Title" Type="Edm.String"/>
+      </EntityType>
+      <EntityType Name="Note">
+        <Key><PropertyRef Name="Id"/></Key>
+        <Property Name="Id" Type="Edm.String" Nullable="false"/>
+        <Property Name="Body" Type="Edm.String"/>
+        <Property Name="Revision" Type="Edm.String"/>
+      </EntityType>
+      <EntityContainer Name="Service">
+        <EntitySet Name="Items" EntityType="Temper.Arn216.Item"/>
+        <EntitySet Name="Notes" EntityType="Temper.Arn216.Note"/>
+      </EntityContainer>
+    </Schema>
+  </edmx:DataServices>
+</edmx:Edmx>

@@ -34,12 +34,16 @@ use crate::platform_store::PlatformStore;
 use crate::platform_store::SimPlatformStore;
 use crate::state::trajectory::{TrajectoryEntry, TrajectorySource};
 
+mod data_only_create;
 mod published_artifacts;
 mod query_plane_impls;
 mod query_plane_read;
+mod vector_event_store;
+pub use data_only_create::{DataOnlyCreateRecord, DataOnlyCreateStore};
 pub use published_artifacts::{
     PublishedArtifactStore, PublishedArtifactStoreRow, PublishedArtifactStoreUpsert,
 };
+pub use vector_event_store::AppendIndexRows;
 mod query_plane;
 pub use query_plane::{
     EntityCatalogRow, QueryFieldIndexOrder, QueryFieldIndexOrderDirection, QueryFieldIndexPage,
@@ -84,10 +88,20 @@ pub trait DynEventStore: Send + Sync {
         persistence_id: &'a str,
         expected_sequence: u64,
         events: &'a [PersistenceEnvelope],
-        key_rows: &'a [temper_runtime::persistence::EntityKeyRow],
-        vector_rows: &'a [temper_runtime::persistence::EntityVectorRow],
-        reconcile_vectors: bool,
+        index_rows: AppendIndexRows<'a>,
     ) -> EventStoreFuture<'a, Result<u64, PersistenceError>>;
+
+    fn persist_spec_declaration<'a>(
+        &'a self,
+        tenant: &'a str,
+        entity_type: &'a str,
+        declaration_fingerprint: &'a str,
+    ) -> EventStoreFuture<'a, Result<u64, PersistenceError>>;
+
+    fn spec_declaration_entity_types<'a>(
+        &'a self,
+        tenant: &'a str,
+    ) -> EventStoreFuture<'a, Result<Vec<String>, PersistenceError>>;
 
     fn backfill_entity_vectors<'a>(
         &'a self,
@@ -104,6 +118,8 @@ pub trait DynEventStore: Send + Sync {
         tenant: &'a str,
         entity_type: &'a str,
         vector_set: &'a str,
+        declaration_revision: u64,
+        declaration_fingerprint: &'a str,
     ) -> EventStoreFuture<'a, Result<u64, PersistenceError>>;
 
     fn vector_candidates<'a>(
@@ -267,19 +283,39 @@ where
         persistence_id: &'a str,
         expected_sequence: u64,
         events: &'a [PersistenceEnvelope],
-        key_rows: &'a [temper_runtime::persistence::EntityKeyRow],
-        vector_rows: &'a [temper_runtime::persistence::EntityVectorRow],
-        reconcile_vectors: bool,
+        index_rows: AppendIndexRows<'a>,
     ) -> EventStoreFuture<'a, Result<u64, PersistenceError>> {
         Box::pin(EventStore::append_with_index_rows(
             self,
             persistence_id,
             expected_sequence,
             events,
-            key_rows,
-            vector_rows,
-            reconcile_vectors,
+            index_rows.key_rows,
+            index_rows.vector_rows,
+            index_rows.reconcile_vectors,
+            index_rows.spec_declaration_fingerprint,
         ))
+    }
+
+    fn persist_spec_declaration<'a>(
+        &'a self,
+        tenant: &'a str,
+        entity_type: &'a str,
+        declaration_fingerprint: &'a str,
+    ) -> EventStoreFuture<'a, Result<u64, PersistenceError>> {
+        Box::pin(EventStore::persist_spec_declaration(
+            self,
+            tenant,
+            entity_type,
+            declaration_fingerprint,
+        ))
+    }
+
+    fn spec_declaration_entity_types<'a>(
+        &'a self,
+        tenant: &'a str,
+    ) -> EventStoreFuture<'a, Result<Vec<String>, PersistenceError>> {
+        Box::pin(EventStore::spec_declaration_entity_types(self, tenant))
     }
 
     fn backfill_entity_vectors<'a>(
@@ -307,12 +343,16 @@ where
         tenant: &'a str,
         entity_type: &'a str,
         vector_set: &'a str,
+        declaration_revision: u64,
+        declaration_fingerprint: &'a str,
     ) -> EventStoreFuture<'a, Result<u64, PersistenceError>> {
         Box::pin(EventStore::begin_vector_index_reconciliation(
             self,
             tenant,
             entity_type,
             vector_set,
+            declaration_revision,
+            declaration_fingerprint,
         ))
     }
 
@@ -572,113 +612,6 @@ impl BoxedEventStore {
             .await
     }
 
-    pub async fn append_with_index_rows(
-        &self,
-        persistence_id: &str,
-        expected_sequence: u64,
-        events: &[PersistenceEnvelope],
-        key_rows: &[temper_runtime::persistence::EntityKeyRow],
-        vector_rows: &[temper_runtime::persistence::EntityVectorRow],
-        reconcile_vectors: bool,
-    ) -> Result<u64, PersistenceError> {
-        self.0
-            .append_with_index_rows(
-                persistence_id,
-                expected_sequence,
-                events,
-                key_rows,
-                vector_rows,
-                reconcile_vectors,
-            )
-            .await
-    }
-
-    pub async fn backfill_entity_vectors(
-        &self,
-        tenant: &str,
-        entity_type: &str,
-        entity_id: &str,
-        reconciliation_generation: u64,
-        observed_sequence: u64,
-        vector_rows: &[temper_runtime::persistence::EntityVectorRow],
-    ) -> Result<(), PersistenceError> {
-        self.0
-            .backfill_entity_vectors(
-                tenant,
-                entity_type,
-                entity_id,
-                reconciliation_generation,
-                observed_sequence,
-                vector_rows,
-            )
-            .await
-    }
-
-    pub async fn begin_vector_index_reconciliation(
-        &self,
-        tenant: &str,
-        entity_type: &str,
-        vector_set: &str,
-    ) -> Result<u64, PersistenceError> {
-        self.0
-            .begin_vector_index_reconciliation(tenant, entity_type, vector_set)
-            .await
-    }
-
-    pub async fn vector_candidates(
-        &self,
-        tenant: &str,
-        entity_type: &str,
-        decl_name: &str,
-        model_tag: &str,
-        limit: usize,
-    ) -> Result<Vec<temper_runtime::persistence::EntityVectorCandidate>, PersistenceError> {
-        self.0
-            .vector_candidates(tenant, entity_type, decl_name, model_tag, limit)
-            .await
-    }
-
-    pub async fn mark_vector_index_backfilled(
-        &self,
-        tenant: &str,
-        entity_type: &str,
-        reconciliation_generation: u64,
-        vector_set: &str,
-    ) -> Result<(), PersistenceError> {
-        self.0
-            .mark_vector_index_backfilled(
-                tenant,
-                entity_type,
-                reconciliation_generation,
-                vector_set,
-            )
-            .await
-    }
-
-    pub async fn vector_index_backfilled_types(
-        &self,
-        tenant: &str,
-    ) -> Result<Vec<(String, String)>, PersistenceError> {
-        self.0.vector_index_backfilled_types(tenant).await
-    }
-
-    pub async fn vector_reconciliation_entity_types(
-        &self,
-        tenant: &str,
-    ) -> Result<Vec<String>, PersistenceError> {
-        self.0.vector_reconciliation_entity_types(tenant).await
-    }
-
-    pub async fn vectored_entity_ids_for_type(
-        &self,
-        tenant: &str,
-        entity_type: &str,
-    ) -> Result<Vec<String>, PersistenceError> {
-        self.0
-            .vectored_entity_ids_for_type(tenant, entity_type)
-            .await
-    }
-
     pub async fn lookup_by_key(
         &self,
         tenant: &str,
@@ -762,16 +695,6 @@ impl BoxedEventStore {
         self.0.list_entity_ids_by_type(tenant, entity_type).await
     }
 
-    pub async fn list_vector_repair_entity_ids(
-        &self,
-        tenant: &str,
-        entity_type: &str,
-    ) -> Result<Vec<String>, PersistenceError> {
-        self.0
-            .list_vector_repair_entity_ids(tenant, entity_type)
-            .await
-    }
-
     pub async fn list_entity_ids_limited(
         &self,
         tenant: &str,
@@ -844,41 +767,6 @@ impl From<PostgresPolicyRow> for PolicyStoreRow {
             enabled: row.enabled,
         }
     }
-}
-
-/// Inputs for a native brand-new data-only entity create.
-///
-/// This capability is only valid for entities whose first durable event and
-/// first query projection row can be inserted atomically by a storage backend.
-pub struct DataOnlyCreateRecord<'a> {
-    /// Tenant that owns the entity.
-    pub tenant: &'a str,
-    /// Entity type being created.
-    pub entity_type: &'a str,
-    /// Entity id being created.
-    pub entity_id: &'a str,
-    /// Initial entity status.
-    pub status: &'a str,
-    /// Projection fields to store in the query catalog and scalar index.
-    pub fields: &'a serde_json::Value,
-    /// Full response projection to store in the query catalog.
-    pub state: &'a serde_json::Value,
-    /// First event envelope to append at sequence number 1.
-    pub event: &'a PersistenceEnvelope,
-}
-
-/// Optional native storage capability for brand-new data-only creates.
-#[async_trait::async_trait]
-pub trait DataOnlyCreateStore: Send + Sync {
-    /// Persist the first event and initial projection atomically.
-    ///
-    /// Returns the new sequence number on success. Duplicate first events or
-    /// duplicate projection rows should return [`PersistenceError::ConcurrencyViolation`]
-    /// so the caller can decline the fast path and use the generic path.
-    async fn create_data_only_entity(
-        &self,
-        record: DataOnlyCreateRecord<'_>,
-    ) -> Result<u64, PersistenceError>;
 }
 
 /// Durable observe trajectory sink.
@@ -2775,6 +2663,7 @@ impl DataOnlyCreateStore for PostgresEventStore {
             record.fields,
             record.state,
             record.event,
+            record.spec_declaration_fingerprint,
         )
         .await
     }

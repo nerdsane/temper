@@ -145,6 +145,9 @@ pub struct RelationGraph {
 /// A registered tenant with its specs and entity configuration.
 #[derive(Debug, Clone)]
 pub struct TenantConfig {
+    /// Process-local monotonic revision for declaration snapshots. Persistent
+    /// stores validate the accompanying fingerprint against their spec catalog.
+    pub revision: u64,
     /// The CSDL document describing this tenant's entity model.
     pub csdl: Arc<CsdlDocument>,
     /// Raw CSDL XML for serving via `$metadata`.

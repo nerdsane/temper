@@ -198,6 +198,7 @@ async fn boxed_event_store_delegates_through_object_safe_adapter() {
                 events: events.clone(),
                 vector_rows: Vec::new(),
                 reconcile_vectors: false,
+                spec_declaration_fingerprint: None,
             }])
             .await
             .expect("append batch through dyn adapter"),

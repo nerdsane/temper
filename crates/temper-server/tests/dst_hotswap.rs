@@ -8,7 +8,9 @@ mod common;
 
 use temper_runtime::scheduler::install_deterministic_context;
 use temper_runtime::tenant::TenantId;
+use temper_server::ServerState;
 use temper_spec::csdl::parse_csdl;
+use temper_store_sim::SimEventStore;
 
 /// An extended Order spec with an additional "Archived" state and "ArchiveOrder" action.
 const ORDER_V2_IOA: &str = r#"
@@ -75,6 +77,23 @@ to = "Archived"
 kind = "input"
 "#;
 
+fn publish_order_v2(state: &ServerState, sim_store: &SimEventStore) {
+    let fingerprint = temper_store_turso::spec_content_hash(ORDER_V2_IOA);
+    let revision = sim_store.persist_spec_declaration("default", "Order", &fingerprint);
+    assert!(
+        revision > 0,
+        "hot-swap must advance durable declaration authority first"
+    );
+    let mut registry = state.registry.write().expect("registry lock"); // ci-ok: infallible lock
+    let csdl = parse_csdl(common::CSDL_XML).expect("CSDL parse");
+    registry.register_tenant(
+        "default",
+        csdl,
+        common::CSDL_XML.to_string(),
+        &[("Order", ORDER_V2_IOA)],
+    );
+}
+
 // =========================================================================
 // Test: Hot-swap adds new states visible to live entities
 // =========================================================================
@@ -83,7 +102,7 @@ kind = "input"
 async fn dst_hotswap_entity_sees_new_table() {
     for seed in 0..50 {
         let (_guard, _clock, _id_gen) = install_deterministic_context(seed);
-        let (state, _sim_store) = common::build_default_state(seed, "dst-hotswap");
+        let (state, sim_store) = common::build_default_state(seed, "dst-hotswap");
         let tenant = TenantId::default();
 
         // Create an Order and advance to Confirmed.
@@ -122,16 +141,7 @@ async fn dst_hotswap_entity_sees_new_table() {
         assert_eq!(r.state.status, "Confirmed");
 
         // Hot-swap to v2 spec (adds "Archived" state and "ArchiveOrder" action).
-        {
-            let mut reg = state.registry.write().expect("registry lock"); // ci-ok: infallible lock
-            let csdl = parse_csdl(common::CSDL_XML).expect("CSDL parse");
-            reg.register_tenant(
-                "default",
-                csdl,
-                common::CSDL_XML.to_string(),
-                &[("Order", ORDER_V2_IOA)],
-            );
-        }
+        publish_order_v2(&state, &sim_store);
 
         // Advance through the remaining states using v2 table.
         for action in &["ProcessOrder", "ShipOrder", "DeliverOrder"] {
@@ -175,7 +185,7 @@ async fn dst_hotswap_entity_sees_new_table() {
 #[tokio::test]
 async fn dst_hotswap_version_increases() {
     let (_guard, _clock, _id_gen) = install_deterministic_context(42);
-    let (state, _sim_store) = common::build_default_state(42, "dst-hotswap");
+    let (state, sim_store) = common::build_default_state(42, "dst-hotswap");
     let tenant = TenantId::default();
 
     // Get initial version.
@@ -186,16 +196,7 @@ async fn dst_hotswap_version_increases() {
     };
 
     // Hot-swap.
-    {
-        let mut reg = state.registry.write().expect("registry lock"); // ci-ok: infallible lock
-        let csdl = parse_csdl(common::CSDL_XML).expect("CSDL parse");
-        reg.register_tenant(
-            "default",
-            csdl,
-            common::CSDL_XML.to_string(),
-            &[("Order", ORDER_V2_IOA)],
-        );
-    }
+    publish_order_v2(&state, &sim_store);
 
     let v2 = {
         let reg = state.registry.read().expect("registry lock"); // ci-ok: infallible lock

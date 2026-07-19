@@ -19,6 +19,7 @@ pub(crate) enum TenantMetadataBackend {
 }
 
 mod logs_and_secrets;
+mod spec_catalog;
 mod spec_metadata;
 
 const BUNDLED_REPLACE_UPLOAD_SOURCE: &str = "bundled-replace-upload";

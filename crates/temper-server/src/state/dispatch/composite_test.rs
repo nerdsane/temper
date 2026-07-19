@@ -1440,8 +1440,13 @@ async fn composite_dispatch_co_commits_vector_purge_fence_before_delayed_repair(
     let tenant = TenantId::default();
     let agent = AgentContext::for_service("composite-vector-test");
     let child_id = "child-vector-through-composite";
+    let child_fingerprint = state
+        .transition_tables
+        .get("Child")
+        .and_then(|table| table.spec_declaration_fingerprint.as_deref())
+        .expect("Child table must carry its exact declaration fingerprint");
     let generation = store
-        .begin_vector_index_reconciliation("default", "Child", "v2|embed")
+        .begin_vector_index_reconciliation("default", "Child", "v2|embed", 1, child_fingerprint)
         .await
         .expect("begin vector reconciliation");
     let stale_row = EntityVectorRow {

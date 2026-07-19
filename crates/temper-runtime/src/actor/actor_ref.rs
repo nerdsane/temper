@@ -1,4 +1,6 @@
 use std::fmt;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use tokio::sync::oneshot;
@@ -38,6 +40,7 @@ pub enum SystemSignal {
 pub struct ActorRef<M: Message> {
     pub(crate) sender: MailboxSender<M>,
     pub(crate) id: ActorId,
+    pub(crate) ready: Arc<AtomicBool>,
 }
 
 /// Unique identifier for an actor instance.
@@ -111,6 +114,11 @@ impl<M: Message> ActorRef<M> {
         &self.id
     }
 
+    /// Whether this actor incarnation completed `pre_start` and is serving messages.
+    pub fn is_ready(&self) -> bool {
+        self.ready.load(Ordering::Acquire)
+    }
+
     /// Current in-flight mailbox depth (messages queued but not yet processed).
     /// Exposed for observability; see `runtime_metrics::record_actor_mailbox_depth`.
     pub fn mailbox_depth(&self) -> usize {
@@ -133,6 +141,7 @@ impl<M: Message> Clone for ActorRef<M> {
         Self {
             sender: self.sender.clone(),
             id: self.id.clone(),
+            ready: self.ready.clone(),
         }
     }
 }

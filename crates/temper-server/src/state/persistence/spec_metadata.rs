@@ -14,19 +14,18 @@ impl ServerState {
         ioa_source: &str,
         csdl_xml: &str,
     ) -> Result<(), String> {
-        let Some(backend) = self.tenant_metadata_backend(tenant).await else {
-            return Ok(());
-        };
-
-        match backend {
-            TenantMetadataBackend::Postgres(pool) => {
+        let content_hash = temper_store_turso::spec_content_hash(ioa_source);
+        if let Some(backend) = self.tenant_metadata_backend(tenant).await {
+            match backend {
+                TenantMetadataBackend::Postgres(pool) => {
                 sqlx::query(
                     "INSERT INTO specs \
-                     (tenant, entity_type, ioa_source, csdl_xml, version, verified, verification_status, updated_at) \
-                     VALUES ($1, $2, $3, $4, 1, false, 'pending', now()) \
+                     (tenant, entity_type, ioa_source, csdl_xml, content_hash, version, verified, verification_status, updated_at) \
+                     VALUES ($1, $2, $3, $4, $5, 1, false, 'pending', now()) \
                      ON CONFLICT (tenant, entity_type) DO UPDATE SET \
                          ioa_source = EXCLUDED.ioa_source, \
                          csdl_xml = EXCLUDED.csdl_xml, \
+                         content_hash = EXCLUDED.content_hash, \
                          version = specs.version + 1, \
                          verified = false, \
                          verification_status = 'pending', \
@@ -39,20 +38,55 @@ impl ServerState {
                 .bind(entity_type)
                 .bind(ioa_source)
                 .bind(csdl_xml)
+                .bind(&content_hash)
                 .execute(&pool)
                 .await
                 .map(|_| ())
                 .map_err(|e| format!("failed to upsert spec {tenant}/{entity_type} in postgres: {e}"))
-            }
-            TenantMetadataBackend::Turso(turso) => {
-                let hash = temper_store_turso::spec_content_hash(ioa_source);
-                turso
-                    .upsert_spec(tenant, entity_type, ioa_source, csdl_xml, &hash)
+                }
+                TenantMetadataBackend::Turso(turso) => turso
+                    .upsert_spec(tenant, entity_type, ioa_source, csdl_xml, &content_hash)
                     .await
-                    .map_err(|e| format!("failed to upsert spec {tenant}/{entity_type} in turso: {e}"))
-            }
-            TenantMetadataBackend::Redis => Err(Self::redis_ephemeral_error("Spec source persistence")),
+                    .map_err(|e| {
+                        format!("failed to upsert spec {tenant}/{entity_type} in turso: {e}")
+                    }),
+                TenantMetadataBackend::Redis => {
+                    Err(Self::redis_ephemeral_error("Spec source persistence"))
+                }
+            }?;
         }
+        self.persist_event_store_spec_declaration(tenant, entity_type, &content_hash)
+            .await
+    }
+
+    /// Delete a persisted spec source while retaining the backend's declaration
+    /// tombstone used to fence stale writers and resume vector-row purging.
+    pub async fn delete_spec_source(&self, tenant: &str, entity_type: &str) -> Result<(), String> {
+        if let Some(backend) = self.tenant_metadata_backend(tenant).await {
+            match backend {
+                TenantMetadataBackend::Postgres(pool) => {
+                    sqlx::query("SELECT tombstone_spec_declaration_authority($1, $2)")
+                        .bind(tenant)
+                        .bind(entity_type)
+                        .execute(&pool)
+                        .await
+                        .map(|_| ())
+                        .map_err(|e| {
+                            format!("failed to delete spec {tenant}/{entity_type} in postgres: {e}")
+                        })
+                }
+                TenantMetadataBackend::Turso(turso) => {
+                    turso.delete_spec(tenant, entity_type).await.map_err(|e| {
+                        format!("failed to delete spec {tenant}/{entity_type} in turso: {e}")
+                    })
+                }
+                TenantMetadataBackend::Redis => {
+                    Err(Self::redis_ephemeral_error("Spec source deletion"))
+                }
+            }?;
+        }
+        self.persist_event_store_spec_declaration(tenant, entity_type, "absent:v1")
+            .await
     }
 
     /// Upsert tenant-level cross-invariant definitions.

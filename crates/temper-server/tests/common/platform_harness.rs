@@ -94,7 +94,18 @@ impl SimPlatformHarness {
     pub fn register_inline_spec(&self, tenant: &str, entity_type: &str, ioa_source: &str) {
         let automaton =
             temper_spec::automaton::parse_automaton(ioa_source).expect("inline IOA should parse");
-        let table = temper_jit::table::TransitionTable::from_automaton(&automaton);
+        let table = temper_jit::table::TransitionTable::from_ioa_source(ioa_source);
+        let fingerprint = table
+            .spec_declaration_fingerprint
+            .as_deref()
+            .expect("inline IOA table should carry its exact declaration fingerprint");
+        let revision =
+            self.sim_event_store
+                .persist_spec_declaration(tenant, entity_type, fingerprint);
+        assert!(
+            revision > 0,
+            "inline hot-swap must advance durable declaration authority first"
+        );
         let mut registry = self.platform_state.server.registry.write().unwrap(); // ci-ok: infallible lock
         let spec = registry
             .get_spec_mut(&TenantId::new(tenant), entity_type)

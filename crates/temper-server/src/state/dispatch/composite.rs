@@ -71,6 +71,7 @@ struct PreflightCompositeTarget {
 struct AtomicCompositeStream {
     entity_type: String,
     entity_id: String,
+    table: Arc<TransitionTable>,
     target_existed: bool,
     state: EntityState,
     expected_sequence: u64,
@@ -286,7 +287,15 @@ impl crate::state::ServerState {
             )
             .await?;
 
-            let table = self.transition_table_for_dispatch(tenant, &write.entity_type)?;
+            // The first write for a stream fixes the transition-table snapshot for
+            // the whole atomic batch. A hot swap may affect the next dispatch, but
+            // it must not relabel events derived from the old table with the new
+            // declaration fingerprint at commit time.
+            let table = streams
+                .get(&persistence_id)
+                .expect("stream inserted before table lookup")
+                .table
+                .clone();
             let cross_entity_booleans =
                 if table_has_cross_entity_guards_for_action(&table, &write.action) {
                     self.resolve_cross_entity_guards(
@@ -374,25 +383,25 @@ impl crate::state::ServerState {
         }
         let stage_ms = stage_started_at.map(|started| started.elapsed().as_millis() as u64);
 
-        let appends = streams
+        let mut appends = Vec::new();
+        for (persistence_id, stream) in streams
             .iter()
             .filter(|(_, stream)| !stream.events.is_empty())
-            .map(|(persistence_id, stream)| {
-                let vectors = self.declared_vectors_for(tenant, &stream.entity_type);
-                let vector_rows = crate::vector_index::rows_for_entity_state(
-                    &vectors,
-                    &stream.state.status,
-                    &stream.state.fields,
-                );
-                PersistenceAppend {
-                    persistence_id: persistence_id.clone(),
-                    expected_sequence: stream.expected_sequence,
-                    events: stream.events.clone(),
-                    vector_rows,
-                    reconcile_vectors: !vectors.is_empty(),
-                }
-            })
-            .collect::<Vec<_>>();
+        {
+            let vector_rows = crate::vector_index::rows_for_entity_state(
+                &stream.table.vectors,
+                &stream.state.status,
+                &stream.state.fields,
+            );
+            appends.push(PersistenceAppend {
+                persistence_id: persistence_id.clone(),
+                expected_sequence: stream.expected_sequence,
+                events: stream.events.clone(),
+                vector_rows,
+                reconcile_vectors: !stream.table.vectors.is_empty(),
+                spec_declaration_fingerprint: stream.table.spec_declaration_fingerprint.clone(),
+            });
+        }
         if appends.is_empty() {
             return Ok(true);
         }
@@ -472,11 +481,11 @@ impl crate::state::ServerState {
         if streams.contains_key(&persistence_id) {
             return Ok(());
         }
+        let table = self.transition_table_for_dispatch(tenant, entity_type)?;
 
         let (target_exists, mut state) = if let Some(target) = preflight_target {
             (target.target_existed, target.state.clone())
         } else {
-            let table = self.transition_table_for_dispatch(tenant, entity_type)?;
             let target_exists = self
                 .ensure_entity_loaded(tenant, entity_type, entity_id)
                 .await;
@@ -514,6 +523,7 @@ impl crate::state::ServerState {
             AtomicCompositeStream {
                 entity_type: entity_type.to_string(),
                 entity_id: entity_id.to_string(),
+                table,
                 target_existed: target_exists,
                 state,
                 expected_sequence,
@@ -913,18 +923,8 @@ impl crate::state::ServerState {
         tenant: &TenantId,
         entity_type: &str,
     ) -> Result<Arc<TransitionTable>, DispatchError> {
-        if let Some(table) = self
-            .registry
-            .read()
-            .map_err(|e| DispatchError::Internal(format!("registry lock poisoned: {e}")))?
-            .get_table(tenant, entity_type)
-        {
-            return Ok(table);
-        }
-
-        self.transition_tables
-            .get(entity_type)
-            .cloned()
+        self.transition_table_for_tenant(tenant, entity_type)
+            .map_err(DispatchError::Internal)?
             .ok_or_else(|| DispatchError::Ungoverned(entity_type.to_string()))
     }
 

@@ -764,6 +764,7 @@ impl EventStore for TenantStoreRouter {
         key_rows: &[temper_runtime::persistence::EntityKeyRow],
         vector_rows: &[temper_runtime::persistence::EntityVectorRow],
         reconcile_vectors: bool,
+        spec_declaration_fingerprint: Option<&str>,
     ) -> Result<u64, PersistenceError> {
         let (tenant, _, _) =
             parse_persistence_id_parts(persistence_id).map_err(PersistenceError::Storage)?;
@@ -776,6 +777,7 @@ impl EventStore for TenantStoreRouter {
                 key_rows,
                 vector_rows,
                 reconcile_vectors,
+                spec_declaration_fingerprint,
             )
             .await
     }
@@ -809,10 +811,18 @@ impl EventStore for TenantStoreRouter {
         tenant: &str,
         entity_type: &str,
         vector_set: &str,
+        declaration_revision: u64,
+        declaration_fingerprint: &str,
     ) -> Result<u64, PersistenceError> {
         let store = self.store_for_tenant(tenant).await?;
         store
-            .begin_vector_index_reconciliation(tenant, entity_type, vector_set)
+            .begin_vector_index_reconciliation(
+                tenant,
+                entity_type,
+                vector_set,
+                declaration_revision,
+                declaration_fingerprint,
+            )
             .await
     }
 

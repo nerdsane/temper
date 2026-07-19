@@ -180,6 +180,10 @@ impl SpecRegistry {
         }
 
         if let Some(existing_config) = self.tenants.get_mut(&tenant) {
+            existing_config.revision = existing_config
+                .revision
+                .checked_add(1)
+                .expect("tenant registry revision exhausted");
             // Hot-reload path: swap tables on existing entities, add new ones.
             if merge {
                 // Merge mode: combine incoming CSDL/entity-set-map with existing.
@@ -219,7 +223,9 @@ impl SpecRegistry {
                         source: e.to_string(),
                     }
                 })?;
-                let table = TransitionTable::from_automaton(&automaton);
+                let mut table = TransitionTable::from_automaton(&automaton);
+                table.spec_declaration_fingerprint =
+                    Some(temper_store_turso::spec_content_hash(ioa_source));
                 let integrations = automaton.integrations.clone();
 
                 if let Some(existing_spec) = existing_config.entities.get_mut(*entity_type) {
@@ -286,7 +292,9 @@ impl SpecRegistry {
                         source: e.to_string(),
                     }
                 })?;
-                let table = TransitionTable::from_automaton(&automaton);
+                let mut table = TransitionTable::from_automaton(&automaton);
+                table.spec_declaration_fingerprint =
+                    Some(temper_store_turso::spec_content_hash(ioa_source));
                 let integrations = automaton.integrations.clone();
                 entities.insert(
                     entity_type.to_string(),
@@ -308,6 +316,7 @@ impl SpecRegistry {
             self.tenants.insert(
                 tenant,
                 TenantConfig {
+                    revision: 1,
                     csdl: Arc::new(csdl),
                     csdl_xml: Arc::new(csdl_xml),
                     entity_set_map,
@@ -498,6 +507,17 @@ impl SpecRegistry {
         }
     }
 
+    /// Remove the verification gate for a specific entity type.
+    ///
+    /// This is used by legacy compatibility constructors whose supplied specs
+    /// were historically trusted without running the design-time cascade.
+    pub fn remove_verification_status(&mut self, tenant: &TenantId, entity_type: &str) -> bool {
+        self.tenants
+            .get_mut(tenant)
+            .and_then(|config| config.verification.remove(entity_type))
+            .is_some()
+    }
+
     /// Get verification status for a specific entity type.
     pub fn get_verification_status(
         &self,
@@ -644,6 +664,13 @@ mod tests {
 
         registry.register_tenant("alpha", csdl, xml, &[("Order", ORDER_IOA)]);
 
+        assert_eq!(
+            registry
+                .get_tenant(&TenantId::new("alpha"))
+                .unwrap()
+                .revision,
+            1
+        );
         let spec = registry.get_spec(&TenantId::new("alpha"), "Order").unwrap();
         assert_eq!(spec.automaton.automaton.name, "Order");
         assert!(!spec.ioa_source.is_empty());
@@ -849,6 +876,12 @@ assert = 'related(Order, OrderId).status in ["Active"]'
                 false,
             )
             .expect("replace should succeed");
+
+        assert_eq!(
+            registry.get_tenant(&tenant).unwrap().revision,
+            2,
+            "tenant declaration revision advances across replacement"
+        );
 
         assert!(
             registry.get_table(&tenant, "Order").is_none(),

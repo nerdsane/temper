@@ -1,4 +1,4 @@
-# ADR-0171: Monotonic vector reconciliation
+# ADR-0181: Monotonic vector reconciliation
 
 - Status: Proposed
 - Date: 2026-07-14
@@ -84,21 +84,54 @@ candidate rows.
 
 Every authoritative indexing backend will maintain one
 `entity_vector_reconciliation_generation (tenant, entity_type, generation,
-vector_set)` row. Before rebuilding a mismatched declaration set, the coordinator
-atomically advances that type's generation, withdraws the prior completion watermark,
-and receives the new token. Withdrawing the watermark prevents a coordinator for the
-old signature from observing a now-invalid completion claim and skipping. Every entity
-replacement and the final watermark write carry the token and fail if it is no longer
-current. Live vector writes read the current type generation and co-commit it into the
-entity fence with the new journal sequence. PostgreSQL takes a shared row lock for that
-read: concurrent live writers remain independent, while a generation update waits for
-all earlier writers to commit.
+declaration_revision, declaration_fingerprint, vector_set)` row. A caller supplies its
+process-local monotonic tenant revision plus the fingerprint of the IOA source from
+which it snapshotted declarations.
 
-The in-process coordinator serializes snapshotting declarations and beginning a
-generation so an older local invocation cannot obtain a later token after a newer
-invocation. The durable generation remains the cross-process and crash boundary: once
-another invocation advances it, any delayed entity replacement or watermark from the
-older invocation is rejected. A stale generation is an explicit failure, not a
+Postgres and Turso additionally maintain
+`spec_declaration_authority (tenant, entity_type, revision, ioa_source,
+declaration_fingerprint, present)`.
+Database triggers advance this row in the same transaction as every IOA insert,
+source change, and hard deletion. The row is a tombstone when `present = false`, so
+its revision survives delete/re-add and process restart. A spec mutation also advances
+an existing reconciliation generation and withdraws its watermark immediately; stale
+work is fenced at the declaration commit point, not only after the next coordinator
+starts.
+
+Persistent reconciliation uses the catalog's stored content fingerprint, falling back
+to hashing authoritative IOA bytes only for migrated rows, or uses the fixed
+`absent:v1` tombstone fingerprint. Validation and the journal/index mutation hold the
+same authority-row barrier through commit. A truly empty compatibility store may
+atomically accept its first fingerprint as authority only when neither a catalog row
+nor an authority/tombstone row exists. That bootstrap never overwrites catalog truth,
+and concurrent different first writers leave exactly one winner. A replica holding A
+therefore cannot begin after durable B merely because its call arrives later, and an
+intentional A re-add receives a strictly newer tombstone-preserved revision. The
+process-local revision remains diagnostic input and is not trusted as cross-process
+authority.
+
+Deterministic simulation mirrors the separate durable authority map. Declaration
+changes use `persist_spec_declaration`; once an authority entry exists, no caller-local
+revision can replace its fingerprint. Direct EventStore tests retain an empty-store
+first-writer bootstrap, but append validation stages that bootstrap and publishes it
+only if the complete append/batch commits. Retrying the identical declaration and
+vector set reuses its generation and does not withdraw an already-valid watermark.
+
+Before rebuilding a mismatched declaration set, the coordinator atomically advances
+that type's generation, withdraws the prior completion watermark, and receives the new
+token. Withdrawing the watermark prevents a coordinator for the old signature from
+observing a now-invalid completion claim and skipping. Every entity replacement and
+the final watermark write carry the token and fail if it is no longer current. Live
+vector writes read the current type generation and co-commit it into the entity fence
+with the new journal sequence. PostgreSQL takes a shared row lock for that read:
+concurrent live writers remain independent, while a generation update waits for all
+earlier writers to commit.
+
+The in-process coordinator serializes only declaration snapshotting and durable
+generation allocation. It releases that lock before journal enumeration, replay, and
+row replacement, so a long rebuild does not globally serialize unrelated tenants or
+types. The durable declaration revision and generation remain the cross-process and
+crash boundary. A stale revision or generation is an explicit failure, not a
 successful no-op, because it must prevent the stale invocation from claiming
 completion.
 
@@ -161,10 +194,19 @@ vector-reconciliation watermark.
 
 Turso will stop using event-first vector write-behind. Its journal, version fence, and
 vector tables share the same libSQL database, so an indexed append will use the existing
-immediate transaction path and commit all three together. Non-vector single-event
-appends retain their current optimized path. A durable outbox is not needed while all
-affected records share this transactional boundary; a future backend with a physically
-separate vector store must add a pre-commit durable obligation before it can advertise
+immediate transaction path and commit all three together. Every spec-derived writer,
+including a currently non-vector declaration, carries the fingerprint of the exact
+transition-table snapshot that produced its event. The store validates that fingerprint
+before any journal mutation. This prevents an old replica from advancing the journal
+after a newer declaration adds, removes, or changes vectors. The actor retry path,
+composite staging, native data-only create, and atomic File initial-write path all retain
+their original table snapshot through commit; none re-read a hot-swapped table merely
+to label old semantics with a new fingerprint.
+
+The single-event optimization remains available only to legacy/untyped appends that
+carry no declaration fingerprint. A durable outbox is not needed while all affected
+records share this transactional boundary; a future backend with a physically separate
+vector store must add a pre-commit durable obligation before it can advertise
 vector-index authority.
 
 **Why this approach**: an outbox would add a second state machine, cleanup rules, and
@@ -182,14 +224,76 @@ Failure to persist the watermark logs a failure outcome; the code must not emit 
 "type watermarked" completion event. The next run replays the bounded type and
 converges idempotently.
 
+The coordinator must cross the declaration barrier before trusting an existing
+watermark, then re-read completion under its short coordinator lock. This closes the
+window where a spec mutation withdraws a completion claim after the coordinator's
+initial tenant-wide read but before it decides to skip the type.
+
+### Sub-Decision 6: Full spec replacement persists omission tombstones
+
+For full-directory replacement, the durable spec catalog and in-memory registry form
+one ordered publication. Omission discovery is part of the backend write transaction,
+not a query performed before mutation. Postgres takes a tenant-scoped advisory
+transaction lock; Turso begins an immediate transaction. Only after that shared lock is
+held does the backend read the current catalog and present declaration authority,
+upsert the incoming committed set, tombstone every omission, and update tenant
+constraints. The server hot-load path and CLI startup overlay both call this exact
+primitive. Concurrent replicas therefore serialize as two complete replacements; they
+cannot each observe an empty catalog and commit their union. Merge-mode inline
+submissions do not delete omitted types.
+
+The transaction returns the exact durable omissions it replaced. The server unions
+those with any registry-only compatibility omissions before publishing the new
+registry. Turso commits only the addressed tenant's incoming set and constraints; it
+does not use a process-wide commit of unrelated staged rows.
+
+A delete always leaves authority at `absent:v1`, even when compatibility first-writer
+bootstrap created authority without a `specs` row. The deletion trigger/transaction
+advances any existing reconciliation generation and removes its watermark. The absent
+type therefore remains discoverable from durable reconciliation state after a crash,
+can purge retained candidates without loading a current transition table, and cannot
+be resurrected by stale writers or startup restore.
+
+**Why this approach**: removing a type only from the process registry is not a durable
+declaration change. On restart the old catalog row would restore the type, while an
+old vector watermark could suppress its purge. Ordering storage before registry
+publication fails closed during hot swap and makes deletion replayable.
+
+### Sub-Decision 7: Registry publication preserves only live actor incarnations
+
+Before durable catalog mutation, the server snapshots the actor key and incarnation
+UUID only for matching actors that completed `pre_start`. Readiness is shared with the
+`ActorRef` and owned by a drop guard in the actor run future; normal shutdown, handler
+panic, and task cancellation all clear it. After the durable commit and while holding
+the actor/spec publication write lock, the server preserves an actor only when the
+same key still maps to the same UUID and remains ready. It stops and removes actors
+created during the publication gap, same-key replacement incarnations, unready or
+dead actors, every removed type, and every legacy fallback actor on a tenant's first
+registry publication.
+
+Preserved actors share the registry transition-table lock and hot-swap in place. An
+actor that captured the old declaration after the snapshot cannot survive publication
+merely because its map key matches, and an unwind cannot leave a dead actor falsely
+advertised as ready.
+
+### Sub-Decision 8: Replay evidence fails closed
+
+Vector reconciliation treats strict journal recovery as evidence, not a best-effort
+read. A malformed persistence envelope is propagated instead of being classified as
+an empty or phantom entity, and an injected truncated-read fault returns an error
+instead of a successful prefix. Any load, replay, replacement, or watermark failure
+keeps the completion claim absent so restart retries the complete bounded type.
+
 ## Rollout Plan
 
 1. Pause vector-declaring writes and background vector backfill before the fleet
    cutover. Mixed old/new writers are unsafe because an old binary can still perform a
    sequence-less replacement that bypasses the new fence.
-2. Add the Postgres version and reconciliation-generation tables, seeding legacy
-   candidate sequences into generation zero. Add the equivalent idempotent Turso
-   bootstrap DDL and deterministic simulation maps.
+2. Add the Postgres version, reconciliation-generation, and declaration-authority
+   tables, including spec-mutation triggers and deletion tombstones. Seed legacy
+   candidate sequences into generation zero and authority tombstones for vector state
+   whose spec is already absent. Apply tenant RLS to all new Postgres metadata. Add the
+   equivalent idempotent Turso bootstrap DDL and deterministic simulation maps.
 3. Add tombstone-inclusive journal-stream enumeration for vector repair without
    changing active entity-listing semantics.
 4. Deploy the generation-and-sequence-carrying trait and backend implementations to
@@ -209,12 +313,27 @@ converges idempotently.
   fenced at the deletion sequence during the revisioned rebuild.
 - Remove-all declarations purge and fence the type; intervening writes followed by
   re-adding the identical declaration signature trigger a fresh rebuild.
-- An older overlapping declaration-set reconciliation cannot mutate rows or publish a
-  watermark after a newer generation begins.
+- An older overlapping declaration-set reconciliation cannot obtain a generation,
+  mutate rows, or publish a watermark after a newer durable declaration completes.
+- A delete interrupted after generation allocation resumes after restart, and an
+  identical later re-add obtains a newer authority revision in both durable stores.
 - Beginning a new generation atomically withdraws the previous completion claim, and
   an interrupted empty-set reconciliation remains discoverable without that watermark.
 - Composite vector updates and deletes advance journal, rows, and the generation-plus-
   sequence fence atomically.
+- A stale non-vector writer cannot advance the journal after a newer vector declaration
+  becomes authoritative, in either a single append or an otherwise-valid batch.
+- Full replacement persists omission tombstones before registry publication; restart
+  cannot restore a removed type, and compatibility authority without a catalog row is
+  still tombstoned.
+- Concurrent Postgres and Turso replicas replacing an empty tenant with disjoint
+  catalogs leave exactly one complete catalog after reopen, never their union.
+- An actor that panics or is cancelled after `pre_start` immediately loses readiness;
+  publication never preserves its dead incarnation.
+- Malformed or truncated journal recovery cannot publish a vector completion
+  watermark from a successful prefix.
+- A fresh compatibility store establishes exactly one first-writer declaration and
+  thereafter obeys the same durable fence as catalog-backed stores.
 - Deployment automation prevents sequence-less old writers/backfills from overlapping
   sequence-fenced writers during the cutover.
 - Equal-sequence replay is idempotent.
@@ -237,8 +356,9 @@ converges idempotently.
 ### Negative
 
 - Indexing backends store one additional small row per reconciled entity.
-- Turso vector-declaring appends hold an immediate transaction through vector
-  replacement instead of completing the index asynchronously.
+- Turso spec-derived appends hold an immediate transaction through declaration
+  validation and, when applicable, vector replacement instead of completing the index
+  asynchronously.
 - An incomplete or revised backfill re-reads the bounded entity type instead of
   resuming from row presence.
 

@@ -1,0 +1,16 @@
+[automaton]
+name = "Note"
+states = ["Draft", "Published"]
+initial = "Draft"
+
+[[state]]
+name = "Body"
+type = "string"
+initial = ""
+
+[[action]]
+name = "Publish"
+kind = "input"
+from = ["Draft"]
+to = "Published"
+params = ["Body"]

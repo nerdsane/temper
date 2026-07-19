@@ -101,6 +101,11 @@ async fn dst_rollback_dispatch_with_store_faults() {
             // Failures are expected — event store faults will cause some to fail.
         }
 
+        // Fault injection belongs to the attempted dispatches. Recovery and
+        // invariant reads must observe the durable outcome without injecting a
+        // second, unrelated truncation into the audit itself.
+        let prev_event = faulty_harness.sim_event_store.disable_faults();
+
         // Restart — only successfully persisted state should be visible.
         faulty_harness.restart().await;
 
@@ -123,5 +128,6 @@ async fn dst_rollback_dispatch_with_store_faults() {
                      ({success_count} succeeded): {e}"
                 )
             });
+        faulty_harness.sim_event_store.restore_faults(prev_event);
     }
 }

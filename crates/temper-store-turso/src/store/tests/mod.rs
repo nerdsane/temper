@@ -9,6 +9,9 @@ use temper_runtime::persistence::{
 use super::{PublishedArtifactUpsert, QueryProjectionUpsert, TursoEventStore};
 use crate::TursoSpecVerificationUpdate;
 
+mod declaration_authority;
+mod spec_catalog;
+
 fn test_envelope(event_type: &str, payload: serde_json::Value) -> PersistenceEnvelope {
     PersistenceEnvelope {
         sequence_nr: 0,
@@ -37,6 +40,23 @@ async fn make_store(test_name: &str) -> TursoEventStore {
     TursoEventStore::new(&sqlite_test_url(test_name), None)
         .await
         .expect("create store")
+}
+
+async fn install_vector_spec(store: &TursoEventStore, revision_label: &str) -> String {
+    let ioa_source = format!("[automaton]\nname = \"Item\"\n# {revision_label}\n");
+    let fingerprint = crate::spec_content_hash(&ioa_source);
+    store
+        .upsert_spec(
+            "t",
+            "Item",
+            &ioa_source,
+            "<Schema Namespace=\"Temper.Tests\" />",
+            &fingerprint,
+        )
+        .await
+        .expect("persist vector spec");
+    store.commit_specs("t").await.expect("commit vector spec");
+    fingerprint
 }
 
 #[tokio::test]
@@ -68,17 +88,18 @@ async fn append_and_read_events_roundtrip() {
 
 #[tokio::test]
 async fn vector_index_co_commit_candidates_and_partitioning() {
-    // ADR-0171: Turso co-commits entity_vector_index with the event journal. A
+    // ADR-0181: Turso co-commits entity_vector_index with the event journal. A
     // candidate scan returns vectors in entity_id order, partitioned by model tag;
     // a raw kNN read never sees another model's vectors.
     let store = make_store("vector-index").await;
+    let fingerprint = install_vector_spec(&store, "vector-index-v1").await;
     let row = |decl: &str, model: &str, v: Vec<f32>| EntityVectorRow {
         decl_name: decl.to_string(),
         model_tag: model.to_string(),
         vector: v,
     };
     let generation = store
-        .begin_vector_index_reconciliation("t", "Item", "embed")
+        .begin_vector_index_reconciliation("t", "Item", "embed", 1, &fingerprint)
         .await
         .unwrap();
 
@@ -90,6 +111,7 @@ async fn vector_index_co_commit_candidates_and_partitioning() {
             &[],
             &[row("embed", "m1", vec![0.0, 1.0])],
             true,
+            Some(&fingerprint),
         )
         .await
         .unwrap();
@@ -101,6 +123,7 @@ async fn vector_index_co_commit_candidates_and_partitioning() {
             &[],
             &[row("embed", "m1", vec![1.0, 0.0])],
             true,
+            Some(&fingerprint),
         )
         .await
         .unwrap();
@@ -113,6 +136,7 @@ async fn vector_index_co_commit_candidates_and_partitioning() {
             &[],
             &[row("embed", "m2", vec![1.0, 0.0])],
             true,
+            Some(&fingerprint),
         )
         .await
         .unwrap();
@@ -169,13 +193,14 @@ async fn vector_index_reconcile_purges_on_delete_and_empty_rows() {
     // ADR-0155: a delete/clear reconciles to an empty row set, purging the entity's
     // vector rows (the turso-side "remove" cleanup) so it is never ranked again.
     let store = make_store("vector-purge").await;
+    let fingerprint = install_vector_spec(&store, "vector-purge-v1").await;
     let row = |v: Vec<f32>| EntityVectorRow {
         decl_name: "embed".to_string(),
         model_tag: "m1".to_string(),
         vector: v,
     };
     let generation = store
-        .begin_vector_index_reconciliation("t", "Item", "embed")
+        .begin_vector_index_reconciliation("t", "Item", "embed", 1, &fingerprint)
         .await
         .unwrap();
 
@@ -188,6 +213,7 @@ async fn vector_index_reconcile_purges_on_delete_and_empty_rows() {
             &[],
             std::slice::from_ref(&row(vec![1.0, 0.0])),
             true,
+            Some(&fingerprint),
         )
         .await
         .unwrap();
@@ -208,6 +234,7 @@ async fn vector_index_reconcile_purges_on_delete_and_empty_rows() {
             &[],
             &[],
             true,
+            Some(&fingerprint),
         )
         .await
         .unwrap();
@@ -237,6 +264,7 @@ async fn vector_index_reconcile_purges_on_delete_and_empty_rows() {
 #[tokio::test]
 async fn vector_index_failure_never_commits_journal_without_index() {
     let store = make_store("vector-atomicity").await;
+    let fingerprint = install_vector_spec(&store, "vector-atomicity-v1").await;
     let conn = store.configured_connection().await.unwrap();
     conn.execute(
         "CREATE TRIGGER reject_vector_insert \
@@ -260,6 +288,7 @@ async fn vector_index_failure_never_commits_journal_without_index() {
                 vector: vec![1.0, 0.0],
             }],
             true,
+            Some(&fingerprint),
         )
         .await;
     let journal = store.read_events(persistence_id, 0).await.unwrap();
@@ -274,6 +303,7 @@ async fn vector_index_failure_never_commits_journal_without_index() {
 #[tokio::test]
 async fn pre_reconciliation_live_vector_type_remains_discoverable() {
     let store = make_store("vector-pre-generation-discovery").await;
+    let fingerprint = install_vector_spec(&store, "vector-pre-generation-v1").await;
     store
         .append_with_index_rows(
             "t:Item:item-before-generation",
@@ -286,6 +316,7 @@ async fn pre_reconciliation_live_vector_type_remains_discoverable() {
                 vector: vec![1.0, 0.0],
             }],
             true,
+            Some(&fingerprint),
         )
         .await
         .unwrap();
@@ -300,6 +331,7 @@ async fn pre_reconciliation_live_vector_type_remains_discoverable() {
 #[tokio::test]
 async fn composite_vector_index_failure_rolls_back_every_journal() {
     let store = make_store("vector-composite-atomicity").await;
+    let fingerprint = install_vector_spec(&store, "vector-composite-atomicity-v1").await;
     let conn = store.configured_connection().await.unwrap();
     conn.execute(
         "CREATE TRIGGER reject_composite_vector_insert \
@@ -324,6 +356,7 @@ async fn composite_vector_index_failure_rolls_back_every_journal() {
                     vector: vec![1.0, 0.0],
                 }],
                 reconcile_vectors: true,
+                spec_declaration_fingerprint: Some(fingerprint.clone()),
             },
             PersistenceAppend {
                 persistence_id: audit_persistence_id.to_string(),
@@ -331,6 +364,7 @@ async fn composite_vector_index_failure_rolls_back_every_journal() {
                 events: vec![test_envelope("Recorded", serde_json::json!({}))],
                 vector_rows: Vec::new(),
                 reconcile_vectors: false,
+                spec_declaration_fingerprint: None,
             },
         ])
         .await;
@@ -357,6 +391,7 @@ async fn composite_vector_index_failure_rolls_back_every_journal() {
 #[tokio::test]
 async fn stale_vector_backfill_cannot_overwrite_or_resurrect_turso_write() {
     let store = make_store("vector-monotonic").await;
+    let fingerprint = install_vector_spec(&store, "vector-monotonic-v1").await;
     let row = |v: Vec<f32>| EntityVectorRow {
         decl_name: "embed".to_string(),
         model_tag: "m1".to_string(),
@@ -364,7 +399,7 @@ async fn stale_vector_backfill_cannot_overwrite_or_resurrect_turso_write() {
     };
     let persistence_id = "t:Item:item-race";
     let generation = store
-        .begin_vector_index_reconciliation("t", "Item", "embed")
+        .begin_vector_index_reconciliation("t", "Item", "embed", 1, &fingerprint)
         .await
         .unwrap();
 
@@ -376,6 +411,7 @@ async fn stale_vector_backfill_cannot_overwrite_or_resurrect_turso_write() {
             &[],
             &[row(vec![1.0, 0.0])],
             true,
+            Some(&fingerprint),
         )
         .await
         .unwrap();
@@ -387,6 +423,7 @@ async fn stale_vector_backfill_cannot_overwrite_or_resurrect_turso_write() {
             &[],
             &[row(vec![0.0, 1.0])],
             true,
+            Some(&fingerprint),
         )
         .await
         .unwrap();
@@ -419,6 +456,7 @@ async fn stale_vector_backfill_cannot_overwrite_or_resurrect_turso_write() {
             &[],
             &[],
             true,
+            Some(&fingerprint),
         )
         .await
         .unwrap();
@@ -473,8 +511,9 @@ async fn stale_vector_backfill_cannot_overwrite_or_resurrect_turso_write() {
 #[tokio::test]
 async fn composite_batch_co_commits_vector_fence_before_delayed_repair() {
     let store = make_store("vector-composite-batch").await;
+    let fingerprint = install_vector_spec(&store, "vector-composite-v1").await;
     let generation = store
-        .begin_vector_index_reconciliation("t", "Item", "embed")
+        .begin_vector_index_reconciliation("t", "Item", "embed", 1, &fingerprint)
         .await
         .unwrap();
     let stale_row = EntityVectorRow {
@@ -495,6 +534,7 @@ async fn composite_batch_co_commits_vector_fence_before_delayed_repair() {
             &[],
             std::slice::from_ref(&stale_row),
             true,
+            Some(&fingerprint),
         )
         .await
         .unwrap();
@@ -507,6 +547,7 @@ async fn composite_batch_co_commits_vector_fence_before_delayed_repair() {
                 events: vec![test_envelope("CompositeUpdated", serde_json::json!({}))],
                 vector_rows: vec![live_row.clone()],
                 reconcile_vectors: true,
+                spec_declaration_fingerprint: Some(fingerprint.clone()),
             },
             PersistenceAppend {
                 persistence_id: "t:Audit:audit-batch".to_string(),
@@ -514,6 +555,7 @@ async fn composite_batch_co_commits_vector_fence_before_delayed_repair() {
                 events: vec![test_envelope("Recorded", serde_json::json!({}))],
                 vector_rows: Vec::new(),
                 reconcile_vectors: false,
+                spec_declaration_fingerprint: None,
             },
         ])
         .await
@@ -544,8 +586,9 @@ async fn composite_batch_co_commits_vector_fence_before_delayed_repair() {
 #[tokio::test]
 async fn newer_reconciliation_generation_rejects_older_rows_and_watermark() {
     let store = make_store("vector-generation-order").await;
+    let fingerprint_old = install_vector_spec(&store, "vector-generation-old").await;
     let old_generation = store
-        .begin_vector_index_reconciliation("t", "Item", "old")
+        .begin_vector_index_reconciliation("t", "Item", "old", 1, &fingerprint_old)
         .await
         .unwrap();
     store
@@ -560,12 +603,14 @@ async fn newer_reconciliation_generation_rejects_older_rows_and_watermark() {
                 vector: vec![1.0, 0.0],
             }],
             true,
+            Some(&fingerprint_old),
         )
         .await
         .unwrap();
 
+    let fingerprint_new = install_vector_spec(&store, "vector-generation-new").await;
     let new_generation = store
-        .begin_vector_index_reconciliation("t", "Item", "new")
+        .begin_vector_index_reconciliation("t", "Item", "new", 2, &fingerprint_new)
         .await
         .unwrap();
     store
@@ -627,6 +672,7 @@ async fn newer_reconciliation_generation_rejects_older_rows_and_watermark() {
 #[tokio::test]
 async fn beginning_reconciliation_withdraws_the_previous_completion_claim() {
     let store = make_store("vector-generation-watermark-invalidation").await;
+    let fingerprint_a = install_vector_spec(&store, "watermark-a-1").await;
     let row_a = EntityVectorRow {
         decl_name: "embed-a".to_string(),
         model_tag: "m1".to_string(),
@@ -638,7 +684,7 @@ async fn beginning_reconciliation_withdraws_the_previous_completion_claim() {
         vector: vec![0.0, 1.0],
     };
     let first_a = store
-        .begin_vector_index_reconciliation("t", "Item", "v2|a")
+        .begin_vector_index_reconciliation("t", "Item", "v2|a", 1, &fingerprint_a)
         .await
         .unwrap();
     store
@@ -649,6 +695,7 @@ async fn beginning_reconciliation_withdraws_the_previous_completion_claim() {
             &[],
             std::slice::from_ref(&row_a),
             true,
+            Some(&fingerprint_a),
         )
         .await
         .unwrap();
@@ -657,8 +704,9 @@ async fn beginning_reconciliation_withdraws_the_previous_completion_claim() {
         .await
         .unwrap();
 
+    let fingerprint_b = install_vector_spec(&store, "watermark-b").await;
     let generation_b = store
-        .begin_vector_index_reconciliation("t", "Item", "v2|b")
+        .begin_vector_index_reconciliation("t", "Item", "v2|b", 2, &fingerprint_b)
         .await
         .unwrap();
     assert!(
@@ -675,8 +723,9 @@ async fn beginning_reconciliation_withdraws_the_previous_completion_claim() {
         "the in-progress type must remain discoverable without its watermark"
     );
 
+    let fingerprint_a = install_vector_spec(&store, "watermark-a-2").await;
     let second_a = store
-        .begin_vector_index_reconciliation("t", "Item", "v2|a")
+        .begin_vector_index_reconciliation("t", "Item", "v2|a", 3, &fingerprint_a)
         .await
         .unwrap();
     assert!(second_a > generation_b);
@@ -786,6 +835,7 @@ async fn append_batch_zero_sequence_detects_existing_stream_by_unique_key() {
             )],
             vector_rows: Vec::new(),
             reconcile_vectors: false,
+            spec_declaration_fingerprint: None,
         }])
         .await
         .unwrap_err();

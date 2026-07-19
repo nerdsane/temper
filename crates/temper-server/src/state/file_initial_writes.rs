@@ -1,5 +1,3 @@
-use std::sync::{Arc, RwLock};
-
 use temper_runtime::persistence::{EventMetadata, PersistenceEnvelope, PersistenceError};
 use temper_runtime::scheduler::{sim_now, sim_uuid};
 
@@ -148,7 +146,38 @@ impl ServerState {
             .map(|(idx, event)| synthetic_envelope(&persistence_id, (idx + 1) as u64, event))
             .collect::<Result<Vec<_>, _>>()?;
 
-        match store.append(&persistence_id, 0, &envelopes).await {
+        let mut key_rows = Vec::new();
+        if let Some(field_map) = state.fields.as_object() {
+            for key in &table.keys {
+                if let Some(key_hash) =
+                    crate::key_index::canonical_key_hash(&key.name, &key.properties, field_map)
+                {
+                    key_rows.push(temper_runtime::persistence::EntityKeyRow {
+                        key_name: key.name.clone(),
+                        key_hash,
+                    });
+                }
+            }
+        }
+        let vector_rows = crate::vector_index::rows_for_entity_state(
+            &table.vectors,
+            &state.status,
+            &state.fields,
+        );
+        match store
+            .append_with_index_rows(
+                &persistence_id,
+                0,
+                &envelopes,
+                crate::storage::AppendIndexRows {
+                    key_rows: &key_rows,
+                    vector_rows: &vector_rows,
+                    reconcile_vectors: !table.vectors.is_empty(),
+                    spec_declaration_fingerprint: table.spec_declaration_fingerprint.as_deref(),
+                },
+            )
+            .await
+        {
             Ok(sequence_nr) => state.sequence_nr = sequence_nr,
             Err(PersistenceError::ConcurrencyViolation { .. }) => {
                 return Err(FileStreamContentError::ActionRejected(format!(
@@ -211,20 +240,14 @@ impl ServerState {
         &self,
         tenant: &temper_runtime::tenant::TenantId,
     ) -> Result<temper_jit::table::TransitionTable, FileStreamContentError> {
-        let table = {
-            let reg = self.registry.read().unwrap();
-            reg.get_table_live(tenant, "File")
-        }
-        .or_else(|| {
-            self.transition_tables
-                .get("File")
-                .map(|t| Arc::new(RwLock::new((**t).clone())))
-        })
-        .ok_or_else(|| {
-            FileStreamContentError::State(format!(
-                "No transition table for tenant '{tenant}', entity type 'File'"
-            ))
-        })?;
+        let table = self
+            .transition_table_live_for_tenant(tenant, "File")
+            .map_err(FileStreamContentError::State)?
+            .ok_or_else(|| {
+                FileStreamContentError::State(format!(
+                    "No transition table for tenant '{tenant}', entity type 'File'"
+                ))
+            })?;
 
         Ok(table
             .read()

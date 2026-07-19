@@ -17,7 +17,7 @@ use temper_jit::table::TransitionTable;
 use temper_runtime::ActorSystem;
 use temper_runtime::persistence::{EntityVectorRow, EventMetadata, PersistenceEnvelope};
 use temper_runtime::scheduler::{install_deterministic_context, sim_now, sim_uuid};
-use temper_server::storage::{BackendLabel, BoxedEventStore};
+use temper_server::storage::{AppendIndexRows, BackendLabel, BoxedEventStore};
 use temper_server::vector_index::{VectorMetric, rank_nearest};
 use temper_server::{EntityActor, EntityMsg, EntityResponse};
 use temper_store_sim::SimEventStore;
@@ -114,9 +114,11 @@ fn test_envelope(event_type: &str) -> PersistenceEnvelope {
 async fn dst_delayed_vector_repair_is_sequence_monotonic() {
     for seed in 0..NUM_SEEDS {
         let (_guard, _clock, _id) = install_deterministic_context(seed);
-        let store = BoxedEventStore::new(SimEventStore::no_faults(seed));
+        let sim_store = SimEventStore::no_faults(seed);
+        sim_store.persist_spec_declaration("default", "Item", "rev-1");
+        let store = BoxedEventStore::new(sim_store);
         let generation = store
-            .begin_vector_index_reconciliation("default", "Item", "v2|embed")
+            .begin_vector_index_reconciliation("default", "Item", "v2|embed", 1, "rev-1")
             .await
             .expect("begin vector reconciliation generation");
         let persistence_id = format!("default:Item:item-race-{seed}");
@@ -137,9 +139,12 @@ async fn dst_delayed_vector_repair_is_sequence_monotonic() {
                 &persistence_id,
                 0,
                 &[test_envelope("Created")],
-                &[],
-                std::slice::from_ref(&stale_row),
-                true,
+                AppendIndexRows {
+                    key_rows: &[],
+                    vector_rows: std::slice::from_ref(&stale_row),
+                    reconcile_vectors: true,
+                    spec_declaration_fingerprint: Some("rev-1"),
+                },
             )
             .await
             .expect("append sequence 1");
@@ -148,9 +153,12 @@ async fn dst_delayed_vector_repair_is_sequence_monotonic() {
                 &persistence_id,
                 1,
                 &[test_envelope("Updated")],
-                &[],
-                std::slice::from_ref(&live_row),
-                true,
+                AppendIndexRows {
+                    key_rows: &[],
+                    vector_rows: std::slice::from_ref(&live_row),
+                    reconcile_vectors: true,
+                    spec_declaration_fingerprint: Some("rev-1"),
+                },
             )
             .await
             .expect("append sequence 2");
@@ -180,9 +188,12 @@ async fn dst_delayed_vector_repair_is_sequence_monotonic() {
                 &persistence_id,
                 2,
                 &[test_envelope("Deleted")],
-                &[],
-                &[],
-                true,
+                AppendIndexRows {
+                    key_rows: &[],
+                    vector_rows: &[],
+                    reconcile_vectors: true,
+                    spec_declaration_fingerprint: Some("rev-1"),
+                },
             )
             .await
             .expect("append sequence-3 purge");
@@ -208,6 +219,85 @@ async fn dst_delayed_vector_repair_is_sequence_monotonic() {
     }
 }
 
+/// Declaration authority follows its monotonic revision, never coordinator
+/// arrival order. A stale A replica cannot supersede completed B, while a later
+/// authoritative A revision remains a valid re-add.
+#[tokio::test(flavor = "current_thread")]
+async fn dst_stale_declaration_revision_cannot_reclaim_generation() {
+    for seed in 0..NUM_SEEDS {
+        let (_guard, _clock, _id) = install_deterministic_context(seed);
+        let sim_store = SimEventStore::no_faults(seed);
+        sim_store.persist_spec_declaration("default", "Item", "rev-a");
+        let store = BoxedEventStore::new(sim_store.clone());
+        let generation_a = store
+            .begin_vector_index_reconciliation("default", "Item", "v2|a", 1, "rev-a")
+            .await
+            .expect("begin declaration A");
+        store
+            .mark_vector_index_backfilled("default", "Item", generation_a, "v2|a")
+            .await
+            .expect("publish declaration A");
+
+        sim_store.persist_spec_declaration("default", "Item", "rev-b");
+        let generation_b = store
+            .begin_vector_index_reconciliation("default", "Item", "v2|b", 2, "rev-b")
+            .await
+            .expect("begin declaration B");
+        store
+            .mark_vector_index_backfilled("default", "Item", generation_b, "v2|b")
+            .await
+            .expect("publish declaration B");
+
+        assert!(
+            store
+                .begin_vector_index_reconciliation("default", "Item", "v2|a", u64::MAX, "rev-a",)
+                .await
+                .is_err(),
+            "seed {seed}: stale A must not reclaim authority after B"
+        );
+        assert_eq!(
+            store
+                .vector_index_backfilled_types("default")
+                .await
+                .expect("read B watermark"),
+            vec![("Item".to_string(), "v2|b".to_string())],
+            "seed {seed}: stale A must leave B's completion claim intact"
+        );
+
+        sim_store.persist_spec_declaration("default", "Item", "rev-a");
+        let readded_a = store
+            .begin_vector_index_reconciliation("default", "Item", "v2|a", 3, "rev-a")
+            .await
+            .expect("begin later authoritative A re-add");
+        assert!(readded_a > generation_b);
+
+        // Crash after allocating the remove-all generation but before publishing
+        // its empty watermark. A restarted server-side dynamic store handle must
+        // resume that generation, then fence it when the identical spec is re-added.
+        sim_store.persist_spec_declaration("default", "Item", "absent:v1");
+        let absent_generation = store
+            .begin_vector_index_reconciliation("default", "Item", "v2|", 4, "absent:v1")
+            .await
+            .expect("begin declaration tombstone");
+        let restarted_store = store.clone();
+        let resumed_generation = restarted_store
+            .begin_vector_index_reconciliation("default", "Item", "v2|", 4, "absent:v1")
+            .await
+            .expect("resume declaration tombstone after restart");
+        assert_eq!(resumed_generation, absent_generation, "seed {seed}");
+        restarted_store
+            .mark_vector_index_backfilled("default", "Item", resumed_generation, "v2|")
+            .await
+            .expect("publish resumed empty declaration");
+        sim_store.persist_spec_declaration("default", "Item", "rev-a");
+        let post_restart_readd = restarted_store
+            .begin_vector_index_reconciliation("default", "Item", "v2|a", 5, "rev-a")
+            .await
+            .expect("re-add declaration after resumed deletion");
+        assert!(post_restart_readd > resumed_generation, "seed {seed}");
+    }
+}
+
 /// The direct/OData delete message persists before mutating the actor's in-memory
 /// status. Vector derivation must use the event's post-transition status so the
 /// journal delete and empty candidate set share one atomic append.
@@ -215,9 +305,12 @@ async fn dst_delayed_vector_repair_is_sequence_monotonic() {
 async fn dst_direct_delete_co_commits_vector_purge_before_delayed_repair() {
     for seed in 0..NUM_SEEDS {
         let (_guard, _clock, _id) = install_deterministic_context(seed);
-        let store = BoxedEventStore::new(SimEventStore::no_faults(seed));
+        let fingerprint = temper_store_turso::spec_content_hash(ITEM_IOA);
+        let sim_store = SimEventStore::no_faults(seed);
+        sim_store.persist_spec_declaration("default", "Item", &fingerprint);
+        let store = BoxedEventStore::new(sim_store);
         let generation = store
-            .begin_vector_index_reconciliation("default", "Item", "v2|embed")
+            .begin_vector_index_reconciliation("default", "Item", "v2|embed", 1, &fingerprint)
             .await
             .expect("begin vector reconciliation generation");
         let table = item_table();
@@ -280,7 +373,13 @@ async fn dst_nearest_ranking_is_reproducible_across_seeds() {
 
     for seed in 0..NUM_SEEDS {
         let (_guard, _clock, _id) = install_deterministic_context(seed);
-        let store: BoxedEventStore = BoxedEventStore::new(SimEventStore::no_faults(seed));
+        let sim_store = SimEventStore::no_faults(seed);
+        sim_store.persist_spec_declaration(
+            "default",
+            "Item",
+            &temper_store_turso::spec_content_hash(ITEM_IOA),
+        );
+        let store: BoxedEventStore = BoxedEventStore::new(sim_store);
         let table = item_table();
         let system = ActorSystem::new("dst-vector");
 

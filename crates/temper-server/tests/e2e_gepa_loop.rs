@@ -927,30 +927,9 @@ hint = "Reassign the issue to a different implementer."
         parsed.err()
     );
 
-    // Hot-deploy: re-register the tenant with the mutated Issue spec (merge mode).
-    {
-        let mut registry = harness.platform_state.registry.write().unwrap(); // ci-ok: infallible lock
-        let tenant_id = temper_runtime::tenant::TenantId::new(TENANT);
-        // Get existing CSDL for merge.
-        let existing_csdl = registry
-            .get_tenant(&tenant_id)
-            .expect("tenant should exist")
-            .csdl
-            .as_ref()
-            .clone();
-        let csdl_xml = temper_spec::csdl::emit_csdl_xml(&existing_csdl);
-        registry
-            .try_register_tenant_with_reactions_and_constraints(
-                tenant_id,
-                existing_csdl,
-                csdl_xml,
-                &[("Issue", &mutated_issue_spec)],
-                Vec::new(),
-                None,
-                true, // merge mode — only update Issue, preserve others
-            )
-            .expect("hot-deploy should succeed");
-    }
+    // Hot-deploy through the harness primitive that advances durable
+    // declaration authority before publishing the replacement table.
+    harness.register_inline_spec(TENANT, "Issue", &mutated_issue_spec);
 
     // Now Reassign should work on an Issue that has an assignee set.
     // Create a fresh Issue (starts in Backlog), then Assign to set assignee_set=true.
@@ -1181,28 +1160,7 @@ params = ["NewAssigneeId"]
 hint = "Reassign the issue to a different implementer."
 "#;
 
-    {
-        let mut registry = harness.platform_state.registry.write().unwrap(); // ci-ok: infallible lock
-        let tenant_id = temper_runtime::tenant::TenantId::new(TENANT);
-        let existing_csdl = registry
-            .get_tenant(&tenant_id)
-            .expect("tenant should exist")
-            .csdl
-            .as_ref()
-            .clone();
-        let csdl_xml = temper_spec::csdl::emit_csdl_xml(&existing_csdl);
-        registry
-            .try_register_tenant_with_reactions_and_constraints(
-                tenant_id,
-                existing_csdl,
-                csdl_xml,
-                &[("Issue", &mutated_issue_spec)],
-                Vec::new(),
-                None,
-                true, // merge mode
-            )
-            .expect("hot-deploy should succeed");
-    }
+    harness.register_inline_spec(TENANT, "Issue", &mutated_issue_spec);
 
     // Complete the deployment.
     let r = harness

@@ -18,11 +18,11 @@ use temper_runtime::persistence::{EntityVectorCandidate, EntityVectorRow};
 pub use temper_runtime::persistence::{pack_f32_le, unpack_f32_le};
 
 /// The stable, protocol-revisioned signature of a type's declared vector-path set
-/// (ADR-0155/ADR-0171): each path is rendered as
+/// (ADR-0155/ADR-0181): each path is rendered as
 /// `name:property:model_property:dims:metric`, sorted by name, and semicolon-joined.
 /// Recorded in the vector-index backfill watermark and compared on the next
 /// backfill, so ANY declaration change re-indexes the type. The protocol prefix
-/// deliberately invalidates pre-ADR-0171 watermarks once, forcing every legacy row
+/// deliberately invalidates pre-ADR-0181 watermarks once, forcing every legacy row
 /// through sequence-aware reconciliation. Including `dims` matters: an edited
 /// `dims` makes every existing row the wrong length (they would be dropped at read
 /// time as corrupt), so the type must be re-embedded/reconciled. Deterministic
@@ -107,7 +107,7 @@ pub fn parse_vector_property(value: &serde_json::Value, dims: usize) -> Option<V
 /// reconciliation so every journal-writing path interprets declarations identically.
 /// A deleted state always yields an empty set; callers still pass
 /// `reconcile_vectors = true` when declarations exist so that empty set purges stale
-/// candidates while retaining the entity fence (ADR-0171).
+/// candidates while retaining the entity fence (ADR-0181).
 pub(crate) fn rows_for_entity_state(
     vectors: &[temper_jit::table::types::DeclaredVector],
     status: &str,

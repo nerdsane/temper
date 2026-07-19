@@ -1,6 +1,6 @@
 //! Spec persistence: upsert, verification updates, and startup loading.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use libsql::{TransactionBehavior, params};
 use temper_runtime::persistence::{PersistenceError, storage_error};
@@ -81,6 +81,115 @@ impl TursoEventStore {
         .await
         .map_err(storage_error)?;
         Ok(())
+    }
+
+    /// Atomically publish one hot-loaded spec catalog update.
+    ///
+    /// When `replace` is true, omissions are discovered only after the Immediate
+    /// transaction owns the database write lock. Replacement omissions are
+    /// tombstoned with the supplied committed specs and tenant constraints, so
+    /// concurrent replicas cannot leave a union that neither source advertised.
+    /// An omitted constraint source is preserved for merges and cleared for
+    /// replacements.
+    pub async fn persist_spec_catalog_update(
+        &self,
+        tenant: &str,
+        specs: &[(&str, &str, &str)],
+        csdl_xml: &str,
+        additional_removed_entity_types: &[String],
+        replace: bool,
+        cross_invariants_toml: Option<&str>,
+    ) -> Result<Vec<String>, PersistenceError> {
+        let _write_permit = self
+            .acquire_write_permit("turso.persist_spec_catalog_update", WritePriority::High)
+            .await?;
+        let conn = self.configured_connection().await?;
+        let tx = conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .await
+            .map_err(storage_error)?;
+        let incoming = specs
+            .iter()
+            .map(|(entity_type, _, _)| *entity_type)
+            .collect::<BTreeSet<_>>();
+        let mut removed_entity_types = if replace {
+            let mut rows = tx
+                .query(
+                    "SELECT entity_type FROM specs WHERE tenant = ?1 \
+                     UNION \
+                     SELECT entity_type FROM spec_declaration_authority \
+                     WHERE tenant = ?1 AND present = 1 \
+                     ORDER BY entity_type",
+                    params![tenant],
+                )
+                .await
+                .map_err(storage_error)?;
+            let mut removed = BTreeSet::new();
+            while let Some(row) = rows.next().await.map_err(storage_error)? {
+                let entity_type = row.get::<String>(0).map_err(storage_error)?;
+                if !incoming.contains(entity_type.as_str()) {
+                    removed.insert(entity_type);
+                }
+            }
+            removed
+        } else {
+            BTreeSet::new()
+        };
+        removed_entity_types.extend(
+            additional_removed_entity_types
+                .iter()
+                .filter(|entity_type| !incoming.contains(entity_type.as_str()))
+                .cloned(),
+        );
+        let removed_entity_types = removed_entity_types.into_iter().collect::<Vec<_>>();
+
+        for (entity_type, ioa_source, content_hash) in specs {
+            tx.execute(
+                "INSERT INTO specs \
+                 (tenant, entity_type, ioa_source, csdl_xml, content_hash, committed, version, verified, verification_status, updated_at) \
+                 VALUES (?1, ?2, ?3, ?4, ?5, 1, 1, 0, 'pending', datetime('now')) \
+                 ON CONFLICT (tenant, entity_type) DO UPDATE SET \
+                     ioa_source = CASE WHEN specs.content_hash IS NOT excluded.content_hash OR specs.csdl_xml IS NOT excluded.csdl_xml THEN excluded.ioa_source ELSE specs.ioa_source END, \
+                     csdl_xml = CASE WHEN specs.content_hash IS NOT excluded.content_hash OR specs.csdl_xml IS NOT excluded.csdl_xml THEN excluded.csdl_xml ELSE specs.csdl_xml END, \
+                     content_hash = CASE WHEN specs.content_hash IS NOT excluded.content_hash OR specs.csdl_xml IS NOT excluded.csdl_xml THEN excluded.content_hash ELSE specs.content_hash END, \
+                     committed = 1, \
+                     version = CASE WHEN specs.content_hash IS NOT excluded.content_hash OR specs.csdl_xml IS NOT excluded.csdl_xml THEN specs.version + 1 ELSE specs.version END, \
+                     verified = CASE WHEN specs.content_hash IS NOT excluded.content_hash OR specs.csdl_xml IS NOT excluded.csdl_xml THEN 0 ELSE specs.verified END, \
+                     verification_status = CASE WHEN specs.content_hash IS NOT excluded.content_hash OR specs.csdl_xml IS NOT excluded.csdl_xml THEN 'pending' ELSE specs.verification_status END, \
+                     levels_passed = CASE WHEN specs.content_hash IS NOT excluded.content_hash OR specs.csdl_xml IS NOT excluded.csdl_xml THEN NULL ELSE specs.levels_passed END, \
+                     levels_total = CASE WHEN specs.content_hash IS NOT excluded.content_hash OR specs.csdl_xml IS NOT excluded.csdl_xml THEN NULL ELSE specs.levels_total END, \
+                     verification_result = CASE WHEN specs.content_hash IS NOT excluded.content_hash OR specs.csdl_xml IS NOT excluded.csdl_xml THEN NULL ELSE specs.verification_result END, \
+                     updated_at = CASE WHEN specs.content_hash IS NOT excluded.content_hash OR specs.csdl_xml IS NOT excluded.csdl_xml THEN datetime('now') ELSE specs.updated_at END",
+                params![tenant, *entity_type, *ioa_source, csdl_xml, *content_hash],
+            )
+            .await
+            .map_err(storage_error)?;
+        }
+        for entity_type in &removed_entity_types {
+            Self::tombstone_spec_in_transaction(&tx, tenant, entity_type).await?;
+        }
+        if let Some(source) = cross_invariants_toml {
+            tx.execute(
+                "INSERT INTO tenant_constraints (tenant, cross_invariants_toml, version, updated_at) \
+                 VALUES (?1, ?2, 1, datetime('now')) \
+                 ON CONFLICT(tenant) DO UPDATE SET \
+                     cross_invariants_toml = excluded.cross_invariants_toml, \
+                     version = tenant_constraints.version + 1, \
+                     updated_at = datetime('now')",
+                params![tenant, source],
+            )
+            .await
+            .map_err(storage_error)?;
+        } else if replace {
+            tx.execute(
+                "DELETE FROM tenant_constraints WHERE tenant = ?1",
+                params![tenant],
+            )
+            .await
+            .map_err(storage_error)?;
+        }
+        tx.commit().await.map_err(storage_error)?;
+        Ok(removed_entity_types)
     }
 
     /// Atomically upsert multiple specs, record the app installation, optionally
@@ -304,6 +413,62 @@ impl TursoEventStore {
         Ok(rows.next().await.map_err(storage_error)?.is_none())
     }
 
+    async fn tombstone_spec_in_transaction(
+        tx: &libsql::Transaction,
+        tenant: &str,
+        entity_type: &str,
+    ) -> Result<(), PersistenceError> {
+        let deleted = tx
+            .execute(
+                "DELETE FROM specs WHERE tenant = ?1 AND entity_type = ?2",
+                params![tenant, entity_type],
+            )
+            .await
+            .map_err(storage_error)?;
+        if deleted > 0 {
+            return Ok(());
+        }
+
+        // Compatibility constructors may establish first-writer authority
+        // without a `specs` row. A later full replacement must still persist
+        // an absence tombstone and fence completed/in-flight vector work.
+        let tombstoned = tx
+            .execute(
+                "INSERT INTO spec_declaration_authority \
+                 (tenant, entity_type, revision, ioa_source, declaration_fingerprint, present) \
+                 VALUES (?1, ?2, 1, '', 'absent:v1', 0) \
+                 ON CONFLICT(tenant, entity_type) DO UPDATE SET \
+                     revision = spec_declaration_authority.revision + 1, \
+                     ioa_source = '', declaration_fingerprint = 'absent:v1', present = 0 \
+                 WHERE spec_declaration_authority.present != 0",
+                params![tenant, entity_type],
+            )
+            .await
+            .map_err(storage_error)?;
+        if tombstoned > 0 {
+            tx.execute(
+                "UPDATE entity_vector_reconciliation_generation \
+                 SET generation = generation + 1, \
+                     declaration_revision = ( \
+                         SELECT revision FROM spec_declaration_authority \
+                         WHERE tenant = ?1 AND entity_type = ?2 \
+                     ), declaration_fingerprint = '', vector_set = '' \
+                 WHERE tenant = ?1 AND entity_type = ?2",
+                params![tenant, entity_type],
+            )
+            .await
+            .map_err(storage_error)?;
+            tx.execute(
+                "DELETE FROM vector_index_backfill_watermark \
+                 WHERE tenant = ?1 AND entity_type = ?2",
+                params![tenant, entity_type],
+            )
+            .await
+            .map_err(storage_error)?;
+        }
+        Ok(())
+    }
+
     /// Delete a spec for a given tenant/entity_type.
     #[instrument(skip_all, fields(tenant, entity_type, otel.name = "turso.delete_spec"))]
     pub async fn delete_spec(
@@ -312,13 +477,16 @@ impl TursoEventStore {
         entity_type: &str,
     ) -> Result<(), PersistenceError> {
         let _query_timer = TursoQueryTimer::start("turso.delete_spec");
+        let _write_permit = self
+            .acquire_write_permit("turso.delete_spec", WritePriority::High)
+            .await?;
         let conn = self.configured_connection().await?;
-        conn.execute(
-            "DELETE FROM specs WHERE tenant = ?1 AND entity_type = ?2",
-            params![tenant, entity_type],
-        )
-        .await
-        .map_err(storage_error)?;
+        let tx = conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .await
+            .map_err(storage_error)?;
+        Self::tombstone_spec_in_transaction(&tx, tenant, entity_type).await?;
+        tx.commit().await.map_err(storage_error)?;
         Ok(())
     }
 
@@ -591,6 +759,33 @@ impl TursoEventStore {
     }
 
     // ── Spec Loading ──────────────────────────────────────────────
+
+    /// Entity types that a source-of-truth replacement must account for.
+    ///
+    /// Includes uncommitted catalog rows left by an interrupted load and
+    /// compatibility authority established without a catalog row.
+    pub async fn spec_replacement_entity_types(
+        &self,
+        tenant: &str,
+    ) -> Result<Vec<String>, PersistenceError> {
+        let conn = self.configured_connection().await?;
+        let mut rows = conn
+            .query(
+                "SELECT entity_type FROM specs WHERE tenant = ?1 \
+                 UNION \
+                 SELECT entity_type FROM spec_declaration_authority \
+                 WHERE tenant = ?1 AND present != 0 \
+                 ORDER BY entity_type",
+                params![tenant],
+            )
+            .await
+            .map_err(storage_error)?;
+        let mut entity_types = Vec::new();
+        while let Some(row) = rows.next().await.map_err(storage_error)? {
+            entity_types.push(row.get::<String>(0).map_err(storage_error)?);
+        }
+        Ok(entity_types)
+    }
 
     /// Load all persisted specs (for startup recovery).
     #[instrument(skip_all, fields(otel.name = "turso.load_specs"))]

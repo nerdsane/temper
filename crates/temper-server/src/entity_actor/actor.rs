@@ -331,6 +331,7 @@ impl EntityActor {
         store: &BoxedEventStore,
         backend: BackendLabel,
         persistence_id: &str,
+        table: &TransitionTable,
         state: &mut EntityState,
         event: &EntityEvent,
     ) -> Result<u64, PersistenceError> {
@@ -354,8 +355,7 @@ impl EntityActor {
         // ADR-0153/0155: derive the declared key rows AND the vector-index rows from
         // the new state and co-commit them with the journal append, so a keyed read
         // is correct without a scan and a kNN read reflects the write deterministically.
-        let (key_rows, vector_rows, reconcile_vectors) = {
-            let table = self.table.read().expect("table lock poisoned");
+        let (key_rows, vector_rows, reconcile_vectors, spec_declaration_fingerprint) = {
             // The type declares vector paths → the store reconciles this entity's
             // vector rows (delete stale + insert current) even when no row is emitted
             // this write (a delete transition or a cleared property), so stale rows are
@@ -379,7 +379,12 @@ impl EntityActor {
                 &event.to_status,
                 &state.fields,
             );
-            (key_rows, vector_rows, reconcile_vectors)
+            (
+                key_rows,
+                vector_rows,
+                reconcile_vectors,
+                table.spec_declaration_fingerprint.clone(),
+            )
         };
         let append_start = Instant::now();
         let result = store
@@ -387,9 +392,12 @@ impl EntityActor {
                 persistence_id,
                 state.sequence_nr,
                 &[envelope],
-                &key_rows,
-                &vector_rows,
-                reconcile_vectors,
+                crate::storage::AppendIndexRows {
+                    key_rows: &key_rows,
+                    vector_rows: &vector_rows,
+                    reconcile_vectors,
+                    spec_declaration_fingerprint: spec_declaration_fingerprint.as_deref(),
+                },
             )
             .await;
         crate::runtime_metrics::record_event_store_append_wait(
@@ -480,7 +488,7 @@ impl EntityActor {
         state: &mut EntityState,
         tenant: &str,
         blob_store: Option<&crate::blob_store::BlobStore>,
-        // When true, a journal read failure PROPAGATES as an error instead of being
+        // When true, a journal read or envelope parse failure PROPAGATES instead of being
         // swallowed ("start fresh"). The key-index backfill needs this: it must
         // distinguish "entity genuinely has no events" from "could not read the
         // journal", or it would watermark a type while a present entity is unkeyed
@@ -543,14 +551,23 @@ impl EntityActor {
                     // Tombstone is terminal: once deleted, entity must not replay
                     // into a live state. Stop at the first Deleted event.
                     if env.event_type == "Deleted" {
-                        let tombstone = parsed_event.unwrap_or_else(|_| EntityEvent {
-                            action: "Deleted".to_string(),
-                            from_status: state.status.clone(),
-                            to_status: "Deleted".to_string(),
-                            timestamp: env.metadata.timestamp,
-                            params: serde_json::json!({}),
-                            idempotency_key: None,
-                        });
+                        let tombstone = match parsed_event {
+                            Ok(event) => event,
+                            Err(error) if strict_journal_read => {
+                                return Err(ActorError::custom(format!(
+                                    "incompatible persisted event at sequence {} for {}:{}: {error}",
+                                    env.sequence_nr, state.entity_type, state.entity_id
+                                )));
+                            }
+                            Err(_) => EntityEvent {
+                                action: "Deleted".to_string(),
+                                from_status: state.status.clone(),
+                                to_status: "Deleted".to_string(),
+                                timestamp: env.metadata.timestamp,
+                                params: serde_json::json!({}),
+                                idempotency_key: None,
+                            },
+                        };
                         state.status = tombstone.to_status.clone();
                         if let Some(obj) = state.fields.as_object_mut() {
                             obj.insert(
@@ -633,6 +650,12 @@ impl EntityActor {
                             state.push_event_bounded(event);
                         }
                         Err(e) => {
+                            if strict_journal_read {
+                                return Err(ActorError::custom(format!(
+                                    "incompatible persisted event at sequence {} for {}:{}: {e}",
+                                    env.sequence_nr, state.entity_type, state.entity_id
+                                )));
+                            }
                             // Schema-mismatched event: log and skip rather than panic.
                             // This preserves entity hydration across spec evolution —
                             // the last valid state is used and replay continues.
@@ -709,11 +732,11 @@ impl EntityActor {
 
 /// Rebuild an entity's current state from its snapshot + event tail.
 ///
-/// `strict_journal_read`: when true, a journal read failure PROPAGATES as an error
-/// instead of being swallowed into a "start fresh"/stale state. The key-index backfill
-/// passes `true` so it can tell "no events" apart from "could not read the journal" —
-/// keying decisions and the per-type watermark depend on that distinction (ADR-0153
-/// soundness gate). Actor hydration passes `false` (keep serving on a transient read).
+/// `strict_journal_read`: when true, journal read and envelope parse failures propagate
+/// instead of being swallowed into a "start fresh"/partial state. Index backfills pass
+/// `true` so they can distinguish a complete replay from unreadable or incompatible
+/// history before publishing a type watermark (ADR-0153/ADR-0181 soundness gate).
+/// Actor hydration passes `false` to preserve compatibility during normal serving.
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn recover_entity_state_from_store(
     tenant: &str,
@@ -788,14 +811,21 @@ impl Actor for EntityActor {
 
             if let (Some(store), Some(backend)) = (self.event_journal.as_ref(), self.event_backend)
             {
-                self.persist_event(store, backend, &self.persistence_id(), &mut state, &created)
-                    .await
-                    .map_err(|e| {
-                        ActorError::custom(format!(
-                            "failed to persist bootstrap Created event for {}:{}: {}",
-                            self.entity_type, self.entity_id, e
-                        ))
-                    })?;
+                self.persist_event(
+                    store,
+                    backend,
+                    &self.persistence_id(),
+                    &table,
+                    &mut state,
+                    &created,
+                )
+                .await
+                .map_err(|e| {
+                    ActorError::custom(format!(
+                        "failed to persist bootstrap Created event for {}:{}: {}",
+                        self.entity_type, self.entity_id, e
+                    ))
+                })?;
             }
             state.push_event_bounded(created);
         }
@@ -984,7 +1014,14 @@ impl Actor for EntityActor {
                         (self.event_journal.as_ref(), self.event_backend)
                     {
                         let first_persist = self
-                            .persist_event(store, backend, &self.persistence_id(), state, &event)
+                            .persist_event(
+                                store,
+                                backend,
+                                &self.persistence_id(),
+                                &table,
+                                state,
+                                &event,
+                            )
                             .await;
 
                         match first_persist {
@@ -1047,9 +1084,12 @@ impl Actor for EntityActor {
                                         state,
                                         &self.tenant,
                                         self.blob_store.as_ref(),
-                                        // Actor hydration keeps the lenient "start
-                                        // fresh on read error" behavior (unchanged).
-                                        false,
+                                        // A concurrency retry must reach the
+                                        // authoritative sequence reported by the
+                                        // rejected append. Treat an unreadable
+                                        // journal as a retry failure instead of
+                                        // continuing from an under-replayed state.
+                                        true,
                                     )
                                     .await?;
 
@@ -1133,6 +1173,7 @@ impl Actor for EntityActor {
                                             store,
                                             backend,
                                             &self.persistence_id(),
+                                            &table,
                                             state,
                                             &retry_event,
                                         )
@@ -1426,6 +1467,7 @@ impl Actor for EntityActor {
                 });
             }
             EntityMsg::Delete => {
+                let table = self.table.read().expect("table lock poisoned").clone();
                 let deleted = EntityEvent {
                     action: "Deleted".to_string(),
                     from_status: state.status.clone(),
@@ -1438,7 +1480,14 @@ impl Actor for EntityActor {
                 if let (Some(store), Some(backend)) =
                     (self.event_journal.as_ref(), self.event_backend)
                     && let Err(e) = self
-                        .persist_event(store, backend, &self.persistence_id(), state, &deleted)
+                        .persist_event(
+                            store,
+                            backend,
+                            &self.persistence_id(),
+                            &table,
+                            state,
+                            &deleted,
+                        )
                         .await
                 {
                     ctx.reply(EntityResponse {

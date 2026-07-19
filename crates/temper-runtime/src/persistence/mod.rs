@@ -1,5 +1,16 @@
 use serde::{Deserialize, Serialize};
 
+mod indexing;
+pub use indexing::{
+    EntityKeyRow, EntityVectorCandidate, EntityVectorRow, PersistenceAppend,
+    PersistenceAppendResult, pack_f32_le, unpack_f32_le,
+};
+mod types;
+pub use types::{
+    CompositeEvent, CompositeEventSubWrite, EventMetadata, PersistenceEnvelope, PersistenceError,
+    storage_error,
+};
+
 /// Event type used for the parent-journal record of a Composite action.
 ///
 /// Concrete sub-write events remain the state-changing events on their target
@@ -7,47 +18,11 @@ use serde::{Deserialize, Serialize};
 /// journals/idempotency keys that were committed atomically with it.
 pub const COMPOSITE_EVENT_TYPE: &str = "CompositeEvent";
 
-/// Replay/audit record for one Composite action application.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct CompositeEvent {
-    pub tenant: String,
-    pub parent_entity_type: String,
-    pub parent_entity_id: String,
-    pub parent_action: String,
-    pub composite_idempotency_key: String,
-    pub sub_writes: Vec<CompositeEventSubWrite>,
-}
-
-/// One concrete sub-write recorded in a [`CompositeEvent`].
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct CompositeEventSubWrite {
-    pub index: usize,
-    pub entity_type: String,
-    pub entity_id: String,
-    pub action: String,
-    pub idempotency_key: String,
-}
-
 /// Marker trait for domain events.
 /// Events must be serializable (for persistence) and Send + 'static (for async).
 pub trait DomainEvent:
     Send + Serialize + for<'de> Deserialize<'de> + std::fmt::Debug + 'static
 {
-}
-
-/// Metadata attached to every persisted event.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct EventMetadata {
-    /// Unique ID of this event.
-    pub event_id: uuid::Uuid,
-    /// ID of the command/message that caused this event.
-    pub causation_id: uuid::Uuid,
-    /// Correlation ID for tracing across actor boundaries.
-    pub correlation_id: uuid::Uuid,
-    /// Timestamp of persistence.
-    pub timestamp: chrono::DateTime<chrono::Utc>,
-    /// Actor that produced this event.
-    pub actor_id: String,
 }
 
 /// Trait for event-sourced persistent actors.
@@ -83,77 +58,6 @@ pub trait PersistentActor: Send + 'static {
     }
 }
 
-/// A declared-key row to co-commit with an append (ADR-0153). The entity claims
-/// `key_hash` for `key_name`; the store writes it into `entity_key_index` in the
-/// same transaction as the journal append, giving the read plane an `O(log n)`
-/// present/absent probe (the negative-existence access path, ARN-68).
-#[derive(Debug, Clone)]
-pub struct EntityKeyRow {
-    /// The declared key's identifier (the `[[key]]` block's `name`).
-    pub key_name: String,
-    /// The canonical, type-tagged hash of the key's values.
-    pub key_hash: String,
-}
-
-/// A derived vector-index row to co-commit with an append (ADR-0155). Parsed from
-/// the entity's post-transition state for one declared `[[vector]]` path: the
-/// float vector and the model tag that partitions its space. Stores that maintain
-/// `entity_vector_index` write one row per `(decl_name, model_tag, entity_id)`; the
-/// blob is packed little-endian f32. Unlike a key row this has no uniqueness
-/// constraint — it is derived, rebuildable ranking state.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct EntityVectorRow {
-    /// The declared vector path's identifier (the `[[vector]]` block's `name`).
-    pub decl_name: String,
-    /// The model tag that partitions this vector's space (only same-tag vectors
-    /// are ever compared).
-    pub model_tag: String,
-    /// The float vector, exactly `dims` long.
-    pub vector: Vec<f32>,
-}
-
-/// Pack an `f32` slice to little-endian bytes — the `entity_vector_index` blob
-/// encoding shared by every backend (ADR-0155). Kept here beside [`EntityVectorRow`]
-/// so the stores and the kernel ranking agree on the byte layout.
-pub fn pack_f32_le(vector: &[f32]) -> Vec<u8> {
-    let mut bytes = Vec::with_capacity(vector.len() * 4);
-    for value in vector {
-        bytes.extend_from_slice(&value.to_le_bytes());
-    }
-    bytes
-}
-
-/// Unpack little-endian bytes back to `f32`. `None` if the byte length is not a
-/// multiple of 4, or if any component is not finite (both signal a corrupt blob),
-/// so a bad row is skipped rather than panicking or feeding a `NaN`/`inf` into the
-/// kNN ranking — where a `NaN` would sort ahead of every real score.
-pub fn unpack_f32_le(bytes: &[u8]) -> Option<Vec<f32>> {
-    if !bytes.len().is_multiple_of(4) {
-        return None;
-    }
-    let mut out = Vec::with_capacity(bytes.len() / 4);
-    for chunk in bytes.chunks_exact(4) {
-        let value = f32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]);
-        if !value.is_finite() {
-            return None;
-        }
-        out.push(value);
-    }
-    Some(out)
-}
-
-/// One candidate row returned from the vector index for a kNN read (ADR-0155):
-/// an entity and its packed vector for one `(tenant, type, decl, model_tag)`
-/// partition. The kernel — not the store — computes the metric over these in the
-/// store-supplied (entity-id) order, so ranking is identical across backends.
-#[derive(Debug, Clone, PartialEq)]
-pub struct EntityVectorCandidate {
-    /// The entity holding this vector.
-    pub entity_id: String,
-    /// The float vector, exactly `dims` long.
-    pub vector: Vec<f32>,
-}
-
 /// Trait for the event store backend (implemented by temper-store-postgres).
 /// Uses desugared async-in-trait to enforce Send bounds on futures.
 pub trait EventStore: Send + Sync + 'static {
@@ -184,6 +88,7 @@ pub trait EventStore: Send + Sync + 'static {
             key_rows,
             &[],
             false,
+            None,
         )
     }
 
@@ -197,7 +102,14 @@ pub trait EventStore: Send + Sync + 'static {
     /// of the entity's vector rows, then inserts `vector_rows` — so a delete
     /// transition or a cleared vector/model property purges the stale rows instead of
     /// leaving them to be ranked forever. The sequence and atomicity contract is
-    /// identical to `append`.
+    /// identical to `append`. `spec_declaration_fingerprint` binds the writer's
+    /// compiled table to durable spec authority; indexing stores reject a stale
+    /// fingerprint before advancing the journal. Callers that reconcile vectors
+    /// must always provide it.
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "journal, key, vector, and declaration data form one atomic storage boundary"
+    )]
     fn append_with_index_rows(
         &self,
         persistence_id: &str,
@@ -206,23 +118,59 @@ pub trait EventStore: Send + Sync + 'static {
         key_rows: &[EntityKeyRow],
         vector_rows: &[EntityVectorRow],
         reconcile_vectors: bool,
+        spec_declaration_fingerprint: Option<&str>,
     ) -> impl std::future::Future<Output = Result<u64, PersistenceError>> + Send {
-        let _ = (key_rows, vector_rows, reconcile_vectors);
+        let _ = (
+            key_rows,
+            vector_rows,
+            reconcile_vectors,
+            spec_declaration_fingerprint,
+        );
         self.append(persistence_id, expected_sequence, events)
     }
 
-    /// Begin a declaration-set reconciliation and return its durable generation
-    /// token (ADR-0171). Every entity replacement and the final watermark write must
-    /// carry this token. Advancing the generation invalidates delayed work from an
-    /// older declaration set. Non-indexing backends reject the operation explicitly
-    /// so callers cannot advertise a false durable completion.
-    fn begin_vector_index_reconciliation(
+    /// Persist one spec declaration fingerprint or absence tombstone.
+    ///
+    /// SQL stores derive this authority from their transactional spec catalog.
+    /// Deterministic stores override this hook so the production hot-load path
+    /// drives the same authority before publishing a rebuilt registry.
+    fn persist_spec_declaration(
         &self,
         tenant: &str,
         entity_type: &str,
-        vector_set: &str,
+        declaration_fingerprint: &str,
     ) -> impl std::future::Future<Output = Result<u64, PersistenceError>> + Send {
-        let _ = (tenant, entity_type, vector_set);
+        let _ = (tenant, entity_type, declaration_fingerprint);
+        async { Ok(0) }
+    }
+
+    /// Return entity types whose durable declarations are currently present.
+    ///
+    /// The default is empty because SQL-backed servers enumerate their catalog
+    /// through the metadata store. Deterministic stores override this for
+    /// replacement retry/restart parity.
+    fn spec_declaration_entity_types(
+        &self,
+        tenant: &str,
+    ) -> impl std::future::Future<Output = Result<Vec<String>, PersistenceError>> + Send {
+        let _ = tenant;
+        async { Ok(Vec::new()) }
+    }
+
+    /// Begin reconciliation and return its durable generation (ADR-0181).
+    /// `declaration_revision` is monotonic; `declaration_fingerprint` identifies the
+    /// IOA source. Durable backends resolve both against a tombstone-preserving
+    /// declaration authority, so a stale caller cannot win by arriving last or after
+    /// delete/re-add. The returned token fences every replacement and watermark.
+    /// Non-indexing backends reject the operation.
+    fn begin_vector_index_reconciliation(
+        &self,
+        _tenant: &str,
+        _entity_type: &str,
+        _vector_set: &str,
+        _declaration_revision: u64,
+        _declaration_fingerprint: &str,
+    ) -> impl std::future::Future<Output = Result<u64, PersistenceError>> + Send {
         async {
             Err(PersistenceError::Storage(
                 "vector-index reconciliation is unsupported by this event store".to_string(),
@@ -231,7 +179,7 @@ pub trait EventStore: Send + Sync + 'static {
     }
 
     /// Reconcile the derived vector-index rows for an **existing** entity to exactly
-    /// `vector_rows` (ADR-0171), without appending a journal event.
+    /// `vector_rows` (ADR-0181), without appending a journal event.
     /// `reconciliation_generation` identifies the declaration set and
     /// `observed_sequence` is the journal position from which the rows were rebuilt.
     /// Stores reject a generation that is no longer current, and within the current
@@ -318,7 +266,7 @@ pub trait EventStore: Send + Sync + 'static {
     }
 
     /// Entity types with durable vector-reconciliation state for `tenant`
-    /// (ADR-0171): a generation row, retained per-entity fence, or candidate row.
+    /// (ADR-0181): a generation row, retained per-entity fence, or candidate row.
     /// Unlike completion watermarks, this state survives an interrupted
     /// reconciliation and includes generation-zero live/legacy rows. The coordinator
     /// uses it as a work source so remove-all declarations cannot strand candidates.
@@ -345,7 +293,7 @@ pub trait EventStore: Send + Sync + 'static {
     }
 
     /// List every durable journal stream that a vector-index repair must reconcile
-    /// for `(tenant, entity_type)`, including deleted streams (ADR-0171). Active
+    /// for `(tenant, entity_type)`, including deleted streams (ADR-0181). Active
     /// entity listing deliberately excludes deletions on some backends, but repair
     /// must retain a sequence tombstone for them so stale rows cannot survive or be
     /// resurrected. Backends whose normal listing already includes the complete
@@ -525,65 +473,4 @@ pub trait EventStore: Send + Sync + 'static {
             Ok(entities)
         }
     }
-}
-
-/// A persisted event with metadata.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct PersistenceEnvelope {
-    /// Monotonic sequence number within the entity's journal.
-    pub sequence_nr: u64,
-    /// Fully qualified event type name.
-    pub event_type: String,
-    /// Serialized event payload.
-    pub payload: serde_json::Value,
-    /// Event metadata (causation, correlation, timestamp).
-    pub metadata: EventMetadata,
-}
-
-/// One stream append inside an atomic multi-journal append.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct PersistenceAppend {
-    /// Persistence ID in the form `{tenant}:{entity_type}:{entity_id}`.
-    pub persistence_id: String,
-    /// Optimistic-concurrency sequence expected before this append.
-    pub expected_sequence: u64,
-    /// Events to append to this journal.
-    pub events: Vec<PersistenceEnvelope>,
-    /// Complete post-transition vector rows to co-commit for this stream.
-    #[serde(default)]
-    pub vector_rows: Vec<EntityVectorRow>,
-    /// Whether this stream's type declares vectors. When true, an empty
-    /// `vector_rows` purges candidates while retaining the live-write fence.
-    #[serde(default)]
-    pub reconcile_vectors: bool,
-}
-
-/// New sequence number for one stream after an atomic batch append.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct PersistenceAppendResult {
-    /// Persistence ID that was appended.
-    pub persistence_id: String,
-    /// New highest sequence number for this journal.
-    pub sequence_nr: u64,
-}
-
-/// Errors that can occur during event persistence operations.
-#[derive(Debug, thiserror::Error)]
-pub enum PersistenceError {
-    /// Optimistic concurrency check failed (another writer appended first).
-    #[error("optimistic concurrency violation: expected sequence {expected}, got {actual}")]
-    ConcurrencyViolation { expected: u64, actual: u64 },
-
-    /// Event serialization or deserialization failed.
-    #[error("serialization error: {0}")]
-    Serialization(String),
-
-    /// Underlying storage backend returned an error.
-    #[error("storage error: {0}")]
-    Storage(String),
-}
-
-/// Convert backend-specific errors into [`PersistenceError::Storage`].
-pub fn storage_error(err: impl std::fmt::Display) -> PersistenceError {
-    PersistenceError::Storage(err.to_string())
 }

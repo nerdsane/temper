@@ -1,3 +1,6 @@
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
+
 use tracing::{error, info, warn};
 
 use super::actor_ref::{ActorId, ActorRef, Envelope, SystemSignal};
@@ -14,6 +17,35 @@ pub struct ActorCell<A: Actor> {
     actor: A,
     id: ActorId,
     mailbox_capacity: usize,
+}
+
+/// Clears publication readiness whenever the actor task future is dropped.
+///
+/// Normal shutdown, panic unwinding, and task cancellation all drop the run
+/// future, so a dead incarnation can never remain externally marked ready.
+struct ActorReadiness {
+    ready: Arc<AtomicBool>,
+}
+
+impl ActorReadiness {
+    fn new(ready: Arc<AtomicBool>) -> Self {
+        ready.store(false, Ordering::Release);
+        Self { ready }
+    }
+
+    fn mark_ready(&self) {
+        self.ready.store(true, Ordering::Release);
+    }
+
+    fn mark_unready(&self) {
+        self.ready.store(false, Ordering::Release);
+    }
+}
+
+impl Drop for ActorReadiness {
+    fn drop(&mut self) {
+        self.mark_unready();
+    }
 }
 
 impl<A: Actor> ActorCell<A> {
@@ -36,13 +68,15 @@ impl<A: Actor> ActorCell<A> {
     pub fn spawn(self) -> ActorRef<A::Msg> {
         let (tx, rx) = mailbox::mailbox(self.mailbox_capacity);
         let id = self.id.clone();
+        let ready = Arc::new(AtomicBool::new(false));
 
         let actor_ref = ActorRef {
             sender: tx,
             id: id.clone(),
+            ready: ready.clone(),
         };
 
-        tokio::spawn(self.run(rx)); // determinism-ok: production actor cell, not on simulation path
+        tokio::spawn(self.run(rx, ready)); // determinism-ok: production actor cell, not on simulation path
 
         actor_ref
     }
@@ -51,7 +85,8 @@ impl<A: Actor> ActorCell<A> {
     /// 1. pre_start → initialize state
     /// 2. loop: receive message → handle
     /// 3. post_stop → cleanup
-    async fn run(self, mut rx: MailboxReceiver<A::Msg>) {
+    async fn run(self, mut rx: MailboxReceiver<A::Msg>, ready: Arc<AtomicBool>) {
+        let readiness = ActorReadiness::new(ready);
         let actor = self.actor;
         let id = self.id;
         let strategy = actor.supervision_strategy();
@@ -59,6 +94,7 @@ impl<A: Actor> ActorCell<A> {
         let mut restart_count: u32 = 0;
 
         loop {
+            readiness.mark_unready();
             // Phase 1: Initialize
             let mut ctx = ActorContext::new(id.clone());
             info!(actor = %id, "actor starting");
@@ -67,6 +103,7 @@ impl<A: Actor> ActorCell<A> {
                 Ok(s) => {
                     info!(actor = %id, "actor started");
                     restart_count = 0;
+                    readiness.mark_ready();
                     s
                 }
                 Err(e) => {
@@ -133,6 +170,7 @@ impl<A: Actor> ActorCell<A> {
             };
 
             // Phase 3: Cleanup
+            readiness.mark_unready();
             info!(actor = %id, "actor stopping");
             actor.post_stop(state, &mut ctx).await;
 
@@ -159,7 +197,78 @@ fn should_restart(strategy: &SupervisionStrategy, current_restarts: u32) -> bool
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::actor::{ActorContext, Message};
     use std::time::Duration;
+    use tokio::sync::Notify;
+
+    #[derive(Debug)]
+    enum PanickingMsg {
+        Crash,
+    }
+
+    impl Message for PanickingMsg {}
+
+    struct PanickingActor {
+        started: Arc<Notify>,
+    }
+
+    impl Actor for PanickingActor {
+        type Msg = PanickingMsg;
+        type State = ();
+
+        async fn pre_start(
+            &self,
+            _ctx: &mut ActorContext<Self>,
+        ) -> Result<Self::State, ActorError> {
+            self.started.notify_one();
+            Ok(())
+        }
+
+        async fn handle(
+            &self,
+            msg: Self::Msg,
+            _state: &mut Self::State,
+            _ctx: &mut ActorContext<Self>,
+        ) -> Result<(), ActorError> {
+            match msg {
+                PanickingMsg::Crash => panic!("intentional handler panic"),
+            }
+        }
+
+        async fn post_stop(&self, _state: Self::State, _ctx: &mut ActorContext<Self>) {}
+    }
+
+    #[tokio::test]
+    async fn handler_panic_clears_actor_readiness() {
+        let started = Arc::new(Notify::new());
+        let actor = ActorCell::new(
+            PanickingActor {
+                started: started.clone(),
+            },
+            ActorId::new("panicking", "system/panicking"),
+        )
+        .spawn();
+        started.notified().await;
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while !actor.is_ready() {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("actor must publish readiness after pre_start");
+
+        actor
+            .tell(PanickingMsg::Crash)
+            .expect("enqueue crashing message");
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while actor.is_ready() {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("actor panic must clear readiness through the run-future drop guard");
+        assert!(!actor.is_ready());
+    }
 
     #[test]
     fn stop_strategy_never_restarts() {

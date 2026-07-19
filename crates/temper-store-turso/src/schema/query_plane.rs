@@ -78,7 +78,7 @@ CREATE INDEX IF NOT EXISTS idx_eki_entity
 /// ADR-0155: declared vector access path — the exact-scan kNN index. One row per
 /// (declared vector path, model tag, entity). `vector` is packed little-endian
 /// f32; `model_tag` partitions the space. Turso co-commits these rows and their
-/// retained per-entity sequence fence with the journal append (ADR-0171).
+/// retained per-entity sequence fence with the journal append (ADR-0181).
 pub const CREATE_ENTITY_VECTOR_INDEX_TABLE: &str = "\
 CREATE TABLE IF NOT EXISTS entity_vector_index (
     tenant       TEXT NOT NULL,
@@ -102,7 +102,7 @@ pub const CREATE_ENTITY_VECTOR_INDEX_ENTITY: &str = "\
 CREATE INDEX IF NOT EXISTS idx_evi_entity
     ON entity_vector_index(tenant, entity_type, entity_id);";
 
-/// ADR-0171 retained per-entity vector reconciliation fence. This row remains even
+/// ADR-0181 retained per-entity vector reconciliation fence. This row remains even
 /// when reconciliation produces no vector rows, preventing stale resurrection.
 pub const CREATE_ENTITY_VECTOR_INDEX_VERSION_TABLE: &str = "\
 CREATE TABLE IF NOT EXISTS entity_vector_index_version (
@@ -114,7 +114,7 @@ CREATE TABLE IF NOT EXISTS entity_vector_index_version (
     PRIMARY KEY (tenant, entity_type, entity_id)
 );";
 
-/// Idempotent-at-bootstrap upgrade for databases created before ADR-0171 gained
+/// Idempotent-at-bootstrap upgrade for databases created before ADR-0181 gained
 /// declaration-set generations. Duplicate-column errors are ignored by the caller.
 pub const ALTER_ENTITY_VECTOR_INDEX_VERSION_ADD_GENERATION: &str = "\
 ALTER TABLE entity_vector_index_version
@@ -123,12 +123,24 @@ ADD COLUMN reconciliation_generation INTEGER NOT NULL DEFAULT 0";
 /// Durable ordering token for overlapping declaration-set reconciliation.
 pub const CREATE_VECTOR_RECONCILIATION_GENERATION_TABLE: &str = "\
 CREATE TABLE IF NOT EXISTS entity_vector_reconciliation_generation (
-    tenant       TEXT NOT NULL,
-    entity_type  TEXT NOT NULL,
-    generation   INTEGER NOT NULL,
-    vector_set   TEXT NOT NULL,
+    tenant                  TEXT NOT NULL,
+    entity_type             TEXT NOT NULL,
+    generation              INTEGER NOT NULL,
+    declaration_revision    INTEGER NOT NULL DEFAULT 0,
+    declaration_fingerprint TEXT NOT NULL DEFAULT '',
+    vector_set              TEXT NOT NULL,
     PRIMARY KEY (tenant, entity_type)
 );";
+
+/// Idempotent-at-bootstrap declaration revision upgrade for ADR-0181 databases.
+pub const ALTER_VECTOR_RECONCILIATION_ADD_DECLARATION_REVISION: &str = "\
+ALTER TABLE entity_vector_reconciliation_generation
+ADD COLUMN declaration_revision INTEGER NOT NULL DEFAULT 0";
+
+/// Idempotent-at-bootstrap declaration fingerprint upgrade for ADR-0181 databases.
+pub const ALTER_VECTOR_RECONCILIATION_ADD_DECLARATION_FINGERPRINT: &str = "\
+ALTER TABLE entity_vector_reconciliation_generation
+ADD COLUMN declaration_fingerprint TEXT NOT NULL DEFAULT ''";
 
 /// Seed the retained fence when upgrading a database that already has vector rows.
 pub const SEED_ENTITY_VECTOR_INDEX_VERSION_TABLE: &str = "\
