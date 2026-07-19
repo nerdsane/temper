@@ -11,6 +11,9 @@ use temper_runtime::persistence::{
 };
 use temper_store_sim::{SimEventStore, SimFaultConfig};
 
+use super::dst_projection_lag::SimQueryPlane;
+use crate::storage::QueryPlaneStore;
+
 mod backend_authority;
 mod contract_race;
 mod ownership_race;
@@ -1035,7 +1038,12 @@ async fn key_index_backfill_skips_deleted_entities_without_blocking_watermark() 
 /// wrong-absent.
 #[tokio::test]
 async fn key_index_backfill_loadfailed_entity_blocks_watermark_then_resumes() {
-    let (state, store) = build_order_state_with_sim("key-backfill-loadfail");
+    let store = SimEventStore::new(0, SimFaultConfig::none());
+    let query_plane = std::sync::Arc::new(SimQueryPlane::default());
+    let mut state = build_order_state("key-backfill-loadfail");
+    let mut storage = StorageStack::from_sim(store.clone(), None);
+    storage.query_plane = Some(query_plane.clone());
+    state.set_storage_stack(storage);
     let tenant = TenantId::default();
     let agent_ctx = AgentContext::for_service("loadfail-test");
     let pid = format!("{tenant}:Order:ord-x");
@@ -1059,6 +1067,26 @@ async fn key_index_backfill_loadfailed_entity_blocks_watermark_then_resumes() {
         .save_snapshot(&pid, 1, &serde_json::to_vec(&snap).unwrap())
         .await
         .expect("snap");
+    let stale_catalog_fields =
+        serde_json::json!({ "Id": "ord-x", "WorkspaceId": "ws1", "Path": "/stale" });
+    query_plane
+        .upsert_projection(
+            tenant.as_str(),
+            "Order",
+            "ord-x",
+            "Draft",
+            &stale_catalog_fields,
+            &serde_json::json!({
+                "entity_type": "Order",
+                "entity_id": "ord-x",
+                "status": "Draft",
+                "fields": stale_catalog_fields,
+                "sequence_nr": 1,
+            }),
+            1,
+        )
+        .await
+        .expect("seed stale catalog fallback");
 
     // Run 1: the entity's journal read fails → LoadFailed → type NOT watermarked,
     // entity NOT keyed.
@@ -1082,6 +1110,19 @@ async fn key_index_backfill_loadfailed_entity_blocks_watermark_then_resumes() {
             .unwrap()
             .is_none(),
         "the unloadable entity must not be keyed"
+    );
+    assert!(
+        store
+            .lookup_by_key(
+                tenant.as_str(),
+                "Order",
+                "ws_path",
+                &ws_path_hash("ws1", "/stale")
+            )
+            .await
+            .unwrap()
+            .is_none(),
+        "strict recovery failure must not be masked by stale catalog ownership"
     );
 
     // Run 2 (resume): the read now succeeds → entity keyed → type watermarked.

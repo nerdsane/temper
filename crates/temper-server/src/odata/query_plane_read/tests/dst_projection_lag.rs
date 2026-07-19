@@ -39,7 +39,7 @@ const DST_SEEDS: u64 = 64;
 /// projection lagging behind the journal — the exact condition that makes the
 /// real planner fall back to the authoritative scan (and 413 at scale).
 #[derive(Default)]
-struct SimQueryPlane {
+pub(super) struct SimQueryPlane {
     // (entity_type, entity_id) -> catalog row
     catalog: Mutex<BTreeMap<(String, String), EntityCatalogRow>>,
 }
