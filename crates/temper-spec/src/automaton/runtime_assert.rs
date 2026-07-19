@@ -84,7 +84,6 @@ pub struct RuntimeInvariant {
 /// Compile the runtime-enforced subset of an automaton's safety assertions.
 pub fn compile_runtime_invariants(automaton: &Automaton) -> Vec<RuntimeInvariant> {
     let declarations = SafetyDeclarations::from_automaton(automaton);
-    let has_parameter_counter_effect = has_parameter_counter_effect(automaton);
 
     automaton
         .invariants
@@ -98,7 +97,9 @@ pub fn compile_runtime_invariants(automaton: &Automaton) -> Vec<RuntimeInvariant
                 parsed,
                 ParsedAssert::StringNonEmpty { .. } | ParsedAssert::CounterVarCompare { .. }
             );
-            if !inherently_runtime_enforced && !has_parameter_counter_effect {
+            if !inherently_runtime_enforced
+                && !requires_parameter_runtime_enforcement(&parsed, &invariant.when, automaton)
+            {
                 return None;
             }
             let assertion = compile_runtime_assert(parsed)?;
@@ -149,15 +150,15 @@ fn compile_runtime_assert(parsed: ParsedAssert) -> Option<RuntimeAssert> {
 /// specs cannot become live even when higher verification layers are bypassed.
 pub fn unsupported_safety_invariant_names(automaton: &Automaton) -> Vec<String> {
     let declarations = SafetyDeclarations::from_automaton(automaton);
-    let has_parameter_counter_effect = has_parameter_counter_effect(automaton);
     automaton
         .invariants
         .iter()
         .filter(|invariant| {
             !declarations.supports(&invariant.when, &invariant.assert)
-                || (has_parameter_counter_effect
-                    && parse_assert_expr(&invariant.assert)
-                        .is_some_and(|parsed| contains_no_further_transitions(&parsed)))
+                || parse_assert_expr(&invariant.assert).is_some_and(|parsed| {
+                    requires_parameter_runtime_enforcement(&parsed, &invariant.when, automaton)
+                        && depends_on_no_further_transitions(&parsed)
+                })
         })
         .map(|invariant| invariant.name.clone())
         .collect()
@@ -249,30 +250,112 @@ pub fn evaluate_runtime_assert(
     }
 }
 
-fn has_parameter_counter_effect(automaton: &Automaton) -> bool {
-    automaton.actions.iter().any(|action| {
-        action.effect.iter().any(|effect| {
-            matches!(
-                effect,
-                super::Effect::Increment {
-                    amount: Some(_),
-                    ..
-                } | super::Effect::Decrement {
-                    amount: Some(_),
-                    ..
-                } | super::Effect::SetCounterFromParam { .. }
-            )
+fn requires_parameter_runtime_enforcement(
+    assertion: &ParsedAssert,
+    active_states: &[String],
+    automaton: &Automaton,
+) -> bool {
+    if assertion_is_tautology(assertion) {
+        return false;
+    }
+    let parameter_counters: BTreeSet<&str> = automaton
+        .actions
+        .iter()
+        .filter(|action| action.kind != "output")
+        .flat_map(|action| &action.effect)
+        .filter_map(|effect| match effect {
+            super::Effect::Increment {
+                var,
+                amount: Some(_),
+            }
+            | super::Effect::Decrement {
+                var,
+                amount: Some(_),
+            }
+            | super::Effect::SetCounterFromParam { var, .. } => Some(var.as_str()),
+            _ => None,
         })
-    })
+        .collect();
+    if parameter_counters.is_empty() {
+        return false;
+    }
+
+    assertion_references_any_counter(assertion, &parameter_counters)
+        || automaton
+            .actions
+            .iter()
+            .filter(|action| action.kind != "output")
+            .filter(|action| {
+                if !is_pure_terminal_assertion(assertion) {
+                    return true;
+                }
+                active_states.is_empty()
+                    || action.from.is_empty()
+                    || action
+                        .from
+                        .iter()
+                        .any(|state| active_states.contains(state))
+            })
+            .flat_map(|action| &action.guard)
+            .any(|guard| match guard {
+                super::Guard::MinCount { var, .. } | super::Guard::MaxCount { var, .. } => {
+                    parameter_counters.contains(var.as_str())
+                }
+                _ => false,
+            })
 }
 
-fn contains_no_further_transitions(assertion: &ParsedAssert) -> bool {
+fn assertion_references_any_counter(assertion: &ParsedAssert, counters: &BTreeSet<&str>) -> bool {
+    match assertion {
+        ParsedAssert::CounterPositive { var } | ParsedAssert::CounterCompare { var, .. } => {
+            counters.contains(var.as_str())
+        }
+        ParsedAssert::CounterVarCompare { left, right, .. } => {
+            counters.contains(left.as_str()) || counters.contains(right.as_str())
+        }
+        ParsedAssert::And(parts) | ParsedAssert::Or(parts) => parts
+            .iter()
+            .any(|part| assertion_references_any_counter(part, counters)),
+        _ => false,
+    }
+}
+
+fn depends_on_no_further_transitions(assertion: &ParsedAssert) -> bool {
+    if assertion_is_tautology(assertion) {
+        return false;
+    }
     match assertion {
         ParsedAssert::NoFurtherTransitions => true,
         ParsedAssert::And(parts) | ParsedAssert::Or(parts) => {
-            parts.iter().any(contains_no_further_transitions)
+            parts.iter().any(depends_on_no_further_transitions)
         }
         _ => false,
+    }
+}
+
+fn is_pure_terminal_assertion(assertion: &ParsedAssert) -> bool {
+    depends_on_no_further_transitions(assertion) && !contains_nonterminal_safety_leaf(assertion)
+}
+
+fn assertion_is_tautology(assertion: &ParsedAssert) -> bool {
+    match assertion {
+        ParsedAssert::Always => true,
+        ParsedAssert::And(parts) => parts.iter().all(assertion_is_tautology),
+        ParsedAssert::Or(parts) => parts.iter().any(assertion_is_tautology),
+        _ => false,
+    }
+}
+
+fn contains_nonterminal_safety_leaf(assertion: &ParsedAssert) -> bool {
+    if assertion_is_tautology(assertion) {
+        return false;
+    }
+    match assertion {
+        ParsedAssert::Always | ParsedAssert::NoFurtherTransitions => false,
+        ParsedAssert::And(parts) | ParsedAssert::Or(parts) => {
+            parts.iter().any(contains_nonterminal_safety_leaf)
+        }
+        _ => true,
     }
 }
 
@@ -287,77 +370,5 @@ fn compare_counter(left: usize, op: &AssertCompareOp, right: usize) -> bool {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::automaton::parse_automaton;
-
-    fn parameter_counter_spec(assertion: &str) -> Automaton {
-        parse_automaton(&format!(
-            r#"
-[automaton]
-name = "Budget"
-states = ["Active"]
-initial = "Active"
-allow_indefinite_states = ["Active"]
-
-[[state]]
-name = "budget"
-type = "counter"
-initial = "1"
-
-[[action]]
-name = "SetBudget"
-kind = "input"
-from = ["Active"]
-to = "Active"
-params = ["budget"]
-effect = [{{ type = "set_counter_from_param", var = "budget", param = "budget" }}]
-
-[[invariant]]
-name = "BudgetInvariant"
-when = ["Active"]
-assert = "{assertion}"
-"#
-        ))
-        .expect("parameter counter spec must parse")
-    }
-
-    fn evaluate_budget(assertion: &RuntimeAssert, budget: usize) -> bool {
-        evaluate_runtime_assert(
-            assertion,
-            "Active",
-            &BTreeMap::from([("budget".to_string(), budget)]),
-            &BTreeMap::new(),
-            &serde_json::Map::new(),
-        )
-    }
-
-    #[test]
-    fn parameter_counter_compounds_preserve_and_or_semantics() {
-        let and_spec = parameter_counter_spec("budget <= 10 && budget > 0");
-        let and_invariants = compile_runtime_invariants(&and_spec);
-        assert_eq!(and_invariants.len(), 1);
-        assert!(matches!(and_invariants[0].assertion, RuntimeAssert::And(_)));
-        assert!(evaluate_budget(&and_invariants[0].assertion, 5));
-        assert!(!evaluate_budget(&and_invariants[0].assertion, 0));
-        assert!(!evaluate_budget(&and_invariants[0].assertion, 100));
-
-        let or_spec = parameter_counter_spec("budget <= 10 || budget == 11");
-        let or_invariants = compile_runtime_invariants(&or_spec);
-        assert_eq!(or_invariants.len(), 1);
-        assert!(matches!(or_invariants[0].assertion, RuntimeAssert::Or(_)));
-        assert!(evaluate_budget(&or_invariants[0].assertion, 11));
-        assert!(!evaluate_budget(&or_invariants[0].assertion, 100));
-    }
-
-    #[test]
-    fn parameter_counter_effect_rejects_terminal_assertion_without_runtime_equivalence() {
-        let spec = parameter_counter_spec("budget <= 10 || no_further_transitions");
-
-        assert_eq!(
-            unsupported_safety_invariant_names(&spec),
-            vec!["BudgetInvariant"]
-        );
-        assert!(compile_runtime_invariants(&spec).is_empty());
-    }
-}
+#[path = "runtime_assert_test.rs"]
+mod tests;
