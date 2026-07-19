@@ -1,4 +1,4 @@
-# ADR-0171: Actor-Spawn State-Timeout Recovery
+# ADR-0191: Actor-Spawn State-Timeout Recovery
 
 - Status: Proposed
 - Date: 2026-07-13

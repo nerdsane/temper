@@ -821,7 +821,7 @@ impl ServerState {
             (actor_ref, timeout_hydration)
         };
 
-        // ADR-0171: actor spawn is the common lifecycle boundary for eager
+        // ADR-0191: actor spawn is the common lifecycle boundary for eager
         // restart hydration, lazy durable loads, and passivation respawn.
         // Reconcile the declared timeout without waiting for request traffic.
         self.schedule_state_timeout_hydration(tenant, entity_type, entity_id, timeout_hydration);

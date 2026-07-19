@@ -27,7 +27,7 @@
 //! Every live and hydrated timer executes under the same named internal
 //! service principal and inherits only caller observability context.
 //!
-//! Durability (ADR-0056, ADR-0171): actor spawn and post-dispatch fallback
+//! Durability (ADR-0056, ADR-0191): actor spawn and post-dispatch fallback
 //! reconcile the **hydration case** — the entity is in a state with a
 //! declared timeout but has no live in-memory timer. Reconciliation claims
 //! the initial sequence atomically, reconstructs how long the entity has
