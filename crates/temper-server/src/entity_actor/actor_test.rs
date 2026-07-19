@@ -808,6 +808,117 @@ assert = "items > 0"
     assert_eq!(recovered.fields["items"], 2);
 }
 
+#[cfg(all(feature = "observe", feature = "sim"))]
+#[tokio::test]
+async fn parameter_counter_effect_cannot_escape_verified_limit_live_or_on_replay() {
+    use temper_runtime::persistence::EventStore;
+    use temper_runtime::scheduler::install_deterministic_context;
+    use temper_store_sim::SimEventStore;
+
+    let (_guard, _clock, _id_gen) = install_deterministic_context(213);
+    let source = r#"
+[automaton]
+name = "Budget"
+states = ["Active"]
+initial = "Active"
+allow_indefinite_states = ["Active"]
+
+[[state]]
+name = "budget"
+type = "counter"
+initial = "0"
+
+[[action]]
+name = "SetBudget"
+kind = "input"
+from = ["Active"]
+to = "Active"
+params = ["budget"]
+effect = [{ type = "set_counter_from_param", var = "budget", param = "budget" }]
+
+[[invariant]]
+name = "BudgetLimit"
+when = ["Active"]
+assert = "budget <= 10"
+"#;
+
+    let cascade = temper_verify::VerificationCascade::from_ioa(source)
+        .with_sim_seeds(1)
+        .with_prop_test_cases(4)
+        .run();
+    assert!(
+        cascade.all_passed,
+        "runtime enforcement must preserve cascade admission: {:?}",
+        cascade.errors
+    );
+
+    let table = TransitionTable::from_ioa_source(source);
+    let mut live_state = crate::entity_actor::effects::build_initial_entity_state(
+        "Budget",
+        "budget-live",
+        &table,
+        &serde_json::json!({}),
+    )
+    .expect("build live state");
+    let live_result = crate::entity_actor::effects::process_action(
+        &mut live_state,
+        &table,
+        "SetBudget",
+        &serde_json::json!({"budget": 100}),
+    );
+    assert!(
+        !live_result.success,
+        "unsafe live mutation must be rejected"
+    );
+    assert_eq!(live_state.counters["budget"], 0);
+
+    let store = Arc::new(SimEventStore::no_faults(213));
+    let pid = "default:Budget:budget-replay";
+    store
+        .append(
+            pid,
+            0,
+            &[PersistenceEnvelope {
+                sequence_nr: 0,
+                event_type: "SetBudget".to_string(),
+                payload: serde_json::json!({
+                    "action": "SetBudget",
+                    "from_status": "Active",
+                    "to_status": "Active",
+                    "timestamp": "2024-01-01T00:00:00Z",
+                    "params": {"budget": 100}
+                }),
+                metadata: EventMetadata {
+                    event_id: sim_uuid(),
+                    causation_id: sim_uuid(),
+                    correlation_id: sim_uuid(),
+                    timestamp: sim_now(),
+                    actor_id: pid.to_string(),
+                },
+            }],
+        )
+        .await
+        .expect("append unsafe persisted event");
+
+    let error = recover_entity_state_from_store(
+        "default",
+        "Budget",
+        "budget-replay",
+        &table,
+        &crate::storage::BoxedEventStore::from_arc(store),
+        crate::storage::BackendLabel::Sim,
+        &serde_json::json!({}),
+        None,
+        true,
+    )
+    .await
+    .expect_err("unsafe persisted mutation must fail replay");
+    assert!(
+        error.to_string().contains("BudgetLimit"),
+        "unexpected replay error: {error}"
+    );
+}
+
 #[cfg(feature = "sim")]
 #[tokio::test]
 async fn hydration_rejects_invalid_snapshot_before_healing_tail_event() {
