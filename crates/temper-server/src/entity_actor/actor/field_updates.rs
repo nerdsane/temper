@@ -86,7 +86,9 @@ impl EntityActor {
         if idempotency_key.is_some_and(|key| state.has_processed_idempotency_key(key)) {
             return Ok(());
         }
-        let table = self.table.read().expect("table lock poisoned").clone();
+        let table = self
+            .authoritative_table_snapshot()
+            .map_err(FieldUpdateCommitError::Recovery)?;
         let mut base = state.clone();
         let mut retries_remaining = FIELD_UPDATE_RETRY_BUDGET;
 

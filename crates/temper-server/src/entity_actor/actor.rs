@@ -200,8 +200,12 @@ pub struct EntityActor {
     /// hot swap cannot reconcile and then be followed by an old-generation write.
     spec_generation_barrier: Option<Arc<crate::state::SpecGenerationBarrier>>,
     /// Registry used to reject detached actors after their entity type is
-    /// removed from the tenant's current generation.
+    /// removed from the tenant's current generation and to promote a
+    /// compatibility actor to newly installed registry authority.
     spec_registry: Option<Arc<RwLock<crate::registry::SpecRegistry>>>,
+    /// Whether the actor's original table is an authoritative compatibility
+    /// fallback when the registry has no entry for this entity type.
+    allows_compatibility_fallback: bool,
 }
 
 impl EntityActor {
@@ -326,6 +330,7 @@ impl EntityActor {
             blob_store: None,
             spec_generation_barrier: None,
             spec_registry: None,
+            allows_compatibility_fallback: false,
         }
     }
 
@@ -352,6 +357,7 @@ impl EntityActor {
             blob_store: None,
             spec_generation_barrier: None,
             spec_registry: None,
+            allows_compatibility_fallback: false,
         }
     }
 
@@ -395,14 +401,39 @@ impl EntityActor {
         self
     }
 
-    /// Attach the live registry so a removed entity type cannot keep writing
-    /// through an actor that retains its former transition-table `Arc`.
+    /// Attach the live registry that selects the authoritative table for every
+    /// operation. Compatibility actors may use their original table only while
+    /// the registry has no entry for their entity type.
     pub(crate) fn with_spec_registry(
         mut self,
         registry: Arc<RwLock<crate::registry::SpecRegistry>>,
+        allows_compatibility_fallback: bool,
     ) -> Self {
         self.spec_registry = Some(registry);
+        self.allows_compatibility_fallback = allows_compatibility_fallback;
         self
+    }
+
+    fn authoritative_table(&self) -> Result<Arc<RwLock<TransitionTable>>, ActorError> {
+        let Some(registry) = self.spec_registry.as_ref() else {
+            return Ok(self.table.clone());
+        };
+        let tenant = temper_runtime::tenant::TenantId::new(&self.tenant);
+        let live_table = registry
+            .read()
+            .map_err(|_| ActorError::custom("spec registry lock poisoned"))?
+            .get_table_live(&tenant, &self.entity_type);
+        match live_table {
+            Some(table) => Ok(table),
+            None if self.allows_compatibility_fallback => Ok(self.table.clone()),
+            None => Err(ActorError::custom(super::SPEC_GENERATION_CHANGED_ERROR)),
+        }
+    }
+
+    fn authoritative_table_snapshot(&self) -> Result<TransitionTable, ActorError> {
+        let table = self.authoritative_table()?;
+        let snapshot = table.read().expect("table lock poisoned").clone();
+        Ok(snapshot)
     }
 
     async fn acquire_spec_generation_read_lock(
@@ -424,17 +455,7 @@ impl EntityActor {
     }
 
     fn validate_spec_registry_authority(&self) -> Result<(), ActorError> {
-        if let Some(registry) = self.spec_registry.as_ref() {
-            let tenant = temper_runtime::tenant::TenantId::new(&self.tenant);
-            let live_table = registry
-                .read()
-                .map_err(|_| ActorError::custom("spec registry lock poisoned"))?
-                .get_table_live(&tenant, &self.entity_type);
-            if !live_table.is_some_and(|table| Arc::ptr_eq(&table, &self.table)) {
-                return Err(ActorError::custom(super::SPEC_GENERATION_CHANGED_ERROR));
-            }
-        }
-        Ok(())
+        self.authoritative_table().map(|_| ())
     }
 
     async fn persist_overflow_blobs(
@@ -908,7 +929,7 @@ impl Actor for EntityActor {
         let _generation_guard = self.acquire_spec_generation_read_lock(None).await?;
         // Snapshot the table for consistent startup (initial state + replay).
         // This is a cheap clone — TransitionTable is a few Vecs of strings.
-        let table = self.table.read().expect("table lock poisoned").clone();
+        let table = self.authoritative_table_snapshot()?;
 
         let mut state = Self::build_initial_state(
             &self.entity_type,
@@ -1008,7 +1029,7 @@ impl Actor for EntityActor {
 
                 // Snapshot the current table for this action dispatch.
                 // On the next action, any hot-swapped table will be picked up.
-                let table = self.table.read().expect("table lock poisoned").clone();
+                let table = self.authoritative_table_snapshot()?;
 
                 // ADR-0048 sub-decision 5: actor-side idempotency dedup.
                 // A dispatch-layer retry can produce a second `ask` after the
@@ -1642,7 +1663,7 @@ impl Actor for EntityActor {
                     }
                     Err(error) => return Err(error),
                 };
-                let table = self.table.read().expect("table lock poisoned").clone();
+                let table = self.authoritative_table_snapshot()?;
                 if state.status == "Deleted" {
                     ctx.reply(EntityResponse {
                         success: true,

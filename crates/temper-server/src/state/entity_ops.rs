@@ -839,8 +839,8 @@ impl ServerState {
             let reg = self.registry.read().expect("spec registry lock poisoned");
             reg.get_table_live(tenant, entity_type)
         };
-        let (table, spec_registry) = match registry_table {
-            Some(table) => (table, Some(self.registry.clone())),
+        let (table, allows_compatibility_fallback) = match registry_table {
+            Some(table) => (table, false),
             None => {
                 // Legacy single-tenant: wrap the static Arc<TransitionTable> in a
                 // new RwLock. Hot-swap doesn't apply to legacy mode, but the actor
@@ -849,7 +849,7 @@ impl ServerState {
                     .transition_tables
                     .get(entity_type)
                     .map(|t| Arc::new(RwLock::new((**t).clone())))?;
-                (table, None)
+                (table, true)
             }
         };
 
@@ -872,7 +872,7 @@ impl ServerState {
             .ok()
             .and_then(|slot| slot.clone());
         let spec_generation_barrier = self.spec_generation_barrier_for_actor(tenant);
-        let mut actor = match self.event_journal() {
+        let actor = match self.event_journal() {
             Some((store, backend)) => EntityActor::with_persistence(
                 entity_type,
                 entity_id,
@@ -892,9 +892,7 @@ impl ServerState {
                 .with_idempotency_cache(self.idempotency_cache.clone())
                 .with_blob_store(tenant_blob_store),
         };
-        if let Some(registry) = spec_registry {
-            actor = actor.with_spec_registry(registry);
-        }
+        let actor = actor.with_spec_registry(self.registry.clone(), allows_compatibility_fallback);
 
         // Slow-path: atomically re-check and spawn under write lock.
         // This prevents duplicate actors when concurrent requests race to create

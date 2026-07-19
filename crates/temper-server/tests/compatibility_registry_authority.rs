@@ -264,4 +264,41 @@ async fn cached_compatibility_actor_cannot_write_after_registry_authority_instal
         current_vectors.len(),
         journal_actions,
     );
+
+    registry_actor.stop().expect("stop promoted actor");
+    state.remove_entity(&tenant, "AuthorityItem", entity_id);
+    let replayed_actor = state
+        .get_or_spawn_tenant_actor(&tenant, "AuthorityItem", entity_id)
+        .expect("registry actor for replay");
+    let replayed: EntityResponse = replayed_actor
+        .ask(EntityMsg::GetState, Duration::from_secs(1))
+        .await
+        .expect("replayed registry actor state");
+    let replayed_obsolete: Result<EntityResponse, _> = replayed_actor
+        .ask(action("Obsolete"), Duration::from_secs(1))
+        .await;
+    let replayed_obsolete_rejected = match replayed_obsolete {
+        Ok(response) => !response.success,
+        Err(_) => true,
+    };
+    let replayed_journal_actions = store
+        .dump_journal(&format!("{tenant}:AuthorityItem:{entity_id}"))
+        .into_iter()
+        .map(|event| event.event_type)
+        .collect::<Vec<_>>();
+
+    assert!(
+        replayed.success
+            && replayed.state.sequence_nr == 2
+            && replayed_obsolete_rejected
+            && !replayed_journal_actions
+                .iter()
+                .any(|action| action == "Obsolete"),
+        "registry authority was not replay-stable: replay_success={}, sequence_nr={}, \
+         obsolete_rejected={}, journal={:?}",
+        replayed.success,
+        replayed.state.sequence_nr,
+        replayed_obsolete_rejected,
+        replayed_journal_actions,
+    );
 }
